@@ -9,8 +9,8 @@ class "mimo" {
 	on "xiaomi" "xiaomi-token-plan-ams" "xiaomi-token-plan-cn" "xiaomi-token-plan-sgp" {
 		stream-idle-timeout-ms 300000
 	}
-	// MiMo remaps the pi ladder edges (minimal→low, xhigh→high) on every
-	// census host except the Xiaomi first-party endpoints (zai dialect).
+	// MiMo remaps ladder edges (minimal→low, xhigh→high) on every census host
+	// except the Xiaomi first-party endpoints (zai dialect).
 	on "aimlapi" "cline-pass" "deepinfra" "huggingface" "kilo" "nanogpt" "novita" "opencode-go" \
 		"opencode-zen" "openrouter" "venice" "zenmux" {
 		reasoning-effort-map {

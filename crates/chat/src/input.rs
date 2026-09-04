@@ -1,6 +1,6 @@
 //! Terminal-input normalization for app-supplied console bindings.
 //!
-//! A `bind` chord is spelled the pi way (`ctrl+shift+p`, `alt+up`, `f5`);
+//! A `bind` chord uses lowercase names (`ctrl+shift+p`, `alt+up`, `f5`);
 //! [`normalize_chord`] folds case and modifier order so every spelling of a
 //! physical chord lands on one table key, and [`Bindings::command`] lowers
 //! a decoded [`Key`] to that same canonical spelling.
@@ -38,7 +38,7 @@ impl Bindings {
 	}
 
 	/// The chord to show in a hint for `command`: the shortest one bound to
-	/// it (`f5` over `alt+r`, as pi lists its primary key first), ties by
+	/// it (`f5` over `alt+r`, as the primary key is listed first), ties by
 	/// chord order. Bind lines carry no declaration order into the table.
 	#[must_use]
 	pub fn chord_for(&self, command: &str) -> Option<&str> {
@@ -77,7 +77,7 @@ pub fn chord(key: Key) -> Option<Str> {
 		Key::PageUp => "pageup",
 		Key::PageDown => "pagedown",
 		// The keymap folds Ctrl+Enter and Alt+Enter into one intent; the
-		// bind table spells it as pi's primary `app.message.followUp` chord
+		// The bind table uses the primary follow-up chord.
 		// (`config/keybindings.ts` `ctrl+enter`), which the default cfg binds.
 		Key::FollowUp => "ctrl+enter",
 		Key::ShiftEnter => "shift+enter",

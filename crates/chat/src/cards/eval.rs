@@ -1,9 +1,9 @@
 //! Typed card for `eval@1`.
 //!
-//! pi `eval-render.ts`: a framed code cell titled `<lang icon> <status>
+//! A framed code cell titled `<lang icon> <status>
 //! <title> · (<duration>ms)`, the cell's stdout under an `Output` rule, and —
-//! after a blank row — every `display()` value as a JSON tree
-//! (`json-tree.ts` `renderJsonTreeLines`). Helper status events retain their
+//! after a blank row — every `display()` value as a JSON tree. Helper status
+//! events retain their
 //! live action rows, while workpool status and snapshot values retain typed
 //! aggregate/worker/item presentation instead of degrading into an
 //! indistinguishable JSON tree. A Python exception is not a tool
@@ -21,11 +21,11 @@ use super::{
 /// Persistent Python-kernel cell card.
 pub struct EvalCard;
 
-/// pi `JSON_TREE_MAX_DEPTH_{COLLAPSED,EXPANDED}`.
+/// Maximum JSON-tree depths for collapsed and expanded cards.
 const TREE_DEPTH: (usize, usize) = (2, 6);
-/// pi `JSON_TREE_MAX_LINES_{COLLAPSED,EXPANDED}`.
+/// Maximum JSON-tree lines for collapsed and expanded cards.
 const TREE_LINES: (usize, usize) = (6, 200);
-/// pi `JSON_TREE_SCALAR_LEN_{COLLAPSED,EXPANDED}`.
+/// Maximum JSON scalar lengths for collapsed and expanded cards.
 const TREE_SCALAR: (usize, usize) = (60, 2000);
 
 impl Card for EvalCard {
@@ -212,7 +212,10 @@ fn status_summary(event: &Value) -> String {
 	}
 	if op == "agent" {
 		let id = event.get("id").and_then(Value::as_str).unwrap_or("agent");
-		let status = event.get("status").and_then(Value::as_str).unwrap_or("running");
+		let status = event
+			.get("status")
+			.and_then(Value::as_str)
+			.unwrap_or("running");
 		let detail = event
 			.get("currentTool")
 			.or_else(|| event.get("lastIntent"))
@@ -226,30 +229,24 @@ fn status_summary(event: &Value) -> String {
 	let detail = match op {
 		"read" => status_path_count(event, "from", "chars"),
 		"write" => status_path_count(event, "to", "chars"),
-		"env" => event
-			.get("key")
-			.and_then(Value::as_str)
-			.map(|key| {
-				let value = event
-					.get("value")
-					.map(display_scalar)
-					.unwrap_or_default();
-				format!("{key}={value}")
-			}),
+		"env" => event.get("key").and_then(Value::as_str).map(|key| {
+			let value = event.get("value").map(display_scalar).unwrap_or_default();
+			format!("{key}={value}")
+		}),
 		"completion" => event
 			.get("model")
 			.and_then(Value::as_str)
 			.map(str::to_owned),
-		"log" => event.get("message").and_then(Value::as_str).map(str::to_owned),
-		"phase" => event.get("title").and_then(Value::as_str).map(str::to_owned),
-		"tool_define" => event
-			.get("name")
+		"log" => event
+			.get("message")
 			.and_then(Value::as_str)
 			.map(str::to_owned),
-		"output" => event
-			.get("id")
+		"phase" => event
+			.get("title")
 			.and_then(Value::as_str)
 			.map(str::to_owned),
+		"tool_define" => event.get("name").and_then(Value::as_str).map(str::to_owned),
+		"output" => event.get("id").and_then(Value::as_str).map(str::to_owned),
 		_ => event
 			.get("path")
 			.or_else(|| event.get("count"))
@@ -292,8 +289,8 @@ fn exception_text(status: &CellStatus) -> Option<String> {
 	})
 }
 
-/// pi `eval-render.ts` `jsonLines`: every `display()` JSON value as a tree,
-/// labelled `display[N]` when there is more than one.
+/// Renders every `display()` JSON value as a tree, labelled `display[N]`
+/// when there is more than one.
 fn display_tree(outputs: &[DisplayOutput], expanded: bool, ui: &UiContext) -> Vec<String> {
 	let values = outputs
 		.iter()
@@ -318,7 +315,7 @@ fn display_tree(outputs: &[DisplayOutput], expanded: bool, ui: &UiContext) -> Ve
 	lines
 }
 
-/// pi `json-tree.ts` `renderJsonTreeLines`.
+/// JSON-tree line renderer.
 struct JsonTree<'a> {
 	lines:      Vec<String>,
 	truncated:  bool,
@@ -502,7 +499,7 @@ impl<'a> JsonTree<'a> {
 	}
 }
 
-/// pi `json-tree.ts` `formatScalar`.
+/// Formats a JSON scalar for the tree.
 fn format_scalar(value: &Value, max_len: usize) -> String {
 	match value {
 		Value::Null => "null".to_owned(),
@@ -516,7 +513,7 @@ fn format_scalar(value: &Value, max_len: usize) -> String {
 	}
 }
 
-/// pi `truncateToWidth` on a scalar: the first `max` columns with an ellipsis.
+/// Clips a scalar to the first `max` columns with an ellipsis.
 fn clip(text: &str, max: usize) -> String {
 	let clipped = truncate_to_width(text, u16::try_from(max).unwrap_or(u16::MAX));
 	if clipped.ellipsis {
@@ -576,7 +573,10 @@ mod tests {
 
 	#[test]
 	fn collapsed_output_uses_the_pi_ten_line_tail() {
-		let output = (1..=12).map(|line| line.to_string()).collect::<Vec<_>>().join("\n");
+		let output = (1..=12)
+			.map(|line| line.to_string())
+			.collect::<Vec<_>>()
+			.join("\n");
 		let preview = output_preview(&output, false);
 		assert!(preview.starts_with("… (2 earlier lines)\n3\n"));
 		assert!(preview.ends_with("\n12"));

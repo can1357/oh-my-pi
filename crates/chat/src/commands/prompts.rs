@@ -1,7 +1,6 @@
-//! Prompt templates as slash commands (pi `interactive-mode.ts`
-//! `promptTemplateCommands`): every discovered template is a dynamic console
-//! command named after it, so `/review fix the tests` in the composer, a
-//! bound key, and a cfg line all run the same statement. The handler expands
+//! Prompt templates as slash commands: every discovered template is a dynamic
+//! console command named after it, so `/review fix the tests` in the composer,
+//! a bound key, and a cfg line all run the same statement. The handler expands
 //! the template with the statement's words and posts the text as a
 //! [`CommandAction::Prompt`], which the host submits exactly like a typed
 //! prompt.
@@ -45,7 +44,7 @@ struct InstalledSkills(Arc<dyn SkillExpander>);
 /// Registers every template as a dynamic console command and installs
 /// `expander` as the table those commands expand from. Returns the names
 /// that could not be registered because a built-in command already owns
-/// them (pi drops those templates: `reservedNames`).
+/// them.
 pub fn register(ctx: &Ctx, expander: Arc<dyn PromptExpander>) -> Vec<Str> {
 	let mut reserved = Vec::new();
 	for (name, desc) in expander.templates() {

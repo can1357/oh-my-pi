@@ -88,7 +88,7 @@ pub struct RenderedMessage {
 pub struct CustomMessage {
 	/// Producer role.
 	pub kind:         CustomMessageKind,
-	/// Producer-chosen message type (pi `customType`).
+	/// Producer-chosen message type.
 	pub custom_type:  Str,
 	/// Semantic Markdown content projected into inference and copy.
 	pub body:         Str,
@@ -149,10 +149,10 @@ impl CustomMessage {
 	/// Returns the normalized handoff document for a visible legacy `handoff`
 	/// message.
 	///
-	/// Older pi sessions persisted handoffs as custom messages instead of
-	/// compaction entries. Missing wrapper tags deliberately follow pi's
-	/// charitable fallback: no opening tag keeps the whole trimmed body, while
-	/// a missing closing tag keeps everything after the opening tag.
+	/// Older sessions persisted handoffs as custom messages instead of
+	/// compaction entries. Missing wrapper tags preserve the whole trimmed body
+	/// when the opening tag is absent, or everything after it when the closing
+	/// tag is absent.
 	#[must_use]
 	pub fn legacy_handoff_document(&self) -> Option<Str> {
 		(self.display && self.custom_type.as_str() == "handoff").then(|| {
@@ -200,9 +200,8 @@ impl CustomMessage {
 
 /// Extracts the semantic document from a legacy `<handoff-context>` wrapper.
 ///
-/// This is the pi `extractHandoffDocument` contract: the first opening tag
-/// wins, the first following closing tag terminates it, and malformed input
-/// falls back without dropping the recoverable text.
+/// The first opening tag wins, the first following closing tag terminates it,
+/// and malformed input falls back without dropping recoverable text.
 #[must_use]
 pub fn extract_handoff_document(text: &str) -> &str {
 	const OPEN: &str = "<handoff-context>";

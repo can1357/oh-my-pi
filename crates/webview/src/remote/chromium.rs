@@ -19,8 +19,18 @@ use std::{
 	time::{Duration, Instant},
 };
 
+use bytes::{Bytes, BytesMut};
 use flume::Receiver;
+use http::{Request, StatusCode, header::CONTENT_LENGTH};
+use http_body_util::{BodyExt as _, Empty};
+use hyper::body::Incoming;
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use hyper_util::{
+	client::legacy::{Client, connect::HttpConnector},
+	rt::TokioExecutor,
+};
 use omp_core::{IntoStr, Str, encoding::base64, sf};
+use rustls::crypto::ring;
 use serde_json::{Value, json};
 use tokio::{
 	process,
@@ -29,7 +39,7 @@ use tokio::{
 };
 
 use crate::{
-	Error, Result,
+	CdpDiscoveryError, Error, Result,
 	event::{SharedState, WebViewEvent},
 	input::{Input, Key, Modifiers},
 	options::{FrameConfig, FrameFormat, PageOptions, WindowConfig},
@@ -49,6 +59,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Upper bound on a single CDP command round-trip.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Hard ceiling for the Chromium discovery document.
+const MAX_CDP_DISCOVERY_RESPONSE_BYTES: usize = 1024 * 1024;
+
+type CdpDiscoveryHttpClient = Client<HttpsConnector<HttpConnector>, Empty<Bytes>>;
+
 /// Grace for the polite `Browser.close` request during shutdown.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -61,6 +76,27 @@ const IPC_BINDING: &str = "__ompIpc";
 /// Shim installed before any user init script so pages can call
 /// `window.ipc.postMessage(string)` regardless of engine.
 const IPC_SHIM: &str = "window.ipc={postMessage:m=>window.__ompIpc(String(m))}";
+
+/// Identity of a foreign Chromium endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttachedKind {
+	/// An ordinary Chromium-compatible CDP endpoint.
+	Cdp,
+	/// The OMP Chromium relay.
+	Relay,
+}
+
+/// Screenshot focus handling for an attached page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ScreenshotFocus {
+	/// Preserve existing behavior for owned browsers and ordinary CDP.
+	#[default]
+	None,
+	/// Explicit relay targets may be activated before capture.
+	Activate,
+	/// Implicit relay targets must still be the visible user tab.
+	RequireVisible,
+}
 
 /// Drive a headless pixel-stream session; see the module docs.
 pub async fn drive_frames(binary: PathBuf, config: FrameConfig, ctx: DriverCtx) -> Result<()> {
@@ -104,6 +140,26 @@ pub async fn drive_attached(
 	config: FrameConfig,
 	ctx: DriverCtx,
 ) -> Result<()> {
+	drive_attached_kind(endpoint, target, config, ctx, AttachedKind::Cdp).await
+}
+
+/// Attach through an explicitly identified OMP Chromium relay.
+pub(crate) async fn drive_relay_attached(
+	endpoint: Str,
+	target: Option<Str>,
+	config: FrameConfig,
+	ctx: DriverCtx,
+) -> Result<()> {
+	drive_attached_kind(endpoint, target, config, ctx, AttachedKind::Relay).await
+}
+
+async fn drive_attached_kind(
+	endpoint: Str,
+	target: Option<Str>,
+	config: FrameConfig,
+	ctx: DriverCtx,
+	kind: AttachedKind,
+) -> Result<()> {
 	let DriverCtx { commands, cancelled, events, state, page, ready } = ctx;
 	match connect_attached(
 		&endpoint,
@@ -113,6 +169,7 @@ pub async fn drive_attached(
 		events,
 		state,
 		cancelled,
+		kind,
 	)
 	.await
 	{
@@ -135,19 +192,16 @@ async fn connect_attached(
 	events: flume::Sender<WebViewEvent>,
 	state: SharedState,
 	cancelled: Arc<AtomicBool>,
+	kind: AttachedKind,
 ) -> Result<Cdp> {
-	let websocket = resolve_cdp_websocket(
-		endpoint,
-		page.connect_timeout.unwrap_or(Duration::from_secs(35)),
-	)
-	.await?;
-	let link = timeout(
-		page.connect_timeout.unwrap_or(Duration::from_secs(35)),
-		WsLink::connect(&websocket),
-	)
-	.await
-	.map_err(|_| Error::Timeout("connecting to the CDP endpoint"))??;
-	let mut cdp = Cdp::new(link, events, state, None, cancelled);
+	let websocket =
+		resolve_cdp_websocket(endpoint, page.connect_timeout.unwrap_or(Duration::from_secs(35)))
+			.await?;
+	let link =
+		timeout(page.connect_timeout.unwrap_or(Duration::from_secs(35)), WsLink::connect(&websocket))
+			.await
+			.map_err(|_| Error::Timeout("connecting to the CDP endpoint"))??;
+	let mut cdp = Cdp::new(link, events, state, None, cancelled, Some(kind));
 	wire_attached(&mut cdp, target_matcher, config, page).await?;
 	Ok(cdp)
 }
@@ -158,46 +212,88 @@ async fn resolve_cdp_websocket(endpoint: &str, connect_timeout: Duration) -> Res
 		return Ok(endpoint.to_str());
 	}
 	if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
-		return Err(Error::Protocol(
-			"CDP endpoint must use http, https, ws, or wss".to_str(),
-		));
+		return Err(Error::Protocol("CDP endpoint must use http, https, ws, or wss".to_str()));
 	}
 	let mut discovery = url::Url::parse(endpoint)
-		.map_err(|_| Error::Protocol("invalid CDP endpoint URL".to_str()))?;
+		.map_err(|source| Error::CdpDiscovery(CdpDiscoveryError::InvalidUrl { source }))?;
 	let base = discovery.path().trim_end_matches('/').to_owned();
 	discovery.set_path(&format!("{base}/json/version"));
-	let client = reqwest::Client::builder()
-		.timeout(connect_timeout.max(Duration::from_millis(1)))
-		.build()
-		.map_err(Error::CdpDiscovery)?;
+	discovery.set_fragment(None);
+	let uri: http::Uri = discovery
+		.as_str()
+		.parse()
+		.map_err(|source| Error::CdpDiscovery(CdpDiscoveryError::InvalidHttpUri { source }))?;
+	let _ = ring::default_provider().install_default();
+	let connector = HttpsConnectorBuilder::new()
+		.with_webpki_roots()
+		.https_or_http()
+		.enable_http1()
+		.enable_http2()
+		.build();
+	let client: CdpDiscoveryHttpClient = Client::builder(TokioExecutor::new()).build(connector);
+	let request_timeout = connect_timeout.max(Duration::from_millis(1));
 	let deadline = Instant::now() + connect_timeout;
 	loop {
 		if Instant::now() >= deadline {
 			return Err(Error::Timeout("waiting for the CDP endpoint"));
 		}
-		let response = client
-			.get(discovery.clone())
-			.send()
+		let request = Request::get(uri.clone())
+			.body(Empty::<Bytes>::new())
+			.expect("GET request with a parsed URI is valid");
+		let request_started = Instant::now();
+		let response = timeout(request_timeout, client.request(request))
 			.await
-			.map_err(Error::CdpDiscovery)?;
-		if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
-			&& Instant::now() < deadline
-		{
+			.map_err(|source| Error::CdpDiscovery(CdpDiscoveryError::HttpTimeout { source }))?
+			.map_err(|source| Error::CdpDiscovery(CdpDiscoveryError::HttpRequest { source }))?;
+		let status = response.status();
+		if status == StatusCode::SERVICE_UNAVAILABLE && Instant::now() < deadline {
 			sleep(Duration::from_millis(250)).await;
 			continue;
 		}
-		let value = response
-			.error_for_status()
-			.map_err(Error::CdpDiscovery)?
-			.json::<Value>()
+		if status.is_client_error() || status.is_server_error() {
+			return Err(Error::CdpDiscovery(CdpDiscoveryError::HttpStatus {
+				status: status.as_u16(),
+			}));
+		}
+		let declared_length = response
+			.headers()
+			.get(CONTENT_LENGTH)
+			.and_then(|value| value.to_str().ok())
+			.and_then(|value| value.parse::<u64>().ok());
+		if declared_length.is_some_and(|length| length > MAX_CDP_DISCOVERY_RESPONSE_BYTES as u64) {
+			return Err(Error::CdpDiscovery(CdpDiscoveryError::ResponseTooLarge {
+				limit: MAX_CDP_DISCOVERY_RESPONSE_BYTES,
+			}));
+		}
+		let remaining = request_timeout.saturating_sub(request_started.elapsed());
+		let body = timeout(remaining, collect_cdp_discovery_body(response.into_body()))
 			.await
+			.map_err(|source| Error::CdpDiscovery(CdpDiscoveryError::HttpTimeout { source }))?
 			.map_err(Error::CdpDiscovery)?;
+		let value = serde_json::from_slice::<Value>(&body)
+			.map_err(|source| Error::CdpDiscovery(CdpDiscoveryError::MalformedJson { source }))?;
 		return value
 			.get("webSocketDebuggerUrl")
 			.and_then(Value::as_str)
 			.map(Str::new)
 			.ok_or_else(|| Error::Protocol("CDP discovery omitted webSocketDebuggerUrl".to_str()));
 	}
+}
+
+async fn collect_cdp_discovery_body(mut body: Incoming) -> Result<Bytes, CdpDiscoveryError> {
+	let mut bytes = BytesMut::new();
+	while let Some(frame) = body.frame().await {
+		let frame = frame.map_err(|source| CdpDiscoveryError::HttpBody { source })?;
+		if let Ok(data) = frame.into_data() {
+			if bytes.len().saturating_add(data.len()) > MAX_CDP_DISCOVERY_RESPONSE_BYTES {
+				return Err(CdpDiscoveryError::ResponseTooLarge {
+					limit: MAX_CDP_DISCOVERY_RESPONSE_BYTES,
+				});
+			}
+			bytes.extend_from_slice(&data);
+		}
+	}
+	Ok(bytes.freeze())
 }
 
 /// Launch the browser, wire a headless screencast target, and hand back the
@@ -213,7 +309,7 @@ async fn connect_frames(
 	let profile = resolve_profile(page)?;
 	let extra = ["--headless=new".to_str(), "about:blank".to_str()];
 	let (link, mut child) = connect(binary, profile.path(), page, &extra).await?;
-	let mut cdp = Cdp::new(link, events, state, Some(config), cancelled);
+	let mut cdp = Cdp::new(link, events, state, Some(config), cancelled, None);
 	if let Err(err) = wire_frames(&mut cdp, config, page).await {
 		let _ = child.start_kill();
 		return Err(err);
@@ -244,7 +340,7 @@ async fn connect_window(
 	extra.push(sf!("--window-size={},{}", config.width, config.height));
 	extra.push(sf!("--app={initial}"));
 	let (link, mut child) = connect(binary, profile.path(), page, &extra).await?;
-	let mut cdp = Cdp::new(link, events, state, None, cancelled);
+	let mut cdp = Cdp::new(link, events, state, None, cancelled, None);
 	if let Err(err) = wire_window(&mut cdp, page).await {
 		let _ = child.start_kill();
 		return Err(err);
@@ -384,38 +480,42 @@ async fn wire_frames(cdp: &mut Cdp, config: FrameConfig, page: &PageOptions) -> 
 }
 
 /// Attach to the best existing page target. A matcher is compared against both
-/// title and URL; without one, the endpoint's first eligible page is adopted.
+/// title and URL; an implicit relay attachment prefers the visible eligible
+/// page so it adopts the user's foreground tab.
 async fn wire_attached(
 	cdp: &mut Cdp,
 	target_matcher: Option<&str>,
 	config: FrameConfig,
 	page: &PageOptions,
 ) -> Result<()> {
+	let kind = cdp
+		.attached
+		.ok_or_else(|| Error::Protocol("attached CDP identity is missing".to_str()))?;
 	let targets = cdp.browser("Target.getTargets", json!({})).await?;
 	let infos = targets
 		.get("targetInfos")
 		.and_then(Value::as_array)
 		.ok_or_else(|| Error::Protocol("getTargets: missing targetInfos".to_str()))?;
-	let eligible = |info: &&Value| {
-		if info.get("type").and_then(Value::as_str) != Some("page") {
-			return false;
-		}
-		let url = info.get("url").and_then(Value::as_str).unwrap_or_default();
-		if url.starts_with("devtools:") || url.starts_with("chrome-extension:") {
-			return false;
-		}
-		target_matcher.is_none_or(|matcher| {
-			url.contains(matcher)
-				|| info
-					.get("title")
-					.and_then(Value::as_str)
-					.is_some_and(|title| title.contains(matcher))
-		})
-	};
-	let info = infos
+	let eligible = infos
 		.iter()
-		.find(eligible)
-		.ok_or_else(|| Error::Protocol("no eligible CDP page matched the requested target".to_str()))?;
+		.enumerate()
+		.filter_map(|(index, info)| target_is_eligible(info, target_matcher).then_some(index))
+		.collect::<Vec<_>>();
+	let mut selected = *eligible.first().ok_or_else(|| {
+		Error::Protocol("no eligible CDP page matched the requested target".to_str())
+	})?;
+	if kind == AttachedKind::Relay && target_matcher.is_none() && eligible.len() > 1 {
+		for index in eligible {
+			let Some(target) = infos[index].get("targetId").and_then(Value::as_str) else {
+				continue;
+			};
+			if cdp.probe_target_visible(target).await {
+				selected = index;
+				break;
+			}
+		}
+	}
+	let info = &infos[selected];
 	let target = info
 		.get("targetId")
 		.and_then(Value::as_str)
@@ -431,9 +531,15 @@ async fn wire_attached(
 		.and_then(Value::as_str)
 		.unwrap_or_default()
 		.to_str();
+	cdp.screenshot_focus = screenshot_focus(kind, target_matcher.is_some());
 	cdp.attach(target).await?;
+	if should_claim_target(kind) {
+		cdp.cmd("OMP.claimTarget", json!({})).await?;
+	}
 	wire_page(cdp, page).await?;
-	cdp.set_metrics(&config).await?;
+	if should_override_attached_viewport(kind, page.viewport_explicit) {
+		cdp.set_metrics(&config).await?;
+	}
 	{
 		let mut state = cdp.state.lock();
 		state.url = url;
@@ -443,6 +549,39 @@ async fn wire_attached(
 		cdp.cmd("Page.navigate", json!({ "url": &**url })).await?;
 	}
 	Ok(())
+}
+
+fn target_is_eligible(info: &Value, target_matcher: Option<&str>) -> bool {
+	if info.get("type").and_then(Value::as_str) != Some("page") {
+		return false;
+	}
+	let url = info.get("url").and_then(Value::as_str).unwrap_or_default();
+	if url.starts_with("devtools:") || url.starts_with("chrome-extension:") {
+		return false;
+	}
+	target_matcher.is_none_or(|matcher| {
+		url.contains(matcher)
+			|| info
+				.get("title")
+				.and_then(Value::as_str)
+				.is_some_and(|title| title.contains(matcher))
+	})
+}
+
+const fn should_claim_target(kind: AttachedKind) -> bool {
+	matches!(kind, AttachedKind::Relay)
+}
+
+const fn should_override_attached_viewport(kind: AttachedKind, explicit: bool) -> bool {
+	matches!(kind, AttachedKind::Cdp) || explicit
+}
+
+const fn screenshot_focus(kind: AttachedKind, target_explicit: bool) -> ScreenshotFocus {
+	match (kind, target_explicit) {
+		(AttachedKind::Relay, true) => ScreenshotFocus::Activate,
+		(AttachedKind::Relay, false) => ScreenshotFocus::RequireVisible,
+		(AttachedKind::Cdp, _) => ScreenshotFocus::None,
+	}
 }
 
 /// Find the `--app` window's page target, attach, and configure it.
@@ -535,35 +674,39 @@ async fn wire_page(cdp: &mut Cdp, page: &PageOptions) -> Result<()> {
 /// Live CDP connection driving one page target.
 struct Cdp {
 	/// Browser-level websocket carrying flattened sessions.
-	link:           WsLink,
+	link:             WsLink,
 	/// Monotonically increasing command id.
-	next_id:        u64,
+	next_id:          u64,
 	/// Flat session id of the attached page target; empty until attached.
-	session:        Str,
-	/// Target id of the page; doubles as its main-frame id.
-	target:         Str,
+	session:          Str,
+	/// Target id of the page.
+	target:           Str,
+	/// Explicit identity of a foreign endpoint; `None` for owned browsers.
+	attached:         Option<AttachedKind>,
+	/// Focus policy applied immediately before screenshots.
+	screenshot_focus: ScreenshotFocus,
 	/// Current top-level frame id reported by `Page.frameNavigated`.
-	main_frame:     Str,
+	main_frame:       Str,
 	/// Default execution contexts belonging to the current top-level frame.
-	main_contexts:  HashSet<u64>,
+	main_contexts:    HashSet<u64>,
 	/// Event sink towards the host.
-	events:         flume::Sender<WebViewEvent>,
+	events:           flume::Sender<WebViewEvent>,
 	/// Shared url/title cache kept current from protocol events.
-	state:          SharedState,
+	state:            SharedState,
 	/// Frames surface config; `None` for window surfaces.
-	frame_cfg:      Option<FrameConfig>,
+	frame_cfg:        Option<FrameConfig>,
 	/// Minimum interval between emitted frames (`fps_cap`).
-	frame_interval: Option<Duration>,
+	frame_interval:   Option<Duration>,
 	/// When the last frame was emitted to the host.
-	last_frame:     Option<Instant>,
+	last_frame:       Option<Instant>,
 	/// Pixels of the last delivered frame, for damage-rect computation.
-	last_pixels:    Option<bytes::Bytes>,
+	last_pixels:      Option<bytes::Bytes>,
 	/// The page target or the socket is gone; the session is over.
-	closed:         bool,
+	closed:           bool,
 	/// A load finished; the main loop should re-read `document.title`.
-	title_dirty:    bool,
+	title_dirty:      bool,
 	/// Out-of-band forced close observed while protocol calls are pending.
-	cancelled:      Arc<AtomicBool>,
+	cancelled:        Arc<AtomicBool>,
 }
 
 impl Cdp {
@@ -574,6 +717,7 @@ impl Cdp {
 		state: SharedState,
 		frame_cfg: Option<FrameConfig>,
 		cancelled: Arc<AtomicBool>,
+		attached: Option<AttachedKind>,
 	) -> Self {
 		let frame_interval = frame_cfg
 			.and_then(|cfg| cfg.fps_cap)
@@ -584,6 +728,8 @@ impl Cdp {
 			next_id: 1,
 			session: Str::default(),
 			target: Str::default(),
+			attached,
+			screenshot_focus: ScreenshotFocus::None,
 			main_frame: Str::default(),
 			main_contexts: HashSet::new(),
 			events,
@@ -617,24 +763,54 @@ impl Cdp {
 			.map(drop)
 	}
 
+	/// Best-effort foreground probe used only to rank implicit relay targets.
+	async fn probe_target_visible(&mut self, target: &str) -> bool {
+		let attached = self
+			.browser("Target.attachToTarget", json!({ "targetId": target, "flatten": true }))
+			.await;
+		let Some(session) = attached
+			.ok()
+			.and_then(|value| value.get("sessionId").and_then(Value::as_str).map(Str::new))
+		else {
+			return false;
+		};
+		let visible = self
+			.call(
+				"Runtime.evaluate",
+				json!({
+					"expression": "document.visibilityState === 'visible'",
+					"returnByValue": true,
+				}),
+				Some(session.clone()),
+			)
+			.await
+			.ok()
+			.and_then(|value| value.pointer("/result/value").and_then(Value::as_bool))
+			.unwrap_or(false);
+		let _ = self
+			.browser("Target.detachFromTarget", json!({ "sessionId": &*session }))
+			.await;
+		visible
+	}
+
 	/// Browser-scoped call (no session id).
 	async fn browser(&mut self, method: &str, params: Value) -> Result<Value> {
-		self.call(method, params, false).await
+		self.call(method, params, None).await
 	}
 
 	/// Session-scoped call to the attached page target.
 	async fn cmd(&mut self, method: &str, params: Value) -> Result<Value> {
-		self.call(method, params, true).await
+		self.call(method, params, Some(self.session.clone())).await
 	}
 
 	/// Send one command and pump the socket until its reply arrives,
 	/// dispatching interleaved events so none are dropped mid-call.
-	async fn call(&mut self, method: &str, params: Value, in_session: bool) -> Result<Value> {
+	async fn call(&mut self, method: &str, params: Value, session: Option<Str>) -> Result<Value> {
 		let id = self.next_id;
 		self.next_id += 1;
 		let mut msg = json!({ "id": id, "method": method, "params": params });
-		if in_session {
-			msg["sessionId"] = json!(&*self.session);
+		if let Some(session) = session {
+			msg["sessionId"] = json!(&*session);
 		}
 		self.link.send_json(&msg).await?;
 		let deadline = Instant::now() + CALL_TIMEOUT;
@@ -647,10 +823,11 @@ impl Cdp {
 			if remaining.is_zero() {
 				return Err(Error::Timeout("waiting for a CDP reply"));
 			}
-			let reply = match timeout(remaining.min(Duration::from_millis(25)), self.link.recv_json()).await {
-				Ok(reply) => reply?,
-				Err(_) => continue,
-			};
+			let reply =
+				match timeout(remaining.min(Duration::from_millis(25)), self.link.recv_json()).await {
+					Ok(reply) => reply?,
+					Err(_) => continue,
+				};
 			let Some(reply) = reply else {
 				self.closed = true;
 				return Err(Error::Closed);
@@ -910,6 +1087,7 @@ impl Cdp {
 		reply: flume::Sender<Result<bytes::Bytes>>,
 	) -> Result<()> {
 		let result = async {
+			self.prepare_screenshot_target().await?;
 			if full_page {
 				let metrics = self.cmd("Page.getLayoutMetrics", json!({})).await?;
 				let size = metrics
@@ -964,6 +1142,37 @@ impl Cdp {
 				Ok(())
 			},
 			Err(error) => Err(error),
+		}
+	}
+
+	/// Prevent compositor capture from returning pixels for a sibling tab.
+	async fn prepare_screenshot_target(&mut self) -> Result<()> {
+		match self.screenshot_focus {
+			ScreenshotFocus::None => Ok(()),
+			ScreenshotFocus::Activate => self.cmd("Page.bringToFront", json!({})).await.map(drop),
+			ScreenshotFocus::RequireVisible => {
+				let visible = self
+					.cmd(
+						"Runtime.evaluate",
+						json!({
+							"expression": "document.visibilityState === 'visible'",
+							"returnByValue": true,
+						}),
+					)
+					.await
+					.ok()
+					.and_then(|value| value.pointer("/result/value").and_then(Value::as_bool))
+					.unwrap_or(false);
+				if visible {
+					Ok(())
+				} else {
+					Err(Error::Protocol(
+						"The attached browser tab is not visible; switch to it before taking a \
+						 screenshot"
+							.to_str(),
+					))
+				}
+			},
 		}
 	}
 
@@ -1155,6 +1364,9 @@ impl Cdp {
 		let Some(method) = msg.get("method").and_then(Value::as_str) else {
 			return Ok(());
 		};
+		if is_foreign_page_session_event(msg, method, &self.session) {
+			return Ok(());
+		}
 		let params = msg.get("params").unwrap_or(&Value::Null);
 		match method {
 			"Page.screencastFrame" => return self.on_screencast_frame(params).await,
@@ -1193,7 +1405,7 @@ impl Cdp {
 				}
 			},
 			"Page.frameStartedLoading" => {
-				if params.get("frameId").and_then(Value::as_str) == Some(&*self.target) {
+				if event_is_for_main_frame(params, &self.main_frame) {
 					let url = self.state.lock().url.clone();
 					let _ = self.events.send(WebViewEvent::LoadStarted(url));
 				}
@@ -1303,6 +1515,18 @@ impl Cdp {
 	}
 }
 
+fn is_foreign_page_session_event(msg: &Value, method: &str, root_session: &str) -> bool {
+	(method.starts_with("Page.") || method.starts_with("Runtime."))
+		&& msg
+			.get("sessionId")
+			.and_then(Value::as_str)
+			.is_some_and(|session| session != root_session)
+}
+
+fn event_is_for_main_frame(params: &Value, main_frame: &str) -> bool {
+	params.get("frameId").and_then(Value::as_str) == Some(main_frame)
+}
+
 fn binding_is_from_main_context(params: &Value, main_contexts: &HashSet<u64>) -> bool {
 	params
 		.get("executionContextId")
@@ -1370,5 +1594,65 @@ mod ipc_tests {
 		assert!(binding_is_from_main_context(&json!({ "executionContextId": 41 }), &contexts,));
 		assert!(!binding_is_from_main_context(&json!({ "executionContextId": 42 }), &contexts,));
 		assert!(!binding_is_from_main_context(&json!({}), &contexts));
+	}
+
+	#[test]
+	fn relay_protocol_is_selected_by_identity_not_url_shape() {
+		assert!(!should_claim_target(AttachedKind::Cdp));
+		assert!(should_claim_target(AttachedKind::Relay));
+	}
+
+	#[test]
+	fn relay_preserves_user_viewport_unless_explicit() {
+		assert!(!PageOptions::default().viewport_explicit);
+		assert!(!should_override_attached_viewport(AttachedKind::Relay, false));
+		assert!(should_override_attached_viewport(AttachedKind::Relay, true));
+		assert!(should_override_attached_viewport(AttachedKind::Cdp, false));
+	}
+
+	#[test]
+	fn relay_screenshot_policy_preserves_or_activates_focus() {
+		assert_eq!(screenshot_focus(AttachedKind::Relay, false), ScreenshotFocus::RequireVisible);
+		assert_eq!(screenshot_focus(AttachedKind::Relay, true), ScreenshotFocus::Activate);
+		assert_eq!(screenshot_focus(AttachedKind::Cdp, false), ScreenshotFocus::None);
+	}
+
+	#[test]
+	fn child_page_and_runtime_events_do_not_reach_root_state() {
+		let child_page = json!({
+			"sessionId": "child",
+			"method": "Page.frameNavigated",
+			"params": {},
+		});
+		let child_runtime = json!({
+			"sessionId": "child",
+			"method": "Runtime.executionContextsCleared",
+			"params": {},
+		});
+		let root_page = json!({
+			"sessionId": "root",
+			"method": "Page.frameNavigated",
+			"params": {},
+		});
+		let browser_event = json!({
+			"sessionId": "child",
+			"method": "Target.detachedFromTarget",
+			"params": {},
+		});
+		assert!(is_foreign_page_session_event(&child_page, "Page.frameNavigated", "root"));
+		assert!(is_foreign_page_session_event(
+			&child_runtime,
+			"Runtime.executionContextsCleared",
+			"root",
+		));
+		assert!(!is_foreign_page_session_event(&root_page, "Page.frameNavigated", "root"));
+		assert!(!is_foreign_page_session_event(&browser_event, "Target.detachedFromTarget", "root",));
+	}
+
+	#[test]
+	fn load_start_matches_the_captured_main_frame_not_target_id() {
+		let event = json!({ "frameId": "real-main-frame" });
+		assert!(event_is_for_main_frame(&event, "real-main-frame"));
+		assert!(!event_is_for_main_frame(&event, "PAGE42"));
 	}
 }

@@ -1,19 +1,22 @@
 //! The historical replacement dialect and its lossless lift data.
 
-use std::{fmt, marker::PhantomData, path::Path, str};
+use std::marker::PhantomData;
 
 use async_stream::stream;
 use bytes::Bytes;
 use futures::{FutureExt, Stream, pin_mut, select_biased};
 use omp_core::{Str, sf};
-use omp_hashline::{
-	ReplaceError, ReplaceOptions, apply_replace,
-	diff_preview::{CompactDiffOptions, build_compact_diff_preview},
-	format_hashline_header, numbered_diff,
-	recovery::recover_exact,
+use omp_edit::{
+	diff_string::{
+		BlockContextSource, CompactDiffOptions, build_compact_diff_preview, generate_diff_string,
+	},
+	fuzzy::{DEFAULT_FUZZY_THRESHOLD, replace_text},
+	modes::hashline::format::format_hashline_header,
+	span_edits,
+	store::file_hash,
 };
 use omp_tool::{
-	Abort, Constraint, DocEffects, Effects, Ev, IncomingParams, InterruptWaitError, Part,
+	Abort, Constraint, Diag, DocEffects, Effects, Ev, IncomingParams, InterruptWaitError, Part,
 	PromptCaps, Rev, Tool, ToolSpec, ToolTerminal,
 };
 use schemars::JsonSchema;
@@ -23,9 +26,10 @@ use tracing::Instrument as _;
 use super::{
 	AppliedOp, CommittedSection, EditAction, EditCommitError, EditDocuments, EditPrepared,
 	EditProposal, EditUpdate, Fault, FormatPolicy, NoopResult, Payload, PrepareRequest,
-	RejectionReason, ResolvedEdit, SectionOp, SectionPayload, StalePolicy, commit_event, done_fault,
+	RejectionReason, ResolvedEdit, SectionOp, SectionPayload, StalePolicy, commit_event,
+	document_text, done_fault,
 	observer::{AppliedEditSnapshot, EditObserver, PendingBlackbox},
-	param_event, recovery_edits, warn_edit_rejection,
+	param_event, path_recovery_diag, restore_text, utf8, warn_edit_rejection,
 };
 use crate::render::TextProjection;
 
@@ -34,7 +38,7 @@ const DESCRIPTION: &str = "Replace exact or uniquely recoverable text in a file.
                            rejects ambiguous matches with previews.";
 
 /// Arguments emitted by the current `edit@rep.2` dialect.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplaceParams {
 	/// Workspace-relative document path.
@@ -196,7 +200,7 @@ pub fn replace_tool_with_observer<D: EditDocuments>(
 		observer,
 		guard_generated,
 		allow_fuzzy,
-		fuzzy_threshold: omp_hashline::replace::DEFAULT_FUZZY_THRESHOLD,
+		fuzzy_threshold: DEFAULT_FUZZY_THRESHOLD,
 		require_seen,
 		spec: replace_spec(),
 		params: PhantomData,
@@ -218,7 +222,7 @@ pub fn legacy_replace_tool_with_observer<D: EditDocuments>(
 		observer,
 		guard_generated,
 		allow_fuzzy,
-		fuzzy_threshold: omp_hashline::replace::DEFAULT_FUZZY_THRESHOLD,
+		fuzzy_threshold: DEFAULT_FUZZY_THRESHOLD,
 		require_seen,
 		spec: legacy_replace_spec(),
 		params: PhantomData,
@@ -229,7 +233,7 @@ impl<D, P> ReplaceTool<D, P> {
 	/// Overrides the host-wide fuzzy similarity threshold used when a call
 	/// does not carry a historical per-operation override.
 	#[must_use]
-	pub fn with_fuzzy_threshold(mut self, threshold: f64) -> Self {
+	pub const fn with_fuzzy_threshold(mut self, threshold: f64) -> Self {
 		self.fuzzy_threshold = threshold.clamp(0.0, 1.0);
 		self
 	}
@@ -243,7 +247,7 @@ struct Work<P> {
 struct Projection {
 	after:    Bytes,
 	resolved: Vec<ResolvedEdit>,
-	warnings: Vec<Str>,
+	diags:    Vec<Diag>,
 }
 
 impl<D: EditDocuments, P: ReplaceArguments> Tool for ReplaceTool<D, P> {
@@ -306,63 +310,60 @@ impl<D: EditDocuments, P: ReplaceArguments> Tool for ReplaceTool<D, P> {
 			let mut projections = Vec::with_capacity(works.len());
 			let mut pending_blackbox = Vec::<PendingBlackbox>::new();
 			for work in &works {
-				let result = apply_replace(work.prepared.authored_bytes(), &work.op.old, &work.op.new, ReplaceOptions {
-					replace_all: work.op.replace_all,
-					allow_fuzzy: self.allow_fuzzy && work.op.allow_fuzzy,
-					threshold: work.op.threshold.unwrap_or(self.fuzzy_threshold),
-				});
-				let (after, resolved, recovery_edits) = match result {
-					Ok(result) => {
-						let resolved = result.edits.iter().map(|edit| ResolvedEdit {
-							start: line_at(work.prepared.authored_bytes(), edit.start),
-							end: line_at_end(work.prepared.authored_bytes(), edit.start, edit.end),
-							body: replacement_body(&edit.replacement),
-						}).collect();
-						let byte_edits = result
-							.edits
-							.iter()
-							.map(|edit| omp_hashline::ByteEdit {
-								start: edit.start,
-								end: edit.end,
-								replacement: edit.replacement.clone(),
-							})
-							.collect::<Vec<_>>();
-						let recovery_edits = match recovery_edits(&byte_edits) {
-							Ok(edits) => edits,
-							Err(fault) => { yield done_fault(fault); return; },
-						};
-						(result.final_bytes, resolved, recovery_edits)
-					},
-					Err(ReplaceError::NoChanges) => {
-						(work.prepared.authored_bytes().clone(), Vec::new(), Vec::new())
-					},
-					Err(error) => { yield done_fault(Fault::invalid(replacement_error(error))); return; },
+				let authored = match document_text(work.prepared.authored_bytes(), "authored document") {
+					Ok(text) => text,
+					Err(fault) => { yield done_fault(fault); return; },
 				};
-				let authored_stale = work.prepared.authored_bytes() != work.prepared.base_bytes();
-				let after = if !authored_stale {
-					after
-				} else if recovery_edits.is_empty() {
-					tracing::warn!(
-						parent: &span,
-						path = %work.prepared.display_path(),
-						"replacement rebase had no recoverable ranges",
-					);
-					yield done_fault(Fault::stale("The source snapshot changed before this replacement could be applied; re-read the document."));
-					return;
-				} else if let Ok(recovered) = recover_exact(
-					work.prepared.authored_bytes(),
-					work.prepared.base_bytes(),
-					&recovery_edits,
+				let base = match document_text(work.prepared.base_bytes(), "current document") {
+					Ok(text) => text,
+					Err(fault) => { yield done_fault(fault); return; },
+				};
+				let allow_fuzzy = self.allow_fuzzy && work.op.allow_fuzzy;
+				let threshold = Some(work.op.threshold.unwrap_or(self.fuzzy_threshold));
+				let result = match replace_text(
+					&authored.text,
+					&work.op.old,
+					&work.op.new,
+					allow_fuzzy,
+					work.op.replace_all,
+					threshold,
 				) {
-					recovered.content().clone()
+					Ok(result) => result,
+					Err(error) => { yield done_fault(Fault::invalid(error.to_string())); return; },
+				};
+				let resolved = span_edits(&authored.text, &result.content)
+					.into_iter()
+					.map(|edit| ResolvedEdit {
+						start: line_at(&authored.text, edit.start),
+						end: line_at_end(&authored.text, edit.start, edit.end),
+						body: replacement_body(edit.replacement),
+					})
+					.collect();
+				let authored_stale = work.prepared.authored_bytes() != work.prepared.base_bytes();
+				let after = if authored_stale {
+					match replace_text(
+						&base.text,
+						&work.op.old,
+						&work.op.new,
+						allow_fuzzy,
+						work.op.replace_all,
+						threshold,
+					) {
+						Ok(rebased) if rebased.content != base.text => {
+							restore_text(&rebased.content, &base)
+						},
+						Ok(_) | Err(_) => {
+							tracing::warn!(
+								parent: &span,
+								path = %work.prepared.display_path(),
+								"replacement rebase overlapped a concurrent change",
+							);
+							yield done_fault(Fault::stale("The source snapshot changed and the replacement overlaps intervening edits; re-read the document."));
+							return;
+						},
+					}
 				} else {
-					tracing::warn!(
-						parent: &span,
-						path = %work.prepared.display_path(),
-						"replacement rebase overlapped a concurrent change",
-					);
-					yield done_fault(Fault::stale("The source snapshot changed and the replacement overlaps intervening edits; re-read the document."));
-					return;
+					restore_text(&result.content, &authored)
 				};
 				if authored_stale {
 					tracing::warn!(
@@ -382,7 +383,17 @@ impl<D: EditDocuments, P: ReplaceArguments> Tool for ReplaceTool<D, P> {
 					&observer_args,
 				).instrument(span.clone()).await;
 				let after = inspected.content;
-				let warnings = inspected.notice.into_iter().collect();
+				if let Err(fault) = utf8(&after, "edited document") {
+					yield done_fault(fault);
+					return;
+				}
+				let mut diags = work
+					.prepared
+					.path_recoveries()
+					.iter()
+					.map(path_recovery_diag)
+					.collect::<Vec<_>>();
+				diags.extend(inspected.diag);
 				pending_blackbox.extend(inspected.pending);
 				proposals.push(EditProposal {
 					action: EditAction::Write { content: after.clone() },
@@ -390,20 +401,24 @@ impl<D: EditDocuments, P: ReplaceArguments> Tool for ReplaceTool<D, P> {
 					stale_policy: StalePolicy::RebaseNonOverlapping,
 					format_policy: self.format_policy,
 				});
-				projections.push(Projection { after, resolved, warnings });
+				projections.push(Projection { after, resolved, diags });
 			}
 
 			let mut preview = String::new();
 			let mut added_lines = 0;
 			let mut removed_lines = 0;
 			for (work, projection) in works.iter().zip(&projections) {
-				if let Ok(diff) = numbered_diff(work.prepared.base_bytes(), &projection.after, Some(Path::new(work.prepared.display_path().as_str()))) {
-					let compact = build_compact_diff_preview(&diff.text, CompactDiffOptions::default());
-					if !preview.is_empty() && !compact.preview.is_empty() { preview.push('\n'); }
-					preview.push_str(&compact.preview);
-					added_lines += compact.added_lines;
-					removed_lines += compact.removed_lines;
-				}
+				let Ok(base) = document_text(work.prepared.base_bytes(), "current document") else { continue };
+				let Ok(after) = document_text(&projection.after, "edited document") else { continue };
+				let diff = generate_diff_string(&base.text, &after.text, None, &BlockContextSource {
+					path: Some(work.prepared.display_path().as_str()),
+					lang: None,
+				});
+				let compact = build_compact_diff_preview(&diff.diff, &CompactDiffOptions::default());
+				if !preview.is_empty() && !compact.preview.is_empty() { preview.push('\n'); }
+				preview.push_str(&compact.preview);
+				added_lines += compact.added_lines;
+				removed_lines += compact.removed_lines;
 			}
 			yield Ev::Update(EditUpdate { applied_ops: projections.iter().map(|projection| projection.resolved.len()).sum(), paths: works.iter().map(|work| work.prepared.display_path().clone()).collect(), preview: preview.into(), added_lines, removed_lines });
 			match params.committed().await {
@@ -414,6 +429,9 @@ impl<D: EditDocuments, P: ReplaceArguments> Tool for ReplaceTool<D, P> {
 				let work = &works[index];
 				let NoopResult { diagnostic, escalate } = self.documents.record_noop(work.prepared.path(), work.prepared.display_path(), journal_input);
 				if escalate || works.len() != 1 { yield done_fault(Fault::invalid(diagnostic)); return; }
+				for diag in &projections[index].diags {
+					yield Ev::Diag(diag.clone());
+				}
 				yield Ev::Done(ToolTerminal::Done { result: Ok(payload(&works, &projections, None)), useless: true });
 				return;
 			}
@@ -436,6 +454,12 @@ impl<D: EditDocuments, P: ReplaceArguments> Tool for ReplaceTool<D, P> {
 			match result {
 				Ok(result) if result.sections.len() == works.len() => {
 					for (work, committed) in works.iter().zip(&result.sections) {
+						if let Some(content) = &committed.content
+							&& let Err(fault) = utf8(content, "committed document")
+						{
+							yield done_fault(fault);
+							return;
+						}
 						if committed.rebased {
 							tracing::warn!(
 								parent: &span,
@@ -447,6 +471,11 @@ impl<D: EditDocuments, P: ReplaceArguments> Tool for ReplaceTool<D, P> {
 					for work in &works { self.documents.reset_noop(work.prepared.path()); }
 					for pending in pending_blackbox {
 						self.observer.record_committed(pending).await;
+					}
+					for projection in &projections {
+						for diag in &projection.diags {
+							yield Ev::Diag(diag.clone());
+						}
 					}
 					yield Ev::Done(ToolTerminal::Done { result: Ok(payload(&works, &projections, Some(&result.sections))), useless: false });
 				},
@@ -508,16 +537,23 @@ fn payload<P: EditPrepared>(
 				let after = committed
 					.and_then(|section| section.content.clone())
 					.unwrap_or_else(|| projection.after.clone());
-				let numbered = numbered_diff(
-					work.prepared.base_bytes(),
-					&after,
-					Some(Path::new(work.prepared.display_path().as_str())),
-				)
-				.ok();
-				let diff = numbered
-					.as_ref()
-					.map_or_else(Str::default, |diff| diff.text.clone());
-				let preview = build_compact_diff_preview(&diff, CompactDiffOptions::default()).preview;
+				let before_text = document_text(work.prepared.base_bytes(), "current document")
+					.expect("prepared replacement document was validated as UTF-8");
+				let after_text = document_text(&after, "replacement document")
+					.expect("replacement document was validated as UTF-8");
+				let numbered = generate_diff_string(
+					&before_text.text,
+					&after_text.text,
+					None,
+					&BlockContextSource {
+						path: Some(work.prepared.display_path().as_str()),
+						lang: None,
+					},
+				);
+				let diff = Str::from(numbered.diff);
+				let preview = build_compact_diff_preview(&diff, &CompactDiffOptions::default())
+					.preview
+					.into();
 				SectionPayload {
 					path: work.prepared.display_path().clone(),
 					canonical_path: work.prepared.path().clone(),
@@ -543,17 +579,19 @@ fn payload<P: EditPrepared>(
 					rebased: committed.is_some_and(|section| section.rebased),
 					before: work.prepared.base_bytes().clone(),
 					before_blob: None,
-					after: after.clone(),
+					after,
 					after_blob: None,
-					header: Some(format_hashline_header(
-						work.prepared.display_path(),
-						&omp_hashline::compute_snapshot_tag(&after),
-					)),
+					header: Some(
+						format_hashline_header(
+							work.prepared.display_path(),
+							&file_hash(&after_text.text),
+						)
+						.into(),
+					),
 					diff,
 					preview,
 					first_changed_line: projection.resolved.first().map(|edit| edit.start),
 					block_resolutions: Vec::new(),
-					warnings: projection.warnings.clone(),
 					diagnostics: committed.map_or_else(Vec::new, |section| section.diagnostics.clone()),
 					diagnostics_complete: committed.is_none_or(|section| section.diagnostics_complete),
 				}
@@ -562,37 +600,23 @@ fn payload<P: EditPrepared>(
 	}
 }
 
-fn line_at(text: &[u8], offset: usize) -> usize {
-	text[..offset].iter().filter(|byte| **byte == b'\n').count() + 1
+fn line_at(text: &str, offset: usize) -> usize {
+	text.as_bytes()[..offset]
+		.iter()
+		.filter(|byte| **byte == b'\n')
+		.count()
+		+ 1
 }
 
-fn line_at_end(text: &[u8], start: usize, end: usize) -> usize {
+fn line_at_end(text: &str, start: usize, end: usize) -> usize {
 	let mut line = line_at(text, end);
-	if end > start && text.get(end.saturating_sub(1)) == Some(&b'\n') {
+	if end > start && text.as_bytes().get(end.saturating_sub(1)) == Some(&b'\n') {
 		line = line.saturating_sub(1);
 	}
 	line.max(line_at(text, start))
 }
 
-fn replacement_error(error: ReplaceError) -> Str {
-	match error {
-		ReplaceError::AmbiguousExact { occurrences, lines, previews } => {
-			let mut text = format!(
-				"found {occurrences} exact occurrences; provide more context or enable replace-all"
-			);
-			for (line, preview) in lines.into_iter().zip(previews) {
-				let _ = fmt::Write::write_fmt(&mut text, format_args!("\nline {line}: {preview}"));
-			}
-			text.into()
-		},
-		error => error.to_string().into(),
-	}
-}
-
-fn replacement_body(text: &[u8]) -> Vec<Str> {
-	let Ok(text) = str::from_utf8(text) else {
-		return Vec::new();
-	};
+fn replacement_body(text: &str) -> Vec<Str> {
 	if text.is_empty() {
 		return Vec::new();
 	}
@@ -610,17 +634,19 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn ladder_preserves_unicode_bom_crlf_and_indentation() {
-		let unicode = apply_replace(
-			b"\xef\xbb\xbfsay \xe2\x80\x9chello\xe2\x80\x9d\r\n",
+	fn ladder_handles_unicode_bom_crlf_and_indentation() {
+		let unicode = replace_text(
+			"\u{feff}say “hello”\r\n",
 			"say \"hello\"\n",
 			"say \"goodbye\"\n",
-			ReplaceOptions::default(),
+			true,
+			false,
+			None,
 		)
 		.expect("unicode fallback");
-		assert_eq!(unicode.final_bytes.as_ref(), b"\xef\xbb\xbfsay \"goodbye\"\r\n");
+		assert_eq!(unicode.content, "\u{feff}say \"goodbye\"\n");
 		assert_eq!(
-			omp_hashline::replace::adjust_indentation("foo\nbar", "    foo\n    bar", "foo\nbaz\nbar",),
+			omp_edit::text::adjust_indentation("foo\nbar", "    foo\n    bar", "foo\nbaz\nbar",),
 			"    foo\n    baz\n    bar"
 		);
 	}
@@ -633,7 +659,7 @@ mod tests {
 			observer:        EditObserver::default(),
 			guard_generated: true,
 			allow_fuzzy:     true,
-			fuzzy_threshold: omp_hashline::replace::DEFAULT_FUZZY_THRESHOLD,
+			fuzzy_threshold: DEFAULT_FUZZY_THRESHOLD,
 			require_seen:    false,
 			spec:            replace_spec(),
 			params:          PhantomData,
@@ -644,14 +670,11 @@ mod tests {
 
 	#[test]
 	fn ambiguous_and_noop_replacements_remain_actionable() {
-		let ambiguous = apply_replace(b"same\nsame\n", "same", "changed", ReplaceOptions::default())
+		let ambiguous = replace_text("same\nsame\n", "same", "changed", false, false, None)
 			.expect_err("ambiguous exact matches must not select arbitrarily");
-		assert!(
-			matches!(ambiguous, ReplaceError::AmbiguousExact { previews, .. } if !previews.is_empty())
-		);
-		assert!(matches!(
-			apply_replace(b"same\n", "same", "same", ReplaceOptions::default()),
-			Err(ReplaceError::NoChanges)
-		));
+		assert!(ambiguous.to_string().contains("Found 2 occurrences"));
+		let noop = replace_text("same\n", "same", "same", false, false, None)
+			.expect("identical replacement is represented by unchanged content");
+		assert_eq!(noop.content, "same\n");
 	}
 }

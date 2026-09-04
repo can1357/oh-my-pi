@@ -12,8 +12,8 @@
 
 use std::sync::Arc;
 
+use omp_ai::{ContentPart, Message, Role};
 use omp_core::{Str, sf};
-use omp_inference::{ContentPart, Message, Role};
 use omp_proto::toolhost::v1::HookEventId;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
@@ -423,8 +423,7 @@ fn parts_of(
 					.and_then(JsonValue::as_str)
 					.and_then(|encoded| omp_core::base64::decode(encoded).into_vec().ok())
 					.and_then(|bytes| String::from_utf8(bytes).ok())
-					.map(Str::new)
-					.unwrap_or_else(|| Str::new(json.to_string())),
+					.map_or_else(|| Str::new(json.to_string()), Str::new),
 				other => Str::new(other.to_string()),
 			}
 		} else if let Some(alt) = part.get("alt").and_then(JsonValue::as_str) {
@@ -541,9 +540,9 @@ mod tests {
 			content: Arc::from([
 				ContentPart::Text { text: Str::new_static("thinking aloud"), proof: None },
 				ContentPart::ToolCall {
-					call:      omp_inference::ToolCallId::from("call-1"),
+					call:      omp_ai::ToolCallId::from("call-1"),
 					name:      Str::new_static("read"),
-					arguments: omp_inference::OpaqueJson::new(serde_json::json!({})),
+					arguments: omp_ai::OpaqueJson::new(serde_json::json!({})),
 					proof:     None,
 				},
 			]),

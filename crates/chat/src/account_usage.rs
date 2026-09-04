@@ -25,7 +25,7 @@ pub struct AccountUsageCache {
 }
 
 impl AccountUsageCache {
-	/// Pi's status usage cache lifetime.
+	/// Status usage cache lifetime.
 	pub const REFRESH: Duration = Duration::from_secs(5 * 60);
 	/// Poll cadence while the application runtime owns an in-flight fetch.
 	pub const SETTLE_POLL: Duration = Duration::from_millis(100);
@@ -109,7 +109,7 @@ impl AccountUsageCache {
 					self.identity = None;
 				},
 				Ok(Err(_)) | Err(flume::TryRecvError::Disconnected) => {
-					// Like pi, a transient refresh failure preserves a valid cache
+					// A transient refresh failure preserves a valid cache
 					// but advances the TTL so paint activity cannot create a retry
 					// storm.
 					self.pending = None;

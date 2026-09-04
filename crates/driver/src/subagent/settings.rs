@@ -144,46 +144,147 @@ omp_con::var! {
 		default: 0,
 		flags: session,
 	};
-	/// Maximum recursive subagent depth; -1 is unlimited.
+	/// How many levels deep subagents can spawn their own subagents.
 	pub static SV_TASK_MAX_RECURSION_DEPTH = sv_task_max_recursion_depth: i32 {
 		default: 2,
 		min: -1,
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Subagents",
+			"ui.label": "Max Task Recursion",
+			"ui.option.-1": "Unlimited",
+			"ui.option.0": "None",
+			"ui.option.1": "Single",
+			"ui.option.2": "Double",
+			"ui.option.3": "Triple",
+			"legacy.path": "task.maxRecursionDepth",
+		},
 	};
-	/// Maximum active subagent runs; 0 is unlimited.
+	/// Maximum number of subagents running concurrently.
 	pub static SV_TASK_MAX_CONCURRENCY = sv_task_max_concurrency: u32 {
 		default: 32,
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Subagents",
+			"ui.label": "Max Concurrent Tasks",
+			"ui.option.0": "Unlimited",
+			"ui.option.1": "1 task",
+			"ui.option.2": "2 tasks",
+			"ui.option.4": "4 tasks",
+			"ui.option.8": "8 tasks",
+			"ui.option.16": "16 tasks",
+			"ui.option.32": "32 tasks",
+			"ui.option.64": "64 tasks",
+			"legacy.path": "task.maxConcurrency",
+		},
 	};
-	/// Per-run wall-clock limit.
+	/// Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against
+	/// provider-side stream hangs that escape the inference-layer watchdog; triggers a normal
+	/// subagent abort with a 'timed out' reason.
 	pub static SV_TASK_MAX_RUNTIME = sv_task_max_runtime: omp_con::Span {
 		default: omp_con::Span::Never,
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Subagents",
+			"ui.label": "Max Subagent Runtime",
+			"ui.unit": "ms",
+			"ui.option.never": "Unlimited",
+			"ui.option.never.desc": "Default",
+			"ui.option.5m": "5 minutes",
+			"ui.option.15m": "15 minutes",
+			"ui.option.30m": "30 minutes",
+			"ui.option.1h": "1 hour",
+			"legacy.path": "task.maxRuntimeMs",
+		},
 	};
-	/// Assistant-request budget before bounded wrap-up; 0 disables it.
+	/// Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up
+	/// steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is
+	/// force-stopped and the agent must yield its partial findings. 0 disables the guard. Bundled
+	/// scout/sonic agents cap out at a lower built-in budget, so a value below that cap still
+	/// applies to them.
 	pub static SV_TASK_SOFT_REQUEST_BUDGET = sv_task_soft_request_budget: u32 {
 		default: 200,
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Subagents",
+			"ui.label": "Soft Subagent Request Budget",
+			"ui.option.0": "Disabled",
+			"ui.option.90": "90 requests",
+			"ui.option.150": "150 requests",
+			"ui.option.200": "200 requests",
+			"ui.option.200.desc": "Default",
+			"legacy.path": "task.softRequestBudget",
+		},
 	};
-	/// Emits one wrap-up notice after crossing the soft request budget.
+	/// Inject one steering notice when a subagent crosses its soft request budget, asking it to
+	/// wrap up before the 1.5x forced-yield stop.
 	pub static SV_TASK_SOFT_REQUEST_BUDGET_NOTICE = sv_task_soft_request_budget_notice: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Subagents",
+			"ui.label": "Soft Request Budget Notice",
+			"legacy.path": "task.softRequestBudgetNotice",
+		},
 	};
-	/// Maximum caller-selectable reasoning effort for a child.
+	/// Maximum reasoning effort allowed for the task tool's per-spawn effort hint. Lower values
+	/// prevent callers from escalating subagents above this ceiling; the default preserves the
+	/// model's full range.
 	pub static SV_TASK_MAX_EFFORT = sv_task_max_effort: TaskEffortCeiling {
 		default: TaskEffortCeiling::Max,
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Subagents",
+			"ui.label": "Maximum Per-Spawn Effort",
+			"ui.option.minimal": "min",
+			"ui.option.minimal.desc": "Very brief reasoning (~1k tokens)",
+			"ui.option.low": "low",
+			"ui.option.low.desc": "Light reasoning (~2k tokens)",
+			"ui.option.medium": "medium",
+			"ui.option.medium.desc": "Moderate reasoning (~8k tokens)",
+			"ui.option.high": "high",
+			"ui.option.high.desc": "Deep reasoning (~16k tokens)",
+			"ui.option.xhigh": "xhigh",
+			"ui.option.xhigh.desc": "Extended reasoning (~32k tokens)",
+			"ui.option.max": "max",
+			"ui.option.max.desc": "Maximum reasoning the model supports",
+			"legacy.path": "task.maxEffort",
+		},
 	};
-	/// Prompt pressure applied to task delegation.
+	/// How strongly to push delegating work to subagents.
 	pub static SV_TASK_EAGER = sv_task_eager: TaskEagerMode {
 		default: TaskEagerMode::Default,
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Subagents",
+			"ui.label": "Prefer Task Delegation",
+			"ui.option.default": "Default",
+			"ui.option.default.desc": "Uses the selected model's policy; some models require an explicit delegation request",
+			"ui.option.preferred": "Preferred",
+			"ui.option.preferred.desc": "Adds delegation guidance to the system prompt",
+			"ui.option.always": "Always",
+			"ui.option.always.desc": "Prompt guidance plus a first-turn delegation reminder",
+			"legacy.path": "task.eager",
+		},
 	};
-	/// Grants LSP capability to children.
+	/// Allow subagents spawned via the task tool to use the lsp tool. Off by default to keep
+	/// subagents cheap; enable when LSP-aware delegation is worth the extra tokens.
 	pub static SV_TASK_ENABLE_LSP = sv_task_enable_lsp: bool {
 		default: false,
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Subagents",
+			"ui.label": "LSP in Subagents",
+			"legacy.path": "task.enableLsp",
+		},
 	};
 	/// Idle interval before a child loop is parked.
 	pub static SV_TASK_AGENT_IDLE_TTL = sv_task_agent_idle_ttl: omp_con::Span {
@@ -213,46 +314,103 @@ omp_con::var! {
 		default: Kv::default(),
 		flags: archive,
 	};
-	/// Environment backend used for isolated child workspaces.
+	/// Backend used for subagent isolation and worktree cloning.
 	pub static SV_TASK_ISOLATION_MODE = sv_task_isolation_mode: TaskIsolationMode {
 		default: TaskIsolationMode::None,
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Isolation",
+			"ui.label": "Isolation Backend",
+			"ui.option.none": "Disabled",
+			"ui.option.auto": "Auto",
+			"ui.option.auto.desc": "Let the environment pick the best available backend",
+			"ui.option.apfs": "APFS",
+			"ui.option.apfs.desc": "macOS clonefile reflink (APFS)",
+			"ui.option.btrfs": "btrfs",
+			"ui.option.btrfs.desc": "btrfs subvolume snapshot",
+			"ui.option.zfs": "ZFS",
+			"ui.option.zfs.desc": "ZFS snapshot + clone",
+			"ui.option.reflink": "Reflink",
+			"ui.option.reflink.desc": "Linux FICLONE per-file reflink",
+			"ui.option.overlayfs": "Overlayfs",
+			"ui.option.overlayfs.desc": "Linux kernel overlay (or fuse-overlayfs fallback)",
+			"ui.option.projfs": "ProjFS",
+			"ui.option.projfs.desc": "Windows Projected File System",
+			"ui.option.block-clone": "Block clone",
+			"ui.option.block-clone.desc": "Windows FSCTL_DUPLICATE_EXTENTS_TO_FILE (NTFS/ReFS)",
+			"ui.option.rcopy": "Recursive copy",
+			"ui.option.rcopy.desc": "git worktree if available, otherwise recursive copy",
+			"legacy.path": "task.isolation.enabled",
+			"legacy.path": "isolation.backend",
+		},
 	};
-	/// Applies successful isolated workspace changes.
+	/// Automatically apply successful isolated task changes to the parent checkout; disable to
+	/// retain patch or branch artifacts.
 	pub static SV_TASK_ISOLATION_APPLY = sv_task_isolation_apply: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Isolation",
+			"ui.label": "Apply Isolated Changes",
+			"legacy.path": "task.isolation.apply",
+		},
 	};
-	/// Merge strategy for successful isolated workspace changes.
+	/// How isolated task changes are integrated (patch apply or branch merge).
 	pub static SV_TASK_ISOLATION_MERGE = sv_task_isolation_merge: TaskIsolationMerge {
 		default: TaskIsolationMerge::Patch,
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Isolation",
+			"ui.label": "Isolation Merge Strategy",
+			"ui.option.patch": "Patch",
+			"ui.option.patch.desc": "Combine diffs and git apply",
+			"ui.option.branch": "Branch",
+			"ui.option.branch.desc": "Commit per task, merge with --no-ff",
+			"legacy.path": "task.isolation.merge",
+		},
 	};
 	/// Shows the selected agent-definition badge in task output.
 	pub static CL_TASK_SHOW_AGENT_BADGE = cl_task_show_agent_badge: bool {
 		default: true,
 		flags: archive,
 	};
-	/// Shows the serving model in task output.
+	/// Display the actual model ID used by each subagent in the task widget status line.
 	pub static CL_TASK_SHOW_RESOLVED_MODEL_BADGE = cl_task_show_resolved_model_badge: bool {
 		default: false,
 		flags: archive,
+		meta: {
+			"ui.tab": "appearance",
+			"ui.group": "Display",
+			"ui.label": "Show Resolved Model Badge",
+			"legacy.path": "task.showResolvedModelBadge",
+		},
 	};
-	/// Default peer-message wait interval.
+	/// Default timeout for hub message waits (and send await:true) in milliseconds; 0 disables the
+	/// timeout.
 	pub static SV_IRC_TIMEOUT = sv_irc_timeout: omp_con::Span {
 		default: omp_con::Span::Finite(omp_core::Duration::new(
 			120,
 			omp_core::DurationUnit::Seconds,
 		)),
 		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Execution",
+			"ui.label": "IRC Timeout",
+			"ui.unit": "ms",
+			"ui.option.never": "Disabled",
+			"ui.option.30s": "30 seconds",
+			"ui.option.1m": "1 minute",
+			"ui.option.2m": "2 minutes",
+			"ui.option.5m": "5 minutes",
+			"legacy.path": "irc.timeoutMs",
+		},
 	};
 	/// Relays peer-to-peer messages to the main transcript.
 	pub static CL_IRC_RELAY_TO_MAIN = cl_irc_relay_to_main: bool {
-		default: true,
-		flags: archive,
-	};
-	/// Shows delivery-state badges beside relayed peer messages.
-	pub static CL_IRC_SHOW_BADGES = cl_irc_show_badges: bool {
 		default: true,
 		flags: archive,
 	};
@@ -366,8 +524,8 @@ impl TaskSettings {
 		}
 	}
 
-	/// Whether an agent at `depth` may not spawn children (pi `atMaxDepth`):
-	/// its `task` tool is withheld rather than advertised and refused.
+	/// Whether an agent at `depth` may not spawn children: its `task` tool is
+	/// withheld rather than advertised and refused.
 	#[must_use]
 	pub fn at_recursion_limit(&self, depth: u32) -> bool {
 		self.max_recursion_depth >= 0

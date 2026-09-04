@@ -168,7 +168,7 @@ struct Harness {
 	_temp:   tempfile::TempDir,
 }
 
-fn harness(scripts: Vec<Vec<omp_inference::ChatEvent>>) -> Harness {
+fn harness(scripts: Vec<Vec<omp_ai::ChatEvent>>) -> Harness {
 	let temp = tempfile::tempdir().expect("tempdir");
 	let route = Arc::new(Mutex::new(None));
 	let (inference, _) = ScriptedInference::new(scripts);

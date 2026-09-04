@@ -1,7 +1,7 @@
 //! Boot chrome: the welcome banner, the composer status band, and the
 //! composer shell. Every glyph and color comes from the ambient
-//! [`UiContext`](omp_tui::UiContext); the shapes follow pi's `welcome.ts`
-//! and the status-band composer.
+//! [`UiContext`](omp_tui::UiContext); the shapes serve the welcome banner
+//! and status-band composer.
 
 use std::time::Duration;
 
@@ -23,24 +23,41 @@ pub use crate::{
 };
 
 omp_con::var! {
-	/// pi `startup.quiet`: skip the welcome box and startup-only status
-	/// notices on interactive launch.
+	/// Skip the welcome screen and startup status messages.
 	pub static CL_STARTUP_QUIET = cl_startup_quiet: bool {
 		default: false,
 		flags: archive,
+		meta: {
+			"ui.tab": "interaction",
+			"ui.group": "Startup & Updates",
+			"ui.label": "Quiet Startup",
+			"legacy.path": "startup.quiet",
+		},
 	};
-	/// pi `tui.titleState`: show the agent run state in the terminal title's
-	/// separator — a spinner while working, `>` on the user's turn, `!`
-	/// while the agent waits on the user.
+	/// Show the agent run state in the terminal title's separator: an animated
+	/// spinner while working, `>` on the user's turn, and `!` while waiting on
+	/// the user.
 	pub static CL_TITLE_STATE = cl_title_state: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"ui.tab": "appearance",
+			"ui.group": "Display",
+			"ui.label": "Terminal Title Run State",
+			"legacy.path": "tui.titleState",
+		},
 	};
-	/// pi `terminal.showProgress`: emit OSC 9;4 indeterminate progress
-	/// while a turn or context maintenance runs. Off by default.
+	/// Emit OSC 9;4 indeterminate progress while the agent or context
+	/// maintenance is running.
 	pub static CL_SHOW_PROGRESS = cl_show_progress: bool {
 		default: false,
 		flags: archive,
+		meta: {
+			"ui.tab": "appearance",
+			"ui.group": "Display",
+			"ui.label": "Native Terminal Progress",
+			"legacy.path": "terminal.showProgress",
+		},
 	};
 }
 
@@ -48,7 +65,7 @@ omp_con::var! {
 pub const COMPOSER_ID: &str = "composer";
 /// Element id of the status band inside the chrome tree.
 pub const STATUS_ID: &str = "status-band";
-/// Element id of the one-row gap above the composer (pi `EditorTopGap`).
+/// Element id of the one-row gap above the composer.
 pub const GAP_ID: &str = "composer-gap";
 /// Composer placeholder shared with the gallery composer previews.
 pub const PLACEHOLDER: &str = "Ask anything, edit files, run tools";
@@ -86,8 +103,8 @@ impl ModelBadge {
 	}
 
 	/// Rebuilds the badge from a picker row: the catalog facts of a model
-	/// the user switched to (pi refreshes welcome and status on every
-	/// `model_changed`).
+	/// the user switched to; welcome and status refresh with every model
+	/// change.
 	#[must_use]
 	pub fn from_row(row: &ModelRow) -> Self {
 		Self {
@@ -103,8 +120,7 @@ impl ModelBadge {
 		}
 	}
 
-	/// Model label for the status band: pi drops the `Claude ` prefix
-	/// (`status-line/segments.ts` `modelSegment`).
+	/// Model label for the status band, without a leading `Claude ` prefix.
 	#[must_use]
 	pub fn short_name(&self) -> Str {
 		match self.name.as_str().strip_prefix("Claude ") {
@@ -114,8 +130,7 @@ impl ModelBadge {
 	}
 }
 
-/// Agent run state carried by the terminal title's separator (pi
-/// `TerminalTitleState`).
+/// Agent run state carried by the terminal title's separator.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TitleState {
 	/// The user's turn: `>` reads like a shell prompt awaiting input.
@@ -127,7 +142,7 @@ pub enum TitleState {
 	Attention,
 }
 
-/// pi `title-generator.ts`: the terminal title as a run-state machine.
+/// `title-generator.ts`: the terminal title as a run-state machine.
 /// The label is the sanitized session name, else the project directory's
 /// base name; the separator carries the state while `cl_title_state` is
 /// on (`π > label`, `π ⠋ label`, `π ! label`), else `π: label`. The
@@ -152,7 +167,7 @@ impl TerminalTitle {
 	}
 
 	/// Sets the session label: `name` sanitized when present, else the base
-	/// name of `cwd` (pi `setSessionTerminalTitle`).
+	/// name of `cwd`.
 	pub fn set_label(&mut self, name: Option<&str>, cwd: &str) {
 		self.override_ = None;
 		self.label = name
@@ -166,13 +181,12 @@ impl TerminalTitle {
 		self.override_ = Some(sanitize_title_part(title).unwrap_or_else(|| Str::new_static("π")));
 	}
 
-	/// Sets the run state (pi `setTerminalTitleState`).
+	/// Sets the run state.
 	pub const fn set_state(&mut self, state: TitleState) {
 		self.state = state;
 	}
 
-	/// Enables or disables the run-state separator (pi
-	/// `setTerminalTitleStateEnabled`).
+	/// Enables or disables the run-state separator.
 	pub const fn set_enabled(&mut self, enabled: bool) {
 		self.enabled = enabled;
 	}
@@ -240,7 +254,7 @@ const fn title_brand(_charset: Charset) -> &'static str {
 const TITLE_SPINNER_STEP: Duration = Duration::from_millis(80);
 const TITLE_SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// pi `buildTerminalTitleWithState`, written into `out`.
+/// `buildTerminalTitleWithState`, written into `out`.
 fn compose_title(
 	out: &mut String,
 	label: Option<&str>,
@@ -277,7 +291,7 @@ fn compose_title(
 
 /// Drops control characters so a model-generated title can never terminate
 /// the OSC or inject another terminal command; empty after trimming is
-/// `None` (pi `sanitizeTerminalTitlePart`).
+/// `None`.
 fn sanitize_title_part(value: &str) -> Option<Str> {
 	let clean = value
 		.chars()
@@ -287,15 +301,14 @@ fn sanitize_title_part(value: &str) -> Option<Str> {
 	(!trimmed.is_empty()).then(|| Str::new(trimmed))
 }
 
-/// The project directory's base name, unless it is a filesystem root (pi
-/// `getFallbackTerminalTitle`).
+/// The project directory's base name, unless it is a filesystem root.
 fn fallback_title(cwd: &str) -> Option<Str> {
 	let path = std::path::Path::new(cwd);
 	let base = path.file_name()?.to_str()?;
 	sanitize_title_part(base)
 }
 
-/// pi `EditorTopGap`: the one-row margin above the editor stays for every
+/// `EditorTopGap`: the one-row margin above the editor stays for every
 /// shape except the band (omp's [`ComposerStyle::Borderless`]), whose status
 /// band is designed to sit flush under an occupied status row — the notice
 /// row the host paints directly above the composer. An empty status row
@@ -306,8 +319,8 @@ pub const fn top_gap_shown(shape: ComposerStyle, status_row_occupied: bool) -> b
 }
 
 /// Builds the composer chrome tree: the top-gap row, then the editor in
-/// `shape` with its status band above the prompt and pi's magic-keyword
-/// shimmer. Mount it with [`composer_ui`], which applies the gap rule.
+/// `shape` with its status band above the prompt and magic-keyword shimmer.
+/// Mount it with [`composer_ui`], which applies the gap rule.
 #[must_use]
 pub fn composer_root(facts: StatusFacts, shape: ComposerStyle) -> Col {
 	let editor = EditorPane::new()
@@ -353,8 +366,7 @@ mod tests {
 		}
 	}
 
-	/// At rest (no notice above), pi's `EditorTopGap` keeps the blank row
-	/// above the band, as in the boot reference capture.
+	/// At rest (no notice above), the blank row remains above the band.
 	#[test]
 	fn composer_root_paints_status_then_prompt_gutter() {
 		let mut ui = composer_ui(
@@ -374,7 +386,7 @@ mod tests {
 		assert_eq!(ui.frame().cursor(), Some((3, 2)), "caret sits after the prompt gutter");
 	}
 
-	/// pi `EditorTopGap`: only the band over an occupied status row sits
+	/// `EditorTopGap`: only the band over an occupied status row sits
 	/// flush; every other shape keeps the one-row gap regardless.
 	#[test]
 	fn top_gap_collapses_only_for_the_band_over_an_occupied_status_row() {
@@ -393,7 +405,7 @@ mod tests {
 		assert_ne!(rows[1].trim(), "");
 	}
 
-	/// pi `buildTerminalTitleWithState`: `π > label` idle, `π ⠋ label`
+	/// `buildTerminalTitleWithState`: `π > label` idle, `π ⠋ label`
 	/// working, `π ! label` attention, `π: label` disabled; without a label
 	/// the separator trails the brand.
 	#[test]
@@ -419,7 +431,7 @@ mod tests {
 			assert_eq!(
 				title.next_wake(charset, Duration::ZERO),
 				Some(Duration::from_millis(80)),
-				"pi TITLE_SPINNER_INTERVAL_MS"
+				"title spinner interval"
 			);
 			assert_eq!(title.emit(charset, Duration::from_millis(80)), Some("π ⠙ refactor auth"));
 		}
@@ -439,7 +451,7 @@ mod tests {
 		assert_eq!(bare.emit(Charset::Ascii, Duration::ZERO), None);
 	}
 
-	/// pi `setExtensionTerminalTitle`: an extension title is not decorated
+	/// `setExtensionTerminalTitle`: an extension title is not decorated
 	/// by state, settings, or spinner updates and survives until the next
 	/// authoritative session title.
 	#[test]
@@ -472,7 +484,7 @@ mod tests {
 		);
 	}
 
-	/// pi `sanitizeTerminalTitlePart` / `getFallbackTerminalTitle`: control
+	/// `sanitizeTerminalTitlePart` / `getFallbackTerminalTitle`: control
 	/// characters never reach the OSC; an unnamed session falls back to the
 	/// project directory's base name.
 	#[test]

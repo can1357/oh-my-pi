@@ -184,6 +184,7 @@ enum OutcomeKind {
   OUTCOME_KIND_ARGS_REJECTED = 3;
   OUTCOME_KIND_ABORTED = 4;
 }
+
 // One result stream is Start, one or more non-empty Chunk frames, then
 // Complete. The host stages chunks directly into its CAS before accepting the
 // completion; the worker never mints artifact identities.
@@ -197,6 +198,7 @@ message ToolResultStart {
   omp.inference.v1.ValueMap props = 15;
   OutcomeKind kind = 16;
 }
+
 // data is bounded to RESULT_CHUNK_MAX_BYTES by the host preflight.
 message ToolResultChunk {
   string call_id = 1;

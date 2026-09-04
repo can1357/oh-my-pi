@@ -100,7 +100,7 @@ impl InputState {
 		self.undo.push((self.text.clone(), self.cursor));
 	}
 
-	fn break_sequence(&mut self) {
+	const fn break_sequence(&mut self) {
 		self.last_action = InputAction::Other;
 		self.last_yank = None;
 	}

@@ -4,10 +4,16 @@ use omp_con::Ctx;
 use serde::{Deserialize, Serialize};
 
 omp_con::var! {
-	/// Load native project MCP server configuration.
+	/// Load .mcp.json/mcp.json from project root.
 	pub static SV_MCP_ENABLE_PROJECT_CONFIG = sv_mcp_enable_project_config: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Discovery & MCP",
+			"ui.label": "MCP Project Config",
+			"legacy.path": "mcp.enableProjectConfig",
+		},
 	};
 }
 

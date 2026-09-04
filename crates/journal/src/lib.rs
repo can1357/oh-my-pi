@@ -109,11 +109,7 @@ impl Journal {
 		// the unlinked predecessor.
 		let namespace = JournalNamespaceLock::acquire_shared(&path)?;
 		let lock = WriterLock::acquire(&path)?;
-		let file = OpenOptions::new()
-			.append(true)
-			.read(true)
-			.write(true)
-			.open(&path)?;
+		let file = OpenOptions::new().append(true).read(true).open(&path)?;
 		let bytes = fs::read(&path)?;
 		let (entries, clean_len) = decode_committed(&bytes)?;
 		let truncated = bytes.len().saturating_sub(clean_len);
@@ -315,7 +311,8 @@ pub(crate) struct WriterLock {
 	_file: File,
 }
 
-/// Shared session-writer or exclusive collector lease for one journal directory.
+/// Shared session-writer or exclusive collector lease for one journal
+/// directory.
 #[derive(Debug)]
 pub(crate) struct JournalNamespaceLock {
 	_file: File,

@@ -19,7 +19,7 @@ use support::{
 async fn local_run_journals_one_tool_turn_without_inference() {
 	let directory = tempfile::tempdir().expect("temporary directory");
 	let journal_path = directory.path().join("local.oms");
-	let (inference, requests) = ScriptedInference::new(Vec::<Vec<omp_inference::ChatEvent>>::new());
+	let (inference, requests) = ScriptedInference::new(Vec::<Vec<omp_ai::ChatEvent>>::new());
 	let mut kernel = Kernel::new(
 		inference,
 		registry([spec("bash", 1, "hi")]),
@@ -94,7 +94,7 @@ async fn local_run_journals_one_tool_turn_without_inference() {
 	assert!(!kinds.contains(&kind::MSG_ASSISTANT_START.to_owned()));
 	assert!(!kinds.contains(&kind::MSG_USER.to_owned()));
 
-	// The model sees what ran as a user message (pi `bashExecutionToText`).
+	// The model sees what ran as a user message.
 	let items = project_thread(dom);
 	let texts = items
 		.iter()
@@ -122,7 +122,7 @@ async fn local_run_journals_one_tool_turn_without_inference() {
 async fn excluded_local_run_is_hidden_from_the_thread() {
 	let directory = tempfile::tempdir().expect("temporary directory");
 	let journal_path = directory.path().join("hidden.oms");
-	let (inference, _) = ScriptedInference::new(Vec::<Vec<omp_inference::ChatEvent>>::new());
+	let (inference, _) = ScriptedInference::new(Vec::<Vec<omp_ai::ChatEvent>>::new());
 	let mut kernel = Kernel::new(
 		inference,
 		registry([spec("bash", 1, "hi")]),

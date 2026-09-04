@@ -19,13 +19,13 @@ use strum::{Display, IntoStaticStr};
 
 use super::{Panel, PanelAnchor, PanelCx, PanelEvent, PanelNote};
 
-/// Pi's Codex-backed realtime model. It is intentionally not the chat model.
+/// Codex-backed realtime model. It is intentionally not the chat model.
 pub const LIVE_MODEL: &str = "gpt-live-1-codex";
-/// Pi's visualizer cadence and peak-decay cadence.
+/// Visualizer and peak-decay cadence.
 const FRAME_INTERVAL: Duration = Duration::from_millis(80);
 /// Meter value used by the reusable progress component.
 const LEVEL_MAX: u16 = 100;
-/// Voices accepted by the Codex live endpoint, in pi settings order.
+/// Voices accepted by the Codex live endpoint, in display order.
 pub const LIVE_VOICES: &[&str] =
 	&["arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale"];
 
@@ -247,8 +247,8 @@ impl LiveUiEvent {
 	/// Projects a provider-neutral inference event into observer-only live UI
 	/// state. Audio bytes and delegation requests stay with the controller.
 	#[must_use]
-	pub fn from_realtime(event: &omp_inference::answer::RealtimeEvent) -> Option<Self> {
-		use omp_inference::answer::{RealtimeEvent, RealtimePhase, RealtimeTranscriptRole};
+	pub fn from_realtime(event: &omp_ai::answer::RealtimeEvent) -> Option<Self> {
+		use omp_ai::answer::{RealtimeEvent, RealtimePhase, RealtimeTranscriptRole};
 
 		match event {
 			RealtimeEvent::Ready => Some(Self::Phase(LivePhase::Listening)),

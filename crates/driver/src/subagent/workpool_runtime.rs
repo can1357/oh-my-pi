@@ -260,9 +260,9 @@ impl WorkpoolLauncher for KernelWorkpoolLauncher {
 				parent.patch(Txn {
 					cause: delivered_cause,
 					label: Some(Str::new_static("workpool.worker.internal")),
-					ops: vec![Op::Set {
-						h: handle,
-						prop: PropKey::Custom(Str::new_static(omp_agent::jobs::DELIVERED)),
+					ops:   vec![Op::Set {
+						h:     handle,
+						prop:  PropKey::Custom(Str::new_static(omp_agent::jobs::DELIVERED)),
 						value: Value::Bool(true),
 					}],
 				})?;
@@ -277,10 +277,7 @@ impl WorkpoolLauncher for KernelWorkpoolLauncher {
 				cancel_guard.0 = None;
 				Ok(WorkerHandle { id: worker_id, batches, cancel, finished, abort })
 			},
-			Ok(Err(source)) => Err(WorkpoolSchedulerError::WorkerSpawn {
-				id: worker_id,
-				source,
-			}),
+			Ok(Err(source)) => Err(WorkpoolSchedulerError::WorkerSpawn { id: worker_id, source }),
 			Err(_) => Err(WorkpoolSchedulerError::WorkerExited { id: worker_id }),
 		}
 	}
@@ -372,8 +369,8 @@ async fn run_kernel_worker_inner(
 	SV_TASK_RECURSION_DEPTH.set(&ctx, depth.saturating_add(1))?;
 	let settings = TaskSettings::from_con(&ctx);
 	configure_child_route(&ctx, &settings, run.request.agent.as_str(), None)?;
-	if omp_con::AI_MODEL.get(&ctx).is_empty() {
-		omp_con::AI_MODEL.set(&ctx, run.model.clone())?;
+	if omp_agent::AI_MODEL.get(&ctx).is_empty() {
+		omp_agent::AI_MODEL.set(&ctx, run.model.clone())?;
 	}
 	let isolation = create_isolation(&run.env, &run.request.id).await?;
 	let path = child_session_path(&run.sessions_dir, &run.request.id);

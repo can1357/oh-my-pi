@@ -535,7 +535,7 @@ pub struct ThinkingSelection {
 	pub suppress_when_off: bool,
 	/// Whether every advertised effort spells the native `adaptive` tag, so
 	/// the model is driven by `thinking.type` alone and still accepts
-	/// `thinking.type: disabled` (MiniMax on Anthropic-shaped routes).
+	/// `thinking.type: disabled` (`MiniMax` on Anthropic-shaped routes).
 	pub adaptive_tag_only: bool,
 }
 

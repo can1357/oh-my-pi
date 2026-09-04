@@ -1,7 +1,7 @@
 //! The `pgrep` process-matching command.
 
 use clap::Parser;
-use omp_shell_engine::builtins;
+use omp_shell::builtins;
 
 use crate::proc_match;
 
@@ -14,12 +14,12 @@ pub(crate) struct PgrepCommand {
 }
 
 impl builtins::Command for PgrepCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
-	fn execute<SE: omp_shell_engine::ShellExtensions>(
+	fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
-		context: omp_shell_engine::ExecutionContext<'_, SE>,
-	) -> impl Future<Output = Result<omp_shell_engine::ExecutionResult, Self::Error>> + Send {
+		context: omp_shell::ExecutionContext<'_, SE>,
+	) -> impl Future<Output = Result<omp_shell::ExecutionResult, Self::Error>> + Send {
 		proc_match::run(proc_match::ProcMatchMode::Grep, self.argv.clone(), context)
 	}
 }
@@ -31,7 +31,7 @@ mod tests {
 		process,
 	};
 
-	use omp_shell_engine::{
+	use omp_shell::{
 		ExecutionContext, Shell,
 		builtins::Command as _,
 		openfiles::{self, OpenFiles},
@@ -47,7 +47,7 @@ mod tests {
 
 	use super::PgrepCommand;
 
-	async fn execute(argv: Vec<String>) -> (omp_shell_engine::ExecutionResult, String) {
+	async fn execute(argv: Vec<String>) -> (omp_shell::ExecutionResult, String) {
 		let mut shell = Shell::builder().build().await.expect("build test shell");
 		let mut params = shell.default_exec_params();
 		let (mut output, writer) = io::pipe().expect("create output pipe");

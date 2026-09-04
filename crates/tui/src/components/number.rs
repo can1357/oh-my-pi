@@ -12,8 +12,7 @@ use crate::{
 	rich::cell_width,
 };
 
-/// Writes a count using the status line's compact `K`/`M`/`B` convention
-/// (pi `formatNumber`).
+/// Writes a count using the status line's compact `K`/`M`/`B` convention.
 ///
 /// A single leading digit keeps one decimal unless it is `.0`; larger
 /// values round to a whole unit: `999`, `1K`, `1.5K`, `25K`, `1M`, `1.5M`.

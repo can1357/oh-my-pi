@@ -151,20 +151,18 @@ async fn jobs_restart_settles_orphaned_subagent_and_replay_stays_revivable() {
 #[tokio::test]
 async fn jobs_revive_rearms_settlement_delivery() {
 	let temp = tempdir().expect("temporary session directory");
-	let mut session = Session::create(
-		temp.path().join("revive-delivery.oms"),
-		ComponentRegistry::standard(),
-	)
-	.expect("create session");
+	let mut session =
+		Session::create(temp.path().join("revive-delivery.oms"), ComponentRegistry::standard())
+			.expect("create session");
 	let head = session.head().expect("genesis head");
 	session
 		.patch(
 			jobs::insert(session.dom(), head, JobSpec {
-				id: Str::new_static("child-revive"),
-				kind: Str::new_static("subagent"),
-				owner: Str::new_static("Main"),
+				id:      Str::new_static("child-revive"),
+				kind:    Str::new_static("subagent"),
+				owner:   Str::new_static("Main"),
 				started: Str::new_static("1"),
-				agent: Some(Str::new_static("task")),
+				agent:   Some(Str::new_static("task")),
 			})
 			.expect("jobs root"),
 		)
@@ -181,9 +179,9 @@ async fn jobs_revive_rearms_settlement_delivery() {
 		.patch(Txn {
 			cause: delivered,
 			label: Some(Str::new_static("test.delivered")),
-			ops: vec![Op::Set {
-				h: handle,
-				prop: PropKey::Custom(Str::new_static(omp_agent::jobs::DELIVERED)),
+			ops:   vec![Op::Set {
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static(omp_agent::jobs::DELIVERED)),
 				value: Value::Bool(true),
 			}],
 		})
@@ -199,12 +197,12 @@ async fn jobs_revive_rearms_settlement_delivery() {
 		tokio_util::sync::CancellationToken::new(),
 		tokio::spawn(async {
 			JobSettlement {
-				status: Str::new_static("completed"),
-				output: Some(
+				status:     Str::new_static("completed"),
+				output:     Some(
 					serde_json::value::to_raw_value(&serde_json::json!({"text":"revived"}))
 						.expect("output"),
 				),
-				error: None,
+				error:      None,
 				completion: None,
 			}
 		}),
@@ -219,7 +217,10 @@ async fn jobs_revive_rearms_settlement_delivery() {
 	assert_eq!(pending.len(), 1);
 	assert_eq!(pending[0].id, "child-revive");
 	assert_eq!(
-		pending[0].output.as_deref().map(serde_json::value::RawValue::get),
+		pending[0]
+			.output
+			.as_deref()
+			.map(serde_json::value::RawValue::get),
 		Some(r#"{"text":"revived"}"#)
 	);
 }

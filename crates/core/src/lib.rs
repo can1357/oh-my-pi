@@ -34,6 +34,8 @@ pub mod principal;
 pub mod qr;
 pub mod secret;
 pub mod semver;
+/// Tolerant JSON for malformed, partial, and streaming documents.
+pub mod slopjson;
 pub mod sparse_index;
 pub mod sparse_map;
 pub mod sparse_set;

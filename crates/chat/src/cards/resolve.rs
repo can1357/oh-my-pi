@@ -2,8 +2,8 @@
 //!
 //! `resolve` applies and `reject` discards one exact staged proposal
 //! (`envd::devices_host` `finalize_proposal`); both take `proposal_id` and
-//! `reason`. pi (`tools/resolve.ts` `resolveRenderer`) paints the verb from
-//! the action — `Accept` / `Discard`, `Failed` for an apply that errored —
+//! `reason`. The card paints the verb from the action — `Accept` / `Discard`,
+//! `Failed` for an apply that errored —
 //! then the proposal label and the reason the caller gave.
 
 use omp_core::{Str, sf};
@@ -37,9 +37,8 @@ impl Card for RejectCard {
 	}
 }
 
-/// pi `ResolveAction`: what the resolution device does to the proposal. The
-/// string form is pi's `renderCall` description; the `message` is its badge,
-/// the staged → settled transition.
+/// What the resolution device does to the proposal. The string form is its
+/// description; the `message` is its staged → settled transition badge.
 #[derive(Clone, Copy, Eq, PartialEq, strum::EnumMessage, strum::IntoStaticStr)]
 enum Action {
 	#[strum(serialize = "apply", message = "⟨proposed -> resolved⟩")]
@@ -49,19 +48,19 @@ enum Action {
 }
 
 impl Action {
-	/// pi `renderCall` badge: the staged → settled transition.
+	/// Staged → settled transition badge.
 	fn badge(self) -> &'static str {
 		self.get_message().unwrap_or_default()
 	}
 
-	/// pi `ResolveAction`, the `renderCall` description.
+	/// Action description.
 	fn name(self) -> &'static str {
 		self.into()
 	}
 }
 
 /// The caller's one-sentence reason, from the arguments (the device input)
-/// else the settled payload, trimmed; pi's `No reason provided` otherwise.
+/// else the settled payload, trimmed; `No reason provided` otherwise.
 fn reason(view: &CardView<'_>) -> Option<Str> {
 	let from = |value: Option<Value>| {
 		value
@@ -104,8 +103,8 @@ fn proposal_id(view: &CardView<'_>) -> Option<Str> {
 	from(view.args_json()).or_else(|| from(view.result_json()))
 }
 
-/// The proposal's label (`<source tool>: <summary>` in pi) when a legacy
-/// settled payload names it; otherwise its exact transaction id.
+/// The proposal's label (`<source tool>: <summary>`) when a legacy settled
+/// payload names it; otherwise its exact transaction id.
 fn label(view: &CardView<'_>) -> Str {
 	view
 		.result_json()
@@ -144,14 +143,14 @@ fn render_resolution(view: &CardView<'_>, action: Action, _ui: &UiContext) -> Co
 			};
 			let header = sf!("{verb} {}", label(view));
 			let reason = reason(view).unwrap_or_else(|| Str::new_static("No reason provided"));
-			// pi's block color: success for an apply, error for a failed
+			// Block color: success for an apply, error for a failed
 			// apply, warning for a discard.
 			let color = match (action, failed) {
 				(Action::Apply, false) => "success",
 				(_, true) => "error",
 				(Action::Discard, false) => "warning",
 			};
-			// pi frames the block as five inverse rows: blank, header,
+			// The block has five inverse rows: blank, header,
 			// blank, reason, blank.
 			dom! {
 				<col fg={color}>

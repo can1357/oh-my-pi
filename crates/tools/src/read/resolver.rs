@@ -11,13 +11,15 @@ use std::{
 	sync::Arc,
 };
 
+use bytes::Bytes;
 use dashmap::DashMap;
 use flate2::read::GzDecoder;
 use omp_core::{
 	CowBytes, Hash32, Str, sf, sparse_index::TrySparseIndex, sparse_map::SparseMap,
 	sparse_set::SparseSet,
 };
-use omp_tool::ArtifactLifetime;
+use omp_tool::{ArtifactLifetime, Diag};
+use smallvec::{SmallVec, smallvec};
 use strum::{EnumString, FromRepr, IntoStaticStr, VariantArray};
 
 use super::{
@@ -285,6 +287,20 @@ pub trait Resolve: Send + Sync + 'static {
 		selector: &'a ParsedSelector,
 	) -> impl Future<Output = Result<CowBytes<'static>, Fault>> + Send + 'a;
 
+	/// Reads a resource together with structured harness diagnostics.
+	fn read_with_diags<'a>(
+		&'a self,
+		resource: &'a str,
+		selector: &'a ParsedSelector,
+	) -> impl Future<Output = Result<ResolvedRead, Fault>> + Send + 'a {
+		async move {
+			self
+				.read(resource, selector)
+				.await
+				.map(|data| ResolvedRead { data, diags: smallvec![] })
+		}
+	}
+
 	/// Reads a resource with its URI query preserved.
 	///
 	/// Resolvers which do not own query semantics inherit the ordinary read
@@ -298,6 +314,21 @@ pub trait Resolve: Send + Sync + 'static {
 	) -> impl Future<Output = Result<CowBytes<'static>, Fault>> + Send + 'a {
 		let _ = query;
 		self.read(resource, selector)
+	}
+
+	/// Reads a query-preserving resource together with structured diagnostics.
+	fn read_query_with_diags<'a>(
+		&'a self,
+		resource: &'a str,
+		query: Option<&'a str>,
+		selector: &'a ParsedSelector,
+	) -> impl Future<Output = Result<ResolvedRead, Fault>> + Send + 'a {
+		async move {
+			self
+				.read_query(resource, query, selector)
+				.await
+				.map(|data| ResolvedRead { data, diags: smallvec![] })
+		}
 	}
 
 	/// Lists direct entries below the addressed resource.
@@ -394,6 +425,15 @@ pub struct ResourceCapability {
 	pub stamp:       ResourceStamp,
 	/// Human-facing capability description.
 	pub description: Str,
+}
+
+/// Resolver bytes with structured harness diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedRead {
+	/// Returned bytes.
+	pub data:  CowBytes<'static>,
+	/// Structured harness notices.
+	pub diags: SmallVec<Diag, 2>,
 }
 
 /// Result of a bounded resource read.
@@ -695,6 +735,21 @@ impl<R: Resolve> ResolverTable<R> {
 		Some(self.unknown_fallback.as_ref()?.read(uri, selector).await)
 	}
 
+	/// Dispatches one raw-scheme read with its structured diagnostics.
+	pub async fn read_unknown_with_diags(
+		&self,
+		uri: &str,
+		selector: &ParsedSelector,
+	) -> Option<Result<ResolvedRead, Fault>> {
+		Some(
+			self
+				.unknown_fallback
+				.as_ref()?
+				.read_with_diags(uri, selector)
+				.await,
+		)
+	}
+
 	/// Dispatches one read, returning `None` when this deployment has no reader
 	/// for the scheme.
 	pub async fn read(
@@ -720,6 +775,24 @@ impl<R: Resolve> ResolverTable<R> {
 			self
 				.get(scheme)?
 				.read_query(resource, query, selector)
+				.await,
+		)
+	}
+
+	/// Dispatches one query-preserving read with its structured diagnostics.
+	pub async fn read_query_with_diags(
+		&self,
+		scheme: Scheme,
+		resource: &str,
+		query: Option<&str>,
+		selector: &ParsedSelector,
+	) -> Option<Result<ResolvedRead, Fault>> {
+		let entry = self.entry(scheme)?;
+		entry.readable.then_some(())?;
+		Some(
+			self
+				.get(scheme)?
+				.read_query_with_diags(resource, query, selector)
 				.await,
 		)
 	}
@@ -1134,7 +1207,7 @@ impl<C: ArtifactCatalog, B: BlobAuthority> ArtifactResolver<C, B> {
 		size: u64,
 		ranges: &[LineRange],
 		raw: bool,
-	) -> Result<CowBytes<'static>, Fault> {
+	) -> Result<ResolvedRead, Fault> {
 		let offsets = self.offsets(record, size).await?;
 		let total_lines = offsets.line_count(raw);
 		let mut spans = Vec::with_capacity(ranges.len());
@@ -1221,16 +1294,14 @@ impl<C: ArtifactCatalog, B: BlobAuthority> ArtifactResolver<C, B> {
 			total_lines,
 			TextFormatOptions::new(&label),
 		);
-		Ok(CowBytes::from(rendered.into_bytes()))
+		Ok(ResolvedRead { data: CowBytes::from(Bytes::from(rendered.text)), diags: rendered.diags })
 	}
-}
 
-impl<C: ArtifactCatalog, B: BlobAuthority> Resolve for ArtifactResolver<C, B> {
-	async fn read<'a>(
-		&'a self,
-		resource: &'a str,
-		selector: &'a ParsedSelector,
-	) -> Result<CowBytes<'static>, Fault> {
+	async fn read_resolved(
+		&self,
+		resource: &str,
+		selector: &ParsedSelector,
+	) -> Result<ResolvedRead, Fault> {
 		let record = self.record(resource).await?;
 		let size = self.blobs.stat(&record.digest).await?.byte_len;
 		match selector {
@@ -1247,15 +1318,46 @@ impl<C: ArtifactCatalog, B: BlobAuthority> Resolve for ArtifactResolver<C, B> {
 					),
 				})
 			},
-			ParsedSelector::None | ParsedSelector::Raw | ParsedSelector::Conflicts => {
-				self.all_bytes(&record, size).await
-			},
+			ParsedSelector::None | ParsedSelector::Raw | ParsedSelector::Conflicts => self
+				.all_bytes(&record, size)
+				.await
+				.map(|data| ResolvedRead { data, diags: smallvec![] }),
 			ParsedSelector::Image => Err(Fault::Invalid {
 				message: Str::new_static(
 					"The ':img' selector only supports local .svg and .svgz files.",
 				),
 			}),
 		}
+	}
+}
+
+impl<C: ArtifactCatalog, B: BlobAuthority> Resolve for ArtifactResolver<C, B> {
+	async fn read<'a>(
+		&'a self,
+		resource: &'a str,
+		selector: &'a ParsedSelector,
+	) -> Result<CowBytes<'static>, Fault> {
+		self
+			.read_resolved(resource, selector)
+			.await
+			.map(|resolved| resolved.data)
+	}
+
+	async fn read_with_diags<'a>(
+		&'a self,
+		resource: &'a str,
+		selector: &'a ParsedSelector,
+	) -> Result<ResolvedRead, Fault> {
+		self.read_resolved(resource, selector).await
+	}
+
+	async fn read_query_with_diags<'a>(
+		&'a self,
+		resource: &'a str,
+		_query: Option<&'a str>,
+		selector: &'a ParsedSelector,
+	) -> Result<ResolvedRead, Fault> {
+		self.read_resolved(resource, selector).await
 	}
 }
 

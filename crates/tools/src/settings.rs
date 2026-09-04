@@ -1,4 +1,4 @@
-//! Typed convars owned by the file-tool runtime.
+//! Typed convars and settings owned by the tool runtime.
 
 use omp_con::Ctx;
 use serde::{Deserialize, Serialize};
@@ -153,69 +153,308 @@ impl FileToolSettings {
 }
 
 omp_con::var! {
-	/// Allow read to fetch HTTP(S) resources.
+	/// Amount of tail content kept inline when output spills to artifact.
+	pub static SV_TOOLS_ARTIFACT_TAIL_BYTES = sv_tools_artifact_tail_bytes: i64 {
+		default: 20 * 1024,
+		min: 1,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Output Limits",
+			"ui.label": "Artifact Tail Size (KB)",
+			"ui.unit": "kib",
+			"ui.option.1024": "1 KB",
+			"ui.option.1024.desc": "~250 tokens",
+			"ui.option.2560": "2.5 KB",
+			"ui.option.2560.desc": "~625 tokens",
+			"ui.option.5120": "5 KB",
+			"ui.option.5120.desc": "~1.25K tokens",
+			"ui.option.10240": "10 KB",
+			"ui.option.10240.desc": "~2.5K tokens",
+			"ui.option.20480": "20 KB",
+			"ui.option.20480.desc": "Default; ~5K tokens",
+			"ui.option.51200": "50 KB",
+			"ui.option.51200.desc": "~12.5K tokens",
+			"ui.option.102400": "100 KB",
+			"ui.option.102400.desc": "~25K tokens",
+			"ui.option.204800": "200 KB",
+			"ui.option.204800.desc": "~50K tokens",
+			"legacy.path": "tools.artifactTailBytes",
+		},
+	};
+	/// Amount of head content kept inline alongside the tail when output spills to artifact
+	/// (middle elision). 0 disables — keep tail only.
+	pub static SV_TOOLS_ARTIFACT_HEAD_BYTES = sv_tools_artifact_head_bytes: i64 {
+		default: 20 * 1024,
+		min: 0,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Output Limits",
+			"ui.label": "Artifact Head Size (KB)",
+			"ui.unit": "kib",
+			"ui.option.0": "0 KB",
+			"ui.option.0.desc": "Disabled; tail-only truncation",
+			"ui.option.1024": "1 KB",
+			"ui.option.1024.desc": "~250 tokens",
+			"ui.option.2560": "2.5 KB",
+			"ui.option.2560.desc": "~625 tokens",
+			"ui.option.5120": "5 KB",
+			"ui.option.5120.desc": "~1.25K tokens",
+			"ui.option.10240": "10 KB",
+			"ui.option.10240.desc": "~2.5K tokens",
+			"ui.option.20480": "20 KB",
+			"ui.option.20480.desc": "Default; ~5K tokens",
+			"ui.option.51200": "50 KB",
+			"ui.option.51200.desc": "~12.5K tokens",
+			"ui.option.102400": "100 KB",
+			"ui.option.102400.desc": "~25K tokens",
+			"ui.option.204800": "200 KB",
+			"ui.option.204800.desc": "~50K tokens",
+			"legacy.path": "tools.artifactHeadBytes",
+		},
+	};
+	/// Per-line byte cap for streaming tool outputs (bash, python, js eval) and `read`. Lines wider
+	/// than this are ellipsis-truncated; remaining bytes up to the next newline are dropped. 0
+	/// disables.
+	pub static SV_TOOLS_OUTPUT_MAX_COLUMNS = sv_tools_output_max_columns: i64 {
+		default: 768,
+		min: 0,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Output Limits",
+			"ui.label": "Output Column Cap",
+			"ui.option.0": "Off",
+			"ui.option.0.desc": "No per-line cap",
+			"ui.option.256": "256",
+			"ui.option.256.desc": "Tight",
+			"ui.option.512": "512",
+			"ui.option.768": "768",
+			"ui.option.768.desc": "Default",
+			"ui.option.1024": "1024",
+			"ui.option.2048": "2048",
+			"ui.option.4096": "4096",
+			"ui.option.4096.desc": "Loose",
+			"legacy.path": "tools.outputMaxColumns",
+		},
+	};
+	/// Maximum lines of tail content kept inline when output spills to artifact.
+	pub static SV_TOOLS_ARTIFACT_TAIL_LINES = sv_tools_artifact_tail_lines: i64 {
+		default: 500,
+		min: 1,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Output Limits",
+			"ui.label": "Artifact Tail Lines",
+			"ui.option.50": "50 lines",
+			"ui.option.50.desc": "~250 tokens",
+			"ui.option.100": "100 lines",
+			"ui.option.100.desc": "~500 tokens",
+			"ui.option.250": "250 lines",
+			"ui.option.250.desc": "~1.25K tokens",
+			"ui.option.500": "500 lines",
+			"ui.option.500.desc": "Default; ~2.5K tokens",
+			"ui.option.1000": "1000 lines",
+			"ui.option.1000.desc": "~5K tokens",
+			"ui.option.2000": "2000 lines",
+			"ui.option.2000.desc": "~10K tokens",
+			"ui.option.5000": "5000 lines",
+			"ui.option.5000.desc": "~25K tokens",
+			"legacy.path": "tools.artifactTailLines",
+		},
+	};
+	/// Similarity threshold (0-1) for accepting fuzzy matches.
+	pub static SV_EDIT_FUZZY_THRESHOLD = sv_edit_fuzzy_threshold: f64 {
+		default: 0.95,
+		flags: archive,
+		meta: {
+			"ui.tab": "files",
+			"ui.group": "Editing",
+			"ui.label": "Fuzzy Match Threshold",
+			"ui.option.0.85": "0.85",
+			"ui.option.0.85.desc": "Lenient",
+			"ui.option.0.9": "0.90",
+			"ui.option.0.9.desc": "Moderate",
+			"ui.option.0.95": "0.95",
+			"ui.option.0.95.desc": "Default",
+			"ui.option.0.98": "0.98",
+			"ui.option.0.98.desc": "Strict",
+			"legacy.path": "edit.fuzzyThreshold",
+		},
+	};
+	/// Allow the eval tool to dispatch Python cells to the IPython kernel.
+	pub static SV_EVAL_PY = sv_eval_py: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"ui.tab": "shell",
+			"ui.group": "Eval & Runtimes",
+			"ui.label": "Python Eval Backend",
+			"legacy.path": "eval.py",
+		},
+	};
+	/// Let eval cells define tools (@tool in Python, tool(fn) in JS) that task, agent(), and
+	/// workpool() subagents can call.
+	pub static SV_EVAL_TOOLS_ENABLED = sv_eval_tools_enabled: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"ui.tab": "shell",
+			"ui.group": "Eval & Runtimes",
+			"ui.label": "Eval-Defined Tools",
+			"legacy.path": "eval.tools.enabled",
+		},
+	};
+	/// Spawn a new subagent for every workpool item instead of reusing workers or batching queued
+	/// items.
+	pub static SV_EVAL_WORKPOOL_FRESH_AGENTS = sv_eval_workpool_fresh_agents: bool {
+		default: false,
+		flags: archive,
+		meta: {
+			"ui.tab": "shell",
+			"ui.group": "Eval & Runtimes",
+			"ui.label": "Fresh Workpool Agents",
+			"legacy.path": "eval.workpool.freshAgents",
+		},
+	};
+	/// Enable the ast_grep tool for structural AST search.
+	pub static SV_AST_GREP_ENABLED = sv_ast_grep_enabled: bool {
+		default: false,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Available Tools",
+			"ui.label": "AST Grep",
+			"legacy.path": "astGrep.enabled",
+		},
+	};
+	/// Enable the scriptable host-desktop eval prelude (screenshots, input, accessibility).
+	pub static SV_COMPUTER_ENABLED = sv_computer_enabled: bool {
+		default: false,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Available Tools",
+			"ui.label": "Computer",
+			"legacy.path": "computer.enabled",
+		},
+	};
+	/// Enable the vault:// internal URL for reading and editing Obsidian vault content via the
+	/// Obsidian CLI. When disabled, vault:// resolution is refused and the vault:// entry is omitted
+	/// from the system prompt.
+	pub static SV_VAULT_ENABLED = sv_vault_enabled: bool {
+		default: false,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Available Tools",
+			"ui.label": "Obsidian Vault",
+			"legacy.path": "vault.enabled",
+		},
+	};
+}
+
+omp_con::var! {
+	/// Allow the read tool to fetch and process URLs.
 	pub static SV_FETCH_ENABLED = sv_fetch_enabled: bool {
 		default: true,
 		flags: archive | replicated,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Available Tools",
+			"ui.label": "Read URLs",
+			"legacy.path": "fetch.enabled",
+		},
 	};
-	/// Resize oversized images before model delivery.
+	/// Resize large images to 2000x2000 max for better model compatibility.
 	pub static SV_IMAGES_AUTO_RESIZE = sv_images_auto_resize: bool {
 		default: true,
 		flags: archive | session | replicated,
+		meta: {
+			"ui.tab": "appearance",
+			"ui.group": "Images",
+			"ui.label": "Auto-Resize Images",
+			"legacy.path": "images.autoResize",
+		},
 	};
-	/// Present Markdown reads as rendered Markdown.
+	/// Render Markdown read results as formatted terminal previews instead of raw source.
 	pub static CL_READ_RENDER_MARKDOWN = cl_read_render_markdown: bool {
 		default: false,
 		flags: archive,
+		meta: {
+			"ui.tab": "files",
+			"ui.group": "Reading",
+			"ui.label": "Markdown Previews",
+			"legacy.path": "read.renderMarkdown",
+		},
 	};
-	/// Format supported documents after a whole-file write.
+	/// Automatically format code files using LSP after writing.
 	pub static SV_LSP_FORMAT_ON_WRITE = sv_lsp_format_on_write: bool {
 		default: false,
 		flags: archive | replicated,
+		meta: {
+			"ui.tab": "files",
+			"ui.group": "LSP",
+			"ui.label": "Format on Write",
+			"legacy.path": "lsp.formatOnWrite",
+		},
 	};
-	/// Return diagnostics bound to the committed write revision.
+	/// Return LSP diagnostics after writing code files.
 	pub static SV_LSP_DIAGNOSTICS_ON_WRITE = sv_lsp_diagnostics_on_write: bool {
 		default: true,
 		flags: archive | replicated,
+		meta: {
+			"ui.tab": "files",
+			"ui.group": "LSP",
+			"ui.label": "Diagnostics on Write",
+			"legacy.path": "lsp.diagnosticsOnWrite",
+		},
 	};
-	/// Return diagnostics bound to the committed edit revision.
+	/// Return LSP diagnostics after editing code files.
 	pub static SV_LSP_DIAGNOSTICS_ON_EDIT = sv_lsp_diagnostics_on_edit: bool {
 		default: false,
 		flags: archive | replicated,
+		meta: {
+			"ui.tab": "files",
+			"ui.group": "LSP",
+			"ui.label": "Diagnostics on Edit",
+			"legacy.path": "lsp.diagnosticsOnEdit",
+		},
 	};
-	/// Suppress diagnostics already surfaced for the same file.
+	/// Suppress post-edit LSP diagnostics already shown for a file; only surface new or changed ones.
 	pub static SV_LSP_DIAGNOSTICS_DEDUPLICATE = sv_lsp_diagnostics_deduplicate: bool {
 		default: true,
 		flags: archive | replicated,
+		meta: {
+			"ui.tab": "files",
+			"ui.group": "LSP",
+			"ui.label": "Deduplicate Diagnostics",
+			"legacy.path": "lsp.diagnosticsDeduplicate",
+		},
 	};
-	/// Bound the per-runtime diagnostic identity history.
+	/// Maximum prior diagnostic identities retained by the deduplication ledger.
 	pub static SV_LSP_DIAGNOSTICS_HISTORY_CAPACITY = sv_lsp_diagnostics_history_capacity: u32 {
 		default: DEFAULT_DIAGNOSTIC_HISTORY_CAPACITY as u32,
 		min: 1,
 		max: MAX_DIAGNOSTIC_HISTORY_CAPACITY as u32,
 		flags: archive | replicated,
+		meta: {
+			"legacy.path": "lsp.diagnosticsHistoryCapacity",
+		},
 	};
-	/// Bound diagnostics attached to one committed revision.
+	/// Maximum diagnostics retained in one committed batch.
 	pub static SV_LSP_MAX_DIAGNOSTICS_PER_BATCH = sv_lsp_max_diagnostics_per_batch: u32 {
 		default: DEFAULT_DIAGNOSTICS_PER_BATCH as u32,
 		min: 1,
 		max: MAX_DIAGNOSTICS_PER_BATCH as u32,
 		flags: archive | replicated,
+		meta: {
+			"legacy.path": "lsp.maxDiagnosticsPerBatch",
+		},
 	};
 }
-
-/// One-shot migration map from reflected TOML paths to convar names.
-pub const LEGACY_CONVAR_MAPPINGS: &[(&str, &str)] = &[
-	("fetch.enabled", "sv_fetch_enabled"),
-	("images.autoResize", "sv_images_auto_resize"),
-	("read.renderMarkdown", "cl_read_render_markdown"),
-	("lsp.formatOnWrite", "sv_lsp_format_on_write"),
-	("lsp.diagnosticsOnWrite", "sv_lsp_diagnostics_on_write"),
-	("lsp.diagnosticsOnEdit", "sv_lsp_diagnostics_on_edit"),
-	("lsp.diagnosticsDeduplicate", "sv_lsp_diagnostics_deduplicate"),
-	("lsp.diagnosticsHistoryCapacity", "sv_lsp_diagnostics_history_capacity"),
-	("lsp.maxDiagnosticsPerBatch", "sv_lsp_max_diagnostics_per_batch"),
-];
 
 #[cfg(test)]
 mod tests {
@@ -235,39 +474,5 @@ mod tests {
 		let settings =
 			LspFileSettings { diagnostics_history_capacity: 0, ..LspFileSettings::default() };
 		assert!(!settings.validate());
-	}
-
-	#[test]
-	fn vars_declare_every_former_schema_field() {
-		let old_fields = [
-			"fetch.enabled",
-			"images.autoResize",
-			"read.renderMarkdown",
-			"lsp.formatOnWrite",
-			"lsp.diagnosticsOnWrite",
-			"lsp.diagnosticsOnEdit",
-			"lsp.diagnosticsDeduplicate",
-			"lsp.diagnosticsHistoryCapacity",
-			"lsp.maxDiagnosticsPerBatch",
-		];
-		let vars = [
-			SV_FETCH_ENABLED.name(),
-			SV_IMAGES_AUTO_RESIZE.name(),
-			CL_READ_RENDER_MARKDOWN.name(),
-			SV_LSP_FORMAT_ON_WRITE.name(),
-			SV_LSP_DIAGNOSTICS_ON_WRITE.name(),
-			SV_LSP_DIAGNOSTICS_ON_EDIT.name(),
-			SV_LSP_DIAGNOSTICS_DEDUPLICATE.name(),
-			SV_LSP_DIAGNOSTICS_HISTORY_CAPACITY.name(),
-			SV_LSP_MAX_DIAGNOSTICS_PER_BATCH.name(),
-		];
-		assert_eq!(
-			LEGACY_CONVAR_MAPPINGS,
-			old_fields
-				.into_iter()
-				.zip(vars)
-				.collect::<Vec<_>>()
-				.as_slice()
-		);
 	}
 }

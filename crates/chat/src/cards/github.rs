@@ -35,14 +35,12 @@ impl Card for GithubCard {
 							.get("output")
 							.and_then(Value::as_str)
 							.or_else(|| {
-								value
-									.get("result")
-									.and_then(|result| {
-										result
-											.get("output")
-											.and_then(Value::as_str)
-											.or_else(|| result.as_str())
-									})
+								value.get("result").and_then(|result| {
+									result
+										.get("output")
+										.and_then(Value::as_str)
+										.or_else(|| result.as_str())
+								})
 							})
 							.map(str::to_owned)
 					})
@@ -64,8 +62,12 @@ impl Card for GithubCard {
 				}.into_component()
 			},
 			_ => {
-				let progress = typed_result::<omp_tools::github::Update>(view)
-					.and_then(|value| value.get("output").and_then(Value::as_str).map(str::to_owned));
+				let progress = typed_result::<omp_tools::github::Update>(view).and_then(|value| {
+					value
+						.get("output")
+						.and_then(Value::as_str)
+						.map(str::to_owned)
+				});
 				dom! {
 					<box border=round bc=border title_pad=3 pad="0 1">
 						<row kind=title gap=1><i:pending fg=output/><text fg=accent>{action}</text><text fg=muted>{detail}</text>
@@ -82,7 +84,7 @@ impl Card for GithubCard {
 	}
 }
 
-/// Heading metadata per operation (pi `buildOpMeta`): the PR identifier or
+/// Heading metadata per operation: the PR identifier or
 /// branch for checkout/push, the query for searches, the path for file reads,
 /// the title for PR creation, then the repository.
 fn operation_meta(op: Option<Operation>, args: &Value) -> Vec<String> {
@@ -143,7 +145,7 @@ fn operation_meta(op: Option<Operation>, args: &Value) -> Vec<String> {
 }
 
 /// `#N` for a number or an issue/pull URL, else the selector itself; batches
-/// list up to three (pi `formatPrIdentifier`).
+/// list up to three.
 fn pr_identifier(pr: Option<&Value>) -> Option<String> {
 	let ids = match pr? {
 		Value::String(one) => vec![issue_id(one)?],

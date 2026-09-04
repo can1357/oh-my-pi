@@ -162,8 +162,8 @@ pub struct ExportConfig {
 	pub metrics_protocol:    Option<String>,
 	/// Effective service name, defaulting literally to `omp`.
 	pub service_name:        String,
-	/// Raw `OTEL_RESOURCE_ATTRIBUTES`; values are percent-decoded per the
-	/// OpenTelemetry environment detector used by `pi`.
+	/// Raw `OTEL_RESOURCE_ATTRIBUTES`; values are percent-decoded by the
+	/// OpenTelemetry environment detector.
 	pub resource_attributes: Option<String>,
 	/// OTLP log threshold from `OTEL_LOG_LEVEL`.
 	pub log_level:           LogLevel,
@@ -178,7 +178,7 @@ pub struct ExportConfig {
 }
 
 impl ExportConfig {
-	/// Resolves all telemetry knobs from the process environment using `pi`'s
+	/// Resolves all telemetry knobs from the process environment using
 	/// per-signal-over-common precedence rules.
 	pub fn from_env() -> Self {
 		let endpoint = env_value("OTEL_EXPORTER_OTLP_ENDPOINT");
@@ -722,7 +722,7 @@ pub fn emit_log(
 /// Forwards a timestamped host log as `pi.omp.log`.
 ///
 /// The source timestamp is preserved while the record's observed timestamp is
-/// captured independently at emission, matching `pi`'s logger sink.
+/// captured independently at emission.
 pub fn emit_log_at(
 	level: ForwardedLogLevel,
 	message: &str,

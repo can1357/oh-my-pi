@@ -1,7 +1,7 @@
-//! Welcome banner: pi's `welcome.ts` two-column box with the brand mark,
+//! Welcome banner: a two-column box with the brand mark,
 //! startup tip, LSP and recent-session slots.
 //!
-//! The mark plays pi's 3000ms gradient intro on the block's paint clock
+//! The mark plays a 3000ms gradient intro on the block's paint clock
 //! (`welcome.ts` `playIntro` / `introLogoFrame`) through
 //! [`Brand`]; the host keeps the block mutable until the intro settles
 //! (ADR 0034) and remounts it on the resting frame.
@@ -22,30 +22,29 @@ use omp_tui::{
 
 use crate::chrome::ModelBadge;
 
-/// Widest welcome box, in cells (pi `welcome.ts` `maxWidth`).
+/// Widest welcome box, in cells.
 const BOX_MAX_WIDTH: u16 = 100;
 const PREFERRED_LEFT: u16 = 26;
 const MIN_LEFT: u16 = 12;
 const MIN_RIGHT: u16 = 20;
-/// Fixed slot counts so the box height never depends on live data (pi
+/// Fixed slot counts so the box height never depends on live data (
 /// `WELCOME_SESSION_SLOTS` / `WELCOME_LSP_SLOTS`).
 const SESSION_SLOTS: usize = 4;
 const LSP_SLOTS: usize = 4;
-/// Startup tips embedded at build time, one per line (pi `tips.txt`).
+/// Startup tips embedded at build time, one per line.
 const TIPS_TEXT: &str = include_str!("tips.txt");
-/// Trailing marker flagging a "what's new" tip (pi `NEW_TIP_MARKER`).
+/// Trailing marker flagging a "what's new" tip.
 const NEW_TIP_MARKER: &str = "[NEW]";
-/// Visible text painted in place of the marker (pi `NEW_TAG_TEXT`).
+/// Visible text painted in place of the marker.
 const NEW_TAG_TEXT: &str = "NEW!";
-/// Selection weight of `[NEW]` tips (pi `NEW_TIP_WEIGHT`).
+/// Selection weight of `[NEW]` tips.
 const NEW_TIP_WEIGHT: u32 = 4;
-/// Shown instead of a tip on a plain-unicode terminal one launch in ten
-/// (pi `WelcomeComponent.tip`).
+/// Shown instead of a tip on a plain-unicode terminal one launch in ten.
 const NERDFONT_NAG: &str = "Please use nerdfont 😭.";
 const NAG_CHANCE: f32 = 0.1;
 const TIP_LABEL: &str = "Tip: ";
 
-/// A recently used session for the welcome box (pi `RecentSession`).
+/// A recently used session for the welcome box.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecentSession {
 	/// Display name: the session title or its first prompt line.
@@ -54,7 +53,7 @@ pub struct RecentSession {
 	pub time_ago: Str,
 }
 
-/// Language-server state for one welcome slot (pi `LspServerInfo.status`).
+/// Language-server state for one welcome slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LspStatus {
 	/// Running and initialized.
@@ -67,7 +66,7 @@ pub enum LspStatus {
 	Error,
 }
 
-/// A language server for the welcome box (pi `LspServerInfo`).
+/// A language server for the welcome box.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LspServer {
 	/// Server name.
@@ -109,7 +108,7 @@ fn strip_new_marker(tip: &str) -> (&str, bool) {
 }
 
 /// Picks a tip biased toward `[NEW]` tips by [`NEW_TIP_WEIGHT`]; `r` is a
-/// uniform sample in `[0, 1)` (pi `welcome.ts` `pickWeightedTip`). Empty
+/// uniform sample in `[0, 1)`. Empty
 /// `tips` yield `""`.
 #[must_use]
 pub fn pick_weighted_tip<'a>(tips: &[&'a str], r: f32) -> &'a str {
@@ -158,7 +157,7 @@ pub fn welcome_seed(cwd: &str) -> u64 {
 	})
 }
 
-/// Picks the session's startup tip from `seed` with pi's rolls: the
+/// Picks the session's startup tip from `seed`: the
 /// nerdfont nag one launch in ten on a plain-unicode terminal, otherwise a
 /// `[NEW]`-weighted pick. Deterministic for a fixed seed.
 #[must_use]
@@ -205,7 +204,7 @@ struct TipWrap {
 	box_width: u16,
 	lines:     Vec<Str>,
 	/// Whether the `NEW!` tag rides the last line (`false` puts it on its
-	/// own indented line), pi `renderWelcomeTip`.
+	/// own indented line).
 	inline:    bool,
 }
 
@@ -223,7 +222,7 @@ struct WelcomeGeometry {
 }
 
 impl Welcome {
-	/// Creates the banner for one launch. `intro` is how far into pi's
+	/// Creates the banner for one launch. `intro` is how far into the
 	/// 3000ms brand intro the block already is when its paint clock starts
 	/// (`Duration::ZERO` = fresh start); `None` paints the resting frame.
 	#[must_use]
@@ -251,8 +250,7 @@ impl Welcome {
 		}
 	}
 
-	/// Mirrors pi's responsive breakpoint arithmetic (`welcome.ts`
-	/// `#renderLines`).
+	/// Computes responsive breakpoint arithmetic.
 	fn geometry(width: u16) -> Option<WelcomeGeometry> {
 		let box_width = BOX_MAX_WIDTH.min(width.saturating_sub(2));
 		if box_width < 4 {
@@ -341,7 +339,7 @@ impl Welcome {
 			return;
 		};
 		// Reserve the bullet prefix and the trailing time so the relative
-		// time is never the part that gets truncated (pi `#renderLines`).
+		// time is never the part that gets truncated.
 		let bullet = pc.ctx.charset.icon(Icon::Bullet);
 		let prefix_width = 1 + cell_width(bullet) + 1;
 		let time_width = 2 + cell_width(&session.time_ago) + 1;
@@ -626,7 +624,7 @@ impl Component for Welcome {
 		}
 
 		// Startup tip, with the rainbow `NEW!` tag on the last line when it
-		// fits, else on its own indented line (pi `renderWelcomeTip`).
+		// fits, else on its own indented line.
 		let label = Style::new().fg(theme.secondary).italic();
 		let body = Style::new().fg(theme.muted).italic();
 		let indent = cell_width(TIP_LABEL);

@@ -13,15 +13,12 @@ use std::{
 use bytes::Bytes;
 use globset::Glob;
 use omp_core::Str;
-use omp_docserver::{
-	diagnostics::parse_pull,
-	position::{PositionEncoding, TextEdit, apply_text_edits},
-};
 use omp_proto::{
 	document::v1::{
 		self as pb, commit_transaction_response, document_mutation, lsp_response, text_mutation,
 	},
 	env::v1::{self as env_pb, OutputChannel},
+	lsp::PositionEncoding,
 };
 use omp_tools::lsp::{
 	Action, Fault, LspControl, Params, Payload, WorkspaceSymbolOutcome, actions,
@@ -39,6 +36,10 @@ use super::{
 	docs::{DocumentError, DocumentHost, lease_target},
 	exec::{ExecEvent, ExecHost},
 	tool_document::{read_whole, transaction_id},
+};
+use crate::docserver::{
+	diagnostics::parse_pull,
+	position::{TextEdit, apply_text_edits},
 };
 
 const CHECKER_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
@@ -481,6 +482,7 @@ impl DocumentLspControl {
 				servers: Vec::new(),
 				output:  Str::from(format!("No files matched pattern: {authored_pattern}")),
 				data:    json!({"diagnostics": [], "complete": true, "truncatedTargets": false}),
+				omitted: 0,
 			});
 		}
 		let mut diagnostics = Vec::new();
@@ -555,7 +557,7 @@ impl DocumentLspControl {
 			"omitted": result.omitted,
 			"complete": result.complete,
 		});
-		Ok(Payload { action: Action::Diagnostics, servers, output, data })
+		Ok(Payload { action: Action::Diagnostics, servers, output, data, omitted: result.omitted })
 	}
 
 	async fn rename_directory(
@@ -673,6 +675,7 @@ impl DocumentLspControl {
 					destination.path(),
 				)),
 				data,
+				omitted: 0,
 			});
 		}
 		self
@@ -742,6 +745,7 @@ impl DocumentLspControl {
 				destination.path(),
 			)),
 			data,
+			omitted: 0,
 		})
 	}
 
@@ -848,7 +852,13 @@ impl DocumentLspControl {
 			Some(lsp_response::Outcome::Error(_)) | None => return Err(Fault::Server),
 		};
 		let output = render_raw_response(&server.name, method, &data)?;
-		Ok(Payload { action: Action::Request, servers: vec![Str::from(server.name)], output, data })
+		Ok(Payload {
+			action: Action::Request,
+			servers: vec![Str::from(server.name)],
+			output,
+			data,
+			omitted: 0,
+		})
 	}
 
 	async fn workspace_diagnostics(&self, cancel: &CancellationToken) -> Result<Payload, Fault> {
@@ -889,7 +899,7 @@ impl DocumentLspControl {
 			"complete": result.complete,
 			"failures": failures,
 		});
-		Ok(Payload { action: Action::Diagnostics, servers, output, data })
+		Ok(Payload { action: Action::Diagnostics, servers, output, data, omitted: result.omitted })
 	}
 }
 
@@ -931,7 +941,13 @@ fn lsp_roster_payload(action: Action, roster: pb::LspStatusResponse, workspace: 
 	} else {
 		Str::from(lines.join("\n"))
 	};
-	Payload { action, servers, output, data: json!({ "workspace": workspace, "servers": entries }) }
+	Payload {
+		action,
+		servers,
+		output,
+		data: json!({ "workspace": workspace, "servers": entries }),
+		omitted: 0,
+	}
 }
 
 fn lsp_capabilities_payload(roster: pb::LspStatusResponse) -> Result<Payload, Fault> {
@@ -955,6 +971,7 @@ fn lsp_capabilities_payload(roster: pb::LspStatusResponse) -> Result<Payload, Fa
 		servers,
 		output: Str::from(serde_json::to_string_pretty(&data).map_err(|_| Fault::Server)?),
 		data,
+		omitted: 0,
 	})
 }
 
@@ -1059,10 +1076,9 @@ impl LspControl for DocumentLspControl {
 				params.action,
 				Action::Diagnostics | Action::RenameFile | Action::Capabilities
 			) {
-				// The registry is priority ordered. Pi routes semantic
-				// navigation/refactors and raw requests through the primary
-				// type-aware server; only diagnostics, capabilities, and
-				// file-rename notifications fan out to every applicable binding.
+				// The registry is priority ordered. Semantic navigation, refactors,
+				// and raw requests use the primary type-aware server; only diagnostics,
+				// capabilities, and file-rename notifications fan out to every binding.
 				selected.truncate(1);
 			}
 			if selected.is_empty() {
@@ -1101,6 +1117,7 @@ impl LspControl for DocumentLspControl {
 					servers,
 					output: Str::new_static("Reloaded selected language-server configuration"),
 					data: json!({ "reloaded": true }),
+					omitted: 0,
 				});
 			}
 			if params.action == Action::RenameFile {
@@ -1152,6 +1169,7 @@ impl LspControl for DocumentLspControl {
 						servers,
 						output: refactor::preview(&preview_edit),
 						data,
+						omitted: 0,
 					});
 				}
 				let source_revision = lease.head().revision.clone();
@@ -1228,6 +1246,7 @@ impl LspControl for DocumentLspControl {
 						destination.path(),
 					)),
 					data,
+					omitted: 0,
 				});
 			}
 			if params.action == Action::Status {
@@ -1237,6 +1256,7 @@ impl LspControl for DocumentLspControl {
 					servers,
 					output: render::structured(&data, usize::MAX),
 					data,
+					omitted: 0,
 				});
 			}
 			if params.action == Action::Capabilities {
@@ -1253,6 +1273,7 @@ impl LspControl for DocumentLspControl {
 					servers,
 					output: Str::from(serde_json::to_string_pretty(&data).unwrap_or_default()),
 					data,
+					omitted: 0,
 				});
 			}
 			let content = read_whole(&self.documents, &lease)
@@ -1407,7 +1428,13 @@ impl LspControl for DocumentLspControl {
 					"omitted": result.omitted,
 					"complete": result.complete,
 				});
-				return Ok(Payload { action: params.action, servers, output, data });
+				return Ok(Payload {
+					action: params.action,
+					servers,
+					output,
+					data,
+					omitted: result.omitted,
+				});
 			}
 			if workspace_symbols {
 				return aggregate_workspace_symbols(
@@ -1446,7 +1473,7 @@ impl LspControl for DocumentLspControl {
 					let applied = self.apply_workspace_edit(&data, encoding, &cancel).await?;
 					let output =
 						Str::from(format!("Applied rename transaction across {applied} document(s)"));
-					return Ok(Payload { action: params.action, servers, output, data });
+					return Ok(Payload { action: params.action, servers, output, data, omitted: 0 });
 				}
 			}
 			if params.action == Action::CodeActions {
@@ -1563,7 +1590,13 @@ impl LspControl for DocumentLspControl {
 							.and_then(Value::as_str)
 							.unwrap_or(selector),
 					));
-					return Ok(Payload { action: params.action, servers, output, data: action });
+					return Ok(Payload {
+						action: params.action,
+						servers,
+						output,
+						data: action,
+						omitted: 0,
+					});
 				}
 				data = Value::Array(actions);
 			}
@@ -1583,7 +1616,7 @@ impl LspControl for DocumentLspControl {
 				Action::Rename => refactor::preview(&data),
 				_ => render::structured(&data, usize::MAX),
 			};
-			Ok(Payload { action: params.action, servers, output, data })
+			Ok(Payload { action: params.action, servers, output, data, omitted: 0 })
 		}
 	}
 }

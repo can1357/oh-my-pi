@@ -44,25 +44,25 @@ pub trait CheckpointControl: Clone + Send + Sync + 'static {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkspaceSnapshot {
 	/// Content-addressed manifest identity.
-	pub snapshot_id:       Str,
+	pub snapshot_id:        Str,
 	/// Canonical environment-owned root URI.
-	pub root_uri:          Str,
+	pub root_uri:           Str,
 	/// Monotonic workspace generation.
-	pub generation:        u64,
+	pub generation:         u64,
 	/// Stable tree digest.
-	pub tree_hash:         Str,
+	pub tree_hash:          Str,
 	/// Captured regular-file count.
-	pub files:             u64,
+	pub files:              u64,
 	/// Captured content bytes.
-	pub bytes:             u64,
+	pub bytes:              u64,
 	/// Environment snapshot label.
-	pub label:             Option<Str>,
+	pub label:              Option<Str>,
 	/// Immediate workspace-snapshot ancestor.
 	pub parent_snapshot_id: Option<Str>,
 	/// Capture time in epoch milliseconds.
-	pub created_at:        u64,
+	pub created_at:         u64,
 	/// Whether only selected paths were captured.
-	pub partial:           bool,
+	pub partial:            bool,
 }
 
 /// Typed workspace restoration committed before the journal branches.
@@ -417,10 +417,7 @@ impl<C: CheckpointControl> Tool for Checkpoint<C> {
 	fn prompt(&self, view: Result<&CheckpointPayload, &Fault>, _: &PromptCaps) -> Vec<Part> {
 		vec![Part::Text {
 			text: match view {
-				Ok(CheckpointPayload {
-					action: CheckpointResultKind::Created,
-					checkpoints,
-				}) => {
+				Ok(CheckpointPayload { action: CheckpointResultKind::Created, checkpoints }) => {
 					let checkpoint = checkpoints
 						.first()
 						.expect("created checkpoint payload contains one checkpoint");
@@ -431,10 +428,7 @@ impl<C: CheckpointControl> Tool for Checkpoint<C> {
 						checkpoint.goal
 					)
 				},
-				Ok(CheckpointPayload {
-					action: CheckpointResultKind::Listed,
-					checkpoints,
-				}) => {
+				Ok(CheckpointPayload { action: CheckpointResultKind::Listed, checkpoints }) => {
 					let mut text = String::from("Selected-branch checkpoints:");
 					for checkpoint in checkpoints {
 						use std::fmt::Write as _;
@@ -606,40 +600,40 @@ mod tests {
 
 	fn snapshot() -> WorkspaceSnapshot {
 		WorkspaceSnapshot {
-			snapshot_id: sf!("snapshot"),
-			root_uri: sf!("file:///workspace"),
-			generation: 7,
-			tree_hash: sf!("tree"),
-			files: 2,
-			bytes: 12,
-			label: Some(sf!("parser-baseline")),
+			snapshot_id:        sf!("snapshot"),
+			root_uri:           sf!("file:///workspace"),
+			generation:         7,
+			tree_hash:          sf!("tree"),
+			files:              2,
+			bytes:              12,
+			label:              Some(sf!("parser-baseline")),
 			parent_snapshot_id: Some(sf!("parent-snapshot")),
-			created_at: 42,
-			partial: false,
+			created_at:         42,
+			partial:            false,
 		}
 	}
 
 	fn info() -> CheckpointInfo {
 		CheckpointInfo {
-			token: sf!("opaque"),
-			label: sf!("parser-baseline"),
-			goal: sf!("inspect"),
-			started_at: 42,
-			parent_token: Some(sf!("parent-token")),
+			token:          sf!("opaque"),
+			label:          sf!("parser-baseline"),
+			goal:           sf!("inspect"),
+			started_at:     42,
+			parent_token:   Some(sf!("parent-token")),
 			session_target: Some(sf!("01K4TARGET")),
-			workspace: snapshot(),
+			workspace:      snapshot(),
 		}
 	}
 
 	fn restore() -> WorkspaceRestore {
 		WorkspaceRestore {
-			snapshot_id: sf!("snapshot"),
+			snapshot_id:      sf!("snapshot"),
 			undo_snapshot_id: sf!("undo"),
-			written: 1,
-			deleted: 1,
-			unchanged: 0,
-			from_generation: 8,
-			to_generation: 9,
+			written:          1,
+			deleted:          1,
+			unchanged:        0,
+			from_generation:  8,
+			to_generation:    9,
 		}
 	}
 
@@ -670,8 +664,8 @@ mod tests {
 		) -> impl Future<Output = Result<RewindAck, CheckpointFault>> + Send {
 			future::ready(Ok(RewindAck {
 				checkpoint: Arc::new(info()),
-				receipt: sf!("rewind-1"),
-				workspace: restore(),
+				receipt:    sf!("rewind-1"),
+				workspace:  restore(),
 			}))
 		}
 	}
@@ -709,8 +703,8 @@ mod tests {
 				.replace((checkpoint, report));
 			future::ready(Ok(RewindAck {
 				checkpoint: Arc::new(info()),
-				receipt: sf!("rewind-1"),
-				workspace: restore(),
+				receipt:    sf!("rewind-1"),
+				workspace:  restore(),
 			}))
 		}
 	}
@@ -720,9 +714,11 @@ mod tests {
 		let (checkpoint, rewind) = tools(Control);
 		assert_eq!(checkpoint.spec().name, "checkpoint");
 		assert_eq!(rewind.spec().name, "rewind");
-		assert!(crate::builtin_tool_identities().iter().any(|identity| {
-			identity.name == rewind.spec().name.as_str() && !identity.hidden
-		}));
+		assert!(
+			crate::builtin_tool_identities()
+				.iter()
+				.any(|identity| { identity.name == rewind.spec().name.as_str() && !identity.hidden })
+		);
 		assert_eq!(checkpoint.spec().rev.n, 3);
 		assert_eq!(rewind.spec().rev.n, 4);
 		assert_eq!(
@@ -781,7 +777,9 @@ mod tests {
 				.keys()
 				.map(String::as_str)
 				.collect::<std::collections::BTreeSet<_>>(),
-			["checkpoint", "i", "notrunc", "report"].into_iter().collect()
+			["checkpoint", "i", "notrunc", "report"]
+				.into_iter()
+				.collect()
 		);
 	}
 
@@ -845,10 +843,7 @@ mod tests {
 			async move {
 				cancel.cancelled().await;
 				observed.store(true, Ordering::Release);
-				Err(CheckpointFault {
-					code: FaultCode::RestoreCancelled,
-					message: sf!("cancelled"),
-				})
+				Err(CheckpointFault { code: FaultCode::RestoreCancelled, message: sf!("cancelled") })
 			}
 		}
 
@@ -878,10 +873,7 @@ mod tests {
 		feed.arg_text(raw.into()).expect("stream args");
 		feed.args_committed(raw.into()).expect("commit args");
 		feed
-			.interrupt(omp_tool::Interrupt {
-				class: sf!("user"),
-				reason: sf!("stop checkpoint"),
-			})
+			.interrupt(omp_tool::Interrupt { class: sf!("user"), reason: sf!("stop checkpoint") })
 			.expect("interrupt");
 		let events = checkpoint.call(incoming).collect::<Vec<_>>().await;
 		assert!(matches!(

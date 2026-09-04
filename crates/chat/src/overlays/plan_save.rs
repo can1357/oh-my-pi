@@ -242,7 +242,7 @@ impl Panel for PlanSavePanel {
 	}
 }
 
-/// pi `planSaveFileName`: normalize the reviewed topic into
+/// Normalizes the reviewed topic into
 /// `<TOPIC>_PLAN.md`, trimming verbose fallbacks at a word boundary.
 #[must_use]
 pub fn suggested_filename(title: &str) -> Str {

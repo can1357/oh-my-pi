@@ -337,9 +337,7 @@ impl WorkpoolProducer {
 			let next = state
 				.last_timestamp_ms
 				.checked_add(1)
-				.ok_or_else(|| WorkpoolProducerError::TimestampExhausted {
-					pool: self.pool.clone(),
-				})?;
+				.ok_or_else(|| WorkpoolProducerError::TimestampExhausted { pool: self.pool.clone() })?;
 			(state.result_observations.contains(&reply_to.id), now.max(next))
 		};
 		if !already_observed {

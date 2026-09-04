@@ -18,8 +18,8 @@ use im::OrdSet;
 use omp_core::{ExposeSecret as _, IntoStr, SecretString, Str, Ulid, sf};
 use omp_proto::toolhost::v1::PreludeParamKind;
 use omp_tool::{
-	CapsBase, ErasedEv, ErasedOutcome, IncomingParams, ModelClass, Part, PromptCaps, Registry,
-	ToolIdentity, ToolRoute,
+	CapsBase, Diag, DiagEnvelope, ErasedEv, ErasedOutcome, IncomingParams, ModelClass, Part,
+	PromptCaps, Registry, ToolIdentity, ToolRoute,
 };
 use omp_tools::eval::{RuntimeSnapshot, idle_timeout::TimeoutHandle, kernel::NamespaceInstaller};
 use parking_lot::Mutex;
@@ -752,9 +752,14 @@ impl BridgeHost for RegistryBridgeHost {
 			.args_committed(Str::from(raw))
 			.map_err(|error| BridgeHostError::message(error.to_string()))?;
 		let mut events = self.registry.invoke(name, params).map_err(registry_error)?;
+		let mut diags = Vec::<Diag>::new();
 		while let Some(event) = events.next().await {
 			match event.map_err(registry_error)? {
 				ErasedEv::Update(update) => {
+					if let Ok(envelope) = serde_json::from_slice::<DiagEnvelope>(&update) {
+						diags.push(envelope.diag);
+						continue;
+					}
 					let update: Value = serde_json::from_slice(&update).map_err(|error| {
 						BridgeHostError::message(format!(
 							"tool {name} returned invalid update JSON: {error}"
@@ -765,7 +770,7 @@ impl BridgeHost for RegistryBridgeHost {
 				ErasedEv::Done(ErasedOutcome::Detached(job)) => {
 					let value = serde_json::to_value(job)
 						.map_err(|error| BridgeHostError::message(error.to_string()))?;
-					return Ok(value);
+					return attach_diags(value, diags);
 				},
 				ErasedEv::Done(ErasedOutcome::Done { verdict, .. }) => {
 					let projected = self
@@ -794,12 +799,27 @@ impl BridgeHost for RegistryBridgeHost {
 							_ => value = json!({ "text": value, "hasError": true }),
 						}
 					}
-					return Ok(value);
+					return attach_diags(value, diags);
 				},
 			}
 		}
 		Err(BridgeHostError::message(format!("tool {name} ended without a terminal result")))
 	}
+}
+
+fn attach_diags(mut value: Value, diags: Vec<Diag>) -> Result<Value, BridgeHostError> {
+	if diags.is_empty() {
+		return Ok(value);
+	}
+	let diags =
+		serde_json::to_value(diags).map_err(|error| BridgeHostError::message(error.to_string()))?;
+	match &mut value {
+		Value::Object(object) => {
+			object.insert("diags".to_owned(), diags);
+		},
+		_ => value = json!({ "result": value, "diags": diags }),
+	}
+	Ok(value)
 }
 
 /// Optional capabilities owned by the live parent agent session.
@@ -1507,7 +1527,8 @@ mod tests {
 	use async_stream::stream;
 	use futures::Stream;
 	use omp_tool::{
-		Claims, Constraint, Effects, Ev, Precedence, Presentation, Rev, Tool, ToolSpec, ToolTerminal,
+		Claims, Constraint, DiagKind, Effects, Ev, Precedence, Presentation, Rev, Tool, ToolSpec,
+		ToolTerminal, Unit,
 	};
 	use serde::{Deserialize, Deserializer, Serialize, ser};
 
@@ -1675,6 +1696,11 @@ mod tests {
 					yield Ev::Update(ProbeUpdate::Invalid);
 				} else {
 					yield Ev::Update(ProbeUpdate::Value(json!({"step": 1})));
+					yield Ev::Diag(
+						Diag::info(DiagKind::Pagination, "more results")
+							.continuation("skip=2")
+							.omitted(3, Unit::Items),
+					);
 					yield Ev::Update(ProbeUpdate::Value(json!({"step": 2})));
 				}
 				yield Ev::Done(ToolTerminal::Done {
@@ -2082,7 +2108,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn registry_bridge_streams_ordered_updates_before_its_response() {
+	async fn registry_bridge_collects_diags_and_streams_ordered_updates_before_its_response() {
 		let mut registry = Registry::new();
 		registry
 			.register(StreamingProbe::new("update_probe", false), Presentation::Slot, test_claims())
@@ -2094,7 +2120,16 @@ mod tests {
 				.call("update_probe", json!({"i":"py prelude"}), &progress)
 				.await
 				.expect("bridge probe call"),
-			json!("done")
+			json!({
+				"result": "done",
+				"diags": [{
+					"severity": "info",
+					"kind": "pagination",
+					"text": "more results",
+					"continuation": "skip=2",
+					"omitted": {"count": 3, "unit": "items"},
+				}],
+			})
 		);
 		assert_eq!(*progress.0.lock(), vec![
 			json!({"op":"tool","name":"update_probe","update":{"step":1}}),

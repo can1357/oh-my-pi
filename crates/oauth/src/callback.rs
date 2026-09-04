@@ -53,7 +53,7 @@ pub fn validate_redirect_pair(
 	Ok(())
 }
 
-fn is_loopback_host(host: Option<Host<&str>>) -> bool {
+const fn is_loopback_host(host: Option<Host<&str>>) -> bool {
 	match host {
 		Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
 		Some(Host::Ipv4(address)) => address.is_loopback(),
@@ -121,7 +121,7 @@ impl LoopbackCallback {
 	}
 
 	/// Overrides the bounded callback deadline for an embedding application.
-	pub fn with_timeout(mut self, timeout: Duration) -> Self {
+	pub const fn with_timeout(mut self, timeout: Duration) -> Self {
 		self.timeout = timeout;
 		self
 	}
@@ -139,12 +139,11 @@ impl LoopbackCallback {
 				() = &mut deadline => return Err(CallbackError::TimedOut),
 				accepted = self.listeners.accept() => accepted?,
 			};
-			let target = match read_request_target(&mut stream).await {
-				Ok(target) => target,
-				Err(_) => {
-					let _ = write_response(&mut stream, 400, "Bad Request").await;
-					continue;
-				},
+			let target = if let Ok(target) = read_request_target(&mut stream).await {
+				target
+			} else {
+				let _ = write_response(&mut stream, 400, "Bad Request").await;
+				continue;
 			};
 			let (path, query) = target.split_once('?').unwrap_or((&target, ""));
 			if path != self.path.as_str() {

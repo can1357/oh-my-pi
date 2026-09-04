@@ -16,16 +16,12 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use flume::Receiver;
 use futures::StreamExt as _;
-use omp_agent::{ApprovalBook, ApprovalRoute, ApprovalSpec, HookGate, KernelSender, TicketState};
+use omp_agent::{
+	ApprovalBook, ApprovalRoute, ApprovalSpec, HookGate, KernelSender, SessionRole, TicketState,
+};
 use omp_cache::{github_cache::GithubCache, telemetry_cache::TelemetryIndex};
 use omp_con::Ctx;
 use omp_core::{Hash32, Str, Ulid, sf};
-#[cfg(any(unix, windows))]
-use omp_docserver::connection::ConnectionConfig;
-#[cfg(unix)]
-use omp_docserver::daemon;
-#[cfg(windows)]
-use omp_docserver::windows::OwnerPipeListener;
 use omp_env::{EnvClient, InProcessEnvTransport, partition::FramePipe};
 use omp_journal::blob;
 use omp_proto::{
@@ -101,7 +97,7 @@ use super::{
 	host_info::HostInfoHost,
 	host_settings::HostSettings,
 	http_egress::{HttpEgressError, HttpEgressHost},
-	journal_runtime::{ExternalJournalActor, PersistenceControlFactory},
+	journal_runtime::DurableScheduleActor,
 	lsp_settings::LspSettings,
 	mcp::{
 		McpConfigPaths, McpService, McpServiceError, ServiceSubscription, SubscriptionEvent,
@@ -133,11 +129,10 @@ use super::{
 	},
 	vcs::{self, RepositoryAvailability},
 	worker::{
-		DEFAULT_MAX_FRAME_BYTES, DomainControlSlot, ExtHostConfig, ExtHostSpec, ExtHostSupervisor,
-		ExternalControlAuthorityBinding, ExternalDomainControlBinding,
-		ExternalDomainControlFactories, HostKey, JournalRuntime, OpenToolCall, PY_EVAL_MODULE,
-		SealedRegistryEvidence, WorkerCompletion, WorkerError, WorkerEvent, WorkerInvocation,
-		WorkerOutcomeKind,
+		DEFAULT_MAX_FRAME_BYTES, DomainControlSlot, ExtHostCompletion, ExtHostConfig, ExtHostError,
+		ExtHostEvent, ExtHostInvocation, ExtHostOutcomeKind, ExtHostSpec, ExtHostSupervisor,
+		ExtHostToolCall, ExternalControlAuthorityBinding, ExternalDomainControlBinding,
+		ExternalDomainControlFactories, HostKey,
 	},
 	worker_pool::{
 		DEFAULT_MAX_CONCURRENT_SPAWNS, DEFAULT_WORKER_LAYER_CEILING, WorkerKey, WorkerRoute,
@@ -149,18 +144,25 @@ use super::{
 	},
 	workspace_roots::WorkspaceRootHost,
 };
+#[cfg(any(unix, windows))]
+use crate::docserver::connection::ConnectionConfig;
+#[cfg(unix)]
+use crate::docserver::daemon;
+#[cfg(windows)]
+use crate::docserver::windows::OwnerPipeListener;
 use crate::{
 	EnvdConfig, RegistryBridges, authenticated_runtime_identity,
 	exthost::{
-		ControlAuthority, ControlAuthorityFactory, ControlCompositionError, EnvdControlAuthorities,
-		ExternalControlAuthorities, HostControlAuthorityFactory, PersistenceControlAuthorities,
-		PolicyControlAuthorities, PresentationControlAuthorities, ProviderControlAuthorities,
-		RegistryAvailabilitySink, RegistryControlAuthorities,
+		ControlAuthority, ControlAuthorityFactory, ControlCompositionError, ControlQuotaRuntime,
+		EnvdControlAuthorities, ExternalControlAuthorities, HostControlAuthorityFactory,
+		PersistenceControlAuthorities, PolicyControlAuthorities, PresentationControlAuthorities,
+		ProviderControlAuthorities, RegistryAvailabilitySink, RegistryControlAuthorities,
 		control::{
 			ControlConnectionIdentity, ControlDispatch, ControlEffect, ControlProtocolError,
-			ControlRequestContext,
+			ControlRequestContext, FixedControlAuthorityFactory,
 		},
 		dispatch::{CallbackDispatcher, CallbackDispatcherSlot, UiCallbackDispatch},
+		extensions::SealedRegistryEvidence,
 	},
 	tools::{
 		DeviceCatalogObserver, DeviceControlFactory, DeviceInvocationAdmission,
@@ -322,9 +324,9 @@ pub enum EnvdError {
 	/// The embedded Python runtime used by `eval` could not be initialized.
 	#[error("eval runtime failed: {0}")]
 	Eval(Str),
-	/// The Python tool worker could not be started or supervised.
+	/// A Python extension host could not be started or supervised.
 	#[error(transparent)]
-	Worker(#[from] WorkerError),
+	ExtensionHost(#[from] ExtHostError),
 	/// The durable schedule authority failed or was generation-fenced.
 	#[error(transparent)]
 	Schedule(#[from] DurableScheduleError),
@@ -580,7 +582,7 @@ struct DocumentAuthority {
 	#[cfg(unix)]
 	task:     Option<JoinHandle<daemon::Result>>,
 	#[cfg(windows)]
-	task:     Option<JoinHandle<Result<(), omp_docserver::windows::WindowsTransportError>>>,
+	task:     Option<JoinHandle<Result<(), crate::docserver::windows::WindowsTransportError>>>,
 }
 
 #[cfg(unix)]
@@ -642,7 +644,7 @@ impl DeviceInvoker for WorkerDeviceInvoker {
 					return;
 				},
 			};
-			let mut invocation = match hosts.open(OpenToolCall {
+			let mut invocation = match hosts.open(ExtHostToolCall {
 				invocation_id: request.invocation_id.clone(),
 				name: request.name.clone(),
 				rev: request.rev.clone(),
@@ -669,8 +671,8 @@ impl DeviceInvoker for WorkerDeviceInvoker {
 			}
 			while let Ok(event) = invocation.next().await {
 				match event {
-					WorkerEvent::Update(update) => yield Ok(ErasedEv::Update(Bytes::from(update.encode_to_vec()))),
-					WorkerEvent::Complete(complete) => match materialize_worker_completion(&blobs, &complete) {
+					ExtHostEvent::Update(update) => yield Ok(ErasedEv::Update(Bytes::from(update.encode_to_vec()))),
+					ExtHostEvent::Complete(complete) => match materialize_worker_completion(&blobs, &complete) {
 						Ok(verdict) => {
 							yield Ok(ErasedEv::Done(ErasedOutcome::Done {
 								verdict,
@@ -683,12 +685,14 @@ impl DeviceInvoker for WorkerDeviceInvoker {
 							return;
 						},
 					},
-					WorkerEvent::Aborted(abort) => {
+					ExtHostEvent::Aborted(abort) => {
 						yield Err(RegistryError::VerdictShape(abort.reason));
 						return;
 					},
-					WorkerEvent::Pull(_) | WorkerEvent::ProtocolError(_) => {
-						yield Err(RegistryError::VerdictShape(sf!("worker device protocol rejected final invocation")));
+					ExtHostEvent::ProtocolError(_) => {
+						yield Err(RegistryError::VerdictShape(sf!(
+							"extension-host device protocol rejected final invocation"
+						)));
 						return;
 					},
 				}
@@ -720,7 +724,7 @@ impl PreludeInvoker for PreludeBridgeInvoker {
 		let invocation_id = Str::from(Ulid::generate().to_string());
 		let mut invocation = self
 			.hosts
-			.open(OpenToolCall {
+			.open(ExtHostToolCall {
 				invocation_id: invocation_id.clone(),
 				name:          Str::new(name),
 				rev:           Str::new(rev),
@@ -749,8 +753,8 @@ impl PreludeInvoker for PreludeBridgeInvoker {
 				BridgeHostError::message("prelude helper invocation channel closed before completion")
 			})?;
 			match event {
-				WorkerEvent::Update(_) => {},
-				WorkerEvent::Complete(complete) => {
+				ExtHostEvent::Update(_) => {},
+				ExtHostEvent::Complete(complete) => {
 					let details = materialize_worker_details(&self.blobs, &complete).map_err(|_| {
 						BridgeHostError::message(
 							"prelude helper result artifact is unavailable or exceeds the bounded \
@@ -758,14 +762,14 @@ impl PreludeInvoker for PreludeBridgeInvoker {
 						)
 					})?;
 					match complete.kind {
-						WorkerOutcomeKind::Ok => {
+						ExtHostOutcomeKind::Ok => {
 							return serde_json::from_slice(&details).map_err(|error| {
 								BridgeHostError::message(sf!(
 									"prelude helper returned invalid JSON: {error}"
 								))
 							});
 						},
-						WorkerOutcomeKind::ArgsRejected => {
+						ExtHostOutcomeKind::ArgsRejected => {
 							let issue = complete.args_issue.as_ref().ok_or_else(|| {
 								BridgeHostError::message(
 									"prelude helper rejected its arguments without an argument issue",
@@ -782,8 +786,8 @@ impl PreludeInvoker for PreludeBridgeInvoker {
 								issue.kind
 							)));
 						},
-						WorkerOutcomeKind::Faulted | WorkerOutcomeKind::Aborted => {
-							let kind = if complete.kind == WorkerOutcomeKind::Faulted {
+						ExtHostOutcomeKind::Faulted | ExtHostOutcomeKind::Aborted => {
+							let kind = if complete.kind == ExtHostOutcomeKind::Faulted {
 								"faulted"
 							} else {
 								"aborted"
@@ -805,18 +809,13 @@ impl PreludeInvoker for PreludeBridgeInvoker {
 						},
 					}
 				},
-				WorkerEvent::Aborted(abort) => {
+				ExtHostEvent::Aborted(abort) => {
 					return Err(BridgeHostError::message(sf!(
 						"prelude helper invocation aborted: {}",
 						abort.reason
 					)));
 				},
-				WorkerEvent::Pull(_) => {
-					return Err(BridgeHostError::message(
-						"prelude helper protocol requested an unsupported argument pull",
-					));
-				},
-				WorkerEvent::ProtocolError(error) => {
+				ExtHostEvent::ProtocolError(error) => {
 					return Err(BridgeHostError::message(sf!(
 						"prelude helper protocol error: {}",
 						error.message
@@ -1283,9 +1282,6 @@ struct ProductionEnvdControlFactory {
 	session_id: Str,
 	telemetry:  Arc<TelemetryIndex>,
 	intents:    Arc<Mutex<BTreeMap<(Str, Str, Str, Str), serde_json::Value>>>,
-	manifests:  Arc<BTreeMap<(Str, Str, Str), ExtensionManifest>>,
-	registries: Arc<Mutex<BTreeMap<(Str, Str, Str), serde_json::Value>>>,
-	registry:   Arc<RegistryControlFactory>,
 	resources:  Arc<sync::OnceLock<Arc<ProductionResolverTable>>>,
 }
 
@@ -1294,19 +1290,12 @@ impl ControlAuthorityFactory for ProductionEnvdControlFactory {
 		&self,
 		identity: Arc<ControlConnectionIdentity>,
 	) -> Result<Arc<dyn ControlAuthority>, ControlCompositionError> {
-		let manifest = self
-			.manifests
-			.get(&(identity.layer.clone(), identity.tier.clone(), identity.extension.clone()))
-			.cloned();
 		Ok(Arc::new(ProductionEnvdControlAuthority {
 			identity,
 			state_dir: self.state_dir.clone(),
 			session_id: self.session_id.clone(),
 			telemetry: Arc::clone(&self.telemetry),
 			intents: Arc::clone(&self.intents),
-			manifest,
-			registries: Arc::clone(&self.registries),
-			registry: Arc::clone(&self.registry),
 			resources: Arc::clone(&self.resources),
 		}))
 	}
@@ -1318,9 +1307,6 @@ struct ProductionEnvdControlAuthority {
 	session_id: Str,
 	telemetry:  Arc<TelemetryIndex>,
 	intents:    Arc<Mutex<BTreeMap<(Str, Str, Str, Str), serde_json::Value>>>,
-	manifest:   Option<ExtensionManifest>,
-	registries: Arc<Mutex<BTreeMap<(Str, Str, Str), serde_json::Value>>>,
-	registry:   Arc<RegistryControlFactory>,
 	resources:  Arc<sync::OnceLock<Arc<ProductionResolverTable>>>,
 }
 
@@ -1576,86 +1562,6 @@ impl ControlAuthority for ProductionEnvdControlAuthority {
 					})?;
 				Ok(())
 			},
-			ControlEffect::Registry(payload) => {
-				let manifest = self.manifest.as_ref().ok_or_else(|| {
-					ControlProtocolError::new(
-						"RegistryOwnerUnavailable",
-						"the connection extension is absent from the admitted manifest set",
-					)
-				})?;
-				let object = payload.as_object().ok_or_else(|| {
-					ControlProtocolError::new(
-						"InvalidRegistry",
-						"extension registry evidence is not an object",
-					)
-				})?;
-				let tools = object
-					.get("tools")
-					.and_then(serde_json::Value::as_array)
-					.ok_or_else(|| {
-						ControlProtocolError::new(
-							"InvalidRegistry",
-							"extension registry tools are missing",
-						)
-					})?;
-				let actual = tools
-					.iter()
-					.map(|tool| {
-						let tool = tool.as_object().ok_or_else(|| {
-							ControlProtocolError::new(
-								"InvalidRegistry",
-								"extension registry tool row is not an object",
-							)
-						})?;
-						let name = tool
-							.get("name")
-							.and_then(serde_json::Value::as_str)
-							.filter(|name| !name.is_empty())
-							.ok_or_else(|| {
-								ControlProtocolError::new(
-									"InvalidRegistry",
-									"extension registry tool name is missing",
-								)
-							})?;
-						let family = tool
-							.get("family")
-							.and_then(serde_json::Value::as_str)
-							.unwrap_or("");
-						let rev = tool
-							.get("rev")
-							.and_then(serde_json::Value::as_u64)
-							.and_then(|rev| u16::try_from(rev).ok())
-							.ok_or_else(|| {
-								ControlProtocolError::new(
-									"InvalidRegistry",
-									"extension registry tool revision is invalid",
-								)
-							})?;
-						Ok((Str::from(name), Str::from(family), rev))
-					})
-					.collect::<Result<BTreeSet<_>, ControlProtocolError>>()?;
-				let expected = manifest
-					.declarations
-					.tools()
-					.map(|tool| (tool.name.clone(), tool.family.clone(), tool.rev))
-					.collect::<BTreeSet<_>>();
-				if actual != expected {
-					return Err(ControlProtocolError::new(
-						"DeclarationDrift",
-						"frozen extension tools differ from the admitted manifest",
-					));
-				}
-				self.registry.publish(&context, &payload)?;
-				self.registries.lock().insert(
-					(
-						self.identity.layer.clone(),
-						self.identity.tier.clone(),
-						self.identity.extension.clone(),
-					),
-					payload,
-				);
-				Ok(())
-			},
 			ControlEffect::Ui(_) => Err(ControlProtocolError::new(
 				"InvalidEffect",
 				"auxiliary CONTROL owner accepts only logs and internal observations",
@@ -1846,6 +1752,67 @@ fn same_control_connection(
 		&& expected.capabilities == actual.capabilities
 }
 
+fn bind_live_session_authority_snapshot(
+	config: &mut ExtHostConfig,
+	root: &Path,
+	authority: Option<&Arc<dyn omp_agent::SessionAuthority>>,
+) {
+	let Some(authority) = authority else {
+		return;
+	};
+	let Some(endpoint) = authority.lookup(config.session_id.as_str()) else {
+		return;
+	};
+	let mut depth = 0_u32;
+	let mut cursor = endpoint.topology.parent_id.clone();
+	let mut seen = BTreeSet::new();
+	while let Some(parent) = cursor {
+		if !seen.insert(parent.clone()) {
+			break;
+		}
+		depth = depth.saturating_add(1);
+		if depth == 64 {
+			break;
+		}
+		cursor = authority
+			.lookup(parent.as_str())
+			.and_then(|parent| parent.topology.parent_id);
+	}
+	let root = Url::from_file_path(root)
+		.map_or_else(|_| String::from("file:///"), |root| root.to_string());
+	let started_at_ms = config
+		.session_started_at
+		.duration_since(UNIX_EPOCH)
+		.unwrap_or_default()
+		.as_millis()
+		.try_into()
+		.unwrap_or(u64::MAX);
+	config.bind_session_authority_snapshot(
+		serde_json::json!({
+			"id": endpoint.id.as_str(),
+			"title": (!endpoint.name.is_empty()).then(|| endpoint.name.as_str()),
+			"title_source": "system",
+			"cwd": root.clone(),
+			"project": root,
+			"created_ms": started_at_ms,
+			"updated_ms": started_at_ms,
+			"status": "pending",
+			"kind": match endpoint.topology.role {
+				SessionRole::Main => "interactive",
+				SessionRole::Child => "subagent",
+			},
+			"parent": endpoint.topology.parent_id.as_deref(),
+			"entries": 0,
+			"turns": 0,
+			"usage": {},
+			"cost": {"nanos_usd": 0, "estimated": true},
+			"models": [],
+			"remote": false,
+		}),
+		depth,
+	);
+}
+
 fn register_extension_convars(con: &Ctx, extensions: &[ExtHostSpec]) -> Result<(), EnvdError> {
 	for extension in extensions {
 		crate::exthost::register_extension_setting_convars(
@@ -1864,9 +1831,9 @@ fn production_control_authorities(
 	telemetry: &Arc<TelemetryIndex>,
 	mcp: &Arc<McpService>,
 	extensions: &[ExtHostSpec],
-	journal_external: &ExternalJournalActor,
 	domain_control: Arc<DomainControlSlot>,
 	convars: Arc<dyn ControlAuthorityFactory>,
+	quota_runtime: ControlQuotaRuntime,
 	extension_tool_call_timeout: Duration,
 ) -> ProductionControlBindings {
 	let resources = Arc::new(sync::OnceLock::new());
@@ -1915,35 +1882,14 @@ fn production_control_authorities(
 	);
 	hooks.bind_mcp_drop_journal(Arc::clone(telemetry), session_id.clone());
 	let hooks_factory: Arc<dyn ControlAuthorityFactory> = hooks.clone();
-	let registry_factory: Arc<dyn ControlAuthorityFactory> = registry_owner.clone();
 	let envd: Arc<dyn ControlAuthorityFactory> = Arc::new(ProductionEnvdControlFactory {
 		state_dir:  state_dir.to_path_buf(),
 		session_id: session_id.clone(),
 		telemetry:  Arc::clone(telemetry),
 		intents:    Arc::new(Mutex::new(BTreeMap::new())),
-		manifests:  Arc::clone(&manifests),
-		registries: Arc::new(Mutex::new(BTreeMap::new())),
-		registry:   Arc::clone(&registry_owner),
 		resources:  Arc::clone(&resources),
 	});
-	let registry = RegistryControlAuthorities::new(registry_factory, devices, hooks_factory);
-	let provenances = Arc::new(
-		extensions
-			.iter()
-			.map(|extension| {
-				(
-					(
-						extension.key.layer().clone(),
-						extension.key.tier().clone(),
-						extension.key.extension().clone(),
-					),
-					extension.manifest.provenance.clone(),
-				)
-			})
-			.collect(),
-	);
-	let persistent: Arc<dyn ControlAuthorityFactory> =
-		Arc::new(PersistenceControlFactory::new(journal_external.clone(), provenances));
+	let registry = RegistryControlAuthorities::new(devices, hooks_factory);
 	let gated = |domain| -> Arc<dyn ControlAuthorityFactory> {
 		Arc::new(ManifestGatedControlFactory {
 			domain,
@@ -1967,7 +1913,10 @@ fn production_control_authorities(
 		owners: vec![Arc::clone(&envd), parameters, workers, direct_filesystem, convars]
 			.into_boxed_slice(),
 	});
-	let persistence = PersistenceControlAuthorities::new(sessions, persistent, credentials);
+	let artifacts: Arc<dyn ControlAuthorityFactory> = Arc::new(
+		FixedControlAuthorityFactory::new(Arc::new(UndeclaredControlAuthority)),
+	);
+	let persistence = PersistenceControlAuthorities::new(sessions, artifacts, credentials);
 	let policy = PolicyControlAuthorities::new(policy_owner, prompts);
 	let presentation = PresentationControlAuthorities::new(ui, telemetry_owner, jobs);
 	let provider = ProviderControlAuthorities::new(provider_owner, services);
@@ -1985,7 +1934,9 @@ fn production_control_authorities(
 		Arc::new(ProductionMcpControlFactory { mcp: Arc::clone(mcp) }),
 	);
 	ProductionControlBindings {
-		factory: Arc::new(HostControlAuthorityFactory::new(envd, external)),
+		factory: Arc::new(
+			HostControlAuthorityFactory::new(envd, external).with_quota_runtime(quota_runtime),
+		),
 		resources,
 		callbacks,
 		registry: registry_owner,
@@ -2029,12 +1980,12 @@ pub struct EnvServer {
 	eval_control:            EvalSessionControl,
 	search_bridge:           Arc<SearchBridgeHost>,
 	github_credentials:      Arc<GithubCredentialBridge>,
-	usage_fetchers:          omp_inference::operation::usage::UsageFetcherRegistry,
-	provider_response_hooks: omp_inference::ProviderResponseHooks,
+	usage_fetchers:          omp_ai::operation::usage::UsageFetcherRegistry,
+	provider_response_hooks: omp_ai::ProviderResponseHooks,
 	admission_gate:          Arc<HookGate>,
 	checkpoint_control:      AgentCheckpointControl,
 	previews:                StagedProposalRegistry,
-	journal_external:        ExternalJournalActor,
+	schedules:               DurableScheduleActor,
 	workers:                 Arc<WorkerSupervisor>,
 	authority:               Arc<AuthorityTable>,
 	repository_revision:     AtomicU64,
@@ -2385,12 +2336,12 @@ impl EnvServer {
 		eval_control: EvalSessionControl,
 		search_bridge: Arc<SearchBridgeHost>,
 		github_credentials: Arc<GithubCredentialBridge>,
-		usage_fetchers: omp_inference::operation::usage::UsageFetcherRegistry,
-		provider_response_hooks: omp_inference::ProviderResponseHooks,
+		usage_fetchers: omp_ai::operation::usage::UsageFetcherRegistry,
+		provider_response_hooks: omp_ai::ProviderResponseHooks,
 		admission_gate: Arc<HookGate>,
 		checkpoint_control: AgentCheckpointControl,
 		previews: StagedProposalRegistry,
-		journal_external: ExternalJournalActor,
+		schedules: DurableScheduleActor,
 		authority: Arc<AuthorityTable>,
 		state_dir: &Path,
 	) -> Self {
@@ -2429,7 +2380,7 @@ impl EnvServer {
 			admission_gate,
 			checkpoint_control,
 			previews,
-			journal_external,
+			schedules,
 			workers: Arc::new(WorkerSupervisor::new(
 				DEFAULT_WORKER_LAYER_CEILING,
 				DEFAULT_MAX_CONCURRENT_SPAWNS,
@@ -2470,14 +2421,14 @@ impl EnvServer {
 				.with_agent_plugin_roots(bridges.content.agent_plugin_roots.clone()),
 		);
 		let lsp_settings = LspSettings::from_con(con);
-		let doc_config = omp_docserver::ServerConfig::new(root)
+		let doc_config = crate::docserver::ServerConfig::new(root)
 			.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?
 			.with_server_build(omp_env::build_id::current());
-		let environment = omp_docserver::Environment::new(doc_config)
+		let environment = crate::docserver::Environment::new(doc_config)
 			.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?;
 		let (document_client, document_server) = duplex(64 * 1024);
 		tokio::spawn(async move {
-			let _ = omp_docserver::connection::serve_connection(
+			let _ = crate::docserver::connection::serve_connection(
 				environment,
 				document_server,
 				ConnectionConfig::default(),
@@ -2487,10 +2438,16 @@ impl EnvServer {
 		let documents = DocumentHost::connect(document_client).await?;
 		let hello = documents.hello().clone();
 		let interrupt_grace = ext_host_config.interrupt_grace;
+		let py_eval = ext_host_config.py_eval;
 		let session_id = ext_host_config.session_id.clone();
 		let authority = Arc::new(AuthorityTable::default());
 		ext_host_config.bind_workspace_root(workspace.root());
 		ext_host_config.bind_data_authority(Arc::clone(&authority));
+		bind_live_session_authority_snapshot(
+			&mut ext_host_config,
+			workspace.root(),
+			bridges.session_authority.as_ref(),
+		);
 		let github_cache = Arc::new(
 			GithubCache::open(
 				state_dir.join("github-cache.sqlite3"),
@@ -2519,17 +2476,17 @@ impl EnvServer {
 		mcp.bind_manager(&mcp_manager);
 		mcp_manager.bind_runtime_settings(con);
 		register_extension_convars(con, &ext_host_config.extensions)?;
-		let journal_external = ExternalJournalActor::spawn(state_dir)?;
+		let schedules = DurableScheduleActor::spawn(state_dir)?;
 		let control_bindings = production_control_authorities(
 			state_dir,
 			&session_id,
 			&telemetry,
 			&mcp,
 			&ext_host_config.extensions,
-			&journal_external,
 			ext_host_config.domain_control_factories(),
 			Arc::clone(&convars),
-			crate::pi_settings::extension_tool_call_timeout(con),
+			ext_host_config.quota_runtime(),
+			crate::extension_tool_call_timeout(con),
 		);
 		mcp_manager.bind_notification_sink(control_bindings.hooks.clone());
 		ext_host_config.bind_control_authorities(Arc::clone(&control_bindings.factory));
@@ -2594,6 +2551,7 @@ impl EnvServer {
 			&hello.root_uri,
 			ext_hosts.as_ref(),
 			interrupt_grace,
+			py_eval,
 			&host_settings.tools,
 			&browser_settings,
 			&shell_settings,
@@ -2613,7 +2571,6 @@ impl EnvServer {
 			.resources
 			.set(Arc::clone(&resources))
 			.map_err(|_| EnvdError::State(sf!("CONTROL URL resolver owner was already bound")))?;
-		ext_hosts.bind_journal_runtime(0, JournalRuntime { external: journal_external.sender() })?;
 		ext_hosts.activate_control_hosts().await?;
 		let identity = ServerIdentity {
 			workspace_id:   hello.workspace_id,
@@ -2624,7 +2581,7 @@ impl EnvServer {
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
-			omp_inference::ProviderResponseHooks::new(control_bindings.hooks.clone());
+			omp_ai::ProviderResponseHooks::new(control_bindings.hooks.clone());
 		let admission_gate = control_bindings.hooks.admission_gate();
 		Ok(Self::new(
 			identity,
@@ -2659,7 +2616,7 @@ impl EnvServer {
 			admission_gate,
 			checkpoint_control,
 			previews,
-			journal_external,
+			schedules,
 			authority,
 			state_dir,
 		))
@@ -2705,7 +2662,7 @@ impl EnvServer {
 				.with_agent_plugin_roots(bridges.content.agent_plugin_roots.clone()),
 		);
 		let lsp_settings = LspSettings::from_con(con);
-		let document_lsp = omp_docserver::NativeLspOptions {
+		let document_lsp = crate::docserver::NativeLspOptions {
 			enabled: lsp_settings.enabled,
 			lazy:    lsp_settings.lazy,
 		};
@@ -2761,10 +2718,16 @@ impl EnvServer {
 		}
 		let hello = documents.hello().clone();
 		let interrupt_grace = ext_host_config.interrupt_grace;
+		let py_eval = ext_host_config.py_eval;
 		let session_id = ext_host_config.session_id.clone();
 		let authority = Arc::new(AuthorityTable::default());
 		ext_host_config.bind_workspace_root(&root);
 		ext_host_config.bind_data_authority(Arc::clone(&authority));
+		bind_live_session_authority_snapshot(
+			&mut ext_host_config,
+			&root,
+			bridges.session_authority.as_ref(),
+		);
 		let github_cache = Arc::new(
 			GithubCache::open(
 				state_dir.join("github-cache.sqlite3"),
@@ -2797,17 +2760,17 @@ impl EnvServer {
 		mcp.bind_manager(&mcp_manager);
 		mcp_manager.bind_runtime_settings(con);
 		register_extension_convars(con, &ext_host_config.extensions)?;
-		let journal_external = ExternalJournalActor::spawn(state_dir)?;
+		let schedules = DurableScheduleActor::spawn(state_dir)?;
 		let control_bindings = production_control_authorities(
 			state_dir,
 			&session_id,
 			&telemetry,
 			&mcp,
 			&ext_host_config.extensions,
-			&journal_external,
 			ext_host_config.domain_control_factories(),
 			Arc::clone(&convars),
-			crate::pi_settings::extension_tool_call_timeout(con),
+			ext_host_config.quota_runtime(),
+			crate::extension_tool_call_timeout(con),
 		);
 		mcp_manager.bind_notification_sink(control_bindings.hooks.clone());
 		ext_host_config.bind_control_authorities(Arc::clone(&control_bindings.factory));
@@ -2875,6 +2838,7 @@ impl EnvServer {
 			&hello.root_uri,
 			ext_hosts.as_ref(),
 			interrupt_grace,
+			py_eval,
 			&host_settings.tools,
 			&browser_settings,
 			&shell_settings,
@@ -2894,7 +2858,6 @@ impl EnvServer {
 			.resources
 			.set(Arc::clone(&resources))
 			.map_err(|_| EnvdError::State(sf!("CONTROL URL resolver owner was already bound")))?;
-		ext_hosts.bind_journal_runtime(0, JournalRuntime { external: journal_external.sender() })?;
 		ext_hosts.activate_control_hosts().await?;
 		let identity = ServerIdentity {
 			workspace_id:   hello.workspace_id,
@@ -2905,7 +2868,7 @@ impl EnvServer {
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
-			omp_inference::ProviderResponseHooks::new(control_bindings.hooks.clone());
+			omp_ai::ProviderResponseHooks::new(control_bindings.hooks.clone());
 		let admission_gate = control_bindings.hooks.admission_gate();
 		Ok(Self::new(
 			identity,
@@ -2940,7 +2903,7 @@ impl EnvServer {
 			admission_gate,
 			checkpoint_control,
 			previews,
-			journal_external,
+			schedules,
 			authority,
 			state_dir,
 		))
@@ -2968,10 +2931,16 @@ impl EnvServer {
 		let owner_info = owner.info().ok_or(EnvdError::MissingOwnerHello)?;
 		let workspace = WorkspaceHost::open(root)?;
 		let root = workspace.root().to_path_buf();
+		let py_eval = ext_host_config.py_eval;
 		let session_id = ext_host_config.session_id.clone();
 		let authority = Arc::new(AuthorityTable::default());
 		ext_host_config.bind_workspace_root(&root);
 		ext_host_config.bind_data_authority(Arc::clone(&authority));
+		bind_live_session_authority_snapshot(
+			&mut ext_host_config,
+			&root,
+			bridges.session_authority.as_ref(),
+		);
 
 		let mcp = McpService::open(state_dir.join("mcp-cache.sqlite3"))
 			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
@@ -3013,17 +2982,17 @@ impl EnvServer {
 			.map_err(|error| EnvdError::State(Str::from(error.to_string())))?;
 
 		register_extension_convars(con, &ext_host_config.extensions)?;
-		let journal_external = ExternalJournalActor::spawn(state_dir)?;
+		let schedules = DurableScheduleActor::spawn(state_dir)?;
 		let control_bindings = production_control_authorities(
 			state_dir,
 			&session_id,
 			&telemetry,
 			&mcp,
 			&ext_host_config.extensions,
-			&journal_external,
 			ext_host_config.domain_control_factories(),
 			Arc::clone(&convars),
-			crate::pi_settings::extension_tool_call_timeout(con),
+			ext_host_config.quota_runtime(),
+			crate::extension_tool_call_timeout(con),
 		);
 		mcp_manager.bind_notification_sink(control_bindings.hooks.clone());
 		ext_host_config.bind_control_authorities(Arc::clone(&control_bindings.factory));
@@ -3087,6 +3056,7 @@ impl EnvServer {
 			&telemetry,
 			Arc::clone(&github_cache),
 			ext_hosts.as_ref(),
+			py_eval,
 			con,
 			omp_tool::ToolsPolicy::Auto,
 			&host_settings.tools,
@@ -3110,7 +3080,6 @@ impl EnvServer {
 			.resources
 			.set(Arc::clone(&resources))
 			.map_err(|_| EnvdError::State(sf!("CONTROL URL resolver owner was already bound")))?;
-		ext_hosts.bind_journal_runtime(0, JournalRuntime { external: journal_external.sender() })?;
 		ext_hosts.activate_control_hosts().await?;
 		let identity = ServerIdentity {
 			workspace_id:   owner_info.workspace_id,
@@ -3121,7 +3090,7 @@ impl EnvServer {
 		};
 		let usage_fetchers = control_bindings.hooks.usage_fetchers();
 		let provider_response_hooks =
-			omp_inference::ProviderResponseHooks::new(control_bindings.hooks.clone());
+			omp_ai::ProviderResponseHooks::new(control_bindings.hooks.clone());
 		let admission_gate = control_bindings.hooks.admission_gate();
 		Ok(Self::new(
 			identity,
@@ -3150,7 +3119,7 @@ impl EnvServer {
 			admission_gate,
 			session.checkpoint_control,
 			StagedProposalRegistry::new(),
-			journal_external,
+			schedules,
 			authority,
 			state_dir,
 		))
@@ -3263,13 +3232,13 @@ impl EnvServer {
 		provider
 	}
 
-	/// Drains idle extension workers and respawns their hot-reload generations.
-	pub async fn reload_extensions(&self) -> Result<Vec<u64>, WorkerError> {
+	/// Drains idle extension hosts and starts their hot-reload generations.
+	pub async fn reload_extensions(&self) -> Result<Vec<u64>, ExtHostError> {
 		self.ext_hosts.reload().await
 	}
 
 	/// Respawns only the child owning one linked extension.
-	pub async fn reload_extension(&self, extension: &str) -> Result<u64, WorkerError> {
+	pub async fn reload_extension(&self, extension: &str) -> Result<u64, ExtHostError> {
 		self.ext_hosts.reload_extension(extension).await
 	}
 
@@ -3280,12 +3249,12 @@ impl EnvServer {
 	}
 
 	/// Returns the shared extension and built-in provider usage registry.
-	pub fn usage_fetchers(&self) -> omp_inference::operation::usage::UsageFetcherRegistry {
+	pub fn usage_fetchers(&self) -> omp_ai::operation::usage::UsageFetcherRegistry {
 		self.usage_fetchers.clone()
 	}
 
 	/// Returns the session-owned provider response hook sink.
-	pub fn provider_response_hooks(&self) -> omp_inference::ProviderResponseHooks {
+	pub fn provider_response_hooks(&self) -> omp_ai::ProviderResponseHooks {
 		self.provider_response_hooks.clone()
 	}
 
@@ -3522,7 +3491,7 @@ impl EnvServer {
 		&self,
 		backend: Arc<dyn ScheduleDeliveryBackend>,
 	) -> Result<(), EnvdError> {
-		self.journal_external.bind_schedule_delivery(backend).await
+		self.schedules.bind_schedule_delivery(backend).await
 	}
 
 	fn release_agent_control(&self, id: u64) {
@@ -7492,7 +7461,7 @@ impl EnvServer {
 				return;
 			};
 			let name = Str::from(request.name);
-			let invocation = match self.ext_hosts.open(OpenToolCall {
+			let invocation = match self.ext_hosts.open(ExtHostToolCall {
 				invocation_id: invocation_id.clone(),
 				name: name.clone(),
 				rev: Str::from(request.rev),
@@ -8328,7 +8297,7 @@ enum InvocationState {
 	Worker {
 		id:                Str,
 		owner:             HostKey,
-		invocation:        Option<WorkerInvocation>,
+		invocation:        Option<ExtHostInvocation>,
 		committed:         bool,
 		admission:         AdmissionGate,
 		pending_commit:    Option<pb::ArgsCommitted>,
@@ -9505,7 +9474,7 @@ async fn forward_native_event(
 fn spawn_worker_invocation(
 	request_id: u64,
 	invocation_id: Str,
-	mut invocation: WorkerInvocation,
+	mut invocation: ExtHostInvocation,
 	cancel: CancellationToken,
 	interrupts: Receiver<pb::Interrupt>,
 	output_request: omp_tool::OutputRequest,
@@ -9537,8 +9506,8 @@ fn spawn_worker_invocation(
 				}
 			};
 			match event {
-				Some(WorkerEvent::Update(_)) if cancel_requested => {},
-				Some(WorkerEvent::Update(update)) => {
+				Some(ExtHostEvent::Update(_)) if cancel_requested => {},
+				Some(ExtHostEvent::Update(update)) => {
 					if !send_invocation_body(
 						&responses,
 						request_id,
@@ -9554,18 +9523,7 @@ fn spawn_worker_invocation(
 						cancel_requested = true;
 					}
 				},
-				Some(WorkerEvent::Pull(_)) => {
-					let _ = send_invocation_error(
-						&responses,
-						request_id,
-						pb::ProtocolErrorCode::Unsupported,
-						"worker cursor pulls are unsupported on env/v1",
-					)
-					.await;
-					invocation.cancel("worker requested an unsupported cursor pull");
-					break;
-				},
-				Some(WorkerEvent::ProtocolError(error)) => {
+				Some(ExtHostEvent::ProtocolError(error)) => {
 					let _ = send_invocation_error(
 						&responses,
 						request_id,
@@ -9575,7 +9533,7 @@ fn spawn_worker_invocation(
 					.await;
 					break;
 				},
-				Some(WorkerEvent::Complete(complete)) => {
+				Some(ExtHostEvent::Complete(complete)) => {
 					let (json, details_blob, is_error) =
 						match projected_worker_completion_json(&blobs, &complete, output_request) {
 							Ok(completion) => completion,
@@ -9715,7 +9673,7 @@ fn spawn_worker_invocation(
 					.await;
 					break;
 				},
-				Some(WorkerEvent::Aborted(abort)) => {
+				Some(ExtHostEvent::Aborted(abort)) => {
 					let reason = if cancel_requested {
 						sf!("environment invocation cancelled")
 					} else {
@@ -9733,7 +9691,7 @@ fn spawn_worker_invocation(
 					let reason = if cancel_requested {
 						sf!("environment invocation cancelled")
 					} else {
-						sf!("tool worker event stream closed after effects authorization")
+						sf!("extension host event stream closed after effects authorization")
 					};
 					send_abort_verdict(
 						&responses,
@@ -10846,7 +10804,10 @@ fn spawn_blob_get(
 	});
 }
 
-fn materialize_worker_outcome(blobs: &BlobHost, complete: &WorkerCompletion) -> Result<Bytes, Str> {
+fn materialize_worker_outcome(
+	blobs: &BlobHost,
+	complete: &ExtHostCompletion,
+) -> Result<Bytes, Str> {
 	let Some(blob) = complete.details_blob.as_ref() else {
 		return worker_completion_json(complete).map(|(json, ..)| json);
 	};
@@ -10867,17 +10828,20 @@ fn materialize_worker_outcome(blobs: &BlobHost, complete: &WorkerCompletion) -> 
 		return Ok(bytes);
 	}
 	match complete.kind {
-		WorkerOutcomeKind::Ok | WorkerOutcomeKind::Faulted => {
-			worker_verdict_json(bytes, complete.kind == WorkerOutcomeKind::Faulted)
+		ExtHostOutcomeKind::Ok | ExtHostOutcomeKind::Faulted => {
+			worker_verdict_json(bytes, complete.kind == ExtHostOutcomeKind::Faulted)
 				.map_err(|_| sf!("worker result blob is invalid"))
 		},
-		WorkerOutcomeKind::ArgsRejected | WorkerOutcomeKind::Aborted => {
+		ExtHostOutcomeKind::ArgsRejected | ExtHostOutcomeKind::Aborted => {
 			Err(sf!("worker result blob omitted its terminal outcome envelope"))
 		},
 	}
 }
 
-fn materialize_worker_details(blobs: &BlobHost, complete: &WorkerCompletion) -> Result<Bytes, Str> {
+fn materialize_worker_details(
+	blobs: &BlobHost,
+	complete: &ExtHostCompletion,
+) -> Result<Bytes, Str> {
 	if complete.details_blob.is_none() {
 		return complete
 			.details_json
@@ -10898,14 +10862,14 @@ fn materialize_worker_details(blobs: &BlobHost, complete: &WorkerCompletion) -> 
 
 fn materialize_worker_completion(
 	blobs: &BlobHost,
-	complete: &WorkerCompletion,
+	complete: &ExtHostCompletion,
 ) -> Result<Bytes, Str> {
 	materialize_worker_outcome(blobs, complete)
 }
 
 fn projected_worker_completion_json(
 	blobs: &BlobHost,
-	complete: &WorkerCompletion,
+	complete: &ExtHostCompletion,
 	request: omp_tool::OutputRequest,
 ) -> Result<(Bytes, Option<thread_pb::Blob>, bool), Str> {
 	let (mut json, details_blob, is_error) = worker_completion_json(complete)?;
@@ -10924,9 +10888,9 @@ fn projected_worker_completion_json(
 }
 
 fn worker_completion_json(
-	complete: &WorkerCompletion,
+	complete: &ExtHostCompletion,
 ) -> Result<(Bytes, Option<thread_pb::Blob>, bool), Str> {
-	let is_error = complete.kind != WorkerOutcomeKind::Ok;
+	let is_error = complete.kind != ExtHostOutcomeKind::Ok;
 	if let Some(blob) = &complete.details_blob {
 		return Ok((Bytes::new(), Some(blob.clone()), is_error));
 	}
@@ -10935,10 +10899,10 @@ fn worker_completion_json(
 		.clone()
 		.ok_or_else(|| sf!("worker completion omitted structured details"))?;
 	let json = match complete.kind {
-		WorkerOutcomeKind::Ok | WorkerOutcomeKind::Faulted => {
+		ExtHostOutcomeKind::Ok | ExtHostOutcomeKind::Faulted => {
 			worker_verdict_json(details, is_error).map_err(|error| Str::from(error.to_string()))?
 		},
-		WorkerOutcomeKind::ArgsRejected => {
+		ExtHostOutcomeKind::ArgsRejected => {
 			let issue = complete
 				.args_issue
 				.as_ref()
@@ -10965,7 +10929,7 @@ fn worker_completion_json(
 				.map_err(|error| Str::from(error.to_string()))?,
 			)
 		},
-		WorkerOutcomeKind::Aborted => {
+		ExtHostOutcomeKind::Aborted => {
 			let abort: Abort =
 				serde_json::from_slice(&details).map_err(|error| Str::from(error.to_string()))?;
 			Bytes::from(
@@ -10981,6 +10945,10 @@ fn worker_completion_json(
 
 fn worker_verdict_json(details: Bytes, is_error: bool) -> Result<Bytes, serde_json::Error> {
 	let _: &RawValue = serde_json::from_slice(&details)?;
+	if serde_json::from_slice::<CallOutcome<serde_json::Value, serde_json::Value>>(&details).is_ok()
+	{
+		return Ok(details);
+	}
 	let prefix: &[u8] = if is_error {
 		br#"{"kind":"faulted","value":"#
 	} else {
@@ -11798,39 +11766,8 @@ pub async fn run_with_registry(
 		session_generation,
 	)?;
 	ext_host_config.interrupt_grace = interrupt_grace;
-	let mut extension_bindings = Vec::new();
-	if args.py_eval {
-		let key = HostKey::new("workspace", "trusted", PY_EVAL_MODULE);
-		let binding = ExtensionDataBinding::built_in(
-			&state_dir,
-			key.clone(),
-			session_id.as_str(),
-			session_generation,
-		);
-		let mut digest = Hash32::hasher();
-		digest.update(omp_env::build_id::current().as_bytes());
-		digest.update(env!("CARGO_PKG_VERSION").as_bytes());
-		digest.update(PY_EVAL_MODULE.as_bytes());
-		let provenance = omp_core::Provenance::new(
-			sf!("omp-first-party"),
-			sf!(crate::worker::PY_EVAL_MODULE),
-			sf!(env!("CARGO_PKG_VERSION")),
-			omp_core::ArtifactDigest::new(digest.finalize().into_bytes()),
-			sf!("workspace"),
-			sf!("trusted"),
-			1,
-		);
-		let manifest = ExtensionManifest::py_eval(provenance, []);
-		let mut spec = ExtHostSpec::new(key, manifest);
-		spec.data_grants = binding.grants().clone();
-		spec.data_socket = Some(binding.path().to_path_buf());
-		ext_host_config.extensions.push(spec);
-		extension_bindings.push(binding);
-	}
+	ext_host_config.py_eval = args.py_eval;
 	let (env_connections, env_connection_rx) = watch::channel(0);
-	for binding in &mut extension_bindings {
-		binding.prepare_endpoint()?;
-	}
 	let (doc_connections, doc_connection_rx) = watch::channel(0);
 	let convars = Arc::new(crate::exthost::ConvarControlFactory::new(Arc::clone(&con)));
 	let server = Arc::new(
@@ -11875,16 +11812,6 @@ pub async fn run_with_registry(
 			.serve_uds(&serve_socket, serve_shutdown, Some(env_connections))
 			.await
 	});
-	let mut extension_tasks = JoinSet::new();
-	for binding in extension_bindings {
-		let extension_server = Arc::clone(&server);
-		let extension_shutdown = listener_shutdown.clone();
-		extension_tasks.spawn(async move {
-			extension_server
-				.serve_extension_uds(binding, extension_shutdown)
-				.await
-		});
-	}
 	let idle_timeout = Duration::from_secs(args.idle_timeout);
 	let idle_state_dir = state_dir.clone();
 	let idle_server_build = Str::from(omp_env::build_id::current());
@@ -11921,9 +11848,6 @@ pub async fn run_with_registry(
 			},
 		}
 		listener_shutdown.cancel();
-		while let Some(result) = extension_tasks.join_next().await {
-			result??;
-		}
 		Ok::<(), EnvdError>(())
 	}
 	.await;
@@ -12036,7 +11960,7 @@ async fn rehost_document_authority(
 	state_dir: &Path,
 	socket: &Path,
 	connections: Option<watch::Sender<usize>>,
-	lsp: omp_docserver::NativeLspOptions,
+	lsp: crate::docserver::NativeLspOptions,
 	user_config_root: Option<PathBuf>,
 	server_build: Str,
 ) -> Result<Option<DocumentAuthority>, EnvdError> {
@@ -12070,7 +11994,7 @@ async fn connect_or_start_docserver(
 	socket: &Path,
 	connections: Option<watch::Sender<usize>>,
 	require_ownership: bool,
-	lsp: omp_docserver::NativeLspOptions,
+	lsp: crate::docserver::NativeLspOptions,
 	user_config_root: Option<PathBuf>,
 	server_build: Str,
 ) -> Result<(DocumentHost, Option<DocumentAuthority>), EnvdError> {
@@ -12123,10 +12047,10 @@ async fn connect_or_start_docserver(
 		let task_server_build = server_build.clone();
 		let task_connections = connections.clone();
 		let task = tokio::spawn(async move {
-			omp_docserver::daemon::serve(
+			crate::docserver::daemon::serve(
 				task_root,
 				daemon::Transport::Socket(task_socket),
-				omp_docserver::daemon::ServeOptions {
+				crate::docserver::daemon::ServeOptions {
 					lsp_config_paths: Vec::new(),
 					lsp:              task_lsp,
 					user_config_root: task_user_config_root,
@@ -12188,7 +12112,7 @@ async fn connect_or_start_docserver(
 fn document_daemon_authority_held(error: &daemon::Error) -> bool {
 	match error {
 		daemon::Error::AcquireAuthorityLock { .. } => true,
-		daemon::Error::Document(omp_docserver::Error::Io { source, .. }) => {
+		daemon::Error::Document(crate::docserver::Error::Io { source, .. }) => {
 			source.kind() == io::ErrorKind::WouldBlock
 		},
 		_ => false,
@@ -12205,11 +12129,11 @@ async fn connect_or_start_docserver(
 	socket: &Path,
 	connections: Option<watch::Sender<usize>>,
 	require_ownership: bool,
-	lsp: omp_docserver::NativeLspOptions,
+	lsp: crate::docserver::NativeLspOptions,
 	user_config_root: Option<PathBuf>,
 	server_build: Str,
 ) -> Result<(DocumentHost, Option<DocumentAuthority>), EnvdError> {
-	if let Ok(stream) = omp_docserver::windows::connect_owner_pipe(socket) {
+	if let Ok(stream) = crate::docserver::windows::connect_owner_pipe(socket) {
 		if require_ownership {
 			return Err(document_authority_held(root));
 		}
@@ -12222,14 +12146,16 @@ async fn connect_or_start_docserver(
 		return Ok((documents, None));
 	}
 	let listener = OwnerPipeListener::bind(socket)?;
-	let config = omp_docserver::ServerConfig::new(root)
+	let config = crate::docserver::ServerConfig::new(root)
 		.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?
 		.with_server_build(server_build);
-	let environment = omp_docserver::Environment::new(config)
+	let environment = crate::docserver::Environment::new(config)
 		.map_err(|error| EnvdError::Document(Str::from(error.to_string())))?;
 	if lsp.enabled {
-		match omp_docserver::NativeLspSupervisor::discover(&environment, user_config_root.as_deref())
-		{
+		match crate::docserver::NativeLspSupervisor::discover(
+			&environment,
+			user_config_root.as_deref(),
+		) {
 			Ok(supervisor) => {
 				environment.install_lsp_supervisor(supervisor.clone());
 				if !lsp.lazy {
@@ -12244,7 +12170,7 @@ async fn connect_or_start_docserver(
 	let shutdown = CancellationToken::new();
 	let task_shutdown = shutdown.clone();
 	let task = tokio::spawn(async move {
-		omp_docserver::windows::serve_owner_pipe(
+		crate::docserver::windows::serve_owner_pipe(
 			environment,
 			listener,
 			ConnectionConfig::default(),
@@ -12254,7 +12180,7 @@ async fn connect_or_start_docserver(
 		.await
 	});
 	let authority = DocumentAuthority { shutdown, task: Some(task) };
-	let stream = omp_docserver::windows::connect_owner_pipe(socket)?;
+	let stream = crate::docserver::windows::connect_owner_pipe(socket)?;
 	let documents = DocumentHost::connect_pipe_stream(socket, stream).await?;
 	validate_document_root(root, documents.hello().root_uri.as_str())?;
 	Ok((documents, Some(authority)))
@@ -12336,10 +12262,6 @@ mod tests {
 	use flume::Receiver;
 	use omp_agent::{ApprovalBook, ApprovalDecision, ApprovalRoute, ApprovalScope, ApprovalSource};
 	use omp_core::{EnvPath, Principal};
-	use omp_docserver::{
-		Environment, ServerConfig,
-		connection::{ConnectionConfig, serve_connection},
-	};
 	use omp_env::{EnvClient, ExecEvent as ClientExecEvent};
 	use omp_proto::{
 		document::v1::{document_target, read_selection},
@@ -12353,6 +12275,10 @@ mod tests {
 	};
 
 	use super::*;
+	use crate::docserver::{
+		Environment, ServerConfig,
+		connection::{ConnectionConfig, serve_connection},
+	};
 
 	const TEST_DAP_SESSION_ID: [u8; 16] = [0x2a; 16];
 
@@ -12642,8 +12568,8 @@ mod tests {
 		let hello = documents.hello().clone();
 		let exec = ExecHost::new();
 		let blobs = BlobHost::open(state.path().join("blobs")).expect("blob host");
-		let journal_external =
-			ExternalJournalActor::spawn(state.path()).expect("external journal actor");
+		let schedules =
+			DurableScheduleActor::spawn(state.path()).expect("durable schedule actor");
 		let workspace_ops = WorkspaceOperations::open(
 			workspace.clone(),
 			documents.clone(),
@@ -12715,12 +12641,12 @@ mod tests {
 			EvalSessionControl::default(),
 			Arc::new(SearchBridgeHost::new(None)),
 			Arc::new(GithubCredentialBridge::new()),
-			omp_inference::operation::usage::UsageFetcherRegistry::default(),
-			omp_inference::ProviderResponseHooks::default(),
+			omp_ai::operation::usage::UsageFetcherRegistry::default(),
+			omp_ai::ProviderResponseHooks::default(),
 			Arc::new(HookGate::channel().0),
 			AgentCheckpointControl::default(),
 			StagedProposalRegistry::new(),
-			journal_external,
+			schedules,
 			Arc::new(AuthorityTable::default()),
 			state.path(),
 		));
@@ -12783,10 +12709,10 @@ mod tests {
 		let (client, adapter) = duplex(64 * 1024);
 		tokio::spawn(fake_dap_adapter(adapter));
 		let (reader, writer) = split(client);
-		let session = omp_docserver::DapSession::start(
+		let session = crate::docserver::DapSession::start(
 			omp_core::hex::encode_n(&TEST_DAP_SESSION_ID).as_str(),
 			"test",
-			omp_docserver::DapProtocol::from_streams(reader, writer),
+			crate::docserver::DapProtocol::from_streams(reader, writer),
 			false,
 			serde_json::Map::new(),
 			None,
@@ -13732,10 +13658,7 @@ mod tests {
 			processes,
 		));
 		time::sleep(Duration::from_millis(75)).await;
-		assert!(
-			!persistent.is_finished(),
-			"live persistent process did not hold the daemon open"
-		);
+		assert!(!persistent.is_finished(), "live persistent process did not hold the daemon open");
 		time::timeout(Duration::from_secs(1), persistent)
 			.await
 			.expect("idle window did not begin after the persistent process exited")
@@ -13775,7 +13698,7 @@ mod tests {
 			&socket,
 			None,
 			true,
-			omp_docserver::NativeLspOptions { enabled: true, lazy: true },
+			crate::docserver::NativeLspOptions { enabled: true, lazy: true },
 			None,
 			sf!("test-build"),
 		)
@@ -13814,12 +13737,15 @@ mod tests {
 		let serve_root = root.path().to_path_buf();
 		let serve_socket = socket.clone();
 		let old_task = tokio::spawn(async move {
-			omp_docserver::daemon::serve(
+			crate::docserver::daemon::serve(
 				serve_root,
 				daemon::Transport::Socket(serve_socket),
-				omp_docserver::daemon::ServeOptions {
+				crate::docserver::daemon::ServeOptions {
 					lsp_config_paths: Vec::new(),
-					lsp:              omp_docserver::NativeLspOptions { enabled: false, lazy: true },
+					lsp:              crate::docserver::NativeLspOptions {
+						enabled: false,
+						lazy:    true,
+					},
 					user_config_root: None,
 					shutdown:         Some(serve_shutdown),
 					server_build:     old_config.server_build().clone(),
@@ -13854,7 +13780,7 @@ mod tests {
 			&socket,
 			None,
 			false,
-			omp_docserver::NativeLspOptions { enabled: false, lazy: true },
+			crate::docserver::NativeLspOptions { enabled: false, lazy: true },
 			None,
 			sf!("new-build"),
 		)
@@ -13891,7 +13817,7 @@ mod tests {
 			&socket,
 			None,
 			false,
-			omp_docserver::NativeLspOptions { enabled: false, lazy: true },
+			crate::docserver::NativeLspOptions { enabled: false, lazy: true },
 			None,
 			sf!("new-build"),
 		)
@@ -13920,7 +13846,7 @@ mod tests {
 			state.path(),
 			&socket,
 			None,
-			omp_docserver::NativeLspOptions { enabled: false, lazy: true },
+			crate::docserver::NativeLspOptions { enabled: false, lazy: true },
 			None,
 			old_config.server_build().clone(),
 		)
@@ -14055,7 +13981,7 @@ mod tests {
 			.await
 			.expect("normal remote request");
 		let mut starts = 0;
-		let mut note = Vec::new();
+		let mut output = Vec::new();
 		let status = loop {
 			match approved
 				.next_event()
@@ -14064,7 +13990,7 @@ mod tests {
 				.expect("remote exec stream")
 			{
 				ClientExecEvent::Started(_) => starts += 1,
-				ClientExecEvent::Output(frame) => note.extend_from_slice(&frame.data),
+				ClientExecEvent::Output(frame) => output.extend_from_slice(&frame.data),
 				ClientExecEvent::Exit(exit) => break exit.status.expect("terminal status"),
 			}
 		};
@@ -14075,9 +14001,12 @@ mod tests {
 			fs::read(root.path().join(".git/approved.txt")).expect("approved write"),
 			b"approved\n"
 		);
-		assert!(
-			String::from_utf8_lossy(&note).contains("[sandbox] rerun with approved scope: write")
-		);
+		assert!(!String::from_utf8_lossy(&output).contains("rerun with approved scope"));
+		assert!(status.diags.iter().any(|diag| {
+			diag
+				.text
+				.contains("sandbox: rerun with approved scope: write")
+		}));
 
 		let mut restored = client
 			.exec(pb::ExecRequest {

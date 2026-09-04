@@ -87,10 +87,9 @@ impl LateDiagnostics {
 		if visible == 1 {
 			body.push_str("Late LSP diagnostics arrived after the edit returned:\n");
 		} else {
-			let _ = write!(
+			let _ = writeln!(
 				body,
-				"Late LSP diagnostics arrived for {} files after their edits returned:\n",
-				visible
+				"Late LSP diagnostics arrived for {visible} files after their edits returned:"
 			);
 		}
 		for (index, file) in self

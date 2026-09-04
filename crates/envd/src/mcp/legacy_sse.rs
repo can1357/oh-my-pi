@@ -132,28 +132,12 @@ impl LegacySseTransport {
 		};
 		let connection = async {
 			let mut generated = transport
-			.config
-			.auth
-			.as_ref()
-			.map_or_else(HeaderMap::new, |auth| auth.current());
-		generated.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-		let mut response = transport
-			.exchange(
-				transport.config.url.clone(),
-				Method::GET,
-				Bytes::new(),
-				generated,
-				&cancellation,
-				false,
-			)
-			.await?;
-		if matches!(response.status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
-			&& let Some(auth) = &transport.config.auth
-			&& transport.refresh_auth(auth, &cancellation, false).await?
-		{
-			generated = auth.current();
+				.config
+				.auth
+				.as_ref()
+				.map_or_else(HeaderMap::new, |auth| auth.current());
 			generated.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-			response = transport
+			let mut response = transport
 				.exchange(
 					transport.config.url.clone(),
 					Method::GET,
@@ -163,30 +147,46 @@ impl LegacySseTransport {
 					false,
 				)
 				.await?;
-		}
-		if !response.status.is_success() {
-			return Err(TransportError::pre_dispatch(TransportFailure::HttpStatus {
-				status: response.status.as_u16(),
-			}));
-		}
-		if !is_sse(&response.headers) {
-			return Err(TransportError::pre_dispatch(TransportFailure::SseProtocol));
-		}
-		let mut body = response.body;
-		loop {
-			let event = body
-				.next_sse_event(&cancellation)
-				.await
-				.map_err(TransportError::pre_dispatch)?;
-			let Some(event) = event else {
-				return Err(TransportError::pre_dispatch(TransportFailure::SseProtocol));
-			};
-			transport.consume_discovery_event(event)?;
-			if transport.endpoint.lock().is_some() {
-				*transport.discovery.lock().await = Some(body);
-				break;
+			if matches!(response.status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+				&& let Some(auth) = &transport.config.auth
+				&& transport.refresh_auth(auth, &cancellation, false).await?
+			{
+				generated = auth.current();
+				generated.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+				response = transport
+					.exchange(
+						transport.config.url.clone(),
+						Method::GET,
+						Bytes::new(),
+						generated,
+						&cancellation,
+						false,
+					)
+					.await?;
 			}
-		}
+			if !response.status.is_success() {
+				return Err(TransportError::pre_dispatch(TransportFailure::HttpStatus {
+					status: response.status.as_u16(),
+				}));
+			}
+			if !is_sse(&response.headers) {
+				return Err(TransportError::pre_dispatch(TransportFailure::SseProtocol));
+			}
+			let mut body = response.body;
+			loop {
+				let event = body
+					.next_sse_event(&cancellation)
+					.await
+					.map_err(TransportError::pre_dispatch)?;
+				let Some(event) = event else {
+					return Err(TransportError::pre_dispatch(TransportFailure::SseProtocol));
+				};
+				transport.consume_discovery_event(event)?;
+				if transport.endpoint.lock().is_some() {
+					*transport.discovery.lock().await = Some(body);
+					break;
+				}
+			}
 			Ok::<(), TransportError>(())
 		};
 		let deadline = async {
@@ -397,7 +397,11 @@ impl LegacySseTransport {
 		{
 			let mut resume = self.resume.lock();
 			if let Some(id) = event.id.as_ref() {
-				resume.last_event_id = if id.is_empty() { None } else { Some(id.clone()) };
+				resume.last_event_id = if id.is_empty() {
+					None
+				} else {
+					Some(id.clone())
+				};
 			}
 			if let Some(retry) = event.retry {
 				resume.retry = retry;
@@ -673,19 +677,17 @@ impl McpTransport for LegacySseTransport {
 				let body =
 					serde_json::to_vec(&json!({"jsonrpc":"2.0","method":method,"params":params}))
 						.map(Bytes::from)
-						.map_err(|source| {
-							TransportError::pre_dispatch(TransportFailure::Json(source))
-						})?;
+						.map_err(|source| TransportError::pre_dispatch(TransportFailure::Json(source)))?;
 				let response = self.post(body, &cancellation).await?;
 				if response.status.is_success() || response.status == StatusCode::ACCEPTED {
-					self.consume_post_body(response, None, &cancellation).await?;
+					self
+						.consume_post_body(response, None, &cancellation)
+						.await?;
 					Ok(DispatchState::Dispatched)
 				} else {
 					Err(TransportError {
 						dispatch: DispatchState::Responded,
-						cause:    TransportFailure::HttpStatus {
-							status: response.status.as_u16(),
-						},
+						cause:    TransportFailure::HttpStatus { status: response.status.as_u16() },
 					})
 				}
 			};
@@ -693,9 +695,7 @@ impl McpTransport for LegacySseTransport {
 				match self.config.timeout {
 					Some(timeout) => tokio::time::timeout(timeout, operation)
 						.await
-						.map_err(|_| {
-							TransportError::effects_unknown(TransportFailure::TimedOut)
-						})?,
+						.map_err(|_| TransportError::effects_unknown(TransportFailure::TimedOut))?,
 					None => operation.await,
 				}
 			};
@@ -747,14 +747,14 @@ impl McpTransport for LegacySseTransport {
 					)
 					.await?;
 				if response.status.is_success() {
-					self.consume_post_body(response, None, &cancellation).await?;
+					self
+						.consume_post_body(response, None, &cancellation)
+						.await?;
 					Ok(DispatchState::Dispatched)
 				} else {
 					Err(TransportError {
 						dispatch: DispatchState::Responded,
-						cause:    TransportFailure::HttpStatus {
-							status: response.status.as_u16(),
-						},
+						cause:    TransportFailure::HttpStatus { status: response.status.as_u16() },
 					})
 				}
 			};
@@ -762,9 +762,7 @@ impl McpTransport for LegacySseTransport {
 				match self.config.timeout {
 					Some(timeout) => tokio::time::timeout(timeout, operation)
 						.await
-						.map_err(|_| {
-							TransportError::effects_unknown(TransportFailure::TimedOut)
-						})?,
+						.map_err(|_| TransportError::effects_unknown(TransportFailure::TimedOut))?,
 					None => operation.await,
 				}
 			};
@@ -988,9 +986,9 @@ mod tests {
 							CONTENT_TYPE,
 							HeaderValue::from_static("text/event-stream"),
 						)]),
-						body:    HttpBody::from_stream(
-							futures::stream::pending::<Result<Bytes, HttpExchangeError>>(),
-						),
+						body:    HttpBody::from_stream(futures::stream::pending::<
+							Result<Bytes, HttpExchangeError>,
+						>()),
 					})
 				})
 			}

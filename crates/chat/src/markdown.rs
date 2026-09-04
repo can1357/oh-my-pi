@@ -1,5 +1,4 @@
-//! Renderer-faithful Markdown facts (pi `extractMarkdownLinks` /
-//! `extractLinks`, `copy-targets.ts:110-147`): the hyperlinks a message
+//! Renderer-faithful Markdown facts: the hyperlinks a message
 //! would draw, gathered from the same Markdown renderer the transcript uses
 //! so fenced code, code spans, escapes, reference definitions, and the
 //! autolink rules agree with the screen.
@@ -55,7 +54,7 @@ impl RichSink for LinkSink {
 }
 
 /// Every http(s) link the renderer would draw for `text`, in document order,
-/// deduplicated by destination (pi `extractLinks`). `mailto:`/`file:`
+/// deduplicated by destination. `mailto:`/`file:`
 /// destinations are not something to hand to the clipboard or the system
 /// opener from a transcript, so they are skipped.
 #[must_use]
@@ -93,8 +92,8 @@ fn is_http(href: &str) -> bool {
 		|| href[..scheme_end].eq_ignore_ascii_case("https")
 }
 
-/// The most recent link of any assistant message on the live chain (pi
-/// `extractLastLink`): the last link of the last message that has one.
+/// The most recent link of any assistant message on the live chain: the last
+/// link of the last message that has one.
 #[must_use]
 pub fn last_link(dom: &Dom) -> Option<Link> {
 	let mut last = None;
@@ -130,7 +129,7 @@ mod tests {
 			.collect()
 	}
 
-	/// pi `extractLinks`: inline, autolink, bare, and reference links in
+	/// Inline, autolink, bare, and reference links in
 	/// document order; the label is the visible text, or the destination
 	/// for autolinks and bare URLs.
 	#[test]

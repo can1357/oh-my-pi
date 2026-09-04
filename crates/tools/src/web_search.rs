@@ -8,9 +8,9 @@ use futures::Stream;
 use omp_core::{Str, sf};
 use omp_proto::inference::v1::{self as pb, search_request};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, ArgPath, CallOutcome, CommitError, Constraint, Effects, Ev,
-	ExecEffects, IncomingParams, InferenceEffects, LiftedCall, ParamError, Part, PromptCaps,
-	RecordedCall, Rev, Tool, ToolSpec, ToolTerminal, Usd,
+	Abort, ArgIssue, ArgIssueKind, ArgPath, CallOutcome, CommitError, Constraint, Diag, DiagKind,
+	Effects, Ev, ExecEffects, IncomingParams, InferenceEffects, LiftedCall, ParamError, Part,
+	PromptCaps, RecordedCall, Rev, Tool, ToolSpec, ToolTerminal, Usd,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -58,7 +58,8 @@ pub struct Params {
 	#[serde(default)]
 	#[schemars(range(min = 1, max = 100))]
 	pub num_search_results: Option<u32>,
-	/// Explicit provider selection; omitted or `auto` walks configured providers.
+	/// Explicit provider selection; omitted or `auto` walks configured
+	/// providers.
 	#[serde(default)]
 	pub provider:           Option<Provider>,
 	/// Per-provider deadline in milliseconds.
@@ -105,7 +106,7 @@ pub enum Provider {
 	Gemini,
 	/// Anthropic hosted search.
 	Anthropic,
-	/// OpenAI Codex hosted search.
+	/// `OpenAI` Codex hosted search.
 	Codex,
 	/// xAI hosted search.
 	Xai,
@@ -113,7 +114,7 @@ pub enum Provider {
 	Zai,
 	/// Exa search.
 	Exa,
-	/// TinyFish search.
+	/// `TinyFish` search.
 	Tinyfish,
 	/// Jina search.
 	Jina,
@@ -131,11 +132,11 @@ pub enum Provider {
 	Parallel,
 	/// Synthetic search.
 	Synthetic,
-	/// Self-hosted SearXNG.
+	/// Self-hosted `SearXNG`.
 	Searxng,
 	/// Startpage search.
 	Startpage,
-	/// DuckDuckGo search.
+	/// `DuckDuckGo` search.
 	Duckduckgo,
 	/// Ecosia search.
 	Ecosia,
@@ -160,15 +161,7 @@ pub enum Update {}
 
 /// Stable, redacted backend failure class.
 #[derive(
-	Clone,
-	Copy,
-	Debug,
-	Deserialize,
-	Eq,
-	PartialEq,
-	Serialize,
-	strum::Display,
-	strum::IntoStaticStr,
+	Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::Display, strum::IntoStaticStr,
 )]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
@@ -310,7 +303,15 @@ impl<B: SearchBackend> Tool for WebSearch<B> {
 			let provider = params.provider;
 			let request = into_request(params);
 			let result = match self.backend.search(request).await {
-				Ok(response) => Ok(Payload { response }),
+				Ok(response) => {
+					for warning in &response.warnings {
+						yield Ev::Diag(Diag::warn(
+							DiagKind::ProviderWarning,
+							Str::from(warning.as_str()),
+						));
+					}
+					Ok(Payload { response })
+				},
 				Err(error) if error.kind == BackendErrorKind::Cancelled => {
 					yield Ev::Aborted(Abort::Interrupted { reason: sf!("web search cancelled") });
 					return;
@@ -348,12 +349,12 @@ const MAX_DOMAIN_BYTES: usize = 253;
 
 fn validate(params: &Params) -> Result<(), ArgIssue> {
 	if params.query.trim().is_empty() || params.query.len() > MAX_QUERY_BYTES {
-		return Err(argument_issue(
-			"query",
-			"a non-empty Google-style query no larger than 16 KiB",
-		));
+		return Err(argument_issue("query", "a non-empty Google-style query no larger than 16 KiB"));
 	}
-	if params.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
+	if params
+		.limit
+		.is_some_and(|limit| !(1..=100).contains(&limit))
+	{
 		return Err(argument_issue("limit", "an integer from 1 through 100"));
 	}
 	if params
@@ -366,10 +367,7 @@ fn validate(params: &Params) -> Result<(), ArgIssue> {
 		.num_search_results
 		.is_some_and(|results| !(1..=100).contains(&results))
 	{
-		return Err(argument_issue(
-			"num_search_results",
-			"an integer from 1 through 100",
-		));
+		return Err(argument_issue("num_search_results", "an integer from 1 through 100"));
 	}
 	if params
 		.temperature
@@ -401,19 +399,19 @@ fn validate(params: &Params) -> Result<(), ArgIssue> {
 
 fn argument_issue(key: &'static str, expected: &'static str) -> ArgIssue {
 	ArgIssue {
-		path: vec![ArgPath::Key(Str::new_static(key))],
+		path:     vec![ArgPath::Key(Str::new_static(key))],
 		expected: Str::new_static(expected),
-		kind: ArgIssueKind::Malformed,
-		example: None,
-		found: None,
+		kind:     ArgIssueKind::Malformed,
+		example:  None,
+		found:    None,
 	}
 }
 
 fn into_request(params: Params) -> pb::SearchRequest {
-	let engine = params.provider.filter(|provider| *provider != Provider::Auto).map_or_else(
-		String::new,
-		|provider| <&'static str>::from(provider).to_owned(),
-	);
+	let engine = params
+		.provider
+		.filter(|provider| *provider != Provider::Auto)
+		.map_or_else(String::new, |provider| <&'static str>::from(provider).to_owned());
 	pb::SearchRequest {
 		query: params.query.to_string(),
 		limit: params.limit.unwrap_or(0),
@@ -425,8 +423,16 @@ fn into_request(params: Params) -> pb::SearchRequest {
 		}),
 		after: params.after.map_or_else(String::new, String::from),
 		before: params.before.map_or_else(String::new, String::from),
-		allowed_domains: params.allowed_domains.into_iter().map(String::from).collect(),
-		excluded_domains: params.excluded_domains.into_iter().map(String::from).collect(),
+		allowed_domains: params
+			.allowed_domains
+			.into_iter()
+			.map(String::from)
+			.collect(),
+		excluded_domains: params
+			.excluded_domains
+			.into_iter()
+			.map(String::from)
+			.collect(),
 		country: params.country.map_or_else(String::new, String::from),
 		language: params.language.map_or_else(String::new, String::from),
 		engine,
@@ -440,9 +446,6 @@ fn into_request(params: Params) -> pb::SearchRequest {
 
 fn render_response(response: &pb::SearchResponse) -> String {
 	let mut output = String::new();
-	for warning in &response.warnings {
-		let _ = writeln!(output, "Note: {warning}");
-	}
 	if !response.engine.is_empty() {
 		let _ = writeln!(output, "Provider: {}", response.engine);
 	}
@@ -543,13 +546,11 @@ fn lift_rev1(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 			})
 		},
 		CallOutcome::ArgsRejected(issue) => CallOutcome::ArgsRejected(issue),
-		CallOutcome::Aborted { abort, kind, policy } => {
-			CallOutcome::Aborted { abort, kind, policy }
-		},
+		CallOutcome::Aborted { abort, kind, policy } => CallOutcome::Aborted { abort, kind, policy },
 	};
 	Some(LiftedCall {
 		raw_args: Bytes::copy_from_slice(call.raw_args),
-		verdict: Bytes::from(serde_json::to_vec(&lifted).ok()?),
+		verdict:  Bytes::from(serde_json::to_vec(&lifted).ok()?),
 	})
 }
 
@@ -559,7 +560,7 @@ enum Rev1Fault {
 	Search {
 		#[serde(default)]
 		provider: Option<Str>,
-		code: Str,
+		code:     Str,
 		#[serde(default, rename = "message")]
 		_message: Option<Str>,
 	},
@@ -575,7 +576,8 @@ fn classify_legacy_code(code: &str) -> BackendErrorKind {
 		BackendErrorKind::Authentication
 	} else if code.contains("permission") || code.contains("forbidden") {
 		BackendErrorKind::Permission
-	} else if code.contains("rate") || code.contains("quota") || code.contains("resource_exhausted") {
+	} else if code.contains("rate") || code.contains("quota") || code.contains("resource_exhausted")
+	{
 		BackendErrorKind::RateLimited
 	} else if code.contains("argument") || code.contains("request") {
 		BackendErrorKind::InvalidRequest
@@ -618,7 +620,24 @@ fn protocol_issue(message: Str) -> ArgIssue {
 
 #[cfg(test)]
 mod tests {
+	use futures::StreamExt as _;
+
 	use super::*;
+
+	struct WarningBackend;
+
+	impl SearchBackend for WarningBackend {
+		fn search(
+			&self,
+			_: pb::SearchRequest,
+		) -> impl Future<Output = Result<pb::SearchResponse, BackendError>> + Send + '_ {
+			std::future::ready(Ok(pb::SearchResponse {
+				answer: sf!("result").to_string(),
+				warnings: vec![sf!("a constraint was relaxed").to_string()],
+				..Default::default()
+			}))
+		}
+	}
 
 	fn params() -> Params {
 		Params {
@@ -686,27 +705,19 @@ mod tests {
 	fn invocation_bounds_reject_before_execution_commit() {
 		let mut invalid = params();
 		invalid.limit = Some(0);
-		assert_eq!(
-			validate(&invalid).unwrap_err().path,
-			vec![ArgPath::Key(sf!("limit"))]
-		);
+		assert_eq!(validate(&invalid).unwrap_err().path, vec![ArgPath::Key(sf!("limit"))]);
 		invalid.limit = Some(1);
 		invalid.temperature = Some(f64::NAN);
-		assert_eq!(
-			validate(&invalid).unwrap_err().path,
-			vec![ArgPath::Key(sf!("temperature"))]
-		);
+		assert_eq!(validate(&invalid).unwrap_err().path, vec![ArgPath::Key(sf!("temperature"))]);
 	}
 
 	#[test]
 	fn rev1_fault_lift_discards_provider_diagnostics() {
 		let raw_args = br#"{"query":"rust tower","provider":"exa"}"#;
 		let verdict = br#"{"kind":"faulted","value":{"kind":"search","provider":"exa","code":"rate_limit","message":"secret upstream body"}}"#;
-		let lifted = lift_rev1(
-			&Rev { family: Default::default(), n: 1 },
-			RecordedCall { raw_args, verdict },
-		)
-		.expect("rev1 call lifts");
+		let lifted =
+			lift_rev1(&Rev { family: Default::default(), n: 1 }, RecordedCall { raw_args, verdict })
+				.expect("rev1 call lifts");
 		let outcome =
 			serde_json::from_slice::<CallOutcome<Payload, Fault>>(&lifted.verdict).expect("outcome");
 		let CallOutcome::Faulted(Fault::Search { category, code, .. }) = outcome else {
@@ -715,6 +726,28 @@ mod tests {
 		assert_eq!(category, BackendErrorKind::RateLimited);
 		assert_eq!(code, "rate_limit");
 		assert!(!String::from_utf8_lossy(&lifted.verdict).contains("secret upstream body"));
+	}
+
+	#[tokio::test]
+	async fn provider_warnings_are_emitted_as_diagnostics() {
+		let search = tool(Arc::new(WarningBackend));
+		let raw = r#"{"query":"rust tower"}"#;
+		let (feed, incoming) = IncomingParams::channel();
+		feed.arg_text(raw.into()).expect("stream args");
+		feed.args_committed(raw.into()).expect("commit args");
+		let events = search.call(incoming).collect::<Vec<_>>().await;
+		assert!(matches!(events.as_slice(), [
+			Ev::Diag(Diag { severity: omp_tool::Severity::Warn, .. }),
+			Ev::Done(ToolTerminal::Done { result: Ok(_), .. })
+		]));
+		let Ev::Diag(diag) = &events[0] else {
+			panic!("provider warning diagnostic");
+		};
+		assert_eq!(diag.native_kind(), Some(DiagKind::ProviderWarning));
+		let Ev::Done(ToolTerminal::Done { result: Ok(payload), .. }) = &events[1] else {
+			panic!("successful search result");
+		};
+		assert_eq!(render_response(&payload.response), "result\n");
 	}
 
 	#[test]
@@ -739,9 +772,9 @@ mod tests {
 			warnings: vec![sf!("a constraint was relaxed").to_string()],
 			failures: vec![pb::search_response::Failure {
 				provider: sf!("brave").to_string(),
-				kind: pb::search_response::failure::Kind::Timeout as i32,
-				status: Some(504),
-				code: sf!("deadline_exceeded").to_string(),
+				kind:     pb::search_response::failure::Kind::Timeout as i32,
+				status:   Some(504),
+				code:     sf!("deadline_exceeded").to_string(),
 			}],
 			..Default::default()
 		};

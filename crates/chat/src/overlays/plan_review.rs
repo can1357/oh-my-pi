@@ -1,14 +1,13 @@
-//! `/plan-review` dialog: pi `plan-review-overlay.ts` as an observer-local
-//! [`Panel`] (ADR 0005).
+//! `/plan-review` dialog as an observer-local [`Panel`] (ADR 0005).
 //!
-//! The plan is split into sections (preamble + one per ATX heading, pi
-//! `plan-toc.ts`) and rendered as one scrollable markdown body; beneath it
+//! The plan is split into sections (preamble + one per ATX heading) and
+//! rendered as one scrollable markdown body; beneath it
 //! sit the prompt title, the optional model-tier slider, the approval
 //! options, and a focus-aware help line. A Contents sidebar appears when
 //! the terminal is wide enough and the plan has at least two headings; it
 //! tracks the scrolled section, jumps between sections, deletes sections
 //! (with undo), and annotates them with feedback that feeds the Refine
-//! branch (pi `plan-review-overlay.ts:8-17`).
+//! branch.
 //!
 //! Execution choices leave as a console line (ADR 0014), refinement recalls
 //! the composed feedback, and “Save and quit” opens the native destination
@@ -24,11 +23,11 @@ use omp_tui::{
 
 use super::{Panel, PanelAction, PanelAnchor, PanelCx, PanelEvent};
 
-/// Box title (pi `plan-review-overlay.ts:56`).
+/// Box title.
 const OVERLAY_TITLE: &str = "Plan Review";
-/// Prompt rendered above the options (pi `interactive-mode.ts:4553`).
+/// Prompt rendered above the options.
 const PROMPT_TITLE: &str = "Plan mode - next step";
-/// Approval options in pi order (pi `interactive-mode.ts:4554-4560`).
+/// Approval options in display order.
 const OPTIONS: [&str; 5] = [
 	"Approve and execute",
 	"Approve and compact context",
@@ -36,31 +35,30 @@ const OPTIONS: [&str; 5] = [
 	"Refine plan",
 	"Save and quit",
 ];
-/// Slider caption (pi `interactive-mode.ts:4530`).
+/// Slider caption.
 const SLIDER_CAPTION: &str = "continue with";
-/// Trailing footer hint (pi `plan-review-overlay.ts:161`).
+/// Trailing footer hint.
 const HELP_SUFFIX: &str = "esc cancel";
 /// Composer seed when Refine is chosen without any annotation feedback.
 const REFINE_SEED: &str = "Refine the plan: ";
-/// Minimum plan-body rows kept visible even on short terminals (pi `:58`).
+/// Minimum plan-body rows kept visible even on short terminals.
 const MIN_BODY_ROWS: u16 = 3;
-/// Sidebar gates (pi `plan-review-overlay.ts:60-62`).
+/// Sidebar display gates.
 const SIDEBAR_MIN_HEADINGS: usize = 2;
 const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 64;
 const SIDEBAR_MIN_BODY_WIDTH: u16 = 40;
-/// Rows a Shift+arrow scroll moves (pi `ScrollView` fast scroll).
+/// Rows a Shift+arrow scroll moves.
 const FAST_SCROLL: u16 = 5;
 /// Box border, section rule, options rule, and bottom border.
 const FRAME_ROWS: u16 = 4;
-/// Local artifact suffix the agent writes plans under (pi
-/// `approved-plan.ts:planFileUrlForSlug`).
+/// Local artifact suffix the agent writes plans under.
 const PLAN_SUFFIX: &str = "-plan.md";
 /// Legacy single-plan artifact.
 const LEGACY_PLAN_URL: &str = "local://PLAN.md";
 /// Error when no plan artifact exists.
 const NO_PLAN: &str = "No plan to review yet — write one to a local://<slug>-plan.md file first.";
 
-/// One plan section (pi `plan-toc.ts:PlanSection`).
+/// One plan section.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Section {
 	/// `0` = preamble (no heading, no ToC entry); `1..=6` = heading depth.
@@ -73,7 +71,7 @@ struct Section {
 	annotations: Vec<Str>,
 }
 
-/// Keyboard focus region (pi `Focus`).
+/// Keyboard focus region.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Focus {
 	Toc,
@@ -81,7 +79,7 @@ enum Focus {
 	Actions,
 }
 
-/// Undo snapshot (pi `UndoEntry`).
+/// Undo snapshot.
 struct UndoEntry {
 	text:        Str,
 	annotations: Vec<Vec<Str>>,
@@ -126,7 +124,7 @@ impl PlanReviewPanel {
 	/// Opens the review over the newest `local://<slug>-plan.md` artifact
 	/// (falling back to `local://PLAN.md`). `cycle` is the `(role, model)`
 	/// roster for the model-tier slider, shown only with two or more
-	/// entries and starting on `default` (pi `interactive-mode.ts:4520-4541`).
+	/// entries and starting on `default`.
 	pub fn open(cx: &PanelCx<'_>, cycle: &[(Str, Str)]) -> Result<Self, Str> {
 		let services = cx.services;
 		let url = services
@@ -178,7 +176,7 @@ impl PlanReviewPanel {
 		Ok(panel)
 	}
 
-	/// Plan title derived per pi `resolvePlanTitle`.
+	/// Plan title derived from its content.
 	#[must_use]
 	pub fn title(&self) -> &str {
 		&self.title
@@ -190,8 +188,8 @@ impl PlanReviewPanel {
 		join_sections(&self.sections)
 	}
 
-	/// Refine feedback markdown built from deletions and annotations (pi
-	/// `#recomputeFeedback`); empty when there is none.
+	/// Refine feedback markdown built from deletions and annotations; empty
+	/// when there is none.
 	#[must_use]
 	pub fn feedback(&self) -> Str {
 		let annotated = self
@@ -245,7 +243,7 @@ impl PlanReviewPanel {
 		self.dirty = true;
 	}
 
-	/// pi `#rebuildToc`: every heading, minus a lone shallowest heading at
+	/// Rebuilds every heading, minus a lone shallowest heading at
 	/// the top of the document (the plan's own name).
 	fn rebuild_toc(&mut self) {
 		let headings = self
@@ -308,7 +306,7 @@ impl PlanReviewPanel {
 	}
 
 	/// Greatest ToC position whose section starts at or above the scroll
-	/// offset (pi `#deriveTocCursorFromScroll`).
+	/// offset.
 	fn toc_from_scroll(&self) -> usize {
 		if self.toc.is_empty() {
 			return 0;
@@ -428,7 +426,7 @@ impl PlanReviewPanel {
 	}
 
 	/// Scrolls the body so the selected ToC section's heading sits at the
-	/// top (pi `#scrubBodyToToc`).
+	/// top.
 	fn scrub_body_to_toc(&mut self) {
 		let Some(&index) = self.toc.get(self.toc_cursor) else {
 			return;
@@ -443,7 +441,7 @@ impl PlanReviewPanel {
 		}
 	}
 
-	/// Shared paging keys for body and actions focus (pi `#handleBodyScroll`).
+	/// Shared paging keys for body and actions focus.
 	fn body_scroll_key(&mut self, key: Key) -> bool {
 		let rows = i32::from(self.rows);
 		let delta = match key {
@@ -559,7 +557,7 @@ impl PlanReviewPanel {
 		});
 	}
 
-	/// pi `#deleteSelectedSection`: the heading plus every deeper section
+	/// Deletes the heading plus every deeper section
 	/// that follows it; the removed titles feed the Refine feedback.
 	fn delete_selected_section(&mut self) {
 		let Some(&index) = self.toc.get(self.toc_cursor) else {
@@ -691,7 +689,7 @@ impl PlanReviewPanel {
 		}
 	}
 
-	/// pi `#buildHelp`.
+	/// Builds the contextual help line.
 	fn help(&self) -> Str {
 		let mut parts: Vec<&str> = Vec::with_capacity(8);
 		match self.focus {
@@ -710,7 +708,7 @@ impl PlanReviewPanel {
 		Str::from(parts.join(" · "))
 	}
 
-	/// Body rows for the current viewport (pi `render`: chrome rows are the
+	/// Body rows for the current viewport: chrome rows are the
 	/// four frame rows plus prompt, slider, options, and footer rows).
 	fn body_rows(&self) -> u16 {
 		let slider_rows = if self.cycle.len() > 1 { 2 } else { 0 };
@@ -880,8 +878,8 @@ impl PlanReviewPanel {
 		self.dirty = false;
 	}
 
-	/// Sidebar rows windowed around the cursor (pi `#renderSidebarLines`,
-	/// `#renderTocEntry`): gutter glyph, indent per nesting level, title,
+	/// Sidebar rows windowed around the cursor: gutter glyph, indent per
+	/// nesting level, title,
 	/// and an annotation marker.
 	fn toc_rows(&self) -> Vec<(Gutter, &'static str, Str, bool)> {
 		let slots = usize::from(self.rows);
@@ -957,7 +955,7 @@ impl PlanReviewPanel {
 	}
 }
 
-/// Sidebar gutter glyph (pi `#renderTocEntry`).
+/// Sidebar gutter glyph.
 #[derive(Clone, Copy)]
 enum Gutter {
 	Cursor,
@@ -975,7 +973,7 @@ impl Panel for PlanReviewPanel {
 	}
 
 	fn action(&mut self, _action: PanelAction) -> PanelEvent {
-		// pi's overlay has no section folding; Ctrl+O and the other chords
+		// This overlay has no section folding; Ctrl+O and the other chords
 		// fall through to the raw key path.
 		PanelEvent::Ignored
 	}
@@ -1048,9 +1046,8 @@ impl Panel for PlanReviewPanel {
 	}
 }
 
-/// pi `resolvePlanTitle` (`approved-plan.ts:59-84`): the first level-1
-/// heading, else the artifact's filename stem, else `plan`, each run
-/// through `normalizePlanTitle`.
+/// Resolves the first level-1 heading, else the artifact filename stem, else
+/// `plan`, each run through `normalize_plan_title`.
 fn plan_title(content: &str, url: &str) -> Str {
 	let heading = content.lines().find_map(|line| {
 		let rest = line.trim_start_matches([' ', '\t']).strip_prefix('#')?;
@@ -1075,8 +1072,7 @@ fn plan_title(content: &str, url: &str) -> Str {
 		.unwrap_or_else(|| Str::new_static("plan"))
 }
 
-/// pi `normalizePlanTitle` (`approved-plan.ts:20-49`) without the thrown
-/// errors: `None` where pi would throw.
+/// Normalizes a title without errors: `None` for invalid input.
 fn normalize_plan_title(title: &str) -> Option<Str> {
 	let trimmed = title.trim();
 	if trimmed.is_empty() || trimmed.contains(['/', '\\']) || trimmed.contains("..") {
@@ -1102,8 +1098,8 @@ fn normalize_plan_title(title: &str) -> Option<Str> {
 	(!out.is_empty()).then(|| out.freeze())
 }
 
-/// ATX heading: 1-6 `#`, required whitespace, a title, optional closing
-/// `#`s (pi `plan-toc.ts:HEADING_RE`).
+/// ATX heading: 1-6 `#`, required whitespace, a title, and optional closing
+/// `#`s.
 fn heading(line: &str) -> Option<(u8, &str)> {
 	let level = line.bytes().take_while(|&b| b == b'#').count();
 	if !(1..=6).contains(&level) {
@@ -1117,8 +1113,8 @@ fn heading(line: &str) -> Option<(u8, &str)> {
 	(!title.is_empty()).then_some((level as u8, title))
 }
 
-/// Opening/closing code fence run (``` or ~~~) allowing up to 3 lead
-/// spaces (pi `plan-toc.ts:FENCE_RE`): fence character, run length, and
+/// Opening/closing code fence run (``` or ~~~) allowing up to 3 lead spaces:
+/// fence character, run length, and
 /// whether the remainder is blank.
 fn fence(line: &str) -> Option<(u8, usize, bool)> {
 	let lead = line.bytes().take_while(|&b| b == b' ').count();
@@ -1134,8 +1130,7 @@ fn fence(line: &str) -> Option<(u8, usize, bool)> {
 	(run >= 3).then(|| (first, run, rest[run..].trim().is_empty()))
 }
 
-/// Collapses inline markdown emphasis, link, and code syntax to readable
-/// text (pi `plan-toc.ts:stripInlineMarkdown`).
+/// Collapses inline markdown emphasis, link, and code syntax to readable text.
 fn strip_inline_markdown(text: &str) -> Str {
 	let mut out = String::from(text);
 	strip_links(&mut out);
@@ -1212,8 +1207,7 @@ fn strip_pairs(text: &mut String, pair: &str) {
 }
 
 /// Splits `text` into preamble + heading sections; `#` inside fenced code
-/// is never a heading; concatenating every `raw` reproduces the source
-/// (pi `plan-toc.ts:parsePlanSections`).
+/// is never a heading; concatenating every `raw` reproduces the source.
 fn parse_sections(text: &str) -> Vec<(u8, Str, Str)> {
 	let mut heads: Vec<(usize, u8, Str)> = Vec::new();
 	let mut open_fence: Option<(u8, usize)> = None;
@@ -1256,8 +1250,7 @@ fn parse_sections(text: &str) -> Vec<(u8, Str, Str)> {
 	sections
 }
 
-/// pi `joinPlanSections`: every `raw` back-to-back with one trailing
-/// newline.
+/// Joins every `raw` back-to-back with one trailing newline.
 fn join_sections(sections: &[Section]) -> Str {
 	let mut joined = StrMut::new("");
 	for section in sections {
@@ -1269,7 +1262,7 @@ fn join_sections(sections: &[Section]) -> Str {
 	joined.freeze()
 }
 
-/// pi `sectionDeletionSpan`: the heading plus every following section
+/// Finds the heading plus every following section
 /// nested deeper than it; the preamble is never a deletion target.
 fn deletion_span(sections: &[Section], index: usize) -> Vec<usize> {
 	let Some(target) = sections.get(index) else {
@@ -1418,7 +1411,7 @@ mod tests {
 			assert!(text.contains(option), "option {option:?} missing:\n{text}");
 		}
 		// The 57-cell help exceeds the 56 inner cells of a 60-column overlay,
-		// so it truncates exactly like pi's `fit(content, width - 4)`.
+		// so it truncates at `fit(content, width - 4)`.
 		assert!(
 			text.contains("↑↓ select · ⏎ confirm · c copy · tab regions · esc canc…"),
 			"help missing:\n{text}"

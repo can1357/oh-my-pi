@@ -7,9 +7,9 @@ use bytes::Bytes;
 use futures::Stream;
 use omp_core::{FastHashSet, Str, sf};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, DocEffects, Effects, Ev,
-	IncomingParams, LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev, Tool, ToolSpec,
-	ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, Diag, DiagKind, DocEffects,
+	Effects, Ev, IncomingParams, LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev, Tool,
+	ToolSpec, ToolTerminal, Unit,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -129,6 +129,9 @@ pub struct Payload {
 	pub output:  Str,
 	/// Structured revisioned result used by enhanced views.
 	pub data:    Value,
+	/// Diagnostic findings excluded from the bounded projection.
+	#[serde(default)]
+	pub omitted: usize,
 }
 /// One language-server failure retained during a workspace-symbol fanout.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -302,6 +305,7 @@ pub fn aggregate_workspace_symbols(
 		servers,
 		output: Str::from(output),
 		data: Value::Array(symbols),
+		omitted: 0,
 	})
 }
 
@@ -415,6 +419,12 @@ impl<C: LspControl> Tool for LspTool<C> {
 					Ok(payload) => {
 						let useless = matches!(payload.action, Action::Definition | Action::TypeDefinition | Action::Implementation | Action::References | Action::Symbols)
 							&& payload.data.as_array().is_some_and(Vec::is_empty);
+						if payload.action == Action::Diagnostics && payload.omitted > 0 {
+							yield Ev::Diag(
+								Diag::info(DiagKind::LimitReached, "diagnostics")
+									.omitted(payload.omitted as u64, Unit::Items),
+							);
+						}
 						yield done(Ok(payload), useless);
 					},
 					Err(fault) => yield done(Err(fault), true),
@@ -517,6 +527,26 @@ mod tests {
 	#[derive(Clone, Default)]
 	struct CancellationControl(Arc<Mutex<Option<CancellationToken>>>);
 
+	#[derive(Clone, Copy)]
+	struct OmittedDiagnosticsControl;
+
+	impl LspControl for OmittedDiagnosticsControl {
+		fn execute(
+			&self,
+			_: Params,
+			_: Duration,
+			_: CancellationToken,
+		) -> impl Future<Output = Result<Payload, Fault>> + Send + '_ {
+			std::future::ready(Ok(Payload {
+				action:  Action::Diagnostics,
+				servers: Vec::new(),
+				output:  sf!("No diagnostics"),
+				data:    serde_json::json!({"diagnostics": []}),
+				omitted: 7,
+			}))
+		}
+	}
+
 	impl LspControl for CancellationControl {
 		fn execute(
 			&self,
@@ -549,8 +579,31 @@ mod tests {
 				servers: vec![sf!("rust-analyzer")],
 				output:  sf!("ok"),
 				data:    serde_json::json!({"ok": true}),
+				omitted: 0,
 			}))
 		}
+	}
+
+	#[tokio::test]
+	async fn omitted_diagnostics_are_emitted_as_a_typed_limit() {
+		let lsp = tool(OmittedDiagnosticsControl, Duration::from_secs(300));
+		let raw = r#"{"action":"diagnostics","file":"src/lib.rs"}"#;
+		let (feed, incoming) = IncomingParams::channel();
+		feed.arg_text(raw.into()).expect("stream args");
+		feed.args_committed(raw.into()).expect("commit args");
+		let events = lsp.call(incoming).collect::<Vec<_>>().await;
+		let [Ev::Diag(diag), Ev::Done(ToolTerminal::Done { result: Ok(payload), .. })] =
+			events.as_slice()
+		else {
+			panic!("diagnostic followed by terminal payload");
+		};
+		assert_eq!(diag.native_kind(), Some(DiagKind::LimitReached));
+		assert_eq!(diag.severity, omp_tool::Severity::Info);
+		assert!(matches!(
+			diag.omitted.as_ref(),
+			Some(omp_tool::Omitted { count: 7, unit: Unit::Items })
+		));
+		assert!(!payload.output.contains("omitted"));
 	}
 
 	#[test]
@@ -593,7 +646,7 @@ mod tests {
 		assert_eq!(schema["properties"]["payload"]["type"], serde_json::json!(["string", "null"]));
 		assert_eq!(schema["properties"]["timeout"]["minimum"], 5);
 		assert_eq!(schema["properties"]["timeout"]["maximum"], 300);
-		// Current pi owns the fields above but has no `notrunc` parameter.
+		// The contract includes the fields above but has no `notrunc` parameter.
 		// `notrunc` is injected by omp-tool under ADR 0009, so this LSP
 		// conformance test verifies its protocol shape without duplicating the
 		// central owner's presentation prose.
@@ -690,6 +743,7 @@ mod tests {
 			servers: vec![Str::new_static("rust-analyzer")],
 			output:  Str::new_static("No references found"),
 			data:    serde_json::json!([]),
+			omitted: 0,
 		}))
 		.expect("verdict JSON");
 		let lifted = lsp
@@ -734,7 +788,7 @@ mod tests {
 	}
 }
 
-fn done(result: Result<Payload, Fault>, useless: bool) -> Ev<Update, Payload, Fault> {
+const fn done(result: Result<Payload, Fault>, useless: bool) -> Ev<Update, Payload, Fault> {
 	Ev::Done(ToolTerminal::Done { result, useless })
 }
 

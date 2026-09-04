@@ -244,7 +244,7 @@ fn compose(scene: &Scene) -> Frame {
 
 // ── studies ─────────────────────────────────────────────────────────────────
 
-/// 1: the pi layout verbatim — a bordered composer whose top border
+/// 1: a bordered composer whose top border
 /// carries the session band on the left and the title on the right, with
 /// the spinner narrating intent on its own row above the box.
 fn study_primary(frame: &mut Frame, y: u16, scene: &Scene) {
@@ -528,7 +528,7 @@ fn draw_working(frame: &mut Frame, x: u16, y: u16, scene: &Scene) {
 	draw_shimmer(frame, &mut column, x, y, scene.right_edge(), WORKING, shimmer, ink(GREEN));
 }
 
-/// The pi flavor of the working line: the spinner and timer lead, then
+/// The working line: the spinner and timer lead, then
 /// the shimmering narration — the band below carries no brand segment.
 fn draw_working_spin(frame: &mut Frame, x: u16, y: u16, scene: &Scene) {
 	let mut column = frame.put(x, y, scene.spinner(), ink(GREEN));

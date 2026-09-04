@@ -358,10 +358,10 @@ fn todo_and_jobs_are_journal_derived_meta_components() {
 			_ => None,
 		})
 		.expect("phase order");
-	assert_eq!(
-		serde_json::from_str::<Vec<Str>>(phase_order).expect("phase order JSON"),
-		vec![Str::new_static("Build"), Str::new_static("Ship")]
-	);
+	assert_eq!(serde_json::from_str::<Vec<Str>>(phase_order).expect("phase order JSON"), vec![
+		Str::new_static("Build"),
+		Str::new_static("Ship")
+	]);
 	let malformed = session
 		.call("todo", 3, "todo-bad", None, Some(raw(serde_json::json!({}))), None)
 		.expect("malformed todo call appends");
@@ -1281,10 +1281,10 @@ fn empty_assistant_messages_are_omitted_from_projection() {
 	);
 }
 
-/// A journaled user prompt with a PNG attachment projects a typed media
-/// part (pi `ImageContent`): the blob reference plus `image/png`, the MIME
-/// persisted with the reference at journal time — and replay projects the
-/// same part, so the provider request never depends on process memory.
+/// A journaled user prompt with a PNG attachment projects a typed media part:
+/// the blob reference plus `image/png`, the MIME persisted with the reference
+/// at journal time. Replay projects the same part, so the provider request
+/// never depends on process memory.
 #[test]
 fn user_attachment_projects_a_media_part_with_its_mime() {
 	let directory = tempfile::tempdir().expect("temporary session directory");

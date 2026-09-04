@@ -28,7 +28,7 @@ from the repository root.
 
 ## Gallery references
 
-`fixtures/gallery/` holds pi reference captures: collapsed, expanded, and
+`fixtures/gallery/` holds TypeScript-reference captures: collapsed, expanded, and
 styled tool cards plus terminal-surface captures. `crates/chat/tests/chrome.rs`
 also reads the chrome goldens here. Keep these fixtures; they are comparison
 inputs, not disposable build output.

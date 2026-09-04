@@ -100,7 +100,7 @@ pub enum EditorError {
 /// Resolves `VISUAL`, then `EDITOR`, then Windows' baseline editor.
 ///
 /// Environment values are trimmed and otherwise handed verbatim to the
-/// user's shell (pi `openInEditor`): `code --wait`, `emacsclient -nw -a ""`,
+/// user's shell: `code --wait`, `emacsclient -nw -a ""`,
 /// a shell function, or `$MY_EDITOR` all work exactly as they do from git.
 /// POSIX deliberately has no fallback: launching `vi` unexpectedly would
 /// consume the user's terminal when they have not configured this feature.
@@ -150,7 +150,7 @@ fn prepared_draft(content: &str, extension: &str) -> Result<DraftFile, EditorErr
 	Ok(draft)
 }
 
-/// pi `resolveEditorSpawnCommand`: the configured command line runs through
+/// The configured command line runs through
 /// the platform shell with the draft path appended as a quoted positional,
 /// never re-split by us — `sh -c '<editor> "$1"' sh <draft>` on POSIX,
 /// `cmd.exe /d /s /c "<editor> "<draft>""` on Windows.
@@ -332,7 +332,7 @@ mod tests {
 		assert!(matches!(error, EditorError::DraftReopen { .. }));
 	}
 
-	/// pi `resolveEditorSpawnCommand`: `$EDITOR` is a shell command line, not
+	/// `$EDITOR` is a shell command line, not
 	/// argv — environment expansion, quoting, and operators all belong to
 	/// `sh`, and the draft path arrives as the quoted `"$1"` positional even
 	/// when it contains spaces.

@@ -82,7 +82,9 @@ impl AdmittedNativeExtension {
 			.filter(|row| row.kind == "skills")
 			.filter_map(|row| row.path.as_deref())
 			.filter_map(|path| fs::canonicalize(site.join(path)).ok())
-			.filter(|path| path.starts_with(&self.root) && path.file_name().is_some_and(|name| name == "SKILL.md"))
+			.filter(|path| {
+				path.starts_with(&self.root) && path.file_name().is_some_and(|name| name == "SKILL.md")
+			})
 			.filter_map(|path| path.parent()?.parent().map(Path::to_path_buf))
 			.collect::<Vec<_>>();
 		roots.sort_unstable();
@@ -695,7 +697,7 @@ default = {default}
 		assert_eq!(admitted[0].spec.settings["enabled"], serde_json::json!(false));
 	}
 
-	/// `cl_disabled_extensions` (pi `disabledExtensions`) is the control
+	/// `cl_disabled_extensions` is the control
 	/// plane's only enablement knob: a listed manifest id is never loaded from
 	/// an automatic root, while an explicitly requested root still is.
 	#[test]
@@ -852,22 +854,18 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 		)
 		.expect("manifest");
 
-		let admitted = admit_native_extensions(
-			tree.path(),
-			tree.path(),
-			NativeAdmissionOptions {
-				explicit_roots:    &[root],
-				mode:              NativeLoadMode::ExplicitOnly,
-				include_workspace: false,
-				setting_overrides: &[],
-				disabled:          &[],
-			},
-		)
+		let admitted = admit_native_extensions(tree.path(), tree.path(), NativeAdmissionOptions {
+			explicit_roots:    &[root],
+			mode:              NativeLoadMode::ExplicitOnly,
+			include_workspace: false,
+			setting_overrides: &[],
+			disabled:          &[],
+		})
 		.expect("admission");
-		assert_eq!(
-			admitted[0].skill_roots(),
-			[fs::canonicalize(skill_root.parent().expect("skills root")).expect("canonical skill root")]
-		);
+		assert_eq!(admitted[0].skill_roots(), [fs::canonicalize(
+			skill_root.parent().expect("skills root")
+		)
+		.expect("canonical skill root")]);
 		assert_eq!(
 			admitted[0].spec.manifest.activation_triggers,
 			[omp_envd::exthost::ActivationTrigger::Static]
@@ -886,17 +884,14 @@ path = "demo/.omp-generated/skills/review/SKILL.md"
 		fs::create_dir_all(&broken).expect("broken extension root");
 		fs::write(broken.join("omp.toml"), "id = [not-valid").expect("broken manifest");
 
-		let report = admit_native_extensions_contained(
-			&project,
-			tree.path(),
-			NativeAdmissionOptions {
+		let report =
+			admit_native_extensions_contained(&project, tree.path(), NativeAdmissionOptions {
 				explicit_roots:    &[],
 				mode:              NativeLoadMode::Merge,
 				include_workspace: true,
 				setting_overrides: &[],
 				disabled:          &[],
-			},
-		);
+			});
 		assert_eq!(report.extensions.len(), 1);
 		assert_eq!(report.extensions[0].spec.key.extension().as_str(), "test.good");
 		assert_eq!(report.errors.len(), 1);

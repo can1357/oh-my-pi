@@ -30,7 +30,11 @@ impl Card for ReadCard {
 		let question = string_at(&args, "question")
 			.or_else(|| partial_string(view.args_text().unwrap_or_default(), "question"))
 			.filter(|question| !question.trim().is_empty());
-		let title = if question.is_some() { "Inspect" } else { "Read" };
+		let title = if question.is_some() {
+			"Inspect"
+		} else {
+			"Read"
+		};
 		match view.status {
 			CardStatus::StreamingArgs | CardStatus::InProgress => dom! {
 				<col>
@@ -49,16 +53,15 @@ impl Card for ReadCard {
 	}
 }
 
-/// pi `renderCodeCell` `codeMaxLines`: preview lines a collapsed read card
-/// shows before folding the rest into `… N more lines ⟨Ctrl+O: Expand⟩`
-/// (ADR 0031: the full preview is `@expanded` only).
+/// Preview lines a collapsed read card shows before folding the rest into
+/// `… N more lines ⟨Ctrl+O: Expand⟩` (ADR 0031: the full preview is
+/// `@expanded` only).
 const COLLAPSED_LINES: usize = 12;
 
-/// The display content of a read payload (pi `details.displayContent`):
-/// the source rows and the first row's number, recovered from the
-/// hashline projection the tool journals (`[<path>#<tag>]` header, then
-/// `LINE:TEXT` rows), plus the path a suffix match resolved to (pi
-/// `details.resolvedPath`, which omp records as the leading
+/// The display content of a read payload: the source rows and the first
+/// row's number, recovered from the hashline projection the tool journals
+/// (`[<path>#<tag>]` header, then `LINE:TEXT` rows), plus the path a suffix
+/// match resolved to, which omp records as the leading
 /// `[Path '…' not found; resolved to '…' via suffix match]` notice).
 struct DisplayContent {
 	text:     String,
@@ -145,7 +148,11 @@ fn render_done(
 	let more = sf!("… {hidden} more line{} ⟨Ctrl+O: Expand⟩", if hidden == 1 { "" } else { "s" });
 	let src = content.and_then(|content| content.resolved);
 	let images = result_images(&result, target, ui);
-	let title = if question.is_some() { "Inspect" } else { "Read" };
+	let title = if question.is_some() {
+		"Inspect"
+	} else {
+		"Read"
+	};
 	dom! {
 		<box border=round bc=muted bg=panel bleed title_pad=3>
 			<row kind=title gap=1><i:card-bullet fg=ok/><text>{format!("{title} {target}")}</text></row>
@@ -173,7 +180,11 @@ fn render_failed(
 	let fault = typed_fault::<omp_tools::read::Fault>(view)
 		.or_else(|| diag_text(view.diag))
 		.unwrap_or_else(|| Str::new_static("read failed"));
-	let title = if question.is_some() { "Inspect" } else { "Read" };
+	let title = if question.is_some() {
+		"Inspect"
+	} else {
+		"Read"
+	};
 	dom! {
 		<box border=round bc=err bg=error_surface bleed title_pad=3>
 			<row kind=title gap=1><i:error fg=err/><text fg=accent>{format!("{title} {target}")}</text></row>
@@ -227,8 +238,8 @@ fn render_group(targets: &[Value], status: CardStatus) -> Component {
 	.into_component()
 }
 
-/// pi `read-tool-group.ts`: consecutive `read` calls of one turn as a single
-/// compact tree — the bullet header with the call count, one branch per
+/// Consecutive `read` calls of one turn as a single compact tree — the
+/// bullet header with the call count, one branch per
 /// call (label from its path and range; a pending spinner while it runs; an
 /// error mark when it failed), and, when the turn contained only reads, the
 /// turn's usage row attached under the last branch (`TC-13`).
@@ -285,10 +296,10 @@ pub fn render_calls_group(
 	.into_component()
 }
 
-/// Image blob parts of a read payload (pi `tool-execution.ts` image
-/// blocks): each renders inline through `<img src="artifact://sha256/…">`
-/// when the terminal has a graphics protocol, else as pi's
-/// `[Image: <name> [<mime>]]` placeholder. The `artifact://` source is
+/// Image blob parts of a read payload: each renders inline through
+/// `<img src="artifact://sha256/…">` when the terminal has a graphics
+/// protocol, else as an `[Image: <name> [<mime>]]` placeholder. The
+/// `artifact://` source is
 /// resolved to the session blob store by the application's image-source
 /// resolver ([`omp_tui::register_image_scheme`]).
 fn result_images(result: &Value, target: &str, ui: &UiContext) -> Vec<Component> {
@@ -443,7 +454,7 @@ mod tests {
 			rows
 				.iter()
 				.any(|row| row.contains("[Image: logo.png [image/png]]")),
-			"cells tier shows pi's placeholder: {rows:?}"
+			"cells tier shows the placeholder: {rows:?}"
 		);
 		let _ = fs::remove_file(path);
 	}

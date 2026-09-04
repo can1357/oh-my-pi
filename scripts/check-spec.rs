@@ -25,7 +25,7 @@ use serde_json::{Value as JsonValue, json};
 use toml::Value as TomlValue;
 
 const AGENT_ALLOWED_WORLD_EDGES: &[&str] = &["omp-env", "omp-storage"];
-const AGENT_DENIED_DIRECT_EDGES: &[&str] = &["omp-docserver", "omp-shell-engine", "omp-walker"];
+const AGENT_DENIED_DIRECT_EDGES: &[&str] = &["omp-docserver", "omp-shell", "omp-walker"];
 // Pre-existing Python operations awaiting Part 1 rows. This fixed debt baseline
 // may shrink; newly frozen CONTROL operations cannot be added without a row.
 const PYTHON_SPEC_BASELINE: &[&str] = &[

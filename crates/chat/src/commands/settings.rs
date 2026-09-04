@@ -1,4 +1,4 @@
-//! `/settings` (pi `builtin-modes.ts`): opens the settings selector over
+//! `/settings`: opens the settings selector over
 //! the console variable registry ([`SettingsPanel`]).
 
 use omp_tui::Icon;

@@ -12,11 +12,9 @@ use super::{
 /// Native-desktop status card.
 pub struct ComputerCard;
 
-/// pi `PREVIEW_LIMITS.COMPUTER_CODE_COLLAPSED`: script lines a collapsed
-/// card shows; expanded shows the whole script.
+/// Script lines a collapsed card shows; expanded shows the whole script.
 const CODE_COLLAPSED: usize = 10;
-/// pi `PREVIEW_LIMITS.OUTPUT_COLLAPSED` / `OUTPUT_EXPANDED`: output lines
-/// shown collapsed and expanded.
+/// Output lines shown collapsed and expanded.
 const OUTPUT_COLLAPSED: usize = 3;
 const OUTPUT_EXPANDED: usize = 10;
 
@@ -40,12 +38,18 @@ impl Card for ComputerCard {
 			.and_then(Value::as_str)
 			.or_else(|| input.as_ref()?.get("code")?.as_str())
 			.unwrap_or_default();
-		let output = result.as_ref().and_then(|value| {
-			value
-				.get("results")
-				.filter(|results| !results.as_array().is_some_and(Vec::is_empty))
-				.or_else(|| value.get("capabilities").filter(|capabilities| !capabilities.is_null()))
-		})
+		let output = result
+			.as_ref()
+			.and_then(|value| {
+				value
+					.get("results")
+					.filter(|results| !results.as_array().is_some_and(Vec::is_empty))
+					.or_else(|| {
+						value
+							.get("capabilities")
+							.filter(|capabilities| !capabilities.is_null())
+					})
+			})
 			.map(|value| serde_json::to_string_pretty(value).unwrap_or_default());
 		let artifacts = result
 			.as_ref()
@@ -87,10 +91,10 @@ impl Card for ComputerCard {
 						.unwrap_or(raw)
 				})
 		});
-		// pi `statusSuffix`: the header names the error state.
+		// The header names the error state.
 		let failed = view.status == CardStatus::Failed;
-		// pi shows a bounded script and output preview in both states; only
-		// the bounds change with `@expanded`.
+		// Both states use bounded script and output previews; only the bounds
+		// change with `@expanded`.
 		let code = (!code.is_empty()).then(|| {
 			if expanded {
 				Str::new(code)

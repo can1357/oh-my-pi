@@ -1,13 +1,14 @@
-This crate depends on omp-shell-engine, which incorporates and adapts source
-code from brush-core 0.5.0 and brush-parser 0.4.0
-(https://github.com/reubeno/brush), used under the MIT License.
+This crate incorporates and adapts source code from brush-core 0.5.0 and
+brush-parser 0.4.0 (https://github.com/reubeno/brush), used under the MIT
+License. The source is compiled directly into omp-shell-engine;
+omp-shell-engine does not depend on the brush crates.
 
 Copyright (c) 2024 reuben olinsky
 
-The omp-shell-engine source includes local fixes for Windows path handling,
+The brush-core source includes local fixes for Windows path handling,
 background process IDs, macOS `/dev/null` polling, and broken-pipe exit status.
-It additionally removes interactive-shell machinery and integrates the parser
-and base shell builtins into one standalone engine crate.
+omp-shell-engine additionally removes interactive-shell machinery and integrates
+the parser and base shell builtins into one standalone engine crate.
 
 MIT License
 

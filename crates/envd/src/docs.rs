@@ -16,15 +16,12 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use omp_core::{FastHashMap, FastHashSet, Str, StrMut, sf};
-use omp_docserver::{
-	client::{TerminalEventReceiver, terminal_event_channel},
-	connection::{PROTOCOL_MAJOR, PROTOCOL_MINOR},
-	diagnostics::{Diagnostic, Severity, parse_push},
-	wire::{self, FrameConfig},
-};
-use omp_hashline::{Clipboard, NoopLoopGuard, SnapshotStore};
-use omp_proto::document::v1::{
-	self as pb, client_frame, commit_transaction_response, document_target, server_frame,
+use omp_edit::store::EditStore;
+use omp_proto::{
+	document::v1::{
+		self as pb, client_frame, commit_transaction_response, document_target, server_frame,
+	},
+	lsp::{Diagnostic, Severity},
 };
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
@@ -38,6 +35,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{ssh::SshService, vault::VaultService};
+use crate::docserver::{
+	client::{TerminalEventReceiver, terminal_event_channel},
+	connection::{PROTOCOL_MAJOR, PROTOCOL_MINOR},
+	diagnostics::parse_push,
+	wire::{self, FrameConfig},
+};
 /// Editor-client document authority installed for an ACP session.
 ///
 /// The boxed futures are confined to this cold dynamic RPC boundary; ordinary
@@ -361,9 +364,7 @@ struct Inner {
 	rehost:             RwLock<Option<RehostCallback>>,
 	next_request:       AtomicU64,
 	shutdown:           CancellationToken,
-	snapshot_store:     Mutex<SnapshotStore>,
-	clipboard:          Mutex<Clipboard>,
-	noop_loop_guard:    Mutex<NoopLoopGuard>,
+	edit_store:         EditStore,
 	late_diagnostics:   Mutex<FastHashMap<Bytes, PendingLateDiagnostics>>,
 	recent_diagnostics: Mutex<FastHashMap<Bytes, pb::LspEvent>>,
 	late_inflight:      Mutex<FastHashSet<Bytes>>,
@@ -594,7 +595,7 @@ impl DocumentHost {
 	pub async fn connect_pipe(path: impl AsRef<Path>) -> Result<Self, DocumentError> {
 		let path = path.as_ref().to_path_buf();
 		let stream =
-			omp_docserver::windows::connect_owner_pipe(&path).map_err(wire::WireError::from)?;
+			crate::docserver::windows::connect_owner_pipe(&path).map_err(wire::WireError::from)?;
 		Self::connect_pipe_stream(path, stream).await
 	}
 
@@ -629,9 +630,7 @@ impl DocumentHost {
 			rehost: RwLock::new(None),
 			next_request: AtomicU64::new(1),
 			shutdown: CancellationToken::new(),
-			snapshot_store: Mutex::new(SnapshotStore::default()),
-			clipboard: Mutex::new(Clipboard::default()),
-			noop_loop_guard: Mutex::new(NoopLoopGuard::default()),
+			edit_store: EditStore::default(),
 			late_diagnostics: Mutex::new(FastHashMap::default()),
 			recent_diagnostics: Mutex::new(FastHashMap::default()),
 			late_inflight: Mutex::new(FastHashSet::default()),
@@ -652,25 +651,9 @@ impl DocumentHost {
 		&self.inner.hello
 	}
 
-	/// Returns the session-shared hashline snapshot store.
-	///
-	/// Callers should hold the lock only for synchronous snapshot operations,
-	/// never across an await point.
-	pub(crate) fn snapshot_store(&self) -> &Mutex<SnapshotStore> {
-		&self.inner.snapshot_store
-	}
-
-	/// Returns the session-shared hashline clipboard.
-	///
-	/// Named registers persist for the lifetime of this document connection.
-	/// Callers should not hold the lock across an await point.
-	pub(crate) fn clipboard(&self) -> &Mutex<Clipboard> {
-		&self.inner.clipboard
-	}
-
-	/// Returns the session-shared repeated no-op edit guard.
-	pub(crate) fn noop_loop_guard(&self) -> &Mutex<NoopLoopGuard> {
-		&self.inner.noop_loop_guard
+	/// Returns the session-shared edit store.
+	pub(crate) fn snapshot_store(&self) -> &EditStore {
+		&self.inner.edit_store
 	}
 
 	/// Takes the connection-wide LSP registry event stream.
@@ -1914,7 +1897,7 @@ async fn reconnect_endpoint(
 ) -> Result<bool, RedialFailure> {
 	let DocumentEndpoint::WindowsPipe(path) = endpoint;
 	let stream =
-		omp_docserver::windows::connect_owner_pipe(path).map_err(|error| match error.kind() {
+		crate::docserver::windows::connect_owner_pipe(path).map_err(|error| match error.kind() {
 			std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
 				RedialFailure::Rehostable
 			},
@@ -2181,11 +2164,11 @@ fn unexpected(expected: &'static str) -> DocumentError {
 mod tests {
 	use std::{path::Path, time::Duration};
 
-	use omp_docserver::daemon::{self, ServeOptions, Transport};
 	use omp_proto::document::v1::{read_document_response, read_selection};
 	use tokio::{task::JoinHandle, time};
 
 	use super::*;
+	use crate::docserver::daemon::{self, ServeOptions, Transport};
 
 	const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 	const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -2199,9 +2182,9 @@ mod tests {
 			vec![
 				Diagnostic {
 					uri:      Str::new_static("file:///workspace/src/lib.rs"),
-					range:    omp_docserver::diagnostics::Range {
-						start: omp_docserver::diagnostics::Position { line: 9, character: 3 },
-						end:   omp_docserver::diagnostics::Position { line: 9, character: 4 },
+					range:    omp_proto::lsp::Range {
+						start: omp_proto::lsp::Position { line: 9, character: 3 },
+						end:   omp_proto::lsp::Position { line: 9, character: 4 },
 					},
 					severity: Severity::Warning,
 					message:  Str::new_static("unused binding"),
@@ -2210,9 +2193,9 @@ mod tests {
 				},
 				Diagnostic {
 					uri:      Str::new_static("file:///workspace/src/lib.rs"),
-					range:    omp_docserver::diagnostics::Range {
-						start: omp_docserver::diagnostics::Position { line: 1, character: 0 },
-						end:   omp_docserver::diagnostics::Position { line: 1, character: 1 },
+					range:    omp_proto::lsp::Range {
+						start: omp_proto::lsp::Position { line: 1, character: 0 },
+						end:   omp_proto::lsp::Position { line: 1, character: 1 },
 					},
 					severity: Severity::Error,
 					message:  Str::new_static("mismatched types"),
@@ -2244,7 +2227,10 @@ mod tests {
 			let task = tokio::spawn(async move {
 				daemon::serve(serve_project, Transport::Socket(serve_socket), ServeOptions {
 					lsp_config_paths: Vec::new(),
-					lsp:              omp_docserver::NativeLspOptions { enabled: false, lazy: true },
+					lsp:              crate::docserver::NativeLspOptions {
+						enabled: false,
+						lazy:    true,
+					},
 					user_config_root: None,
 					shutdown:         Some(serve_shutdown),
 					server_build:     Str::from(omp_env::build_id::current()),
@@ -2330,7 +2316,7 @@ mod tests {
 		let file = project_root.join("restart.txt");
 		let expected = "before restart: λ\n";
 		std::fs::write(&file, expected).expect("write UTF-8 fixture");
-		let config = omp_docserver::ServerConfig::new(&project_root).expect("document config");
+		let config = crate::docserver::ServerConfig::new(&project_root).expect("document config");
 		let uri = Str::from(
 			config
 				.file_uri(&file)

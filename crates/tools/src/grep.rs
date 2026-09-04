@@ -11,15 +11,17 @@ use async_stream::stream;
 use bytes::Bytes;
 use futures::{FutureExt, Stream, pin_mut, select_biased};
 use omp_core::{Str, sf};
-use omp_hashline::format_hashline_header;
+use omp_edit::modes::hashline::format::format_hashline_header;
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, DocEffects, Effects, Ev, IncomingParams,
-	InterruptWaitError, ParamError, Part, ProjectionAuthorizationError, ProjectionSpan, PromptCaps,
-	PromptProjection, Rev, Tool, ToolSpec, ToolTerminal, VisibilityReceipt,
+	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, Diag, DiagKind, DocEffects, Effects, Ev,
+	IncomingParams, InterruptWaitError, ParamError, Part, ProjectionAuthorizationError,
+	ProjectionSpan, PromptCaps, PromptProjection, Rev, Tool, ToolSpec, ToolTerminal, Unit,
+	VisibilityReceipt,
 };
-use tokio_util::sync::CancellationToken;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 use crate::{
@@ -266,8 +268,6 @@ pub struct Payload {
 	pub file_limit_reached:      bool,
 	/// Whether any hot file was clipped at its diversity cap.
 	pub per_file_limit_reached:  bool,
-	/// Ordered model-facing diagnostic notes.
-	pub notes:                   Vec<Str>,
 }
 
 /// Ephemeral progress from `grep@1`; grep has no durable updates.
@@ -496,7 +496,15 @@ impl<W: WorkspaceSearch> Tool for Grep<W> {
 			pin_mut!(operation, interruption);
 			select_biased! {
 				result = operation => {
-					yield done(result);
+					match result {
+						Ok((payload, diags)) => {
+							for diag in diags {
+								yield Ev::Diag(diag);
+							}
+							yield done(Ok(payload));
+						},
+						Err(fault) => yield done(Err(fault)),
+					}
 				},
 				interrupt = interruption => {
 					yield interrupt_event(interrupt, "grep traversal owner disappeared");
@@ -617,7 +625,10 @@ fn parse_roots(path: Option<&str>) -> Result<(Vec<SearchRoot>, Option<SearchRoot
 	} else {
 		entries
 	};
-	let roots = entries.into_iter().map(parse_root).collect::<Result<Vec<_>, _>>()?;
+	let roots = entries
+		.into_iter()
+		.map(parse_root)
+		.collect::<Result<Vec<_>, _>>()?;
 	let unsplit = path
 		.filter(|path| path.contains(';'))
 		.and_then(|path| parse_root(Str::new(path.trim_end())).ok());
@@ -709,7 +720,11 @@ fn fetch_budgets(roots: &[SearchRoot]) -> (u32, u32, u32) {
 	(single, multi, max_count)
 }
 
-fn make_payload(result: SearchResult, roots: &[SearchRoot], requested_skip: u64) -> Payload {
+fn make_payload(
+	result: SearchResult,
+	roots: &[SearchRoot],
+	requested_skip: u64,
+) -> (Payload, SmallVec<Diag, 6>) {
 	let per_file_cap = if result.multi_scope {
 		MULTI_FILE_PER_FILE_MATCHES
 	} else {
@@ -781,39 +796,40 @@ fn make_payload(result: SearchResult, roots: &[SearchRoot], requested_skip: u64)
 	let end = start.saturating_add(DEFAULT_FILE_LIMIT).min(groups.len());
 	let file_limit_reached = result.multi_scope && end < groups.len();
 	let files = groups.drain(start..end).collect();
-	let mut notes = Vec::new();
+	let mut diags = SmallVec::new();
 	if !result.missing_paths.is_empty() {
-		notes.push(sf!("Skipped missing paths: {}", join_strs(&result.missing_paths)));
+		diags.push(Diag::warn(DiagKind::MissingPaths, Str::new(join_strs(&result.missing_paths))));
 	}
 	if !result.archive_unreadable.is_empty() {
-		notes.push(sf!(
-			"Skipped archive entries (search supports text members only): {}",
-			join_strs(&result.archive_unreadable)
+		diags.push(Diag::warn(
+			DiagKind::Skipped,
+			sf!("Archive entries not searched: {}", join_strs(&result.archive_unreadable)),
 		));
 	}
 	if !result.oversized_files.is_empty() {
-		notes.push(sf!(
-			"Searched only the first 4MB of large files (matches past the 4MB window are not shown; \
-			 use `read` for the rest): {}",
-			join_strs(&result.oversized_files)
+		diags.push(Diag::warn(
+			DiagKind::PartialScan,
+			sf!("Only the first 4 MB was searched: {}", join_strs(&result.oversized_files)),
 		));
 	} else if result.skipped_oversized > 0 {
-		notes.push(sf!(
-			"Skipped {} unreadable large file(s); target them directly with `read`",
-			result.skipped_oversized
+		diags.push(Diag::warn(
+			DiagKind::Skipped,
+			sf!("{} unreadable large files were not searched", result.skipped_oversized),
 		));
 	}
-	Payload {
-		files,
-		snapshots: Vec::new(),
-		total_files,
-		total_files_lower_bound: result.limit_reached,
-		multi_scope: result.multi_scope,
-		skip,
-		file_limit_reached,
-		per_file_limit_reached,
-		notes,
-	}
+	(
+		Payload {
+			files,
+			snapshots: Vec::new(),
+			total_files,
+			total_files_lower_bound: result.limit_reached,
+			multi_scope: result.multi_scope,
+			skip,
+			file_limit_reached,
+			per_file_limit_reached,
+		},
+		diags,
+	)
 }
 
 fn prepare_payload<W: WorkspaceSearch>(
@@ -821,9 +837,9 @@ fn prepare_payload<W: WorkspaceSearch>(
 	roots: &[SearchRoot],
 	requested_skip: u64,
 	workspace: &W,
-) -> Result<Payload, Fault> {
+) -> Result<(Payload, SmallVec<Diag, 6>), Fault> {
 	let snapshots = std::mem::take(&mut result.snapshots);
-	let mut payload = make_payload(result, roots, requested_skip);
+	let (mut payload, mut diags) = make_payload(result, roots, requested_skip);
 	let visible_sources = payload
 		.files
 		.iter()
@@ -841,7 +857,40 @@ fn prepare_payload<W: WorkspaceSearch>(
 		})
 		.collect();
 	workspace.stage_snapshots(snapshots)?;
-	Ok(payload)
+	if payload.files.is_empty()
+		&& payload.multi_scope
+		&& payload.skip > 0
+		&& payload.total_files > 0
+		&& payload.skip >= payload.total_files
+	{
+		let suffix = if payload.total_files_lower_bound {
+			"+"
+		} else {
+			""
+		};
+		diags.push(Diag::warn(
+			DiagKind::RangeOutOfBounds,
+			sf!("skip={} is past the end of {}{} files", payload.skip, payload.total_files, suffix),
+		));
+	} else if payload.file_limit_reached {
+		let next_skip = payload
+			.skip
+			.saturating_add(u64::try_from(payload.files.len()).unwrap_or(u64::MAX));
+		diags.push(
+			Diag::info(
+				DiagKind::Pagination,
+				sf!(
+					"files {}-{} of {}",
+					payload.skip.saturating_add(1),
+					next_skip,
+					payload.total_files
+				),
+			)
+			.continuation(sf!("skip={next_skip}"))
+			.omitted(payload.total_files.saturating_sub(next_skip), Unit::Files),
+		);
+	}
+	Ok((payload, diags))
 }
 
 #[derive(Debug)]
@@ -856,25 +905,9 @@ fn render_payload(payload: &Payload) -> (String, Vec<RenderedSourceLine>) {
 	let mut output = String::new();
 	let mut source_rows = Vec::new();
 	if payload.files.is_empty() {
-		if payload.multi_scope
-			&& payload.skip > 0
-			&& payload.total_files > 0
-			&& payload.skip >= payload.total_files
-		{
-			let suffix = if payload.total_files_lower_bound {
-				"+"
-			} else {
-				""
-			};
-			let _ = write!(
-				output,
-				"No more results ({}{} files total; skip={} is past the end)",
-				payload.total_files, suffix, payload.skip
-			);
-		} else {
+		if payload.total_files == 0 {
 			output.push_str("No matches found");
 		}
-		append_notes(&mut output, &payload.notes);
 		return (output, source_rows);
 	}
 
@@ -891,26 +924,6 @@ fn render_payload(payload: &Payload) -> (String, Vec<RenderedSourceLine>) {
 			render_file_matches(&mut output, &mut source_rows, file);
 		}
 	}
-	if payload.file_limit_reached {
-		let next_skip = payload
-			.skip
-			.saturating_add(u64::try_from(payload.files.len()).unwrap_or(u64::MAX));
-		let suffix = if payload.total_files_lower_bound {
-			"+"
-		} else {
-			""
-		};
-		let _ = write!(
-			output,
-			"\n\nShowing files {}-{} of {}{}. Use skip={} for the next page, or narrow paths/pattern.",
-			payload.skip.saturating_add(1),
-			next_skip,
-			payload.total_files,
-			suffix,
-			next_skip
-		);
-	}
-	append_notes(&mut output, &payload.notes);
 	(output, source_rows)
 }
 
@@ -1028,19 +1041,6 @@ fn push_match_line(
 	*last = Some(number);
 }
 
-fn append_notes(output: &mut String, notes: &[Str]) {
-	if notes.is_empty() {
-		return;
-	}
-	output.push_str("\n\n");
-	for (index, note) in notes.iter().enumerate() {
-		if index > 0 {
-			output.push('\n');
-		}
-		output.push_str(note);
-	}
-}
-
 fn join_strs(values: &[Str]) -> String {
 	values
 		.iter()
@@ -1123,8 +1123,7 @@ mod tests {
 
 	#[test]
 	fn semicolon_roots_preserve_order_and_parse_per_file_ranges() {
-		let (roots, unsplit) =
-			parse_roots(Some(" src ; tests/grep.rs:5-8,12-13 ")).unwrap();
+		let (roots, unsplit) = parse_roots(Some(" src ; tests/grep.rs:5-8,12-13 ")).unwrap();
 		assert_eq!(roots.len(), 2);
 		assert_eq!(roots[0].path, "src");
 		assert!(roots[0].ranges.is_empty());
@@ -1210,7 +1209,7 @@ mod tests {
 		let matches: Vec<_> = (0..22)
 			.map(|index| search_match(format!("src/file-{index:02}.rs"), 0))
 			.collect();
-		let first = make_payload(
+		let (first, _) = make_payload(
 			SearchResult { matches: matches.clone(), multi_scope: true, ..SearchResult::default() },
 			&roots,
 			0,
@@ -1219,7 +1218,7 @@ mod tests {
 		assert_eq!(first.files[0].path, "src/file-00.rs");
 		assert!(first.file_limit_reached);
 
-		let second = make_payload(
+		let (second, _) = make_payload(
 			SearchResult { matches, multi_scope: true, ..SearchResult::default() },
 			&roots,
 			20,

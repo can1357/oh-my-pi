@@ -347,13 +347,12 @@ fn typed_outcomes_are_not_shadowed_by_projection_json() {
 	);
 	assert!(goal.contains("1K left"), "{goal}");
 
-	let legacy_goal =
-		renders_typed::<tools::goal::Params, tools::goal::Payload, tools::goal::Fault>(
-			"goal",
-			json!({"op":"get","goal":{"id":"g0","objective":"legacy","status":"active",
+	let legacy_goal = renders_typed::<tools::goal::Params, tools::goal::Payload, tools::goal::Fault>(
+		"goal",
+		json!({"op":"get","goal":{"id":"g0","objective":"legacy","status":"active",
 				"token_budget":null,"tokens_used":100,"time_used_secs":60},
 				"remaining_tokens":null,"completion_report":null}),
-		);
+	);
 	assert!(legacy_goal.contains("legacy"), "{legacy_goal}");
 
 	let github = renders_typed::<tools::github::Params, tools::github::Payload, tools::github::Fault>(

@@ -69,37 +69,86 @@ omp_con::var! {
 	pub static SV_INTERRUPT_GRACE = sv_interrupt_grace: Duration {
 		default: DEFAULT_INTERRUPT_GRACE,
 		flags: archive,
+		meta: {
+			"legacy.path": "runtime.interrupt_grace",
+		},
 	};
-	/// Default-off durable memory backend.
+	/// Select the durable memory backend.
 	pub static AI_MEMORY_BACKEND = ai_memory_backend: MemoryBackendSetting {
 		default: MemoryBackendSetting::Off,
 		flags: archive,
+		meta: {
+			"ui.tab": "memory",
+			"ui.group": "General",
+			"ui.label": "Memory Backend",
+			"ui.option.off": "Off",
+			"ui.option.off.desc": "No memory subsystem runs",
+			"ui.option.mnemopi": "Mnemopi",
+			"ui.option.mnemopi.desc": "Local SQLite recall/retain backend with optional embeddings",
+			"legacy.path": "memory.backend",
+		},
 	};
-	/// Canonical-project and shared-bank recall policy.
+	/// Choose canonical-project and shared-bank recall policy.
 	pub static AI_MNEMOPI_SCOPING = ai_mnemopi_scoping: BankScopingSetting {
 		default: BankScopingSetting::PerProject,
 		flags: archive,
+		meta: {
+			"ui.tab": "memory",
+			"ui.group": "Mnemopi",
+			"ui.label": "Mnemopi Scoping",
+			"ui.when": "ai_memory_backend=mnemopi",
+			"ui.option.global": "Global",
+			"ui.option.global.desc": "One shared Mnemopi bank for every project",
+			"ui.option.per-project": "Per project",
+			"ui.option.per-project.desc": "Project-local Mnemopi bank per cwd basename",
+			"ui.option.per-project-tagged": "Per project (tagged)",
+			"ui.option.per-project-tagged.desc": "Write to a project-local bank but merge project + shared recall results",
+			"legacy.path": "mnemopi.scoping",
+		},
 	};
-	/// Enable managed-skill guidance and capture eligibility.
+	/// After the agent stops, nudge it to capture lessons to memory and create or enhance isolated managed skills.
 	pub static AI_AUTOLEARN_ENABLED = ai_autolearn_enabled: bool {
 		default: false,
 		flags: archive,
+		meta: {
+			"ui.tab": "memory",
+			"ui.group": "Auto-Learn",
+			"ui.label": "Auto-Learn (experimental)",
+			"legacy.path": "autolearn.enabled",
+		},
 	};
-	/// Run one private managed-skill or lesson capture after a substantive turn.
+	/// Auto-run one private capture turn at stop; this uses extra tokens.
 	pub static AI_AUTOLEARN_AUTO_CONTINUE = ai_autolearn_auto_continue: bool {
 		default: false,
 		flags: archive,
+		meta: {
+			"ui.tab": "memory",
+			"ui.group": "Auto-Learn",
+			"ui.label": "Auto-run capture at stop",
+			"ui.when": "ai_autolearn_enabled=true",
+			"legacy.path": "autolearn.auto_continue",
+			"legacy.path": "autolearn.autoContinue",
+		},
 	};
 	/// Minimum settled tool executions required in one primary turn.
 	pub static AI_AUTOLEARN_MIN_TOOL_CALLS = ai_autolearn_min_tool_calls: i64 {
 		default: 5,
 		min: 0,
 		flags: archive,
+		meta: {
+			"legacy.path": "autolearn.min_tool_calls",
+		},
 	};
-	/// Base directory for Environment-owned isolated worktrees; empty selects the default.
+	/// Base directory for agent-managed worktrees; empty selects ~/.omp/wt and OMP_WORKTREE_DIR overrides it.
 	pub static SV_WORKTREE_BASE = sv_worktree_base: Str {
 		default: Str::default(),
 		flags: archive,
+		meta: {
+			"ui.tab": "tasks",
+			"ui.group": "Isolation",
+			"ui.label": "Worktree Base Directory",
+			"legacy.path": "worktree.base",
+		},
 	};
 }
 
@@ -167,7 +216,7 @@ impl HostSettings {
 			MemoryBackendSetting::Off => omp_memory::MemoryBackend::Off,
 			MemoryBackendSetting::Mnemopi => omp_memory::MemoryBackend::Mnemopi,
 		};
-		let db_path = omp_inference::pi_settings::AI_MNEMOPI_DB_PATH.get(ctx);
+		let db_path = omp_ai::settings::AI_MNEMOPI_DB_PATH.get(ctx);
 		settings.mnemopi.db_path =
 			(!db_path.trim().is_empty()).then(|| PathBuf::from(db_path.as_str()));
 		settings.mnemopi.scoping = match AI_MNEMOPI_SCOPING.get(ctx) {
@@ -206,7 +255,7 @@ mod tests {
 		AI_AUTOLEARN_MIN_TOOL_CALLS
 			.set(&ctx, 9)
 			.expect("set threshold");
-		omp_inference::pi_settings::AI_MNEMOPI_DB_PATH
+		omp_ai::settings::AI_MNEMOPI_DB_PATH
 			.set(&ctx, Str::new_static("/tmp/mnemopi.sqlite"))
 			.expect("set Mnemopi database");
 		let settings = HostSettings::from_con(&ctx);

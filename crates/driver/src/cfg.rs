@@ -513,12 +513,12 @@ mod tests {
 		fs::write(user.join("scout.cfg"), "ai_model @smol\n").unwrap();
 		let files = CfgFiles::with_roots(user, Some(project));
 		let child = omp_con::Ctx::new();
-		omp_con::AI_FASTMODE.set(&child, true).unwrap();
+		omp_agent::AI_FASTMODE.set(&child, true).unwrap();
 		let outcome = child.exec_spawn_configs(&files, "scout").unwrap();
 		assert_eq!(outcome.failed, 0);
-		assert!(!omp_con::AI_FASTMODE.get(&child), "user subagent.cfg ran");
-		assert_eq!(omp_con::AI_THINKING.get(&child).as_str(), "high", "project overlay ran last");
-		assert_eq!(omp_con::AI_MODEL.get(&child).as_str(), "@smol", "user <agent>.cfg ran");
+		assert!(!omp_agent::AI_FASTMODE.get(&child), "user subagent.cfg ran");
+		assert_eq!(omp_agent::AI_THINKING.get(&child).as_str(), "high", "project overlay ran last");
+		assert_eq!(omp_agent::AI_MODEL.get(&child).as_str(), "@smol", "user <agent>.cfg ran");
 	}
 
 	#[test]

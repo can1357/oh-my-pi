@@ -1,4 +1,4 @@
-//! Plan mode commands (pi `builtin-modes.ts:227-257`): `/plan [prompt]`
+//! Plan mode commands: `/plan [prompt]`
 //! toggles the plan Director (ADR 0015 `<meta><directors>` engagement) and
 //! submits the prompt once on; `/plan-review` opens the observer-local
 //! review overlay over the plan artifact.
@@ -15,7 +15,7 @@ pub const PALETTE: &[PaletteEntry] =
 		icon: Icon::Plan,
 	}];
 
-/// pi's default plan artifact (`interactive-mode.ts` `#getPlanFilePath`).
+/// Default plan artifact.
 pub const DEFAULT_PLAN: &str = "local://PLAN.md";
 
 omp_con::cmd! {

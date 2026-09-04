@@ -5,10 +5,10 @@ use strum::IntoStaticStr;
 
 use crate::{NetworkMode, ResourceKind, SandboxError, SandboxOperation, SandboxSpec, WriteMode};
 
-pub(crate) const CPU_PERIOD_MICROS: u64 = 100_000;
+pub const CPU_PERIOD_MICROS: u64 = 100_000;
 
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
-pub(crate) enum GvisorPlaceholder {
+pub enum GvisorPlaceholder {
 	#[strum(serialize = "<omp:gvisor-bundle>")]
 	Bundle,
 	#[strum(serialize = "<omp:gvisor-rootfs>")]
@@ -24,7 +24,7 @@ impl GvisorPlaceholder {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct GvisorOciPlan {
+pub struct GvisorOciPlan {
 	pub(crate) id:                    String,
 	pub(crate) runtime_flags:         Vec<OsString>,
 	pub(crate) denied_syscalls:       Vec<&'static str>,
@@ -71,7 +71,7 @@ impl GvisorOciPlan {
 	}
 }
 
-pub(crate) fn needs_filesystem_view(spec: &SandboxSpec) -> bool {
+pub const fn needs_filesystem_view(spec: &SandboxSpec) -> bool {
 	!spec.readable.is_empty()
 		|| !spec.read_deny.is_empty()
 		|| !spec.write_deny.is_empty()
@@ -79,7 +79,7 @@ pub(crate) fn needs_filesystem_view(spec: &SandboxSpec) -> bool {
 		|| matches!(spec.write, WriteMode::Scoped | WriteMode::Overlay)
 }
 
-pub(crate) fn needs_oci(spec: &SandboxSpec) -> bool {
+pub fn needs_oci(spec: &SandboxSpec) -> bool {
 	spec.network == NetworkMode::Outbound
 		|| spec.no_exec
 		|| needs_filesystem_view(spec)
@@ -88,7 +88,7 @@ pub(crate) fn needs_oci(spec: &SandboxSpec) -> bool {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct OciConfig {
+pub struct OciConfig {
 	pub(crate) oci_version: String,
 	pub(crate) process:     OciProcess,
 	pub(crate) root:        OciRoot,
@@ -99,7 +99,7 @@ pub(crate) struct OciConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct OciProcess {
+pub struct OciProcess {
 	pub(crate) terminal:          bool,
 	pub(crate) args:              Vec<String>,
 	#[serde(skip_serializing_if = "Vec::is_empty")]
@@ -110,7 +110,7 @@ pub(crate) struct OciProcess {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct OciCapabilities {
+pub struct OciCapabilities {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub(crate) bounding:    Vec<String>,
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -124,13 +124,13 @@ pub(crate) struct OciCapabilities {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct OciRoot {
+pub struct OciRoot {
 	pub(crate) path:     String,
 	pub(crate) readonly: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct OciMount {
+pub struct OciMount {
 	pub(crate) destination: String,
 	#[serde(rename = "type")]
 	pub(crate) kind:        String,
@@ -151,7 +151,7 @@ impl OciMount {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct OciLinux {
+pub struct OciLinux {
 	pub(crate) namespaces: Vec<OciNamespace>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub(crate) seccomp:    Option<OciSeccomp>,
@@ -160,7 +160,7 @@ pub(crate) struct OciLinux {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct OciNamespace {
+pub struct OciNamespace {
 	#[serde(rename = "type")]
 	pub(crate) kind: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -169,21 +169,21 @@ pub(crate) struct OciNamespace {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct OciSeccomp {
+pub struct OciSeccomp {
 	pub(crate) default_action: String,
 	pub(crate) syscalls:       Vec<OciSeccompSyscall>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct OciSeccompSyscall {
+pub struct OciSeccompSyscall {
 	pub(crate) names:     Vec<String>,
 	pub(crate) action:    String,
 	pub(crate) errno_ret: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct OciResources {
+pub struct OciResources {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub(crate) cpu:    Option<OciCpu>,
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -193,23 +193,23 @@ pub(crate) struct OciResources {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct OciCpu {
+pub struct OciCpu {
 	pub(crate) quota:  i64,
 	pub(crate) period: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct OciMemory {
+pub struct OciMemory {
 	pub(crate) limit: i64,
 	pub(crate) swap:  i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct OciPids {
+pub struct OciPids {
 	pub(crate) limit: i64,
 }
 
-pub(crate) fn config(
+pub fn config(
 	spec: &SandboxSpec,
 	program: &Path,
 	plan: &GvisorOciPlan,
@@ -273,7 +273,7 @@ pub(crate) fn config(
 	}
 }
 
-pub(crate) fn preview_config(
+pub fn preview_config(
 	spec: &SandboxSpec,
 	program: &Path,
 	plan: &GvisorOciPlan,
@@ -294,7 +294,7 @@ pub(crate) fn preview_config(
 			source,
 		})
 }
-pub(crate) fn validate_resources(spec: &SandboxSpec) -> Result<(), SandboxError> {
+pub fn validate_resources(spec: &SandboxSpec) -> Result<(), SandboxError> {
 	if let Some(cores) = spec.resources.cpu_cores()
 		&& cores * CPU_PERIOD_MICROS as f64 > i64::MAX as f64
 	{
@@ -311,7 +311,7 @@ pub(crate) fn validate_resources(spec: &SandboxSpec) -> Result<(), SandboxError>
 	Ok(())
 }
 
-pub(crate) fn resources(spec: &SandboxSpec) -> Option<OciResources> {
+pub fn resources(spec: &SandboxSpec) -> Option<OciResources> {
 	if spec.resources.is_empty() {
 		return None;
 	}

@@ -14,16 +14,22 @@ use http::{
 	HeaderMap, HeaderValue,
 	header::{ACCEPT, ETAG, IF_NONE_MATCH, USER_AGENT},
 };
-use omp_cache::github_cache::{GithubCache, GithubCacheKey, GithubCacheStatus, GithubResourceKind};
-use omp_catalog::AuthSpecId;
-use omp_core::{CowBytes, Str, sf};
-use omp_inference::{
+use omp_ai::{
 	auth::{CredentialError, CredentialFuture, CredentialLease, CredentialNeed, HeaderPlacement},
 	id::{AccountId, PrincipalId},
 };
-use omp_tools::read::{Fault, resolver::Resolve, selector::ParsedSelector};
+use omp_cache::github_cache::{GithubCache, GithubCacheKey, GithubCacheStatus, GithubResourceKind};
+use omp_catalog::AuthSpecId;
+use omp_core::{CowBytes, Str, sf};
+use omp_tool::{Diag, DiagKind};
+use omp_tools::read::{
+	Fault,
+	resolver::{Resolve, ResolvedRead},
+	selector::ParsedSelector,
+};
 use omp_vcs::git::GitRepo;
 use serde_json::Value;
+use smallvec::smallvec;
 
 use super::tool_url;
 
@@ -54,8 +60,7 @@ impl GithubRepo {
 	}
 
 	pub(super) fn new(host: &str, owner: &str, name: &str) -> Result<Self, Fault> {
-		if !valid_github_host(host) || !valid_repo_component(owner) || !valid_repo_component(name)
-		{
+		if !valid_github_host(host) || !valid_repo_component(owner) || !valid_repo_component(name) {
 			return Err(invalid("GitHub repository must be [host/]owner/repo."));
 		}
 		let host = Str::new(host);
@@ -216,7 +221,7 @@ impl GithubResolver {
 		skip_all,
 		fields(scheme = ?self.scheme, repo = tracing::field::Empty, number = tracing::field::Empty),
 	)]
-	async fn resolve(&self, resource: &str, query: Option<&str>) -> Result<Vec<u8>, Fault> {
+	async fn resolve(&self, resource: &str, query: Option<&str>) -> Result<GithubRead, Fault> {
 		let target = Target::parse(self.scheme, resource, query, &self.root)?;
 		tracing::Span::current().record("repo", target.repo.identity());
 		if let Some(number) = target.number {
@@ -229,7 +234,7 @@ impl GithubResolver {
 			.as_ref()
 			.is_some_and(|entry| entry.status == GithubCacheStatus::Fresh)
 		{
-			return Ok(cached.expect("fresh entry").body.to_vec());
+			return Ok(GithubRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
 		}
 		match self
 			.fetch(&target, cached.as_ref().and_then(|entry| entry.etag.as_deref()))
@@ -237,7 +242,10 @@ impl GithubResolver {
 		{
 			Ok(Fetch::NotModified) => {
 				self.cache.touch(&key, now).map_err(cache_fault)?;
-				Ok(cached.expect("304 requires cached entity").body.to_vec())
+				Ok(GithubRead {
+					data:  cached.expect("304 requires cached entity").body.to_vec(),
+					stale: false,
+				})
 			},
 			Ok(Fetch::Body { body, etag }) => {
 				let comments = if target.comments_enabled() {
@@ -250,11 +258,7 @@ impl GithubResolver {
 								"GitHub comments refresh failed",
 							);
 							if let Some(cached) = &cached {
-								let mut warning =
-									b"> WARNING: Live GitHub comments refresh failed; cached content may be stale.\n\n"
-										.to_vec();
-								warning.extend_from_slice(&cached.body);
-								return Ok(warning);
+								return Ok(GithubRead { data: cached.body.to_vec(), stale: true });
 							}
 							return Err(error);
 						},
@@ -267,7 +271,7 @@ impl GithubResolver {
 					.cache
 					.put(&key, &rendered, etag.as_deref(), now)
 					.map_err(cache_fault)?;
-				Ok(rendered)
+				Ok(GithubRead { data: rendered, stale: false })
 			},
 			Err(error) => {
 				tracing::warn!(
@@ -276,11 +280,7 @@ impl GithubResolver {
 					"GitHub resource refresh failed",
 				);
 				if let Some(cached) = cached {
-					let mut warning =
-						b"> WARNING: Live GitHub refresh failed; cached content may be stale.\n\n"
-							.to_vec();
-					warning.extend_from_slice(&cached.body);
-					Ok(warning)
+					Ok(GithubRead { data: cached.body.to_vec(), stale: true })
 				} else {
 					Err(error)
 				}
@@ -407,8 +407,19 @@ impl Resolve for GithubResolver {
 		resource: &'a str,
 		selector: &'a ParsedSelector,
 	) -> Result<CowBytes<'static>, Fault> {
-		let bytes = self.resolve(resource, None).await?;
-		tool_url::select_bytes(&Default::default(), resource, CowBytes::from(bytes), selector)
+		self
+			.read_with_diags(resource, selector)
+			.await
+			.map(|resolved| resolved.data)
+	}
+
+	async fn read_with_diags<'a>(
+		&'a self,
+		resource: &'a str,
+		selector: &'a ParsedSelector,
+	) -> Result<ResolvedRead, Fault> {
+		let resolved = self.resolve(resource, None).await?;
+		selected_read(resolved, resource, selector)
 	}
 
 	async fn read_query<'a>(
@@ -417,15 +428,54 @@ impl Resolve for GithubResolver {
 		query: Option<&'a str>,
 		selector: &'a ParsedSelector,
 	) -> Result<CowBytes<'static>, Fault> {
-		let bytes = self.resolve(resource, query).await?;
-		tool_url::select_bytes(&Default::default(), resource, CowBytes::from(bytes), selector)
+		self
+			.read_query_with_diags(resource, query, selector)
+			.await
+			.map(|resolved| resolved.data)
 	}
+
+	async fn read_query_with_diags<'a>(
+		&'a self,
+		resource: &'a str,
+		query: Option<&'a str>,
+		selector: &'a ParsedSelector,
+	) -> Result<ResolvedRead, Fault> {
+		let resolved = self.resolve(resource, query).await?;
+		selected_read(resolved, resource, selector)
+	}
+}
+
+fn selected_read(
+	resolved: GithubRead,
+	resource: &str,
+	selector: &ParsedSelector,
+) -> Result<ResolvedRead, Fault> {
+	let data = tool_url::select_bytes(
+		&Default::default(),
+		resource,
+		CowBytes::from(resolved.data),
+		selector,
+	)?;
+	let diags = if resolved.stale {
+		smallvec![Diag::warn(
+			DiagKind::StaleCache,
+			"Live GitHub refresh failed; cached content may be stale.",
+		)]
+	} else {
+		smallvec![]
+	};
+	Ok(ResolvedRead { data, diags })
 }
 
 impl fmt::Debug for GithubResolver {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.write_str("GithubResolver(..)")
 	}
+}
+
+struct GithubRead {
+	data:  Vec<u8>,
+	stale: bool,
 }
 
 enum Fetch {
@@ -822,6 +872,21 @@ fn http_fault(error: impl Display) -> Fault {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn stale_cache_is_reported_out_of_band_without_changing_document_bytes() {
+		let cached = b"# Cached issue\n\nBody".to_vec();
+		let resolved = selected_read(
+			GithubRead { data: cached.clone(), stale: true },
+			"owner/repo/1",
+			&ParsedSelector::None,
+		)
+		.expect("cached resource");
+		assert_eq!(resolved.data.as_ref(), cached.as_slice());
+		assert_eq!(resolved.diags.len(), 1);
+		assert_eq!(resolved.diags[0].native_kind(), Some(DiagKind::StaleCache));
+		assert_eq!(resolved.diags[0].severity, omp_tool::Severity::Warn);
+	}
 
 	#[test]
 	fn target_parses_dotted_and_single_label_enterprise_hosts() {

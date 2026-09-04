@@ -78,7 +78,7 @@ validates, and calls long-tail devices. `crates/envd/src/mcp/discovery.rs` compo
 Claude, Agent Plugins, Codex, Gemini, OpenCode, Cursor, Windsurf, VS Code, and standalone MCP
 sources with deterministic provider/scope precedence; reload re-runs discovery without changing
 the permanent model-facing roster. The `image_gen@4` device in
-`crates/envd/src/media_devices.rs` is mounted only through this surface and implements pi's
+`crates/envd/src/media_devices.rs` is mounted only through this surface and implements a
 structured generation/edit schema, configured/active/automatic provider ordering, bounded image
 inputs and outputs, typed provider-attempt updates and faults, cancellation, a three-minute
 deadline, content-addressed retention, and optional atomic workspace output. The `tts@4` device in

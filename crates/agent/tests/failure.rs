@@ -6,13 +6,13 @@ use omp_agent::{
 	BoxFut, Director, DirectorError, DirectorRegistry, DirectorStack, DispatchPolicy, Inference,
 	Kernel, KernelError, MutDirectorCx, Prepared, PromptSource, RunControl, StaticPrompt, TurnInput,
 };
-use omp_core::Str;
-use omp_dom::{PropId, PropKey, Value};
-use omp_inference::{
+use omp_ai::{
 	BlockKind, ChatEvent, ChatRequest, ChatStream, Error, ErrorDetail, ErrorKind, ErrorPhase,
 	ExecutionReceipt, ProviderId, ReasonId, RecoveryKind, RecoveryRecord, RequestId, ResponseMeta,
 	RetryAction, RouteId,
 };
+use omp_core::Str;
+use omp_dom::{PropId, PropKey, Value};
 use omp_journal::blob::BlobStore;
 use omp_session::{ComponentRegistry, Session};
 

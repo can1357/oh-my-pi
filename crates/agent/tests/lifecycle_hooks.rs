@@ -8,8 +8,8 @@ use futures::Stream;
 use omp_agent::{
 	ApprovalBook, ApprovalDecision, ApprovalScope, ApprovalSource, ApprovalSpec, DispatchPolicy,
 	GateDecision, GateError, GateEvent, GateOutcome, HookDecision, HookGate, HookPatch, HookPhase,
-	Kernel, KernelEvent, LifecycleHooks, OnFailure, RunControl, SourceRef, StaticPrompt, TicketState,
-	ToolAdmission, ToolAdmissionVerdict, TurnInput, TurnStop, Up, When,
+	Kernel, KernelEvent, LifecycleHooks, OnFailure, RunControl, SourceRef, StaticPrompt,
+	TicketState, ToolAdmission, ToolAdmissionVerdict, TurnInput, TurnStop, Up, When,
 };
 use omp_core::sf;
 use omp_journal::{blob::BlobStore, kind};
@@ -90,19 +90,19 @@ fn capture_registry(seen: Arc<Mutex<Option<Value>>>) -> Arc<Registry> {
 
 fn approval_spec(title: &'static str, body: &'static str) -> ApprovalSpec {
 	ApprovalSpec {
-		title: sf!(title),
-		body: sf!(body),
-		subject: sf!("capture"),
-		kind: sf!("exec"),
-		scopes: vec![sf!("once")],
-		default: Some(false),
-		route: sf!("user"),
-		approver: None,
-		timeout_ms: 1_000,
-		unreachable: sf!("fail_closed"),
+		title:         sf!(title),
+		body:          sf!(body),
+		subject:       sf!("capture"),
+		kind:          sf!("exec"),
+		scopes:        vec![sf!("once")],
+		default:       Some(false),
+		route:         sf!("user"),
+		approver:      None,
+		timeout_ms:    1_000,
+		unreachable:   sf!("fail_closed"),
 		require_human: true,
-		pattern: None,
-		evidence: vec![sf!("host_generation=7"), sf!("session_generation=3")],
+		pattern:       None,
+		evidence:      vec![sf!("host_generation=7"), sf!("session_generation=3")],
 	}
 }
 
@@ -174,10 +174,9 @@ async fn timeout_obeys_each_subscription_failure_policy() {
 
 #[tokio::test]
 async fn delegated_host_loss_uses_the_published_failure_class() {
-	for (event, denied) in [
-		(HookEventId::HookEventSessionStart, false),
-		(HookEventId::HookEventToolCall, true),
-	] {
+	for (event, denied) in
+		[(HookEventId::HookEventSessionStart, false), (HookEventId::HookEventToolCall, true)]
+	{
 		let (gate, receiver) = HookGate::delegated_channel();
 		let bit = 1_u128 << (event as u32);
 		gate.replace_masks(bit, denied.then_some(bit).unwrap_or(0));
@@ -366,16 +365,15 @@ async fn lifecycle_and_native_approval_share_one_durable_ticket_and_replay() {
 	let (gate, receiver) = HookGate::channel();
 	let gate = Arc::new(gate);
 	gate
-		.subscribe("test", [subscription(
-			1,
-			HookEventId::HookEventToolCall,
-			HookPhase::Approval,
-		)])
+		.subscribe("test", [subscription(1, HookEventId::HookEventToolCall, HookPhase::Approval)])
 		.expect("approval subscription");
 	let responder = {
 		let gate = Arc::clone(&gate);
 		tokio::spawn(async move {
-			let dispatch = receiver.recv_async().await.expect("tool-call approval phase");
+			let dispatch = receiver
+				.recv_async()
+				.await
+				.expect("tool-call approval phase");
 			gate
 				.answer(dispatch.dispatch_id, vec![(
 					1,
@@ -411,20 +409,20 @@ async fn lifecycle_and_native_approval_share_one_durable_ticket_and_replay() {
 				assert_eq!(ticket.reasons.len(), 2, "one ticket merges both authorities");
 				assert_eq!(ticket.reasons[0].title, "Extension approval");
 				assert_eq!(ticket.reasons[1].title, "Native capability approval");
-				assert_eq!(
-					ticket.reasons[0].evidence,
-					[sf!("host_generation=7"), sf!("session_generation=3")],
-				);
+				assert_eq!(ticket.reasons[0].evidence, [
+					sf!("host_generation=7"),
+					sf!("session_generation=3")
+				],);
 				mailbox
 					.send(Up::Approve {
-						id: ticket.ticket_id,
+						id:       ticket.ticket_id,
 						decision: ApprovalDecision {
-							approved: true,
-							scope: ApprovalScope::Once,
-							source: ApprovalSource::User,
+							approved:   true,
+							scope:      ApprovalScope::Once,
+							source:     ApprovalSource::User,
 							decided_by: Some(sf!("tester")),
-							reason: None,
-							audited: true,
+							reason:     None,
+							audited:    true,
 						},
 					})
 					.expect("approve merged ticket");
@@ -455,23 +453,19 @@ async fn lifecycle_approval_timeout_denies_before_execution_and_replays() {
 	let (gate, receiver) = HookGate::channel();
 	let gate = Arc::new(gate);
 	gate
-		.subscribe("test", [subscription(
-			1,
-			HookEventId::HookEventToolCall,
-			HookPhase::Approval,
-		)])
+		.subscribe("test", [subscription(1, HookEventId::HookEventToolCall, HookPhase::Approval)])
 		.expect("approval subscription");
 	let responder = {
 		let gate = Arc::clone(&gate);
 		tokio::spawn(async move {
-			let dispatch = receiver.recv_async().await.expect("tool-call approval phase");
+			let dispatch = receiver
+				.recv_async()
+				.await
+				.expect("tool-call approval phase");
 			let mut spec = approval_spec("Extension approval", "extension policy");
 			spec.timeout_ms = 1;
 			gate
-				.answer(
-					dispatch.dispatch_id,
-					vec![(1, GateDecision::RequireApproval(spec))],
-				)
+				.answer(dispatch.dispatch_id, vec![(1, GateDecision::RequireApproval(spec))])
 				.expect("approval requirement");
 		})
 	};
@@ -533,34 +527,29 @@ async fn cancellation_withdraws_lifecycle_approval_and_never_starts_the_tool() {
 	let (gate, receiver) = HookGate::channel();
 	let gate = Arc::new(gate);
 	gate
-		.subscribe("test", [subscription(
-			1,
-			HookEventId::HookEventToolCall,
-			HookPhase::Approval,
-		)])
+		.subscribe("test", [subscription(1, HookEventId::HookEventToolCall, HookPhase::Approval)])
 		.expect("approval subscription");
 	let responder = {
 		let gate = Arc::clone(&gate);
 		tokio::spawn(async move {
-			let dispatch = receiver.recv_async().await.expect("tool-call approval phase");
+			let dispatch = receiver
+				.recv_async()
+				.await
+				.expect("tool-call approval phase");
 			let mut spec = approval_spec("Extension approval", "extension policy");
 			spec.timeout_ms = 0;
 			gate
-				.answer(
-					dispatch.dispatch_id,
-					vec![(1, GateDecision::RequireApproval(spec))],
-				)
+				.answer(dispatch.dispatch_id, vec![(1, GateDecision::RequireApproval(spec))])
 				.expect("approval requirement");
 		})
 	};
 	let seen = Arc::new(Mutex::new(None));
 	let temp = tempfile::tempdir().expect("tempdir");
-	let (inference, _) =
-		ScriptedInference::new([tool_script(
-			"capture-cancel",
-			"capture",
-			serde_json::json!({"value": 1}),
-		)]);
+	let (inference, _) = ScriptedInference::new([tool_script(
+		"capture-cancel",
+		"capture",
+		serde_json::json!({"value": 1}),
+	)]);
 	let mut kernel = Kernel::new(
 		inference,
 		capture_registry(Arc::clone(&seen)),

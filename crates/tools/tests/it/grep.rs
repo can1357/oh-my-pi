@@ -6,8 +6,8 @@ use bytes::Bytes;
 use futures::{StreamExt, executor::block_on};
 use omp_core::{Str, sf};
 use omp_tool::{
-	CallOutcome, CapsBase, Claims, ErasedEv, ErasedOutcome, IncomingParams, ModelClass, Part,
-	Precedence, Presentation, PromptCaps, Registry, Tool, VisibilityReceipt, VisibleSourceLine,
+	CallOutcome, CapsBase, Diag, DiagKind, Ev, IncomingParams, ModelClass, Omitted, Part,
+	PromptCaps, Severity, Tool, ToolTerminal, Unit, VisibilityReceipt, VisibleSourceLine,
 };
 use omp_tools::{glob, grep};
 use parking_lot::Mutex;
@@ -60,6 +60,7 @@ impl grep::WorkspaceSearch for FakeWorkspace {
 struct Invocation {
 	outcome: CallOutcome<grep::Payload, grep::Fault>,
 	useless: bool,
+	diags:   Vec<Diag>,
 }
 
 fn fake(result: grep::SearchResult) -> FakeWorkspace {
@@ -94,32 +95,29 @@ fn invoke_with_context(
 	context_before: u32,
 	context_after: u32,
 ) -> Invocation {
-	let mut registry = Registry::new();
-	registry
-		.register(
-			grep::tool(workspace.clone(), context_before, context_after),
-			Presentation::Slot,
-			Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
-		)
-		.expect("grep schema and revision register");
+	let tool = grep::tool(workspace.clone(), context_before, context_after);
 	let (feed, params) = IncomingParams::channel();
 	feed
 		.args_committed(Str::new(raw))
 		.expect("invocation consumer remains live");
-	let events = block_on(
-		registry
-			.invoke("grep", params)
-			.expect("registered grep is invokable")
-			.collect::<Vec<_>>(),
-	);
-	let [Ok(ErasedEv::Done(ErasedOutcome::Done { verdict, useless }))] = events.as_slice() else {
-		panic!("expected one terminal grep event: {events:?}");
-	};
-	Invocation {
-		outcome: serde_json::from_slice(verdict)
-			.expect("typed grep outcome survives registry erasure"),
-		useless: *useless,
+	let events = block_on(tool.call(params).collect::<Vec<_>>());
+	let mut diags = Vec::new();
+	let mut terminal = None;
+	for event in events {
+		match event {
+			Ev::Diag(diag) => diags.push(diag),
+			Ev::Done(ToolTerminal::Done { result, useless }) => {
+				let outcome = match result {
+					Ok(payload) => CallOutcome::Ok(payload),
+					Err(fault) => CallOutcome::Faulted(fault),
+				};
+				terminal = Some((outcome, useless));
+			},
+			other => panic!("unexpected grep event: {other:?}"),
+		}
 	}
+	let (outcome, useless) = terminal.expect("grep emits one terminal outcome");
+	Invocation { outcome, useless, diags }
 }
 
 fn invoke(workspace: &FakeWorkspace, raw: &str) -> Invocation {
@@ -142,10 +140,11 @@ fn prompt(workspace: &FakeWorkspace, outcome: &CallOutcome<grep::Payload, grep::
 		CallOutcome::Faulted(fault) => tool.prompt(Err(fault), &caps),
 		other => panic!("expected a projectable grep outcome, got {other:?}"),
 	};
-	let [Part::Text { text }] = parts.as_slice() else {
-		panic!("grep must project exactly one text part: {parts:?}");
-	};
-	text.to_string()
+	match parts.as_slice() {
+		[] => String::new(),
+		[Part::Text { text }] => text.to_string(),
+		_ => panic!("grep must project at most one text part: {parts:?}"),
+	}
 }
 
 fn invoke_prompt(workspace: &FakeWorkspace, raw: &str) -> (String, bool) {
@@ -272,7 +271,7 @@ fn asymmetric_and_zero_context_are_request_scoped_and_preserve_source_order() {
 }
 
 #[test]
-fn twenty_file_window_has_exact_footer_and_skip_twenty_returns_next_page() {
+fn twenty_file_window_emits_pagination_diag_and_skip_twenty_returns_next_page() {
 	let matches = (1..=21)
 		.map(|index| {
 			let path = format!("page/file-{index:02}.rs");
@@ -282,24 +281,42 @@ fn twenty_file_window_has_exact_footer_and_skip_twenty_returns_next_page() {
 	let workspace =
 		fake(grep::SearchResult { matches, multi_scope: true, ..grep::SearchResult::default() });
 
-	let (first, first_useless) = invoke_prompt(&workspace, r#"{"pattern":"needle","path":"page"}"#);
+	let first = invoke(&workspace, r#"{"pattern":"needle","path":"page"}"#);
+	let first_text = prompt(&workspace, &first.outcome);
 	let expected_files = (1..=20)
 		.map(|index| format!("## file-{index:02}.rs#CAFE\n*1:needle"))
 		.collect::<Vec<_>>()
 		.join("\n");
-	assert_eq!(
-		first,
-		format!(
-			"# page/\n{expected_files}\n\nShowing files 1-20 of 21. Use skip=20 for the next page, \
-			 or narrow paths/pattern."
-		)
-	);
-	assert!(!first_useless);
+	assert_eq!(first_text, format!("# page/\n{expected_files}"));
+	assert!(!first.useless);
+	assert_eq!(first.diags.len(), 1);
+	let diag = &first.diags[0];
+	assert_eq!(diag.native_kind(), Some(DiagKind::Pagination));
+	assert_eq!(diag.severity, Severity::Info);
+	assert_eq!(diag.continuation.as_deref(), Some("skip=20"));
+	assert_eq!(diag.omitted, Some(Omitted { count: 1, unit: Unit::Files }));
 
 	let (second, second_useless) =
 		invoke_prompt(&workspace, r#"{"pattern":"needle","path":"page","skip":20}"#);
 	assert_eq!(second, "# page/\n## file-21.rs#CAFE\n*1:needle");
 	assert!(!second_useless);
+}
+
+#[test]
+fn skip_past_the_last_matching_file_has_empty_data_and_range_diag() {
+	let workspace = fake(grep::SearchResult {
+		matches: vec![
+			matched("page/one.rs", 1, "needle", None),
+			matched("page/two.rs", 1, "needle", None),
+		],
+		multi_scope: true,
+		..grep::SearchResult::default()
+	});
+	let invocation = invoke(&workspace, r#"{"pattern":"needle","path":"page","skip":2}"#);
+	assert_eq!(prompt(&workspace, &invocation.outcome), "");
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::RangeOutOfBounds));
+	assert_eq!(invocation.diags[0].severity, Severity::Warn);
 }
 
 #[test]
@@ -417,20 +434,61 @@ fn central_visibility_receipt_authorizes_only_dispatcher_retained_rows() {
 }
 
 #[test]
-fn explicit_oversized_file_note_is_appended_verbatim() {
+fn explicit_oversized_file_emits_partial_scan_diag() {
 	let workspace = fake(grep::SearchResult {
 		matches: vec![matched("large.log", 1, "needle", None)],
 		multi_scope: false,
 		oversized_files: vec![sf!("large.log")],
 		..grep::SearchResult::default()
 	});
-	let (text, useless) = invoke_prompt(&workspace, r#"{"pattern":"needle","path":"large.log"}"#);
+	let invocation = invoke(&workspace, r#"{"pattern":"needle","path":"large.log"}"#);
+	assert_eq!(prompt(&workspace, &invocation.outcome), "*1:needle");
+	assert!(!invocation.useless);
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::PartialScan));
+	assert_eq!(invocation.diags[0].severity, Severity::Warn);
+}
+
+#[test]
+fn skipped_inputs_emit_structured_diags_without_changing_result_data() {
+	let workspace = fake(grep::SearchResult {
+		matches: vec![matched("src/lib.rs", 1, "needle", None)],
+		multi_scope: true,
+		missing_paths: vec![sf!("missing")],
+		archive_unreadable: vec![sf!("archive.zip:binary.bin")],
+		oversized_files: vec![sf!("large.log")],
+		..grep::SearchResult::default()
+	});
+	let invocation = invoke(&workspace, r#"{"pattern":"needle","path":"src; missing"}"#);
+	assert_eq!(prompt(&workspace, &invocation.outcome), "# src/\n## lib.rs\n*1:needle");
 	assert_eq!(
-		text,
-		"*1:needle\n\nSearched only the first 4MB of large files (matches past the 4MB window are \
-		 not shown; use `read` for the rest): large.log"
+		invocation
+			.diags
+			.iter()
+			.map(Diag::native_kind)
+			.collect::<Vec<_>>(),
+		[Some(DiagKind::MissingPaths), Some(DiagKind::Skipped), Some(DiagKind::PartialScan),]
 	);
-	assert!(!useless);
+	assert!(
+		invocation
+			.diags
+			.iter()
+			.all(|diag| diag.severity == Severity::Warn)
+	);
+}
+
+#[test]
+fn unnamed_unreadable_large_files_emit_skipped_diag() {
+	let workspace = fake(grep::SearchResult {
+		matches: vec![matched("src/lib.rs", 1, "needle", None)],
+		skipped_oversized: 2,
+		..grep::SearchResult::default()
+	});
+	let invocation = invoke(&workspace, r#"{"pattern":"needle","path":"src/lib.rs"}"#);
+	assert_eq!(prompt(&workspace, &invocation.outcome), "*1:needle");
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::Skipped));
+	assert_eq!(invocation.diags[0].severity, Severity::Warn);
 }
 
 #[test]

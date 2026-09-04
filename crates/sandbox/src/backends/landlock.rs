@@ -41,8 +41,8 @@ use crate::{
 /// [--proxy-relay BROKER_UDS PORT] -- PROGRAM ARGS...`.
 pub const HIDDEN_CHILD_ARG: &str = "--omp-sandbox-child";
 
-pub(crate) const BPF_PLACEHOLDER: &str = "@omp-sandbox-bpf@";
-pub(crate) const POLICY_PLACEHOLDER: &str = "@omp-sandbox-landlock-policy@";
+pub const BPF_PLACEHOLDER: &str = "@omp-sandbox-bpf@";
+pub const POLICY_PLACEHOLDER: &str = "@omp-sandbox-landlock-policy@";
 #[cfg(target_os = "linux")]
 const POLICY_MAGIC: &[u8; 8] = b"OMPLL\0\0\x01";
 #[cfg(target_os = "linux")]
@@ -59,11 +59,11 @@ const LANDLOCK_CAPABILITIES: CapabilitySet = CapabilitySet::one(Capability::EnvS
 	.union(CapabilitySet::one(Capability::NetEnable))
 	.union(CapabilitySet::one(Capability::NetOutbound));
 
-pub(crate) const fn capabilities() -> CapabilitySet {
+pub const fn capabilities() -> CapabilitySet {
 	LANDLOCK_CAPABILITIES
 }
 
-pub(crate) fn compile(
+pub fn compile(
 	spec: &SandboxSpec,
 	program: &Path,
 	requested: CapabilitySet,
@@ -150,14 +150,14 @@ pub(crate) fn compile(
 	Ok(plan)
 }
 
-pub(crate) fn prepare(
+pub const fn prepare(
 	spec: &SandboxSpec,
 	prepared: &mut PreparedSandbox,
 ) -> Result<(), SandboxError> {
 	#[cfg(not(target_os = "linux"))]
 	{
 		let _ = (spec, prepared);
-		return Err(SandboxError::UnsupportedHost { os: std::env::consts::OS });
+		Err(SandboxError::UnsupportedHost { os: std::env::consts::OS })
 	}
 	#[cfg(target_os = "linux")]
 	{
@@ -293,7 +293,7 @@ fn write_paths(writer: &mut impl Write, paths: &[PathBuf]) -> io::Result<()> {
 
 /// Returns the running kernel's Landlock ABI, or `None` when unavailable.
 #[must_use]
-pub fn abi() -> Option<u32> {
+pub const fn abi() -> Option<u32> {
 	#[cfg(not(target_os = "linux"))]
 	{
 		None
@@ -313,7 +313,7 @@ pub fn abi() -> Option<u32> {
 	}
 }
 
-pub(crate) fn probe() -> BackendStatus {
+pub fn probe() -> BackendStatus {
 	#[cfg(not(target_os = "linux"))]
 	{
 		BackendStatus::unavailable(Backend::Landlock, ProbeFailure::WrongHost {
@@ -345,7 +345,7 @@ pub(crate) fn probe() -> BackendStatus {
 /// The caller must dispatch this before launching untrusted work. The helper
 /// reads an owned BPF artifact, optionally applies an owned Landlock manifest,
 /// and then `execve(2)`s the command following the required `--` separator.
-pub fn run_child_entry() -> Result<(), SandboxError> {
+pub const fn run_child_entry() -> Result<(), SandboxError> {
 	#[cfg(not(target_os = "linux"))]
 	{
 		Err(SandboxError::UnsupportedHost { os: std::env::consts::OS })

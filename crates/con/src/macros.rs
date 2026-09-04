@@ -55,13 +55,17 @@ macro_rules! __var_flag {
 ///         validate: |_ctx, v| if *v == 0 { Err("zero gravity".into()) } else { Ok(()) },
 ///         on_change: |_ctx, old, new| println!("{old} -> {new}"),
 ///         flags: archive | replicated,
+///         meta: {
+///             "ui.tab": "model",
+///             "legacy.path": "gravity",
+///         },
 ///     };
 /// }
 /// ```
 ///
 /// Fields after `default` are optional but order-fixed: `min`, `max`,
-/// `suggest` *or* `complete`, `validate`, `on_change`, `flags`. Hooks are
-/// typed against the declared Rust type and must be non-capturing. The doc
+/// `suggest` *or* `complete`, `validate`, `on_change`, `flags`, `meta`. Hooks
+/// are typed against the declared Rust type and must be non-capturing. The doc
 /// comment becomes the console description.
 #[macro_export]
 macro_rules! var {
@@ -76,6 +80,7 @@ macro_rules! var {
 			$(, validate: $validate:expr)?
 			$(, on_change: $change:expr)?
 			$(, flags: $($flag:tt)|+)?
+			$(, meta: { $($mk:literal : $mv:literal),+ $(,)? })?
 			$(,)?
 		};
 	)+) => {$(
@@ -117,7 +122,8 @@ macro_rules! var {
 				}
 				change_shim
 			}))?
-			$(.flag($crate::VarFlags::NONE $(.with($crate::__var_flag!($flag)))+))?;
+			$(.flag($crate::VarFlags::NONE $(.with($crate::__var_flag!($flag)))+))?
+			$(.meta(&[$(($mk, $mv)),+]))?;
 			#[$crate::__private::linkme::distributed_slice($crate::REGISTRY)]
 			#[linkme(crate = $crate::__private::linkme)]
 			static REG: $crate::RegItem = $crate::RegItem::Var(&SPEC);

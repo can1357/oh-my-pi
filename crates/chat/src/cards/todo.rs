@@ -41,8 +41,8 @@ fn render_live(view: &CardView<'_>) -> Component {
 	.into_component()
 }
 
-/// pi `#updateTodoStrikeAnimation` ticks the completion strike every 65 ms
-/// for `TODO_STRIKE_TOTAL_FRAMES` frames; `<strike reveal>` sweeps over the
+/// The completion strike ticks every 65 ms for `TODO_STRIKE_TOTAL_FRAMES`
+/// frames; `<strike reveal>` sweeps over the
 /// same total on the shared clock.
 const TODO_STRIKE_FRAME_MS: u64 = 65;
 
@@ -72,21 +72,19 @@ fn completion_sweeps(
 			.is_none_or(|named| named == phase)
 }
 
-/// Collapsed phases show at most this many task rows (pi
-/// `PREVIEW_LIMITS.COLLAPSED_ITEMS`).
+/// Collapsed phases show at most this many task rows.
 const COLLAPSED_ITEMS: usize = 8;
 
-/// Closed rows kept above the open window so a completion stays visible
-/// (pi `COLLAPSED_CLOSED_CONTEXT`).
+/// Closed rows kept above the open window so a completion stays visible.
 const COLLAPSED_CLOSED_CONTEXT: usize = 1;
 
-/// A task the collapsed viewport hides (pi `isClosedTodo`).
+/// A task the collapsed viewport hides.
 fn is_closed(task: &Task) -> bool {
 	matches!(task.status, Status::Completed | Status::Abandoned)
 }
 
-/// Collapsed task rows for one phase plus the trailing summary (pi
-/// `selectCollapsedTodos`): the last closed task leads, then in-progress
+/// Collapsed task rows for one phase plus the trailing summary: the last
+/// closed task leads, then in-progress
 /// work, then the pending tasks that follow it, capped at `cap`.
 fn select_collapsed(tasks: &[Task], cap: usize) -> (Vec<&Task>, Option<Str>) {
 	let open = tasks
@@ -108,8 +106,8 @@ fn select_collapsed(tasks: &[Task], cap: usize) -> (Vec<&Task>, Option<Str>) {
 	(items, summary)
 }
 
-/// pi `selectWithinCap`: every in-progress task first (in todo order), then
-/// the tasks following the first active one until `cap`; when actives alone
+/// Selects every in-progress task first (in todo order), then the tasks
+/// following the first active one until `cap`; when actives alone
 /// overflow, only they show and the summary counts the hidden actives.
 fn select_within_cap(base: Vec<&Task>, cap: usize) -> (Vec<&Task>, Option<Str>) {
 	if base.len() <= cap {
@@ -146,8 +144,8 @@ fn select_within_cap(base: Vec<&Task>, cap: usize) -> (Vec<&Task>, Option<Str>) 
 	(items, summary)
 }
 
-/// Phases this update touched (pi `computeTouchedPhases`): the phase holding
-/// in-progress work, phases with a task just completed, phases named by the
+/// Phases this update touched: the phase holding in-progress work, phases
+/// with a task just completed, phases named by the
 /// op's `phase`/`task`; `init` replaces the whole list, so every phase counts.
 /// `None` means no usable signal: render every phase in full.
 fn touched_phases(
@@ -262,10 +260,11 @@ fn render_checklist(view: &CardView<'_>, expanded: bool) -> Component {
 			let sweeping =
 				is_completed && completion_sweeps(view, &completed, phase.name.as_str(), text.as_str());
 			let blocked_note = (task.status == Status::Blocked).then(|| {
-				task.blocker.as_ref().filter(|text| !text.is_empty()).map_or_else(
-					|| Str::new_static("(blocked)"),
-					|blocker| sf!("(blocked: {blocker})"),
-				)
+				task
+					.blocker
+					.as_ref()
+					.filter(|text| !text.is_empty())
+					.map_or_else(|| Str::new_static("(blocked)"), |blocker| sf!("(blocked: {blocker})"))
 			});
 			phase_rows.push(
 				dom! {

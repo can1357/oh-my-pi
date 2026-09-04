@@ -1090,10 +1090,7 @@ mod tests {
 		truncated[12..16].copy_from_slice(b"IHDR");
 		truncated[16..20].copy_from_slice(&8_u32.to_be_bytes());
 		truncated[20..24].copy_from_slice(&6_u32.to_be_bytes());
-		assert_eq!(
-			process_image(Bytes::from(truncated)),
-			Err(ImageFault::InvalidImageData)
-		);
+		assert_eq!(process_image(Bytes::from(truncated)), Err(ImageFault::InvalidImageData));
 	}
 
 	fn assert_reported_dimensions_match_bytes(encoded: &EncodedImage) {

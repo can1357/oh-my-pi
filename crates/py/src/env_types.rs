@@ -14,11 +14,11 @@ macro_rules! py_record {
 	($rust:ident, $name:literal, $( $field:ident ),+ $(,)? $(; $($method:tt)*)?) => {
 		#[pyclass(name = $name, frozen, module = "_omp")]
 		#[derive(Debug)]
-		pub(crate) struct $rust { $(pub(crate) $field: Py<PyAny>,)+ }
+		pub struct $rust { $(pub(crate) $field: Py<PyAny>,)+ }
 		#[pymethods]
 		impl $rust {
 			#[new]
-			fn new($( $field: Py<PyAny> ),+) -> Self { Self { $( $field, )+ } }
+			const fn new($( $field: Py<PyAny> ),+) -> Self { Self { $( $field, )+ } }
 			$(#[getter] fn $field(&self, py: Python<'_>) -> Py<PyAny> { self.$field.clone_ref(py) })+
 			fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
 				let values = [$(format!("{}={}", stringify!($field), self.$field.bind(py).repr()?.to_str()?)),+];
@@ -37,7 +37,7 @@ macro_rules! py_record {
 
 #[pyclass(frozen, module = "_omp", from_py_object)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Revision {
+pub struct Revision {
 	#[pyo3(get)]
 	pub(crate) sequence:     u64,
 	pub(crate) content_hash: Vec<u8>,
@@ -45,7 +45,7 @@ pub(crate) struct Revision {
 #[pymethods]
 impl Revision {
 	#[new]
-	pub(crate) fn new(sequence: u64, content_hash: Vec<u8>) -> Self {
+	pub(crate) const fn new(sequence: u64, content_hash: Vec<u8>) -> Self {
 		Self { sequence, content_hash }
 	}
 
@@ -78,7 +78,7 @@ impl Revision {
 
 #[pyclass(frozen, module = "_omp")]
 #[derive(Debug)]
-pub(crate) struct PathMeta {
+pub struct PathMeta {
 	pub(crate) path:        Py<PyEnvPath>,
 	pub(crate) kind:        Py<PyAny>,
 	pub(crate) byte_length: u64,
@@ -92,7 +92,7 @@ pub(crate) struct PathMeta {
 impl PathMeta {
 	#[new]
 	#[pyo3(signature = (path, kind, byte_length, read_only=None, executable=None, modified=None, accessed=None, created=None))]
-	fn new(
+	const fn new(
 		path: Py<PyEnvPath>,
 		kind: Py<PyAny>,
 		byte_length: u64,
@@ -116,32 +116,32 @@ impl PathMeta {
 	}
 
 	#[getter]
-	fn byte_length(&self) -> u64 {
+	const fn byte_length(&self) -> u64 {
 		self.byte_length
 	}
 
 	#[getter]
-	fn read_only(&self) -> Option<bool> {
+	const fn read_only(&self) -> Option<bool> {
 		self.read_only
 	}
 
 	#[getter]
-	fn executable(&self) -> Option<bool> {
+	const fn executable(&self) -> Option<bool> {
 		self.executable
 	}
 
 	#[getter]
-	fn modified(&self) -> Option<f64> {
+	const fn modified(&self) -> Option<f64> {
 		self.modified
 	}
 
 	#[getter]
-	fn accessed(&self) -> Option<f64> {
+	const fn accessed(&self) -> Option<f64> {
 		self.accessed
 	}
 
 	#[getter]
-	fn created(&self) -> Option<f64> {
+	const fn created(&self) -> Option<f64> {
 		self.created
 	}
 
@@ -222,7 +222,7 @@ py_record!(ProcessInfo, "ProcessInfo", name, generation, state, status);
 py_record!(ProcessOutput, "ProcessOutput", generation, channel, data, sequence);
 #[pyclass(frozen, module = "_omp")]
 #[derive(Debug)]
-pub(crate) struct HttpResponse {
+pub struct HttpResponse {
 	pub(crate) status:    Py<PyAny>,
 	pub(crate) headers:   Py<PyAny>,
 	pub(crate) body:      Py<PyAny>,
@@ -306,7 +306,7 @@ py_record!(LspReply, "LspReply", revision, result, error);
 
 #[pyclass(frozen, module = "_omp")]
 #[derive(Debug)]
-pub(crate) struct SummarySegment {
+pub struct SummarySegment {
 	kept:       bool,
 	start_line: u64,
 	end_line:   u64,
@@ -330,17 +330,17 @@ impl SummarySegment {
 	}
 
 	#[getter]
-	fn kept(&self) -> bool {
+	const fn kept(&self) -> bool {
 		self.kept
 	}
 
 	#[getter]
-	fn start_line(&self) -> u64 {
+	const fn start_line(&self) -> u64 {
 		self.start_line
 	}
 
 	#[getter]
-	fn end_line(&self) -> u64 {
+	const fn end_line(&self) -> u64 {
 		self.end_line
 	}
 
@@ -361,7 +361,7 @@ impl SummarySegment {
 const _: () = assert!(std::mem::size_of::<Output>() <= 48, "Output must stay compact");
 const _: () = assert!(std::mem::size_of::<Entry>() <= 48, "Entry must stay compact");
 
-pub(crate) fn any<'py, T>(py: Python<'py>, value: T) -> PyResult<Py<PyAny>>
+pub fn any<'py, T>(py: Python<'py>, value: T) -> PyResult<Py<PyAny>>
 where
 	T: IntoPyObject<'py>,
 	T::Error: Into<PyErr>,

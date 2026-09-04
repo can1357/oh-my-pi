@@ -163,8 +163,8 @@ pub(super) async fn render<C: HttpClient + Sync>(
 	}
 	let content_type = response.header("content-type").unwrap_or("");
 	let mut markdown = String::new();
-	writeln!(markdown, "# {}\n", site).expect("writing markdown to a string");
-	writeln!(markdown, "**Source:** {}\n", url).expect("writing markdown to a string");
+	writeln!(markdown, "# {site}\n").expect("writing markdown to a string");
+	writeln!(markdown, "**Source:** {url}\n").expect("writing markdown to a string");
 	if content_type.contains("json")
 		|| response
 			.body

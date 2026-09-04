@@ -1540,7 +1540,7 @@ mod follow {
 		};
 
 		use notify::{RecommendedWatcher, RecursiveMode, Watcher, WatcherKind};
-		use omp_shell_engine::openfiles::OpenFile;
+		use omp_shell::openfiles::OpenFile;
 
 		#[cfg(target_os = "linux")]
 		use crate::support::sys::signals::ensure_stdout_not_broken;
@@ -2817,7 +2817,7 @@ use chunks::ReverseChunks;
 use clap::ArgMatches;
 use follow::Observer;
 use memchr::{memchr_iter, memrchr_iter};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use paths::{FileExtTail, HeaderPrinter, Input, InputKind};
 use thiserror::Error;
 

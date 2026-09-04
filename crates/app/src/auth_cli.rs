@@ -9,9 +9,7 @@ use std::{
 
 use miette::{IntoDiagnostic as _, miette};
 use nix::sys::termios::{LocalFlags, SetArg, tcgetattr, tcsetattr};
-use omp_catalog::ProviderId;
-use omp_core::{ExposeSecret as _, SecretString, Str};
-use omp_inference::{
+use omp_ai::{
 	Client,
 	answer::{
 		AuthAnswer, AuthEvent, AuthPrompt, AuthPromptKind as InferenceAuthPromptKind, AuthResponse,
@@ -21,6 +19,8 @@ use omp_inference::{
 	receipt::ExecutionBudget,
 	router,
 };
+use omp_catalog::ProviderId;
+use omp_core::{ExposeSecret as _, SecretString, Str};
 use tokio::task;
 use zeroize::Zeroizing;
 

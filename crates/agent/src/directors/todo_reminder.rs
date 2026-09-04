@@ -64,9 +64,9 @@ impl Director for TodoReminder {
 			.count("prompts prompt[kind=ask][status=pending]")
 			.unwrap_or(0)
 			> 0;
-		// pi `#hasPendingAsyncWake`: a running detached job or subagent will
-		// wake this session with an async-result follow-up; stop-time passes
-		// defer to the settle reached once the work lands.
+		// A running detached job or subagent will wake this session with an
+		// async-result follow-up; stop-time passes defer to the settle reached
+		// once the work lands.
 		let pending_wake = crate::jobs::pending_wake(dom);
 		let open_force = find_director(dom, "force_tool").is_some();
 		if pending_ask || pending_wake || open_force || turn.had_tool_calls {

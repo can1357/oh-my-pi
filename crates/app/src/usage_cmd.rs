@@ -8,14 +8,14 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_catalog::ProviderId;
-use omp_core::Str;
-use omp_inference::{
+use omp_ai::{
 	account::AccountStateStore,
 	answer::{UsageQuantity, UsageReport},
 	call::{UsageRequest, UsageScope},
 	id::AccountId,
 };
+use omp_catalog::ProviderId;
+use omp_core::Str;
 use serde_json::{Value, json};
 
 use crate::cli::UsageArgs;

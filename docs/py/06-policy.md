@@ -1626,7 +1626,7 @@ allow.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `omp.POLICY_DEADLINE` | `Duration("30s")` | wall clock the admission phases get before core synthesises a `Deny`; matches pi's `runner.ts` `emitToolCall` timeout |
+| `omp.POLICY_DEADLINE` | `Duration("30s")` | wall clock the admission phases get before core synthesises a `Deny` |
 | `omp.APPROVAL_DEADLINE` | `Duration("5m")` | default `ApprovalSpec.timeout` |
 | `omp.VIOLATION_COALESCE` | `Duration("1s")` | window in which identical violations increment `count` instead of re-firing the hook |
 | `omp.BASH_IR_REV`, `omp.BASH_IR_MAX_SOURCE`, `omp.BASH_IR_MAX_NODES`, `omp.BASH_IR_MAX_DEPTH` | see above | IR limits |

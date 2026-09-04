@@ -1,5 +1,5 @@
 //! Panel over one asynchronous service request: a cancellable loader while
-//! the request runs (pi `BorderedLoader`), then its settled line. `/share`
+//! the request runs, then its settled line. `/share`
 //! and `/cleanse` open one; the host polls it through [`Panel::tick`] so
 //! the actor never blocks on the application.
 

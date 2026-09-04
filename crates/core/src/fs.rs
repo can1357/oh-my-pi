@@ -39,7 +39,7 @@ pub enum AtomicReplaceError {
 /// before the publication error is returned.
 pub fn replace_file_atomically(staged: &Path, target: &Path) -> Result<(), AtomicReplaceError> {
 	match fs::rename(staged, target) {
-		Ok(()) => return Ok(()),
+		Ok(()) => Ok(()),
 		Err(error)
 			if matches!(
 				error.kind(),

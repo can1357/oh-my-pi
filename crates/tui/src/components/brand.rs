@@ -1,6 +1,5 @@
-//! The block-grid brand mark painted through pi's diagonal gradient, with
-//! the one-shot intro sweep (pi `welcome.ts` `PI_LOGO`, `gradientLogo`,
-//! `introLogoFrame`).
+//! The block-grid brand mark painted through a diagonal gradient, with a
+//! one-shot intro sweep.
 
 use std::time::Duration;
 
@@ -13,8 +12,8 @@ use crate::{
 	props::{Prop, PropValue, Props},
 };
 
-/// Brand mark rows (pi `PI_LOGO`); every non-space cell participates in the
-/// same diagonal gradient.
+/// Brand mark rows; every non-space cell participates in the same diagonal
+/// gradient.
 const MARK: [&str; 5] =
 	["████████████", "   ██  ██   ", "   ██  ██   ", "   ▒▒  ██   ", "       ██   "];
 /// The same mark for a terminal that cannot show block elements
@@ -36,8 +35,8 @@ const fn mark(charset: Charset) -> &'static [&'static str; ROWS] {
 
 /// The brand mark: a 12×5 block grid painted through [`Gradient`].
 ///
-/// With [`intro`](Self::intro) the mark plays pi's 3000ms sweep on the
-/// paint clock — waking every [`anim::FRAME`] until it settles — and then
+/// With [`intro`](Self::intro) the mark plays a 3000ms sweep on the paint
+/// clock — waking every [`anim::FRAME`] until it settles — and then
 /// paints the resting frame forever without asking for another wake.
 /// Diagonal positions are computed once at construction, so a paint pass
 /// allocates nothing.
@@ -76,7 +75,7 @@ impl Brand {
 
 	/// Sets one property.
 	pub fn with(mut self, prop: Prop, value: impl Into<PropValue>) -> Self {
-		let _ = self.props.set(prop, value.into());
+		let () = self.props.set(prop, value.into());
 		self
 	}
 

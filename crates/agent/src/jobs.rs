@@ -443,14 +443,15 @@ impl JobBoard {
 					match detached.poll(session) {
 						Ok(Some(report)) => {
 							job._detached = None;
-							let settlement = recovered_settlement(session.dom(), &job.record)
-								.unwrap_or(RecoveredSettlement {
+							let settlement = recovered_settlement(session.dom(), &job.record).unwrap_or(
+								RecoveredSettlement {
 									is_error: report.is_error,
 									status:   None,
 									artifact: report.spilled,
 									output:   None,
 									error:    None,
-								});
+								},
+							);
 							job.recovered = Some(settlement.clone());
 							Some((*handle, settlement))
 						},
@@ -812,8 +813,7 @@ fn recovered_workpool_settlement(dom: &Dom, record: &JobRecord) -> Option<Recove
 		.get("terminal_status")
 		.and_then(serde_json::Value::as_str)
 		.filter(|status| matches!(*status, "completed" | "cancelled" | "failed"))
-		.map(Str::new)
-		.unwrap_or_else(|| Str::new_static("completed"));
+		.map_or_else(|| Str::new_static("completed"), Str::new);
 	let is_error = status != "completed";
 	let error = match status.as_str() {
 		"cancelled" => Some(Str::new_static("workpool was cancelled")),
@@ -869,8 +869,7 @@ fn recovered_tool_settlement(dom: &Dom, record: &JobRecord) -> Option<RecoveredS
 					&& prop(child, PropId::Severity) == Some("error")
 			})
 			.and_then(|child| prop(child, PropId::Text))
-			.map(Str::new)
-			.unwrap_or_else(|| Str::new_static("detached tool failed"))
+			.map_or_else(|| Str::new_static("detached tool failed"), Str::new)
 	});
 	Some(RecoveredSettlement { is_error, status: None, artifact, output: None, error })
 }
@@ -1030,9 +1029,9 @@ fn commit_settlement(
 	Ok(())
 }
 
-/// Whether a job or subagent owned by this session is still running (pi
-/// `#hasPendingAsyncWake`): its settlement will re-wake the loop with an
-/// async-result follow-up, so a candidate yield is a scheduling pause.
+/// Whether a job or subagent owned by this session is still running: its
+/// settlement will re-wake the loop with an async-result follow-up, so a
+/// candidate yield is a scheduling pause.
 #[must_use]
 pub fn pending_wake(dom: &Dom) -> bool {
 	records(dom)
@@ -1120,25 +1119,18 @@ fn record(dom: &Dom, handle: Handle) -> Option<JobRecord> {
 	};
 	Some(JobRecord {
 		handle,
-		id: prop(node, PropId::Id)
-			.map(Str::new)
-			.unwrap_or_else(|| Str::new(handle.to_string())),
+		id: prop(node, PropId::Id).map_or_else(|| Str::new(handle.to_string()), Str::new),
 		kind,
-		status: prop(node, PropId::Status)
-			.map(Str::new)
-			.unwrap_or_else(|| Str::new_static("running")),
+		status: prop(node, PropId::Status).map_or_else(|| Str::new_static("running"), Str::new),
 		job_type: prop(node, PropId::Name)
 			.filter(|value| !value.is_empty())
-			.map(Str::new)
-			.unwrap_or_else(|| fallback_job_type(kind)),
+			.map_or_else(|| fallback_job_type(kind), Str::new),
 		label: prop(node, PropId::Label)
 			.filter(|value| !value.is_empty())
-			.map(Str::new)
-			.unwrap_or_else(|| {
-				prop(node, PropId::Id)
-					.map(Str::new)
-					.unwrap_or_else(|| Str::new(handle.to_string()))
-			}),
+			.map_or_else(
+				|| prop(node, PropId::Id).map_or_else(|| Str::new(handle.to_string()), Str::new),
+				Str::new,
+			),
 		owner: custom(node, "owner").map(Str::new),
 		started: custom(node, "started").map(Str::new),
 		duration_ms: prop_int(node, PropId::DurationMs).and_then(|value| u64::try_from(value).ok()),

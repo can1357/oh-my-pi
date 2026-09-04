@@ -1856,7 +1856,7 @@ mod tests {
 
 	#[test]
 	fn nested_command_arguments_share_arity_across_whitespace() {
-		// pi fe86512: a nested command consumes exactly its own arity —
+		// A nested command consumes exactly its own arity —
 		// adjacent, spaced, and source-line-split forms all parse alike
 		let sqrt_fraction = ["  ┌── ", " ╲│ a ", "──────", "  b   "];
 		assert_eq!(plain(r"\frac\sqrt{a}{b}"), sqrt_fraction);

@@ -13,7 +13,8 @@ use futures::StreamExt as _;
 use omp_ar::zip::Writer;
 use omp_core::{Str, sf};
 use omp_tool::{
-	BlobRef, CapsBase, Ev, IncomingParams, ModelClass, Part, PromptCaps, Tool, ToolTerminal,
+	BlobRef, CapsBase, Diag, DiagKind, Ev, IncomingParams, ModelClass, Part, PromptCaps, Severity,
+	Tool, ToolTerminal, Unit,
 };
 use omp_tools::read::{
 	self, DirectorySource, Fault, ReadBlobs, ReadLease, ReadSources, SnapshotRecord, SourceKind,
@@ -178,12 +179,12 @@ impl ReadBlobs for RecordingBlobs {
 	}
 }
 
-async fn read_document_tool_text_with_blobs<B: ReadBlobs>(
+async fn read_document_tool_text_with_blobs_and_diags<B: ReadBlobs>(
 	path: &str,
 	document_path: &str,
 	bytes: Vec<u8>,
 	blobs: B,
-) -> String {
+) -> (String, Vec<Diag>) {
 	let tool = read::tool(
 		DocumentSources { path: Str::new(document_path), bytes: Bytes::from(bytes) },
 		blobs,
@@ -193,9 +194,16 @@ async fn read_document_tool_text_with_blobs<B: ReadBlobs>(
 		.args_committed(Str::new(json!({ "path": path }).to_string()))
 		.expect("read invocation remains live");
 	let events = tool.call(params).collect::<Vec<_>>().await;
-	let [Ev::Done(ToolTerminal::Done { result, .. })] = events.as_slice() else {
-		panic!("expected one terminal document read event: {events:?}");
-	};
+	let mut diags = Vec::new();
+	let mut terminal = None;
+	for event in events {
+		match event {
+			Ev::Diag(diag) => diags.push(diag),
+			Ev::Done(ToolTerminal::Done { result, .. }) => terminal = Some(result),
+			other => panic!("unexpected document read event: {other:?}"),
+		}
+	}
+	let result = terminal.expect("one terminal document read event");
 	let parts = tool.prompt(
 		result.as_ref(),
 		&PromptCaps::for_tool(
@@ -211,11 +219,30 @@ async fn read_document_tool_text_with_blobs<B: ReadBlobs>(
 	let [Part::Text { text }] = parts.as_slice() else {
 		panic!("expected one model-facing document text part: {parts:?}");
 	};
-	text.to_string()
+	(text.to_string(), diags)
+}
+
+async fn read_document_tool_text_with_blobs<B: ReadBlobs>(
+	path: &str,
+	document_path: &str,
+	bytes: Vec<u8>,
+	blobs: B,
+) -> String {
+	read_document_tool_text_with_blobs_and_diags(path, document_path, bytes, blobs)
+		.await
+		.0
 }
 
 async fn read_document_tool_text(path: &str, document_path: &str, bytes: Vec<u8>) -> String {
 	read_document_tool_text_with_blobs(path, document_path, bytes, NoBlobs).await
+}
+
+async fn read_document_tool_text_and_diags(
+	path: &str,
+	document_path: &str,
+	bytes: Vec<u8>,
+) -> (String, Vec<Diag>) {
+	read_document_tool_text_with_blobs_and_diags(path, document_path, bytes, NoBlobs).await
 }
 
 #[test]
@@ -278,12 +305,20 @@ fn selector_fixture_docx() -> Vec<u8> {
 
 #[tokio::test]
 async fn read_tool_dispatches_docx_bytes_and_applies_line_selectors_to_converted_text() {
-	let output =
-		read_document_tool_text("fixture.docx:3-3", "fixture.docx", selector_fixture_docx()).await;
-	assert_eq!(
-		output,
-		"2:# Range Fixture\n3:\n4:alpha\n5:\n6:beta\n\n[4 more lines in file. Use :7 to continue]"
-	);
+	let (output, diags) = read_document_tool_text_and_diags(
+		"fixture.docx:3-3",
+		"fixture.docx",
+		selector_fixture_docx(),
+	)
+	.await;
+	assert_eq!(output, "2:# Range Fixture\n3:\n4:alpha\n5:\n6:beta");
+	let [diag] = diags.as_slice() else {
+		panic!("document range emits one diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::Pagination));
+	assert_eq!(diag.severity, Severity::Info);
+	assert_eq!(diag.continuation.as_deref(), Some(":7"));
+	assert_eq!(diag.omitted, Some(omp_tool::Omitted { count: 4, unit: Unit::Lines }));
 }
 
 #[tokio::test]
@@ -322,7 +357,7 @@ async fn oversized_converted_document_returns_the_complete_numbered_markdown() {
 		.expect("DOCX is supported");
 	let framed = format!("Content-Type: text/markdown\n{}", converted.text);
 	let numbered = framed
-		.split("\n")
+		.split('\n')
 		.enumerate()
 		.map(|(index, line)| format!("{}:{line}", index + 1))
 		.collect::<Vec<_>>()

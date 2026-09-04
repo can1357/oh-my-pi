@@ -91,7 +91,7 @@ pub use graphics::{
 	ImagePassthrough, encode_image_passthrough, extract_image_passthrough, image_passthrough_ranges,
 };
 pub use host::{
-	DynDevice, DynFault, DynFuture, DynHost, DynOutput, DynSchema, panic_scope_active,
-	rayon_global_pool_available, set_rayon_global_pool_available,
+	DynCallOutput, DynDevice, DynFault, DynFuture, DynHost, DynOutput, DynSchema,
+	panic_scope_active, rayon_global_pool_available, set_rayon_global_pool_available,
 };
 pub use proc_snapshot::{ProcInfo, ProcessStatus};

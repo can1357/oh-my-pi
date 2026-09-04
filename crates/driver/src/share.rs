@@ -13,9 +13,9 @@ use http::{
 	HeaderMap, HeaderValue, StatusCode,
 	header::{ACCEPT, CONTENT_TYPE, USER_AGENT},
 };
+use omp_ai::auth::HeaderPlacement;
 use omp_core::{Str, base64};
 use omp_envd::github_url::GithubCredentialBridge;
-use omp_inference::auth::HeaderPlacement;
 use omp_secrets::redact::SecretRedactor;
 use ring::{
 	aead,

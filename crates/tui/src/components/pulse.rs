@@ -1,7 +1,6 @@
 //! Breathing starburst activity pulse with an optional throughput badge.
 //!
-//! The reference shape is pi's hidden-thinking indicator
-//! (`assistant-message.ts`): one fixed-width starburst cycles through eight
+//! One fixed-width starburst cycles through eight
 //! facets so the line never shifts, and each facet's dwell eases on a raised
 //! cosine between [`Pulse::DWELL_MIN`] and [`Pulse::DWELL_MAX`] — quickest at
 //! the cycle start, slowest at its midpoint — so the rotation breathes
@@ -33,7 +32,7 @@ pub const SPEED_WINDOW: Duration = Duration::from_millis(3000);
 /// Clamp ceiling for one observation and the rate that maps to full accent.
 pub const SPEED_MAX: f32 = 200.0;
 
-/// Windowed-average throughput gauge (pi `SpeedTracker`).
+/// Windowed-average throughput gauge.
 ///
 /// Observations are instantaneous rates stamped on the presentation clock;
 /// [`SpeedGauge::speed`] averages those inside the trailing
@@ -119,7 +118,7 @@ impl Pulse {
 		}
 	}
 
-	/// Sets the muted label painted right after the glyph (pi: `" Thinking"`).
+	/// Sets the muted label painted right after the glyph.
 	pub fn label(mut self, label: impl IntoStr) -> Self {
 		self.label = label.into_str();
 		self
@@ -165,12 +164,12 @@ impl Pulse {
 		let cycle = bounds[Self::FACETS];
 		let now_ms = now.as_secs_f64() * 1000.0;
 		let cycles = (now_ms / f64::from(cycle)).floor();
-		let phase = (now_ms - cycles * f64::from(cycle)) as f32;
+		let phase = cycles.mul_add(-f64::from(cycle), now_ms) as f32;
 		let facet = (0..Self::FACETS)
 			.rev()
 			.find(|facet| phase >= bounds[*facet])
 			.unwrap_or(0);
-		let next_ms = cycles * f64::from(cycle) + f64::from(bounds[facet + 1]);
+		let next_ms = cycles.mul_add(f64::from(cycle), f64::from(bounds[facet + 1]));
 		(facet, Duration::from_secs_f64(next_ms / 1000.0))
 	}
 
@@ -209,7 +208,7 @@ impl Default for Pulse {
 	}
 }
 
-/// pi `formatNumber`: `999`, `1.5K`, `25K`, `1.5M`, `25M`, `1.5B`.
+/// Compact number examples: `999`, `1.5K`, `25K`, `1.5M`, `25M`, `1.5B`.
 pub fn write_compact(out: &mut String, value: u64) {
 	let trimmed = |out: &mut String, scaled: f64, suffix: char| {
 		let text = format!("{scaled:.1}");

@@ -3,7 +3,7 @@
 
 use std::fs;
 
-use omp_docserver::lsp_config::{LspConfigSourceKind, discover_native_lsp_sources};
+use omp_envd::docserver::lsp_config::{LspConfigSourceKind, discover_native_lsp_sources};
 
 #[test]
 fn document_authority_probes_the_user_config_root_for_lsp_overrides() {

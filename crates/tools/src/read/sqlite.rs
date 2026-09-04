@@ -13,8 +13,13 @@ use std::{
 	time::Duration,
 };
 
+use omp_core::sf;
+use omp_tool::{Diag, DiagKind, Unit};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, types, types::ValueRef};
+use smallvec::{SmallVec, smallvec};
+
+use super::format::Rendered;
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const DEFAULT_QUERY_LIMIT: usize = 20;
@@ -1123,47 +1128,51 @@ pub fn render_row(row: &Row) -> String {
 		.join("\n")
 }
 
-/// Renders a query page and its exact continuation instruction.
-pub fn render_table(page: &QueryPage, offset: usize, limit: usize, table: &str) -> String {
-	let mut result = render_ascii_table(&page.columns, &page.rows);
+/// Renders a query page and its exact continuation diagnostic.
+pub fn render_table(page: &QueryPage, offset: usize, limit: usize, table: &str) -> Rendered {
+	let text = render_ascii_table(&page.columns, &page.rows);
 	let shown = page.total_count.min(offset + page.rows.len());
+	let mut diags = SmallVec::new();
 	if shown < page.total_count {
-		let note = format!(
-			"[{} more rows; append :{table}?limit={limit}&offset={} to the database path to continue]",
-			page.total_count - shown,
-			offset + page.rows.len()
+		let omitted = page.total_count - shown;
+		diags.push(
+			Diag::info(DiagKind::Pagination, sf!("{omitted} rows remain in table '{table}'."))
+				.continuation(sf!(":{table}?limit={limit}&offset={}", offset + page.rows.len()))
+				.omitted(omitted as u64, Unit::Rows),
 		);
-		result.push('\n');
-		result.push_str(&truncate_width(&note.replace('\t', "    "), MAX_RENDER_WIDTH));
 	}
-	result
+	Rendered { text: text.into(), diags }
 }
 
 /// Executes and renders any parsed selector against an already-open read-only
 /// database.
-pub fn render_selector(connection: &Connection, selector: &Selector) -> Result<String, Error> {
+pub fn render_selector(connection: &Connection, selector: &Selector) -> Result<Rendered, Error> {
 	match selector {
-		Selector::List => Ok(render_table_list(&list_tables(connection, ROW_COUNT_PROBE_CAP)?)),
+		Selector::List => Ok(Rendered {
+			text:  render_table_list(&list_tables(connection, ROW_COUNT_PROBE_CAP)?).into(),
+			diags: smallvec![],
+		}),
 		Selector::Schema { table, sample_limit } => {
 			let sample = query_rows(connection, table, *sample_limit, 0, None, None)?;
-			let mut output = render_schema(&table_schema(connection, table)?, &sample);
+			let output = render_schema(&table_schema(connection, table)?, &sample);
+			let mut diags = SmallVec::new();
 			if sample.rows.len() < sample.total_count {
-				write!(
-					output,
-					"\n[{} more rows; append :{table}?limit=20&offset={} to the database path to \
-					 continue]",
-					sample.total_count - sample.rows.len(),
-					sample.rows.len()
-				)
-				.expect("writing to a String cannot fail");
+				let omitted = sample.total_count - sample.rows.len();
+				diags.push(
+					Diag::info(DiagKind::Pagination, sf!("{omitted} rows remain in table '{table}'."))
+						.continuation(sf!(":{table}?limit=20&offset={}", sample.rows.len()))
+						.omitted(omitted as u64, Unit::Rows),
+				);
 			}
-			Ok(output)
+			Ok(Rendered { text: output.into(), diags })
 		},
 		Selector::Row { table, key } => {
-			match row_by_key(connection, table, &resolve_row_lookup(connection, table)?, key)? {
-				Some(row) => Ok(render_row(&row)),
-				None => Ok(format!("No row found in table '{table}' for key '{key}'.")),
-			}
+			let text =
+				match row_by_key(connection, table, &resolve_row_lookup(connection, table)?, key)? {
+					Some(row) => render_row(&row),
+					None => format!("No row found in table '{table}' for key '{key}'."),
+				};
+			Ok(Rendered { text: text.into(), diags: smallvec![] })
 		},
 		Selector::Query { table, limit, offset, order, where_clause } => Ok(render_table(
 			&query_rows(
@@ -1185,22 +1194,24 @@ pub fn render_selector(connection: &Connection, selector: &Selector) -> Result<S
 				total_count: result.rows.len(),
 				rows:        result.rows,
 			};
-			let mut output = render_table(&page, 0, page.rows.len().max(1), "query");
+			let mut rendered = render_table(&page, 0, page.rows.len().max(1), "query");
 			if result.truncated {
-				write!(
-					output,
-					"\n[Output capped at {MAX_RAW_QUERY_ROWS} rows; add a LIMIT/OFFSET clause to the \
-					 query to page through more]"
-				)
-				.expect("writing to a String cannot fail");
+				rendered.diags.push(
+					Diag::info(
+						DiagKind::LimitReached,
+						sf!("Output capped at {MAX_RAW_QUERY_ROWS} rows."),
+					)
+					.continuation("q=SELECT ... LIMIT ... OFFSET ...")
+					.omitted(1, Unit::Rows),
+				);
 			}
-			Ok(output)
+			Ok(rendered)
 		},
 	}
 }
 
 /// Opens, parses, executes, and renders a SQLite target.
-pub fn read_path(path: &Path, sub_path: &str, query_string: &str) -> Result<String, Error> {
+pub fn read_path(path: &Path, sub_path: &str, query_string: &str) -> Result<Rendered, Error> {
 	let selector = parse_selector(sub_path, query_string)?;
 	let connection = open_read_only(path)?;
 	render_selector(&connection, &selector)
@@ -1211,7 +1222,7 @@ pub fn read_interruptible(
 	path: &Path,
 	authored_target: &str,
 	interrupt: Arc<QueryInterrupt>,
-) -> Result<String, Error> {
+) -> Result<Rendered, Error> {
 	let candidate = parse_path_candidates(authored_target)
 		.into_iter()
 		.next()
@@ -1229,7 +1240,7 @@ pub fn read_interruptible(
 ///
 /// The authored target supplies the `:table[:key]` and `?query` suffix while
 /// `path` remains the resource-owned, resolved database path.
-pub fn read(path: &Path, authored_target: &str) -> Result<String, Error> {
+pub fn read(path: &Path, authored_target: &str) -> Result<Rendered, Error> {
 	let candidate = parse_path_candidates(authored_target)
 		.into_iter()
 		.next()

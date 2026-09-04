@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Regenerate QA gallery fixtures for tool rows from pi's own gallery.
+"""Regenerate QA gallery fixtures for tool rows from the TypeScript reference gallery.
 
-pi (`/work/pi`, or `$PI_ROOT`) is the behavior oracle: `omp gallery` in its
-coding-agent package renders every tool renderer through the real
-`ToolExecutionComponent`. Each tool row is captured three ways, exactly as the
-existing references were: `tools/<tool>.txt` (`--plain`),
+The TypeScript reference checkout (`/work/pi`, or `$PI_ROOT`) is the behavior
+oracle: `omp gallery` in its coding-agent package renders every tool renderer
+through the real `ToolExecutionComponent`. Each tool row is captured three ways,
+exactly as the existing references were: `tools/<tool>.txt` (`--plain`),
 `tools-expanded/<tool>.txt` (`--plain --expanded`) and `tools-ansi/<tool>.txt`
 (styled, no `--plain`). A capture is the tool's section — from its rule to the
-trailing blank line — with pi's leading blank line dropped.
+trailing blank line — with its leading blank line dropped.
 
 Usage: `uv run --no-project python scripts/qa/gallery-ref-regen.py resolve reject`
 """
@@ -32,7 +32,7 @@ def main() -> int:
         for subdir, expanded, ansi in (("tools", False, False), ("tools-expanded", True, False), ("tools-ansi", False, True)):
             text = capture(tool, expanded, ansi)
             if not ANSI.sub("", text).startswith(f"── {tool}"):
-                print(f"{tool}: pi rendered no section", file=sys.stderr); return 1
+                print(f"{tool}: reference rendered no section", file=sys.stderr); return 1
             (REF / subdir / f"{tool}.txt").write_text(text)
             print(f"{subdir}/{tool}.txt")
     return 0

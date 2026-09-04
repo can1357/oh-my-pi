@@ -292,7 +292,8 @@ pub struct PushOptions {
 	pub remote:           Option<String>,
 	/// Refspec to push; the current branch when absent.
 	pub refspec:          Option<String>,
-	/// Exact `refname[:expected]` lease; an empty string requests Git's default lease.
+	/// Exact `refname[:expected]` lease; an empty string requests Git's default
+	/// lease.
 	pub force_with_lease: Option<String>,
 }
 

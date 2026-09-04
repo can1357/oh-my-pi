@@ -2138,9 +2138,9 @@ where
 								});
 								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
 							},
-							// pi `followUp`: behind a running turn the prompt is
-							// journaled into `<queues><prompts>` and popped when the
-							// turn yields; idle, it runs now (pi's idle queue drain).
+							// Behind a running turn the prompt is journaled into
+							// `<queues><prompts>` and popped when the turn yields;
+							// idle, it runs now.
 							"follow_up" => {
 								let response = if turn_running {
 									up_response(id, command.as_str(), &request.params, &mailbox, |text| Up::Queue {
@@ -2194,7 +2194,7 @@ where
 								};
 								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
 							},
-							// pi `abort_and_prompt`: interrupt the running turn, then
+							// Interrupt the running turn, then
 							// prompt; the response acknowledges the abort and the new
 							// turn's events stream after it.
 							"abort_and_prompt" => {
@@ -2304,7 +2304,7 @@ where
 									))).into_diagnostic()?;
 								}
 							},
-							// pi answers `get_state` while streaming (`isStreaming`
+							// `get_state` works while streaming (`isStreaming`
 							// is part of the state); the replica projects the tree
 							// whether or not a turn owns the session.
 							"get_state" => {
@@ -2462,7 +2462,7 @@ where
 				}
 				// The aborted-then-prompted turn outranks the follow-up queue;
 				// otherwise the oldest queued follow-up runs now that the
-				// agent yielded (pi `followUp`).
+				// agent yielded.
 				let next = match abort_prompt.take() {
 					Some(input) => Some(input),
 					None if session_cancelled => None,
@@ -2812,7 +2812,7 @@ fn kernel_event_value(event: KernelEvent) -> Option<Value> {
 			"toolName": name,
 			"isError": is_error,
 		})),
-		// pi surfaces the wrapper's approval `select` as an extension UI
+		// The wrapper's approval `select` becomes an extension UI
 		// request; the journal-first host names the durable prompt so the
 		// client answers with `approve`.
 		KernelEvent::ApprovalRequested(ticket) => {

@@ -1,12 +1,12 @@
-//! Codex quota-reset celebration (pi `codex-reset-fireworks.ts`): a
+//! Codex quota-reset celebration: a
 //! top-third fireworks animation over the transcript — 34 frames at 85 ms
 //! of rockets, bursts, and a drifting star field above a banner naming the
 //! event. The animation loops until Escape dismisses it; other keys are
 //! consumed without disturbing the celebration.
 //!
 //! The canvas is one retained [`Frame`] plus a per-cell priority plane;
-//! each animation frame repaints in place (pi's priority compositing:
-//! a glyph lands when its priority is at least the cell's current one).
+//! each animation frame repaints in place: a glyph lands when its priority
+//! is at least the cell's current one.
 
 use std::{f64::consts::PI, time::Duration};
 
@@ -16,36 +16,35 @@ use omp_tui::{Border, Color, Frame, Key, Size, Style, Theme, UiContext, cell_wid
 use super::{Panel, PanelAnchor, PanelCx, PanelEvent};
 use crate::celebrate::CodexResetEvent;
 
-/// pi `FRAME_INTERVAL_MS`.
+/// Delay between animation frames.
 pub const FRAME_INTERVAL: Duration = Duration::from_millis(85);
-/// pi `FRAME_COUNT`.
+/// Number of animation frames.
 pub const FRAME_COUNT: u32 = 34;
-/// pi: the overlay takes the top third of the terminal (`maxHeight: "33%"`).
+/// The overlay takes the top third of the terminal.
 const HEIGHT_PERCENT: u16 = 33;
-/// pi: the art is centered in at most 96 columns.
+/// The art is centered in at most 96 columns.
 const ART_WIDTH: u16 = 96;
-/// pi: the banner panel is at most 62 columns wide.
+/// Maximum banner-panel width.
 const BANNER_WIDTH: u16 = 62;
-/// pi `glyphs` per burst age.
+/// Glyphs by burst age.
 const BURST_GLYPHS: [&str; 9] = ["@", "*", "*", "+", "o", "o", ".", ".", "."];
 
-/// pi `FIREWORK_THEME_COLORS`, keyed by the palette name pi's burst table
-/// uses; each resolves to the nearest [`Theme`] slot.
+/// Theme colors by burst palette, resolved to the nearest [`Theme`] slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Tint {
-	/// pi `mdLink`.
+	/// Informational-link color.
 	Cyan,
-	/// pi `dim`.
+	/// Muted color.
 	Dim,
-	/// pi `warning`.
+	/// Warning color.
 	Gold,
-	/// pi `success`.
+	/// Success color.
 	Green,
-	/// pi `accent`.
+	/// Accent color.
 	Pink,
-	/// pi `thinkingXhigh`.
+	/// Secondary color.
 	Violet,
-	/// pi `text`.
+	/// Foreground text color.
 	White,
 }
 
@@ -63,7 +62,7 @@ impl Tint {
 	}
 }
 
-/// One scheduled burst (pi `FireworkBurst`): sky-fraction position, the
+/// One scheduled burst: sky-fraction position, the
 /// frame it detonates on, and its particle tint.
 struct Burst {
 	x:     f64,
@@ -72,7 +71,7 @@ struct Burst {
 	color: Tint,
 }
 
-/// pi `BURSTS`.
+/// Scheduled fireworks bursts.
 const BURSTS: [Burst; 6] = [
 	Burst { x: 0.17, y: 0.46, start: 5, color: Tint::Pink },
 	Burst { x: 0.48, y: 0.2, start: 9, color: Tint::Cyan },
@@ -89,7 +88,7 @@ fn js_round(value: f64) -> i64 {
 	(value + 0.5).floor() as i64
 }
 
-/// Retained fireworks overlay (pi `CodexResetFireworksComponent`).
+/// Retained fireworks overlay.
 pub struct Fireworks {
 	event:    CodexResetEvent,
 	ctx:      UiContext,
@@ -130,7 +129,7 @@ impl Fireworks {
 		self.index
 	}
 
-	/// pi: full width, `max(1, floor(rows * 0.33))` rows.
+	/// Full width, `max(1, floor(rows * 0.33))` rows.
 	fn canvas_size(viewport: Size) -> Size {
 		Size::new(
 			viewport.width.max(1),
@@ -138,7 +137,7 @@ impl Fireworks {
 		)
 	}
 
-	/// pi `setCell`: claims the cell when `priority` is at least the
+	/// Claims the cell when `priority` is at least the
 	/// cell's current one; `glyph` is `None` for the continuation cells of
 	/// a wide glyph, which keep whatever the head `put` painted.
 	fn claim(&mut self, x: i64, y: i64, glyph: Option<&str>, tint: Tint, priority: u8) {
@@ -213,7 +212,7 @@ impl Fireworks {
 		self.draw_text(panel_left, top + 2, &line, Tint::Violet, 20);
 	}
 
-	/// pi banner copy for the event kind.
+	/// Banner copy for the event kind.
 	fn caption(&self) -> (Str, Str) {
 		match self.event {
 			CodexResetEvent::UnscheduledWeeklyReset => (
@@ -301,7 +300,7 @@ impl Fireworks {
 		}
 	}
 
-	/// pi `renderCodexResetFireworks` into the retained canvas.
+	/// Paints the retained canvas.
 	fn paint(&mut self) {
 		let size = self.frame.size();
 		if self.painted == Some((self.index, size)) {
@@ -338,8 +337,7 @@ fn cells(size: Size) -> usize {
 	usize::from(size.width) * usize::from(size.height)
 }
 
-/// pi `truncateToWidth(text, width, "")`: clips to `width` cells, no
-/// ellipsis.
+/// Clips to `width` cells without an ellipsis.
 fn truncate_to_width(text: &str, width: u16) -> Str {
 	if cell_width(text) <= width {
 		return Str::new(text);

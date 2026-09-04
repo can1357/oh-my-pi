@@ -12,11 +12,11 @@
 
 use std::{fs, io, path::Path};
 
+use omp_agent::AI_MODEL;
 use omp_chat::overlays::services::{
 	AgentRow, ForeignSessionRow, ForeignSessionSource, ServiceError, ServiceResult, SessionRow,
 	SessionScope,
 };
-use omp_con::AI_MODEL;
 use omp_core::Str;
 use omp_driver::{sessions::SessionIndex, subagent::settings::SV_TASK_DISABLED_AGENTS};
 

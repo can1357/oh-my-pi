@@ -11,7 +11,7 @@
 
 use std::{env, ffi::OsString, io, process::ExitCode};
 
-use omp_shell_engine::{ProfileLoadBehavior, RcLoadBehavior, Shell, SourceInfo};
+use omp_shell::{ProfileLoadBehavior, RcLoadBehavior, Shell, SourceInfo};
 
 /// Private argv selector used to re-enter `omp` as a detached shell child.
 pub const SHELL_CHILD_ARG: &str = "__omp-shell-child";
@@ -24,7 +24,7 @@ pub enum ShellChildError {
 	MissingScript,
 	/// The interpreter failed to start.
 	#[error("shell child interpreter failed to start")]
-	Shell(#[source] omp_shell_engine::Error),
+	Shell(#[source] omp_shell::Error),
 	/// The working directory could not be resolved.
 	#[error("shell child working directory is unavailable")]
 	WorkingDir(#[source] io::Error),
@@ -46,7 +46,7 @@ pub async fn run_shell_child_entry() -> Result<ExitCode, ShellChildError> {
 		.profile(ProfileLoadBehavior::Skip)
 		.rc(RcLoadBehavior::Skip)
 		.working_dir(cwd)
-		.builtins(omp_shell_engine::builtins::default_builtins())
+		.builtins(omp_shell::builtins::default_builtins())
 		.builtins(
 			omp_shell_builtins::utility_builtins()
 				.into_iter()

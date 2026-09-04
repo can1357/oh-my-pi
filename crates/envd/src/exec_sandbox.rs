@@ -16,7 +16,7 @@ use omp_sandbox::{
 	Capability, CommandWrapper, DegradationPolicy, EnvironmentSource, NetworkMode,
 	RUNTIME_READ_ROOTS, Runner, SandboxError, SandboxSpec, WriteMode,
 };
-use omp_shell_engine::{OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper};
+use omp_shell::{OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper};
 use parking_lot::Mutex;
 
 use crate::{

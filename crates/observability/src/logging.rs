@@ -484,7 +484,7 @@ impl io::Write for &RotatingWriter {
 }
 
 impl<'writer> MakeWriter<'writer> for RotatingWriter {
-	type Writer = &'writer RotatingWriter;
+	type Writer = &'writer Self;
 
 	fn make_writer(&'writer self) -> Self::Writer {
 		self
@@ -784,7 +784,7 @@ mod tests {
 	fn prune_removes_old_dead_logs_and_keeps_live_processes() {
 		let directory = tempdir().expect("tempdir");
 		let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
-		let old = now - Duration::from_secs(6 * 24 * 60 * 60);
+		let old = now - Duration::from_hours(144);
 		let recent = now - Duration::from_secs(60);
 		let dead_pid = i32::MAX as u32;
 		let old_dead = create_log(directory.path(), date(2026, 8, 1), dead_pid, None, old);

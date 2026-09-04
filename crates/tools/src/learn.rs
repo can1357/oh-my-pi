@@ -23,7 +23,7 @@ const DESCRIPTION: &str = "Capture one durable, self-contained lesson in active 
                            the optional skill mutation.";
 
 /// Optional managed-skill mutation bundled with a lesson.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillInput {
 	/// Create or update. Delete is not accepted by `learn`.
@@ -69,7 +69,7 @@ impl From<LearnSkillAction> for Action {
 }
 
 /// Arguments accepted by `learn@1`.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Params {
 	/// Durable, self-contained lesson: what worked, when, and why.
@@ -207,18 +207,12 @@ impl<A: ManagedSkillAuthority> Tool for LearnTool<A> {
 				yield commit_event(error);
 				return;
 			}
-			let memory_id = match self.memory.save(
+			let memory_id = if let Ok(outcome) = self.memory.save(
 				lesson.as_str(),
 				"coding-agent-learn",
 				0.8,
 				params.context.as_deref(),
-			) {
-				Ok(outcome) => match outcome.id {
-					Some(id) => id,
-					None => { yield done(Err(Fault::Memory)); return; },
-				},
-				Err(_) => { yield done(Err(Fault::Memory)); return; },
-			};
+			) { if let Some(id) = outcome.id { id } else { yield done(Err(Fault::Memory)); return; } } else { yield done(Err(Fault::Memory)); return; };
 			let Some(skill) = params.skill else {
 				yield done(Ok(LearnOutcome {
 					memory_id,
@@ -278,7 +272,7 @@ fn render_outcome(outcome: &LearnOutcome) -> Str {
 	text.freeze()
 }
 
-fn done(result: Result<LearnOutcome, Fault>) -> Ev<Update, LearnOutcome, Fault> {
+const fn done(result: Result<LearnOutcome, Fault>) -> Ev<Update, LearnOutcome, Fault> {
 	Ev::Done(ToolTerminal::Done { result, useless: false })
 }
 

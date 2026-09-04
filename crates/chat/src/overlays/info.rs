@@ -1,4 +1,4 @@
-//! `/debug` tools selector (pi `showDebugSelector`) plus the pure report
+//! `/debug` tools selector plus the pure report
 //! builders behind `/context`, `/hotkeys`, `/changelog`, and the `/debug
 //! <key>` inspectors. Every report is markdown for a
 //! [`ReportPanel`](super::report::ReportPanel); nothing here touches the
@@ -7,7 +7,8 @@
 use std::{collections::VecDeque, fmt::Write as _, sync::Arc};
 
 use flume::Receiver;
-use omp_con::{AI_COMPACT_THRESHOLD, AI_MODEL, Ctx};
+use omp_agent::{AI_COMPACT_THRESHOLD, AI_MODEL};
+use omp_con::Ctx;
 use omp_core::{Str, sf};
 use omp_dom::Dom;
 use omp_tui::{
@@ -24,8 +25,7 @@ use crate::status_line::StatusLine;
 const DEBUG_HINT: &str = "↑/↓ choose · Enter select · Esc close";
 /// Border, rule, hint, and blank rows around the select list.
 const DEBUG_CHROME_ROWS: u16 = 5;
-/// `## ` sections shown by `/changelog` without `full` (pi
-/// `RECENT_CHANGELOG_ENTRY_LIMIT`).
+/// `## ` sections shown by `/changelog` without `full`.
 const RECENT_CHANGELOG_ENTRIES: usize = 3;
 
 /// One `/debug` operation: stable key, label, and consequence.
@@ -35,15 +35,16 @@ pub struct DebugAction {
 	pub action:      DebugActionId,
 	/// Word passed back as `debug <key>`.
 	pub key:         &'static str,
-	/// Human-facing pi label.
+	/// Human-facing label.
 	pub label:       &'static str,
 	/// Consequence description.
 	pub description: &'static str,
 }
 
-/// Supported pi debug operations, in menu order.
+/// Supported debug operations, in menu order.
 ///
-/// Pi's `remote-debugger` row is intentionally absent: ADR 0036 prohibits its
+/// The TS implementation's `remote-debugger` row is intentionally absent:
+/// ADR 0036 prohibits its
 /// JavaScriptCore inspector and omp has no embedded-Python runtime inspector.
 pub const DEBUG_ACTIONS: [DebugAction; 12] = [
 	DebugAction {
@@ -483,7 +484,7 @@ pub fn context_report(dom: &Dom, con: &Ctx) -> Str {
 	Str::from(out)
 }
 
-/// `/hotkeys`: the fixed editor keys (pi `hotkeys-markdown.ts`) plus every
+/// `/hotkeys`: the fixed editor keys plus every
 /// console bind, sorted by key.
 #[must_use]
 pub fn hotkeys_report(con: &Ctx) -> Str {

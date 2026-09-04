@@ -7,13 +7,13 @@ use omp_agent::{
 	directors::advisor::{self, MODEL_SELECTOR},
 	find_director, state_bool, state_int, state_str,
 };
-use omp_con::Ctx;
-use omp_core::{Str, sf};
-use omp_dom::{KnownTag, PropId, PropKey, Tag, Value};
-use omp_inference::{
+use omp_ai::{
 	ChatEvent, ChatRequest, ChatStream, ContentPart, Error, ErrorDetail, ErrorKind,
 	ExecutionReceipt, Role,
 };
+use omp_con::Ctx;
+use omp_core::{Str, sf};
+use omp_dom::{KnownTag, PropId, PropKey, Tag, Value};
 use omp_journal::{
 	blob::BlobStore,
 	data::{AdvisorMessage, AdvisorSeverity},
@@ -71,7 +71,7 @@ impl Inference for RoutedInference {
 	fn chat(
 		&mut self,
 		request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		self.calls.primary.lock().push(request);
 		let events = self
 			.primary
@@ -84,7 +84,7 @@ impl Inference for RoutedInference {
 		&mut self,
 		selector: &str,
 		request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		self.calls.selectors.lock().push(Str::new(selector));
 		self.calls.advisor.lock().push(request);
 		let reply = self
@@ -97,7 +97,7 @@ impl Inference for RoutedInference {
 				AdvisorReply::Failure(error) => Err(error),
 				AdvisorReply::Pending(started) => {
 					started.notify_one();
-					std::future::pending::<Result<ChatStream, omp_inference::Error>>().await
+					std::future::pending::<Result<ChatStream, omp_ai::Error>>().await
 				},
 			}
 		}
@@ -190,7 +190,7 @@ fn ai_advisor_enabled_controls_idempotent_launch_engagement() {
 			.expect("selector"),
 		0
 	);
-	omp_inference::pi_settings::AI_ADVISOR_ENABLED
+	omp_ai::settings::AI_ADVISOR_ENABLED
 		.set(&con, true)
 		.expect("enable advisor");
 	advisor::apply_launch(&mut session, &con).expect("enabled launch");
@@ -288,7 +288,7 @@ async fn sync_backlog_reviews_before_the_next_primary_request() {
 		AdvisorReply::Events(empty_script()),
 	]);
 	let con = Arc::new(Ctx::new());
-	omp_inference::pi_settings::AI_ADVISOR_SYNC_BACKLOG
+	omp_ai::settings::AI_ADVISOR_SYNC_BACKLOG
 		.set(&con, Str::new_static("1"))
 		.expect("sync backlog");
 	let mut kernel = kernel(inference, root.path()).with_con_context(Arc::clone(&con));

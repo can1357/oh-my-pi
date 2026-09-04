@@ -1,7 +1,6 @@
-//! Session lifecycle slash commands (pi `builtin-lifecycle.ts`,
-//! `builtin-session.ts`): the journal is the tree, so every one of these is
-//! a `Session` create/open/rewind or a `<meta>`/`<queues>` patch performed
-//! by the controller, never presentation state.
+//! Session lifecycle slash commands: the journal is the tree, so every one of
+//! these is a `Session` create/open/rewind or a `<meta>`/`<queues>` patch
+//! performed by the controller, never presentation state.
 
 use omp_con::ConError;
 use omp_core::Str;
@@ -36,8 +35,8 @@ pub const PALETTE: &[PaletteEntry] = &[
 	PaletteEntry { name: "handoff", icon: Icon::Handoff },
 ];
 
-/// pi `/compact` mode words; omp has one local summary path, so a mode word
-/// is accepted and the remainder is the focus.
+/// The TS implementation has `/compact` mode words; OMP has one local summary
+/// path, so a mode word is accepted and the remainder is the focus.
 const COMPACT_MODES: [&str; 3] = ["soft", "remote", "snapcompact"];
 
 /// Parses a journal entry id argument (`/fork 01J…`).
@@ -51,7 +50,7 @@ fn usage(message: &'static str) -> ConError {
 	ConError::Usage(Str::new_static(message))
 }
 
-/// Splits `/compact [mode] [focus]` into its focus (pi `parseCompactArgs`).
+/// Splits `/compact [mode] [focus]` into its focus.
 pub fn compact_focus(words: Option<Str>) -> Result<Option<Str>, ConError> {
 	let Some(words) = words else {
 		return Ok(None);
@@ -72,7 +71,7 @@ pub fn compact_focus(words: Option<Str>) -> Result<Option<Str>, ConError> {
 	Ok((!text.is_empty()).then(|| Str::new(text)))
 }
 
-/// Parses `/shake [mode]` (pi `parseShakeMode`); empty defaults to `elide`.
+/// Parses `/shake [mode]`; empty defaults to `elide`.
 pub fn shake_mode(words: Option<Str>) -> Result<ShakeMode, ConError> {
 	let Some(words) = words else {
 		return Ok(ShakeMode::Elide);
@@ -102,7 +101,7 @@ pub fn session_op(words: Option<Str>) -> Result<SessionOp, ConError> {
 	}
 }
 
-/// Parses `/todo [subcommand] [args]` (pi `helpers/todo.ts`).
+/// Parses `/todo [subcommand] [args]`.
 pub fn todo_op(words: Option<Str>) -> Result<TodoOp, ConError> {
 	let Some(words) = words else {
 		return Ok(TodoOp::List);

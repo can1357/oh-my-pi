@@ -364,7 +364,7 @@ fn type_name_matches(name: &str, data: &Value) -> bool {
 	}
 }
 
-fn type_name(data: &Value) -> &'static str {
+const fn type_name(data: &Value) -> &'static str {
 	match data {
 		Value::Null => "null",
 		Value::Bool(_) => "boolean",

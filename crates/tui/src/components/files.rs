@@ -15,7 +15,7 @@ use crate::{
 struct Node {
 	name:      String,
 	directory: bool,
-	children:  Vec<Node>,
+	children:  Vec<Self>,
 }
 
 impl Node {

@@ -3,7 +3,7 @@
 use std::{future::Future, io::Write, result, time::Duration};
 
 use clap::Parser;
-use omp_shell_engine::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
+use omp_shell::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
 use tokio::time;
 
 use crate::host::parse_duration;
@@ -17,7 +17,7 @@ pub(crate) struct SleepCommand {
 }
 
 impl builtins::Command for SleepCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
 	fn new<I>(args: I) -> result::Result<Self, clap::Error>
 	where
@@ -34,10 +34,10 @@ impl builtins::Command for SleepCommand {
 		})
 	}
 
-	fn execute<SE: omp_shell_engine::ShellExtensions>(
+	fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell_engine::Error>> + Send {
+	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell::Error>> + Send {
 		let durations = self.durations.clone();
 		async move {
 			if context.is_cancelled() {
@@ -71,7 +71,7 @@ impl builtins::Command for SleepCommand {
 mod tests {
 	use std::io::{self, Read};
 
-	use omp_shell_engine::{
+	use omp_shell::{
 		ExecutionParameters, Shell,
 		builtins::Command,
 		openfiles::{OpenFile, OpenFiles},

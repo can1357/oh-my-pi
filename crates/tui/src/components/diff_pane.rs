@@ -238,7 +238,7 @@ impl SyntaxHighlights {
 		self.new.runs.resize_with(document.new_lines.len(), || None);
 	}
 
-	fn pending(&self, document: &DiffDocument) -> bool {
+	const fn pending(&self, document: &DiffDocument) -> bool {
 		(self.old.stream.is_some() && self.old.offset < document.old_lines.len())
 			|| (self.new.stream.is_some() && self.new.offset < document.new_lines.len())
 	}
@@ -490,7 +490,7 @@ impl DiffPane {
 	/// Clears a shift-extended selection while preserving the cursor row.
 	///
 	/// Returns whether an explicit selection was active.
-	pub fn clear_selection(&mut self) -> bool {
+	pub const fn clear_selection(&mut self) -> bool {
 		self.anchor.take().is_some()
 	}
 
@@ -578,7 +578,7 @@ impl DiffPane {
 		true
 	}
 
-	fn action_allowed(&self, action: DiffActionKind) -> bool {
+	const fn action_allowed(&self, action: DiffActionKind) -> bool {
 		matches!(
 			(self.patch_target, action),
 			(Some(DiffPatchTarget::Stage), DiffActionKind::Stage | DiffActionKind::Discard)
@@ -628,15 +628,15 @@ impl DiffPane {
 	}
 
 	fn segments(&self, width: u16, content: u16) -> u16 {
-		if !self.wrap {
-			1
-		} else {
+		if self.wrap {
 			content
 				.max(1)
 				.saturating_add(width - 1)
 				.checked_div(width)
 				.unwrap_or(1)
 				.max(1)
+		} else {
+			1
 		}
 	}
 
@@ -1150,11 +1150,11 @@ impl DiffPane {
 					x,
 					y,
 					"│",
-					Style::new().fg(pc.ctx.theme.border).bg(
-						selected
-							.then_some(palette.selection)
-							.unwrap_or(Color::Default),
-					),
+					Style::new().fg(pc.ctx.theme.border).bg(if selected {
+						palette.selection
+					} else {
+						Color::Default
+					}),
 				);
 				self.paint_side(
 					pc,
@@ -1177,9 +1177,11 @@ impl DiffPane {
 				let source = &document.file_lines[line];
 				let gutter = document.gutter_width;
 				let text_width = self.file_text_width(rect.width);
-				let bg = selected
-					.then_some(palette.selection)
-					.unwrap_or(Color::Default);
+				let bg = if selected {
+					palette.selection
+				} else {
+					Color::Default
+				};
 				pc.frame
 					.fill(Rect::new(rect.x, y, self.body_width(rect.width), 1), Style::new().bg(bg));
 				if segment == 0 {
@@ -1392,11 +1394,11 @@ impl DiffPane {
 	fn paint_header(&self, pc: &mut PaintCtx<'_>, rect: Rect, y: u16, hunk: usize, selected: bool) {
 		let document = self.document.as_ref().expect("document");
 		let body = self.body_width(rect.width);
-		let style = Style::new().fg(pc.ctx.theme.accent).bg(
-			selected
-				.then_some(pc.ctx.theme.surface)
-				.unwrap_or(Color::Default),
-		);
+		let style = Style::new().fg(pc.ctx.theme.accent).bg(if selected {
+			pc.ctx.theme.surface
+		} else {
+			Color::Default
+		});
 		pc.frame.fill(Rect::new(rect.x, y, body, 1), style);
 		pc.frame.put_clipped(
 			rect.x,
@@ -1816,7 +1818,7 @@ fn minimap_bucket_range(total: usize, band: usize, bands: usize) -> Option<Range
 	Some(from..to)
 }
 
-fn row_map_kind(kind: DiffRowKind) -> MapKind {
+const fn row_map_kind(kind: DiffRowKind) -> MapKind {
 	match kind {
 		DiffRowKind::Context => MapKind::Context,
 		DiffRowKind::Change => MapKind::Change,
@@ -1826,19 +1828,19 @@ fn row_map_kind(kind: DiffRowKind) -> MapKind {
 }
 
 fn segments(width: u16, content: u16, wrap: bool) -> u16 {
-	if !wrap {
-		1
-	} else {
+	if wrap {
 		content
 			.max(1)
 			.saturating_add(width - 1)
 			.checked_div(width)
 			.unwrap_or(1)
 			.max(1)
+	} else {
+		1
 	}
 }
 
-fn visual_row(visual: Visual) -> Option<usize> {
+const fn visual_row(visual: Visual) -> Option<usize> {
 	match visual {
 		Visual::Split { row, .. } | Visual::Line { row, .. } => Some(row),
 		Visual::File { row, .. } => row,

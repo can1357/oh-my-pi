@@ -10,7 +10,9 @@ use std::{
 	time::{Duration, UNIX_EPOCH},
 };
 
-use omp_core::{Str, utc_minute};
+use omp_core::{Str, sf, utc_minute};
+use omp_tool::{Diag, DiagKind, Unit};
+use smallvec::{SmallVec, smallvec};
 
 /// Maximum directory depth rendered below the root.
 pub const MAX_DEPTH: usize = 2;
@@ -37,8 +39,10 @@ pub struct DirEntry {
 /// Fully formatted result of one directory read.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectoryRender {
-	/// Model-facing listing, including selector continuation diagnostics.
+	/// Model-facing listing.
 	pub text:        Str,
+	/// Structured harness notices.
+	pub diags:       SmallVec<Diag, 2>,
 	/// Number of rows in the unsliced listing.
 	pub total_lines: usize,
 	/// Whether traversal or a per-directory child cap omitted entries.
@@ -101,7 +105,8 @@ pub fn render_directory(
 
 	let mut rows = vec![RenderedLine { label: ".".into(), size: None, age: None, depth: 0 }];
 	let mut truncated = scan_truncated;
-	render_children("", 0, &by_parent, now_ms, &mut rows, &mut truncated);
+	let mut diags = SmallVec::new();
+	render_children("", 0, &by_parent, now_ms, &mut rows, &mut truncated, &mut diags);
 	let formatted = format_lines(&rows);
 	let base = if rows.len() <= 1 {
 		"(empty directory)".to_owned()
@@ -115,6 +120,7 @@ pub fn render_directory(
 		return DirectoryRender {
 			root_path,
 			text: base.into(),
+			diags,
 			total_lines,
 			truncated,
 			edit_locked: true,
@@ -123,30 +129,40 @@ pub fn render_directory(
 
 	let start = offset.unwrap_or(1).saturating_sub(1);
 	if start >= total_lines {
-		let suggestion = if total_lines == 0 {
-			"The listing is empty.".to_owned()
-		} else {
-			format!("Use :1 to read from the start, or :{total_lines} to read the last line.")
-		};
+		diags.push(
+			Diag::warn(
+				DiagKind::RangeOutOfBounds,
+				sf!("Line {} is beyond end of listing ({total_lines} lines total).", start + 1),
+			)
+			.continuation(":1"),
+		);
 		return DirectoryRender {
 			root_path,
-			text: format!(
-				"Line {} is beyond end of listing ({total_lines} lines total). {suggestion}",
-				start + 1
-			)
-			.into(),
+			text: Str::new_static(""),
+			diags,
 			total_lines,
 			truncated,
 			edit_locked: true,
 		};
 	}
 	let end = limit.map_or(total_lines, |count| start.saturating_add(count).min(total_lines));
-	let mut text = all_lines[start..end].join("\n");
+	let text = all_lines[start..end].join("\n");
 	if end < total_lines {
 		let remaining = total_lines - end;
-		let _ = write!(text, "\n\n[{remaining} more lines in listing. Use :{} to continue]", end + 1);
+		diags.push(
+			Diag::info(DiagKind::Pagination, sf!("{remaining} lines remain in listing."))
+				.continuation(sf!(":{}", end + 1))
+				.omitted(remaining as u64, Unit::Lines),
+		);
 	}
-	DirectoryRender { root_path, text: text.into(), total_lines, truncated, edit_locked: true }
+	DirectoryRender {
+		root_path,
+		text: text.into(),
+		diags,
+		total_lines,
+		truncated,
+		edit_locked: true,
+	}
 }
 
 fn render_children<'a>(
@@ -156,6 +172,7 @@ fn render_children<'a>(
 	now_ms: u64,
 	rows: &mut Vec<RenderedLine>,
 	truncated: &mut bool,
+	diags: &mut SmallVec<Diag, 2>,
 ) {
 	let Some(all) = by_parent.get(parent) else {
 		return;
@@ -166,7 +183,7 @@ fn render_children<'a>(
 		all.len()
 	};
 	for child in &all[..retained] {
-		render_entry(*child, parent, by_parent, now_ms, rows, truncated);
+		render_entry(*child, parent, by_parent, now_ms, rows, truncated, diags);
 	}
 	if retained == all.len() {
 		return;
@@ -174,12 +191,10 @@ fn render_children<'a>(
 
 	*truncated = true;
 	let omitted = all.len() - retained;
-	rows.push(RenderedLine {
-		label: format!("{}- … {omitted} more", "  ".repeat(parent_depth + 1)),
-		size:  None,
-		age:   None,
-		depth: parent_depth + 1,
-	});
+	diags.push(
+		Diag::info(DiagKind::LimitReached, sf!("{omitted} directory entries omitted."))
+			.omitted(omitted as u64, Unit::Entries),
+	);
 }
 
 fn render_entry<'a>(
@@ -189,6 +204,7 @@ fn render_entry<'a>(
 	now_ms: u64,
 	rows: &mut Vec<RenderedLine>,
 	truncated: &mut bool,
+	diags: &mut SmallVec<Diag, 2>,
 ) {
 	let suffix = if node.entry.is_dir { "/" } else { "" };
 	rows.push(RenderedLine {
@@ -205,7 +221,7 @@ fn render_entry<'a>(
 	} else {
 		format!("{parent}/{}", node.name)
 	};
-	render_children(&child_path, node.depth, by_parent, now_ms, rows, truncated);
+	render_children(&child_path, node.depth, by_parent, now_ms, rows, truncated, diags);
 }
 
 /// Renders the deterministic workspace tree embedded in the prompt.
@@ -258,6 +274,7 @@ pub fn render_prompt_directory(
 		} else {
 			format_lines(&rows).into()
 		},
+		diags: smallvec![],
 		total_lines,
 		truncated,
 		root_path,
@@ -463,6 +480,8 @@ fn format_age(seconds: u64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+	use omp_tool::DiagKind;
+
 	use super::*;
 
 	#[test]
@@ -500,6 +519,34 @@ mod tests {
 		let zeta = rendered.text.find("- zeta.txt").unwrap();
 		assert!(alpha < nested_a && nested_a < nested_b && nested_b < zeta);
 		assert!(rendered.edit_locked);
+	}
+
+	#[test]
+	fn listing_ranges_emit_structured_pagination_and_bounds_diags() {
+		let entries = [DirEntry {
+			relative_path: "a.txt".into(),
+			is_dir:        false,
+			size:          1,
+			modified_ms:   0,
+		}];
+		let page = render_directory("root", &entries, false, 10_000, Some(1), Some(1));
+		assert_eq!(page.text, ".");
+		let [diag] = page.diags.as_slice() else {
+			panic!("bounded listing emits one pagination diagnostic");
+		};
+		assert_eq!(diag.native_kind(), Some(DiagKind::Pagination));
+		assert_eq!(diag.severity, omp_tool::Severity::Info);
+		assert_eq!(diag.continuation.as_deref(), Some(":2"));
+		assert_eq!(diag.omitted, Some(omp_tool::Omitted { count: 1, unit: omp_tool::Unit::Lines }));
+
+		let beyond = render_directory("root", &entries, false, 10_000, Some(3), Some(1));
+		assert!(beyond.text.is_empty());
+		let [diag] = beyond.diags.as_slice() else {
+			panic!("out-of-range listing emits one bounds diagnostic");
+		};
+		assert_eq!(diag.native_kind(), Some(DiagKind::RangeOutOfBounds));
+		assert_eq!(diag.severity, omp_tool::Severity::Warn);
+		assert_eq!(diag.continuation.as_deref(), Some(":1"));
 	}
 
 	#[test]

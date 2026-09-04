@@ -1083,17 +1083,10 @@ impl ExtensionManifest {
 				"" => Some(match row.kind.as_str() {
 					"completion" => ActivationTrigger::BeforeUiInput,
 					"prompt_slot" => ActivationTrigger::BeforeFirstPrompt,
-					"credential"
-					| "secret"
-					| "placement"
-					| "skills"
-					| "rules"
-					| "context-files"
-					| "prompts"
-					| "themes"
-					| "agents"
-					| "lsp-servers"
-					| "dap-adapters" => ActivationTrigger::Static,
+					"credential" | "secret" | "placement" | "skills" | "rules" | "context-files"
+					| "prompts" | "themes" | "agents" | "lsp-servers" | "dap-adapters" => {
+						ActivationTrigger::Static
+					},
 					_ => ActivationTrigger::FirstReach,
 				}),
 				_ => Some(ActivationTrigger::FirstReach),
@@ -1141,25 +1134,6 @@ impl ExtensionManifest {
 	/// Returns whether runtime-published declarations are operator-trusted.
 	pub const fn runtime_declarations_trusted(&self) -> bool {
 		self.runtime_declarations_trusted
-	}
-
-	/// Builds the explicit first-party `omp_py_eval` manifest.
-	///
-	/// Callers must still supply core-authenticated provenance and resource
-	/// limits; there is no permissive default or runtime-derived expectation.
-	pub fn py_eval(
-		provenance: Provenance,
-		resource_limits: impl IntoIterator<Item = QuotaSpec>,
-	) -> Self {
-		Self::new(
-			provenance,
-			sf!("omp_py_eval"),
-			[],
-			DeclarationSet::new([ToolDeclarationKey::new("py_eval", "", 1)], []),
-			ServiceManifest::default(),
-			resource_limits,
-			[ActivationTrigger::FirstReach],
-		)
 	}
 
 	/// Creates a lifecycle machine fenced to one session epoch.

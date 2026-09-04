@@ -141,7 +141,7 @@ async fn execute_params(
 			Ev::Done(ToolTerminal::Detached(_)) => panic!("eval unexpectedly detached"),
 			Ev::Args(issue) => panic!("eval rejected arguments: {issue:?}"),
 			Ev::Aborted(abort) => panic!("eval aborted: {abort:?}"),
-			Ev::Update(_) => {},
+			Ev::Update(_) | Ev::Diag(_) => {},
 		}
 	}
 	panic!("eval stream ended without a terminal payload")
@@ -400,7 +400,7 @@ fn no_output_and_python_error_projection_are_exact() {
 fn large_display_json_projection_is_complete() {
 	let mut value = payload();
 	let expected = "x".repeat(9_000);
-	value.display_outputs = vec![DisplayOutput::Json { data: json!({"payload": expected.clone()}) }];
+	value.display_outputs = vec![DisplayOutput::Json { data: json!({"payload": expected}) }];
 	let rendered = text(&project(&value, false));
 	assert!(rendered.contains(&expected));
 	assert!(!rendered.contains("elided"));

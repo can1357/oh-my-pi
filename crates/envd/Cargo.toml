@@ -11,35 +11,42 @@ readme = "README.md"
 
 [features]
 default = []
-local-tts = ["omp-inference/local-tts"]
+local-tts = ["omp-ai/local-tts"]
 
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
 arboard.workspace = true
 bytes.workspace = true
+cap-std.workspace = true
 flume.workspace = true
 futures.workspace = true
 globset.workspace = true
 http.workspace = true
+http-body-util.workspace = true
 hyper.workspace = true
+hyper-util.workspace = true
 im.workspace = true
 jiff.workspace = true
 miette.workspace = true
 nix.workspace = true
 omp-agent.workspace = true
+omp-ast.workspace = true
+omp-audio.workspace = true
 omp-session.workspace = true
 omp-dom.workspace = true
 omp-catalog.workspace = true
 omp-con.workspace = true
 omp-core.workspace = true
 omp-desktop.workspace = true
-omp-docserver.workspace = true
 omp-env.workspace = true
 omp-ext.workspace = true
-omp-grep.workspace = true
-omp-hashline.workspace = true
-omp-inference.workspace = true
+bytecount.workspace = true
+grep-matcher.workspace = true
+grep-pcre2.workspace = true
+grep-regex.workspace = true
+omp-edit.workspace = true
+omp-ai.workspace = true
 omp-journal.workspace = true
 omp-http.workspace = true
 omp-memory.workspace = true
@@ -49,13 +56,12 @@ omp-py.workspace = true
 omp-secrets.workspace = true
 omp-sandbox.workspace = true
 omp-shell-builtins.workspace = true
-omp-shell-engine.workspace = true
+omp-shell.workspace = true
 omp-cache.workspace = true
 omp-observability.workspace = true
 omp-tool.workspace = true
 omp-tools.workspace = true
 omp-vcs.workspace = true
-omp-voice.workspace = true
 omp-walker.workspace = true
 omp-webview.workspace = true
 parking_lot.workspace = true
@@ -68,9 +74,11 @@ rusqlite.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+similar.workspace = true
 strum.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 url.workspace = true
@@ -85,8 +93,6 @@ russh.workspace = true
 russh-sftp.workspace = true
 
 encoding_rs.workspace = true
-
-bytecount.workspace = true
 
 smallvec.workspace = true
 tempfile.workspace = true
@@ -105,9 +111,10 @@ omp-ar.workspace = true
 
 flate2.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
-http-body-util.workspace = true
-hyper-util.workspace = true
 tempfile.workspace = true
 
 [lints]

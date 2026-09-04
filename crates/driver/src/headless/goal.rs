@@ -3,8 +3,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use omp_agent::{
-	DirectorRegistry, DirectorStack, SessionTool, SessionToolCx, SessionToolError, SessionToolFuture,
-	director_status, find_director, state_bool, state_int, state_str,
+	DirectorRegistry, DirectorStack, SessionTool, SessionToolCx, SessionToolError,
+	SessionToolFuture, director_status, find_director, state_bool, state_int, state_str,
 };
 use omp_core::{Str, sf};
 use omp_dom::{Op, PropKey, Txn, Value};
@@ -71,11 +71,11 @@ impl SessionTool for GoalSessionTool {
 				Ok(params) => params,
 				Err(_) => {
 					return Ok(CallOutcome::ArgsRejected(omp_tool::ArgIssue {
-						path: Vec::new(),
+						path:     Vec::new(),
 						expected: sf!("a valid goal operation"),
-						kind: omp_tool::ArgIssueKind::Malformed,
-						example: Some(sf!(r#"{{"op":"get"}}"#)),
-						found: None,
+						kind:     omp_tool::ArgIssueKind::Malformed,
+						example:  Some(sf!(r#"{{"op":"get"}}"#)),
+						found:    None,
 					}));
 				},
 			};
@@ -83,7 +83,10 @@ impl SessionTool for GoalSessionTool {
 				return fault(goal::Fault::InvalidBudget);
 			}
 			if params.op == Operation::Create
-				&& params.objective.as_ref().is_none_or(|value| value.trim().is_empty())
+				&& params
+					.objective
+					.as_ref()
+					.is_none_or(|value| value.trim().is_empty())
 			{
 				return fault(goal::Fault::ObjectiveRequired);
 			}
@@ -115,10 +118,9 @@ impl SessionTool for GoalSessionTool {
 					)?;
 					// Goal accounting begins at creation, not at the request
 					// that led the model to create it.
-					if let (Some((handle, _)), Some(turn)) = (
-						find_director(cx.session.dom(), FAMILY),
-						cx.session.dom().parent(cx.call),
-					) {
+					if let (Some((handle, _)), Some(turn)) =
+						(find_director(cx.session.dom(), FAMILY), cx.session.dom().parent(cx.call))
+					{
 						let baseline = omp_agent::turn_tokens(cx.session.dom(), turn);
 						patch_state(cx.session, handle, [
 							(
@@ -134,14 +136,13 @@ impl SessionTool for GoalSessionTool {
 				},
 				Operation::Get => {},
 				Operation::Complete => {
-					let Some(handle) = existing else { return fault(goal::Fault::NoGoal) };
+					let Some(handle) = existing else {
+						return fault(goal::Fault::NoGoal);
+					};
 					patch_state(cx.session, handle, [
 						("state/done", Value::Bool(true)),
 						("state/continuation_armed", Value::Bool(false)),
-						(
-							"state/updated_at_ms",
-							Value::Int(i64::try_from(now_ms()).unwrap_or(i64::MAX)),
-						),
+						("state/updated_at_ms", Value::Int(i64::try_from(now_ms()).unwrap_or(i64::MAX))),
 					])?;
 				},
 				Operation::Resume => {
@@ -157,20 +158,21 @@ impl SessionTool for GoalSessionTool {
 					set_armed(cx.session, true)?;
 				},
 				Operation::Drop => {
-					let Some(handle) = existing else { return fault(goal::Fault::NoGoal) };
+					let Some(handle) = existing else {
+						return fault(goal::Fault::NoGoal);
+					};
 					patch_state(cx.session, handle, [
 						("state/dropped", Value::Bool(true)),
 						("state/continuation_armed", Value::Bool(false)),
-						(
-							"state/updated_at_ms",
-							Value::Int(i64::try_from(now_ms()).unwrap_or(i64::MAX)),
-						),
+						("state/updated_at_ms", Value::Int(i64::try_from(now_ms()).unwrap_or(i64::MAX))),
 					])?;
 				},
 			}
 			let projection = project(cx.session.dom());
 			let remaining_tokens = projection.as_ref().and_then(|goal| {
-				goal.token_budget.map(|budget| budget.saturating_sub(goal.tokens_used))
+				goal
+					.token_budget
+					.map(|budget| budget.saturating_sub(goal.tokens_used))
 			});
 			let completion_report = (op == Operation::Complete)
 				.then(|| projection.as_ref())
@@ -199,8 +201,7 @@ fn account_current_turn(
 		return Ok(());
 	};
 	let total = omp_agent::turn_tokens(session.dom(), turn);
-	let previous = if state_int(node, "accounted_turn")
-		.and_then(|value| u64::try_from(value).ok())
+	let previous = if state_int(node, "accounted_turn").and_then(|value| u64::try_from(value).ok())
 		== Some(turn.get())
 	{
 		state_int(node, "accounted_turn_tokens")
@@ -214,28 +215,19 @@ fn account_current_turn(
 		.unwrap_or(0)
 		.saturating_add(total.saturating_sub(previous));
 	patch_state(session, handle, [
-		(
-			"state/tokens_used",
-			Value::Int(i64::try_from(used).unwrap_or(i64::MAX)),
-		),
-		(
-			"state/accounted_turn",
-			Value::Int(i64::try_from(turn.get()).unwrap_or(i64::MAX)),
-		),
-		(
-			"state/accounted_turn_tokens",
-			Value::Int(i64::try_from(total).unwrap_or(i64::MAX)),
-		),
-		(
-			"state/updated_at_ms",
-			Value::Int(i64::try_from(now_ms()).unwrap_or(i64::MAX)),
-		),
+		("state/tokens_used", Value::Int(i64::try_from(used).unwrap_or(i64::MAX))),
+		("state/accounted_turn", Value::Int(i64::try_from(turn.get()).unwrap_or(i64::MAX))),
+		("state/accounted_turn_tokens", Value::Int(i64::try_from(total).unwrap_or(i64::MAX))),
+		("state/updated_at_ms", Value::Int(i64::try_from(now_ms()).unwrap_or(i64::MAX))),
 	])
 }
 
 /// Durably changes whether the interactive idle boundary may start another
 /// hidden Goal turn.
-pub fn set_armed(session: &mut omp_session::Session, armed: bool) -> Result<bool, omp_session::SessionError> {
+pub fn set_armed(
+	session: &mut omp_session::Session,
+	armed: bool,
+) -> Result<bool, omp_session::SessionError> {
 	let Some((handle, node)) = find_director(session.dom(), FAMILY) else {
 		return Ok(false);
 	};
@@ -288,7 +280,9 @@ fn patch_state<const N: usize>(
 	handle: omp_dom::Handle,
 	updates: [(&'static str, Value); N],
 ) -> Result<(), omp_session::SessionError> {
-	let cause = session.head().ok_or(omp_session::SessionError::NoActiveTurn)?;
+	let cause = session
+		.head()
+		.ok_or(omp_session::SessionError::NoActiveTurn)?;
 	session.patch(Txn {
 		cause,
 		label: Some(Str::new_static("goal.state")),
@@ -305,7 +299,10 @@ fn patch_state<const N: usize>(
 }
 
 fn completion_report(goal: &goal::Goal) -> Str {
-	let mut report = sf!("Goal achieved. Report final budget usage to the user: tokens used: {}", goal.tokens_used);
+	let mut report = sf!(
+		"Goal achieved. Report final budget usage to the user: tokens used: {}",
+		goal.tokens_used
+	);
 	if let Some(budget) = goal.token_budget {
 		report = sf!("{report} of {budget}");
 	}

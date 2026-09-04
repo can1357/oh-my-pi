@@ -1271,15 +1271,15 @@ pub fn render_snapcompact_png(text: &str, options: &SnapcompactRenderOptions) ->
 	// shapes draw wide code points through Silver across two cells, so they
 	// count double here; the square-celled Silver shape keeps one cell each.
 	let wide_cells = matches!(font, RenderFont::Bitmap(_));
-	let used = used_rows(&text, &grid, doc, wide_cells);
+	let used = used_rows(text, &grid, doc, wide_cells);
 	let height = used * grid.repeat * grid.cell_h;
 
 	match font {
 		RenderFont::Ttf(font) => {
 			let pixels = if doc {
-				render_ttf_doc_rgb(&text, size, height, font, &grid, black_ink)
+				render_ttf_doc_rgb(text, size, height, font, &grid, black_ink)
 			} else {
-				render_ttf_rgb(&text, size, height, font, &grid, black_ink)
+				render_ttf_rgb(text, size, height, font, &grid, black_ink)
 			};
 			encode_rgb_png(&pixels, size, height, png::Compression::High)
 		},
@@ -1291,9 +1291,9 @@ pub fn render_snapcompact_png(text: &str, options: &SnapcompactRenderOptions) ->
 				// cell box (the natural cell, or natural glyphs on a padded pitch
 				// when `stretch: false`).
 				let pixels = if doc {
-					render_doc_bitmap(&text, size, height, font, &grid, black_ink)
+					render_doc_bitmap(text, size, height, font, &grid, black_ink)
 				} else {
-					render_bitmap(&text, size, height, font, &grid, black_ink)
+					render_bitmap(text, size, height, font, &grid, black_ink)
 				};
 				return encode_indexed_png(&pixels, size, height, png::Compression::High);
 			}
@@ -1307,9 +1307,9 @@ pub fn render_snapcompact_png(text: &str, options: &SnapcompactRenderOptions) ->
 			let dst_w = grid.cols * target_w;
 			let dst_h = used * grid.repeat * target_h;
 			let indexed = if doc {
-				render_doc_bitmap(&text, src_w, src_h, font, &native, black_ink)
+				render_doc_bitmap(text, src_w, src_h, font, &native, black_ink)
 			} else {
-				render_bitmap(&text, src_w, src_h, font, &native, black_ink)
+				render_bitmap(text, src_w, src_h, font, &native, black_ink)
 			};
 			let mut rgb = vec![0f32; src_w * src_h * 3];
 			for (dst, &idx) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(&indexed) {

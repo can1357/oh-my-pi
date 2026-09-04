@@ -2259,7 +2259,7 @@ has every field in hand — `TurnEnd` from the turn's own accumulators, `ModelRe
 `Outcome` message the loop already receives.
 
 `ToolCall` is published **agent/env-side, never worker-side**, and that placement is what makes
-`args_raw`, `repairs`, and `pulls` obtainable at all. Charitable decoding happens in `omp-slopjson`
+`args_raw`, `repairs`, and `pulls` obtainable at all. Charitable decoding happens in `omp_core::slopjson`
 and `omp-tool` before dispatch, so by the time a worker sees `InvokeTool.args_json` the repair has
 already been applied and the raw emission is gone from that side of the boundary. The raw text is
 available where it is produced: `env/v1`'s `ArgsCommitted` documents `raw` as "the exact committed

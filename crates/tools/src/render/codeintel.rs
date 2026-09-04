@@ -42,21 +42,27 @@ impl RenderFold for LspRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
-		if let Some(action) = args.get("action").and_then(omp_slopjson::Value::as_str) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
+		if let Some(action) = args
+			.get("action")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.action = Some(Str::new(action));
 		}
-		if let Some(file) = args.get("file").and_then(omp_slopjson::Value::as_str) {
+		if let Some(file) = args.get("file").and_then(omp_core::slopjson::Value::as_str) {
 			state.file = Some(Str::new(file));
 		}
 		if let Some(line) = args
 			.get("line")
-			.and_then(omp_slopjson::Value::as_u64)
+			.and_then(omp_core::slopjson::Value::as_u64)
 			.and_then(|line| u32::try_from(line).ok())
 		{
 			state.line = Some(line);
 		}
-		if let Some(symbol) = args.get("symbol").and_then(omp_slopjson::Value::as_str) {
+		if let Some(symbol) = args
+			.get("symbol")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.symbol = Some(Str::new(symbol));
 		}
 	}
@@ -90,17 +96,26 @@ impl RenderFold for DebugRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
-		if let Some(action) = args.get("action").and_then(omp_slopjson::Value::as_str) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
+		if let Some(action) = args
+			.get("action")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.action = Some(Str::new(action));
 		}
-		if let Some(adapter) = args.get("adapter").and_then(omp_slopjson::Value::as_str) {
+		if let Some(adapter) = args
+			.get("adapter")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.adapter = Some(Str::new(adapter));
 		}
-		if let Some(program) = args.get("program").and_then(omp_slopjson::Value::as_str) {
+		if let Some(program) = args
+			.get("program")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.program = Some(Str::new(program));
 		}
-		if let Some(file) = args.get("file").and_then(omp_slopjson::Value::as_str) {
+		if let Some(file) = args.get("file").and_then(omp_core::slopjson::Value::as_str) {
 			state.file = Some(Str::new(file));
 		}
 	}
@@ -280,14 +295,14 @@ fn render_debug_payload(state: &DebugState, payload: &DebugPayload) -> El {
 		.and_then(Value::as_array)
 		.and_then(|frames| frames.first());
 	let rendered = (payload.action != DebugAction::StackTrace)
-		.then(|| debug_render::render(payload.action, &payload.data));
+		.then(|| debug_render::render(payload.action, &payload.data).text);
 	view! {
 		<col gap=1>
 			<text bold fg=accent>{"Session"}</text>
 			if let Some(session) = snapshot
 				.get("id")
 				.and_then(Value::as_str)
-				.or_else(|| payload.session.as_deref())
+				.or(payload.session.as_deref())
 			{
 				{fact("Session", session)}
 			}
@@ -295,7 +310,7 @@ fn render_debug_payload(state: &DebugState, payload: &DebugPayload) -> El {
 				{integer_fact("Revision", revision)}
 			}
 			if let Some(adapter) =
-				string_field(snapshot, "adapter", "adapter").or_else(|| state.adapter.as_deref())
+				string_field(snapshot, "adapter", "adapter").or(state.adapter.as_deref())
 			{
 				{fact("Adapter", adapter)}
 			}
@@ -305,7 +320,7 @@ fn render_debug_payload(state: &DebugState, payload: &DebugPayload) -> El {
 			if let Some(program) = snapshot
 				.get("program")
 				.and_then(Value::as_str)
-				.or_else(|| state.program.as_deref())
+				.or(state.program.as_deref())
 			{
 				{fact("Program", program)}
 			}
@@ -367,18 +382,18 @@ fn render_debug_location(snapshot: &Value, first_frame: Option<&Value>) -> Optio
 		.and_then(|frame| frame.get("line"))
 		.and_then(Value::as_u64)
 		.or_else(|| {
-		first_frame
-			.and_then(|frame| frame.get("line"))
-			.and_then(Value::as_u64)
-	});
+			first_frame
+				.and_then(|frame| frame.get("line"))
+				.and_then(Value::as_u64)
+		});
 	let column = stopped_frame
 		.and_then(|frame| frame.get("column"))
 		.and_then(Value::as_u64)
 		.or_else(|| {
-		first_frame
-			.and_then(|frame| frame.get("column"))
-			.and_then(Value::as_u64)
-	});
+			first_frame
+				.and_then(|frame| frame.get("column"))
+				.and_then(Value::as_u64)
+		});
 	let (source, line) = (source?, line?);
 	let location =
 		column.map_or_else(|| sf!("{source}:{line}"), |column| sf!("{source}:{line}:{column}"));
@@ -465,10 +480,7 @@ fn render_fault(message: &str) -> El {
 
 /// Native LSP and debugger renderer lifecycle fixtures for the visual QA
 /// gallery.
-pub(crate) fn gallery_fixtures(
-	lsp: ToolIdentity,
-	debug: ToolIdentity,
-) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(lsp: ToolIdentity, debug: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
 			identity: lsp,
@@ -506,12 +518,16 @@ mod tests {
 		let mut lsp_state = LspState::default();
 		LspRenderer.fold_args(
 			&mut lsp_state,
-			&omp_slopjson::parse_streaming(fixtures[0].streaming_args),
+			&omp_core::slopjson::parse_streaming(fixtures[0].streaming_args),
 			false,
 		);
 		let lsp_live = LspRenderer.view(&lsp_state, None).unwrap();
 		assert!(lsp_live.contains("src/server/au"));
-		LspRenderer.fold_args(&mut lsp_state, &omp_slopjson::parse_streaming(fixtures[0].args), true);
+		LspRenderer.fold_args(
+			&mut lsp_state,
+			&omp_core::slopjson::parse_streaming(fixtures[0].args),
+			true,
+		);
 		let lsp_outcome: CallOutcome<LspPayload, LspFault> =
 			serde_json::from_slice(fixtures[0].success_outcome).unwrap();
 		let lsp_view = LspRenderer.view(&lsp_state, Some(&lsp_outcome)).unwrap();
@@ -528,14 +544,14 @@ mod tests {
 		let mut debug_state = DebugState::default();
 		DebugRenderer.fold_args(
 			&mut debug_state,
-			&omp_slopjson::parse_streaming(fixtures[1].streaming_args),
+			&omp_core::slopjson::parse_streaming(fixtures[1].streaming_args),
 			false,
 		);
 		let debug_live = DebugRenderer.view(&debug_state, None).unwrap();
 		assert!(debug_live.contains("./app/ser"));
 		DebugRenderer.fold_args(
 			&mut debug_state,
-			&omp_slopjson::parse_streaming(fixtures[1].args),
+			&omp_core::slopjson::parse_streaming(fixtures[1].args),
 			true,
 		);
 		let debug_outcome: CallOutcome<DebugPayload, DebugFault> =

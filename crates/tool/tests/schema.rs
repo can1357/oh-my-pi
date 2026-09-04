@@ -138,8 +138,8 @@ fn arbitrary_schema_injection_normalizes_protocol_fields() {
 
 #[test]
 fn arbitrary_schema_injection_rejects_invalid_shapes() {
-	assert!(matches!(inject_protocol_schema(br#"{"#), Err(ProtocolSchemaError::Json(_))));
-	for schema in [br#"[]"#.as_slice(), br#"{"type":"string"}"#] {
+	assert!(matches!(inject_protocol_schema(br"{"), Err(ProtocolSchemaError::Json(_))));
+	for schema in [br"[]".as_slice(), br#"{"type":"string"}"#] {
 		assert!(matches!(inject_protocol_schema(schema), Err(ProtocolSchemaError::Object)));
 	}
 	assert!(matches!(

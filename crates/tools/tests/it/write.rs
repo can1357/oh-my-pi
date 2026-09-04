@@ -5,7 +5,8 @@ use std::{future, future::Future, sync::Arc, time::Duration};
 use futures::{StreamExt, executor::block_on};
 use omp_core::{Str, sf};
 use omp_tool::{
-	Abort, CapsBase, Ev, IncomingParams, Interrupt, ModelClass, Part, PromptCaps, Tool, ToolTerminal,
+	Abort, CapsBase, Diag, DiagKind, Ev, IncomingParams, Interrupt, ModelClass, Part, PromptCaps,
+	Severity, Tool, ToolTerminal,
 };
 use omp_tools::{
 	read::selector::LiteralPathProbe,
@@ -109,6 +110,7 @@ struct Invocation {
 	result:  Result<write::Payload, Fault>,
 	useless: bool,
 	text:    String,
+	diags:   Vec<Diag>,
 }
 
 fn committed(
@@ -134,8 +136,18 @@ fn invoke(documents: FakeDocuments, raw: &str) -> Invocation {
 		.args_committed(Str::new(raw))
 		.expect("invocation consumer remains live");
 	let events = block_on(tool.call(params).collect::<Vec<_>>());
-	let [Ev::Done(ToolTerminal::Done { result, useless })] = events.as_slice() else {
-		panic!("expected one terminal write outcome: {events:?}");
+	let Some((terminal, preceding)) = events.split_last() else {
+		panic!("expected a terminal write outcome");
+	};
+	let diags = preceding
+		.iter()
+		.map(|event| match event {
+			Ev::Diag(diag) => diag.clone(),
+			_ => panic!("expected diagnostics before terminal write outcome: {events:?}"),
+		})
+		.collect();
+	let Ev::Done(ToolTerminal::Done { result, useless }) = terminal else {
+		panic!("expected terminal write outcome last: {events:?}");
 	};
 	let parts = tool.prompt(
 		result.as_ref(),
@@ -157,7 +169,7 @@ fn invoke(documents: FakeDocuments, raw: &str) -> Invocation {
 			Part::Blob { .. } => panic!("write must never project blobs"),
 		})
 		.collect();
-	Invocation { result: result.clone(), useless: *useless, text }
+	Invocation { result: result.clone(), useless: *useless, text, diags }
 }
 
 #[test]
@@ -213,10 +225,10 @@ fn generated_schema_definition_and_revision_are_exact() {
 		 `vault://<name>/path` resources; Obsidian operations use `?op=create[&overwrite]`, \
 		 `?op=move&to=<path>`, `?op=delete[&permanent]`, or `?op=open[&newtab]` (the latter three \
 		 require empty content); partial selectors remain read-only\n- Supports registered \
-		 merge-conflict splices via `conflict://<id>` \
-		 and `@ours`/`@base`/`@theirs`/`@both`\n</conditions>\n\n<critical>\n- You SHOULD use Edit \
-		 tool for modifying existing files\n- You NEVER create documentation files (*.md, README) \
-		 unless explicitly requested\n- You NEVER use emojis unless requested\n</critical>"
+		 merge-conflict splices via `conflict://<id>` and \
+		 `@ours`/`@base`/`@theirs`/`@both`\n</conditions>\n\n<critical>\n- You SHOULD use Edit tool \
+		 for modifying existing files\n- You NEVER create documentation files (*.md, README) unless \
+		 explicitly requested\n- You NEVER use emojis unless requested\n</critical>"
 	);
 }
 
@@ -276,7 +288,7 @@ fn success_count_matches_javascript_utf16_length_while_payload_keeps_utf8_bytes(
 }
 
 #[test]
-fn copied_hashline_display_is_stripped_before_commit_with_exact_notice() {
+fn copied_hashline_display_emits_content_normalized_diag() {
 	let documents = FakeDocuments::success(
 		LiteralPathProbe::Missing,
 		committed(WriteDisposition::Created, 13, false, Some("BEEF")),
@@ -286,11 +298,13 @@ fn copied_hashline_display_is_stripped_before_commit_with_exact_notice() {
 		documents,
 		r#"{"path":"[out.txt#1234]","content":"[source.txt#ABCD]\n1:first\n2:second\n"}"#,
 	);
-	assert_eq!(
-		invocation.text,
-		"[out.txt#BEEF]\nSuccessfully wrote 13 bytes to out.txt\nNote: auto-stripped hashline \
-		 display prefixes from content before writing."
-	);
+	assert_eq!(invocation.text, "[out.txt#BEEF]\nSuccessfully wrote 13 bytes to out.txt");
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::ContentNormalized));
+	assert_eq!(invocation.diags[0].severity, Severity::Info);
+	assert_eq!(invocation.diags[0].continuation, None);
+	assert_eq!(invocation.diags[0].artifact, None);
+	assert_eq!(invocation.diags[0].omitted, None);
 	assert!(
 		invocation
 			.result
@@ -306,17 +320,19 @@ fn copied_hashline_display_is_stripped_before_commit_with_exact_notice() {
 }
 
 #[test]
-fn shebang_chmod_truth_appends_the_exact_notice() {
+fn shebang_execute_bits_emit_made_executable_diag() {
 	let documents = FakeDocuments::success(
 		LiteralPathProbe::Missing,
 		committed(WriteDisposition::Created, 18, true, Some("C0DE")),
 	);
 	let invocation = invoke(documents, r##"{"path":"out.txt","content":"#!/bin/sh\necho hi\n"}"##);
-	assert_eq!(
-		invocation.text,
-		"[out.txt#C0DE]\nSuccessfully wrote 18 bytes to out.txt\n[Notice: Made executable via chmod \
-		 +x]"
-	);
+	assert_eq!(invocation.text, "[out.txt#C0DE]\nSuccessfully wrote 18 bytes to out.txt");
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::MadeExecutable));
+	assert_eq!(invocation.diags[0].severity, Severity::Info);
+	assert_eq!(invocation.diags[0].continuation, None);
+	assert_eq!(invocation.diags[0].artifact, None);
+	assert_eq!(invocation.diags[0].omitted, None);
 	assert!(
 		invocation
 			.result

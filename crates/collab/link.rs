@@ -191,7 +191,7 @@ impl LinkCredentials {
 	}
 
 	/// Returns a write token only for full-access links.
-	pub fn write_token(&self) -> Option<WriteToken> {
+	pub const fn write_token(&self) -> Option<WriteToken> {
 		match self {
 			Self::ReadOnly(_) => None,
 			Self::Full { write_token, .. } => Some(WriteToken::from_bytes(*write_token)),
@@ -379,12 +379,11 @@ fn parse_inner(input: &str, depth: u8) -> Result<CollabLink, LinkError> {
 		format!("wss://{text}")
 	};
 	let url = Url::parse(&candidate).map_err(LinkError::Parse)?;
-	if matches!(url.scheme(), "http" | "https") {
-		if let Some(fragment) = url.fragment() {
-			if let Ok(link) = parse_inner(fragment, depth + 1) {
-				return Ok(link);
-			}
-		}
+	if matches!(url.scheme(), "http" | "https")
+		&& let Some(fragment) = url.fragment()
+		&& let Ok(link) = parse_inner(fragment, depth + 1)
+	{
+		return Ok(link);
 	}
 	if !matches!(url.scheme(), "ws" | "wss" | "http" | "https") {
 		if let Some(fragment) = url.fragment() {

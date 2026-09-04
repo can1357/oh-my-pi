@@ -40,15 +40,9 @@ fn parse_cli_secret(value: &str) -> Result<SecretString, convert::Infallible> {
 
 use std::{convert, env, fs, time};
 
-use omp_catalog::{ModelKey, compile::compile_oracle};
-use omp_driver::bridges::{AgentGoalControl, InferenceBridge};
-use omp_envd::{
-	exthost::{ActivationTrigger, DeclarationSet, ExtensionManifest, ServiceManifest},
-	worker::HostKey,
-};
 #[cfg(feature = "local-applefm")]
-use omp_inference::local::applefm::{AppleFm, AppleFmEvent, AppleFmOptions};
-use omp_inference::{
+use omp_ai::local::applefm::{AppleFm, AppleFmEvent, AppleFmOptions};
+use omp_ai::{
 	Client,
 	call::{
 		CallMeta, ChatRequest, ContentPart, Message, NegotiationPolicy, Role, Sampling, Setting,
@@ -58,6 +52,12 @@ use omp_inference::{
 	id::RequestId,
 	receipt::ExecutionBudget,
 	router,
+};
+use omp_catalog::{ModelKey, compile::compile_oracle};
+use omp_driver::bridges::{AgentGoalControl, InferenceBridge};
+use omp_envd::{
+	exthost::{ActivationTrigger, DeclarationSet, ExtensionManifest, ServiceManifest},
+	worker::HostKey,
 };
 use tokio::io::{AsyncWriteExt as _, stdout};
 
@@ -78,13 +78,13 @@ use crate::{
 	gallery_cmd::GalleryArgs,
 	gc_cmd, git_cmd,
 	git_cmd::GitArgs,
-	grep_cmd, grievances_cmd, models_cmd, print_mode, profile_alias, render_cmd,
+	grievances_cmd, models_cmd, print_mode, profile_alias, render_cmd,
 	render_cmd::RenderArgs,
-	rpc_mode, say_cmd, setup_cmd, smoke_test, ssh_cmd, stats_cmd,
+	rpc_mode, say_cmd, setup_cmd, smoke_test, ssh_cmd,
 	ssh_cmd::SshArgs,
 	startup_notice,
 	startup_notice::Eligibility,
-	tiny_models_cmd, update_cmd, usage_cmd,
+	stats_cmd, tiny_models_cmd, update_cmd, usage_cmd,
 	usage_error::CliUsageError,
 	worktree_cmd,
 };
@@ -143,8 +143,8 @@ impl FromStr for ThinkingLevel {
 }
 
 /// Parses `--service-tier` into the session's OpenAI-family tier setting
-/// (`ai_tier_openai`; pi `SERVICE_TIER_OPENAI_VALUES`). `inherit` is a
-/// subagent-only value and is rejected at the CLI.
+/// (`ai_tier_openai`). `inherit` is a subagent-only value and is rejected at
+/// the CLI.
 fn parse_service_tier(value: &str) -> Result<TierSetting, String> {
 	use strum::VariantNames as _;
 	match value.parse::<TierSetting>() {
@@ -500,7 +500,7 @@ pub struct InstallArgs {
 pub struct StatsArgs {
 	/// Emit the complete aggregate as machine-readable JSON.
 	#[arg(short = 'j', long)]
-	pub json: bool,
+	pub json:    bool,
 	/// Print the human-readable aggregate (the default).
 	#[arg(short = 's', long)]
 	pub summary: bool,
@@ -718,49 +718,6 @@ pub struct SayArgs {
 	/// speaker.
 	#[arg(long = "out", visible_alias = "output", short = 'o', value_name = "WAV")]
 	pub output:          Option<PathBuf>,
-}
-
-/// Standalone native grep options.
-#[derive(Clone, Debug, Args)]
-pub struct GrepArgs {
-	/// Rust/PCRE2 regular expression.
-	pub pattern:      Str,
-	/// File or directory to search.
-	#[arg(default_value = ".")]
-	pub path:         PathBuf,
-	/// Recursive file glob.
-	#[arg(short = 'g', long)]
-	pub glob:         Option<Str>,
-	/// Maximum returned matches.
-	#[arg(short = 'l', long, default_value_t = 20)]
-	pub limit:        u32,
-	/// Context lines before and after each match.
-	#[arg(short = 'C', long, default_value_t = 2)]
-	pub context:      u32,
-	/// Return matching file names only.
-	#[arg(short = 'f', long, conflicts_with = "count")]
-	pub files:        bool,
-	/// Return match counts per file.
-	#[arg(short = 'c', long)]
-	pub count:        bool,
-	/// Match without regard to ASCII case.
-	#[arg(short = 'i', long)]
-	pub ignore_case:  bool,
-	/// Enable multiline matching.
-	#[arg(long)]
-	pub multiline:    bool,
-	/// Include dot-prefixed paths.
-	#[arg(long, default_value_t = true)]
-	pub hidden:       bool,
-	/// Ignore repository ignore files.
-	#[arg(long)]
-	pub no_gitignore: bool,
-	/// Operation deadline in milliseconds.
-	#[arg(long)]
-	pub timeout_ms:   Option<u32>,
-	/// Emit machine-readable JSON.
-	#[arg(long)]
-	pub json:         bool,
 }
 
 /// Grievance operation selected by the positional action.
@@ -1066,8 +1023,6 @@ pub enum Command {
 	Setup(SetupArgs),
 	/// Synthesize text with local Kokoro and play or export it.
 	Say(SayArgs),
-	/// Run the native grep engine as a standalone operator.
-	Grep(GrepArgs),
 	/// View, clean, or manually push reported tool issues.
 	Grievances(GrievancesArgs),
 	/// Manage scoped native SSH hosts and run bounded client operations.
@@ -1148,8 +1103,14 @@ pub struct BrowserRelayArgs {
 	#[arg(value_enum, default_value = "serve")]
 	pub action:   BrowserRelayAction,
 	/// Loopback port.
-	#[arg(long, default_value_t = 9222)]
+	#[arg(long, default_value_t = 9224)]
 	pub port:     u16,
+	/// Loopback bind address used by the internal managed launcher.
+	#[arg(long, default_value = "127.0.0.1", hide = true)]
+	pub bind:     std::net::IpAddr,
+	/// Run under machine-global consumer lease ownership.
+	#[arg(long, hide = true)]
+	pub managed:  bool,
 	/// Optional extension authentication token.
 	#[arg(long)]
 	pub token:    Option<Str>,
@@ -1427,7 +1388,6 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
 	CommandSpec { name: "tiny-models", aliases: &[] },
 	CommandSpec { name: "setup", aliases: &[] },
 	CommandSpec { name: "say", aliases: &[] },
-	CommandSpec { name: "grep", aliases: &[] },
 	CommandSpec { name: "grievances", aliases: &[] },
 	CommandSpec { name: "ssh", aliases: &[] },
 	CommandSpec { name: "cleanse", aliases: &[] },
@@ -1951,16 +1911,16 @@ impl ChatArgs {
 pub struct PrintArgs {
 	/// Launch and session settings shared with interactive, RPC, and ACP modes.
 	#[command(flatten)]
-	pub launch:           ChatArgs,
+	pub launch:         ChatArgs,
 	/// Emit newline-delimited JSON events rather than final text.
 	#[arg(long, value_parser = ["text", "json"], default_value = "text")]
-	pub mode:             String,
+	pub mode:           String,
 	/// Include streamed reasoning in text output.
 	#[arg(long)]
-	pub print_thoughts:   bool,
+	pub print_thoughts: bool,
 	/// Additional user messages applied in order after the initial prompt.
 	#[arg(long = "follow-up", value_name = "TEXT")]
-	pub follow_ups:       Vec<Str>,
+	pub follow_ups:     Vec<Str>,
 }
 
 impl std::ops::Deref for PrintArgs {
@@ -2471,7 +2431,6 @@ enum DispatchTarget {
 	TinyModels,
 	Setup,
 	Say,
-	Grep,
 	Grievances,
 	Ssh,
 	Cleanse,
@@ -2523,7 +2482,6 @@ const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 		Some(Command::TinyModels(_)) => DispatchTarget::TinyModels,
 		Some(Command::Setup(_)) => DispatchTarget::Setup,
 		Some(Command::Say(_)) => DispatchTarget::Say,
-		Some(Command::Grep(_)) => DispatchTarget::Grep,
 		Some(Command::Grievances(_)) => DispatchTarget::Grievances,
 		Some(Command::Ssh(_)) => DispatchTarget::Ssh,
 		Some(Command::Cleanse(_)) => DispatchTarget::Cleanse,
@@ -3053,7 +3011,6 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 		Command::TinyModels(args) => tiny_models_cmd::run(args).await,
 		Command::Setup(args) => setup_cmd::run(args).await,
 		Command::Say(args) => say_cmd::run(args).await,
-		Command::Grep(args) => grep_cmd::run(args),
 		Command::Grievances(args) => grievances_cmd::run(args).await,
 		Command::Ssh(args) => ssh_cmd::run(args).await,
 		Command::Cleanse(args) => {
@@ -3121,7 +3078,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<OmpC
 				|| !arguments[index].to_string_lossy().starts_with('-'))
 		{
 			// Clap's generated root help command is special only in the leading
-			// position; after launch flags pi treats `help` as prompt text.
+			// position; after launch flags, `help` is prompt text.
 			arguments.insert(index, OsString::from("chat"));
 		}
 	}
@@ -3699,6 +3656,33 @@ mod tests {
 
 	fn parse(arguments: &[&str]) -> OmpCli {
 		OmpCli::try_parse_from(arguments).expect("valid command")
+	}
+
+	#[test]
+	fn parses_hidden_managed_relay_mode_and_ipv6_bind() {
+		let Some(Command::BrowserRelay(args)) = parse(&[
+			"omp",
+			"browser-relay",
+			"serve",
+			"--managed",
+			"--bind",
+			"::1",
+			"--port",
+			"9333",
+		])
+		.command
+		else {
+			panic!("browser relay command");
+		};
+		assert!(args.managed);
+		assert_eq!(args.bind, std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+		assert_eq!(args.port, 9333);
+		let help = omp_command(false)
+			.try_get_matches_from(["omp", "browser-relay", "--help"])
+			.expect_err("help exits before parsing")
+			.to_string();
+		assert!(!help.contains("--managed"));
+		assert!(!help.contains("--bind"));
 	}
 
 	#[test]
@@ -4880,7 +4864,7 @@ mod tests {
 		assert_eq!(
 			"Read,search,find,read,,Publisher.Tool"
 				.parse::<ToolNames>()
-				.expect("pi-compatible tool aliases"),
+				.expect("compatible tool aliases"),
 			ToolNames(vec![sf!("read"), sf!("grep"), sf!("glob"), sf!("Publisher.Tool")])
 		);
 		for arguments in [

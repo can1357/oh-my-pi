@@ -1,11 +1,11 @@
-//! `/copy` picker (pi `modes/components/copy-selector.ts`): the transcript
+//! `/copy` picker: the transcript
 //! itself, one message outlined, with `→` descending into that message's
 //! inner blocks (fenced code, quotes, shell commands, tool output). Enter
-//! copies and closes, exactly like pi's `onPick`; the close rides the
+//! copies and closes; the close rides the
 //! panel's `settled` hook so the host writes the clipboard first.
 //!
 //! Links follow a message's blocks; `o` on a link block hands it to the
-//! system opener (pi `onOpen`).
+//! system opener.
 //!
 //! `/copy code`, `/copy cmd`, and `/copy link` are one-shot host calls over
 //! the same transcript walk ([`last_code_block`], [`last_command`],
@@ -66,7 +66,7 @@ pub enum CommandKind {
 }
 
 impl CommandKind {
-	/// pi's status wording (`Copied bash command to clipboard`).
+	/// Status wording for the command kind.
 	#[must_use]
 	pub fn noun(self) -> &'static str {
 		self.into()
@@ -132,7 +132,7 @@ enum Segment {
 	Summary(SummaryDivider),
 }
 
-/// One selectable transcript message (pi `OutlineTarget`): a user prompt,
+/// One selectable transcript message: a user prompt,
 /// or an assistant message with the tool results it folded.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CopyTarget {
@@ -291,7 +291,7 @@ impl CopySelector {
 		PanelEvent::Copy(content)
 	}
 
-	/// `o` on a link block (pi `onOpen`): hand the URL to the system opener,
+	/// `o` on a link block hands the URL to the system opener,
 	/// report it, and close. On any other block the key is ignored.
 	fn open_link(&mut self) -> PanelEvent {
 		let Some(block) = self
@@ -497,8 +497,8 @@ fn segment_view(segment: &Segment, expanded: bool, ui: &UiContext) -> Component 
 }
 
 /// User bubble inside the alternate-screen copy overlay. It mirrors the main
-/// bubble but deliberately omits the OSC 133 prompt zone, matching pi's
-/// `stripPromptZones` and keeping terminal click-to-move state off the picker.
+/// bubble but deliberately omits the OSC 133 prompt zone, keeping terminal
+/// click-to-move state off the picker.
 fn copy_user_bubble(text: Str, reaction: Option<Str>, chips: &[Str]) -> Component {
 	if reaction.is_none() && chips.is_empty() {
 		return dom! { <md bg=surface pad="1 1">{text}</md> }.into_component();
@@ -523,10 +523,9 @@ fn copy_user_bubble(text: Str, reaction: Option<Str>, chips: &[Str]) -> Componen
 	.into_component()
 }
 
-/// pi `targetCopy` `custom` for the notices omp renders with their own
-/// cards (`advisor`, `diagnostics`, `tangent`): the card title and the text
-/// the card shows, which is what lands on the clipboard. `None` for the
-/// controller kinds (`error | warn | info | success`), which pi skips.
+/// Notices rendered with their own cards (`advisor`, `diagnostics`, `tangent`)
+/// copy their card title and shown text. `None` for controller kinds
+/// (`error | warn | info | success`).
 fn notice_copy(kind: &str, node: &Node) -> Option<(Str, Str)> {
 	let content = node.content.as_deref().unwrap_or_default().trim();
 	match kind {
@@ -619,7 +618,7 @@ fn block_card(
 	}
 }
 
-/// The first `limit` lines of `text` plus pi's `… +N more lines` tail.
+/// The first `limit` lines of `text` plus an `… +N more lines` tail.
 fn preview(text: &str, limit: usize) -> Str {
 	let total = text.lines().count();
 	if total <= limit {
@@ -720,7 +719,7 @@ impl Panel for CopySelector {
 	}
 }
 
-/// Walks the replica into pi's outline targets: every user prompt, every
+/// Walks the replica into outline targets: every user prompt, every
 /// assistant message with the visible tool results it folded, every displayed
 /// notice (`message`), and every history-collapse divider (`summary`) after
 /// the turn holding its boundary. Hidden tool activity is not selectable.
@@ -925,7 +924,7 @@ pub fn collect_targets(
 						segments: vec![Segment::IrcTraffic(traffic)],
 					});
 				},
-				// pi `targetCopy` `custom | hookMessage`: the framed message is
+				// A framed message is
 				// its own outline target labeled `message`.
 				Tag::Known(KnownTag::Notice | KnownTag::Developer)
 					if custom::message_kind(node).is_some() =>
@@ -947,7 +946,7 @@ pub fn collect_targets(
 						segments: vec![Segment::Message { name: prop_text(node, PropId::Name), body }],
 					});
 				},
-				// pi `custom` messages with their own cards (advisor notes,
+				// Custom messages with their own cards (advisor notes,
 				// late diagnostics, `/tan` breadcrumbs): outline targets
 				// labeled `message` whose clipboard text is the card's text.
 				Tag::Known(KnownTag::Notice | KnownTag::Developer) => {
@@ -1049,7 +1048,7 @@ pub fn collect_targets(
 			}
 		}
 		targets.extend(open.take());
-		// pi `targetCopy` `compactionSummary | branchSummary`: the divider
+		// The compaction or branch-summary divider
 		// after the turn is its own target, copying the raw summary.
 		for compaction in turn_compactions(dom, *turn) {
 			let Some(node) = dom.get(compaction) else {
@@ -1085,8 +1084,7 @@ pub fn collect_targets(
 	targets
 }
 
-/// The last fenced code block of any assistant message (pi
-/// `extractLastCodeBlock`).
+/// The last fenced code block of any assistant message.
 #[must_use]
 pub fn last_code_block(dom: &Dom) -> Option<CopyBlock> {
 	let mut last = None;
@@ -1117,8 +1115,7 @@ pub fn last_code_block(dom: &Dom) -> Option<CopyBlock> {
 	last
 }
 
-/// The last `bash`/`eval` tool call's command text (pi
-/// `extractLastCommand`).
+/// The last `bash`/`eval` tool call's command text.
 #[must_use]
 pub fn last_command(dom: &Dom) -> Option<(CommandKind, Str)> {
 	let mut last = None;
@@ -1156,7 +1153,7 @@ fn command_of(tool: &str, input: &Node) -> Option<(CommandKind, Str, Option<Str>
 	}
 }
 
-/// pi `extractEvalCode` (`copy-targets.ts:150-176`): an `eval` call carries
+/// An `eval` call carries
 /// either one `code` cell or a `cells` array; the non-empty cell bodies join
 /// with a blank line, and the highlight language is the first cell's,
 /// spelled out (`js` → `javascript`, `rb` → `ruby`, `jl` → `julia`, anything
@@ -1234,8 +1231,8 @@ fn node_json(node: &Node) -> Option<&str> {
 	}
 }
 
-/// pi `pushMarkdownBlocks`: fenced code blocks and blockquotes in order
-/// (`extractBlocks`), then the message's links (`extractLinks`) — the
+/// Fenced code blocks and blockquotes appear in order, followed by message
+/// links. The
 /// preview shows the whole URL on one row, so a link the transcript wrapped
 /// is copied or opened intact.
 fn push_markdown_blocks(blocks: &mut Vec<CopyBlock>, text: &str) {
@@ -1255,7 +1252,7 @@ fn push_markdown_blocks(blocks: &mut Vec<CopyBlock>, text: &str) {
 	}
 }
 
-/// pi `extractBlocks`: fenced code blocks and blockquotes, in order. A
+/// Fenced code blocks and blockquotes, in order. A
 /// fence masks its body (a `>` line inside code is never a quote); an
 /// unclosed fence is ordinary text, matching the fenced-block grammar.
 fn push_code_and_quotes(blocks: &mut Vec<CopyBlock>, text: &str) {
@@ -1555,7 +1552,7 @@ mod tests {
 
 		let targets = collect_targets(session.dom(), true, true, false);
 		let target = targets.last().expect("assistant target");
-		assert_eq!(target.content, "beforeafter", "whole-message copy retains pi's text contract");
+		assert_eq!(target.content, "beforeafter", "whole-message copy keeps the text contract");
 		let order = target
 			.segments
 			.iter()
@@ -1611,7 +1608,7 @@ mod tests {
 		assert_eq!(last_command(without.dom()), None);
 	}
 
-	/// pi `extractEvalCode`: `cells: [{code}]` joins the non-empty bodies
+	/// `cells: [{code}]` joins the non-empty bodies
 	/// with a blank line and names the first cell's language; a bare `code`
 	/// argument is one cell.
 	#[test]
@@ -1633,7 +1630,7 @@ mod tests {
 		assert_eq!(eval_code(&serde_json::json!({"language": "py"})), None);
 	}
 
-	/// pi `pushMarkdownBlocks` + `copy-selector.ts`: links follow a message's
+	/// Links follow a message's
 	/// code and quote blocks, labeled `link · text` (or `link` for a bare
 	/// URL) with the destination as content; a link block's hint offers `o`,
 	/// which reports the opening and closes the picker, while `o` on a
@@ -1719,8 +1716,8 @@ mod tests {
 		);
 	}
 
-	/// pi `targetCopy` `compactionSummary | branchSummary` → `summary` and
-	/// `custom` (advisor, late diagnostics, `/tan`) → `message`: every
+	/// Compaction and branch summaries use `summary`; custom advisor, late
+	/// diagnostics, and `/tan` notices use `message`. Every
 	/// displayed transcript entry is an outline target the picker can reach
 	/// and copy, in transcript order (the divider lands after its turn).
 	#[test]
@@ -1830,7 +1827,7 @@ mod tests {
 			Some("src/lib.rs:3:5 [error] unused variable"),
 		);
 		notice("tangent", &[(PropId::Id, "tan-1"), (PropId::Label, "check the docs")], None);
-		notice("info", &[], Some("controller chatter pi never lists"));
+		notice("info", &[], Some("controller chatter the picker never lists"));
 
 		let targets = collect_targets(session.dom(), false, true, true);
 		let labels = targets
@@ -1842,7 +1839,7 @@ mod tests {
 			["user message", "summary", "user message", "message", "message", "message"],
 			"{targets:#?}"
 		);
-		assert_eq!(targets[1].content, "Earlier: wired the parser.", "raw summary, as pi copies it");
+		assert_eq!(targets[1].content, "Earlier: wired the parser.", "raw summary text");
 		assert!(targets[1].blocks.is_empty());
 		assert_eq!(
 			targets[3].content,
@@ -1928,7 +1925,7 @@ mod tests {
 		assert_eq!(divider.detail, "**Handoff context**\n\n# Goal\nKeep the branch.");
 	}
 
-	/// pi `extractBlocks`: an unclosed fence is ordinary text — no phantom
+	/// An unclosed fence is ordinary text — no phantom
 	/// code block, and a `>` line after it is still a quote.
 	#[test]
 	fn unclosed_fence_is_ordinary_text() {

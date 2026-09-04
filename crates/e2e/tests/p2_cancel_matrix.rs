@@ -6,11 +6,11 @@ use std::sync::Arc;
 use omp_agent::{
 	CancelTree, DispatchPolicy, Kernel, RunControl, StaticPrompt, TurnInput, TurnStop, Up,
 };
+use omp_ai::{ChatEvent, Completion, ExecutionReceipt, FinishReason, Usage};
 use omp_core::Str;
 use omp_e2e::support::{
 	ScriptedInference, assert_all_entries_caused, create_session, journal_entries,
 };
-use omp_inference::{ChatEvent, Completion, ExecutionReceipt, FinishReason, Usage};
 use omp_journal::{blob::BlobStore, kind};
 use omp_tool::Registry;
 

@@ -29,10 +29,11 @@ use omp_journal::{
 use omp_session::{Session, SessionError};
 use omp_tool::{
 	Abort, ArtifactLifetime, BlobRef as ToolBlobRef, CallOutcome, CallOutcomeDetails, CapsBase,
-	Effects, ErasedEv, ErasedOutcome, ExpectedArtifact, IncomingParams, Interrupt, InvocationFeed,
-	JobKind, JobMetadata, JobOwner, JobRef, ModelClass, OutputProjection, OutputRequest, Part,
-	ProjectionSpan, PromptCaps, Registry, RegistryError, Rev, ToolIdentity, ToolRoute, ToolSpec,
-	VisibilityReceipt, VisibleSourceLine,
+	Diag, DiagEnvelope, DiagKind, Effects, ErasedEv, ErasedOutcome, ExpectedArtifact,
+	IncomingParams, Interrupt, InvocationFeed, JobKind, JobMetadata, JobOwner, JobRef, ModelClass,
+	OutputProjection, OutputRequest, Part, ProjectionSpan, PromptCaps, Registry, RegistryError, Rev,
+	Severity, ToolIdentity, ToolRoute, ToolSpec, Unit as ToolUnit, VisibilityReceipt,
+	VisibleSourceLine,
 };
 use serde_json::value::RawValue;
 use thiserror::Error;
@@ -69,7 +70,7 @@ impl ToolCancellation {
 	}
 
 	/// Whether the call mutates shared state and therefore runs exclusively
-	/// within its batch (pi: mutating calls never overlap).
+	/// within its batch.
 	const fn is_exclusive(&self) -> bool {
 		matches!(self, Self::Foreground(_))
 	}
@@ -326,9 +327,8 @@ pub enum Received {
 	Approved(crate::ApprovalTicket),
 }
 
-/// Host policy deciding whether a native call may start (pi
-/// `resolveApproval`: the tool's declared effect tier against the session
-/// approval mode and per-tool overrides).
+/// Host policy deciding whether a native call may start from its declared
+/// effect tier, the session approval mode, and per-tool overrides.
 pub trait ToolAdmission: Send + Sync {
 	/// Decides one committed call before its unit starts.
 	fn admit(
@@ -561,56 +561,53 @@ fn checkpoint_open(
 	workspace: omp_proto::env::v1::WorkspaceSnapshot,
 ) -> Result<(), SessionError> {
 	let cause = session.head().ok_or(SessionError::NoActiveTurn)?;
-	let mut node =
-		NodeSpec::new(omp_dom::Tag::Custom(Str::new_static("rewind-checkpoint")))
-			.with_prop(PropKey::Custom(Str::new_static("token")), Value::Str(token))
-			.with_prop(PropId::Label, Value::Str(label))
-			.with_prop(
-				PropKey::Custom(Str::new_static("target")),
-				Value::Str(Str::new(cause.to_string())),
-			)
-			.with_prop(PropKey::Custom(Str::new_static("goal")), Value::Str(goal))
-			.with_prop(
-				PropKey::Custom(Str::new_static("started-at")),
-				Value::Int(i64::try_from(started_at).unwrap_or(i64::MAX)),
-			)
-			.with_prop(
-				PropKey::Custom(Str::new_static("workspace-snapshot")),
-				Value::Str(Str::new(workspace.snapshot_id)),
-			)
-			.with_prop(
-				PropKey::Custom(Str::new_static("workspace-root")),
-				Value::Str(Str::new(workspace.root_uri)),
-			)
-			.with_prop(
-				PropKey::Custom(Str::new_static("workspace-generation")),
-				Value::Int(i64::try_from(workspace.generation).unwrap_or(i64::MAX)),
-			)
-			.with_prop(
-				PropKey::Custom(Str::new_static("workspace-tree")),
-				Value::Str(Str::new(workspace.tree_hash)),
-			)
-			.with_prop(
-				PropKey::Custom(Str::new_static("workspace-files")),
-				Value::Int(i64::try_from(workspace.files).unwrap_or(i64::MAX)),
-			)
-			.with_prop(
-				PropKey::Custom(Str::new_static("workspace-bytes")),
-				Value::Int(i64::try_from(workspace.bytes).unwrap_or(i64::MAX)),
-			)
-			.with_prop(
-				PropKey::Custom(Str::new_static("workspace-created-at")),
-				Value::Int(i64::try_from(workspace.created_ms).unwrap_or(i64::MAX)),
-			)
-			.with_prop(
-				PropKey::Custom(Str::new_static("workspace-partial")),
-				Value::Bool(workspace.partial),
-			);
-	if let Some(parent_token) = parent_token {
-		node = node.with_prop(
-			PropKey::Custom(Str::new_static("parent-token")),
-			Value::Str(parent_token),
+	let mut node = NodeSpec::new(omp_dom::Tag::Custom(Str::new_static("rewind-checkpoint")))
+		.with_prop(PropKey::Custom(Str::new_static("token")), Value::Str(token))
+		.with_prop(PropId::Label, Value::Str(label))
+		.with_prop(
+			PropKey::Custom(Str::new_static("target")),
+			Value::Str(Str::new(cause.to_string())),
+		)
+		.with_prop(PropKey::Custom(Str::new_static("goal")), Value::Str(goal))
+		.with_prop(
+			PropKey::Custom(Str::new_static("started-at")),
+			Value::Int(i64::try_from(started_at).unwrap_or(i64::MAX)),
+		)
+		.with_prop(
+			PropKey::Custom(Str::new_static("workspace-snapshot")),
+			Value::Str(Str::new(workspace.snapshot_id)),
+		)
+		.with_prop(
+			PropKey::Custom(Str::new_static("workspace-root")),
+			Value::Str(Str::new(workspace.root_uri)),
+		)
+		.with_prop(
+			PropKey::Custom(Str::new_static("workspace-generation")),
+			Value::Int(i64::try_from(workspace.generation).unwrap_or(i64::MAX)),
+		)
+		.with_prop(
+			PropKey::Custom(Str::new_static("workspace-tree")),
+			Value::Str(Str::new(workspace.tree_hash)),
+		)
+		.with_prop(
+			PropKey::Custom(Str::new_static("workspace-files")),
+			Value::Int(i64::try_from(workspace.files).unwrap_or(i64::MAX)),
+		)
+		.with_prop(
+			PropKey::Custom(Str::new_static("workspace-bytes")),
+			Value::Int(i64::try_from(workspace.bytes).unwrap_or(i64::MAX)),
+		)
+		.with_prop(
+			PropKey::Custom(Str::new_static("workspace-created-at")),
+			Value::Int(i64::try_from(workspace.created_ms).unwrap_or(i64::MAX)),
+		)
+		.with_prop(
+			PropKey::Custom(Str::new_static("workspace-partial")),
+			Value::Bool(workspace.partial),
 		);
+	if let Some(parent_token) = parent_token {
+		node =
+			node.with_prop(PropKey::Custom(Str::new_static("parent-token")), Value::Str(parent_token));
 	}
 	if let Some(workspace_parent) = workspace.parent_snapshot_id {
 		node = node.with_prop(
@@ -623,7 +620,7 @@ fn checkpoint_open(
 		label: Some(Str::new_static("checkpoint.open")),
 		ops: vec![Op::Ins {
 			parent: session.dom().meta(),
-			after:  session.dom().children(session.dom().meta()).last().copied(),
+			after: session.dom().children(session.dom().meta()).last().copied(),
 			node,
 		}],
 	})?;
@@ -664,7 +661,10 @@ fn checkpoint_rewind(
 			Value::Int(value) => u64::try_from(*value).ok()?,
 			_ => return None,
 		};
-		let label = node.prop(&PropKey::from(PropId::Label)).and_then(Value::as_str).map(Str::new)?;
+		let label = node
+			.prop(&PropKey::from(PropId::Label))
+			.and_then(Value::as_str)
+			.map(Str::new)?;
 		Some((target, started_at, label))
 	});
 	let Some((target, started_at, label)) = checkpoint else {
@@ -701,10 +701,7 @@ fn checkpoint_rewind(
 						PropKey::Custom(Str::new_static("checkpoint-token")),
 						Value::Str(Str::new(token)),
 					)
-					.with_prop(
-						PropKey::Custom(Str::new_static("checkpoint-label")),
-						Value::Str(label),
-					)
+					.with_prop(PropKey::Custom(Str::new_static("checkpoint-label")), Value::Str(label))
 					.with_prop(
 						PropKey::Custom(Str::new_static("workspace-snapshot")),
 						Value::Str(Str::new(&workspace.snapshot_id)),
@@ -801,9 +798,7 @@ pub trait SessionTool: Send + Sync {
 	) -> Result<Vec<Part>, SessionToolError> {
 		Ok(match outcome {
 			CallOutcome::Ok(payload) | CallOutcome::Faulted(payload) => {
-				vec![Part::Json {
-					json: bytes::Bytes::copy_from_slice(payload.get().as_bytes()),
-				}]
+				vec![Part::Json { json: bytes::Bytes::copy_from_slice(payload.get().as_bytes()) }]
 			},
 			CallOutcome::ArgsRejected(_) | CallOutcome::Aborted { .. } => Vec::new(),
 		})
@@ -841,7 +836,7 @@ pub(crate) struct OutputStream {
 }
 
 impl OutputStream {
-	fn new(limit: Option<usize>) -> Self {
+	const fn new(limit: Option<usize>) -> Self {
 		Self {
 			sid: None,
 			last: None,
@@ -931,13 +926,12 @@ impl OutputStream {
 			.map_or(usize::MAX, |limit| limit.saturating_sub(self.shown));
 		let visible = utf8_prefix(text, available);
 		if !visible.is_empty() {
-			let sid = match self.sid {
-				Some(sid) => sid,
-				None => {
-					let sid = session.stream_open(result_handle(session, call)?, PropId::Text.into())?;
-					self.sid = Some(sid);
-					sid
-				},
+			let sid = if let Some(sid) = self.sid {
+				sid
+			} else {
+				let sid = session.stream_open(result_handle(session, call)?, PropId::Text.into())?;
+				self.sid = Some(sid);
+				sid
 			};
 			session.stream_append(sid, visible)?;
 			self.shown += visible.len();
@@ -950,15 +944,14 @@ impl OutputStream {
 			return Ok(());
 		}
 		self.spilled = true;
-		let stage = match self.stage.as_mut() {
-			Some(stage) => stage,
-			None => {
-				let mut stage = spill.begin_put()?;
-				stage
-					.write_all(std::mem::take(&mut self.prefix).as_bytes())
-					.map_err(omp_journal::blob::Error::from)?;
-				self.stage.insert(stage)
-			},
+		let stage = if let Some(stage) = self.stage.as_mut() {
+			stage
+		} else {
+			let mut stage = spill.begin_put()?;
+			stage
+				.write_all(std::mem::take(&mut self.prefix).as_bytes())
+				.map_err(omp_journal::blob::Error::from)?;
+			self.stage.insert(stage)
 		};
 		stage
 			.write_all(overflow.as_bytes())
@@ -1074,8 +1067,7 @@ pub enum DispatchError {
 	},
 }
 
-/// Model-facing reason for a call the host refused (pi `Tool call denied
-/// by user`).
+/// Model-facing reason for a call the host refused.
 fn denial_reason(ticket: &crate::ApprovalTicket) -> Str {
 	let by = ticket
 		.decision
@@ -1152,28 +1144,28 @@ enum Phase {
 
 /// A call whose execution unit is open and consuming argument streaming.
 pub struct PreparedCall {
-	identity:     ToolIdentity,
-	call_id:      Str,
-	call:         EntryId,
-	cancellation: ToolCancellation,
-	interrupt:    CancellationToken,
+	identity:         ToolIdentity,
+	call_id:          Str,
+	call:             EntryId,
+	cancellation:     ToolCancellation,
+	interrupt:        CancellationToken,
 	/// Armed once at admission and polled in place by [`Signals`]; the
 	/// `Notified` inside is `!Unpin` and the call lives in a movable `Vec`,
 	/// so it is pinned on the heap exactly once per running call.
-	interrupted:  Option<Pin<Box<WaitForCancellationFutureOwned>>>,
-	unit:         Unit,
-	events:       Receiver<DispatchEvent>,
+	interrupted:      Option<Pin<Box<WaitForCancellationFutureOwned>>>,
+	unit:             Unit,
+	events:           Receiver<DispatchEvent>,
 	/// Persistent async view of `events`, polled in place by [`Signals`].
-	stream:       RecvStream<'static, DispatchEvent>,
-	task:         Option<tokio::task::JoinHandle<Result<(), RegistryError>>>,
-	args:         Option<Box<RawValue>>,
-	options:      DispatchOptions,
-	output:       Option<OutputStream>,
-	phase:        Phase,
-	started:      Option<Instant>,
-	grace_until:  Option<Instant>,
-	closed:       bool,
-	report:       Option<DispatchReport>,
+	stream:           RecvStream<'static, DispatchEvent>,
+	task:             Option<tokio::task::JoinHandle<Result<(), RegistryError>>>,
+	args:             Option<Box<RawValue>>,
+	options:          DispatchOptions,
+	output:           Option<OutputStream>,
+	phase:            Phase,
+	started:          Option<Instant>,
+	grace_until:      Option<Instant>,
+	closed:           bool,
+	report:           Option<DispatchReport>,
 	/// Approval prompt this call waits on while `AwaitingApproval`.
 	ticket:           Option<Str>,
 	/// Hook requirements merged with native admission before filing.
@@ -1193,7 +1185,7 @@ impl PreparedCall {
 
 	/// Stable provider call identity.
 	#[must_use]
-	pub fn call_id(&self) -> &Str {
+	pub const fn call_id(&self) -> &Str {
 		&self.call_id
 	}
 
@@ -1237,7 +1229,7 @@ impl PreparedCall {
 		self.args = Some(args);
 	}
 
-	fn is_exclusive(&self) -> bool {
+	const fn is_exclusive(&self) -> bool {
 		self.cancellation.is_exclusive() || matches!(self.unit, Unit::Session(_))
 	}
 
@@ -1262,7 +1254,7 @@ impl PreparedCall {
 	/// Whether the call still occupies its scheduling slot: running,
 	/// stopping, or waiting on an approval prompt (ordering holds while the
 	/// host decides).
-	fn is_live(&self) -> bool {
+	const fn is_live(&self) -> bool {
 		matches!(self.phase, Phase::Running | Phase::Interrupting | Phase::AwaitingApproval)
 	}
 }
@@ -1339,7 +1331,7 @@ impl Dispatcher {
 
 	/// Borrows the runtime registry.
 	#[must_use]
-	pub fn registry(&self) -> &Arc<Registry> {
+	pub const fn registry(&self) -> &Arc<Registry> {
 		&self.committer.registry
 	}
 
@@ -1360,7 +1352,7 @@ impl Dispatcher {
 
 	/// Borrows the runtime job index.
 	#[must_use]
-	pub fn jobs(&self) -> &Arc<JobBoard> {
+	pub const fn jobs(&self) -> &Arc<JobBoard> {
 		&self.jobs
 	}
 
@@ -1489,9 +1481,9 @@ impl Dispatcher {
 	/// Drives a batch of committed calls to their terminals, journaling every
 	/// event through the session as it arrives. Read-only calls run
 	/// concurrently; a mutating or session-owned call is exclusive. Steering
-	/// journaled meanwhile skips every call that has not started (pi
-	/// `interrupt_skipped`); a call outliving the blocking limit detaches into
-	/// the job primitive; a stop request follows the cooperative → grace →
+	/// journaled meanwhile skips every call that has not started; a call
+	/// outliving the blocking limit detaches into the job primitive; a stop
+	/// request follows the cooperative → grace →
 	/// forced ladder (ADR 0011). Reports are returned in batch order.
 	pub async fn drive(
 		&self,
@@ -1531,14 +1523,13 @@ impl Dispatcher {
 						break;
 					}
 				}
-				let report = match terminal {
-					Some(report) => report,
-					None => {
-						let mut output = std::mem::take(call.output(&policy));
-						self
-							.committer
-							.commit_abort(session, call, Abort::MissingOutcome, &mut output)?
-					},
+				let report = if let Some(report) = terminal {
+					report
+				} else {
+					let mut output = std::mem::take(call.output(&policy));
+					self
+						.committer
+						.commit_abort(session, call, Abort::MissingOutcome, &mut output)?
 				};
 				call.phase = Phase::Settled;
 				call.report = Some(report);
@@ -1560,7 +1551,12 @@ impl Dispatcher {
 			let approval = calls
 				.iter()
 				.filter(|call| call.phase == Phase::AwaitingApproval)
-				.filter_map(|call| call.approval_timeout.as_ref().map(|(deadline, _)| *deadline))
+				.filter_map(|call| {
+					call
+						.approval_timeout
+						.as_ref()
+						.map(|(deadline, _)| *deadline)
+				})
 				.min();
 			let wake = [deadline, grace, approval].into_iter().flatten().min();
 			let signal = tokio::select! {
@@ -1676,10 +1672,11 @@ impl Dispatcher {
 					call.grace_until = Some(Instant::now() + policy.interrupt_grace);
 					if let Unit::Native { feed } = &call.unit {
 						let _ = feed.interrupt(Interrupt {
-							class: Str::new_static(Interrupt::ESCAPE),
-							reason: call.abort_reason.clone().unwrap_or_else(|| {
-								Str::new_static("tool execution cancelled")
-							}),
+							class:  Str::new_static(Interrupt::ESCAPE),
+							reason: call
+								.abort_reason
+								.clone()
+								.unwrap_or_else(|| Str::new_static("tool execution cancelled")),
 						});
 					}
 				},
@@ -1697,27 +1694,28 @@ impl Dispatcher {
 								.approval_timeout
 								.take()
 								.expect("filtered on approval timeout");
-							let ticket = match (control, call.ticket.as_deref()) {
-								(Some(control), Some(ticket_id)) => control
+							let ticket = if let (Some(control), Some(ticket_id)) =
+								(control, call.ticket.as_deref())
+							{
+								control
 									.approvals
 									.decide(session, ticket_id, decision)
-									.map_err(|source| DispatchError::Approval { source })?,
-								_ => {
-									let mut output = std::mem::take(call.output(&policy));
-									let report = self.committer.commit_abort(
-										session,
-										call,
-										Abort::Skipped {
-											reason: Str::new_static(
-												"approval deadline elapsed without a host route",
-											),
-										},
-										&mut output,
-									)?;
-									call.phase = Phase::Settled;
-									call.report = Some(report);
-									continue;
-								},
+									.map_err(|source| DispatchError::Approval { source })?
+							} else {
+								let mut output = std::mem::take(call.output(&policy));
+								let report = self.committer.commit_abort(
+									session,
+									call,
+									Abort::Skipped {
+										reason: Str::new_static(
+											"approval deadline elapsed without a host route",
+										),
+									},
+									&mut output,
+								)?;
+								call.phase = Phase::Settled;
+								call.report = Some(report);
+								continue;
 							};
 							call.interrupted = None;
 							if ticket
@@ -1830,9 +1828,10 @@ impl Dispatcher {
 			if call.interrupt.is_cancelled() {
 				// A stop already requested never starts new work.
 				let mut output = std::mem::take(call.output(&self.committer.policy));
-				let reason = call.abort_reason.take().unwrap_or_else(|| {
-					Str::new_static("tool execution cancelled before it started")
-				});
+				let reason = call
+					.abort_reason
+					.take()
+					.unwrap_or_else(|| Str::new_static("tool execution cancelled before it started"));
 				let report = self.committer.commit_abort(
 					session,
 					call,
@@ -1892,10 +1891,8 @@ impl Dispatcher {
 								crate::approvals::epoch_millis(),
 							)
 							.map_err(|source| DispatchError::Approval { source })?;
-						let decision = crate::approvals::unreachable_decision(
-							&ticket,
-							"approval host unavailable",
-						);
+						let decision =
+							crate::approvals::unreachable_decision(&ticket, "approval host unavailable");
 						book
 							.decide(session, ticket.ticket_id.as_str(), decision)
 							.map_err(|source| DispatchError::Approval { source })?
@@ -2260,25 +2257,25 @@ impl crate::jobs::DetachedCall {
 	) -> Result<Option<DispatchReport>, DispatchError> {
 		let (_, empty_events) = flume::unbounded();
 		let stub = PreparedCall {
-			identity:     self.identity.clone(),
-			call_id:      self.call_id.clone(),
-			call:         self.call,
-			cancellation: ToolCancellation::Background(BackgroundToolCancellation::from_token(
+			identity:         self.identity.clone(),
+			call_id:          self.call_id.clone(),
+			call:             self.call,
+			cancellation:     ToolCancellation::Background(BackgroundToolCancellation::from_token(
 				CancellationToken::new(),
 			)),
-			interrupt:    CancellationToken::new(),
-			interrupted:  None,
-			unit:         Unit::Detached { feed: self.feed.clone() },
-			stream:       empty_events.clone().into_stream(),
-			events:       empty_events,
-			task:         None,
-			args:         None,
-			options:      self.options,
-			output:       None,
-			phase:        Phase::Running,
-			started:      None,
-			grace_until:  None,
-			closed:       false,
+			interrupt:        CancellationToken::new(),
+			interrupted:      None,
+			unit:             Unit::Detached { feed: self.feed.clone() },
+			stream:           empty_events.clone().into_stream(),
+			events:           empty_events,
+			task:             None,
+			args:             None,
+			options:          self.options,
+			output:           None,
+			phase:            Phase::Running,
+			started:          None,
+			grace_until:      None,
+			closed:           false,
 			report:           None,
 			ticket:           None,
 			approval_specs:   Vec::new(),
@@ -2347,9 +2344,9 @@ impl Committer {
 		result
 	}
 
-	/// Runs the `tool_result` gate over a staged terminal (pi
-	/// `shared-events.ts` `tool_result`: hooks may annotate, force a spill,
-	/// or replace the payload/fault). The gate fails open: a denial or a
+	/// Runs the `tool_result` gate over a staged terminal. Hooks may annotate,
+	/// force a spill, or replace the payload/fault. The gate fails open: a
+	/// denial or a
 	/// malformed transform keeps the tool's own terminal.
 	async fn gate_result(
 		&self,
@@ -2400,15 +2397,43 @@ impl Committer {
 			.and_then(serde_json::Value::as_array)
 		{
 			for annotation in annotations {
-				let diag = serde_json::value::to_raw_value(&serde_json::json!({
-					"diag": {
-						"kind": annotation.get("kind").cloned().unwrap_or_else(|| "annotation".into()),
-						"severity": "info",
-						"data": annotation.get("data").cloned().unwrap_or(serde_json::Value::Null),
-						"display": annotation.get("display").and_then(serde_json::Value::as_bool).unwrap_or(true),
-					}
-				}))?;
-				self.commit_update(session, call, diag, output)?;
+				let diag = Diag {
+					kind: annotation
+						.get("kind")
+						.and_then(serde_json::Value::as_str)
+						.map_or_else(|| Str::new_static("annotation"), Str::new),
+					severity: Severity::Info,
+					text: annotation
+						.get("text")
+						.and_then(serde_json::Value::as_str)
+						.map_or_else(|| Str::new_static(""), Str::new),
+					..Diag::default()
+				};
+				let mut raw = serde_json::to_value(diag)?
+					.as_object()
+					.cloned()
+					.expect("Diag serializes as an object");
+				raw.insert(
+					"data".to_owned(),
+					annotation
+						.get("data")
+						.cloned()
+						.unwrap_or(serde_json::Value::Null),
+				);
+				raw.insert(
+					"display".to_owned(),
+					annotation
+						.get("display")
+						.cloned()
+						.unwrap_or(serde_json::Value::Bool(true)),
+				);
+				let envelope = DiagEnvelope { diag: serde_json::Value::Object(raw) };
+				self.commit_update(
+					session,
+					call,
+					serde_json::value::to_raw_value(&envelope)?,
+					output,
+				)?;
 			}
 		}
 		let replacement = match kind {
@@ -2663,7 +2688,7 @@ impl Committer {
 				transport_projection
 					.as_ref()
 					.is_some_and(|projection| projection.omitted)
-					.then(|| source_artifact.clone())
+					.then_some(source_artifact)
 					.flatten()
 			});
 		let spill = session.blobs().clone();
@@ -2702,16 +2727,19 @@ impl Committer {
 		};
 		if let Some(artifact) = &spilled {
 			let address = artifact_address(artifact);
-			let diag = serde_json::value::to_raw_value(&serde_json::json!({
-				"diag": {
-					"kind": "output_bounded",
-					"severity": "info",
-					"text": format!("Output exceeded inline limits; full output: {address}"),
-					"artifact": address,
-					"lines_clamped": bounded.lines_clamped,
-				}
-			}))?;
-			self.commit_update(session, call, diag, output)?;
+			let diag =
+				Diag::info(DiagKind::OutputBounded, "output exceeded inline limits").artifact(address);
+			let diag = if bounded.lines_clamped == 0 {
+				diag
+			} else {
+				diag.omitted(bounded.lines_clamped, ToolUnit::Lines)
+			};
+			self.commit_update(
+				session,
+				call,
+				serde_json::value::to_raw_value(&DiagEnvelope { diag })?,
+				output,
+			)?;
 		}
 		let visibility_verdict =
 			(!visibility.is_empty()).then(|| bytes::Bytes::copy_from_slice(outcome.get().as_bytes()));
@@ -2973,8 +3001,8 @@ fn timeout_job(identity: &ToolIdentity) -> JobRef {
 		.as_millis() as u64;
 	let id = Str::new(omp_core::Ulid::generate().to_string());
 	JobRef {
-		id:       id.clone(),
-		owner:    JobOwner::AgentLoop { agent_id: Str::new_static("kernel") },
+		id,
+		owner: JobOwner::AgentLoop { agent_id: Str::new_static("kernel") },
 		metadata: Arc::new(JobMetadata::running(JobKind::Shell, identity.name.clone(), now)),
 		artifact: ExpectedArtifact {
 			description: sf!("detached {} output", identity.name),
@@ -3002,7 +3030,6 @@ fn bound_parts(
 	spill: &BlobStore,
 	transport_spill: Option<BlobRef>,
 ) -> Result<BoundedParts, DispatchError> {
-	const CONTINUATION_BYTES: usize = "artifact://sha256/".len() + 64;
 	let inline_limit = if options.notrunc {
 		policy.max_complete_output_bytes
 	} else {
@@ -3016,17 +3043,14 @@ fn bound_parts(
 		})
 	});
 	if options.notrunc && source_bytes <= inline_limit {
-		let mut parts = parts.to_vec();
-		if let Some(artifact) = transport_spill {
-			parts.push(Part::Text { text: artifact_address(&artifact) });
-		}
+		let parts = parts.to_vec();
 		let inline_bytes = u64::try_from(source_bytes).unwrap_or(u64::MAX);
 		let source_bytes = transport_spill
 			.as_ref()
 			.map_or(inline_bytes, |artifact| artifact.size.max(inline_bytes));
 		return Ok(BoundedParts {
 			parts,
-			spilled: transport_spill.clone(),
+			spilled: transport_spill,
 			source_bytes,
 			inline_bytes,
 			omitted: transport_spill.is_some(),
@@ -3034,15 +3058,13 @@ fn bound_parts(
 			visibility: visibility_receipt(visibility.iter()),
 		});
 	}
-	let text_limit = inline_limit
-		.checked_sub(CONTINUATION_BYTES)
-		.unwrap_or(inline_limit);
+	let text_limit = inline_limit;
 	let line_limit = if options.notrunc {
 		usize::MAX
 	} else {
 		policy.max_line_bytes
 	};
-	let mut output = Vec::with_capacity(parts.len().saturating_add(1));
+	let mut output = Vec::with_capacity(parts.len());
 	let mut full = String::new();
 	let mut projected = String::new();
 	let mut shown_bytes = 0;
@@ -3116,9 +3138,6 @@ fn bound_parts(
 		None if changed => Some(spill.put(full.as_bytes())?),
 		None => None,
 	};
-	if let Some(artifact) = spilled {
-		output.push(Part::Text { text: artifact_address(&artifact) });
-	}
 	let source_bytes = u64::try_from(source_bytes).unwrap_or(u64::MAX);
 	let source_bytes = transport_spill
 		.as_ref()

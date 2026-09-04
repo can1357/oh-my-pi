@@ -6,10 +6,14 @@ pub mod admission;
 pub mod blobs;
 pub mod browser_daemon;
 pub mod browser_fetch;
+pub mod browser_relay;
 mod computer;
 mod devices_host;
 mod direnv;
 pub mod docs;
+/// Local document authority: filesystem, revision, transaction, watch, and
+/// language-server operations.
+pub mod docserver;
 pub mod document_cache;
 pub mod eval;
 pub mod exec;
@@ -19,10 +23,10 @@ pub mod ext_git;
 pub mod exthost;
 mod github;
 pub mod github_url;
+pub mod grep;
 pub mod host_info;
 pub mod host_settings;
 mod http_egress;
-pub mod model_discovery;
 mod journal_runtime;
 pub mod lsp_settings;
 mod managed_skills;
@@ -31,8 +35,7 @@ pub mod mcp;
 mod media_devices;
 mod media_tts;
 pub mod memory;
-/// Additional literal pi environment-setting convars.
-pub mod pi_settings;
+pub mod model_discovery;
 pub mod policy;
 mod presence;
 pub mod process_identity;
@@ -105,11 +108,11 @@ use nix::{
 	unistd::{Pid, User},
 };
 use omp_agent::KernelSender;
+use omp_ai::auth::AuthControlHandle;
 use omp_con::Ctx;
 use omp_core::{Hash32, Str, Ulid, sf};
 use omp_env::{AcpRequest, EnvClient, PartitionedEnvTransport, in_process_frames};
 use omp_ext::config::ContributedCliValue;
-use omp_inference::auth::AuthControlHandle;
 use omp_proto::{
 	env::v1::{
 		AcpDocumentAnswer, AcpExecEvent, ApprovalMode as ProtoApprovalMode, ClientHello,
@@ -146,92 +149,142 @@ pub use tools::{
 	DynamicToolFactory, GoalAuthority, HostResourceResult, HostResources, RegistryBridges,
 	RegistryControlFactory, SearchInference, TelemetryUpload,
 };
-#[doc(hidden)]
-pub use worker::run_py_worker_entry;
 
 use self::{
 	tool_settings::ApprovalMode,
-	worker::{ExtHostConfig, ExtHostSpec, HostKey, PY_EVAL_MODULE},
+	worker::{ExtHostConfig, ExtHostSpec},
 };
 use crate::eval::{BridgeHostError, ParentSessionHost};
 
-/// One-shot migration map from legacy TOML field paths to convar names.
-pub const LEGACY_CONVAR_MAPPINGS: &[(&str, &str)] = &[
-	("runtime.interrupt_grace", "sv_interrupt_grace"),
-	("memory.backend", "ai_memory_backend"),
-	("mnemopi.scoping", "ai_mnemopi_scoping"),
-	("autolearn.enabled", "ai_autolearn_enabled"),
-	("autolearn.auto_continue", "ai_autolearn_auto_continue"),
-	("autolearn.min_tool_calls", "ai_autolearn_min_tool_calls"),
-	("worktree.base", "sv_worktree_base"),
-	("browser.enabled", "sv_browser_enabled"),
-	("browser.headless", "sv_browser_headless"),
-	("lsp.enabled", "sv_lsp_enabled"),
-	("lsp.lazy", "sv_lsp_lazy"),
-	("lsp.formatOnWrite", "sv_lsp_format_on_write"),
-	("lsp.diagnosticsOnWrite", "sv_lsp_diagnostics_on_write"),
-	("lsp.diagnosticsOnEdit", "sv_lsp_diagnostics_on_edit"),
-	("lsp.diagnosticsDeduplicate", "sv_lsp_diagnostics_deduplicate"),
-	("tools.enabled", "sv_tools_enabled"),
-	("tools.max_timeout", "sv_tools_max_timeout"),
-	("tools.edit_dialect", "sv_tools_edit_dialect"),
-	("edit.blackbox.enabled", "sv_tools_edit_blackbox_enabled"),
-	("tools.edit_blackbox_path", "sv_tools_edit_blackbox_path"),
-	("tools.edit_auto_repair", "sv_tools_edit_auto_repair"),
-	("edit.streamingAbort", "sv_tools_edit_streaming_abort"),
-	("tools.approval_mode", "sv_tools_approval_mode"),
-	("tools.approval", "sv_tools_approval"),
-	("edit.fuzzyMatch", "sv_tools_edit_fuzzy"),
-	("edit.enforceSeenLines", "sv_tools_edit_require_seen"),
-	("tools.edit_guard_generated", "sv_tools_edit_guard_generated"),
-	("tools.read_max_bytes", "sv_tools_read_max_bytes"),
-	("read.summarize.enabled", "sv_tools_read_summarize"),
-	("readLineNumbers", "sv_tools_read_line_numbers"),
-	("grep.contextBefore", "sv_tools_grep_context_before"),
-	("grep.contextAfter", "sv_tools_grep_context_after"),
-	("tools.eval_interpreters", "sv_tools_eval_interpreters"),
-	("tools.output_spill_bytes", "sv_tools_output_spill_bytes"),
-	("tools.output_max_bytes", "sv_tools_output_max_bytes"),
-	("inspect_image.timeoutMs", "sv_inspect_image_timeout_ms"),
-	("tools.intentTracing", "sv_tools_intent_tracing"),
-	("tools.abortOnFabricatedResult", "sv_tools_abort_on_fabricated_result"),
-	("tools.loop_guard_limit", "sv_tools_loop_guard_limit"),
-	("acp.routing", "sv_acp_routing"),
-	("async.enabled", "sv_async_enabled"),
-	("async.max_jobs", "sv_async_max_jobs"),
-	("async.retention_ms", "sv_async_retention_ms"),
-	("async.poll_wait_duration", "sv_async_poll_wait_duration"),
-	("sandbox.mode", "sv_sandbox_mode"),
-	("sandbox.network_mode", "sv_sandbox_network_mode"),
-	("sandbox.allow_domains", "sv_sandbox_allow_domains"),
-	("sandbox.deny_domains", "sv_sandbox_deny_domains"),
-	("sandbox.allow_ports", "sv_sandbox_allow_ports"),
-	("sandbox.allow_localhost", "sv_sandbox_allow_localhost"),
-	("sandbox.allow_unix_sockets", "sv_sandbox_allow_unix_sockets"),
-	("sandbox.writable_roots", "sv_sandbox_writable_roots"),
-	("sandbox.unscoped_writes", "sv_sandbox_unscoped_writes"),
-	("sandbox.env_deny", "sv_sandbox_env_deny"),
-	("sandbox.env_inherit", "sv_sandbox_env_inherit"),
-	("sandbox.env_include_only", "sv_sandbox_env_include_only"),
-	("sandbox.env_set", "sv_sandbox_env_set"),
-	("sandbox.exclude_tmpdir", "sv_sandbox_exclude_tmpdir"),
-	("sandbox.exclude_slash_tmp", "sv_sandbox_exclude_slash_tmp"),
-	("sandbox.read_deny", "sv_sandbox_read_deny"),
-	("sandbox.read_mode", "sv_sandbox_read_mode"),
-	("sandbox.readable_roots", "sv_sandbox_readable_roots"),
-	("sandbox.read_deny_globs", "sv_sandbox_read_deny_globs"),
-	("sandbox.write_deny", "sv_sandbox_write_deny"),
-	("shell.enabled", "sv_shell_enabled"),
-	("shell.command_prefix", "sv_shell_command_prefix"),
-	("shell.embedded_builtins", "sv_shell_embedded_builtins"),
-	("shell.auto_background.enabled", "sv_shell_auto_background_enabled"),
-	("shell.auto_background.threshold_ms", "sv_shell_auto_background_threshold_ms"),
-	("shell.interceptor.enabled", "sv_shell_interceptor_enabled"),
-	("shell.interceptor.patterns", "sv_shell_interceptor_patterns"),
-	("shell.direnv", "sv_shell_direnv"),
-	("shell.direnv_load_timeout_ms", "sv_shell_direnv_load_timeout_ms"),
-	("mcp.enableProjectConfig", "sv_mcp_enable_project_config"),
-];
+omp_con::var! {
+	/// Enables authored and managed skill discovery.
+	pub static SV_SKILLS_ENABLED = sv_skills_enabled: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.enabled",
+		},
+	};
+	/// Additional authored skill roots.
+	pub static SV_SKILLS_CUSTOM_DIRECTORIES = sv_skills_custom_directories: Vec<Str> {
+		default: Vec::new(),
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.customDirectories",
+		},
+	};
+	/// Skill names excluded before publication.
+	pub static SV_SKILLS_IGNORE = sv_skills_ignore: Vec<Str> {
+		default: Vec::new(),
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.ignoredSkills",
+		},
+	};
+	/// Optional skill-name inclusion filters.
+	pub static SV_SKILLS_INCLUDE = sv_skills_include: Vec<Str> {
+		default: Vec::new(),
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.includeSkills",
+		},
+	};
+	/// Default HTTP CDP discovery endpoint used when no tool-call endpoint is provided.
+	pub static SV_BROWSER_CDP_URL = sv_browser_cdp_url: Str {
+		default: Str::new_static(""),
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Grep & Browser",
+			"ui.label": "Browser CDP URL",
+			"legacy.path": "browser.cdpUrl",
+		},
+	};
+	/// Drive the user's Chrome tabs through the omp browser relay.
+	pub static SV_BROWSER_RELAY = sv_browser_relay: bool {
+		default: false,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Grep & Browser",
+			"ui.label": "Browser Relay",
+			"legacy.path": "browser.relay",
+		},
+	};
+	/// omp browser relay endpoint.
+	pub static SV_BROWSER_RELAY_URL = sv_browser_relay_url: Str {
+		default: Str::new_static(""),
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Grep & Browser",
+			"ui.label": "Browser Relay URL",
+			"legacy.path": "browser.relayUrl",
+		},
+	};
+	/// Render non-JSON MCP text results as Markdown in the transcript.
+	pub static SV_MCP_RENDER_MARKDOWN_RESULTS = sv_mcp_render_markdown_results: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Discovery & MCP",
+			"ui.label": "MCP Markdown Results",
+			"legacy.path": "mcp.renderMarkdownResults",
+		},
+	};
+	/// Inject MCP resource updates into the agent conversation.
+	pub static SV_MCP_NOTIFICATIONS = sv_mcp_notifications: bool {
+		default: false,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Discovery & MCP",
+			"ui.label": "MCP Update Injection",
+			"legacy.path": "mcp.notifications",
+		},
+	};
+	/// Debounce window for MCP resource updates before injecting them into the conversation.
+	pub static SV_MCP_NOTIFICATION_DEBOUNCE_MS = sv_mcp_notification_debounce_ms: i64 {
+		default: 500,
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Discovery & MCP",
+			"ui.label": "MCP Notification Debounce",
+			"ui.unit": "ms",
+			"legacy.path": "mcp.notificationDebounceMs",
+		},
+	};
+	/// Positive finite active-work timeout for extension tool_call handlers; time awaiting OMP-owned dialogs does not count.
+	pub static AI_EXTENSION_HANDLERS_TOOL_CALL_TIMEOUT_MS = ai_extension_handlers_tool_call_timeout_ms: i64 {
+		default: 30000,
+		validate: |_ctx, value| {
+			if *value > 0 {
+				Ok(())
+			} else {
+				Err(Str::new_static("extension tool-call timeout must be positive"))
+			}
+		},
+		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Extensions",
+			"ui.label": "Tool Call Handler Timeout (ms)",
+			"ui.unit": "ms",
+			"legacy.path": "extensionHandlers.toolCallTimeoutMs",
+		},
+	};
+}
+
+/// Resolves the extension `tool_call` handler deadline at environment-host
+/// activation.
+#[must_use]
+pub fn extension_tool_call_timeout(ctx: &Ctx) -> Duration {
+	let milliseconds = u64::try_from(AI_EXTENSION_HANDLERS_TOOL_CALL_TIMEOUT_MS.get(ctx))
+		.expect("the convar minimum keeps extension handler timeouts positive");
+	Duration::from_millis(milliseconds)
+}
 
 static ATOMIC_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -240,14 +293,18 @@ mod settings_tests {
 	use super::*;
 
 	#[test]
-	fn vars_declare_every_former_schema_field() {
+	fn extension_tool_call_timeout_resolves_positive_milliseconds() {
 		let ctx = Ctx::new();
-		let mut fields = BTreeMap::new();
-		for &(legacy, convar) in LEGACY_CONVAR_MAPPINGS {
-			assert!(fields.insert(legacy, convar).is_none(), "duplicate legacy field {legacy}");
-			assert!(ctx.get(convar).is_some(), "missing convar {convar} for {legacy}");
-		}
-		assert_eq!(fields.len(), LEGACY_CONVAR_MAPPINGS.len());
+		assert_eq!(extension_tool_call_timeout(&ctx), Duration::from_secs(30));
+		AI_EXTENSION_HANDLERS_TOOL_CALL_TIMEOUT_MS
+			.set(&ctx, 125)
+			.expect("set extension handler timeout");
+		assert_eq!(extension_tool_call_timeout(&ctx), Duration::from_millis(125));
+		assert!(
+			AI_EXTENSION_HANDLERS_TOOL_CALL_TIMEOUT_MS
+				.set(&ctx, 0)
+				.is_err()
+		);
 	}
 }
 
@@ -547,24 +604,24 @@ pub struct ExtensionReloadHandle {
 }
 
 impl ExtensionReloadHandle {
-	/// Drains idle extension workers and respawns their hot-reload generations.
-	pub async fn reload(&self) -> Result<Vec<u64>, worker::WorkerError> {
+	/// Drains idle extension hosts and starts their hot-reload generations.
+	pub async fn reload(&self) -> Result<Vec<u64>, worker::ExtHostError> {
 		self.server.reload_extensions().await
 	}
 
 	/// Respawns only the child which owns `extension`.
-	pub async fn reload_extension(&self, extension: &str) -> Result<u64, worker::WorkerError> {
+	pub async fn reload_extension(&self, extension: &str) -> Result<u64, worker::ExtHostError> {
 		self.server.reload_extension(extension).await
 	}
 
-	/// Quarantines host groups containing any newly revoked extension while
-	/// keeping their static unavailable routes registered.
+	/// Quarantines each newly revoked extension host while keeping its static
+	/// unavailable routes registered.
 	pub async fn quarantine(&self, extensions: &[Str]) {
 		self.server.quarantine_extensions(extensions).await;
 	}
 
 	/// Returns every registry sealed by the current post-reload generations.
-	pub fn registry_evidences(&self) -> Vec<Arc<worker::SealedRegistryEvidence>> {
+	pub fn registry_evidences(&self) -> Vec<Arc<exthost::extensions::SealedRegistryEvidence>> {
 		self.server.extension_registry_evidences()
 	}
 }
@@ -1206,12 +1263,12 @@ impl ProjectEnvironment {
 	}
 
 	/// Returns the shared extension and built-in provider usage registry.
-	pub fn usage_fetchers(&self) -> omp_inference::operation::usage::UsageFetcherRegistry {
+	pub fn usage_fetchers(&self) -> omp_ai::operation::usage::UsageFetcherRegistry {
 		self.lifecycle.server.usage_fetchers()
 	}
 
 	/// Returns the session-owned provider response hook sink.
-	pub fn provider_response_hooks(&self) -> omp_inference::ProviderResponseHooks {
+	pub fn provider_response_hooks(&self) -> omp_ai::ProviderResponseHooks {
 		self.lifecycle.server.provider_response_hooks()
 	}
 
@@ -1234,12 +1291,14 @@ impl ProjectEnvironment {
 	pub fn extension_registry_evidence(
 		&self,
 		identity: &ControlConnectionIdentity,
-	) -> Option<Arc<worker::SealedRegistryEvidence>> {
+	) -> Option<Arc<exthost::extensions::SealedRegistryEvidence>> {
 		self.lifecycle.server.extension_registry_evidence(identity)
 	}
 
 	/// Returns every currently sealed exact-generation extension registry.
-	pub fn extension_registry_evidences(&self) -> Vec<Arc<worker::SealedRegistryEvidence>> {
+	pub fn extension_registry_evidences(
+		&self,
+	) -> Vec<Arc<exthost::extensions::SealedRegistryEvidence>> {
 		self.lifecycle.server.extension_registry_evidences()
 	}
 
@@ -1357,35 +1416,8 @@ fn worker_config(
 	config
 		.contributed_values
 		.extend_from_slice(contributed_values);
+	config.py_eval = py_eval;
 	let mut bindings = Vec::new();
-	if py_eval {
-		let key = HostKey::new("workspace", "trusted", PY_EVAL_MODULE);
-		let binding = ExtensionDataBinding::built_in(
-			state_dir,
-			key.clone(),
-			session_id.as_str(),
-			session_generation,
-		);
-		let mut digest = Hash32::hasher();
-		digest.update(omp_env::build_id::current().as_bytes());
-		digest.update(env!("CARGO_PKG_VERSION").as_bytes());
-		digest.update(PY_EVAL_MODULE.as_bytes());
-		let provenance = omp_core::Provenance::new(
-			sf!("omp-first-party"),
-			sf!(PY_EVAL_MODULE),
-			sf!(env!("CARGO_PKG_VERSION")),
-			omp_core::ArtifactDigest::new(digest.finalize().into_bytes()),
-			sf!("workspace"),
-			sf!("trusted"),
-			1,
-		);
-		let manifest = ExtensionManifest::py_eval(provenance, []);
-		let mut extension = ExtHostSpec::new(key, manifest);
-		extension.data_grants = binding.grants().clone();
-		extension.data_socket = Some(extension_data_endpoint(&binding));
-		config.extensions.push(extension);
-		bindings.push(binding);
-	}
 	for trusted in trusted_extensions {
 		let mut extension = trusted.clone();
 		let binding = ExtensionDataBinding::scoped(
@@ -1918,6 +1950,7 @@ fn acp_exec_body(
 					spilled_output,
 					aborted: status.aborted,
 					projection: None,
+					diags: status.diags.iter().map(exec::wire_diag).collect(),
 					props: Some(acp_bool_props([("acp/effects-unknown", status.effects_unknown)])),
 				}),
 				final_cwd_uri,
@@ -2242,10 +2275,7 @@ async fn spawn_project_daemon_with(
 }
 
 #[cfg(unix)]
-async fn terminate_spawned_daemon(
-	child: &mut tokio::process::Child,
-	process_group: Option<u32>,
-) {
+async fn terminate_spawned_daemon(child: &mut tokio::process::Child, process_group: Option<u32>) {
 	if let Some(process_group) = process_group {
 		let group = Pid::from_raw(process_group.cast_signed());
 		let _ = signal::killpg(group, Signal::SIGTERM);
@@ -2258,10 +2288,7 @@ async fn terminate_spawned_daemon(
 }
 
 #[cfg(not(unix))]
-async fn terminate_spawned_daemon(
-	child: &mut tokio::process::Child,
-	_process_group: Option<u32>,
-) {
+async fn terminate_spawned_daemon(child: &mut tokio::process::Child, _process_group: Option<u32>) {
 	let _ = child.start_kill();
 	let _ = child.wait().await;
 }
@@ -2430,6 +2457,7 @@ mod tests {
 				}),
 				aborted:            true,
 				effects_unknown:    true,
+				diags:              Vec::new(),
 				final_cwd_uri:      Some(sf!("file:///workspace/after")),
 				final_cwd_revision: 11,
 			}),
@@ -2523,10 +2551,7 @@ mod tests {
 			.await
 			.expect_err("capture process must exit during startup");
 		assert!(error.to_string().contains("exited during startup"), "unexpected error: {error}");
-		assert_eq!(
-			fs::read_to_string(capture).expect("captured daemon selector"),
-			"envd"
-		);
+		assert_eq!(fs::read_to_string(capture).expect("captured daemon selector"), "envd");
 	}
 
 	#[tokio::test]

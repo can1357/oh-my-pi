@@ -151,7 +151,7 @@ pub enum EnvEvent {
 	Notice {
 		/// Notice kind (`hook`, `custom`, …).
 		kind: Str,
-		/// Producer-chosen name (pi `customType`).
+		/// Producer-chosen name.
 		name: Option<Str>,
 		/// Notice body.
 		body: Str,

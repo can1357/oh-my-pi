@@ -6,8 +6,8 @@
 
 use std::{net::SocketAddr, time::Duration};
 
+use omp_ai::realtime::{live::LiveIcePath, transport::LiveProxy};
 use omp_core::{Str, sf};
-use omp_voice::{live::LiveIcePath, transport::LiveProxy};
 use smallvec::SmallVec;
 use strum::IntoStaticStr;
 use tokio::{
@@ -410,7 +410,7 @@ mod tests {
 
 	#[test]
 	fn selected_ice_path_annotation_contains_only_redacted_classes_and_aggregate() {
-		use omp_voice::live::{LiveIceCandidateClass, LiveIcePathKind};
+		use omp_ai::realtime::live::{LiveIceCandidateClass, LiveIcePathKind};
 
 		let report = annotate_ice_path(
 			diagnosis(LiveFailureClass::Ice, ProbeEvidence::default(), false),

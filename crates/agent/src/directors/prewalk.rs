@@ -82,7 +82,7 @@ impl Director for Prewalk {
 		]
 	}
 
-	fn prepare_inference(&self, _cx: &DirectorCx<'_>, request: &mut omp_inference::ChatRequest) {
+	fn prepare_inference(&self, _cx: &DirectorCx<'_>, request: &mut omp_ai::ChatRequest) {
 		crate::director::prepend_system(
 			request,
 			Str::new_static(if self.prompted {

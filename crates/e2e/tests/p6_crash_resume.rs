@@ -22,6 +22,17 @@ use nix::{
 	sys::signal,
 	unistd::{Pid, ttyname},
 };
+use omp_ai::{
+	Answer, Error as InferenceError, Registry,
+	answer::{AnswerBody, ChatStream},
+	call::Call,
+	event::{BlockKind, ChatEvent, Completion, FinishReason, WorkflowResponse},
+	layer::{LayerCall, stack::RouteProviderService},
+	provider::fake::{FakeProvider, FakeScript},
+	receipt::{ExecutionReceipt, ReasonId, Usage},
+	registry::RouteUnavailable,
+	session::ConversationSessionPlanner,
+};
 use omp_app::{
 	daemon::{DaemonConfig, DaemonHandle},
 	endpoint::LocalEndpoint,
@@ -33,17 +44,6 @@ use omp_catalog::{
 use omp_core::{Str, sf};
 use omp_e2e::support::{
 	OwnedProcess, create_session, install_omp_binary_env, omp_binary, reopen_session, within,
-};
-use omp_inference::{
-	Answer, Error as InferenceError, Registry,
-	answer::{AnswerBody, ChatStream},
-	call::Call,
-	event::{BlockKind, ChatEvent, Completion, FinishReason, WorkflowResponse},
-	layer::{LayerCall, stack::RouteProviderService},
-	provider::fake::{FakeProvider, FakeScript},
-	receipt::{ExecutionReceipt, ReasonId, Usage},
-	registry::RouteUnavailable,
-	session::ConversationSessionPlanner,
 };
 use omp_tool::Registry as ToolRegistry;
 use serde_json::{Value, json};

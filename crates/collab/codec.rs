@@ -298,17 +298,15 @@ fn frame_from_json(value: &Value) -> Result<CollabFrame, CodecError> {
 		"agent-view-cancel" => collab_frame::Payload::AgentViewCancel(v1::AgentViewCancel {
 			request_id: json_u32(object, "reqId")?,
 		}),
-		"agent-view-snapshot" => {
-			collab_frame::Payload::AgentViewSnapshot(v1::AgentViewSnapshot {
-				request_id:    json_u32(object, "reqId")?,
-				chunk_index:   json_u32(object, "index")?,
-				snapshot_bytes: Bytes::from(decode_base64(json_str(object, "data")?)?),
-				r#final:       object
-					.get("final")
-					.and_then(Value::as_bool)
-					.unwrap_or(false),
-			})
-		},
+		"agent-view-snapshot" => collab_frame::Payload::AgentViewSnapshot(v1::AgentViewSnapshot {
+			request_id:     json_u32(object, "reqId")?,
+			chunk_index:    json_u32(object, "index")?,
+			snapshot_bytes: Bytes::from(decode_base64(json_str(object, "data")?)?),
+			r#final:        object
+				.get("final")
+				.and_then(Value::as_bool)
+				.unwrap_or(false),
+		}),
 		"agent-view-event" => collab_frame::Payload::AgentViewEvent(v1::AgentViewEvent {
 			request_id: json_u32(object, "reqId")?,
 			event:      object
@@ -510,11 +508,7 @@ fn agent_from_json(value: &Value) -> Result<v1::AgentSummary, CodecError> {
 	Ok(v1::AgentSummary {
 		id:               json_str(item, "id")?.to_owned(),
 		display_name:     json_str(item, "displayName")?.to_owned(),
-		kind:             if json_str(item, "kind").unwrap_or("main") == "sub" {
-			1
-		} else {
-			0
-		},
+		kind:             i32::from(json_str(item, "kind").unwrap_or("main") == "sub"),
 		parent_id:        item
 			.get("parentId")
 			.and_then(Value::as_str)
@@ -633,7 +627,7 @@ pub fn validate_collab_frame(encoded: &[u8]) -> Result<(), CodecError> {
 	preflight(encoded, Node::CollabFrame, FRAME_MAX_BYTES)
 }
 
-fn ensure_revision(message: &'static str, actual: u32) -> Result<(), CodecError> {
+const fn ensure_revision(message: &'static str, actual: u32) -> Result<(), CodecError> {
 	if actual == PROTOCOL_REVISION {
 		Ok(())
 	} else {
@@ -1023,10 +1017,10 @@ mod tests {
 			protocol_revision: PROTOCOL_REVISION,
 			sequence: 17,
 			payload: Some(collab_frame::Payload::AgentViewSnapshot(v1::AgentViewSnapshot {
-				request_id: 9,
-				chunk_index: 2,
+				request_id:     9,
+				chunk_index:    2,
 				snapshot_bytes: Bytes::from_static(b"\0snapshot\xff"),
-				r#final: true,
+				r#final:        true,
 			})),
 			..Default::default()
 		};

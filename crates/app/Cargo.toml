@@ -24,7 +24,7 @@ required-features = ["claude-trace"]
 [features]
 default = ["local"]
 claude-trace = []
-local = ["omp-driver/local", "omp-inference/local"]
+local = ["omp-driver/local", "omp-ai/local"]
 gui = ["dep:omp-gui"]
 local-all = [
 	"local-applefm",
@@ -32,15 +32,15 @@ local-all = [
 	"local-stt",
 	"local-tts",
 ]
-local-applefm = ["local", "omp-driver/local-applefm", "omp-inference/local-applefm"]
+local-applefm = ["local", "omp-driver/local-applefm", "omp-ai/local-applefm"]
 local-embedding = [
 	"local",
 	"omp-driver/local-embedding",
-	"omp-inference/local-embedding",
+	"omp-ai/local-embedding",
 	"omp-memory/local-embedding",
 ]
-local-stt = ["local", "omp-driver/local-stt", "omp-inference/local-stt"]
-local-tts = ["local", "omp-driver/local-tts", "omp-inference/local-tts"]
+local-stt = ["local", "omp-driver/local-stt", "omp-ai/local-stt"]
+local-tts = ["local", "omp-driver/local-tts", "omp-ai/local-tts"]
 
 [dependencies]
 arc-swap.workspace = true
@@ -64,17 +64,16 @@ omp-chat.workspace = true
 omp-collab.workspace = true
 omp-con.workspace = true
 omp-core.workspace = true
-omp-docserver.workspace = true
 omp-driver.workspace = true
 omp-env.workspace = true
 omp-envd.workspace = true
 omp-ext.workspace = true
 omp-gui = { workspace = true, optional = true }
-omp-grep.workspace = true
-omp-hashline.workspace = true
+omp-edit.workspace = true
 omp-http.workspace = true
 omp-catalog.workspace = true
-omp-inference.workspace = true
+omp-audio.workspace = true
+omp-ai = { workspace = true, features = ["realtime"] }
 omp-journal.workspace = true
 omp-memory.workspace = true
 omp-session.workspace = true
@@ -91,8 +90,7 @@ omp-observability.workspace = true
 omp-tool.workspace = true
 omp-tui.workspace = true
 omp-vcs.workspace = true
-omp-voice = { workspace = true, features = ["realtime-transport"] }
-omp-slopjson.workspace = true
+omp-shell-builtins.workspace = true
 omp-shell.workspace = true
 omp-tools.workspace = true
 omp-walker.workspace = true
@@ -131,7 +129,7 @@ windows-sys.workspace = true
 async-stream.workspace = true
 flume.workspace = true
 insta.workspace = true
-omp-inference.workspace = true
+omp-ai.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tonic-health.workspace = true

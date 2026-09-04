@@ -2259,7 +2259,7 @@ pub fn is_bare_math_environment(name: &str) -> bool {
 /// Every form closes at its first unescaped matching delimiter. The single
 /// dollar form additionally follows Pandoc's anti-currency whitespace, digit,
 /// and single-line rules.
-pub(crate) fn math_span(text: &str) -> Option<(&str, usize)> {
+pub fn math_span(text: &str) -> Option<(&str, usize)> {
 	if text.starts_with("$$") {
 		let close = delimiter_end(text, "$$", 2)?;
 		let body = &text[2..close];
@@ -2313,7 +2313,7 @@ fn delimiter_end(text: &str, delimiter: &str, from: usize) -> Option<usize> {
 	None
 }
 
-fn escaped_at(text: &str, at: usize, from: usize) -> bool {
+const fn escaped_at(text: &str, at: usize, from: usize) -> bool {
 	let bytes = text.as_bytes();
 	let mut cursor = at;
 	while cursor > from && bytes[cursor - 1] == b'\\' {

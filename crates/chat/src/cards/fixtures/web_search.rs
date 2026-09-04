@@ -14,8 +14,7 @@ const RESULT: &str = r#"{"response":{
 	"citations":[{"url":"https://bun.sh/blog/bun-v1.2-benchmarks","title":"Bun 1.2 Benchmarks","cited_text":"Bun serves roughly 2.5x the requests per second of Node.js"}],
 	"usage":{"input_tokens":312,"output_tokens":248,"total_tokens":560,"server_tools":{"web_search_requests":2}}
 }}"#;
-const ERROR: &str =
-	r#"{"kind":"search","provider":"perplexity","category":"rate_limited","code":"resource_exhausted","status":429}"#;
+const ERROR: &str = r#"{"kind":"search","provider":"perplexity","category":"rate_limited","code":"resource_exhausted","status":429}"#;
 
 pub(super) const FIXTURES: &[CardFixture] = &[CardFixture {
 	tool:   "web_search",

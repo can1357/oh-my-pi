@@ -14,13 +14,13 @@ use std::{
 use async_stream::stream;
 use bytes::Bytes;
 use futures::{Stream, StreamExt, pin_mut};
-use omp_catalog::GrammarBits;
-use omp_core::{Hash32, SparseMap, Str, hash32::Hasher, sf};
-use omp_inference::{
+use omp_ai::{
 	Adjustment, FREEFORM_INPUT_PROPERTY, FeatureId, OpaqueJson, ReasonId, ToolDefinition,
 	ToolGrammar, ToolGrammarSyntax, ToolInputConstraint,
 	recovery::tools::{ToolAssemblyLimits, schema_within_strict_subset},
 };
+use omp_catalog::GrammarBits;
+use omp_core::{Hash32, SparseMap, Str, hash32::Hasher, sf};
 use omp_proto::inference::{v1, v1::InvokeInput};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -1571,6 +1571,16 @@ impl<T: Tool> ErasedTool for Registered<T> {
 							break;
 						},
 					},
+					crate::Ev::Diag(diag) => {
+						match serde_json::to_vec(&crate::DiagEnvelope { diag: &diag }) {
+							Ok(json) => yield Ok(ErasedEv::Update(Bytes::from(json))),
+							Err(error) => {
+								terminal = true;
+								yield Err(RegistryError::Serialize(error));
+								break;
+							},
+						}
+					},
 					crate::Ev::Args(issue) => {
 						terminal = true;
 						let verdict = CallOutcome::<T::Payload, T::Fault>::ArgsRejected(issue);
@@ -1733,8 +1743,8 @@ impl Registry {
 		Self::default()
 	}
 
-	/// Projects this registry onto an explicit stable-name allow-list (pi
-	/// `options.toolNames`): the returned registry knows only the named
+	/// Projects this registry onto an explicit stable-name allow-list: the
+	/// returned registry knows only the named
 	/// tools, so a kernel built on it neither advertises nor dispatches any
 	/// other native or host tool. Unknown names are ignored; the caller
 	/// validates them against [`Self::live_identities`] first when a typo
@@ -1872,7 +1882,7 @@ impl Registry {
 			if let Some(owner) = owner {
 				return Err(RegistryError::HostToolConflict {
 					name: spec.name.clone(),
-					claimant: claimant.clone(),
+					claimant,
 					owner,
 				});
 			}
@@ -2022,59 +2032,56 @@ impl Registry {
 			}
 		};
 
-		match requested {
-			Some(requested) => {
-				for name in requested {
-					push(name, &mut names, &mut seen);
+		if let Some(requested) = requested {
+			for name in requested {
+				push(name, &mut names, &mut seen);
+			}
+			if policy.checkpoint {
+				if seen.contains("checkpoint") {
+					push("rewind", &mut names, &mut seen);
+				} else if seen.contains("rewind") {
+					push("checkpoint", &mut names, &mut seen);
 				}
-				if policy.checkpoint {
-					if seen.contains("checkpoint") {
-						push("rewind", &mut names, &mut seen);
-					} else if seen.contains("rewind") {
-						push("checkpoint", &mut names, &mut seen);
+			}
+			if !policy.restricted {
+				if seen.contains("grep") && policy.ast {
+					push("ast_grep", &mut names, &mut seen);
+				}
+				if seen.contains("edit") && policy.ast {
+					push("ast_edit", &mut names, &mut seen);
+				}
+				if policy.memory == MemoryToolState::Mnemopi {
+					for name in ["recall", "retain", "reflect", "memory_edit"] {
+						push(name, &mut names, &mut seen);
 					}
 				}
-				if !policy.restricted {
-					if seen.contains("grep") && policy.ast {
-						push("ast_grep", &mut names, &mut seen);
-					}
-					if seen.contains("edit") && policy.ast {
-						push("ast_edit", &mut names, &mut seen);
-					}
+				if policy.external_thinking {
+					push("think", &mut names, &mut seen);
+				}
+				if policy.goal == GoalToolState::Active {
+					push("goal", &mut names, &mut seen);
+				}
+				if policy.autolearn && policy.top_level {
+					push("manage_skill", &mut names, &mut seen);
 					if policy.memory == MemoryToolState::Mnemopi {
-						for name in ["recall", "retain", "reflect", "memory_edit"] {
-							push(name, &mut names, &mut seen);
-						}
-					}
-					if policy.external_thinking {
-						push("think", &mut names, &mut seen);
-					}
-					if policy.goal == GoalToolState::Active {
-						push("goal", &mut names, &mut seen);
-					}
-					if policy.autolearn && policy.top_level {
-						push("manage_skill", &mut names, &mut seen);
-						if policy.memory == MemoryToolState::Mnemopi {
-							push("learn", &mut names, &mut seen);
-						}
+						push("learn", &mut names, &mut seen);
 					}
 				}
-			},
-			None => {
-				for name in self.live.keys() {
-					push(name, &mut names, &mut seen);
-				}
-				let host_names = self
-					.host_tools
-					.read()
-					.live
-					.keys()
-					.cloned()
-					.collect::<Vec<_>>();
-				for name in &host_names {
-					push(name, &mut names, &mut seen);
-				}
-			},
+			}
+		} else {
+			for name in self.live.keys() {
+				push(name, &mut names, &mut seen);
+			}
+			let host_names = self
+				.host_tools
+				.read()
+				.live
+				.keys()
+				.cloned()
+				.collect::<Vec<_>>();
+			for name in &host_names {
+				push(name, &mut names, &mut seen);
+			}
 		}
 		names
 	}
@@ -3266,11 +3273,11 @@ fn render_arg_issue(issue: &ArgIssue) -> Str {
 	Str::new(text)
 }
 
-fn host_tool_stream<'a>(
+fn host_tool_stream(
 	executor: Arc<dyn HostToolExecutor>,
 	mut invocation: HostToolInvocation,
-	mut params: IncomingParams<'a>,
-) -> ErasedStream<'a> {
+	mut params: IncomingParams<'_>,
+) -> ErasedStream<'_> {
 	Box::pin(stream! {
 		invocation.arguments = match params.whole::<Map<String, Value>>().await {
 			Ok(arguments) => arguments,
@@ -3975,8 +3982,8 @@ mod tests {
 		));
 	}
 
-	/// pi `options.toolNames`: an allow-list bounds both what the model sees
-	/// and what can execute, for native and host tools alike.
+	/// An allow-list bounds both what the model sees and what can execute, for
+	/// native and host tools alike.
 	#[test]
 	fn restrict_keeps_only_the_named_native_and_host_tools() {
 		let mut registry = Registry::new();

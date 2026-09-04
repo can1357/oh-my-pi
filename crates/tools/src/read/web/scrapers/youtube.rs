@@ -1,8 +1,9 @@
 //! Anonymous `YouTube` metadata and transcript renderer.
 
-use omp_core::{Str, sf};
+#[cfg(test)]
+use omp_tool::Severity;
+use omp_tool::{Diag, DiagKind};
 use serde_json::Value;
-use smallvec::SmallVec;
 use url::Url;
 
 use super::utils::{decode_html_entities, format_media_duration};
@@ -63,20 +64,22 @@ pub(super) async fn render<C: HttpClient + Sync>(
 		metadata_from_page(&page, &mut metadata);
 	}
 
-	let mut notes = SmallVec::<Str, 4>::new();
+	let mut diags = Vec::new();
 
 	let transcript = fetch_transcript(client, &caption_tracks).await;
 	match transcript.as_ref().map(|value| value.kind) {
-		Some(TranscriptKind::Manual) => notes.push(sf!("Using manual subtitles")),
-		Some(TranscriptKind::Automatic) => {
-			notes.push(sf!("Using auto-generated captions"));
+		Some(TranscriptKind::Manual) => {
+			diags.push(Diag::info(DiagKind::Provenance, "Using manual subtitles"));
 		},
-		None => notes.push(sf!("No subtitles/captions available")),
+		Some(TranscriptKind::Automatic) => {
+			diags.push(Diag::info(DiagKind::Provenance, "Using auto-generated captions"));
+		},
+		None => diags.push(Diag::warn(DiagKind::Fallback, "No subtitles or captions were available")),
 	}
 
 	let content = render_markdown(&target.video_id, &metadata, transcript.as_ref());
 	let mut result = RenderResult::markdown(&content, "youtube");
-	result.notes.extend(notes);
+	result.diags.extend(diags);
 	Ok(Some(result))
 }
 
@@ -607,6 +610,7 @@ mod tests {
 
 	use bytes::Bytes;
 	use parking_lot::Mutex;
+	use smallvec::SmallVec;
 
 	use super::*;
 	use crate::read::web::types::HttpResponse;
@@ -718,7 +722,9 @@ mod tests {
 			 2:02\n**Views:** 1.2M\n**Video ID:** dQw4w9WgXcQ\n\n---\n\n## Description\n\nA useful \
 			 description.\n\n---\n\n## Transcript (manual)\n\nHello world Next line"
 		);
-		assert_eq!(result.notes.as_slice(), ["Using manual subtitles"]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 		assert_eq!(result.method.as_str(), "youtube");
 		assert_eq!(result.content_type.as_deref(), Some("text/markdown"));
 
@@ -750,7 +756,9 @@ mod tests {
 			 1:05\n**Views:** 13K\n**Video ID:** dQw4w9WgXcQ\n\n---\n\n## Description\n\nCompact \
 			 fallback.\n\n---\n\n*No transcript available for this video.*"
 		);
-		assert_eq!(result.notes.as_slice(), ["No subtitles/captions available"]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Fallback));
+		assert_eq!(result.diags[0].severity, Severity::Warn);
 	}
 
 	#[tokio::test]
@@ -766,7 +774,9 @@ mod tests {
 			"# Embedded Video\n\n**Channel:** Embed Channel\n**Video ID:** dQw4w9WgXcQ\n\n---\n\n*No \
 			 transcript available for this video.*"
 		);
-		assert_eq!(result.notes.as_slice(), ["No subtitles/captions available"]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Fallback));
+		assert_eq!(result.diags[0].severity, Severity::Warn);
 		let requests = client.requests.lock();
 		assert_eq!(requests.len(), 1);
 		assert_eq!(requests[0].url.as_str(), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
@@ -799,7 +809,9 @@ mod tests {
 			"# Captioned\n\n**Channel:** Channel\n**Video ID:** dQw4w9WgXcQ\n\n---\n\n## Transcript \
 			 (auto-generated)\n\nfirst line second line"
 		);
-		assert_eq!(result.notes.as_slice(), ["Using auto-generated captions"]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 	}
 
 	#[tokio::test]
@@ -816,7 +828,9 @@ mod tests {
 			"# YouTube Video\n\n**Video ID:** dQw4w9WgXcQ\n\n---\n\n*No transcript available for \
 			 this video.*"
 		);
-		assert_eq!(result.notes.as_slice(), ["No subtitles/captions available"]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Fallback));
+		assert_eq!(result.diags[0].severity, Severity::Warn);
 	}
 
 	#[tokio::test]
@@ -829,7 +843,9 @@ mod tests {
 			"# YouTube Video\n\n**Video ID:** dQw4w9WgXcQ\n\n---\n\n*No transcript available for \
 			 this video.*"
 		);
-		assert_eq!(result.notes.as_slice(), ["No subtitles/captions available"]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Fallback));
+		assert_eq!(result.diags[0].severity, Severity::Warn);
 	}
 	#[tokio::test]
 	async fn unsupported_url_is_not_claimed_or_fetched() {

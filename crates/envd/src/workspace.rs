@@ -12,15 +12,16 @@ use std::{
 
 use bytes::Bytes;
 use omp_core::Str;
-use omp_grep::{
-	CompiledGrep, GrepControl, GrepMatchRef, GrepSink, GrepStreamError, GrepStreamStatus,
-	RegexOptions, StreamOptions,
-};
 use omp_walker::{
 	EntryMeta, FileCandidate, WalkDecision, WalkError, WalkOutcome, WalkRequest, WalkStatus,
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+
+use crate::grep::{
+	CompiledGrep, GrepControl, GrepMatchRef, GrepSink, GrepStreamError, GrepStreamStatus,
+	RegexOptions, StreamOptions,
+};
 
 mod operations;
 
@@ -108,7 +109,7 @@ pub enum WorkspaceError {
 	Walk(Str),
 	/// Regex compilation or matching failed.
 	#[error("workspace grep failed: {0}")]
-	Grep(#[source] omp_grep::GrepError),
+	Grep(#[source] crate::grep::GrepError),
 	/// A scoped search worker exited without reporting its result.
 	#[error("workspace search worker stopped unexpectedly")]
 	SearchWorkerStopped,

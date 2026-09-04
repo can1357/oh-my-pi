@@ -426,8 +426,8 @@ pub fn phase(now: Duration, period: Duration) -> f32 {
 	(now.as_millis() % period) as f32 / period as f32
 }
 
-/// Wraps any real into `[0, 1)` (pi `((phase % 1) + 1) % 1`), so negative
-/// and over-range phases stay well-defined.
+/// Wraps any real into `[0, 1)`, so negative and over-range phases stay
+/// well-defined.
 #[must_use]
 pub fn wrap_unit(t: f32) -> f32 {
 	let wrapped = t.rem_euclid(1.0);
@@ -435,7 +435,7 @@ pub fn wrap_unit(t: f32) -> f32 {
 }
 
 /// HSL → RGB (`hue` in degrees, `saturation`/`lightness` in `[0, 1]`), the
-/// color space pi's rainbow tag and gradient keyword highlighter sample.
+/// color space used by the rainbow tag and gradient keyword highlighter.
 #[must_use]
 pub fn hsl(hue: f32, saturation: f32, lightness: f32) -> Color {
 	let hue = hue.rem_euclid(360.0);
@@ -457,8 +457,7 @@ pub fn hsl(hue: f32, saturation: f32, lightness: f32) -> Color {
 	Color::Rgb(channel(r), channel(g), channel(b))
 }
 
-/// A soft white highlight band composited over a [`Gradient`] (pi
-/// `welcome.ts` `ShineConfig`).
+/// A soft white highlight band composited over a [`Gradient`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Shine {
 	/// Overall opacity of the highlight, in `[0, 1]`.
@@ -468,11 +467,10 @@ pub struct Shine {
 }
 
 impl Shine {
-	/// Half-width of the band in gradient-`t` units (pi `SHINE_HALF_WIDTH`).
+	/// Half-width of the band in gradient-`t` units.
 	pub const HALF_WIDTH: f32 = 0.18;
 
-	/// Lift toward white at `t`: `max(0, 1 - dist / HALF_WIDTH) * strength`
-	/// (pi `welcome.ts` `gradientEscape`).
+	/// Lift toward white at `t`: `max(0, 1 - dist / HALF_WIDTH) * strength`.
 	#[must_use]
 	pub fn intensity(self, t: f32) -> f32 {
 		if self.strength <= 0.0 {
@@ -483,8 +481,7 @@ impl Shine {
 	}
 }
 
-/// pi's multi-stop diagonal brand gradient (`welcome.ts` `GRADIENT_STOPS`,
-/// `GRADIENT_RAMP_256`, `gradientEscape`, `gradientLogo`).
+/// Multi-stop diagonal brand gradient.
 ///
 /// `t` runs along the top-left → bottom-right diagonal of a glyph grid:
 /// `(x / x_span + y / y_span) / 2`, so the top-right and bottom-left corners
@@ -509,12 +506,12 @@ impl Gradient {
 	}
 
 	/// Diagonal position of cell `(x, y)` in a `cols × rows` grid before the
-	/// phase shift (pi `gradientLogo` `base`).
+	/// phase shift.
 	#[must_use]
 	pub fn diagonal(x: u16, y: u16, cols: u16, rows: u16) -> f32 {
 		let x_span = f32::from(cols.saturating_sub(1).max(1));
 		let y_span = f32::from(rows.saturating_sub(1).max(1));
-		(f32::from(x) / x_span + f32::from(y) / y_span) / 2.0
+		f32::midpoint(f32::from(x) / x_span, f32::from(y) / y_span)
 	}
 
 	/// Color at diagonal position `t`, shifted by [`phase`](Self::phase) and
@@ -549,7 +546,7 @@ impl Gradient {
 		}
 		let ramp = &Self::RAMP_256;
 		let last = ramp.len() - 1;
-		let mut index = ((t * last as f32 + 0.5).floor().max(0.0) as usize).min(last);
+		let mut index = (f32::mul_add(t, last as f32, 0.5).floor().max(0.0) as usize).min(last);
 		if intensity > 0.5 {
 			index = last;
 		}
@@ -557,8 +554,8 @@ impl Gradient {
 	}
 }
 
-/// pi's one-shot brand intro (`welcome.ts` `introLogoFrame`): the gradient
-/// sweeps backward through 2.5 rotations on an ease-out cubic while a shine
+/// One-shot brand intro: the gradient sweeps backward through 2.5 rotations
+/// on an ease-out cubic while a shine
 /// band crosses the diagonal three times at a steady pace, fading with the
 /// same curve, so the two layers parallax and settle together on the
 /// resting frame.
@@ -566,11 +563,11 @@ impl Gradient {
 pub struct Intro;
 
 impl Intro {
-	/// Total length of the intro (pi `INTRO_MS`).
+	/// Total length of the intro.
 	pub const DURATION: Duration = Duration::from_millis(3000);
-	/// Shine crossings of the diagonal (pi `INTRO_SHINE_TRAVERSALS`).
+	/// Shine crossings of the diagonal.
 	pub const SHINE_TRAVERSALS: f32 = 3.0;
-	/// Full gradient rotations before settling (pi `INTRO_SWEEPS`).
+	/// Full gradient rotations before settling.
 	pub const SWEEPS: f32 = 2.5;
 
 	/// Whether `elapsed` is past the intro: the resting frame from here on.
@@ -595,8 +592,8 @@ impl Intro {
 	}
 }
 
-/// pi's per-glyph HSL rainbow (`welcome.ts` `renderNewTag`): glyph `i` of
-/// `n` takes hue `round(((i / n + phase) mod 1) * 360)` at 95% saturation
+/// Per-glyph HSL rainbow: glyph `i` of `n` takes hue
+/// `round(((i / n + phase) mod 1) * 360)` at 95% saturation
 /// and 60% lightness, painted bold. `phase` advances one full rotation per
 /// [`PERIOD`](Self::PERIOD) on the shared clock.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -606,7 +603,7 @@ pub struct Rainbow {
 }
 
 impl Rainbow {
-	/// One full hue rotation (pi `NEW_GLOW_PERIOD_MS`).
+	/// One full hue rotation.
 	pub const PERIOD: Duration = Duration::from_millis(1500);
 
 	/// The rainbow phase-locked to `now`.
@@ -670,7 +667,7 @@ mod tests {
 		assert_eq!(gradient.color(0.1, None, false), Color::Indexed(170));
 		let shine = Some(Shine { strength: 1.0, pos: 0.0 });
 		assert_eq!(gradient.color(0.0, shine, false), Color::Indexed(44));
-		// Intensity 0.5 exactly is not promoted (pi `> 0.5`).
+		// Intensity 0.5 exactly is not promoted.
 		let half = Some(Shine { strength: 0.5, pos: 0.0 });
 		assert_eq!(gradient.color(0.0, half, false), Color::Indexed(206));
 	}

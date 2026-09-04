@@ -1,6 +1,9 @@
 //! MCP protocol-header precedence and redirect-origin enforcement.
 
-use http::{HeaderMap, HeaderName, Method, StatusCode, header::{HOST, LOCATION}};
+use http::{
+	HeaderMap, HeaderName, Method, StatusCode,
+	header::{HOST, LOCATION},
+};
 use url::Url;
 
 const MAX_REDIRECT_HOPS: u8 = 5;
@@ -227,18 +230,9 @@ mod tests {
 				.expect("redirect")
 		);
 		let generated = HeaderMap::from_iter([
-			(
-				HeaderName::from_static("authorization"),
-				HeaderValue::from_static("secret"),
-			),
-			(
-				HeaderName::from_static("x-api-key"),
-				HeaderValue::from_static("secret"),
-			),
-			(
-				HeaderName::from_static("mcp-session-id"),
-				HeaderValue::from_static("session-secret"),
-			),
+			(HeaderName::from_static("authorization"), HeaderValue::from_static("secret")),
+			(HeaderName::from_static("x-api-key"), HeaderValue::from_static("secret")),
+			(HeaderName::from_static("mcp-session-id"), HeaderValue::from_static("session-secret")),
 		]);
 		let configured = HeaderMap::from_iter([(
 			HeaderName::from_static("x-package-secret"),

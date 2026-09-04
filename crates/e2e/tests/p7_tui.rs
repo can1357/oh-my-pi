@@ -34,16 +34,7 @@ use nix::{
 	sys::termios::{Termios, cfgetispeed, cfgetospeed, tcgetattr},
 	unistd::ttyname,
 };
-use omp_app::{
-	daemon::{DaemonConfig, DaemonHandle},
-	endpoint::LocalEndpoint,
-};
-use omp_catalog::{
-	ManagementCapabilities, OperationBits, OperationKind,
-	snapshot::{Catalog, SnapshotProvenance},
-};
-use omp_core::{Str, sf};
-use omp_inference::{
+use omp_ai::{
 	Answer, Error as InferenceError, Registry,
 	answer::{AnswerBody, ChatStream},
 	call::{Call, OpaqueJson},
@@ -55,6 +46,15 @@ use omp_inference::{
 	registry::RouteUnavailable,
 	session::ConversationSessionPlanner,
 };
+use omp_app::{
+	daemon::{DaemonConfig, DaemonHandle},
+	endpoint::LocalEndpoint,
+};
+use omp_catalog::{
+	ManagementCapabilities, OperationBits, OperationKind,
+	snapshot::{Catalog, SnapshotProvenance},
+};
+use omp_core::{Str, sf};
 use omp_session::{ComponentRegistry, Session};
 use omp_tool::{Claims, Constraint, Effects, Precedence, Presentation, Rev, ToolSpec};
 use parking_lot::Mutex;
@@ -1074,8 +1074,8 @@ async fn chat_tui_persists_thinking_blocks_across_turns_and_resume() {
 	assert!(second_journal.matches("event: msg.assistant.end@1").count() >= 2);
 	assert_journal_chain(&second_journal);
 
-	// pi: ctrl+c on an idle composer arms exit; a second press within the
-	// window quits.
+	// Ctrl+C on an idle composer arms exit; a second press within the window
+	// quits.
 	debug.keys("ctrl+c ctrl+c");
 	drop(debug);
 	let before = process.before.clone();

@@ -1,6 +1,6 @@
 Snapcompact renderer
 
-The renderer source is derived from Oh My Pi's MIT-licensed snapcompact renderer.
+The renderer source is derived from the MIT-licensed snapcompact renderer.
 
 Bundled X.org bitmap fonts (5x8.bdf, 6x12.bdf, and 8x13.bdf) retain their
 upstream notices in the font files. unscii-8.hex is from the Unscii project.

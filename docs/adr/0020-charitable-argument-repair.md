@@ -61,4 +61,4 @@ dialect charitably. The repair layer is engine-owned, declarative, and receipted
 - The Harness Playbook, "The inference" — "Tool schemas are model-facing protocols"
 - blog.can.ac, "The minutiae of tool calling" (2026-08-03)
 - 0002, 0008 (tool call as a state stream), 0021, 0022, 0026 (versioned tools)
-- `crates/tool/src/incoming.rs`, `crates/tool/src/lib.rs`, `crates/slopjson/src/lib.rs`
+- `crates/tool/src/incoming.rs`, `crates/tool/src/lib.rs`, `crates/core/src/slopjson/mod.rs`

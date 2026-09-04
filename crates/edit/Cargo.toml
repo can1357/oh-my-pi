@@ -1,0 +1,30 @@
+[package]
+name = "omp-edit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Edit engine: replace, patch, apply_patch, hashline, and sloppy edit modes with streaming previews and jsdiff-compatible diffs"
+
+[lints]
+workspace = true
+
+[dependencies]
+omp-ast.workspace = true
+strum.workspace = true
+omp-walker.workspace = true
+omp-core.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+xutf.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+serde_json.workspace = true

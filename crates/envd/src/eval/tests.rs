@@ -58,13 +58,14 @@ impl BridgeHost for PreludeHost {
 						.to_owned(),
 				)),
 				"agent://ansi:raw" => Ok(Value::String(
-					r#"{"id":"ansi","status":"completed","output":"\u001b[31mred\u001b[0m"}"#
-						.to_owned(),
+					r#"{"id":"ansi","status":"completed","output":"\u001b[31mred\u001b[0m"}"#.to_owned(),
 				)),
-				"artifact://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:raw" => {
+				"artifact://sha256/\
+				 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:raw" => {
 					Ok(Value::String("durable artifact".to_owned()))
 				},
-				"artifact://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:2-2" => {
+				"artifact://sha256/\
+				 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:2-2" => {
 					Ok(Value::String("artifact line two".to_owned()))
 				},
 				path => Ok(Value::String(format!("delegated:{path}"))),

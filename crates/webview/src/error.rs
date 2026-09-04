@@ -2,14 +2,83 @@
 
 use std::{io, path::PathBuf, result};
 
+use hyper_util::client::legacy;
 use omp_core::Str;
 use png::DecodingError;
+use tokio::time::error::Elapsed;
 use tokio_tungstenite::tungstenite;
 
 use crate::SurfaceKind;
 
 /// Crate-wide result alias.
 pub type Result<T, E = Error> = result::Result<T, E>;
+
+/// A typed failure while resolving an HTTP(S) CDP discovery endpoint.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CdpDiscoveryError {
+	/// The endpoint is not a syntactically valid URL.
+	#[error("CDP discovery endpoint URL is invalid")]
+	InvalidUrl {
+		/// URL parser failure.
+		#[source]
+		source: url::ParseError,
+	},
+
+	/// The validated URL could not be represented as an HTTP request URI.
+	#[error("CDP discovery request URI is invalid")]
+	InvalidHttpUri {
+		/// HTTP URI parser failure.
+		#[source]
+		source: http::uri::InvalidUri,
+	},
+
+	/// The request failed before response headers arrived.
+	#[error("CDP discovery HTTP request failed")]
+	HttpRequest {
+		/// Hyper client failure.
+		#[source]
+		source: legacy::Error,
+	},
+
+	/// The response body failed while streaming.
+	#[error("CDP discovery HTTP response body failed")]
+	HttpBody {
+		/// Hyper body failure.
+		#[source]
+		source: hyper::Error,
+	},
+
+	/// The request or response body exceeded its end-to-end deadline.
+	#[error("CDP discovery HTTP request timed out")]
+	HttpTimeout {
+		/// Tokio deadline failure.
+		#[source]
+		source: Elapsed,
+	},
+
+	/// The endpoint rejected discovery with a client or server error status.
+	#[error("CDP discovery endpoint returned HTTP status {status}")]
+	HttpStatus {
+		/// Numeric HTTP status.
+		status: u16,
+	},
+
+	/// The endpoint's discovery document exceeded the hard response ceiling.
+	#[error("CDP discovery response exceeds {limit} bytes")]
+	ResponseTooLarge {
+		/// Maximum accepted response size.
+		limit: usize,
+	},
+
+	/// The endpoint returned malformed discovery JSON.
+	#[error("CDP discovery response is malformed JSON")]
+	MalformedJson {
+		/// JSON decoder failure.
+		#[source]
+		source: serde_json::Error,
+	},
+}
 
 /// Everything that can go wrong while creating or driving a web surface.
 #[derive(Debug, thiserror::Error)]
@@ -35,7 +104,7 @@ pub enum Error {
 	/// Discovery of an existing CDP endpoint failed. The URL is intentionally
 	/// omitted from Display because it may carry relay credentials.
 	#[error("CDP endpoint discovery failed")]
-	CdpDiscovery(#[source] reqwest::Error),
+	CdpDiscovery(#[source] CdpDiscoveryError),
 
 	/// The engine sent traffic the driver could not interpret, or answered a
 	/// command with an error.

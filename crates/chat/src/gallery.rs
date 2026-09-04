@@ -17,7 +17,7 @@ use crate::cards::{CardRegistry, CardStatus, CardView, fixtures::CardFixture};
 
 /// Tool lifecycle states rendered by the gallery, in display order.
 ///
-/// The `Display` spelling is the label pi prints above each state
+/// The `Display` spelling is the label printed above each state
 /// (`gallery-cli.ts` `GALLERY_STATE_LABELS`).
 #[derive(Clone, Copy, Debug, Display, EnumIter, Eq, PartialEq)]
 pub enum GalleryState {
@@ -131,8 +131,7 @@ fn render_fixture(
 	let tool_name = card_tool(fixture.tool);
 	let revision = if tool_name == "github" { 3 } else { 1 };
 	let call = if state == GalleryState::StreamingArgs {
-		let (call, sid) =
-			session.call_streaming(tool_name, revision, call_id.as_str(), None)?;
+		let (call, sid) = session.call_streaming(tool_name, revision, call_id.as_str(), None)?;
 		if !state_fixture.args.is_empty() {
 			session.stream_append(sid, state_fixture.args)?;
 		}
@@ -238,7 +237,7 @@ fn render_fixture(
 	let mut ui_context = UiContext::default();
 	ui_context.charset = Charset::NerdFont;
 	let card = registry.render(card_tool(fixture.tool), &view, expanded, &ui_context);
-	// Pi's custom/state renderers already own their vertical extent. Framed
+	// Custom/state renderers already own their vertical extent. Framed
 	// tool calls inherit the transcript block's one-row vertical margin.
 	let component = if matches!(fixture.tool, "context_gauge" | "custom" | "read_group") {
 		card
@@ -382,6 +381,7 @@ fn shell_payload(args: &Value, value: &Value) -> shell::Payload {
 			spilled_output: None,
 			aborted: false,
 			effects_unknown: false,
+			diags: Vec::new(),
 			final_cwd_uri: None,
 			final_cwd_revision: 0,
 		},

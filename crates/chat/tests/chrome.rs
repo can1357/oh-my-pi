@@ -16,7 +16,7 @@ use omp_session::{ComponentRegistry, Session};
 use omp_tui::{Charset, Icon, Size, Ui, UiContext, frame_text};
 use tempfile::tempdir;
 
-/// pi's band row from the capture at the given geometry, for exact-byte
+/// The recorded band row at the given geometry, for exact-byte
 /// comparison of the static content.
 fn reference_band(name: &str, row: usize) -> String {
 	let path =
@@ -123,7 +123,7 @@ fn insert_director(
 	Handle::new(high + 1).expect("new handle")
 }
 
-/// The band pi paints for a fresh session at `width`: the group, then the
+/// The fresh-session band at `width`: the group, then the
 /// embedded gauge with `0%` on the one accent cell, the compaction tick at
 /// `threshold` percent of the scale, and the `1M` window label at the end.
 fn expected_band(group: &str, width: u16, threshold: u16) -> String {
@@ -149,7 +149,7 @@ fn boot_surface_matches_pi_chrome_at_120x40() {
 	assert!(rows[21].starts_with(" Tip: "), "{}", rows[21]);
 	assert_eq!(rows[22], "");
 	assert_eq!(rows[23], "");
-	// Band: pi segment order with the `/work` root stripped from the path,
+	// Band segment order with the `/work` root stripped from the path,
 	// the git branch, the powerline cap, and the gauge running to the edge
 	// with its `1M` window label.
 	assert_eq!(rows[24], expected_band(" π  > ⬢ Fable 5 > 📁 omp > ⑂ main ▶", 120, 80));
@@ -168,7 +168,7 @@ fn boot_surface_keeps_the_composer_reachable_at_80x24() {
 		.expect("composer row visible");
 	assert_eq!(cursor.map(|(_, row)| row), Some(u16::try_from(prompt).unwrap()));
 	assert!(rows.iter().any(|row| row.contains("Welcome back!")));
-	// pi's resize capture keeps the whole band with the gauge at its
+	// The resize capture keeps the whole band with the gauge at its
 	// label-preserving minimum; ours keeps every chip at 80 columns too.
 	assert_eq!(rows[prompt - 1], expected_band(" π  > ⬢ Fable 5 > 📁 omp > ⑂ main ▶", 80, 80));
 }
@@ -213,10 +213,9 @@ fn working_surface_swaps_the_brand_for_spinner_and_timer() {
 	assert!(band.starts_with(" ⠋ 0s  > ⬢ Fable 5 > 📁 omp > ⑂ main ▶"), "{band}");
 }
 
-/// The pi capture's own facts: a scratch project under `/tmp`, thinking
-/// `high`, ~2.35% of a 1M window (pi's system-prompt estimate: the `2%`
-/// label sits on cell 1 at 120 columns and cell 3 at 184), and pi's 85%
-/// compaction threshold.
+/// The capture's facts: a scratch project under `/tmp`, thinking `high`,
+/// ~2.35% of a 1M window (the `2%` label sits on cell 1 at 120 columns and
+/// cell 3 at 184), and an 85% compaction threshold.
 fn capture_facts(scenario: &str) -> StatusFacts {
 	StatusFacts {
 		model: Str::new_static("Fable 5"),

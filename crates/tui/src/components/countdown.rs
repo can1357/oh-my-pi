@@ -80,8 +80,8 @@ impl Component for Countdown {
 			self.shown = remaining;
 			self.text = sf!("{} · {remaining}s", self.label);
 		}
-		// pi `countdown-timer.ts`: one-second cadence until the deadline;
-		// the next label change lands exactly on the next whole-second
+		// Use a one-second cadence until the deadline; the next label change
+		// lands exactly on the next whole-second
 		// boundary of the remaining time.
 		if !self.expired(now) {
 			let elapsed = now.saturating_sub(self.started);

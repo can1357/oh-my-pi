@@ -8,7 +8,7 @@ Area: control-plane
 
 omp v1's configuration system became a minefield. It grew dirty tracking and several
 configuration levels (global, session-level, ephemeral), and most get/set operations were routed
-through the `AgentSession` type — as in pi — because every change had to be persisted to the
+through the `AgentSession` type because every change had to be persisted to the
 session JSONL. Each new setting therefore added a property to a growing god object, a branch in
 the persistence path, and a private decision at every setter about which level it lived in and
 whether children saw it. The `tier: { openai: priority, subagent: inherit }` shape (0013) is one

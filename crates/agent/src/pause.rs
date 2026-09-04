@@ -82,49 +82,46 @@ pub fn set_paused(session: &mut Session, active: bool) -> Result<PauseTransition
 	let now = now_ms();
 	let cause = session.head().ok_or(SessionError::NoActiveTurn)?;
 	let mut ops = Vec::with_capacity(3);
-	match pause_node(session.dom()) {
-		Some((handle, _)) => {
+	if let Some((handle, _)) = pause_node(session.dom()) {
+		ops.push(Op::Set {
+			h:     handle,
+			prop:  PropId::Status.into(),
+			value: Value::Str(Str::new_static(if active { PAUSED } else { RUNNING })),
+		});
+		if active {
 			ops.push(Op::Set {
 				h:     handle,
-				prop:  PropId::Status.into(),
-				value: Value::Str(Str::new_static(if active { PAUSED } else { RUNNING })),
+				prop:  PropKey::Custom(Str::new_static(STARTED_AT_MS)),
+				value: Value::Int(i64::try_from(now).unwrap_or(i64::MAX)),
 			});
-			if active {
-				ops.push(Op::Set {
-					h:     handle,
-					prop:  PropKey::Custom(Str::new_static(STARTED_AT_MS)),
-					value: Value::Int(i64::try_from(now).unwrap_or(i64::MAX)),
-				});
-				ops.push(Op::Set {
-					h:     handle,
-					prop:  PropId::DurationMs.into(),
-					value: Value::Int(0),
-				});
-			} else {
-				let duration = before
-					.started_at_ms
-					.map_or(before.duration_ms, |started| now.saturating_sub(started));
-				ops.push(Op::Set {
-					h:     handle,
-					prop:  PropId::DurationMs.into(),
-					value: Value::Int(i64::try_from(duration).unwrap_or(i64::MAX)),
-				});
-			}
-		},
-		None => {
-			let node = NodeSpec::new(Tag::Custom(Str::new_static(PAUSE)))
-				.with_prop(PropId::Status, Value::Str(Str::new_static(PAUSED)))
-				.with_prop(
-					PropKey::Custom(Str::new_static(STARTED_AT_MS)),
-					Value::Int(i64::try_from(now).unwrap_or(i64::MAX)),
-				)
-				.with_prop(PropId::DurationMs, Value::Int(0));
-			ops.push(Op::Ins {
-				parent: session.dom().meta(),
-				after: session.dom().children(session.dom().meta()).last().copied(),
-				node,
+			ops.push(Op::Set {
+				h:     handle,
+				prop:  PropId::DurationMs.into(),
+				value: Value::Int(0),
 			});
-		},
+		} else {
+			let duration = before
+				.started_at_ms
+				.map_or(before.duration_ms, |started| now.saturating_sub(started));
+			ops.push(Op::Set {
+				h:     handle,
+				prop:  PropId::DurationMs.into(),
+				value: Value::Int(i64::try_from(duration).unwrap_or(i64::MAX)),
+			});
+		}
+	} else {
+		let node = NodeSpec::new(Tag::Custom(Str::new_static(PAUSE)))
+			.with_prop(PropId::Status, Value::Str(Str::new_static(PAUSED)))
+			.with_prop(
+				PropKey::Custom(Str::new_static(STARTED_AT_MS)),
+				Value::Int(i64::try_from(now).unwrap_or(i64::MAX)),
+			)
+			.with_prop(PropId::DurationMs, Value::Int(0));
+		ops.push(Op::Ins {
+			parent: session.dom().meta(),
+			after: session.dom().children(session.dom().meta()).last().copied(),
+			node,
+		});
 	}
 	session.patch(Txn {
 		cause,

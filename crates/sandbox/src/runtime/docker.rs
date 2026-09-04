@@ -7,7 +7,7 @@ use tokio::process::Child;
 use crate::{Backend, CleanupFailure, CleanupFailures, SandboxError, SandboxOperation};
 
 /// Explicitly owned Docker preparation artifacts, released in reverse order.
-pub(crate) enum DockerArtifact {
+pub enum DockerArtifact {
 	File(Option<NamedTempFile>),
 	Directory(Option<TempDir>),
 }
@@ -20,7 +20,7 @@ enum ContainerState {
 }
 
 /// Runtime state which keeps Docker secrets and masks alive for the container.
-pub(crate) struct DockerPrepared {
+pub struct DockerPrepared {
 	backend:   Backend,
 	docker:    OsString,
 	name:      Str,

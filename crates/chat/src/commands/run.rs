@@ -30,11 +30,11 @@ use crate::{
 	status_line::StatusLine,
 };
 
-/// pi `builtin-modes.ts` mutual-exclusion warnings.
+/// Mutual-exclusion warnings.
 const EXIT_PLAN_FIRST: &str = "Exit plan mode first.";
 const EXIT_GOAL_FIRST: &str = "Exit goal mode first.";
 const EXIT_VIBE_FIRST: &str = "Exit vibe mode first.";
-/// pi `builtin-lifecycle.ts` streaming guards.
+/// Streaming guards.
 const WAIT_BEFORE_HANDOFF: &str =
 	"Wait for the current response to finish or abort it before handing off.";
 const WAIT_BEFORE_FORK: &str =
@@ -46,14 +46,13 @@ const WAIT_BEFORE_RESET: &str =
 const WAIT_BEFORE_MOVE: &str = "Wait for the current response to finish or abort it before moving.";
 const WAIT_BEFORE_WORKTREE: &str =
 	"Wait for the current response to finish or abort it before creating a worktree.";
-/// pi `/jobs` empty notice.
+/// Empty `/jobs` notice.
 const NO_JOBS: &str = "No background jobs running. (Background jobs run async tools — e.g. \
                        long-running bash, debug, or task subagents that would otherwise tie up a \
                        turn. They appear here while alive and for ~5 minutes after.)";
-/// pi `prompts/goals/guided-goal-interview.md`.
+/// Guided-goal interview prompt.
 const GUIDED_GOAL_INTERVIEW: &str = include_str!("../../prompts/guided-goal-interview.md");
-/// pi `prompts/system/omfg-user.md`, reduced to the steering rule the
-/// kernel enforces on this host.
+/// Emergency steering rule the kernel enforces on this host.
 const OMFG_RULE: &str = include_str!("../../prompts/omfg-rule.md");
 
 /// `/vibe` Director family as journaled under `<meta><directors>`.
@@ -99,8 +98,8 @@ pub fn director_frame(dom: &Dom, family: &str) -> Option<Handle> {
 	None
 }
 
-/// User plus assistant message count on the live chain (pi's "no messages
-/// yet" preflight).
+/// User plus assistant message count on the live chain for the empty-session
+/// preflight.
 #[must_use]
 pub fn message_count(dom: &Dom) -> usize {
 	dom.children(dom.body())
@@ -179,7 +178,7 @@ impl Presenter {
 				}
 				// This kernel keeps no provider-side conversation state: every
 				// inference is projected from the journal, so there is nothing
-				// to prune and pi's report is exact.
+				// to prune and the report is exact.
 				self.notice("Fresh provider session started (0 provider states pruned).")
 			},
 			CommandAction::Drop => {
@@ -365,7 +364,7 @@ impl Presenter {
 		})))
 	}
 
-	/// pi `plan-review-overlay.ts` verdicts: approving exits plan mode,
+	/// Plan-review verdicts: approving exits plan mode,
 	/// optionally switches `ai_model` to the slider's role, optionally
 	/// compacts first, then submits the execution prompt.
 	fn plan_approve(&mut self, role: Option<Str>, compact: bool, keep: bool) -> Routed {
@@ -379,7 +378,7 @@ impl Presenter {
 		});
 		if let Some(role) = role
 			&& let Some((_, model, _)) = self.cycle.iter().find(|(name, ..)| *name == role)
-			&& let Err(error) = omp_con::AI_MODEL.set(&self.con, model.clone())
+			&& let Err(error) = omp_agent::AI_MODEL.set(&self.con, model.clone())
 		{
 			return self.notice(format!("Could not switch to the {role} model: {error}"));
 		}
@@ -803,7 +802,7 @@ fn conversation_context(dom: &Dom) -> Str {
 	out.freeze()
 }
 
-/// pi `/session` info block projected from the replica.
+/// `/session` info block projected from the replica.
 fn session_info(dom: &Dom, services: &dyn crate::overlays::Services) -> Str {
 	let status = StatusLine::from_dom(dom);
 	let session_id = services.live_session_id().ok().or_else(|| {
@@ -883,7 +882,7 @@ fn session_info(dom: &Dom, services: &dyn crate::overlays::Services) -> Str {
 	out.freeze()
 }
 
-/// pi `/jobs` report from `<meta><jobs>`; `None` when there are no jobs.
+/// `/jobs` report from `<meta><jobs>`; `None` when there are no jobs.
 fn jobs_report(dom: &Dom) -> Option<Str> {
 	let jobs = dom.children(dom.meta()).iter().copied().find(|handle| {
 		dom.get(*handle)
@@ -983,7 +982,9 @@ pub fn todo_markdown(dom: &Dom) -> Str {
 			.prop(&PropId::Detail.into())
 			.and_then(Value::as_str)
 			.map(Str::new);
-		phases[phase_index].tasks.push(Task { content, status, blocker });
+		phases[phase_index]
+			.tasks
+			.push(Task { content, status, blocker });
 	}
 	if phases.is_empty() {
 		Str::default()

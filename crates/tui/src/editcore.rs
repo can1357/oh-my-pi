@@ -28,12 +28,11 @@ use crate::{
 
 const KILL_CAP: usize = 60;
 const UNDO_CAP: usize = 100;
-/// Default dropdown window (pi `autocompleteMaxVisible` default).
+/// Default dropdown window.
 const PICKER_ROWS: usize = 10;
-/// Page navigation fallback before a host reports its rendered viewport (pi
-/// `DEFAULT_PAGE_SCROLL_LINES`).
+/// Page navigation fallback before a host reports its rendered viewport.
 const DEFAULT_PAGE_ROWS: usize = 10;
-/// pi `setAutocompleteMaxVisible` clamps the window to `[3, 20]`.
+/// Completion window bounds.
 const PICKER_ROWS_MIN: usize = 3;
 const PICKER_ROWS_MAX: usize = 20;
 const MAX_INPUT_ROWS: usize = 16;
@@ -264,7 +263,7 @@ impl EditBuffer {
 	}
 
 	/// Moves the cursor to the start (`end == false`) or end of the whole
-	/// message, collapsing any selection (pi `moveToMessageStart/End`).
+	/// message, collapsing any selection.
 	pub fn move_to_message_edge(&mut self, end: bool) -> BufferOutcome {
 		let at = if end { self.text.len() } else { 0 };
 		self.anchor = None;
@@ -274,7 +273,7 @@ impl EditBuffer {
 	}
 
 	/// Undoes the last meaningful edit while ignoring `transient` text that
-	/// was just removed at the cursor (pi `undoPastTransientText`): every
+	/// was just removed at the cursor: every
 	/// undo snapshot that only differs from the current text by a partially
 	/// typed `transient` is discarded first, so a `#undo` trigger never
 	/// counts as the edit being undone.
@@ -869,8 +868,8 @@ impl EditBuffer {
 	}
 
 	fn insert_char(&mut self, ch: char) -> BufferOutcome {
-		// pi groups every consecutive non-whitespace typing run into one undo
-		// unit, including punctuation and symbols.
+		// Group every consecutive non-whitespace typing run into one undo unit,
+		// including punctuation and symbols.
 		let word = !ch.is_whitespace();
 		let selection = self.selection();
 		if selection.is_some() || !word || self.last_action != Action::TypeWord {
@@ -1498,7 +1497,7 @@ fn wrap_logical_line(
 
 /// Markdown code spans and fences whose contents are opaque to XML completion
 /// and prose assistance.
-pub(crate) fn code_ranges(text: &str) -> SmallVec<Range<usize>, 8> {
+pub fn code_ranges(text: &str) -> SmallVec<Range<usize>, 8> {
 	let bytes = text.as_bytes();
 	let mut ranges = SmallVec::new();
 	let mut at = 0;
@@ -1557,7 +1556,7 @@ pub(crate) fn code_ranges(text: &str) -> SmallVec<Range<usize>, 8> {
 /// XML tags, comments, declarations, and processing instructions hidden from
 /// prose assistance. Apparent markup inside Markdown code is already covered
 /// by [`code_ranges`].
-pub(crate) fn xml_ranges(text: &str) -> SmallVec<Range<usize>, 8> {
+pub fn xml_ranges(text: &str) -> SmallVec<Range<usize>, 8> {
 	let mut ranges = SmallVec::new();
 	let mut offset = 0;
 	while let Some(relative) = text[offset..].find('<') {
@@ -1815,8 +1814,8 @@ pub struct EditorOptions {
 	/// XML affordances: `</` completes the innermost open tag, and
 	/// renderers should apply structural markup highlighting.
 	pub xml:         bool,
-	/// Rows the completion dropdown shows at once (pi
-	/// `autocompleteMaxVisible`), clamped to `[3, 20]` on use.
+	/// Rows the completion dropdown shows at once, clamped to `[3, 20]` on
+	/// use.
 	pub picker_rows: usize,
 }
 
@@ -1827,7 +1826,7 @@ impl Default for EditorOptions {
 }
 
 impl EditorOptions {
-	/// The dropdown window after pi's `[3, 20]` clamp.
+	/// The dropdown window after the `[3, 20]` clamp.
 	#[must_use]
 	pub const fn picker_rows(&self) -> usize {
 		if self.picker_rows < PICKER_ROWS_MIN {
@@ -2079,10 +2078,9 @@ pub trait EditorCompletion {
 		true
 	}
 
-	/// One of this engine's rows was accepted: `replaced` is the buffer
-	/// text the row's value overwrote (the typed trigger and query). Engines
-	/// whose rows are actions rather than text (pi's `#` prompt actions)
-	/// record the side effect here for the host to apply.
+	/// One of this engine's rows was accepted: `replaced` is the buffer text
+	/// the row's value overwrote (the typed trigger and query). Action rows
+	/// record their side effect here for the host to apply.
 	fn accepted(&mut self, replaced: &str, suggestion: &Suggestion) {
 		let _ = (replaced, suggestion);
 	}
@@ -2139,7 +2137,7 @@ impl Picker {
 
 	/// Returns visible rows including category headers. Headers only
 	/// separate mixed categories: a dropdown whose rows all share one
-	/// category is a plain list (pi's slash menu carries no heading).
+	/// category is a plain list without a heading.
 	pub fn visible_rows(&self) -> SmallVec<PickerRow<'_>, 8> {
 		let (start, suggestions) = self.visible_suggestions();
 		let mut rows = SmallVec::new();
@@ -2248,8 +2246,7 @@ impl Editor {
 	}
 
 	/// Replaces the editor text without adding an undo entry, preserving
-	/// completion and history configuration. Leaves history browsing (pi
-	/// `setText`: `historyIndex = -1`).
+	/// completion and history configuration. Leaves history browsing.
 	pub fn set_text(&mut self, text: &str) {
 		self.history_index = None;
 		self.history_query = None;
@@ -2259,12 +2256,11 @@ impl Editor {
 		self.refresh();
 	}
 
-	/// Records a submitted prompt as the newest history entry (pi
-	/// `addToHistory`): blank text is ignored, an earlier copy of the same
-	/// text is dropped, the list is capped, and browsing state resets so the
+	/// Records a submitted prompt as the newest history entry: blank text is
+	/// ignored, an earlier copy is dropped, the list is capped, and browsing
+	/// state resets so the
 	/// next Up starts from the newest entry. The host calls this after it
-	/// decides the submission really happened, exactly as pi's input
-	/// controller does.
+	/// decides the submission really happened.
 	pub fn add_to_history(&mut self, text: &str) {
 		self.history_index = None;
 		self.history_query = None;
@@ -2280,9 +2276,9 @@ impl Editor {
 		self.history.truncate(HISTORY_CAPACITY);
 	}
 
-	/// Replaces the history list with `prompts`, newest first (pi
-	/// `setHistoryStorage`: a resumed session seeds Up/Down from its stored
-	/// prompts). Duplicates keep their first (newest) position.
+	/// Replaces the history list with `prompts`, newest first. A resumed
+	/// session seeds Up/Down from stored prompts. Duplicates keep their first
+	/// (newest) position.
 	pub fn seed_history(&mut self, prompts: impl IntoIterator<Item = Str>) {
 		self.history_index = None;
 		self.history_query = None;
@@ -2306,8 +2302,8 @@ impl Editor {
 		}
 	}
 
-	/// Whether `key` would step prompt history instead of moving the caret
-	/// (pi `cursorUp`/`cursorDown`): Up on an empty draft or while browsing
+	/// Whether `key` would step prompt history instead of moving the caret:
+	/// Up on an empty draft or while browsing
 	/// from the first visual row, Down while browsing from the last visual
 	/// row. Hosts that borrow Up/Down at the draft's edges (transcript
 	/// scrolling) yield to the editor when this holds.
@@ -2342,9 +2338,8 @@ impl Editor {
 		self.options
 	}
 
-	/// Replaces the feature switches at runtime (pi `setAutocompleteMaxVisible`
-	/// and the `emojiAutocomplete` setting): an open dropdown re-queries so
-	/// its window and the built-in emoji source follow the new switches.
+	/// Replaces the feature switches at runtime: an open dropdown re-queries
+	/// so its window and built-in emoji source follow the new switches.
 	pub fn set_options(&mut self, options: EditorOptions) {
 		self.options = options;
 		self.buffer.set_xml(options.xml);
@@ -2512,8 +2507,8 @@ impl Editor {
 				self.history_newer()
 			},
 			_ => {
-				// pi: any edit leaves history browsing; caret motion inside a
-				// recalled entry keeps it (and never pops the dropdown).
+				// Any edit leaves history browsing; caret motion inside a recalled
+				// entry keeps it and never pops the dropdown.
 				if !is_caret_motion(key) {
 					self.history_index = None;
 					self.history_query = None;
@@ -2615,8 +2610,8 @@ impl Editor {
 	}
 
 	/// Re-queries completion after a history step but keeps the dropdown
-	/// closed (pi `#setTextInternal` never opens autocomplete): a recalled
-	/// `/command` is a prompt to resend, and Up/Down keep stepping history
+	/// closed. A recalled `/command` is a prompt to resend, and Up/Down keep
+	/// stepping history
 	/// instead of walking a popup that popped over it.
 	fn refresh_recalled(&mut self) {
 		self.refresh();
@@ -2699,11 +2694,7 @@ impl Editor {
 	/// Shows or replaces one volatile native-IME preedit and applies the
 	/// byte-indexed selection winit reports inside that preedit. `None`
 	/// hides the insertion caret while the platform candidate picker owns it.
-	pub fn set_volatile_text_selection(
-		&mut self,
-		text: &str,
-		selection: Option<Range<usize>>,
-	) {
+	pub fn set_volatile_text_selection(&mut self, text: &str, selection: Option<Range<usize>>) {
 		self.history_index = None;
 		self.history_query = None;
 		let range = self
@@ -2731,7 +2722,11 @@ impl Editor {
 				};
 				let start = boundary(selection.start);
 				let end = boundary(selection.end);
-				if start <= end { (start, end) } else { (end, start) }
+				if start <= end {
+					(start, end)
+				} else {
+					(end, start)
+				}
 			};
 			self.buffer.cursor = range.start + end;
 			self.buffer.anchor = (start != end).then_some(range.start + start);
@@ -2915,7 +2910,7 @@ impl Editor {
 	}
 
 	/// Moves keyboard selection one row without wrapping, as a pointer wheel
-	/// over pi's completion list does.
+	/// over the completion list does.
 	pub fn wheel_picker(&mut self, down: bool) -> EditOutcome {
 		let Some(picker) = self.picker.as_mut() else {
 			return EditOutcome::Ignored;
@@ -3049,8 +3044,7 @@ impl Editor {
 
 	/// Applies the selected dropdown row and closes the dropdown without
 	/// re-querying, leaving the completed text in place for the host's
-	/// submit path (pi: Enter on a submitted slash command applies, then
-	/// submits).
+	/// submit path. Enter on a submitted slash command applies, then submits.
 	pub fn accept_for_submit(&mut self) {
 		let Some(picker) = self.picker.take() else {
 			return;
@@ -3352,8 +3346,8 @@ impl SlashCommands {
 		let query = body.to_ascii_lowercase();
 		let in_skill_namespace = query.starts_with(SKILL_NAMESPACE);
 		let approaches_skill_namespace = SKILL_NAMESPACE.starts_with(&query);
-		let strongest_command_tier = (!approaches_skill_namespace)
-			.then(|| {
+		let strongest_command_tier = if !approaches_skill_namespace {
+			{
 				self
 					.commands
 					.iter()
@@ -3365,8 +3359,10 @@ impl SlashCommands {
 					.map(|name| breakout_match_tier(&query, name))
 					.max()
 					.unwrap_or(0)
-			})
-			.unwrap_or(0);
+			}
+		} else {
+			0
+		};
 		let skill_count = self
 			.commands
 			.iter()
@@ -3383,7 +3379,7 @@ impl SlashCommands {
 			if let Some(ref bare_name) = skill_name
 				&& !in_skill_namespace
 				&& (approaches_skill_namespace
-					|| breakout_match_tier(&query, &bare_name) <= strongest_command_tier)
+					|| breakout_match_tier(&query, bare_name) <= strongest_command_tier)
 			{
 				continue;
 			}
@@ -3465,9 +3461,11 @@ impl SlashCommands {
 			.as_ref()
 			.map(|provider| provider(partial))
 			.unwrap_or_default();
-		let paths = (first_argument && command.name == "move")
-			.then(|| filesystem_path_arguments(partial))
-			.unwrap_or_default();
+		let paths = if first_argument && command.name == "move" {
+			filesystem_path_arguments(partial)
+		} else {
+			Default::default()
+		};
 		if command.args.is_empty() && dynamic.is_empty() && paths.is_empty() {
 			return None;
 		}
@@ -4479,8 +4477,8 @@ mod tests {
 		// usage words already typed stop ghosting
 		type_text(&mut editor, "report.json");
 		assert_eq!(editor.inline_hint(), None);
-		// multi-word usages ghost only the remainder (pi counts whole and
-		// in-progress words alike)
+		// Multi-word usages ghost only the remainder; whole and in-progress
+		// words count alike.
 		let mut compare = make_editor();
 		type_text(&mut compare, "/security compare one");
 		assert_eq!(compare.inline_hint().as_deref(), Some("<run-b>"));
@@ -4750,8 +4748,8 @@ mod tests {
 
 	#[test]
 	fn host_recorded_and_seeded_history_drives_up_down_navigation() {
-		// pi `addToHistory` / `setHistoryStorage`: the host records what it
-		// actually sent; a resumed session seeds newest-first.
+		// The host records what it actually sent; a resumed session seeds
+		// newest-first.
 		let mut editor = editor();
 		assert!(!editor.history_navigates(Key::Up), "nothing recorded yet");
 		editor.seed_history(["older".into(), "  ".into(), "newest".into(), "older".into()]);
@@ -4782,8 +4780,8 @@ mod tests {
 		assert!(editor.history_index.is_none());
 		assert_eq!(editor.handle(Key::Up), EditOutcome::Changed);
 		assert_eq!(editor.text(), "older", "Up restarts from the newest entry");
-		// A recalled `/command` never opens the dropdown (pi
-		// `#setTextInternal`), so the next Down steps history, not rows.
+		// A recalled `/command` never opens the dropdown, so the next Down
+		// steps history, not rows.
 		editor.set_text("");
 		editor.add_to_history("/settings");
 		assert_eq!(editor.handle(Key::Up), EditOutcome::Changed);

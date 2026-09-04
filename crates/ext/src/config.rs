@@ -45,7 +45,7 @@ pub struct UpdateInterval(Duration);
 
 impl UpdateInterval {
 	/// The default twenty-four hour due window.
-	pub const DEFAULT: Self = Self(Duration::from_secs(24 * 60 * 60));
+	pub const DEFAULT: Self = Self(Duration::from_hours(24));
 
 	/// Returns the interval as a standard duration.
 	pub const fn duration(self) -> Duration {
@@ -76,11 +76,11 @@ impl Serialize for UpdateInterval {
 		S: serde::Serializer,
 	{
 		let seconds = self.0.as_secs();
-		if seconds % (24 * 60 * 60) == 0 {
+		if seconds.is_multiple_of(24 * 60 * 60) {
 			serializer.serialize_str(&format!("{}d", seconds / (24 * 60 * 60)))
-		} else if seconds % (60 * 60) == 0 {
+		} else if seconds.is_multiple_of(60 * 60) {
 			serializer.serialize_str(&format!("{}h", seconds / (60 * 60)))
-		} else if seconds % 60 == 0 {
+		} else if seconds.is_multiple_of(60) {
 			serializer.serialize_str(&format!("{}m", seconds / 60))
 		} else {
 			serializer.serialize_str(&format!("{seconds}s"))

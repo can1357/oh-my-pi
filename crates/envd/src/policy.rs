@@ -189,30 +189,32 @@ pub const fn lsp_tier_capability(tier: LspOperationTier) -> &'static str {
 }
 
 /// Returns the immutable Environment tier for one DAP action.
-pub const fn dap_action_tier(action: omp_docserver::DapAction) -> omp_docserver::DapApprovalTier {
+pub const fn dap_action_tier(
+	action: crate::docserver::DapAction,
+) -> crate::docserver::DapApprovalTier {
 	action.approval_tier()
 }
 
 /// Classifies one DAP wire action, failing closed for unknown/custom commands.
-pub fn dap_command_tier(command: &str) -> omp_docserver::DapApprovalTier {
+pub fn dap_command_tier(command: &str) -> crate::docserver::DapApprovalTier {
 	command
-		.parse::<omp_docserver::DapAction>()
-		.map_or(omp_docserver::DapApprovalTier::Execution, dap_action_tier)
+		.parse::<crate::docserver::DapAction>()
+		.map_or(crate::docserver::DapApprovalTier::Execution, dap_action_tier)
 }
 
 /// Returns the exact DATA capability required by one DAP action.
-pub const fn dap_action_capability(action: omp_docserver::DapAction) -> &'static str {
+pub const fn dap_action_capability(action: crate::docserver::DapAction) -> &'static str {
 	match dap_action_tier(action) {
-		omp_docserver::DapApprovalTier::ReadOnly => "env.dap.read",
-		omp_docserver::DapApprovalTier::Execution => "env.dap.execute",
+		crate::docserver::DapApprovalTier::ReadOnly => "env.dap.read",
+		crate::docserver::DapApprovalTier::Execution => "env.dap.execute",
 	}
 }
 
 /// Returns the exact DATA capability required by one DAP wire command.
 pub fn dap_command_capability(command: &str) -> &'static str {
 	match dap_command_tier(command) {
-		omp_docserver::DapApprovalTier::ReadOnly => "env.dap.read",
-		omp_docserver::DapApprovalTier::Execution => "env.dap.execute",
+		crate::docserver::DapApprovalTier::ReadOnly => "env.dap.read",
+		crate::docserver::DapApprovalTier::Execution => "env.dap.execute",
 	}
 }
 
@@ -1360,7 +1362,7 @@ pub(crate) fn bash_ir_json(ir: &v1::BashIr, script: &str) -> Value {
 	json!({
 		"source": script,
 		"rev": if ir.rev.is_empty() { "bashir@3" } else { ir.rev.as_str() },
-		"parser_rev": if ir.parser_rev.is_empty() { "omp-shell-engine" } else { ir.parser_rev.as_str() },
+		"parser_rev": if ir.parser_rev.is_empty() { "omp-shell" } else { ir.parser_rev.as_str() },
 		"parse_ok": ir.parse_ok,
 		"parse_error": parse_error,
 		"truncated": ir.truncated,

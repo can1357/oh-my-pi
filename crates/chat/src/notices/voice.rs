@@ -1,6 +1,4 @@
-//! Streaming assistant speech (pi `tts/vocalizer.ts`, event-controller
-//! routing at `modes/controllers/event-controller.ts:1135-1166` and
-//! `:1340-1349`).
+//! Streaming assistant speech.
 //!
 //! The [`Vocalizer`] turns the assistant's streaming output into spoken audio
 //! as a side effect of the turn. Deltas run through
@@ -13,7 +11,7 @@
 //! playback at once and drops everything queued — wired to a new user
 //! message and to the Esc/Ctrl+C interrupt.
 //!
-//! Mode routing (pi `speech.mode`): `assistant` and `all` speak text deltas,
+//! Mode routing: `assistant` and `all` speak text deltas,
 //! `all` also speaks thinking, `yield` speaks nothing live and the whole
 //! final message at turn end, `off` speaks nothing. The host reads the mode
 //! with [`Vocalizer::mode`] and passes it to every call so the app's
@@ -35,17 +33,14 @@ use std::{
 };
 
 use flume::{Receiver, Sender, TrySendError};
+use omp_ai::realtime::rewrite::RewriteBlockAccumulator;
+use omp_audio::{VoiceError, audio::PlaybackStream, segmentation::SpeakableStream};
 use omp_con::{Ctx, Value};
 use omp_core::Str;
-use omp_voice::{
-	VoiceError, audio::PlaybackStream, rewrite::RewriteBlockAccumulator,
-	segmentation::SpeakableStream,
-};
 use parking_lot::Mutex;
 use tokio::{sync::Notify, time::Instant};
 
-/// Quiet time on the delta stream before the buffered partial is spoken
-/// (pi `vocalizer.ts` `IDLE_FLUSH_MS`).
+/// Quiet time on the delta stream before the buffered partial is flushed.
 const IDLE_FLUSH: Duration = Duration::from_millis(1000);
 /// Maximum sentence/rewrite jobs waiting behind synthesis. A full queue
 /// rejects the newest segment rather than allocating without bound.
@@ -59,8 +54,7 @@ const MAX_REWRITE_CHARS: usize = 4_000;
 /// for the oldest result before admitting a third.
 const MAX_REWRITES_IN_FLIGHT: usize = 2;
 
-/// Which assistant channels are vocalized (pi `speech.mode`, plus `off` for
-/// the disabled state so a caller carries one value).
+/// Which assistant channels are vocalized, with `off` for the disabled state.
 #[derive(
 	Clone,
 	Copy,
@@ -464,7 +458,7 @@ impl Shared {
 
 /// Synthesis worker: synthesizes queued segments in order and feeds one
 /// gapless playback session per utterance, so sequential utterances never
-/// overlap (pi `#chain`). Exits once every sender is gone.
+/// overlap. Exits once every sender is gone.
 async fn synthesize_and_play(
 	generation: u64,
 	request: SynthRequest,
@@ -581,7 +575,7 @@ async fn worker(rx: Receiver<Job>, synth: Arc<dyn SpeechSynth>, shared: Arc<Shar
 	shared.abort_playback();
 }
 
-/// Idle-flush timer (pi `#armIdle`): when no delta arrives for
+/// Idle-flush timer: when no delta arrives for
 /// [`IDLE_FLUSH`], speaks the buffered partial instead of holding it through
 /// a tool call or thinking block.
 async fn idle_flush(tx: Sender<Job>, shared: Arc<Shared>) {
@@ -628,7 +622,7 @@ async fn idle_flush(tx: Sender<Job>, shared: Arc<Shared>) {
 	}
 }
 
-/// Streaming assistant vocalizer (pi `Vocalizer`).
+/// Streaming assistant vocalizer.
 ///
 /// Every method is non-blocking on the host thread; synthesis and playback
 /// run on a worker spawned onto the current tokio runtime, or onto a
@@ -701,24 +695,22 @@ impl Vocalizer {
 			.unwrap_or(SpeechMode::Off)
 	}
 
-	/// Streams an assistant text delta (`assistant` and `all` modes; pi
-	/// `event-controller.ts:1145`).
+	/// Streams an assistant text delta in `assistant` and `all` modes.
 	pub fn push_text(&mut self, mode: SpeechMode, delta: &str) {
 		if mode.speaks_text() {
 			self.push_delta(delta);
 		}
 	}
 
-	/// Streams a thinking delta (`all` mode only; pi
-	/// `event-controller.ts:1147`).
+	/// Streams a thinking delta in `all` mode only.
 	pub fn push_thinking(&mut self, mode: SpeechMode, delta: &str) {
 		if mode == SpeechMode::All {
 			self.push_delta(delta);
 		}
 	}
 
-	/// Speaks the trailing partial sentence of a completed assistant message
-	/// (pi `event-controller.ts:1346`); `yield` waits for
+	/// Speaks the trailing partial sentence of a completed assistant message.
+	/// `yield` waits for
 	/// [`turn_ended`](Self::turn_ended). An aborted message must go through
 	/// [`clear`](Self::clear) instead, never here.
 	pub fn message_completed(&mut self, mode: SpeechMode) {
@@ -727,7 +719,7 @@ impl Vocalizer {
 		}
 	}
 
-	/// End of turn (pi `#handleTurnEnd`): `yield` speaks the whole final
+	/// End of turn: `yield` speaks the whole final
 	/// message in one shot; every other mode flushes the live buffer.
 	pub fn turn_ended(&mut self, mode: SpeechMode, final_text: &str) {
 		match mode {
@@ -743,7 +735,7 @@ impl Vocalizer {
 	}
 
 	/// Drops every queued segment, stops playback at once, and discards the
-	/// buffered partial (pi `clear`: new user message, Esc interrupt).
+	/// buffered partial on a new user message or Esc interrupt.
 	pub fn clear(&mut self) {
 		self.shared.generation.fetch_add(1, Ordering::AcqRel);
 		self.disarm_idle();
@@ -810,7 +802,7 @@ impl Vocalizer {
 	}
 
 	/// Closes the current utterance: drains the trailing partial and ends
-	/// the playback session after it (pi `flush`).
+	/// the playback session after it.
 	fn flush(&mut self) {
 		self.disarm_idle();
 		let (queued, had_input) = {
@@ -1048,7 +1040,7 @@ mod tests {
 			desc:    Str::new_static("test"),
 			ty:      TypeSpec::BOOL,
 			flags:   VarFlags::NONE,
-			ui:      None,
+			meta:    Arc::from([]),
 			default: Value::Bool(true),
 		})
 		.expect("registers enhanced speech");
@@ -1276,7 +1268,7 @@ mod tests {
 			desc:    Str::new_static("test"),
 			ty:      TypeSpec::STR,
 			flags:   VarFlags::NONE,
-			ui:      None,
+			meta:    Arc::from([]),
 			default: Value::Str(Str::new_static("all")),
 		})
 		.expect("registers");
@@ -1286,7 +1278,7 @@ mod tests {
 			desc:    Str::new_static("test"),
 			ty:      TypeSpec::BOOL,
 			flags:   VarFlags::NONE,
-			ui:      None,
+			meta:    Arc::from([]),
 			default: Value::Bool(false),
 		})
 		.expect("registers");

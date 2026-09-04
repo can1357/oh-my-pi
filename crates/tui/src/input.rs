@@ -563,7 +563,7 @@ impl InputDecoder {
 			// A `CSI ?…` / `CSI >…` prefix flushed mid-sequence is the start
 			// of a terminal report split by a slow link. Swallowing it here
 			// and reassembling with later bytes keeps the reply out of the
-			// composer for the whole session (pi #8542).
+			// composer for the whole session.
 			self.private_csi_partial = buffered;
 			return;
 		}
@@ -629,7 +629,7 @@ impl InputDecoder {
 		}
 	}
 
-	fn enter_string_discard(&mut self, now: Instant) {
+	const fn enter_string_discard(&mut self, now: Instant) {
 		self.string_discard = Some(StringDiscard { bytes: 0, esc_held: false, last: now });
 	}
 
@@ -675,7 +675,7 @@ impl InputDecoder {
 		&[]
 	}
 }
-fn is_string_sequence(bytes: &[u8]) -> bool {
+const fn is_string_sequence(bytes: &[u8]) -> bool {
 	matches!(bytes, [0x1b, b']' | b'P' | b'_', ..])
 }
 
@@ -1406,7 +1406,7 @@ impl Chord {
 	}
 
 	/// Writes the canonical portable chord spelling: modifiers in
-	/// `ctrl+alt+shift+super` order, pi key names (`escape`, `pageup`),
+	/// `ctrl+alt+shift+super` order, canonical key names (`escape`, `pageup`),
 	/// and a letter lowercased under Ctrl/Alt/Super so `bind ctrl+shift+p`
 	/// matches both the Kitty (`p`+shift) and the modifyOtherKeys (`P`)
 	/// report of the same chord.
@@ -1674,8 +1674,8 @@ const DEFAULT_BINDINGS: &[(Key, u8, Key)] = &[
 	(Key::Char('P'), 5, Key::CyclePrevious),
 	(Key::Char('p'), 3, Key::PlanToggle),
 	(Key::Char('P'), 3, Key::PlanToggle),
-	// pi tui.input.newLine: Shift+Enter / Ctrl+J. Ctrl+Enter is deliberately
-	// absent: pi binds it to app.message.followUp, so it must stay a
+	// Shift+Enter / Ctrl+J insert a newline. Ctrl+Enter is deliberately
+	// absent so it remains a
 	// distinct chord for hosts (and is FollowUp here, like Alt+Enter, for
 	// hosts without a bind table).
 	(Key::Char('j'), 4, Key::ShiftEnter),
@@ -1683,8 +1683,8 @@ const DEFAULT_BINDINGS: &[(Key, u8, Key)] = &[
 	(Key::Enter, 2, Key::FollowUp),
 	(Key::Enter, 3, Key::ShiftEnter),
 	(Key::Enter, 4, Key::FollowUp),
-	// legacy `CSI 13;2~` is byte-identical for Shift+Enter and Shift+F3;
-	// pi resolves the same ambiguity to newline
+	// Legacy `CSI 13;2~` is byte-identical for Shift+Enter and Shift+F3, so
+	// resolve the ambiguity to a newline.
 	(Key::Function(3), 1, Key::ShiftEnter),
 ];
 
@@ -2052,7 +2052,7 @@ pub fn word_right_column(text: &str, column: u16) -> u16 {
 	cell_width(&text[..word_right_byte(text, byte_at_column(text, column))])
 }
 
-/// Byte start of the coarse word before `at` (pi `deleteWordBackward`).
+/// Byte start of the coarse word before `at`.
 pub fn word_rubout_start(text: &str, at: usize) -> usize {
 	word_left_byte(text, at)
 }
@@ -2576,7 +2576,7 @@ mod tests {
 	#[test]
 	fn submit_remap_on_ctrl_enter_wins_over_follow_up_default() {
 		// A chord the user explicitly binds to submit must win over the hardcoded
-		// Ctrl+Enter -> follow-up default (pi `app.message.followUp`). OMP's
+		// Ctrl+Enter -> follow-up default. OMP's
 		// chord spellings are table-owned rows, so rebinding the exact chord
 		// replaces the default `(Enter, ctrl) -> FollowUp` row — including under kitty
 		// caps/num lock bits, which the decoder drops before lookup. Bare LF
@@ -2606,7 +2606,7 @@ mod tests {
 
 	#[test]
 	fn split_private_csi_report_reassembles_after_partial_expiry() {
-		// pi #8542: a Device-Attributes reply split by a slow SSH/PTY link.
+		// A Device-Attributes reply split by a slow SSH/PTY link.
 		// The prefix outlives the partial hold, the tail arrives as ordinary
 		// bytes; neither half may leak into the composer as literal text.
 		let start = Instant::now();

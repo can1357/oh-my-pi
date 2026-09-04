@@ -1,4 +1,4 @@
-//! Large-paste menu (pi `presentLargePasteMenu`): a marker-sized paste of
+//! Large-paste menu: a marker-sized paste of
 //! at least `cl_paste_large_menu_threshold` lines asks how to land it —
 //! wrapped in `<attachment>` tags, saved as a `local://paste-N.md` file the
 //! agent can `read`, or collapsed to an inline chip. Esc keeps the default
@@ -51,7 +51,7 @@ impl PasteChoice {
 	}
 }
 
-/// pi `wrapPasteInAttachmentBlock`: one quoted block for the model.
+/// Wraps a large paste in one quoted block for the model.
 #[must_use]
 pub fn wrap_in_attachment_block(text: &str) -> String {
 	let mut wrapped = String::with_capacity(text.len() + 28);
@@ -61,7 +61,7 @@ pub fn wrap_in_attachment_block(text: &str) -> String {
 	wrapped
 }
 
-/// pi `#attachPasteAsFile`: saves `text` as the next free
+/// Saves `text` as the next free
 /// `local://paste-N.md` of the live session and returns the URL. The host
 /// inserts it into the draft; a failed write falls back to a chip.
 pub fn save_paste_file(services: &dyn Services, text: &str) -> Result<Str, ServiceError> {
@@ -155,7 +155,7 @@ impl Panel for PasteMenu {
 
 	fn key(&mut self, key: Key) -> PanelEvent {
 		match key {
-			// Pi restores the held paste as the default inline chip when the
+			// Restores the held paste as the default inline chip when the
 			// selector is cancelled, so neither the pending content nor the
 			// draft around its insertion point is lost.
 			Key::Esc | Key::Ctrl('c') => self.choose(PasteChoice::Inline),

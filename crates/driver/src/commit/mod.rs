@@ -13,12 +13,12 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use omp_catalog::ModelKey;
-use omp_core::{FastHashMap, Hash32, Str, StrMut};
-use omp_inference::{
+use omp_ai::{
 	AnswerBody, Call, CallMeta, ChatEvent, ChatRequest, ContentPart, ExecutionBudget, Message,
 	NegotiationPolicy, RequestId, Role, Sampling, Setting, Target,
 };
+use omp_catalog::ModelKey;
+use omp_core::{FastHashMap, Hash32, Str, StrMut};
 use parking_lot::Mutex;
 
 use self::{budget::budget_diff, normalize::normalize_and_validate, parse::parse_completion};
@@ -80,7 +80,7 @@ pub enum CommitError {
 		model:  ModelKey,
 		/// Typed inference failure.
 		#[source]
-		source: omp_inference::Error,
+		source: omp_ai::Error,
 	},
 	/// Inference completed without user-visible text.
 	#[error("commit inference returned no visible text for {model}")]
@@ -109,14 +109,14 @@ pub enum ValidationIssue {
 /// Clone-cheap conventional-commit generator sharing one registry and cache.
 #[derive(Clone)]
 pub struct CommitGenerator {
-	registry: omp_inference::Registry,
+	registry: omp_ai::Registry,
 	model:    ModelKey,
 	cache:    Arc<Mutex<FastHashMap<Hash32, ConventionalCommit>>>,
 }
 
 impl CommitGenerator {
 	/// Uses one already-composed production registry and resolved model.
-	pub fn new(registry: omp_inference::Registry, model: ModelKey) -> Self {
+	pub fn new(registry: omp_ai::Registry, model: ModelKey) -> Self {
 		Self { registry, model, cache: Arc::new(Mutex::new(FastHashMap::default())) }
 	}
 
@@ -218,9 +218,9 @@ impl CommitGenerator {
 			debug_session:  None,
 			response_hooks: Default::default(),
 		};
-		let answer = omp_inference::router::execute_registry_call(
+		let answer = omp_ai::router::execute_registry_call(
 			self.registry.clone(),
-			Call::new(meta, omp_inference::OperationCall::Chat(Arc::new(request))),
+			Call::new(meta, omp_ai::OperationCall::Chat(Arc::new(request))),
 			Duration::from_secs(30),
 		)
 		.await

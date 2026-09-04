@@ -120,8 +120,7 @@ impl AskPresenter for AskRoute {
 }
 
 /// Orders the host's selections like the questions and fills any the host
-/// skipped, so the presentation always has one selection per question (pi
-/// `buildResults`).
+/// skipped, so the presentation always has one selection per question.
 fn align(questions: &[Question], mut selections: Vec<Selection>) -> Vec<Selection> {
 	questions
 		.iter()

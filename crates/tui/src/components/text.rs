@@ -297,7 +297,7 @@ impl TextLeaf {
 /// those clusters but never earlier ones — so each streamed chunk and each
 /// cursor step re-segments only the suffix it touched.
 #[derive(Default)]
-pub(crate) struct RevealState {
+pub struct RevealState {
 	pace:        anim::Reveal,
 	/// The text the memos below describe (O(1) clone of the leaf's text).
 	seen:        Str,
@@ -406,7 +406,7 @@ fn count_clusters(text: &str, start: usize) -> (usize, usize) {
 	}
 	(count, tail)
 }
-fn decimal_width(mut value: u64) -> u16 {
+const fn decimal_width(mut value: u64) -> u16 {
 	let mut width = 1;
 	while value >= 10 {
 		value /= 10;
@@ -569,7 +569,7 @@ impl Pre {
 		self.props.start()
 	}
 
-	fn line_count(&self) -> u16 {
+	const fn line_count(&self) -> u16 {
 		self.line_count
 	}
 
@@ -678,7 +678,7 @@ impl Component for Pre {
 						pc.ctx.charset.quote_rail(),
 						&mut prefix_buffer,
 					);
-					put_clipped(pc.frame, x, y, content_x, &prefix, gutter_style);
+					put_clipped(pc.frame, x, y, content_x, prefix, gutter_style);
 				}
 				if self.highlighted_for.is_some() {
 					let inline_number = line

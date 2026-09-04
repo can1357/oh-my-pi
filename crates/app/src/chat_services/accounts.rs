@@ -6,12 +6,7 @@
 use std::path::Path;
 
 use flume::{Receiver, Sender};
-use omp_catalog::{ProviderId, provider::AuthSpecKind};
-use omp_chat::overlays::services::{
-	AccountRow, LoginEvent, LoginFlow, Pending, ProviderRow, ServiceError, ServiceResult,
-};
-use omp_core::{ExposeSecret as _, SecretString, Str, sf};
-use omp_inference::{
+use omp_ai::{
 	answer::{
 		AccountSummary, AuthAnswer, AuthEvent, AuthPrompt, AuthPromptKind, AuthResponse, AuthSession,
 	},
@@ -19,6 +14,11 @@ use omp_inference::{
 	call::{AuthInput, AuthRequest, LoginRequest},
 	id::AccountId,
 };
+use omp_catalog::{ProviderId, provider::AuthSpecKind};
+use omp_chat::overlays::services::{
+	AccountRow, LoginEvent, LoginFlow, Pending, ProviderRow, ServiceError, ServiceResult,
+};
+use omp_core::{ExposeSecret as _, SecretString, Str, sf};
 
 use super::{ServiceState, StackHandles};
 

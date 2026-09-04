@@ -19,11 +19,11 @@ const RUNSC_ENV: &str = "OMP_SANDBOX_RUNSC";
 #[cfg(target_os = "linux")]
 const DIAGNOSTIC_LIMIT: usize = 4096;
 
-pub(crate) fn runtime() -> OsString {
+pub fn runtime() -> OsString {
 	env::var_os(RUNSC_ENV).unwrap_or_else(|| OsString::from("runsc"))
 }
 
-pub(crate) fn compile(
+pub fn compile(
 	spec: &SandboxSpec,
 	program: &Path,
 	requested: CapabilitySet,
@@ -217,13 +217,13 @@ fn runtime_flags(spec: &SandboxSpec) -> Vec<OsString> {
 	flags
 }
 
-pub(crate) fn probe() -> BackendStatus {
+pub fn probe() -> BackendStatus {
 	#[cfg(not(target_os = "linux"))]
 	{
-		return BackendStatus::unavailable(Backend::Gvisor, ProbeFailure::WrongHost {
+		BackendStatus::unavailable(Backend::Gvisor, ProbeFailure::WrongHost {
 			backend: Backend::Gvisor,
 			os:      std::env::consts::OS,
-		});
+		})
 	}
 	#[cfg(target_os = "linux")]
 	probe_output(
@@ -256,7 +256,7 @@ pub(crate) fn probe_oci_seccomp() -> BackendStatus {
 		rejected(output.status.code(), diagnostic)
 	}
 }
-pub(crate) fn check_requirements(spec: &SandboxSpec) -> Result<BackendStatus, SandboxError> {
+pub fn check_requirements(spec: &SandboxSpec) -> Result<BackendStatus, SandboxError> {
 	let status = probe();
 	if !status.is_available() || !needs_oci(spec) {
 		return Ok(status);

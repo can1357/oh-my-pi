@@ -49,26 +49,52 @@ pub enum PollWaitDuration {
 omp_con::con_enum!(PollWaitDuration);
 
 omp_con::var! {
-	/// Enable detached shell, task, and evaluation jobs.
+	/// Enable async bash commands and background task execution.
 	pub static SV_ASYNC_ENABLED = sv_async_enabled: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Execution",
+			"ui.label": "Async Execution",
+			"legacy.path": "async.enabled",
+		},
 	};
 	/// Maximum running detached jobs; zero removes the capacity ceiling.
 	pub static SV_ASYNC_MAX_JOBS = sv_async_max_jobs: u32 {
 		default: 100,
 		flags: archive,
+		meta: {
+			"legacy.path": "async.max_jobs",
+		},
 	};
 	/// Milliseconds to retain terminal job rows for observation.
 	pub static SV_ASYNC_RETENTION_MS = sv_async_retention_ms: i64 {
 		default: 300_000,
 		min: 0,
 		flags: archive,
+		meta: {
+			"legacy.path": "async.retention_ms",
+		},
 	};
-	/// Maximum implicit wait, or the adaptive wait ladder.
+	/// How long a `hub` wait watches background jobs before returning the current state. A fixed value waits that exact duration every time. `smart` adapts from 5s to 5m and resets after about a minute without waiting.
 	pub static SV_ASYNC_POLL_WAIT_DURATION = sv_async_poll_wait_duration: PollWaitDuration {
 		default: PollWaitDuration::Smart,
 		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Execution",
+			"ui.label": "Max Poll Time",
+			"ui.option.5s": "5 seconds",
+			"ui.option.10s": "10 seconds",
+			"ui.option.30s": "30 seconds",
+			"ui.option.1m": "1 minute",
+			"ui.option.5m": "5 minutes",
+			"ui.option.smart": "Smart",
+			"ui.option.smart.desc": "Default — adaptive 5s→5m, resets when you stop polling",
+			"legacy.path": "async.poll_wait_duration",
+			"legacy.path": "async.pollWaitDuration",
+		},
 	};
 }
 

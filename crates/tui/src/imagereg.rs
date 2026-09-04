@@ -171,7 +171,7 @@ fn is_png(bytes: &[u8]) -> bool {
 /// Async hosts run this through the component's off-thread decode loader. Its
 /// normal completion delivery invalidates the component and repaints the newly
 /// interned Kitty image.
-pub(crate) fn prepare_png(source: &str) -> Option<CowBytes<'static>> {
+pub fn prepare_png(source: &str) -> Option<CowBytes<'static>> {
 	{
 		let mut registry = IMAGES.lock();
 		if let Some(cached) = registry.by_source.get(source) {

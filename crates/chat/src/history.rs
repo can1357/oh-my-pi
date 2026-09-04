@@ -82,7 +82,7 @@ pub enum HistoryError {
 
 /// Thread-safe SQLite prompt history.
 ///
-/// Opening performs one dump-and-rebuild migration for legacy pi schemas,
+/// Opening performs one dump-and-rebuild migration for legacy schemas,
 /// including missing `session_id`, `unixepoch()` defaults, duplicate rows,
 /// and terminal-padded multiline prompts.
 pub struct HistoryStorage {
@@ -90,12 +90,15 @@ pub struct HistoryStorage {
 }
 
 impl HistoryStorage {
-	/// Opens or creates `path`, migrating legacy schemas without discarding rows.
+	/// Opens or creates `path`, migrating legacy schemas without discarding
+	/// rows.
 	pub fn open(path: impl AsRef<Path>) -> Result<Self, HistoryError> {
 		let path = path.as_ref();
-		if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-			fs::create_dir_all(parent)
-				.map_err(|source| HistoryError::CreateDirectory { source })?;
+		if let Some(parent) = path
+			.parent()
+			.filter(|parent| !parent.as_os_str().is_empty())
+		{
+			fs::create_dir_all(parent).map_err(|source| HistoryError::CreateDirectory { source })?;
 		}
 		let mut connection = Connection::open(path)?;
 		connection.busy_timeout(std::time::Duration::from_secs(2))?;
@@ -118,8 +121,8 @@ impl HistoryStorage {
 		if prompt.is_empty() || crate::composer::should_skip_history(prompt.trim_start()) {
 			return Ok(false);
 		}
-		let created_at = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
-			.unwrap_or(i64::MAX);
+		let created_at =
+			i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()).unwrap_or(i64::MAX);
 		let cwd = cwd.map(|path| path.to_string_lossy());
 		let session_id = session_id.filter(|id| !id.is_empty());
 		let mut connection = self.connection.lock();
@@ -154,8 +157,8 @@ impl HistoryStorage {
 
 	/// Finds prompts containing every alphanumeric query token, newest first.
 	///
-	/// FTS prefix results are merged with literal substring matches so punctuation
-	/// and infix queries (`git-commit`, `mit`) behave consistently.
+	/// FTS prefix results are merged with literal substring matches so
+	/// punctuation and infix queries (`git-commit`, `mit`) behave consistently.
 	pub fn search(&self, query: &str, limit: usize) -> Result<Vec<HistoryEntry>, HistoryError> {
 		let limit = normalize_limit(limit);
 		let tokens = query_tokens(query);
@@ -179,9 +182,10 @@ impl HistoryStorage {
 			matches.insert(entry.id, entry);
 		}
 
-		let where_clause = std::iter::repeat_n("prompt LIKE ? ESCAPE '\\' COLLATE NOCASE", tokens.len())
-			.collect::<Vec<_>>()
-			.join(" AND ");
+		let where_clause =
+			std::iter::repeat_n("prompt LIKE ? ESCAPE '\\' COLLATE NOCASE", tokens.len())
+				.collect::<Vec<_>>()
+				.join(" AND ");
 		let sql = format!(
 			"SELECT id, prompt, created_at, cwd, session_id FROM history
 			 WHERE {where_clause} ORDER BY created_at DESC, id DESC LIMIT ?"
@@ -209,11 +213,7 @@ impl HistoryStorage {
 	}
 
 	/// Returns matching session IDs in prompt-recency order, without duplicates.
-	pub fn matching_session_ids(
-		&self,
-		query: &str,
-		limit: usize,
-	) -> Result<Vec<Str>, HistoryError> {
+	pub fn matching_session_ids(&self, query: &str, limit: usize) -> Result<Vec<Str>, HistoryError> {
 		let mut seen = FastHashSet::<Str>::default();
 		let mut ids = Vec::new();
 		for entry in self.search(query, limit)? {
@@ -230,11 +230,9 @@ impl HistoryStorage {
 
 fn migrate(connection: &mut Connection) -> Result<(), HistoryError> {
 	let exists = connection
-		.query_row(
-			"SELECT 1 FROM sqlite_master WHERE type='table' AND name='history'",
-			[],
-			|row| row.get::<_, i64>(0),
-		)
+		.query_row("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history'", [], |row| {
+			row.get::<_, i64>(0)
+		})
 		.optional()?
 		.is_some();
 	if !exists {
@@ -267,13 +265,21 @@ fn rebuild(connection: &mut Connection) -> Result<(), HistoryError> {
 			.query_map([], |row| row.get::<_, String>(1))?
 			.collect::<Result<FastHashSet<_>, _>>()?
 	};
-	let id = if columns.contains("id") { "id" } else { "rowid AS id" };
+	let id = if columns.contains("id") {
+		"id"
+	} else {
+		"rowid AS id"
+	};
 	let created = if columns.contains("created_at") {
 		"created_at"
 	} else {
 		"0 AS created_at"
 	};
-	let cwd = if columns.contains("cwd") { "cwd" } else { "NULL AS cwd" };
+	let cwd = if columns.contains("cwd") {
+		"cwd"
+	} else {
+		"NULL AS cwd"
+	};
 	let session = if columns.contains("session_id") {
 		"session_id"
 	} else {
@@ -356,7 +362,10 @@ fn map_row(row: &rusqlite::Row<'_>) -> Result<HistoryEntry, rusqlite::Error> {
 		prompt:     Str::new(row.get::<_, String>(1)?),
 		created_at: row.get(2)?,
 		cwd:        row.get::<_, Option<String>>(3)?.map(PathBuf::from),
-		session_id: row.get::<_, Option<String>>(4)?.filter(|id| !id.is_empty()).map(Str::new),
+		session_id: row
+			.get::<_, Option<String>>(4)?
+			.filter(|id| !id.is_empty())
+			.map(Str::new),
 	})
 }
 
@@ -442,29 +451,51 @@ mod tests {
 	#[test]
 	fn query_merges_prefix_and_infix_matches_in_recency_order() {
 		let (_dir, storage) = storage();
-		storage.add("commit the changes", None, Some("one")).unwrap();
-		storage.add("precommit hook fix", None, Some("two")).unwrap();
+		storage
+			.add("commit the changes", None, Some("one"))
+			.unwrap();
+		storage
+			.add("precommit hook fix", None, Some("two"))
+			.unwrap();
 		let rows = storage.search("commit", 10).unwrap();
-		assert_eq!(rows.iter().map(|row| row.prompt.as_str()).collect::<Vec<_>>(), [
-			"precommit hook fix",
-			"commit the changes",
-		]);
+		assert_eq!(
+			rows
+				.iter()
+				.map(|row| row.prompt.as_str())
+				.collect::<Vec<_>>(),
+			["precommit hook fix", "commit the changes",]
+		);
 		assert_eq!(storage.search("git-commit", 10).unwrap(), Vec::new());
-		storage.add("run git commit --amend", None, Some("three")).unwrap();
-		assert_eq!(storage.search("git-commit", 10).unwrap()[0].session_id.as_deref(), Some("three"));
+		storage
+			.add("run git commit --amend", None, Some("three"))
+			.unwrap();
+		assert_eq!(
+			storage.search("git-commit", 10).unwrap()[0]
+				.session_id
+				.as_deref(),
+			Some("three")
+		);
 	}
 
 	#[test]
 	fn matching_session_ids_are_ranked_and_deduplicated() {
 		let (_dir, storage) = storage();
-		storage.add("deploy alpha", Some(Path::new("/repo")), Some("one")).unwrap();
-		storage.add("deploy beta", Some(Path::new("/repo")), Some("one")).unwrap();
-		storage.add("deploy gamma", Some(Path::new("/repo")), Some("two")).unwrap();
-		storage.add("deploy orphan", Some(Path::new("/repo")), None).unwrap();
-		assert_eq!(
-			storage.matching_session_ids("deploy", 100).unwrap(),
-			[Str::new_static("two"), Str::new_static("one")]
-		);
+		storage
+			.add("deploy alpha", Some(Path::new("/repo")), Some("one"))
+			.unwrap();
+		storage
+			.add("deploy beta", Some(Path::new("/repo")), Some("one"))
+			.unwrap();
+		storage
+			.add("deploy gamma", Some(Path::new("/repo")), Some("two"))
+			.unwrap();
+		storage
+			.add("deploy orphan", Some(Path::new("/repo")), None)
+			.unwrap();
+		assert_eq!(storage.matching_session_ids("deploy", 100).unwrap(), [
+			Str::new_static("two"),
+			Str::new_static("one")
+		]);
 	}
 
 	#[test]
@@ -482,8 +513,16 @@ mod tests {
 				);",
 			)
 			.unwrap();
-		connection.execute("INSERT INTO history(prompt, created_at, cwd) VALUES (?1, 1, '/old')", ["same   \nline"]).unwrap();
-		connection.execute("INSERT INTO history(prompt, created_at, cwd) VALUES (?1, 2, '/new')", ["same\nline"]).unwrap();
+		connection
+			.execute("INSERT INTO history(prompt, created_at, cwd) VALUES (?1, 1, '/old')", [
+				"same   \nline",
+			])
+			.unwrap();
+		connection
+			.execute("INSERT INTO history(prompt, created_at, cwd) VALUES (?1, 2, '/new')", [
+				"same\nline",
+			])
+			.unwrap();
 		drop(connection);
 		let storage = HistoryStorage::open(&path).unwrap();
 		let rows = storage.recent(10).unwrap();
@@ -517,11 +556,7 @@ mod tests {
 			.unwrap();
 		assert_eq!(count, HISTORY_CAPACITY as i64);
 		let oldest = connection
-			.query_row(
-				"SELECT 1 FROM history WHERE prompt='prompt-0'",
-				[],
-				|row| row.get::<_, i64>(0),
-			)
+			.query_row("SELECT 1 FROM history WHERE prompt='prompt-0'", [], |row| row.get::<_, i64>(0))
 			.optional()
 			.unwrap();
 		assert_eq!(oldest, None);
@@ -530,11 +565,7 @@ mod tests {
 	#[test]
 	fn privacy_filter_is_enforced_at_the_storage_boundary() {
 		let (_dir, storage) = storage();
-		for secret in [
-			"/login raw-code",
-			"/join omp://share/key",
-			"/mcp add server --token bearer",
-		] {
+		for secret in ["/login raw-code", "/join omp://share/key", "/mcp add server --token bearer"] {
 			assert!(!storage.add(secret, None, Some("session")).unwrap());
 		}
 		assert!(storage.add("/login", None, Some("session")).unwrap());

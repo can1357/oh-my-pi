@@ -11,7 +11,7 @@ use omp_journal::{
 	},
 	kind,
 };
-use omp_tool::Part as ToolPart;
+use omp_tool::{Diag, Part as ToolPart};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -296,13 +296,13 @@ impl Session {
 			Some("started") => {
 				return self.apply_ops(entry, vec![
 					Op::Set {
-						h: call,
-						prop: PropKey::Custom(Str::new_static("execution-started")),
+						h:     call,
+						prop:  PropKey::Custom(Str::new_static("execution-started")),
 						value: Value::Bool(true),
 					},
 					Op::Set {
-						h: call,
-						prop: PropId::Order.into(),
+						h:     call,
+						prop:  PropId::Order.into(),
 						value: Value::Str(Str::new(entry.id.to_string())),
 					},
 				]);
@@ -715,34 +715,37 @@ fn project_update(
 	}) {
 		return Ok(());
 	}
-	if let Some(diag) = object.and_then(|map| map.get("diag").or_else(|| map.get("diagnostic"))) {
+	if let Some(raw) = object.and_then(|map| map.get("diag").or_else(|| map.get("diagnostic"))) {
 		// Every diagnostic is its own structured child (ADR 0008); a tool
 		// that emits several keeps all of them on the element and on replay.
 		// Data remains the typed authority. Text is only the human projection:
 		// serializing the object there leaks transport JSON into every card.
-		let severity = diag
-			.get("severity")
-			.and_then(serde_json::Value::as_str)
-			.unwrap_or("info");
-		let mut node = NodeSpec::new(KnownTag::Diag)
-			.with_prop(PropId::Severity, Value::Str(Str::new(severity)))
-			.with_prop(
-				PropId::Data,
-				Value::Json(RawValue::from_string(serde_json::to_string(diag)?)?),
-			);
-		let text = match diag {
-			serde_json::Value::String(text) => Some(text.as_str()),
-			serde_json::Value::Object(fields) => fields
-				.get("text")
-				.or_else(|| fields.get("message"))
-				.and_then(serde_json::Value::as_str),
-			_ => None,
+		// Extension tools may send a bare string or a loosely shaped object;
+		// `Diag` decodes both leniently.
+		let diag = match raw {
+			serde_json::Value::String(text) => Diag { text: Str::new(text), ..Diag::default() },
+			_ => Diag::deserialize(raw)?,
 		};
-		if let Some(text) = text {
-			node = node.with_prop(PropId::Text, Value::Str(Str::new(text)));
+		let mut node = NodeSpec::new(KnownTag::Diag)
+			.with_prop(PropId::Severity, Value::Str(Str::new_static(diag.severity.into())))
+			.with_prop(PropId::Kind, Value::Str(diag.kind.clone()))
+			.with_prop(PropId::Data, Value::Json(RawValue::from_string(serde_json::to_string(raw)?)?));
+		if !diag.text.is_empty() {
+			node = node.with_prop(PropId::Text, Value::Str(diag.text.clone()));
 		}
-		if let Some(kind) = diag.get("kind").and_then(serde_json::Value::as_str) {
-			node = node.with_prop(PropId::Kind, Value::Str(Str::new(kind)));
+		if let Some(continuation) = &diag.continuation {
+			node = node.with_prop(PropId::Continuation, Value::Str(continuation.clone()));
+		}
+		if let Some(artifact) = &diag.artifact {
+			node = node.with_prop(PropId::Recovery, Value::Str(artifact.clone()));
+		}
+		if let Some(omitted) = diag.omitted {
+			node = node
+				.with_prop(
+					PropId::Omitted,
+					Value::Int(i64::try_from(omitted.count).unwrap_or(i64::MAX)),
+				)
+				.with_prop(PropId::Unit, Value::Str(Str::new_static(omitted.unit.into())));
 		}
 		ops.push(Op::Ins {
 			parent: call,
@@ -806,7 +809,7 @@ fn outcome_text(raw: &RawValue) -> Str {
 	}
 }
 
-pub(crate) fn prompt_parts_text(raw: &RawValue) -> Result<Str, SessionError> {
+pub fn prompt_parts_text(raw: &RawValue) -> Result<Str, SessionError> {
 	let parts: Vec<ToolPart> = serde_json::from_str(raw.get())?;
 	let mut text = String::new();
 	for part in parts {

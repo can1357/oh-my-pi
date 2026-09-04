@@ -222,7 +222,7 @@ mod tests {
 			.expect("fixture renders")
 			.expect("fixture has a title");
 		assert_eq!(rendered.method.as_str(), "mdn");
-		assert!(rendered.notes.is_empty());
+		assert!(rendered.diags.is_empty());
 		assert_eq!(
 			rendered.content.as_str(),
 			"# Array.from()\n\nCreates an array.\n\n## Syntax\n\nUse \

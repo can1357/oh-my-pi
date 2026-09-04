@@ -1,5 +1,5 @@
-//! `/dirs`, `/add-dir`, `/move`, `/wt`: the session's working directory
-//! and pi's `createSessionWorktree` over the project checkout.
+//! `/dirs`, `/add-dir`, `/move`, `/wt`: the session's working directory and
+//! worktrees over the project checkout.
 
 use std::{
 	fs,
@@ -23,10 +23,9 @@ pub(super) fn project_dir(state: &ServiceState) -> ServiceResult<PathBuf> {
 	std::env::current_dir().map_err(ServiceError::failed)
 }
 
-/// pi `createSessionWorktree`: validates `branch`, creates it from `HEAD`
-/// in a new linked worktree under the configured base
-/// (`sv_worktree_base` or `<data>/worktrees`), and carries the
-/// uncommitted changes of the source checkout over (pi `keepChanges`).
+/// Validates `branch`, creates it from `HEAD` in a new linked worktree under
+/// the configured base (`sv_worktree_base` or `<data>/worktrees`), and carries
+/// uncommitted changes from the source checkout over.
 pub(super) fn create_worktree(state: &ServiceState, branch: &str) -> ServiceResult<WorktreeInfo> {
 	create_worktree_at(&project_dir(state)?, &worktree_base(state), branch)
 }
@@ -91,8 +90,8 @@ fn create_worktree_at(cwd: &Path, base: &Path, branch: &str) -> ServiceResult<Wo
 	Ok(WorktreeInfo { path, branch: Str::new(branch) })
 }
 
-/// pi's branch-name check (`^[^\s~^:?*[\\]+$`, no leading `-`, no trailing
-/// `/`, no `..`).
+/// Branch names exclude whitespace and `~^:?*[\\]`, leading `-`, trailing
+/// `/`, and `..`.
 fn validate_branch(branch: &str) -> ServiceResult<()> {
 	let bad = branch.is_empty()
 		|| branch
@@ -117,7 +116,7 @@ fn worktree_base(state: &ServiceState) -> PathBuf {
 	}
 }
 
-/// Short stable hash of the primary checkout (pi `hashPath`).
+/// Short stable hash of the primary checkout.
 fn hash_path(path: &Path) -> String {
 	let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
 	for byte in path.to_string_lossy().bytes() {

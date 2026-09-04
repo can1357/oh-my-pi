@@ -30,14 +30,14 @@ impl RenderFold for AstGrepRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, complete: bool) {
 		state.pattern = args
 			.get("pat")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new);
 		state.scope = args
 			.get("path")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new)
 			.or_else(|| complete.then(|| Str::new(".")));
 	}
@@ -72,22 +72,22 @@ impl RenderFold for AstEditRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		let operation = args
 			.get("ops")
-			.and_then(omp_slopjson::Value::as_array)
+			.and_then(omp_core::slopjson::Value::as_array)
 			.and_then(|operations| operations.first());
 		state.pattern = operation
 			.and_then(|operation| operation.get("pat"))
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new);
 		state.replacement = operation
 			.and_then(|operation| operation.get("out"))
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new);
 		state.scope = args
 			.get("paths")
-			.and_then(omp_slopjson::Value::as_array)
+			.and_then(omp_core::slopjson::Value::as_array)
 			.and_then(joined_slop_strings);
 	}
 
@@ -103,10 +103,10 @@ impl RenderFold for AstEditRenderer {
 	}
 }
 
-fn joined_slop_strings(values: &[omp_slopjson::Value]) -> Option<Str> {
+fn joined_slop_strings(values: &[omp_core::slopjson::Value]) -> Option<Str> {
 	let capacity = values
 		.iter()
-		.filter_map(omp_slopjson::Value::as_str)
+		.filter_map(omp_core::slopjson::Value::as_str)
 		.map(str::len)
 		.sum::<usize>()
 		.saturating_add(values.len().saturating_sub(1).saturating_mul(2));
@@ -289,7 +289,7 @@ fn render_ast_fault(name: &str, message: &str) -> El {
 }
 
 /// Native AST renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(
+pub fn gallery_fixtures(
 	ast_grep: ToolIdentity,
 	ast_edit: ToolIdentity,
 ) -> Vec<RendererGalleryFixture> {
@@ -331,7 +331,7 @@ mod tests {
 		let mut state = AstGrepState::default();
 		AstGrepRenderer.fold_args(
 			&mut state,
-			&omp_slopjson::parse_streaming(fixture.streaming_args),
+			&omp_core::slopjson::parse_streaming(fixture.streaming_args),
 			false,
 		);
 		let live = AstGrepRenderer
@@ -340,7 +340,11 @@ mod tests {
 		assert!(live.contains("<state status=running/>"));
 		assert!(live.contains("console.$METHOD($AR"));
 
-		AstGrepRenderer.fold_args(&mut state, &omp_slopjson::parse_streaming(fixture.args), true);
+		AstGrepRenderer.fold_args(
+			&mut state,
+			&omp_core::slopjson::parse_streaming(fixture.args),
+			true,
+		);
 		let view = AstGrepRenderer
 			.view(&state, Some(&outcome))
 			.expect("ast_grep renders");
@@ -383,7 +387,7 @@ mod tests {
 		let mut state = AstEditState::default();
 		AstEditRenderer.fold_args(
 			&mut state,
-			&omp_slopjson::parse_streaming(fixture.streaming_args),
+			&omp_core::slopjson::parse_streaming(fixture.streaming_args),
 			false,
 		);
 		let live = AstEditRenderer
@@ -392,7 +396,11 @@ mod tests {
 		assert!(live.contains("<state status=running/>"));
 		assert!(live.contains("$A?."));
 
-		AstEditRenderer.fold_args(&mut state, &omp_slopjson::parse_streaming(fixture.args), true);
+		AstEditRenderer.fold_args(
+			&mut state,
+			&omp_core::slopjson::parse_streaming(fixture.args),
+			true,
+		);
 		let view = AstEditRenderer
 			.view(&state, Some(&outcome))
 			.expect("ast_edit renders");

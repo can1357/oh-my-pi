@@ -576,7 +576,7 @@ pub mod compiler {
 		rc::Rc,
 	};
 
-	use omp_shell_engine::{openfiles::OpenFile, sys::fs};
+	use omp_shell::{openfiles::OpenFile, sys::fs};
 
 	use crate::sed::{
 		command::{
@@ -7468,7 +7468,7 @@ pub mod in_place {
 		path::{Path, PathBuf},
 	};
 
-	use omp_shell_engine::openfiles::OpenFile;
+	use omp_shell::openfiles::OpenFile;
 	use tempfile::NamedTempFile;
 
 	#[cfg(test)]
@@ -7803,7 +7803,7 @@ pub mod named_writer {
 		sync::Arc,
 	};
 
-	use omp_shell_engine::PathPolicy;
+	use omp_shell::PathPolicy;
 
 	use crate::{
 		sed::error_handling::{ScriptLocation, SedResult, runtime_error},
@@ -8873,7 +8873,7 @@ pub mod script_line_provider {
 		path::PathBuf,
 	};
 
-	use omp_shell_engine::{openfiles::OpenFile, sys::fs};
+	use omp_shell::{openfiles::OpenFile, sys::fs};
 
 	use crate::{
 		sed::error_handling::{IoContext, SedResult},
@@ -9193,7 +9193,7 @@ use std::{
 };
 
 use clap::{Arg, ArgMatches, Command, arg};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},

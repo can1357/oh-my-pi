@@ -7,25 +7,11 @@
 
 use std::sync::Arc;
 
+use omp_ai::{ContentPart, MediaInput, Message, ToolResultContent};
 use omp_core::{Str, sf};
 use omp_dom::{Dom, PropId, PropKey, Value};
-use omp_inference::{ContentPart, MediaInput, Message, ToolResultContent};
 
-use crate::director::RouteFacts;
-
-/// The `ai_vision` values (`omp_con::VisionMode`, spelled here so the
-/// kernel reads them from the tree without the console crate).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, strum::EnumString)]
-#[strum(serialize_all = "lowercase")]
-pub enum VisionMode {
-	/// Follow the route's image capability.
-	#[default]
-	Auto,
-	/// Always send images.
-	On,
-	/// Never send images.
-	Off,
-}
+use crate::{VisionMode, director::RouteFacts};
 
 /// Text standing in for an image the policy withholds.
 const OMITTED: &str =
@@ -123,7 +109,7 @@ fn placeholder(media: &MediaInput) -> Str {
 #[cfg(test)]
 mod tests {
 	use bytes::Bytes;
-	use omp_inference::Role;
+	use omp_ai::Role;
 
 	use super::*;
 

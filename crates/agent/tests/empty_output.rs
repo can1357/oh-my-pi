@@ -10,9 +10,9 @@ use omp_agent::{
 	Director, DirectorCx, DirectorRegistry, DirectorStack, DispatchPolicy, Kernel, RunControl,
 	StaticPrompt, TurnInput, TurnStop, TurnView, Verdict,
 };
+use omp_ai::{BlockKind, ChatEvent, ContentPart, FinishReason, Role};
 use omp_core::Str;
 use omp_dom::{PropId, PropKey};
-use omp_inference::{BlockKind, ChatEvent, ContentPart, FinishReason, Role};
 use omp_journal::blob::BlobStore;
 
 mod support;
@@ -48,7 +48,7 @@ fn policy(path: &std::path::Path) -> DispatchPolicy {
 	DispatchPolicy::new(BlobStore::open(path).expect("blob store opens"))
 }
 
-fn request_has_text(request: &omp_inference::ChatRequest, role: Role, expected: &str) -> bool {
+fn request_has_text(request: &omp_ai::ChatRequest, role: Role, expected: &str) -> bool {
 	request.messages.iter().any(|message| {
 		message.role == role
 			&& message

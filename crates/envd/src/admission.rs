@@ -16,7 +16,7 @@ use omp_proto::{
 	env::v1::{Admission, AdmitInvocation},
 	policy::v1::{BashIr, EffectEnvelope, PolicyDenied},
 };
-use omp_shell_engine::{
+use omp_shell::{
 	analysis,
 	parser::{Parser, ParserOptions},
 };

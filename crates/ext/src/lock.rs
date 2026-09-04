@@ -266,16 +266,16 @@ impl LockFile {
 			frozen:          &'a [FrozenDistribution],
 		}
 		let bytes = serde_json::to_vec(&Resolution {
-			layer: self.layer,
+			layer:           self.layer,
 			requires_python: &self.requires_python,
-			abi: &self.abi,
-			targets: &self.targets,
-			exclude_newer: self.exclude_newer.as_ref(),
-			indexes: &self.indexes,
-			index_strategy: &self.index_strategy,
-			extensions: &self.extensions,
-			packages: &self.packages,
-			frozen: &self.frozen,
+			abi:             &self.abi,
+			targets:         &self.targets,
+			exclude_newer:   self.exclude_newer.as_ref(),
+			indexes:         &self.indexes,
+			index_strategy:  &self.index_strategy,
+			extensions:      &self.extensions,
+			packages:        &self.packages,
+			frozen:          &self.frozen,
 		})
 		.map_err(|error| ExtensionError::new(ExtensionCode::ELockDrift, error.to_string()))?;
 		Ok(Str::new(format!("b3:{}", blake3::hash(&bytes).to_hex())))
@@ -374,9 +374,9 @@ fn is_unique_nonempty(values: &[Str]) -> bool {
 }
 
 fn valid_digest(value: &str, prefix: &str) -> bool {
-	value
-		.strip_prefix(prefix)
-		.is_some_and(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+	value.strip_prefix(prefix).is_some_and(|digest| {
+		digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+	})
 }
 
 /// Local-only record of materialized extension selections, including `link`
@@ -726,7 +726,9 @@ mod tests {
 			regenerated.resolution_digest().expect("regenerated digest")
 		);
 
-		regenerated.indexes.insert(0, "https://private.example/simple".to_owned());
+		regenerated
+			.indexes
+			.insert(0, "https://private.example/simple".to_owned());
 		assert_ne!(
 			first.resolution_digest().expect("first digest"),
 			regenerated.resolution_digest().expect("changed digest")

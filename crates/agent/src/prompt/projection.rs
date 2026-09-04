@@ -32,10 +32,10 @@ pub fn template_props(dom: &Dom) -> Props {
 
 	let roster = omp_session::components::lifecycle::roster(dom);
 	if !roster.is_empty() {
-		props.set("tools", roster.iter().cloned().collect::<Vec<_>>());
+		props.set("tools", roster.clone());
 		props.set("tool_inventory", compact_tool_inventory(&roster));
 	}
-	if let Some(skillful) = session_bool(dom, omp_con::AI_SKILLFUL.name()) {
+	if let Some(skillful) = session_bool(dom, crate::AI_SKILLFUL.name()) {
 		props.set("include_skills", skillful);
 	}
 	props.set(
@@ -47,8 +47,8 @@ pub fn template_props(dom: &Dom) -> Props {
 
 /// Projects canonical conversation items and resolves journaled blob parts
 /// against `blobs` at the projection boundary (no process-local attachment
-/// index): every user attachment (pi `ImageContent`) must be present, so a
-/// missing one fails the request. A missing snapcompact frame is omitted
+/// index): every user attachment must be present, so a missing one fails the
+/// request. A missing snapcompact frame is omitted
 /// while its summary text remains usable; a tool-result blob absent from the
 /// session store stays a reference. Each present blob is read once into a
 /// shared buffer the inference request then borrows.

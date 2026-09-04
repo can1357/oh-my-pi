@@ -6,16 +6,49 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Batteries-included shell facade combining the execution engine and builtin registries"
+description = "Standalone Bash parser and execution engine for omp"
 
 [lints]
 workspace = true
 
 [dependencies]
-omp-shell-builtins.workspace = true
-omp-shell-engine.workspace = true
+async-recursion.workspace = true
+bon.workspace = true
+clap.workspace = true
+chrono.workspace = true
+fancy-regex.workspace = true
+futures.workspace = true
+im.workspace = true
+itertools.workspace = true
+jiff.workspace = true
+
+omp-core.workspace = true
+omp-macros.workspace = true
+omp-proto.workspace = true
+peg.workspace = true
+rand.workspace = true
+smallvec.workspace = true
+serde.workspace = true
+strum.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
+xutf.workspace = true
+
+[target.'cfg(any(unix, windows))'.dependencies]
+
+[target.'cfg(unix)'.dependencies]
+command-fds.workspace = true
+libc.workspace = true
+nix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
+insta.workspace = true
+pretty_assertions.workspace = true
+serde.workspace = true
 tempfile.workspace = true

@@ -9,7 +9,7 @@ use omp_agent::{
 };
 use omp_core::Str;
 use omp_journal::blob::BlobStore;
-use omp_proto::thread::v1::item;
+use omp_proto::thread::v1::{item, part};
 use omp_session::project_thread;
 use omp_tool::{
 	CallOutcome, Claims, Part, Precedence, Presentation, PromptCaps, Rev, ToolIdentity, ToolRoute,
@@ -111,9 +111,30 @@ async fn central_truncation_spills_and_notrunc_explicitly_opts_out() {
 		!dispatcher.policy().spill.has(&spilled),
 		"the launch-session CAS is never a fallback after navigation"
 	);
-	let parts = result_text(&bounded, "bounded");
-	assert_eq!(parts[0], "abcde");
-	assert!(parts[1].starts_with("artifact://sha256/"));
+	assert_eq!(result_text(&bounded, "bounded"), ["abcde"]);
+	let projected = project_thread(bounded.dom())
+		.into_iter()
+		.find_map(|item| match item.kind? {
+			item::Kind::ToolResult(result) if result.call_id == "bounded" => Some(result),
+			_ => None,
+		})
+		.expect("bounded result projects");
+	let parts = projected
+		.parts
+		.into_iter()
+		.filter_map(|part| match part.kind? {
+			part::Kind::Text(text) => Some(text),
+			_ => None,
+		})
+		.collect::<Vec<_>>();
+	let address = format!("artifact://sha256/{}", spilled.to_hex());
+	assert_eq!(parts, vec![
+		"abcde".to_owned(),
+		format!(
+			"<diag severity=\"info\" kind=\"output_bounded\" artifact=\"{address}\">output exceeded \
+			 inline limits</diag>"
+		),
+	]);
 	assert_journal_cause(&bounded, entry);
 
 	let mut unlimited = session(&active.join("unlimited.oms"));
@@ -446,6 +467,30 @@ async fn central_per_line_clamp_bounds_long_lines_and_records_the_count() {
 			.expect("artifact reads"),
 		output.as_bytes()
 	);
+	let projected = project_thread(session.dom())
+		.into_iter()
+		.find_map(|item| match item.kind? {
+			item::Kind::ToolResult(result) if result.call_id == "lines" => Some(result),
+			_ => None,
+		})
+		.expect("line-clamped result projects");
+	let diag = projected
+		.parts
+		.into_iter()
+		.filter_map(|part| match part.kind? {
+			part::Kind::Text(text) if text.starts_with("<diag ") => Some(text),
+			_ => None,
+		})
+		.next()
+		.expect("output bound diagnostic projects");
+	let address = format!("artifact://sha256/{}", artifact.to_hex());
+	assert_eq!(
+		diag,
+		format!(
+			"<diag severity=\"info\" kind=\"output_bounded\" artifact=\"{address}\" omitted=\"2 \
+			 lines\">output exceeded inline limits</diag>"
+		)
+	);
 }
 
 #[tokio::test]
@@ -600,9 +645,7 @@ async fn tool_scoped_abort_forces_only_the_selected_sibling_and_replays() {
 		DispatchPolicy::new(BlobStore::open(directory.path()).expect("blob store"))
 			.with_interrupt_grace(Duration::from_millis(25)),
 	)
-	.with_external_executor(Arc::new(ScopedAbortExternal {
-		started: Arc::clone(&started),
-	}));
+	.with_external_executor(Arc::new(ScopedAbortExternal { started: Arc::clone(&started) }));
 	let mut session = session(&journal_path);
 	let (aborted_entry, aborted_args) = call(&mut session, &identity, "abort-me");
 	let (sibling_entry, sibling_args) = call(&mut session, &identity, "sibling");
@@ -664,8 +707,7 @@ async fn tool_scoped_abort_forces_only_the_selected_sibling_and_replays() {
 		let settled_at = entries
 			.iter()
 			.position(|entry| {
-				entry.kind.name.as_str() == omp_journal::kind::TOOL_RESULT
-					&& entry.by == Some(call)
+				entry.kind.name.as_str() == omp_journal::kind::TOOL_RESULT && entry.by == Some(call)
 			})
 			.expect("terminal journals");
 		assert!(started_at < settled_at, "start must precede settlement");
@@ -680,7 +722,10 @@ async fn tool_scoped_abort_forces_only_the_selected_sibling_and_replays() {
 			.next()
 			.expect("call materializes");
 		assert_eq!(
-			session.dom().get(call).and_then(|node| node.prop(&started_key)),
+			session
+				.dom()
+				.get(call)
+				.and_then(|node| node.prop(&started_key)),
 			Some(&omp_dom::Value::Bool(true)),
 			"execution start boundary is durable"
 		);
@@ -702,11 +747,9 @@ async fn tool_scoped_abort_forces_only_the_selected_sibling_and_replays() {
 	);
 	let live = session.dom().snapshot();
 	drop(session);
-	let replayed = omp_session::Session::open(
-		&journal_path,
-		omp_session::ComponentRegistry::default(),
-	)
-	.expect("journal replays");
+	let replayed =
+		omp_session::Session::open(&journal_path, omp_session::ComponentRegistry::default())
+			.expect("journal replays");
 	assert_eq!(replayed.dom().snapshot(), live);
 	assert!(
 		result_text(&replayed, "abort-me")[0].contains("effects unknown"),

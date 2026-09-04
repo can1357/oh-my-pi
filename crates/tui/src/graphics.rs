@@ -1486,7 +1486,7 @@ mod tests {
 
 	#[test]
 	fn probe_detects_sixel_on_terminals_without_identifying_environment() {
-		// pi #8724 regression: a SIXEL-capable terminal that exports no
+		// Regression: a SIXEL-capable terminal that exports no
 		// identifying variable (foot sets TERM=foot and COLORTERM=truecolor
 		// only) resolved the trueColor row and rendered every image as the
 		// `[Image: …]` text card. The runtime probe must upgrade it.

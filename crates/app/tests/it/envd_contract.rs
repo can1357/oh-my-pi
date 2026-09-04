@@ -16,8 +16,7 @@ use omp_env::{
 	Admitter, BlobDownloadEvent, EnvClient, ExecEvent, InvocationEvent, ProcessAttachmentEvent,
 };
 use omp_envd::{
-	AttachOptions, EnvServer, ProjectEnvironment, RegistryBridges,
-	blobs::BlobHost,
+	AttachOptions, EnvServer, ExtensionDataBinding, ProjectEnvironment, RegistryBridges,
 	eval::{
 		BridgeHostError, BridgeProgressSink, EvalSessionConfig, ParentBindingLease, ParentSessionHost,
 	},
@@ -26,7 +25,7 @@ use omp_envd::{
 		ActivationTrigger, DeclarationSet, ExtensionManifest, ServiceManifest, ToolDeclarationKey,
 	},
 	policy::Grants,
-	worker::{ExtHostConfig, ExtHostSpec, ExtHostSupervisor, HostKey, PY_EVAL_MODULE},
+	worker::{ExtHostConfig, ExtHostSpec, HostKey},
 	workspace::{WorkspaceError, WorkspaceHost, WorkspaceSearchOptions},
 };
 use omp_ext::config::{StaticDeclaration, StaticDeclarations};
@@ -44,7 +43,7 @@ use omp_proto::{
 };
 use omp_tool::{
 	Abort, CallOutcome, Claims, Constraint, DocEffects, Effects, Ev, IncomingParams, LoweringCaps,
-	Part, Precedence, Presentation, PromptCaps, Registry, Rev, Tool, ToolRoute, ToolSpec,
+	Part, Precedence, Presentation, PromptCaps, Registry, Rev, Tool, ToolLocus, ToolRoute, ToolSpec,
 };
 use omp_tools::eval;
 use serde_json::{Value, json};
@@ -495,23 +494,18 @@ fn test_manifest(
 }
 
 fn test_config() -> ExtHostConfig {
-	let root = tempfile::tempdir().expect("worker result CAS root").keep();
-	let mut config = ExtHostConfig::new(
+	ExtHostConfig::new(
 		PathBuf::from(env!("CARGO_BIN_EXE_omp")),
 		Principal::new(sf!("test"), sf!("Test")),
 		sf!("test-session"),
 		1,
-	);
-	config.bind_result_store(BlobHost::open(root).expect("worker result CAS"));
-	config
+	)
 }
 
 fn extension_worker(module: &str, python_site: Option<PathBuf>) -> ExtHostConfig {
 	let mut config = test_config();
 	let key = HostKey::new("workspace", "trusted", module);
-	let manifest = if module == PY_EVAL_MODULE {
-		test_manifest(&key, module, [ToolDeclarationKey::new("py_eval", "", 1)])
-	} else if module == PRELUDE_HELPER_EXTENSION_MODULE {
+	let manifest = if module == PRELUDE_HELPER_EXTENSION_MODULE {
 		ExtensionManifest::new(
 			test_provenance(&key),
 			Str::from(module),
@@ -535,12 +529,14 @@ fn extension_worker(module: &str, python_site: Option<PathBuf>) -> ExtHostConfig
 }
 
 struct Harness {
-	client:       EnvClient,
-	server:       Arc<EnvServer>,
-	root:         TempDir,
-	state:        TempDir,
-	server_task:  JoinHandle<()>,
-	_eval_parent: ParentBindingLease,
+	client:                  EnvClient,
+	server:                  Arc<EnvServer>,
+	root:                    TempDir,
+	state:                   TempDir,
+	server_task:             JoinHandle<()>,
+	extension_data_shutdown: CancellationToken,
+	extension_data_tasks:    Vec<JoinHandle<()>>,
+	_eval_parent:            ParentBindingLease,
 }
 struct TestEvalParent {
 	cwd: PathBuf,
@@ -549,10 +545,7 @@ struct TestEvalParent {
 #[async_trait::async_trait]
 impl ParentSessionHost for TestEvalParent {
 	fn eval_session_config(&self) -> Result<EvalSessionConfig, BridgeHostError> {
-		Ok(EvalSessionConfig {
-			cwd:              self.cwd.clone(),
-			local_roots_json: None,
-		})
+		Ok(EvalSessionConfig { cwd: self.cwd.clone(), local_roots_json: None })
 	}
 
 	async fn completion(
@@ -585,9 +578,24 @@ impl Harness {
 		Self::start_with_worker(registry, test_config()).await
 	}
 
-	async fn start_with_worker(registry: Registry, worker: ExtHostConfig) -> Self {
+	async fn start_with_worker(registry: Registry, mut worker: ExtHostConfig) -> Self {
 		let root = tempfile::tempdir().expect("workspace scratch directory");
 		let state = tempfile::tempdir().expect("state scratch directory");
+		let mut extension_data_bindings = Vec::with_capacity(worker.extensions.len());
+		for extension in &mut worker.extensions {
+			let mut binding = ExtensionDataBinding::scoped(
+				state.path(),
+				extension.key.clone(),
+				worker.session_id.as_str(),
+				worker.session_generation,
+				extension.data_grants.clone(),
+			);
+			extension.data_socket = Some(binding.path().to_path_buf());
+			binding
+				.prepare_endpoint()
+				.expect("prepare extension DATA endpoint");
+			extension_data_bindings.push(binding);
+		}
 		let con = Arc::new(omp_con::Ctx::new());
 		let convars = Arc::new(omp_envd::exthost::ConvarControlFactory::new(Arc::clone(&con)));
 		let server = Arc::new(
@@ -603,6 +611,20 @@ impl Harness {
 			.await
 			.expect("real local environment host"),
 		);
+		let extension_data_shutdown = CancellationToken::new();
+		let extension_data_tasks = extension_data_bindings
+			.into_iter()
+			.map(|binding| {
+				let host = Arc::clone(&server);
+				let shutdown = extension_data_shutdown.clone();
+				tokio::spawn(async move {
+					host
+						.serve_extension_uds(binding, shutdown)
+						.await
+						.expect("serve extension DATA endpoint");
+				})
+			})
+			.collect();
 		let (client, transport) = EnvClient::in_process(64);
 		client.set_admitter(AllowAdmission);
 		let host = Arc::clone(&server);
@@ -621,7 +643,16 @@ impl Harness {
 				Arc::new(TestEvalParent { cwd: env::current_dir().expect("test process cwd") }),
 			)
 			.expect("bind eval parent");
-		Self { client, server, root, state, server_task, _eval_parent: eval_parent }
+		Self {
+			client,
+			server,
+			root,
+			state,
+			server_task,
+			extension_data_shutdown,
+			extension_data_tasks,
+			_eval_parent: eval_parent,
+		}
 	}
 
 	const fn client(&self) -> &EnvClient {
@@ -647,6 +678,10 @@ impl Harness {
 
 impl Drop for Harness {
 	fn drop(&mut self) {
+		self.extension_data_shutdown.cancel();
+		for task in &self.extension_data_tasks {
+			task.abort();
+		}
 		self.server_task.abort();
 	}
 }
@@ -1041,7 +1076,7 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		read_text.starts_with("[note.txt#"),
 		"read must mint the edit anchor used by the shared document adapter: {read_text}"
 	);
-	let tag = omp_hashline::compute_snapshot_tag(b"before\n");
+	let tag = omp_edit::store::file_hash("before\n");
 	let patch = format!("[note.txt#{tag}]\nPUT 1.=1:\n+after");
 	let edit =
 		invoke_builtin(harness.client(), "builtin-edit", "edit", "hl.1", json!({"input":patch}))
@@ -1401,10 +1436,9 @@ async fn production_eval_covers_bridge_persistence_reset_timeout_cancellation_an
 		Some(json!(42)),
 		"top-level await did not preserve the persistent namespace"
 	);
-	assert_eq!(
-		rich.display_outputs,
-		vec![omp_tools::eval::DisplayOutput::Json { data: json!({"bundle": true}) }]
-	);
+	assert_eq!(rich.display_outputs, vec![omp_tools::eval::DisplayOutput::Json {
+		data: json!({"bundle": true}),
+	}]);
 
 	let (unrelated, unrelated_task) = harness.connect("eval-unrelated-owner").await;
 	let isolated = invoke_builtin_as(
@@ -1881,26 +1915,34 @@ async fn uds_clients_invoke_owner_eval_and_retain_ordinary_tools() {
 }
 
 #[tokio::test]
-async fn opt_in_python_admits_its_soft_declaration_without_shadowing_native_eval() {
-	let worker = extension_worker(PY_EVAL_MODULE, None);
-	let harness = Harness::start_with_worker(Registry::new(), worker).await;
-	let registry = harness.server.registry();
-	let advertised = registry
-		.advertise(LoweringCaps {
-			strict_schema:  true,
-			grammar:        omp_catalog::GrammarBits::empty(),
-			maximum_tools:  None,
-			maximum_strict: None,
-		})
-		.expect("advertise worker registry");
-	assert_eq!(advertised.len(), 5);
-	assert_eq!(
-		registry
-			.presentation("py_eval")
-			.expect("python presentation"),
-		Presentation::Device
+async fn opt_in_py_eval_is_environment_routed_and_uses_a_fresh_namespace() {
+	let root = tempfile::tempdir().expect("py_eval workspace");
+	let state = tempfile::tempdir().expect("py_eval state");
+	let environment = ProjectEnvironment::attach(root.path(), state.path(), AttachOptions {
+		py_eval:            true,
+		approval_mode:      None,
+		trusted_extensions: Vec::new(),
+		contributed_values: Vec::new(),
+		con:                Arc::new(omp_con::Ctx::new()),
+		bridges:            RegistryBridges::default(),
+		spawn_idle_timeout: Some(2),
+	})
+	.await
+	.expect("start py_eval environment");
+	let eval_parent_lease = environment
+		.bind_eval_sdk_parent(
+			sf!("test-session"),
+			Arc::new(TestEvalParent { cwd: root.path().to_owned() }),
+		)
+		.expect("bind py_eval parent");
+	environment.client().set_admitter(AllowAdmission);
+	let registry = environment.registry();
+
+	assert_eq!(registry.locus("py_eval").expect("py_eval locus"), ToolLocus::Environment);
+	assert!(
+		!matches!(registry.route("py_eval").expect("py_eval route"), ToolRoute::Worker { .. }),
+		"built-in py_eval used the extension or named-worker route"
 	);
-	assert!(matches!(registry.route("py_eval").expect("python route"), ToolRoute::Worker { .. }));
 	assert_eq!(
 		registry
 			.live_identity("py_eval")
@@ -1908,10 +1950,29 @@ async fn opt_in_python_admits_its_soft_declaration_without_shadowing_native_eval
 			.as_deref(),
 		Some("1")
 	);
-	let verdict =
-		invoke_builtin(harness.client(), "builtin-python", "py_eval", "1", json!({"code":"40 + 2"}))
-			.await;
-	assert!(!verdict.is_error, "python worker route returned an error");
+
+	let seeded = invoke_builtin(
+		environment.client(),
+		"builtin-python-seed",
+		"py_eval",
+		"1",
+		json!({"code":"globals().__setitem__('sentinel', 42) or sentinel"}),
+	)
+	.await;
+	assert_eq!(ok_builtin_payload(seeded, "py_eval seed"), json!({"result": 42}));
+	let fresh = invoke_builtin(
+		environment.client(),
+		"builtin-python-fresh",
+		"py_eval",
+		"1",
+		json!({"code":"globals().get('sentinel', 'fresh')"}),
+	)
+	.await;
+	assert_eq!(
+		ok_builtin_payload(fresh, "py_eval fresh namespace"),
+		json!({"result": "fresh"})
+	);
+	drop(eval_parent_lease);
 }
 #[tokio::test]
 async fn extension_prelude_helper_bridges_eval_without_registering_a_tool() {
@@ -2499,10 +2560,7 @@ async fn worker_cancel_forwards_effects_unknown_once_and_respawn_serves_next_req
 	fs::write(site.path().join("envd_cancel_tools.py"), WORKER_CANCEL_EXTENSION)
 		.expect("write worker cancellation extension");
 	let mut worker = extension_worker("envd_cancel_tools", Some(site.path().to_owned()));
-	worker.health_timeout = Duration::from_secs(5);
 	worker.interrupt_grace = omp_core::Duration::new(150, omp_core::DurationUnit::Milliseconds);
-	worker.initial_backoff = Duration::from_millis(10);
-	worker.max_backoff = Duration::from_millis(50);
 	let respawn_timeout = worker.spawn_timeout;
 	let harness = Harness::start_with_worker(Registry::new(), worker).await;
 	let started = site.path().join("worker-started");
@@ -2688,10 +2746,7 @@ async fn same_worker_invocation_id_on_two_connections_cancels_only_its_owner() {
 	fs::write(site.path().join("envd_cancel_tools.py"), WORKER_CANCEL_EXTENSION)
 		.expect("write worker collision extension");
 	let mut worker = extension_worker("envd_cancel_tools", Some(site.path().to_owned()));
-	worker.health_timeout = Duration::from_secs(5);
 	worker.interrupt_grace = omp_core::Duration::new(100, omp_core::DurationUnit::Milliseconds);
-	worker.initial_backoff = Duration::from_millis(10);
-	worker.max_backoff = Duration::from_millis(50);
 	let respawn_timeout = worker.spawn_timeout;
 	let harness = Harness::start_with_worker(Registry::new(), worker).await;
 	let (client_b, client_b_task) = harness.connect("envd-contract-b").await;
@@ -3216,22 +3271,6 @@ async fn active_cancel_allows_queued_cancel_to_propagate_before_execution() {
 	};
 	assert_eq!(exit.status.expect("queued cancel status").outcome, ExecOutcome::Cancelled as i32);
 	assert!(!root.path().join("queued-race-marker").exists());
-}
-
-#[tokio::test]
-async fn real_embedded_python_worker_registers_configured_extensions_when_available() {
-	let (Some(site), Some(module)) =
-		(env::var_os("OMP_TEST_PY_SITE"), env::var_os("OMP_TEST_PY_MODULE"))
-	else {
-		return;
-	};
-	let module = Str::from(module.to_string_lossy().into_owned());
-	let config = extension_worker(module.as_str(), Some(PathBuf::from(site)));
-	let supervisor = ExtHostSupervisor::spawn(config)
-		.await
-		.expect("real embedded Python worker and extension");
-	assert!(!supervisor.registrations().is_empty(), "configured extension registered no tools");
-	supervisor.shutdown().await;
 }
 
 #[tokio::test]

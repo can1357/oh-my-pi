@@ -29,9 +29,9 @@ const ENTRY_SUFFIX: &str = ".doc";
 /// Default cache footprint: 256 MiB.
 pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024 * 1024;
 /// Entries not accessed for this long are eligible for age eviction.
-pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+pub const DEFAULT_MAX_AGE: Duration = Duration::from_hours(720);
 /// Atomic-write temporaries older than this are treated as crash orphans.
-pub const DEFAULT_ORPHAN_AGE: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_ORPHAN_AGE: Duration = Duration::from_mins(5);
 
 /// Content-addressed identity for one converter result.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -213,12 +213,11 @@ impl DocumentCache {
 		file
 			.read_to_end(&mut bytes)
 			.map_err(|source| io_error(path.clone(), source))?;
-		let (created_ms, content_len, blob) = match decode_header(&bytes, &path) {
-			Ok(header) => header,
-			Err(_) => {
-				remove_corrupt(&path);
-				return Ok(None);
-			},
+		let (created_ms, content_len, blob) = if let Ok(header) = decode_header(&bytes, &path) {
+			header
+		} else {
+			remove_corrupt(&path);
+			return Ok(None);
 		};
 		let expected_len = HEADER_BYTES
 			.checked_add(usize::try_from(content_len).map_err(|_| corrupt(path.clone()))?)
@@ -444,11 +443,11 @@ fn unix_millis(time: SystemTime) -> Result<u64, DocumentCacheError> {
 	u64::try_from(duration.as_millis()).map_err(|_| DocumentCacheError::InvalidTimestamp)
 }
 
-fn io_error(path: PathBuf, source: io::Error) -> DocumentCacheError {
+const fn io_error(path: PathBuf, source: io::Error) -> DocumentCacheError {
 	DocumentCacheError::Io { path, source }
 }
 
-fn corrupt(path: PathBuf) -> DocumentCacheError {
+const fn corrupt(path: PathBuf) -> DocumentCacheError {
 	DocumentCacheError::Corrupt { path }
 }
 

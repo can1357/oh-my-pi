@@ -1,12 +1,11 @@
-//! Dashboard and report slash commands (pi `builtin-session.ts`,
-//! `builtin-collaboration.ts`, `builtin-lifecycle.ts`): `/usage`, `/stats`,
-//! `/context`, `/trace`, `/changelog`, `/hotkeys`, `/debug`.
+//! Dashboard and report slash commands: `/usage`, `/stats`, `/context`,
+//! `/trace`, `/changelog`, `/hotkeys`, and `/debug`.
 //!
 //! `/usage` opens the full-screen dashboard; the report commands open a
-//! [`ReportPanel`]; `/debug` opens the selector or one inspector. pi's
-//! `/stats` and `/trace` opened its local stats web dashboard; on this host
-//! `/stats` syncs the application's usage index over every stored journal
-//! and shows pi's summary layout in a report, and `/trace` renders the last
+//! [`ReportPanel`]; `/debug` opens the selector or one inspector. The TS
+//! implementation opened a local stats web dashboard for `/stats` and `/trace`;
+//! here `/stats` syncs the application's usage index over every stored journal
+//! and shows a summary layout in a report, and `/trace` renders the last
 //! turn's timeline from the replica plus the recorded kernel notifications.
 
 use omp_con::{ConError, ConResult, Ctx};
@@ -40,9 +39,9 @@ pub const PALETTE: &[PaletteEntry] = &[
 ];
 
 const USAGE_USAGE: &str = "Usage: /usage [show|reset [account|active]]";
-/// pi `stats-dashboard.ts` status while `syncAllSessions` runs.
+/// Status while session files are synchronized.
 const STATS_SYNCING: &str = "Syncing session files...";
-/// pi `/trace` preflight (`builtin-collaboration.ts:200`).
+/// `/trace` preflight when no session file exists.
 const NO_TRACE: &str = "No session file yet — send a message first.";
 const NO_CHANGELOG: &str = "No changelog entries found.";
 
@@ -58,7 +57,7 @@ fn call(ctx: &Ctx, call: PanelCall) -> ConResult<()> {
 	post(ctx, HostAction::Call(call))
 }
 
-/// `/usage` subcommands (pi `parseSubcommand`).
+/// `/usage` subcommands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UsageOp {
 	/// Open the dashboard.
@@ -132,7 +131,7 @@ omp_con::cmd! {
 			words.as_str().split_whitespace().any(|word| word.eq_ignore_ascii_case("full"))
 		});
 		// An opener's `Err` is the host's status notice, so an empty or
-		// unavailable changelog reads exactly as pi's one-liner.
+		// unavailable changelog reads use this one-line status notice.
 		open(ctx, PanelOpener::new(move |cx| {
 			let text = match cx.services.changelog() {
 				Ok(text) => text,

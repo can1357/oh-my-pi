@@ -28,7 +28,7 @@ pub fn run(StatsArgs { json: emit_json, .. }: StatsArgs) -> miette::Result<()> {
 	} else {
 		let summary = omp_chat::overlays::stats::stats_report(&report);
 		// The shared projection uses Markdown emphasis inside the chat panel;
-		// stdout is plain text (pi applies terminal emphasis only on a TTY).
+		// stdout is plain text; terminal emphasis belongs only on a TTY.
 		print!("{}", summary.as_str().replace("**", ""));
 	}
 	Ok(())
@@ -122,31 +122,35 @@ mod tests {
 	#[test]
 	fn json_projection_keeps_aggregate_precision_and_group_identity() {
 		let report = StatsReport {
-			synced: 2,
-			files: 3,
-			requests: 4,
-			errors: 1,
-			input_tokens: 300,
-			output_tokens: 100,
-			cache_read: 100,
-			cache_write: 20,
-			cost_nano_usd: 1_250_000_000,
-			unpriced: 1,
-			avg_duration_ms: Some(900),
-			avg_ttft_ms: Some(120),
+			synced:            2,
+			files:             3,
+			requests:          4,
+			errors:            1,
+			input_tokens:      300,
+			output_tokens:     100,
+			cache_read:        100,
+			cache_write:       20,
+			cost_nano_usd:     1_250_000_000,
+			unpriced:          1,
+			avg_duration_ms:   Some(900),
+			avg_ttft_ms:       Some(120),
 			tokens_per_second: Some(42.5),
-			by_model: vec![StatsGroup {
-				key: Str::new_static("anthropic/claude"),
-				requests: 4,
+			by_model:          vec![StatsGroup {
+				key:           Str::new_static("anthropic/claude"),
+				requests:      4,
 				cost_nano_usd: 1_250_000_000,
-				unpriced: 1,
-				input_tokens: 300,
+				unpriced:      1,
+				input_tokens:  300,
 				output_tokens: 100,
-				cache_read: 100,
-				cache_write: 20,
+				cache_read:    100,
+				cache_write:   20,
 			}],
-			by_folder: Vec::new(),
-			tools: vec![StatsTool { tool: Str::new_static("read"), calls: 2, errors: 1 }],
+			by_folder:         Vec::new(),
+			tools:             vec![StatsTool {
+				tool:   Str::new_static("read"),
+				calls:  2,
+				errors: 1,
+			}],
 		};
 
 		let value = report_json(&report);

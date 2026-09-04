@@ -755,7 +755,7 @@ pub enum ClipboardWriteOutcome {
 }
 
 impl ClipboardWriteOutcome {
-	fn fallback(self, next: Self) -> Self {
+	const fn fallback(self, next: Self) -> Self {
 		match (self, next) {
 			(Self::Success, _) | (_, Self::Success) => Self::Success,
 			(Self::PermissionDenied, _) | (_, Self::PermissionDenied) => Self::PermissionDenied,
@@ -789,7 +789,7 @@ fn smart_clipboard(
 		Some(paths) => {
 			// The authoritative media file bytes beat Finder's co-advertised
 			// icon bitmap. Mixed Finder selections attach only previewable
-			// media, preserving their source order, as pi's per-URL loop does.
+			// media, preserving their source order.
 			let previewable = paths
 				.iter()
 				.filter(|path| classify_attachment_path(path).is_some())
@@ -840,8 +840,10 @@ impl ClipboardRead {
 			Self::Smart => read_clipboard(),
 			Self::Text => read_clipboard_text()
 				.filter(|text| !text.is_empty())
-				.map(|text| ClipboardReadOutcome::Payload(Clipboard::Text(text)))
-				.unwrap_or_else(|| classify_clipboard_miss(Self::Text)),
+				.map_or_else(
+					|| classify_clipboard_miss(Self::Text),
+					|text| ClipboardReadOutcome::Payload(Clipboard::Text(text)),
+				),
 		}
 	}
 }
@@ -1801,7 +1803,7 @@ mod tests {
 
 	#[test]
 	fn previewable_file_url_wins_over_co_advertised_icon_bitmap() {
-		// pi #8769: Finder advertises both the authoritative file URL and a
+		// Finder advertises both the authoritative file URL and a
 		// generated icon bitmap. Image and video files must both beat the icon.
 		for path in ["/Users/me/Desktop/screenshot.png", "/Users/me/Desktop/launch.mov"] {
 			let clipboard = smart_clipboard(

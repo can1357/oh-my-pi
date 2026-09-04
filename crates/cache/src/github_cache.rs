@@ -68,7 +68,7 @@ pub enum GithubCacheStatus {
 pub struct GithubCacheEntry {
 	/// Exact cached bytes.
 	pub body:          Bytes,
-	/// GitHub ETag used for conditional refresh.
+	/// GitHub `ETag` used for conditional refresh.
 	pub etag:          Option<Str>,
 	/// Successful fetch time in Unix milliseconds.
 	pub fetched_at_ms: u64,
@@ -99,9 +99,9 @@ pub enum GithubCacheError {
 /// Runtime policy for the rebuildable GitHub response cache.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GithubCachePolicy {
-	enabled:   bool,
-	soft_ttl:  Duration,
-	hard_ttl:  Duration,
+	enabled:  bool,
+	soft_ttl: Duration,
+	hard_ttl: Duration,
 }
 
 impl GithubCachePolicy {
@@ -120,7 +120,10 @@ pub struct GithubCache {
 
 impl GithubCache {
 	/// Opens a cache database and creates its schema when absent.
-	pub fn open(path: impl AsRef<Path>, policy: GithubCachePolicy) -> Result<Self, GithubCacheError> {
+	pub fn open(
+		path: impl AsRef<Path>,
+		policy: GithubCachePolicy,
+	) -> Result<Self, GithubCacheError> {
 		let connection = Connection::open(path)?;
 		connection.execute_batch(
 			"PRAGMA journal_mode=WAL;
@@ -141,7 +144,8 @@ impl GithubCache {
 		Ok(Self { connection: Mutex::new(connection), policy })
 	}
 
-	/// Returns an entry, retaining soft-expired bytes for refresh-failure fallback.
+	/// Returns an entry, retaining soft-expired bytes for refresh-failure
+	/// fallback.
 	///
 	/// Disabled caches always miss. Entries older than the hard TTL are deleted
 	/// before returning a miss, even when the soft TTL is longer.
@@ -329,11 +333,8 @@ mod tests {
 	#[test]
 	fn cache_tracks_fresh_stale_conditional_refresh_and_repo_invalidation() {
 		let directory = tempfile::tempdir().expect("cache directory");
-		let cache = GithubCache::open(
-			directory.path().join("github.sqlite3"),
-			policy(true, 60, 600),
-		)
-		.expect("cache");
+		let cache = GithubCache::open(directory.path().join("github.sqlite3"), policy(true, 60, 600))
+			.expect("cache");
 		let key = GithubCacheKey::new(
 			GithubResourceKind::PullRequest,
 			"Owner/Repo",
@@ -397,11 +398,8 @@ mod tests {
 	#[test]
 	fn list_filters_and_comment_modes_have_distinct_keys() {
 		let directory = tempfile::tempdir().expect("cache directory");
-		let cache = GithubCache::open(
-			directory.path().join("github.sqlite3"),
-			policy(true, 60, 600),
-		)
-		.expect("cache");
+		let cache = GithubCache::open(directory.path().join("github.sqlite3"), policy(true, 60, 600))
+			.expect("cache");
 		let open = GithubCacheKey::new(
 			GithubResourceKind::Issue,
 			"owner/repo",
@@ -432,25 +430,28 @@ mod tests {
 	#[test]
 	fn policy_bypasses_disabled_cache_and_hard_ttl_dominates_soft_ttl() {
 		let directory = tempfile::tempdir().expect("cache directory");
-		let key =
-			GithubCacheKey::new(GithubResourceKind::Issue, "owner/repo", Some(9), "detail")
-				.expect("key");
+		let key = GithubCacheKey::new(GithubResourceKind::Issue, "owner/repo", Some(9), "detail")
+			.expect("key");
 		let enabled_path = directory.path().join("enabled.sqlite3");
 		let cache = GithubCache::open(&enabled_path, policy(true, 300, 10)).expect("enabled cache");
 		cache.put(&key, b"expired", None, 1_000).expect("put");
-		assert!(cache.get(&key, 11_001).expect("hard-expired read").is_none());
 		assert!(
 			cache
-				.get(&key, 1_000)
-				.expect("deleted-row read")
-				.is_none(),
+				.get(&key, 11_001)
+				.expect("hard-expired read")
+				.is_none()
+		);
+		assert!(
+			cache.get(&key, 1_000).expect("deleted-row read").is_none(),
 			"hard-expired rows are removed from storage"
 		);
 
 		let disabled =
 			GithubCache::open(directory.path().join("disabled.sqlite3"), policy(false, 300, 600))
 				.expect("disabled cache");
-		disabled.put(&key, b"ignored", None, 1_000).expect("disabled put");
+		disabled
+			.put(&key, b"ignored", None, 1_000)
+			.expect("disabled put");
 		assert!(disabled.get(&key, 1_000).expect("disabled get").is_none());
 		assert!(!disabled.touch(&key, 2_000).expect("disabled touch"));
 	}

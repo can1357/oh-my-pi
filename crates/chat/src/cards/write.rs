@@ -33,13 +33,13 @@ impl Card for WriteCard {
 	}
 }
 
-/// Collapsed streaming previews follow the edge with a bounded tail window
-/// (pi `WRITE_STREAMING_PREVIEW_LINES`); `@expanded` lifts the cap.
+/// Collapsed streaming previews follow the edge with a bounded tail window;
+/// `@expanded` lifts the cap.
 const STREAMING_PREVIEW_LINES: usize = 12;
 
-/// Numbers every segment of the streamed content the way pi's
-/// `formatStreamingContent` does: a trailing newline yields a numbered empty
-/// row, and the gutter keeps counting past the fixture's two lines.
+/// Numbers every segment of streamed content: a trailing newline yields a
+/// numbered empty row, and the gutter keeps counting past the fixture's two
+/// lines.
 fn render_streaming(path: &str, content: &str, expanded: bool, _ui: &UiContext) -> Component {
 	let total = content.split('\n').count();
 	let start = if expanded {
@@ -152,8 +152,7 @@ fn render_failed(view: &CardView<'_>, path: &str, _ui: &UiContext) -> Component 
 	.into_component()
 }
 
-/// pi `countLines` / `normalizeDisplayText(content).split("\n")`: every
-/// newline-delimited segment, so a trailing newline yields a final empty
+/// Every newline-delimited segment, so a trailing newline yields a final empty
 /// numbered row and counts as a line; empty content has none.
 fn segments(content: &str) -> Vec<&str> {
 	if content.is_empty() {

@@ -1,4 +1,4 @@
-//! Agent slash commands (pi `builtin-session.ts` `/agents` and `/hub`):
+//! Agent slash commands:
 //! `/agents` opens the definitions browser, `/hub` the live supervisor, and
 //! `transcript <id>` — the console line the hub runs on Enter (ADR 0014) —
 //! stacks the transcript viewer for one child over the hub.

@@ -6,12 +6,12 @@ use std::sync::Arc;
 use async_stream::stream;
 use bytes::Bytes;
 use omp_agent::{DispatchPolicy, Kernel, RunControl, StaticPrompt, TurnInput};
-use omp_core::Str;
-use omp_e2e::support::{ScriptedInference, create_session};
-use omp_inference::{
+use omp_ai::{
 	BlockKind, ChatEvent, Completion, ExecutionReceipt, FinishReason, ToolCall, Usage,
 	call::OpaqueJson,
 };
+use omp_core::Str;
+use omp_e2e::support::{ScriptedInference, create_session};
 use omp_journal::blob::BlobStore;
 use omp_tool::{
 	Claims, Constraint, Effects, Ev, IncomingParams, Part, Precedence, Presentation, PromptCaps,

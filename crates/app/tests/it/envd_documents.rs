@@ -4,13 +4,13 @@ use std::{fs, future::Future, sync::mpsc, thread, time::Duration};
 
 use bytes::Bytes;
 use omp_core::{Hash32, Str, sf};
-use omp_docserver::{
-	Environment, ServerConfig,
-	connection::{ConnectionConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, serve_connection},
-};
 use omp_envd::{
 	blobs::BlobHost,
 	docs::DocumentHost,
+	docserver::{
+		Environment, ServerConfig,
+		connection::{ConnectionConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, serve_connection},
+	},
 	workspace::{WorkspaceError, WorkspaceHost},
 };
 use omp_proto::{

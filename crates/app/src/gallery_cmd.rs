@@ -94,7 +94,7 @@ fn run_tool(args: &GalleryArgs) -> miette::Result<()> {
 		}
 		return Ok(());
 	}
-	// Pi's block layout: a leading blank and the section rule per tool, then a
+	// The block layout has a leading blank and the section rule per tool, then a
 	// blank, the dim state label, and the card frame per lifecycle state.
 	let mut current = None;
 	for section in sections {

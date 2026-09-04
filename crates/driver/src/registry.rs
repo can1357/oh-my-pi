@@ -13,21 +13,13 @@ use std::{
 	time::Duration,
 };
 
-use omp_catalog::{
-	CatalogOverlay, ContextStrategy, DiscoveryDefaults, DiscoveryNormalizer, OverlaySource,
-	OverlayStack, Pricing, ProvenanceKind, ProvenanceSource, UnsafeTrustScope,
-	provider::AuthSpecKind,
-	snapshot,
-};
-use omp_core::{Hash32, SecretString, Str, sf};
-use omp_envd::browser_fetch::BrowserFetchAdapter;
 #[cfg(target_os = "macos")]
-use omp_inference::auth::FallbackKeySource;
+use omp_ai::auth::FallbackKeySource;
 #[cfg(feature = "local-applefm")]
-use omp_inference::provider::builtin::LocalRouteBackend;
+use omp_ai::provider::builtin::LocalRouteBackend;
 #[cfg(feature = "local-applefm")]
-use omp_inference::receipt::ReasonId;
-use omp_inference::{
+use omp_ai::receipt::ReasonId;
+use omp_ai::{
 	Registry,
 	account::{
 		AccountPool, AccountStateStore, AccountStateStoreError, RefreshCoordinator, RefreshPolicy,
@@ -75,6 +67,13 @@ use omp_inference::{
 	session::{ConversationError, ConversationSessionPlanner},
 	transport::{http::HttpTransport, websocket_transport::WebSocketTransport},
 };
+use omp_catalog::{
+	CatalogOverlay, ContextStrategy, DiscoveryDefaults, DiscoveryNormalizer, OverlaySource,
+	OverlayStack, Pricing, ProvenanceKind, ProvenanceSource, UnsafeTrustScope,
+	provider::AuthSpecKind, snapshot,
+};
+use omp_core::{Hash32, SecretString, Str, sf};
+use omp_envd::browser_fetch::BrowserFetchAdapter;
 use omp_serve::inference::InferenceRpc;
 use tokio::time;
 
@@ -148,7 +147,7 @@ pub enum RegistryError {
 	CatalogComposition(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 	/// Registry construction or route service failed.
 	#[error(transparent)]
-	Inference(#[from] Box<omp_inference::Error>),
+	Inference(#[from] Box<omp_ai::Error>),
 	/// Encrypted credential state could not be opened.
 	#[error(transparent)]
 	CredentialStore(#[from] StoreError),
@@ -178,7 +177,7 @@ pub enum RegistryError {
 	OAuthCustom(#[from] OAuthCustomDispatchError),
 	/// Refresh coordination policy was invalid.
 	#[error(transparent)]
-	RefreshPolicy(#[from] omp_inference::account::RefreshPolicyError),
+	RefreshPolicy(#[from] omp_ai::account::RefreshPolicyError),
 	/// Catalog authentication could not be assembled.
 	#[error(transparent)]
 	AuthManager(#[from] AuthManagerBuildError),
@@ -187,8 +186,8 @@ pub enum RegistryError {
 	Conversation(#[from] ConversationError),
 }
 
-impl From<omp_inference::Error> for RegistryError {
-	fn from(error: omp_inference::Error) -> Self {
+impl From<omp_ai::Error> for RegistryError {
+	fn from(error: omp_ai::Error) -> Self {
 		Self::Inference(Box::new(error))
 	}
 }
@@ -331,8 +330,7 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 		.map_err(RegistryError::Catalog)?
 		.clone();
 	let loaded = if data_dir.exists() {
-		crate::discovery::models::load_or_import_legacy(data_dir)
-			.map_err(catalog_composition)?
+		crate::discovery::models::load_or_import_legacy(data_dir).map_err(catalog_composition)?
 	} else {
 		None
 	};
@@ -355,8 +353,7 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 	if !cache_path.exists() {
 		return Ok(Arc::new(configured));
 	}
-	let store = omp_inference::discovery::DiscoveryStore::open(&cache_path)
-		.map_err(catalog_composition)?;
+	let store = omp_ai::discovery::DiscoveryStore::open(&cache_path).map_err(catalog_composition)?;
 	let now_ms = std::time::SystemTime::now()
 		.duration_since(std::time::UNIX_EPOCH)
 		.unwrap_or_default()
@@ -371,20 +368,19 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 	let mut cache_keys = BTreeSet::new();
 	for route in configured.routes() {
 		if route.discovery.is_some() {
-			cache_keys.insert(omp_inference::discovery::DiscoveryCacheKey::provider(
-				route.provider.clone(),
-			));
+			cache_keys.insert(omp_ai::discovery::DiscoveryCacheKey::provider(route.provider.clone()));
 		}
 	}
 	for probe in probes {
-		cache_keys.insert(omp_inference::discovery::DiscoveryCacheKey::endpoint(
-			probe.provider,
-			&probe.endpoint,
-		));
+		cache_keys
+			.insert(omp_ai::discovery::DiscoveryCacheKey::endpoint(probe.provider, &probe.endpoint));
 	}
 	let mut normalized = Vec::new();
 	for key in cache_keys {
-		let Some(cached) = store.load_fresh(&key, now_ms).map_err(catalog_composition)? else {
+		let Some(cached) = store
+			.load_fresh(&key, now_ms)
+			.map_err(catalog_composition)?
+		else {
 			continue;
 		};
 		let Some(provider) = configured.provider(&key.provider) else {
@@ -440,9 +436,7 @@ pub fn production_catalog(data_dir: &Path) -> Result<Arc<snapshot::Catalog>, Reg
 	Ok(Arc::new(catalog))
 }
 
-fn catalog_composition(
-	source: impl std::error::Error + Send + Sync + 'static,
-) -> RegistryError {
+fn catalog_composition(source: impl std::error::Error + Send + Sync + 'static) -> RegistryError {
 	RegistryError::CatalogComposition(Box::new(source))
 }
 
@@ -450,13 +444,13 @@ async fn refresh_model_discovery_cache(
 	data_dir: &Path,
 	catalog: Arc<snapshot::Catalog>,
 ) -> Result<Arc<snapshot::Catalog>, RegistryError> {
-	use omp_inference::discovery::{
+	use omp_ai::discovery::{
 		DiscoveryCacheKey, DiscoveryStore, DiscoveryStoreError, ProviderDiscoveryState,
 		ProviderLifecycle,
 	};
 
-	let loaded = crate::discovery::models::load_or_import_legacy(data_dir)
-		.map_err(catalog_composition)?;
+	let loaded =
+		crate::discovery::models::load_or_import_legacy(data_dir).map_err(catalog_composition)?;
 	let probes = crate::discovery::models::discovery_probes(
 		loaded.as_ref().map(|loaded| &loaded.config),
 		&catalog,
@@ -465,9 +459,8 @@ async fn refresh_model_discovery_cache(
 	if probes.is_empty() {
 		return Ok(catalog);
 	}
-	let store = Arc::new(
-		DiscoveryStore::open(&data_dir.join("models.db")).map_err(catalog_composition)?,
-	);
+	let store =
+		Arc::new(DiscoveryStore::open(&data_dir.join("models.db")).map_err(catalog_composition)?);
 	let now_ms = std::time::SystemTime::now()
 		.duration_since(std::time::UNIX_EPOCH)
 		.unwrap_or_default()
@@ -492,8 +485,7 @@ async fn refresh_model_discovery_cache(
 			.is_some_and(|state| {
 				state.state == ProviderDiscoveryState::Failed
 					&& state.retry_at_ms.is_some_and(|retry| retry > now_ms)
-			})
-		{
+			}) {
 			continue;
 		}
 		store
@@ -515,10 +507,7 @@ async fn refresh_model_discovery_cache(
 				.await
 			{
 				Ok(mut rows) => {
-					crate::discovery::models::apply_runtime_discovery_overrides(
-						&probe,
-						&mut rows,
-					);
+					crate::discovery::models::apply_runtime_discovery_overrides(&probe, &mut rows);
 					for row in &mut rows {
 						row.observed_at_ms = Some(now_ms);
 					}
@@ -615,9 +604,9 @@ fn production_codex_redemption(data_dir: &Path) -> Result<Option<CodexRedemption
 		..CredentialBrokerEngines::default()
 	})
 	.map_err(|_| {
-		RegistryError::Inference(Box::new(omp_inference::Error::planning(
-			omp_inference::ErrorKind::InvalidRequest,
-			omp_inference::ErrorDetail::target(sf!("catalog-credential-broker-invalid")),
+		RegistryError::Inference(Box::new(omp_ai::Error::planning(
+			omp_ai::ErrorKind::InvalidRequest,
+			omp_ai::ErrorDetail::target(sf!("catalog-credential-broker-invalid")),
 			Default::default(),
 		)))
 	})?;
@@ -668,7 +657,7 @@ pub struct InferenceSessionOverrides {
 	/// Shared extension-host usage registry allocated before inference assembly.
 	pub usage_fetchers:          Option<UsageFetcherRegistry>,
 	/// Session-owned provider response hook sink.
-	pub provider_response_hooks: Option<omp_inference::ProviderResponseHooks>,
+	pub provider_response_hooks: Option<omp_ai::ProviderResponseHooks>,
 	/// Catalog composed with frozen extension providers before model selection.
 	pub catalog:                 Option<Arc<snapshot::Catalog>>,
 	/// Effective console context for the session.
@@ -765,9 +754,9 @@ pub async fn production_inference_for_session(
 		(Some(provider), Some(secret)) => Some((provider.clone(), secret)),
 		(None, None) => None,
 		(Some(_), None) | (None, Some(_)) => {
-			return Err(RegistryError::Inference(Box::new(omp_inference::Error::planning(
-				omp_inference::ErrorKind::InvalidRequest,
-				omp_inference::ErrorDetail::target(sf!("invocation-credential-override-incomplete")),
+			return Err(RegistryError::Inference(Box::new(omp_ai::Error::planning(
+				omp_ai::ErrorKind::InvalidRequest,
+				omp_ai::ErrorDetail::target(sf!("invocation-credential-override-incomplete")),
 				Default::default(),
 			))));
 		},
@@ -784,7 +773,7 @@ pub async fn production_inference_for_session(
 		)
 		.await?;
 	let usage_fetchers = usage_manager.fetchers();
-	let search_settings = omp_inference::search_settings::WebSearchSettings::from_con(ctx.as_ref());
+	let search_settings = omp_ai::search_settings::WebSearchSettings::from_con(ctx.as_ref());
 	let rpc = InferenceRpc::new(registry.clone(), sessions, tool_registry)
 		.with_session_overrides(provider, overrides.prompt_cache_affinity)
 		.with_provider_response_hooks(provider_response_hooks.clone())
@@ -814,19 +803,19 @@ pub async fn production_inference_for_session(
 fn inference_settings(
 	ctx: &omp_con::Ctx,
 	project_root: Option<&Path>,
-) -> omp_inference::InferenceSettings {
+) -> omp_ai::InferenceSettings {
 	let cwd = project_root
 		.map(Path::to_path_buf)
 		.or_else(|| env::current_dir().ok())
 		.unwrap_or_default();
 	let home = env::var_os("HOME").map_or_else(|| cwd.clone(), std::path::PathBuf::from);
-	omp_inference::InferenceSettings {
-		retry:                     omp_inference::settings::RetrySettings::from_con(ctx),
-		sampling:                  omp_inference::settings::SamplingSettings::from_con(ctx),
-		providers:                 omp_inference::settings::ProviderRuntimeSettings::from_con(ctx),
+	omp_ai::InferenceSettings {
+		retry:                     omp_ai::settings::RetrySettings::from_con(ctx),
+		sampling:                  omp_ai::settings::SamplingSettings::from_con(ctx),
+		providers:                 omp_ai::settings::ProviderRuntimeSettings::from_con(ctx),
 		model:                     omp_catalog::settings::ModelSettings::from_con(ctx)
 			.resolve_path_scopes(&cwd, &home),
-		context_promotion_enabled: omp_inference::pi_settings::AI_CONTEXT_PROMOTION_ENABLED.get(ctx),
+		context_promotion_enabled: omp_ai::settings::AI_CONTEXT_PROMOTION_ENABLED.get(ctx),
 	}
 }
 
@@ -850,7 +839,7 @@ async fn production_assembly(
 		credential_store,
 		None,
 		UsageFetcherRegistry::default(),
-		omp_inference::InferenceSettings::default(),
+		omp_ai::InferenceSettings::default(),
 	)
 	.await
 }
@@ -860,7 +849,7 @@ async fn production_assembly_for_session(
 	credential_store: Arc<CredentialStore>,
 	invocation_key: Option<(omp_catalog::ProviderId, SecretString)>,
 	usage_fetchers: UsageFetcherRegistry,
-	inference_settings: omp_inference::InferenceSettings,
+	inference_settings: omp_ai::InferenceSettings,
 ) -> Result<
 	(
 		Registry,
@@ -889,7 +878,7 @@ async fn production_assembly_with_catalog(
 	credential_store: Arc<CredentialStore>,
 	invocation_key: Option<(omp_catalog::ProviderId, SecretString)>,
 	usage_fetchers: UsageFetcherRegistry,
-	inference_settings: omp_inference::InferenceSettings,
+	inference_settings: omp_ai::InferenceSettings,
 	catalog: Option<Arc<snapshot::Catalog>>,
 ) -> Result<
 	(
@@ -939,9 +928,9 @@ async fn production_assembly_with_catalog(
 		..CredentialBrokerEngines::default()
 	})
 	.map_err(|_| {
-		RegistryError::Inference(Box::new(omp_inference::Error::planning(
-			omp_inference::ErrorKind::InvalidRequest,
-			omp_inference::ErrorDetail::target(sf!("catalog-credential-broker-invalid")),
+		RegistryError::Inference(Box::new(omp_ai::Error::planning(
+			omp_ai::ErrorKind::InvalidRequest,
+			omp_ai::ErrorDetail::target(sf!("catalog-credential-broker-invalid")),
 			Default::default(),
 		)))
 	})?;
@@ -1030,9 +1019,9 @@ async fn production_assembly_with_catalog(
 		..CredentialBrokerEngines::default()
 	})
 	.map_err(|_| {
-		RegistryError::Inference(Box::new(omp_inference::Error::planning(
-			omp_inference::ErrorKind::InvalidRequest,
-			omp_inference::ErrorDetail::target(sf!("catalog-credential-broker-invalid",)),
+		RegistryError::Inference(Box::new(omp_ai::Error::planning(
+			omp_ai::ErrorKind::InvalidRequest,
+			omp_ai::ErrorDetail::target(sf!("catalog-credential-broker-invalid",)),
 			Default::default(),
 		)))
 	})?;
@@ -1040,9 +1029,9 @@ async fn production_assembly_with_catalog(
 		Some((provider, secret)) => credentials
 			.with_api_key_override(&catalog, &provider, secret)
 			.map_err(|_| {
-				RegistryError::Inference(Box::new(omp_inference::Error::planning(
-					omp_inference::ErrorKind::InvalidRequest,
-					omp_inference::ErrorDetail::target(sf!("invocation-credential-override-invalid")),
+				RegistryError::Inference(Box::new(omp_ai::Error::planning(
+					omp_ai::ErrorKind::InvalidRequest,
+					omp_ai::ErrorDetail::target(sf!("invocation-credential-override-invalid")),
 					Default::default(),
 				)))
 			})?,
@@ -1131,7 +1120,7 @@ async fn production_assembly_with_catalog(
 	let dependencies = dependencies.with_usage_manager(usage_manager);
 	#[cfg(feature = "local-applefm")]
 	let dependencies = {
-		use omp_inference::local::applefm::{AppleFmCodec, AppleFmTransport, FRAMEWORK_TIMEOUT};
+		use omp_ai::local::applefm::{AppleFmCodec, AppleFmTransport, FRAMEWORK_TIMEOUT};
 		match AppleFmTransport::new() {
 			Ok(transport) => {
 				let backend =

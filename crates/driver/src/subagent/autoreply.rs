@@ -1,8 +1,7 @@
 //! Recipient-owned IRC side-channel replies.
 //!
-//! This is the Rust counterpart of pi's `IrcBridge.#runAutoReply`: only a
-//! busy recipient accepts the obligation, the model call is ephemeral, and
-//! the result crosses back through the same authenticated session authority
+//! A busy recipient alone accepts the obligation. The model call is ephemeral,
+//! and its result crosses back through the same authenticated session authority
 //! as ordinary peer traffic.
 
 use std::{
@@ -17,12 +16,12 @@ use std::{
 
 use futures::StreamExt as _;
 use omp_agent::{AutoreplyRequest, PeerAutoreply, ReplyObligations, Up};
-use omp_core::{Str, StrMut, Ulid};
-use omp_dom::Dom;
-use omp_inference::{
+use omp_ai::{
 	AnswerBody, Call, CallMeta, ChatEvent, ChatRequest, ContentPart, ExecutionBudget, Message,
 	NegotiationPolicy, OperationCall, RequestId, Role, Sampling, Setting, Target,
 };
+use omp_core::{Str, StrMut, Ulid};
+use omp_dom::Dom;
 use omp_journal::data::{IrcDirection, IrcTraffic};
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
@@ -49,7 +48,7 @@ trait ReplyModel: Send + Sync {
 /// Cloneable model authority for ephemeral peer replies.
 #[derive(Clone)]
 enum AutoreplyClient {
-	Production { registry: omp_inference::Registry, target: Target },
+	Production { registry: omp_ai::Registry, target: Target },
 	Gateway(GatewayInference),
 }
 
@@ -89,7 +88,7 @@ impl ReplyModel for AutoreplyClient {
 						debug_session:  None,
 						response_hooks: Default::default(),
 					};
-					let execute = omp_inference::router::execute_registry_call(
+					let execute = omp_ai::router::execute_registry_call(
 						registry.clone(),
 						Call::new(meta, OperationCall::Chat(Arc::new(request))),
 						Duration::from_secs(120),
@@ -390,7 +389,7 @@ enum AutoreplyError {
 	#[error("automatic peer reply inference failed")]
 	Inference {
 		#[source]
-		source: omp_inference::Error,
+		source: omp_ai::Error,
 	},
 	#[error("automatic peer reply system prompt projection failed")]
 	Prompt {
@@ -405,7 +404,7 @@ enum AutoreplyError {
 	#[error("automatic peer reply history projection failed")]
 	Projection {
 		#[source]
-		source: omp_inference::ThreadProjectionError,
+		source: omp_ai::ThreadProjectionError,
 	},
 	#[error("automatic peer reply completed without text")]
 	EmptyOutput,

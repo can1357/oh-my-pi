@@ -199,7 +199,7 @@ impl BankStore {
 
 	/// Applies the normalized transient working-memory eviction policy to this
 	/// bank handle.
-	pub(crate) fn with_working_policy(mut self, limit: usize, ttl_hours: u64) -> Self {
+	pub(crate) const fn with_working_policy(mut self, limit: usize, ttl_hours: u64) -> Self {
 		self.working_limit = limit;
 		self.working_ttl_hours = ttl_hours;
 		self
@@ -267,10 +267,10 @@ impl BankStore {
 				 superseded_by IS NULL ORDER BY rowid LIMIT 1",
 			)?;
 			let mut refresh = transaction.prepare(
-				"UPDATE working_memory SET importance = MAX(importance, ?2), timestamp = ?3, source \
-				 = ?4, embed_text = COALESCE(?5, embed_text), metadata_json = ?6, veracity = CASE \
-				 WHEN ?7 != 'unknown' THEN ?7 ELSE veracity END, memory_type = COALESCE(?8, \
-				 memory_type) WHERE id = ?1",
+				"UPDATE working_memory SET importance = MAX(importance, ?2), timestamp = ?3, source = \
+				 ?4, embed_text = COALESCE(?5, embed_text), metadata_json = ?6, veracity = CASE WHEN \
+				 ?7 != 'unknown' THEN ?7 ELSE veracity END, memory_type = COALESCE(?8, memory_type) \
+				 WHERE id = ?1",
 			)?;
 			let mut insert = transaction.prepare(
 				"INSERT OR IGNORE INTO working_memory\n(id, content, embed_text, source, timestamp, \
@@ -299,10 +299,10 @@ impl BankStore {
 					ids.push(Str::new(existing));
 					continue;
 				}
-				let id = input
-					.stable_id
-					.map(Str::new)
-					.unwrap_or_else(|| new_memory_id(self.bank.as_str(), input.session_id, content));
+				let id = input.stable_id.map_or_else(
+					|| new_memory_id(self.bank.as_str(), input.session_id, content),
+					Str::new,
+				);
 				if insert.execute(params![
 					id.as_str(),
 					content,
@@ -821,7 +821,7 @@ impl BankStore {
 			let record = row_to_record(row, &self.bank, MemoryTier::Fact)?;
 			let lexical = 1.0 / (1.0 + rank.abs());
 			Ok(RankedCandidate {
-				score: (lexical * 0.8 + record.importance * 0.2).clamp(0.0, 1.0),
+				score: f64::mul_add(record.importance, 0.2, lexical * 0.8).clamp(0.0, 1.0),
 				record,
 			})
 		})?;
@@ -969,8 +969,7 @@ impl BankStore {
 			if records.len() == limit {
 				return Ok((records, true));
 			}
-			let content_bytes =
-				usize::try_from(row.get::<_, i64>(11)?).unwrap_or(usize::MAX);
+			let content_bytes = usize::try_from(row.get::<_, i64>(11)?).unwrap_or(usize::MAX);
 			let Some(next) = bytes.checked_add(content_bytes) else {
 				return Ok((records, true));
 			};
@@ -1165,7 +1164,7 @@ impl BankStore {
 			let record = row_to_record(row, &self.bank, tier)?;
 			let lexical = 1.0 / (1.0 + rank.abs());
 			Ok(RankedCandidate {
-				score: (lexical * 0.8 + record.importance * 0.2).clamp(0.0, 1.0),
+				score: f64::mul_add(record.importance, 0.2, lexical * 0.8).clamp(0.0, 1.0),
 				record,
 			})
 		})?;
@@ -1278,10 +1277,10 @@ fn normalize_authoritative_rows(transaction: &rusqlite::Transaction<'_>) -> Resu
 		transaction.execute(
 			&format!(
 				"UPDATE {table} SET timestamp = COALESCE(NULLIF(timestamp, ''), NULLIF(created_at, \
-				 ''), CURRENT_TIMESTAMP), session_id = COALESCE(session_id, 'default'), importance \
-				 = MIN(1.0, MAX(0.0, COALESCE(importance, 0.5))), veracity = \
-				 COALESCE(veracity, 'unknown'), memory_type = COALESCE(memory_type, 'unknown'), \
-				 scope = COALESCE(scope, 'bank')"
+				 ''), CURRENT_TIMESTAMP), session_id = COALESCE(session_id, 'default'), importance = \
+				 MIN(1.0, MAX(0.0, COALESCE(importance, 0.5))), veracity = COALESCE(veracity, \
+				 'unknown'), memory_type = COALESCE(memory_type, 'unknown'), scope = COALESCE(scope, \
+				 'bank')"
 			),
 			[],
 		)?;
@@ -1296,11 +1295,9 @@ fn normalize_authoritative_rows(transaction: &rusqlite::Transaction<'_>) -> Resu
 
 fn table_exists(transaction: &rusqlite::Transaction<'_>, table: &str) -> Result<bool> {
 	transaction
-		.query_row(
-			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-			[table],
-			|_| Ok(()),
-		)
+		.query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |_| {
+			Ok(())
+		})
 		.optional()
 		.map(|opt| opt.is_some())
 		.map_err(Into::into)
@@ -1328,7 +1325,8 @@ fn add_column_if_missing(
 	definition: &str,
 ) -> Result<()> {
 	if !column_exists(transaction, table, column)? {
-		transaction.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
+		transaction
+			.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
 	}
 	Ok(())
 }
@@ -1451,7 +1449,7 @@ fn durable_generation(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Resu
 }
 
 fn encode_vector(vector: &[f32]) -> Vec<u8> {
-	let mut bytes = Vec::with_capacity(vector.len() * size_of::<f32>());
+	let mut bytes = Vec::with_capacity(std::mem::size_of_val(vector));
 	for value in vector {
 		bytes.extend_from_slice(&value.to_le_bytes());
 	}
@@ -1463,8 +1461,8 @@ fn decode_vector(bytes: &[u8], dimensions: usize) -> Option<Vec<f32>> {
 		return None;
 	}
 	let mut vector = Vec::with_capacity(dimensions);
-	for chunk in bytes.chunks_exact(size_of::<f32>()) {
-		let value = f32::from_le_bytes(chunk.try_into().ok()?);
+	for chunk in bytes.as_chunks::<{ size_of::<f32>() }>().0 {
+		let value = f32::from_le_bytes(*chunk);
 		if !value.is_finite() {
 			return None;
 		}
@@ -1602,7 +1600,7 @@ fn prune_working_transaction(
 	Ok(removed)
 }
 
-const RESET_REBUILDABLE_INDEXES: &str = r#"
+const RESET_REBUILDABLE_INDEXES: &str = r"
 DROP TRIGGER IF EXISTS wm_ai;
 DROP TRIGGER IF EXISTS wm_ad;
 DROP TRIGGER IF EXISTS wm_au;
@@ -1618,18 +1616,18 @@ DROP TABLE IF EXISTS fts_facts;
 DROP TABLE IF EXISTS memory_embeddings;
 DROP TABLE IF EXISTS triples;
 DROP TABLE IF EXISTS memory_links;
-"#;
+";
 
-const REBUILD_SEARCH_INDEXES: &str = r#"
+const REBUILD_SEARCH_INDEXES: &str = r"
 INSERT INTO fts_working(id, content)
 SELECT id, COALESCE(embed_text, content) FROM working_memory;
 INSERT INTO fts_episodes(id, content)
 SELECT id, content FROM episodic_memory;
 INSERT INTO fts_facts(fact_id, content)
 SELECT fact_id, trim(subject || ' ' || predicate || ' ' || object) FROM facts;
-"#;
+";
 
-const SCHEMA: &str = r#"
+const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS bank_scope (
 	singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
 	identity_root TEXT NOT NULL,
@@ -1765,7 +1763,7 @@ CREATE TABLE IF NOT EXISTS scope_adoptions (
 	bank TEXT NOT NULL,
 	PRIMARY KEY(identity_root, bank)
 );
-"#;
+";
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -2011,12 +2009,8 @@ mod tests {
 			.expect("legacy schema");
 		drop(connection);
 
-		let store = BankStore::open(
-			&path,
-			BankId::configured("default").expect("bank"),
-			root,
-		)
-		.expect("migration");
+		let store = BankStore::open(&path, BankId::configured("default").expect("bank"), root)
+			.expect("migration");
 		assert_eq!(
 			store
 				.get("legacy-memory")

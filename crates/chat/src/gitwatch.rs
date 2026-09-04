@@ -1,6 +1,6 @@
 //! Observer-local git facts for the status band: the checked-out branch and
 //! whether the worktree is dirty, kept live by watching the repository's head
-//! marker (pi `vcs.watch`) with a stat-poll safety net.
+//! marker with a stat-poll safety net.
 //!
 //! Nothing here is journaled (ADR 0005): the watcher is a projection input of
 //! one observer, exactly like the terminal size.

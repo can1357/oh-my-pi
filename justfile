@@ -143,7 +143,7 @@ test-all:
     cargo nextest run --workspace --locked
     cargo test --doc --workspace --locked
 
-# Run tests for a single crate, e.g. `just test-pkg omp-hashline`.
+# Run tests for a single crate, e.g. `just test-pkg omp-edit`.
 [group('test')]
 test-pkg pkg:
     cargo nextest run -p {{ pkg }} --locked
@@ -222,10 +222,10 @@ catalog-test:
 run *args:
     cargo run -p omp-app --bin omp --locked -- {{ args }}
 
-# Run the standalone `omp-sh` shell (facade over shell-engine + builtins).
+# Run the standalone `omp-sh` shell (shell-engine composed with builtins).
 [group('run')]
 run-shell *args:
-    cargo run -p omp-shell --bin omp-sh --locked -- {{ args }}
+    cargo run -p omp-shell-builtins --bin omp-sh --locked -- {{ args }}
 
 # ---------------------------------------------------------------------------
 # Example galleries (visual smoke tests for tui/gui/webview/ar/inference)

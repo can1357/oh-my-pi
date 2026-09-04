@@ -1,5 +1,4 @@
-//! Codex quota-reset celebration detector (pi
-//! `codex-reset-fireworks.ts` `detectCodexResetFireworks`).
+//! Codex quota-reset celebration detector.
 //!
 //! The host keeps the previous [`QuotaSnapshot`] of the active Codex
 //! account between usage refreshes and compares it with the next one; a
@@ -8,8 +7,8 @@
 
 use std::time::{Duration, SystemTime};
 
+use omp_ai::{UsageQuantity, UsageReport, UsageWindow};
 use omp_core::Str;
-use omp_inference::{UsageQuantity, UsageReport, UsageWindow};
 
 /// Weekly usage, its quota identity, and its scheduled reset deadline.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,8 +24,7 @@ pub struct SevenDay {
 	pub plan:      Option<Str>,
 }
 
-/// The active Codex account fields retained between status refreshes (pi
-/// `CodexResetUsageSnapshot`).
+/// The active Codex account fields retained between status refreshes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QuotaSnapshot {
 	/// When this usage report was observed, if supplied by the provider.
@@ -37,8 +35,7 @@ pub struct QuotaSnapshot {
 	pub saved_resets: Option<u32>,
 }
 
-/// A detected Codex quota event that can trigger the fireworks (pi
-/// `CodexResetFireworksEvent`).
+/// A detected Codex quota event that can trigger the fireworks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodexResetEvent {
 	/// The provider cleared weekly usage before the scheduled deadline.
@@ -107,7 +104,7 @@ pub fn detect_codex_reset(
 	Some(CodexResetEvent::UnscheduledWeeklyReset)
 }
 
-/// pi `Math.round(Math.max(0, Math.min(100, percent)))`; a NaN percent
+/// `Math.round(Math.max(0, Math.min(100, percent)))`; a NaN percent
 /// clamps to zero like JavaScript's `Math.max(0, NaN)` chain rounds to
 /// `NaN`, which never equals another percent — treated here as no usage.
 fn rounded_percent(percent: f64) -> u8 {
@@ -117,12 +114,12 @@ fn rounded_percent(percent: f64) -> u8 {
 	percent.clamp(0.0, 100.0).round() as u8
 }
 
-/// Seconds in the Codex weekly window (`limit_window_seconds`); pi labels a
-/// window `7d` when its rounded day count is seven.
+/// Seconds in the Codex weekly window; a window is weekly when its rounded
+/// day count is seven.
 const DAY: Duration = Duration::from_secs(86_400);
 
-/// Whether a usage window is the account's weekly quota (pi window id
-/// `7d`: a rolling duration that rounds to seven days).
+/// Whether a usage window is the account's weekly quota: a rolling duration
+/// that rounds to seven days.
 fn is_seven_day(window: &UsageWindow) -> bool {
 	window.duration.is_some_and(|duration| {
 		duration >= DAY && (duration.as_secs_f64() / DAY.as_secs_f64()).round() == 7.0
@@ -133,8 +130,7 @@ fn quantity_percent(quantity: UsageQuantity) -> f64 {
 	quantity.units as f64 / 10_f64.powi(i32::from(quantity.decimal_exponent))
 }
 
-/// Builds the retained snapshot from an `openai-codex` usage report (pi
-/// `#normalizeCodexResetSnapshot`).
+/// Builds the retained snapshot from an `openai-codex` usage report.
 ///
 /// The weekly window is the shared `7d` window when the provider reports
 /// one, else the first tiered `7d` window; `tier` is the window's scope
@@ -183,11 +179,17 @@ pub fn snapshot_from_report(report: &UsageReport) -> Option<QuotaSnapshot> {
 }
 
 omp_con::var! {
-	/// Celebrates a Codex weekly quota reset with fireworks (pi
-	/// `tui.codexResetFireworks`).
+	/// Celebrate unscheduled Codex weekly usage resets and newly banked saved
+	/// resets with a top-third fireworks overlay that remains until Escape.
 	pub static CL_CODEX_FIREWORKS = cl_codex_fireworks: bool {
 		default: true,
 		flags: archive | session,
+		meta: {
+			"ui.tab": "appearance",
+			"ui.group": "Display",
+			"ui.label": "Codex Reset Fireworks",
+			"legacy.path": "tui.codexResetFireworks",
+		},
 	};
 }
 
@@ -225,9 +227,8 @@ pub fn snapshot_from_account(
 	})
 }
 
-/// Periodic quota refresh for the active Codex account (pi status line
-/// `refreshUsageInBackground`: at most one fetch per five minutes) that
-/// compares consecutive snapshots.
+/// Periodic quota refresh for the active Codex account. At most one fetch
+/// runs per five minutes; consecutive snapshots are compared.
 #[derive(Default)]
 pub struct QuotaWatch {
 	fetched_at:  Option<Duration>,
@@ -238,7 +239,7 @@ pub struct QuotaWatch {
 }
 
 impl QuotaWatch {
-	/// pi: `now - usageFetchedAt < 5 * 60_000` skips the refresh.
+	/// Skips refreshes for five minutes after a fetch starts or settles.
 	pub const REFRESH: Duration = Duration::from_secs(5 * 60);
 	/// Poll cadence while a fetch is in flight.
 	const SETTLE_POLL: Duration = Duration::from_millis(500);
@@ -308,11 +309,11 @@ impl QuotaWatch {
 mod tests {
 	use std::time::{Duration, SystemTime};
 
-	use omp_core::sf;
-	use omp_inference::{
+	use omp_ai::{
 		AccountId, ProviderId, UsageAccountMetadata, UsageAmount, UsageQuantity, UsageReport,
 		UsageResetCredits, UsageSource, UsageStatus, UsageUnit, UsageWindow, UsageWindowKind,
 	};
+	use omp_core::sf;
 
 	use super::{
 		CodexResetEvent, QuotaSnapshot, SevenDay, detect_codex_reset, snapshot_from_report,

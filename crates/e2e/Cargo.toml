@@ -22,11 +22,6 @@ path = "src/bin/pooling_bench.rs"
 test = false
 
 [[bin]]
-name = "pooling-runner"
-path = "src/bin/pooling_runner.rs"
-test = false
-
-[[bin]]
 name = "omp_e2e_host"
 path = "src/bin/omp_e2e_host.rs"
 test = false
@@ -43,23 +38,22 @@ omp-agent.workspace = true
 omp-app.workspace = true
 omp-con.workspace = true
 omp-core.workspace = true
-omp-docserver.workspace = true
 omp-dom.workspace = true
 omp-driver.workspace = true
 omp-env.workspace = true
 omp-envd.workspace = true
 omp-ext.workspace = true
-omp-hashline.workspace = true
+omp-edit.workspace = true
 omp-catalog.workspace = true
-omp-inference.workspace = true
+omp-ai.workspace = true
 omp-journal.workspace = true
 omp-proto.workspace = true
 omp-rpc.workspace = true
 omp-serve.workspace = true
 omp-session.workspace = true
 omp-scribe.workspace = true
+omp-shell-builtins.workspace = true
 omp-shell.workspace = true
-omp-shell-engine.workspace = true
 omp-observability.workspace = true
 omp-tool.workspace = true
 omp-tools.workspace = true

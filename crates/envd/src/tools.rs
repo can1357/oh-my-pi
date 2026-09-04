@@ -1,5 +1,7 @@
 //! Production built-in tool registry assembly.
 
+#[cfg(test)]
+use std::sync::LazyLock;
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
 	env,
@@ -7,7 +9,7 @@ use std::{
 	future::Future,
 	path::{Path, PathBuf},
 	sync::{
-		Arc, LazyLock,
+		Arc,
 		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	time,
@@ -18,15 +20,7 @@ use omp_agent::{
 	GateDecision, GateEvent, GateOutcome, HookDispatch as AgentHookDispatch, HookGate, HookPatch,
 	HookPhase, KernelSender, OBSERVE_HANDLER_CAP,
 };
-use omp_cache::{github_cache::GithubCache, telemetry_cache::TelemetryIndex};
-use omp_catalog::{ModelKey, ProviderId, snapshot::Catalog};
-use omp_con::Ctx;
-use omp_core::{
-	Duration, ExposeSecret as _, FastHashSet, Hash32, InvocationPhase, LifecyclePhase, SecretString,
-	Str, Ulid, sf,
-};
-use omp_env::EnvClient;
-use omp_inference::{
+use omp_ai::{
 	BeforeRequestDenied, BeforeRequestDraft, BeforeRequestMutation, CredentialDisabledObservation,
 	ModelsDiscoverHookPage, ModelsDiscoverHookRequest, ProviderHookCredential, ProviderHookError,
 	ProviderHookObserver, ProviderLoginHookRequest, ProviderRefreshHookRequest,
@@ -41,6 +35,14 @@ use omp_inference::{
 	},
 	receipt::UsageSource,
 };
+use omp_cache::{github_cache::GithubCache, telemetry_cache::TelemetryIndex};
+use omp_catalog::{ModelKey, ProviderId, snapshot::Catalog};
+use omp_con::Ctx;
+use omp_core::{
+	Duration, ExposeSecret as _, FastHashSet, Hash32, InvocationPhase, LifecyclePhase, SecretString,
+	Str, Ulid, sf,
+};
+use omp_env::EnvClient;
 use omp_proto::{
 	env::v1 as env_wire,
 	inference::{v1, v1::tool_def},
@@ -99,6 +101,7 @@ use super::{
 			ControlProtocolError, ControlRequestContext,
 		},
 		dispatch::{CallbackDispatcher, EventDeadline, NestedCallbackDispatcher},
+		extensions::{SealedRegistryEvidence, SealedRegistryEvidenceError, seal_registry_evidence},
 	},
 	github::GithubService,
 	managed_skills::ManagedSkills,
@@ -123,10 +126,7 @@ use super::{
 	tool_shell::{AcpExecSlot, ShellExecHost},
 	tool_url::{UrlResolver, production_url_resolvers},
 	vault::{VaultPaths, VaultService},
-	worker::{
-		ExtHostSupervisor, SealedRegistryEvidence, SealedRegistryEvidenceError,
-		seal_registry_evidence,
-	},
+	worker::ExtHostSupervisor,
 	workspace::{WorkspaceHost, WorkspaceOperationError, WorkspaceOperations},
 };
 use crate::{
@@ -218,7 +218,7 @@ pub trait CommandCredentialExecutorFactory: Send + Sync + 'static {
 		&self,
 		client: omp_env::EnvClient,
 		cwd: &Path,
-	) -> Arc<dyn omp_inference::auth::command::CommandCredentialExecutor>;
+	) -> Arc<dyn omp_ai::auth::command::CommandCredentialExecutor>;
 }
 /// Registers host-owned tools before registry freeze, then binds their live
 /// Environment client after transport composition.
@@ -317,7 +317,7 @@ where
 					Ev::Aborted(_) => {
 						span.record("outcome", "aborted");
 					},
-					Ev::Update(_) => {},
+					Ev::Update(_) | Ev::Diag(_) => {},
 				}
 				yield event;
 			}
@@ -466,19 +466,62 @@ impl RegistryControlFactory {
 				"no authenticated manifest owns this registry publication",
 			)
 		})?;
+		let session = context
+			.invocation
+			.as_ref()
+			.map(|invocation| invocation.session.clone())
+			.ok_or_else(|| {
+				ControlProtocolError::new(
+					"InvalidPhase",
+					"registry FREEZE evidence has no authenticated lifecycle session",
+				)
+			})?;
 		let evidence = Arc::new(
-			seal_registry_evidence(context, manifest, payload).map_err(registry_evidence_error)?,
+			seal_registry_evidence(
+				Arc::clone(&context.connection),
+				session,
+				manifest,
+				payload.clone(),
+			)
+			.map_err(registry_evidence_error)?,
 		);
-		let connection = connection_key(&context.connection);
+		self.install_evidence(evidence)
+	}
+
+	/// Installs evidence already sealed by the trusted extension-host lifecycle.
+	///
+	/// A newer host/session generation replaces the retained generation for
+	/// the same deployment. Re-publication within one exact generation must be
+	/// declaration-identical.
+	pub fn install_evidence(
+		&self,
+		evidence: Arc<SealedRegistryEvidence>,
+	) -> Result<Arc<SealedRegistryEvidence>, ControlProtocolError> {
+		if !self.admits(&evidence.identity) {
+			return Err(ControlProtocolError::new(
+				"RegistryUnauthorized",
+				"no authenticated manifest owns this sealed registry evidence",
+			));
+		}
+		let connection = connection_key(&evidence.identity);
 		let mut published = self.evidence.write();
 		if let Some(current) = published.get(&connection) {
-			if current.tools != evidence.tools || current.hooks != evidence.hooks {
+			if !same_registry_evidence(current, &evidence) {
 				return Err(ControlProtocolError::new(
 					"RegistryConflict",
 					"sealed registry changed within one host generation",
 				));
 			}
 			return Ok(Arc::clone(current));
+		}
+		let generation = (connection.3, connection.4);
+		if published.iter().any(|(key, _)| {
+			key.0 == connection.0
+				&& key.1 == connection.1
+				&& key.2 == connection.2
+				&& (key.3, key.4) > generation
+		}) {
+			return Err(stale_connection());
 		}
 		published
 			.retain(|key, _| key.0 != connection.0 || key.1 != connection.1 || key.2 != connection.2);
@@ -489,91 +532,41 @@ impl RegistryControlFactory {
 	}
 }
 
+fn same_registry_evidence(
+	current: &SealedRegistryEvidence,
+	candidate: &SealedRegistryEvidence,
+) -> bool {
+	same_connection(&current.identity, &candidate.identity)
+		&& current.session == candidate.session
+		&& current.tools == candidate.tools
+		&& current.prompts == candidate.prompts
+		&& current.services == candidate.services
+		&& current.hooks == candidate.hooks
+		&& current.ui_registration == candidate.ui_registration
+		&& current.ui.generation == candidate.ui.generation
+		&& current.ui.extension == candidate.ui.extension
+		&& current.ui.commands == candidate.ui.commands
+		&& current.ui.shortcuts == candidate.ui.shortcuts
+		&& current.ui.triggers == candidate.ui.triggers
+		&& current.ui.message_renderers == candidate.ui.message_renderers
+		&& current.ui.markdown_transformers == candidate.ui.markdown_transformers
+		&& current.ui.renderers == candidate.ui.renderers
+		&& current.providers == candidate.providers
+		&& current.directors == candidate.directors
+		&& current.components == candidate.components
+}
+
 fn registry_evidence_error(error: SealedRegistryEvidenceError) -> ControlProtocolError {
 	let code = match error {
 		SealedRegistryEvidenceError::Identity => "RegistryUnauthorized",
 		SealedRegistryEvidenceError::ManifestDrift => "DeclarationDrift",
-		SealedRegistryEvidenceError::ExecutableDrift
-		| SealedRegistryEvidenceError::Duplicate
-		| SealedRegistryEvidenceError::SourceModule => "RegistryDrift",
-		SealedRegistryEvidenceError::Nested => "InvalidPhase",
-		SealedRegistryEvidenceError::Ui(_) => "RegistryDrift",
-		SealedRegistryEvidenceError::Malformed(_) => "RegistryMalformed",
+		SealedRegistryEvidenceError::Duplicate
+		| SealedRegistryEvidenceError::SourceModule
+		| SealedRegistryEvidenceError::Ui(_)
+		| SealedRegistryEvidenceError::Prompt(_) => "RegistryDrift",
+		SealedRegistryEvidenceError::Malformed => "RegistryMalformed",
 	};
 	ControlProtocolError::new(code, Str::from(error.to_string()))
-}
-
-impl ControlAuthorityFactory for RegistryControlFactory {
-	fn bind(
-		&self,
-		identity: Arc<ControlConnectionIdentity>,
-	) -> Result<Arc<dyn ControlAuthority>, ControlCompositionError> {
-		if !self.manifests.contains_key(&(
-			identity.layer.clone(),
-			identity.tier.clone(),
-			identity.extension.clone(),
-		)) {
-			return Err(ControlCompositionError::unavailable(
-				"registry",
-				"authenticated extension has no deployment manifest",
-			));
-		}
-		Ok(Arc::new(BoundRegistryControl { identity, owner: self.clone() }))
-	}
-}
-
-struct BoundRegistryControl {
-	identity: Arc<ControlConnectionIdentity>,
-	owner:    RegistryControlFactory,
-}
-
-#[async_trait::async_trait]
-impl ControlAuthority for BoundRegistryControl {
-	fn handles(&self, _operation: &str) -> bool {
-		false
-	}
-
-	fn authorize(
-		&self,
-		context: &ControlRequestContext,
-		_operation: &str,
-		_arguments: &JsonMap<String, JsonValue>,
-	) -> Result<(), ControlProtocolError> {
-		if same_connection(&self.identity, &context.connection) {
-			Ok(())
-		} else {
-			Err(stale_connection())
-		}
-	}
-
-	async fn request(
-		&self,
-		context: ControlRequestContext,
-		operation: Str,
-		_arguments: JsonMap<String, JsonValue>,
-	) -> Result<JsonValue, ControlProtocolError> {
-		self.authorize(&context, operation.as_str(), &JsonMap::new())?;
-		Err(ControlProtocolError::new(
-			"InvalidOperation",
-			"registry publications are effects, not request operations",
-		))
-	}
-
-	async fn effect(
-		&self,
-		context: ControlRequestContext,
-		effect: ControlEffect,
-	) -> Result<(), ControlProtocolError> {
-		self.authorize(&context, "omp.registry.publish", &JsonMap::new())?;
-		let ControlEffect::Registry(payload) = effect else {
-			return Err(ControlProtocolError::new(
-				"InvalidEffect",
-				"registry owner accepts only Registry effects",
-			));
-		};
-		self.owner.publish(&context, &payload)?;
-		Ok(())
-	}
 }
 
 /// One live dynamic device row published to catalog observers.
@@ -702,14 +695,20 @@ impl DeviceControlFactory {
 		let parent_name = required_string(parent, "name")?;
 		let family = required_string(parent, "family")?;
 		let rev = required_u16(parent, "rev")?;
+		let parent_revision = Rev { family: family.clone(), n: rev };
 		let place = required_string(parent, "place")?;
 		let _registration = evidence
 			.tools
 			.iter()
 			.find(|tool| {
-				tool.name == parent_name
-					&& tool.family == family
-					&& tool.rev == rev
+				tool
+					.definition
+					.as_ref()
+					.is_some_and(|definition| definition.name.as_str() == parent_name.as_str())
+					&& tool
+						.rev
+						.parse::<Rev>()
+						.is_ok_and(|revision| revision == parent_revision)
 					&& tool.place == place
 			})
 			.ok_or_else(|| {
@@ -1969,12 +1968,7 @@ impl HookControlFactory {
 		}
 	}
 
-	async fn observe(
-		&self,
-		context: &ControlRequestContext,
-		event: &str,
-		payload: &JsonValue,
-	) {
+	async fn observe(&self, context: &ControlRequestContext, event: &str, payload: &JsonValue) {
 		let scoped_provider = payload.get("provider").and_then(JsonValue::as_str);
 		let mut rows = self
 			.subscriptions
@@ -1991,11 +1985,7 @@ impl HookControlFactory {
 								.iter()
 								.any(|candidate| candidate.as_str() == provider)
 						})
-					}) && lifecycle_hook_recipient(
-					event,
-					payload,
-					row.identity.extension.as_str(),
-				)
+					}) && lifecycle_hook_recipient(event, payload, row.identity.extension.as_str())
 			})
 			.cloned()
 			.collect::<Vec<_>>();
@@ -2152,10 +2142,7 @@ impl HookControlFactory {
 							"HookContractError",
 							"approval decision omitted its specification",
 						);
-						match hook_callback_failure(
-							row.on_failure.unwrap_or(policy.on_failure),
-							error,
-						) {
+						match hook_callback_failure(row.on_failure.unwrap_or(policy.on_failure), error) {
 							None => continue,
 							Some(decision) => return Ok(decision),
 						}
@@ -2177,10 +2164,7 @@ impl HookControlFactory {
 						&mut modification,
 						decision,
 					) {
-						match hook_callback_failure(
-							row.on_failure.unwrap_or(policy.on_failure),
-							error,
-						) {
+						match hook_callback_failure(row.on_failure.unwrap_or(policy.on_failure), error) {
 							None => continue,
 							Some(decision) => return Ok(decision),
 						}
@@ -3573,7 +3557,7 @@ fn configured_model_edit_revision(ctx: &Ctx) -> Result<Option<Rev>, EnvdError> {
 
 fn configured_model_identity(ctx: &Ctx) -> Option<Str> {
 	let settings = omp_catalog::settings::ModelSettings::from_con(ctx);
-	let selected = omp_con::AI_MODEL.get(ctx);
+	let selected = omp_agent::AI_MODEL.get(ctx);
 	if let Some(role) = selected.strip_prefix("@") {
 		return settings.role_selector(role.as_str()).cloned();
 	}
@@ -3584,7 +3568,7 @@ fn configured_model_identity(ctx: &Ctx) -> Option<Str> {
 }
 
 fn image_config(ctx: &Ctx) -> media_devices::ImageConfig {
-	let provider_order = omp_inference::pi_settings::AI_PROVIDERS_IMAGE_ORDER
+	let provider_order = omp_ai::settings::AI_PROVIDERS_IMAGE_ORDER
 		.get(ctx)
 		.into_iter()
 		.filter_map(|provider| provider.parse().ok())
@@ -3594,7 +3578,7 @@ fn image_config(ctx: &Ctx) -> media_devices::ImageConfig {
 }
 
 fn speech_config(ctx: &Ctx) -> SpeechConfig {
-	use omp_inference::speech_settings::{AI_TTS_PROVIDER, CL_TTS_MODEL, CL_TTS_VOICE, TtsProvider};
+	use omp_ai::speech_settings::{AI_TTS_PROVIDER, CL_TTS_MODEL, CL_TTS_VOICE, TtsProvider};
 	let preference = match AI_TTS_PROVIDER.get(ctx) {
 		TtsProvider::Auto => SpeechPreference::Auto,
 		TtsProvider::Local => SpeechPreference::Local,
@@ -3775,7 +3759,7 @@ fn register_session_base(
 	}
 	if tool_settings.enabled("think") {
 		// External-thinking sessions select `think` explicitly via
-		// `advertise_selected`; ordinary models must never see it (pi parity).
+		// `advertise_selected`; ordinary models must never see it.
 		register_instrumented(
 			registry,
 			omp_tools::think::tool(),
@@ -4010,6 +3994,7 @@ fn environment_declarations(
 	tool_settings: &ToolSettings,
 	browser_settings: &BrowserSettings,
 	inputs: &EnvironmentDeclarationInputs,
+	py_eval: bool,
 	policy: ToolsPolicy,
 ) -> Vec<EnvironmentDeclaration> {
 	let mut declarations = Vec::new();
@@ -4109,6 +4094,13 @@ fn environment_declarations(
 			);
 		}
 	}
+	if py_eval {
+		push(
+			omp_tools::eval::py_eval_spec(),
+			long_tail_presentation(policy),
+			long_tail_claims(policy),
+		);
+	}
 	if tool_settings.enabled("bash") {
 		if let Some(snapshot) = &inputs.shell_snapshot {
 			push(omp_tools::shell::spec(snapshot), bash_presentation(policy), core_claims());
@@ -4126,9 +4118,12 @@ fn declare_remote_environment(
 	tool_settings: &ToolSettings,
 	browser_settings: &BrowserSettings,
 	inputs: &EnvironmentDeclarationInputs,
+	py_eval: bool,
 	policy: ToolsPolicy,
 ) -> Result<(), EnvdError> {
-	for declaration in environment_declarations(tool_settings, browser_settings, inputs, policy) {
+	for declaration in
+		environment_declarations(tool_settings, browser_settings, inputs, py_eval, policy)
+	{
 		registry.declare_remote(
 			declaration.spec,
 			declaration.presentation,
@@ -4168,6 +4163,7 @@ pub(crate) fn session_registry(
 	telemetry: &Arc<TelemetryIndex>,
 	github_cache: Arc<GithubCache>,
 	workers: &ExtHostSupervisor,
+	py_eval: bool,
 	con: &Ctx,
 	policy: ToolsPolicy,
 	tool_settings: &ToolSettings,
@@ -4209,6 +4205,7 @@ pub(crate) fn session_registry(
 		tool_settings,
 		browser_settings,
 		&declarations,
+		py_eval,
 		policy,
 	)?;
 	if tool_settings.enabled("bash") {
@@ -4254,7 +4251,7 @@ pub(crate) fn environment_tool_names(registry: &Registry) -> FastHashSet<Str> {
 }
 
 fn managed_skills_enabled(con: &Ctx, autolearn_enabled: bool) -> bool {
-	autolearn_enabled && crate::pi_settings::SV_SKILLS_ENABLED.get(con)
+	autolearn_enabled && crate::SV_SKILLS_ENABLED.get(con)
 }
 
 /// Builds the complete registry shared by environment dispatch and the agent.
@@ -4281,6 +4278,7 @@ pub(crate) fn production_registry<
 	root_uri: &Str,
 	workers: &ExtHostSupervisor,
 	interrupt_grace: Duration,
+	py_eval: bool,
 	tool_settings: &ToolSettings,
 	browser_settings: &BrowserSettings,
 	shell_settings: &ShellSettings,
@@ -4436,7 +4434,7 @@ pub(crate) fn production_registry<
 	);
 	let vault = VaultService::load_layered(&VaultPaths::new(&user_config_root, workspace.root()))
 		.map_err(|error| EnvdError::State(Str::new(error.to_string())))?
-		.with_obsidian_enabled(omp_tools::pi_settings::SV_VAULT_ENABLED.get(con));
+		.with_obsidian_enabled(omp_tools::settings::SV_VAULT_ENABLED.get(con));
 	documents.set_resource_mutations(ResourceMutationServices {
 		ssh:   ssh.clone(),
 		vault: vault.clone(),
@@ -4756,41 +4754,47 @@ pub(crate) fn production_registry<
 		.collect::<Vec<_>>();
 	let eval_host = Arc::new(SessionBridgeHost::new());
 	let mut eval_control = EvalSessionControl::default();
-	if tool_settings.enabled("eval") {
-		match preflight_python_eval(
-			exec.clone(),
-			Arc::clone(&eval_host),
-			interrupt_grace,
-			blobs.clone(),
-			tool_settings
-				.eval_interpreters
-				.get("py")
-				.map(|path| PathBuf::from(path.as_str())),
-		) {
-			Ok(eval_exec) => {
-				let mut task_snapshot = TaskDescriptionSnapshot {
-					helpers: &helper_docs,
-					..TaskDescriptionSnapshot::standard()
-				};
-				if !tool_settings.enabled("task") {
-					task_snapshot.agents = &[];
-				}
-				let (eval_tool, control) =
-					omp_tools::eval::eval_controlled_with_task_snapshot(eval_exec, task_snapshot);
+	if tool_settings.enabled("eval") || py_eval {
+		let eval_exec = compose_eval_executor(
+			ProcessEvalExec::production(
+				exec.clone(),
+				Arc::clone(&eval_host),
+				interrupt_grace,
+				blobs.clone(),
+				tool_settings
+					.eval_interpreters
+					.get("py")
+					.map(|path| PathBuf::from(path.as_str())),
+			),
+			py_eval,
+		)?;
+		if let Some(eval_exec) = eval_exec {
+			let mut task_snapshot = TaskDescriptionSnapshot {
+				helpers: &helper_docs,
+				..TaskDescriptionSnapshot::standard()
+			};
+			if !tool_settings.enabled("task") {
+				task_snapshot.agents = &[];
+			}
+			let (eval_tool, control) =
+				omp_tools::eval::eval_controlled_with_task_snapshot(eval_exec.clone(), task_snapshot);
+			eval_control = control;
+			if tool_settings.enabled("eval") {
 				environment_registry(
 					&mut registry,
 					eval_tool,
 					long_tail_presentation(policy),
 					long_tail_claims(policy),
 				)?;
-				eval_control = control;
-			},
-			Err(error) => {
-				tracing::warn!(
-					error = %error,
-					"eval omitted because CPython is unreachable; run `just setup-python` and restart OMP"
-				);
-			},
+			}
+			if py_eval {
+				environment_registry(
+					&mut registry,
+					omp_tools::eval::py_eval(eval_exec),
+					long_tail_presentation(policy),
+					long_tail_claims(policy),
+				)?;
+			}
 		}
 	}
 	let dyn_installed = tool_settings.enabled("dyn") && dyn_enabled(policy);
@@ -4876,6 +4880,27 @@ pub(crate) fn production_registry<
 		ask_presenter,
 	))
 }
+
+fn compose_eval_executor<T>(
+	executor: Result<T, std::io::Error>,
+	py_eval_explicit: bool,
+) -> Result<Option<T>, EnvdError> {
+	match executor {
+		Ok(executor) => Ok(Some(executor)),
+		Err(error) if py_eval_explicit => Err(EnvdError::Eval(Str::from(format!(
+			"environment composition could not construct the explicitly requested py_eval executor: \
+			 {error}"
+		)))),
+		Err(error) => {
+			tracing::warn!(
+				error = %error,
+				"Python tools omitted because the eval child configuration is unavailable"
+			);
+			Ok(None)
+		},
+	}
+}
+
 #[derive(Clone)]
 struct GoalControlAdapter(Arc<dyn GoalAuthority>);
 
@@ -4966,11 +4991,11 @@ impl AgentCheckpointControl {
 					omp_dom::Value::Int(value) => u64::try_from(*value).ok(),
 					_ => None,
 				};
-				let boolean = |name: &'static str| {
-					match node.prop(&omp_dom::PropKey::Custom(Str::new_static(name)))? {
-						omp_dom::Value::Bool(value) => Some(*value),
-						_ => None,
-					}
+				let boolean = |name: &'static str| match node
+					.prop(&omp_dom::PropKey::Custom(Str::new_static(name)))?
+				{
+					omp_dom::Value::Bool(value) => Some(*value),
+					_ => None,
 				};
 				let label = node
 					.prop(&omp_dom::PropKey::from(omp_dom::PropId::Label))
@@ -4993,7 +5018,7 @@ impl AgentCheckpointControl {
 				};
 				Some(ActiveCheckpoint {
 					binding_id: id,
-					info: Arc::new(checkpoint::CheckpointInfo {
+					info:       Arc::new(checkpoint::CheckpointInfo {
 						token: text("token")?,
 						label,
 						goal: text("goal")?,
@@ -5168,13 +5193,18 @@ impl omp_tools::checkpoint::CheckpointControl for AgentCheckpointControl {
 		let binding = self.binding()?;
 		let parent_token = {
 			let checkpoints = self.active_checkpoints.read();
-			if checkpoints.iter().any(|checkpoint| checkpoint.info.label == label) {
+			if checkpoints
+				.iter()
+				.any(|checkpoint| checkpoint.info.label == label)
+			{
 				return Err(checkpoint_fault(
 					checkpoint::FaultCode::DuplicateLabel,
 					"checkpoint label already exists on the selected branch",
 				));
 			}
-			checkpoints.last().map(|checkpoint| checkpoint.info.token.clone())
+			checkpoints
+				.last()
+				.map(|checkpoint| checkpoint.info.token.clone())
 		};
 		let started_at = epoch_millis()?;
 		let token = sf!("checkpoint-{}-{}", binding.id, Ulid::generate());
@@ -5278,8 +5308,7 @@ impl omp_tools::checkpoint::CheckpointControl for AgentCheckpointControl {
 				.filter(|checkpoint| {
 					checkpoint.binding_id == binding.id && checkpoint.info.label == selector
 				})
-				.count()
-				> 1;
+				.count() > 1;
 			if ambiguous {
 				checkpoint_fault(
 					checkpoint::FaultCode::AmbiguousSelector,
@@ -5310,11 +5339,14 @@ impl omp_tools::checkpoint::CheckpointControl for AgentCheckpointControl {
 			));
 		}
 		let restored = workspace
-			.restore(env_wire::RestoreWorkspace {
-				dry_run: false,
-				expected_generation: preview.from_generation,
-				..request
-			}, &cancel)
+			.restore(
+				env_wire::RestoreWorkspace {
+					dry_run: false,
+					expected_generation: preview.from_generation,
+					..request
+				},
+				&cancel,
+			)
 			.await?;
 		if let Err(fault) = ensure_complete_restore(&restored) {
 			if restored.partial {
@@ -5449,16 +5481,16 @@ fn checkpoint_snapshot(
 	snapshot: &env_wire::WorkspaceSnapshot,
 ) -> omp_tools::checkpoint::WorkspaceSnapshot {
 	omp_tools::checkpoint::WorkspaceSnapshot {
-		snapshot_id: Str::new(&snapshot.snapshot_id),
-		root_uri: Str::new(&snapshot.root_uri),
-		generation: snapshot.generation,
-		tree_hash: Str::new(&snapshot.tree_hash),
-		files: snapshot.files,
-		bytes: snapshot.bytes,
-		label: snapshot.label.as_deref().map(Str::new),
+		snapshot_id:        Str::new(&snapshot.snapshot_id),
+		root_uri:           Str::new(&snapshot.root_uri),
+		generation:         snapshot.generation,
+		tree_hash:          Str::new(&snapshot.tree_hash),
+		files:              snapshot.files,
+		bytes:              snapshot.bytes,
+		label:              snapshot.label.as_deref().map(Str::new),
 		parent_snapshot_id: snapshot.parent_snapshot_id.as_deref().map(Str::new),
-		created_at: snapshot.created_ms,
-		partial: snapshot.partial,
+		created_at:         snapshot.created_ms,
+		partial:            snapshot.partial,
 	}
 }
 
@@ -5483,6 +5515,7 @@ fn checkpoint_fault(
 	omp_tools::checkpoint::CheckpointFault { code, message: sf!(message) }
 }
 
+#[cfg(test)]
 pub(super) fn python_engine() -> Result<Arc<omp_py::Engine>, EnvdError> {
 	static ENGINE: LazyLock<Result<Arc<omp_py::Engine>, Str>> = LazyLock::new(|| {
 		omp_py::Engine::builder()
@@ -5494,18 +5527,6 @@ pub(super) fn python_engine() -> Result<Arc<omp_py::Engine>, EnvdError> {
 		.as_ref()
 		.map(Arc::clone)
 		.map_err(|error| EnvdError::Eval(error.clone()))
-}
-
-fn preflight_python_eval(
-	exec: ExecHost,
-	host: Arc<SessionBridgeHost>,
-	interrupt_grace: Duration,
-	blobs: BlobHost,
-	configured_interpreter: Option<PathBuf>,
-) -> Result<ProcessEvalExec, EnvdError> {
-	python_engine()?;
-	ProcessEvalExec::production(exec, host, interrupt_grace, blobs, configured_interpreter)
-		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))
 }
 
 fn ensure_name_absent(registry: &Registry, name: &str) -> Result<(), EnvdError> {
@@ -5868,27 +5889,90 @@ const fn worker_declaration_error(message: &'static str) -> EnvdError {
 mod tests {
 	use super::*;
 
+	static EVAL_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+	struct EvalEnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+	impl EvalEnvRestore {
+		fn set(values: &[(&'static str, &std::ffi::OsStr)]) -> Self {
+			let previous = values
+				.iter()
+				.map(|(name, _)| (*name, env::var_os(name)))
+				.collect();
+			for (name, value) in values {
+				// SAFETY: every mutation of these eval-specific variables in this
+				// module is serialized by EVAL_ENV_LOCK and restored on drop.
+				unsafe { env::set_var(name, value) };
+			}
+			Self(previous)
+		}
+	}
+
+	impl Drop for EvalEnvRestore {
+		fn drop(&mut self) {
+			for (name, value) in self.0.drain(..).rev() {
+				// SAFETY: EVAL_ENV_LOCK remains held until after this guard drops.
+				unsafe {
+					if let Some(value) = value {
+						env::set_var(name, value);
+					} else {
+						env::remove_var(name);
+					}
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn explicit_py_eval_failure_is_typed_and_environment_override_has_precedence() {
+		let _lock = EVAL_ENV_LOCK.lock();
+		let scratch = tempfile::tempdir().expect("eval scratch");
+		let current_exe = env::current_exe().expect("current test executable");
+		let invalid_override = scratch.path().join("missing-python");
+		let _restore = EvalEnvRestore::set(&[
+			("CARGO_BIN_EXE_omp", current_exe.as_os_str()),
+			("OMP_PYTHON_INTERPRETER", invalid_override.as_os_str()),
+		]);
+		let blobs = BlobHost::open(scratch.path().join("blobs")).expect("blob host");
+		let constructed = ProcessEvalExec::production(
+			ExecHost::new(),
+			Arc::new(SessionBridgeHost::new()),
+			"1s".parse().expect("interrupt grace"),
+			blobs,
+			Some(current_exe),
+		);
+		let error = match compose_eval_executor(constructed, true) {
+			Err(error) => error,
+			Ok(_) => panic!("explicit py_eval must reject an invalid environment override"),
+		};
+		let EnvdError::Eval(message) = error else {
+			panic!("explicit py_eval failure must use the typed eval composition error");
+		};
+		assert!(message.contains("explicitly requested py_eval"));
+		assert!(
+			message.contains(invalid_override.to_string_lossy().as_ref()),
+			"the environment override must win over the valid configured interpreter"
+		);
+	}
+
+	#[test]
+	fn incidental_eval_executor_failure_remains_an_omission() {
+		let unavailable = std::io::Error::new(
+			std::io::ErrorKind::NotFound,
+			"configured Python interpreter is unavailable",
+		);
+		assert!(matches!(compose_eval_executor::<()>(Err(unavailable), false), Ok(None)));
+	}
+
 	#[test]
 	fn extension_tool_call_timeout_caps_only_tool_call_handlers() {
 		let configured = time::Duration::from_millis(125);
 		let short = time::Duration::from_millis(25);
 		let long = time::Duration::from_secs(5);
-		assert_eq!(
-			extension_callback_timeout("tool_call", configured, None, long),
-			configured
-		);
-		assert_eq!(
-			extension_callback_timeout("tool_call", configured, Some(short), long),
-			short
-		);
-		assert_eq!(
-			extension_callback_timeout("tool_call", configured, Some(long), long),
-			configured
-		);
-		assert_eq!(
-			extension_callback_timeout("tool_result", configured, None, long),
-			long
-		);
+		assert_eq!(extension_callback_timeout("tool_call", configured, None, long), configured);
+		assert_eq!(extension_callback_timeout("tool_call", configured, Some(short), long), short);
+		assert_eq!(extension_callback_timeout("tool_call", configured, Some(long), long), configured);
+		assert_eq!(extension_callback_timeout("tool_result", configured, None, long), long);
 	}
 
 	#[tokio::test]
@@ -5908,10 +5992,7 @@ mod tests {
 						omp_dom::PropKey::Custom(sf!("token")),
 						omp_dom::Value::Str(sf!("checkpoint-1")),
 					)
-					.with_prop(
-						omp_dom::PropId::Label,
-						omp_dom::Value::Str(sf!("parser-baseline")),
-					)
+					.with_prop(omp_dom::PropId::Label, omp_dom::Value::Str(sf!("parser-baseline")))
 					.with_prop(
 						omp_dom::PropKey::Custom(sf!("goal")),
 						omp_dom::Value::Str(sf!("inspect parser")),
@@ -5977,10 +6058,9 @@ mod tests {
 			Some("snapshot-0")
 		);
 		drop(active);
-		let listed =
-			omp_tools::checkpoint::CheckpointControl::list_checkpoints(&control, 10)
-				.await
-				.expect("checkpoint list");
+		let listed = omp_tools::checkpoint::CheckpointControl::list_checkpoints(&control, 10)
+			.await
+			.expect("checkpoint list");
 		assert_eq!(listed.first().map(|value| value.label.as_str()), Some("parser-baseline"));
 
 		control.restore_session(7, &omp_dom::Dom::new());
@@ -5991,7 +6071,7 @@ mod tests {
 	fn skills_enabled_gates_managed_skill_runtime() {
 		let ctx = Ctx::new();
 		assert!(managed_skills_enabled(&ctx, true));
-		crate::pi_settings::SV_SKILLS_ENABLED
+		crate::SV_SKILLS_ENABLED
 			.set(&ctx, false)
 			.expect("disable skills");
 		assert!(!managed_skills_enabled(&ctx, true));
@@ -6102,11 +6182,31 @@ mod tests {
 		tool_settings
 			.enabled
 			.insert(Str::new_static("ast_grep"), true);
+		let browser_settings = BrowserSettings::default();
+		let py_eval_declaration = environment_declarations(
+			&tool_settings,
+			&browser_settings,
+			&inputs,
+			true,
+			ToolsPolicy::Auto,
+		)
+		.into_iter()
+		.find(|declaration| declaration.spec.name == "py_eval")
+		.expect("explicit py_eval declaration");
+		assert_eq!(py_eval_declaration.spec, omp_tools::eval::py_eval_spec());
+
 		let declarations = environment_declarations(
 			&tool_settings,
-			&BrowserSettings::default(),
+			&browser_settings,
 			&inputs,
+			false,
 			ToolsPolicy::Auto,
+		);
+		assert!(
+			declarations
+				.iter()
+				.all(|declaration| declaration.spec.name != "py_eval"),
+			"py_eval must remain absent unless explicitly requested"
 		);
 		let slots = declarations
 			.iter()
@@ -6274,7 +6374,8 @@ mod tests {
 			spec["evidence"],
 			json!([
 				"rule=destructive",
-				"hook=publisher.guard extension=publisher.extension host_generation=11 session_generation=19",
+				"hook=publisher.guard extension=publisher.extension host_generation=11 \
+				 session_generation=19",
 			]),
 		);
 	}

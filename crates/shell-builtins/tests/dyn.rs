@@ -3,14 +3,15 @@
 use std::{collections::BTreeMap, fs, sync::Arc};
 
 use omp_core::Str;
-use omp_shell_builtins::{
-	DynDevice, DynFault, DynFuture, DynHost, DynOutput, DynSchema, dyn_builtin,
-	extract_image_passthrough,
-};
-use omp_shell_engine::{
+use omp_shell::{
 	ProfileLoadBehavior, RcLoadBehavior, Shell, SourceInfo, builtins::default_builtins,
 	extensions::DefaultShellExtensions,
 };
+use omp_shell_builtins::{
+	DynCallOutput, DynDevice, DynFault, DynFuture, DynHost, DynOutput, DynSchema, dyn_builtin,
+	extract_image_passthrough,
+};
+use omp_tool::{Diag, DiagKind};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -107,7 +108,12 @@ impl DynHost for FakeHost {
 		)
 	}
 
-	fn call(&self, name: &str, args: Value, _cancel: CancellationToken) -> DynFuture<'_, DynOutput> {
+	fn call(
+		&self,
+		name: &str,
+		args: Value,
+		_cancel: CancellationToken,
+	) -> DynFuture<'_, DynCallOutput> {
 		let name = Str::new(name);
 		let calls = Arc::clone(&self.calls);
 		Box::pin(async move {
@@ -118,10 +124,14 @@ impl DynHost for FakeHost {
 				return Ok(DynOutput::Parts(vec![
 					DynOutput::Text(Str::new_static("rendered")),
 					DynOutput::Blob { mime: Str::new_static("image/png"), bytes: PNG.into() },
-				]));
+				])
+				.into());
 			}
 			calls.lock().push((name, args.clone()));
-			Ok(DynOutput::Json(args))
+			Ok(DynCallOutput {
+				output: DynOutput::Json(args),
+				diags:  vec![Diag::info(DiagKind::Snapshot, "not stdout")],
+			})
 		})
 	}
 }

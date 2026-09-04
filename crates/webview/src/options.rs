@@ -34,30 +34,35 @@ pub enum EngineKind {
 #[derive(Debug, Default)]
 pub struct PageOptions {
 	/// Initial URL (wins over `html`).
-	pub url:          Option<Str>,
+	pub url:               Option<Str>,
 	/// Initial HTML document (loaded with a null origin).
-	pub html:         Option<Str>,
+	pub html:              Option<Str>,
 	/// Custom user-agent string.
-	pub user_agent:   Option<Str>,
+	pub user_agent:        Option<Str>,
 	/// Public HTTP headers applied to remote page navigations.
-	pub headers:      Vec<(Str, Str)>,
+	pub headers:           Vec<(Str, Str)>,
 	/// Transparent page background.
-	pub transparent:  bool,
+	pub transparent:       bool,
 	/// Solid background color (RGBA), ignored when `transparent`.
-	pub background:   Option<[u8; 4]>,
+	pub background:        Option<[u8; 4]>,
 	/// Scripts injected before `window.onload` on every new document.
-	pub init_scripts: Vec<Str>,
+	pub init_scripts:      Vec<Str>,
 	/// Do not persist browsing data.
-	pub incognito:    bool,
+	pub incognito:         bool,
 	/// Remote engines: browsing-profile directory (cookies, cache, storage).
 	/// `None` uses an ephemeral directory removed when the view closes.
-	pub profile:      Option<PathBuf>,
+	pub profile:           Option<PathBuf>,
 	/// Allow opening the engine's devtools.
-	pub devtools:     bool,
+	pub devtools:          bool,
 	/// Extra arguments for an owned remote browser process.
-	pub arguments:    Vec<Str>,
+	pub arguments:         Vec<Str>,
 	/// Upper bound for attaching to an existing automation endpoint.
-	pub connect_timeout: Option<Duration>,
+	pub connect_timeout:   Option<Duration>,
+	/// Whether the caller explicitly requested the supplied frame viewport.
+	///
+	/// Native relay attachments leave user-owned tabs at their existing
+	/// viewport unless this is `true`.
+	pub viewport_explicit: bool,
 }
 
 /// Wire encoding for captured frames.

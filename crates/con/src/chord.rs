@@ -1,6 +1,6 @@
 //! Canonical key-chord spelling for `bind`.
 //!
-//! A chord is spelled the pi way (`ctrl+shift+p`, `alt+up`, `f5`).
+//! A chord uses canonical spelling (`ctrl+shift+p`, `alt+up`, `f5`).
 //! [`normalize_chord`] folds case, modifier aliases, and modifier order so
 //! every spelling of one physical chord lands on one bind-table key; the
 //! terminal decoder lowers a received key to the same canonical spelling.
@@ -28,11 +28,11 @@ const MODIFIERS: [&str; 4] = ["ctrl", "alt", "shift", "super"];
 
 /// Symbols whose printable form already implies Shift. Terminals disagree
 /// about whether the Shift modifier remains set beside the shifted codepoint,
-/// so both reports must name one physical chord (pi `addKeyAliases`).
+/// so both reports must name one physical chord.
 const SHIFTED_SYMBOLS: &str = "!@#$%^&*()_+{}|:<>?~";
 
 /// Folds a `bind` chord to its canonical spelling: lowercase, modifiers in
-/// `ctrl+alt+shift+super` order, pi key names (`escape`, `pageup`,
+/// `ctrl+alt+shift+super` order, canonical key names (`escape`, `pageup`,
 /// `shift+tab`, `f5`).
 pub fn normalize_chord(chord: &str) -> Result<Str, ChordError> {
 	let chord = chord.trim();

@@ -20,7 +20,7 @@ use clap::{
 	builder::{TypedValueParser, ValueParserFactory},
 	error,
 };
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use rand::{
 	RngExt as _, SeedableRng as _,
 	rngs::{self, SmallRng},

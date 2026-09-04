@@ -34,9 +34,7 @@ pub struct BankDiagnostic {
 
 /// Collects complete diagnostics for one bank.
 pub fn inspect(store: &BankStore) -> Result<BankDiagnostic> {
-	let database_bytes = fs::metadata(store.path())
-		.map(|value| value.len())
-		.unwrap_or(0);
+	let database_bytes = fs::metadata(store.path()).map_or(0, |value| value.len());
 	Ok(BankDiagnostic {
 		bank: store.bank().to_string(),
 		database: store.path().to_path_buf(),

@@ -1,5 +1,4 @@
-//! `/resume` session picker: pi `session-selector.ts` as an observer-local
-//! [`Panel`] (ADR 0005).
+//! `/resume` session picker as an observer-local [`Panel`] (ADR 0005).
 //!
 //! The picker opens on the project session index, then asks the controller
 //! for project/global replacements when Tab toggles scope. It keeps only the
@@ -7,12 +6,11 @@
 //! 0005/0014): typed index requests plus `resume`, `session_rename`, and
 //! `session_delete` console lines.
 //!
-//! pi's picker (`SessionSelectorComponent`, `session-selector.ts:809`)
-//! stacks a search input over a multi-line session list; here the list is
-//! one `<select filter>` whose rows carry the pi `app.session.*` chords
-//! declared in `config/keybindings.ts:197-216`: Ctrl+P toggles the path
+//! The picker stacks a search input over a multi-line session list; here the
+//! list is one `<select filter>` whose rows carry session chords: Ctrl+P
+//! toggles the path
 //! column, Ctrl+S the sort key, Ctrl+R renames, Ctrl+D deletes with the
-//! `Delete session?` confirmation (`session-selector.ts:942`), and
+//! `Delete session?` confirmation, and
 //! Ctrl+Backspace deletes without it.
 
 use std::sync::Arc;
@@ -29,9 +27,9 @@ use super::{
 };
 use crate::host::HostCommand;
 
-/// pi `session-selector.ts:833` default heading.
+/// Default heading.
 const TITLE: &str = "Resume Session";
-/// pi `session-selector.ts:1021` footer plus omp's session chords.
+/// Footer with session chords.
 const LIST_HINT: &str =
 	"[Tab scope · Del · Enter · Ctrl+P path · Ctrl+S sort · Ctrl+R rename · Esc]";
 const RENAME_HINT: &str = "[Enter save · Esc cancel]";
@@ -39,7 +37,7 @@ const CONFIRM_HINT: &str = "[y delete · n/Esc keep]";
 /// Foreign import pickers use the same filter/select controls but expose no
 /// native-session mutation chords.
 const IMPORT_HINT: &str = "[Enter import · Esc cancel]";
-/// pi `session-selector.ts:559` empty-state wording.
+/// Empty-state wording.
 const NO_SESSIONS: &str = "No sessions found";
 /// Border, hint rule, hint, and blank rows around the list.
 const FRAME_ROWS: u16 = 6;
@@ -49,7 +47,7 @@ const HISTORY_MERGE_DELAY: std::time::Duration = std::time::Duration::from_milli
 const STAMP_FORMAT: &str = "%Y-%m-%d %H:%M";
 /// Stamp shown when a timestamp cannot be represented.
 const NO_STAMP: &str = "????-??-?? ??:??";
-/// Indent pi's session list draws for a subagent child under its parent.
+/// Indent drawn for a subagent child under its parent.
 const CHILD_PREFIX: &str = "└ ";
 
 /// Which timestamp orders the list and fills the date column.
@@ -356,17 +354,17 @@ impl Panel for ForeignSessionPicker {
 
 /// Retained `/resume` picker.
 pub struct SessionPicker {
-	ui:        Ui,
-	ctx:       UiContext,
-	zone:      TimeZone,
-	rows:      Vec<SessionRow>,
-	shown:     Vec<Shown>,
+	ui:              Ui,
+	ctx:             UiContext,
+	zone:            TimeZone,
+	rows:            Vec<SessionRow>,
+	shown:           Vec<Shown>,
 	/// Highlighted position in `shown`.
-	cursor:    Option<usize>,
-	query:     Str,
-	mode:      Mode,
-	full_path: bool,
-	sort:      Sort,
+	cursor:          Option<usize>,
+	query:           Str,
+	mode:            Mode,
+	full_path:       bool,
+	sort:            Sort,
 	scope:           SessionScope,
 	requested:       Option<SessionScope>,
 	history:         Option<Arc<dyn Services>>,
@@ -379,7 +377,7 @@ pub struct SessionPicker {
 
 impl SessionPicker {
 	/// Opens the picker over the host's session index in the local
-	/// timezone. `Err` carries the service failure or pi's empty-state
+	/// timezone. `Err` carries the service failure or empty-state
 	/// wording when there is nothing to resume.
 	pub fn open(cx: &PanelCx<'_>) -> Result<Self, Str> {
 		let rows = cx
@@ -490,8 +488,7 @@ impl SessionPicker {
 			.map_or_else(|| Str::new_static(NO_STAMP), Str::new)
 	}
 
-	/// Title when named, else the id (pi `displayName`,
-	/// `session-selector.ts:943`).
+	/// Title when named, else the id.
 	fn display_name(row: &SessionRow) -> &str {
 		row.title.as_deref().unwrap_or(row.id.as_str())
 	}
@@ -608,8 +605,7 @@ impl SessionPicker {
 		Ui::from_root(tree, self.width, self.ctx.clone())
 	}
 
-	/// pi suffixes the heading with the listing scope
-	/// (`session-selector.ts:889`).
+	/// Suffixes the heading with the listing scope.
 	fn list_title(&self) -> Str {
 		let sort = match self.sort {
 			Sort::Modified => "modified",
@@ -729,7 +725,7 @@ impl SessionPicker {
 			self.rebuild();
 			return PanelEvent::Command(HostCommand::SessionIndex { scope });
 		}
-		// pi `session-selector.ts:670-683`: Delete, or Backspace on an empty
+		// Delete, or Backspace on an empty
 		// query, asks to delete the highlighted session.
 		if key == Key::Delete || (key == Key::Backspace && self.query.is_empty()) {
 			return self.action(PanelAction::Delete);
@@ -740,7 +736,7 @@ impl SessionPicker {
 
 	/// Applies what the list widget reported for a key or pointer gesture:
 	/// highlight moves the cursor, filtering re-seats it, activation (Enter
-	/// or a click on a row, pi `session-selector.ts` `onSelect`) resumes.
+	/// or a click on a row) resumes.
 	fn list_event(&mut self, event: UiEvent) -> PanelEvent {
 		match event {
 			UiEvent::Cancel => PanelEvent::Close,
@@ -798,7 +794,12 @@ impl SessionPicker {
 		self.reorder_for_query();
 		self.cursor = selected
 			.as_ref()
-			.and_then(|id| self.shown.iter().position(|shown| self.rows[shown.row].id == *id))
+			.and_then(|id| {
+				self
+					.shown
+					.iter()
+					.position(|shown| self.rows[shown.row].id == *id)
+			})
 			.or_else(|| (!self.shown.is_empty()).then_some(0));
 		self.rebuild();
 		true
@@ -1160,7 +1161,7 @@ mod tests {
 		);
 	}
 
-	/// pi `session-selector.ts` `onSelect`: a click on a session row resumes
+	/// A click on a session row resumes
 	/// it, and the wheel moves the highlight without committing.
 	#[test]
 	fn click_on_a_row_resumes_it_and_wheel_moves_the_highlight() {

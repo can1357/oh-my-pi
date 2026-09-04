@@ -79,10 +79,7 @@ pub(crate) fn run(options: HostOptions) -> miette::Result<()> {
 
 enum GuiDebugOp {
 	Shared(DebugRequest),
-	ImePreedit {
-		text:      String,
-		selection: Option<std::ops::Range<usize>>,
-	},
+	ImePreedit { text: String, selection: Option<std::ops::Range<usize>> },
 	ImeCommit(String),
 	Drop(Vec<PathBuf>),
 	Focus(bool),
@@ -352,17 +349,11 @@ impl GuiScene {
 			GuiDebugOp::Shared(request) => request,
 			GuiDebugOp::ImePreedit { text, selection } => {
 				let effect = Scene::ime_preedit(self, &text, selection);
-				return (
-					serde_json::json!({"ok":true,"injected":"ime-preedit"}),
-					effect,
-				);
+				return (serde_json::json!({"ok":true,"injected":"ime-preedit"}), effect);
 			},
 			GuiDebugOp::ImeCommit(text) => {
 				let effect = Scene::ime_commit(self, &text);
-				return (
-					serde_json::json!({"ok":true,"injected":"ime-commit"}),
-					effect,
-				);
+				return (serde_json::json!({"ok":true,"injected":"ime-commit"}), effect);
 			},
 			GuiDebugOp::Drop(paths) => {
 				let paths = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
@@ -371,10 +362,7 @@ impl GuiScene {
 			},
 			GuiDebugOp::Focus(focused) => {
 				let effect = Scene::focus(self, focused);
-				return (
-					serde_json::json!({"ok":true,"injected":"focus","focused":focused}),
-					effect,
-				);
+				return (serde_json::json!({"ok":true,"injected":"focus","focused":focused}), effect);
 			},
 			GuiDebugOp::Appearance(appearance) => {
 				let effect = Scene::appearance(self, appearance);
@@ -407,26 +395,23 @@ impl GuiScene {
 					.lines()
 					.map(str::to_owned)
 					.collect::<Vec<_>>();
-				(
-					serde_json::json!({"ok":true,"lines":lines,"surface":"native"}),
-					Effect::Ignored,
-				)
+				(serde_json::json!({"ok":true,"lines":lines,"surface":"native"}), Effect::Ignored)
 			},
 			DebugRequest::Frame => {
 				let frame = self.debug_frame();
 				match debug::frame_png(&frame) {
-				Ok(png) => (
-					serde_json::json!({
-						"ok": true,
-						"lines": debug::frame_text(&frame).lines().collect::<Vec<_>>(),
-						"png": png,
-						"surface": "native",
-					}),
-					Effect::Ignored,
-				),
-				Err(error) => {
-					(serde_json::json!({"ok":false,"error":error.to_string()}), Effect::Ignored)
-				},
+					Ok(png) => (
+						serde_json::json!({
+							"ok": true,
+							"lines": debug::frame_text(&frame).lines().collect::<Vec<_>>(),
+							"png": png,
+							"surface": "native",
+						}),
+						Effect::Ignored,
+					),
+					Err(error) => {
+						(serde_json::json!({"ok":false,"error":error.to_string()}), Effect::Ignored)
+					},
 				}
 			},
 			DebugRequest::Tree => {
@@ -625,9 +610,9 @@ impl Scene for GuiScene {
 		let mut layers = SmallVec::new();
 		if let Some(overlay) = self.host.picker_overlay() {
 			layers.push(Layer {
-				frame: &overlay.frame,
+				frame:   &overlay.frame,
 				options: &overlay.options,
-				active: overlay.active,
+				active:  overlay.active,
 			});
 		}
 		if let Some(frame) = self.host.approval_frame() {
@@ -766,14 +751,14 @@ mod tests {
 					up,
 					con: Arc::new(omp_con::Ctx::new()),
 					models: vec![omp_chat::ModelRow {
-						key: "test/model".into(),
-						name: "Test Model".into(),
+						key:         "test/model".into(),
+						name:        "Test Model".into(),
 						provider_id: "test".into(),
-						provider: "Test".into(),
-						context: Some(200_000),
-						input_mtok: None,
+						provider:    "Test".into(),
+						context:     Some(200_000),
+						input_mtok:  None,
 						output_mtok: None,
-						efforts: Vec::new(),
+						efforts:     Vec::new(),
 					}],
 					cycle: Vec::new(),
 					resize_policy: ResizePolicy::Rebuild,

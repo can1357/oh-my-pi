@@ -40,11 +40,11 @@ flowchart LR
     C --> A3["params.arg('input').chunks()"]
 ```
 
-One invocation owns one append-only text buffer and exactly one cursor over it. In Rust that linearity is the borrow checker: `IncomingDoc::json` hands out a cursor that mutably reborrows the document, and every child cursor retains that borrow (`crates/slopjson/src/incoming.rs:250-259`). Python has no borrow checker, so linearity is enforced dynamically: **at most one pull may be pending at a time.** `asyncio.gather(params.arg("a"), params.arg("b"))` raises `omp.ParamsMisuse`; awaiting them in sequence is correct and cheap.
+One invocation owns one append-only text buffer and exactly one cursor over it. In Rust that linearity is the borrow checker: `IncomingDoc::json` hands out a cursor that mutably reborrows the document, and every child cursor retains that borrow (`crates/core/src/slopjson/incoming.rs:250-259`). Python has no borrow checker, so linearity is enforced dynamically: **at most one pull may be pending at a time.** `asyncio.gather(params.arg("a"), params.arg("b"))` raises `omp.ParamsMisuse`; awaiting them in sequence is correct and cheap.
 
 This is not an implementation limitation being papered over. Fan-out is what makes a stuck invocation invisible: two coroutines each waiting on a key that will never arrive look exactly like two coroutines making progress. Serialized pulls turn the same situation into one `ArgFault` naming one path.
 
-There are no snapshots, no per-field events, and no broadcast channels — the same guarantee the Rust module header states (`crates/slopjson/src/incoming.rs:6-9`).
+There are no snapshots, no per-field events, and no broadcast channels — the same guarantee the Rust module header states (`crates/core/src/slopjson/incoming.rs:6-9`).
 
 ### Completeness is a delimiter, not a flag
 
@@ -58,7 +58,7 @@ Nothing tells you arguments are "complete". A value *is* complete when its delim
 | array | closing `]` arrives | `array()` hands you each element as it *starts* |
 | object | closing `}` arrives | `object().key(k)` resolves when `k`'s value starts |
 
-Two consequences worth internalising. First, a scalar is not complete merely because it parsed — structural garbage after a value surfaces as `omp.ArgIssueKind.INCOMPLETE` rather than a silently misparsed pull (`crates/slopjson/src/incoming.rs:29-34`). Second, string chunks contain only bytes whose *decoded meaning is stable*, so a `\uD83D\uDE00` surrogate pair spanning three fragments is never emitted half-decoded.
+Two consequences worth internalising. First, a scalar is not complete merely because it parsed — structural garbage after a value surfaces as `omp.ArgIssueKind.INCOMPLETE` rather than a silently misparsed pull (`crates/core/src/slopjson/incoming.rs:29-34`). Second, string chunks contain only bytes whose *decoded meaning is stable*, so a `\uD83D\uDE00` surrogate pair spanning three fragments is never emitted half-decoded.
 
 ### One state machine, seven phases
 
@@ -122,7 +122,7 @@ Pi's answer was a 2,100-line central validator that guesses repairs from outside
 
 omp splits the job by who actually knows the answer:
 
-1. **A tolerant parser at the bottom.** `omp-slopjson` accepts single-quoted strings, unquoted keys, Python literals, comments, trailing and stray commas, invalid escapes, hex/binary integers, relaxed numbers, raw control characters inside strings, and bareword values — while still refusing input that is not complete enough to trust (`crates/slopjson/README.md:3`). No tool sees a parse error for something a human would call obviously valid.
+1. **A tolerant parser at the bottom.** `omp_core::slopjson` accepts single-quoted strings, unquoted keys, Python literals, comments, trailing and stray commas, invalid escapes, hex/binary integers, relaxed numbers, raw control characters inside strings, and bareword values — while still refusing input that is not complete enough to trust (`crates/core/README.md`). No tool sees a parse error for something a human would call obviously valid.
 2. **Declared aliases and coercions on the pulled types.** The names models are RL'd against are data about model behaviour, so they are declared, versioned with the rev, and owned by the device.
 3. **Validation scoped to what you pulled — for previews only.** During `OPEN`, a param you pull is required and a param you never touch is never type-checked, so a preview can begin before the document finishes. This is asserted today: `pull_validates_only_the_requested_value_and_ignores_unknown_malformed_json` (`crates/tool/tests/contracts.rs:552`) pulls `wanted` out of the literal text `{"wanted":7,"unknown":[}` — a document that no complete parse could ever accept. Revision 1 presented that as the validation story; it is now the *preview* story. A document whose tail is structurally malformed never reaches `EFFECTS_AUTHORIZED`: partial pulls are preview-only, and finalization requires the whole document to parse.
 
@@ -219,7 +219,7 @@ The cursor. Constructed by the host, never by extension code.
 
 Returns a cursor bound to one top-level argument. Cheap and synchronous: no I/O, no waiting, no allocation beyond the path segment. The pull happens when you await the `Arg` or one of its shape methods.
 
-- `name` — the canonical key. During `OPEN`, a preview pull resolves against the first occurrence, matching `IncomingObject::key` (`crates/slopjson/src/incoming.rs:444-448`); a duplicate canonical key is rejected at `ARGS_FINALIZED` as `ArgIssueKind.AMBIGUOUS`, so no interpretation a preview showed can diverge from the one object everything downstream shares.
+- `name` — the canonical key. During `OPEN`, a preview pull resolves against the first occurrence, matching `IncomingObject::key` (`crates/core/src/slopjson/incoming.rs:444-448`); a duplicate canonical key is rejected at `ARGS_FINALIZED` as `ArgIssueKind.AMBIGUOUS`, so no interpretation a preview showed can diverge from the one object everything downstream shares.
 - `alias` — additional accepted key names for this pull, merged with any declared on the params type. Exactly one of `(name, *alias)` may appear in the document; two of them present is `AMBIGUOUS` at finalization. The repair record names which alias matched.
 - `coerce` — an `omp.Coerce` member or tuple of members applied to the pulled value, overriding the declared coercions for this pull.
 - `example` — a worked example string attached to any `ArgFault` raised by this pull.
@@ -358,7 +358,7 @@ A linear cursor for keyed pulls.
 - `await collect() -> dict` — waits for the closing brace and returns the object. A duplicate key raises `omp.ArgFault` with `kind=AMBIGUOUS`.
 - `keys()` — `AsyncIterator[tuple[str, Arg]]`, yielding each member as it opens. Only fields declared `additional_properties=True` (see `@omp.params` below) support it; calling it on a closed-schema field raises `omp.ParamsMisuse`. Use it for genuinely open maps (an `env` block, an MCP passthrough payload); use `key()` for anything you named in a schema.
 
-Revision 1 documented a load-bearing divergence here: `key()` bound the first occurrence of a duplicate key while `collect()` used last-write-wins, mirroring the split the Rust cursors document (`crates/slopjson/src/incoming.rs:23-27`), and told consumers who cared about duplicates to detect them themselves via `raw()`. That is deleted, deliberately. Two resolution rules over one document meant a preview pull, a whole-object decode, and a policy evaluation could each act on a *different* value of the same argument — the review's three-interpretations hole. The Rust crate still carries the split today; the finalizer work item in the build section closes it by rejecting duplicates outright, which is the only answer that leaves one canonical object.
+Revision 1 documented a load-bearing divergence here: `key()` bound the first occurrence of a duplicate key while `collect()` used last-write-wins, mirroring the split the Rust cursors document (`crates/core/src/slopjson/incoming.rs:23-27`), and told consumers who cared about duplicates to detect them themselves via `raw()`. That is deleted, deliberately. Two resolution rules over one document meant a preview pull, a whole-object decode, and a policy evaluation could each act on a *different* value of the same argument — the review's three-interpretations hole. The Rust crate still carries the split today; the finalizer work item in the build section closes it by rejecting duplicates outright, which is the only answer that leaves one canonical object.
 
 ### `omp.InterruptibleParams`
 
@@ -517,7 +517,7 @@ the direct payload fields `.path`, `.kind`, `.detail`, and `.example`.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `omp.params.MAX_NESTING_DEPTH` | `128` | Parser nesting limit; deeper input is `ArgIssueKind.MALFORMED`. Mirrors `Parser::MAX_DEPTH` (`crates/slopjson/src/parser.rs:34`). |
+| `omp.params.MAX_NESTING_DEPTH` | `128` | Parser nesting limit; deeper input is `ArgIssueKind.MALFORMED`. Mirrors `Parser::MAX_DEPTH` (`crates/core/src/slopjson/parser.rs:34`). |
 | `omp.params.INTERRUPT_GRACE` | `omp.Duration("150ms")` | Time between an interrupt the device ignores and the resource owner reclaiming. Mirrors `ToolWorkerConfig::interrupt_grace`, whose default is `Duration::from_millis(150)` (`crates/app/src/envd/worker.rs:96`) and whose own doc calls it the "courtesy-interrupt grace period before the process group is killed" (`worker.rs:74`). An earlier draft of this document guessed two seconds and typed the constant as bare float seconds; the shipped value is 150 ms and the type is `omp.Duration`. The courtesy window is not the mechanism — see the closing section. |
 | `omp.params.MAX_PENDING_PULLS` | `1` | The linearity constant. Documented, not configurable — it exists so the error message can name it. |
 
@@ -691,9 +691,9 @@ Three structural gains. `ArgIssueKind.INCOMPLETE` distinguishes truncation from 
 
 ## What this requires us to build
 
-### `crates/slopjson`
+### `crates/core/src/slopjson`
 
-The cursor machinery is already the right shape and already path-addressed internally, which is the single most important fact for this design: `wait_for(shared, path, mode, expected)` (`crates/slopjson/src/incoming.rs:487-496`) and `locate(src, path, ended)` (`incoming.rs:615`) resolve an arbitrary `&[PathPart]` against the append buffer on every poll. The typed cursors (`IncomingJson`, `IncomingString`, `IncomingArray`, `IncomingObject`) are ergonomic wrappers over that. A path-addressed pull service for a non-Rust host is therefore an exposure, not a rewrite.
+The cursor machinery is already the right shape and already path-addressed internally, which is the single most important fact for this design: `wait_for(shared, path, mode, expected)` (`crates/core/src/slopjson/incoming.rs:487-496`) and `locate(src, path, ended)` (`incoming.rs:615`) resolve an arbitrary `&[PathPart]` against the append buffer on every poll. The typed cursors (`IncomingJson`, `IncomingString`, `IncomingArray`, `IncomingObject`) are ergonomic wrappers over that. A path-addressed pull service for a non-Rust host is therefore an exposure, not a rewrite.
 
 Four concrete additions:
 
@@ -734,7 +734,7 @@ Tolerances to leave alone: `NaN`/`Infinity`/`undefined` rejection, number-overfl
 
    registered per `Rev` in a `SparseMap` keyed by an interned path id, consulted by `arg_issue`. The table is built once at registration and is immutable thereafter, so lookups are index reads with no locking.
 
-2. **`Coerce`, applied in `omp-tool`, not `omp-slopjson`.** The recommended split: the parser stays shape-faithful and the tool crate owns coercion, because coercion is tool-specific knowledge (the blogpost's whole argument) and because putting it in the parser would make `Value` semantics depend on who is asking. `Coerce` operates on the pulled `Value` (or on the raw span for `JSON_STRING`, which re-enters `from_str`) and pushes a `Repair` on success. Nine members, matching the Python table above.
+2. **`Coerce`, applied in `omp-tool`, not `omp_core::slopjson`.** The recommended split: the parser stays shape-faithful and the tool crate owns coercion, because coercion is tool-specific knowledge (the blogpost's whole argument) and because putting it in the parser would make `Value` semantics depend on who is asking. `Coerce` operates on the pulled `Value` (or on the raw span for `JSON_STRING`, which re-enters `from_str`) and pushes a `Repair` on success. Nine members, matching the Python table above.
 
    The alternative — coercion as a serde `Deserializer` adapter — is tempting because it composes with `whole::<T>()`, but it cannot express `SINGLETON` for a field whose target type is only known at the pull site, and it would make coercion invisible to the repair log. Rejected.
 
@@ -748,11 +748,11 @@ Tolerances to leave alone: `NaN`/`Infinity`/`undefined` rejection, number-overfl
 
    Linearity across the boundary is then enforced by the host, not the type system: one outstanding pull slot per invocation. A second concurrent request is answered with `ParamError::Protocol("concurrent pull")` — the Python surface's `omp.ParamsMisuse` — rather than queued. Queueing is the wrong choice because a queued pull on a key that never arrives is an invisible deadlock, whereas a refused one names the path.
 
-4. **Chunk cursor state.** `IncomingString` keeps `emitted: usize` in the cursor (`crates/slopjson/src/incoming.rs:355-358`). A stateless-per-request host needs that state keyed by `(invocation, path)`. A `SparseMap<u32, usize>` per invocation, allocated lazily on the first `chunks()` call, sized by the number of distinct string cursors — one or two in practice.
+4. **Chunk cursor state.** `IncomingString` keeps `emitted: usize` in the cursor (`crates/core/src/slopjson/incoming.rs:355-358`). A stateless-per-request host needs that state keyed by `(invocation, path)`. A `SparseMap<u32, usize>` per invocation, allocated lazily on the first `chunks()` call, sized by the number of distinct string cursors — one or two in practice.
 
 5. **Interrupt classes.** `Interrupt { class: Str, reason: Str }` (`crates/tool/src/incoming.rs:34-41`) and `env.proto`'s `Interrupt` (`env.proto:83-87`) carry no class at all on the wire — only `reason`. `.interruptable()` cannot mean anything portable until the class exists end to end. Add `class` to the proto message and a `const` set for the four shipped classes. This is additive; the field number is new.
 
-6. **The finalizer.** `ARGS_FINALIZED` is a new, real component: one pass, run when the document completes, that (a) requires the whole document to parse structurally — the preview-only tolerance for malformed tails ends here; (b) rejects duplicate canonical keys, canonical-plus-alias pairs, and two-aliases-to-one-field as `AMBIGUOUS`, using the alias-aware key scan from `omp-slopjson` addition 3; (c) refuses undeclared open maps unless the field carries `additional_properties=True`; (d) fixes the repair record against the raw emission; and (e) emits the one canonical effective object that policy, the device, the journal, and telemetry share. Nothing like it exists today — the Rust cursors deliberately tolerate `{"wanted":7,"unknown":[}` forever (`crates/tool/tests/contracts.rs:552`), and `IncomingObject`'s two duplicate-key behaviours (`incoming.rs:23-27`) are exactly the ambiguity the finalizer exists to reject.
+6. **The finalizer.** `ARGS_FINALIZED` is a new, real component: one pass, run when the document completes, that (a) requires the whole document to parse structurally — the preview-only tolerance for malformed tails ends here; (b) rejects duplicate canonical keys, canonical-plus-alias pairs, and two-aliases-to-one-field as `AMBIGUOUS`, using the alias-aware key scan from `omp_core::slopjson` addition 3; (c) refuses undeclared open maps unless the field carries `additional_properties=True`; (d) fixes the repair record against the raw emission; and (e) emits the one canonical effective object that policy, the device, the journal, and telemetry share. Nothing like it exists today — the Rust cursors deliberately tolerate `{"wanted":7,"unknown":[}` forever (`crates/tool/tests/contracts.rs:552`), and `IncomingObject`'s two duplicate-key behaviours (`incoming.rs:23-27`) are exactly the ambiguity the finalizer exists to reject.
 
 ### `crates/proto`
 
@@ -801,7 +801,7 @@ Applied to the frames above, that means declared bounds, enforced before any all
 
 | Field | Bound | Why |
 |---|---|---|
-| `PullRequest.path` | 128 segments | `Parser::MAX_DEPTH` is 128 (`crates/slopjson/src/parser.rs:34`); a deeper path cannot resolve, so accepting one only buys an allocation. |
+| `PullRequest.path` | 128 segments | `Parser::MAX_DEPTH` is 128 (`crates/core/src/slopjson/parser.rs:34`); a deeper path cannot resolve, so accepting one only buys an allocation. |
 | `PullRequest.path[].key` | 1 KiB | A JSON key longer than that is not a key a schema declared. |
 | `PullRequest.alias` | 16 entries | Alias sets are `SmallVec<Str, 4>` by design; 16 is generous headroom that still fits the inline capacity story. |
 | `PullRequest.expected` | 256 B | It is a shape name, not prose. |
@@ -835,8 +835,8 @@ A pull is then four hops with no polling anywhere:
 
 Cancellation composes in both directions, and the directions are not symmetric:
 
-- **Rust → Python.** The invocation's `RunGuard` (`crates/env/src/guard.rs:13-24`, dropped at `guard.rs:58`) is dropped by the loop on timeout, turn loss, or Esc. Drop sets the invocation's cancel flag, aborts the `IncomingFeed` (which makes every parked pull resolve `IncomingError::Aborted`, `crates/slopjson/src/incoming.rs:203-207`), and posts `task.cancel()` through `call_soon_threadsafe`. Python sees `CancelledError` at its next await point; `finally` blocks run, `async with` leases release, `aclose()` runs on the generator. Ordinary Python cancellation, structurally driven.
-- **Python → Rust.** Dropping a pull is exactly cancelling its future, which is what Rust already relies on: "pulls are ordinary futures whose cancellation releases that borrow" (`crates/slopjson/src/incoming.rs:7-8`). `asyncio.wait_for(params.arg("x"), 0.5)` cancels the future, the host drops the Rust pull, the borrow is released, and the next pull works. No leak, no half-consumed cursor.
+- **Rust → Python.** The invocation's `RunGuard` (`crates/env/src/guard.rs:13-24`, dropped at `guard.rs:58`) is dropped by the loop on timeout, turn loss, or Esc. Drop sets the invocation's cancel flag, aborts the `IncomingFeed` (which makes every parked pull resolve `IncomingError::Aborted`, `crates/core/src/slopjson/incoming.rs:203-207`), and posts `task.cancel()` through `call_soon_threadsafe`. Python sees `CancelledError` at its next await point; `finally` blocks run, `async with` leases release, `aclose()` runs on the generator. Ordinary Python cancellation, structurally driven.
+- **Python → Rust.** Dropping a pull is exactly cancelling its future, which is what Rust already relies on: "pulls are ordinary futures whose cancellation releases that borrow" (`crates/core/src/slopjson/incoming.rs:7-8`). `asyncio.wait_for(params.arg("x"), 0.5)` cancels the future, the host drops the Rust pull, the borrow is released, and the next pull works. No leak, no half-consumed cursor.
 - **The gap Python cannot close — and the ruling that resizes it.** A device that ignores `CancelledError` — `while True: pass`, or `except BaseException: continue` — cannot be forcibly stopped. Lesson #2's answer is *the resource owner reclaims, not the tool*, and `PLAN.md` §D5 (**D5, Cancellation is resource-owned**, amended 2026-08-19) makes that concrete for this boundary: "Py/extension tools: supervised worker processes, one per active extension, keyed `(layer, tier, extension)`; pooling is explicit opt-in fate-sharing. Cancel = SIGKILL of that extension's process group + respawn; blast radius is one extension. Interpreter interrupts are courtesy, never the mechanism." SIGKILL-and-respawn stays the mechanism, and the topology this document described ahead of the amendment is now D5's own text: **one process and one site tree per extension**, host key `(layer, tier, extension)`, callback entry serialized per extension by default with concurrency an explicit opt-in (`concurrency=N` / `threadsafe=True`). SIGKILL granularity is one extension's process group.
 
   Revision 1 recorded here, honestly, that the shipped supervisor made this much worse than one device: `WorkerInvocation::drop` sends `SupervisorCommand::Cancel` (`crates/app/src/envd/worker.rs:220-229`), the supervisor's own doc says it "kills only the worker process group, reports effects-unknown, and replaces the worker before it accepts the next invocation" (`worker.rs:169-172`), with `SIGKILL` at `worker.rs:515-517` after the 150 ms courtesy window and `respawn` at `:806` — and `ToolWorkerSupervisor` is a "One-worker warm supervisor" (`worker.rs:232`), so the killed process group was *every device in the session*. That analysis stands as a description of the shipped code, which still implements pre-amendment D5's warm pool of one — `run_invocation` still serializes one invocation at a time (`worker.rs:592-598`), so the defect is latent rather than live. But it is no longer an open design question. The per-extension process ruling makes the target blast radius one extension: cancelling a call can only take down sibling calls *of the same extension* — fate-sharing that is explicit and author-legible, since opting into `--pool` or into intra-extension concurrency is opting into shared fate. The amendment to D5's "warm pool of one" wording that this document flagged as recommended was ratified 2026-08-19 (`PLAN.md` §D5): D5's third clause now reads per-extension worker processes, and the remaining delta between the shipped one-worker supervisor and the per-extension target is purely implementation. Durable approval tickets ([06-policy.md](06-policy.md)) remove the other half of the old deadlock — D5 as amended says approval "is a durable Core-owned ticket" — so nothing suspends a Python coroutine across an approval, and a long wait never holds an interpreter hostage. Until the per-extension supervisor exists, the shipped code remains unsafe under concurrent device calls, exactly as Revision 1 said.
@@ -852,7 +852,7 @@ Arguments never travel over the `omp_remote` pickle transport, and that is delib
 Satisfied outright:
 
 - `FEATURES.md:254` "streaming edit guard: live patch validation, abort broken diffs" — the guard becomes the core edit tool's own pre-authorization phases (pattern 1's rendering). Nothing external validates a patch mid-stream, because the tool dry-runs each op as it closes and its `Update` stream *is* the live validation.
-- `FEATURES.md:543` "streaming previews: partial-JSON parsing, monotonic windows, cached reads" — partial-JSON parsing moves into `omp-slopjson`; monotonic windows fall out of `chunks()`/`lines()` being append-only; cached reads become the doc lease, which also fixes the read-twice race the cache was hiding.
+- `FEATURES.md:543` "streaming previews: partial-JSON parsing, monotonic windows, cached reads" — partial-JSON parsing moves into `omp_core::slopjson`; monotonic windows fall out of `chunks()`/`lines()` being append-only; cached reads become the doc lease, which also fixes the read-twice race the cache was hiding.
 - `FEATURES.md:526` "permissive params schema" and `FEATURES.md:533-534` the replace-mode fallback ladder — both become declared coercions on the params type, versioned with the rev, with journaled repairs. The ladder's *matching* half stays in the device; only the argument-shape half moves.
 - `FEATURES.md:379` "lenient args: flat-spawn back-compat, arktype-failed forwarding, double-escaped JSON auto-repair" — `omp.Alias` plus `Coerce.JSON_STRING` plus `Coerce.SINGLETON`.
 - `tools-file.md:188` `dropIncompleteLastEdit` and `tools-file.md:121` the write tool's streaming tail window — `ArgArray` and `Arg.lines()` respectively.

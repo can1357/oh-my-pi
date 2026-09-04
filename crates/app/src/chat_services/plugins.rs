@@ -167,7 +167,7 @@ pub(super) fn update_marketplace(
 	}))
 }
 
-/// Upgrades one or every outdated plugin; settles pi's `Upgraded …` lines
+/// Upgrades one or every outdated plugin; settles `Upgraded …` lines
 /// or `All marketplace plugins are up to date`.
 pub(super) fn upgrade(state: &ServiceState, spec: Option<&str>) -> ServiceResult<Pending<Str>> {
 	let transactions = transactions(state);

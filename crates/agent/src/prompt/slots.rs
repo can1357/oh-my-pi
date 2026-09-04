@@ -378,13 +378,11 @@ impl SlotAssembler {
 	}
 }
 
-pub(crate) fn hash_framed<'a>(
-	contributions: impl IntoIterator<Item = (u64, &'a [u8])>,
-) -> BandHash {
+pub fn hash_framed<'a>(contributions: impl IntoIterator<Item = (u64, &'a [u8])>) -> BandHash {
 	let mut hasher = Hash32::hasher();
 	for (tag, bytes) in contributions {
-		hasher.update(&tag.to_le_bytes());
-		hasher.update(&(bytes.len() as u64).to_le_bytes());
+		hasher.update(tag.to_le_bytes());
+		hasher.update((bytes.len() as u64).to_le_bytes());
 		hasher.update(bytes);
 	}
 	BandHash(hasher.finalize().into_bytes())
@@ -408,7 +406,7 @@ const fn default_slot_class(slot: SlotId) -> SlotClass {
 	}
 }
 
-pub(crate) fn system_text(text: String) -> Item {
+pub fn system_text(text: String) -> Item {
 	Item {
 		seq:           0,
 		created_at_ms: 0,

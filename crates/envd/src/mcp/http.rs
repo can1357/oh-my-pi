@@ -136,9 +136,7 @@ impl HttpBody {
 				self.buffer.extend_from_slice(&chunk);
 				Ok(true)
 			},
-			Some(Err(HttpExchangeError::Http(source))) => {
-				Err(TransportFailure::from_http(source))
-			},
+			Some(Err(HttpExchangeError::Http(source))) => Err(TransportFailure::from_http(source)),
 			Some(Err(HttpExchangeError::ResponseTooLarge)) => Err(TransportFailure::FrameTooLarge),
 			None => {
 				self.eof = true;
@@ -249,7 +247,10 @@ pub enum HttpExchangeError {
 impl std::fmt::Debug for HttpExchangeError {
 	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let kind: &'static str = self.into();
-		formatter.debug_tuple("HttpExchangeError").field(&kind).finish()
+		formatter
+			.debug_tuple("HttpExchangeError")
+			.field(&kind)
+			.finish()
 	}
 }
 
@@ -537,9 +538,7 @@ impl StreamableHttpTransport {
 				.map_err(|cause| TransportError::effects_unknown(cause))?
 			{
 				progressed = true;
-				if let Some(result) =
-					self.consume_sse_event(event, Some(expected), &mut resume)?
-				{
+				if let Some(result) = self.consume_sse_event(event, Some(expected), &mut resume)? {
 					return Ok(result);
 				}
 			}
@@ -597,30 +596,21 @@ impl StreamableHttpTransport {
 				.and_then(|value| serde_json::from_value::<RequestId>(value.clone()).ok());
 			if expected.is_some_and(|id| message_id.as_ref() == Some(id)) {
 				if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-					return Err(TransportError::effects_unknown(
-						TransportFailure::MalformedFrame,
-					));
+					return Err(TransportError::effects_unknown(TransportFailure::MalformedFrame));
 				}
 				match (message.get("result"), message.get("error")) {
 					(Some(result), None) => response = Some(result.clone()),
 					(None, Some(error)) => {
-						let code = error
-							.get("code")
-							.and_then(Value::as_i64)
-							.ok_or_else(|| {
-								TransportError::effects_unknown(
-									TransportFailure::MalformedFrame,
-								)
-							})?;
+						let code = error.get("code").and_then(Value::as_i64).ok_or_else(|| {
+							TransportError::effects_unknown(TransportFailure::MalformedFrame)
+						})?;
 						return Err(TransportError {
 							dispatch: DispatchState::Responded,
 							cause:    TransportFailure::JsonRpc { code },
 						});
 					},
 					_ => {
-						return Err(TransportError::effects_unknown(
-							TransportFailure::MalformedFrame,
-						));
+						return Err(TransportError::effects_unknown(TransportFailure::MalformedFrame));
 					},
 				}
 			} else {
@@ -761,9 +751,7 @@ impl McpTransport for StreamableHttpTransport {
 				let body =
 					serde_json::to_vec(&json!({"jsonrpc":"2.0","method":method,"params":params}))
 						.map(Bytes::from)
-						.map_err(|source| {
-							TransportError::pre_dispatch(TransportFailure::Json(source))
-						})?;
+						.map_err(|source| TransportError::pre_dispatch(TransportFailure::Json(source)))?;
 				let response = self
 					.exchange_with_refresh(
 						Method::POST,
@@ -786,9 +774,7 @@ impl McpTransport for StreamableHttpTransport {
 				} else {
 					Err(TransportError {
 						dispatch: DispatchState::Responded,
-						cause:    TransportFailure::HttpStatus {
-							status: response.status.as_u16(),
-						},
+						cause:    TransportFailure::HttpStatus { status: response.status.as_u16() },
 					})
 				}
 			};
@@ -796,9 +782,7 @@ impl McpTransport for StreamableHttpTransport {
 				match self.config.timeout {
 					Some(timeout) => tokio::time::timeout(timeout, operation)
 						.await
-						.map_err(|_| {
-							TransportError::effects_unknown(TransportFailure::TimedOut)
-						})?,
+						.map_err(|_| TransportError::effects_unknown(TransportFailure::TimedOut))?,
 					None => operation.await,
 				}
 			};
@@ -841,9 +825,7 @@ impl McpTransport for StreamableHttpTransport {
 				};
 				let body = serde_json::to_vec(&value)
 					.map(Bytes::from)
-					.map_err(|source| {
-						TransportError::pre_dispatch(TransportFailure::Json(source))
-					})?;
+					.map_err(|source| TransportError::pre_dispatch(TransportFailure::Json(source)))?;
 				let response = self
 					.exchange_with_refresh(
 						Method::POST,
@@ -866,9 +848,7 @@ impl McpTransport for StreamableHttpTransport {
 				} else {
 					Err(TransportError {
 						dispatch: DispatchState::Responded,
-						cause:    TransportFailure::HttpStatus {
-							status: response.status.as_u16(),
-						},
+						cause:    TransportFailure::HttpStatus { status: response.status.as_u16() },
 					})
 				}
 			};
@@ -876,9 +856,7 @@ impl McpTransport for StreamableHttpTransport {
 				match self.config.timeout {
 					Some(timeout) => tokio::time::timeout(timeout, operation)
 						.await
-						.map_err(|_| {
-							TransportError::effects_unknown(TransportFailure::TimedOut)
-						})?,
+						.map_err(|_| TransportError::effects_unknown(TransportFailure::TimedOut))?,
 					None => operation.await,
 				}
 			};
@@ -984,9 +962,7 @@ fn correlated_json(body: &[u8], expected: &RequestId) -> Result<Value, Transport
 			let code = error
 				.get("code")
 				.and_then(Value::as_i64)
-				.ok_or_else(|| {
-					TransportError::effects_unknown(TransportFailure::MalformedFrame)
-				})?;
+				.ok_or_else(|| TransportError::effects_unknown(TransportFailure::MalformedFrame))?;
 			Err(TransportError {
 				dispatch: DispatchState::Responded,
 				cause:    TransportFailure::JsonRpc { code },
@@ -1275,9 +1251,9 @@ mod tests {
 							CONTENT_TYPE,
 							HeaderValue::from_static("application/json"),
 						)]),
-						body:    HttpBody::from_stream(
-							futures::stream::pending::<Result<Bytes, HttpExchangeError>>(),
-						),
+						body:    HttpBody::from_stream(futures::stream::pending::<
+							Result<Bytes, HttpExchangeError>,
+						>()),
 					})
 				})
 			}
@@ -1342,17 +1318,13 @@ mod tests {
 	fn debug_output_redacts_request_credentials_and_rpc_query_secrets() {
 		let request = HttpRequest {
 			method:  Method::POST,
-			url:     Url::parse("https://example.test/mcp?api_key=top-secret&view=all")
-				.expect("url"),
+			url:     Url::parse("https://example.test/mcp?api_key=top-secret&view=all").expect("url"),
 			headers: HeaderMap::from_iter([
 				(
 					HeaderName::from_static("authorization"),
 					HeaderValue::from_static("Bearer top-secret"),
 				),
-				(
-					HeaderName::from_static("x-request-id"),
-					HeaderValue::from_static("trace-safe"),
-				),
+				(HeaderName::from_static("x-request-id"), HeaderValue::from_static("trace-safe")),
 			]),
 			body:    Bytes::from_static(b"{\"secret\":\"body-secret\"}"),
 		};

@@ -16,9 +16,9 @@ use async_stream::stream;
 use bytes::Bytes;
 use flume::Receiver;
 use futures::{FutureExt, Stream, StreamExt, executor::block_on};
+use omp_ai::{Adjustment, ToolGrammarSyntax};
 use omp_catalog::GrammarBits;
 use omp_core::{Hash32, Str, sf};
-use omp_inference::{Adjustment, ToolGrammarSyntax};
 use omp_proto::policy::v1;
 use omp_tool::{
 	Abort, AbortKind, ArgIssue, ArgIssueKind, ArgPath, ArgSpec, ArgSpecRegistry,
@@ -2066,7 +2066,7 @@ fn cursor_refuses_concurrent_pulls_and_keeps_lazy_chunk_offsets() {
 	feed.args_committed(sf!(r#"{{"text":"hello"}}"#)).unwrap();
 	let pulled = block_on(cursor.pull_at(&path, PullMode::Complete, "string")).unwrap();
 	assert!(
-		matches!(pulled.kind, PulledKind::Complete(omp_slopjson::Value::String(value)) if value == "hello")
+		matches!(pulled.kind, PulledKind::Complete(omp_core::slopjson::Value::String(value)) if value == "hello")
 	);
 
 	let (feed, mut params) = bound_params(&rev, &specs);

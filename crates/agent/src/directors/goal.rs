@@ -32,7 +32,7 @@ pub fn continuation_is_active(dom: &Dom) -> bool {
 /// Builds the hidden prompt for the next idle-boundary continuation.
 ///
 /// An active Goal yields after a prose-only model response. The interactive
-/// controller may submit this prompt as a new turn after pi's 800 ms idle
+/// controller may submit this prompt as a new turn after an 800 ms idle
 /// window; paused and queued engagements deliberately produce no prompt.
 #[must_use]
 pub fn continuation_prompt(dom: &Dom) -> Option<Str> {
@@ -85,8 +85,7 @@ fn push_xml_text(out: &mut String, text: &str) {
 }
 
 fn budget_exhausted(node: &Node) -> bool {
-	let Some(budget) = state_int(node, "token_budget")
-		.and_then(|value| u64::try_from(value).ok())
+	let Some(budget) = state_int(node, "token_budget").and_then(|value| u64::try_from(value).ok())
 	else {
 		return false;
 	};
@@ -106,18 +105,18 @@ fn now_ms() -> u64 {
 /// changes the goal to a held, budget-limited state; exhaustion is never
 /// treated as successful completion.
 pub struct Goal {
-	id:                 Str,
-	objective:          Str,
-	token_budget:       Option<u64>,
-	tokens_used:        u64,
-	time_used_secs:       u64,
-	created_at_ms:        u64,
-	updated_at_ms:        u64,
-	accounted_turn:       Option<u64>,
+	id:                    Str,
+	objective:             Str,
+	token_budget:          Option<u64>,
+	tokens_used:           u64,
+	time_used_secs:        u64,
+	created_at_ms:         u64,
+	updated_at_ms:         u64,
+	accounted_turn:        Option<u64>,
 	accounted_turn_tokens: u64,
-	continuation_armed:   bool,
-	done:               bool,
-	dropped:            bool,
+	continuation_armed:    bool,
+	done:                  bool,
+	dropped:               bool,
 }
 
 impl Goal {
@@ -145,30 +144,30 @@ impl Goal {
 	#[must_use]
 	pub fn from_node(node: &Node) -> Self {
 		Self {
-			id:                 state_str(node, "id").unwrap_or_default(),
-			objective:          state_str(node, "objective").unwrap_or_default(),
-			token_budget:       state_int(node, "token_budget")
+			id:                    state_str(node, "id").unwrap_or_default(),
+			objective:             state_str(node, "objective").unwrap_or_default(),
+			token_budget:          state_int(node, "token_budget")
 				.and_then(|value| u64::try_from(value).ok()),
-			tokens_used:        state_int(node, "tokens_used")
+			tokens_used:           state_int(node, "tokens_used")
 				.and_then(|value| u64::try_from(value).ok())
 				.unwrap_or(0),
-			time_used_secs:     state_int(node, "time_used_secs")
+			time_used_secs:        state_int(node, "time_used_secs")
 				.and_then(|value| u64::try_from(value).ok())
 				.unwrap_or(0),
-			created_at_ms:      state_int(node, "created_at_ms")
+			created_at_ms:         state_int(node, "created_at_ms")
 				.and_then(|value| u64::try_from(value).ok())
 				.unwrap_or(0),
-			updated_at_ms:      state_int(node, "updated_at_ms")
+			updated_at_ms:         state_int(node, "updated_at_ms")
 				.and_then(|value| u64::try_from(value).ok())
 				.unwrap_or(0),
-			accounted_turn:     state_int(node, "accounted_turn")
+			accounted_turn:        state_int(node, "accounted_turn")
 				.and_then(|value| u64::try_from(value).ok()),
 			accounted_turn_tokens: state_int(node, "accounted_turn_tokens")
 				.and_then(|value| u64::try_from(value).ok())
 				.unwrap_or(0),
-			continuation_armed: state_bool(node, "continuation_armed").unwrap_or(true),
-			done:               state_bool(node, "done").unwrap_or(false),
-			dropped:            state_bool(node, "dropped").unwrap_or(false),
+			continuation_armed:    state_bool(node, "continuation_armed").unwrap_or(true),
+			done:                  state_bool(node, "done").unwrap_or(false),
+			dropped:               state_bool(node, "dropped").unwrap_or(false),
 		}
 	}
 
@@ -192,11 +191,10 @@ impl Goal {
 				"\n</objective>\n\nBudget:\n- Time used: {} seconds\n- Tokens used: {}\n- Token \
 				 budget: {budget}\n\nRuntime marked goal budget-limited. NEVER start new substantive \
 				 work for this goal. Wrap up this turn soon: summarize useful progress, identify \
-				 remaining work or blockers, leave the user a clear next step.\n\nBudget exhaustion \
-				 ≠ completion. NEVER call `goal({{op:\"complete\"}})` unless current repo state proves \
+				 remaining work or blockers, leave the user a clear next step.\n\nBudget exhaustion ≠ \
+				 completion. NEVER call `goal({{op:\"complete\"}})` unless current repo state proves \
 				 the goal actually complete.",
-				self.time_used_secs,
-				self.tokens_used,
+				self.time_used_secs, self.tokens_used,
 			)
 			.expect("formatting a String is infallible");
 		} else {
@@ -217,8 +215,7 @@ impl Goal {
 				 verification scope to claim scope. If any deliverable lacks direct current-state \
 				 evidence, keep working.\n\nBudget exhaustion ≠ completion. If work unfinished, leave \
 				 goal active.\n</goal_context>",
-				self.tokens_used,
-				self.time_used_secs,
+				self.tokens_used, self.time_used_secs,
 			)
 			.expect("formatting a String is infallible");
 		}
@@ -277,21 +274,14 @@ impl Director for Goal {
 				Str::new_static("accounted_turn_tokens"),
 				BindValue::Int(i64::try_from(self.accounted_turn_tokens).unwrap_or(i64::MAX)),
 			),
-			(
-				Str::new_static("continuation_armed"),
-				BindValue::Bool(self.continuation_armed),
-			),
+			(Str::new_static("continuation_armed"), BindValue::Bool(self.continuation_armed)),
 			(Str::new_static("done"), BindValue::Bool(self.done)),
 			(Str::new_static("dropped"), BindValue::Bool(self.dropped)),
 			(Str::new_static("tool"), BindValue::Str(Str::new_static("goal"))),
 		]
 	}
 
-	fn prepare_inference(
-		&self,
-		_cx: &DirectorCx<'_>,
-		request: &mut omp_inference::ChatRequest,
-	) {
+	fn prepare_inference(&self, _cx: &DirectorCx<'_>, request: &mut omp_ai::ChatRequest) {
 		if self.done || self.dropped {
 			return;
 		}
@@ -308,9 +298,11 @@ impl Director for Goal {
 
 	fn observe_turn(&self, dom: &Dom, _cx: &DirectorCx<'_>, turn: &TurnView) -> Vec<StateUpdate> {
 		let total = turn_tokens(dom, turn.turn);
-		let previous = (self.accounted_turn == Some(turn.turn.get()))
-			.then_some(self.accounted_turn_tokens)
-			.unwrap_or(0);
+		let previous = if self.accounted_turn == Some(turn.turn.get()) {
+			self.accounted_turn_tokens
+		} else {
+			0
+		};
 		let delta = total.saturating_sub(previous);
 		let mut updates = vec![
 			StateUpdate::new(

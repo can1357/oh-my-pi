@@ -4,7 +4,7 @@
 //! that live outside the journal — provider quotas, the kernel's tool
 //! roster, extension and MCP status, stored OAuth accounts, on-disk
 //! sessions, marketplace plugins — reach panels only through this seam.
-//! The application implements [`Services`] once over `omp-inference`,
+//! The application implements [`Services`] once over `omp-ai`,
 //! `omp-envd`, `omp-driver`, and `omp-cache`; the chat crate never depends
 //! on those engines. Every method has a default that reports the feature
 //! as unavailable, so a headless or test host needs no implementation.
@@ -95,7 +95,7 @@ pub struct ActiveAccountUsage {
 	pub monthly:   Option<crate::status_band::UsageWindow>,
 }
 
-/// One quota window on a provider account (pi `UsageWindow`).
+/// One quota window on a provider account.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UsageWindow {
 	/// Window label (`5h`, `weekly`, `daily`).
@@ -117,7 +117,7 @@ pub enum UsageStatus {
 	Warning,
 	/// Exhausted until reset.
 	Exhausted,
-	/// No usage recorded (pi `IDLE_FRACTION`).
+	/// No usage recorded.
 	Idle,
 	/// The provider could not be queried.
 	Unknown,
@@ -136,7 +136,7 @@ pub struct ResetAccountRow {
 	pub active:    bool,
 }
 
-/// One provider account's quota card (pi `UsageReport`).
+/// One provider account's quota card.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UsageAccount {
 	/// Provider identifier.
@@ -183,8 +183,8 @@ pub struct StatsTool {
 	pub errors: u64,
 }
 
-/// Historical usage over every stored session (pi `/stats`, the
-/// `stats.db` overall summary plus by-model and by-folder breakdowns).
+/// Historical usage over every stored session: the `stats.db` overall
+/// summary plus by-model and by-folder breakdowns.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StatsReport {
 	/// Journal files that were re-read by this sync.
@@ -251,14 +251,14 @@ pub struct UsageReport {
 	pub accounts:      Vec<UsageAccount>,
 	/// Daily activity, oldest first.
 	pub activity:      Vec<UsageDay>,
-	/// Why `activity` is empty when the host has no local cost history
-	/// (pi `activityError`); `None` means the heatmap is authoritative.
+	/// Why `activity` is empty when the host has no local cost history;
+	/// `None` means the heatmap is authoritative.
 	pub activity_note: Option<Str>,
-	/// Preformatted per-account detail report (pi `renderDetail`).
+	/// Preformatted per-account detail report.
 	pub detail:        Str,
 }
 
-/// One kernel-registered tool (pi `/tools`).
+/// One kernel-registered tool.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolRow {
 	/// Tool name.
@@ -275,7 +275,7 @@ pub struct ToolRow {
 	pub source:      Str,
 }
 
-/// One configured SSH host (pi `/ssh list`).
+/// One configured SSH host.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SshHostRow {
 	/// Host alias.
@@ -302,7 +302,7 @@ pub enum ExtensionKind {
 }
 
 impl ExtensionKind {
-	/// Tab label (pi provider tabs).
+	/// Tab label.
 	#[must_use]
 	pub const fn label(self) -> &'static str {
 		match self {
@@ -356,7 +356,7 @@ pub struct ExtensionRow {
 	pub error:       Option<Str>,
 }
 
-/// One stored provider account (pi `/logout` selector row).
+/// One stored provider account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountRow {
 	/// Stable account identifier.
@@ -412,7 +412,7 @@ pub struct ProviderRow {
 	pub logged_in: bool,
 }
 
-/// An in-flight interactive login (pi `LoginDialogComponent`).
+/// An in-flight interactive login.
 ///
 /// The driver pushes what the dialog must show; the dialog feeds pasted
 /// callback URLs or codes back through `input`; `done` settles once.
@@ -457,8 +457,8 @@ pub enum LoginEvent {
 	Info(Str),
 }
 
-/// One journal entry as the tree selector sees it (pi `tree-selector.ts`
-/// node): only user turns, assistant messages, and branch points carry
+/// One journal entry as the tree selector sees it: only user turns,
+/// assistant messages, and branch points carry
 /// text; everything else is a structural link.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeEntry {
@@ -524,7 +524,7 @@ pub struct ForeignSessionRow {
 	pub first_message: Option<Str>,
 }
 
-/// One on-disk session (pi session picker row / agents hub child).
+/// One on-disk session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRow {
 	/// Stable session id (journal stem).
@@ -547,7 +547,7 @@ pub struct SessionRow {
 	pub pinned:      bool,
 }
 
-/// One agent definition (pi agents hub row).
+/// One agent definition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentRow {
 	/// Agent class name.
@@ -566,7 +566,7 @@ pub struct AgentRow {
 	pub path:        Option<PathBuf>,
 }
 
-/// One marketplace plugin (pi plugin selector row).
+/// One marketplace plugin.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginRow {
 	/// Stable plugin id.
@@ -589,7 +589,7 @@ pub struct PluginRow {
 	pub shadowed:    bool,
 }
 
-/// One configured marketplace source (pi `/marketplace list` row).
+/// One configured marketplace source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketplaceSource {
 	/// Catalog name.
@@ -598,7 +598,7 @@ pub struct MarketplaceSource {
 	pub uri:  Str,
 }
 
-/// Marketplace state (pi `/marketplace`, `/plugins`).
+/// Marketplace state.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PluginsReport {
 	/// Configured marketplace sources.
@@ -683,7 +683,7 @@ pub struct CollabOutcome {
 	pub result: ServiceResult<CollabState>,
 }
 
-/// `/memory` subcommands (pi `builtin-lifecycle.ts` `/memory`).
+/// `/memory` subcommands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString, strum::Display)]
 #[strum(serialize_all = "lowercase")]
 pub enum MemoryOp {
@@ -749,7 +749,7 @@ pub struct SshHostSpec {
 	pub project:  bool,
 }
 
-/// `/mcp` subcommands (pi `mcp-command-controller.ts`).
+/// `/mcp` subcommands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum McpOp {
 	/// `list`: every configured and discovered server with its state.
@@ -855,8 +855,8 @@ pub struct WorktreeInfo {
 	pub branch: Str,
 }
 
-/// Which stored sessions the session picker lists (pi session picker Tab
-/// toggle: current project vs every project).
+/// Which stored sessions the session picker lists: current project or every
+/// project.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, strum::Display, strum::EnumString)]
 #[strum(serialize_all = "lowercase")]
 pub enum SessionScope {
@@ -1232,11 +1232,7 @@ pub trait Services: Send + Sync {
 	}
 
 	/// Session IDs whose latest prompt provenance matches `query`, newest first.
-	fn history_matching_session_ids(
-		&self,
-		_query: &str,
-		_limit: usize,
-	) -> ServiceResult<Vec<Str>> {
+	fn history_matching_session_ids(&self, _query: &str, _limit: usize) -> ServiceResult<Vec<Str>> {
 		Err(ServiceError::Unavailable("prompt history"))
 	}
 
@@ -1268,8 +1264,8 @@ pub trait Services: Send + Sync {
 		Err(ServiceError::Unavailable("local artifacts"))
 	}
 
-	/// Internal-URL completions for the composer (pi
-	/// `internal-url-autocomplete.ts`): `input` is the whole token being
+	/// Internal-URL completions for the composer: `input` is the whole token
+	/// being
 	/// typed (`skill://pro`); every row's `value` is resource-relative
 	/// (`provider`, not `skill://provider`). Served by the Environment's
 	/// resource catalog (`skill://`, `rule://`, `local://`, `omp://`,
@@ -1368,14 +1364,13 @@ pub trait Services: Send + Sync {
 	}
 
 	/// `/wt [branch]`: forks the checkout into a new linked worktree on
-	/// `branch`, carrying uncommitted changes along (pi
-	/// `createSessionWorktree`).
+	/// `branch`, carrying uncommitted changes along.
 	fn create_worktree(&self, _branch: &str) -> ServiceResult<WorktreeInfo> {
 		Err(ServiceError::Unavailable("worktrees"))
 	}
 
 	/// `/dump`: writes the next LLM request as JSON to a temp file and
-	/// returns its path (pi `dumpLlmRequestToTmpDir`).
+	/// returns its path.
 	fn dump_request(&self, _dom: &omp_dom::Dom) -> ServiceResult<PathBuf> {
 		Err(ServiceError::Unavailable("request dump"))
 	}

@@ -8,39 +8,32 @@ use omp_app::{
 };
 
 #[test]
-fn config_migrate_is_idempotent_and_maps_every_schema_key() {
+fn config_migrate_is_idempotent_and_uses_declaration_metadata() {
 	let registry = omp_con::Ctx::new();
-	for &(legacy, name) in [
-		omp_catalog::settings::LEGACY_CONVAR_MAPPINGS,
-		omp_catalog::pi_settings::LEGACY_CONVAR_MAPPINGS,
-		omp_inference::settings::LEGACY_CONVAR_MAPPINGS,
-		omp_inference::pi_settings::LEGACY_CONVAR_MAPPINGS,
-		omp_tools::settings::LEGACY_CONVAR_MAPPINGS,
-		omp_tools::pi_settings::LEGACY_CONVAR_MAPPINGS,
-		omp_envd::LEGACY_CONVAR_MAPPINGS,
-		omp_envd::pi_settings::LEGACY_CONVAR_MAPPINGS,
-		omp_driver::settings::LEGACY_CONVAR_MAPPINGS,
-		omp_driver::pi_settings::LEGACY_CONVAR_MAPPINGS,
-		omp_app::settings::LEGACY_CONVAR_MAPPINGS,
-		omp_chat::settings::LEGACY_CONVAR_MAPPINGS,
-		omp_app::voice::settings::LEGACY_CONVAR_MAPPINGS,
-	]
-	.into_iter()
-	.flatten()
-	{
-		assert!(
-			matches!(registry.find(name), Some(omp_con::RegItem::Var(_))),
-			"legacy key {legacy} maps to missing convar {name}",
-		);
+	let mut saw_retry_enabled = false;
+	let mut saw_steering_mode = false;
+	for var in registry.vars() {
+		for path in var.meta_all("legacy.path") {
+			assert!(!path.is_empty(), "legacy path for {} is empty", var.name);
+			saw_retry_enabled |= path == "retry.enabled" && var.name == "ai_retry_enabled";
+			saw_steering_mode |= path == "steeringMode" && var.name == "ai_steering_mode";
+		}
 	}
+	assert!(saw_retry_enabled, "retry.enabled metadata is missing");
+	assert!(saw_steering_mode, "steeringMode metadata is missing");
+
 	let data = tempfile::tempdir().expect("data directory");
 	let config = tempfile::tempdir().expect("config directory");
 	// SAFETY: nextest runs each test in its own process; nothing else reads the
 	// variable concurrently.
 	unsafe { std::env::set_var("OMP_CONFIG_DIR", config.path()) };
 	let project = tempfile::tempdir().expect("project directory");
-	fs::write(data.path().join("config.toml"), "[stt]\nenabled = true\nmodelName = \"turbo\"\n")
-		.expect("legacy TOML");
+	fs::write(
+		data.path().join("config.toml"),
+		"steeringMode = \"all\"\nhideThinkingBlock = true\n[display]\nhideToolActivity = \
+		 true\n[retry]\nenabled = false\n[stt]\nenabled = true\nmodelName = \"turbo\"\n",
+	)
+	.expect("legacy TOML");
 
 	let path = migrate_settings(data.path(), project.path()).expect("first migration");
 	let first = fs::read(&path).expect("first config.cfg");
@@ -49,6 +42,10 @@ fn config_migrate_is_idempotent_and_maps_every_schema_key() {
 
 	assert_eq!(second, first);
 	let script = String::from_utf8(first).expect("UTF-8 cfg");
+	assert!(script.contains("ai_retry_enabled false"));
+	assert!(script.contains("ai_steering_mode all"));
+	assert!(script.contains("cl_showthinking false"));
+	assert!(script.contains("cl_showtools false"));
 	assert!(script.contains("cl_voice_stt_enabled true"));
 	assert!(script.contains("cl_stt_model turbo"));
 }
@@ -61,11 +58,8 @@ fn config_migrate_moves_legacy_data_mcp_without_overwriting() {
 	unsafe { std::env::set_var("OMP_CONFIG_DIR", config.path()) };
 	let project = tempfile::tempdir().expect("project directory");
 	let legacy = data.path().join("mcp.json");
-	fs::write(
-		&legacy,
-		br#"{"mcpServers":{"legacy":{"type":"stdio","command":"legacy"}}}"#,
-	)
-	.expect("legacy MCP config");
+	fs::write(&legacy, br#"{"mcpServers":{"legacy":{"type":"stdio","command":"legacy"}}}"#)
+		.expect("legacy MCP config");
 
 	migrate_settings(data.path(), project.path()).expect("migration");
 	let destination = config.path().join("mcp.json");
@@ -80,10 +74,7 @@ fn config_migrate_moves_legacy_data_mcp_without_overwriting() {
 	.expect("replacement MCP config");
 	migrate_settings(data.path(), project.path()).expect("repeat migration");
 	assert!(legacy.exists());
-	assert_eq!(
-		fs::read_to_string(destination).expect("preserved MCP config"),
-		migrated
-	);
+	assert_eq!(fs::read_to_string(destination).expect("preserved MCP config"), migrated);
 }
 
 #[test]
@@ -113,6 +104,80 @@ artifactTailLines = 500
 	assert!(script.contains("sv_tools_artifact_head_bytes 20480"));
 	assert!(script.contains("sv_tools_output_max_columns 768"));
 	assert!(script.contains("sv_tools_artifact_tail_lines 500"));
+}
+
+#[test]
+fn config_migrate_converts_legacy_value_encodings() {
+	let data = tempfile::tempdir().expect("data directory");
+	let config = tempfile::tempdir().expect("config directory");
+	// SAFETY: nextest runs each test in its own process.
+	unsafe { std::env::set_var("OMP_CONFIG_DIR", config.path()) };
+	let project = tempfile::tempdir().expect("project directory");
+	fs::write(
+		data.path().join("config.toml"),
+		r#"
+doubleEscapeAction = "rewind"
+
+[completion]
+notify = "off"
+
+[error]
+notify = "on"
+
+[ask]
+notify = "off"
+
+[compaction]
+thresholdPercent = 80
+thresholdTokens = "default"
+
+[task]
+maxRuntimeMs = 0
+
+[task.isolation]
+enabled = true
+
+[irc]
+timeoutMs = 30000
+
+[tools]
+maxTimeout = 60
+
+[edit]
+mode = "hashline"
+
+[providers]
+tinyModel = "online"
+memoryModel = "online"
+autoThinkingModel = "online"
+unexpectedStopModel = "online"
+fireworksTier = "standard"
+
+[share]
+store = "blob"
+"#,
+	)
+	.expect("legacy TOML");
+
+	let path = migrate_settings(data.path(), project.path()).expect("migration");
+	let script = fs::read_to_string(path).expect("config.cfg");
+	assert!(script.contains("cl_double_escape branch"));
+	assert!(script.contains("cl_notify_completion false"));
+	assert!(script.contains("cl_notify_error true"));
+	assert!(script.contains("cl_notify_ask false"));
+	assert!(script.contains("ai_compact_threshold 0.8"));
+	assert!(script.contains("ai_compaction_threshold_tokens -1"));
+	assert!(script.contains("sv_task_isolation_mode auto"));
+	assert!(script.contains("sv_task_max_runtime never"));
+	assert!(script.contains("sv_irc_timeout 30000ms"));
+	assert!(script.contains("sv_tools_max_timeout 60s"));
+	assert!(script.contains("sv_tools_edit_dialect hl.1"));
+	assert!(script.contains("ai_tiny_selector @tiny"));
+	assert!(script.contains("ai_memory_selector @tiny"));
+	assert!(script.contains("ai_auto_thinking_selector @tiny"));
+	assert!(script.contains("ai_unexpected_stop_selector @tiny"));
+	assert!(script.contains("ai_tier_fireworks none"));
+	assert!(script.contains("sv_share_store http"));
 }
 
 #[test]

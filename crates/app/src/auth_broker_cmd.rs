@@ -9,14 +9,14 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_catalog::{ProviderId, provider::OAuthFlowSpec, snapshot};
-use omp_core::SecretString;
-use omp_inference::{
+use omp_ai::{
 	account::{AccountRecord, AccountStateStore},
 	auth::{CredentialOrigin, OAuthCredentialImport},
 	call::AccountRoutingContext,
 	id::{AccountId, PrincipalId},
 };
+use omp_catalog::{ProviderId, provider::OAuthFlowSpec, snapshot};
+use omp_core::SecretString;
 use ring::rand::{SecureRandom as _, SystemRandom};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};

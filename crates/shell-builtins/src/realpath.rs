@@ -13,7 +13,7 @@ use clap::{
 	builder::{TypedValueParser, ValueParserFactory},
 	error,
 };
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, os_bytes, util},

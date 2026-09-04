@@ -10,15 +10,6 @@ use omp_core::Str;
 pub use omp_envd::host_settings::SV_WORKTREE_BASE;
 use serde::{Deserialize, Serialize};
 
-/// One-shot legacy TOML paths mapped into surviving convars.
-pub const LEGACY_CONVAR_MAPPINGS: &[(&str, &str)] = &[
-	("worktree.base", "sv_worktree_base"),
-	("share.serverUrl", "sv_share_server"),
-	("share.store", "sv_share_store"),
-	("export.shareRedactSecrets", "sv_share_redact_secrets"),
-	("collab.displayName", "cl_collab_display_name"),
-];
-
 /// Standalone sharing backend.
 #[derive(
 	Clone,
@@ -45,25 +36,119 @@ pub enum ShareStore {
 omp_con::con_enum!(ShareStore);
 
 omp_con::var! {
-	/// Share service origin.
+	/// Enables skill commands.
+	pub static SV_SKILLS_ENABLE_SKILL_COMMANDS = sv_skills_enable_skill_commands: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.enableSkillCommands",
+		},
+	};
+	/// Enables user-level Codex skills.
+	pub static SV_SKILLS_ENABLE_CODEX_USER = sv_skills_enable_codex_user: bool {
+		default: false,
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.enableCodexUser",
+		},
+	};
+	/// Enables user-level Claude skills.
+	pub static SV_SKILLS_ENABLE_CLAUDE_USER = sv_skills_enable_claude_user: bool {
+		default: false,
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.enableClaudeUser",
+		},
+	};
+	/// Enables project-level Claude skills.
+	pub static SV_SKILLS_ENABLE_CLAUDE_PROJECT = sv_skills_enable_claude_project: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.enableClaudeProject",
+		},
+	};
+	/// Enables user-level native skills.
+	pub static SV_SKILLS_ENABLE_PI_USER = sv_skills_enable_pi_user: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.enablePiUser",
+		},
+	};
+	/// Enables project-level native skills.
+	pub static SV_SKILLS_ENABLE_PI_PROJECT = sv_skills_enable_pi_project: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.enablePiProject",
+		},
+	};
+	/// Enables user-level agent skills.
+	pub static SV_SKILLS_ENABLE_AGENTS_USER = sv_skills_enable_agents_user: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.enableAgentsUser",
+		},
+	};
+	/// Enables project-level agent skills.
+	pub static SV_SKILLS_ENABLE_AGENTS_PROJECT = sv_skills_enable_agents_project: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"legacy.path": "skills.enableAgentsProject",
+		},
+	};
+	/// Share viewer/upload base used by /share (encrypted blob upload + viewer; links are
+	/// `<base>/<id>#<key>`).
 	pub static SV_SHARE_SERVER = sv_share_server: Str {
 		default: Str::new_static("https://share.omp.dev"),
 		flags: archive,
+		meta: {
+			"ui.tab": "interaction",
+			"ui.group": "Collab",
+			"ui.label": "Share Server",
+			"legacy.path": "share.serverUrl",
+		},
 	};
-	/// Share storage backend.
+	/// Where /share uploads the encrypted session blob.
 	pub static SV_SHARE_STORE = sv_share_store: ShareStore {
 		default: ShareStore::Http,
 		flags: archive,
+		meta: {
+			"ui.tab": "interaction",
+			"ui.group": "Collab",
+			"ui.label": "Share Store",
+			"ui.option.http": "Encrypted Blob",
+			"ui.option.http.desc": "Upload to the share server (no GitHub account needed; avoids gist API rate limits)",
+			"ui.option.gist": "GitHub Gist",
+			"ui.option.gist.desc": "Push to a secret gist (needs authenticated gh), falling back to the share server",
+			"legacy.path": "share.store",
+		},
 	};
-	/// Redact discovered secrets before encryption.
+	/// Run the secret obfuscator over /share snapshots before upload (uses the secrets.* config).
 	pub static SV_SHARE_REDACT_SECRETS = sv_share_redact_secrets: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"ui.tab": "interaction",
+			"ui.group": "Collab",
+			"ui.label": "Share Secret Redaction",
+			"legacy.path": "export.shareRedactSecrets",
+			"legacy.path": "share.redactSecrets",
+		},
 	};
-	/// Collaboration display name.
+	/// Name shown to other collab participants (default: OS username).
 	pub static CL_COLLAB_DISPLAY_NAME = cl_collab_display_name: Str {
 		default: Str::default(),
 		flags: archive,
+		meta: {
+			"ui.tab": "interaction",
+			"ui.group": "Collab",
+			"ui.label": "Display Name",
+			"legacy.path": "collab.displayName",
+		},
 	};
 }
 

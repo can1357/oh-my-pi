@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use omp_core::{Str, StrMut};
-use omp_docserver::diagnostics::{Diagnostic, Severity, normalize};
+use omp_proto::lsp::{Diagnostic, Severity, normalize};
 use serde::{Deserialize, Serialize};
 
 /// Maximum explicit file targets from one glob.
@@ -60,11 +60,6 @@ pub fn render(result: &DiagnosticResult) -> Str {
 			output.push_str(&diagnostic.message);
 			output.push_str("\n");
 		}
-	}
-	if result.omitted > 0 {
-		output.push_str("[diagnostics omitted: ");
-		output.push_str(result.omitted.to_string().as_str());
-		output.push_str("]\n");
 	}
 	output.freeze()
 }

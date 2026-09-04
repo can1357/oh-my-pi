@@ -730,7 +730,7 @@ impl<W: Write> Renderer<W> {
 			let joined =
 				index > 0 && retirement_joinable(&finalized, &viewport_view, index - 1, index);
 			if joined {
-				let _ = write!(output, "\x1b[{};1H", screen_row);
+				let _ = write!(output, "\x1b[{screen_row};1H");
 				output.push_str(esc!(autowrap));
 				arm_retirement_boundary(
 					&mut output,
@@ -765,7 +765,7 @@ impl<W: Write> Renderer<W> {
 		for index in
 			usize::from(viewport_height)..finalized_rows.saturating_add(usize::from(viewport_height))
 		{
-			let _ = write!(output, "\x1b[{};1H", viewport_height);
+			let _ = write!(output, "\x1b[{viewport_height};1H");
 			if retirement_joinable(&finalized, &viewport_view, index - 1, index) {
 				output.push_str(esc!(autowrap));
 				arm_retirement_boundary(
@@ -1344,7 +1344,7 @@ fn emit_absolute_window(
 			&& row - 1 < frame.base.size().height
 			&& wrap_joinable(frame, row - 1);
 		if joined {
-			let _ = write!(output, "\x1b[{};1H", screen_row);
+			let _ = write!(output, "\x1b[{screen_row};1H");
 			output.push_str(esc!(autowrap));
 			arm_wrap_boundary(output, frame, row - 1, graphics, hyperlinks);
 			encode_frame_row(output, frame, row, graphics, hyperlinks);
@@ -2159,7 +2159,7 @@ fn encode_frame_row(
 	}
 }
 
-/// OSC 133 shell integration around a prompt zone (pi `user-message.ts`).
+/// OSC 133 shell integration around a prompt zone.
 ///
 /// The zone is closed within the same paint: `133;B` latches a sticky
 /// `.input` cursor semantic in Ghostty (and cmux) that only a command
@@ -2256,7 +2256,7 @@ fn encode_blank_row(output: &mut String, width: u16) {
 	}
 }
 
-pub(crate) fn emit_cell_style(
+pub fn emit_cell_style(
 	output: &mut String,
 	style: Style,
 	active_style: &mut Style,
@@ -2276,7 +2276,7 @@ pub(crate) fn emit_cell_style(
 	*active_style = style;
 }
 
-pub(crate) fn close_active_link(output: &mut String, active_style: &mut Style, hyperlinks: bool) {
+pub fn close_active_link(output: &mut String, active_style: &mut Style, hyperlinks: bool) {
 	if hyperlinks && active_style.link.is_some() {
 		output.push_str(esc!(osc, "8;;", st));
 	}
@@ -2315,9 +2315,7 @@ pub fn file_link_target(path: &Path, line: Option<u32>, column: Option<u32>) -> 
 		env::current_dir().ok()?.join(path)
 	};
 	let raw = absolute.to_string_lossy();
-	if sanitize_link_target(&raw).is_none() {
-		return None;
-	}
+	sanitize_link_target(&raw)?;
 	let mut target = String::with_capacity(raw.len() + 32);
 	target.push_str("file://");
 	for byte in raw.bytes() {
@@ -2337,7 +2335,7 @@ pub fn file_link_target(path: &Path, line: Option<u32>, column: Option<u32>) -> 
 	Some(Str::from(target))
 }
 
-pub(crate) fn emit_style(output: &mut String, style: Style) {
+pub fn emit_style(output: &mut String, style: Style) {
 	let style = style.without_link();
 	output.push_str(RESET_STYLE);
 	if style == Style::default() {
@@ -2588,8 +2586,7 @@ mod tests {
 		renderer
 			.present_plan(&paint_only, &[])
 			.expect("history-neutral repaint");
-		let repeated =
-			String::from_utf8(mem::take(renderer.writer_mut())).expect("terminal UTF-8");
+		let repeated = String::from_utf8(mem::take(renderer.writer_mut())).expect("terminal UTF-8");
 		assert!(!repeated.contains("38;2;18;52;86"));
 		assert!(!repeated.contains(target));
 	}

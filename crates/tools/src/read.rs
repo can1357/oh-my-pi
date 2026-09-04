@@ -7,13 +7,14 @@ use bytes::Bytes;
 use futures::{FutureExt as _, Stream, pin_mut, select_biased};
 use omp_core::{Str, sf};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, BlobRef, CallOutcome, CommitError, Constraint, DocEffects,
-	Effects, Ev, IncomingParams, LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev, Tool,
-	ToolSpec, ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, BlobRef, CallOutcome, CommitError, Constraint, Diag, DiagKind,
+	DocEffects, Effects, Ev, IncomingParams, LiftedCall, ParamError, Part, PromptCaps, RecordedCall,
+	Rev, Tool, ToolSpec, ToolTerminal,
 };
 use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use tracing::Instrument as _;
 
 use crate::{
@@ -59,7 +60,7 @@ const DESCRIPTION: &str = r"Read files, directories, archives, SQLite, images, d
 - Multiple local paths: semicolon/comma lists or a JSON string array. An existing literal path always wins over splitting.
 
 ## Source kinds
-- Parseable code, no selector → structural summary (declarations only, body elided). Footer names recovery selector — re-issue ONLY those ranges.
+- Parseable code, no selector → structural summary (declarations only, body elided). Summary diagnostic names the exact recovery selector.
 - File + selector → `[foo.ts#1A2B]` snapshot header + numbered lines. Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag.
 - Directory → deterministic alphabetical depth-limited entries; directories end in / and listings are edit-locked.
 - SQLite (`.sqlite`, `.sqlite3`, `.db`, `.db3`): `file.db` (tables), `file.db:table` (schema+rows), `file.db:table:key` (by PK), `?limit=`/`?where=`/`?q=SELECT`.
@@ -73,7 +74,7 @@ const DESCRIPTION: &str = r"Read files, directories, archives, SQLite, images, d
 - Literal `:`, `?`, `#` in other URI-like member paths → percent-encode (`%3A`/`%3F`/`%23`).
 
 <critical>
-Summary footer names elided ranges? Re-issue ONLY those ranges. NEVER guess `..`/`…` content.
+Summary diagnostic names elided ranges? Re-issue ONLY those ranges. NEVER guess `..`/`…` content.
 </critical>";
 const VISION_UNAVAILABLE: &str =
 	"Image question unavailable: the active model route does not accept image input.";
@@ -329,6 +330,44 @@ pub enum PayloadPart {
 pub struct Payload {
 	/// Ordered text and blob parts.
 	pub parts: Vec<PayloadPart>,
+}
+
+struct ReadExecution {
+	payload: Payload,
+	diags:   Vec<Diag>,
+}
+
+struct ReadSection {
+	parts: Vec<PayloadPart>,
+	diags: SmallVec<Diag, 2>,
+}
+
+impl ReadSection {
+	const fn new(parts: Vec<PayloadPart>) -> Self {
+		Self { parts, diags: SmallVec::new() }
+	}
+
+	fn text(text: impl Into<Str>) -> Self {
+		Self::new(vec![PayloadPart::Text { text: text.into() }])
+	}
+
+	fn rendered(rendered: format::Rendered) -> Self {
+		Self { parts: vec![PayloadPart::Text { text: rendered.text }], diags: rendered.diags }
+	}
+
+	fn with_diags(mut self, diags: impl IntoIterator<Item = Diag>) -> Self {
+		self.diags.extend(diags);
+		self
+	}
+
+	fn recovered(mut self, from: Option<&str>, to: &str) -> Self {
+		if let Some(from) = from {
+			self
+				.diags
+				.push(Diag::info(DiagKind::PathRecovered, sf!("{from} -> {to}")));
+		}
+		self
+	}
 }
 
 /// Typed read failure with an exact model-facing message.
@@ -681,11 +720,19 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> Tool for ReadTool<S, B,
 				},
 				value = work => value,
 			};
-			let result = result.map(|mut payload| {
-				self.append_repeat_read_hint(&path, &mut payload);
-				payload
-			});
-			yield done(result);
+			match result {
+				Ok(execution) => {
+					let repeat_diag = self.repeat_read_diag(&path, &execution.payload);
+					for diag in execution.diags {
+						yield Ev::Diag(diag);
+					}
+					if let Some(diag) = repeat_diag {
+						yield Ev::Diag(diag);
+					}
+					yield done(Ok(execution.payload));
+				},
+				Err(fault) => yield done(Err(fault)),
+			}
 		}
 	}
 
@@ -744,26 +791,19 @@ fn lift_rev1(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 }
 
 impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
-	fn append_repeat_read_hint(&self, path: &str, payload: &mut Payload) {
-		let Some(PayloadPart::Text { text }) = payload
-			.parts
-			.iter_mut()
-			.find(|part| matches!(part, PayloadPart::Text { text } if !text.is_empty()))
-		else {
-			return;
-		};
-		let Some(count) = self.repeat_reads.lock().observe(path, text) else {
-			return;
-		};
-		*text = sf!(
-			"{}\n\n[You have received this identical output {count} times. Re-reading '{}' will not \
-			 change it — use a narrower selector (path:A-B), or proceed with the edit.]",
-			text,
-			path
-		);
+	fn repeat_read_diag(&self, path: &str, payload: &Payload) -> Option<Diag> {
+		let text = payload.parts.iter().find_map(|part| match part {
+			PayloadPart::Text { text } if !text.is_empty() => Some(text),
+			_ => None,
+		})?;
+		let count = self.repeat_reads.lock().observe(path, text)?;
+		Some(Diag::warn(
+			DiagKind::Advisory,
+			sf!("Identical output returned {count} times for '{path}'."),
+		))
 	}
 
-	async fn execute(&self, authored: Str, question: Option<Str>) -> Result<Payload, Fault> {
+	async fn execute(&self, authored: Str, question: Option<Str>) -> Result<ReadExecution, Fault> {
 		if question
 			.as_ref()
 			.is_some_and(|question| question.trim().is_empty())
@@ -780,23 +820,26 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		}
 		let multiple = targets.len() > 1;
 		let mut parts = Vec::new();
+		let mut diags = Vec::new();
 		if multiple {
 			let names = targets
 				.iter()
 				.map(Str::as_str)
 				.collect::<Vec<_>>()
 				.join(", ");
-			push_payload_part(&mut parts, PayloadPart::Text {
-				text: sf!("Note: interpreted as {} paths: {}", targets.len(), names),
-			});
+			diags.push(Diag::info(
+				DiagKind::Advisory,
+				sf!("Interpreted as {} paths: {names}", targets.len()),
+			));
 		}
 		for target in &targets {
 			match self.execute_target(target).await {
 				Ok(mut section) => {
 					if let Some(question) = &question {
-						Self::attach_vision_question(&mut section, question)?;
+						Self::attach_vision_question(&mut section.parts, question)?;
 					}
-					for part in section {
+					diags.extend(section.diags);
+					for part in section.parts {
 						push_payload_part(&mut parts, part);
 					}
 				},
@@ -808,7 +851,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				Err(fault) => return Err(fault),
 			}
 		}
-		Ok(Payload { parts })
+		Ok(ReadExecution { payload: Payload { parts }, diags })
 	}
 
 	fn attach_vision_question(parts: &mut Vec<PayloadPart>, question: &Str) -> Result<(), Fault> {
@@ -888,7 +931,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		}
 	}
 
-	async fn execute_target(&self, authored: &str) -> Result<Vec<PayloadPart>, Fault> {
+	async fn execute_target(&self, authored: &str) -> Result<ReadSection, Fault> {
 		let normalized = normalize_target(authored, None, HostPaths::current());
 		let normalization_from = normalized
 			.recovered()
@@ -919,13 +962,18 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				Some(path)
 			},
 			Some(uri) if uri.scheme == resolver::Scheme::Unknown => {
-				let Some(result) = self.resolvers.read_unknown(authored, &uri.selector).await else {
+				let Some(result) = self
+					.resolvers
+					.read_unknown_with_diags(authored, &uri.selector)
+					.await
+				else {
 					return Err(Fault::UnknownScheme {
 						scheme:  Str::new(uri.raw_scheme),
 						message: sf!("Unknown URL scheme '{}'", uri.raw_scheme),
 					});
 				};
-				let bytes = result?;
+				let resolved = result?;
+				let bytes = resolved.data;
 				if !uri.selector.is_raw()
 					&& image::sniff_metadata(&bytes[..bytes.len().min(256 * 1024)]).is_some()
 					&& let Some(loaded) = Self::process_image_async(
@@ -938,15 +986,16 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 						.blobs
 						.store(loaded.data, loaded.media_type.clone())
 						.await?;
-					return Ok(vec![
+					return Ok(ReadSection::new(vec![
 						PayloadPart::Text { text: loaded.description.clone() },
 						PayloadPart::Blob { blob, alt: loaded.description, vision: None },
-					]);
+					])
+					.with_diags(resolved.diags));
 				}
 				let text = str::from_utf8(&bytes).map_err(|_| Fault::Invalid {
 					message: sf!("{}:// did not resolve to UTF-8 text", uri.raw_scheme),
 				})?;
-				return Ok(vec![PayloadPart::Text { text: Str::new(text) }]);
+				return Ok(ReadSection::text(text).with_diags(resolved.diags));
 			},
 			Some(uri) => {
 				if matches!(uri.selector, selector::ParsedSelector::Image)
@@ -956,7 +1005,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				}
 				let Some(result) = self
 					.resolvers
-					.read_query(uri.scheme, uri.resource, uri.query, &uri.selector)
+					.read_query_with_diags(uri.scheme, uri.resource, uri.query, &uri.selector)
 					.await
 				else {
 					return Err(Fault::SchemeNotReadable {
@@ -967,11 +1016,15 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 						),
 					});
 				};
-				let bytes = result?;
+				let resolved = result?;
+				let bytes = resolved.data;
 				if matches!(uri.selector, selector::ParsedSelector::Image) {
 					let gzip =
 						svg_gzip_path(Path::new(uri.resource)).ok_or_else(svg_image_selector_fault)?;
-					return self.read_svg_image(bytes.into_bytes(), gzip).await;
+					return self
+						.read_svg_image(bytes.into_bytes(), gzip)
+						.await
+						.map(|section| section.with_diags(resolved.diags));
 				}
 				if !uri.selector.is_raw()
 					&& image::sniff_metadata(&bytes[..bytes.len().min(256 * 1024)]).is_some()
@@ -985,15 +1038,16 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 						.blobs
 						.store(loaded.data, loaded.media_type.clone())
 						.await?;
-					return Ok(vec![
+					return Ok(ReadSection::new(vec![
 						PayloadPart::Text { text: loaded.description.clone() },
 						PayloadPart::Blob { blob, alt: loaded.description, vision: None },
-					]);
+					])
+					.with_diags(resolved.diags));
 				}
 				let text = str::from_utf8(&bytes).map_err(|_| Fault::Invalid {
 					message: sf!("{}://{} did not resolve to UTF-8 text", uri.raw_scheme, uri.resource),
 				})?;
-				return Ok(vec![PayloadPart::Text { text: Str::new(text) }]);
+				return Ok(ReadSection::text(text).with_diags(resolved.diags));
 			},
 			None => None,
 		};
@@ -1083,7 +1137,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 					})?
 					.map_err(|error| Fault::Source { message: Str::new(error.to_string()) })?;
 				let blob = self.blobs.store(raster.data, raster.media_type).await?;
-				return Ok(vec![
+				return Ok(ReadSection::new(vec![
 					PayloadPart::Text {
 						text: sf!(
 							"Rendered PDF page {} of {} from {} ({}x{} PNG).",
@@ -1104,7 +1158,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 						),
 						vision: None,
 					},
-				]);
+				]));
 			}
 		}
 
@@ -1157,13 +1211,10 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				.collect::<Vec<_>>();
 			let rendered = conflicts::RenderedConflicts {
 				text:  conflicts::format_conflict_summary(&entries, &stat.display_path, false),
+				diags: SmallVec::new(),
 				count: entries.len(),
 			};
-			let text = format::prepend_suffix_resolution_notice(
-				&rendered.text,
-				suffix_from.map(|from| format::SuffixResolution { from, to: &stat.display_path }),
-			);
-			return Ok(vec![PayloadPart::Text { text: Str::new(text) }]);
+			return Ok(ReadSection::text(rendered.text).recovered(suffix_from, &stat.display_path));
 		}
 
 		if matches!(parsed, selector::ParsedSelector::Image) {
@@ -1179,7 +1230,10 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				});
 			}
 			let bytes = self.sources.read_bytes(stat.canonical_path.clone()).await?;
-			return self.read_svg_image(bytes, gzip).await;
+			return self
+				.read_svg_image(bytes, gzip)
+				.await
+				.map(|section| section.recovered(suffix_from, &stat.display_path));
 		}
 
 		let raw = parsed.is_raw();
@@ -1205,8 +1259,8 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				.await?;
 			image::sniff_metadata(&prefix).is_some()
 		};
-		if image_by_magic && let Some(parts) = self.read_image(&stat).await? {
-			return Ok(parts);
+		if image_by_magic && let Some(section) = self.read_image(&stat).await? {
+			return Ok(section.recovered(suffix_from, &stat.display_path));
 		}
 		if !raw
 			&& path
@@ -1250,12 +1304,8 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				},
 				Ok(None) => {},
 				Err(_) => {
-					let notice = binary_notice(&stat);
-					let text = format::prepend_suffix_resolution_notice(
-						&notice,
-						suffix_from.map(|from| format::SuffixResolution { from, to: &stat.display_path }),
-					);
-					return Ok(vec![PayloadPart::Text { text: Str::new(text) }]);
+					return Ok(ReadSection::text(binary_notice(&stat))
+						.recovered(suffix_from, &stat.display_path));
 				},
 			}
 		}
@@ -1302,45 +1352,33 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		)
 	}
 
-	async fn read_web(&self, target: web::ParsedTarget) -> Result<Vec<PayloadPart>, Fault> {
+	async fn read_web(&self, target: web::ParsedTarget) -> Result<ReadSection, Fault> {
 		let fetched = web::read_resource(&self.sources, &target.url, target.selector.is_raw())
 			.await
 			.map_err(|error| Fault::Web { message: error.message() })?;
-		let notes = if fetched.render.notes.is_empty() {
-			String::new()
-		} else {
-			format!(
-				"Notes: {}\n",
-				fetched
-					.render
-					.notes
-					.iter()
-					.map(Str::as_str)
-					.collect::<Vec<_>>()
-					.join("; ")
-			)
-		};
 		let framed = format!(
-			"URL: {}\nContent-Type: {}\nMethod: {}\n{}\n---\n\n{}",
+			"URL: {}\nContent-Type: {}\nMethod: {}\n\n---\n\n{}",
 			fetched.final_url,
 			fetched.render.content_type.as_deref().unwrap_or("unknown"),
 			fetched.render.method,
-			notes,
 			fetched.render.content
 		);
-		let mut parts = if matches!(
+		let mut section = if matches!(
 			&target.selector,
 			selector::ParsedSelector::None | selector::ParsedSelector::Raw
 		) {
-			vec![PayloadPart::Text { text: Str::new(framed) }]
+			ReadSection::text(framed)
 		} else {
 			Self::virtual_text_parts(&framed, &target.selector)
 		};
+		section.diags.extend(fetched.render.diags);
 		if let Some(image) = fetched.image {
 			let blob = self.blobs.store(image.data, image.media_type).await?;
-			parts.push(PayloadPart::Blob { blob, alt: image.description, vision: None });
+			section
+				.parts
+				.push(PayloadPart::Blob { blob, alt: image.description, vision: None });
 		}
-		Ok(parts)
+		Ok(section)
 	}
 
 	async fn read_directory(
@@ -1348,7 +1386,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		stat: &SourceStat,
 		parsed: &selector::ParsedSelector,
 		suffix_from: Option<&str>,
-	) -> Result<Vec<PayloadPart>, Fault> {
+	) -> Result<ReadSection, Fault> {
 		if parsed.is_multi_range() {
 			return Err(Fault::Invalid {
 				message: sf!("Multi-range line selectors are not supported for directory listings.",),
@@ -1383,14 +1421,11 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 			offset,
 			limit,
 		);
-		let mut text = rendered.text.to_string();
-		if let Some(from) = suffix_from {
-			text = format::prepend_suffix_resolution_notice(
-				&text,
-				Some(format::SuffixResolution { from, to: &stat.display_path }),
-			);
+		Ok(ReadSection {
+			parts: vec![PayloadPart::Text { text: rendered.text }],
+			diags: rendered.diags,
 		}
-		Ok(vec![PayloadPart::Text { text: Str::new(text) }])
+		.recovered(suffix_from, &stat.display_path))
 	}
 
 	async fn read_archive(
@@ -1399,7 +1434,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		target: &str,
 		stat: &SourceStat,
 		suffix_from: Option<&str>,
-	) -> Result<Vec<PayloadPart>, Fault> {
+	) -> Result<ReadSection, Fault> {
 		let hinted_format = archive::archive_format_from_path(archive_path);
 		let result = if hinted_format == Some(archive::ArchiveFormat::Asar) {
 			match archive::read_archive_path(stat.canonical_path.as_str(), target) {
@@ -1421,14 +1456,8 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 			archive::read_archive_bytes(bytes, archive_format, target)
 				.map_err(|error| Fault::Source { message: Str::new(error.to_string()) })?
 		};
-		match result.content {
-			archive::ArchiveContent::Directory(listing) => {
-				let text = format::prepend_suffix_resolution_notice(
-					&listing.render(),
-					suffix_from.map(|from| format::SuffixResolution { from, to: &stat.display_path }),
-				);
-				Ok(vec![PayloadPart::Text { text: Str::new(text) }])
-			},
+		let section = match result.content {
+			archive::ArchiveContent::Directory(listing) => ReadSection::rendered(listing.render()),
 			archive::ArchiveContent::Text(member_text) => {
 				let display_path = if member_text.node.path.is_empty() {
 					stat.display_path.clone()
@@ -1436,19 +1465,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 					sf!("{}:{}", stat.display_path, member_text.node.path)
 				};
 				let member_stat = SourceStat { display_path, ..stat.clone() };
-				let mut parts =
-					self.text_parts(&member_stat, &member_text.text, &result.selector, None, None)?;
-				if let Some(from) = suffix_from
-					&& let Some(PayloadPart::Text { text }) = parts
-						.iter_mut()
-						.find(|part| matches!(part, PayloadPart::Text { .. }))
-				{
-					*text = Str::new(format::prepend_suffix_resolution_notice(
-						text,
-						Some(format::SuffixResolution { from, to: &stat.display_path }),
-					));
-				}
-				Ok(parts)
+				self.text_parts(&member_stat, &member_text.text, &result.selector, None, None)?
 			},
 			archive::ArchiveContent::Binary(member_binary) => {
 				if image::sniff_metadata(
@@ -1456,38 +1473,30 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				)
 				.is_some()
 				{
-					let loaded = Self::process_image_async(
-						member_binary.bytes,
-						self.policy.auto_resize_images,
-					)
-					.await?
-					.expect("sniffed archive image remains supported");
-					let description = Str::new(format::prepend_suffix_resolution_notice(
-						&format!(
-							"Archive image {}:{}\n{}",
-							stat.display_path, member_binary.member.node.path, loaded.description
-						),
-						suffix_from.map(|from| format::SuffixResolution {
-							from,
-							to: &stat.display_path,
-						}),
-					));
+					let loaded =
+						Self::process_image_async(member_binary.bytes, self.policy.auto_resize_images)
+							.await?
+							.expect("sniffed archive image remains supported");
+					let description = sf!(
+						"Archive image {}:{}\n{}",
+						stat.display_path,
+						member_binary.member.node.path,
+						loaded.description
+					);
 					let blob = self
 						.blobs
 						.store(loaded.data, loaded.media_type.clone())
 						.await?;
-					return Ok(vec![
+					ReadSection::new(vec![
 						PayloadPart::Text { text: description.clone() },
 						PayloadPart::Blob { blob, alt: description, vision: None },
-					]);
+					])
+				} else {
+					ReadSection::text(member_binary.member.notice)
 				}
-				let text = format::prepend_suffix_resolution_notice(
-					&member_binary.member.notice,
-					suffix_from.map(|from| format::SuffixResolution { from, to: &stat.display_path }),
-				);
-				Ok(vec![PayloadPart::Text { text: Str::new(text) }])
 			},
-		}
+		};
+		Ok(section.recovered(suffix_from, &stat.display_path))
 	}
 
 	async fn read_sqlite(
@@ -1495,7 +1504,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		authored: &str,
 		stat: &SourceStat,
 		suffix_from: Option<&str>,
-	) -> Result<Vec<PayloadPart>, Fault> {
+	) -> Result<ReadSection, Fault> {
 		let path = Path::new(stat.canonical_path.as_str()).to_owned();
 		let authored = authored.to_owned();
 		let interrupt = Arc::new(sqlite::QueryInterrupt::default());
@@ -1508,17 +1517,12 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		let rendered = result
 			.map_err(|error| Fault::source(format!("SQLite read task failed: {error}")))?
 			.map_err(|error| Fault::Source { message: Str::new(error.to_string()) })?;
-		let text = format::prepend_suffix_resolution_notice(
-			&rendered,
-			suffix_from.map(|from| format::SuffixResolution { from, to: &stat.display_path }),
-		);
-		Ok(vec![PayloadPart::Text { text: Str::new(text) }])
+		Ok(ReadSection::rendered(rendered).recovered(suffix_from, &stat.display_path))
 	}
 
-	async fn read_image(&self, stat: &SourceStat) -> Result<Option<Vec<PayloadPart>>, Fault> {
+	async fn read_image(&self, stat: &SourceStat) -> Result<Option<ReadSection>, Fault> {
 		let bytes = self.sources.read_bytes(stat.canonical_path.clone()).await?;
-		let Some(loaded) =
-			Self::process_image_async(bytes, self.policy.auto_resize_images).await?
+		let Some(loaded) = Self::process_image_async(bytes, self.policy.auto_resize_images).await?
 		else {
 			return Ok(None);
 		};
@@ -1526,19 +1530,16 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 			.blobs
 			.store(loaded.data, loaded.media_type.clone())
 			.await?;
-		Ok(Some(vec![PayloadPart::Text { text: loaded.description.clone() }, PayloadPart::Blob {
-			blob,
-			alt: loaded.description,
-			vision: None,
-		}]))
+		Ok(Some(ReadSection::new(vec![
+			PayloadPart::Text { text: loaded.description.clone() },
+			PayloadPart::Blob { blob, alt: loaded.description, vision: None },
+		])))
 	}
 
-	async fn read_svg_image(&self, source: Bytes, gzip: bool) -> Result<Vec<PayloadPart>, Fault> {
+	async fn read_svg_image(&self, source: Bytes, gzip: bool) -> Result<ReadSection, Fault> {
 		let png = task::spawn_blocking(move || image::rasterize_svg(&source, gzip))
 			.await
-			.map_err(|_| Fault::Source {
-				message: Str::new_static("SVG image raster task failed"),
-			})?
+			.map_err(|_| Fault::Source { message: Str::new_static("SVG image raster task failed") })?
 			.map_err(|error| Fault::Source { message: Str::new(error.to_string()) })?;
 		let loaded = Self::process_image_async(png, false)
 			.await?
@@ -1547,11 +1548,10 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 			.blobs
 			.store(loaded.data, loaded.media_type.clone())
 			.await?;
-		Ok(vec![PayloadPart::Text { text: loaded.description.clone() }, PayloadPart::Blob {
-			blob,
-			alt: loaded.description,
-			vision: None,
-		}])
+		Ok(ReadSection::new(vec![
+			PayloadPart::Text { text: loaded.description.clone() },
+			PayloadPart::Blob { blob, alt: loaded.description, vision: None },
+		]))
 	}
 
 	async fn process_image_async(
@@ -1560,9 +1560,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 	) -> Result<Option<image::ProcessedImage>, Fault> {
 		task::spawn_blocking(move || image::process_image_with_policy(bytes, auto_resize))
 			.await
-			.map_err(|_| Fault::Source {
-				message: Str::new_static("Image processing task failed"),
-			})?
+			.map_err(|_| Fault::Source { message: Str::new_static("Image processing task failed") })?
 			.map_err(|error| Fault::Source { message: error.message() })
 	}
 
@@ -1574,26 +1572,17 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		revision: &Str,
 		bytes: &Bytes,
 		suffix_from: Option<&str>,
-	) -> Result<Vec<PayloadPart>, Fault> {
+	) -> Result<ReadSection, Fault> {
 		if !self.policy.hashline_headers {
-			if let Some(from) = suffix_from {
-				summary.text = format::prepend_suffix_resolution_notice(
-					&summary.text,
-					Some(format::SuffixResolution { from, to: &stat.display_path }),
-				);
+			return Ok(ReadSection {
+				parts: vec![PayloadPart::Text { text: Str::new(summary.text) }],
+				diags: summary.diags,
 			}
-			return Ok(vec![PayloadPart::Text { text: Str::new(summary.text) }]);
+			.recovered(suffix_from, &stat.display_path));
 		}
 		let placeholder = format::format_read_hashline_header(&stat.display_path, "0000");
 		summary.text = format!("{}\n{}", placeholder, summary.text);
 		summary.source_lines.insert(0, format::SourceLines::new());
-		if let Some(from) = suffix_from {
-			summary.text = format::prepend_suffix_resolution_notice(
-				&summary.text,
-				Some(format::SuffixResolution { from, to: &stat.display_path }),
-			);
-			summary.source_lines.insert(0, format::SourceLines::new());
-		}
 		let seen = retained_source_lines(&summary.source_lines);
 		let tag = self.sources.record_snapshot(SnapshotRecord {
 			path:     path.clone(),
@@ -1613,7 +1602,11 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 			let remove_end = end + usize::from(summary.text.as_bytes().get(end) == Some(&b'\n'));
 			summary.text.replace_range(header_at..remove_end, "");
 		}
-		Ok(vec![PayloadPart::Text { text: Str::new(summary.text) }])
+		Ok(ReadSection {
+			parts: vec![PayloadPart::Text { text: Str::new(summary.text) }],
+			diags: summary.diags,
+		}
+		.recovered(suffix_from, &stat.display_path))
 	}
 
 	fn text_parts(
@@ -1623,17 +1616,11 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		parsed: &selector::ParsedSelector,
 		pinned: Option<(&Str, &Str, &Bytes)>,
 		suffix_from: Option<&str>,
-	) -> Result<Vec<PayloadPart>, Fault> {
+	) -> Result<ReadSection, Fault> {
 		let pinned = pinned.filter(|_| self.policy.hashline_headers);
 		let placeholder_tag = pinned.filter(|_| !parsed.is_raw()).map(|_| "0000");
-		let mut formatted = format_read_projection(
-			stat,
-			text,
-			parsed,
-			placeholder_tag,
-			suffix_from,
-			self.policy.line_numbers,
-		);
+		let mut formatted =
+			format_read_projection(stat, text, parsed, placeholder_tag, self.policy.line_numbers);
 		append_visible_conflict_warning(
 			&mut formatted,
 			text,
@@ -1654,8 +1641,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 		};
 
 		if placeholder_tag.is_some() && tag.is_none() {
-			formatted =
-				format_read_projection(stat, text, parsed, None, suffix_from, self.policy.line_numbers);
+			formatted = format_read_projection(stat, text, parsed, None, self.policy.line_numbers);
 			append_visible_conflict_warning(
 				&mut formatted,
 				text,
@@ -1665,6 +1651,7 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 			);
 		}
 		let mut projection = formatted.text;
+		let diags = formatted.diags;
 		if let Some(tag) = tag
 			&& placeholder_tag.is_some()
 		{
@@ -1675,13 +1662,17 @@ impl<S: ReadSources, B: ReadBlobs, R: resolver::Resolve> ReadTool<S, B, R> {
 				1,
 			);
 		}
-		Ok(vec![PayloadPart::Text { text: Str::new(projection) }])
+		Ok(ReadSection { parts: vec![PayloadPart::Text { text: Str::new(projection) }], diags }
+			.recovered(suffix_from, &stat.display_path))
 	}
 
-	fn virtual_text_parts(text: &str, parsed: &selector::ParsedSelector) -> Vec<PayloadPart> {
+	fn virtual_text_parts(text: &str, parsed: &selector::ParsedSelector) -> ReadSection {
 		let formatted =
 			format::format_text(text, parsed, format::TextFormatOptions::new("URL output"));
-		vec![PayloadPart::Text { text: Str::new(formatted.text) }]
+		ReadSection {
+			parts: vec![PayloadPart::Text { text: Str::new(formatted.text) }],
+			diags: formatted.diags,
+		}
 	}
 }
 fn format_read_projection<'a>(
@@ -1689,7 +1680,6 @@ fn format_read_projection<'a>(
 	text: &str,
 	parsed: &selector::ParsedSelector,
 	tag: Option<&'a str>,
-	suffix_from: Option<&str>,
 	line_numbers: bool,
 ) -> format::FormattedText {
 	let mut options = format::TextFormatOptions::new("file");
@@ -1697,11 +1687,7 @@ fn format_read_projection<'a>(
 		format::BlockContextSource { path: Some(&stat.display_path), language: None };
 	options.snapshot = tag.map(|tag| format::SnapshotHeader { anchor: &stat.display_path, tag });
 	options.line_numbers = line_numbers;
-	let mut formatted = format::format_text(text, parsed, options);
-	if let Some(from) = suffix_from {
-		formatted.prepend_suffix_resolution_notice(from, &stat.display_path);
-	}
-	formatted
+	format::format_text(text, parsed, options)
 }
 
 /// Every source line exposed by a complete projection, sorted and deduplicated.
@@ -1777,12 +1763,14 @@ fn append_visible_conflict_warning(
 	if visible.is_empty() {
 		return;
 	}
-	let warning = conflicts::format_conflict_warning(&visible, conflicts::ConflictWarningOptions {
-		total_in_file:  Some(total),
-		display_path:   (visible.len() < total).then_some(display_path),
-		scan_truncated: false,
-	});
-	formatted.append_conflict_warning(&warning);
+	formatted.diags.extend(conflicts::format_conflict_warning(
+		&visible,
+		conflicts::ConflictWarningOptions {
+			total_in_file:  Some(total),
+			display_path:   Some(display_path),
+			scan_truncated: false,
+		},
+	));
 }
 
 fn svg_gzip_path(path: &Path) -> Option<bool> {
@@ -1796,7 +1784,7 @@ fn svg_gzip_path(path: &Path) -> Option<bool> {
 	}
 }
 
-fn svg_image_selector_fault() -> Fault {
+const fn svg_image_selector_fault() -> Fault {
 	Fault::Invalid {
 		message: Str::new_static("The ':img' selector only supports local .svg and .svgz files."),
 	}
@@ -1849,6 +1837,7 @@ fn binary_notice(stat: &SourceStat) -> String {
 
 struct StructuralRender {
 	text:         String,
+	diags:        SmallVec<Diag, 2>,
 	source_lines: Vec<format::SourceLines>,
 }
 
@@ -1915,14 +1904,11 @@ fn structural_summary(path: &str, text: &str) -> Option<StructuralRender> {
 		}
 		index += 1;
 	}
-	let footer = format::format_summary_elision_footer(path, &elided, elided_lines);
-	let mut output = rows.join("\n");
-	if !footer.is_empty() {
-		output.push_str("\n\n");
-		output.push_str(&footer);
-		source_lines.extend([format::SourceLines::new(), format::SourceLines::new()]);
+	let mut diags = SmallVec::new();
+	if let Some(diag) = format::summary_elision_diag(path, &elided, elided_lines) {
+		diags.push(diag);
 	}
-	Some(StructuralRender { text: output, source_lines })
+	Some(StructuralRender { text: rows.join("\n"), diags, source_lines })
 }
 
 fn seen_ranges(lines: &[usize]) -> Vec<SeenRange> {

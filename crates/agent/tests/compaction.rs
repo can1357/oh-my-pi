@@ -6,18 +6,19 @@ use std::{collections::VecDeque, path::Path, sync::Arc};
 use bytes::Bytes;
 use futures::stream;
 use omp_agent::{
-	GateDecision, HookGate, HookPatch, HookPhase, LifecycleHooks, OnFailure, SourceRef, When,
+	AI_COMPACT_THRESHOLD, GateDecision, HookGate, HookPatch, HookPhase, LifecycleHooks, OnFailure,
+	SourceRef, When,
 	director::{BoxFut, Director, ErasedInference, MutDirectorCx, Prepared, RouteFacts},
 	directors::compaction::CompactionDirector,
 };
-use omp_con::{AI_COMPACT_THRESHOLD, Ctx};
-use omp_core::{Str, sf};
-use omp_dom::{KnownTag, NodeSpec, Op, PropId, Txn, Value};
-use omp_inference::{
+use omp_ai::{
 	ChatEvent, ChatRequest, ChatStream, ContentPart, Message, NegotiationPolicy, Role,
 	SafetySetting, Sampling, Setting,
-	pi_settings::{AI_COMPACTION_KEEP_RECENT_TOKENS, AI_COMPACTION_THRESHOLD_TOKENS},
+	settings::{AI_COMPACTION_KEEP_RECENT_TOKENS, AI_COMPACTION_THRESHOLD_TOKENS},
 };
+use omp_con::Ctx;
+use omp_core::{Str, sf};
+use omp_dom::{KnownTag, NodeSpec, Op, PropId, Txn, Value};
 use omp_journal::{
 	Journal,
 	blob::BlobStore,
@@ -43,7 +44,7 @@ impl ErasedInference for FakeInference {
 	fn execute<'a>(
 		&'a mut self,
 		request: ChatRequest,
-	) -> BoxFut<'a, Result<ChatStream, omp_inference::Error>> {
+	) -> BoxFut<'a, Result<ChatStream, omp_ai::Error>> {
 		self.requests.push(request);
 		let reply = self
 			.replies
@@ -212,9 +213,8 @@ async fn dom_ai_compact_threshold_controls_compaction() {
 	let (mut session, blobs) = open(directory.path());
 	session.begin_turn().expect("turn");
 	session.user("oldest history", Vec::new()).expect("user");
-	// Without a console the pi defaults apply: 20k recent tokens stay
-	// verbatim, so the turn before the prompt must exceed that to hide
-	// anything older.
+	// Without a console, the default retains 20k recent tokens verbatim, so
+	// the turn before the prompt must exceed that to hide anything older.
 	let recent = "small but configured ".repeat(4_000);
 	session.begin_turn().expect("turn");
 	session.user(recent.clone(), Vec::new()).expect("user");

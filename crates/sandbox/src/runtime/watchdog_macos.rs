@@ -17,7 +17,7 @@ const MAX_CPU_PAUSE: Duration = Duration::from_millis(250);
 /// Best-effort Seatbelt ceilings. PID limits are intentionally absent because
 /// macOS Seatbelt has no corresponding runtime primitive.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct WatchdogLimits {
+pub struct WatchdogLimits {
 	pub(crate) cpu_cores:    Option<f64>,
 	pub(crate) memory_bytes: Option<u64>,
 }
@@ -41,7 +41,7 @@ struct ProcessGroupUsage {
 /// Samples and controls one already-created process group until `done` becomes
 /// true or its sender is dropped. A sampled memory breach kills the entire
 /// process group before returning the typed limit error.
-pub(crate) async fn watch_process_group(
+pub async fn watch_process_group(
 	pgid: i32,
 	limits: WatchdogLimits,
 	mut done: watch::Receiver<bool>,
@@ -88,7 +88,7 @@ pub(crate) async fn watch_process_group(
 						return Ok(());
 					}
 				},
-				_ = time::sleep(pause) => {},
+				() = time::sleep(pause) => {},
 			}
 			watchdog.resume();
 		}
@@ -97,7 +97,7 @@ pub(crate) async fn watch_process_group(
 
 fn cpu_pause(cpu_nanoseconds: u64, elapsed: Duration, cpu_cores: f64) -> Option<Duration> {
 	let used = Duration::from_nanos(cpu_nanoseconds).as_secs_f64();
-	let overshoot = used - elapsed.as_secs_f64() * cpu_cores;
+	let overshoot = elapsed.as_secs_f64().mul_add(-cpu_cores, used);
 	(overshoot > 0.0)
 		.then(|| Duration::from_secs_f64(overshoot / cpu_cores).min(MAX_CPU_PAUSE))
 		.filter(|pause| !pause.is_zero())

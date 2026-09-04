@@ -584,7 +584,7 @@ pub struct ToolPolicy {
 	pub supports_parallel_calls: Option<bool>,
 	/// Whether the endpoint accepts strict tool mode.
 	pub supports_strict_mode: Option<bool>,
-	/// Whether OpenAI's forty-character tool-call identifier limit applies.
+	/// Whether `OpenAI`'s forty-character tool-call identifier limit applies.
 	pub uses_openai_id_limit: Option<bool>,
 	/// Whether object-root `anyOf`/`oneOf` tool-parameter unions must be
 	/// flattened when exclusive-required and withheld otherwise (xAI rejects
@@ -809,7 +809,7 @@ pub struct StreamingPolicy {
 	pub reasoning_deltas_cumulative: Option<bool>,
 	/// Catalog-selected leaked-markup healing pattern.
 	pub markup_healing_pattern: Option<StreamMarkupHealingPattern>,
-	/// Whether DeepSeek special tokens are stripped from text.
+	/// Whether `DeepSeek` special tokens are stripped from text.
 	pub strip_deepseek_special_tokens: Option<bool>,
 	/// Whether Responses stream obfuscation may be disabled.
 	pub supports_obfuscation_opt_out: Option<bool>,

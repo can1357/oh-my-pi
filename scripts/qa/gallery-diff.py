@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Compare omp tool-gallery sections with captured Pi references.
+"""Compare omp tool-gallery sections with captured TypeScript-reference output.
 
 Spinner phase is normalized away on both sides before comparing. Live tool
-cards animate pi's `status` spinner (theme/symbols.ts SPINNER_FRAMES: twelve
-nerd glyphs, eight braille glyphs, four ASCII spokes) on a shared 80 ms clock,
-so the glyph a capture holds is whatever phase the clock was at when pi's
-gallery froze it (edit shows frame 2, apply_patch frame 4, eval frame 3) while
-omp's gallery renders at t=0 (frame 0). Both are the same animation observed
-at different instants, so every status-spinner glyph — and only those glyphs —
-maps to one token; everything else compares byte for byte. The ASCII spokes
-(`| / - \\`) are deliberately not normalized: the gallery renders the nerd
-tier, so they never appear as spinner frames, while they do appear as ordinary
-text (paths, rules) whose differences must stay visible.
+cards animate the `status` spinner (twelve nerd glyphs, eight braille glyphs,
+four ASCII spokes) on a shared 80 ms clock, so the glyph a capture holds is
+whatever phase the reference gallery had when it froze (edit shows frame 2,
+apply_patch frame 4, eval frame 3) while omp's gallery renders at t=0
+(frame 0). Both are the same animation observed at different instants, so every
+status-spinner glyph — and only those glyphs — maps to one token; everything
+else compares byte for byte. The ASCII spokes (`| / - \\`) are deliberately not
+normalized: the gallery renders the nerd tier, so they never appear as spinner
+frames, while they do appear as ordinary text (paths, rules) whose differences
+must stay visible.
 """
 from __future__ import annotations
 import argparse, difflib, os, pathlib, re, subprocess, sys

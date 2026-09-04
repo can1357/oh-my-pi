@@ -1,4 +1,4 @@
-//! Rebuildable historical usage index behind `/stats` (pi `stats.db`).
+//! Rebuildable historical usage index behind `/stats`.
 //!
 //! Session journals stay authoritative; this SQLite file holds one row per
 //! journaled turn receipt and per tool call, keyed by the journal file that
@@ -13,7 +13,7 @@ use omp_core::Str;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 
-/// One journaled turn receipt (pi `messages` row).
+/// One journaled turn receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageRow {
 	/// Journal entry id of the receipt.
@@ -46,7 +46,7 @@ pub struct MessageRow {
 	pub cost_nano_usd: Option<u64>,
 }
 
-/// One journaled tool call (pi `tool_calls` row).
+/// One journaled tool call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolCallRow {
 	/// Tool call id.
@@ -102,7 +102,7 @@ pub struct ToolStat {
 	pub errors: u64,
 }
 
-/// Everything `/stats` shows (pi `getOverallStats` + by-model/by-folder).
+/// Everything `/stats` shows, including by-model and by-folder aggregates.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StatsSummary {
 	/// Journal files indexed.
@@ -452,7 +452,7 @@ fn to_u64(value: i64) -> u64 {
 	u64::try_from(value).unwrap_or(0)
 }
 
-fn round_u64(value: f64) -> u64 {
+const fn round_u64(value: f64) -> u64 {
 	#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "rounded average")]
 	{
 		value.round().max(0.0) as u64

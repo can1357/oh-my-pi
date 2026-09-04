@@ -9,8 +9,8 @@ use super::{
 	typed_result,
 };
 
-/// pi `BROWSER_DEFAULT_PREVIEW_LINES`: script and output lines a collapsed
-/// cell shows; `@expanded` lifts both caps.
+/// Script and output lines a collapsed cell shows; `@expanded` lifts both
+/// caps.
 const PREVIEW_LINES: usize = 10;
 
 /// Browser automation code-cell card.
@@ -49,8 +49,8 @@ impl Card for BrowserCard {
 			.and_then(Value::as_str)
 			.unwrap_or_default()
 			.to_owned();
-		// pi `describeBrowser`: the backend mode rides the title after the
-		// URL; payloads journaled before the field existed show nothing.
+		// The backend mode follows the URL in the title; payloads journaled
+		// before the field existed show nothing.
 		let kind = result
 			.as_ref()
 			.or(fault_value.as_ref())
@@ -68,7 +68,10 @@ impl Card for BrowserCard {
 			.iter()
 			.filter(|artifact| {
 				artifact.get("kind").and_then(Value::as_str) == Some("screenshot")
-					&& artifact.get("visible").and_then(Value::as_bool).unwrap_or(true)
+					&& artifact
+						.get("visible")
+						.and_then(Value::as_bool)
+						.unwrap_or(true)
 			})
 			.filter_map(|artifact| {
 				Some(result_image(
@@ -86,7 +89,10 @@ impl Card for BrowserCard {
 			.iter()
 			.filter(|artifact| {
 				artifact.get("kind").and_then(Value::as_str) == Some("download")
-					&& artifact.get("visible").and_then(Value::as_bool).unwrap_or(true)
+					&& artifact
+						.get("visible")
+						.and_then(Value::as_bool)
+						.unwrap_or(true)
 			})
 			.filter_map(|artifact| artifact.get("uri").and_then(Value::as_str))
 			.map(Str::new)

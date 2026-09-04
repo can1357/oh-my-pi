@@ -19,8 +19,9 @@ use omp_proto::inference::v1::{
 };
 use omp_shell_builtins::{ImagePassthrough, image_passthrough_ranges};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, BlobRef, CommitError, Constraint, Effects, Ev, IncomingParams,
-	Interrupt, InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool, ToolSpec, ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, BlobRef, CommitError, Constraint, Diag, Effects, Ev,
+	IncomingParams, Interrupt, InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool,
+	ToolSpec, ToolTerminal,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -41,10 +42,8 @@ use crate::{
 ///
 /// Each segment retains original spelling and identifies whether it consumes
 /// the preceding pipeline stage.
-pub fn command_segments(
-	command: &str,
-) -> Vec<omp_shell_engine::parser::FlatShellCommandSegment<'_>> {
-	omp_shell_engine::parser::flat_shell_segments(command)
+pub fn command_segments(command: &str) -> Vec<omp_shell::parser::FlatShellCommandSegment<'_>> {
+	omp_shell::parser::flat_shell_segments(command)
 }
 
 /// Complete arguments for `bash@2`.
@@ -169,6 +168,10 @@ pub struct ExecStatus {
 	pub aborted:            bool,
 	/// Whether the host cannot establish the final effect state.
 	pub effects_unknown:    bool,
+	/// Harness notices recorded by the environment host and projected as
+	/// diagnostic events before settlement.
+	#[serde(skip)]
+	pub diags:              Vec<Diag>,
 	/// Environment URI of the session working directory after this command.
 	#[serde(default)]
 	pub final_cwd_uri:      Option<Str>,
@@ -893,6 +896,9 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 							&& !status.effects_unknown
 							&& cancellation_reason.is_some() =>
 					{
+						for diag in status.diags.iter().cloned() {
+							yield Ev::Diag(diag);
+						}
 						self.finish_session(&session, persistent, true).await;
 						yield Ev::Aborted(Abort::Skipped {
 							reason: cancellation_reason.take().expect("guarded by is_some"),
@@ -900,6 +906,9 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 						return;
 					},
 					Ok(Some(RunEvent::Exit(status))) => {
+						for diag in status.diags.iter().cloned() {
+							yield Ev::Diag(diag);
+						}
 						let quarantine = status.aborted
 							|| matches!(status.outcome, ExecOutcome::Timeout | ExecOutcome::Cancelled)
 							|| status.effects_unknown;
@@ -1361,7 +1370,7 @@ mod tests {
 
 	#[test]
 	fn params_schema_stays_strict_and_allocates_async_jobs_internally() {
-		use omp_inference::recovery::tools::{
+		use omp_ai::recovery::tools::{
 			ToolAssemblyLimits, schema_within_strict_subset, validate_schema,
 		};
 		let schema_bytes = omp_tool::schema::<Params>();

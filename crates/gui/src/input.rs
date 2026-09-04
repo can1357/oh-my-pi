@@ -63,7 +63,7 @@ pub fn map_key(
 
 /// The fallback result for a plain physical key, used to recognize when
 /// layout-resolved printable text should replace keycap identity.
-fn identity_key(key: Key, shifted: bool) -> Key {
+const fn identity_key(key: Key, shifted: bool) -> Key {
 	match key {
 		Key::Char(' ') => Key::Space,
 		Key::Char(character) if shifted => Key::Char(character.to_ascii_uppercase()),

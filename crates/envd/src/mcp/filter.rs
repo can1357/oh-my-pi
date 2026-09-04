@@ -5,12 +5,12 @@ use std::{
 	fmt,
 };
 
-use omp_catalog::ProviderId;
-use omp_core::{ExposeSecret as _, Secret, SecretString, Str};
-use omp_inference::{
+use omp_ai::{
 	auth::{self, AuthControlHandle, CredentialControlWrite},
 	id::PrincipalId,
 };
+use omp_catalog::ProviderId;
+use omp_core::{ExposeSecret as _, Secret, SecretString, Str};
 use url::Url;
 
 use super::config::{McpServerConfig, ResolvedServer, TransportKind};

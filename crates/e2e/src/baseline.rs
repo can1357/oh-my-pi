@@ -11,8 +11,8 @@ use std::{
 };
 
 use omp_agent::{DispatchPolicy, Kernel, RunControl, StaticPrompt, TurnInput};
+use omp_ai::{BlockKind, ChatEvent, Completion, ExecutionReceipt, FinishReason, Usage};
 use omp_core::Str;
-use omp_inference::{BlockKind, ChatEvent, Completion, ExecutionReceipt, FinishReason, Usage};
 use omp_journal::blob::BlobStore;
 use omp_session::{ComponentRegistry, Session};
 use omp_tool::Registry;

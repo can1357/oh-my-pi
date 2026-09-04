@@ -1,5 +1,5 @@
-//! Prompt-cache invalidation detection and its transcript marker: pi
-//! `cache-invalidation-marker.ts` (`detectCacheInvalidation`,
+//! Prompt-cache invalidation detection and its transcript marker
+//! (`detectCacheInvalidation`,
 //! `CacheInvalidationMarkerComponent`).
 
 use omp_core::{Str, sf};
@@ -15,13 +15,13 @@ use super::{
 };
 use crate::cards::Component;
 
-/// pi `cache-invalidation-marker.ts:12` `MIN_CACHE_FOOTPRINT`: the prefix the
+/// `MIN_CACHE_FOOTPRINT`: the prefix the
 /// previous turn must have read back from cache before a collapse counts as
 /// an invalidation, filtering tiny contexts and providers below the
 /// cacheable-prefix floor where a zero `cacheRead` is expected.
 pub const MIN_CACHE_FOOTPRINT: u64 = 2048;
 
-/// pi `cache-invalidation-marker.ts:52` `CACHE_INVALIDATION_RULE_WIDTH`.
+/// `CACHE_INVALIDATION_RULE_WIDTH`.
 const RULE_WIDTH: u16 = 10;
 
 /// A prompt-cache invalidation detected from a turn's usage.
@@ -32,8 +32,7 @@ pub struct CacheInvalidation {
 	pub reprocessed_tokens: u64,
 }
 
-/// pi `detectCacheInvalidation` (`cache-invalidation-marker.ts:49-66`):
-/// flags only the warm→cold transition. `prev` must have read at least
+/// Detects only the warm→cold transition. `prev` must have read at least
 /// [`MIN_CACHE_FOOTPRINT`] back, `current` reads nothing, an explicit cache
 /// re-created the prefix (`cache_write > 0`; implicit caches report zero and
 /// drop reads as propagation noise), and the reprocessed prompt
@@ -52,8 +51,8 @@ pub fn detect_cache_invalidation(
 }
 
 /// Every `<usage>` element in `<body>` document order whose request lost the
-/// cache its predecessor was reusing, paired with the invalidation. Matches
-/// pi comparing consecutive assistant turns: `prev` is the nearest earlier
+/// cache its predecessor was reusing, paired with the invalidation. When
+/// comparing consecutive assistant turns, `prev` is the nearest earlier
 /// `<usage>` anywhere in the transcript.
 #[must_use]
 pub fn cache_invalidations(dom: &Dom) -> Vec<(Handle, CacheInvalidation)> {
@@ -77,8 +76,7 @@ pub fn cache_invalidations(dom: &Dom) -> Vec<(Handle, CacheInvalidation)> {
 	found
 }
 
-/// pi `CacheInvalidationMarkerComponent`
-/// (`cache-invalidation-marker.ts:67-105`): blank row, a ten-cell rule and
+/// Blank row, a ten-cell rule, and
 /// muted label, blank row. Too narrow to frame, only the label paints.
 #[must_use]
 pub fn cache_miss_marker(info: &CacheInvalidation) -> Component {

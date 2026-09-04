@@ -1,4 +1,4 @@
-//! `scheme://` internal URL references (pi `internal-url-autocomplete.ts`).
+//! `scheme://` internal URL references.
 //!
 //! A `skill://`, `rule://`, `local://`, `omp://`, `memory://`, `agent://`,
 //! `artifact://`, … token ending at the cursor offers the resources the
@@ -7,8 +7,7 @@
 //! plus a trailing space (like `@` file references).
 //!
 //! The application supplies resource-relative candidates through
-//! [`UrlCompleter`]. The provider passes the live query on every request,
-//! matching pi's `InternalUrlRouter.complete(scheme, query)` contract.
+//! [`UrlCompleter`]. The provider passes the live query on every request.
 
 use std::sync::Arc;
 
@@ -17,7 +16,7 @@ use omp_tui::{EditorCompletion, Icon, Suggestion, Suggestions};
 
 use super::fuzzy_score;
 
-/// Upper bound on rows surfaced in the dropdown (pi `MAX_URL_SUGGESTIONS`).
+/// Upper bound on rows surfaced in the dropdown.
 const MAX_ROWS: usize = 25;
 
 /// One completable resource under a scheme.
@@ -36,7 +35,7 @@ pub struct UrlCandidate {
 /// completion-capable resolver.
 pub type UrlCompleter = Arc<dyn Fn(&str, &str) -> Option<Vec<UrlCandidate>> + Send + Sync>;
 
-/// A `scheme://query` token ending at the cursor (pi `InternalUrlContext`).
+/// A `scheme://query` token ending at the cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UrlContext<'a> {
 	/// Byte offset of the token start.
@@ -47,14 +46,13 @@ pub struct UrlContext<'a> {
 	pub query:  &'a str,
 }
 
-/// Whether `character` may continue a URL token (pi `URL_TOKEN_RE` rest
-/// class: anything but whitespace, quotes, parentheses, and angle brackets).
+/// Whether `character` may continue a URL token: anything but whitespace,
+/// quotes, parentheses, and angle brackets.
 const fn is_url_char(character: char) -> bool {
 	!(character.is_whitespace() || matches!(character, '"' | '\'' | '`' | '(' | ')' | '<' | '>'))
 }
 
-/// Whether `character` may precede a URL token (pi `URL_TOKEN_RE` boundary
-/// class).
+/// Whether `character` may precede a URL token.
 const fn is_url_boundary(character: char) -> bool {
 	character.is_whitespace() || matches!(character, '"' | '\'' | '`' | '(' | '<' | '=')
 }
@@ -88,8 +86,8 @@ pub fn url_context(text: &str, cursor: usize) -> Option<UrlContext<'_>> {
 		return None;
 	}
 	// `=` is both a boundary and a token character (`a=omp://`, and
-	// `omp://k=v` alike); pi's regex takes the leftmost boundary whose
-	// remainder parses as `scheme:/…`, so try each `=` from the left.
+	// `omp://k=v` alike); use the leftmost boundary whose remainder parses
+	// as `scheme:/…`, so try each `=` from the left.
 	let token = &before[start..];
 	let starts = std::iter::once(start).chain(
 		token
@@ -112,8 +110,8 @@ pub fn url_context(text: &str, cursor: usize) -> Option<UrlContext<'_>> {
 	None
 }
 
-/// Decodes `%XX` escapes for matching (pi `decodeUrlCompletionValue`);
-/// the raw value is returned untouched when the encoding is malformed.
+/// Decodes `%XX` escapes for matching; the raw value is returned untouched
+/// when the encoding is malformed.
 fn percent_decode(value: &str) -> Str {
 	if !value.contains('%') {
 		return Str::new(value);
@@ -171,7 +169,7 @@ impl EditorCompletion for InternalUrls {
 			.iter()
 			.enumerate()
 			.filter_map(|(index, candidate)| {
-				// Scheme ownership is one-way, as in current pi: the resolver
+				// Scheme ownership is one-way: the resolver
 				// returns a resource-relative value and this provider adds the
 				// scheme exactly once. Reject a producer contract violation
 				// instead of ever offering `agent://agent://…`.
@@ -296,7 +294,7 @@ mod tests {
 			.expect("case-insensitive prefix");
 		assert_eq!(labels(&prefix), ["pyo3"]);
 		assert!(urls.suggest("see skill://zzz", 15).is_none(), "no match closes");
-		// Current pi passes the live query to the resolver on every request.
+		// The provider passes the live query to the resolver on every request.
 		assert_eq!(calls.load(Ordering::Relaxed), 4);
 	}
 

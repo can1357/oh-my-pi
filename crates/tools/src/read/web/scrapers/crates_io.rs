@@ -2,7 +2,8 @@
 
 use std::fmt::Write as _;
 
-use omp_core::{USER_AGENT, sf};
+use omp_core::USER_AGENT;
+use omp_tool::{Diag, DiagKind};
 use serde::Deserialize;
 use url::Url;
 
@@ -180,7 +181,9 @@ pub(super) async fn render<C: HttpClient + Sync>(
 	}
 
 	let mut rendered = RenderResult::markdown(&markdown, "crates.io");
-	rendered.notes.push(sf!("Fetched via crates.io API"));
+	rendered
+		.diags
+		.push(Diag::info(DiagKind::Provenance, "Fetched via crates.io API"));
 	Ok(Some(rendered))
 }
 

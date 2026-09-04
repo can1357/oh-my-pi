@@ -224,7 +224,7 @@ pub trait RenderFold: Send + Sync + 'static {
 	/// so overriding renderers replace prior argument state instead of
 	/// appending. The default ignores arguments; renderers that preview
 	/// arguments while they stream override it.
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, complete: bool) {
 		let _ = (state, args, complete);
 	}
 
@@ -359,7 +359,7 @@ trait ErasedRender: Send + Sync {
 		&self,
 		identity: &ToolIdentity,
 		state: &mut dyn Any,
-		args: &omp_slopjson::Value,
+		args: &omp_core::slopjson::Value,
 		complete: bool,
 	) -> Result<(), RenderRegistryError>;
 	fn view(
@@ -396,7 +396,7 @@ impl<R: RenderFold> ErasedRender for RegisteredRender<R> {
 		&self,
 		identity: &ToolIdentity,
 		state: &mut dyn Any,
-		args: &omp_slopjson::Value,
+		args: &omp_core::slopjson::Value,
 		complete: bool,
 	) -> Result<(), RenderRegistryError> {
 		let state = state
@@ -443,7 +443,7 @@ impl RenderEntry<'_> {
 	pub fn fold_args(
 		self,
 		state: &mut ViewState,
-		args: &omp_slopjson::Value,
+		args: &omp_core::slopjson::Value,
 		complete: bool,
 	) -> Result<(), RenderRegistryError> {
 		state.bind(self.identity)?;
@@ -626,7 +626,7 @@ impl RenderRegistry {
 		&self,
 		identity: &ToolIdentity,
 		state: &mut ViewState,
-		args: &omp_slopjson::Value,
+		args: &omp_core::slopjson::Value,
 		complete: bool,
 	) -> Result<(), RenderRegistryError> {
 		if let Some(entry) = self.get(identity) {
@@ -766,6 +766,23 @@ impl RenderRegistry {
 	}
 }
 
+fn generic_view(
+	identity: &ToolIdentity,
+	state: &ViewState,
+	outcome: Option<&[u8]>,
+) -> Result<Str, RenderRegistryError> {
+	let data = outcome.or_else(|| match &state.fold {
+		FoldState::Updates(updates) => updates.last().map(Bytes::as_ref),
+		FoldState::Reduced(_) => None,
+	});
+	let Some(data) = data else {
+		return Ok(Str::new_static("{}"));
+	};
+	let data = str::from_utf8(data)
+		.map_err(|source| RenderRegistryError::Utf8 { identity: identity.clone(), source })?;
+	Ok(Str::new(data))
+}
+
 #[cfg(test)]
 mod jtd_tests {
 	use serde_json::json;
@@ -808,21 +825,4 @@ mod jtd_tests {
 		.expect_err("mixed authoring formats must be rejected");
 		assert!(matches!(error, JtdImportError::InvalidForm));
 	}
-}
-
-fn generic_view(
-	identity: &ToolIdentity,
-	state: &ViewState,
-	outcome: Option<&[u8]>,
-) -> Result<Str, RenderRegistryError> {
-	let data = outcome.or_else(|| match &state.fold {
-		FoldState::Updates(updates) => updates.last().map(Bytes::as_ref),
-		FoldState::Reduced(_) => None,
-	});
-	let Some(data) = data else {
-		return Ok(Str::new_static("{}"));
-	};
-	let data = str::from_utf8(data)
-		.map_err(|source| RenderRegistryError::Utf8 { identity: identity.clone(), source })?;
-	Ok(Str::new(data))
 }

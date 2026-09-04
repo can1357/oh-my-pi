@@ -69,7 +69,7 @@ create_exception!(
 create_exception!(_omp, TemplateError, OmpError, "A scribe template failed to compile or render.");
 /// Immutable declarative inputs for one atomic interactive-session transition.
 #[pyclass(name = "SessionSetup", frozen, module = "_omp")]
-pub(crate) struct PySessionSetup {
+pub struct PySessionSetup {
 	title:          Option<Str>,
 	parent:         Option<Str>,
 	initial_prompt: Option<Py<PyAny>>,
@@ -222,7 +222,7 @@ fn value_error(error: impl Display) -> PyErr {
 /// Immutable Python duration retaining its explicit source unit.
 #[pyclass(name = "Duration", frozen, module = "_omp", from_py_object)]
 #[derive(Clone, Debug)]
-pub(crate) struct PyDuration(pub(crate) Duration);
+pub struct PyDuration(pub(crate) Duration);
 
 #[pymethods]
 impl PyDuration {
@@ -781,7 +781,7 @@ typed_location!(PyWorkspaceUri, "WorkspaceUri", WorkspaceUri);
 #[pyclass(name = "EnvPath", frozen, module = "_omp", from_py_object)]
 /// A path in the workspace Environment filesystem namespace.
 #[derive(Clone, Debug)]
-pub(crate) struct PyEnvPath(pub(crate) EnvPath);
+pub struct PyEnvPath(pub(crate) EnvPath);
 
 #[pymethods]
 impl PyEnvPath {
@@ -952,7 +952,7 @@ fn path_uri(path: &str) -> PyResult<String> {
 #[pyclass(name = "BlobRef", frozen, module = "_omp", from_py_object)]
 /// A content-addressed reference in one Environment blob store.
 #[derive(Clone, Debug)]
-pub(crate) struct PyBlobRef {
+pub struct PyBlobRef {
 	hash: [u8; 32],
 	size: u64,
 }
@@ -1068,27 +1068,85 @@ struct PyResourceReceipt {
 	dropped: Py<PyAny>,
 }
 
+fn parse_resource_quotas(
+	quotas: Vec<(String, u64, u64, Option<String>)>,
+) -> PyResult<Vec<(Str, u64, u64, Option<Duration>)>> {
+	quotas
+		.into_iter()
+		.map(|(name, limit, used, window)| {
+			let window = window
+				.map(|window| Duration::from_str(&window))
+				.transpose()
+				.map_err(value_error)?;
+			Ok((Str::from(name), limit, used, window))
+		})
+		.collect()
+}
+
 #[pyfunction]
-fn resources(py: Python<'_>) -> PyResult<PyResourceReceipt> {
-	let state = RUNTIME.resources.read();
-	let quotas = PyDict::new(py);
-	for (name, status) in &state.quotas {
+fn _set_resource_receipt(
+	quotas: Vec<(String, u64, u64, Option<String>)>,
+	dropped: Vec<(String, u64)>,
+) -> PyResult<()> {
+	set_resource_receipt(
+		parse_resource_quotas(quotas)?,
+		dropped
+			.into_iter()
+			.map(|(name, count)| (Str::from(name), count)),
+	);
+	Ok(())
+}
+
+fn bind_resource_receipt(
+	py: Python<'_>,
+	quotas: impl IntoIterator<Item = (Str, QuotaStatusValue)>,
+	dropped_rows: impl IntoIterator<Item = (Str, u64)>,
+) -> PyResult<PyResourceReceipt> {
+	let quotas_mapping = PyDict::new(py);
+	for (name, status) in quotas {
 		let value = Py::new(py, PyQuotaStatus {
 			limit:  status.limit,
 			used:   status.used,
 			window: status.window.map(PyDuration),
 		})?;
-		quotas.set_item(name.as_str(), value)?;
+		quotas_mapping.set_item(name.as_str(), value)?;
 	}
 	let dropped = PyDict::new(py);
-	for (name, count) in &state.dropped {
+	for (name, count) in dropped_rows {
 		dropped.set_item(name.as_str(), count)?;
 	}
 	let proxy = py.import("types")?.getattr("MappingProxyType")?;
 	Ok(PyResourceReceipt {
-		quotas:  proxy.call1((quotas,))?.unbind(),
+		quotas:  proxy.call1((quotas_mapping,))?.unbind(),
 		dropped: proxy.call1((dropped,))?.unbind(),
 	})
+}
+
+#[pyfunction]
+fn _resource_receipt_from_host(
+	py: Python<'_>,
+	quotas: Vec<(String, u64, u64, Option<String>)>,
+	dropped: Vec<(String, u64)>,
+) -> PyResult<PyResourceReceipt> {
+	let quotas = parse_resource_quotas(quotas)?
+		.into_iter()
+		.map(|(name, limit, used, window)| (name, QuotaStatusValue { limit, used, window }));
+	bind_resource_receipt(
+		py,
+		quotas,
+		dropped
+			.into_iter()
+			.map(|(name, count)| (Str::from(name), count)),
+	)
+}
+
+#[pyfunction]
+fn resources(py: Python<'_>) -> PyResult<PyResourceReceipt> {
+	let (quotas, dropped) = {
+		let state = RUNTIME.resources.read();
+		(state.quotas.clone(), state.dropped.clone())
+	};
+	bind_resource_receipt(py, quotas, dropped)
 }
 
 #[pyfunction]
@@ -1350,8 +1408,7 @@ fn path_metadata(py: Python<'_>, value: &document_pb::PathMetadata) -> PyResult<
 	let (read_only, executable) = value
 		.permissions
 		.as_ref()
-		.map(|permissions| (permissions.read_only, permissions.executable))
-		.unwrap_or((None, None));
+		.map_or((None, None), |permissions| (permissions.read_only, permissions.executable));
 	Ok(Py::new(py, env_types::PathMeta {
 		path: path_value(py, &value.uri)?,
 		kind,
@@ -1466,11 +1523,13 @@ impl NativeStream {
 				Self::Search(stream) => stream.next_event().await?.map(NativeStreamItem::Search),
 			};
 			match item {
-				Some(NativeStreamItem::Exec(ExecEvent::Started(_)))
-				| Some(NativeStreamItem::Process(ProcessAttachmentEvent::Attached(_)))
-				| Some(NativeStreamItem::Blob(BlobDownloadEvent::Complete(_)))
-				| Some(NativeStreamItem::Walk(WalkEvent::Complete(_)))
-				| Some(NativeStreamItem::Search(SearchEvent::Complete(_))) => continue,
+				Some(
+					NativeStreamItem::Exec(ExecEvent::Started(_))
+					| NativeStreamItem::Process(ProcessAttachmentEvent::Attached(_))
+					| NativeStreamItem::Blob(BlobDownloadEvent::Complete(_))
+					| NativeStreamItem::Walk(WalkEvent::Complete(_))
+					| NativeStreamItem::Search(SearchEvent::Complete(_)),
+				) => continue,
 				Some(NativeStreamItem::Lsp(LspStreamEvent::Bindings(_))) => continue,
 				item => return Ok(item),
 			}
@@ -1486,7 +1545,7 @@ struct PyEnvironmentStream {
 
 #[pymethods]
 impl PyEnvironmentStream {
-	fn __iter__(slf: Py<Self>) -> Py<Self> {
+	const fn __iter__(slf: Py<Self>) -> Py<Self> {
 		slf
 	}
 
@@ -2081,7 +2140,7 @@ impl PyEnvironmentBackend {
 			.filter(|value| !value.is_none())
 			.map(|value| value.extract::<Vec<u8>>())
 			.transpose()?
-			.unwrap_or_else(|| fresh_transaction_id());
+			.unwrap_or_else(fresh_transaction_id);
 		let mut mutations = Vec::new();
 		let operations = arguments
 			.get_item("operations")?
@@ -4286,14 +4345,14 @@ mod _omp {
 	#[pymodule_export]
 	use super::{
 		_interrupt, _local_path_string, _open_environment_scope, _phase_legality_matrix,
-		_principal_from_host, _runtime_metadata, _scheme_snapshot, _scribe_canonicalize, _thread_id,
-		EnvUnavailable, HostDisconnected, OmpError, PlacementError, PyActivateReason, PyAgentUrl,
-		PyArtifactUrl, PyAuthority, PyBlobRef, PyBlobUpload, PyCancellation, PyClientPath,
-		PyControlHandle, PyCostClass, PyDurability, PyDuration, PyEnvPath, PyEnvironmentBackend,
-		PyEnvironmentStream, PyHistoryUrl, PyInvocationPhase, PyLifecyclePhase, PyOperationSpec,
-		PyPrincipal, PyQuotaStatus, PyResourceReceipt, PyRestartReason, PyScribeTemplate, PySecret,
-		PySecretUse, PySessionSetup, PyStateScope, PyWorkspaceUri, StaleGeneration, TemplateError,
-		operation_spec, resources,
+		_principal_from_host, _resource_receipt_from_host, _runtime_metadata, _scheme_snapshot,
+		_scribe_canonicalize, _set_resource_receipt, _thread_id, EnvUnavailable, HostDisconnected,
+		OmpError, PlacementError, PyActivateReason, PyAgentUrl, PyArtifactUrl, PyAuthority,
+		PyBlobRef, PyBlobUpload, PyCancellation, PyClientPath, PyControlHandle, PyCostClass,
+		PyDurability, PyDuration, PyEnvPath, PyEnvironmentBackend, PyEnvironmentStream, PyHistoryUrl,
+		PyInvocationPhase, PyLifecyclePhase, PyOperationSpec, PyPrincipal, PyQuotaStatus,
+		PyResourceReceipt, PyRestartReason, PyScribeTemplate, PySecret, PySecretUse, PySessionSetup,
+		PyStateScope, PyWorkspaceUri, StaleGeneration, TemplateError, operation_spec, resources,
 	};
 	#[pymodule_export]
 	use crate::env_types::{

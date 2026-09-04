@@ -3,7 +3,7 @@
 use std::{future, io::Write, result, sync::Arc, time::Duration};
 
 use clap::Parser;
-use omp_shell_engine::{
+use omp_shell::{
 	ExecutionContext, ExecutionExitCode, ExecutionResult, ProcessGroupPolicy, ProcessScope,
 	SourceInfo, SpawnObserver, builtins, sys, traps::TrapSignal,
 };
@@ -84,7 +84,7 @@ impl clap::Parser for TimeoutCommand {}
 /// Records the external children spawned while running the timed command.
 ///
 /// brush's cancellation token can only SIGKILL a child (see
-/// `omp_shell_engine::processes::Process::wait`), so delivering the
+/// `omp_shell::processes::Process::wait`), so delivering the
 /// *configured* signal requires knowing the child's pid/pgid; the shell reports
 /// those through its [`SpawnObserver`] hook.
 #[derive(Default)]
@@ -149,7 +149,7 @@ fn signal_display(signal: TrapSignal) -> &'static str {
 }
 
 impl builtins::Command for TimeoutCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
 	fn new<I>(args: I) -> Result<Self, clap::Error>
 	where
@@ -158,10 +158,10 @@ impl builtins::Command for TimeoutCommand {
 		Ok(Self { argv: args.into_iter().collect() })
 	}
 
-	async fn execute<SE: omp_shell_engine::ShellExtensions>(
+	async fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
-	) -> result::Result<ExecutionResult, omp_shell_engine::Error> {
+	) -> result::Result<ExecutionResult, omp_shell::Error> {
 		if context.is_cancelled() {
 			return Ok(ExecutionExitCode::Interrupted.into());
 		}
@@ -299,11 +299,9 @@ impl builtins::Command for TimeoutCommand {
 		// After a cancel-fallback (in-process operand), the inner shell may
 		// surface its own cancellation as an Interrupted error instead of the
 		// operand's result; that is expected retirement, not a fault.
-		let reap = |result: Result<ExecutionResult, omp_shell_engine::Error>| match result {
+		let reap = |result: Result<ExecutionResult, omp_shell::Error>| match result {
 			Ok(result) => Ok(Some(result)),
-			Err(err)
-				if !signalled && matches!(err.kind(), omp_shell_engine::ErrorKind::Interrupted) =>
-			{
+			Err(err) if !signalled && matches!(err.kind(), omp_shell::ErrorKind::Interrupted) => {
 				Ok(None)
 			},
 			Err(err) => Err(err),
@@ -377,7 +375,7 @@ mod tests {
 	};
 
 	use clap::Parser;
-	use omp_shell_engine::{
+	use omp_shell::{
 		ExecutionContext, ExecutionResult, Shell, SourceInfo, builtins,
 		extensions::DefaultShellExtensions, openfiles::OpenFiles,
 	};
@@ -389,9 +387,9 @@ mod tests {
 	struct StatusCommand;
 
 	impl builtins::Command for StatusCommand {
-		type Error = omp_shell_engine::Error;
+		type Error = omp_shell::Error;
 
-		async fn execute<SE: omp_shell_engine::ShellExtensions>(
+		async fn execute<SE: omp_shell::ShellExtensions>(
 			&self,
 			_context: ExecutionContext<'_, SE>,
 		) -> Result<ExecutionResult, Self::Error> {
@@ -403,9 +401,9 @@ mod tests {
 	struct SlowCommand;
 
 	impl builtins::Command for SlowCommand {
-		type Error = omp_shell_engine::Error;
+		type Error = omp_shell::Error;
 
-		async fn execute<SE: omp_shell_engine::ShellExtensions>(
+		async fn execute<SE: omp_shell::ShellExtensions>(
 			&self,
 			context: ExecutionContext<'_, SE>,
 		) -> Result<ExecutionResult, Self::Error> {
@@ -427,9 +425,9 @@ mod tests {
 	struct StubbornCommand;
 
 	impl builtins::Command for StubbornCommand {
-		type Error = omp_shell_engine::Error;
+		type Error = omp_shell::Error;
 
-		async fn execute<SE: omp_shell_engine::ShellExtensions>(
+		async fn execute<SE: omp_shell::ShellExtensions>(
 			&self,
 			_context: ExecutionContext<'_, SE>,
 		) -> Result<ExecutionResult, Self::Error> {
@@ -454,7 +452,7 @@ mod tests {
 		// Cancelling the operand makes the shell report an interrupted command;
 		// without this the diagnostic lands on the test runner's terminal.
 		for fd in [OpenFiles::STDIN_FD, OpenFiles::STDOUT_FD, OpenFiles::STDERR_FD] {
-			params.set_fd(fd, omp_shell_engine::openfiles::null().expect("null device"));
+			params.set_fd(fd, omp_shell::openfiles::null().expect("null device"));
 		}
 		time::timeout(
 			Duration::from_secs(1),
@@ -602,7 +600,7 @@ mod tests {
 		// Keep the inner shell's interrupted notice off the test runner's
 		// terminal, like run_with_deadline does.
 		for fd in [OpenFiles::STDIN_FD, OpenFiles::STDOUT_FD, OpenFiles::STDERR_FD] {
-			params.set_fd(fd, omp_shell_engine::openfiles::null().expect("null device"));
+			params.set_fd(fd, omp_shell::openfiles::null().expect("null device"));
 		}
 		let result = time::timeout(
 			Duration::from_secs(1),

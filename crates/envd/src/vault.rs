@@ -3,8 +3,9 @@
 
 use std::{
 	collections::BTreeMap,
-	env, fs, io,
+	env,
 	ffi::{OsStr, OsString},
+	fs, io,
 	path::{Component, Path, PathBuf},
 	process::{ExitStatus, Stdio},
 	sync::{
@@ -153,11 +154,11 @@ impl VaultService {
 		let mut roots = parse_vaults(&paths.user)?;
 		roots.extend(parse_vaults(&paths.project)?);
 		Ok(Self {
-			roots: Arc::new(roots),
-			revision: Arc::new(AtomicU64::new(1)),
-			obsidian: ObsidianCli::default(),
+			roots:      Arc::new(roots),
+			revision:   Arc::new(AtomicU64::new(1)),
+			obsidian:   ObsidianCli::default(),
 			discovered: Arc::new(RwLock::new(None)),
-			active: Arc::new(RwLock::new(None)),
+			active:     Arc::new(RwLock::new(None)),
 		})
 	}
 
@@ -193,7 +194,12 @@ impl VaultService {
 	async fn effective_roots(&self) -> Result<BTreeMap<Str, PathBuf>, VaultError> {
 		let discovered = self.discover_obsidian_vaults().await?;
 		let mut effective = discovered.as_ref().clone();
-		effective.extend(self.roots.iter().map(|(name, root)| (name.clone(), root.clone())));
+		effective.extend(
+			self
+				.roots
+				.iter()
+				.map(|(name, root)| (name.clone(), root.clone())),
+		);
 		Ok(effective)
 	}
 
@@ -204,7 +210,9 @@ impl VaultService {
 		if self.obsidian.binary.is_none() {
 			return Ok(Arc::new(BTreeMap::new()));
 		}
-		let output = self.run_obsidian(ObsidianOperation::Discover, None, ["vaults", "verbose"]).await?;
+		let output = self
+			.run_obsidian(ObsidianOperation::Discover, None, ["vaults", "verbose"])
+			.await?;
 		let parsed = Arc::new(parse_vault_directory(output.stdout.as_ref())?);
 		let mut cached = self.discovered.write().await;
 		if let Some(existing) = cached.as_ref() {
@@ -312,11 +320,7 @@ impl VaultService {
 			.take(bound)
 			.read_to_end(&mut bytes)
 			.await
-			.map_err(|source| VaultError::Io {
-				operation: VaultOperation::Read,
-				path,
-				source,
-			})?;
+			.map_err(|source| VaultError::Io { operation: VaultOperation::Read, path, source })?;
 		if bytes.len() > limit {
 			return Err(VaultError::Limit { limit, actual: bytes.len() });
 		}
@@ -357,13 +361,14 @@ impl VaultService {
 				path: parent.to_path_buf(),
 				source,
 			})?;
-		let canonical_parent = tokio::fs::canonicalize(parent)
-			.await
-			.map_err(|source| VaultError::Io {
-				operation: VaultOperation::Resolve,
-				path: parent.to_path_buf(),
-				source,
-			})?;
+		let canonical_parent =
+			tokio::fs::canonicalize(parent)
+				.await
+				.map_err(|source| VaultError::Io {
+					operation: VaultOperation::Resolve,
+					path: parent.to_path_buf(),
+					source,
+				})?;
 		ensure_contained(&root, &canonical_parent)?;
 		let file_name = target
 			.file_name()
@@ -442,14 +447,13 @@ impl VaultService {
 				source,
 			})?;
 		temporary.close();
-		replace_file_atomically(&temporary_path, &destination).map_err(|source| {
-			VaultError::AtomicReplace {
-				path: destination,
-				source,
-			}
-		})?;
+		replace_file_atomically(&temporary_path, &destination)
+			.map_err(|source| VaultError::AtomicReplace { path: destination, source })?;
 		temporary.committed = true;
-		Ok(self.revision.fetch_add(1, Ordering::AcqRel).saturating_add(1))
+		Ok(self
+			.revision
+			.fetch_add(1, Ordering::AcqRel)
+			.saturating_add(1))
 	}
 
 	/// Reads a file through Obsidian's CLI after independently proving that the
@@ -461,11 +465,10 @@ impl VaultService {
 	) -> Result<ObsidianOutput, VaultError> {
 		let _ = self.confine_existing_file(vault, relative).await?;
 		self
-			.run_obsidian(
-				ObsidianOperation::Read,
-				vault_arg(vault),
-				["read".to_owned(), format!("path={relative}")],
-			)
+			.run_obsidian(ObsidianOperation::Read, vault_arg(vault), [
+				"read".to_owned(),
+				format!("path={relative}"),
+			])
 			.await
 	}
 
@@ -481,19 +484,22 @@ impl VaultService {
 			return Err(VaultError::Limit { limit: OBSIDIAN_ARGUMENT_LIMIT, actual: content.len() });
 		}
 		self.confine_new_target(vault, relative).await?;
-		let mut args = vec![
-			"create".to_owned(),
-			format!("path={relative}"),
-			format!("content={content}"),
-		];
+		let mut args =
+			vec!["create".to_owned(), format!("path={relative}"), format!("content={content}")];
 		if overwrite {
 			args.push("overwrite".to_owned());
 		}
-		self.run_obsidian(ObsidianOperation::Create, vault_arg(vault), args).await?;
-		Ok(self.revision.fetch_add(1, Ordering::AcqRel).saturating_add(1))
+		self
+			.run_obsidian(ObsidianOperation::Create, vault_arg(vault), args)
+			.await?;
+		Ok(self
+			.revision
+			.fetch_add(1, Ordering::AcqRel)
+			.saturating_add(1))
 	}
 
-	/// Moves a note through Obsidian after confining both source and destination.
+	/// Moves a note through Obsidian after confining both source and
+	/// destination.
 	pub async fn obsidian_move(
 		&self,
 		vault: &str,
@@ -503,17 +509,16 @@ impl VaultService {
 		let _ = self.confine_existing_file(vault, relative).await?;
 		self.confine_new_target(vault, destination).await?;
 		self
-			.run_obsidian(
-				ObsidianOperation::Move,
-				vault_arg(vault),
-				[
-					"move".to_owned(),
-					format!("path={relative}"),
-					format!("to={destination}"),
-				],
-			)
+			.run_obsidian(ObsidianOperation::Move, vault_arg(vault), [
+				"move".to_owned(),
+				format!("path={relative}"),
+				format!("to={destination}"),
+			])
 			.await?;
-		Ok(self.revision.fetch_add(1, Ordering::AcqRel).saturating_add(1))
+		Ok(self
+			.revision
+			.fetch_add(1, Ordering::AcqRel)
+			.saturating_add(1))
 	}
 
 	/// Deletes a note through Obsidian after confining the existing target.
@@ -528,8 +533,13 @@ impl VaultService {
 		if permanent {
 			args.push("permanent".to_owned());
 		}
-		self.run_obsidian(ObsidianOperation::Delete, vault_arg(vault), args).await?;
-		Ok(self.revision.fetch_add(1, Ordering::AcqRel).saturating_add(1))
+		self
+			.run_obsidian(ObsidianOperation::Delete, vault_arg(vault), args)
+			.await?;
+		Ok(self
+			.revision
+			.fetch_add(1, Ordering::AcqRel)
+			.saturating_add(1))
 	}
 
 	/// Opens a confined note in Obsidian.
@@ -544,8 +554,13 @@ impl VaultService {
 		if new_tab {
 			args.push("newtab".to_owned());
 		}
-		self.run_obsidian(ObsidianOperation::Open, vault_arg(vault), args).await?;
-		Ok(self.revision.fetch_add(1, Ordering::AcqRel).saturating_add(1))
+		self
+			.run_obsidian(ObsidianOperation::Open, vault_arg(vault), args)
+			.await?;
+		Ok(self
+			.revision
+			.fetch_add(1, Ordering::AcqRel)
+			.saturating_add(1))
 	}
 
 	/// Searches one vault through Obsidian and returns bounded JSON output.
@@ -555,13 +570,13 @@ impl VaultService {
 		search: &VaultSearch<'_>,
 	) -> Result<ObsidianOutput, VaultError> {
 		if search.query.is_empty() {
-			return Err(VaultError::MissingParameter { operation: ObsidianOperation::Search, name: "q" });
+			return Err(VaultError::MissingParameter {
+				operation: ObsidianOperation::Search,
+				name:      "q",
+			});
 		}
 		let root = self.root(vault).await?;
-		let mut args = vec![
-			"search:context".to_owned(),
-			format!("query={}", search.query),
-		];
+		let mut args = vec!["search:context".to_owned(), format!("query={}", search.query)];
 		if let Some(path) = search.path {
 			validate_relative_path(path)?;
 			let target = tokio::fs::canonicalize(root.join(path))
@@ -581,7 +596,9 @@ impl VaultService {
 			args.push("case".to_owned());
 		}
 		args.push("format=json".to_owned());
-		self.run_obsidian(ObsidianOperation::Search, vault_arg(vault), args).await
+		self
+			.run_obsidian(ObsidianOperation::Search, vault_arg(vault), args)
+			.await
 	}
 
 	async fn confine_existing_file(
@@ -616,13 +633,14 @@ impl VaultService {
 				if metadata.file_type().is_symlink() {
 					return Err(VaultError::SymlinkTarget { path: target });
 				}
-				let canonical = tokio::fs::canonicalize(&target)
-					.await
-					.map_err(|source| VaultError::Io {
-						operation: VaultOperation::Resolve,
-						path: target.clone(),
-						source,
-					})?;
+				let canonical =
+					tokio::fs::canonicalize(&target)
+						.await
+						.map_err(|source| VaultError::Io {
+							operation: VaultOperation::Resolve,
+							path: target.clone(),
+							source,
+						})?;
 				ensure_contained(&root, &canonical)
 			},
 			Err(source) if source.kind() == io::ErrorKind::NotFound => {
@@ -632,11 +650,9 @@ impl VaultService {
 				let ancestor = existing_ancestor(parent, &root).await?;
 				ensure_contained(&root, &ancestor)
 			},
-			Err(source) => Err(VaultError::Io {
-				operation: VaultOperation::ReadMetadata,
-				path: target,
-				source,
-			}),
+			Err(source) => {
+				Err(VaultError::Io { operation: VaultOperation::ReadMetadata, path: target, source })
+			},
 		}
 	}
 
@@ -656,7 +672,11 @@ impl VaultService {
 			.as_ref()
 			.ok_or(VaultError::ObsidianUnavailable)?;
 		let mut command = Command::new(binary);
-		command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+		command
+			.stdin(Stdio::null())
+			.stdout(Stdio::piped())
+			.stderr(Stdio::piped())
+			.kill_on_drop(true);
 		if let Some(vault) = vault {
 			command.arg(vault);
 		}
@@ -676,10 +696,7 @@ impl VaultService {
 			Ok(result) => result?,
 			Err(_) => {
 				child.terminate().await;
-				return Err(VaultError::ObsidianTimeout {
-					operation,
-					timeout: self.obsidian.timeout,
-				});
+				return Err(VaultError::ObsidianTimeout { operation, timeout: self.obsidian.timeout });
 			},
 		};
 		child.disarm();
@@ -722,8 +739,7 @@ impl VaultService {
 				operation: VaultOperation::List,
 				path: path.clone(),
 				source,
-			})?
-		{
+			})? {
 			if values.len() == limit {
 				truncated = true;
 				break;
@@ -741,9 +757,9 @@ impl VaultService {
 				.into_string()
 				.map_err(|_| VaultError::NonUtf8Name { path: entry_path })?;
 			values.push(VaultEntry {
-				name: Str::new(name),
+				name:      Str::new(name),
 				directory: metadata.is_dir(),
-				size: metadata.len(),
+				size:      metadata.len(),
 			});
 		}
 		values.sort_unstable_by(|left, right| left.name.cmp(&right.name));
@@ -752,7 +768,11 @@ impl VaultService {
 }
 
 fn resolve_obsidian_binary() -> Option<PathBuf> {
-	let executable = if cfg!(windows) { "obsidian.exe" } else { "obsidian" };
+	let executable = if cfg!(windows) {
+		"obsidian.exe"
+	} else {
+		"obsidian"
+	};
 	if let Some(path) = env::var_os("PATH") {
 		for directory in env::split_paths(&path) {
 			let candidate = directory.join(executable);
@@ -897,11 +917,13 @@ impl CliChild {
 			use std::os::unix::process::CommandExt as _;
 			command.as_std_mut().process_group(0);
 		}
-		let child = command.spawn().map_err(|source| VaultError::ObsidianSpawn {
-			operation,
-			binary: binary.to_path_buf(),
-			source,
-		})?;
+		let child = command
+			.spawn()
+			.map_err(|source| VaultError::ObsidianSpawn {
+				operation,
+				binary: binary.to_path_buf(),
+				source,
+			})?;
 		let pid = child.id();
 		Ok(Self { child: Some(child), pid })
 	}
@@ -929,14 +951,14 @@ impl CliChild {
 	}
 
 	async fn wait(&mut self, operation: ObsidianOperation) -> Result<ExitStatus, VaultError> {
-		let child = self.child.as_mut().ok_or(VaultError::ObsidianPipe {
-			operation,
-			stream: ObsidianStream::Process,
-		})?;
-		let status = child.wait().await.map_err(|source| VaultError::ObsidianWait {
-			operation,
-			source,
-		})?;
+		let child = self
+			.child
+			.as_mut()
+			.ok_or(VaultError::ObsidianPipe { operation, stream: ObsidianStream::Process })?;
+		let status = child
+			.wait()
+			.await
+			.map_err(|source| VaultError::ObsidianWait { operation, source })?;
 		self.child.take();
 		Ok(status)
 	}
@@ -989,7 +1011,11 @@ async fn read_cli_stream(
 ) -> Result<Vec<u8>, VaultError> {
 	let mut bytes = Vec::new();
 	stream
-		.take(u64::try_from(OBSIDIAN_OUTPUT_LIMIT).unwrap_or(u64::MAX).saturating_add(1))
+		.take(
+			u64::try_from(OBSIDIAN_OUTPUT_LIMIT)
+				.unwrap_or(u64::MAX)
+				.saturating_add(1),
+		)
 		.read_to_end(&mut bytes)
 		.await
 		.map_err(|source| VaultError::ObsidianOutput { operation, source })?;
@@ -1009,14 +1035,10 @@ fn assert_obsidian_success(
 	stdout: &[u8],
 	stderr: &[u8],
 ) -> Result<(), VaultError> {
-	let stdout = std::str::from_utf8(stdout).map_err(|source| VaultError::ObsidianUtf8 {
-		operation,
-		source,
-	})?;
-	let stderr = std::str::from_utf8(stderr).map_err(|source| VaultError::ObsidianUtf8 {
-		operation,
-		source,
-	})?;
+	let stdout = std::str::from_utf8(stdout)
+		.map_err(|source| VaultError::ObsidianUtf8 { operation, source })?;
+	let stderr = std::str::from_utf8(stderr)
+		.map_err(|source| VaultError::ObsidianUtf8 { operation, source })?;
 	let reported = stderr
 		.trim()
 		.strip_prefix("Error:")
@@ -1109,10 +1131,9 @@ fn parse_vaults(path: &Path) -> Result<BTreeMap<Str, PathBuf>, VaultError> {
 fn validate_name(name: &str) -> Result<(), VaultError> {
 	if name.is_empty()
 		|| name == "_"
-		|| name
-			.bytes()
-			.any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\' | b':' | b'@' | b'?' | b'#'))
-	{
+		|| name.bytes().any(|byte| {
+			byte.is_ascii_control() || matches!(byte, b'/' | b'\\' | b':' | b'@' | b'?' | b'#')
+		}) {
 		return Err(VaultError::InvalidName { name: Str::new(name) });
 	}
 	Ok(())
@@ -1151,7 +1172,10 @@ impl AtomicTemp {
 	}
 
 	fn file_mut(&mut self) -> &mut tokio::fs::File {
-		self.file.as_mut().expect("atomic temporary remains open until replacement")
+		self
+			.file
+			.as_mut()
+			.expect("atomic temporary remains open until replacement")
 	}
 
 	fn close(&mut self) {
@@ -1224,7 +1248,7 @@ pub enum VaultError {
 	#[error("cannot atomically replace vault path {path}")]
 	AtomicReplace {
 		/// Destination path.
-		path: PathBuf,
+		path:   PathBuf,
 		/// Typed atomic-publication cause.
 		#[source]
 		source: omp_core::fs::AtomicReplaceError,
@@ -1357,7 +1381,9 @@ pub enum VaultError {
 		source:    std::str::Utf8Error,
 	},
 	/// Obsidian exceeded the host-owned output ceiling.
-	#[error("Obsidian CLI operation {operation} output size {actual} exceeds its {limit}-byte bound")]
+	#[error(
+		"Obsidian CLI operation {operation} output size {actual} exceeds its {limit}-byte bound"
+	)]
 	ObsidianOutputLimit {
 		/// Requested operation.
 		operation: ObsidianOperation,
@@ -1451,14 +1477,30 @@ mod tests {
 		let service = VaultService::load_layered(&paths).expect("layered load");
 		assert_eq!(service.names(), vec![sf!("extra"), sf!("notes")]);
 		assert_eq!(
-			service.read("notes", "a.md", 64).await.expect("shadowed read").as_ref(),
+			service
+				.read("notes", "a.md", 64)
+				.await
+				.expect("shadowed read")
+				.as_ref(),
 			b"project"
 		);
-		assert!(service.list("extra", "", 8).await.expect("user-only vault").0.is_empty());
+		assert!(
+			service
+				.list("extra", "", 8)
+				.await
+				.expect("user-only vault")
+				.0
+				.is_empty()
+		);
 		assert!(matches!(service.read("absent", "a.md", 64).await, Err(VaultError::Unknown { .. })));
 
 		let missing = VaultPaths::new(&temp.path().join("nope"), &temp.path().join("nope"));
-		assert!(VaultService::load_layered(&missing).expect("missing files are empty").names().is_empty());
+		assert!(
+			VaultService::load_layered(&missing)
+				.expect("missing files are empty")
+				.names()
+				.is_empty()
+		);
 	}
 
 	#[tokio::test]
@@ -1471,19 +1513,41 @@ mod tests {
 		let paths = VaultPaths { user: config, project: temp.path().join("missing.toml") };
 		let service = VaultService::load_layered(&paths).expect("vault service");
 		let file = root.join("nested/note.md");
-		let revision = service.write("notes", "nested/note.md", b"first", 64).await.expect("create");
+		let revision = service
+			.write("notes", "nested/note.md", b"first", 64)
+			.await
+			.expect("create");
 		assert_eq!(fs::read(&file).expect("created bytes"), b"first");
-		assert!(service.write("notes", "nested/note.md", b"second", 64).await.expect("replace") > revision);
+		assert!(
+			service
+				.write("notes", "nested/note.md", b"second", 64)
+				.await
+				.expect("replace")
+				> revision
+		);
 		assert_eq!(fs::read(&file).expect("replaced bytes"), b"second");
-		assert!(matches!(service.write("notes", "too-big", b"12345", 4).await, Err(VaultError::Limit { actual: 5, .. })));
-		assert!(fs::read_dir(file.parent().unwrap()).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".omp-vault-")));
+		assert!(matches!(
+			service.write("notes", "too-big", b"12345", 4).await,
+			Err(VaultError::Limit { actual: 5, .. })
+		));
+		assert!(fs::read_dir(file.parent().unwrap()).unwrap().all(|entry| {
+			!entry
+				.unwrap()
+				.file_name()
+				.to_string_lossy()
+				.starts_with(".omp-vault-")
+		}));
 	}
 
 	#[tokio::test]
 	async fn cancelled_staging_removes_unpublished_temporary_bytes() {
 		let temp = tempfile::tempdir().expect("tempdir");
 		let mut staged = AtomicTemp::create(temp.path()).await.expect("staged file");
-		staged.file_mut().write_all(b"not published").await.expect("staged bytes");
+		staged
+			.file_mut()
+			.write_all(b"not published")
+			.await
+			.expect("staged bytes");
 		let path = staged.path.clone();
 		drop(staged);
 		assert!(!path.exists());
@@ -1513,14 +1577,34 @@ mod tests {
 			),
 		);
 		let service = VaultService::load_layered(&VaultPaths {
-			user: config,
+			user:    config,
 			project: temp.path().join("missing"),
 		})
 		.expect("vault service")
 		.with_obsidian_binary(Some(script));
-		assert_eq!(service.names_with_obsidian().await.expect("effective names"), vec![sf!("cli"), sf!("notes")]);
-		assert_eq!(service.read("notes", "note.md", 64).await.expect("configured wins").as_ref(), b"configured");
-		assert!(service.list("cli", "", 8).await.expect("discovered root").0.is_empty());
+		assert_eq!(
+			service
+				.names_with_obsidian()
+				.await
+				.expect("effective names"),
+			vec![sf!("cli"), sf!("notes")]
+		);
+		assert_eq!(
+			service
+				.read("notes", "note.md", 64)
+				.await
+				.expect("configured wins")
+				.as_ref(),
+			b"configured"
+		);
+		assert!(
+			service
+				.list("cli", "", 8)
+				.await
+				.expect("discovered root")
+				.0
+				.is_empty()
+		);
 	}
 
 	#[cfg(unix)]
@@ -1536,33 +1620,47 @@ mod tests {
 		let script = temp.path().join("obsidian");
 		write_executable(
 			&script,
-			&format!(
-				"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'ok'\n",
-				log.display(),
-			),
+			&format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'ok'\n", log.display(),),
 		);
 		let service = VaultService::load_layered(&VaultPaths {
-			user: config,
+			user:    config,
 			project: temp.path().join("missing"),
 		})
 		.expect("vault service")
 		.with_obsidian_binary(Some(script));
 
-		assert_eq!(service.obsidian_read("notes", "note.md").await.expect("read").stdout.as_ref(), b"ok");
-		service.obsidian_create("notes", "folder/new.md", "body", true).await.expect("create");
-		service.obsidian_move("notes", "note.md", "folder/moved.md").await.expect("move");
-		service.obsidian_delete("notes", "note.md", true).await.expect("delete");
-		service.obsidian_open("notes", "note.md", true).await.expect("open");
+		assert_eq!(
+			service
+				.obsidian_read("notes", "note.md")
+				.await
+				.expect("read")
+				.stdout
+				.as_ref(),
+			b"ok"
+		);
 		service
-			.obsidian_search(
-				"notes",
-				&VaultSearch {
-					query: "needle",
-					path: Some("folder"),
-					limit: Some(3),
-					case_sensitive: true,
-				},
-			)
+			.obsidian_create("notes", "folder/new.md", "body", true)
+			.await
+			.expect("create");
+		service
+			.obsidian_move("notes", "note.md", "folder/moved.md")
+			.await
+			.expect("move");
+		service
+			.obsidian_delete("notes", "note.md", true)
+			.await
+			.expect("delete");
+		service
+			.obsidian_open("notes", "note.md", true)
+			.await
+			.expect("open");
+		service
+			.obsidian_search("notes", &VaultSearch {
+				query:          "needle",
+				path:           Some("folder"),
+				limit:          Some(3),
+				case_sensitive: true,
+			})
 			.await
 			.expect("search");
 		assert_eq!(
@@ -1577,7 +1675,9 @@ mod tests {
 			)
 		);
 		assert!(matches!(
-			service.obsidian_move("notes", "note.md", "../outside").await,
+			service
+				.obsidian_move("notes", "note.md", "../outside")
+				.await,
 			Err(VaultError::InvalidPath { .. })
 		));
 	}
@@ -1601,7 +1701,7 @@ mod tests {
 			),
 		);
 		let service = VaultService::load_layered(&VaultPaths {
-			user: config,
+			user:    config,
 			project: temp.path().join("missing"),
 		})
 		.expect("vault service")
@@ -1648,7 +1748,7 @@ mod tests {
 		let script = temp.path().join("obsidian");
 		write_executable(&script, "#!/bin/sh\nsleep 30\n");
 		let mut service = VaultService::load_layered(&VaultPaths {
-			user: config,
+			user:    config,
 			project: temp.path().join("missing"),
 		})
 		.expect("vault service")
@@ -1674,10 +1774,20 @@ mod tests {
 		symlink(&outside, root.join("escape")).expect("escape link");
 		let config = temp.path().join("vaults.toml");
 		write_config(&config, &[("notes", &root)]);
-		let service = VaultService::load_layered(&VaultPaths { user: config, project: temp.path().join("missing") }).expect("vault service");
-		assert!(matches!(service.read("notes", "escape/secret", 64).await, Err(VaultError::Escape { .. })));
+		let service = VaultService::load_layered(&VaultPaths {
+			user:    config,
+			project: temp.path().join("missing"),
+		})
+		.expect("vault service");
+		assert!(matches!(
+			service.read("notes", "escape/secret", 64).await,
+			Err(VaultError::Escape { .. })
+		));
 		assert!(matches!(service.list("notes", "escape", 64).await, Err(VaultError::Escape { .. })));
-		assert!(matches!(service.write("notes", "escape/new", b"nope", 64).await, Err(VaultError::Escape { .. })));
+		assert!(matches!(
+			service.write("notes", "escape/new", b"nope", 64).await,
+			Err(VaultError::Escape { .. })
+		));
 		assert!(!outside.join("new").exists());
 	}
 }

@@ -10,7 +10,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, parser::ValuesRef};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 #[cfg(unix)]
 use rustix::fs;
 

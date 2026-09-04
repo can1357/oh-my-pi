@@ -38,13 +38,13 @@ impl SupervisorConfig {
 		Self {
 			executable:      executable.into(),
 			args:            Vec::new(),
-			load_timeout:    Duration::from_secs(10 * 60),
+			load_timeout:    Duration::from_mins(10),
 			request_timeout: Duration::from_secs(120),
 		}
 	}
 }
 
-/// Lazy single-worker supervisor. Requests serialize because FastEmbed model
+/// Lazy single-worker supervisor. Requests serialize because `FastEmbed` model
 /// access is serialized; a timeout or protocol fault hard-reaps the child and
 /// the next request starts a fresh generation.
 pub struct EmbeddingSupervisor {
@@ -195,7 +195,7 @@ impl EmbeddingSupervisor {
 		};
 		match time::timeout(timeout, future).await {
 			Ok(Ok(response)) if !matches!(response, OutboundFrame::Error { .. }) => Ok(response),
-			Ok(Ok(_)) | Ok(Err(_)) => {
+			Ok(Ok(_) | Err(_)) => {
 				reap_locked(&mut guard).await;
 				Err(Error::EmbeddingWorker)
 			},

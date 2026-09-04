@@ -1,17 +1,17 @@
-//! Word-local fuzzy matching (pi `packages/tui/src/fuzzy.ts`).
+//! Word-local fuzzy matching.
 //!
 //! Matching is deliberately word-local: a query like `image provider` never
 //! matches a long description only because the letters i-m-a-g-e appear in
 //! order across unrelated words. Every space-separated query token must
 //! match; whole-phrase and word-start hits earn large bonuses so contiguous
 //! literal matches always outrank scattered subsequences. Lower score is
-//! better. Scores are pi's floating-point values scaled by [`SCALE`].
+//! better. Scores are fixed-point values scaled by [`SCALE`].
 
 use std::ops::Range;
 
 use smallvec::SmallVec;
 
-/// Fixed-point scale: one pi score unit.
+/// Fixed-point score scale.
 const SCALE: i32 = 100;
 const ALPHANUMERIC_SWAP_PENALTY: i32 = 5 * SCALE;
 const COMPACT_PHRASE_BONUS: i32 = 1200 * SCALE;
@@ -22,7 +22,7 @@ const PHRASE_BONUS: i32 = 1000 * SCALE;
 const MIN_SHADOW_RESCAN_LENGTH: usize = 3;
 
 /// Splits camel-case, lowercases, and collapses every non-alphanumeric run
-/// into one space (pi `normalizeForSearch`).
+/// into one space.
 fn normalize(value: &str) -> String {
 	let chars: SmallVec<char, 64> = value.chars().collect();
 	let mut out = String::with_capacity(value.len());
@@ -56,7 +56,7 @@ struct Word {
 	ordinal: usize,
 }
 
-/// A candidate text prepared once for repeated matching (pi `FuzzyText`).
+/// A candidate text prepared once for repeated matching.
 #[derive(Clone)]
 pub struct SearchIndex {
 	normalized:     String,
@@ -112,7 +112,7 @@ impl SearchIndex {
 	}
 
 	/// Offset of the first occurrence of `needle` that starts a word in the
-	/// compact text (pi `findCompactWordStart`).
+	/// compact text.
 	fn find_compact_word_start(&self, needle: &str) -> Option<usize> {
 		if needle.is_empty() {
 			return None;
@@ -171,7 +171,7 @@ impl SearchIndex {
 		best
 	}
 
-	/// Matches a short token against word initials (pi `scoreAcronym`).
+	/// Matches a short token against word initials.
 	fn score_acronym(&self, token: &str) -> Option<i32> {
 		let length = token.chars().count();
 		if !(2..=4).contains(&length) {
@@ -183,7 +183,7 @@ impl SearchIndex {
 		let mut last_ordinal = 0;
 		let mut matched = 0;
 		for word in &self.words {
-			if self.word_text(word).chars().next() != Some(current) {
+			if !self.word_text(word).starts_with(current) {
 				continue;
 			}
 			if first.is_none() {
@@ -208,8 +208,8 @@ impl SearchIndex {
 	}
 }
 
-/// A query normalized and tokenized once for a whole candidate list (pi
-/// `prepareQuery`). `None` when the query has no searchable characters.
+/// A query normalized and tokenized once for a whole candidate list. `None`
+/// when the query has no searchable characters.
 pub struct Query {
 	normalized: String,
 	compact:    String,
@@ -241,15 +241,15 @@ fn next_char_boundary(text: &str, at: usize) -> usize {
 	at + text[at..].chars().next().map_or(1, char::len_utf8)
 }
 
-fn is_word_boundary_phrase(normalized: &str, at: usize, len: usize) -> bool {
+const fn is_word_boundary_phrase(normalized: &str, at: usize, len: usize) -> bool {
 	let before = at == 0 || normalized.as_bytes()[at - 1] == b' ';
 	let end = at + len;
 	let after = end == normalized.len() || normalized.as_bytes()[end] == b' ';
 	before && after
 }
 
-/// Offset of the first whole-word occurrence of `phrase` (pi
-/// `findWordBoundaryPhrase`): a hit buried inside a word may shadow a later
+/// Offset of the first whole-word occurrence of `phrase`: a hit buried
+/// inside a word may shadow a later
 /// whole-word one, so longer phrases rescan past it.
 fn find_word_boundary_phrase(normalized: &str, phrase: &str) -> Option<usize> {
 	if phrase.is_empty() {
@@ -276,8 +276,8 @@ fn find_word_boundary_phrase(normalized: &str, phrase: &str) -> Option<usize> {
 	None
 }
 
-/// Subsequence match of `query` inside one word (pi `scoreCharacters`):
-/// contiguous runs score down, gaps and late starts score up. Returns the
+/// Subsequence match of `query` inside one word: contiguous runs score down,
+/// gaps and late starts score up. Returns the
 /// score and the matched span in characters.
 fn score_characters(query: &str, text: &str) -> Option<(i32, usize)> {
 	let mut wanted = query.chars();
@@ -310,12 +310,11 @@ fn score_characters(query: &str, text: &str) -> Option<(i32, usize)> {
 		}
 		score += index as i32 * 10;
 		last = Some(index);
-		match wanted.next() {
-			Some(next) => current = next,
-			None => {
-				complete = true;
-				break;
-			},
+		if let Some(next) = wanted.next() {
+			current = next
+		} else {
+			complete = true;
+			break;
 		}
 	}
 	if !complete {
@@ -349,8 +348,8 @@ fn score_token_against_word(token: &str, word: &str, word_index: usize) -> Optio
 	Some(-40 * SCALE + score + position)
 }
 
-/// Query variants with one adjacent letter/digit pair swapped (pi
-/// `buildAlphanumericSwapQueries`): `gpt5` also tries `gp5t`-style typos.
+/// Query variants with one adjacent letter/digit pair swapped: `gpt5` also
+/// tries `gp5t`-style typos.
 fn alphanumeric_swaps(token: &str) -> SmallVec<String, 4> {
 	let chars: SmallVec<char, 16> = token.chars().collect();
 	let mut variants: SmallVec<String, 4> = SmallVec::new();

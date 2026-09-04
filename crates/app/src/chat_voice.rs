@@ -19,6 +19,35 @@ use std::{
 	time::Duration,
 };
 
+use omp_ai::{
+	answer::{RealtimeEvent, RealtimePhase},
+	auth::{AuthManager, CodexLiveCredentialError},
+	realtime::{
+		live::{
+			LiveCallbacks, LiveIceCandidateClass as NativeIceCandidateClass,
+			LiveIcePath as NativeIcePath, LiveIcePathKind as NativeIcePathKind, LiveMediaFailure,
+			LiveMediaSession, VoiceError as NativeVoiceError,
+		},
+		transport::{
+			EventDeduplicator, LiveClientMessage, LiveDelegationAdmission, LiveDelegationBridge,
+			LiveDelegationSettlement, LiveDelegationTerminal, LiveOAuthAccess, LiveProxy,
+			LiveProxyError, LiveServerEvent, LiveSignalingClient, LiveSignalingRequest,
+			LiveSignalingResponse, LiveTransportError, LiveTransportOptions, LiveTurnRole,
+			ProxySidebandConnector, ProxySidebandError, SIGNALING_URL, SidebandFailureLayer,
+			complete_live_transport, parse_live_server_event, receive_sideband, send_sideband,
+		},
+	},
+};
+#[cfg(feature = "local-stt")]
+use omp_audio::vad::{EndpointerEvent, StreamEndpointer};
+use omp_audio::{
+	AudioError,
+	audio::CaptureStream,
+	device::{
+		self, AudioDevice, DeviceSnapshot, DeviceWatcher,
+		MicrophonePermission as DeviceMicrophonePermission,
+	},
+};
 use omp_chat::{
 	HostAction, HostMailbox, SttFailureKind, SttUiEvent,
 	overlays::live::{
@@ -29,33 +58,6 @@ use omp_chat::{
 };
 use omp_con::Ctx;
 use omp_core::{Hash32, Str};
-use omp_inference::{
-	answer::{RealtimeEvent, RealtimePhase},
-	auth::{AuthManager, CodexLiveCredentialError},
-};
-#[cfg(feature = "local-stt")]
-use omp_voice::vad::{EndpointerEvent, StreamEndpointer};
-use omp_voice::{
-	VoiceError,
-	audio::CaptureStream,
-	device::{
-		self, AudioDevice, DeviceSnapshot, DeviceWatcher,
-		MicrophonePermission as DeviceMicrophonePermission,
-	},
-	live::{
-		LiveCallbacks, LiveIceCandidateClass as NativeIceCandidateClass,
-		LiveIcePath as NativeIcePath, LiveIcePathKind as NativeIcePathKind, LiveMediaFailure,
-		LiveMediaSession,
-	},
-	transport::{
-		EventDeduplicator, LiveClientMessage, LiveDelegationAdmission, LiveDelegationBridge,
-		LiveDelegationSettlement, LiveDelegationTerminal, LiveOAuthAccess, LiveProxy, LiveProxyError,
-		LiveServerEvent, LiveSignalingClient, LiveSignalingRequest, LiveSignalingResponse,
-		LiveTransportError, LiveTransportOptions, LiveTurnRole, ProxySidebandConnector,
-		ProxySidebandError, SIGNALING_URL, SidebandFailureLayer, complete_live_transport,
-		parse_live_server_event, receive_sideband, send_sideband,
-	},
-};
 use parking_lot::Mutex;
 use thiserror::Error;
 use url::Url;
@@ -106,17 +108,17 @@ enum SttError {
 	#[error("the speech-to-text microphone lease is unavailable")]
 	MicrophoneLease {
 		#[source]
-		source: omp_voice::coordinator::CoordinatorError,
+		source: omp_audio::coordinator::CoordinatorError,
 	},
 	#[error("microphone capture failed")]
 	Capture {
 		#[source]
-		source: VoiceError,
+		source: AudioError,
 	},
 	#[error("microphone capture shutdown failed")]
 	CaptureStop {
 		#[source]
-		source: VoiceError,
+		source: AudioError,
 	},
 	#[error("speech capture exceeded the five-minute audio bound")]
 	AudioLimit,
@@ -138,19 +140,19 @@ enum SttError {
 	#[error("the speech artifact store failed")]
 	Artifact {
 		#[source]
-		source: omp_inference::local::ArtifactError,
+		source: omp_ai::local::ArtifactError,
 	},
 	#[cfg(feature = "local-stt")]
 	#[error("the speech artifact catalog is invalid")]
 	Catalog {
 		#[source]
-		source: omp_inference::local::SpeechCatalogError,
+		source: omp_ai::local::SpeechCatalogError,
 	},
 	#[cfg(feature = "local-stt")]
 	#[error("the local speech recognizer failed")]
 	Recognition {
 		#[source]
-		source: omp_inference::local::LocalError,
+		source: omp_ai::local::LocalError,
 	},
 	#[cfg(feature = "local-stt")]
 	#[error("the speech recognition worker failed")]
@@ -190,7 +192,7 @@ impl SttError {
 	allow(dead_code, reason = "capture shutdown details are consumed by the local-stt backend")
 )]
 enum SttRuntimeCommand {
-	Stop { capture_error: Option<VoiceError> },
+	Stop { capture_error: Option<AudioError> },
 	Cancel,
 }
 
@@ -407,7 +409,7 @@ impl PushToTalk {
 		terminal: LiveDelegationTerminal,
 		final_text: &str,
 		ctx: &Ctx,
-	) -> Option<omp_voice::transport::LiveDelegationRequest> {
+	) -> Option<omp_ai::realtime::transport::LiveDelegationRequest> {
 		if !self
 			.live
 			.as_ref()
@@ -743,7 +745,7 @@ impl Drop for PushToTalk {
 	}
 }
 
-fn stop_capture(capture: &Mutex<Option<CaptureStream>>) -> Result<(), VoiceError> {
+fn stop_capture(capture: &Mutex<Option<CaptureStream>>) -> Result<(), AudioError> {
 	let Some(mut capture) = capture.lock().take() else {
 		return Ok(());
 	};
@@ -790,8 +792,8 @@ async fn prepare_stt(
 	model: SttModel,
 	events: Arc<SttEventSink>,
 	cancel: tokio_util::sync::CancellationToken,
-) -> Result<omp_inference::local::stt::SpeechToTextAdapter, SttError> {
-	use omp_inference::local::{
+) -> Result<omp_ai::local::stt::SpeechToTextAdapter, SttError> {
+	use omp_ai::local::{
 		ArtifactCacheStatus, ArtifactStore, MemoryPool, SystemArtifactFetcher,
 		speech_catalog::SpeechArtifactManifests,
 		stt::{SpeechToTextAdapter, SttRuntimeOptions, resolve_stt_preset},
@@ -863,12 +865,12 @@ fn normalize_stt_text(text: &str, committed: bool) -> Str {
 
 #[cfg(feature = "local-stt")]
 fn decode_stt_audio(
-	adapter: &omp_inference::local::stt::SpeechToTextAdapter,
+	adapter: &omp_ai::local::stt::SpeechToTextAdapter,
 	samples: &[f32],
 	language: &Str,
 	cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Str, SttError> {
-	use omp_inference::local::stt::TranscriptionOptions;
+	use omp_ai::local::stt::TranscriptionOptions;
 
 	let transcription = adapter
 		.transcribe_mono_16khz(
@@ -885,7 +887,7 @@ fn decode_stt_audio(
 
 #[cfg(feature = "local-stt")]
 fn decode_stt_stream(
-	adapter: omp_inference::local::stt::SpeechToTextAdapter,
+	adapter: omp_ai::local::stt::SpeechToTextAdapter,
 	language: Str,
 	trigger: SttSubmitTrigger,
 	events: Arc<SttEventSink>,
@@ -1327,7 +1329,7 @@ const LIVE_PROXY_ENV: &str = "OMP_PROXY";
 #[derive(Debug, Error)]
 enum LiveProxyDiscoveryError {
 	#[error(transparent)]
-	Environment(#[from] omp_inference::transport::proxy::ProxyEnvironmentError),
+	Environment(#[from] omp_ai::transport::proxy::ProxyEnvironmentError),
 	#[error("the live sideband cannot use proxy scheme {scheme}")]
 	UnsupportedScheme { scheme: Str },
 	#[error("the live proxy credentials are invalid")]
@@ -1376,8 +1378,7 @@ fn route_local_address(target: &str) -> Option<IpAddr> {
 }
 
 fn environment_proxy_for(url: &Url) -> Result<Option<LiveProxy>, LiveProxyDiscoveryError> {
-	let Some(proxy) =
-		omp_inference::transport::proxy::for_provider_url(url, LIVE_PROVIDER_PROXY_ENV)?
+	let Some(proxy) = omp_ai::transport::proxy::for_provider_url(url, LIVE_PROVIDER_PROXY_ENV)?
 	else {
 		return Ok(None);
 	};
@@ -1414,18 +1415,23 @@ fn classify_transport_failure(
 	}
 }
 
-fn classify_voice_failure(error: &VoiceError) -> LiveFailureClass {
+fn classify_voice_failure(error: &NativeVoiceError) -> LiveFailureClass {
 	match error {
-		VoiceError::LiveMedia { source } => classify_media_failure(source),
-		VoiceError::DeviceUnavailable { .. }
-		| VoiceError::Backend { .. }
-		| VoiceError::PlaybackClosed
-		| VoiceError::PlaybackBackpressure { .. } => LiveFailureClass::Media,
-		VoiceError::RealtimeTransport { .. } => LiveFailureClass::WebRtc,
-		VoiceError::Coordinator { .. }
-		| VoiceError::UnsupportedPlatform { .. }
-		| VoiceError::UnsupportedSampleRate { .. }
-		| VoiceError::NonFiniteGain => LiveFailureClass::Configuration,
+		NativeVoiceError::LiveMedia { source } => classify_media_failure(source),
+		NativeVoiceError::Audio(
+			AudioError::DeviceUnavailable { .. }
+			| AudioError::Backend { .. }
+			| AudioError::PlaybackClosed
+			| AudioError::PlaybackBackpressure { .. },
+		) => LiveFailureClass::Media,
+		NativeVoiceError::RealtimeTransport(_) => LiveFailureClass::WebRtc,
+		NativeVoiceError::Coordinator(_)
+		| NativeVoiceError::Audio(
+			AudioError::Coordinator { .. }
+			| AudioError::UnsupportedPlatform { .. }
+			| AudioError::UnsupportedSampleRate { .. }
+			| AudioError::NonFiniteGain,
+		) => LiveFailureClass::Configuration,
 	}
 }
 
@@ -2166,7 +2172,7 @@ async fn run_live_transport(
 			session_id.clone(),
 			Str::new_static(LIVE_INSTRUCTIONS),
 			voice.clone(),
-			Str::new_static(omp_inference::codec::openai_codex::CODEX_CLIENT_VERSION),
+			Str::new_static(omp_ai::codec::openai_codex::CODEX_CLIENT_VERSION),
 		);
 		let destination =
 			Url::parse(SIGNALING_URL).expect("the fixed live signaling URL must remain valid");
@@ -2645,7 +2651,7 @@ async fn run_live_transport(
 				LIVE_CLOSE_TIMEOUT,
 				send_sideband(
 					transport.sideband_mut(),
-					&omp_voice::transport::LiveClientMessage::SessionClose,
+					&omp_ai::realtime::transport::LiveClientMessage::SessionClose,
 				),
 			)
 			.await;

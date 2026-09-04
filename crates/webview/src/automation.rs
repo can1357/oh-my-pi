@@ -98,7 +98,7 @@ const HELPERS: &str = r#"
 pub enum Selector {
 	/// A CSS selector.
 	Css(Str),
-	/// An XPath expression.
+	/// An `XPath` expression.
 	XPath(Str),
 	/// Visible accessible text.
 	Text(Str),
@@ -577,7 +577,7 @@ impl<'view> DocumentHandle<'view> {
 	/// Observe a bounded set of document elements.
 	pub fn observe(self, options: ObserveOptions) -> Result<Observation> {
 		let script = format!(
-			r#"{HELPERS}
+			r"{HELPERS}
 (() => {{
  const all=[...document.querySelectorAll('body *')];
  const candidates=all.filter(el=>{{ const m=window.__ompMetadata(el); if(!m)return false;
@@ -585,7 +585,7 @@ impl<'view> DocumentHandle<'view> {
   return {all}||['button','link','textbox','checkbox','combobox','option','menuitem','tab'].includes(m.role)||el.tabIndex>=0; }});
  const chosen=candidates.slice(0,{limit}).map(window.__ompMetadata);
  return {{url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,65536),elements:chosen,truncated:candidates.length>chosen.length}};
-}})()"#,
+}})()",
 			viewport = options.viewport_only,
 			all = options.include_all,
 			limit = options.limit.max(1)

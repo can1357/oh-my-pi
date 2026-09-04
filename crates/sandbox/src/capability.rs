@@ -44,7 +44,7 @@ pub enum Backend {
 	#[strum(serialize = "docker-runsc-ephemeral")]
 	#[serde(rename = "docker-runsc-ephemeral")]
 	DockerRunscEphemeral,
-	/// Windows low-privilege AppContainer confinement.
+	/// Windows low-privilege `AppContainer` confinement.
 	#[strum(serialize = "appcontainer")]
 	#[serde(rename = "appcontainer")]
 	AppContainer,

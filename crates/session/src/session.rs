@@ -332,7 +332,7 @@ impl Session {
 
 	/// Number of materialized journal entries (the durable event index).
 	#[must_use]
-	pub fn entry_count(&self) -> usize {
+	pub const fn entry_count(&self) -> usize {
 		self.entries.len()
 	}
 
@@ -479,9 +479,8 @@ impl Session {
 	}
 
 	/// Returns the rewind target that re-opens the last turn's tool batch for
-	/// re-execution (pi `retry()` on an aborted tool tail): the entry after
-	/// which the batch's calls are all authorized but none has a result. `None`
-	/// when the last turn has no tool call.
+	/// re-execution: the entry after which the batch's calls are all authorized
+	/// but none has a result. `None` when the last turn has no tool call.
 	#[must_use]
 	pub fn tool_tail_retry_target(&self) -> Option<EntryId> {
 		let dom = &self.dom;
@@ -542,9 +541,9 @@ impl Session {
 		self.commit(KindName::TurnStart, Some(by), None, None, &TurnStart {})
 	}
 
-	/// Appends a user message to the active turn. `attachments` are
-	/// positional: `[Image #N]` in `text` names `attachments[N-1]` (pi's
-	/// marker contract), and each carries the media type the provider needs.
+	/// Appends a user message to the active turn. `attachments` are positional:
+	/// `[Image #N]` in `text` names `attachments[N-1]`, and each carries the
+	/// media type the provider needs.
 	pub fn user(
 		&mut self,
 		text: impl Into<Str>,

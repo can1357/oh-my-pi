@@ -591,9 +591,7 @@ impl ClientState {
 			.unwrap_or_default();
 		let handler = {
 			let registry = self.host_uri_schemes.read().await;
-			if registry.generation != request.generation {
-				None
-			} else {
+			if registry.generation == request.generation {
 				registry
 					.schemes
 					.get(scheme)
@@ -601,6 +599,8 @@ impl ClientState {
 						request.operation == HostUriOperation::Read || registered.definition.writable
 					})
 					.map(|registered| Arc::clone(&registered.handler))
+			} else {
+				None
 			}
 		};
 		let Some(handler) = handler else {

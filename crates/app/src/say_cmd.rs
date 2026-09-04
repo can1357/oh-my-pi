@@ -3,13 +3,13 @@
 use std::{cell::Cell, fs, path::Path, sync::Arc, time::Duration};
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_core::Str;
-use omp_inference::local::{
+use omp_ai::local::{
 	ArtifactStore, LocalCancellation, MemoryPool, SystemArtifactFetcher,
 	speech_catalog::{DEFAULT_KOKORO_VOICE, SpeechArtifactManifests},
 	tts::{KokoroAdapter, KokoroConfig, KokoroDevice, SynthesisOptions},
 };
-use omp_voice::audio::PlaybackStream;
+use omp_audio::audio::PlaybackStream;
+use omp_core::Str;
 
 use crate::{cli::SayArgs, progress_reporter::ProgressReporter};
 
@@ -109,7 +109,7 @@ const fn device() -> KokoroDevice {
 }
 
 fn write_wav_atomic(path: &Path, sample_rate: u32, samples: &[f32]) -> miette::Result<()> {
-	let wav = omp_voice::wav::encode_wav(samples, sample_rate).into_diagnostic()?;
+	let wav = omp_audio::wav::encode_wav(samples, sample_rate).into_diagnostic()?;
 	if let Some(parent) = path
 		.parent()
 		.filter(|parent| !parent.as_os_str().is_empty())

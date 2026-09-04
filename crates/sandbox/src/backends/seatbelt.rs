@@ -19,7 +19,7 @@ use crate::{
 	WriteMode, paths::temp_roots, runner::COMMAND_WRAPPER_PLACEHOLDER,
 };
 const LAUNCHER: &str = "/usr/bin/sandbox-exec";
-pub(crate) const EPHEMERAL_ROOT_PLACEHOLDER: &str = "<omp-sandbox-ephemeral-root>";
+pub const EPHEMERAL_ROOT_PLACEHOLDER: &str = "<omp-sandbox-ephemeral-root>";
 
 const SEATBELT_BASE_POLICY: &str = r#"(version 1)
 (deny default)
@@ -124,7 +124,7 @@ const NETWORK_SERVICE_POLICY: &str = r#"(allow system-socket
 (allow sysctl-read (sysctl-name-regex #"^net.routetable"))
 "#;
 
-pub(crate) fn compile(
+pub fn compile(
 	spec: &SandboxSpec,
 	program: &Path,
 	requested: CapabilitySet,
@@ -274,7 +274,7 @@ pub(crate) fn compile(
 			);
 		},
 		WriteMode::Ephemeral => {
-			push_write_scopes(&mut profile, [Path::new(EPHEMERAL_ROOT_PLACEHOLDER)], &spec.write_deny)
+			push_write_scopes(&mut profile, [Path::new(EPHEMERAL_ROOT_PLACEHOLDER)], &spec.write_deny);
 		},
 	}
 
@@ -340,17 +340,17 @@ pub(crate) fn compile(
 			 filesystem unless separately constrained",
 		));
 	}
-	if !spec.readable.is_empty() {
+	if spec.readable.is_empty() {
+		plan.add_caveat(Caveat::capability(
+			Capability::FsReadHost,
+			"Broad host reads rely on OS permissions; raw disk and kernel-memory devices are denied",
+		));
+	} else {
 		plan.add_caveat(Caveat::capability(
 			Capability::FsReadScope,
 			"Seatbelt additionally exposes /usr/lib, /System, and /private/var/db/dyld so dynamic \
 			 Mach-O programs can load; reading the root directory itself is allowed for cwd \
 			 resolution without exposing descendant contents",
-		));
-	} else {
-		plan.add_caveat(Caveat::capability(
-			Capability::FsReadHost,
-			"Broad host reads rely on OS permissions; raw disk and kernel-memory devices are denied",
 		));
 	}
 	if !spec.read_deny.is_empty() {
@@ -414,7 +414,7 @@ pub(crate) fn compile(
 	Ok(plan)
 }
 
-pub(crate) fn probe() -> BackendStatus {
+pub fn probe() -> BackendStatus {
 	#[cfg(not(target_os = "macos"))]
 	{
 		return BackendStatus::unavailable(Backend::Seatbelt, ProbeFailure::WrongHost {

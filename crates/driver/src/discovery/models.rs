@@ -259,7 +259,7 @@ pub fn load_or_import_legacy(
 	let config = if yaml {
 		serde_yaml::from_str(&text)?
 	} else {
-		omp_slopjson::from_str(&text)?
+		omp_core::slopjson::from_str(&text)?
 	};
 	atomic_replace(&native, &toml::to_string_pretty(&config)?)?;
 	let backup = path.with_file_name(format!(
@@ -416,16 +416,16 @@ pub fn lower_user_overlay(config: &ModelsConfig) -> Result<CatalogOverlay, Model
 					(alternate_id, alternate)
 				});
 			added_provider.routes = match &alternate_route {
-				Some((alternate, _)) => {
-					vec![route_id.clone(), alternate.clone()].into_boxed_slice()
-				},
+				Some((alternate, _)) => vec![route_id.clone(), alternate.clone()].into_boxed_slice(),
 				None => Box::new([route_id.clone()]),
 			};
-			builder = builder.with_provider(added_provider).with_route(RouteOverlay {
-				route: route_id.clone(),
-				added: Some(added_route),
-				patch: RoutePatch::default(),
-			});
+			builder = builder
+				.with_provider(added_provider)
+				.with_route(RouteOverlay {
+					route: route_id.clone(),
+					added: Some(added_route),
+					patch: RoutePatch::default(),
+				});
 			if let Some((alternate_id, alternate)) = alternate_route {
 				builder = builder.with_route(RouteOverlay {
 					route: alternate_id,
@@ -604,9 +604,7 @@ fn validate_discovery(config: &ModelsConfig) -> Result<(), ModelsConfigError> {
 			|| (discovery.inject_v1.is_some()
 				&& discovery.kind != ProviderDiscoveryKind::OpenAiModelsList)
 		{
-			return Err(ModelsConfigError::InvalidProviderDiscovery {
-				provider: provider.clone(),
-			});
+			return Err(ModelsConfigError::InvalidProviderDiscovery { provider: provider.clone() });
 		}
 	}
 	Ok(())
@@ -863,10 +861,10 @@ fn parse_multiplier(value: &str) -> Option<u64> {
 pub fn discovery_probes(
 	config: Option<&ModelsConfig>,
 	catalog: &omp_catalog::Catalog,
-) -> Result<Vec<omp_inference::discovery::DiscoveryProbe>, ModelsConfigError> {
-	use omp_inference::discovery::{
-		DiscoveryEndpointKind, DiscoveryProbe, ProxyDiscoveryRoutes, configured_endpoint_with_options,
-		known_loopback_endpoints,
+) -> Result<Vec<omp_ai::discovery::DiscoveryProbe>, ModelsConfigError> {
+	use omp_ai::discovery::{
+		DiscoveryEndpointKind, DiscoveryProbe, ProxyDiscoveryRoutes,
+		configured_endpoint_with_options, known_loopback_endpoints,
 	};
 
 	let mut probes = BTreeMap::<ProviderId, DiscoveryProbe>::new();
@@ -948,20 +946,15 @@ pub fn discovery_probes(
 				provider: provider_name.clone(),
 				source,
 			})?;
-		let provider_definition = catalog
-			.provider(&provider)
-			.ok_or_else(|| ModelsConfigError::DiscoveryProviderMissing {
-				provider: provider_name.clone(),
-			})?;
-		let route = provider_definition
-			.routes
-			.first()
-			.cloned()
-			.ok_or_else(|| ModelsConfigError::DiscoveryRouteMissing {
-				provider: provider_name.clone(),
-			})?;
+		let provider_definition = catalog.provider(&provider).ok_or_else(|| {
+			ModelsConfigError::DiscoveryProviderMissing { provider: provider_name.clone() }
+		})?;
+		let route = provider_definition.routes.first().cloned().ok_or_else(|| {
+			ModelsConfigError::DiscoveryRouteMissing { provider: provider_name.clone() }
+		})?;
 		let proxy_routes = (kind == DiscoveryEndpointKind::Proxy).then(|| {
-			let mut routes = ProxyDiscoveryRoutes { openai: route.clone(), anthropic: route.clone() };
+			let mut routes =
+				ProxyDiscoveryRoutes { openai: route.clone(), anthropic: route.clone() };
 			for route_id in &provider_definition.routes {
 				let Some(candidate) = catalog.route(route_id) else {
 					continue;
@@ -992,10 +985,10 @@ pub fn discovery_probes(
 /// Ollama's `OLLAMA_CONTEXT_LENGTH` is the served context selected by its
 /// Responses compatibility layer and therefore outranks `/api/show`.
 pub fn apply_runtime_discovery_overrides(
-	probe: &omp_inference::discovery::DiscoveryProbe,
+	probe: &omp_ai::discovery::DiscoveryProbe,
 	rows: &mut [omp_catalog::DiscoveredModel],
 ) {
-	if probe.endpoint.kind != omp_inference::discovery::DiscoveryEndpointKind::Ollama {
+	if probe.endpoint.kind != omp_ai::discovery::DiscoveryEndpointKind::Ollama {
 		return;
 	}
 	let Some(context) = env::var("OLLAMA_CONTEXT_LENGTH")
@@ -1013,21 +1006,15 @@ pub fn apply_runtime_discovery_overrides(
 			maximum_batch:         None,
 		});
 		limits.context_window = Some(context);
-		limits.maximum_output_tokens = Some(
-			limits
-				.maximum_output_tokens
-				.unwrap_or(32_768)
-				.min(context),
-		);
+		limits.maximum_output_tokens =
+			Some(limits.maximum_output_tokens.unwrap_or(32_768).min(context));
 	}
 }
 
 fn environment_discovery_endpoint(
-	endpoint: omp_inference::discovery::DiscoveryEndpoint,
-) -> Result<omp_inference::discovery::DiscoveryEndpoint, ModelsConfigError> {
-	use omp_inference::discovery::{
-		DiscoveryEndpointKind, configured_endpoint_with_options,
-	};
+	endpoint: omp_ai::discovery::DiscoveryEndpoint,
+) -> Result<omp_ai::discovery::DiscoveryEndpoint, ModelsConfigError> {
+	use omp_ai::discovery::{DiscoveryEndpointKind, configured_endpoint_with_options};
 
 	let base_url = match endpoint.kind {
 		DiscoveryEndpointKind::Ollama => env::var("OLLAMA_BASE_URL")
@@ -1080,10 +1067,7 @@ fn normalize_ollama_host(value: String) -> String {
 	url.as_str().trim_end_matches('/').to_owned()
 }
 
-fn catalog_route_headers(
-	catalog: &omp_catalog::Catalog,
-	route: &RouteId<str>,
-) -> http::HeaderMap {
+fn catalog_route_headers(catalog: &omp_catalog::Catalog, route: &RouteId<str>) -> http::HeaderMap {
 	let mut headers = http::HeaderMap::new();
 	let Some(route) = catalog.route(route) else {
 		return headers;
@@ -1137,10 +1121,7 @@ fn discovery_headers(
 			continue;
 		};
 		let name = http::HeaderName::from_bytes(name.as_bytes()).map_err(|source| {
-			ModelsConfigError::DiscoveryHeaderName {
-				provider: Str::new(provider),
-				source,
-			}
+			ModelsConfigError::DiscoveryHeaderName { provider: Str::new(provider), source }
 		})?;
 		let value = http::HeaderValue::from_bytes(value.as_bytes()).map_err(|source| {
 			ModelsConfigError::DiscoveryHeaderValue {
@@ -1236,7 +1217,7 @@ pub enum ModelsConfigError {
 		provider: Str,
 		/// Typed endpoint validation failure.
 		#[source]
-		source: omp_inference::discovery::EndpointError,
+		source:   omp_ai::discovery::EndpointError,
 	},
 	/// The configured provider did not materialize in the catalog.
 	#[error("configured discovery provider {provider} is missing from the catalog")]
@@ -1257,7 +1238,7 @@ pub enum ModelsConfigError {
 		provider: Str,
 		/// Header parser failure.
 		#[source]
-		source: http::header::InvalidHeaderName,
+		source:   http::header::InvalidHeaderName,
 	},
 	/// A configured discovery header value is invalid and has been redacted.
 	#[error("configured discovery provider {provider} has an invalid value for header {header}")]
@@ -1265,10 +1246,10 @@ pub enum ModelsConfigError {
 		/// Provider containing the header.
 		provider: Str,
 		/// Non-secret header name.
-		header: Str,
+		header:   Str,
 		/// Header parser failure, which never contains the value.
 		#[source]
-		source: http::header::InvalidHeaderValue,
+		source:   http::header::InvalidHeaderValue,
 	},
 	/// Reading the configured source failed.
 	#[error(transparent)]
@@ -1281,7 +1262,7 @@ pub enum ModelsConfigError {
 	Yaml(#[from] serde_yaml::Error),
 	/// A legacy JSON/JSONC source was malformed.
 	#[error(transparent)]
-	Json(#[from] omp_slopjson::ParseError),
+	Json(#[from] omp_core::slopjson::ParseError),
 	/// Native TOML encoding failed.
 	#[error(transparent)]
 	Encode(#[from] ser::Error),
@@ -1460,10 +1441,7 @@ mod tests {
 		let overlay = lower_user_overlay(&config).expect("overlay");
 		let catalog = omp_catalog::Catalog::embedded()
 			.with_overlay_stack(
-				&omp_catalog::OverlayStack::from_layers([(
-					OverlaySource::UserConfig,
-					overlay,
-				)]),
+				&omp_catalog::OverlayStack::from_layers([(OverlaySource::UserConfig, overlay)]),
 				omp_catalog::UnsafeTrustScope::ALL,
 			)
 			.expect("catalog");

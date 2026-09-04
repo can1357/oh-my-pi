@@ -729,7 +729,7 @@ fn coerce(
 fn enum_matches(member: &Value, raw: &str) -> bool {
 	member
 		.as_str()
-		.map_or_else(|| member.to_string() == raw, |member| member == raw)
+		.map_or_else(|| member == raw, |member| member == raw)
 }
 
 fn invalid_value(flag: &str, expected: &str, found: &str) -> CliParseError {

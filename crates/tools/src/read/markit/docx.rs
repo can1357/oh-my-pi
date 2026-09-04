@@ -218,7 +218,7 @@ fn extract_attachments(
 			!relationship.external && relationship.rel_type.ends_with("/image")
 		})
 		.collect::<Vec<_>>();
-	images.sort_by(|(left, _), (right, _)| left.cmp(right));
+	images.sort_by_key(|(left, _)| *left);
 	let mut used = HashSet::new();
 	let mut attachments = Vec::with_capacity(images.len());
 	for (ordinal, (_, relationship)) in images.into_iter().enumerate() {

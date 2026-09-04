@@ -56,7 +56,7 @@ impl Card for AstGrepCard {
 				|count| count,
 			);
 		// `files_searched` is `0` for lifted `ast_grep@1` calls that never
-		// recorded it; pi only prints the meta when a count exists.
+		// recorded it; show the metadata only when a count exists.
 		let searched = result
 			.as_ref()
 			.and_then(|value| value.get("files_searched"))
@@ -143,12 +143,11 @@ impl Card for AstGrepCard {
 	}
 }
 
-/// Collapsed previews spend at most this many rows on match groups (pi
-/// `COLLAPSED_MATCH_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2`).
+/// Collapsed previews spend at most this many rows on match groups.
 const COLLAPSED_MATCH_LINES: usize = 6;
 
-/// Matches grouped by directory in path order (pi `formatGroupedFiles`
-/// blank-line groups: `# dir/`, then `## file` and its matches).
+/// Matches grouped by directory in path order: `# dir/`, then `## file`
+/// and its matches.
 fn directory_groups(matches: &[Value]) -> Vec<(String, Vec<&Value>)> {
 	let mut groups: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
 	for entry in matches {
@@ -173,8 +172,8 @@ fn group_rows(entries: &[&Value]) -> usize {
 	rows
 }
 
-/// Leading groups that fit the collapsed row budget whole (pi
-/// `renderTreeList` with `maxCollapsedLines`): a group is shown only when
+/// Leading groups that fit the collapsed row budget whole: a group is shown
+/// only when
 /// its rows plus the summary row reserved for any group after it fit.
 fn fitting_groups(groups: &[(String, Vec<&Value>)]) -> usize {
 	let mut fitted = 0;

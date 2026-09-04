@@ -270,10 +270,10 @@ impl PartialEq for Snapshot {
 
 impl Eq for Snapshot {}
 
-pub(crate) fn slot(nodes: &[Option<Node>], handle: Handle) -> Option<&Node> {
+pub fn slot(nodes: &[Option<Node>], handle: Handle) -> Option<&Node> {
 	nodes.get(handle.get() as usize)?.as_ref()
 }
 
-pub(crate) fn slot_mut(nodes: &mut [Option<Node>], handle: Handle) -> Option<&mut Node> {
+pub fn slot_mut(nodes: &mut [Option<Node>], handle: Handle) -> Option<&mut Node> {
 	nodes.get_mut(handle.get() as usize)?.as_mut()
 }

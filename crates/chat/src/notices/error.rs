@@ -1,12 +1,6 @@
 //! Provider error surfaces: the capped inline transcript block, the pinned
 //! banner above the editor, the pin/suppression predicates that keep the
 //! two from showing the same error twice, and the idle retry hint.
-//!
-//! Ports pi `components/error-block.ts` (`formatErrorBlock`),
-//! `components/error-banner.ts` (`ErrorBannerComponent`),
-//! `components/assistant-message.ts:410-431,616-632,975-1000` (inline
-//! block, pin suppression, ctrl+o expansion), and
-//! `interactive-mode.ts:5321-5338` (`syncRetryHintRow`).
 
 use omp_core::{Str, StrMut, sf};
 use omp_dom::{Dom, Handle, KnownTag, Node, PropId, Tag, Value};
@@ -18,23 +12,21 @@ use omp_tui::{
 use super::prop_text;
 use crate::cards::Component;
 
-/// Wrapped rows the collapsed inline transcript block keeps
-/// (pi `assistant-message.ts:23` `MAX_TRANSCRIPT_ERROR_ROWS`).
+/// Wrapped rows the collapsed inline transcript block keeps.
 pub const MAX_INLINE_ROWS: usize = 8;
-/// Wrapped rows the pinned banner keeps (pi `error-banner.ts:8`
-/// `MAX_BANNER_ROWS`).
+/// Wrapped rows the pinned banner keeps.
 pub const MAX_BANNER_ROWS: usize = 4;
 /// Indent for every row after the first, so continuations hang under the
-/// lead-in (pi `error-block.ts:6`).
+/// lead-in.
 pub const CONTINUATION_INDENT: &str = "  ";
-/// Spaces standing in for one tab (pi `replaceTabs`, `DEFAULT_TAB_WIDTH = 3`).
+/// Spaces standing in for one tab.
 const TAB: &str = "   ";
-/// pi `formatErrorBlock`: the body shown when the message has no non-blank
+/// The body shown when the message has no non-blank
 /// line.
 const UNKNOWN_ERROR: &str = "Unknown error";
-/// The key the overflow row advertises (pi `expandKeyHint()`).
+/// The key the overflow row advertises.
 const EXPAND_KEY: &str = "ctrl+o";
-/// pi `error-banner.ts:38`.
+/// Hint shown after a pinned banner is dismissed.
 const DISMISSAL_HINT: &str = "Dismissed when you send your next message.";
 
 /// Wrapped, capped rows of one provider error.
@@ -49,7 +41,7 @@ pub struct ErrorRows {
 
 impl ErrorRows {
 	/// The dim overflow row that follows the kept rows when rows were cut:
-	/// `  … +N more line(s) (ctrl+o to expand)` (pi `error-block.ts:40-44`).
+	/// `  … +N more line(s) (ctrl+o to expand)`.
 	#[must_use]
 	pub fn hint(&self) -> Option<Str> {
 		(self.hidden > 0).then(|| {
@@ -59,7 +51,7 @@ impl ErrorRows {
 	}
 }
 
-/// pi `formatErrorBlock`: tabs become spaces, lines are trimmed and blank
+/// Tabs become spaces, lines are trimmed and blank
 /// lines dropped (`Unknown error` when nothing remains), each logical line
 /// word-wraps at `content_width - 2` cells so continuation rows can hang
 /// under the two-space indent, and the row list is cut at `max_rows`
@@ -70,8 +62,7 @@ pub fn format_error_rows(message: &str, content_width: u16, max_rows: Option<usi
 }
 
 /// [`format_error_rows`] with `lead` pieces run ahead of the first logical
-/// line so the lead-in counts toward the first row's width, exactly as pi's
-/// `styleLine(line, 0)` prefixes before wrapping.
+/// line so the lead-in counts toward the first row's width before wrapping.
 fn wrap_rows(
 	message: &str,
 	content_width: u16,
@@ -124,7 +115,7 @@ fn wrap_rows(
 	ErrorRows { rows, hidden: total - keep }
 }
 
-/// Trimmed, non-blank logical lines of a message (pi `error-block.ts:23-26`).
+/// Trimmed, non-blank logical lines of a message.
 fn logical_lines(message: &str) -> impl Iterator<Item = &str> {
 	message
 		.split('\n')
@@ -132,8 +123,8 @@ fn logical_lines(message: &str) -> impl Iterator<Item = &str> {
 		.filter(|line| !line.is_empty())
 }
 
-/// What styles the first row: pi `assistant-message.ts:624` prefixes
-/// `Error: `; `error-banner.ts:29-30` leads with the bold error glyph.
+/// The inline first row begins with `Error: `; the banner leads with a bold
+/// error glyph.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Lead {
 	Prefix,
@@ -141,8 +132,7 @@ enum Lead {
 }
 
 /// Width-aware error body: wraps the message to the painted width on demand
-/// and caches the rows per `(width, charset)` so paint never re-wraps
-/// (pi `WidthAwareText` + `formatErrorBlock`).
+/// and caches the rows per `(width, charset)` so paint never re-wraps.
 pub struct ErrorBody {
 	props:    Props,
 	slot:     Slot,
@@ -269,7 +259,7 @@ impl TuiComponent for ErrorBody {
 /// Controller notice: rules above and below and an icon in the kind's
 /// color. `error` notices render the message through [`ErrorBody`]: the
 /// `Error: ` lead, [`MAX_INLINE_ROWS`] wrapped rows unless `expanded`, and
-/// the dim overflow hint (pi `assistant-message.ts:616-632`).
+/// the dim overflow hint.
 #[must_use]
 pub fn notice_card(kind: &str, text: Str, expanded: bool) -> Component {
 	if kind == "error" {
@@ -301,7 +291,7 @@ pub fn notice_card(kind: &str, text: Str, expanded: bool) -> Component {
 	.into_component()
 }
 
-/// pi `ErrorBannerComponent`: a spacer, an error-colored rule, up to
+/// A spacer, an error-colored rule, up to
 /// [`MAX_BANNER_ROWS`] wrapped rows led by the bold error glyph, the dim
 /// dismissal hint, and a closing rule. Pinned above the editor until the
 /// next turn starts.
@@ -336,8 +326,7 @@ fn is_notice(node: &Node, kinds: &[&str]) -> bool {
 
 /// The `<notice kind=error>` that ended the last turn, if the turn ended on
 /// one: its newest lifecycle child (receipts aside) is the notice. The
-/// banner stays pinned until the next turn starts (pi clears
-/// `#errorBanner` on the next turn: `interactive-mode.ts` `setErrorPinned`).
+/// banner stays pinned until the next turn starts.
 #[must_use]
 pub fn pinned_error(dom: &Dom) -> Option<(Handle, Str)> {
 	let turn = last_turn(dom)?;
@@ -349,7 +338,7 @@ pub fn pinned_error(dom: &Dom) -> Option<(Handle, Str)> {
 	is_notice(node, &["error"]).then(|| (tail, node.content.clone().unwrap_or_default()))
 }
 
-/// ERR-06 (pi `assistant-message.ts:995`): while the identical error is
+/// ERR-06: while the identical error is
 /// pinned in the banner, its inline transcript notice is not rendered
 /// (the expanded inline block is still drawn: callers pass `expanded`
 /// through to [`notice_card`] and skip this check).
@@ -358,7 +347,7 @@ pub fn suppressed_inline(dom: &Dom, handle: Handle) -> bool {
 	pinned_error(dom).is_some_and(|(pinned, _)| pinned == handle)
 }
 
-/// ERR-09 (pi `turn-recovery.ts:2603` `hasAbortedToolCallTail`): the last
+/// ERR-09: the last
 /// turn died on a tool call. Its newest element (receipts and the interrupt
 /// `<notice kind=warn>` aside) is a tool whose status is `cancelled` or
 /// `aborted`, or one still `running` when the interrupt notice landed after
@@ -441,8 +430,7 @@ fn fault_is_abort(json: &str) -> bool {
 		.unwrap_or(false)
 }
 
-/// The idle `<loop> <key> to Retry` status row (pi
-/// `interactive-mode.ts:5333-5337`).
+/// The idle `<loop> <key> to Retry` status row.
 #[must_use]
 pub fn retry_hint_row(key_label: &str) -> Component {
 	let text = sf!("{key_label} to Retry");

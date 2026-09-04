@@ -3,33 +3,33 @@
 use std::{str::FromStr, sync::Arc};
 
 use futures::StreamExt;
-use omp_con::{AI_COMPACT_THRESHOLD, Ctx};
-use omp_core::{Str, StrMut};
-use omp_dom::{Dom, Handle, KnownTag, Node, PropId, PropKey, Tag, Value};
-use omp_inference::{
+use omp_ai::{
 	ChatEvent, ChatRequest, ContentPart, MediaInput, Message, OpaqueJson, Role, Setting, ToolChoice,
 	ToolInputConstraint, ToolResultContent,
-	pi_settings::{
+	settings::{
 		AI_COMPACTION_ENABLED, AI_COMPACTION_KEEP_RECENT_TOKENS, AI_COMPACTION_MID_TURN_ENABLED,
 		AI_COMPACTION_RESERVE_TOKENS, AI_COMPACTION_THRESHOLD_TOKENS,
 	},
 };
+use omp_con::Ctx;
+use omp_core::{Str, StrMut};
+use omp_dom::{Dom, Handle, KnownTag, Node, PropId, PropKey, Tag, Value};
 use omp_journal::{EntryId, data::Compaction};
 use omp_proto::toolhost::v1::HookEventId;
 use omp_session::{project_thread, project_thread_through};
 
 use crate::{
-	KernelEvent, LifecycleHookError, LifecycleHooks,
+	AI_COMPACT_THRESHOLD, KernelEvent, LifecycleHookError, LifecycleHooks,
 	director::{BoxFut, Director, DirectorError, MutDirectorCx, Prepared},
 };
 
 const DEFAULT_THRESHOLD: f64 = 0.80;
-/// pi `DEFAULT_RESERVE_TOKENS`: output headroom subtracted from the window
-/// when no explicit reserve is configured.
+/// Output headroom subtracted from the window when no explicit reserve is
+/// configured.
 const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
-/// pi's proportional reserve: 15% of the window.
+/// Proportional reserve: 15% of the window.
 const RESERVE_FRACTION: f64 = 0.15;
-/// pi `compaction.keepRecentTokens` default.
+/// Default count of recent tokens retained verbatim.
 const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
 const BYTES_PER_TOKEN: u64 = 4;
 const MESSAGE_OVERHEAD_TOKENS: u64 = 4;
@@ -50,22 +50,20 @@ pub struct CompactionDirector {
 	method: Option<Str>,
 }
 
-/// Effective compaction settings (pi `CompactionSettings`).
+/// Effective compaction settings.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Settings {
-	/// pi `compaction.enabled`.
+	/// Whether automatic compaction is enabled.
 	enabled:            bool,
-	/// Fraction of the post-reserve window that triggers compaction
-	/// (`ai_compact_threshold`; pi `thresholdPercent`).
+	/// Fraction of the post-reserve window that triggers compaction.
 	threshold_fraction: f64,
-	/// pi `thresholdTokens`: an explicit limit that wins over the fraction.
+	/// Explicit token limit that wins over the fraction.
 	threshold_tokens:   Option<u64>,
-	/// pi `reserveTokens`; `None` marks the defaulted reserve.
+	/// Explicit reserve; `None` marks the defaulted reserve.
 	reserve_tokens:     Option<u64>,
-	/// pi `keepRecentTokens`: recent history kept verbatim after the summary.
+	/// Recent history kept verbatim after the summary.
 	keep_recent_tokens: u64,
-	/// pi `midTurnEnabled`: automatic compaction may run after the turn's
-	/// first inference.
+	/// Whether automatic compaction may run after the turn's first inference.
 	mid_turn_enabled:   bool,
 }
 
@@ -180,8 +178,8 @@ impl CompactionDirector {
 		let context_tokens = context_tokens(dom, previous_boundary, request);
 		let target_tokens = threshold_tokens(context_window, &settings);
 		if !self.manual {
-			// pi `shouldCompact`, the dead-end guard (the newest marker is the
-			// head: this request already compacted), and `midTurnEnabled`.
+			// The dead-end guard rejects a request whose newest marker is the
+			// head: that request already compacted.
 			if !settings.enabled
 				|| context_window == 0
 				|| previous.as_ref().is_some_and(|marker| marker.id == head)
@@ -203,7 +201,7 @@ impl CompactionDirector {
 		};
 		let hidden = Message::from_thread_items(&project_thread_through(dom, cut.boundary))?;
 		if hidden.is_empty() {
-			// pi `prepareCompaction`: nothing to summarize is a no-op.
+			// Nothing to summarize is a no-op.
 			return Ok(Prepared::Unchanged);
 		}
 		// Thread items map one-to-one onto request messages, so whatever the
@@ -235,22 +233,21 @@ impl CompactionDirector {
 		};
 		let from_extension = summary.is_some();
 
-		// pi `compactionSpeculation`: the gauge tick pulses while the summary
-		// is produced and settles once the boundary lands (or the run fails).
+		// The gauge tick pulses while the summary is produced and settles once
+		// the boundary lands (or the run fails).
 		cx.notify(KernelEvent::CompactionSpeculating {
 			percent: occupancy_percent(context_tokens, context_window),
 		});
-		let summarized = match summary {
-			Some(summary) => Ok(summary),
-			None => {
-				let summary_request = summary_request(
-					&request.messages[..system_prefix],
-					previous.as_ref().map(|marker| marker.summary.clone()),
-					&hidden,
-					self.focus.as_deref(),
-				);
-				self.summarize(cx, summary_request).await
-			},
+		let summarized = if let Some(summary) = summary {
+			Ok(summary)
+		} else {
+			let summary_request = summary_request(
+				&request.messages[..system_prefix],
+				previous.as_ref().map(|marker| marker.summary.clone()),
+				&hidden,
+				self.focus.as_deref(),
+			);
+			self.summarize(cx, summary_request).await
 		};
 		cx.notify(KernelEvent::CompactionSettled { applied: summarized.is_ok() });
 		let summary = summarized?;
@@ -458,8 +455,8 @@ fn first_kept_id(dom: &Dom, first_kept: Option<Handle>) -> String {
 }
 
 /// The summariser request: the handoff instruction, the live system prompt
-/// verbatim (pi passes it through so providers hit the cached prefix), the
-/// previous summary, then only the history the new boundary hides.
+/// verbatim so providers hit the cached prefix, the previous summary, then
+/// only the history the new boundary hides.
 fn summary_request(
 	system: &[Message],
 	previous_summary: Option<Str>,
@@ -478,9 +475,9 @@ fn summary_request(
 	if let Some(previous) = previous_summary {
 		messages.push(text_message(Role::User, previous));
 	}
-	// pi `session-history-format.ts` `contentToText`: the summariser reads
-	// history as text; attached media becomes `[image]` rather than
-	// re-uploading bytes (which the hidden run may no longer resolve).
+	// The summariser reads history as text; attached media becomes `[image]`
+	// rather than re-uploading bytes, which the hidden run may no longer
+	// resolve.
 	messages.extend(hidden.iter().map(media_as_text));
 	ChatRequest {
 		messages:          messages.into(),
@@ -492,11 +489,11 @@ fn summary_request(
 		verbosity:         Setting::Unset,
 		cache_retention:   Setting::Unset,
 		service_tier:      Setting::Unset,
-		sampling:          omp_inference::Sampling::default(),
+		sampling:          omp_ai::Sampling::default(),
 		max_output_tokens: None,
 		top_logprobs:      None,
 		safety:            Arc::from([]),
-		negotiation:       omp_inference::NegotiationPolicy::default(),
+		negotiation:       omp_ai::NegotiationPolicy::default(),
 		forced_call:       None,
 	}
 }
@@ -505,7 +502,7 @@ fn text_message(role: Role, text: Str) -> Message {
 	Message { role, content: Arc::from([ContentPart::Text { text, proof: None }]), name: None }
 }
 
-/// The message with every media part replaced by pi's `[image]` text.
+/// The message with every media part replaced by `[image]` text.
 fn media_as_text(message: &Message) -> Message {
 	if !message.content.iter().any(|part| {
 		matches!(part, ContentPart::Image(_) | ContentPart::Audio(_) | ContentPart::Document(_))
@@ -537,9 +534,9 @@ fn occupancy_percent(context_tokens: u64, context_window: u64) -> u8 {
 	u8::try_from(percent.min(100)).unwrap_or(100)
 }
 
-/// pi `calculateContextTokens` over the newest receipt on the live body
-/// (after the previous compaction boundary); the byte estimate of the
-/// projected request stands in until a receipt exists.
+/// Calculates context tokens from the newest receipt on the live body after
+/// the previous compaction boundary; the byte estimate of the projected
+/// request stands in until a receipt exists.
 fn context_tokens(dom: &Dom, previous_boundary: Option<EntryId>, request: &ChatRequest) -> u64 {
 	for turn in dom.children(dom.body()).iter().rev() {
 		for child in dom.children(*turn).iter().rev() {
@@ -563,9 +560,8 @@ fn context_tokens(dom: &Dom, previous_boundary: Option<EntryId>, request: &ChatR
 	estimate_request_tokens(request)
 }
 
-/// pi `resolveThresholdTokens`: an explicit token limit wins; otherwise the
-/// configured fraction of the window left after the reserve. Both stay
-/// strictly below the window.
+/// An explicit token limit wins; otherwise use the configured fraction of the
+/// window left after the reserve. Both stay strictly below the window.
 fn threshold_tokens(context_window: u64, settings: &Settings) -> u64 {
 	let ceiling = context_window.saturating_sub(1);
 	if let Some(explicit) = settings.threshold_tokens {
@@ -577,9 +573,9 @@ fn threshold_tokens(context_window: u64, settings: &Settings) -> u64 {
 	(usable as f64 * settings.threshold_fraction).floor() as u64
 }
 
-/// pi `resolveBudgetReserveTokens`: the larger of 15% and the configured (or
-/// default) reserve, falling back to the proportional reserve when a
-/// defaulted absolute reserve would leave no usable budget.
+/// Uses the larger of 15% and the configured (or default) reserve, falling
+/// back to the proportional reserve when a defaulted absolute reserve would
+/// leave no usable budget.
 fn budget_reserve_tokens(context_window: u64, settings: &Settings) -> u64 {
 	let proportional = (context_window as f64 * RESERVE_FRACTION).floor() as u64;
 	let effective = proportional.max(settings.reserve_tokens.unwrap_or(DEFAULT_RESERVE_TOKENS));
@@ -593,12 +589,12 @@ fn budget_reserve_tokens(context_window: u64, settings: &Settings) -> u64 {
 	}
 }
 
-/// pi `findCutPoint` at turn granularity: walk turns newest-first, keeping
-/// each one while the kept tail is still under `keep_recent_tokens` (the
-/// turn that crosses the budget stays, like pi's cut point). The current
-/// turn is always kept when `keep_current` (automatic compaction never hides
-/// the prompt that triggered it). The boundary is the entry before the
-/// oldest kept turn; when nothing is kept it is the head.
+/// Finds a cut point at turn granularity: walk turns newest-first, keeping
+/// each one while the kept tail is still under `keep_recent_tokens`. The turn
+/// that crosses the budget stays. The current turn is always kept when
+/// `keep_current` (automatic compaction never hides the prompt that triggered
+/// it). The boundary is the entry before the oldest kept turn; when nothing
+/// is kept it is the head.
 fn cut_point(
 	dom: &Dom,
 	current: Handle,
@@ -636,7 +632,7 @@ fn cut_point(
 }
 
 /// Whether the turn already ran inference (an assistant message exists), the
-/// mid-turn case pi `midTurnEnabled` gates.
+/// mid-turn case the setting gates.
 fn turn_has_inference(dom: &Dom, turn: Handle) -> bool {
 	dom.children(turn).iter().any(|child| {
 		dom.get(*child)

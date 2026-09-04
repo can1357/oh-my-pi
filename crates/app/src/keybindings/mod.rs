@@ -1,9 +1,9 @@
 //! Physical key chords lowered to command-stream bindings.
 //!
-//! ADR 0014: keybindings are `bind` lines. [`DEFAULT_BINDS`] is the cfg of
-//! defaults (pi parity), executed before the user's `config.cfg`;
-//! [`PI_ACTIONS`] is the migration table from pi's action ids to the console
-//! command each default binds.
+//! ADR 0014: keybindings are `bind` lines. [`DEFAULT_BINDS`] is the built-in
+//! default binding set, executed before the user's `config.cfg`;
+//! [`PI_ACTIONS`] maps legacy action ids to the console command each default
+//! binds.
 
 pub mod config;
 
@@ -22,11 +22,11 @@ pub const DEFAULT_BINDS: &str = include_str!("default.cfg");
 /// Name of the default bind cfg as reported in command-stream provenance.
 pub const DEFAULT_BINDS_NAME: &str = "default-binds.cfg";
 
-/// pi keybinding id → console command used by migration.
+/// Legacy keybinding action id → console command used by migration.
 ///
 /// The default cfg may bind one physical chord to a short fallback script
-/// when pi gives that chord to several contextual actions. Each action still
-/// has its own command here, so a migrated user remap retains its exact scope.
+/// for several contextual actions. Each action still has its own command here,
+/// so a migrated user remap retains its exact scope.
 pub const PI_ACTIONS: &[(&str, &str)] = &[
 	("app.interrupt", "cl_interrupt"),
 	("app.clear", "cl_clear"),
@@ -100,7 +100,7 @@ pub const PI_ACTIONS: &[(&str, &str)] = &[
 	("tui.select.cancel", "cl_interrupt"),
 ];
 
-/// Console command for a pi keybinding id, when omp implements it.
+/// Console command for a legacy keybinding action id, when supported.
 #[must_use]
 pub fn pi_action_command(action: &str) -> Option<&'static str> {
 	PI_ACTIONS

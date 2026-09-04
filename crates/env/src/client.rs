@@ -327,7 +327,7 @@ pub struct ActiveExecControl {
 
 impl ActiveExecControl {
 	/// Returns the opaque execution identity.
-	pub fn exec_id(&self) -> &Bytes {
+	pub const fn exec_id(&self) -> &Bytes {
 		&self.exec
 	}
 

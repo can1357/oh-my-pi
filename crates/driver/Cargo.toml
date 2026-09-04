@@ -11,17 +11,17 @@ readme = "README.md"
 
 [features]
 default = []
-local = ["omp-inference/local"]
+local = ["omp-ai/local"]
 local-all = [
 	"local-applefm",
 	"local-embedding",
 	"local-stt",
 	"local-tts",
 ]
-local-applefm = ["local", "omp-inference/local-applefm"]
-local-embedding = ["local", "omp-inference/local-embedding", "omp-memory/local-embedding"]
-local-stt = ["local", "omp-inference/local-stt"]
-local-tts = ["local", "omp-envd/local-tts", "omp-inference/local-tts"]
+local-applefm = ["local", "omp-ai/local-applefm"]
+local-embedding = ["local", "omp-ai/local-embedding", "omp-memory/local-embedding"]
+local-stt = ["local", "omp-ai/local-stt"]
+local-tts = ["local", "omp-envd/local-tts", "omp-ai/local-tts"]
 
 [dependencies]
 async-stream.workspace = true
@@ -42,14 +42,13 @@ omp-ar.workspace = true
 omp-collab.workspace = true
 omp-core.workspace = true
 omp-scribe.workspace = true
-omp-docserver.workspace = true
 omp-env.workspace = true
 omp-envd.workspace = true
 omp-ext.workspace = true
 omp-catalog.workspace = true
 omp-con.workspace = true
 omp-dom.workspace = true
-omp-inference.workspace = true
+omp-ai.workspace = true
 omp-journal.workspace = true
 omp-session.workspace = true
 omp-http.workspace = true
@@ -90,7 +89,6 @@ smallvec.workspace = true
 ring.workspace = true
 globset.workspace = true
 notify.workspace = true
-omp-slopjson.workspace = true
 rand.workspace = true
 regex.workspace = true
 

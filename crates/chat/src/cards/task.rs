@@ -8,14 +8,13 @@ use serde_json::Value;
 use super::{Card, CardStatus, CardView, Component, partial_string, typed_input, typed_result};
 
 /// Agent rows a collapsed batch call shows; the rest fold into one
-/// `… N more agents` line (pi `COLLAPSED_AGENT_LIMIT`).
+/// `… N more agents` line.
 const COLLAPSED_AGENT_LIMIT: usize = 4;
-/// Characters of the assignment's first line a call row previews (pi
-/// `previewLine(brief, 64)`).
+/// Characters of the assignment's first line a call row previews.
 const BRIEF_CHARS: usize = 64;
 
-/// The call arguments as far as they have arrived (pi `repairTaskParams`):
-/// the parsed object once complete, else the string fields a torn object
+/// The call arguments as far as they have arrived: the parsed object once
+/// complete, else the string fields a torn object
 /// already names, so the live card can show the dispatched agent and its
 /// brief while the provider is still streaming.
 struct CallArgs {
@@ -77,8 +76,7 @@ impl CallArgs {
 			.and_then(|item| string(item, "task"))
 	}
 
-	/// The frame's leading sections (pi `createContextSectionRenderer` +
-	/// `createAssignmentSectionRenderer`): the shared batch context, then the
+	/// The frame's leading sections: the shared batch context, then the
 	/// assignment brief, as muted markdown.
 	fn sections(&self) -> Vec<Component> {
 		[&self.context, &self.task]
@@ -106,8 +104,8 @@ impl Card for TaskCard {
 	}
 }
 
-/// The call frame while arguments stream or the children run (pi
-/// `renderCall`): `Task: <agent>` for the flat form, the context and
+/// The call frame while arguments stream or the children run: `Task: <agent>`
+/// for the flat form, the context and
 /// assignment markdown, then a divider and one `• name: brief ⟨agent⟩` row
 /// per dispatched agent.
 fn render_live(view: &CardView<'_>, ui: &UiContext) -> Component {
@@ -130,8 +128,8 @@ fn render_live(view: &CardView<'_>, ui: &UiContext) -> Component {
 	.into_component()
 }
 
-/// pi `renderTaskCallLines`: the flat form's single `• name: brief ⟨agent⟩`
-/// row, then the batch items (`#N` when unnamed, `[isolated]` when so),
+/// The flat form's single `• name: brief ⟨agent⟩` row, then the batch items
+/// (`#N` when unnamed, `[isolated]` when so),
 /// capped at [`COLLAPSED_AGENT_LIMIT`] with a `… N more agents` fold.
 fn call_rows(args: &CallArgs) -> Vec<Component> {
 	let mut rows = Vec::with_capacity(args.tasks.len().min(COLLAPSED_AGENT_LIMIT) + 2);
@@ -189,8 +187,8 @@ fn call_row(label: Str, brief: Option<Str>, agent: Option<&str>, isolated: bool)
 	.into_component()
 }
 
-/// pi `taskFirstLine` + `previewLine(brief, 64)`: the first line of the
-/// assignment with whitespace runs collapsed, cut to [`BRIEF_CHARS`] with an
+/// The first line of the assignment with whitespace runs collapsed, cut to
+/// [`BRIEF_CHARS`] with an
 /// ellipsis.
 fn first_line(task: &str) -> Option<Str> {
 	let line = task.trim().lines().next()?;
@@ -204,7 +202,7 @@ fn first_line(task: &str) -> Option<Str> {
 	(!collapsed.is_empty()).then(|| preview(&collapsed, BRIEF_CHARS))
 }
 
-/// pi `formatTaskId`: nesting levels (`Anna.Bob`) render as a `>` breadcrumb.
+/// Nesting levels (`Anna.Bob`) render as a `>` breadcrumb.
 fn task_id(name: &str) -> Str {
 	if name.contains('.') {
 		Str::from(name.replace('.', ">"))
@@ -249,9 +247,8 @@ fn render_settled(view: &CardView<'_>, expanded: bool, ui: &UiContext) -> Compon
 			.or_else(|| row.get("id"))
 			.and_then(Value::as_str)
 			.map_or_else(|| Str::new_static("agent"), task_id);
-		// pi's row is `id: description`; omp's child request carries no
-		// description, so the brief of its assignment stands in, as pi's own
-		// running rows do without one.
+		// A task row is `id: description`; OMP child requests carry no
+		// description, so the brief of their assignment stands in.
 		let assignment = row
 			.get("assignment")
 			.and_then(Value::as_str)
@@ -277,8 +274,8 @@ fn render_settled(view: &CardView<'_>, expanded: bool, ui: &UiContext) -> Compon
 			.as_deref()
 			.filter(|text| !text.trim().is_empty())
 			.map(|text| preview(text, 70));
-		// pi `renderOutputSection`: the child's final text, three rows
-		// collapsed, ten expanded, each cut at 70 cells.
+		// The child's final text: three rows collapsed, ten expanded, each cut
+		// at 70 cells.
 		let output = row
 			.get("output")
 			.and_then(Value::as_str)
@@ -349,9 +346,9 @@ fn render_settled(view: &CardView<'_>, expanded: bool, ui: &UiContext) -> Compon
 }
 
 /// `Payload::Started`: every child was admitted as a detached runtime job
-/// (ADR 0010) and settles later through `<meta><jobs>`. pi
-/// (`task/render.ts` `renderAgentProgress`) keeps such rows static — the
-/// same dot finished rows use, the id, the agent badge, and the job state —
+/// (ADR 0010) and settles later through `<meta><jobs>`. Such rows stay
+/// static — with the same dot finished rows use, the id, the agent badge,
+/// and the job state —
 /// never an error panel: the spawn itself succeeded.
 fn render_started(jobs: &[Value], sections: Vec<Component>, ui: &UiContext) -> Component {
 	let sections_empty = sections.is_empty();
@@ -448,7 +445,7 @@ fn task_detail(row: &Value) -> Option<Str> {
 	))
 }
 
-/// The first `limit` output lines, each cut at 70 cells, and pi's
+/// The first `limit` output lines, each cut at 70 cells, and a
 /// `… N more lines` fold when more follow.
 fn output_preview(text: &str, limit: usize) -> Str {
 	let total = text.lines().count();

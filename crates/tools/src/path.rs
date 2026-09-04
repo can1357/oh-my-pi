@@ -182,11 +182,7 @@ fn trim_outer_quotes(input: &str) -> &str {
 	};
 	let paired = matches!(
 		(first, last),
-		('"', '"')
-			| ('\'', '\'')
-			| ('\u{2018}', '\u{2019}')
-			| ('\u{201c}', '\u{201d}')
-			| ('\u{2019}', '\u{2019}')
+		('"', '"') | ('\'', '\'') | ('\u{2018}' | '\u{2019}', '\u{2019}') | ('\u{201c}', '\u{201d}')
 	);
 	if paired && input.len() > first.len_utf8() + last.len_utf8() {
 		&input[first.len_utf8()..input.len() - last.len_utf8()]
@@ -379,11 +375,11 @@ fn windows_drive_alias(input: &str) -> Option<String> {
 	Some(output)
 }
 
-fn one_drive_letter(input: &str) -> bool {
+const fn one_drive_letter(input: &str) -> bool {
 	input.len() == 1 && input.as_bytes()[0].is_ascii_alphabetic()
 }
 
-fn is_windows_drive(input: &str) -> bool {
+const fn is_windows_drive(input: &str) -> bool {
 	input.len() >= 2 && input.as_bytes()[0].is_ascii_alphabetic() && input.as_bytes()[1] == b':'
 }
 

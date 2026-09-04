@@ -1,6 +1,5 @@
-//! Collaboration, lifecycle, and capability-toggle slash commands (pi
-//! `builtin-collaboration.ts`, `builtin-lifecycle.ts`, `builtin-modes.ts`,
-//! `builtin-control.ts`): `/export`, `/share`, `/cleanse`, `/security`,
+//! Collaboration, lifecycle, and capability-toggle slash commands: `/export`,
+//! `/share`, `/cleanse`, `/security`,
 //! `/memory`, `/ssh`, `/browser`, `/computer`, `/vision`, `/prewalk`,
 //! `/extended-context`, `/advisor`, `/collab`, `/join`, `/leave`, `/live`.
 //!
@@ -54,7 +53,7 @@ pub const PALETTE: &[PaletteEntry] = &[
 
 /// Snapshot schema revision written by `/share`.
 const SHARE_SNAPSHOT_VERSION: u8 = 1;
-/// pi `/share` copies the viewer link; the same line is the panel row.
+/// `/share` copies the viewer link; the same line is the panel row.
 const SHARE_MESSAGE: &str = "Sharing session…";
 const CLEANSE_MESSAGE: &str = "Cleansing workspace…";
 /// Legacy `security review` child brief (`chat_ui/commands/security.rs`).
@@ -64,11 +63,17 @@ const SECURITY_REVIEW_BRIEF: &str =
 	 checks, and unsafe shell or SQL construction. Report findings first, each with file:line, \
 	 severity, and a concrete fix; never edit files.";
 omp_con::var! {
-	/// Uses the premium extended-context pricing tier of the current model
-	/// (pi `/extended-context`).
+	/// Use premium long-context windows on models that bill extra past a
+	/// threshold; when disabled, cap them at the standard-pricing window.
 	pub static AI_EXTENDED_CONTEXT = ai_extended_context: bool {
 		default: false,
 		flags: archive | session,
+		meta: {
+			"ui.tab": "context",
+			"ui.group": "General",
+			"ui.label": "Extended Context",
+			"legacy.path": "extendedContext",
+		},
 	};
 }
 
@@ -112,7 +117,7 @@ fn var_text(cx: &PanelCx<'_>, name: &str) -> Str {
 		.map_or_else(|| Str::new_static("unset"), |value| Str::new(value.to_string()))
 }
 
-/// How `ai_vision` reads in a notice (pi `formatVisionStatus`).
+/// How `ai_vision` reads in a notice.
 fn vision_flow(mode: &str) -> &'static str {
 	match mode {
 		"on" => "always sent",
@@ -128,7 +133,7 @@ fn var_bool(cx: &PanelCx<'_>, name: &str) -> Option<bool> {
 	}
 }
 
-/// pi `/share`: the transcript as a schema-agnostic JSON snapshot for the
+/// `/share`: the transcript as a schema-agnostic JSON snapshot for the
 /// zero-knowledge viewer (`SHARE_LOADER_HTML` pretty-prints whatever it
 /// decrypts).
 pub(crate) fn share_snapshot(dom: &omp_dom::Dom) -> serde_json::Value {
@@ -705,7 +710,7 @@ mod tests {
 	#[test]
 	fn advisor_command_controls_the_real_director_and_convar() {
 		let (ctx, event) = run_call("advisor on");
-		assert!(omp_inference::pi_settings::AI_ADVISOR_ENABLED.get(&ctx));
+		assert!(omp_ai::settings::AI_ADVISOR_ENABLED.get(&ctx));
 		assert_eq!(
 			event,
 			PanelEvent::Command(HostCommand::Director {

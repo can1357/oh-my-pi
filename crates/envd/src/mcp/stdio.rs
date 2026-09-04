@@ -454,9 +454,7 @@ impl StdioTransport {
 			let (line, ordinary) = plan
 				.args
 				.split_last()
-				.ok_or_else(|| {
-					TransportError::pre_dispatch(TransportFailure::InvalidSpawnPlan)
-				})?;
+				.ok_or_else(|| TransportError::pre_dispatch(TransportFailure::InvalidSpawnPlan))?;
 			command.args(ordinary);
 			command.as_std_mut().raw_arg(line);
 		} else {
@@ -886,10 +884,8 @@ fn terminate_windows_process_tree(root: u32) {
 	if snapshot == INVALID_HANDLE_VALUE {
 		return;
 	}
-	let mut entry = PROCESSENTRY32W {
-		dwSize: size_of::<PROCESSENTRY32W>() as u32,
-		..PROCESSENTRY32W::default()
-	};
+	let mut entry =
+		PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..PROCESSENTRY32W::default() };
 	let mut relationships = Vec::new();
 	// SAFETY: `snapshot` is live and `entry` has the required size initialized.
 	if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {

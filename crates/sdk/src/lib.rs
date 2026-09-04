@@ -87,11 +87,11 @@ mod tests {
 
 	use futures::stream;
 	use omp_agent::StaticPrompt;
-	use omp_catalog::{ProviderId, RouteId};
-	use omp_inference::{
+	use omp_ai::{
 		BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ExecutionReceipt, FinishReason,
 		RequestId, ResponseMeta, Usage,
 	};
+	use omp_catalog::{ProviderId, RouteId};
 	use omp_tool::Registry;
 
 	use super::*;
@@ -102,7 +102,7 @@ mod tests {
 		fn chat(
 			&mut self,
 			_request: ChatRequest,
-		) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+		) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 			let events = [
 				ChatEvent::Started(ResponseMeta {
 					request_id:          RequestId::from("sdk-test"),

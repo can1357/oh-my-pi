@@ -935,8 +935,8 @@ this event's bit set — useful to skip building an expensive
 |---|---|---|
 | `omp.limits.REENTRANCY_DEPTH` | 4 | Maximum nested CONTROL round-trips from inside a hook. Exceeding raises `omp.ReentrancyError` |
 | `omp.limits.INTERACTIVE_CAP` | `15m` | Wall-clock ceiling (`omp.Duration`) for a suspended deadline budget across all legal interactive round-trips in one hook invocation. Approval waits are excluded: the ticket is Core's (§2.6) |
-| `omp.limits.SETTLE_CONTINUATION_CAP` | 8 | Maximum consecutive `agent_settled` continuations per session before the core refuses further continuation. Ports pi's `SESSION_STOP_CONTINUATION_CAP = 8` (`.plan/feature-map/session.md`) |
-| `omp.limits.SHUTDOWN_BUDGET` | `2s` | Total budget (`omp.Duration`) for all `session_shutdown` handlers, dispatched concurrently. Ports pi's `SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS = 2_000` (`runner.ts:109`) |
+| `omp.limits.SETTLE_CONTINUATION_CAP` | 8 | Maximum consecutive `agent_settled` continuations per session before the core refuses further continuation. |
+| `omp.limits.SHUTDOWN_BUDGET` | `2s` | Total budget (`omp.Duration`) for all `session_shutdown` handlers, dispatched concurrently. |
 | `omp.limits.OBSERVE_CAP` | 64 | Maximum `OBSERVE` subscriptions dispatched for one event; beyond it observers are truncated and the truncation journaled. **Gate phases have no truncation cap**: exceeding mandatory gate capacity is an activation-time error, never a runtime truncation (§3.13). A previous revision applied this cap to whole chains, silently dropping policy past the 64th hook — proceeding with "the top 64" of a mandatory policy set is not defensible, and that rule is reversed |
 | `omp.limits.MODIFY_ROUNDS` | 1 | The decision procedure runs exactly once per invocation. There is no re-run after mutation; a transform that needs to see final arguments declares a higher `order` |
 

@@ -10,6 +10,15 @@ use std::{
 	time::Duration,
 };
 
+use omp_ai::{
+	AccountId, PrincipalId, auth,
+	auth::{
+		APP_HEADER, AuditedCredentialReveal, AuthControlHandle, CommandCredentialError,
+		CommandCredentialExecutor, CommandExecutionFuture, CredentialControlWrite, CredentialGrants,
+		HOSTNAME_HEADER, INSTALL_ID_HEADER, OAuthControlImport, ScopedCredentialGrant,
+		UsageAttribution,
+	},
+};
 use omp_core::{EnvPath, ExposeSecret as _, InvocationPhase, Secret, SecretString, Str};
 use omp_env::{EnvClient, ExecEvent};
 pub use omp_envd::mcp::auth_authority::CombinedAuthAuthority;
@@ -19,15 +28,6 @@ use omp_envd::{
 		ControlConnectionIdentity, ControlEffect, ControlProtocolError, ControlRequestContext,
 	},
 	mcp::auth_authority::CredentialAuthority,
-};
-use omp_inference::{
-	AccountId, PrincipalId, auth,
-	auth::{
-		APP_HEADER, AuditedCredentialReveal, AuthControlHandle, CommandCredentialError,
-		CommandCredentialExecutor, CommandExecutionFuture, CredentialControlWrite, CredentialGrants,
-		HOSTNAME_HEADER, INSTALL_ID_HEADER, OAuthControlImport, ScopedCredentialGrant,
-		UsageAttribution,
-	},
 };
 use omp_proto::{
 	env::v1::{
@@ -57,7 +57,7 @@ use crate::secrets::{key, session::SecretSessionSnapshot};
 
 /// Composes provider and MCP leasing over the one encrypted credential store.
 pub fn combined_authority(
-	store: sync::Arc<omp_inference::auth::CredentialStore>,
+	store: sync::Arc<omp_ai::auth::CredentialStore>,
 ) -> CombinedAuthAuthority {
 	CombinedAuthAuthority::new(store)
 }
@@ -74,19 +74,17 @@ impl GithubCredentialAuthority {
 	}
 }
 /// Composes the encrypted store and adapts it to environment-owned GitHub URLs.
-pub fn github_authority(
-	store: Arc<omp_inference::auth::CredentialStore>,
-) -> GithubCredentialAuthority {
+pub fn github_authority(store: Arc<omp_ai::auth::CredentialStore>) -> GithubCredentialAuthority {
 	GithubCredentialAuthority::new(Arc::new(combined_authority(store)))
 }
 
 impl omp_envd::github_url::CredentialAuthority for GithubCredentialAuthority {
 	fn provider_lease(
 		&self,
-		need: omp_inference::auth::CredentialNeed,
-	) -> omp_inference::auth::CredentialFuture<
+		need: omp_ai::auth::CredentialNeed,
+	) -> omp_ai::auth::CredentialFuture<
 		'_,
-		Result<omp_inference::auth::CredentialLease, omp_inference::auth::CredentialError>,
+		Result<omp_ai::auth::CredentialLease, omp_ai::auth::CredentialError>,
 	> {
 		CredentialAuthority::provider_lease(self.inner.as_ref(), need)
 	}
@@ -570,7 +568,7 @@ impl CredentialSecretControlAuthority {
 	fn account_record(
 		&self,
 		account: &AccountId<str>,
-	) -> Result<omp_inference::account::AccountRecord, ControlProtocolError> {
+	) -> Result<omp_ai::account::AccountRecord, ControlProtocolError> {
 		self
 			.control
 			.accounts(None)
@@ -581,7 +579,7 @@ impl CredentialSecretControlAuthority {
 
 	fn metadata_value(
 		&self,
-		account: omp_inference::account::AccountRecord,
+		account: omp_ai::account::AccountRecord,
 	) -> Result<Value, ControlProtocolError> {
 		let metadata = self
 			.control
@@ -1302,7 +1300,7 @@ fn store_control_error(error: auth::StoreError) -> ControlProtocolError {
 	}
 }
 
-fn auth_control_error(error: omp_inference::Error) -> ControlProtocolError {
+fn auth_control_error(error: omp_ai::Error) -> ControlProtocolError {
 	control_error("CredentialOperationFailed", error.to_string())
 }
 

@@ -14,10 +14,11 @@ use async_stream::stream;
 use bytes::Bytes;
 use futures::{FutureExt as _, Stream, pin_mut, select_biased};
 use omp_core::{Str, sf};
-use omp_hashline::format_hashline_header;
+use omp_edit::modes::hashline::format::format_hashline_header;
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, DocEffects, Effects, Ev, IncomingParams,
-	InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool, ToolSpec, ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, Diag, DiagKind, DocEffects, Effects, Ev,
+	IncomingParams, InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool, ToolSpec,
+	ToolTerminal, Unit,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -52,14 +53,11 @@ const DESCRIPTION: &str =
 	 empty content)\n- Supports whole-file writes to configured or Obsidian-discovered \
 	 `vault://<name>/path` resources; Obsidian operations use `?op=create[&overwrite]`, \
 	 `?op=move&to=<path>`, `?op=delete[&permanent]`, or `?op=open[&newtab]` (the latter three \
-	 require empty content); partial selectors remain read-only\n- Supports registered merge-conflict \
-	 splices via `conflict://<id>` and \
+	 require empty content); partial selectors remain read-only\n- Supports registered \
+	 merge-conflict splices via `conflict://<id>` and \
 	 `@ours`/`@base`/`@theirs`/`@both`\n</conditions>\n\n<critical>\n- You SHOULD use Edit tool \
 	 for modifying existing files\n- You NEVER create documentation files (*.md, README) unless \
 	 explicitly requested\n- You NEVER use emojis unless requested\n</critical>";
-const EXECUTABLE_NOTICE: &str = "[Notice: Made executable via chmod +x]";
-const STRIPPED_NOTICE: &str =
-	"Note: auto-stripped hashline display prefixes from content before writing.";
 
 /// Model arguments for `write@2`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -238,7 +236,8 @@ pub struct Payload {
 	pub resolved_path:      Str,
 	/// Stable model-facing committed path.
 	pub display_path:       Str,
-	/// Recovery notice when the authored target required lexical normalization.
+	/// Authored-to-canonical mapping when the target required lexical
+	/// normalization.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub canonical_recovery: Option<Str>,
 	/// Exact UTF-8 byte length persisted.
@@ -571,7 +570,9 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 			let authored_path = unwrap_hashline_header_path(&arguments.path);
 			let normalized = normalize_target(authored_path, None, HostPaths::current());
 			let path = normalized.canonical.clone();
-			let canonical_recovery = normalized.recovery_notice();
+			let canonical_recovery = normalized
+				.recovered()
+				.then(|| sf!("{} -> {}", normalized.authored, normalized.canonical));
 			let conflict_request = match parse_uri(&path) {
 				Ok(Some(uri))
 				if uri.scheme == Scheme::Conflict && uri.resource == "*" =>
@@ -736,7 +737,7 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 					yield done(Err(Fault::Document { message: Str::new(message) }));
 					return;
 				}
-				yield done(Ok(Payload {
+				let payload = Payload {
 					resolved_path: path.clone(),
 					display_path: path.clone(),
 					canonical_recovery,
@@ -752,7 +753,11 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 						failed,
 						echo_trimmed,
 					},
-				}));
+				};
+				for diag in diags(&payload) {
+					yield Ev::Diag(diag);
+				}
+				yield done(Ok(payload));
 				return;
 			}
 			let resource_request = match route_resource_mutation(&path, stripped.text.clone()) {
@@ -769,7 +774,7 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 				select_biased! {
 					result = operation => match result {
 						Ok(Some(receipt)) => {
-							yield done(Ok(Payload {
+							let payload = Payload {
 								resolved_path: receipt.canonical_uri.clone(),
 								display_path: receipt.canonical_uri.clone(),
 								canonical_recovery,
@@ -783,7 +788,11 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 									uri: receipt.canonical_uri,
 									revision: receipt.revision,
 								},
-							}));
+							};
+							for diag in diags(&payload) {
+								yield Ev::Diag(diag);
+							}
+							yield done(Ok(payload));
 							return;
 						},
 						Ok(None) => {
@@ -820,7 +829,7 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 					result = operation => match result {
 						Ok(Some(result)) => {
 							self.conflicts.remove(id);
-							yield done(Ok(Payload {
+							let payload = Payload {
 								resolved_path: result.write.resolved_path,
 								display_path: result.write.display_path,
 								canonical_recovery: canonical_recovery.clone(),
@@ -836,7 +845,11 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 									end_line: result.range.1,
 									echo_trimmed: result.echo_trimmed,
 								},
-							}));
+							};
+							for diag in diags(&payload) {
+								yield Ev::Diag(diag);
+							}
+							yield done(Ok(payload));
 						},
 						Ok(None) => yield done(Err(Fault::Document {
 							message: sf!(
@@ -881,12 +894,16 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 				}
 			};
 			if let Some(result) = archive_result {
-				yield done(Ok(special_payload(
+				let payload = special_payload(
 					result,
 					stripped.stripped,
 					reported_len,
 					canonical_recovery.clone(),
-				)));
+				);
+				for diag in diags(&payload) {
+					yield Ev::Diag(diag);
+				}
+				yield done(Ok(payload));
 				return;
 			}
 
@@ -916,12 +933,16 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 				}
 			};
 			if let Some(result) = sqlite_result {
-				yield done(Ok(special_payload(
+				let payload = special_payload(
 					result,
 					stripped.stripped,
 					reported_len,
 					canonical_recovery.clone(),
-				)));
+				);
+				for diag in diags(&payload) {
+					yield Ev::Diag(diag);
+				}
+				yield done(Ok(payload));
 				return;
 			}
 
@@ -971,18 +992,24 @@ impl<D: WriteDocuments> Tool for WriteTool<D> {
 			pin_mut!(operation, interruption);
 			select_biased! {
 				result = operation => match result {
-					Ok(result) => yield done(Ok(Payload {
-						resolved_path: result.resolved_path,
-						display_path: result.display_path,
-						canonical_recovery,
-						byte_len: result.byte_len,
-						reported_len,
-						disposition: result.disposition,
-						stripped_wrapper: stripped.stripped,
-						made_executable: result.made_executable,
-						snapshot_tag: result.snapshot_tag,
-						operation: WriteOperation::Plain,
-					})),
+					Ok(result) => {
+						let payload = Payload {
+							resolved_path: result.resolved_path,
+							display_path: result.display_path,
+							canonical_recovery,
+							byte_len: result.byte_len,
+							reported_len,
+							disposition: result.disposition,
+							stripped_wrapper: stripped.stripped,
+							made_executable: result.made_executable,
+							snapshot_tag: result.snapshot_tag,
+							operation: WriteOperation::Plain,
+						};
+						for diag in diags(&payload) {
+							yield Ev::Diag(diag);
+						}
+						yield done(Ok(payload));
+					},
 					Err(WriteCommitError::Rejected(fault)) => yield done(Err(fault)),
 					Err(WriteCommitError::EffectsUnknown { reason }) => {
 						yield Ev::Aborted(Abort::EffectsUnknown { reason });
@@ -1258,12 +1285,37 @@ fn special_payload(
 	}
 }
 
+fn diags(payload: &Payload) -> impl Iterator<Item = Diag> {
+	let echo_trimmed = match &payload.operation {
+		WriteOperation::ConflictSplice { echo_trimmed, .. }
+		| WriteOperation::ConflictBulk { echo_trimmed, .. } => *echo_trimmed,
+		_ => 0,
+	};
+	[
+		payload
+			.canonical_recovery
+			.as_ref()
+			.map(|recovery| Diag::info(DiagKind::PathRecovered, recovery.clone())),
+		payload.stripped_wrapper.then(|| {
+			Diag::info(DiagKind::ContentNormalized, "stripped hashline display prefixes from content")
+		}),
+		payload
+			.made_executable
+			.then(|| Diag::info(DiagKind::MadeExecutable, "added execute bits for the shebang")),
+		(echo_trimmed > 0).then(|| {
+			Diag::info(
+				DiagKind::ContentNormalized,
+				"dropped duplicated echo lines next to the conflict region",
+			)
+			.omitted(u64::try_from(echo_trimmed).unwrap_or(u64::MAX), Unit::Lines)
+		}),
+	]
+	.into_iter()
+	.flatten()
+}
+
 fn render_payload(payload: &Payload) -> String {
 	let mut output = String::new();
-	if let Some(recovery) = &payload.canonical_recovery {
-		output.push_str(recovery);
-		output.push('\n');
-	}
 	if let Some(tag) = &payload.snapshot_tag {
 		output.push_str(&format_hashline_header(&payload.display_path, tag));
 		output.push('\n');
@@ -1279,31 +1331,19 @@ fn render_payload(payload: &Payload) -> String {
 			payload.reported_len, payload.display_path
 		)
 		.expect("writing to String cannot fail"),
-		WriteOperation::ConflictSplice { id, start_line, end_line, echo_trimmed } => {
+		WriteOperation::ConflictSplice { id, start_line, end_line, .. } => {
 			write!(
 				output,
 				"Resolved conflict #{id} at {}:L{start_line}-L{end_line}",
 				payload.display_path
 			)
 			.expect("writing to String cannot fail");
-			if *echo_trimmed > 0 {
-				write!(
-					output,
-					"\nNote: dropped {echo_trimmed} content line(s) duplicated next to the conflict \
-					 region."
-				)
-				.expect("writing to String cannot fail");
-			}
 		},
-		WriteOperation::ConflictBulk { resolved, succeeded, failed, echo_trimmed } => {
+		WriteOperation::ConflictBulk { resolved, succeeded, failed, .. } => {
 			write!(output, "Resolved {resolved} conflicts across {} files", succeeded.len())
 				.expect("writing to String cannot fail");
 			for path in succeeded {
 				write!(output, "\n  {path}: committed").expect("writing to String cannot fail");
-			}
-			if *echo_trimmed > 0 {
-				write!(output, "\nDropped {echo_trimmed} adjacent echo lines")
-					.expect("writing to String cannot fail");
 			}
 			if !failed.is_empty() {
 				output.push_str("\nFiles left unchanged for retry:");
@@ -1334,14 +1374,6 @@ fn render_payload(payload: &Payload) -> String {
 					.expect("writing to String cannot fail");
 			}
 		},
-	}
-	if payload.stripped_wrapper {
-		output.push('\n');
-		output.push_str(STRIPPED_NOTICE);
-	}
-	if payload.made_executable {
-		output.push('\n');
-		output.push_str(EXECUTABLE_NOTICE);
 	}
 	output
 }
@@ -1404,6 +1436,8 @@ fn protocol_issue(message: Str) -> ArgIssue {
 
 #[cfg(test)]
 mod tests {
+	use omp_tool::{Omitted, Severity};
+
 	use super::*;
 
 	#[test]
@@ -1448,7 +1482,7 @@ mod tests {
 	}
 
 	#[test]
-	fn renders_plain_write_exactly() {
+	fn renders_plain_write_without_structured_diags() {
 		let payload = Payload {
 			resolved_path:      "/repo/bin/run".into(),
 			display_path:       "bin/run".into(),
@@ -1463,9 +1497,54 @@ mod tests {
 		};
 		assert_eq!(
 			render_payload(&payload),
-			"[bin/run#A1B2]\nSuccessfully wrote 10 bytes to bin/run\nNote: auto-stripped hashline \
-			 display prefixes from content before writing.\n[Notice: Made executable via chmod +x]"
+			"[bin/run#A1B2]\nSuccessfully wrote 10 bytes to bin/run"
 		);
+		let diags = diags(&payload).collect::<Vec<_>>();
+		assert_eq!(diags.len(), 2);
+		assert_eq!(diags[0].native_kind(), Some(DiagKind::ContentNormalized));
+		assert_eq!(diags[0].severity, Severity::Info);
+		assert_eq!(diags[0].continuation, None);
+		assert_eq!(diags[0].artifact, None);
+		assert_eq!(diags[0].omitted, None);
+		assert_eq!(diags[1].native_kind(), Some(DiagKind::MadeExecutable));
+		assert_eq!(diags[1].severity, Severity::Info);
+		assert_eq!(diags[1].continuation, None);
+		assert_eq!(diags[1].artifact, None);
+		assert_eq!(diags[1].omitted, None);
+	}
+
+	#[test]
+	fn conflict_echo_and_path_recovery_are_structured_diags() {
+		let payload = Payload {
+			resolved_path:      "/repo/src/a.rs".into(),
+			display_path:       "src/a.rs".into(),
+			canonical_recovery: Some("\"src/a.rs\" -> src/a.rs".into()),
+			byte_len:           10,
+			reported_len:       10,
+			disposition:        WriteDisposition::Overwrote,
+			stripped_wrapper:   false,
+			made_executable:    false,
+			snapshot_tag:       None,
+			operation:          WriteOperation::ConflictSplice {
+				id:           3,
+				start_line:   4,
+				end_line:     8,
+				echo_trimmed: 2,
+			},
+		};
+		assert_eq!(render_payload(&payload), "Resolved conflict #3 at src/a.rs:L4-L8");
+		let diags = diags(&payload).collect::<Vec<_>>();
+		assert_eq!(diags.len(), 2);
+		assert_eq!(diags[0].native_kind(), Some(DiagKind::PathRecovered));
+		assert_eq!(diags[0].severity, Severity::Info);
+		assert_eq!(diags[0].continuation, None);
+		assert_eq!(diags[0].artifact, None);
+		assert_eq!(diags[0].omitted, None);
+		assert_eq!(diags[1].native_kind(), Some(DiagKind::ContentNormalized));
+		assert_eq!(diags[1].severity, Severity::Info);
+		assert_eq!(diags[1].continuation, None);
+		assert_eq!(diags[1].artifact, None);
+		assert_eq!(diags[1].omitted, Some(Omitted { count: 2, unit: Unit::Lines }));
 	}
 
 	#[test]

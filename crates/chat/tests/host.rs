@@ -419,14 +419,14 @@ fn native_host_polls_background_update_actions_into_a_local_card() {
 	con.user::<HostMailbox>()
 		.expect("host mailbox")
 		.post(HostAction::UpdateAvailable(
-			omp_chat::notices::update::UpdateAvailable::new("99.0.0", "stable")
-				.expect("valid update"),
+			omp_chat::notices::update::UpdateAvailable::new("99.0.0", "stable").expect("valid update"),
 		));
 	assert_eq!(host.poll().expect("poll update"), NativeEffect::Consumed);
 	assert!(host.blocks().iter().any(|block| {
 		block.kind == BlockKind::Notice
 			&& block.text.as_str()
-				== "Update Available\nNew version 99.0.0 is available on the stable channel. Run: omp update"
+				== "Update Available\nNew version 99.0.0 is available on the stable channel. Run: omp \
+				    update"
 	}));
 }
 
@@ -535,8 +535,8 @@ fn explicit_resume_suppresses_intro_even_for_an_empty_journal() {
 	);
 }
 
-/// A host over the fixture journal, opened as pi's `--continue`/`--resume`
-/// path does (`resuming: true`) or as a fresh launch.
+/// A host over the fixture journal, opened with `resuming: true` or as a fresh
+/// launch.
 fn fixture_host(resuming: bool) -> NativeHost {
 	let (mut session, _) = fixture();
 	let (snapshot, dom_events) = session.subscribe();
@@ -567,7 +567,7 @@ fn fixture_host(resuming: bool) -> NativeHost {
 	)
 }
 
-/// pi `setHistoryStorage` at `interactive-mode.ts:968`: a resumed session's
+/// A resumed session's
 /// prompts are Up-arrow history from the first keypress.
 #[test]
 fn resumed_session_seeds_up_arrow_history_from_the_journal() {
@@ -651,7 +651,7 @@ fn real_png(width: u32, height: u32) -> Vec<u8> {
 	output.into_inner()
 }
 
-/// pi `internal-url-autocomplete.ts`: typing `scheme://` offers the
+/// Typing `scheme://` offers the
 /// resources the host can name — `local://` artifacts from the services
 /// seam and `agent://` ids from the live `<meta><jobs>` roster, which
 /// follows spawns as the replica changes.
@@ -724,7 +724,7 @@ fn composer_completion_popup_accepts_mouse_hits_and_requests_tracking() {
 	assert!(!host.mouse_tracking(), "acceptance closes the popup");
 }
 
-/// pi `applySpellingSettings`: the `cl_spelling_*` convars reach the live
+/// The `cl_spelling_*` convars reach the live
 /// editor on the next status sync, not only at boot.
 #[test]
 fn spelling_convars_reach_the_composer_editor() {
@@ -855,10 +855,10 @@ fn durable_history_seeds_up_down_and_records_accepted_submissions() {
 			_limit: usize,
 		) -> omp_chat::overlays::services::ServiceResult<Vec<omp_chat::history::HistoryEntry>> {
 			Ok(vec![omp_chat::history::HistoryEntry {
-				id: 1,
-				prompt: omp_core::Str::new_static("persisted prompt"),
+				id:         1,
+				prompt:     omp_core::Str::new_static("persisted prompt"),
 				created_at: 1,
-				cwd: Some(std::path::PathBuf::from("/project")),
+				cwd:        Some(std::path::PathBuf::from("/project")),
 				session_id: Some(omp_core::Str::new_static("old-session")),
 			}])
 		}
@@ -921,10 +921,10 @@ fn thinking_toggle_changes_projection_without_touching_dom() {
 	let (session, _) = fixture();
 	let ctx = omp_con::Ctx::new();
 	let before = session.dom().snapshot();
-	let shown = block_views(session.dom(), omp_con::CL_SHOWTHINKING.get(&ctx));
+	let shown = block_views(session.dom(), omp_chat::settings::CL_SHOWTHINKING.get(&ctx));
 	ctx.exec("toggle cl_showthinking", omp_con::Source::Console)
 		.expect("toggle command");
-	let hidden = block_views(session.dom(), omp_con::CL_SHOWTHINKING.get(&ctx));
+	let hidden = block_views(session.dom(), omp_chat::settings::CL_SHOWTHINKING.get(&ctx));
 	let after = session.dom().snapshot();
 
 	assert!(shown.iter().any(|block| block.kind == BlockKind::Thinking));
@@ -933,7 +933,7 @@ fn thinking_toggle_changes_projection_without_touching_dom() {
 }
 
 /// A host over a fresh fixture session with a live kernel-event feed and
-/// pi's default retry/interrupt binds.
+/// default retry/interrupt binds.
 fn kernel_host()
 -> (NativeHost, flume::Receiver<HostCommand>, flume::Sender<omp_agent::KernelEvent>, Session) {
 	let (mut session, _) = fixture();
@@ -1192,7 +1192,7 @@ fn idle_retry_hint_shows_after_a_turn_died_on_a_tool_call() {
 	assert!(row.contains("f5 to Retry"), "{row}");
 	assert!(text_of(host.frame()).contains("f5 to Retry"), "the native frame shows the hint");
 	// The advertised key runs the same predicate and hands the replay to
-	// the controller (pi `viewSession.retry()`), never a prompt resubmit.
+	// the controller, never a prompt resubmit.
 	host.key(Key::Function(5)).expect("retry key");
 	assert!(
 		matches!(commands.try_recv(), Ok(HostCommand::Retry)),
@@ -1203,7 +1203,7 @@ fn idle_retry_hint_shows_after_a_turn_died_on_a_tool_call() {
 }
 
 /// Journals `<notice kind=K name=N>` under the last turn exactly as the
-/// kernel does for `EnvEvent::Notice` (pi `custom_message` / `hookMessage`).
+/// kernel does for `EnvEvent::Notice`.
 fn append_named_notice(session: &mut Session, kind: &'static str, name: &'static str, body: &str) {
 	use omp_dom::{NodeSpec, Op, Txn, Value};
 	let turn = last_turn(session);
@@ -1246,7 +1246,7 @@ fn hook_message_is_a_journaled_notice_that_replays_rewinds_and_copies() {
 		Session::open(replay_path, ComponentRegistry::standard()).expect("reopen copied journal");
 	let replayed_blocks = block_views(replayed.dom(), true);
 	assert_eq!(replayed_blocks.last().map(|block| block.text.as_str()), Some(hook.text.as_str()));
-	// The copy selector offers it as pi's `message` outline target.
+	// The copy selector offers it as a `message` outline target.
 	let targets = omp_chat::overlays::copy::collect_targets(session.dom(), true, true, true);
 	let message = targets.last().expect("copy target");
 	assert_eq!(message.label, "message");
@@ -1272,7 +1272,7 @@ fn extension_message_folds_only_when_it_is_a_hook() {
 	host.poll().expect("apply dom events");
 	let frame = text_of(host.frame());
 	// One `l7` from the extension message (never folded); the hook shows
-	// its first five lines then pi's `…` fold.
+	// its first five lines then the `…` fold.
 	assert_eq!(frame.matches("l7").count(), 1, "{frame}");
 	assert!(frame.contains('…'), "{frame}");
 	assert!(frame.contains("irc:incoming") && frame.contains("audit"), "{frame}");
@@ -1485,7 +1485,7 @@ fn begin_local_run(session: &mut Session, mode: omp_chat::composer::PrefixMode) 
 		.expect("mark local run");
 }
 
-/// pi `#submitToFocusedSession`: `!` / `$` lines never run while a subagent
+/// `!` / `$` lines never run while a subagent
 /// is focused; the draft stays put and the status names the way back.
 #[test]
 fn local_prefixes_are_refused_while_a_subagent_is_focused_and_keep_the_draft() {
@@ -1509,7 +1509,7 @@ fn local_prefixes_are_refused_while_a_subagent_is_focused_and_keep_the_draft() {
 	}
 }
 
-/// pi `piSegment`: while a subagent is focused the band's brand slot holds
+/// While a subagent is focused the band's brand slot holds
 /// the ghost and the agent id, so the target of every submit stays visible
 /// after the transient notice has gone; leaving restores the brand glyph.
 #[test]
@@ -1606,7 +1606,7 @@ fn collaboration_status_tracks_outcomes_presence_snapshots_and_disconnect() {
 	assert!(!frame.contains("collab guest:"), "{frame}");
 }
 
-/// pi `handleSubmit` collab guest branch: local execution is host-only; the
+/// In a collab guest session, local execution is host-only; the
 /// line is consumed with a status and nothing is sent.
 #[test]
 fn local_prefixes_are_refused_for_a_collab_guest() {
@@ -1619,7 +1619,7 @@ fn local_prefixes_are_refused_for_a_collab_guest() {
 	assert!(commands.try_recv().is_err(), "the guest never runs a local tool");
 	assert!(!host.turn_active());
 	assert_eq!(host.notice(), Some("Local execution is host-only during a collab session"));
-	assert_eq!(host.composer_text(), "", "pi clears the consumed line");
+	assert_eq!(host.composer_text(), "", "the consumed line is cleared");
 }
 
 /// Reconnect progress and both recoverable and terminal diagnostics stay in
@@ -1713,7 +1713,7 @@ fn live_reconnect_and_errors_do_not_close_the_host_before_closed() {
 	assert!(commands.try_recv().is_err(), "Closed emits Stop exactly once");
 }
 
-/// Pi owns shell and evaluator activity independently: the active runner
+/// Shell and evaluator activity are independent: the active runner
 /// rejects only its own prefix and restores that draft; the other runner is
 /// admitted.
 #[test]
@@ -1795,7 +1795,7 @@ fn a_refused_local_run_restores_the_draft_and_rolls_back_activity() {
 }
 
 /// Dropping or pasting an image stages a `#1` chip; Enter submits the draft
-/// with pi's positional `[Image #1, WxH]` marker and normalized image bytes;
+/// with the positional `[Image #1, WxH]` marker and normalized image bytes;
 /// the controller content-addresses them beside the
 /// journaled prompt, and the transcript bubble shows the same compact chip
 /// the composer used.
@@ -1843,8 +1843,7 @@ fn pasted_image_chip_submits_attachments_and_the_bubble_shows_the_chip() {
 		user.text, "[Image #1, 200x200] what is this?",
 		"normalizing bytes never rewrites the source dimensions in the submitted marker"
 	);
-	// The painted bubble collapses the marker back into the composer's chip
-	// (pi `collapseImageMarkers` in `user-message.ts`).
+	// The painted bubble collapses the marker back into the composer's chip.
 	let frame = text_of(host.frame());
 	assert!(frame.contains(&format!("{image_icon} #1")), "bubble shows the chip:\n{frame}");
 	assert!(!frame.contains("[Image #1"), "the marker collapses:\n{frame}");

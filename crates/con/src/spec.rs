@@ -99,10 +99,12 @@ pub struct VarSpec {
 	pub on_change: Option<ChangeHook>,
 	/// Pre-commit veto hook.
 	pub validate:  Option<ValidateHook>,
+	/// Consumer-owned declaration metadata in declaration order.
+	pub meta:      &'static [(&'static str, &'static str)],
 }
 
 impl VarSpec {
-	/// New spec with no constraints, flags, hints, or hooks.
+	/// New spec with no constraints, flags, hints, metadata, or hooks.
 	#[must_use]
 	pub const fn new(
 		name: &'static str,
@@ -121,6 +123,7 @@ impl VarSpec {
 			hint: Hint::None,
 			on_change: None,
 			validate: None,
+			meta: &[],
 		}
 	}
 
@@ -164,6 +167,30 @@ impl VarSpec {
 	pub const fn validate(mut self, hook: ValidateHook) -> Self {
 		self.validate = Some(hook);
 		self
+	}
+
+	/// Sets consumer-owned declaration metadata.
+	#[must_use]
+	pub const fn meta(mut self, meta: &'static [(&'static str, &'static str)]) -> Self {
+		self.meta = meta;
+		self
+	}
+
+	/// Returns the first value declared for `key`.
+	#[must_use]
+	pub fn meta_get(&self, key: &str) -> Option<&'static str> {
+		self
+			.meta
+			.iter()
+			.find_map(|&(candidate, value)| (candidate == key).then_some(value))
+	}
+
+	/// Iterates every value declared for `key` in declaration order.
+	pub fn meta_all<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'static str> + 'a {
+		self
+			.meta
+			.iter()
+			.filter_map(move |&(candidate, value)| (candidate == key).then_some(value))
 	}
 }
 

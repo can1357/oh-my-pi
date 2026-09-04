@@ -34,17 +34,16 @@ rewrite of `pi`: port observable behavior, not TS shape.
   to `omp-journal` and folds into `omp-dom`; `omp-chat` is an actor over
   `Session::subscribe()` and never owns controller state.
   `crates/catalog`: model/provider data (`data/`) + transports.
-  `crates/inference`: typed requests → concrete Tower services, routing,
-  recovery middleware → `ChatEvent` streams.
+  `crates/ai`: typed requests → concrete Tower services, routing,
+  recovery middleware → `ChatEvent` streams (`omp-ai`).
 - `crates/tool`: revisioned tool contracts; `crates/tools`: implementations.
   `crates/env` (`omp-env`) is the typed environment-protocol client and owns no
   host resources. `crates/envd` (`omp-envd`) is the live project-environment
   host: daemon transport, filesystem/process/document/tool authorities, and
   Python extension-host/worker supervision. Host changes go to `omp-envd`;
   client protocol APIs go to `omp-env`.
-  `crates/docserver|ast|walker|hashline`: document authority, syntax, fs
-  discovery, anchored edits.
-  `crates/shell|shell-engine|shell-builtins`: facade, parser/runtime, built-ins.
+  `crates/edit|ast|walker`: multi-paradigm edit engine, syntax, fs discovery.
+  `crates/shell|shell-builtins`: in-process Bash parser/runtime, built-ins.
 - `crates/tui`+`tui-macros`: retained declarative UI; `crates/chat`: terminal
   and native chat actor/projections; `crates/gui`: native window host.
   None owns agent/provider policy.
@@ -63,7 +62,7 @@ adapter) → `omp-driver` chat/headless composition (environment, registries,
 journal, agent session, and higher-layer host bridges) → `omp-envd`
 project-environment host, reached through `omp-env` clients for effects →
 `agent/src/loop.rs` (mailbox input/interrupts, `TurnClient`, typed tool batches,
-durable `AgentEvent`s) → `omp-inference` (facade + Tower spine; streamed events
+durable `AgentEvent`s) → `omp-ai` (facade + Tower spine; streamed events
 → storage → app adapter) → TUI retained tree → terminal output materialized
 once at final renderer.
 
@@ -86,7 +85,7 @@ Linux; lint/tests/P1-P8/baseline on `macos-15` arm64 (CPython bundle
 Deps: all in root `[workspace.dependencies]`; members `{ workspace = true }`,
 NEVER pin versions. Extra features fine:
 `serde = { workspace = true, features = ["rc"] }`. `serde_json` always
-`preserve_order` + `raw_value`; `crates/slopjson` (broken/partial/streaming
+`preserve_order` + `raw_value`; `omp_core::slopjson` (broken/partial/streaming
 JSON) mirrors that surface.
 
 Env vars `OMP_*`, never `PI_*`; ported code strips upstream (`pi`, `uu`, …)
@@ -136,7 +135,7 @@ workspace = true
 Taxonomy: domain prefix after `omp-` (`omp-llm-*`, `omp-shell*`).
 **transport** = provider wire protocol ≠ **dialect** = thread rendering to the
 LLM; NEVER conflate. Providers = catalog data entries; code only for genuinely
-distinct wire behavior; routing stays in inference. `omp-tool` defines
+distinct wire behavior; routing stays in ai. `omp-tool` defines
 contracts, `omp-tools` implements — never inverted. Public daemon commands and
 same-binary child roles are dispatched by app; daemon implementation belongs
 in its host crate (`omp-envd` for the project environment), never in app
@@ -494,7 +493,7 @@ explicitly; regressing to pi shape = defect, not parity. Full audit ledger:
 - Runtime: tokio + rayon only (custom executor crates prohibited); local
   audio/ML via candle, never C/C++ binding graphs (whisper-rs, llama-cpp).
 - Feature graphs earn their weight: a crate enabling a feature whose code it
-  never imports (e.g. app → `omp-voice/realtime-transport` → WebRTC/DTLS/
+  never imports (e.g. app → `omp-inference/realtime` → WebRTC/DTLS/
   Opus) is a defect; cold `cargo run --bin omp` build time is a gate. No
   dual-committed catalog formats, no leftover port fixtures, no lockfiles
   nothing reads.
@@ -530,7 +529,7 @@ generated inputs.
 - Tests run under `cargo nextest run` (config: `.config/nextest.toml`), never
   bare `cargo test`. nextest does NOT run doctests, so every recipe pairs it
   with `cargo test --doc`; omp has doctests in 25+ modules (`crates/core`,
-  `crates/shell-*`, `crates/slopjson`). Adding a nextest call without the
+  `crates/shell`, `omp_core::slopjson`). Adding a nextest call without the
   doctest half silently drops that coverage. Prefer `just test` /
   `just test-pkg <crate>`, which already run both.
 - Protobuf: `protox`; no system `protoc`.

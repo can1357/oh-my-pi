@@ -1,27 +1,24 @@
-//! Second-model watchdog (pi `advisor/`): a Director whose engagement pairs
-//! the session with the `@advisor` role model, which reads the primary
-//! transcript as incremental *Session update*s and speaks only through the
-//! `advise` tool.
+//! Second-model watchdog: a Director whose engagement pairs the session with
+//! the `@advisor` role model, which reads the primary transcript as
+//! incremental *Session update*s and speaks only through the `advise` tool.
 //!
-//! Where pi runs the advisor as a concurrent agent that steers the primary
-//! from the outside, this Director reviews at the two points the kernel
-//! already exposes cold hooks for: every candidate yield
-//! ([`Director::before_yield`], pi's post-turn update) and, when
-//! `ai_advisor_sync_backlog` names a turn count, mid-turn once that many
-//! primary turns are unreviewed ([`Director::before_inference`], pi's
-//! `[in progress]` update). The review is one isolated inference on the
-//! advisor route; the kernel drops it on interrupt.
+//! Where the TS implementation runs the advisor as a concurrent agent that
+//! steers the primary from the outside, this Director reviews at the two
+//! points the kernel already exposes cold hooks for: every candidate yield
+//! ([`Director::before_yield`]) and, when `ai_advisor_sync_backlog` names a
+//! turn count, mid-turn once that many primary turns are unreviewed
+//! ([`Director::before_inference`]). The review is one isolated inference on
+//! the advisor route; the kernel drops it on interrupt.
 //!
-//! Delivery follows pi `resolveAdvisorDeliveryChannel`: a `nit` is an
-//! aside; a `concern`/`blocker` steers, except that a `concern` never wakes
-//! an idle primary that just gave a terminal answer with no queued work,
-//! never interrupts inside the post-interrupt immune window
-//! (`ai_advisor_immune_turns`), and never triggers a turn under plan mode.
-//! Every accepted note is journaled twice in the turn: the model-facing
-//! `<developer>` aside carrying pi's exact `<advisory>` bytes and the
-//! transcript's `<notice kind=advisor>` card. A steered note makes the
-//! Director consume the candidate yield (`Verdict::Continue`), which is how
-//! pi's `triggerTurn: true` reaches the loop.
+//! Delivery routes a `nit` as an aside and a `concern`/`blocker` as steering,
+//! except that a `concern` never wakes an idle primary that just gave a
+//! terminal answer with no queued work, never interrupts inside the
+//! post-interrupt immune window (`ai_advisor_immune_turns`), and never
+//! triggers a turn under plan mode. Every accepted note is journaled twice in
+//! the turn: the model-facing `<developer>` aside carrying exact
+//! `<advisory>` bytes and the transcript's `<notice kind=advisor>` card. A
+//! steered note makes the Director consume the candidate yield
+//! (`Verdict::Continue`) and start another turn.
 //!
 //! Everything durable is element state under `<meta><directors>`: roster
 //! health (`status`), whether the yielded turn is reviewed (`yielded`, the
@@ -32,14 +29,14 @@
 use std::{fmt::Write as _, sync::Arc};
 
 use futures::StreamExt;
+use omp_ai::{
+	ChatEvent, ChatRequest, Completion, ContentPart, ErrorKind, Message, OpaqueJson, Role, Setting,
+	ToolChoice, ToolDefinition, ToolInputConstraint, ToolResultContent,
+	settings::{AI_ADVISOR_ENABLED, AI_ADVISOR_IMMUNE_TURNS, AI_ADVISOR_SYNC_BACKLOG},
+};
 use omp_con::Ctx;
 use omp_core::{FastHashMap, FastHashSet, Str, sf};
 use omp_dom::{Dom, Handle, KnownTag, Node, NodeSpec, Op, PropId, PropKey, Tag, Value};
-use omp_inference::{
-	ChatEvent, ChatRequest, Completion, ContentPart, ErrorKind, Message, OpaqueJson, Role, Setting,
-	ToolChoice, ToolDefinition, ToolInputConstraint, ToolResultContent,
-	pi_settings::{AI_ADVISOR_ENABLED, AI_ADVISOR_IMMUNE_TURNS, AI_ADVISOR_SYNC_BACKLOG},
-};
 use omp_journal::data::{AdvisorMessage, ReceiptIdentity, ReceiptRole, TurnReceipt};
 pub use omp_journal::data::{AdvisorNote as Note, AdvisorSeverity as Severity};
 use omp_session::{Session, projection::project_thread};
@@ -53,10 +50,10 @@ use crate::director::{
 
 /// Director family and registry id.
 pub const FAMILY: &str = "advisor";
-/// Model selector the review runs on (pi `modelRoles.advisor`, defaulting to
-/// the `slow` chain through the catalog's known roles).
+/// Model selector the review runs on, defaulting to the `slow` chain through
+/// the catalog's known roles.
 pub const MODEL_SELECTOR: &str = "@advisor";
-/// pi `ADVISOR_GUIDANCE`: the primary's only cue for how to treat advice.
+/// The primary's only cue for how to treat advice.
 pub const GUIDANCE: &str = "weigh, don't blindly obey";
 const SYSTEM_PROMPT: &str = include_str!("../../prompts/modes/advisor.md");
 const ADVISE_DESCRIPTION: &str = include_str!("../../prompts/advisor/advise-tool.md");
@@ -65,20 +62,18 @@ const ADVISE_DESCRIPTION: &str = include_str!("../../prompts/advisor/advise-tool
 const TOOL_GRANT: &str = "Session-granted tools: none. Advise from the rendered transcript alone.";
 const HEADING: &str = "### Session update";
 const WIP_TRAILER: &str = "[in progress — more steps follow]";
-/// pi `AdvisorRuntime`: transient failures tolerated before the backlog is
-/// dropped and the roster reports `error`.
+/// Transient failures tolerated before the backlog is dropped and the roster
+/// reports `error`.
 const MAX_FAILURES: i64 = 3;
-/// pi `EXPANDED_TOOL_IO_MAX_BYTES` / `_LINES`: per-tool budget for expanded
-/// input and output.
+/// Per-tool budget for expanded input and output.
 const TOOL_IO_MAX_BYTES: usize = 8 * 1024;
 const TOOL_IO_MAX_LINES: usize = 80;
-/// pi `PRIMARY_ARG_MAX`: one-line argument preview length.
+/// One-line argument preview length.
 const PRIMARY_ARG_MAX: usize = 120;
 /// Whole-update bound; the head is elided when the backlog exceeds it.
 const UPDATE_MAX_BYTES: usize = 192 * 1024;
 const ELIDED_MARKER: &str = "[…content elided to fit advisor context…]";
-/// pi `PRIMARY_ARG_KEYS`: per-tool preference order for the most
-/// informative scalar argument.
+/// Per-tool preference order for the most informative scalar argument.
 const PRIMARY_ARG_KEYS: &[&str] = &[
 	"path",
 	"file_path",
@@ -96,8 +91,7 @@ const PRIMARY_ARG_KEYS: &[&str] = &[
 	"name",
 	"id",
 ];
-/// pi `SUPPRESSED_NORMALIZED_PHRASES`: content-free filler the emission guard
-/// drops.
+/// Content-free filler the emission guard drops.
 const CONTENT_FREE: &[&str] = &[
 	"stop",
 	"stop here",
@@ -138,7 +132,7 @@ const CONTENT_FREE: &[&str] = &[
 	"carry on",
 ];
 
-/// Runtime health of the advisor (pi `AdvisorRuntimeStatus`).
+/// Runtime health of the advisor.
 #[derive(Clone, Copy, Debug, Default, Display, EnumString, Eq, PartialEq)]
 #[strum(serialize_all = "snake_case")]
 pub enum Status {
@@ -155,7 +149,7 @@ pub enum Status {
 	NoModel,
 }
 
-/// How one accepted note reaches the primary (pi `AdvisorDeliveryChannel`).
+/// How one accepted note reaches the primary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Channel {
 	/// Non-interrupting: lands at the next step boundary.
@@ -166,7 +160,7 @@ pub enum Channel {
 	Preserve,
 }
 
-/// Facts the channel decision reads (pi `resolveAdvisorDeliveryChannel`).
+/// Facts the channel decision reads.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DeliveryFacts {
 	/// The primary loop is mid-turn (a sync-backlog review).
@@ -179,8 +173,8 @@ pub struct DeliveryFacts {
 	pub plan_mode: bool,
 }
 
-/// pi `resolveAdvisorDeliveryChannel` plus the plan-mode preserve rule that
-/// `#routeAdvice` applies to a steer.
+/// Resolves the delivery channel, including the plan-mode preserve rule for
+/// steering.
 #[must_use]
 pub fn delivery_channel(severity: Severity, facts: DeliveryFacts) -> Channel {
 	if !severity.interrupting() {
@@ -198,8 +192,8 @@ pub fn delivery_channel(severity: Severity, facts: DeliveryFacts) -> Channel {
 	Channel::Steer
 }
 
-/// pi `normalizeAdvisorNote`: lowercase, non-alphanumerics collapsed to one
-/// space, trimmed — the dedupe key.
+/// Lowercases, collapses non-alphanumerics to one space, and trims the dedupe
+/// key.
 #[must_use]
 pub fn normalize_note(note: &str) -> Str {
 	let mut normalized = String::with_capacity(note.len());
@@ -218,7 +212,7 @@ pub fn normalize_note(note: &str) -> Str {
 	Str::new(normalized)
 }
 
-/// pi `formatAdvisorBatchContent` for one note: the agent-facing bytes.
+/// Formats one note as agent-facing bytes.
 #[must_use]
 pub fn advisory_text(note: &Note) -> Str {
 	let advisor = if note.advisor == "default" {
@@ -240,14 +234,13 @@ pub struct Advisor {
 	/// Projected thread items already delivered to the advisor.
 	delivered:       i64,
 	/// Compaction markers seen when `delivered` was taken; a change re-primes
-	/// the advisor from the rewritten history (pi `#resetAllAdvisorRuntimes`).
+	/// the advisor from the rewritten history.
 	compactions:     i64,
 	failures:        i64,
-	/// Primary turns completed since engagement (pi
-	/// `#advisorPrimaryTurnsCompleted`).
+	/// Primary turns completed since engagement.
 	completed_turns: i64,
-	/// `completed_turns` when the last interrupting note was delivered (pi
-	/// `#advisorInterruptImmuneTurnStart`); `-1` when none.
+	/// `completed_turns` when the last interrupting note was delivered; `-1`
+	/// when none.
 	immune_start:    i64,
 	/// A steered note awaits the candidate-yield verdict.
 	pending_steer:   bool,
@@ -260,8 +253,8 @@ impl Default for Advisor {
 }
 
 impl Advisor {
-	/// Creates a running advisor whose first update delivers the whole
-	/// primary transcript (pi's initial full render).
+	/// Creates a running advisor whose first update delivers the whole primary
+	/// transcript.
 	#[must_use]
 	pub const fn new() -> Self {
 		Self {
@@ -305,7 +298,7 @@ impl Advisor {
 		self.yielded
 	}
 
-	/// pi `isAdvisorInterruptImmuneTurnActive`.
+	/// Whether the post-interrupt immune window remains active.
 	fn immune_active(&self, con: Option<&Ctx>) -> bool {
 		let immune_turns = con.map_or(3, |con| AI_ADVISOR_IMMUNE_TURNS.get(con));
 		self.immune_start >= 0
@@ -366,8 +359,8 @@ impl Advisor {
 				updates.push(StateUpdate::new("failures", BindValue::Int(0)));
 				updates.push(StateUpdate::new("delivered", BindValue::Int(items.len() as i64)));
 				updates.push(StateUpdate::new("compactions", BindValue::Int(compactions)));
-				// pi `AdvisorEmissionGuard`: noise, session dedupe, one accepted
-				// note per update; a suppressed note never burns the slot.
+				// Reject noise, session duplicates, and all but one note per
+				// update; a suppressed note never burns the slot.
 				let accepted = review.notes.into_iter().find(|note| {
 					let key = normalize_note(note.note.as_str());
 					!key.is_empty() && !CONTENT_FREE.contains(&key.as_str()) && seen.insert(key)
@@ -383,8 +376,8 @@ impl Advisor {
 					ops.push(notice_op(dom, cx.turn, std::slice::from_ref(&note))?);
 					ops.push(developer_op(dom, cx.turn, advisory_text(&note)));
 					if channel == Channel::Steer {
-						// pi `#recordAdvisorInterruptDelivered`: arm the immune
-						// window only when a turn is actually steered.
+						// Arm the immune window only when a turn is actually
+						// steered.
 						updates.push(StateUpdate::new(
 							"immune_start",
 							BindValue::Int(self.completed_turns.saturating_add(1)),
@@ -456,8 +449,8 @@ impl Director for Advisor {
 		_req: &'a ChatRequest,
 	) -> BoxFut<'a, Result<Prepared, DirectorError>> {
 		Box::pin(async move {
-			// pi `advisor.syncBacklog`: `off`, or the number of primary turns
-			// the advisor may fall behind before the primary waits for it.
+			// `off`, or the number of primary turns the advisor may fall behind
+			// before the primary waits for it.
 			let Some(threshold) = cx
 				.con
 				.and_then(|con| AI_ADVISOR_SYNC_BACKLOG.get(con).parse::<usize>().ok())
@@ -494,7 +487,7 @@ impl Director for Advisor {
 
 	fn observe_turn(&self, _dom: &Dom, _cx: &DirectorCx<'_>, _turn: &TurnView) -> Vec<StateUpdate> {
 		// A completed primary turn re-opens the eye until the yield review
-		// catches up and advances the immune fence (pi `turn_end`).
+		// catches up and advances the immune fence.
 		let mut updates = vec![StateUpdate::new(
 			"completed_turns",
 			BindValue::Int(self.completed_turns.saturating_add(1)),
@@ -507,8 +500,8 @@ impl Director for Advisor {
 
 	fn evaluate(&self, _dom: &Dom, _cx: &DirectorCx<'_>, _turn: &TurnView) -> DirectorEffect {
 		if self.pending_steer {
-			// The advisory is already in the turn; consuming the yield is pi's
-			// `triggerTurn: true`.
+			// The advisory is already in the turn; consume the yield to start
+			// another turn.
 			DirectorEffect::new(Verdict::Continue { reminder: None })
 				.with_update("pending_steer", BindValue::Bool(false))
 		} else {
@@ -518,7 +511,7 @@ impl Director for Advisor {
 }
 
 /// Engages the advisor at launch when `ai_advisor_enabled` is set (`--advisor`
-/// or the archived pi `advisor.enabled`); idempotent.
+/// or the archived `advisor.enabled`); idempotent.
 pub fn apply_launch(session: &mut Session, con: &Ctx) -> Result<(), DirectorError> {
 	if !AI_ADVISOR_ENABLED.get(con) {
 		return Ok(());
@@ -564,7 +557,7 @@ fn unreviewed_assistant_turns(dom: &Dom, delivered: i64) -> usize {
 		.count()
 }
 
-/// pi `hasQueuedMessages`: a queued follow-up prompt awaits the yield.
+/// Whether a queued follow-up prompt awaits the yield.
 fn queued_prompts(dom: &Dom) -> bool {
 	dom.children(dom.queues()).iter().any(|queue| {
 		dom.get(*queue)
@@ -655,9 +648,8 @@ fn developer_op(dom: &Dom, turn: Handle, text: Str) -> Op {
 	}
 }
 
-/// The advisor request: pi's advisor system prompt, the `advise` tool, the
-/// advisor's own earlier notes (its append-only context in pi), then the
-/// session update.
+/// The advisor request: the system prompt, the `advise` tool, the advisor's
+/// own earlier notes as append-only context, then the session update.
 fn advisor_request(update: Str, earlier: &[Note]) -> ChatRequest {
 	let mut system = String::with_capacity(SYSTEM_PROMPT.len() + TOOL_GRANT.len() + 2);
 	system.push_str(SYSTEM_PROMPT);
@@ -706,11 +698,11 @@ fn advisor_request(update: Str, earlier: &[Note]) -> ChatRequest {
 		verbosity:         Setting::Unset,
 		cache_retention:   Setting::Unset,
 		service_tier:      Setting::Unset,
-		sampling:          omp_inference::Sampling::default(),
+		sampling:          omp_ai::Sampling::default(),
 		max_output_tokens: None,
 		top_logprobs:      None,
 		safety:            Arc::from([]),
-		negotiation:       omp_inference::NegotiationPolicy::default(),
+		negotiation:       omp_ai::NegotiationPolicy::default(),
 		forced_call:       None,
 	}
 }
@@ -728,9 +720,7 @@ struct Review {
 
 /// Drains the advisor stream into its `advise` calls and authoritative
 /// completion receipt.
-async fn collect_notes(
-	mut stream: omp_inference::ChatStream,
-) -> Result<Review, omp_inference::Error> {
+async fn collect_notes(mut stream: omp_ai::ChatStream) -> Result<Review, omp_ai::Error> {
 	let mut notes = Vec::new();
 	let mut receipt = None;
 	while let Some(event) = stream.next().await {
@@ -830,9 +820,9 @@ fn advisor_receipt(completion: &Completion) -> Option<TurnReceipt> {
 	})
 }
 
-/// pi `renderAdvisorDeltaChunks` + `formatSessionHistoryMarkdown` in watched
-/// mode: role labels (consecutive same-role messages collapse), thinking
-/// included, tool calls as one line with intent, expanded bounded results.
+/// Renders a watched update with role labels (consecutive same-role messages
+/// collapse), included thinking, one-line tool calls with intent, and expanded
+/// bounded results.
 #[must_use]
 pub fn render_update(messages: &[Message], wip: bool) -> Str {
 	let mut results: FastHashMap<&str, (&[ToolResultContent], bool)> = FastHashMap::default();
@@ -948,7 +938,7 @@ fn push_labeled(
 	body.push('\n');
 }
 
-/// pi `contentToText`: text parts joined, media as `[image]`.
+/// Joins text parts and renders media as `[image]`.
 fn content_text(content: &[ContentPart]) -> String {
 	let mut text = String::new();
 	for part in content {
@@ -987,7 +977,7 @@ fn result_text(content: &[ToolResultContent]) -> String {
 	text
 }
 
-/// pi `toolCallLine` with `includeToolIntent` and `expandToolIO`.
+/// Renders a tool call with its intent and expanded I/O.
 fn tool_call_line(
 	name: &str,
 	args: Option<&serde_json::Value>,
@@ -1049,7 +1039,7 @@ fn primary_arg_value(value: &serde_json::Value) -> Option<String> {
 	}
 }
 
-/// pi `formatToolCallPrimaryArg`.
+/// Selects and formats a tool call's primary argument.
 fn primary_arg(name: &str, args: &serde_json::Value) -> String {
 	let Some(object) = args.as_object() else {
 		return String::new();
@@ -1113,7 +1103,7 @@ fn primary_arg(name: &str, args: &serde_json::Value) -> String {
 	one_line(&serde_json::Value::Object(rest).to_string(), PRIMARY_ARG_MAX)
 }
 
-/// pi `oneLine`: whitespace runs collapsed, truncated to `max` chars.
+/// Collapses whitespace runs and truncates to `max` chars.
 fn one_line(text: &str, max: usize) -> String {
 	let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
 	if flat.chars().count() > max {
@@ -1125,7 +1115,7 @@ fn one_line(text: &str, max: usize) -> String {
 	}
 }
 
-/// pi `truncateMiddle` under both a byte and a line budget.
+/// Truncates the middle under both a byte and a line budget.
 fn truncate_middle(text: &str, max_bytes: usize, max_lines: usize) -> (String, bool) {
 	let lines = text.lines().count();
 	if text.len() <= max_bytes && lines <= max_lines {
@@ -1176,8 +1166,8 @@ fn clip_start(text: &str, max: usize) -> &str {
 	&text[cut..]
 }
 
-/// pi `boundedFencedToolContext`: an adaptive fence sized past the longest
-/// backtick run, or indented code when the run would eat the budget.
+/// Uses an adaptive fence sized past the longest backtick run, or indented
+/// code when the run would eat the budget.
 fn bounded_fenced(text: &str, language: &str) -> String {
 	let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
 	if longest * 2 > TOOL_IO_MAX_BYTES / 2 {
@@ -1233,23 +1223,23 @@ mod tests {
 
 	#[test]
 	fn completion_projects_an_independent_advisor_receipt_with_serving_identity() {
-		let mut execution = omp_inference::ExecutionReceipt::default();
-		execution.serving_model = Some(omp_inference::ServingModelAttribution {
-			provider: omp_inference::ProviderId::from("anthropic"),
-			model:    omp_inference::ModelKey::from("claude-sonnet-4-5"),
+		let mut execution = omp_ai::ExecutionReceipt::default();
+		execution.serving_model = Some(omp_ai::ServingModelAttribution {
+			provider: omp_ai::ProviderId::from("anthropic"),
+			model:    omp_ai::ModelKey::from("claude-sonnet-4-5"),
 			attempt:  0,
 		});
-		execution.cost = omp_inference::Cost::from_micro_usd(80_000);
+		execution.cost = omp_ai::Cost::from_micro_usd(80_000);
 		execution.timings.first_frame = Some(std::time::Duration::from_millis(420));
 		execution.timings.total = std::time::Duration::from_millis(1_500);
 		let receipt = advisor_receipt(&Completion {
-			reason:  omp_inference::FinishReason::Stop,
+			reason:  omp_ai::FinishReason::Stop,
 			blocks:  1,
-			usage:   omp_inference::Usage {
+			usage:   omp_ai::Usage {
 				input_tokens: 7_000,
 				output_tokens: 80,
 				cache_read_tokens: 2_000,
-				..omp_inference::Usage::default()
+				..omp_ai::Usage::default()
 			},
 			receipt: Box::new(execution),
 		})
@@ -1370,7 +1360,7 @@ mod tests {
 			Message {
 				role:    Role::Assistant,
 				content: Arc::from([ContentPart::ToolCall {
-					call:      omp_inference::ToolCallId::from("c1"),
+					call:      omp_ai::ToolCallId::from("c1"),
 					name:      Str::new_static("bash"),
 					arguments: OpaqueJson::new(serde_json::json!({"i": "Listing", "command": "ls"})),
 					proof:     None,
@@ -1380,7 +1370,7 @@ mod tests {
 			Message {
 				role:    Role::Tool,
 				content: Arc::from([ContentPart::ToolResult {
-					call:     omp_inference::ToolCallId::from("c1"),
+					call:     omp_ai::ToolCallId::from("c1"),
 					name:     Some(Str::new_static("bash")),
 					content:  Arc::from([ToolResultContent::Text(Str::new(long))]),
 					is_error: false,

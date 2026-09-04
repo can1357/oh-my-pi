@@ -43,7 +43,7 @@ use omp_proto::{
 	thread::v1::Blob as WireBlob,
 	toolhost::v1::{HostFrame, Ping, WorkerFrame, host_frame, worker_frame},
 };
-use omp_shell_engine::{
+use omp_shell::{
 	ExecutionParameters, PathAccess, ProcessScope, Shell, ShellValue, ShellVariable, SourceInfo,
 	SpawnObserver, SpawnWrapper,
 	env::EnvironmentScope,
@@ -480,6 +480,7 @@ struct SessionCommand {
 	github_targets: Vec<GithubMutationTarget>,
 	sandbox: Option<Arc<ExecSandbox>>,
 	sandbox_announced: Arc<AtomicBool>,
+	diags: Arc<Mutex<Vec<omp_tool::Diag>>>,
 	sequence: Arc<AtomicU64>,
 	rerun: bool,
 	sandbox_environment_update: bool,
@@ -710,11 +711,11 @@ impl ExecHost {
 			},
 		);
 		let mut builder = Shell::builder()
-			.profile(omp_shell_engine::ProfileLoadBehavior::Skip)
-			.rc(omp_shell_engine::RcLoadBehavior::Skip)
+			.profile(omp_shell::ProfileLoadBehavior::Skip)
+			.rc(omp_shell::RcLoadBehavior::Skip)
 			.working_dir(cwd)
 			.do_not_inherit_env(true)
-			.builtins(omp_shell_engine::builtins::default_builtins())
+			.builtins(omp_shell::builtins::default_builtins())
 			.builtins(
 				omp_shell_builtins::utility_builtins()
 					.into_iter()
@@ -975,6 +976,7 @@ impl ExecHost {
 			github_targets,
 			sandbox: session.sandbox,
 			sandbox_announced: session.sandbox_announced,
+			diags: Arc::new(Mutex::new(Vec::new())),
 			sequence: Arc::new(AtomicU64::new(1)),
 			rerun: false,
 			sandbox_environment_update: false,
@@ -1645,18 +1647,17 @@ impl ExecHost {
 			.timeout_ms
 			.filter(|timeout| *timeout != 0)
 			.map(Duration::from_millis);
-		let due_ms = record.restart_history.last().map_or(0, |restart| {
-			restart.at_ms.saturating_add(restart.delay_ms)
-		});
+		let due_ms = record
+			.restart_history
+			.last()
+			.map_or(0, |restart| restart.at_ms.saturating_add(restart.delay_ms));
 		let delay = Duration::from_millis(due_ms.saturating_sub(unix_time_ms()));
 		if !self.inner.starting.lock().insert(record.name.clone()) {
 			let _ = self.mark_recovered_terminal(&record, ProcessPhase::Failed);
 			return;
 		}
-		let reservation = ProcessReservation {
-			host: Arc::downgrade(&self.inner),
-			name: record.name.clone(),
-		};
+		let reservation =
+			ProcessReservation { host: Arc::downgrade(&self.inner), name: record.name.clone() };
 		let Ok(runtime) = runtime::Handle::try_current() else {
 			let _ = self.mark_recovered_terminal(&record, ProcessPhase::Failed);
 			return;
@@ -1669,14 +1670,7 @@ impl ExecHost {
 			let generation = record.generation.saturating_add(1);
 			let launched = if record.detached {
 				host
-					.launch_detached(
-						name,
-						spec,
-						ready,
-						generation,
-						Some(&record),
-						timeout,
-					)
+					.launch_detached(name, spec, ready, generation, Some(&record), timeout)
 					.await
 			} else {
 				host
@@ -2103,14 +2097,18 @@ impl ExecHost {
 		if !self.inner.starting.lock().insert(name.clone()) {
 			return Err(ExecError::ProcessExists(name));
 		}
-		let retained_generation =
-			self.persisted_record(&name).map_or(0, |record| record.generation);
+		let retained_generation = self
+			.persisted_record(&name)
+			.map_or(0, |record| record.generation);
 		let generation = if let Some(process) = self.inner.processes.lock().get(&name).cloned() {
 			if !process_state_is_terminal(process.stream.lock().info.state) {
 				self.inner.starting.lock().remove(&name);
 				return Err(ExecError::ProcessExists(name));
 			}
-			process.generation.max(retained_generation).saturating_add(1)
+			process
+				.generation
+				.max(retained_generation)
+				.saturating_add(1)
 		} else {
 			retained_generation.saturating_add(1)
 		};
@@ -2319,9 +2317,10 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 	if let Some(sandbox) = command.sandbox.as_ref()
 		&& !command.sandbox_announced.swap(true, Ordering::AcqRel)
 	{
-		sequencer
+		command
+			.diags
 			.lock()
-			.sandbox_note(&command.exec, sandbox.session_note());
+			.push(omp_tool::Diag::info(omp_tool::DiagKind::Sandbox, sandbox.session_note().clone()));
 	}
 	let attempt = command.sandbox.as_ref().map(ExecSandbox::begin_attempt);
 	let environment_scoped =
@@ -2361,7 +2360,7 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 	let _ = command
 		.events
 		.send(ExecEvent::Started { exec_id: command.exec.clone() });
-	params.process_group_policy = omp_shell_engine::ProcessGroupPolicy::NewProcessGroup;
+	params.process_group_policy = omp_shell::ProcessGroupPolicy::NewProcessGroup;
 	params.set_spawn_observer(command.control.spawns.clone());
 	params.set_process_scope(command.control.spawns.clone());
 	params.set_protect_host_process(true);
@@ -2378,7 +2377,10 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 			}
 		};
 		tokio::pin!(timeout);
-		let execution = shell.run_string(command.source.to_string(), &source_info, &params);
+		let execution = crate::devices_host::scope_exec_diags(
+			Arc::clone(&command.diags),
+			shell.run_string(command.source.to_string(), &source_info, &params),
+		);
 		tokio::pin!(execution);
 		tokio::select! {
 			  result = &mut execution => match result {
@@ -2462,10 +2464,10 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 					ApprovedSandboxAmendment::Network(fact) => sandbox.amended_network(fact),
 				};
 				if let Ok(Some(sandbox)) = amended {
-					sequencer.lock().sandbox_note(
-						&command.exec,
-						&sf!("[sandbox] rerun with approved scope: {scope}"),
-					);
+					command.diags.lock().push(omp_tool::Diag::info(
+						omp_tool::DiagKind::Sandbox,
+						sf!("sandbox: rerun with approved scope: {scope}"),
+					));
 					let mut rerun = command.clone();
 					rerun.sandbox = Some(sandbox);
 					rerun.rerun = true;
@@ -2534,9 +2536,11 @@ fn finish_session_command(
 			let _ = cache.invalidate_repo(&repo);
 		}
 	}
+	let mut status = result.status_with_projection(elapsed, spilled_output, projection);
+	status.diags = command.diags.lock().iter().map(wire_diag).collect();
 	let event = ExecEvent::Exit(ExitEvent {
 		exec: command.exec.clone(),
-		status: Some(result.status_with_projection(elapsed, spilled_output, projection)),
+		status: Some(status),
 		final_cwd_uri,
 		final_cwd_revision,
 		props: Default::default(),
@@ -2560,6 +2564,34 @@ fn wire_blob(reference: &omp_journal::blob::BlobRef) -> WireBlob {
 		size:   reference.size,
 		inline: Bytes::new(),
 		detail: Default::default(),
+	}
+}
+
+pub(crate) fn wire_diag(diag: &omp_tool::Diag) -> v1::ToolDiag {
+	let severity = match diag.severity {
+		omp_tool::Severity::Info => v1::ToolDiagSeverity::Info,
+		omp_tool::Severity::Warn => v1::ToolDiagSeverity::Warn,
+		omp_tool::Severity::Error => v1::ToolDiagSeverity::Error,
+	};
+	let omitted = diag.omitted.map(|omitted| v1::ToolDiagOmitted {
+		count: omitted.count,
+		unit:  match omitted.unit {
+			omp_tool::Unit::Lines => v1::ToolDiagUnit::Lines,
+			omp_tool::Unit::Rows => v1::ToolDiagUnit::Rows,
+			omp_tool::Unit::Entries => v1::ToolDiagUnit::Entries,
+			omp_tool::Unit::Files => v1::ToolDiagUnit::Files,
+			omp_tool::Unit::Bytes => v1::ToolDiagUnit::Bytes,
+			omp_tool::Unit::Chars => v1::ToolDiagUnit::Chars,
+			omp_tool::Unit::Items => v1::ToolDiagUnit::Items,
+		} as i32,
+	});
+	v1::ToolDiag {
+		severity: severity as i32,
+		kind: diag.kind.to_string(),
+		text: diag.text.to_string(),
+		continuation: diag.continuation.as_ref().map(ToString::to_string),
+		artifact: diag.artifact.as_ref().map(ToString::to_string),
+		omitted,
 	}
 }
 
@@ -2598,6 +2630,7 @@ impl RunTerminal {
 			spilled_output,
 			aborted,
 			projection,
+			diags: Vec::new(),
 			props,
 		}
 	}
@@ -2652,15 +2685,13 @@ fn classify_sandbox_denial(
 	sandbox_active: bool,
 	broker_denial: Option<SandboxDenialFact>,
 	result: &RunTerminal,
-	error: Option<&omp_shell_engine::Error>,
+	error: Option<&omp_shell::Error>,
 	stderr: &[u8],
 ) -> Option<SandboxDenial> {
 	if !sandbox_active {
 		return None;
 	}
-	if let Some(omp_shell_engine::ErrorKind::PathDenied(denied)) =
-		error.map(omp_shell_engine::Error::kind)
-	{
+	if let Some(omp_shell::ErrorKind::PathDenied(denied)) = error.map(omp_shell::Error::kind) {
 		return Some(SandboxDenial {
 			exit_code: None,
 			fact:      match denied.access {
@@ -2776,7 +2807,6 @@ fn setup_io(
 		sequence,
 		events,
 		output,
-		at_line_start: true,
 		sandbox_diagnostic: capture_sandbox_diagnostic.then(Vec::new),
 	}));
 	if let Some(pty) = pty {
@@ -2930,7 +2960,6 @@ struct OutputSequencer {
 	sequence:           Arc<AtomicU64>,
 	events:             flume::Sender<ExecEvent>,
 	output:             Arc<Mutex<OutputCapture>>,
-	at_line_start:      bool,
 	sandbox_diagnostic: Option<Vec<u8>>,
 }
 impl OutputSequencer {
@@ -2951,33 +2980,6 @@ impl OutputSequencer {
 			diagnostic.drain(..discard);
 		}
 	}
-
-	fn sandbox_note(&mut self, exec: &Bytes, note: &str) {
-		let mut data = Vec::with_capacity(note.len() + usize::from(!self.at_line_start) + 1);
-		if !self.at_line_start {
-			data.push(b'\n');
-		}
-		data.extend_from_slice(note.as_bytes());
-		data.push(b'\n');
-		let projected = self.output.lock().project(&data);
-		if let Some(data) = projected {
-			if self
-				.events
-				.try_send(ExecEvent::Output(OutputFrame {
-					exec: exec.clone(),
-					channel: OutputChannel::Stderr as i32,
-					data,
-					sequence: self.next,
-					..OutputFrame::default()
-				}))
-				.is_err()
-			{
-				self.output.lock().close_projection();
-			}
-		}
-		self.next += 1;
-		self.sequence.store(self.next, Ordering::Release);
-	}
 }
 
 fn spawn_reader<R: Read + Send + 'static>(
@@ -2994,7 +2996,6 @@ fn spawn_reader<R: Read + Send + 'static>(
 				Ok(read) => read,
 			};
 			let mut sequencer = sequencer.lock();
-			sequencer.at_line_start = buffer[read - 1] == b'\n';
 			if matches!(channel, OutputChannel::Stderr | OutputChannel::Pty) {
 				sequencer.capture_sandbox_diagnostic(&buffer[..read]);
 			}
@@ -3721,7 +3722,7 @@ fn apply_sandbox_environment(
 	shell: &mut Shell,
 	sandbox: &impl SpawnWrapper,
 	scope: EnvironmentScope,
-) -> Result<(), omp_shell_engine::Error> {
+) -> Result<(), omp_shell::Error> {
 	let inherited = shell
 		.env()
 		.iter_exported()
@@ -3768,7 +3769,7 @@ fn apply_amended_proxy_environment(
 	shell: &mut Shell,
 	sandbox: &impl SpawnWrapper,
 	scope: EnvironmentScope,
-) -> Result<(), omp_shell_engine::Error> {
+) -> Result<(), omp_shell::Error> {
 	let inherited = shell
 		.env()
 		.iter_exported()
@@ -3802,7 +3803,7 @@ fn apply_amended_proxy_environment(
 fn apply_run_environment_delta(
 	shell: &mut Shell,
 	delta: &EnvironmentDelta,
-) -> Result<(), omp_shell_engine::Error> {
+) -> Result<(), omp_shell::Error> {
 	for name in &delta.unset {
 		let mut variable = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
 		variable.export();
@@ -3823,7 +3824,7 @@ fn apply_run_environment_delta(
 fn apply_env_delta(
 	shell: &mut Shell,
 	delta: Option<&EnvironmentDelta>,
-) -> Result<(), omp_shell_engine::Error> {
+) -> Result<(), omp_shell::Error> {
 	let Some(delta) = delta else { return Ok(()) };
 	for name in &delta.unset {
 		shell.env_mut().unset(name)?;
@@ -3964,7 +3965,7 @@ fn clamp_u16(value: u32) -> u16 {
 	value.min(u32::from(u16::MAX)) as u16
 }
 
-fn shell_error(error: omp_shell_engine::Error) -> ExecError {
+fn shell_error(error: omp_shell::Error) -> ExecError {
 	ExecError::Shell(Str::from(error.to_string()))
 }
 
@@ -4005,9 +4006,9 @@ mod tests {
 	#[test]
 	fn sandbox_denial_classification_is_typed_and_conservative() {
 		let denied_path = PathBuf::from("/private/blocked");
-		let write_error: omp_shell_engine::Error = omp_shell_engine::PathDenied {
+		let write_error: omp_shell::Error = omp_shell::PathDenied {
 			path:   denied_path.clone(),
-			access: omp_shell_engine::PathAccess::Write,
+			access: omp_shell::PathAccess::Write,
 		}
 		.into();
 		let denial =
@@ -4227,7 +4228,10 @@ mod tests {
 			}
 		}
 	}
-	async fn run_failure(host: &ExecHost, request: ExecRequest) -> (i32, Option<i32>, Vec<u8>) {
+	async fn run_failure(
+		host: &ExecHost,
+		request: ExecRequest,
+	) -> (i32, Option<i32>, Vec<u8>, Vec<v1::ToolDiag>) {
 		let (_, run) = host.exec(request, None).await.expect("exec starts");
 		let mut output = Vec::new();
 		loop {
@@ -4235,7 +4239,7 @@ mod tests {
 				Some(ExecEvent::Output(frame)) => output.extend_from_slice(&frame.data),
 				Some(ExecEvent::Exit(event)) => {
 					let status = event.status.expect("exit status");
-					return (status.outcome, status.exit_code, output);
+					return (status.outcome, status.exit_code, output, status.diags);
 				},
 				Some(ExecEvent::Started { .. }) => {},
 				None => panic!("exec event stream closed before exit"),
@@ -4286,14 +4290,17 @@ mod tests {
 		let session = &opened.session;
 
 		// Software lane: the same redirection into the carve-out is denied.
-		let (outcome, exit, output) =
+		let (outcome, exit, output, diags) =
 			run_failure(&host, script_request(session, "echo no > .git/blocked.txt")).await;
 		assert_eq!(outcome, ExecOutcome::Denied as i32);
 		assert_ne!(exit, Some(0));
 		let output = String::from_utf8_lossy(&output);
 		assert!(output.contains("sandbox denied write"));
 		assert!(output.contains(".git/blocked.txt"));
-		assert_eq!(output.matches("sandbox: backend=").count(), 1);
+		assert!(!output.contains("sandbox: backend="));
+		assert_eq!(diags.len(), 1);
+		assert_eq!(diags[0].kind, "sandbox");
+		assert!(diags[0].text.contains("sandbox: backend="));
 		assert!(!workspace.join(".git/blocked.txt").exists());
 
 		// The one-time session note must not change ordinary command behavior.
@@ -4591,7 +4598,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn concurrent_sessions_own_distinct_sandbox_denial_slots() {
-		use omp_shell_engine::PathPolicy as _;
+		use omp_shell::PathPolicy as _;
 
 		let root = tempfile::tempdir().expect("workspace");
 		let host = ExecHost::new();
@@ -4787,12 +4794,12 @@ mod tests {
 		let host = ExecHost::new();
 		let mut request = process_request("fast-ready-exit", root.path(), "printf READY");
 		request.ready.push(ReadyProbe {
-			probe: Some(ready_probe::Probe::Log(v1::ReadyLog {
+			probe:      Some(ready_probe::Probe::Log(v1::ReadyLog {
 				pattern: String::from("READY"),
-				props: None,
+				props:   None,
 			})),
 			timeout_ms: 1_000,
-			props: None,
+			props:      None,
 		});
 		let started = host
 			.start_process(request)

@@ -13,8 +13,6 @@ pub mod compress;
 pub mod discovery;
 pub mod ext_updates;
 pub mod headless;
-/// Additional literal pi driver-setting convars.
-pub mod pi_settings;
 pub mod prompt_input;
 pub mod prompt_templates;
 pub mod registry;

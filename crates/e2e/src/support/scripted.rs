@@ -8,7 +8,7 @@ use std::{
 };
 
 use omp_agent::Inference;
-use omp_inference::{ChatEvent, ChatRequest, ChatStream, RequestId, ResponseMeta};
+use omp_ai::{ChatEvent, ChatRequest, ChatStream, RequestId, ResponseMeta};
 use parking_lot::Mutex;
 
 /// Captured canonical inference requests.
@@ -32,7 +32,7 @@ impl Inference for ScriptedInference {
 	fn chat(
 		&mut self,
 		request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		self.requests.lock().push(request);
 		let events = self
 			.scripts

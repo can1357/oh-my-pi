@@ -6,8 +6,8 @@ use bytes::{Bytes, BytesMut};
 use flume::Sender;
 use futures::StreamExt as _;
 use http::{HeaderMap, HeaderValue, header::USER_AGENT};
+use omp_ai::auth::{CredentialLease, HeaderPlacement};
 use omp_core::{Str, sf};
-use omp_inference::auth::{CredentialLease, HeaderPlacement};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -56,8 +56,8 @@ impl Default for SpeechConfig {
 	}
 }
 
-/// One validated producer request. The output codec is derived from the path,
-/// matching pi: `.wav` requests WAV and every other suffix requests MP3.
+/// One validated producer request. The output codec is derived from the path:
+/// `.wav` requests WAV and every other suffix requests MP3.
 #[derive(Clone, Debug)]
 pub(crate) struct SpeechInput {
 	pub(crate) text:        Str,
@@ -92,7 +92,7 @@ pub(crate) struct SpeechProducer {
 	credentials: Arc<GithubCredentialBridge>,
 	client:      omp_http::Client,
 	#[cfg(feature = "local-tts")]
-	local:       tokio::sync::OnceCell<Arc<omp_inference::local::tts::KokoroAdapter>>,
+	local:       tokio::sync::OnceCell<Arc<omp_ai::local::tts::KokoroAdapter>>,
 }
 
 impl SpeechProducer {
@@ -401,7 +401,7 @@ impl SpeechProducer {
 		cancellation: CancellationToken,
 		updates: Sender<SpeechProgress>,
 	) -> Result<SpeechOutput, MediaFault> {
-		use omp_inference::local::{
+		use omp_ai::local::{
 			ArtifactStore, MemoryPool, SystemArtifactFetcher,
 			speech_catalog::SpeechArtifactManifests,
 			tts::{KokoroAdapter, KokoroConfig, KokoroDevice, SynthesisOptions},
@@ -509,7 +509,7 @@ impl SpeechProducer {
 					},
 				)
 				.map_err(|_| fault("tts_local_failed", "local", "Kokoro synthesis failed"))?;
-			let audio = omp_voice::wav::encode_wav(&samples, 24_000)
+			let audio = omp_audio::wav::encode_wav(&samples, 24_000)
 				.map(Bytes::from)
 				.map_err(|_| {
 					fault("tts_local_encode_failed", "local", "Kokoro audio could not be encoded as WAV")
@@ -587,14 +587,14 @@ fn local_wav_path(output_path: &str) -> Str {
 }
 
 #[cfg(feature = "local-tts")]
-const fn local_device() -> omp_inference::local::tts::KokoroDevice {
+const fn local_device() -> omp_ai::local::tts::KokoroDevice {
 	#[cfg(target_os = "macos")]
 	{
-		omp_inference::local::tts::KokoroDevice::Metal
+		omp_ai::local::tts::KokoroDevice::Metal
 	}
 	#[cfg(not(target_os = "macos"))]
 	{
-		omp_inference::local::tts::KokoroDevice::Cpu
+		omp_ai::local::tts::KokoroDevice::Cpu
 	}
 }
 

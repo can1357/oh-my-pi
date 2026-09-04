@@ -6,13 +6,13 @@ use std::{
 };
 
 use miette::{Context as _, IntoDiagnostic as _, miette};
-use omp_catalog::ProviderId;
-use omp_core::Str;
-use omp_inference::{
+use omp_ai::{
 	answer::{AccountState, AuthAnswer},
 	auth::AuditedCredentialReveal,
 	call::AuthRequest,
 };
+use omp_catalog::ProviderId;
+use omp_core::Str;
 use serde_json::Value;
 
 use crate::cli::TokenArgs;

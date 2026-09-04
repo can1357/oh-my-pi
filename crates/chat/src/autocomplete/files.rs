@@ -1,6 +1,5 @@
-//! `@` project file references (pi `CombinedAutocompleteProvider`'s
-//! `@`-prefix branch): a bare `@` lists the project root, `@query` fuzzy
-//! matches every gitignore-aware project path, and acceptance inserts
+//! `@` project file references: a bare `@` lists the project root, `@query`
+//! fuzzy matches every gitignore-aware project path, and acceptance inserts
 //! `@path ` (a directory keeps its trailing `/` so typing can continue).
 //!
 //! The project is walked once on a background thread; the key path only
@@ -20,9 +19,9 @@ use smallvec::SmallVec;
 
 use super::fuzzy_score;
 
-/// Upper bound on indexed paths; pi's fuzzy scan is capped the same way.
+/// Upper bound on indexed paths.
 const MAX_ENTRIES: usize = 5_000;
-/// Rows offered per query (pi `maxResults` for the `@` profile).
+/// Rows offered per query.
 const MAX_ROWS: usize = 20;
 
 /// One indexed project path.
@@ -107,7 +106,7 @@ impl ProjectFiles {
 			return SmallVec::new();
 		};
 		if query.is_empty() {
-			// pi: a bare `@` lists the root directory.
+			// A bare `@` lists the root directory.
 			let mut top: SmallVec<&Entry, 8> = entries
 				.iter()
 				.filter(|entry| {

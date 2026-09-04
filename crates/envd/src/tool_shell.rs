@@ -780,12 +780,60 @@ pub(crate) fn map_event(event: ExecEvent) -> Result<RunEvent, Fault> {
 				spilled_output,
 				aborted: status.aborted,
 				effects_unknown: wire_bool(&status.props, "acp/effects-unknown").unwrap_or(false),
+				diags: status
+					.diags
+					.into_iter()
+					.map(tool_diag)
+					.collect::<Result<Vec<_>, _>>()?,
 				final_cwd_uri: (!event.final_cwd_uri.is_empty())
 					.then(|| Str::from(event.final_cwd_uri)),
 				final_cwd_revision: event.final_cwd_revision,
 			}))
 		},
 	}
+}
+
+fn tool_diag(diag: v1::ToolDiag) -> Result<omp_tool::Diag, Fault> {
+	let severity = match v1::ToolDiagSeverity::try_from(diag.severity) {
+		Ok(v1::ToolDiagSeverity::Info) => omp_tool::Severity::Info,
+		Ok(v1::ToolDiagSeverity::Warn) => omp_tool::Severity::Warn,
+		Ok(v1::ToolDiagSeverity::Error) => omp_tool::Severity::Error,
+		Ok(v1::ToolDiagSeverity::Unspecified) | Err(_) => {
+			return Err(protocol_fault(
+				"next_event",
+				sf!("invalid tool diagnostic severity {}", diag.severity),
+			));
+		},
+	};
+	let omitted = diag
+		.omitted
+		.map(|omitted| {
+			let unit = match v1::ToolDiagUnit::try_from(omitted.unit) {
+				Ok(v1::ToolDiagUnit::Lines) => omp_tool::Unit::Lines,
+				Ok(v1::ToolDiagUnit::Rows) => omp_tool::Unit::Rows,
+				Ok(v1::ToolDiagUnit::Entries) => omp_tool::Unit::Entries,
+				Ok(v1::ToolDiagUnit::Files) => omp_tool::Unit::Files,
+				Ok(v1::ToolDiagUnit::Bytes) => omp_tool::Unit::Bytes,
+				Ok(v1::ToolDiagUnit::Chars) => omp_tool::Unit::Chars,
+				Ok(v1::ToolDiagUnit::Items) => omp_tool::Unit::Items,
+				Ok(v1::ToolDiagUnit::Unspecified) | Err(_) => {
+					return Err(protocol_fault(
+						"next_event",
+						sf!("invalid tool diagnostic unit {}", omitted.unit),
+					));
+				},
+			};
+			Ok(omp_tool::Omitted { count: omitted.count, unit })
+		})
+		.transpose()?;
+	Ok(omp_tool::Diag {
+		severity,
+		kind: Str::from(diag.kind),
+		text: Str::from(diag.text),
+		continuation: diag.continuation.map(Str::from),
+		artifact: diag.artifact.map(Str::from),
+		omitted,
+	})
 }
 
 fn sandbox_authority_is_inactive(sandbox: &SandboxSettings) -> bool {
@@ -821,6 +869,17 @@ fn protocol_fault(operation: &'static str, message: impl Into<Str>) -> Fault {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn exec_diagnostics_preserve_typed_recovery_fields_across_the_wire() {
+		let expected =
+			omp_tool::Diag::warn(omp_tool::DiagKind::Pagination, "More output is available.")
+				.continuation(":16")
+				.artifact("artifact://sha256/abcd")
+				.omitted(45, omp_tool::Unit::Lines);
+		let actual = tool_diag(crate::exec::wire_diag(&expected)).expect("valid diagnostic");
+		assert_eq!(actual, expected);
+	}
 
 	#[test]
 	fn acp_requires_all_sandbox_authority_to_be_inactive() {
@@ -1101,7 +1160,13 @@ mod tests {
 		assert_eq!(status.exit_code, Some(0));
 		let output = String::from_utf8_lossy(&output);
 		assert!(output.contains("sandbox denied write"));
-		assert!(output.contains("rerun with approved scope"));
+		assert!(!output.contains("rerun with approved scope"));
+		assert!(
+			status
+				.diags
+				.iter()
+				.any(|diag| diag.text.contains("sandbox: rerun with approved scope"))
+		);
 		let mut restored = host
 			.run(&session, RunRequest {
 				command:     sf!("echo blocked > .git/blocked-again.txt"),

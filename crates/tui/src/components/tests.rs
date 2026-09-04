@@ -159,7 +159,7 @@ fn select_scrolls_the_preselected_row_into_view_on_the_first_layout() {
 }
 
 /// Filtering ranks whole-word and contiguous matches ahead of scattered
-/// subsequences (pi `fuzzy.ts`), puts the current (recommended) option
+/// subsequences, puts the current (recommended) option
 /// first among equals, and returns the cursor to the best match whenever
 /// the rows above it changed.
 #[test]

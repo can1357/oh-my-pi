@@ -11,6 +11,13 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use omp_ai::{
+	account::AccountRecord,
+	answer::{
+		UsageQuantity, UsageReport as ProviderUsageReport, UsageUnit,
+		UsageWindow as ProviderUsageWindow,
+	},
+};
 use omp_catalog::{ModelKey, ProviderId, RouteId, snapshot::Catalog};
 use omp_chat::{
 	overlays::services::{
@@ -20,13 +27,6 @@ use omp_chat::{
 	status_band::UsageWindow as StatusUsageWindow,
 };
 use omp_core::Str;
-use omp_inference::{
-	account::AccountRecord,
-	answer::{
-		UsageQuantity, UsageReport as ProviderUsageReport, UsageUnit,
-		UsageWindow as ProviderUsageWindow,
-	},
-};
 use serde_json::Value;
 
 use super::ServiceState;
@@ -36,7 +36,7 @@ use crate::usage_cmd::{self, QuotaSnapshot};
 const EXHAUSTED: f64 = 1.0;
 /// Fraction at or above which a window warns.
 const WARNING: f64 = 0.8;
-/// Fraction at or below which a window is untouched (pi `IDLE_FRACTION`).
+/// Fraction at or below which a window is untouched.
 const IDLE: f64 = 0.005;
 const NO_ACTIVITY: &str = "Usage history unavailable (this host keeps no per-day cost telemetry).";
 
@@ -650,8 +650,7 @@ struct ProviderFold {
 }
 
 /// One card per provider: each window bucket shows the mean used fraction
-/// across accounts with the most-used account's reset countdown (pi
-/// `buildProviderCards`).
+/// across accounts with the most-used account's reset countdown.
 fn cards(snapshot: &QuotaSnapshot, catalog: Option<&Catalog>, now_ms: u64) -> Vec<UsageAccount> {
 	let mut folds: BTreeMap<Str, ProviderFold> = BTreeMap::new();
 	for row in &snapshot.rows {
@@ -735,7 +734,7 @@ fn cards(snapshot: &QuotaSnapshot, catalog: Option<&Catalog>, now_ms: u64) -> Ve
 		.collect()
 }
 
-/// Classic per-account report (pi `renderDetail`), markdown.
+/// Classic per-account markdown report.
 fn detail(snapshot: &QuotaSnapshot) -> Str {
 	let mut out = String::from("**Usage**\n\n");
 	if snapshot.rows.is_empty() {

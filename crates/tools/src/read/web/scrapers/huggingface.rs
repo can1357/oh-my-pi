@@ -674,7 +674,7 @@ mod tests {
 		);
 		assert_eq!(rendered.method.as_str(), "huggingface");
 		assert_eq!(rendered.content_type.as_deref(), Some("text/markdown"));
-		assert!(rendered.notes.is_empty());
+		assert!(rendered.diags.is_empty());
 		assert_eq!(
 			rendered.content.as_str(),
 			"# acme/model\n\n**Task:** text-generation\n**Library:** transformers\n**Downloads:** \
@@ -835,7 +835,7 @@ mod tests {
 				.unwrap()
 				.unwrap();
 			assert_eq!(rendered.content.as_str(), "# acme/model");
-			assert!(rendered.notes.is_empty());
+			assert!(rendered.diags.is_empty());
 		}
 	}
 }

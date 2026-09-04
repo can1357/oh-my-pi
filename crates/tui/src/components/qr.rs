@@ -191,15 +191,12 @@ impl Component for Qr {
 	}
 
 	fn measure(&mut self, _ctx: &UiContext) -> (u16, u16) {
-		match self.modules() {
-			Some(modules) => {
-				let columns = modules.columns();
-				(columns, columns)
-			},
-			None => {
-				let width = cell_width(self.payload());
-				(width.min(8), width)
-			},
+		if let Some(modules) = self.modules() {
+			let columns = modules.columns();
+			(columns, columns)
+		} else {
+			let width = cell_width(self.payload());
+			(width.min(8), width)
 		}
 	}
 

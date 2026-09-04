@@ -143,13 +143,13 @@ pub struct SessionTopology {
 impl SessionTopology {
 	/// Creates a root topology bound to `id`.
 	#[must_use]
-	pub fn main(id: Str) -> Self {
+	pub const fn main(id: Str) -> Self {
 		Self { role: SessionRole::Main, parent_id: None, main_id: id }
 	}
 
 	/// Creates a child topology under an authenticated parent and root.
 	#[must_use]
-	pub fn child(parent_id: Str, main_id: Str) -> Self {
+	pub const fn child(parent_id: Str, main_id: Str) -> Self {
 		Self { role: SessionRole::Child, parent_id: Some(parent_id), main_id }
 	}
 

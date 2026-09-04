@@ -17,7 +17,7 @@ use std::{fs, mem, ptr};
 
 use clap::Parser;
 use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
-use omp_shell_engine::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
+use omp_shell::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
 
 use crate::proc_snapshot::{ProcInfo, sanitize_process_command};
 
@@ -293,12 +293,12 @@ impl PsProcessRow {
 }
 
 impl builtins::Command for PsCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
-	fn execute<SE: omp_shell_engine::ShellExtensions>(
+	fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell_engine::Error>> + Send {
+	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell::Error>> + Send {
 		let argv = self.argv.clone();
 		async move {
 			let options = match parse_ps_args(&argv) {

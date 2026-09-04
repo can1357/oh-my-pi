@@ -79,8 +79,7 @@ fn lifecycle_nodes(snapshot: &Snapshot) -> FastHashMap<LifecycleId, Handle> {
 			};
 			let id = identity
 				.and_then(Value::as_str)
-				.map(Str::new)
-				.unwrap_or_else(|| Str::new(handle.to_string()));
+				.map_or_else(|| Str::new(handle.to_string()), Str::new);
 			Some((LifecycleId { tag: node.tag.clone(), id }, handle))
 		})
 		.collect()

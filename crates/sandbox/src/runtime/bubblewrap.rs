@@ -22,7 +22,7 @@ impl MaskKind {
 
 /// Replaces mask placeholders with empty artifacts owned by the prepared
 /// sandbox. Dropping the prepared value closes and removes every mask.
-pub(crate) fn prepare(mut prepared: PreparedSandbox) -> Result<PreparedSandbox, SandboxError> {
+pub fn prepare(mut prepared: PreparedSandbox) -> Result<PreparedSandbox, SandboxError> {
 	if has_placeholder(&prepared, MaskKind::File) {
 		let file = tempfile::Builder::new()
 			.prefix("omp-sandbox-bwrap-mask-")

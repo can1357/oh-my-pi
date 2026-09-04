@@ -446,7 +446,7 @@ fn expand_tabs(line: &str) -> Str {
 	out.freeze()
 }
 
-fn decimal_width(mut value: usize) -> usize {
+const fn decimal_width(mut value: usize) -> usize {
 	let mut width = 1;
 	while value >= 10 {
 		value /= 10;
@@ -468,7 +468,7 @@ fn cell_width(text: &str) -> u16 {
 	u16::try_from(text.visible_width()).unwrap_or(u16::MAX)
 }
 
-fn make_row(kind: DiffRowKind, old: Option<DiffSide>, new: Option<DiffSide>) -> DiffRow {
+const fn make_row(kind: DiffRowKind, old: Option<DiffSide>, new: Option<DiffSide>) -> DiffRow {
 	DiffRow { kind, old, new }
 }
 

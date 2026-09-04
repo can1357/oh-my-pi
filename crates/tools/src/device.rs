@@ -38,7 +38,7 @@ Dynamic devices are invoked through the `dyn` builtin inside the shell tool. Run
 	 attachments. Retry an empty or narrow search with different terms; absent devices are \
 	 unavailable and MUST NOT be advertised or guessed.";
 
-/// Conditional model-facing guidance for the mounted AutoQA recorder.
+/// Conditional model-facing guidance for the mounted `AutoQA` recorder.
 pub const AUTO_QA_PROMPT_GUIDANCE: &str =
 	"\
 Automated QA reporting is available through the live `report_issue` device. When a tool or device \

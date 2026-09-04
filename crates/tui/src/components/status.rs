@@ -124,7 +124,7 @@ impl GaugeLabel {
 		u16::from(self.len)
 	}
 
-	fn is_empty(&self) -> bool {
+	const fn is_empty(&self) -> bool {
 		self.len == 0
 	}
 }
@@ -338,8 +338,8 @@ pub const fn compaction_threshold_color(theme: &Theme) -> Color {
 	theme.status_rule
 }
 /// Returns the dimmed accent painting compaction boundary ticks and the
-/// embedded window label; pi dims the session accent by HSV saturation ×0.7
-/// and value ×0.75. Non-RGB colors pass through unchanged.
+/// embedded window label: HSV saturation ×0.7 and value ×0.75. Non-RGB
+/// colors pass through unchanged.
 pub fn compaction_boundary_color(theme: &Theme) -> Color {
 	scale_hsv(compaction_threshold_color(theme), 0.7, 0.75)
 }

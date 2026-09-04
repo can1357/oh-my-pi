@@ -3,7 +3,9 @@
 use std::{collections::HashMap, ops, sync::Arc};
 
 use omp_core::{CowBytes, Str, sf};
+use omp_tool::{Diag, DiagKind};
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 
 use super::{Fault, resolver::Resolve, selector::ParsedSelector};
 
@@ -11,7 +13,6 @@ const OURS_PREFIX: &str = "<<<<<<<";
 const BASE_PREFIX: &str = "|||||||";
 const SEPARATOR: &str = "=======";
 const THEIRS_PREFIX: &str = ">>>>>>>";
-const PREVIEW_SIDE_LINES: usize = 6;
 
 /// One complete unresolved conflict block.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,11 +60,13 @@ impl ConflictEntry {
 pub struct RenderedConflicts {
 	/// Model-facing text.
 	pub text:  String,
+	/// Structured harness notices.
+	pub diags: SmallVec<Diag, 2>,
 	/// Number of complete unresolved regions represented by `text`.
 	pub count: usize,
 }
 
-/// Options controlling the warning appended to an ordinary file read.
+/// Options controlling diagnostics emitted for an ordinary file read.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ConflictWarningOptions<'a> {
 	/// Total conflicts in the file when `entries` only covers a read window.
@@ -280,92 +283,39 @@ pub fn render_conflicts_for_path(
 	let entries = numbered_entries(scan_conflicts(input));
 	RenderedConflicts {
 		text:  format_conflict_summary(&entries, display_path, scan_truncated),
+		diags: SmallVec::new(),
 		count: entries.len(),
 	}
 }
 
-/// Formats the complete warning appended after an ordinary read.
+/// Builds structured diagnostics for unresolved conflicts visible in an
+/// ordinary read.
 pub fn format_conflict_warning(
 	entries: &[ConflictEntry],
 	options: ConflictWarningOptions<'_>,
-) -> String {
+) -> SmallVec<Diag, 2> {
 	if entries.is_empty() {
-		return String::new();
+		return SmallVec::new();
 	}
 	let total = options.total_in_file.unwrap_or(entries.len());
 	let partial = total > entries.len();
 	let word = if total == 1 { "conflict" } else { "conflicts" };
 	let guidance_path = options.display_path.unwrap_or("path");
-	let mut out = vec![String::new()];
-	if partial {
-		out.push(format!(
-			"⚠ {} of {total} unresolved {word} visible in this window (read \
-			 `{guidance_path}:conflicts` for the full list).",
-			entries.len()
-		));
+	let text = if partial {
+		sf!("{} of {total} unresolved {word} visible in this window.", entries.len())
 	} else {
-		out.push(format!("⚠ {total} unresolved {word} detected"));
-	}
+		sf!("{total} unresolved {word} detected.")
+	};
+	let mut diags = SmallVec::new();
+	diags.push(Diag::warn(DiagKind::Conflicts, text).continuation(sf!("{guidance_path}:conflicts")));
 	if options.scan_truncated {
-		out.push(
-			"- note: file scan hit the byte cap; additional conflicts may exist beyond the scanned \
-			 prefix."
-				.to_owned(),
-		);
+		diags.push(Diag::warn(
+			DiagKind::PartialScan,
+			"Conflict scan hit the byte cap; additional conflicts may exist beyond the scanned \
+			 prefix.",
+		));
 	}
-	if let Some(label) = pick_label(entries, |block| block.ours_label.as_deref()) {
-		out.push(format!("- ours = {label}"));
-	}
-	if let Some(label) = pick_label(entries, |block| block.theirs_label.as_deref()) {
-		out.push(format!("- theirs = {label}"));
-	}
-	let any_base = entries.iter().any(|entry| entry.block.base_lines.is_some());
-	if any_base {
-		let label =
-			pick_label(entries, |block| block.base_lines.as_ref().and(block.base_label.as_deref()));
-		out.push(format!("- base = {}", label.unwrap_or("(no label)")));
-	}
-	out.push(conflict_resolution_guidance(guidance_path));
-
-	for entry in entries {
-		let block = &entry.block;
-		let range = if block.start_line == block.end_line {
-			format!("L{}", block.start_line)
-		} else {
-			format!("L{}-{}", block.start_line, block.end_line)
-		};
-		out.push(String::new());
-		out.push(format!("──── #{}  {range} ────", entry.id));
-		let base_equals_ours = block
-			.base_lines
-			.as_ref()
-			.is_some_and(|base| base == &block.ours_lines);
-		let base_equals_theirs = block
-			.base_lines
-			.as_ref()
-			.is_some_and(|base| base == &block.theirs_lines);
-		let theirs_equals_ours = block.theirs_lines == block.ours_lines;
-
-		out.push("<<< ours".to_owned());
-		append_body(&mut out, &block.ours_lines);
-		if let Some(base) = block.base_lines.as_ref() {
-			if base_equals_ours {
-				out.push("=== base ≡ ours".to_owned());
-			} else if base_equals_theirs {
-				out.push("=== base ≡ theirs".to_owned());
-			} else {
-				out.push("=== base".to_owned());
-				append_body(&mut out, base);
-			}
-		}
-		if theirs_equals_ours {
-			out.push(">>> theirs ≡ ours".to_owned());
-		} else {
-			out.push(">>> theirs".to_owned());
-			append_body(&mut out, &block.theirs_lines);
-		}
-	}
-	out.join("\n")
+	diags
 }
 
 fn conflict_resolution_guidance(display_path: &str) -> String {
@@ -377,20 +327,12 @@ fn conflict_resolution_guidance(display_path: &str) -> String {
 	)
 }
 
-/// Returns the exact warning header for a known unresolved-conflict count.
-pub fn conflict_warning(count: usize) -> String {
-	if count == 0 {
-		return String::new();
-	}
-	let word = if count == 1 { "conflict" } else { "conflicts" };
-	format!("\n⚠ {count} unresolved {word} detected")
-}
-
-/// Scans a complete file and formats its ordinary-read warning and count.
+/// Scans a complete file and returns its ordinary-read diagnostics and count.
 pub fn render_conflict_warning(input: &str) -> RenderedConflicts {
 	let entries = numbered_entries(scan_conflicts(input));
 	RenderedConflicts {
-		text:  format_conflict_warning(&entries, ConflictWarningOptions::default()),
+		text:  String::new(),
+		diags: format_conflict_warning(&entries, ConflictWarningOptions::default()),
 		count: entries.len(),
 	}
 }
@@ -423,19 +365,6 @@ fn pick_label<'a>(
 		.iter()
 		.filter_map(|entry| get(&entry.block))
 		.find(|label| !label.trim().is_empty())
-}
-
-fn append_body(out: &mut Vec<String>, section: &[String]) {
-	if section.is_empty() {
-		out.push("(empty)".to_owned());
-		return;
-	}
-	out.extend(section.iter().take(PREVIEW_SIDE_LINES).cloned());
-	let hidden = section.len().saturating_sub(PREVIEW_SIDE_LINES);
-	if hidden > 0 {
-		let suffix = if hidden == 1 { "" } else { "s" };
-		out.push(format!("… ({hidden} more line{suffix})"));
-	}
 }
 
 /// One session-registered conflict addressable through `conflict://<id>`.
@@ -670,7 +599,7 @@ pub fn parse_bulk_directives(
 		if line.is_empty() {
 			continue;
 		}
-		let Some((head, value)) = line.split_once(|character| matches!(character, ':' | '=')) else {
+		let Some((head, value)) = line.split_once([':', '=']) else {
 			stray.push(Str::new(line));
 			continue;
 		};
@@ -993,9 +922,11 @@ fn line_byte_range(
 
 #[cfg(test)]
 mod tests {
+	use omp_tool::DiagKind;
+
 	use super::{
-		ConflictRegistry, ConflictReplacement, ConflictScope, parse_conflict_address,
-		render_registered, splice_registered,
+		ConflictRegistry, ConflictReplacement, ConflictScope, ConflictWarningOptions,
+		format_conflict_warning, parse_conflict_address, render_registered, splice_registered,
 	};
 
 	const CONFLICT: &str =
@@ -1019,6 +950,27 @@ mod tests {
 		assert_eq!(spliced.text, "before\nours\ntheirs\nafter\n");
 		let changed = CONFLICT.replace("ours", "changed");
 		assert!(splice_registered(&changed, &entry, &ConflictReplacement::Ours).is_err());
+	}
+
+	#[test]
+	fn capped_ordinary_scan_emits_conflict_and_partial_scan_diags() {
+		let registry = ConflictRegistry::default();
+		let entries = registry
+			.refresh("src/lib.rs", CONFLICT)
+			.into_iter()
+			.map(|entry| super::ConflictEntry::new(entry.id, entry.block))
+			.collect::<Vec<_>>();
+		let diags = format_conflict_warning(&entries, ConflictWarningOptions {
+			total_in_file:  Some(1),
+			display_path:   Some("src/lib.rs"),
+			scan_truncated: true,
+		});
+		assert_eq!(diags.len(), 2);
+		assert_eq!(diags[0].native_kind(), Some(DiagKind::Conflicts));
+		assert_eq!(diags[0].severity, omp_tool::Severity::Warn);
+		assert_eq!(diags[0].continuation.as_deref(), Some("src/lib.rs:conflicts"));
+		assert_eq!(diags[1].native_kind(), Some(DiagKind::PartialScan));
+		assert_eq!(diags[1].severity, omp_tool::Severity::Warn);
 	}
 
 	#[test]

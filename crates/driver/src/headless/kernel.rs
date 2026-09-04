@@ -14,13 +14,13 @@ use omp_agent::{
 	ExternalDispatchEvent, ExternalDispatchRequest, ExternalDispatchStream, ExternalToolExecutor,
 	Kernel, RouteFacts, RuntimeFlags,
 };
-use omp_core::{FastHashMap, Hash32, SecretString, Str, StrMut, Ulid, sf};
-use omp_dom::{Op, PropKey, Txn, Value};
-use omp_inference::{
+use omp_ai::{
 	AnswerBody, Call, CallMeta, ChatEvent, ChatRequest, ChatStream, Client, ContentPart,
 	ExecutionBudget, Message, NegotiationPolicy, OperationCall, ProviderService, RequestId, Role,
 	Sampling, Setting, Target, router::Router,
 };
+use omp_core::{FastHashMap, Hash32, SecretString, Str, StrMut, Ulid, sf};
+use omp_dom::{Op, PropKey, Txn, Value};
 use omp_session::{ComponentRegistry, Session};
 use omp_tool::{
 	Abort, BlobRef as ToolBlobRef, CallOutcome, Claims, Part as ToolPart, Precedence, Presentation,
@@ -230,7 +230,7 @@ impl ProductionInference {
 	/// The catalog model `ai_model` currently selects (role selectors such
 	/// as `@plan` resolve through the launch roles), else the launch model.
 	fn selected_model(&self) -> Str {
-		let selector = omp_con::AI_MODEL.get(&self.con);
+		let selector = omp_agent::AI_MODEL.get(&self.con);
 		if selector.is_empty() {
 			return Str::new(self.model.as_str());
 		}
@@ -274,12 +274,12 @@ impl ProductionInference {
 			self.client.set_call_meta(meta);
 			self.model = key;
 		}
-		// pi `externalThinking`: provider reasoning stays off; the kernel
+		// Provider reasoning stays off; the kernel
 		// advertises the hidden `think` tool instead.
-		if omp_inference::pi_settings::AI_EXTERNAL_THINKING.get(&self.con) {
-			request.reasoning = omp_inference::Setting::Unset;
-		} else if matches!(request.reasoning, omp_inference::Setting::Unset) {
-			let thinking = omp_con::AI_THINKING.get(&self.con);
+		if omp_ai::settings::AI_EXTERNAL_THINKING.get(&self.con) {
+			request.reasoning = omp_ai::Setting::Unset;
+		} else if matches!(request.reasoning, omp_ai::Setting::Unset) {
+			let thinking = omp_agent::AI_THINKING.get(&self.con);
 			request.reasoning = convar_reasoning(self.catalog.as_ref(), &self.model, &thinking);
 		}
 		let provider = match &self.meta.target {
@@ -292,7 +292,7 @@ impl ProductionInference {
 				.map(|route| route.provider.as_str()),
 			Target::Model(_) => None,
 		};
-		omp_inference::settings::InferenceSettings::from_con(&self.con).apply_chat_request(
+		omp_ai::settings::InferenceSettings::from_con(&self.con).apply_chat_request(
 			request,
 			provider,
 			Some(model.as_str()),
@@ -316,22 +316,22 @@ fn convar_reasoning(
 	catalog: &omp_catalog::snapshot::Catalog,
 	model: &omp_catalog::ModelKey<str>,
 	thinking: &str,
-) -> omp_inference::Setting<omp_inference::ReasoningRequest> {
+) -> omp_ai::Setting<omp_ai::ReasoningRequest> {
 	let Some(spec) = catalog.model(model) else {
-		return omp_inference::Setting::Unset;
+		return omp_ai::Setting::Unset;
 	};
 	let Some(policy) = spec
 		.thinking
 		.as_ref()
 		.and_then(|id| catalog.thinking_policy(id))
 	else {
-		return omp_inference::Setting::Unset;
+		return omp_ai::Setting::Unset;
 	};
 	let requested = match thinking.parse::<omp_catalog::ReasoningEffort>() {
 		Ok(effort) => omp_catalog::ThinkingEffort::from(effort),
 		Err(_) => {
 			tracing::warn!(value = thinking, "ai_thinking is not a reasoning effort; ignored");
-			return omp_inference::Setting::Unset;
+			return omp_ai::Setting::Unset;
 		},
 	};
 	let wire_model = omp_catalog::WireModelId::from_ref(model.as_str());
@@ -342,11 +342,11 @@ fn convar_reasoning(
 		Ok(selection) => selection.effort,
 		Err(_) => match policy.default_level {
 			Some(level) => level,
-			None => return omp_inference::Setting::Unset,
+			None => return omp_ai::Setting::Unset,
 		},
 	};
-	omp_inference::Setting::Prefer(omp_inference::ReasoningRequest {
-		visibility:          omp_inference::ReasoningVisibility::Visible,
+	omp_ai::Setting::Prefer(omp_ai::ReasoningRequest {
+		visibility:          omp_ai::ReasoningVisibility::Visible,
 		effort:              Some(effort.into()),
 		max_tokens:          None,
 		preserve_signatures: true,
@@ -546,8 +546,8 @@ async fn replicate_verdict_parts(
 	Ok(projected)
 }
 
-/// The prompt an admission query becomes (pi `formatApprovalPrompt`): the
-/// exact command for `bash`, else the tool name and its committed arguments.
+/// An admission query presents the exact `bash` command, or the tool name and
+/// its committed arguments for other tools.
 fn admission_spec(
 	request: &ExternalDispatchRequest,
 	query: &omp_env::frame::AdmitInvocation,
@@ -579,9 +579,8 @@ fn admission_spec(
 	}
 }
 
-/// `--approval-mode` / `tools.approval.*` for native tool calls (pi
-/// `resolveApproval`): the tool's declared effect tier against the session
-/// approval mode, with per-tool overrides.
+/// Resolves native-tool approval from the declared effect tier, session
+/// approval mode, and per-tool overrides.
 pub struct SettingsAdmission {
 	settings: omp_envd::tool_settings::ToolSettings,
 }
@@ -1104,7 +1103,7 @@ impl omp_agent::Inference for ProductionInference {
 	fn chat(
 		&mut self,
 		mut request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		self.apply_convars(&mut request);
 		self.client.execute(request)
 	}
@@ -1118,7 +1117,7 @@ impl omp_agent::Inference for ProductionInference {
 		&mut self,
 		selector: &str,
 		mut request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		let resolved = resolve_model_selector(self.catalog.as_ref(), selector).or_else(|_| {
 			let settings = omp_catalog::settings::ModelSettings::from_con(&self.con);
 			crate::discovery::roles::resolve_role_selector(self.catalog.as_ref(), &settings, selector)
@@ -1127,17 +1126,17 @@ impl omp_agent::Inference for ProductionInference {
 		});
 		async move {
 			let model = resolved.map_err(|_| {
-				omp_inference::Error::planning(
-					omp_inference::ErrorKind::TargetNotFound,
-					omp_inference::ErrorDetail::target(Str::new(selector)),
-					omp_inference::ExecutionReceipt::default(),
+				omp_ai::Error::planning(
+					omp_ai::ErrorKind::TargetNotFound,
+					omp_ai::ErrorDetail::target(Str::new(selector)),
+					omp_ai::ExecutionReceipt::default(),
 				)
 			})?;
 			let key = omp_catalog::ModelKey::from(model.as_str());
-			if matches!(request.reasoning, omp_inference::Setting::Unset)
-				&& !omp_inference::pi_settings::AI_EXTERNAL_THINKING.get(&self.con)
+			if matches!(request.reasoning, omp_ai::Setting::Unset)
+				&& !omp_ai::settings::AI_EXTERNAL_THINKING.get(&self.con)
 			{
-				let thinking = omp_con::AI_THINKING.get(&self.con);
+				let thinking = omp_agent::AI_THINKING.get(&self.con);
 				request.reasoning = convar_reasoning(self.catalog.as_ref(), &key, &thinking);
 			}
 			let live = self.client.call_meta().clone();
@@ -1155,7 +1154,7 @@ impl omp_agent::Inference for ProductionInference {
 		}
 	}
 
-	fn install_retry_sink(&mut self, sink: omp_inference::RetrySink) {
+	fn install_retry_sink(&mut self, sink: omp_ai::RetrySink) {
 		// Both the launch metadata (the base every `ai_model` re-target copies)
 		// and the client's live copy carry the sink.
 		self.meta.response_hooks = self.meta.response_hooks.clone().with_retry_sink(sink);
@@ -1174,7 +1173,7 @@ pub enum SpeechRewriteClient {
 	/// Direct provider call sharing the session's registry and credentials.
 	Production {
 		/// Shared immutable route registry.
-		registry: omp_inference::Registry,
+		registry: omp_ai::Registry,
 		/// Resolved tiny-role model.
 		model:    omp_catalog::ModelKey,
 	},
@@ -1199,7 +1198,7 @@ pub enum SpeechRewriteClientError {
 	Inference {
 		/// Typed provider/runtime source.
 		#[source]
-		source: omp_inference::Error,
+		source: omp_ai::Error,
 	},
 	/// The route completed without emitting speakable text.
 	#[error("speech rewrite completed without text")]
@@ -1250,7 +1249,7 @@ impl SpeechRewriteClient {
 					debug_session:  None,
 					response_hooks: Default::default(),
 				};
-				let execute = omp_inference::router::execute_registry_call(
+				let execute = omp_ai::router::execute_registry_call(
 					registry.clone(),
 					Call::new(meta, OperationCall::Chat(Arc::new(request))),
 					Duration::from_secs(6),
@@ -1451,7 +1450,7 @@ impl omp_agent::Inference for ComposedInference {
 	fn chat(
 		&mut self,
 		request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		async move {
 			match self {
 				Self::Production(inference) => inference.chat(request).await,
@@ -1464,7 +1463,7 @@ impl omp_agent::Inference for ComposedInference {
 		&mut self,
 		selector: &str,
 		request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		async move {
 			match self {
 				Self::Production(inference) => inference.chat_on(selector, request).await,
@@ -1490,7 +1489,7 @@ impl omp_agent::Inference for ComposedInference {
 		}
 	}
 
-	fn install_retry_sink(&mut self, sink: omp_inference::RetrySink) {
+	fn install_retry_sink(&mut self, sink: omp_ai::RetrySink) {
 		match self {
 			Self::Production(inference) => inference.install_retry_sink(sink),
 			Self::Gateway { inference, .. } => inference.install_retry_sink(sink),
@@ -1548,7 +1547,8 @@ impl omp_tools::goal::GoalControl for GoalDeclaration {
 	fn apply(
 		&self,
 		_params: omp_tools::goal::Params,
-	) -> impl Future<Output = Result<Option<omp_tools::goal::Goal>, omp_tools::goal::Fault>> + Send + '_ {
+	) -> impl Future<Output = Result<Option<omp_tools::goal::Goal>, omp_tools::goal::Fault>> + Send + '_
+	{
 		async { Err(omp_tools::goal::Fault::Unavailable) }
 	}
 }
@@ -1562,15 +1562,11 @@ fn install_goal_contract(registry: Arc<Registry>) -> Result<Arc<Registry>, Headl
 		.filter(|name| name.as_str() != "goal")
 		.collect::<Vec<_>>();
 	let mut registry = registry.restrict(retained.iter().map(Str::as_str));
-	registry.register(
-		omp_tools::goal::tool(GoalDeclaration),
-		Presentation::Hidden,
-		Claims {
-			precedence: Precedence::CORE,
-			claimant:   Str::new_static("omp/core"),
-			replaces:   None,
-		},
-	)?;
+	registry.register(omp_tools::goal::tool(GoalDeclaration), Presentation::Hidden, Claims {
+		precedence: Precedence::CORE,
+		claimant:   Str::new_static("omp/core"),
+		replaces:   None,
+	})?;
 	Ok(Arc::new(registry))
 }
 
@@ -1840,7 +1836,7 @@ pub async fn compose_kernel(
 			_environment:       environment,
 			_agent_control:     Mutex::new(None),
 			_python_components: python_components,
-			_eval_parent: None,
+			_eval_parent:       None,
 			_ephemeral_journal: None,
 		}
 	} else {
@@ -1874,7 +1870,7 @@ pub async fn compose_kernel(
 			response_hooks: Default::default(),
 		};
 		let client = Client::new(stack.registry.service(), planner, meta.clone()).with_affinity(
-			omp_inference::CallAffinity {
+			omp_ai::CallAffinity {
 				prompt_cache:     options.prompt_cache_key.clone(),
 				provider_session: options.provider_session.clone(),
 			},
@@ -1959,15 +1955,15 @@ pub async fn compose_kernel(
 		usize::try_from(omp_envd::tool_settings::SV_TOOLS_OUTPUT_SPILL_BYTES.get(&ctx))
 			.unwrap_or(usize::MAX);
 	let artifact_head_bytes =
-		usize::try_from(omp_tools::pi_settings::SV_TOOLS_ARTIFACT_HEAD_BYTES.get(&ctx))
+		usize::try_from(omp_tools::settings::SV_TOOLS_ARTIFACT_HEAD_BYTES.get(&ctx))
 			.unwrap_or(usize::MAX);
 	let artifact_tail_bytes =
-		usize::try_from(omp_tools::pi_settings::SV_TOOLS_ARTIFACT_TAIL_BYTES.get(&ctx))
+		usize::try_from(omp_tools::settings::SV_TOOLS_ARTIFACT_TAIL_BYTES.get(&ctx))
 			.unwrap_or(usize::MAX);
 	let artifact_tail_lines =
-		usize::try_from(omp_tools::pi_settings::SV_TOOLS_ARTIFACT_TAIL_LINES.get(&ctx))
+		usize::try_from(omp_tools::settings::SV_TOOLS_ARTIFACT_TAIL_LINES.get(&ctx))
 			.unwrap_or(usize::MAX);
-	let output_max_columns = omp_tools::pi_settings::SV_TOOLS_OUTPUT_MAX_COLUMNS.get(&ctx);
+	let output_max_columns = omp_tools::settings::SV_TOOLS_OUTPUT_MAX_COLUMNS.get(&ctx);
 	let max_line_bytes = if output_max_columns == 0 {
 		usize::MAX
 	} else {
@@ -2091,35 +2087,29 @@ pub async fn compose_kernel(
 		let eval = kernel.inference().environment().eval_control();
 		let authority: Arc<dyn omp_agent::SessionAuthority> = live_sessions.clone();
 		let producers = Arc::new(crate::subagent::workpool::WorkpoolRegistry::new(authority));
-		let launcher = Arc::new(
-			crate::subagent::workpool_scheduler::KernelWorkpoolLauncher::new(
-				data_dir.to_path_buf(),
-				sessions_dir.clone(),
-				Arc::clone(&live_sessions),
-				session_mutator.clone(),
-				Arc::clone(&jobs),
-				hub_environment.clone(),
-				Arc::clone(&ctx),
-				Arc::clone(&cfg),
-				model.clone(),
-				Arc::clone(kernel.tool_registry()),
-				eval.clone(),
-			),
-		);
-		let scheduler = Arc::new(
-			crate::subagent::workpool_scheduler::SchedulerRegistry::new(
-				id.clone(),
-				session_mutator,
-				jobs,
-				session.blobs().clone(),
-				producers,
-				launcher,
-				Arc::new(crate::subagent::workpool_scheduler::ConWorkpoolPolicy::new(
-					Arc::clone(&ctx),
-				)),
-				eval,
-			),
-		);
+		let launcher = Arc::new(crate::subagent::workpool_scheduler::KernelWorkpoolLauncher::new(
+			data_dir.to_path_buf(),
+			sessions_dir.clone(),
+			Arc::clone(&live_sessions),
+			session_mutator.clone(),
+			Arc::clone(&jobs),
+			hub_environment.clone(),
+			Arc::clone(&ctx),
+			Arc::clone(&cfg),
+			model.clone(),
+			Arc::clone(kernel.tool_registry()),
+			eval.clone(),
+		));
+		let scheduler = Arc::new(crate::subagent::workpool_scheduler::SchedulerRegistry::new(
+			id.clone(),
+			session_mutator,
+			jobs,
+			session.blobs().clone(),
+			producers,
+			launcher,
+			Arc::new(crate::subagent::workpool_scheduler::ConWorkpoolPolicy::new(Arc::clone(&ctx))),
+			eval,
+		));
 		let parent = Arc::new(crate::subagent::workpool_scheduler::WorkpoolParentHost::new(
 			crate::subagent::workpool_scheduler::WorkpoolSessionHost::new(project_root.clone()),
 			scheduler,
@@ -2137,7 +2127,7 @@ pub async fn compose_kernel(
 		kernel = kernel.with_session_tool(Arc::new(super::todo::TodoSessionTool::new()));
 		// ADR 0013: `subagent.cfg` and `<agent>.cfg` resolve through the same
 		// user (`~/.o2`) and project cfg roots every other `exec` uses.
-		// pi `atMaxDepth`: a child at the recursion ceiling never sees `task`,
+		// A child at the recursion ceiling never sees `task`,
 		// so it cannot plan a delegation the spawner would refuse.
 		if !crate::subagent::settings::task_withheld(&ctx) {
 			kernel = kernel.with_session_tool(Arc::new(crate::subagent::spawn::TaskSessionTool::new(
@@ -2369,7 +2359,7 @@ fn apply_model_override(
 	explicit: bool,
 ) -> Result<(), HeadlessError> {
 	if explicit {
-		omp_con::AI_MODEL
+		omp_agent::AI_MODEL
 			.set(ctx, Str::new(model))
 			.map_err(|error| std::io::Error::other(error))?;
 	}
@@ -2618,7 +2608,7 @@ fn select_journal_path(
 		if let Some(path) = remembered_terminal_session(sessions_dir, terminal)? {
 			return Ok(path);
 		}
-		// pi `findMostRecentSession`: no breadcrumb for this terminal, so
+		// No breadcrumb exists for this terminal, so
 		// continue the project's newest journal before creating a fresh one.
 		if let Some(path) = newest_project_session(sessions_dir)? {
 			return Ok(path);
@@ -2817,17 +2807,17 @@ fn install_prompt_facts(
 mod tests {
 	use std::sync::Arc;
 
-	use omp_catalog::{
-		ModelKey, ReasoningEffort, ThinkingEffort, ThinkingPolicy, WireTarget, snapshot::Catalog,
-	};
-	use omp_core::sf;
-	use omp_inference::{
+	use omp_ai::{
 		ChatRequest, NegotiationPolicy, RequestId, Sampling, Setting,
 		codec::{
 			EncodeContext,
 			openai_responses::{OpenAiResponsesCodec, OpenAiResponsesOptions},
 		},
 	};
+	use omp_catalog::{
+		ModelKey, ReasoningEffort, ThinkingEffort, ThinkingPolicy, WireTarget, snapshot::Catalog,
+	};
+	use omp_core::sf;
 
 	use super::{
 		EphemeralJournal, HeadlessError, KernelOptions, PromptOverrides, apply_model_override,
@@ -2995,7 +2985,7 @@ mod tests {
 			.expect("gpt-5 thinking policy")
 	}
 
-	fn effort(setting: &Setting<omp_inference::ReasoningRequest>) -> Option<ReasoningEffort> {
+	fn effort(setting: &Setting<omp_ai::ReasoningRequest>) -> Option<ReasoningEffort> {
 		match setting {
 			Setting::Unset => None,
 			Setting::Require(value) | Setting::Prefer(value) => value.effort,
@@ -3139,7 +3129,7 @@ mod tests {
 		ctx.restore_session_write("ai_model", "archived/model")
 			.expect("restored model");
 		apply_model_override(&ctx, "explicit/model", true).expect("explicit model");
-		assert_eq!(omp_con::AI_MODEL.get(&ctx).as_str(), "explicit/model");
+		assert_eq!(omp_agent::AI_MODEL.get(&ctx).as_str(), "explicit/model");
 		assert!(
 			ctx.session_writes()
 				.any(|(name, value)| name == "ai_model" && value.to_string() == "explicit/model")
@@ -3150,7 +3140,7 @@ mod tests {
 			.restore_session_write("ai_model", "archived/model")
 			.expect("restored model");
 		apply_model_override(&inherited, "default/model", false).expect("default model");
-		assert_eq!(omp_con::AI_MODEL.get(&inherited).as_str(), "archived/model");
+		assert_eq!(omp_agent::AI_MODEL.get(&inherited).as_str(), "archived/model");
 	}
 
 	#[test]
@@ -3165,8 +3155,8 @@ mod tests {
 			.expect("continue");
 		assert_eq!(resumed, first);
 
-		// pi SessionManager.continueRecent: a terminal without its own breadcrumb
-		// continues the newest session of the project, not a fresh one.
+		// A terminal without its own breadcrumb continues the newest session of the
+		// project, not a fresh one.
 		let other_terminal =
 			select_journal_path(sessions, None, None, true, false, Some("terminal-b"))
 				.expect("newest project session");

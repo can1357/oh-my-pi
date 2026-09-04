@@ -1,7 +1,6 @@
-//! Account panels: the in-place login dialog (pi `LoginDialogComponent`),
-//! the `/logout` account selector (pi `LogoutAccountSelectorComponent`),
+//! Account panels: the in-place login dialog, the `/logout` account selector,
 //! and the provider picker behind `/login`, `/setup`, `/providers`, and
-//! `/logout` without a provider (pi `OAuthSelectorComponent`).
+//! `/logout` without a provider.
 //!
 //! Every panel is observer-local (ADR 0005): the login dialog only relays
 //! [`LoginFlow`] channel traffic, the logout selector posts a typed mutation
@@ -22,7 +21,7 @@ use crate::host::HostCommand;
 
 /// Poll cadence while a flow or deletion is pending.
 const POLL: Duration = Duration::from_millis(100);
-/// pi `LOGOUT_SELECTOR_MAX_VISIBLE` / `OAUTH_SELECTOR_MAX_VISIBLE`.
+/// Maximum visible provider or account rows.
 pub const LOGOUT_SELECTOR_MAX_VISIBLE: usize = 10;
 const INPUT_ID: &str = "login-input";
 const LIST_ID: &str = "providers";
@@ -52,7 +51,7 @@ enum Location {
 	DeviceCode { code: Str, url: Str },
 }
 
-/// In-place provider login (pi `LoginDialogComponent`): status line, the
+/// In-place provider login: status line, the
 /// authorization URL or device code, and a paste input once the driver
 /// asks for one. Esc cancels the flow; the settled outcome stays on screen
 /// until Enter or Esc closes the dialog.
@@ -340,8 +339,8 @@ fn escape_quoted(text: &str) -> Str {
 	out.freeze()
 }
 
-/// Account picker for `/logout` once the provider is known (pi
-/// `LogoutAccountSelectorComponent`): circular ↑/↓, PgUp/PgDn by a page,
+/// Account picker for `/logout` once the provider is known: circular ↑/↓,
+/// PgUp/PgDn by a page,
 /// Enter asks the controller to delete the highlighted account.
 pub struct LogoutSelector {
 	provider: Str,
@@ -552,7 +551,7 @@ pub enum ProviderMode {
 	Logout,
 }
 
-/// Provider picker (pi `OAuthSelectorComponent` / setup wizard step 1):
+/// Provider picker and setup wizard step 1:
 /// each row shows the provider name and whether it is signed in; Enter
 /// runs `login <id>` or `logout <id>` through the console.
 pub struct ProviderPicker {

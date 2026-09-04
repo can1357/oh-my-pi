@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use omp_core::{Str, StrMut};
 use serde_json::Value;
 
-/// Validates an LSP WorkspaceEdit before it crosses the transaction boundary.
+/// Validates an LSP `WorkspaceEdit` before it crosses the transaction boundary.
 pub fn validate_workspace_edit(edit: &Value) -> Result<(), &'static str> {
 	let mut seen = HashSet::new();
 	if let Some(changes) = edit.get("changes").and_then(Value::as_object) {

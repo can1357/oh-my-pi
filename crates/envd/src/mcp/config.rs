@@ -375,15 +375,17 @@ impl McpServerConfig {
 			},
 			(false, true) => {
 				self.env_literal_keys.len() == other.env.len()
-					&& other.env.keys().all(|key| self.env_literal_keys.contains(key))
+					&& other
+						.env
+						.keys()
+						.all(|key| self.env_literal_keys.contains(key))
 			},
 		}
 	}
 
 	/// Whether one configured environment value bypasses dynamic resolution.
 	pub(crate) fn env_value_is_literal(&self, key: &str) -> bool {
-		self.env_policy == Some(EnvironmentPolicy::Literal)
-			|| self.env_literal_keys.contains(key)
+		self.env_policy == Some(EnvironmentPolicy::Literal) || self.env_literal_keys.contains(key)
 	}
 }
 
@@ -761,9 +763,7 @@ mod tests {
 		project_config
 			.env
 			.insert(Str::from("TOKEN"), Str::from("TOKEN"));
-		project_config
-			.env_literal_keys
-			.insert(Str::from("TOKEN"));
+		project_config.env_literal_keys.insert(Str::from("TOKEN"));
 		let mut project = McpConfigFile::default();
 		project
 			.mcp_servers

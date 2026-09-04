@@ -1,5 +1,5 @@
-//! `/hub` live supervisor: pi `agent-hub.ts` and `agent-transcript-viewer.ts`
-//! as full-screen observer-local [`Panel`]s (ADR 0005).
+//! `/hub` live supervisor as full-screen observer-local [`Panel`]s
+//! (ADR 0005).
 //!
 //! Live agents are the `<meta><jobs>` children of the session replica
 //! (`<subagent>` rows and detached `<job>` rows), refreshed after every DOM
@@ -35,12 +35,11 @@ use crate::{
 	project::{AssistantPart, assistant_parts},
 };
 
-/// pi `agent-hub.ts`: two-pane mode needs a useful roster and a readable
-/// inspector.
+/// Two-pane mode needs a useful roster and a readable inspector.
 const SPLIT_MIN_WIDTH: u16 = 96;
 const DETAIL_MIN_WIDTH: u16 = 34;
 const ROSTER_MIN_WIDTH: u16 = 48;
-/// pi `agent-hub.ts`: double-tap window for the roster's `←←` close gesture.
+/// Double-tap window for the roster's `←←` close gesture.
 const LEFT_TAP_WINDOW: Duration = Duration::from_millis(500);
 /// Wake cadence while waiting for a child subscription or its next patch.
 pub const STREAM_POLL_MS: u64 = 50;
@@ -57,7 +56,7 @@ const NO_ACTIVITY: &str = "No agent activity recorded yet";
 const NO_MATCHING_ACTIVITY: &str = "No matching activity";
 const RESOLVED_MODEL_BADGE_VAR: &str = "cl_task_show_resolved_model_badge";
 const RESOLVED_MODEL_BADGE_WIDTH: u16 = 30;
-/// pi `agent-transcript-viewer.ts` footer hint.
+/// Agent transcript viewer footer hint.
 const VIEWER_HINT: &str =
 	"Enter:send  Esc:close  ctrl+o:expand  empty input → j/k:scroll  g/G:top/bottom";
 const VIEWER_PLACEHOLDER: &str = "No messages yet.";
@@ -184,7 +183,7 @@ pub fn session_stem(id: &str) -> Str {
 	)
 }
 
-/// pi `STATUS_ORDER` over omp job statuses.
+/// Display order for job statuses.
 fn status_rank(status: &str) -> u8 {
 	match status {
 		"running" => 0,
@@ -221,14 +220,14 @@ fn clock(zone: &TimeZone, ms: Option<u64>) -> Str {
 		.map_or_else(|| Str::new_static("--:--:--"), Str::new)
 }
 
-/// Which top-level projection the hub shows (pi `AgentHubSection`).
+/// Which top-level projection the hub shows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
 	Agents,
 	Activity,
 }
 
-/// Roster projection (pi `HubViewMode`).
+/// Roster projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum View {
 	Roster,
@@ -243,7 +242,7 @@ impl View {
 		}
 	}
 
-	/// pi footer `t:<nextView>` label.
+	/// Footer label for the next projection.
 	const fn next_label(self) -> &'static str {
 		match self {
 			Self::Roster => "by parent",
@@ -417,7 +416,7 @@ impl AgentHub {
 	}
 
 	/// Seeds the `←←` close detector so one more `←` inside
-	/// [`LEFT_TAP_WINDOW`] dismisses the hub (pi `armCloseTap`).
+	/// [`LEFT_TAP_WINDOW`] dismisses the hub.
 	pub fn arm_close_tap(&mut self) {
 		self.last_left = Some(Instant::now());
 	}
@@ -439,7 +438,7 @@ impl AgentHub {
 			.collect()
 	}
 
-	/// pi `#refreshRows`: status-then-recency order, the `/` filter, then
+	/// Applies status-then-recency order, the `/` filter, then
 	/// the tree projection when `By parent` is on.
 	fn refresh_rows(&mut self) {
 		let selected_id = self.selected_job().map(|job| job.id.clone());
@@ -548,7 +547,7 @@ impl AgentHub {
 		}
 	}
 
-	/// pi `#refreshActivityRows` over the job rows: one event per job at its
+	/// Projects one event per job at its
 	/// start time, filtered by kind/status, scope, and search.
 	fn refresh_activity(&mut self) {
 		let scope = self.scope_ids();
@@ -791,7 +790,7 @@ impl AgentHub {
 		}
 	}
 
-	/// pi `#renderDetailPanel` over what a job row carries.
+	/// Renders the selected job's detail panel.
 	fn inspector(&self, rows: u16) -> Vec<Box<dyn omp_tui::Component>> {
 		let mut lines: Vec<Box<dyn omp_tui::Component>> = Vec::with_capacity(usize::from(rows));
 		let Some(job) = self.selected_job() else {
@@ -1542,7 +1541,9 @@ impl TranscriptViewer {
 			.services
 			.agent_view(id)
 			.map_err(|error| Str::new(error.to_string()))?;
-		let show_thinking = omp_con::CL_SHOWTHINKING.try_get(cx.con).unwrap_or(true);
+		let show_thinking = crate::settings::CL_SHOWTHINKING
+			.try_get(cx.con)
+			.unwrap_or(true);
 		Ok(Self::waiting(job, pending, show_thinking, cx.viewport, cx.ui))
 	}
 

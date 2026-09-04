@@ -26,22 +26,40 @@ use tokio_util::sync::CancellationToken;
 use super::blobs::BlobHost;
 
 omp_con::var! {
-	/// Native display id selected for the computer session, or `all` for the composite desktop.
+	/// Composite all displays or select a native display id.
 	pub static SV_COMPUTER_DISPLAY = sv_computer_display: Str {
 		default: Str::new_static("all"),
 		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Computer",
+			"ui.label": "Computer Display",
+			"legacy.path": "computer.display",
+		},
 	};
-	/// Maximum width of a computer screenshot in pixels.
+	/// Maximum composite screenshot width in pixels.
 	pub static SV_COMPUTER_MAX_WIDTH = sv_computer_max_width: u32 {
 		default: 3840,
 		min: 1,
 		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Computer",
+			"ui.label": "Computer Screenshot Width",
+			"legacy.path": "computer.maxWidth",
+		},
 	};
-	/// Maximum height of a computer screenshot in pixels.
+	/// Maximum composite screenshot height in pixels.
 	pub static SV_COMPUTER_MAX_HEIGHT = sv_computer_max_height: u32 {
 		default: 2400,
 		min: 1,
 		flags: archive,
+		meta: {
+			"ui.tab": "tools",
+			"ui.group": "Computer",
+			"ui.label": "Computer Screenshot Height",
+			"legacy.path": "computer.maxHeight",
+		},
 	};
 }
 
@@ -116,10 +134,10 @@ impl ComputerHost for ComputerSessionHost {
 					.map(capabilities)
 					.map_err(|error| native_fault(Operation::Capabilities, error))?;
 				Ok(Payload {
-					action: Action::Capabilities,
-					code: None,
-					results: Vec::new(),
-					artifacts: Vec::new(),
+					action:       Action::Capabilities,
+					code:         None,
+					results:      Vec::new(),
+					artifacts:    Vec::new(),
 					capabilities: Some(capabilities),
 				})
 			},
@@ -131,14 +149,18 @@ impl ComputerHost for ComputerSessionHost {
 				}
 				let _run = self.run_lock.lock().await;
 				if should_close {
-					self.session.close().await.map_err(|error| native_fault(Operation::Close, error))?;
+					self
+						.session
+						.close()
+						.await
+						.map_err(|error| native_fault(Operation::Close, error))?;
 					self.state.lock().clear();
 				}
 				Ok(Payload {
-					action: Action::Close,
-					code: None,
-					results: Vec::new(),
-					artifacts: Vec::new(),
+					action:       Action::Close,
+					code:         None,
+					results:      Vec::new(),
+					artifacts:    Vec::new(),
 					capabilities: None,
 				})
 			},
@@ -160,7 +182,8 @@ impl ComputerHost for ComputerSessionHost {
 				}
 				let timeout = Duration::from_secs_f64(requested_timeout.min(300.0));
 				let program = parse_program(&code)?;
-				let execution = self.execute_program(program, params.read_only, cancellation.clone(), updates);
+				let execution =
+					self.execute_program(program, params.read_only, cancellation.clone(), updates);
 				tokio::pin!(execution);
 				let (results, artifacts) = tokio::select! {
 					_ = cancellation.cancelled() => {
@@ -236,7 +259,8 @@ impl ComputerSessionHost {
 					if read_only && params.required_effects().input {
 						return Err(fault(
 							FaultCode::ReadOnly,
-							"read_only computer programs cannot perform input, focus, accessibility, or clipboard mutation",
+							"read_only computer programs cannot perform input, focus, accessibility, or \
+							 clipboard mutation",
 							Some(params.operation),
 						));
 					}
@@ -286,9 +310,7 @@ impl ComputerSessionHost {
 					if !evaluate_assertion(&expression, &self.state.lock()) {
 						return Err(fault(
 							FaultCode::InvalidRequest,
-							message
-								.as_deref()
-								.unwrap_or("computer assertion failed"),
+							message.as_deref().unwrap_or("computer assertion failed"),
 							None,
 						));
 					}
@@ -307,7 +329,11 @@ impl ComputerSessionHost {
 	) -> Result<(Value, Vec<Artifact>), Fault> {
 		let operation = params.operation;
 		if cancellation.is_cancelled() {
-			return Err(fault(FaultCode::Cancelled, "computer program was cancelled", Some(operation)));
+			return Err(fault(
+				FaultCode::Cancelled,
+				"computer program was cancelled",
+				Some(operation),
+			));
 		}
 		let _ = updates.send(Update::Operation { operation });
 		let mut artifacts = Vec::new();
@@ -359,23 +385,19 @@ impl ComputerSessionHost {
 					.list_windows()
 					.await
 					.map_err(|error| native_fault(operation, error))?;
-				let mut matches = windows
-					.into_iter()
-					.filter(|window| {
-						params
-							.window
-							.as_deref()
-							.is_none_or(|id| window.id == id)
-							&& params.app.as_deref().is_none_or(|app| {
-								window.app.to_lowercase().contains(&app.to_lowercase())
-							})
-							&& params.title.as_deref().is_none_or(|title| {
+				let mut matches =
+					windows
+						.into_iter()
+						.filter(|window| {
+							params.window.as_deref().is_none_or(|id| window.id == id)
+								&& params.app.as_deref().is_none_or(|app| {
+									window.app.to_lowercase().contains(&app.to_lowercase())
+								}) && params.title.as_deref().is_none_or(|title| {
 								window.title.to_lowercase().contains(&title.to_lowercase())
-							})
-							&& (!matches!(operation, Operation::FocusedWindow) || window.focused)
-					})
-					.map(window)
-					.collect::<Vec<_>>();
+							}) && (!matches!(operation, Operation::FocusedWindow) || window.focused)
+						})
+						.map(window)
+						.collect::<Vec<_>>();
 				match operation {
 					Operation::ListWindows => Value::Array(matches),
 					Operation::FocusedWindow => matches.pop().unwrap_or(Value::Null),
@@ -415,20 +437,18 @@ impl ComputerSessionHost {
 				})?;
 				let uri = Str::new(ArtifactUrl::from_digest(id.hash).as_str());
 				let artifact = Artifact {
-					uri: uri.clone(),
-					mime: sf!("image/png"),
-					visible: !params.silent,
-					byte_len: id.size,
-					width: capture.width,
-					height: capture.height,
-					source_width: capture.source_width,
+					uri:           uri.clone(),
+					mime:          sf!("image/png"),
+					visible:       !params.silent,
+					byte_len:      id.size,
+					width:         capture.width,
+					height:        capture.height,
+					source_width:  capture.source_width,
 					source_height: capture.source_height,
-					target: Str::new(&capture.target),
+					target:        Str::new(&capture.target),
 				};
-				let _ = updates.send(Update::Artifact {
-					uri: uri.clone(),
-					visible: artifact.visible,
-				});
+				let _ =
+					updates.send(Update::Artifact { uri: uri.clone(), visible: artifact.visible });
 				artifacts.push(artifact);
 				json!({
 					"artifact": uri,
@@ -502,11 +522,7 @@ impl ComputerSessionHost {
 			Operation::TypeText => {
 				self
 					.session
-					.type_text(
-						target(&params),
-						text(&params)?.to_owned(),
-						pointer_options(&params),
-					)
+					.type_text(target(&params), text(&params)?.to_owned(), pointer_options(&params))
 					.await
 					.map_err(|error| native_fault(operation, error))?;
 				Value::Bool(true)
@@ -712,7 +728,11 @@ impl ComputerSessionHost {
 					fault(FaultCode::ClipboardFailed, "clipboard worker failed", Some(operation))
 				})?
 				.map_err(|()| {
-					fault(FaultCode::ClipboardFailed, "clipboard text could not be written", Some(operation))
+					fault(
+						FaultCode::ClipboardFailed,
+						"clipboard text could not be written",
+						Some(operation),
+					)
 				})?;
 				Value::Bool(true)
 			},
@@ -800,7 +820,8 @@ fn parse_program(code: &str) -> Result<Vec<Statement>, Fault> {
 			params
 		} else {
 			return Err(invalid(
-				"computer code may call only `desktop`, retained window/element handles, `wait`, `assert`, `display`, and `print`",
+				"computer code may call only `desktop`, retained window/element handles, `wait`, \
+				 `assert`, `display`, and `print`",
 			));
 		};
 		if returns {
@@ -853,12 +874,14 @@ fn parse_wait(arguments: &str) -> Result<Statement, Fault> {
 		.and_then(Value::as_f64)
 		.unwrap_or(50.0);
 	if !timeout.is_finite() || timeout < 0.0 || !interval.is_finite() || interval <= 0.0 {
-		return Err(invalid("wait predicate timeout and interval must be finite positive milliseconds"));
+		return Err(invalid(
+			"wait predicate timeout and interval must be finite positive milliseconds",
+		));
 	}
 	Ok(Statement::WaitUntil {
 		expression: Str::new(expression),
-		timeout: Duration::from_secs_f64(timeout / 1_000.0),
-		interval: Duration::from_secs_f64(interval / 1_000.0),
+		timeout:    Duration::from_secs_f64(timeout / 1_000.0),
+		interval:   Duration::from_secs_f64(interval / 1_000.0),
 	})
 }
 
@@ -1108,17 +1131,21 @@ fn parse_arguments(arguments: &str) -> Result<Vec<Value>, Fault> {
 		.into_iter()
 		.map(|argument| match serde_json::from_str(argument.as_str()) {
 			Ok(value) => Ok(value),
-			Err(_) if argument.bytes().all(|byte| {
-				byte == b'_'
-					|| byte == b'.'
-					|| byte == b'?'
-					|| byte == b'['
-					|| byte == b']'
-					|| byte.is_ascii_alphanumeric()
-			}) => Ok(json!({ "$expr": argument })),
-			Err(_) => Err(invalid(
-				"computer call arguments must be JSON values or retained-value paths",
-			)),
+			Err(_)
+				if argument.bytes().all(|byte| {
+					byte == b'_'
+						|| byte == b'.'
+						|| byte == b'?'
+						|| byte == b'['
+						|| byte == b']'
+						|| byte.is_ascii_alphanumeric()
+				}) =>
+			{
+				Ok(json!({ "$expr": argument }))
+			},
+			Err(_) => {
+				Err(invalid("computer call arguments must be JSON values or retained-value paths"))
+			},
 		})
 		.collect()
 }
@@ -1527,9 +1554,9 @@ fn pointer_options(params: &NativeParams) -> Option<PointerOptions> {
 		|| params.modifiers.is_some()
 		|| params.delivery.is_some();
 	configured.then(|| PointerOptions {
-		button: params.button.as_ref().map(ToString::to_string),
-		count: params.count,
-		modifiers: params
+		button:        params.button.as_ref().map(ToString::to_string),
+		count:         params.count,
+		modifiers:     params
 			.modifiers
 			.as_ref()
 			.map(|values| values.iter().map(ToString::to_string).collect()),
@@ -1541,10 +1568,17 @@ fn resolve_bound_params(
 	params: &mut NativeParams,
 	state: &Map<String, Value>,
 ) -> Result<(), Fault> {
-	if let Some(binding) = params.window.as_deref().and_then(|value| value.strip_prefix('$')) {
+	if let Some(binding) = params
+		.window
+		.as_deref()
+		.and_then(|value| value.strip_prefix('$'))
+	{
 		let value = expression_value(binding, state)
 			.ok_or_else(|| invalid("retained window handle is unavailable"))?;
-		if let Some(id) = value.as_str().or_else(|| value.get("id").and_then(Value::as_str)) {
+		if let Some(id) = value
+			.as_str()
+			.or_else(|| value.get("id").and_then(Value::as_str))
+		{
 			params.window = Some(Str::new(id));
 		} else if let Some(reference) = value.get("ref").and_then(Value::as_str) {
 			params.window = None;
@@ -1558,7 +1592,11 @@ fn resolve_bound_params(
 			return Err(invalid("retained receiver is not a window or accessibility element"));
 		}
 	}
-	if let Some(binding) = params.reference.as_deref().and_then(|value| value.strip_prefix('$')) {
+	if let Some(binding) = params
+		.reference
+		.as_deref()
+		.and_then(|value| value.strip_prefix('$'))
+	{
 		let value = expression_value(binding, state)
 			.ok_or_else(|| invalid("retained accessibility handle is unavailable"))?;
 		let reference = value
@@ -1567,7 +1605,11 @@ fn resolve_bound_params(
 			.ok_or_else(|| invalid("retained receiver is not an accessibility element"))?;
 		params.reference = Some(Str::new(reference));
 	}
-	if let Some(binding) = params.value.as_deref().and_then(|value| value.strip_prefix('$')) {
+	if let Some(binding) = params
+		.value
+		.as_deref()
+		.and_then(|value| value.strip_prefix('$'))
+	{
 		let value = expression_value(binding, state)
 			.ok_or_else(|| invalid("retained value is unavailable"))?;
 		params.value = Some(match value {
@@ -1675,7 +1717,8 @@ fn native_fault(operation: Operation, error: omp_desktop::DesktopError) -> Fault
 		ErrorCode::InputFailed => (FaultCode::InputFailed, "desktop input delivery failed"),
 		ErrorCode::BackgroundUnavailable => (
 			FaultCode::BackgroundUnavailable,
-			"background delivery is unavailable for this target; retry foreground delivery or accessibility",
+			"background delivery is unavailable for this target; retry foreground delivery or \
+			 accessibility",
 		),
 		ErrorCode::WindowNotFound => (FaultCode::WindowNotFound, "desktop window was not found"),
 		ErrorCode::InvalidTarget => (FaultCode::InvalidTarget, "desktop target is invalid"),
@@ -1684,10 +1727,9 @@ fn native_fault(operation: Operation, error: omp_desktop::DesktopError) -> Fault
 			FaultCode::InvalidCoordinateFrame,
 			"pointer input requires a recent screenshot of the same target",
 		),
-		ErrorCode::StaleRef => (
-			FaultCode::StaleRef,
-			"accessibility reference expired; take a new accessibility snapshot",
-		),
+		ErrorCode::StaleRef => {
+			(FaultCode::StaleRef, "accessibility reference expired; take a new accessibility snapshot")
+		},
 		ErrorCode::AxUnsupported => {
 			(FaultCode::AxUnsupported, "accessibility is unavailable on this backend")
 		},
@@ -1771,15 +1813,13 @@ mod tests {
 	#[test]
 	fn computer_program_lifts_window_ax_clipboard_and_pointer_options() {
 		let program = parse_program(
-			"const win = await desktop.window({\"app\":\"Terminal\",\"title\":\"omp\"});\n\
-			 const shot = await win.screenshot({\"silent\":true});\n\
-			 await win.doubleClick(20, 30, {\"button\":\"left\",\"modifiers\":[\"shift\"],\"delivery\":\"foreground\"});\n\
-			 const tree = await win.ax({\"all\":true,\"maxDepth\":8});\n\
-			 const el = await win.ref(\"e5\");\n\
-			 await el.setValue(\"updated\");\n\
-			 return await el.bounds();\n\
-			 const clip = await desktop.clipboard.read();\n\
-			 await wait(() => clip.length > 0, {\"timeout\":500,\"interval\":10});",
+			"const win = await desktop.window({\"app\":\"Terminal\",\"title\":\"omp\"});\nconst shot \
+			 = await win.screenshot({\"silent\":true});\nawait win.doubleClick(20, 30, \
+			 {\"button\":\"left\",\"modifiers\":[\"shift\"],\"delivery\":\"foreground\"});\nconst \
+			 tree = await win.ax({\"all\":true,\"maxDepth\":8});\nconst el = await \
+			 win.ref(\"e5\");\nawait el.setValue(\"updated\");\nreturn await el.bounds();\nconst \
+			 clip = await desktop.clipboard.read();\nawait wait(() => clip.length > 0, \
+			 {\"timeout\":500,\"interval\":10});",
 		)
 		.expect("parse complete computer surface");
 		assert!(program.iter().any(|statement| matches!(
@@ -1802,18 +1842,17 @@ mod tests {
 				if params.operation == Operation::AxSetValue
 					&& params.reference.as_deref() == Some("$el")
 		)));
-		assert!(program.iter().any(|statement| {
-			matches!(statement, Statement::WaitUntil { .. })
-		}));
+		assert!(
+			program
+				.iter()
+				.any(|statement| { matches!(statement, Statement::WaitUntil { .. }) })
+		);
 	}
 
 	#[test]
 	fn expression_paths_accept_javascript_index_and_optional_chain_syntax() {
 		let mut state = Map::new();
 		state.insert("windows".to_owned(), json!([{"id":"w1"}]));
-		assert_eq!(
-			super::expression_value("windows[0]?.id", &state),
-			Some(json!("w1"))
-		);
+		assert_eq!(super::expression_value("windows[0]?.id", &state), Some(json!("w1")));
 	}
 }

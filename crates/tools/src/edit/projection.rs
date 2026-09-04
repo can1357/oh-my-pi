@@ -4,7 +4,7 @@ use std::{collections::VecDeque, ops::Range, sync::Arc};
 
 use bytes::Bytes;
 use omp_core::{Hash32, Str, StrMut, sf};
-use omp_hashline::diff_preview::PinnedMyersWindow;
+use omp_edit::diff_string::PinnedMyersWindow;
 
 use super::ResolvedBlock;
 
@@ -326,8 +326,6 @@ pub struct SectionView<'a> {
 	pub preview:           &'a str,
 	/// Concrete spans selected by block locators.
 	pub block_resolutions: &'a [ResolvedBlock],
-	/// Non-fatal application/recovery diagnostics.
-	pub warnings:          &'a [Str],
 }
 
 /// Renders one section's exact model-facing success/diagnostic text.
@@ -338,10 +336,7 @@ pub fn render_section(view: SectionView<'_>) -> Str {
 		SectionOp::Update => {},
 	}
 
-	let estimated = view.header.len()
-		+ view.preview.len()
-		+ view.warnings.iter().map(Str::len).sum::<usize>()
-		+ view.block_resolutions.len() * 80;
+	let estimated = view.header.len() + view.preview.len() + view.block_resolutions.len() * 80;
 	let mut output = StrMut::with_capacity(estimated);
 	output.push_str(view.header);
 	for resolution in view.block_resolutions {
@@ -355,15 +350,6 @@ pub fn render_section(view: SectionView<'_>) -> Str {
 	if !view.preview.is_empty() {
 		output.push('\n');
 		output.push_str(view.preview);
-	}
-	if !view.warnings.is_empty() {
-		output.push_str("\n\nWarnings:\n");
-		for (index, warning) in view.warnings.iter().enumerate() {
-			if index > 0 {
-				output.push('\n');
-			}
-			output.push_str(warning);
-		}
 	}
 	output.freeze()
 }
@@ -453,9 +439,7 @@ mod tests {
 		let ProjectionLookup::Advance(mut first) = cache.lookup(&first_matcher, &revisions) else {
 			panic!("first complete entry must start a projection");
 		};
-		first
-			.advance("rev-1", b"a\nb\nc\n", b"a\nB\nc\n", None)
-			.unwrap();
+		first.advance("rev-1", "a\nb\nc\n", "a\nB\nc\n", None);
 		let first_text = first.text().to_owned();
 		assert!(cache.insert_projection(first_matcher.clone(), Arc::clone(&revisions), first,));
 
@@ -483,9 +467,7 @@ mod tests {
 		let ProjectionLookup::Advance(mut second) = cache.lookup(&second_matcher, &revisions) else {
 			panic!("a new complete entry must advance its predecessor");
 		};
-		second
-			.advance("rev-1", b"a\nb\nc\n", b"prefix\na\nB\nc\n", None)
-			.unwrap();
+		second.advance("rev-1", "a\nb\nc\n", "prefix\na\nB\nc\n", None);
 		assert!(second.text().starts_with(&first_text));
 	}
 
@@ -500,7 +482,7 @@ mod tests {
 		let ProjectionLookup::Advance(mut window) = cache.lookup(&hashline, &revisions) else {
 			panic!("first projection must advance");
 		};
-		window.advance("rev-1", b"a\n", b"A\n", None).unwrap();
+		window.advance("rev-1", "a\n", "A\n", None);
 		assert!(cache.insert_projection(hashline, Arc::clone(&revisions), window));
 
 		for dialect in [ProjectionDialect::ApplyPatch, ProjectionDialect::Sloppy] {
@@ -523,7 +505,7 @@ mod tests {
 		let ProjectionLookup::Advance(mut window) = cache.lookup(&old_matcher, &old_revisions) else {
 			panic!("first projection must advance");
 		};
-		window.advance("rev-1", b"a\n", b"A\n", None).unwrap();
+		window.advance("rev-1", "a\n", "A\n", None);
 		assert!(cache.insert_projection(old_matcher, old_revisions, window));
 
 		cache.insert_source(new.clone(), Bytes::from_static(b"x\n"));
@@ -538,14 +520,13 @@ mod tests {
 	}
 
 	#[test]
-	fn renders_update_delete_move_warnings_and_blocks_exactly() {
+	fn renders_update_delete_move_and_blocks_exactly() {
 		let resolution = ResolvedBlock {
 			anchor_line: 4,
 			start:       4,
 			end:         7,
 			operation:   "insert_after".into(),
 		};
-		let warnings = vec!["Recovered by remapping stale line anchors.".into()];
 		assert_eq!(
 			render_section(SectionView {
 				op:                SectionOp::Update,
@@ -555,11 +536,9 @@ mod tests {
 				move_dest:         Some("src/new.rs"),
 				preview:           "4:fn f() {\n8:after();",
 				block_resolutions: &[resolution],
-				warnings:          &warnings,
 			}),
 			"[src/new.rs#1A2B]\nPUT >4*: → resolved lines 4-7 (4 lines); body lands after line \
-			 7\nMoved to src/new.rs\n4:fn f() {\n8:after();\n\nWarnings:\nRecovered by remapping \
-			 stale line anchors."
+			 7\nMoved to src/new.rs\n4:fn f() {\n8:after();"
 		);
 		assert_eq!(
 			render_section(SectionView {
@@ -570,7 +549,6 @@ mod tests {
 				move_dest:         None,
 				preview:           "",
 				block_resolutions: &[],
-				warnings:          &[],
 			}),
 			"Deleted src/old.rs"
 		);

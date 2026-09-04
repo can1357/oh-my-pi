@@ -3,14 +3,14 @@
 use std::{future::poll_fn, thread};
 
 use bytes::Bytes;
-use omp_core::Str;
-use omp_inference::{
+use omp_ai::{
 	codec::Cancellation,
 	transport::browser::{
 		BrowserFetch, BrowserFetchError, BrowserFetchFuture, BrowserFetchRequest,
 		BrowserFetchResponse,
 	},
 };
+use omp_core::Str;
 use omp_webview::{
 	CloseHandle, Engine, FrameConfig, SurfaceKind, WebViewBuilder, automation::ExtractFormat,
 };

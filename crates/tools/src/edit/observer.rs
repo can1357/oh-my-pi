@@ -6,6 +6,7 @@ use bytes::Bytes;
 use flume::{Receiver, Sender};
 use omp_ast::summary::{SummarySettings, summarize_source};
 use omp_core::{Str, sf};
+use omp_tool::{Diag, DiagKind};
 use serde::{Deserialize, Serialize};
 use similar::{Algorithm, DiffOp, capture_diff_slices};
 
@@ -40,7 +41,7 @@ pub struct CapturedSource {
 }
 
 /// One structured, bounded valid-to-invalid edit transition.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct EditBlackboxRecord {
 	/// Canonical target path.
 	pub path:   Str,
@@ -256,9 +257,9 @@ impl EditObserver {
 		mode: &str,
 		args: &serde_json::Value,
 	) -> EditInspection {
-		if !introduced_parse_failure(&snapshot) {
-			return EditInspection { content: snapshot.after, notice: None, pending: None };
-		}
+		let Some(language) = parse_regression_language(&snapshot) else {
+			return EditInspection { content: snapshot.after, diag: None, pending: None };
+		};
 		let pending = self.blackbox.path.as_ref().map(|_| PendingBlackbox {
 			record: bounded_record(
 				&snapshot,
@@ -281,11 +282,12 @@ impl EditObserver {
 			);
 			return EditInspection {
 				content: repaired.content,
-				notice: Some(sf!(
-					"{} stopped parsing after this edit; automatic syntax repair succeeded in {} \
-					 attempt(s). Review the repaired region.",
-					snapshot.path,
-					repaired.attempts
+				diag: Some(Diag::info(
+					DiagKind::SyntaxRepaired,
+					sf!(
+						"{language}: automatic syntax repair succeeded in {} attempt(s)",
+						repaired.attempts
+					),
 				)),
 				pending,
 			};
@@ -297,9 +299,9 @@ impl EditObserver {
 		);
 		EditInspection {
 			content: snapshot.after,
-			notice: Some(sf!(
-				"{} no longer parses after this edit. Re-read the edited region and fix the syntax.",
-				snapshot.path
+			diag: Some(Diag::warn(
+				DiagKind::SyntaxBroken,
+				sf!("{language}: no longer parses after this edit"),
 			)),
 			pending,
 		}
@@ -339,8 +341,8 @@ fn append(path: &PathBuf, bytes: &[u8], lock: &parking_lot::Mutex<()>) -> std::i
 pub struct EditInspection {
 	/// Proposed final content, repaired only after a validated parse regression.
 	pub content: Bytes,
-	/// Model-facing repair or regression diagnostic.
-	pub notice:  Option<Str>,
+	/// Structured repair or regression diagnostic.
+	pub diag:    Option<Diag>,
 	/// Blackbox record which must be appended only after commit.
 	pub pending: Option<PendingBlackbox>,
 }
@@ -353,13 +355,21 @@ pub struct PendingBlackbox {
 
 /// True only for supported valid-to-invalid syntax transitions.
 pub fn introduced_parse_failure(snapshot: &AppliedEditSnapshot) -> bool {
-	let Ok(before) = std::str::from_utf8(&snapshot.before) else {
-		return false;
-	};
-	let Ok(after) = std::str::from_utf8(&snapshot.after) else {
-		return false;
-	};
-	!source_parses(after, &snapshot.path) && source_parses(before, &snapshot.path)
+	parse_regression_language(snapshot).is_some()
+}
+
+fn parse_regression_language(snapshot: &AppliedEditSnapshot) -> Option<Str> {
+	let before = std::str::from_utf8(&snapshot.before).ok()?;
+	let after = std::str::from_utf8(&snapshot.after).ok()?;
+	let summary = summarize_source(before, SummarySettings {
+		path: Some(&snapshot.path),
+		..SummarySettings::default()
+	})
+	.ok()?;
+	if !summary.parsed || source_parses(after, &snapshot.path) {
+		return None;
+	}
+	summary.language.map(Str::new)
 }
 
 /// Whether tree-sitter accepts a supported source, treating an empty file as
@@ -679,7 +689,7 @@ mod tests {
 					}),
 				)
 				.await;
-			assert!(inspected.notice.is_some());
+			assert!(inspected.diag.is_some());
 			observer
 				.record_committed(inspected.pending.expect("record"))
 				.await;
@@ -784,6 +794,9 @@ mod tests {
 			.inspect(snapshot(INVALID), "replace", &serde_json::Value::Null)
 			.await;
 		assert!(source_parses(std::str::from_utf8(&inspected.content).expect("utf8"), PATH));
+		let repaired = inspected.diag.expect("syntax repair diagnostic");
+		assert_eq!(repaired.native_kind(), Some(DiagKind::SyntaxRepaired));
+		assert_eq!(repaired.severity, omp_tool::Severity::Info);
 		worker.await.expect("worker");
 
 		let (client, requests) = EditRepairClient::channel();
@@ -802,6 +815,9 @@ mod tests {
 			.inspect(snapshot(INVALID), "replace", &serde_json::Value::Null)
 			.await;
 		assert_eq!(inspected.content, Bytes::copy_from_slice(INVALID.as_bytes()));
+		let broken = inspected.diag.expect("syntax regression diagnostic");
+		assert_eq!(broken.native_kind(), Some(DiagKind::SyntaxBroken));
+		assert_eq!(broken.severity, omp_tool::Severity::Warn);
 		tokio::time::timeout(Duration::from_secs(1), worker)
 			.await
 			.expect("worker timeout")

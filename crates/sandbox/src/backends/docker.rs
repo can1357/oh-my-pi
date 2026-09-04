@@ -44,7 +44,7 @@ struct ImageConfig {
 	volumes: Option<std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
-pub(crate) fn compile(
+pub fn compile(
 	spec: &SandboxSpec,
 	program: &Path,
 	requested: CapabilitySet,
@@ -53,7 +53,7 @@ pub(crate) fn compile(
 	compile_for(Backend::DockerEphemeral, spec, program, requested, enforced)
 }
 
-pub(crate) fn compile_runsc(
+pub fn compile_runsc(
 	spec: &SandboxSpec,
 	program: &Path,
 	requested: CapabilitySet,
@@ -143,7 +143,7 @@ fn compile_for(
 		push_mount(&mut argv, backend, path, path, false)?;
 	}
 	for path in &spec.unix_sockets {
-		if !path_under_any(path, &readable) && !path_under_any(path, &writable) {
+		if !path_under_any(path, readable) && !path_under_any(path, writable) {
 			push_mount(&mut argv, backend, path, path, true)?;
 		}
 	}
@@ -301,7 +301,7 @@ fn compile_for(
 	Ok(plan)
 }
 
-pub(crate) fn probe(backend: Backend) -> BackendStatus {
+pub fn probe(backend: Backend) -> BackendStatus {
 	let Some(image) = env::var_os(IMAGE_ENV) else {
 		return BackendStatus::unavailable(backend, ProbeFailure::Configuration {
 			backend,
@@ -353,7 +353,7 @@ pub(crate) fn probe(backend: Backend) -> BackendStatus {
 	}
 }
 
-pub(crate) fn prepare(
+pub fn prepare(
 	plan: &Plan,
 	spec: &SandboxSpec,
 	prepared: &mut PreparedSandbox,
@@ -637,10 +637,10 @@ fn writable_destinations(argv: &[OsString]) -> Vec<String> {
 			)),
 			Some("--mount") => {
 				let mount = argv[index + 1].to_string_lossy();
-				if mount_writable(&mount) {
-					if let Some(destination) = mount_destination(&mount) {
-						destinations.push(destination);
-					}
+				if mount_writable(&mount)
+					&& let Some(destination) = mount_destination(&mount)
+				{
+					destinations.push(destination);
 				}
 			},
 			_ => {},

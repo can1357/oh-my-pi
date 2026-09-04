@@ -1111,9 +1111,8 @@ async fn process_stop(
 		})
 		.await
 		.map_err(env_error)?;
-		let deadline = tokio::time::Instant::now()
-			+ Duration::from_millis(grace_ms)
-			+ Duration::from_secs(2);
+		let deadline =
+			tokio::time::Instant::now() + Duration::from_millis(grace_ms) + Duration::from_secs(2);
 		loop {
 			let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
 			if remaining.is_zero() {
@@ -1146,7 +1145,7 @@ async fn process_stop(
 	};
 	sync_process_statuses(session, jobs, std::slice::from_ref(&settled))?;
 	Ok(Response {
-		text: Str::new(
+		text:    Str::new(
 			serde_json::json!({
 				"name": name,
 				"generation": settled.generation,
@@ -1342,7 +1341,7 @@ async fn process_wait(
 	}
 	if pattern.is_none() && lifecycle == "ready" && terminal_process(&process) {
 		return Ok(Response {
-			text: Str::new(
+			text:    Str::new(
 				serde_json::json!({
 					"timeout": true,
 					"process": process_json(&process),
@@ -1472,9 +1471,7 @@ async fn process_wait(
 			},
 			ProcessAttachmentEvent::State(state) => {
 				let Some(info) = state.process else { continue };
-				if info.generation != process.generation
-					|| info.restart_count > process.restart_count
-				{
+				if info.generation != process.generation || info.restart_count > process.restart_count {
 					return Err(replaced_process_wait(name, process.generation));
 				}
 				if pattern.is_none() && process_matches_wait(&info, lifecycle) {
@@ -1487,7 +1484,7 @@ async fn process_wait(
 				}
 				if pattern.is_none() && lifecycle == "ready" && terminal_process(&info) {
 					return Ok(Response {
-						text: Str::new(
+						text:    Str::new(
 							serde_json::json!({
 								"timeout": true,
 								"process": process_json(&info),
@@ -1603,8 +1600,8 @@ fn ready_probe_json(probe: &ReadyProbe) -> serde_json::Value {
 fn replaced_process_wait(name: &str, generation: u64) -> omp_agent::SessionToolError {
 	omp_agent::SessionToolError::Rejected {
 		message: sf!(
-			"process `{name}` generation {generation} ended before the wait completed; \
-			 refusing to continue against a replacement generation"
+			"process `{name}` generation {generation} ended before the wait completed; refusing to \
+			 continue against a replacement generation"
 		),
 	}
 }

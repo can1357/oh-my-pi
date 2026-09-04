@@ -1,5 +1,5 @@
-//! `/marketplace` (no argument, `install`, `uninstall`): pi's
-//! `PluginSelectorComponent` — a centered `Plugins` list of every catalog
+//! `/marketplace` (no argument, `install`, `uninstall`) is a centered
+//! `Plugins` list of every catalog
 //! plugin with `@version`, `[installed]`, and `[scope]` tags plus the
 //! marketplace as the hint. Enter installs (or, for an installed row,
 //! uninstalls) through the controller's typed mutation stream; settled
@@ -16,7 +16,7 @@ use super::{
 };
 use crate::host::HostCommand;
 
-/// pi `SelectList` cap: `Math.min(items.length, 20)`.
+/// Maximum visible plugin rows.
 const MAX_VISIBLE: usize = 20;
 /// Border rows, divider, status row, and hint.
 const CHROME_ROWS: u16 = 5;
@@ -25,7 +25,7 @@ const HINT_INSTALL: &str =
 	"↑/↓ plugins · Enter install (uninstall when installed) · type to search · Esc close";
 const HINT_UNINSTALL: &str = "↑/↓ plugins · Enter uninstall · type to search · Esc close";
 
-/// Which pi selector opened: the install browser over every catalog
+/// Which selector opened: the install browser over every catalog
 /// plugin or the uninstall picker over installed ones.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PluginMode {
@@ -198,7 +198,7 @@ impl PluginSelector {
 		self.ui = Ui::from_root(tree, self.width, self.ctx.clone());
 	}
 
-	/// pi `onSelect`: install the chosen plugin, or uninstall an installed
+	/// Installs the chosen plugin, or uninstalls an installed
 	/// one (the uninstall picker only lists those).
 	fn choose(&mut self, id: &str) -> PanelEvent {
 		if id == EMPTY_VALUE {

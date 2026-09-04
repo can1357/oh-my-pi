@@ -192,7 +192,7 @@ try {
 			quiet: true,
 		});
 		await op({ op: "keys", name: NAME, keys: "enter", quiet: true });
-		// The running bash card paints the command with pi's `$ ` lead.
+		// The running bash card paints the command with a `$ ` lead.
 		await waitFor("$ sleep 25");
 		await Bun.sleep(1_000);
 		await screen("running bash card");

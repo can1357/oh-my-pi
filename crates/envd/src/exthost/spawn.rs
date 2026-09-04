@@ -56,6 +56,8 @@ pub const PACKAGE_SNAPSHOT_ENV: &str = "OMP_EXT_PACKAGE_SNAPSHOT";
 pub const MANIFEST_SNAPSHOT_ENV: &str = "OMP_EXT_MANIFEST_SNAPSHOT";
 /// Environment variable carrying manifest-ordered declaration modules as JSON.
 pub const DECLARATION_MODULES_ENV: &str = "OMP_EXT_DECLARATION_MODULES";
+/// Environment variable carrying the operator-admitted exact entry file.
+pub const ENTRY_PATH_ENV: &str = "OMP_EXT_ENTRY_PATH";
 
 /// One captured child output fragment.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -85,8 +87,12 @@ pub struct SpawnSpec {
 	pub executable:          PathBuf,
 	/// Per-extension Python site tree.
 	pub python_site:         PathBuf,
+	/// Exact operator-admitted entry file loaded before symbolic imports.
+	pub entry_path:          Option<PathBuf>,
 	/// Scoped Environment DATA socket.
 	pub env_socket:          PathBuf,
+	/// Authoritative extension process working directory.
+	pub current_dir:         Option<PathBuf>,
 	/// Optional workspace root granted to declared local callback sinks.
 	pub workspace_root:      Option<PathBuf>,
 	/// Generation assigned to this newly spawned child.
@@ -128,9 +134,12 @@ pub struct RunningHost {
 	cancellation: CancellationLadder,
 	restart_spec: SpawnSpec,
 	identity:     ControlConnectionIdentity,
-	authority:    Arc<dyn ControlAuthority>,
 	snapshot:     ControlAuthoritySnapshot,
 	sandbox:      Option<PreparedSandbox>,
+}
+
+const fn cancellation_stops_child(outcome: &CancellationOutcome) -> bool {
+	matches!(outcome, CancellationOutcome::Killed(_) | CancellationOutcome::Disabled(_))
 }
 
 /// Failure while driving a live child or its cancellation ladder.
@@ -170,7 +179,7 @@ impl SpawnedHost {
 	) -> Result<RunningHost, RunningHostError> {
 		let Self { key, mut child, control, logs, restart_spec, sandbox } = self;
 		let (runtime, handle) =
-			ControlRuntime::new(control, key.clone(), identity.clone(), Arc::clone(&authority));
+			ControlRuntime::new(control, key.clone(), identity.clone(), authority);
 		let pump = tokio::spawn(runtime.serve());
 		if let Err(error) = handle.install_authority_snapshot(snapshot).await {
 			pump.abort();
@@ -205,7 +214,6 @@ impl SpawnedHost {
 			cancellation: CancellationLadder::default(),
 			restart_spec,
 			identity,
-			authority,
 			snapshot: snapshot.clone(),
 			sandbox,
 		})
@@ -242,14 +250,6 @@ impl RunningHost {
 		self.cancellation.disabled(&self.key)
 	}
 
-	/// Reaps the current process group and starts its next authenticated
-	/// generation.
-	pub async fn restart(&mut self) -> Result<(), RunningHostError> {
-		self
-			.restart_with_authority(Arc::clone(&self.authority))
-			.await
-	}
-
 	/// Reaps the current process group and starts its next generation with a
 	/// freshly identity-bound CONTROL authority.
 	pub async fn restart_with_authority(
@@ -281,6 +281,10 @@ impl RunningHost {
 
 	/// Runs all three cancellation stages, killing only this process group when
 	/// Python remains live after both courtesy graces.
+	///
+	/// A forced kill leaves the host stopped. The supervisor must acquire a
+	/// freshly generation-bound authority before calling
+	/// [`Self::restart_with_authority`].
 	pub async fn cancel_dispatch(
 		&mut self,
 		invocation: &str,
@@ -299,10 +303,8 @@ impl RunningHost {
 			self
 				.cancellation
 				.kill_after_grace(self.key.clone(), &mut self.child, last_frame)?;
-		match outcome {
-			CancellationOutcome::Killed(_) => self.restart().await?,
-			CancellationOutcome::Disabled(_) => self.terminate().await,
-			CancellationOutcome::DispatchCancel | CancellationOutcome::InterruptThread => {},
+		if cancellation_stops_child(&outcome) {
+			self.terminate().await;
 		}
 		Ok(outcome)
 	}
@@ -532,6 +534,9 @@ pub async fn spawn(spec: SpawnSpec) -> Result<SpawnedHost, SpawnError> {
 			sandbox.allow_read(&spec.executable)?;
 			allow_loaded_runtime_images(&mut sandbox, &spec.executable)?;
 			sandbox.allow_read(&spec.python_site)?;
+			if let Some(entry_path) = &spec.entry_path {
+				sandbox.allow_read(entry_path)?;
+			}
 			sandbox.set_write(WriteMode::Scoped);
 			sandbox.allow_write(&env_socket)?;
 			if let Some(root) = &spec.workspace_root {
@@ -581,7 +586,12 @@ pub async fn spawn(spec: SpawnSpec) -> Result<SpawnedHost, SpawnError> {
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
 		.kill_on_drop(true);
-	if let Some(root) = &spec.workspace_root {
+	if let Some(entry_path) = &spec.entry_path {
+		command.env(ENTRY_PATH_ENV, entry_path);
+	} else {
+		command.env_remove(ENTRY_PATH_ENV);
+	}
+	if let Some(root) = &spec.current_dir {
 		command.current_dir(root);
 	}
 	if let Some(snapshot) = &spec.package_snapshot {
@@ -764,6 +774,20 @@ fn install_package_snapshot(engine: &omp_py::Engine) -> Result<(), SpawnError> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::exthost::cancel::{CancelStage, CancellationJournal};
+
+	#[test]
+	fn forced_cancellation_stops_before_authorized_restart() {
+		assert!(!cancellation_stops_child(&CancellationOutcome::DispatchCancel));
+		assert!(!cancellation_stops_child(&CancellationOutcome::InterruptThread));
+		let journal = CancellationJournal {
+			extension:  HostKey::new("project", "trusted", "fixture"),
+			last_frame: 7,
+			stage:      CancelStage::ProcessGroupKill,
+		};
+		assert!(cancellation_stops_child(&CancellationOutcome::Killed(journal.clone())));
+		assert!(cancellation_stops_child(&CancellationOutcome::Disabled(journal)));
+	}
 
 	#[tokio::test]
 	async fn unknown_trust_tier_never_falls_back_to_raw_spawn() {
@@ -771,7 +795,9 @@ mod tests {
 			key:                 HostKey::new("workspace", "unknown", "fixture"),
 			executable:          PathBuf::from("/definitely/not/an/executable"),
 			python_site:         PathBuf::from("/definitely/not/a/site"),
+			entry_path:          None,
 			env_socket:          PathBuf::from("/definitely/not/a/socket"),
+			current_dir:         None,
 			workspace_root:      None,
 			host_generation:     1,
 			session_generation:  1,

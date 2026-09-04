@@ -1,4 +1,4 @@
-//! Agent reactions (pi `modes/components/reaction.ts`). A reply that opens
+//! Agent reactions. A reply that opens
 //! with a complete emoji grapheme reacts to the transcript block before it:
 //! the emoji and immediately following whitespace are lifted out of the prose
 //! and shown as a badge on that block instead. While the reply streams, an
@@ -12,11 +12,11 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-/// Longest emoji grapheme (UTF-16 units, pi's measure) still worth
+/// Longest emoji grapheme (UTF-16 units) still worth
 /// withholding for.
 const MAX_REACTION_UNITS: usize = 32;
 
-/// One emoji grapheme (pi `REACTION_RE`, `\p{RGI_Emoji}` spelled out as the
+/// One emoji grapheme (`\p{RGI_Emoji}` spelled out as the
 /// RGI sequence grammar): a pictograph, a flag (two regional indicators), or
 /// a keycap, followed by any run of presentation selectors, skin tones, tag
 /// letters, and ZWJ-joined pictographs.
@@ -32,7 +32,7 @@ static REACTION: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// A still-streaming run that can only ever be an emoji grapheme plus
-/// trailing blanks (pi `REACTION_PREFIX_RE`).
+/// trailing blanks.
 static REACTION_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 	Regex::new(
 		r"(?x)^
@@ -80,7 +80,7 @@ pub fn split_reaction(text: &str) -> ReactionSplit<'_> {
 	}
 }
 
-/// Removes the whitespace current pi associates with an opening reaction.
+/// Removes the whitespace associated with an opening reaction.
 fn reaction_body(rest: &str) -> &str {
 	let horizontal = rest
 		.bytes()
@@ -93,7 +93,7 @@ fn reaction_body(rest: &str) -> &str {
 		.unwrap_or(after)
 }
 
-/// UTF-16 code units, pi's length measure.
+/// UTF-16 code units.
 fn units(text: &str) -> usize {
 	text.encode_utf16().count()
 }
@@ -102,7 +102,7 @@ fn units(text: &str) -> usize {
 mod tests {
 	use super::*;
 
-	/// pi `splitReaction`: a lone emoji line lifts off as the reaction and
+	/// A lone emoji line lifts off as the reaction and
 	/// the body is what follows it; emoji sequences (flags, skin tones,
 	/// keycaps, ZWJ families) count as one grapheme.
 	#[test]
@@ -126,7 +126,7 @@ mod tests {
 
 	/// Ordinary prose does not react. Once an opening emoji is complete, any
 	/// following non-whitespace is the reply body (including another emoji or
-	/// punctuation), matching pi's prefix split.
+	/// punctuation), matching the prefix split.
 	#[test]
 	fn prose_stays_plain_and_content_after_an_emoji_becomes_the_body() {
 		for text in ["Sure 👍\nDone.", "hello\nworld", "\nDone."] {

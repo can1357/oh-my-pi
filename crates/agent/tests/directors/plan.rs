@@ -53,7 +53,7 @@ fn plan_binds_derive_into_registered_convars_and_restrict_the_roster() {
 		"plan binds the mode prompt slot"
 	);
 	assert_eq!(con.get("ai_model"), Some(omp_con::Value::Str("@plan".into())));
-	let roster = omp_con::SV_TOOLS.get(&con);
+	let roster = omp_agent::SV_TOOLS.get(&con);
 	assert!(roster.iter().any(|name| name.as_str() == "write"), "{roster:?}");
 	assert!(!roster.iter().any(|name| name.as_str() == "edit"), "{roster:?}");
 	assert_eq!(
@@ -65,7 +65,7 @@ fn plan_binds_derive_into_registered_convars_and_restrict_the_roster() {
 	world.remove_director("plan");
 	world.stack.apply_binds(world.session.dom(), &con);
 	assert_eq!(con.get("ai_prompt_mode"), Some(omp_con::Value::Str("".into())));
-	assert!(omp_con::SV_TOOLS.get(&con).is_empty(), "exit restores the full roster");
+	assert!(omp_agent::SV_TOOLS.get(&con).is_empty(), "exit restores the full roster");
 }
 
 #[test]

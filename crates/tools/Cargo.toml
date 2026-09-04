@@ -32,17 +32,15 @@ omp-ast.workspace = true
 omp-ar.workspace = true
 omp-con.workspace = true
 omp-core.workspace = true
-omp-docserver.workspace = true
 omp-env.workspace = true
-omp-hashline.workspace = true
+omp-edit.workspace = true
 omp-memory.workspace = true
 omp-proto.workspace = true
 omp-py.workspace = true
 omp-shell-builtins.workspace = true
-omp-shell-engine.workspace = true
+omp-shell.workspace = true
 omp-tool.workspace = true
 omp-macros.workspace = true
-omp-slopjson.workspace = true
 omp-walker.workspace = true
 parking_lot.workspace = true
 pdf-inspector.workspace = true
@@ -69,5 +67,5 @@ xutf.workspace = true
 flate2.workspace = true
 
 [dev-dependencies]
-omp-inference.workspace = true
+omp-ai.workspace = true
 tempfile.workspace = true

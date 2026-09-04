@@ -1,6 +1,6 @@
 # omp-shell-builtins
 
-`omp-shell-builtins` provides in-process command-line utilities and process-management commands for the OMP shell. It exposes separate registration lists for general utilities such as `cat`, `grep`, `sed`, `ls`, and checksum tools, and for process-oriented commands such as `pgrep`, `pkill`, `pidwait`, `ps`, `top`, `sleep`, `timeout`, and `nohup`.
+`omp-shell-builtins` provides in-process command-line utilities and process-management commands for the OMP shell. It exposes separate registration lists for general utilities such as `cat`, `grep`, `sed`, `ls`, and checksum tools, and for process-oriented commands such as `pgrep`, `pkill`, `pidwait`, `ps`, `top`, `sleep`, `timeout`, and `nohup`. Its `omp-sh` binary is the batteries-included composition of these registries with `omp-shell`.
 
 ## Structure
 

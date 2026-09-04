@@ -6,8 +6,8 @@ use std::sync::{
 };
 
 use flume::Receiver;
+use omp_ai::call::AuthInput;
 use omp_core::Str;
-use omp_inference::call::AuthInput;
 
 /// Explanation shown when encrypted credential storage is unavailable.
 pub const CREDENTIAL_STORAGE_LOCKED_MESSAGE: &str =

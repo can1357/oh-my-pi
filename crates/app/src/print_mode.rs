@@ -1,6 +1,6 @@
 //! Single-shot adapter over the journal-first production agent kernel.
 //!
-//! Text mode keeps stdout clean for shell captures (pi `print-mode.ts`): the
+//! Text mode keeps stdout clean for shell captures: the
 //! only bytes written there are the final assistant response in provider block
 //! order (including thinking when `--print-thoughts`), after every prompt
 //! settled. Progress (`Working...`) and failures go to stderr, and a failed or
@@ -11,7 +11,7 @@
 //! `agent_end` for each submitted prompt. A failed turn still closes with
 //! `turn_end` and `agent_end`; the terminal assistant message carries
 //! `stopReason` and `errorMessage` instead of the stream ending without a
-//! terminal frame. Like current pi, repeated message/partial snapshots are
+//! terminal frame. Repeated message/partial snapshots are
 //! always removed from `message_update`; its incremental
 //! `assistantMessageEvent`, terminal messages, and tool results remain
 //! complete.
@@ -95,7 +95,7 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 	let (snapshot, events) = session.subscribe();
 	let mut replica = Dom::from_snapshot(&snapshot);
 	let mut json = JsonState::new(catalog, session.blobs().clone(), launch.model.clone());
-	// pi `wrapper.ts`: without an interactive UI an approval-requiring call
+	// Without an interactive UI, an approval-requiring call
 	// is denied immediately (`--approval-mode yolo` or `tools.approval.<tool>
 	// allow` opt it back in); the denial is journaled like any other.
 	let kernel_events = kernel.subscribe();
@@ -280,7 +280,10 @@ async fn run_inner(args: PrintArgs, piped_input: Option<Str>) -> miette::Result<
 
 async fn report_print_failure(message: &str) -> miette::Result<()> {
 	let mut stderr = tokio::io::stderr();
-	stderr.write_all(message.as_bytes()).await.into_diagnostic()?;
+	stderr
+		.write_all(message.as_bytes())
+		.await
+		.into_diagnostic()?;
 	stderr.write_all(b"\n").await.into_diagnostic()?;
 	stderr.flush().await.into_diagnostic()
 }
@@ -302,7 +305,7 @@ fn kernel_exit_cause(error: &KernelError, model: &str) -> ExitCause {
 	}
 }
 
-/// pi's stop-reason vocabulary for a turn that did not complete.
+/// Stop-reason vocabulary for a turn that did not complete.
 const fn stop_reason_name(stop: TurnStop) -> &'static str {
 	match stop {
 		TurnStop::Completed => "stop",
@@ -313,7 +316,7 @@ const fn stop_reason_name(stop: TurnStop) -> &'static str {
 
 /// The final `agent_end` frame: every message the submission produced, with
 /// the terminal assistant carrying `stopReason`/`errorMessage` when the turn
-/// failed or was aborted (pi `agent_end.messages`).
+/// failed or was aborted.
 #[cfg(test)]
 fn agent_end_value(dom: &Dom, first_turn: usize) -> serde_json::Value {
 	serde_json::json!({
@@ -409,7 +412,7 @@ fn terminal_assistant_message(dom: &Dom, turn: Handle, state: &JsonState) -> ser
 /// Text-mode stdout: the last assistant response across the submitted
 /// prompts, in provider block order, with thinking included when requested.
 /// Intermediate assistant messages before tool calls and the tool calls
-/// themselves never reach stdout (pi `print-mode.ts` text output).
+/// themselves never reach stdout.
 fn final_response_text(dom: &Dom, first_turn: usize, print_thoughts: bool) -> String {
 	let mut output = String::new();
 	let Some(assistant) = dom
@@ -1045,7 +1048,7 @@ fn message_delta(index: u32, kind: &str, delta: &str) -> serde_json::Value {
 }
 
 fn printable_message_update(stream: serde_json::Value) -> serde_json::Value {
-	// Current pi always applies `printableEvent`: partial snapshots and the
+	// Partial snapshots and the
 	// outer message are intentionally absent so NDJSON grows linearly.
 	serde_json::json!({"type":"message_update","assistantMessageEvent":stream})
 }
@@ -1342,11 +1345,7 @@ fn message_value_impl(dom: &Dom, handle: Handle, state: Option<&JsonState>) -> s
 		if let Some(thinking) = node_text(node, PropId::Thinking)
 			&& !thinking.is_empty()
 		{
-			indexed.push((
-				0,
-				0,
-				serde_json::json!({"type":"thinking","thinking":thinking}),
-			));
+			indexed.push((0, 0, serde_json::json!({"type":"thinking","thinking":thinking})));
 		}
 		if let Some(text) = node_text(node, PropId::Text)
 			.or(node.content.as_deref())
@@ -1961,11 +1960,8 @@ pub fn transcript_json(dom: &Dom, blobs: &BlobStore) -> serde_json::Value {
 				.flatten()
 		})
 		.unwrap_or("session");
-	let state = JsonState::new(
-		Arc::new(Catalog::embedded().clone()),
-		blobs.clone(),
-		Str::new(model),
-	);
+	let state =
+		JsonState::new(Arc::new(Catalog::embedded().clone()), blobs.clone(), Str::new(model));
 	let notices = dom
 		.children(dom.body())
 		.iter()
@@ -1993,14 +1989,17 @@ pub fn transcript_json(dom: &Dom, blobs: &BlobStore) -> serde_json::Value {
 	value
 }
 
-/// Pi-compatible concise Markdown projection of the live session branch.
+/// Concise Markdown projection of the live session branch.
 ///
 /// Tool call/result pairs collapse into one bounded line, reasoning is hidden
 /// unless requested, and attachment bytes never enter the Markdown document.
 #[must_use]
 pub fn transcript_markdown(dom: &Dom, blobs: &BlobStore, include_thinking: bool) -> String {
 	let document = transcript_json(dom, blobs);
-	let messages = document["messages"].as_array().map(Vec::as_slice).unwrap_or_default();
+	let messages = document["messages"]
+		.as_array()
+		.map(Vec::as_slice)
+		.unwrap_or_default();
 	let mut results = FastHashMap::<&str, &serde_json::Value>::default();
 	for message in messages {
 		if message["role"] == "toolResult"
@@ -2129,10 +2128,7 @@ fn json_content_text(content: &serde_json::Value) -> String {
 		.join("\n")
 }
 
-fn markdown_tool_line(
-	call: &serde_json::Value,
-	result: Option<&serde_json::Value>,
-) -> String {
+fn markdown_tool_line(call: &serde_json::Value, result: Option<&serde_json::Value>) -> String {
 	let name = call["name"]
 		.as_str()
 		.or_else(|| call["toolName"].as_str())
@@ -2143,7 +2139,11 @@ fn markdown_tool_line(
 		return format!("{head} ⇒ pending");
 	};
 	let text = json_content_text(&result["content"]);
-	let count = if text.is_empty() { 0 } else { text.split('\n').count() };
+	let count = if text.is_empty() {
+		0
+	} else {
+		text.split('\n').count()
+	};
 	let noun = if count == 1 { "line" } else { "lines" };
 	if result["isError"].as_bool().unwrap_or(false) {
 		let preview = one_line(text.split('\n').next().unwrap_or_default(), 120);
@@ -2189,8 +2189,21 @@ fn primary_arg(name: &str, args: &serde_json::Value) -> String {
 		scalar("pat")
 	} else {
 		[
-			"path", "file_path", "filePath", "command", "cmd", "pattern", "url", "query",
-			"prompt", "assignment", "note", "message", "op", "name", "id",
+			"path",
+			"file_path",
+			"filePath",
+			"command",
+			"cmd",
+			"pattern",
+			"url",
+			"query",
+			"prompt",
+			"assignment",
+			"note",
+			"message",
+			"op",
+			"name",
+			"id",
 		]
 		.into_iter()
 		.find_map(scalar)
@@ -2364,16 +2377,14 @@ mod tests {
 		let markdown = transcript_markdown(session.dom(), session.blobs(), false);
 		assert_eq!(
 			markdown,
-			"## user\n\nread note.txt\n\n\
-			 ## assistant\n\nLet me read that file.\n→ read(note.txt) ⇒ ok · 1 line\n\n\
-			 ## assistant\n\nhello from fixture\n",
+			"## user\n\nread note.txt\n\n## assistant\n\nLet me read that file.\n→ read(note.txt) ⇒ \
+			 ok · 1 line\n\n## assistant\n\nhello from fixture\n",
 		);
 		let with_thinking = transcript_markdown(session.dom(), session.blobs(), true);
 		assert_eq!(
 			with_thinking,
-			"## user\n\nread note.txt\n\n\
-			 ## assistant\n\nLet me read that file.\n→ read(note.txt) ⇒ ok · 1 line\n\n\
-			 ## assistant\n\n_thinking:_ The file says hello.\nhello from fixture\n",
+			"## user\n\nread note.txt\n\n## assistant\n\nLet me read that file.\n→ read(note.txt) ⇒ \
+			 ok · 1 line\n\n## assistant\n\n_thinking:_ The file says hello.\nhello from fixture\n",
 		);
 	}
 

@@ -23,7 +23,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle, T
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
 use omp_core::FastHashMap;
 use omp_core::{FastHashSet, FastState};
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use parking_lot::Mutex;
 use thiserror::Error;
 #[cfg(windows)]

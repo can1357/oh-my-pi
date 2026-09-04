@@ -1,11 +1,11 @@
-//! Workspace slash commands (pi `builtin-lifecycle.ts`): `/add-dir`,
-//! `/remove-dir`, `/dirs`, `/move`, `/wt` (`/worktree`).
+//! Workspace slash commands: `/add-dir`, `/remove-dir`, `/dirs`, `/move`,
+//! `/wt` (`/worktree`).
 //!
-//! pi keeps the additional workspace directories on the session manager;
-//! here they are the `SESSION` convar [`SV_WORKSPACE_DIRS`] (ADR 0012), so
-//! they journal into `<meta><con>`, survive `-c` resume, fall off on rewind,
-//! and seed spawned children. `/move` and `/wt` relocate the journal and
-//! the process working directory through the controller
+//! The TS implementation keeps additional workspace directories on the session
+//! manager; here they are the `SESSION` convar [`SV_WORKSPACE_DIRS`] (ADR
+//! 0012), so they journal into `<meta><con>`, survive `-c` resume, fall off on
+//! rewind, and seed spawned children. `/move` and `/wt` relocate the journal
+//! and the process working directory through the controller
 //! ([`HostCommand::Move`](crate::HostCommand::Move)); the worktree itself
 //! is created by the application ([`Services::create_worktree`]).
 //!
@@ -51,11 +51,14 @@ pub struct DirectoryChoice {
 }
 
 omp_con::var! {
-	/// Additional workspace directories of this session (pi multi-root
-	/// `/add-dir`), beside the working directory.
+	/// Extra workspace directories added to every session as additional roots.
+	/// Relative paths resolve from the working directory.
 	pub static SV_WORKSPACE_DIRS = sv_workspace_dirs: Vec<Str> {
 		default: Vec::new(),
 		flags: archive | session,
+		meta: {
+			"legacy.path": "workspace.additionalDirectories",
+		},
 	};
 }
 
@@ -89,7 +92,7 @@ pub fn quote_console_atom(line: &mut String, input: &str) {
 	line.push('"');
 }
 
-/// pi `resolveToCwd`: absolute paths stand, `~` expands, the rest joins the
+/// Absolute paths stand, `~` expands, and the rest joins the
 /// working directory; the result is lexically normalized.
 #[must_use]
 pub fn resolve_to_cwd(input: &str, cwd: &Path) -> PathBuf {
@@ -124,7 +127,7 @@ pub fn resolve_to_cwd(input: &str, cwd: &Path) -> PathBuf {
 	out
 }
 
-/// Lists directory argument completions using pi's path-style preservation.
+/// Lists directory argument completions while preserving input path style.
 ///
 /// `substring` is the centered MovePanel behavior (typing `ph` finds
 /// `alpha/`); the slash-command completer passes `false` for prefix matching.
@@ -334,7 +337,7 @@ pub fn register_move_completer(
 	});
 }
 
-/// pi `defaultSessionWorktreeBranch`: `wt/<yyyymmdd-hhmmss>` in local time.
+/// `wt/<yyyymmdd-hhmmss>` branch name in local time.
 #[must_use]
 pub fn default_worktree_branch() -> Str {
 	let now = jiff::Zoned::now();
@@ -364,7 +367,7 @@ fn set_dirs(cx: &PanelCx<'_>, dirs: &[Str]) -> Result<(), Str> {
 		.map_err(|error| Str::new(error.to_string()))
 }
 
-/// pi `formatWorkspaceDirectories`.
+/// Formats workspace directories.
 #[must_use]
 pub fn format_dirs(cwd: &Path, additional: &[Str], note: Option<&str>) -> Str {
 	let mut lines = String::new();

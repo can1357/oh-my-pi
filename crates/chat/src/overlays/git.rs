@@ -1,4 +1,4 @@
-//! Fullscreen Git workbench (pi `cli/git-tui`).
+//! Fullscreen Git workbench.
 //!
 //! A split diff viewer with staging, a tree/flat sidebar, and a commit
 //! composer. Repository reads use [`omp_vcs`] from the actor thread, while
@@ -6,9 +6,10 @@
 //! controller (ADR 0005). The panel re-reads status only after an outcome or
 //! when the index, `HEAD`, or viewed file changes on disk.
 //!
-//! Deviations from pi, by ADR 0032 (the renderer owns presentation policy)
-//! and the no-network actor rule: author avatars (pi fetches GitHub
-//! avatars over HTTP) and identicons are not painted; AI staging and
+//! Deviations from the TS implementation, by ADR 0032 (the renderer owns
+//! presentation policy) and the no-network actor rule: author avatars
+//! (it fetches GitHub avatars over HTTP) and identicons are not painted; AI
+//! staging and
 //! commit-message generation are not wired (they need an inference seam).
 
 use std::{
@@ -33,9 +34,9 @@ use omp_vcs::{DiffOptions, StatusOptions, UntrackedMode, git::GitRepo};
 use super::{Outcome, Panel, PanelAnchor, PanelCx, PanelEvent, PanelNote, services::ServiceResult};
 use crate::host::HostCommand;
 
-/// pi `REFRESH_MS`: how often the on-disk fingerprint is re-checked.
+/// How often the on-disk fingerprint is re-checked.
 pub const REFRESH_MS: Duration = Duration::from_millis(2_000);
-/// pi `STATUS_TTL_MS`: how long a non-sticky status message replaces the
+/// How long a non-sticky status message replaces the
 /// key hints.
 pub const STATUS_TTL: Duration = Duration::from_millis(6_000);
 const SIDEBAR_MIN: u16 = 30;
@@ -45,10 +46,10 @@ const MIN_TREE_ROWS: u16 = 6;
 /// Files above this size are not diffed in the actor.
 const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
-/// pi diff-focus hint.
+/// Hint while the diff has focus.
 const DIFF_HINT: &str = "alt+↓/↑ hunk · ]/[ file · shift+↑/↓ select · s/u stage · x discard · v \
                          view · c commit · q quit";
-/// pi sidebar-focus hint.
+/// Hint while the sidebar has focus.
 const SIDEBAR_HINT: &str =
 	"↑/↓ move · ←/→ fold · space stage · enter open · alt+↓/↑ hunk · c commit · t tree · q quit";
 /// The empty tree, the parent side of a root commit.
@@ -2102,7 +2103,7 @@ impl GitWorkbench {
 				let fixed = text_rows(head.subject.as_str())
 					.saturating_add(6)
 					.saturating_add(u16::from(!head.parents.is_empty()));
-				// The body yields to the file list: pi shows at most eight
+				// The body yields to the file list: show at most eight
 				// body lines, and never fewer than `MIN_TREE_ROWS` files.
 				let budget = content_rows.saturating_sub(fixed.saturating_add(MIN_TREE_ROWS + 1));
 				let mut body_rows = 0_u16;
@@ -2929,7 +2930,7 @@ mod tests {
 		assert_eq!(panel.status_text(), DIFF_HINT);
 		assert_eq!(panel.key(Key::BackTab), PanelEvent::Consumed);
 
-		// pi rests on the section header; ↓ walks section → src/ → lib.rs.
+		// The cursor starts on the section header; ↓ walks section → src/ → lib.rs.
 		assert!(matches!(panel.current_sidebar_target(), Some(SidebarTarget::Section { .. })));
 		assert_eq!(panel.key(Key::Down), PanelEvent::Consumed);
 		assert!(matches!(panel.current_sidebar_target(), Some(SidebarTarget::Directory { .. })));

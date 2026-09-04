@@ -314,17 +314,16 @@ const DESCRIPTION: &str =
 	 `start` (`task`) marks in progress; `done`/`drop` (`task` or `phase`; omit both for every \
 	 task) mark completed/abandoned; `block` (`task` or `phase`, optional `reason`) marks open \
 	 tasks blocked while awaiting external input and excludes them from incomplete-work reminders; \
-	 blocking the active task promotes the next pending task. `unblock` (`task` or `phase`) returns \
-	 blocked tasks to pending; `rm` (optional \
-	 `task` or `phase`; omit both to clear) removes tasks; `append` (`phase`, `items`) adds tasks \
-	 and lazily creates the phase; `view` echoes the list read-only.\n\nTask content: 5-10 words, \
-	 what not how, unique. Phase name: short unique noun phrase, never numbered. Keep introduced \
-	 `task`/`phase` strings stable; when the exact text is lost, `view` echoes it. Mark tasks done \
-	 immediately and \
-	 complete phases in order. Create a list for work with at least three distinct steps, whenever \
-	 the user requests one or supplies multiple items, and when new instructions arrive mid-task. \
-	 A user-provided checklist is exhaustive: initialize every item separately, never summarize or \
-	 track part of it from memory. Batch todo calls with real work, never as a turn's only call.";
+	 blocking the active task promotes the next pending task. `unblock` (`task` or `phase`) \
+	 returns blocked tasks to pending; `rm` (optional `task` or `phase`; omit both to clear) \
+	 removes tasks; `append` (`phase`, `items`) adds tasks and lazily creates the phase; `view` \
+	 echoes the list read-only.\n\nTask content: 5-10 words, what not how, unique. Phase name: \
+	 short unique noun phrase, never numbered. Keep introduced `task`/`phase` strings stable; when \
+	 the exact text is lost, `view` echoes it. Mark tasks done immediately and complete phases in \
+	 order. Create a list for work with at least three distinct steps, whenever the user requests \
+	 one or supplies multiple items, and when new instructions arrive mid-task. A user-provided \
+	 checklist is exhaustive: initialize every item separately, never summarize or track part of \
+	 it from memory. Batch todo calls with real work, never as a turn's only call.";
 
 /// Phase name for a flattened `init` that supplies `items` without `phase`.
 const DEFAULT_INIT_PHASE: &str = "Tasks";
@@ -336,15 +335,15 @@ impl Todo {
 		phases
 			.iter()
 			.flat_map(|phase| {
-				phase.tasks.iter().filter_map(|task| {
-					matches!(task.status, Status::Pending | Status::InProgress).then(|| {
-						ActionableTodoRef {
-							phase:   phase.name.clone(),
-							content: task.content.clone(),
-							status:  task.status,
-						}
+				phase
+					.tasks
+					.iter()
+					.filter(|&task| matches!(task.status, Status::Pending | Status::InProgress))
+					.map(|task| ActionableTodoRef {
+						phase:   phase.name.clone(),
+						content: task.content.clone(),
+						status:  task.status,
 					})
-				})
 			})
 			.collect()
 	}
@@ -384,7 +383,7 @@ impl Tool for Todo {
 }
 
 /// Execute-time argument shape: `op` may be absent and repaired from an
-/// unambiguous payload, mirroring pi's lenient argument validation.
+/// unambiguous payload.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LenientParams {
@@ -598,12 +597,11 @@ fn append_items(phases: &mut Vec<Phase>, params: Params) -> Result<(), Fault> {
 			return Err(Fault::TaskExists { content: content.clone() });
 		}
 	}
-	let phase_index = match find_phase(phases, name) {
-		Some(index) => index,
-		None => {
-			phases.push(Phase { name: Str::new(name), tasks: Vec::new() });
-			phases.len() - 1
-		},
+	let phase_index = if let Some(index) = find_phase(phases, name) {
+		index
+	} else {
+		phases.push(Phase { name: Str::new(name), tasks: Vec::new() });
+		phases.len() - 1
 	};
 	phases[phase_index]
 		.tasks
@@ -659,7 +657,7 @@ fn present(value: &Option<Str>) -> Option<&str> {
 	value.as_deref().filter(|value| !value.is_empty())
 }
 
-fn pending_task(content: Str) -> Task {
+const fn pending_task(content: Str) -> Task {
 	Task { content, status: Status::Pending, blocker: None }
 }
 
@@ -744,16 +742,19 @@ fn completion_transitions(previous: &[Phase], updated: &[Phase]) -> Vec<Completi
 		.iter()
 		.flat_map(|phase| {
 			let previous_statuses = &previous_statuses;
-			phase.tasks.iter().filter_map(move |task| {
-				(task.status == Status::Completed
-					&& previous_statuses
-						.get(&(phase.name.as_str(), task.content.as_str()))
-						.is_some_and(|status| *status != Status::Completed))
-				.then(|| CompletionTransition {
+			phase
+				.tasks
+				.iter()
+				.filter(|&task| {
+					task.status == Status::Completed
+						&& previous_statuses
+							.get(&(phase.name.as_str(), task.content.as_str()))
+							.is_some_and(|status| *status != Status::Completed)
+				})
+				.map(|task| CompletionTransition {
 					phase:   phase.name.clone(),
 					content: task.content.clone(),
 				})
-			})
 		})
 		.collect()
 }
@@ -1088,7 +1089,7 @@ fn lift_rev1(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 	if from.n == 2 {
 		return Some(LiftedCall {
 			raw_args: Bytes::copy_from_slice(call.raw_args),
-			verdict: Bytes::copy_from_slice(call.verdict),
+			verdict:  Bytes::copy_from_slice(call.verdict),
 		});
 	}
 	if from.n != 1 {
@@ -1879,15 +1880,14 @@ mod tests {
 				.lift(&from, RecordedCall { raw_args, verdict: faulted })
 				.is_none()
 		);
-		let rev_two_args =
-			br#"{"i":"Tracking","op":"view","task":"port"}"#;
+		let rev_two_args = br#"{"i":"Tracking","op":"view","task":"port"}"#;
 		let rev_two_verdict =
 			br#"{"kind":"ok","value":{"op":"view","phases":[{"name":"Build","tasks":[{"content":"port","status":"in_progress"}]}]}}"#;
 		let rev_two = todo
-			.lift(
-				&Rev { family: Str::default(), n: 2 },
-				RecordedCall { raw_args: rev_two_args, verdict: rev_two_verdict },
-			)
+			.lift(&Rev { family: Str::default(), n: 2 }, RecordedCall {
+				raw_args: rev_two_args,
+				verdict:  rev_two_verdict,
+			})
 			.expect("rev 2 lifts byte-for-byte");
 		assert_eq!(rev_two.raw_args.as_ref(), rev_two_args);
 		assert_eq!(rev_two.verdict.as_ref(), rev_two_verdict);

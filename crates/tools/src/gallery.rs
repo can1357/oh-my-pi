@@ -39,7 +39,7 @@ pub struct BuiltinRendererGallery {
 /// formats. Dispatching them through the native render registry validates every
 /// fixture against its renderer's typed fold.
 pub fn builtin_renderer_gallery() -> BuiltinRendererGallery {
-	fn identity(name: &'static str, family: &'static str) -> ToolIdentity {
+	const fn identity(name: &'static str, family: &'static str) -> ToolIdentity {
 		ToolIdentity {
 			name: Str::new_static(name),
 			rev:  Rev { family: Str::new_static(family), n: 1 },
@@ -63,10 +63,8 @@ pub fn builtin_renderer_gallery() -> BuiltinRendererGallery {
 	let lsp = identity("lsp", "");
 	let debug = identity("debug", "");
 	let goal = identity("goal", "");
-	let github = ToolIdentity {
-		name: Str::new_static("github"),
-		rev: Rev { family: Str::default(), n: 3 },
-	};
+	let github =
+		ToolIdentity { name: Str::new_static("github"), rev: Rev { family: Str::default(), n: 3 } };
 	let browser = identity("browser", "");
 	let computer = identity("computer", "");
 	let identities = BuiltinRendererIdentities {
@@ -92,17 +90,17 @@ pub fn builtin_renderer_gallery() -> BuiltinRendererGallery {
 		computer:   Some(computer.clone()),
 	};
 	let fixtures = [
-		crate::render::edit::gallery_fixtures(edit.clone()),
-		crate::render::fs::gallery_fixtures(write.clone(), read.clone()),
-		crate::render::search::gallery_fixtures(grep.clone(), glob.clone()),
-		crate::render::exec::gallery_fixtures(shell.clone(), eval.clone()),
-		crate::render::web::gallery_fixtures(web_search.clone()),
-		crate::render::hub::gallery_fixtures(hub.clone()),
-		crate::render::ast::gallery_fixtures(ast_grep.clone(), ast_edit.clone()),
-		crate::render::interaction::gallery_fixtures(ask.clone(), todo.clone(), think.clone()),
-		crate::render::codeintel::gallery_fixtures(lsp.clone(), debug.clone()),
-		crate::render::agentic::gallery_fixtures(goal.clone()),
-		crate::render::misc::gallery_fixtures(github.clone(), browser.clone(), computer.clone()),
+		crate::render::edit::gallery_fixtures(edit),
+		crate::render::fs::gallery_fixtures(write, read),
+		crate::render::search::gallery_fixtures(grep, glob),
+		crate::render::exec::gallery_fixtures(shell, eval),
+		crate::render::web::gallery_fixtures(web_search),
+		crate::render::hub::gallery_fixtures(hub),
+		crate::render::ast::gallery_fixtures(ast_grep, ast_edit),
+		crate::render::interaction::gallery_fixtures(ask, todo, think),
+		crate::render::codeintel::gallery_fixtures(lsp, debug),
+		crate::render::agentic::gallery_fixtures(goal),
+		crate::render::misc::gallery_fixtures(github, browser, computer),
 	]
 	.concat();
 	BuiltinRendererGallery { identities, fixtures }

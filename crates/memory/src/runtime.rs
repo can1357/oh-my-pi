@@ -283,8 +283,7 @@ impl MemoryRuntime {
 			.db_path
 			.as_deref()
 			.and_then(Path::parent)
-			.map(Path::to_path_buf)
-			.unwrap_or_else(|| input.data_dir.join("mnemopi"));
+			.map_or_else(|| input.data_dir.join("mnemopi"), Path::to_path_buf);
 		let retain_path =
 			selected_database_path(&db_dir, settings.db_path.as_deref(), &scope.global, &scope.retain);
 		let retain = BankStore::open(retain_path, scope.retain.clone(), scope.identity_root.clone())?
@@ -350,7 +349,7 @@ impl MemoryRuntime {
 	}
 
 	/// Whether Mnemopi effects are live.
-	pub fn is_active(&self) -> bool {
+	pub const fn is_active(&self) -> bool {
 		matches!(self.backend, RuntimeBackend::Mnemopi(_))
 	}
 
@@ -405,19 +404,18 @@ impl MemoryRuntime {
 		}
 		let bounds = bounds.normalized();
 		let current = stamps(&runtime.recall)?;
-		if runtime.settings.enhanced_recall {
-			if let Some(items) = runtime
-				.cache
-				.exact(query, &current, bounds)
-				.or_else(|| runtime.cache.similar(query, query_embedding, &current, bounds))
-			{
-				return Ok(SearchOutcome {
-					backend: MemoryBackend::Mnemopi,
-					query: Str::new(query),
-					items,
-					message: None,
-				});
-			}
+		if runtime.settings.enhanced_recall
+			&& let Some(items) = runtime.cache.exact(query, &current, bounds).or_else(|| {
+				runtime
+					.cache
+					.similar(query, query_embedding, &current, bounds)
+			}) {
+			return Ok(SearchOutcome {
+				backend: MemoryBackend::Mnemopi,
+				query: Str::new(query),
+				items,
+				message: None,
+			});
 		}
 		let engine = RecallEngine::new(
 			&runtime.recall,
@@ -449,7 +447,7 @@ impl MemoryRuntime {
 		let outcome = self.save_batch(&[SaveRequest { content, context }], source, importance)?;
 		Ok(SaveOutcome {
 			backend: outcome.backend,
-			id: outcome.ids.into_iter().next(),
+			id:      outcome.ids.into_iter().next(),
 			message: outcome.message,
 		})
 	}
@@ -464,7 +462,7 @@ impl MemoryRuntime {
 		let RuntimeBackend::Mnemopi(runtime) = &self.backend else {
 			return Ok(SaveBatchOutcome {
 				backend: MemoryBackend::Off,
-				ids: Vec::new(),
+				ids:     Vec::new(),
 				message: Some(Str::new_static(INACTIVE_MESSAGE)),
 			});
 		};
@@ -474,7 +472,10 @@ impl MemoryRuntime {
 		let mut aggregate = 0usize;
 		for item in items {
 			let content = item.content.trim();
-			let context = item.context.map(str::trim).filter(|value| !value.is_empty());
+			let context = item
+				.context
+				.map(str::trim)
+				.filter(|value| !value.is_empty());
 			if content.is_empty()
 				|| content.len() > MAX_MEMORY_CONTENT_BYTES
 				|| context.is_some_and(|value| value.len() > MAX_MEMORY_CONTEXT_BYTES)
@@ -517,10 +518,10 @@ impl MemoryRuntime {
 			.collect::<Vec<_>>();
 		let ids = runtime.retain.save_batch(&inputs)?;
 		runtime.cache.clear();
-		if runtime.settings.proactive_linking {
-			if let Err(error) = link::reconcile(&runtime.retain) {
-				tracing::warn!(?error, bank = %runtime.retain.bank(), "memory proactive linking deferred");
-			}
+		if runtime.settings.proactive_linking
+			&& let Err(error) = link::reconcile(&runtime.retain)
+		{
+			tracing::warn!(?error, bank = %runtime.retain.bank(), "memory proactive linking deferred");
 		}
 		self.generation.fetch_add(1, Ordering::AcqRel);
 		Ok(SaveBatchOutcome { backend: MemoryBackend::Mnemopi, ids, message: None })
@@ -892,19 +893,14 @@ impl MemoryRuntime {
 				.iter()
 				.find(|store| store.bank().as_str() == bank_name)
 				.ok_or(Error::InvalidIdentifier)?;
-			let (records, truncated) =
-				store.list_bounded(max_records.clamp(1, 1000), max_bytes)?;
+			let (records, truncated) = store.list_bounded(max_records.clamp(1, 1000), max_bytes)?;
 			tracing::debug!(
 				projection = "bank",
 				bank = %store.bank(),
 				records = records.len(),
 				"memory resource projected"
 			);
-			return Ok(MemoryProjection::Bank {
-				bank: store.bank().clone(),
-				records,
-				truncated,
-			});
+			return Ok(MemoryProjection::Bank { bank: store.bank().clone(), records, truncated });
 		}
 		if resource.contains('/') || matches!(resource, "." | "..") {
 			return Err(Error::InvalidIdentifier);
@@ -930,7 +926,7 @@ impl MemoryRuntime {
 	}
 
 	/// Borrows the write store for top-level retention coordination.
-	pub fn retain_store(&self) -> Result<&BankStore> {
+	pub const fn retain_store(&self) -> Result<&BankStore> {
 		match &self.backend {
 			RuntimeBackend::Mnemopi(runtime) => Ok(&runtime.retain),
 			RuntimeBackend::Off => Err(Error::Inactive),
@@ -979,7 +975,7 @@ impl MemoryRuntime {
 	}
 
 	/// Normalized Mnemopi settings.
-	pub fn mnemopi_settings(&self) -> Result<&MnemopiSettings> {
+	pub const fn mnemopi_settings(&self) -> Result<&MnemopiSettings> {
 		match &self.backend {
 			RuntimeBackend::Mnemopi(runtime) => Ok(&runtime.settings),
 			RuntimeBackend::Off => Err(Error::Inactive),
@@ -1052,9 +1048,7 @@ fn selected_database_path(
 	bank: &BankId,
 ) -> PathBuf {
 	if bank == global {
-		configured
-			.map(Path::to_path_buf)
-			.unwrap_or_else(|| database_path(db_dir, global, bank))
+		configured.map_or_else(|| database_path(db_dir, global, bank), Path::to_path_buf)
 	} else {
 		database_path(db_dir, global, bank)
 	}
@@ -1095,7 +1089,7 @@ fn slot_generation(base: u64, content: Option<&str>) -> u64 {
 		return 0;
 	};
 	let mut hasher = Hash32::hasher();
-	hasher.update(&base.to_le_bytes());
+	hasher.update(base.to_le_bytes());
 	hasher.update(content.as_bytes());
 	u64::from_le_bytes(
 		hasher.finalize().as_bytes()[..8]

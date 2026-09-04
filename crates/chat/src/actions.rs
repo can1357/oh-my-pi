@@ -1,7 +1,7 @@
 //! Host actions: console commands the interactive actor executes locally.
 //!
 //! ADR 0014: keybindings are `bind <chord> "<command>"` lines over the one
-//! command stream, never an action-id schema. Every pi app keybinding
+//! command stream, never an action-id schema. Every configured keybinding
 //! therefore maps to a `cl_*` console command declared here. A bound key,
 //! a `/`-prefixed composer line, and a cfg script all run the same words;
 //! the command posts a [`HostAction`] into the actor's one console mailbox
@@ -22,7 +22,7 @@ use crate::{
 	overlays::{PanelCall, PanelOpener},
 };
 
-/// Which rung of pi's Escape ladder an [`EscapeHook`] answers.
+/// Which rung of the Escape ladder an [`EscapeHook`] answers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EscapeRung {
 	/// Rung 1 (`/mcp test`): every registered hook fires on one Esc and is
@@ -137,76 +137,75 @@ pub enum SttUiEvent {
 /// One observer-local request posted by a console command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HostAction {
-	/// `cl_interrupt` (pi `app.interrupt`, Esc): dismiss the topmost local
+	/// `cl_interrupt` (Esc): dismiss the topmost local
 	/// surface, else interrupt the active turn, else preserve the draft.
 	Interrupt,
-	/// `cl_clear` (pi `app.clear`, Ctrl+C): the first press clears the draft
+	/// `cl_clear` (Ctrl+C): the first press clears the draft
 	/// (including an already-empty draft); a repeat within 500 ms exits.
 	Clear,
-	/// `cl_exit` (pi `app.exit`, Ctrl+D): leave the chat.
+	/// `cl_exit` (Ctrl+D): leave the chat.
 	Exit,
-	/// `cl_suspend` (pi `app.suspend`, Ctrl+Z): job-control suspend.
+	/// `cl_suspend` (Ctrl+Z): job-control suspend.
 	Suspend,
-	/// `cl_display_reset` (pi `app.display.reset`, Alt+L): repaint from the
+	/// `cl_display_reset` (Alt+L): repaint from the
 	/// retained document after re-probing the terminal.
 	DisplayReset,
-	/// `cl_thinking_cycle` (pi `app.thinking.cycle`, Shift+Tab): step
+	/// `cl_thinking_cycle` (Shift+Tab): step
 	/// `ai_thinking` through the current model's catalog efforts.
 	ThinkingCycle,
-	/// `cl_model_cycle [back]` (pi `app.model.cycleForward/Backward`,
-	/// Ctrl+P / Ctrl+Shift+P): step `ai_model` through the role roster.
+	/// `cl_model_cycle [back]` (Ctrl+P / Ctrl+Shift+P): step `ai_model`
+	/// through the role roster.
 	ModelCycle {
 		/// Step toward the previous role instead of the next.
 		backward: bool,
 	},
-	/// `cl_model_select [session]` (pi `app.model.select` Alt+M /
-	/// `app.model.selectTemporary` Alt+P): open the model picker.
+	/// `cl_model_select [session]` (Alt+M / Alt+P): open the model picker.
 	ModelSelect {
 		/// Only this session: skip archiving the choice to `config.cfg`.
 		session_only: bool,
 	},
-	/// `/model <selector>` (pi `/model` with an argument): set `ai_model`
+	/// `/model <selector>`: set `ai_model`
 	/// to the roster entry matching `selector` by key or display name and
 	/// archive it, or notice `Unknown model`.
 	ModelSet(Str),
-	/// `cl_followup` (pi `app.message.followUp`, Ctrl+Q / Alt+Enter):
+	/// `cl_followup` (Ctrl+Q / Alt+Enter):
 	/// queue the draft behind a running turn (it runs when the agent
 	/// yields, never as mid-turn steering), else submit it as a turn.
 	FollowUp,
-	/// `cl_retry` (pi `app.retry`, F5 / Alt+R): resend the last user prompt
+	/// `cl_retry` (F5 / Alt+R): resend the last user prompt
 	/// when its turn ended in an error notice.
 	Retry,
-	/// `cl_tools_expand` (pi `app.tools.expand`, Ctrl+O): toggle the
+	/// `cl_tools_expand` (Ctrl+O): toggle the
 	/// transcript's default tool-card expansion after an active panel has
 	/// had first refusal.
 	ToolsExpand,
-	/// `cl_plan_toggle` (pi `app.plan.toggle`, Alt+Shift+P): flip the
+	/// `cl_plan_toggle` (Alt+Shift+P): flip the
 	/// plan-mode Director engagement.
 	PlanToggle,
-	/// `cl_history_search` (pi `app.history.search`, Ctrl+R): open the
+	/// `cl_history_search` (Ctrl+R): open the
 	/// prompt-history picker.
 	HistorySearch,
-	/// `cl_editor_external` (pi `app.editor.external`, Ctrl+G): edit the
+	/// `cl_editor_external` (Ctrl+G): edit the
 	/// draft in `$VISUAL`/`$EDITOR`.
 	ExternalEditor,
-	/// `cl_dequeue` (pi `app.message.dequeue`, Alt+Up / Shift+Up): pull
+	/// `cl_dequeue` (Alt+Up / Shift+Up): pull
 	/// every queued message back into the composer.
 	Dequeue,
-	/// `cl_paste_image` (pi `app.clipboard.pasteImage`, Ctrl+V / Cmd+V):
+	/// `cl_paste_image` (Ctrl+V / Cmd+V):
 	/// read the system clipboard, preferring an image, and stage it as a
 	/// composer chip.
 	PasteImage,
-	/// `cl_paste_raw` (pi `app.clipboard.pasteTextRaw`, Ctrl+Shift+V /
-	/// Alt+Shift+V): paste clipboard text verbatim.
+	/// `cl_paste_raw` (Ctrl+Shift+V / Alt+Shift+V): paste clipboard text
+	/// verbatim.
 	PasteRaw,
-	/// `cl_copy_line` (pi `app.clipboard.copyLine`, Alt+Shift+L): copy the
+	/// `cl_copy_line` (Alt+Shift+L): copy the
 	/// current composer line.
 	CopyLine,
-	/// `cl_copy_prompt` (pi `app.clipboard.copyPrompt`, Alt+Shift+C): copy
+	/// `cl_copy_prompt` (Alt+Shift+C): copy
 	/// the whole draft.
 	CopyPrompt,
 	/// `cl_agent_focus [id]`: view a subagent (`None` returns to the main
-	/// session). pi `focusSession` / `unfocusSession`.
+	/// session).
 	FocusAgent(Option<Str>),
 	/// `cl_collab_guest on|off`: this actor is a collaboration guest, so
 	/// Esc asks the remote host to interrupt instead of aborting locally.
@@ -214,10 +213,10 @@ pub enum HostAction {
 	/// Authoritative collaboration role, presence, and guest footer snapshot
 	/// published by the collaboration runtime.
 	CollabStatus(Option<crate::status_band::CollabStatus>),
-	/// `cl_stt_toggle` (pi `app.stt.toggle`): start or stop push-to-talk
+	/// `cl_stt_toggle`: start or stop push-to-talk
 	/// recording without the space-hold gesture.
 	SttToggle,
-	/// `cl_live_toggle` (pi `app.live.toggle`, Ctrl+L): start or stop the
+	/// `cl_live_toggle` (Ctrl+L): start or stop the
 	/// duplex live-voice session; the app owns the microphone and transport.
 	LiveToggle,
 	/// Push-to-talk recording edge from the space-hold gesture.
@@ -270,12 +269,12 @@ pub enum HostAction {
 	/// `HostCommand::Git` / `Service` / `Agent`); delivered to every open
 	/// panel through `Panel::notify`.
 	Outcome(crate::overlays::Outcome),
-	/// An editor command (`ed_*`, pi `tui.editor.*` / `tui.input.*`): the
+	/// An editor command (`ed_*`): the
 	/// composer applies the named semantic key. Bound chords reach the
 	/// composer only through these, so `bind`/`unbind` decide every editor
 	/// key (ADR 0014).
 	Editor(omp_tui::Key),
-	/// A panel command (`panel_*`, pi `app.session.*` / `app.tree.*`):
+	/// A panel command (`panel_*`):
 	/// lowered onto the topmost open panel.
 	Panel(crate::overlays::PanelAction),
 	/// A console reply line (the sink installed by [`HostMailbox::attach`]).
@@ -359,16 +358,21 @@ pub fn post(ctx: &Ctx, action: HostAction) -> ConResult<()> {
 }
 
 omp_con::var! {
-	/// Expands tool cards in the transcript (pi `app.tools.expand`, Ctrl+O).
+	/// Expands tool cards in the transcript (Ctrl+O).
 	pub static CL_TOOLS_EXPANDED = cl_tools_expanded: bool {
 		default: false,
 		flags: session,
 	};
-	/// Shows tool activity in the transcript (pi `app.tools.toggleVisibility`,
-	/// Ctrl+Shift+O).
+	/// Show model-initiated tool calls and results in the transcript.
 	pub static CL_SHOWTOOLS = cl_showtools: bool {
 		default: true,
 		flags: archive | session,
+		meta: {
+			"ui.tab": "appearance",
+			"ui.group": "Display",
+			"ui.label": "Show Tool Activity",
+			"legacy.path": "display.hideToolActivity",
+		},
 	};
 }
 
@@ -538,14 +542,25 @@ omp_con::cmd! {
 }
 
 omp_con::var! {
-	/// What a double Esc on an empty composer opens (pi
-	/// `doubleEscapeAction`): `branch` (rewind selector), `tree`, or `none`.
+	/// What pressing Escape twice with an empty editor does.
 	pub static CL_DOUBLE_ESCAPE = cl_double_escape: Str {
 		default: Str::new_static("branch"),
+		suggest: ["branch", "tree", "none"],
 		flags: archive,
+		meta: {
+			"ui.tab": "interaction",
+			"ui.group": "Input",
+			"ui.label": "Double-Escape Action",
+			"ui.option.branch": "Rewind",
+			"ui.option.branch.desc": "Open the transcript rewind selector",
+			"ui.option.tree": "Tree",
+			"ui.option.tree.desc": "Open the session tree",
+			"ui.option.none": "None",
+			"ui.option.none.desc": "Do nothing",
+			"legacy.path": "doubleEscapeAction",
+		},
 	};
-	/// Whether holding the space bar starts push-to-talk (pi
-	/// `stt.holdToTalk`).
+	/// Whether holding the space bar starts push-to-talk.
 	pub static CL_STT_HOLD = cl_stt_hold: bool {
 		default: true,
 		flags: archive,

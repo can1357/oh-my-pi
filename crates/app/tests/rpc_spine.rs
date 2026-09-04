@@ -8,13 +8,13 @@ use std::{
 };
 
 use omp_agent::{DispatchPolicy, Inference, Kernel, StaticPrompt};
-use omp_app::rpc_mode::RpcUiBridge;
-use omp_core::Str;
-use omp_driver::{headless::kernel::SessionHome, sessions::SessionRegistry};
-use omp_inference::{
+use omp_ai::{
 	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ExecutionReceipt, FinishReason,
 	ProviderId, RequestId, ResponseMeta, RouteId, Usage,
 };
+use omp_app::rpc_mode::RpcUiBridge;
+use omp_core::Str;
+use omp_driver::{headless::kernel::SessionHome, sessions::SessionRegistry};
 use omp_journal::blob::BlobStore;
 use omp_rpc::framing::{MAX_FRAME_BYTES, RpcFrameDecoder, encode_json_v2};
 use omp_session::{ComponentRegistry, Session};
@@ -36,7 +36,7 @@ impl Inference for ScriptedInference {
 	fn chat(
 		&mut self,
 		_request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		let stream = match self
 			.scripts
 			.get_mut()
@@ -141,7 +141,7 @@ async fn rpc_prompt_is_acknowledged_then_emits_one_terminal_agent_end() {
 	server.expect("server");
 	assert!(
 		frames.iter().any(|frame| frame["type"] == "message_start"),
-		"RPC projects session mutations into pi message events rather than private DOM patches",
+		"RPC projects session mutations into public message events, not private DOM patches",
 	);
 	assert!(
 		!frames.iter().any(|frame| frame["event"] == "patch@1"),
@@ -277,7 +277,7 @@ fn response<'a>(frames: &'a [Value], id: &str) -> &'a Value {
 		.unwrap_or_else(|| panic!("missing response {id}: {frames:#?}"))
 }
 
-/// pi `follow_up`: behind a running turn the message is queued (not
+/// `follow_up`: behind a running turn the message is queued (not
 /// steering) and runs as its own turn once the agent yields; idle, it runs
 /// immediately. Each follow-up produces a `turn_start` and one `agent_end`.
 #[tokio::test]
@@ -334,7 +334,7 @@ async fn rpc_follow_up_runs_after_the_turn_yields_and_immediately_when_idle() {
 	assert_eq!(statuses, ["sent"]);
 }
 
-/// pi `abort_and_prompt`: the running turn is interrupted and the new prompt
+/// `abort_and_prompt`: the running turn is interrupted and the new prompt
 /// starts as soon as the session comes back, ahead of anything queued.
 #[tokio::test]
 async fn rpc_abort_and_prompt_interrupts_then_starts_the_new_turn() {
@@ -355,7 +355,7 @@ async fn rpc_abort_and_prompt_interrupts_then_starts_the_new_turn() {
 	assert_eq!(ends[1]["cancelled"], false);
 }
 
-/// pi answers `get_state` while streaming; the actor's replica serves the
+/// `get_state` works while streaming; the actor's replica serves the
 /// tree even though the running turn owns the session.
 #[tokio::test]
 async fn rpc_get_state_answers_while_a_turn_is_running() {

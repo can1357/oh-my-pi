@@ -16,8 +16,9 @@ use omp_proto::inference::v1::invoke_input::{self, chunk};
 use omp_shell_builtins::encode_image_passthrough;
 use omp_tool::{
 	Abort, ArtifactLifetime, CallOutcome, CallOutcomeDetails, CallOutcomeSpill, CapsBase, Claims,
-	ErasedEv, ErasedOutcome, Ev, IncomingParams, Interrupt, JobOwner, ModelClass, Part, Precedence,
-	Presentation, PromptCaps, Registry, Tool, ToolIdentity, ToolTerminal,
+	DiagEnvelope, DiagKind, ErasedEv, ErasedOutcome, Ev, IncomingParams, Interrupt, JobOwner,
+	ModelClass, Part, Precedence, Presentation, PromptCaps, Registry, Severity, Tool, ToolIdentity,
+	ToolTerminal,
 };
 use omp_tools::{
 	auto_background::DetachedJob,
@@ -192,6 +193,17 @@ impl ShellExec for FakeExec {
 				events.push_back(RunEvent::Exit(status(ExecOutcome::Exited)));
 			},
 			"timeout" => events.push_back(RunEvent::Exit(status(ExecOutcome::Timeout))),
+			"sandboxed" => {
+				let mut terminal = status(ExecOutcome::Exited);
+				terminal.diags.push(omp_tool::Diag::info(
+					DiagKind::Sandbox,
+					sf!(
+						"sandbox: backend=seatbelt; mode=workspace-write; writes outside workspace are \
+						 denied"
+					),
+				));
+				events.push_back(RunEvent::Exit(terminal));
+			},
 			"nonzero" => {
 				let mut terminal = status(ExecOutcome::Exited);
 				terminal.exit_code = Some(17);
@@ -262,6 +274,7 @@ fn status(outcome: ExecOutcome) -> ExecStatus {
 		spilled_output: None,
 		aborted: matches!(outcome, ExecOutcome::Timeout | ExecOutcome::Cancelled),
 		effects_unknown: false,
+		diags: Vec::new(),
 		final_cwd_uri: None,
 		final_cwd_revision: 0,
 	}
@@ -785,6 +798,22 @@ fn malformed_whole_arguments_are_a_structured_args_verdict() {
 	let state = exec.state.lock();
 	assert_eq!(state.opens, 0);
 	assert!(state.runs.is_empty());
+}
+
+#[test]
+fn sandbox_notice_is_a_structured_diag_not_process_output() {
+	let events = call(&registry(FakeExec::default(), 1024), r#"{"command":"sandboxed"}"#);
+	let diags = events
+		.iter()
+		.filter_map(|event| match event {
+			ErasedEv::Update(json) => serde_json::from_slice::<DiagEnvelope>(json).ok(),
+			ErasedEv::Done(_) => None,
+		})
+		.collect::<Vec<_>>();
+	assert_eq!(diags.len(), 1);
+	assert_eq!(diags[0].diag.native_kind(), Some(DiagKind::Sandbox));
+	assert_eq!(diags[0].diag.severity, Severity::Info);
+	assert!(payload(&events).transcript.is_empty());
 }
 
 #[test]

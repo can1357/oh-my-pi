@@ -7,11 +7,9 @@ use serde_json::Value;
 
 use super::{Card, CardView, Component, elapsed_badge, typed_fault, typed_input, typed_result};
 
-/// Command-output rows shown while collapsed (pi
-/// `PREVIEW_LIMITS.COLLAPSED_LINES`).
+/// Command-output rows shown while collapsed.
 const OUTPUT_COLLAPSED_LINES: usize = 3;
-/// Command-output rows shown when expanded (pi
-/// `PREVIEW_LIMITS.EXPANDED_LINES`).
+/// Command-output rows shown when expanded.
 const OUTPUT_EXPANDED_LINES: usize = 12;
 
 /// Renders debugger session state and stack frames.
@@ -52,8 +50,8 @@ impl Card for DebugCard {
 		};
 		let data = result.get("data").unwrap_or(&Value::Null);
 		let session = data.get("session").unwrap_or(&Value::Null);
-		// Pi renders the Session block only for a snapshot-bearing result and
-		// always renders the command output; breakpoints, evaluations, and
+		// Render the Session block only for a snapshot-bearing result and
+		// always render the command output; breakpoints, evaluations, and
 		// variable reads carry neither a session snapshot nor frames.
 		let has_session = session.is_object();
 		let frames = data

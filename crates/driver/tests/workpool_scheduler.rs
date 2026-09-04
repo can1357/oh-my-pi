@@ -16,8 +16,8 @@ use omp_driver::{
 	subagent::{
 		workpool::WorkpoolRegistry,
 		workpool_scheduler::{
-			SchedulerRegistry, WorkerBatch, WorkerEvent, WorkerHandle, WorkerSpawn, WorkpoolCreate,
-			SessionMutator, WorkpoolLauncher, WorkpoolParentHost, WorkpoolPolicy,
+			SchedulerRegistry, SessionMutator, WorkerBatch, WorkerEvent, WorkerHandle, WorkerSpawn,
+			WorkpoolCreate, WorkpoolLauncher, WorkpoolParentHost, WorkpoolPolicy,
 			WorkpoolSchedulerError, WorkpoolSessionHost,
 		},
 	},
@@ -156,7 +156,8 @@ struct Harness {
 }
 
 impl Harness {
-	/// Closes every owner mailbox and joins the sole session actor before replay.
+	/// Closes every owner mailbox and joins the sole session actor before
+	/// replay.
 	async fn release_session_owner(self) -> std::path::PathBuf {
 		let Self { registry, parent, jobs, launcher, producers, owner_actor } = self;
 		registry.release_owner();
@@ -167,7 +168,9 @@ impl Harness {
 		drop(launcher);
 		let path = parent.lock().await.journal_path().to_path_buf();
 		drop(parent);
-		owner_actor.await.expect("owner actor stops after its mailbox closes");
+		owner_actor
+			.await
+			.expect("owner actor stops after its mailbox closes");
 		path
 	}
 }
@@ -263,18 +266,12 @@ async fn eval_parent_host_routes_workpool_mutations_through_the_kernel_actor() {
 	);
 	let progress = omp_envd::eval::NoopBridgeProgress;
 	let created = host
-		.workpool(
-			json!({"op":"create","name":"eval-live","agent":"task"}),
-			&progress,
-		)
+		.workpool(json!({"op":"create","name":"eval-live","agent":"task"}), &progress)
 		.await
 		.expect("eval parent create");
 	assert_eq!(created["name"], "eval-live");
 	let pushed = host
-		.workpool(
-			json!({"op":"push","name":"eval-live","items":["one"]}),
-			&progress,
-		)
+		.workpool(json!({"op":"push","name":"eval-live","items":["one"]}), &progress)
 		.await
 		.expect("eval parent push");
 	assert_eq!(pushed["ids"], json!(["eval-live#1"]));
@@ -431,11 +428,7 @@ async fn restart_adopts_durable_drained_pool_before_settlement_patch() {
 	let harness = harness(1, false, false);
 	let pool = harness
 		.registry
-		.create(WorkpoolCreate {
-			name: sf!("adopt"),
-			agent: sf!("task"),
-			context: None,
-		})
+		.create(WorkpoolCreate { name: sf!("adopt"), agent: sf!("task"), context: None })
 		.expect("create pool");
 	pool.push(vec![sf!("one")]).await.expect("push");
 	wait_closed(&pool).await;

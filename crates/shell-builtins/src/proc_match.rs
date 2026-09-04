@@ -21,8 +21,8 @@ use std::{
 use std::{mem, os::fd, ptr};
 
 #[cfg(unix)]
-use omp_shell_engine::openfiles::OpenFiles;
-use omp_shell_engine::{
+use omp_shell::openfiles::OpenFiles;
+use omp_shell::{
 	ExecutionContext, ExecutionExitCode, ExecutionResult, ProcessScope, builtins::signal_number,
 };
 use regex::RegexBuilder;
@@ -82,11 +82,11 @@ struct ProcMatchOptions {
 /// `pgrep`, `pkill`, and `pidwait` each call this with their own mode; the
 /// invoked name still comes from the execution context, so diagnostics and help
 /// name the command the user actually typed.
-pub(crate) fn run<SE: omp_shell_engine::ShellExtensions>(
+pub(crate) fn run<SE: omp_shell::ShellExtensions>(
 	mode: ProcMatchMode,
 	argv: Vec<String>,
 	context: ExecutionContext<'_, SE>,
-) -> impl Future<Output = result::Result<ExecutionResult, omp_shell_engine::Error>> + Send {
+) -> impl Future<Output = result::Result<ExecutionResult, omp_shell::Error>> + Send {
 	{
 		let command_name = context.command_name.clone();
 		let cwd = context.shell.working_dir().to_path_buf();
@@ -933,7 +933,7 @@ fn parse_states(value: &str, target: &mut HashSet<char>) -> result::Result<(), (
 }
 
 fn resolve_shell_path(cwd: &Path, value: &str) -> PathBuf {
-	use omp_shell_engine::sys::fs;
+	use omp_shell::sys::fs;
 
 	let normalized = fs::normalize_shell_path(Path::new(value));
 	if normalized.is_absolute() {

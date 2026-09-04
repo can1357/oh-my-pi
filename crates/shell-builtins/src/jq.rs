@@ -25,7 +25,7 @@ use jaq_core::{
 	load::{self, test},
 };
 use jaq_json::Val;
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 
 use crate::host::{Host, StreamWriter, Utility, util};
 

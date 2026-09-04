@@ -87,7 +87,7 @@ pub use services::{NoServices, Services};
 /// Where the host composites a [`Panel`] frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PanelAnchor {
-	/// Replaces the composer band (pi swaps the editor slot for pickers).
+	/// Replaces the composer band for pickers.
 	Bottom,
 	/// Centered modal dialog at 80% width.
 	Center,
@@ -211,7 +211,7 @@ pub enum PanelNote<'a> {
 	Live(&'a live::LiveUiEvent, Duration),
 }
 
-/// pi panel chords the host lowers before handing a panel the raw key
+/// Panel chords the host lowers before handing a panel the raw key
 /// (`app.session.*`, `app.tree.*`, `app.tools.expand`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PanelAction {
@@ -235,7 +235,7 @@ pub enum PanelAction {
 }
 
 impl PanelAction {
-	/// Lowers a decoded key to its pi panel action.
+	/// Lowers a decoded key to its panel action.
 	#[must_use]
 	pub const fn from_key(key: Key) -> Option<Self> {
 		Some(match key {
@@ -276,7 +276,7 @@ pub trait Panel {
 	fn anchor(&self) -> PanelAnchor {
 		PanelAnchor::Bottom
 	}
-	/// Applies one lowered pi panel chord. `Ignored` hands the raw key to
+	/// Applies one lowered panel chord. `Ignored` hands the raw key to
 	/// [`Panel::key`].
 	fn action(&mut self, _action: PanelAction) -> PanelEvent {
 		PanelEvent::Ignored
@@ -289,7 +289,7 @@ pub trait Panel {
 	}
 	/// Records that real input (a key or a paste) reached the panel at
 	/// `now` on the host clock; called before [`Panel::key`] / [`Panel::paste`]
-	/// so inactivity deadlines (pi `ask.timeout`) restart from the actual
+	/// so inactivity deadlines restart from the actual
 	/// input time, never from the last periodic tick.
 	fn touch(&mut self, _now: Duration) {}
 	/// Applies one mouse report in panel-frame coordinates (the host
@@ -599,7 +599,7 @@ pub enum PickerEvent {
 	CopyHistory(Str),
 }
 
-/// Retained filterable model picker (pi `app.model.selectTemporary`).
+/// Retained filterable model picker.
 pub struct ModelPicker {
 	ui:           Ui,
 	rows:         Vec<ModelRow>,
@@ -1023,7 +1023,7 @@ fn compact_count(value: u64) -> Str {
 	}
 }
 
-/// Retained prompt-history picker (pi `app.history.search`, Ctrl+R).
+/// Retained Ctrl+R prompt-history picker.
 pub struct HistoryPicker {
 	ui:       Ui,
 	source:   Vec<HistoryEntry>,
@@ -1076,7 +1076,9 @@ impl HistoryPicker {
 	/// Routes a key into the filter and list.
 	pub fn key(&mut self, key: Key) -> PickerEvent {
 		if matches!(key, Key::Ctrl('c') | Key::Copy) {
-			return self.selected_prompt().map_or(PickerEvent::Consumed, PickerEvent::CopyHistory);
+			return self
+				.selected_prompt()
+				.map_or(PickerEvent::Consumed, PickerEvent::CopyHistory);
 		}
 		if key == Key::FollowUp {
 			return self
@@ -1139,7 +1141,7 @@ impl HistoryPicker {
 			UiEvent::Filtered { id, query, .. } if id.as_str() == "prompts" => {
 				self.query = query;
 				self.refresh_entries();
-				// pi resets the cursor to the highest-ranked result after
+				// Reset the cursor to the highest-ranked result after
 				// every query edit.
 				self.selected = (!self.entries.is_empty()).then_some(0);
 				self.rebuild();
@@ -1330,7 +1332,7 @@ impl Overlays {
 		self.stack.push(overlay);
 	}
 
-	/// Shows a transient status line (pi `showStatus`), cleared by the next
+	/// Shows a transient status line, cleared by the next
 	/// key; it never displaces an interactive overlay.
 	pub fn notify(&mut self, text: impl Into<Str>) {
 		self.notice = Some(text.into());
@@ -1629,7 +1631,7 @@ mod tests {
 
 	/// A fresh picker over a large catalog opens scrolled to the current
 	/// model with the cursor marker on its row, and the facts line names
-	/// the same model (pi `model-selector.ts`: current model preselected and
+	/// the same model (current model preselected and
 	/// visible).
 	#[test]
 	fn picker_opens_scrolled_to_the_current_model_with_the_cursor_on_it() {
@@ -1685,17 +1687,17 @@ mod tests {
 	fn history_picker_searches_recalls_copies_and_submits() {
 		let entries = vec![
 			HistoryEntry {
-				id: 2,
-				prompt: Str::new_static("newest deploy"),
+				id:         2,
+				prompt:     Str::new_static("newest deploy"),
 				created_at: i64::MAX,
-				cwd: None,
+				cwd:        None,
 				session_id: Some(Str::new_static("two")),
 			},
 			HistoryEntry {
-				id: 1,
-				prompt: Str::new_static("older\nsecond line"),
+				id:         1,
+				prompt:     Str::new_static("older\nsecond line"),
 				created_at: 0,
-				cwd: None,
+				cwd:        None,
 				session_id: Some(Str::new_static("one")),
 			},
 		];

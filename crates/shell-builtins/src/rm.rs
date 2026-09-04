@@ -24,7 +24,7 @@ use clap::{
 };
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
 use omp_core::NormalizePath;
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use parking_lot::Mutex;
 use thiserror::Error;
 

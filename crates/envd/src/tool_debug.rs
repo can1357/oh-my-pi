@@ -10,7 +10,10 @@ use std::{
 use bytes::Bytes;
 use omp_core::{Str, encoding::hex};
 use omp_proto::document::v1 as pb;
-use omp_tools::debug::{Action, DebugControl, Fault, Params, Payload, render};
+use omp_tools::{
+	debug::{Action, DebugControl, Fault, Params, Payload},
+	debug_render::render,
+};
 use parking_lot::RwLock;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
@@ -76,13 +79,7 @@ impl DebugControl for DocumentDebugControl {
 			}
 			if params.action == Action::Terminate && self.sessions.read().is_empty() {
 				let data = json!({"terminated": false});
-				return Ok(Payload {
-					action: params.action,
-					session: None,
-					revision: None,
-					output: render(params.action, &data),
-					data,
-				});
+				return Ok(rendered_payload(params.action, None, None, data));
 			}
 			let (session_id, tracked) = self.session(None)?;
 			let arguments = action_arguments(&params);
@@ -127,13 +124,7 @@ impl DebugControl for DocumentDebugControl {
 			}
 			if params.action == Action::Sessions {
 				self.merge_session_rows(&mut data);
-				return Ok(Payload {
-					action: params.action,
-					session: self.active.read().clone(),
-					revision: None,
-					output: render(params.action, &data),
-					data,
-				});
+				return Ok(rendered_payload(params.action, self.active.read().clone(), None, data));
 			}
 			if params.action == Action::Terminate {
 				next_tracked.status = Str::new_static("terminated");
@@ -146,7 +137,6 @@ impl DebugControl for DocumentDebugControl {
 					.insert(session_id.clone(), next_tracked.clone());
 			}
 			attach_snapshot(&mut data, &session_id, &next_tracked);
-			let output = render(params.action, &data);
 			if params.action == Action::Terminate {
 				self.sessions.write().remove(&session_id);
 				let next_active = self.sessions.read().keys().next().cloned();
@@ -154,13 +144,7 @@ impl DebugControl for DocumentDebugControl {
 			} else {
 				*self.active.write() = Some(session_id.clone());
 			}
-			Ok(Payload {
-				action: params.action,
-				session: Some(session_id),
-				revision: Some(next.revision),
-				output,
-				data,
-			})
+			Ok(rendered_payload(params.action, Some(session_id), Some(next.revision), data))
 		}
 	}
 }
@@ -216,12 +200,12 @@ impl DocumentDebugControl {
 		let session = response.session.ok_or(Fault::Adapter)?;
 		let id = Str::from(hex::encode(&session.session_id).into_string());
 		let tracked = TrackedSession {
-			wire: session.clone(),
+			wire:    session.clone(),
 			adapter: Str::new(response.adapter.as_str()),
 			program: params.program.clone(),
-			cwd: params.cwd.clone(),
-			pid: params.pid,
-			status: Str::new_static("running"),
+			cwd:     params.cwd.clone(),
+			pid:     params.pid,
+			status:  Str::new_static("running"),
 		};
 		self.sessions.write().insert(id.clone(), tracked.clone());
 		*self.active.write() = Some(id.clone());
@@ -230,13 +214,7 @@ impl DocumentDebugControl {
 		});
 		merge_events(&mut data, events);
 		attach_snapshot(&mut data, &id, &tracked);
-		Ok(Payload {
-			action: params.action,
-			session: Some(id),
-			revision: Some(session.revision),
-			output: render(params.action, &data),
-			data,
-		})
+		Ok(rendered_payload(params.action, Some(id), Some(session.revision), data))
 	}
 
 	fn merge_session_rows(&self, data: &mut Value) {
@@ -288,14 +266,18 @@ impl DocumentDebugControl {
 				.map(|(id, tracked)| session_snapshot(id, tracked, active.as_ref() == Some(id)))
 				.collect(),
 		);
-		Payload {
-			action: Action::Sessions,
-			session: active,
-			revision: None,
-			output: render(Action::Sessions, &data),
-			data,
-		}
+		rendered_payload(Action::Sessions, active, None, data)
 	}
+}
+
+fn rendered_payload(
+	action: Action,
+	session: Option<Str>,
+	revision: Option<u64>,
+	data: Value,
+) -> Payload {
+	let rendered = render(action, &data);
+	Payload { action, session, revision, output: rendered.text, data, diags: rendered.diags }
 }
 
 fn wire_action(params: &Params) -> String {

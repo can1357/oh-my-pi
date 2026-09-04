@@ -8,10 +8,8 @@
 //! projection containing only identities and the command/path fields useful
 //! for recovery.
 //!
-//! Behavioral donor: pi
-//! `packages/coding-agent/src/session/exit-diagnostics.ts:5-310`; this Rust
-//! shape moves its custom JSONL marker into the authoritative session DOM and
-//! extends the owner taxonomy for provider, tool, and worker failures.
+//! Diagnostics use the authoritative session DOM instead of custom JSONL
+//! markers and distinguish provider, tool, and worker failures.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

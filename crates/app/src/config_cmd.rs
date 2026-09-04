@@ -8,9 +8,7 @@ use std::{
 };
 
 use miette::IntoDiagnostic as _;
-use omp_con::{
-	Ctx, DumpOptions, Origin, RegItem, Source, Span, TypeSpec, Value, ValueKind, VarFlags,
-};
+use omp_con::{Ctx, DumpOptions, Origin, Source, Span, TypeSpec, Value, ValueKind, VarFlags};
 use omp_core::Str;
 use omp_envd::mcp::{
 	McpConfigPaths,
@@ -48,7 +46,7 @@ pub fn run(data_dir: &Path, command: &ConfigCommand) -> miette::Result<()> {
 		ConfigCommand::Unset { key, scope } => {
 			let destination = path(&project, *scope)?;
 			update_cfg(&destination, |ctx| {
-				let RegItem::Var(spec) = ctx
+				let omp_con::RegItem::Var(spec) = ctx
 					.find(key)
 					.ok_or_else(|| miette::miette!("unknown convar `{key}`; run `omp config list`"))?
 				else {
@@ -391,12 +389,10 @@ pub(crate) fn update_cfg(
 }
 
 fn assignment(ctx: &Ctx, name: &str, input: &str) -> miette::Result<String> {
-	let RegItem::Var(spec) = ctx
-		.find(name)
-		.ok_or_else(|| miette::miette!("unknown convar `{name}`; run `omp config list`"))?
-	else {
-		return Err(miette::miette!("`{name}` is not a convar"));
-	};
+	let spec = ctx
+		.vars()
+		.find(|spec| spec.name.eq_ignore_ascii_case(name))
+		.ok_or_else(|| miette::miette!("unknown convar `{name}`; run `omp config list`"))?;
 	let value = if spec.ty.kind == ValueKind::Str {
 		serde_json::to_string(input).into_diagnostic()?
 	} else {
@@ -406,13 +402,7 @@ fn assignment(ctx: &Ctx, name: &str, input: &str) -> miette::Result<String> {
 }
 
 fn list(ctx: &Ctx, json: bool) -> miette::Result<()> {
-	let mut vars = ctx
-		.items()
-		.filter_map(|item| match item {
-			RegItem::Var(spec) => Some(spec),
-			_ => None,
-		})
-		.collect::<Vec<_>>();
+	let mut vars = ctx.vars().collect::<Vec<_>>();
 	vars.sort_unstable_by_key(|spec| spec.name);
 	if json {
 		let mut output = serde_json::Map::new();
@@ -421,7 +411,7 @@ fn list(ctx: &Ctx, json: bool) -> miette::Result<()> {
 				spec.name.to_owned(),
 				serde_json::json!({
 					"value": ctx.value(spec.name).into_diagnostic()?.to_string(),
-					"default": (spec.default)().to_string(),
+					"default": spec.default().to_string(),
 					"flags": flag_names(spec.flags),
 				}),
 			);
@@ -434,7 +424,7 @@ fn list(ctx: &Ctx, json: bool) -> miette::Result<()> {
 			"{}\t{}\t{}\t{}",
 			spec.name,
 			ctx.value(spec.name).into_diagnostic()?,
-			(spec.default)(),
+			spec.default(),
 			flag_names(spec.flags).join("|"),
 		);
 	}
@@ -515,7 +505,7 @@ pub fn migrate_settings(data_dir: &Path, project: &Path) -> miette::Result<PathB
 }
 
 /// Folds legacy TOML documents (later sources override earlier) into one
-/// archive-layer context through the per-crate legacy mappings.
+/// archive-layer context through legacy paths owned by each declaration.
 fn migrate_toml_sources(sources: &[PathBuf]) -> miette::Result<Ctx> {
 	let mut document = toml::Table::new();
 	for source in sources {
@@ -527,32 +517,12 @@ fn migrate_toml_sources(sources: &[PathBuf]) -> miette::Result<Ctx> {
 		merge_toml(&mut document, incoming);
 	}
 	let ctx = Ctx::new();
-	for mappings in [
-		omp_catalog::settings::LEGACY_CONVAR_MAPPINGS,
-		omp_catalog::pi_settings::LEGACY_CONVAR_MAPPINGS,
-		omp_inference::settings::LEGACY_CONVAR_MAPPINGS,
-		omp_inference::pi_settings::LEGACY_CONVAR_MAPPINGS,
-		omp_tools::settings::LEGACY_CONVAR_MAPPINGS,
-		omp_tools::pi_settings::LEGACY_CONVAR_MAPPINGS,
-		omp_envd::LEGACY_CONVAR_MAPPINGS,
-		omp_envd::pi_settings::LEGACY_CONVAR_MAPPINGS,
-		omp_driver::settings::LEGACY_CONVAR_MAPPINGS,
-		omp_driver::pi_settings::LEGACY_CONVAR_MAPPINGS,
-		crate::settings::LEGACY_CONVAR_MAPPINGS,
-		omp_chat::settings::LEGACY_CONVAR_MAPPINGS,
-		crate::voice::settings::LEGACY_CONVAR_MAPPINGS,
-	] {
-		for &(legacy_path, name) in mappings {
-			let Some(value) = value_at(&document, legacy_path) else {
+	for var in ctx.vars() {
+		for path in var.meta_all("legacy.path") {
+			let Some(value) = value_at(&document, path) else {
 				continue;
 			};
-			let RegItem::Var(spec) = ctx
-				.find(name)
-				.ok_or_else(|| miette::miette!("migration target `{name}` is not registered"))?
-			else {
-				return Err(miette::miette!("migration target `{name}` is not a convar"));
-			};
-			ctx.set(spec.name, legacy_toml_value(legacy_path, value, spec.ty)?, Origin::Archive)
+			ctx.set(var.name, legacy_toml_value(path, value, var.ty)?, Origin::Archive)
 				.into_diagnostic()?;
 		}
 	}
@@ -654,6 +624,91 @@ fn legacy_action_command(action: &str) -> Option<&'static str> {
 }
 
 fn legacy_toml_value(path: &str, value: &toml::Value, ty: &TypeSpec) -> miette::Result<Value> {
+	if matches!(path, "display.hideToolActivity" | "hideThinkingBlock") {
+		let hidden = value
+			.as_bool()
+			.ok_or_else(|| miette::miette!("expected boolean migration value"))?;
+		return Ok(Value::Bool(!hidden));
+	}
+	if matches!(path, "completion.notify" | "error.notify" | "ask.notify")
+		&& let Some(value) = value.as_str()
+	{
+		return match value {
+			"on" => Ok(Value::Bool(true)),
+			"off" => Ok(Value::Bool(false)),
+			_ => Err(miette::miette!("expected `on` or `off` migration value")),
+		};
+	}
+	if path == "compaction.thresholdPercent" {
+		let percent = value
+			.as_float()
+			.or_else(|| value.as_integer().map(|value| value as f64))
+			.ok_or_else(|| miette::miette!("expected numeric percent migration value"))?;
+		return Ok(Value::Float(percent / 100.0));
+	}
+	if path == "compaction.thresholdTokens" && value.as_str() == Some("default") {
+		return Ok(Value::Int(-1));
+	}
+	if path == "task.isolation.enabled" {
+		let enabled = value
+			.as_bool()
+			.ok_or_else(|| miette::miette!("expected boolean migration value"))?;
+		return Ok(Value::Enum(Str::new_static(if enabled { "auto" } else { "none" })));
+	}
+	if path == "edit.mode"
+		&& let Some(revision) = value.as_str().and_then(|value| match value {
+			"apply_patch" => Some("apply_patch.1"),
+			"hashline" => Some("hl.1"),
+			"patch" => Some("patch.2"),
+			"replace" => Some("rep.2"),
+			"sloppy" => Some("sloppy.1"),
+			_ => None,
+		}) {
+		return Ok(Value::Str(Str::new_static(revision)));
+	}
+	if matches!(
+		path,
+		"providers.tinyModel"
+			| "providers.memoryModel"
+			| "providers.autoThinkingModel"
+			| "providers.unexpectedStopModel"
+	) && value.as_str() == Some("online")
+	{
+		return Ok(Value::Str(Str::new_static("@tiny")));
+	}
+	if path == "providers.fireworksTier" && value.as_str() == Some("standard") {
+		return Ok(Value::Enum(Str::new_static("none")));
+	}
+	if path == "share.store" && value.as_str() == Some("blob") {
+		return Ok(Value::Enum(Str::new_static("http")));
+	}
+	if path == "doubleEscapeAction" && value.as_str() == Some("rewind") {
+		return Ok(Value::Str(Str::new_static("branch")));
+	}
+	if matches!(path, "task.maxRuntimeMs" | "irc.timeoutMs")
+		&& let Some(millis) = value.as_integer()
+	{
+		let millis = u64::try_from(millis)
+			.map_err(|_| miette::miette!("expected non-negative millisecond migration value"))?;
+		let span = if millis == 0 {
+			Span::NEVER
+		} else {
+			Span::millis(millis)
+		};
+		return Ok(Value::Duration(span));
+	}
+	if path == "tools.maxTimeout"
+		&& let Some(seconds) = value.as_integer()
+	{
+		let seconds = u64::try_from(seconds)
+			.map_err(|_| miette::miette!("expected non-negative second migration value"))?;
+		let span = if seconds == 0 {
+			Span::NEVER
+		} else {
+			Span::secs(seconds)
+		};
+		return Ok(Value::Duration(span));
+	}
 	if matches!(
 		path,
 		"tools.artifactSpillThreshold" | "tools.artifactTailBytes" | "tools.artifactHeadBytes"

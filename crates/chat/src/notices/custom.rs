@@ -1,7 +1,7 @@
-//! Extension and hook messages (pi `custom-message.ts` / `hook-message.ts`
-//! over `message-frame.ts`): `<notice kind=custom|hook name=<type>>` elements
-//! the kernel journals into a `<turn>` (`EnvEvent::Notice`), so they replay
-//! on resume, vanish on rewind, and reach every peer actor (ADR 0005).
+//! Extension and hook messages: `<notice kind=custom|hook name=<type>>`
+//! elements that the kernel journals into a `<turn>` (`EnvEvent::Notice`), so
+//! they replay on resume, vanish on rewind, and reach every peer actor (ADR
+//! 0005).
 
 use omp_core::{Str, sf};
 use omp_dom::{Node, PropId, PropKey, Value};
@@ -17,7 +17,7 @@ use omp_tui::{IntoComponent as _, MarkupOrigin, UiContext, dom, parse_component_
 use super::prop_text;
 use crate::cards::Component;
 
-/// pi `HOOK_COLLAPSED_LINES`: Markdown body lines a hook message shows
+/// Markdown body lines a hook message shows
 /// before the `…` fold while the transcript is collapsed.
 const HOOK_COLLAPSED_LINES: usize = 5;
 
@@ -57,8 +57,8 @@ pub fn renderer_identity(node: &Node) -> Option<MessageRendererIdentity> {
 	})
 }
 
-/// Renders a journaled custom-message element: pi
-/// `renderFramedMessage` — a rounded, muted-bordered box with one cell of
+/// Renders a journaled custom-message element: a rounded, muted-bordered box
+/// with one cell of
 /// padding, a bold `<icon> <name>` header row followed by a blank row when
 /// the element names its type, and the Markdown body.
 #[must_use]
@@ -119,7 +119,7 @@ fn framed_message_with_presentation(
 		}
 		.into_component()
 	} else {
-		// pi's unnamed custom message is a compact three-row box: border,
+		// An unnamed custom message is a compact three-row box: border,
 		// body, border. Vertical padding belongs only to the named frame.
 		dom! {
 			<box border=round bc=border bg=surface pad-x=1>
@@ -160,7 +160,7 @@ fn rendered_component(node: &Node, ui: &UiContext) -> Option<Component> {
 	parse_component_with_origin(&Str::new(source), ui, MarkupOrigin::Extension).ok()
 }
 
-/// pi `collapseAfterLines`: the first `keep` lines then `…`.
+/// Keeps the first `keep` lines, then adds `…`.
 fn fold_lines(body: Str, keep: usize) -> Str {
 	let mut lines = body.as_str().split('\n');
 	let mut folded = String::with_capacity(body.len());

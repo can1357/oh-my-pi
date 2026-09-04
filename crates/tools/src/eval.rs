@@ -99,7 +99,7 @@ Acyclic waves via `agent(…, handle=true)` + `pipeline`/`parallel`:
 - **Isolate failure.** Wrap risky nodes in try/except; a failure degrades only its subtree.
 - **Acyclic only.** No node waits on its own descendant.
 </dag>"#;
-const EVAL_DEFINED_TOOLS: &str = r#"<eval-defined-tools>
+const EVAL_DEFINED_TOOLS: &str = r"<eval-defined-tools>
 Additional Python helpers:
 ```
 @tool / tool(fn, name=None, description=None, rev=1)
@@ -107,7 +107,7 @@ Additional Python helpers:
 workpool(agent=None, *, name=None, context=None, tools=None) → WorkPool
     Queue independent items onto persistent children. `tools` exposes only named eval-defined handlers.
 ```
-</eval-defined-tools>"#;
+</eval-defined-tools>";
 
 /// One live discovered agent projected into eval task guidance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -407,6 +407,58 @@ pub struct Params {
 	/// Select a persistent kernel or an isolated one-shot process.
 	#[schemars(default, skip_serializing_if = "Option::is_none")]
 	pub kernel_mode: Option<KernelMode>,
+}
+
+/// Arguments accepted by the isolated `py_eval@1` expression evaluator.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[schemars(description = "")]
+#[serde(deny_unknown_fields)]
+pub struct PyEvalParams {
+	/// Python expression to evaluate in a fresh namespace.
+	#[schemars(required, with = "String", description = "Python expression to evaluate")]
+	pub code: Str,
+}
+
+/// Durable result of one isolated Python expression.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PyEvalPayload {
+	/// JSON-safe expression value, or its Python `repr` when it is not JSON
+	/// serializable.
+	pub result: Value,
+}
+
+/// `py_eval` has no streaming updates.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum PyEvalUpdate {}
+
+/// Typed failure from isolated Python expression evaluation.
+#[derive(Clone, Debug, Deserialize, Eq, Error, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PyEvalFault {
+	/// The expression was empty.
+	#[error("py_eval code must be nonempty")]
+	EmptyCode,
+	/// The shared eval resource failed.
+	#[error("{fault}")]
+	Resource {
+		/// Typed eval resource failure.
+		#[source]
+		fault: Fault,
+	},
+	/// Python raised while evaluating the expression.
+	#[error("{name}: {message}")]
+	Python {
+		/// Python exception class name.
+		name:      Str,
+		/// Exception message without the class prefix.
+		message:   Str,
+		/// Formatted traceback lines in Python order.
+		traceback: Vec<Str>,
+	},
+	/// The eval child returned a completion that violates the `py_eval`
+	/// protocol.
+	#[error("py_eval child returned an invalid result")]
+	InvalidResult,
 }
 
 /// Ordered text stream emitted by Python.
@@ -802,6 +854,13 @@ fn format_display_json(outputs: &[DisplayOutput]) -> String {
 	rendered.join("\n\n")
 }
 
+/// Isolated `py_eval@1` implementation backed by disposable eval children.
+pub struct PyEvalTool<E: EvalExec> {
+	exec:     E,
+	sessions: Arc<DashMap<Str, Arc<OnceCell<Session>>>>,
+	spec:     ToolSpec,
+}
+
 /// Python-only `eval@1` implementation retaining one lazy session per owner.
 pub struct EvalTool<E: EvalExec> {
 	exec: E,
@@ -1179,6 +1238,38 @@ impl EvalSessionControl {
 	}
 }
 
+/// Constructs `py_eval@1` over the shared killable eval resource.
+///
+/// Every invocation runs in a fresh namespace and requests a disposable child;
+/// the returned tool never initializes Python in its own process.
+pub fn py_eval<E: EvalExec>(exec: E) -> PyEvalTool<E> {
+	PyEvalTool { exec, sessions: Arc::new(DashMap::new()), spec: py_eval_spec() }
+}
+
+/// Returns the canonical host-free `py_eval@1` declaration.
+#[must_use]
+pub fn py_eval_spec() -> ToolSpec {
+	ToolSpec {
+		name:            sf!("py_eval"),
+		rev:             Rev { family: Str::default(), n: 1 },
+		description:     sf!("Evaluate one Python expression"),
+		schema:          Bytes::from_static(
+			br#"{"type":"object","properties":{"code":{"type":"string","minLength":1}},"required":["code"],"additionalProperties":false}"#,
+		),
+		constraint:      Constraint::Schema {
+			priority:       100,
+			on_unsupported: omp_tool::Fallback::Unspecified,
+		},
+		effects:         eval_effects(),
+		projection_code: omp_tool::native_projection_code(
+			env!("CARGO_PKG_NAME"),
+			env!("CARGO_PKG_VERSION"),
+			include_bytes!("eval.rs"),
+		)
+		.into(),
+	}
+}
+
 /// Constructs `eval@1` over a persistent Python resource.
 pub fn eval<E: EvalExec>(exec: E) -> EvalTool<E> {
 	eval_controlled(exec).0
@@ -1200,28 +1291,29 @@ pub fn spec(description: Str) -> ToolSpec {
 			priority:       100,
 			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
-		effects: Effects {
-			documents: Some(DocEffects {
-				read:        true,
-				write_globs: [sf!("**")].into_iter().collect(),
-			}),
-			exec:      Some(ExecEffects {
-				commands: [sf!("*")].into_iter().collect(),
-				network:  true,
-			}),
-			inference: Some(InferenceEffects {
-				max_requests: u32::MAX,
-				max_usd:      Usd::from_nanos(u64::MAX),
-			}),
-			desktop:   None,
-			subagents: u32::MAX,
-		},
+		effects: eval_effects(),
 		projection_code: omp_tool::native_projection_code(
 			env!("CARGO_PKG_NAME"),
 			env!("CARGO_PKG_VERSION"),
 			include_bytes!("eval.rs"),
 		)
 		.into(),
+	}
+}
+
+fn eval_effects() -> Effects {
+	Effects {
+		documents: Some(DocEffects {
+			read:        true,
+			write_globs: [sf!("**")].into_iter().collect(),
+		}),
+		exec:      Some(ExecEffects { commands: [sf!("*")].into_iter().collect(), network: true }),
+		inference: Some(InferenceEffects {
+			max_requests: u32::MAX,
+			max_usd:      Usd::from_nanos(u64::MAX),
+		}),
+		desktop:   None,
+		subagents: u32::MAX,
 	}
 }
 
@@ -1269,6 +1361,232 @@ impl<E: EvalExec> EvalTool<E> {
 	pub const fn with_auto_background_threshold(mut self, threshold: Duration) -> Self {
 		self.auto_background_threshold = threshold;
 		self
+	}
+}
+
+fn py_eval_source(code: &str) -> Str {
+	let expression =
+		serde_json::to_string(code).expect("serializing a Rust string to JSON cannot fail");
+	Str::from(format!(
+		r#"import builtins as __omp_py_eval_builtins
+import json as __omp_py_eval_json
+
+def __omp_py_eval_pack(value):
+	try:
+		__omp_py_eval_json.dumps(value, allow_nan=False)
+	except BaseException:
+		return {{"result": repr(value)}}
+	return {{"result": value}}
+
+__omp_py_eval_globals = {{"__builtins__": __omp_py_eval_builtins}}
+__omp_py_eval_pack(eval(compile({expression}, "<py_eval>", "eval"), __omp_py_eval_globals, __omp_py_eval_globals))"#
+	))
+}
+
+fn py_eval_completion(completion: RunCompletion) -> Result<PyEvalPayload, PyEvalFault> {
+	if completion.status.outcome != CellOutcome::Complete {
+		return match completion.status.exception {
+			Some(exception) => Err(PyEvalFault::Python {
+				name:      exception.name,
+				message:   exception.message,
+				traceback: exception.traceback,
+			}),
+			None => Err(PyEvalFault::InvalidResult),
+		};
+	}
+	let mut value = completion
+		.result
+		.and_then(|value| value.json)
+		.and_then(|value| match value {
+			Value::Object(value) => Some(value),
+			_ => None,
+		})
+		.ok_or(PyEvalFault::InvalidResult)?;
+	let result = value.remove("result").ok_or(PyEvalFault::InvalidResult)?;
+	Ok(PyEvalPayload { result })
+}
+
+const fn py_eval_resource(fault: Fault) -> PyEvalFault {
+	PyEvalFault::Resource { fault }
+}
+
+impl<E: EvalExec> Tool for PyEvalTool<E> {
+	type Fault = PyEvalFault;
+	type Params = PyEvalParams;
+	type Payload = PyEvalPayload;
+	type Update = PyEvalUpdate;
+
+	fn spec(&self) -> &ToolSpec {
+		&self.spec
+	}
+
+	fn call<'c>(
+		&'c self,
+		mut params: IncomingParams<'c>,
+	) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+		let owner = params
+			.owner()
+			.cloned()
+			.unwrap_or_else(|| sf!("__direct_py_eval_owner__"));
+		stream! {
+			let args = match params.whole::<PyEvalParams>().await {
+				Ok(args) => args,
+				Err(error) => {
+					yield py_eval_param_event(error);
+					return;
+				},
+			};
+			if args.code.is_empty() {
+				yield Ev::Done(ToolTerminal::Done {
+					result: Err(PyEvalFault::EmptyCode),
+					useless: true,
+				});
+				return;
+			}
+			if let Err(error) = params.committed().await {
+				yield py_eval_commit_event(error);
+				return;
+			}
+
+			let owned = self
+				.sessions
+				.entry(owner.clone())
+				.or_insert_with(|| Arc::new(OnceCell::new()))
+				.clone();
+			let session = match owned
+				.get_or_try_init(|| self.exec.open_session_for(owner.as_str()))
+				.await
+			{
+				Ok(session) => session.clone(),
+				Err(fault) => {
+					yield Ev::Done(ToolTerminal::Done {
+						result: Err(py_eval_resource(fault)),
+						useless: false,
+					});
+					return;
+				},
+			};
+			let runtime = match self.exec.runtime_snapshot(owner.as_str(), &session) {
+				Ok(runtime) => runtime,
+				Err(fault) => {
+					yield Ev::Done(ToolTerminal::Done {
+						result: Err(py_eval_resource(fault)),
+						useless: false,
+					});
+					return;
+				},
+			};
+			let mut run = match self.exec.run_with_mode(
+				&session,
+				RunRequest {
+					code: py_eval_source(args.code.as_str()),
+					timeout: None,
+					reset: true,
+					runtime,
+				},
+				true,
+			).await {
+				Ok(run) => run,
+				Err(fault) => {
+					yield Ev::Done(ToolTerminal::Done {
+						result: Err(py_eval_resource(fault)),
+						useless: false,
+					});
+					return;
+				},
+			};
+			let mut cancellation_reason = None;
+			loop {
+				let event = if cancellation_reason.is_some() {
+					run.next_event().await
+				} else {
+					let next = run.next_event().fuse();
+					let interrupt = params.next_interrupt().fuse();
+					let selected = {
+						pin_mut!(next, interrupt);
+						match futures::future::select(interrupt, next).await {
+							Either::Left((interrupt, _)) => Either::Left(interrupt),
+							Either::Right((event, _)) => Either::Right(event),
+						}
+					};
+					match selected {
+						Either::Left(interrupt) => {
+							let reason = match interrupt {
+								Ok(interrupt) => interrupt.reason,
+								Err(InterruptWaitError::Closed) =>
+									sf!("invocation owner disappeared"),
+								Err(InterruptWaitError::Protocol(reason)) => reason,
+							};
+							if run.cancel().await.is_err() {
+								let _ = self.exec.dispose_session(&session).await;
+								yield Ev::Aborted(Abort::EffectsUnknown { reason });
+								return;
+							}
+							cancellation_reason = Some(reason);
+							continue;
+						},
+						Either::Right(event) => event,
+					}
+				};
+
+				match event {
+					Ok(Some(RunEvent::Started { .. } | RunEvent::Output(_))) => {},
+					Ok(Some(RunEvent::Completed(completion))) => {
+						let disposed = self.exec.dispose_session(&session).await;
+						if let Some(reason) = cancellation_reason {
+							yield Ev::Aborted(Abort::EffectsUnknown { reason });
+						} else if let Err(fault) = disposed {
+							yield Ev::Done(ToolTerminal::Done {
+								result: Err(py_eval_resource(fault)),
+								useless: false,
+							});
+						} else {
+							yield Ev::Done(ToolTerminal::Done {
+								result: py_eval_completion(completion),
+								useless: false,
+							});
+						}
+						return;
+					},
+					Ok(None) => {
+						let _ = self.exec.dispose_session(&session).await;
+						if let Some(reason) = cancellation_reason {
+							yield Ev::Aborted(Abort::EffectsUnknown { reason });
+						} else {
+							yield Ev::Done(ToolTerminal::Done {
+								result: Err(PyEvalFault::InvalidResult),
+								useless: false,
+							});
+						}
+						return;
+					},
+					Err(fault) => {
+						let _ = self.exec.dispose_session(&session).await;
+						if let Some(reason) = cancellation_reason {
+							yield Ev::Aborted(Abort::EffectsUnknown { reason });
+						} else {
+							yield Ev::Done(ToolTerminal::Done {
+								result: Err(py_eval_resource(fault)),
+								useless: false,
+							});
+						}
+						return;
+					},
+				}
+			}
+		}
+	}
+
+	fn prompt(&self, view: Result<&PyEvalPayload, &PyEvalFault>, _: &PromptCaps) -> Vec<Part> {
+		vec![Part::Text {
+			text: match view {
+				Ok(payload) => Str::from(
+					serde_json::to_string(payload)
+						.expect("serializing a JSON-safe py_eval payload cannot fail"),
+				),
+				Err(fault) => Str::from(fault.to_string()),
+			},
+		}]
 	}
 }
 
@@ -1640,6 +1958,38 @@ fn detached_terminal(job: DetachedJob) -> ToolTerminal<Payload, Fault> {
 	managed_job_terminal(job, omp_tool::JobKind::Eval, sf!("eval cell settlement"))
 }
 
+fn py_eval_param_event(error: ParamError) -> Ev<PyEvalUpdate, PyEvalPayload, PyEvalFault> {
+	match error {
+		ParamError::Args(issue) => Ev::Args(*issue),
+		ParamError::Interrupted(interrupt) => {
+			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
+		},
+		ParamError::Protocol(reason) => Ev::Args(ArgIssue {
+			path:     Vec::new(),
+			expected: sf!("one complete py_eval@1 expression object"),
+			kind:     ArgIssueKind::Protocol,
+			example:  Some(Str::new_static(r#"{"code":"1 + 1"}"#)),
+			found:    Some(reason),
+		}),
+	}
+}
+
+fn py_eval_commit_event(error: CommitError) -> Ev<PyEvalUpdate, PyEvalPayload, PyEvalFault> {
+	match error {
+		CommitError::Aborted => Ev::Aborted(Abort::InputDropped),
+		CommitError::Interrupted(interrupt) => {
+			Ev::Aborted(Abort::Interrupted { reason: interrupt.reason })
+		},
+		CommitError::Protocol(reason) => Ev::Args(ArgIssue {
+			path:     Vec::new(),
+			expected: sf!("one complete py_eval@1 expression object"),
+			kind:     ArgIssueKind::Protocol,
+			example:  Some(Str::new_static(r#"{"code":"1 + 1"}"#)),
+			found:    Some(reason),
+		}),
+	}
+}
+
 fn param_event<U, P>(error: ParamError) -> Ev<U, P, Fault> {
 	match error {
 		ParamError::Args(issue) => Ev::Args(*issue),
@@ -1665,7 +2015,7 @@ fn protocol_issue(reason: Str) -> ArgIssue {
 		path:     Vec::new(),
 		expected: sf!("one complete eval@1 Python cell object"),
 		kind:     ArgIssueKind::Protocol,
-		example:  Some(sf!(r#"{{"language":"py","code":"1 + 1"}}"#)),
+		example:  Some(Str::new_static(r#"{"language":"py","code":"1 + 1"}"#)),
 		found:    Some(reason),
 	}
 }
@@ -1929,6 +2279,240 @@ mod tests {
 			}))
 			.is_err()
 		);
+	}
+
+	#[derive(Clone)]
+	struct PyEvalProtocolExec {
+		completions: Arc<Mutex<std::collections::VecDeque<RunCompletion>>>,
+		requests:    Arc<Mutex<Vec<(RunRequest, bool)>>>,
+		cancelled:   Arc<AtomicBool>,
+		disposals:   Arc<AtomicU64>,
+	}
+
+	struct PyEvalProtocolRun {
+		completion: Option<RunCompletion>,
+		pending:    bool,
+		cancelled:  Arc<AtomicBool>,
+	}
+
+	impl EvalRun for PyEvalProtocolRun {
+		fn reset(&self) -> bool {
+			true
+		}
+
+		async fn next_event(&mut self) -> Result<Option<RunEvent>, Fault> {
+			if self.pending && !self.cancelled.load(Ordering::Acquire) {
+				future::pending().await
+			}
+			Ok(self.completion.take().map(RunEvent::Completed))
+		}
+
+		async fn cancel(&self) -> Result<(), Fault> {
+			self.cancelled.store(true, Ordering::Release);
+			Ok(())
+		}
+	}
+
+	impl PyEvalProtocolExec {
+		fn start(&self, request: RunRequest, disposable: bool) -> PyEvalProtocolRun {
+			let pending = request.code.contains("sleep(30)");
+			self.requests.lock().push((request, disposable));
+			PyEvalProtocolRun {
+				completion: self.completions.lock().pop_front(),
+				pending,
+				cancelled: Arc::clone(&self.cancelled),
+			}
+		}
+	}
+
+	impl EvalExec for PyEvalProtocolExec {
+		type Run = PyEvalProtocolRun;
+
+		async fn open_session(&self) -> Result<Session, Fault> {
+			Ok(Session { id: Bytes::from_static(b"py-eval-test") })
+		}
+
+		async fn run<'a>(
+			&'a self,
+			_session: &'a Session,
+			request: RunRequest,
+		) -> Result<Self::Run, Fault> {
+			Ok(self.start(request, false))
+		}
+
+		async fn run_with_mode<'a>(
+			&'a self,
+			_session: &'a Session,
+			request: RunRequest,
+			disposable: bool,
+		) -> Result<Self::Run, Fault> {
+			Ok(self.start(request, disposable))
+		}
+
+		fn dispose_session(
+			&self,
+			_session: &Session,
+		) -> impl Future<Output = Result<(), Fault>> + Send + '_ {
+			self.disposals.fetch_add(1, Ordering::AcqRel);
+			future::ready(Ok(()))
+		}
+	}
+
+	fn py_eval_exec(completions: impl IntoIterator<Item = RunCompletion>) -> PyEvalProtocolExec {
+		PyEvalProtocolExec {
+			completions: Arc::new(Mutex::new(completions.into_iter().collect())),
+			requests:    Arc::new(Mutex::new(Vec::new())),
+			cancelled:   Arc::new(AtomicBool::new(false)),
+			disposals:   Arc::new(AtomicU64::new(0)),
+		}
+	}
+
+	fn py_eval_completion_with(result: Value) -> RunCompletion {
+		RunCompletion {
+			status:          CellStatus {
+				outcome:     CellOutcome::Complete,
+				exit_code:   Some(0),
+				duration_ms: 1,
+				exception:   None,
+			},
+			result:          Some(CellValue {
+				text: Str::new(result.to_string()),
+				json: Some(serde_json::json!({ "result": result })),
+			}),
+			display_outputs: Vec::new(),
+		}
+	}
+
+	#[test]
+	fn py_eval_spec_preserves_the_canonical_strict_expression_contract() {
+		let declaration = py_eval_spec();
+		assert_eq!(declaration.name, "py_eval");
+		assert_eq!(declaration.rev, Rev { family: Str::default(), n: 1 });
+		assert_eq!(declaration.description, "Evaluate one Python expression");
+		assert_eq!(
+			serde_json::from_slice::<Value>(&declaration.schema).expect("py_eval schema"),
+			serde_json::json!({
+				"type": "object",
+				"properties": { "code": { "type": "string", "minLength": 1 } },
+				"required": ["code"],
+				"additionalProperties": false,
+			})
+		);
+	}
+
+	#[tokio::test]
+	async fn py_eval_returns_json_or_repr_and_always_uses_a_fresh_disposable_namespace() {
+		use futures::StreamExt as _;
+
+		let exec = py_eval_exec([
+			py_eval_completion_with(serde_json::json!(42)),
+			py_eval_completion_with(serde_json::json!("{1, 2, 3}")),
+		]);
+		let tool = py_eval(exec.clone());
+		for (code, expected) in
+			[("6 * 7", serde_json::json!(42)), ("{3, 1, 2}", serde_json::json!("{1, 2, 3}"))]
+		{
+			let (feed, params) = IncomingParams::channel();
+			feed
+				.args_committed(Str::from(serde_json::json!({ "code": code }).to_string()))
+				.expect("py_eval invocation remains live");
+			let events = tool.call(params).collect::<Vec<_>>().await;
+			assert!(matches!(
+				events.as_slice(),
+				[Ev::Done(ToolTerminal::Done {
+					result: Ok(PyEvalPayload { result }),
+					..
+				})] if result == &expected
+			));
+		}
+
+		let requests = exec.requests.lock();
+		assert_eq!(requests.len(), 2);
+		assert!(
+			requests
+				.iter()
+				.all(|(request, disposable)| request.reset && *disposable)
+		);
+		assert!(
+			requests
+				.iter()
+				.all(|(request, _)| request.code.contains("__omp_py_eval_globals"))
+		);
+		assert_eq!(exec.disposals.load(Ordering::Acquire), 2);
+	}
+
+	#[tokio::test]
+	async fn py_eval_rejects_empty_code_and_reports_python_errors_as_typed_faults() {
+		use futures::StreamExt as _;
+
+		let exec = py_eval_exec([RunCompletion {
+			status:          CellStatus {
+				outcome:     CellOutcome::Error,
+				exit_code:   Some(1),
+				duration_ms: 1,
+				exception:   Some(PythonException {
+					name:      sf!("ZeroDivisionError"),
+					message:   sf!("division by zero"),
+					traceback: vec![sf!("ZeroDivisionError: division by zero\n")],
+				}),
+			},
+			result:          None,
+			display_outputs: Vec::new(),
+		}]);
+		let tool = py_eval(exec);
+
+		let (empty_feed, empty_params) = IncomingParams::channel();
+		empty_feed
+			.args_committed(Str::new_static(r#"{"code":""}"#))
+			.expect("empty invocation remains live");
+		assert!(matches!(tool.call(empty_params).collect::<Vec<_>>().await.as_slice(), [Ev::Done(
+			ToolTerminal::Done { result: Err(PyEvalFault::EmptyCode), .. }
+		)]));
+
+		let (fault_feed, fault_params) = IncomingParams::channel();
+		fault_feed
+			.args_committed(Str::new_static(r#"{"code":"1 / 0"}"#))
+			.expect("failing invocation remains live");
+		assert!(matches!(
+			tool.call(fault_params).collect::<Vec<_>>().await.as_slice(),
+			[Ev::Done(ToolTerminal::Done {
+				result: Err(PyEvalFault::Python { name, message, .. }),
+				..
+			})] if name == "ZeroDivisionError" && message == "division by zero"
+		));
+	}
+
+	#[tokio::test]
+	async fn py_eval_cancellation_waits_for_disposable_session_reaping() {
+		use futures::StreamExt as _;
+
+		let exec = py_eval_exec([RunCompletion {
+			status:          CellStatus {
+				outcome:     CellOutcome::Cancelled,
+				exit_code:   None,
+				duration_ms: 1,
+				exception:   None,
+			},
+			result:          None,
+			display_outputs: Vec::new(),
+		}]);
+		let tool = py_eval(exec.clone());
+		let (feed, params) = IncomingParams::channel();
+		feed
+			.args_committed(Str::new_static(r#"{"code":"__import__('time').sleep(30)"}"#))
+			.expect("sleeping invocation remains live");
+		feed
+			.interrupt(Interrupt { class: sf!("user"), reason: sf!("stop py_eval") })
+			.expect("interrupt py_eval");
+
+		let events = tool.call(params).collect::<Vec<_>>().await;
+		assert!(matches!(
+			events.as_slice(),
+			[Ev::Aborted(Abort::EffectsUnknown { reason })] if reason == "stop py_eval"
+		));
+		assert!(exec.cancelled.load(Ordering::Acquire));
+		assert_eq!(exec.disposals.load(Ordering::Acquire), 1);
+		assert!(exec.requests.lock()[0].1, "py_eval did not request a disposable child");
 	}
 
 	#[derive(Clone)]

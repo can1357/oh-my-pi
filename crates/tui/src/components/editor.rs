@@ -228,8 +228,7 @@ pub enum InlineAccent {
 /// Pure host decoration from full editor text to accented byte spans.
 pub type InlineDecorator = Box<dyn Fn(&str) -> SmallVec<(usize, usize, InlineAccent), 4>>;
 
-/// Which leading sigil recolors the composer chrome for the whole draft
-/// (pi `isBashMode` / `isPythonMode`).
+/// Which leading sigil recolors the composer chrome for the whole draft.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrefixAccent {
 	/// `!` — the draft runs as a shell command (theme `warn`).
@@ -238,9 +237,8 @@ pub enum PrefixAccent {
 	Eval,
 }
 
-/// Host classification of a draft's leading sigil. The host owns the
-/// grammar (pi's `pythonCommandPrefixLength` and pasted-shell-prompt
-/// guard); the editor only paints the verdict.
+/// Host classification of a draft's leading sigil. The host owns the grammar
+/// and pasted-shell-prompt guard; the editor only paints the verdict.
 pub type PrefixClassifier = fn(&str) -> Option<PrefixAccent>;
 
 /// Default classifier: a bare leading `!` or `$` byte.
@@ -252,8 +250,8 @@ fn leading_sigil(text: &str) -> Option<PrefixAccent> {
 	}
 }
 
-/// HSL hue sweep painted across one magic keyword (pi
-/// `GradientHighlightSpec`): stop `i` of [`STOPS`](Self::STOPS) takes hue
+/// HSL hue sweep painted across one magic keyword: stop `i` of
+/// [`STOPS`](Self::STOPS) takes hue
 /// `start + (i / STOPS) * span` at 90% saturation and 62% lightness.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KeywordGradient {
@@ -265,21 +263,19 @@ pub struct KeywordGradient {
 
 impl KeywordGradient {
 	const LIGHTNESS: f32 = 0.62;
-	/// pi `orchestrate.ts`: green through blue to violet, `150 + t * 130`.
+	/// Green through blue to violet, `150 + t * 130`.
 	pub const ORCHESTRATE: Self = Self { hue_start: 150.0, hue_span: 130.0 };
 	const SATURATION: f32 = 0.90;
-	/// Repaint cadence while a keyword shimmers (pi
-	/// `CustomEditor.SHIMMER_FRAME_MS`): ~14 frames/s reads as motion without
-	/// flooding the renderer.
+	/// Repaint cadence while a keyword shimmers: ~14 frames/s reads as motion
+	/// without flooding the renderer.
 	pub const SHIMMER_FRAME: Duration = Duration::from_millis(70);
-	/// Time for the gradient to sweep one full cycle across each keyword
-	/// (pi `CustomEditor.SHIMMER_PERIOD_MS`).
+	/// Time for the gradient to sweep one full cycle across each keyword.
 	pub const SHIMMER_PERIOD: Duration = Duration::from_millis(1800);
-	/// Color stops swept across the gradient (pi `stops: 14`).
+	/// Color stops swept across the gradient.
 	pub const STOPS: usize = 14;
-	/// pi `ultrathink.ts`: the full rainbow, `t * 330`.
+	/// The full rainbow, `t * 330`.
 	pub const ULTRATHINK: Self = Self { hue_start: 0.0, hue_span: 330.0 };
-	/// pi `workflow.ts`: orange through green, `30 + t * 120`.
+	/// Orange through green, `30 + t * 120`.
 	pub const WORKFLOWZ: Self = Self { hue_start: 30.0, hue_span: 120.0 };
 
 	/// Compiles the stop palette once per color depth: truecolor keeps the
@@ -299,8 +295,8 @@ impl KeywordGradient {
 		palette
 	}
 
-	/// Stop for character `index` of an `len`-character keyword at `phase`
-	/// (pi `paint`: `floor(((i / n + phase) mod 1) * stops) mod stops`).
+	/// Stop for character `index` of an `len`-character keyword at `phase`:
+	/// `floor(((i / n + phase) mod 1) * stops) mod stops`.
 	#[must_use]
 	pub fn stop(index: usize, len: usize, phase: f32) -> usize {
 		let t = anim::wrap_unit(index as f32 / len.max(1) as f32 + phase);
@@ -338,8 +334,8 @@ impl KeywordAccent {
 		}
 	}
 
-	/// pi's built-in magic keywords (`magic-keywords.ts`): `ultrathink`,
-	/// `orchestrate`, and `workflowz`, each with its own hue sweep.
+	/// Built-in magic keywords: `ultrathink`, `orchestrate`, and `workflowz`,
+	/// each with its own hue sweep.
 	#[must_use]
 	pub fn magic() -> Self {
 		Self::new([
@@ -422,9 +418,8 @@ pub struct EditInput {
 	correction_guard:  Option<usize>,
 	/// Exact source snapshot for an in-flight replacement request.
 	guesses_guard:     Option<AssistanceGuard>,
-	/// pi `setImeSafeCursorLayout`: leave the caret row empty to its right
-	/// in side-bordered shapes so terminal-local IME preedit cannot shift the
-	/// chrome onto the next row.
+	/// Leave the caret row empty to its right in side-bordered shapes so
+	/// terminal-local IME preedit cannot shift the chrome onto the next row.
 	ime_safe_cursor:   bool,
 }
 
@@ -453,9 +448,9 @@ impl EditInput {
 		}
 	}
 
-	/// Enables pi's IME-safe cursor layout (`tui.imeSafeCursor`): in
-	/// side-bordered shapes (box, field, rail) the row whose caret sits at
-	/// its end paints no right chrome, so marked text a terminal renders
+	/// Enables an IME-safe cursor layout: in side-bordered shapes (box, field,
+	/// rail), the row whose caret sits at its end paints no right chrome, so
+	/// marked text a terminal renders
 	/// locally during IME composition never pushes the frame apart.
 	pub const fn set_ime_safe_cursor(&mut self, enabled: bool) {
 		self.ime_safe_cursor = enabled;
@@ -545,7 +540,7 @@ impl EditInput {
 	}
 
 	/// Applies an asynchronous platform correction while the buffer still
-	/// matches the requesting state (pi `tryAutocorrect` application).
+	/// matches the requesting state.
 	fn apply_autocorrect(&mut self, range: &Range<usize>, replacement: &str) {
 		let Some(guard) = self.correction_guard.take() else {
 			return;
@@ -563,7 +558,7 @@ impl EditInput {
 	}
 
 	/// After a boundary character lands, asks the platform for a confident
-	/// correction of the word preceding it (pi `tryAutocorrect` trigger).
+	/// correction of the preceding word.
 	fn request_autocorrect(&mut self, key: Key) {
 		self.correction_guard = None;
 		if !self.spelling_features.autocorrect {
@@ -607,8 +602,8 @@ impl EditInput {
 		let Some(suffix) = self.spelling.completion(text, &range) else {
 			return false;
 		};
-		// pi stores logical lines without their newline: a completion at a
-		// line end therefore receives its separating space before `\n`.
+		// Logical lines exclude their newline, so a completion at line end
+		// receives its separating space before `\n`.
 		let needs_space = text[cursor..]
 			.chars()
 			.next()
@@ -641,8 +636,8 @@ impl EditInput {
 		self.editor.set_options(options);
 	}
 
-	/// Stages `text` as a text-attachment chip (pi `insertTextAttachment`):
-	/// a compact `<icon> #N` token in the buffer whose submitted form is
+	/// Stages `text` as a text-attachment chip: a compact `<icon> #N` token
+	/// in the buffer whose submitted form is
 	/// `expansion` (default: the sanitized text itself), plus a band card.
 	/// Returns whether a chip was inserted (needs staged attachments).
 	pub fn stage_text_attachment(
@@ -673,13 +668,12 @@ impl EditInput {
 		self.spelling_features
 	}
 
-	/// Records a submitted prompt for Up/Down recall (pi `addToHistory`).
+	/// Records a submitted prompt for Up/Down recall.
 	pub fn add_to_history(&mut self, text: &str) {
 		self.editor.add_to_history(text);
 	}
 
-	/// Replaces the Up/Down prompt history, newest first (pi
-	/// `setHistoryStorage`).
+	/// Replaces the Up/Down prompt history, newest first.
 	pub fn seed_history(&mut self, prompts: impl IntoIterator<Item = Str>) {
 		self.editor.seed_history(prompts);
 	}
@@ -720,11 +714,7 @@ impl EditInput {
 
 	/// Shows or replaces native-IME marked text and its byte-indexed
 	/// selection inside the marked span.
-	pub fn set_volatile_text_selection(
-		&mut self,
-		text: &str,
-		selection: Option<Range<usize>>,
-	) {
+	pub fn set_volatile_text_selection(&mut self, text: &str, selection: Option<Range<usize>>) {
 		self.editor.set_volatile_text_selection(text, selection);
 		self.refresh_keyword_spans();
 	}
@@ -779,7 +769,7 @@ impl EditInput {
 	}
 
 	/// Undoes the last edit made before the just-removed `transient`
-	/// trigger text (pi `undoPastTransientText`).
+	/// trigger text.
 	pub fn undo_past_transient(&mut self, transient: &str) {
 		if self.editor.undo_past_transient(transient) == EditOutcome::Changed {
 			self.refresh_keyword_spans();
@@ -1110,7 +1100,7 @@ fn word_suffix_range(text: &str, end: usize) -> Option<Range<usize>> {
 }
 
 /// Partial prose word ending at the cursor that platform autocomplete may
-/// extend (pi `getWordCompletion` gating): at least two characters, no word
+/// extend: at least two characters, no word
 /// character immediately after the cursor, and prose by [`is_prose_word`].
 fn completion_prefix_range(
 	text: &str,
@@ -1279,16 +1269,16 @@ impl Component for EditInput {
 		} else {
 			None
 		};
-		// pi `isBashMode` / `isPythonMode`: a `!` or `$` prefix recolors the
-		// composer chrome (here the prompt gutter) for the whole draft.
+		// A `!` or `$` prefix recolors the composer chrome (here the prompt
+		// gutter) for the whole draft.
 		let prefix_mode = (self.prefix_classifier)(text).map(|accent| match accent {
 			PrefixAccent::Bash => pc.ctx.theme.warn,
 			PrefixAccent::Eval => pc.ctx.theme.info,
 		});
 		let shell = prefix_mode.is_some();
 		let keyword_accent = !self.keyword_spans.is_empty();
-		// pi `CustomEditor.decorateText`: the keyword gradient shimmers only
-		// while the prompt is focused and a magic keyword is on screen; the
+		// The keyword gradient shimmers only while the prompt is focused and a
+		// magic keyword is on screen; the
 		// next frame decides whether to schedule another, so the chain stops
 		// by itself when focus leaves or the keyword is deleted.
 		let shimmer = focused && keyword_accent;
@@ -1350,8 +1340,8 @@ impl Component for EditInput {
 			}
 		}
 		let content_y = rect.y.saturating_add(layout.top_rows);
-		// pi `imeSafeCursorTail`: the focused caret row whose text ends at the
-		// caret keeps no right chrome (box border, field cap, surface fill).
+		// The focused caret row whose text ends at the caret keeps no right
+		// chrome (box border, field cap, surface fill).
 		let ime_tail_row = (self.ime_safe_cursor && focused)
 			.then(|| {
 				rows
@@ -1567,8 +1557,8 @@ impl Component for EditInput {
 				&& self.editor.caret_visible()
 				&& (selection.is_none() || self.editor.volatile_active()))
 			.then_some(content.cursor_column)
-				.flatten()
-				.map(|column| byte_at_column(content.text, column));
+			.flatten()
+			.map(|column| byte_at_column(content.text, column));
 			paint_xml_range(
 				pc.frame,
 				x,
@@ -1580,8 +1570,8 @@ impl Component for EditInput {
 				selection_bytes,
 				pc.ctx.theme.selection,
 			);
-			// pi `useTerminalCursor`: the hardware cursor alone marks the
-			// insertion point — the caret cell keeps its text styling, so no
+			// The hardware cursor alone marks the insertion point — the caret
+			// cell keeps its text styling, so no
 			// painted block competes with the terminal's own cursor (and
 			// IMEs, screen readers, and PTY drivers see the real caret).
 			if let Some(cursor) = cursor {
@@ -1684,8 +1674,8 @@ impl Component for EditInput {
 			return Flow::Consumed;
 		}
 		if key == Key::Enter && self.props.flag(Prop::Submit) {
-			// pi: Enter on a command row with nothing before its token
-			// applies the completion and submits it in one keypress.
+			// Enter on a command row with nothing before its token applies the
+			// completion and submits it in one keypress.
 			if self.editor.picker_enter_submits() {
 				self.editor.accept_for_submit();
 				self.refresh_keyword_spans();
@@ -1702,8 +1692,8 @@ impl Component for EditInput {
 			}
 		}
 
-		// pi `cursorUp`/`cursorDown`: prompt history first; only a draft
-		// edge that history does not claim is handed to the host.
+		// Prompt history comes first; only a draft edge that history does not
+		// claim is handed to the host.
 		if self.editor.picker().is_none()
 			&& !self.editor.history_navigates(key)
 			&& (matches!(key, Key::Up) && self.editor.buffer().at_visual_start()
@@ -1983,8 +1973,8 @@ fn chip_style(marker: &str) -> Option<Style> {
 	(marker > 0).then(|| Style::new().fg(attachment_color(marker)).bold())
 }
 
-/// Whether a paste is "marker-sized" (pi `isMarkerSized`: more than ten
-/// lines or more than 1000 characters) and so collapses into an attachment
+/// Whether a paste is "marker-sized" (more than ten lines or more than 1000
+/// characters) and so collapses into an attachment
 /// chip instead of flooding the buffer.
 #[must_use]
 pub fn marker_sized_paste(text: &str) -> bool {
@@ -1995,7 +1985,7 @@ pub fn marker_sized_paste(text: &str) -> bool {
 ///
 /// Background does not participate in [`Style::inherit`], so it is carried
 /// explicitly alongside foreground, emphasis, and hyperlink state.
-fn typo_squiggle_style(base: Style, error: Color) -> Style {
+const fn typo_squiggle_style(base: Style, error: Color) -> Style {
 	Style::new()
 		.undercurl()
 		.underline_color(error)
@@ -2103,8 +2093,8 @@ impl Attachment {
 		Self { content, marker, color, preview_names, size_label }
 	}
 
-	/// The submitted form of a media chip (pi `#insertPendingImage`):
-	/// `[Image #N, WxH]`, `[Image #N]`, or `[Video #N]`. The marker is
+	/// The submitted form of a media chip: `[Image #N, WxH]`, `[Image #N]`, or
+	/// `[Video #N]`. The marker is
 	/// positional — `#N` names the N-th media source handed to the host on
 	/// submit. `None` for a collapsed text paste, whose submitted form is the
 	/// paste itself.
@@ -2120,7 +2110,7 @@ impl Attachment {
 	}
 }
 
-/// pi's positional image marker: `[Image #N, WxH]` / `[Image #N]`.
+/// Positional image marker: `[Image #N, WxH]` / `[Image #N]`.
 fn image_wire_marker(marker: usize, dimensions: Option<(u32, u32)>) -> Str {
 	match dimensions {
 		Some((width, height)) => sf!("[Image #{marker}, {width}x{height}]"),
@@ -2179,11 +2169,11 @@ pub struct Attachments {
 #[derive(Default)]
 struct AttachmentState {
 	staged:  Vec<Staged>,
-	/// Monotonic media marker source (pi `pendingImages.length`); survives
-	/// hides so numbers stay stable. Images/videos and text pastes number
+	/// Monotonic media marker source; survives hides so numbers stay stable.
+	/// Images/videos and text pastes number
 	/// separately so vision markers stay positional over media alone.
 	media:   usize,
-	/// Monotonic text-chip marker source (pi `#textAttachmentCounter`).
+	/// Monotonic text-chip marker source.
 	texts:   usize,
 	version: u64,
 }
@@ -2403,14 +2393,14 @@ impl EditorPane {
 		}
 	}
 
-	/// Enables pi's IME-safe cursor layout on the editable surface; see
+	/// Enables an IME-safe cursor layout on the editable surface; see
 	/// [`EditInput::set_ime_safe_cursor`].
 	pub fn ime_safe_cursor(mut self, enabled: bool) -> Self {
 		self.set_ime_safe_cursor(enabled);
 		self
 	}
 
-	/// Toggles pi's IME-safe cursor layout at runtime.
+	/// Toggles the IME-safe cursor layout at runtime.
 	pub fn set_ime_safe_cursor(&mut self, enabled: bool) {
 		if let Some(input) = self.children[0].comp_mut().downcast_mut::<EditInput>() {
 			input.set_ime_safe_cursor(enabled);
@@ -2419,7 +2409,7 @@ impl EditorPane {
 	}
 
 	/// Caps the editable surface at `rows` (`max-rows`), the terminal-size
-	/// budget hosts recompute on resize (pi `setMaxHeight`).
+	/// budget hosts recompute on resize.
 	pub fn set_max_rows(&mut self, rows: u16) {
 		let input = &mut self.children[0];
 		if input.comp().props().max_rows() == Some(rows) {
@@ -2491,8 +2481,7 @@ impl EditorPane {
 			.map_or_else(SpellingFeatures::default, EditInput::active_spelling_features)
 	}
 
-	/// Replaces the editable surface's feature switches at runtime (pi
-	/// `setAutocompleteMaxVisible`, `emojiAutocomplete`).
+	/// Replaces the editable surface's feature switches at runtime.
 	pub fn set_editor_options(&mut self, options: EditorOptions) {
 		if let Some(input) = self.children[0].comp_mut().downcast_mut::<EditInput>() {
 			input.set_editor_options(options);
@@ -2549,12 +2538,10 @@ impl EditorPane {
 
 	/// Shows or replaces native-IME marked text and its byte-indexed
 	/// selection inside the marked span.
-	pub fn set_volatile_text_selection(
-		&mut self,
-		text: &str,
-		selection: Option<Range<usize>>,
-	) {
-		self.input_mut().set_volatile_text_selection(text, selection);
+	pub fn set_volatile_text_selection(&mut self, text: &str, selection: Option<Range<usize>>) {
+		self
+			.input_mut()
+			.set_volatile_text_selection(text, selection);
 		self.children[0].invalidate();
 	}
 
@@ -2570,27 +2557,25 @@ impl EditorPane {
 		self.children[0].invalidate();
 	}
 
-	/// Moves the caret to the start or end of the whole draft (pi prompt
-	/// actions "Move cursor to message start/end").
+	/// Moves the caret to the start or end of the whole draft.
 	pub fn move_to_message_edge(&mut self, end: bool) {
 		self.input_mut().move_to_message_edge(end);
 		self.children[0].invalidate();
 	}
 
 	/// Undoes the last edit made before the just-removed `transient`
-	/// trigger text (pi prompt action "Undo").
+	/// trigger text.
 	pub fn undo_past_transient(&mut self, transient: &str) {
 		self.input_mut().undo_past_transient(transient);
 		self.children[0].invalidate();
 	}
 
-	/// Records a submitted prompt for Up/Down recall (pi `addToHistory`).
+	/// Records a submitted prompt for Up/Down recall.
 	pub fn add_to_history(&mut self, text: &str) {
 		self.input_mut().add_to_history(text);
 	}
 
-	/// Replaces the Up/Down prompt history, newest first (pi
-	/// `setHistoryStorage`).
+	/// Replaces the Up/Down prompt history, newest first.
 	pub fn seed_history(&mut self, prompts: impl IntoIterator<Item = Str>) {
 		self.input_mut().seed_history(prompts);
 	}
@@ -3562,7 +3547,7 @@ mod tests {
 		// a thumb) starts only once content exceeds its 18-row height cap.
 		assert!(
 			(1..5).any(|row| frame_row_text(ui.frame(), row).ends_with('█')),
-			"overflowing pi input should paint a thumb in its right border",
+			"overflowing input should paint a thumb in its right border",
 		);
 	}
 
@@ -3580,8 +3565,8 @@ mod tests {
 		assert_eq!(frame.cell(2, 0).style(), style);
 	}
 
-	/// pi `useTerminalCursor`: only the hardware cursor marks the caret; the
-	/// cell under it and the cell after the text stay unstyled.
+	/// Only the hardware cursor marks the caret; the cell under it and the
+	/// cell after the text stay unstyled.
 	#[test]
 	fn caret_is_hardware_only_and_never_paints_a_styled_cell() {
 		let mut ui = Ui::from_root(
@@ -3639,10 +3624,9 @@ mod tests {
 		assert_eq!(ui.frame().cursor(), Some((5, 0)), "never between the halves of 日");
 	}
 
-	/// pi `imeSafeCursorTail` (`#5563`): with the IME-safe layout on, the
-	/// focused caret row of a side-bordered shape keeps no right chrome, so
-	/// terminal-local preedit cannot push the border onto the next row. Off
-	/// (pi's default) and unfocused, the border stays.
+	/// With the IME-safe layout on, the focused caret row of a side-bordered
+	/// shape keeps no right chrome, so terminal-local preedit cannot push the
+	/// border onto the next row. Off and unfocused, the border stays.
 	#[test]
 	fn ime_safe_layout_drops_right_chrome_on_the_caret_row() {
 		let mut ui = Ui::from_root(
@@ -3680,7 +3664,7 @@ mod tests {
 			UiContext::default(),
 		);
 		plain.focus_first();
-		assert!(frame_row_text(plain.frame(), 1).ends_with('│'), "pi default keeps the compact box");
+		assert!(frame_row_text(plain.frame(), 1).ends_with('│'), "the default keeps the compact box");
 
 		let mut rail = Ui::from_root(
 			EditorPane::new()
@@ -3705,9 +3689,9 @@ mod tests {
 		);
 	}
 
-	/// pi `CustomEditor.decorateText`: magic keywords shimmer on the paint
-	/// clock (1800 ms sweep, 70 ms frames) only while focused; unfocused the
-	/// gradient rests at phase 0 and schedules nothing.
+	/// Magic keywords shimmer on the paint clock (1800ms sweep, 70ms frames)
+	/// only while focused; unfocused, the gradient rests at phase 0 and
+	/// schedules nothing.
 	#[test]
 	fn magic_keywords_shimmer_only_while_focused() {
 		fn row_colors(ui: &Ui, row: u16, from: u16, len: u16) -> Vec<Color> {
@@ -3733,7 +3717,7 @@ mod tests {
 		let expected: Vec<Color> = (0..10)
 			.map(|i| palette[KeywordGradient::stop(i, 10, 0.0)])
 			.collect();
-		assert_eq!(resting, expected, "phase 0 paints pi's static palette");
+		assert_eq!(resting, expected, "phase 0 paints the static palette");
 		assert_eq!(resting[0], anim::hsl(0.0, 0.90, 0.62));
 		assert_eq!(
 			ui.next_wake(),
@@ -3996,8 +3980,7 @@ mod tests {
 		assert_eq!(eval.frame().cell(0, 0).style().foreground_color(), ctx.theme.info);
 	}
 
-	/// `picker_rows` (pi `autocompleteMaxVisible`) bounds the open dropdown
-	/// live and is clamped to `[3, 20]`.
+	/// `picker_rows` bounds the open dropdown live and is clamped to `[3, 20]`.
 	#[test]
 	fn editor_options_resize_the_open_dropdown() {
 		let commands = (0..30)
@@ -4064,7 +4047,7 @@ mod tests {
 	}
 
 	/// `stage_text_attachment` inserts a chip whose submitted form is the
-	/// caller's expansion (pi `insertTextAttachment(content, expansion)`).
+	/// caller's expansion.
 	#[test]
 	fn staged_text_attachment_expands_to_the_given_text() {
 		let mut pane = EditorPane::new().with(Prop::Id, "input");
@@ -4465,7 +4448,7 @@ mod tests {
 		assert!(visible.contains("#1"));
 		assert!(!visible.contains(&pasted));
 		assert!(visible.ends_with(' '));
-		// pi wire form: a header without IHDR gives no dimensions.
+		// A header without IHDR gives no dimensions.
 		assert_eq!(editor_pane(&ui).buffer().expanded_text(), "[Image #1] ");
 		assert!(matches!(
 			&attachments.snapshot()[0].content,

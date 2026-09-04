@@ -302,7 +302,7 @@ fn route_client_frame(
 	}
 }
 
-fn opens_response_route(frame: &ClientFrame) -> bool {
+const fn opens_response_route(frame: &ClientFrame) -> bool {
 	!matches!(
 		frame.body.as_ref(),
 		Some(client_frame::Body::AcpDocumentAnswer(_) | client_frame::Body::AcpExecEvent(_))

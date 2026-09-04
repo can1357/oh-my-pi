@@ -1,4 +1,4 @@
-//! `#` prompt actions (pi `prompt-action-autocomplete.ts`): editor commands
+//! `#` prompt actions: editor commands
 //! offered from a `#query` token at the cursor. Accepting a row removes the
 //! token and records the action for the composer to apply.
 
@@ -36,13 +36,13 @@ struct Definition {
 	/// Builds the action from the removed `#…` token.
 	build:       fn(Str) -> PromptAction,
 	label:       &'static str,
-	/// pi shows the bound chord; these are the editor's default chords.
+	/// Bound editor chord.
 	description: &'static str,
 	keywords:    &'static str,
 	icon:        Icon,
 }
 
-/// pi's action table, in its display order.
+/// Action table, in display order.
 const DEFINITIONS: [Definition; 7] = [
 	Definition {
 		build:       |_| PromptAction::CopyLine,
@@ -95,7 +95,7 @@ const DEFINITIONS: [Definition; 7] = [
 	},
 ];
 
-/// The `#query` token ending at `cursor` (pi `getPromptActionPrefix`): the
+/// The `#query` token ending at `cursor`: the
 /// last `#` before the cursor with no whitespace after it.
 fn prefix_start(text: &str, cursor: usize) -> Option<usize> {
 	let before = text.get(..cursor)?;
@@ -118,7 +118,7 @@ impl PromptActions {
 		Self { pending: Rc::new(Cell::new(None)), commands: Box::default() }
 	}
 
-	/// Records the submitted slash-command roster. Current pi suppresses
+	/// Records the submitted slash-command roster. The provider suppresses
 	/// prompt actions inside a recognized command's arguments while still
 	/// allowing numeric GitHub refs and internal URLs there.
 	pub fn suppress_in_command_args<'a>(&mut self, commands: impl IntoIterator<Item = &'a str>) {

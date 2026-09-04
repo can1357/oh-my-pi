@@ -50,7 +50,7 @@ pub struct RetentionMessage<'a> {
 }
 
 /// Result of one retention decision.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RetentionOutcome {
 	/// Whether a new durable episode was stored.
 	pub stored_id:           Option<Str>,

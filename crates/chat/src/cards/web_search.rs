@@ -18,9 +18,7 @@ impl Card for WebSearchCard {
 
 	fn render(&self, view: &CardView<'_>, expanded: bool, ui: &UiContext) -> Component {
 		let args = view.input::<omp_tools::web_search::Params>();
-		let query = args
-			.as_ref()
-			.map_or("", |params| params.query.as_str());
+		let query = args.as_ref().map_or("", |params| params.query.as_str());
 		if view.status == CardStatus::Failed {
 			let fault = view.fault::<omp_tools::web_search::Fault>();
 			let provider = match fault.as_ref() {
@@ -31,14 +29,11 @@ impl Card for WebSearchCard {
 				_ => None,
 			};
 			let error = match fault.as_ref() {
-				Some(omp_tools::web_search::Fault::Search {
-					category,
-					code,
-					status,
-					..
-				}) => match status {
-					Some(status) => sf!("{category}: {code} (HTTP {status})"),
-					None => sf!("{category}: {code}"),
+				Some(omp_tools::web_search::Fault::Search { category, code, status, .. }) => {
+					match status {
+						Some(status) => sf!("{category}: {code} (HTTP {status})"),
+						None => sf!("{category}: {code}"),
+					}
 				},
 				None => typed_fault::<omp_tools::web_search::Fault>(view)
 					.unwrap_or_else(|| omp_core::Str::new_static("search failed")),
@@ -75,15 +70,17 @@ impl Card for WebSearchCard {
 			"Usage: in {} · out {} · total {} · search {}",
 			usage.map_or(0, |usage| usage.input_tokens),
 			usage.map_or(0, |usage| usage.output_tokens),
-			usage.and_then(|usage| usage.total_tokens).unwrap_or_default(),
+			usage
+				.and_then(|usage| usage.total_tokens)
+				.unwrap_or_default(),
 			usage
 				.and_then(|usage| usage.server_tools.as_ref())
 				.and_then(|tools| tools.web_search_requests)
 				.unwrap_or_default(),
 		);
 		let (branch, last, _) = ui.charset.guides(Border::Square);
-		// pi `renderTreeList` (`MAX_COLLAPSED_ITEMS`): a collapsed card lists
-		// the first eight sources and a `… N more sources` tail row; expanded
+		// A collapsed card lists the first eight sources and a
+		// `… N more sources` tail row; expanded
 		// lists them all.
 		let shown = if expanded {
 			sources.len()
@@ -179,9 +176,8 @@ impl Card for WebSearchCard {
 		}
 		let mut warning_rows = Vec::with_capacity(result.warnings.len() + result.failures.len());
 		for warning in &result.warnings {
-			warning_rows.push(
-				dom! { <callout kind="warn">{warning.as_str()}</callout> }.into_component(),
-			);
+			warning_rows
+				.push(dom! { <callout kind="warn">{warning.as_str()}</callout> }.into_component());
 		}
 		for failure in &result.failures {
 			let kind = search_response::failure::Kind::try_from(failure.kind)
@@ -229,12 +225,11 @@ impl Card for WebSearchCard {
 	}
 }
 
-/// pi `PREVIEW_LIMITS.COLLAPSED_ITEMS`: sources listed before the collapsed
-/// card folds the rest into a `… N more sources` row.
+/// Sources listed before the collapsed card folds the rest into a
+/// `… N more sources` row.
 const COLLAPSED_SOURCES: usize = 8;
 
-/// How a source's publication time is painted (pi `formatAge(src.ageSeconds)
-/// || src.publishedDate`).
+/// How a source's publication time is painted.
 enum SourceAge {
 	/// Age in milliseconds for a live `<time kind=relative>` badge.
 	Relative(u64),

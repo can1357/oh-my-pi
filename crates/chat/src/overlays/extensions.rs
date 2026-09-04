@@ -1,7 +1,6 @@
-//! `/extensions` (`/status`): pi's Extension Control Center
-//! (`extension-dashboard.ts`, `extension-list.ts`, `inspector-panel.ts`)
-//! as a full-screen [`Panel`]. Provider tabs on top, a searchable
-//! inventory list on the left, the inspector on the right, pi's footer at
+//! `/extensions` (`/status`) is a full-screen [`Panel`] with provider tabs
+//! on top, a searchable inventory list on the left, the inspector on the
+//! right, and a footer at
 //! the bottom. Rows come from [`Services::extensions`]; Space asks the
 //! controller to flip the persisted switch (`HostCommand::Service` with
 //! [`Mutation::SetExtensionEnabled`]) and the row changes only once the
@@ -21,24 +20,22 @@ use super::{
 };
 use crate::host::HostCommand;
 
-/// pi `extFooter()` with `expandKeyHint()` resolved to the Ctrl+O chord.
+/// Footer key hints.
 const FOOTER: &str = " ↑/↓: navigate · Space: toggle · ←/→: provider · PgUp/PgDn: inspector · \
                       ctrl+o: expand · Esc: close";
-/// pi `expandKeyHint()`.
+/// Hint for expanding folded inspector content.
 const EXPAND_HINT: &str = "ctrl+o";
 /// Border rows, tab bar and its rule, list search row and its blank, the
 /// divider, and the footer.
 const CHROME_ROWS: u16 = 8;
-/// Items shown before the inspector folds a list (pi
-/// `PREVIEW_LIMITS.COLLAPSED_ITEMS`).
+/// Items shown before the inspector folds a list.
 const COLLAPSED_ITEMS: usize = 8;
-/// Description lines shown before the inspector folds it (pi
-/// `MCP_INLINE_DESC_LINES`).
+/// Description lines shown before the inspector folds it.
 const COLLAPSED_DESC_LINES: usize = 3;
 const TABS_ID: &str = "extension-tabs";
 /// Poll cadence while a server is still connecting.
 const CONNECTING_POLL: Duration = Duration::from_secs(1);
-/// Tab order (pi `kindOrder`) restricted to the kinds this host feeds.
+/// Tab order restricted to the kinds this host feeds.
 const KIND_ORDER: [ExtensionKind; 4] =
 	[ExtensionKind::Mcp, ExtensionKind::Builtin, ExtensionKind::Python, ExtensionKind::Plugin];
 
@@ -138,7 +135,7 @@ impl ExtensionsDashboard {
 
 	/// Rebuilds the flattened list for the active tab and query. `keep`
 	/// leaves the cursor on the same extension when it survives (a data
-	/// refresh); pi resets it to the first row on tab and query changes.
+	/// refresh); tab and query changes reset it to the first row.
 	fn reflow_items(&mut self, keep: bool) {
 		let keep = keep
 			.then(|| self.selected().map(|row| row.id.clone()))
@@ -226,7 +223,7 @@ impl ExtensionsDashboard {
 		self.rebuild();
 	}
 
-	/// pi `#activateSelected`: ask the controller to flip the persisted
+	/// Asks the controller to flip the persisted
 	/// switch behind the row; the row itself changes in [`Self::settle`].
 	fn toggle_selected(&mut self) -> PanelEvent {
 		let Some(row) = self.selected() else {
@@ -317,7 +314,7 @@ impl ExtensionsDashboard {
 				</scroll>
 			</row>
 		};
-		// The tab set is the chip bar only (pi's `TabBar`); the two-column
+		// The tab set is the chip bar only; the two-column
 		// body is a sibling so its height never depends on pane selection.
 		let mut tabs = Tabs::new().with_str(Prop::Id, TABS_ID);
 		for tab in &self.tabs {
@@ -417,7 +414,7 @@ impl ExtensionsDashboard {
 		}
 	}
 
-	/// pi `InspectorPanel.render` for the selected row.
+	/// Renders the inspector for the selected row.
 	fn inspector(&self, width: u16) -> Vec<Box<dyn Component>> {
 		let Some(row) = self.selected() else {
 			return vec![
@@ -643,8 +640,7 @@ impl Panel for ExtensionsDashboard {
 	}
 }
 
-/// pi `#getStateIcon` / `#getMcpHealthIcon`: an `icons.tsv` name and its
-/// theme token.
+/// Returns an `icons.tsv` name and its theme token.
 fn state_icon(row: &ExtensionRow) -> (&'static str, &'static str) {
 	if !row.enabled {
 		return ("disabled", "muted");
@@ -658,7 +654,7 @@ fn state_icon(row: &ExtensionRow) -> (&'static str, &'static str) {
 	}
 }
 
-/// pi `formatMcpHealthLabel` / `enablementLabel`.
+/// Returns the row's status label.
 fn status_label(row: &ExtensionRow) -> &'static str {
 	if !row.enabled {
 		return "Disabled (manually disabled)";
@@ -676,7 +672,7 @@ fn status_label(row: &ExtensionRow) -> &'static str {
 	}
 }
 
-/// pi `formatMcpListHint` / `formatExtensionListHint`.
+/// Returns the row's compact list hint.
 fn list_hint(row: &ExtensionRow) -> Str {
 	if !row.enabled || row.status == ExtensionStatus::Disabled {
 		return Str::new_static("inactive");
@@ -717,7 +713,7 @@ fn plural(count: usize, noun: &str) -> Str {
 	}
 }
 
-/// pi `#padText`: the name column padded (or truncated) to `width` cells.
+/// Pads or truncates a name to `width` cells.
 fn pad_name(name: &str, width: usize) -> Str {
 	let cells = usize::from(cell_width(name));
 	if cells >= width {
@@ -749,7 +745,7 @@ const fn tab_icon(kind: ExtensionKind) -> &'static str {
 	}
 }
 
-/// pi `#getKindLabel`.
+/// Heading for an extension kind.
 const fn kind_heading(kind: ExtensionKind) -> &'static str {
 	match kind {
 		ExtensionKind::Mcp => "MCP Servers",
@@ -759,7 +755,7 @@ const fn kind_heading(kind: ExtensionKind) -> &'static str {
 	}
 }
 
-/// pi `#pushOrigin` provider name.
+/// Provider-origin label for an extension kind.
 const fn kind_origin(kind: ExtensionKind) -> &'static str {
 	match kind {
 		ExtensionKind::Mcp => "mcp.json (MCP server)",

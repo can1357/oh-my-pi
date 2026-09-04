@@ -1,32 +1,29 @@
-//! `/tree` branch explorer: pi `tree-selector.ts` ported as an observer-local
-//! [`Panel`] (ADR 0005). The journal arrives as a parent-linked entry list
+//! `/tree` branch explorer as an observer-local [`Panel`] (ADR 0005). The
+//! journal arrives as a parent-linked entry list
 //! ([`TreeEntry`]); structural entries (`turn.start`, `stream`, `patch`, …)
 //! fold into the nearest message row so the tree shows turns rather than raw
 //! entries, and Enter asks the console to `rewind` to the row (ADR 0014).
 //!
-//! The shared filterable select owns type-to-search. Left out of the port on
+//! The shared filterable select owns type-to-search. Left out on
 //! purpose: `Shift+L` labels, `Ctrl+O` / `Alt+D/T/U/L/A` filter modes, and
-//! `Shift+Enter` summarize (no console command backs them); `Alt+↑/↓` turn jumps (the host decodes
-//! `Alt+Up` as `RestoreQueue` and drops `Alt+Down`). Added: `Ctrl/Alt+←/→`
-//! fold and unfold from [`PanelAction`].
+//! `Shift+Enter` summarize (no console command backs them); `Alt+↑/↓` turn
+//! jumps (the host decodes `Alt+Up` as `RestoreQueue` and drops `Alt+Down`).
+//! Added: `Ctrl/Alt+←/→` fold and unfold from [`PanelAction`].
 
 use std::collections::HashMap;
 
 use omp_core::{Str, StrMut, sf};
 use omp_journal::{EntryId, kind};
-use omp_tui::{
-	Border, Frame, Icon, Key, MouseReport, Size, Ui, UiContext, UiEvent, dom,
-};
+use omp_tui::{Border, Frame, Icon, Key, MouseReport, Size, Ui, UiContext, UiEvent, dom};
 
 use super::{Panel, PanelAction, PanelAnchor, PanelCx, PanelEvent, services::TreeEntry};
 
-/// pi `tree-selector.ts:1113` panel title.
+/// Panel title.
 const TITLE: &str = "Session Tree";
-/// pi `tree-selector.ts:1137`, restricted to the chords this port
-/// implements, plus the fold chord.
+/// Panel chords, plus the fold chord.
 const HINT: &str = "Enter: switch. PgUp/PgDn (←/→): page. Home/End: first/last item. Ctrl+←/→: \
                     fold/unfold. Type to search. Esc: close";
-/// pi `tree-selector.ts:578` empty-tree row.
+/// Empty-tree row.
 const EMPTY: &str = "No entries found";
 /// Top and bottom borders, the rule, and the hint row.
 const CHROME_ROWS: u16 = 4;
@@ -34,10 +31,10 @@ const CHROME_ROWS: u16 = 4;
 const SELECT_HEADER_ROWS: u16 = 1;
 /// Border plus `pad-x=1` on both sides.
 const INSET: u16 = 4;
-/// pi `tree-selector.ts:613-614`: content budget guarding deep gutters.
+/// Content budget guarding deep gutters.
 const MIN_CONTENT_COLS: u16 = 24;
 const OVERHEAD_COLS: u16 = 4;
-/// pi `SEARCH_TEXT_LIMIT` (`tree-selector.ts:147`): preview cap.
+/// Preview cap.
 const TEXT_LIMIT: usize = 200;
 /// Marker on the row whose folded chain holds the head.
 const HEAD_MARK: &str = " (head)";
@@ -57,14 +54,14 @@ struct Node {
 	children: Vec<usize>,
 }
 
-/// pi `GutterInfo`: a `│` column left behind by an ancestor connector.
+/// A `│` column left behind by an ancestor connector.
 #[derive(Clone, Copy)]
 struct Gutter {
 	position: u16,
 	show:     bool,
 }
 
-/// pi `FlatNode`: one pre-order row with its connector geometry.
+/// One pre-order row with its connector geometry.
 struct Row {
 	node:               usize,
 	indent:             u16,
@@ -94,8 +91,7 @@ pub struct TreePanel {
 
 impl TreePanel {
 	/// Opens the selector over the host journal tree. Fails when the feed
-	/// is unavailable or holds no entries (pi cancels the empty tree,
-	/// `tree-selector.ts:1151`).
+	/// is unavailable or holds no entries.
 	pub fn open(cx: &PanelCx<'_>) -> Result<Self, Str> {
 		let entries = cx
 			.services
@@ -135,7 +131,7 @@ impl TreePanel {
 		Ok(panel)
 	}
 
-	/// pi `tree-selector.ts:1116-1120`: at least five rows, half the
+	/// Keeps at least five rows, half the
 	/// viewport, never past the shared select header and panel chrome.
 	fn rows_for(height: u16) -> u16 {
 		(height / 2)
@@ -232,47 +228,52 @@ impl TreePanel {
 			/ 3)
 			.max(1);
 
-		let options = self.visible.iter().enumerate().map(|(index, &row_idx)| {
-			let row = &self.rows[row_idx];
-			let node = &self.nodes[row.node];
-			let charset = self.ctx.charset;
-			let prefix = self.gutter_prefix(row, max_indent_levels);
-			let marker = if node.live {
-				sf!("{} ", Icon::MarkdownBullet.glyph(charset))
-			} else {
-				Str::default()
-			};
-			let fold = if self.folded[row.node] {
-				charset.expander(false)
-			} else {
-				""
-			};
-			let (label_fg, label, content) = entry_display(node);
-			let content_fg = if node.live && !node.text.is_empty() {
-				"fg"
-			} else {
-				"muted"
-			};
-			let head = if node.head { HEAD_MARK } else { "" };
-			let label_fg = if node.live { label_fg } else { "muted" };
-			let search_label = sf!("{label} {content}");
-			let value = sf!("{row_idx}");
-			let selected = index == self.cursor;
-			let icon = sf!("{marker}{fold}");
+		let options = self
+			.visible
+			.iter()
+			.enumerate()
+			.map(|(index, &row_idx)| {
+				let row = &self.rows[row_idx];
+				let node = &self.nodes[row.node];
+				let charset = self.ctx.charset;
+				let prefix = self.gutter_prefix(row, max_indent_levels);
+				let marker = if node.live {
+					sf!("{} ", Icon::MarkdownBullet.glyph(charset))
+				} else {
+					Str::default()
+				};
+				let fold = if self.folded[row.node] {
+					charset.expander(false)
+				} else {
+					""
+				};
+				let (label_fg, label, content) = entry_display(node);
+				let content_fg = if node.live && !node.text.is_empty() {
+					"fg"
+				} else {
+					"muted"
+				};
+				let head = if node.head { HEAD_MARK } else { "" };
+				let label_fg = if node.live { label_fg } else { "muted" };
+				let search_label = sf!("{label} {content}");
+				let value = sf!("{row_idx}");
+				let selected = index == self.cursor;
+				let icon = sf!("{marker}{fold}");
 
-			(
-				value,
-				search_label,
-				selected,
-				prefix,
-				icon,
-				label_fg,
-				label,
-				content_fg,
-				content,
-				head,
-			)
-		}).collect::<Vec<_>>();
+				(
+					value,
+					search_label,
+					selected,
+					prefix,
+					icon,
+					label_fg,
+					label,
+					content_fg,
+					content,
+					head,
+				)
+			})
+			.collect::<Vec<_>>();
 
 		let tree = dom! {
 			<box border=round title={TITLE} pad-x=1>
@@ -313,7 +314,8 @@ impl TreePanel {
 			UiEvent::Cancel => PanelEvent::Close,
 			UiEvent::Changed { id, value } if id.as_str() == "tree" => {
 				self.cursor_to(&value);
-				self.selected()
+				self
+					.selected()
 					.map_or(PanelEvent::Close, |id| PanelEvent::Finish(sf!("rewind {id}")))
 			},
 			UiEvent::Highlighted { id, value } if id.as_str() == "tree" => {
@@ -332,7 +334,7 @@ impl TreePanel {
 		}
 	}
 
-	/// pi `tree-selector.ts:641-673`: three cells per indent level with
+	/// Three cells per indent level with
 	/// ancestor gutters and this row's connector at their positions; older
 	/// levels compress behind a leading `…` past `max_indent_levels`.
 	fn gutter_prefix(&self, row: &Row, max_indent_levels: u16) -> Str {
@@ -452,8 +454,8 @@ impl Panel for TreePanel {
 
 /// Contracts the entry DAG to displayed nodes: user turns, assistant
 /// messages, and root-level structural branch points. Every other entry
-/// folds into the nearest shown ancestor (pi shows turns, not raw
-/// entries); a fork at a folded entry (rewinding before a turn forks at
+/// folds into the nearest shown ancestor; a fork at a folded entry
+/// (rewinding before a turn forks at
 /// the previous receipt) hangs its branches off the owning row, whose
 /// rewind target is then that fork entry.
 fn build_nodes(entries: &[TreeEntry]) -> Vec<Node> {
@@ -525,7 +527,7 @@ fn build_nodes(entries: &[TreeEntry]) -> Vec<Node> {
 	nodes
 }
 
-/// pi `#flattenTree` (`tree-selector.ts:234-336`): pre-order rows, the
+/// Flattens to pre-order rows, with the
 /// live branch first at every fork, connector geometry per row.
 fn flatten(nodes: &[Node]) -> (Vec<Row>, bool) {
 	struct Item {
@@ -598,8 +600,7 @@ fn flatten(nodes: &[Node]) -> (Vec<Row>, bool) {
 	(rows, multiple_roots)
 }
 
-/// pi `#getEntryDisplayText` (`tree-selector.ts:712-808`): `(label color,
-/// label, content)`.
+/// Returns `(label color, label, content)`.
 fn entry_display(node: &Node) -> (&'static str, Str, Str) {
 	let text = normalize(&node.text);
 	if node.kind == kind::MSG_USER {
@@ -616,7 +617,7 @@ fn entry_display(node: &Node) -> (&'static str, Str, Str) {
 	}
 }
 
-/// pi `normalize`: newlines and tabs to spaces, trimmed, capped.
+/// Normalizes newlines and tabs to spaces, trims, and caps the result.
 fn normalize(text: &str) -> Str {
 	let mut out = StrMut::with_capacity(text.len().min(TEXT_LIMIT));
 	for ch in text.chars().take(TEXT_LIMIT) {

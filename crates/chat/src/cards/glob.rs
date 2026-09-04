@@ -44,8 +44,7 @@ impl Card for GlobCard {
 	}
 }
 
-/// pi `PREVIEW_LIMITS.COLLAPSED_ITEMS` (`glob.ts` `COLLAPSED_LIST_LIMIT`):
-/// files listed before a collapsed card folds the rest into one
+/// Files listed before a collapsed card folds the rest into one
 /// `… N more files` row.
 const COLLAPSED_FILES: usize = 8;
 
@@ -76,8 +75,8 @@ fn render_done(view: &CardView<'_>, query: &str, expanded: bool) -> Component {
 		.flatten()
 		.filter_map(Value::as_str)
 		.collect::<Vec<_>>();
-	let missing_note = (!missing_paths.is_empty())
-		.then(|| sf!("skipped missing: {}", missing_paths.join(", ")));
+	let missing_note =
+		(!missing_paths.is_empty()).then(|| sf!("skipped missing: {}", missing_paths.join(", ")));
 	let limit_note = result
 		.get("result_limit_reached")
 		.and_then(Value::as_u64)

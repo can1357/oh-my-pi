@@ -39,8 +39,8 @@ class "minimax" {
 	on "alibaba-coding-plan" "minimax-code" "minimax-code-cn" "wafer-serverless" {
 		supports-developer-role #false
 	}
-	// pi ladders these hosts on the generic four-tier scale; priority resolves
-	// the intentional overlap with the class-wide M2 rule.
+	// These hosts use the generic four-tier scale; priority resolves the
+	// intentional overlap with the class-wide M2 rule.
 	on "amazon-bedrock" "ollama-cloud" priority=1 {
 		thinking-efforts "minimal" "low" "medium" "high"
 	}

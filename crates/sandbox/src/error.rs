@@ -235,7 +235,7 @@ pub struct CleanupFailures {
 }
 
 impl CleanupFailures {
-	pub(crate) fn new(failures: Vec<CleanupFailure>) -> Self {
+	pub(crate) const fn new(failures: Vec<CleanupFailure>) -> Self {
 		Self { failures }
 	}
 

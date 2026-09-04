@@ -72,7 +72,7 @@ checksum = "f8eb277bec05f56a0e0591f155a484cbd0f4f07ff2905051a48c72f004f7ed58"
 dependencies = [
  "cipher 0.5.2",
  "cpubits",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "zeroize",
 ]
 
@@ -322,7 +322,7 @@ checksum = "7af50940b73bf4e16c15c448a2b121c63f2d68e3e54b6a8731673cb4aa0cdff5"
 dependencies = [
  "base64ct",
  "blake2 0.11.0-rc.6",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "password-hash",
 ]
 
@@ -429,9 +429,9 @@ dependencies = [
 
 [[package]]
 name = "astral-tl"
-version = "0.7.11"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d90933ffb0f97e2fc2e0de21da9d3f20597b804012d199843a6fe7c2810d28f3"
+checksum = "04d4bb5df351abb6758a04240b0193794ddaf34a7c0b9452fab3c25dcce39e88"
 dependencies = [
  "memchr",
 ]
@@ -734,7 +734,7 @@ dependencies = [
  "addr2line",
  "cfg-if",
  "libc",
- "miniz_oxide",
+ "miniz_oxide 0.8.9",
  "object",
  "rustc-demangle",
  "windows-link 0.2.1",
@@ -925,7 +925,7 @@ dependencies = [
  "cc",
  "cfg-if",
  "constant_time_eq",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -1404,7 +1404,7 @@ version = "0.20.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe4ece8474b5f766c63426647e7b4b316b67431ade1036a8313cee24a03ae917"
 dependencies = [
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "target-lexicon",
 ]
 
@@ -1433,13 +1433,13 @@ dependencies = [
 
 [[package]]
 name = "chacha20"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cipher 0.5.2",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "rand_core 0.10.1",
  "zeroize",
 ]
@@ -1646,9 +1646,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combine"
-version = "4.6.7"
+version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "memchr",
@@ -1882,9 +1882,9 @@ dependencies = [
 
 [[package]]
 name = "cpufeatures"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
+checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
 ]
@@ -2097,7 +2097,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "curve25519-dalek-derive",
  "digest 0.11.3",
  "fiat-crypto 0.3.0",
@@ -3070,12 +3070,12 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "flate2"
-version = "1.1.9"
+version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "crc32fast",
- "miniz_oxide",
+ "miniz_oxide 0.9.1",
  "zlib-rs",
 ]
 
@@ -3779,7 +3779,7 @@ dependencies = [
  "gix-worktree-state",
  "gix-worktree-stream",
  "nonempty",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
 ]
 
@@ -3806,7 +3806,7 @@ dependencies = [
  "gix-quote",
  "gix-trace",
  "kstring",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
  "unicode-bom",
 ]
@@ -3869,7 +3869,7 @@ dependencies = [
  "gix-path",
  "gix-ref",
  "gix-sec",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
  "unicode-bom",
 ]
@@ -4006,7 +4006,7 @@ dependencies = [
  "gix-quote",
  "gix-trace",
  "gix-utils",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
 ]
 
@@ -4107,7 +4107,7 @@ dependencies = [
  "libc",
  "memmap2",
  "rustix 1.1.4",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
 ]
 
@@ -4163,7 +4163,7 @@ dependencies = [
  "gix-utils",
  "gix-validate",
  "itoa",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
 ]
 
@@ -4203,7 +4203,7 @@ dependencies = [
  "gix-object",
  "gix-path",
  "memmap2",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
  "uluru",
 ]
@@ -4222,9 +4222,9 @@ dependencies = [
 
 [[package]]
 name = "gix-path"
-version = "0.12.5"
+version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b075e730586bba7341304d6fc1b4efc1d10cf64532622521c0e07f30e661046"
+checksum = "38fc6f029ea67de83cbcbd33fd98c05a48360d2932b39d9fdacbc6eae802d475"
 dependencies = [
  "bstr",
  "gix-trace",
@@ -4309,7 +4309,7 @@ dependencies = [
  "gix-hash",
  "gix-revision",
  "gix-validate",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
 ]
 
@@ -4344,7 +4344,7 @@ dependencies = [
  "gix-hash",
  "gix-hashtable",
  "gix-object",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
 ]
 
@@ -4459,7 +4459,7 @@ dependencies = [
  "gix-hashtable",
  "gix-object",
  "gix-revwalk",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
 ]
 
@@ -4583,7 +4583,7 @@ dependencies = [
  "peniko",
  "png 0.18.1",
  "skrifa 0.42.1",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "vello_common 0.0.9",
 ]
 
@@ -4919,7 +4919,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "siphasher",
  "skrifa 0.42.1",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "yoke 0.8.3",
 ]
 
@@ -4960,7 +4960,7 @@ dependencies = [
  "hayro-jpeg2000",
  "memchr",
  "rustc-hash 2.1.3",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "zune-jpeg 0.5.15",
 ]
 
@@ -5007,9 +5007,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hermit-abi"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hex"
@@ -5099,9 +5099,9 @@ checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
 name = "html-to-markdown-rs"
-version = "3.11.4"
+version = "3.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6331a4c21bc99309e5863092660c08505c426eb1158e0472013487ecff85412b"
+checksum = "9fd381d291246b2df83535a2f2896dc32633a4cb69a14861f29f9dc0c7fbab77"
 dependencies = [
  "ahash",
  "astral-tl",
@@ -5192,9 +5192,9 @@ dependencies = [
 
 [[package]]
 name = "hyper"
-version = "1.11.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d22053281f852e11534f5198498373cbb59295120a20771d90f7ed1897490a72"
+checksum = "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -5207,7 +5207,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "tokio",
  "want",
 ]
@@ -5325,7 +5325,7 @@ dependencies = [
  "icu_normalizer_data",
  "icu_properties",
  "icu_provider",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "zerovec",
 ]
 
@@ -5384,7 +5384,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
 dependencies = [
  "idna_adapter",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "utf8_iter",
 ]
 
@@ -5485,9 +5485,9 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.14.0"
+version = "2.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
@@ -5824,7 +5824,7 @@ dependencies = [
  "rustix 1.1.4",
  "same-file",
  "serde",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "strsim",
  "tempfile",
  "thiserror 2.0.20",
@@ -5951,7 +5951,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8f198d1db720e4940b5a493201d199d9f24f568f8f746bd13706243a2f71598"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -6018,7 +6018,7 @@ checksum = "c62026ae44756f8a599ba21140f350303d4f08dcdcc71b5ad9c9bb8128c13c62"
 dependencies = [
  "arrayvec",
  "euclid",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
 ]
 
 [[package]]
@@ -6030,7 +6030,7 @@ dependencies = [
  "arrayvec",
  "euclid",
  "polycool",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
 ]
 
 [[package]]
@@ -6080,14 +6080,14 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.20"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28d0a00925a9f930d679b6789b721e3a7f9ed110f41b86d2497caa780c3a070a"
+checksum = "8d8f1ea3f21fd3405dcaf6c9b5c1630af9afc422d9073ea39c5f6d6c772e08ed"
 dependencies = [
  "bitflags 2.13.1",
  "libc",
  "plain",
- "redox_syscall 0.9.2",
+ "redox_syscall 0.9.3",
 ]
 
 [[package]]
@@ -6559,10 +6559,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "mio"
-version = "1.2.2"
+name = "miniz_oxide"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
+
+[[package]]
+name = "mio"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
 dependencies = [
  "libc",
  "log",
@@ -7568,11 +7578,11 @@ dependencies = [
  "futures",
  "insta",
  "jiff",
+ "omp-ai",
  "omp-catalog",
  "omp-con",
  "omp-core",
  "omp-dom",
- "omp-inference",
  "omp-journal",
  "omp-proto",
  "omp-scribe",
@@ -7582,7 +7592,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "tempfile",
  "thiserror 2.0.20",
@@ -7590,6 +7600,75 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+]
+
+[[package]]
+name = "omp-ai"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-stream",
+ "audiopus_sys",
+ "block2 0.6.2",
+ "brotli",
+ "bytes",
+ "candle-core",
+ "candle-nn",
+ "candle-transformers",
+ "crc32fast",
+ "dashmap",
+ "fastembed",
+ "flate2",
+ "flume",
+ "futures",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "im",
+ "libc",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "omp-audio",
+ "omp-catalog",
+ "omp-con",
+ "omp-core",
+ "omp-oauth",
+ "omp-proto",
+ "omp-secrets",
+ "opus",
+ "parking_lot",
+ "pin-project-lite",
+ "postcard",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "protox",
+ "regex",
+ "ring",
+ "rusqlite",
+ "rustls",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "smallvec 2.0.0-alpha.13",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokenizers",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "url",
+ "voice-g2p",
+ "webrtc",
+ "xutf",
+ "zeroize",
+ "zstd",
 ]
 
 [[package]]
@@ -7617,24 +7696,23 @@ dependencies = [
  "nix 0.31.3",
  "objc2 0.6.4",
  "omp-agent",
+ "omp-ai",
  "omp-ar",
+ "omp-audio",
  "omp-cache",
  "omp-catalog",
  "omp-chat",
  "omp-collab",
  "omp-con",
  "omp-core",
- "omp-docserver",
  "omp-dom",
  "omp-driver",
+ "omp-edit",
  "omp-env",
  "omp-envd",
  "omp-ext",
- "omp-grep",
  "omp-gui",
- "omp-hashline",
  "omp-http",
- "omp-inference",
  "omp-journal",
  "omp-memory",
  "omp-observability",
@@ -7647,12 +7725,11 @@ dependencies = [
  "omp-serve",
  "omp-session",
  "omp-shell",
- "omp-slopjson",
+ "omp-shell-builtins",
  "omp-tool",
  "omp-tools",
  "omp-tui",
  "omp-vcs",
- "omp-voice",
  "omp-walker",
  "parking_lot",
  "rand 0.10.2",
@@ -7664,7 +7741,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "tempfile",
  "thiserror 2.0.20",
@@ -7692,7 +7769,7 @@ dependencies = [
  "omp-core",
  "serde_json",
  "sha2 0.10.9",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "tempfile",
  "thiserror 2.0.20",
@@ -7712,7 +7789,7 @@ dependencies = [
  "omp-walker",
  "parking_lot",
  "serde",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "thiserror 2.0.20",
  "tree-sitter",
@@ -7775,6 +7852,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-audio"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "flume",
+ "libc",
+ "objc2 0.6.4",
+ "omp-core",
+ "parking_lot",
+ "regex",
+ "strum",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "omp-cache"
 version = "0.1.0"
 dependencies = [
@@ -7808,7 +7903,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "thiserror 2.0.20",
  "toml",
@@ -7828,10 +7923,11 @@ dependencies = [
  "nix 0.31.3",
  "notify",
  "omp-agent",
+ "omp-ai",
+ "omp-audio",
  "omp-con",
  "omp-core",
  "omp-dom",
- "omp-inference",
  "omp-journal",
  "omp-proto",
  "omp-session",
@@ -7839,14 +7935,13 @@ dependencies = [
  "omp-tools",
  "omp-tui",
  "omp-vcs",
- "omp-voice",
  "omp-walker",
  "parking_lot",
  "regex",
  "rusqlite",
  "serde",
  "serde_json",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "tempfile",
  "thiserror 2.0.20",
@@ -7916,7 +8011,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "smol_bitmap",
  "strum",
  "thiserror 2.0.20",
@@ -7958,42 +8053,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omp-docserver"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "cap-std",
- "flume",
- "futures",
- "libc",
- "notify",
- "omp-ast",
- "omp-core",
- "omp-env",
- "omp-hashline",
- "omp-proto",
- "omp-walker",
- "parking_lot",
- "prost",
- "rand 0.10.2",
- "rustix 1.1.4",
- "serde",
- "serde_json",
- "serde_yaml",
- "similar 3.2.0",
- "smallvec 2.0.0-alpha.12",
- "strum",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "xutf",
-]
-
-[[package]]
 name = "omp-dom"
 version = "0.1.0"
 dependencies = [
@@ -8005,7 +8064,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "thiserror 2.0.20",
 ]
@@ -8031,19 +8090,18 @@ dependencies = [
  "libc",
  "notify",
  "omp-agent",
+ "omp-ai",
  "omp-ar",
  "omp-cache",
  "omp-catalog",
  "omp-collab",
  "omp-con",
  "omp-core",
- "omp-docserver",
  "omp-dom",
  "omp-env",
  "omp-envd",
  "omp-ext",
  "omp-http",
- "omp-inference",
  "omp-journal",
  "omp-memory",
  "omp-observability",
@@ -8053,7 +8111,6 @@ dependencies = [
  "omp-secrets",
  "omp-serve",
  "omp-session",
- "omp-slopjson",
  "omp-tool",
  "omp-tools",
  "omp-tui",
@@ -8070,7 +8127,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "tempfile",
  "thiserror 2.0.20",
@@ -8097,18 +8154,17 @@ dependencies = [
  "libc",
  "nix 0.31.3",
  "omp-agent",
+ "omp-ai",
  "omp-app",
  "omp-catalog",
  "omp-con",
  "omp-core",
- "omp-docserver",
  "omp-dom",
  "omp-driver",
+ "omp-edit",
  "omp-env",
  "omp-envd",
  "omp-ext",
- "omp-hashline",
- "omp-inference",
  "omp-journal",
  "omp-observability",
  "omp-proto",
@@ -8117,7 +8173,7 @@ dependencies = [
  "omp-serve",
  "omp-session",
  "omp-shell",
- "omp-shell-engine",
+ "omp-shell-builtins",
  "omp-tool",
  "omp-tools",
  "omp-tui",
@@ -8134,6 +8190,25 @@ dependencies = [
  "tracing",
  "url",
  "xutf",
+]
+
+[[package]]
+name = "omp-edit"
+version = "0.1.0"
+dependencies = [
+ "omp-ast",
+ "omp-core",
+ "omp-walker",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "xutf",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -8167,11 +8242,15 @@ dependencies = [
  "async-trait",
  "bytecount",
  "bytes",
+ "cap-std",
  "encoding_rs",
  "flate2",
  "flume",
  "futures",
  "globset",
+ "grep-matcher",
+ "grep-pcre2",
+ "grep-regex",
  "http",
  "http-body-util",
  "hyper",
@@ -8183,20 +8262,20 @@ dependencies = [
  "nix 0.31.3",
  "notify",
  "omp-agent",
+ "omp-ai",
  "omp-ar",
+ "omp-ast",
+ "omp-audio",
  "omp-cache",
  "omp-catalog",
  "omp-con",
  "omp-core",
  "omp-desktop",
- "omp-docserver",
  "omp-dom",
+ "omp-edit",
  "omp-env",
  "omp-ext",
- "omp-grep",
- "omp-hashline",
  "omp-http",
- "omp-inference",
  "omp-journal",
  "omp-memory",
  "omp-oauth",
@@ -8206,12 +8285,11 @@ dependencies = [
  "omp-sandbox",
  "omp-secrets",
  "omp-session",
+ "omp-shell",
  "omp-shell-builtins",
- "omp-shell-engine",
  "omp-tool",
  "omp-tools",
  "omp-vcs",
- "omp-voice",
  "omp-walker",
  "omp-webview",
  "parking_lot",
@@ -8224,15 +8302,18 @@ dependencies = [
  "rusqlite",
  "russh",
  "russh-sftp",
+ "rustix 1.1.4",
  "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
- "smallvec 2.0.0-alpha.12",
+ "similar 3.2.0",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "toml",
  "tonic",
@@ -8265,22 +8346,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omp-grep"
-version = "0.1.0"
-dependencies = [
- "bytecount",
- "grep-matcher",
- "grep-pcre2",
- "grep-regex",
- "omp-core",
- "omp-walker",
- "regex",
- "smallvec 2.0.0-alpha.12",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
 name = "omp-gui"
 version = "0.1.0"
 dependencies = [
@@ -8299,7 +8364,7 @@ dependencies = [
  "raw-window-handle",
  "rustybuzz",
  "self_cell",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "swash",
  "thiserror 2.0.20",
  "tracing",
@@ -8309,93 +8374,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "omp-hashline"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "im",
- "omp-ast",
- "omp-core",
- "parking_lot",
- "similar 3.2.0",
- "smallvec 2.0.0-alpha.12",
- "strum",
- "thiserror 2.0.20",
- "xutf",
- "xxhash-rust",
-]
-
-[[package]]
 name = "omp-http"
 version = "0.1.0"
 dependencies = [
  "reqwest 0.13.4",
  "rustls",
  "tracing",
-]
-
-[[package]]
-name = "omp-inference"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "async-stream",
- "brotli",
- "bytes",
- "candle-core",
- "candle-nn",
- "candle-transformers",
- "crc32fast",
- "dashmap",
- "fastembed",
- "flate2",
- "flume",
- "futures",
- "http",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "im",
- "libc",
- "omp-catalog",
- "omp-con",
- "omp-core",
- "omp-oauth",
- "omp-proto",
- "omp-secrets",
- "omp-slopjson",
- "omp-voice-kokoro",
- "parking_lot",
- "pin-project-lite",
- "postcard",
- "prost",
- "prost-build",
- "prost-types",
- "protox",
- "regex",
- "ring",
- "rusqlite",
- "rustls",
- "security-framework",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "smallvec 2.0.0-alpha.12",
- "strum",
- "tempfile",
- "thiserror 2.0.20",
- "tokenizers",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "tower",
- "tracing",
- "url",
- "voice-g2p",
- "xutf",
- "zeroize",
- "zstd",
 ]
 
 [[package]]
@@ -8439,7 +8423,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "thiserror 2.0.20",
  "tokio",
@@ -8492,7 +8476,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -8587,7 +8571,7 @@ dependencies = [
  "omp-dom",
  "serde",
  "serde_json",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "thiserror 2.0.20",
 ]
 
@@ -8598,10 +8582,10 @@ dependencies = [
  "flume",
  "futures",
  "omp-agent",
+ "omp-ai",
  "omp-catalog",
  "omp-core",
  "omp-dom",
- "omp-inference",
  "omp-journal",
  "omp-session",
  "omp-tool",
@@ -8637,9 +8621,9 @@ dependencies = [
  "flume",
  "futures",
  "im",
+ "omp-ai",
  "omp-catalog",
  "omp-core",
- "omp-inference",
  "omp-journal",
  "omp-proto",
  "omp-session",
@@ -8677,11 +8661,36 @@ dependencies = [
 name = "omp-shell"
 version = "0.1.0"
 dependencies = [
- "omp-shell-builtins",
- "omp-shell-engine",
+ "anyhow",
+ "async-recursion",
+ "bon",
+ "chrono",
+ "clap",
+ "command-fds",
+ "fancy-regex 0.17.0",
+ "futures",
+ "im",
+ "insta",
+ "itertools 0.14.0",
+ "jiff",
+ "libc",
+ "nix 0.31.3",
+ "omp-core",
+ "omp-macros",
+ "omp-proto",
+ "peg",
+ "pretty_assertions",
+ "rand 0.10.2",
+ "serde",
+ "smallvec 2.0.0-alpha.13",
+ "strum",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
+ "windows-sys 0.61.2",
+ "xutf",
 ]
 
 [[package]]
@@ -8728,7 +8737,8 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "omp-core",
- "omp-shell-engine",
+ "omp-shell",
+ "omp-tool",
  "omp-walker",
  "parking_lot",
  "parse_datetime",
@@ -8743,7 +8753,7 @@ dependencies = [
  "sha2 0.10.9",
  "sha3 0.10.9",
  "similar 3.2.0",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "tempfile",
  "thiserror 2.0.20",
@@ -8752,54 +8762,6 @@ dependencies = [
  "tracing",
  "windows-sys 0.61.2",
  "xutf",
-]
-
-[[package]]
-name = "omp-shell-engine"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-recursion",
- "bon",
- "chrono",
- "clap",
- "command-fds",
- "fancy-regex 0.17.0",
- "futures",
- "im",
- "insta",
- "itertools 0.14.0",
- "jiff",
- "libc",
- "nix 0.31.3",
- "omp-core",
- "omp-macros",
- "omp-proto",
- "peg",
- "pretty_assertions",
- "rand 0.10.2",
- "serde",
- "smallvec 2.0.0-alpha.12",
- "strum",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "tracing",
- "windows-sys 0.61.2",
- "xutf",
-]
-
-[[package]]
-name = "omp-slopjson"
-version = "0.1.0"
-dependencies = [
- "futures",
- "omp-core",
- "parking_lot",
- "serde",
- "smallvec 2.0.0-alpha.12",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -8820,16 +8782,15 @@ dependencies = [
  "bytes",
  "flume",
  "futures",
+ "omp-ai",
  "omp-catalog",
  "omp-core",
- "omp-inference",
  "omp-proto",
- "omp-slopjson",
  "parking_lot",
  "schemars",
  "serde",
  "serde_json",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "thiserror 2.0.20",
  "tokio",
@@ -8855,21 +8816,19 @@ dependencies = [
  "html-to-markdown-rs",
  "image",
  "libc",
+ "omp-ai",
  "omp-ar",
  "omp-ast",
  "omp-con",
  "omp-core",
- "omp-docserver",
+ "omp-edit",
  "omp-env",
- "omp-hashline",
- "omp-inference",
  "omp-macros",
  "omp-memory",
  "omp-proto",
  "omp-py",
+ "omp-shell",
  "omp-shell-builtins",
- "omp-shell-engine",
- "omp-slopjson",
  "omp-tool",
  "omp-walker",
  "parking_lot",
@@ -8884,7 +8843,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar 3.2.0",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "strum",
  "tempfile",
  "thiserror 2.0.20",
@@ -8921,7 +8880,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar 3.2.0",
- "smallvec 2.0.0-alpha.12",
+ "smallvec 2.0.0-alpha.13",
  "smol_bitmap",
  "strum",
  "syntect",
@@ -8957,47 +8916,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omp-voice"
-version = "0.1.0"
-dependencies = [
- "audiopus_sys",
- "block2 0.6.2",
- "bytes",
- "flume",
- "futures",
- "http",
- "libc",
- "objc2 0.6.4",
- "objc2-foundation 0.3.2",
- "omp-core",
- "opus",
- "parking_lot",
- "regex",
- "serde",
- "serde_json",
- "strum",
- "thiserror 2.0.20",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "url",
- "webrtc",
- "windows-sys 0.61.2",
- "zeroize",
-]
-
-[[package]]
-name = "omp-voice-kokoro"
-version = "0.1.0"
-dependencies = [
- "candle-core",
- "candle-nn",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "omp-walker"
 version = "0.1.0"
 dependencies = [
@@ -9021,6 +8939,11 @@ dependencies = [
  "dispatch2",
  "flume",
  "futures",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
@@ -9033,7 +8956,7 @@ dependencies = [
  "parking_lot",
  "png 0.18.1",
  "raw-window-handle",
- "reqwest 0.13.4",
+ "rustls",
  "serde_json",
  "strum",
  "tempfile",
@@ -9228,7 +9151,7 @@ checksum = "4336a1e2b38848325241c72889086886004e589b7c74f335e60a8e8db5138a0b"
 dependencies = [
  "ndarray",
  "ort-sys",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "tracing",
  "ureq",
 ]
@@ -9379,7 +9302,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "redox_syscall 0.5.18",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "windows-link 0.2.1",
 ]
 
@@ -9530,7 +9453,7 @@ dependencies = [
  "color",
  "kurbo 0.13.1",
  "linebender_resource_handle",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
 ]
 
 [[package]]
@@ -9868,7 +9791,7 @@ dependencies = [
  "crc32fast",
  "fdeflate",
  "flate2",
- "miniz_oxide",
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -9881,7 +9804,7 @@ dependencies = [
  "crc32fast",
  "fdeflate",
  "flate2",
- "miniz_oxide",
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -9921,7 +9844,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
 dependencies = [
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "universal-hash 0.6.1",
  "zeroize",
 ]
@@ -9954,7 +9877,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0fa31d631f2b2cb2a544d0aa321ce847a94764d701ca2becc411138b93d49cd"
 dependencies = [
  "cpubits",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "universal-hash 0.6.1",
  "zeroize",
 ]
@@ -10511,7 +10434,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
- "chacha20 0.10.1",
+ "chacha20 0.10.2",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
 ]
@@ -10734,9 +10657,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.9.2"
+version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1c93da5bb2c5d4e6c0ef7abeead62c89169a0a4882bfb83ac892f2423aea2fe"
+checksum = "d678d17679829e73d371e96880897e98fee2ded7acc0a50bdf8af2affa4b2fe5"
 dependencies = [
  "bitflags 2.13.1",
 ]
@@ -11090,7 +11013,7 @@ dependencies = [
  "fallible-streaming-iterator",
  "hashlink",
  "libsqlite3-sys",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "sqlite-wasm-rs",
 ]
 
@@ -11298,9 +11221,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-native-certs"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "612460d5f7bea540c490b2b6395d8e34a953e52b491accd6c86c8164c5932a63"
+checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
 dependencies = [
  "openssl-probe",
  "rustls-pki-types",
@@ -11384,7 +11307,7 @@ dependencies = [
  "bytemuck",
  "core_maths",
  "log",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "ttf-parser",
  "unicode-bidi-mirroring",
  "unicode-ccc",
@@ -11442,9 +11365,9 @@ dependencies = [
 
 [[package]]
 name = "schannel"
-version = "0.1.28"
+version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891d81b926048e76efe18581bf793546b4c0eaf8448d72be8de2bbee5fd166e1"
+checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -11768,7 +11691,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "digest 0.11.3",
 ]
 
@@ -11801,7 +11724,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "digest 0.11.3",
 ]
 
@@ -12001,18 +11924,18 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "smallvec"
-version = "2.0.0-alpha.12"
+version = "2.0.0-alpha.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef784004ca8777809dcdad6ac37629f0a97caee4c685fcea805278d81dd8b857"
+checksum = "ce56585dbefaf71c9723e9a269fa65227bdcdbb6fd2f3ef50d264c65e067c648"
 dependencies = [
  "serde_core",
 ]
@@ -12169,7 +12092,7 @@ dependencies = [
  "aead 0.6.1",
  "aes 0.9.2",
  "aes-gcm 0.11.1",
- "chacha20 0.10.1",
+ "chacha20 0.10.2",
  "cipher 0.5.2",
  "ctutils",
  "des",
@@ -12800,9 +12723,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.4+spec-1.1.0"
+version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
+checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -13050,7 +12973,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sharded-slab",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thread_local",
  "tracing",
  "tracing-core",
@@ -13877,7 +13800,7 @@ version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43f613e4fa046e69818dd287fdc4bc78175ff20331479dab6e1b0f98d57062de"
 dependencies = [
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
 ]
 
 [[package]]
@@ -14071,9 +13994,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.25.0"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -14106,7 +14029,7 @@ dependencies = [
  "log",
  "peniko",
  "png 0.18.1",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
 ]
 
@@ -14123,7 +14046,7 @@ dependencies = [
  "log",
  "peniko",
  "png 0.18.1",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
 ]
 
@@ -14308,7 +14231,7 @@ dependencies = [
  "downcast-rs",
  "rustix 1.1.4",
  "scoped-tls",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "wayland-sys",
 ]
 
@@ -14676,7 +14599,7 @@ dependencies = [
  "portable-atomic",
  "profiling",
  "raw-window-handle",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "static_assertions",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -14710,7 +14633,7 @@ dependencies = [
  "profiling",
  "raw-window-handle",
  "rustc-hash 1.1.0",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "thiserror 2.0.20",
  "wgpu-core-deps-apple",
  "wgpu-core-deps-emscripten",
@@ -14731,18 +14654,18 @@ dependencies = [
 
 [[package]]
 name = "wgpu-core-deps-emscripten"
-version = "30.0.0"
+version = "30.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85dcf2b2e5c2afb9eda64c570a87a4e570304bf39e52eddbaaf222d655b656ad"
+checksum = "d98b86cf4abf524a902dd35f18ca6a3f08fc2ae9847c8f10b48e30491b1f0b86"
 dependencies = [
  "wgpu-hal",
 ]
 
 [[package]]
 name = "wgpu-core-deps-windows-linux-android"
-version = "30.0.0"
+version = "30.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f76bc9c1c186ff3d9054e0d224c93c8c1c79d6653907c5249a5c1ea1a2cb1e43"
+checksum = "7586165fd5f6d881cb9ce4bb71f40d6caab2c0f1837e3fc1d9788a197fb6004f"
 dependencies = [
  "wgpu-hal",
 ]
@@ -14790,7 +14713,7 @@ dependencies = [
  "raw-window-handle",
  "raw-window-metal",
  "renderdoc-sys",
- "smallvec 1.15.2",
+ "smallvec 1.16.0",
  "static_assertions",
  "thiserror 2.0.20",
  "wasm-bindgen",
@@ -15515,9 +15438,9 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xutf"
-version = "1.4.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a14f3ca7038796715a5f5fd1c22aac21423b4f86fd9ef5585ef1744a5cfc573e"
+checksum = "990cc0159ef1d38b900524ac2308778ce60de2d32af70f40a71517c6b299fe8a"
 
 [[package]]
 name = "xxhash-rust"

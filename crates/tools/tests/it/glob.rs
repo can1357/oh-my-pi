@@ -11,7 +11,8 @@ use std::{
 use futures::{StreamExt, executor::block_on};
 use omp_core::{Str, sf};
 use omp_tool::{
-	Abort, CapsBase, Ev, IncomingParams, Interrupt, ModelClass, Part, PromptCaps, Tool, ToolTerminal,
+	Abort, CapsBase, Diag, DiagKind, Ev, IncomingParams, Interrupt, ModelClass, Omitted, Part,
+	PromptCaps, Severity, Tool, ToolTerminal, Unit,
 };
 use omp_tools::{glob, grep};
 use parking_lot::Mutex;
@@ -64,6 +65,7 @@ struct Invocation {
 	result:  Result<glob::Payload, glob::Fault>,
 	useless: bool,
 	text:    String,
+	diags:   Vec<Diag>,
 }
 
 fn fake(result: glob::WalkResult) -> FakeWorkspace {
@@ -101,9 +103,18 @@ fn invoke(workspace: FakeWorkspace, raw: &str) -> Invocation {
 		.args_committed(Str::new(raw))
 		.expect("invocation consumer remains live");
 	let events = block_on(tool.call(params).collect::<Vec<_>>());
-	let [Ev::Done(ToolTerminal::Done { result, useless })] = events.as_slice() else {
-		panic!("expected one terminal glob outcome: {events:?}");
-	};
+	let mut diags = Vec::new();
+	let mut terminal = None;
+	for event in events {
+		match event {
+			Ev::Diag(diag) => diags.push(diag),
+			Ev::Done(ToolTerminal::Done { result, useless }) => {
+				terminal = Some((result, useless));
+			},
+			other => panic!("unexpected glob event: {other:?}"),
+		}
+	}
+	let (result, useless) = terminal.expect("glob emits one terminal outcome");
 	let parts = tool.prompt(
 		result.as_ref(),
 		&PromptCaps::for_tool(
@@ -124,7 +135,7 @@ fn invoke(workspace: FakeWorkspace, raw: &str) -> Invocation {
 			Part::Blob { .. } => panic!("glob must never project blobs"),
 		})
 		.collect();
-	Invocation { result: result.clone(), useless: *useless, text }
+	Invocation { result, useless, text, diags }
 }
 
 #[test]
@@ -223,8 +234,14 @@ fn limit_one_keeps_only_the_newest_match_and_records_truncation_truth() {
 	let workspace = fake(walk(vec![matched("old.rs", 1), matched("new.rs", 2)]));
 	let seen = Arc::clone(&workspace.seen);
 	let invocation = invoke(workspace, r#"{"path":"*.rs","limit":1}"#);
-	assert_eq!(invocation.text, "new.rs\n\n1 results limit reached. Use limit=2 for more.");
+	assert_eq!(invocation.text, "new.rs");
 	assert!(!invocation.useless);
+	assert_eq!(invocation.diags.len(), 1);
+	let diag = &invocation.diags[0];
+	assert_eq!(diag.native_kind(), Some(DiagKind::LimitReached));
+	assert_eq!(diag.severity, Severity::Info);
+	assert_eq!(diag.continuation.as_deref(), Some("limit=2"));
+	assert_eq!(diag.omitted, Some(Omitted { count: 1, unit: Unit::Files }));
 	let payload = invocation.result.expect("glob succeeds");
 	assert_eq!(payload.matches, vec![matched("new.rs", 2)]);
 	assert!(payload.truncated);
@@ -301,8 +318,12 @@ fn surviving_multi_target_appends_the_missing_path_note() {
 	let mut result = walk(vec![matched("src/lib.rs", 1)]);
 	result.missing_paths = vec![sf!("gone"), sf!("also-gone")];
 	let invocation = invoke(fake(result), r#"{"path":"src; gone; also-gone"}"#);
-	assert_eq!(invocation.text, "# src/\nlib.rs\n\nSkipped missing paths: gone, also-gone");
+	assert_eq!(invocation.text, "# src/\nlib.rs");
 	assert!(!invocation.useless);
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::MissingPaths));
+	assert_eq!(invocation.diags[0].severity, Severity::Warn);
+	assert_eq!(invocation.diags[0].text, "gone, also-gone");
 	assert_eq!(
 		invocation
 			.result
@@ -346,12 +367,11 @@ fn timeout_with_partial_matches_returns_ranked_incomplete_output() {
 	let mut result = walk(vec![matched("old.rs", 1), matched("new.rs", 2)]);
 	result.timed_out = true;
 	let invocation = invoke(fake(result), r#"{"path":"*.rs"}"#);
-	assert_eq!(
-		invocation.text,
-		"new.rs\nold.rs\n\nglob timed out after 5s; returning 2 partial matches — results are \
-		 incomplete, scope to a deeper directory instead of retrying blindly"
-	);
+	assert_eq!(invocation.text, "new.rs\nold.rs");
 	assert!(!invocation.useless);
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::Timeout));
+	assert_eq!(invocation.diags[0].severity, Severity::Warn);
 	let payload = invocation.result.expect("partial timeout is successful");
 	assert!(payload.timed_out);
 	assert!(payload.truncated);
@@ -364,13 +384,11 @@ fn timeout_without_matches_is_not_reported_as_proof_of_absence() {
 	let mut result = walk(Vec::new());
 	result.timed_out = true;
 	let invocation = invoke(fake(result), r#"{"path":"*.rs"}"#);
-	assert_eq!(
-		invocation.text,
-		"Glob timed out after 5s before finding any matches — the scan is incomplete, NOT proof of \
-		 absence. The walk is bounded by directory size, not pattern width; scope the search to a \
-		 deeper directory (e.g. `sub/dir/*.ext` instead of `*.ext` at a huge root)."
-	);
+	assert_eq!(invocation.text, "");
 	assert!(!invocation.useless, "an incomplete traversal is useful partial truth");
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::Timeout));
+	assert_eq!(invocation.diags[0].severity, Severity::Warn);
 	let payload = invocation.result.expect("empty timeout is successful");
 	assert!(payload.timed_out);
 	assert!(payload.truncated);

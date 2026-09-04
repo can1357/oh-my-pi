@@ -2,8 +2,8 @@
 
 use std::{sync::Arc, time::Duration};
 
+use omp_ai::{ContentPart, Message};
 use omp_core::Str;
-use omp_inference::{ContentPart, Message};
 use parking_lot::Mutex;
 
 /// Ephemeral notification for hosts that want immediate turn progress.
@@ -15,8 +15,8 @@ pub enum KernelEvent {
 	/// An inference response selected its concrete route.
 	InferenceStarted,
 	/// The transport layer is about to wait `delay` before same-route retry
-	/// `attempt` of `max_attempts` (pi `auto_retry_start`). Pre-commit and
-	/// replay-irrelevant, so it is never journaled.
+	/// `attempt` of `max_attempts`. Pre-commit and replay-irrelevant, so it is
+	/// never journaled.
 	InferenceRetry {
 		/// One-based retry number.
 		attempt:      u32,
@@ -34,8 +34,8 @@ pub enum KernelEvent {
 		/// Reasoning tokens so far.
 		reasoning_tokens: u64,
 	},
-	/// One explicit turn returned control (pi `agent_end`); the journal
-	/// carries the durable outcome, this only wakes hosts promptly.
+	/// One explicit turn returned control; the journal carries the durable
+	/// outcome, this only wakes hosts promptly.
 	TurnEnded {
 		/// Why the kernel stopped.
 		stop: crate::TurnStop,
@@ -66,9 +66,8 @@ pub enum KernelEvent {
 	/// A pending approval prompt was journaled under `<queues><prompts>`;
 	/// hosts that do not replay the DOM answer it with [`crate::Up::Approve`].
 	ApprovalRequested(crate::ApprovalTicket),
-	/// The compaction Director started producing a summary (pi
-	/// `compactionSpeculation`): hosts pulse the gauge's threshold tick until
-	/// [`KernelEvent::CompactionSettled`].
+	/// The compaction Director started producing a summary; hosts pulse the
+	/// gauge's threshold tick until [`KernelEvent::CompactionSettled`].
 	CompactionSpeculating {
 		/// Live context occupancy that triggered it (the newest receipt's
 		/// tokens, or the byte estimate before any receipt), in percent of
@@ -81,8 +80,8 @@ pub enum KernelEvent {
 		/// Whether a boundary landed.
 		applied: bool,
 	},
-	/// Settled background jobs or subagents were injected into the turn as
-	/// an async-result follow-up (pi `async-result`).
+	/// Settled background jobs or subagents were injected into the turn as an
+	/// async-result follow-up.
 	JobsDelivered {
 		/// Durable job identities delivered, oldest first.
 		ids: Vec<Str>,

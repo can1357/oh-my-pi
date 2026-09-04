@@ -14,17 +14,15 @@ use std::{
 
 use flume::Receiver;
 use omp_agent::{SlotClass, SlotId};
-use omp_core::{CowBytes, Hash32, InvocationPhase, LifecyclePhase, SparseMap, Str, sf};
+use omp_core::{CowBytes, InvocationPhase, LifecyclePhase, SparseMap, Str, sf};
 use omp_proto::{
-	inference::v1::{Value, ValueMap, value},
 	toolhost::{
 		v1,
 		v1::{
-			ContextHostEnvelope, Dispatch as HookDispatch, FallbackLifecycleEventV1, HookEventId,
-			HookHostEnvelope, HostFrame, LifecycleEventContext, PromptContribution, PromptPull,
-			RetryLifecycleEventV1, UiHostEnvelope, UiWorkerEnvelope, WorkerFrame,
-			context_host_envelope, context_worker_envelope, hook_host_envelope, host_frame,
-			lifecycle_worker_envelope, ui_host_envelope, ui_worker_envelope, worker_frame,
+			Dispatch as HookDispatch, FallbackLifecycleEventV1, HookEventId, HookHostEnvelope,
+			LifecycleEventContext, RetryLifecycleEventV1, UiHostEnvelope, UiWorkerEnvelope,
+			WorkerFrame, hook_host_envelope, lifecycle_worker_envelope, ui_host_envelope,
+			ui_worker_envelope, worker_frame,
 		},
 	},
 	ui::v1::{
@@ -141,7 +139,7 @@ pub fn admit_skill_path_contributions(
 use super::{
 	control::{
 		ControlConnectionIdentity, ControlDispatch, ControlInvocationAuthority, ControlProtocolError,
-		ControlRequestContext,
+		ControlRequestContext, ControlRuntimeError,
 	},
 	lifecycle::{
 		AvailabilityBatch, AvailabilitySink, HeadlessLifecycleSink, HeadlessSinkError,
@@ -874,11 +872,7 @@ fn bounded_event_text(value: Str, limit: usize) -> String {
 /// Default maximum UTF-8 bytes allocated to one extension prompt contribution.
 pub const DEFAULT_PROMPT_CONTRIBUTION_BUDGET: usize = 64 * 1024;
 
-pub(crate) const PROMPT_OWNER_PROP: &str = "omp/prompt-owner";
-pub(crate) const PROMPT_KEY_PROP: &str = "omp/prompt-key";
-pub(crate) const PROMPT_CONTEXT_PROP: &str = "omp/prompt-context-json";
-
-/// One manifest-verified prompt renderer reachable through a worker process.
+/// One manifest-verified prompt renderer reachable through CONTROL.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PromptSlotBinding {
 	/// Stable callable identity within the owning extension.
@@ -893,6 +887,8 @@ pub struct PromptSlotBinding {
 	pub priority:     i16,
 	/// Maximum accepted UTF-8 bytes.
 	pub budget_bytes: usize,
+	/// Stable qualified Python callable selected by the sealed declaration.
+	pub callback:     Str,
 }
 
 /// Immutable context supplied to one pure Python prompt renderer.
@@ -939,7 +935,7 @@ pub trait PromptContributionProvider: Send + Sync + 'static {
 	/// Returns every declaration available before the first prompt.
 	fn declarations(&self) -> Vec<PromptSlotBinding>;
 
-	/// Refreshes one exact declaration from its owning Python worker.
+	/// Refreshes one exact declaration from its owning Python extension host.
 	async fn pull(
 		&self,
 		binding: &PromptSlotBinding,
@@ -947,12 +943,12 @@ pub trait PromptContributionProvider: Send + Sync + 'static {
 	) -> Result<PromptContributionRecord, PromptDispatchError>;
 }
 
-/// Invalid prompt registration, pull, or contribution frame.
+/// Invalid prompt registration, pull, or CONTROL contribution.
 #[derive(Debug, Error)]
 pub enum PromptDispatchError {
-	/// A declaration named an unknown numeric catalog slot.
+	/// A declaration named an unknown catalog slot.
 	#[error("prompt declaration names unknown slot {0}")]
-	UnknownSlot(u32),
+	UnknownSlot(Str),
 	/// A declaration targeted a core-owned slot.
 	#[error("prompt declaration targets non-writable slot {0}")]
 	ReadOnlySlot(SlotId),
@@ -968,51 +964,71 @@ pub enum PromptDispatchError {
 	/// A declaration priority did not fit the supported ordering type.
 	#[error("prompt declaration priority is out of range")]
 	Priority,
-	/// A live renderer was not present in the admitted manifest table.
-	#[error("prompt renderer is not present in the admitted declaration table")]
-	Undeclared,
+	/// A frozen prompt declaration was malformed.
+	#[error("prompt declaration is malformed")]
+	MalformedDeclaration,
 	/// The prompt provider was not activated with immutable context.
 	#[error("prompt provider has no active prompt context")]
 	MissingContext,
 	/// Prompt context could not be encoded.
 	#[error("prompt context could not be encoded")]
 	Context(#[source] serde_json::Error),
-	/// A worker frame was malformed protobuf.
-	#[error("worker returned a malformed prompt contribution")]
-	Decode(#[source] prost::DecodeError),
-	/// A worker response was not a prompt contribution.
-	#[error("worker returned no prompt contribution")]
+	/// A CONTROL response was not a prompt contribution.
+	#[error("extension host returned no prompt contribution")]
 	MissingContribution,
 	/// A contribution did not match the declaration which was pulled.
-	#[error("worker returned a prompt contribution for another declaration")]
+	#[error("extension host returned a prompt contribution for another declaration")]
 	StaleContribution,
-	/// Prompt contributions may contain text parts only.
-	#[error("prompt contribution contains a non-text part")]
-	NonTextPart,
-	/// The owning worker could not complete the pull.
-	#[error("prompt contribution worker failed")]
-	Worker(#[source] crate::worker::WorkerError),
+	/// The owning extension host could not complete the pull.
+	#[error("prompt contribution CONTROL dispatch failed")]
+	Control(#[source] ControlRuntimeError),
 }
 
-/// Decodes one worker declaration using its transport-authenticated owner.
+/// Decodes one frozen CONTROL declaration using its transport-authenticated
+/// owner.
 pub fn prompt_slot_binding(
 	owner: impl Into<Str>,
-	declaration: &v1::SlotDecl,
+	declaration: &serde_json::Value,
 ) -> Result<PromptSlotBinding, PromptDispatchError> {
 	let owner = owner.into();
-	let slot = prompt_slot_id(declaration.slot)?;
+	let declaration = declaration
+		.as_object()
+		.ok_or(PromptDispatchError::MalformedDeclaration)?;
+	let slot_name = declaration
+		.get("slot")
+		.and_then(serde_json::Value::as_str)
+		.filter(|slot| !slot.is_empty())
+		.ok_or(PromptDispatchError::MalformedDeclaration)?;
+	let slot = SlotId::from_str(slot_name)
+		.map_err(|_| PromptDispatchError::UnknownSlot(Str::new(slot_name)))?;
 	if !prompt_slot_writable(slot) {
 		return Err(PromptDispatchError::ReadOnlySlot(slot));
 	}
-	let class =
-		SlotClass::from_str(&declaration.class).map_err(|_| PromptDispatchError::InvalidClass)?;
+	let class_name = declaration
+		.get("class")
+		.and_then(serde_json::Value::as_str)
+		.ok_or(PromptDispatchError::MalformedDeclaration)?;
+	let class = match class_name {
+		"epochal" => SlotClass::Dynamic,
+		name => SlotClass::from_str(name).map_err(|_| PromptDispatchError::InvalidClass)?,
+	};
 	if class > prompt_slot_default_class(slot) {
 		return Err(PromptDispatchError::ClassConflict { slot });
 	}
-	let priority = i16::try_from(declaration.priority).map_err(|_| PromptDispatchError::Priority)?;
-	let key = prompt_prop(declaration.props.as_ref(), PROMPT_KEY_PROP)
-		.map(Str::from)
-		.unwrap_or_else(|| sf!("{owner}:{slot}:{priority}"));
+	let priority = declaration
+		.get("priority")
+		.and_then(serde_json::Value::as_i64)
+		.and_then(|priority| i16::try_from(priority).ok())
+		.ok_or(PromptDispatchError::Priority)?;
+	let callback = declaration
+		.get("callback")
+		.and_then(serde_json::Value::as_object)
+		.and_then(|callback| callback.get("$omp.callable"))
+		.and_then(serde_json::Value::as_str)
+		.filter(|callback| !callback.is_empty())
+		.map(Str::new)
+		.ok_or(PromptDispatchError::MalformedDeclaration)?;
+	let key = sf!("{owner}:{slot}:{priority}:{callback}");
 	Ok(PromptSlotBinding {
 		key,
 		owner,
@@ -1020,103 +1036,61 @@ pub fn prompt_slot_binding(
 		class,
 		priority,
 		budget_bytes: DEFAULT_PROMPT_CONTRIBUTION_BUDGET,
+		callback,
 	})
 }
 
-/// Builds one correlated prompt pull for the exact declaration.
-pub fn prompt_pull_frame(
-	request_id: u64,
+/// Builds one CONTROL argument object for an exact prompt declaration.
+pub fn prompt_dispatch_arguments(
 	binding: &PromptSlotBinding,
 	context: &PromptPullContext,
-) -> Result<HostFrame, PromptDispatchError> {
-	let turn_id = context.session_id.to_string();
+) -> Result<serde_json::Map<String, serde_json::Value>, PromptDispatchError> {
 	let mut context = serde_json::to_value(context).map_err(PromptDispatchError::Context)?;
 	let object = context
 		.as_object_mut()
 		.expect("PromptPullContext serializes as an object");
-	object.insert("slot".to_owned(), serde_json::Value::String(binding.slot.to_string()));
-	object.insert("cls".to_owned(), serde_json::Value::String(binding.class.to_string()));
+	object.insert(
+		"cls".to_owned(),
+		serde_json::Value::String(match binding.class {
+			SlotClass::Dynamic => "epochal".to_owned(),
+			class => class.to_string(),
+		}),
+	);
 	object.insert("budget_bytes".to_owned(), serde_json::Value::from(binding.budget_bytes));
-	let context = serde_json::to_string(&context).map_err(PromptDispatchError::Context)?;
-	let context_digest = Hash32::sum(context.as_bytes()).into_bytes();
-	let props = ValueMap {
-		fields: BTreeMap::from([
-			(PROMPT_OWNER_PROP.to_owned(), string_value(binding.owner.as_str())),
-			(PROMPT_KEY_PROP.to_owned(), string_value(binding.key.as_str())),
-			(PROMPT_CONTEXT_PROP.to_owned(), string_value(&context)),
-		]),
-	};
-	Ok(HostFrame {
-		request_id,
-		body: Some(host_frame::Body::Context(ContextHostEnvelope {
-			body:  Some(context_host_envelope::Body::PromptPull(PromptPull {
-				slot: binding.slot as u32,
-				turn_id,
-				context_digest: context_digest.to_vec().into(),
-				props: Some(props),
-			})),
-			props: None,
-		})),
-		props: None,
-	})
+	Ok(serde_json::Map::from_iter([
+		("slot".to_owned(), serde_json::Value::String(binding.slot.to_string())),
+		("callback".to_owned(), serde_json::Value::String(binding.callback.to_string())),
+		("context".to_owned(), context),
+	]))
 }
 
-/// Decodes, identity-checks, and bounds one worker prompt contribution.
+/// Decodes, identity-checks, and bounds one CONTROL prompt contribution.
 pub fn decode_prompt_contribution(
-	frame: WorkerFrame,
+	value: serde_json::Value,
 	binding: &PromptSlotBinding,
 ) -> Result<PromptContributionRecord, PromptDispatchError> {
-	let Some(worker_frame::Body::Context(context)) = frame.body else {
-		return Err(PromptDispatchError::MissingContribution);
-	};
-	let Some(context_worker_envelope::Body::PromptContribution(PromptContribution {
-		slot,
-		parts,
-		props,
-		..
-	})) = context.body
-	else {
-		return Err(PromptDispatchError::MissingContribution);
-	};
-	if slot != binding.slot as u32
-		|| prompt_prop(props.as_ref(), PROMPT_OWNER_PROP) != Some(binding.owner.as_str())
-		|| prompt_prop(props.as_ref(), PROMPT_KEY_PROP) != Some(binding.key.as_str())
+	let contribution = value
+		.as_object()
+		.ok_or(PromptDispatchError::MissingContribution)?;
+	let slot = binding.slot.to_string();
+	if contribution.get("slot").and_then(serde_json::Value::as_str) != Some(slot.as_str())
+		|| contribution
+			.get("callback")
+			.and_then(serde_json::Value::as_str)
+			!= Some(binding.callback.as_str())
 	{
 		return Err(PromptDispatchError::StaleContribution);
 	}
-	let mut content = String::new();
-	for part in parts {
-		let Some(omp_proto::thread::v1::part::Kind::Text(text)) = part.kind else {
-			return Err(PromptDispatchError::NonTextPart);
-		};
-		content.push_str(&text);
-	}
+	let mut content = contribution
+		.get("content")
+		.and_then(serde_json::Value::as_str)
+		.ok_or(PromptDispatchError::MissingContribution)?
+		.to_owned();
 	let truncated = content.len() > binding.budget_bytes;
 	if truncated {
 		content.truncate(content.floor_char_boundary(binding.budget_bytes));
 	}
 	Ok(PromptContributionRecord { binding: binding.clone(), content: Str::from(content), truncated })
-}
-
-fn prompt_slot_id(slot: u32) -> Result<SlotId, PromptDispatchError> {
-	match slot {
-		0 => Ok(SlotId::Conventions),
-		1 => Ok(SlotId::Role),
-		2 => Ok(SlotId::Runtime),
-		3 => Ok(SlotId::Tools),
-		4 => Ok(SlotId::Policy),
-		5 => Ok(SlotId::Workflow),
-		6 => Ok(SlotId::Skills),
-		7 => Ok(SlotId::Rules),
-		8 => Ok(SlotId::Guidance),
-		9 => Ok(SlotId::Workspace),
-		10 => Ok(SlotId::Memory),
-		11 => Ok(SlotId::Standing),
-		12 => Ok(SlotId::Recall),
-		13 => Ok(SlotId::Status),
-		14 => Ok(SlotId::Delivery),
-		unknown => Err(PromptDispatchError::UnknownSlot(unknown)),
-	}
 }
 
 const fn prompt_slot_writable(slot: SlotId) -> bool {
@@ -1146,18 +1120,6 @@ const fn prompt_slot_default_class(slot: SlotId) -> SlotClass {
 		SlotId::Recall | SlotId::Status => SlotClass::Volatile,
 		SlotId::Conventions | SlotId::Role | SlotId::Tools | SlotId::Delivery => SlotClass::Frozen,
 	}
-}
-
-pub(crate) fn prompt_prop<'a>(props: Option<&'a ValueMap>, key: &str) -> Option<&'a str> {
-	let value = props?.fields.get(key)?;
-	match value.kind.as_ref()? {
-		value::Kind::String(value) => Some(value),
-		_ => None,
-	}
-}
-
-fn string_value(value: &str) -> Value {
-	Value { kind: Some(value::Kind::String(value.to_owned())) }
 }
 
 /// Invocation bytes awaiting host dispatch.
@@ -1298,7 +1260,7 @@ struct ExtensionActor {
 	queued:  VecDeque<DispatchRequest>,
 }
 
-/// Failure while projecting a verified worker frame into a headless sink.
+/// Failure while projecting a verified extension frame into a headless sink.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum HeadlessDispatchError {
 	/// Worker dispatch generation or correlation was stale.
@@ -1858,47 +1820,40 @@ mod tests {
 
 	#[test]
 	fn prompt_contribution_is_identity_checked_and_truncated_at_utf8_boundary() {
-		let declaration = v1::SlotDecl {
-			slot:     SlotId::Policy as u32,
-			class:    "stable".to_owned(),
-			priority: 20,
-			props:    Some(ValueMap {
-				fields: BTreeMap::from([(
-					PROMPT_KEY_PROP.to_owned(),
-					string_value("dev.example.policy"),
-				)]),
-			}),
-		};
+		let declaration = serde_json::json!({
+			"slot": "policy",
+			"class": "stable",
+			"priority": 20,
+			"callback": {"$omp.callable": "extension.render_policy"},
+		});
 		let mut binding = prompt_slot_binding("dev.example", &declaration).expect("binding");
 		binding.budget_bytes = 5;
-		let props = ValueMap {
-			fields: BTreeMap::from([
-				(PROMPT_OWNER_PROP.to_owned(), string_value(binding.owner.as_str())),
-				(PROMPT_KEY_PROP.to_owned(), string_value(binding.key.as_str())),
-			]),
-		};
-		let frame = WorkerFrame {
-			request_id: 9,
-			body:       Some(worker_frame::Body::Context(v1::ContextWorkerEnvelope {
-				body:  Some(context_worker_envelope::Body::PromptContribution(PromptContribution {
-					slot: binding.slot as u32,
-					parts: vec![omp_proto::thread::v1::Part {
-						kind: Some(omp_proto::thread::v1::part::Kind::Text("ééé".to_owned())),
-					}],
-					props: Some(props),
-					..Default::default()
-				})),
-				props: None,
-			})),
-			props:      None,
-		};
-		let contribution = decode_prompt_contribution(frame, &binding).expect("contribution");
+		let contribution = decode_prompt_contribution(
+			serde_json::json!({
+				"slot": "policy",
+				"callback": "extension.render_policy",
+				"content": "ééé",
+			}),
+			&binding,
+		)
+		.expect("contribution");
 		assert_eq!(contribution.content.as_str(), "éé");
 		assert!(contribution.truncated);
+		assert!(matches!(
+			decode_prompt_contribution(
+				serde_json::json!({
+					"slot": "memory",
+					"callback": "extension.render_policy",
+					"content": "stale",
+				}),
+				&binding,
+			),
+			Err(PromptDispatchError::StaleContribution)
+		));
 	}
 
 	#[test]
-	fn prompt_pull_carries_exact_context_and_declaration_identity() {
+	fn prompt_dispatch_carries_exact_context_and_declaration_identity() {
 		let binding = PromptSlotBinding {
 			key:          sf!("dev.example.memory"),
 			owner:        sf!("dev.example"),
@@ -1906,6 +1861,7 @@ mod tests {
 			class:        SlotClass::Dynamic,
 			priority:     4,
 			budget_bytes: 1024,
+			callback:     sf!("extension.render_memory"),
 		};
 		let context = PromptPullContext {
 			session_id:     sf!("session"),
@@ -1920,19 +1876,10 @@ mod tests {
 			is_subagent:    false,
 			agent_kind:     None,
 		};
-		let frame = prompt_pull_frame(17, &binding, &context).expect("pull frame");
-		let Some(host_frame::Body::Context(envelope)) = frame.body else {
-			panic!("context frame");
-		};
-		let Some(context_host_envelope::Body::PromptPull(pull)) = envelope.body else {
-			panic!("prompt pull");
-		};
-		assert_eq!(pull.slot, SlotId::Memory as u32);
-		let props = pull.props.as_ref().expect("props");
-		assert_eq!(prompt_prop(Some(props), PROMPT_OWNER_PROP), Some("dev.example"));
-		let encoded = prompt_prop(Some(props), PROMPT_CONTEXT_PROP).expect("context");
-		let value: serde_json::Value = serde_json::from_str(encoded).expect("json");
-		assert_eq!(value["budget_bytes"], 1024);
-		assert_eq!(value["cls"], "dynamic");
+		let arguments = prompt_dispatch_arguments(&binding, &context).expect("arguments");
+		assert_eq!(arguments["slot"], "memory");
+		assert_eq!(arguments["callback"], "extension.render_memory");
+		assert_eq!(arguments["context"]["budget_bytes"], 1024);
+		assert_eq!(arguments["context"]["cls"], "epochal");
 	}
 }

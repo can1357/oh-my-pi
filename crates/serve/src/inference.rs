@@ -12,12 +12,7 @@ use bytes::Bytes;
 use flume::Receiver;
 use futures::{Stream, StreamExt as _, stream};
 use im::OrdMap;
-use omp_catalog::{
-	Availability, GrammarBits, ModalityBits, ModelAvailability, ModelKey, ModelSpec, OperationKind,
-	ProviderDef, ProviderId, model::ProvenanceKind, provider::AuthSpecKind,
-};
-use omp_core::{Str, format_rfc3339};
-use omp_inference::{
+use omp_ai::{
 	Client, ProviderResponseHooks, Registry, RetryAction,
 	answer::{
 		Artifact, ArtifactBody, AudioChunk, ChatControl, ChatControlError, ChatStream,
@@ -54,6 +49,11 @@ use omp_inference::{
 	router::Router,
 	session::{ConversationError, ConversationSessionPlanner, TurnReplay},
 };
+use omp_catalog::{
+	Availability, GrammarBits, ModalityBits, ModelAvailability, ModelKey, ModelSpec, OperationKind,
+	ProviderDef, ProviderId, model::ProvenanceKind, provider::AuthSpecKind,
+};
+use omp_core::{Str, format_rfc3339};
 use omp_proto::{
 	inference::v1::{
 		self as pb, count_tokens_request, exec_status, generate_image_request, generation_status,
@@ -152,7 +152,7 @@ pub struct InferenceRpc {
 	test_live_responses:   Option<flume::Sender<WorkflowResponse>>,
 	contexts:              Arc<Mutex<BTreeMap<String, RpcContext>>>,
 	generations:           Arc<Mutex<BTreeMap<String, RpcGeneration>>>,
-	search_settings:       Arc<omp_inference::search_settings::WebSearchSettings>,
+	search_settings:       Arc<omp_ai::search_settings::WebSearchSettings>,
 	session_provider:      Option<ProviderId>,
 	prompt_cache_affinity: Option<Str>,
 	provider_authority:    Option<Arc<dyn ProviderGatewayAuthority>>,
@@ -294,7 +294,7 @@ impl InferenceRpc {
 	/// Replaces web-search routing settings for this immutable RPC facade.
 	pub fn with_search_settings(
 		mut self,
-		settings: omp_inference::search_settings::WebSearchSettings,
+		settings: omp_ai::search_settings::WebSearchSettings,
 	) -> Self {
 		self.search_settings = Arc::new(settings);
 		self
@@ -412,11 +412,7 @@ impl InferenceRpc {
 			})
 	}
 
-	fn client(
-		&self,
-		target: Target,
-		request: RequestId,
-	) -> Client<omp_inference::ProviderService, Router> {
+	fn client(&self, target: Target, request: RequestId) -> Client<omp_ai::ProviderService, Router> {
 		self.client_with_deadline(target, request, None)
 	}
 
@@ -425,7 +421,7 @@ impl InferenceRpc {
 		target: Target,
 		request: RequestId,
 		deadline: Option<Instant>,
-	) -> Client<omp_inference::ProviderService, Router> {
+	) -> Client<omp_ai::ProviderService, Router> {
 		Client::new(
 			self.registry.service(),
 			Router::new(self.registry.clone(), Duration::from_secs(30)),
@@ -446,7 +442,7 @@ impl InferenceRpc {
 		target: Target,
 		request: RequestId,
 		session: Option<SessionRequest>,
-	) -> Client<omp_inference::ProviderService, Router> {
+	) -> Client<omp_ai::ProviderService, Router> {
 		Client::new(
 			self.registry.service(),
 			Router::new(self.registry.clone(), Duration::from_secs(30)),
@@ -2279,7 +2275,7 @@ pub fn project_provider_turn_for_test(
 	thread: &thread_pb::Thread,
 	params: &pb::ChatParams,
 	tool_registry: &ToolRegistry,
-) -> Result<(thread_pb::Thread, omp_inference::call::ChatRequest), Status> {
+) -> Result<(thread_pb::Thread, omp_ai::call::ChatRequest), Status> {
 	let projected = project_thread_history(thread, tool_registry, &RPC_HISTORY_CAPS_BASE)
 		.map_err(|error| Status::invalid_argument(error.to_string()))?;
 	let request = chat_request(thread_messages(&projected)?, params, tool_registry)?;
@@ -2360,7 +2356,7 @@ fn chat_request(
 	messages: Vec<Message>,
 	params: &pb::ChatParams,
 	tool_registry: &ToolRegistry,
-) -> Result<omp_inference::call::ChatRequest, Status> {
+) -> Result<omp_ai::call::ChatRequest, Status> {
 	if let Some(tool) = params
 		.tools
 		.iter()
@@ -2435,7 +2431,7 @@ fn chat_request(
 			presence_penalty:   sampling.presence_penalty.map(|value| value as f32),
 			frequency_penalty:  sampling.frequency_penalty.map(|value| value as f32),
 		});
-	Ok(omp_inference::call::ChatRequest {
+	Ok(omp_ai::call::ChatRequest {
 		messages: messages.into(),
 		tools: tools.into(),
 		hosted_tools: Arc::from([]),
@@ -2463,7 +2459,7 @@ fn configured_search_providers(name: &str) -> Vec<ProviderId> {
 			&["perplexity-cookie", "perplexity", "perplexity-openrouter", "perplexity-anonymous"]
 		},
 		"public" => &["startpage", "google-search", "duckduckgo", "ecosia", "mojeek"],
-		_ => &[omp_inference::search_settings::catalog_provider_name(name)],
+		_ => &[omp_ai::search_settings::catalog_provider_name(name)],
 	};
 	names.iter().map(|name| ProviderId::from(*name)).collect()
 }
@@ -2495,7 +2491,7 @@ fn proto_usage(usage: Usage) -> pb::Usage {
 }
 
 fn tokenizer_provenance(
-	provenance: omp_inference::answer::TokenizerProvenance,
+	provenance: omp_ai::answer::TokenizerProvenance,
 ) -> pb::TokenizerProvenance {
 	pb::TokenizerProvenance {
 		tokenizer: provenance.tokenizer.as_str().to_owned(),
@@ -3259,7 +3255,7 @@ fn turn_events(
 }
 
 fn image_events(
-	mut events: omp_inference::answer::GenerationStream<ImageArtifact>,
+	mut events: omp_ai::answer::GenerationStream<ImageArtifact>,
 ) -> impl Stream<Item = Result<pb::ImageEvent, Status>> + Send + 'static {
 	async_stream::try_stream! {
 		let mut images = Vec::new();
@@ -3358,7 +3354,7 @@ fn speak_event(chunk: AudioChunk) -> pb::SpeakEvent {
 }
 
 fn search_response(answer: SearchResults) -> pb::SearchResponse {
-	let omp_inference::answer::SearchResults { results, answer, usage, metadata } = answer;
+	let omp_ai::answer::SearchResults { results, answer, usage, metadata } = answer;
 	let projected_at = SystemTime::now();
 	let engine = metadata
 		.provider
@@ -3437,7 +3433,7 @@ fn search_response(answer: SearchResults) -> pb::SearchResponse {
 	}
 }
 
-fn search_failure_kind(kind: SearchFailureKind) -> failure::Kind {
+const fn search_failure_kind(kind: SearchFailureKind) -> failure::Kind {
 	match kind {
 		SearchFailureKind::Authentication => failure::Kind::Authentication,
 		SearchFailureKind::Quota => failure::Kind::Quota,
@@ -3783,7 +3779,7 @@ const fn video_dimensions(resolution: i32, aspect_ratio: i32) -> Setting<Dimensi
 }
 
 async fn run_generation(
-	mut session: omp_inference::answer::GenerationSession<VideoArtifact>,
+	mut session: omp_ai::answer::GenerationSession<VideoArtifact>,
 	status: Arc<Mutex<pb::GenerationStatus>>,
 	updates: broadcast::Sender<pb::GenerationStatus>,
 	cancel: Receiver<oneshot::Sender<Result<JobCancellationReceipt, JobCancelError>>>,
@@ -3900,13 +3896,13 @@ fn system_time_ms(time: SystemTime) -> u64 {
 
 #[cfg(test)]
 mod tests {
-	use omp_catalog::snapshot;
-	use omp_core::sf;
-	use omp_inference::{
+	use omp_ai::{
 		Role, RouteId,
 		error::{ErrorPhase, RetryAction},
 		receipt::{ExecutionReceipt, ReasonId, RecoveryKind, RecoveryRecord},
 	};
+	use omp_catalog::snapshot;
+	use omp_core::sf;
 	use omp_tool::{
 		Claims, Constraint, Effects, Ev, GrammarSyntax, IncomingParams, Part, Precedence,
 		Presentation, PromptCaps, Rev, Tool, ToolSpec,
@@ -4309,7 +4305,7 @@ mod tests {
 	}
 
 	fn empty_stop_receipt(classification: &str, billed_output: u64) -> ExecutionReceipt {
-		use omp_inference::{
+		use omp_ai::{
 			body::{AttemptBodyEvidence, Replayability, RetryDecision, RetryDecisionReason},
 			receipt::{AttemptOutcome, AttemptReceipt, ProviderEvidence},
 		};

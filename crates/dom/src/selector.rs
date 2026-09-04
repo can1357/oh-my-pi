@@ -49,7 +49,7 @@ struct Compound {
 	predicates: SmallVec<Predicate, 2>,
 }
 
-pub(crate) fn select(dom: &Dom, source: &str) -> Result<Vec<Handle>, SelectorError> {
+pub fn select(dom: &Dom, source: &str) -> Result<Vec<Handle>, SelectorError> {
 	let compounds = parse(source)?;
 	Ok(dom
 		.handles()
@@ -202,6 +202,6 @@ fn parse_value(raw: &str) -> Value {
 	}
 }
 
-fn is_ident(byte: &u8) -> bool {
+const fn is_ident(byte: &u8) -> bool {
 	byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
 }

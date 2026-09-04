@@ -18,21 +18,15 @@ use std::{
 
 use flume::{Receiver, Sender};
 use jiff::Zoned;
-use omp_agent::{KernelEvent, Up};
-use omp_con::{
-	AI_COMPACT_THRESHOLD, AI_FASTMODE, AI_MODEL, AI_THINKING, CL_IME_SAFE_CURSOR, CL_SHOWTHINKING,
-	CL_STATUS_COMPACT_THINKING, Ctx, Source,
-};
+use omp_agent::{AI_COMPACT_THRESHOLD, AI_FASTMODE, AI_MODEL, AI_THINKING, KernelEvent, Up};
+use omp_con::{Ctx, Source};
 use omp_core::{Str, sf};
 use omp_dom::{Dom, Event, Handle, KnownTag, Op, PropId, PropKey, Snapshot, Tag, Value};
 use omp_journal::EntryId;
-use tokio::sync::Notify;
-
 use omp_tui::{
 	Appearance, CursorStyle, DebugOp, Dim, Frame, InputEvent, Key, KeyEvent, Layer, MouseReport,
-	OverlayAnchor,
-	OverlayOptions, Progress, Renderer, Size, SpellingFeatures, Terminal, TerminalEvent,
-	TerminalOptions, TtyOut, Ui, UiContext,
+	OverlayAnchor, OverlayOptions, Progress, Renderer, Size, SpellingFeatures, Terminal,
+	TerminalEvent, TerminalOptions, TtyOut, Ui, UiContext,
 	anim::Intro,
 	components::{ComposerStyle, Countdown},
 	negotiate_async,
@@ -44,7 +38,7 @@ use omp_tui::{
 };
 use parking_lot::Mutex;
 use thiserror::Error;
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 
 use crate::{
 	account_usage::AccountUsageCache,
@@ -79,8 +73,8 @@ use crate::{
 	project::{BlockKind, BlockView, RenderedBlock, project},
 	settings::{
 		CL_AUTOCOMPLETE_MAX_VISIBLE, CL_EMOJI_AUTOCOMPLETE, CL_GOAL_STATUS_IN_FOOTER,
-		CL_PASTE_LARGE_MENU_THRESHOLD, CL_SPELLING_AUTOCOMPLETE, CL_SPELLING_AUTOCORRECT,
-		CL_SPELLING_TYPO_DETECTION,
+		CL_IME_SAFE_CURSOR, CL_PASTE_LARGE_MENU_THRESHOLD, CL_SHOWTHINKING, CL_SPELLING_AUTOCOMPLETE,
+		CL_SPELLING_AUTOCORRECT, CL_SPELLING_TYPO_DETECTION, CL_STATUS_COMPACT_THINKING,
 		CL_STATUS_LINE_CONTEXT_LINE, CL_STATUS_LINE_LEFT_SEGMENTS, CL_STATUS_LINE_PRESET,
 		CL_STATUS_LINE_RIGHT_SEGMENTS, CL_STATUS_LINE_SEGMENT_OPTIONS, CL_STATUS_LINE_SEPARATOR,
 		CL_STATUS_LINE_SHOW_HOOK_STATUS, CL_STATUS_LINE_TIME_FORMAT,
@@ -96,11 +90,11 @@ use crate::{
 	welcome::{WelcomeFacts, tip_seeded, welcome_seed},
 };
 
-/// Rows requested per scheme for `scheme://` completion (pi
+/// Rows requested per scheme for `scheme://` completion (
 /// `MAX_URL_SUGGESTIONS`); the provider ranks and trims them.
 const URL_COMPLETION_ROWS: usize = 25;
 
-/// The objective-bearing `/goal` forms that current pi submits as a prompt
+/// The objective-bearing `/goal` forms submitted as a prompt
 /// after engaging the goal Director. Media remains positional against the
 /// markers in this returned text.
 fn goal_media_prompt(statement: &str) -> Option<Str> {
@@ -122,7 +116,7 @@ fn goal_media_prompt(statement: &str) -> Option<Str> {
 /// completion; the presenter refreshes it as the replica changes.
 type AgentRoster = Arc<Mutex<Vec<(Str, Option<Str>)>>>;
 
-/// pi `InternalUrlRouter.complete`: the application's resolver table
+/// `InternalUrlRouter.complete`: the application's resolver table
 /// answers the composer's `scheme://` completion. When the application
 /// wires no table, the host answers from what it holds itself — the
 /// session's `local://` artifacts and the live `agent://` roster; any other
@@ -197,7 +191,7 @@ fn spelling_features(con: &Ctx) -> SpellingFeatures {
 }
 
 /// The composer's dropdown, emoji, and large-paste knobs as their convars
-/// say (pi `autocompleteMaxVisible`, `emojiAutocomplete`,
+/// say ( `autocompleteMaxVisible`, `emojiAutocomplete`,
 /// `paste.largeMenuThreshold`).
 fn composer_settings(con: &Ctx) -> ComposerSettings {
 	ComposerSettings {
@@ -213,16 +207,16 @@ const PLAN_DIRECTOR: &str = "plan";
 const LOOP_DIRECTOR: &str = "loop_mode";
 /// Notice shown when a bound command wants a reasoning level the model lacks.
 const NO_THINKING: &str = "Current model does not support thinking";
-/// pi `LEFT_DOUBLE_TAP_MIN_GAP_MS`: taps closer than this are a terminal
+/// `LEFT_DOUBLE_TAP_MIN_GAP_MS`: taps closer than this are a terminal
 /// burst, never a human double-tap.
 const LEFT_DOUBLE_TAP_MIN_GAP: Duration = Duration::from_millis(40);
-/// pi `LEFT_DOUBLE_TAP_MAX_GAP_MS`: a quiet gap this long starts a fresh
+/// `LEFT_DOUBLE_TAP_MAX_GAP_MS`: a quiet gap this long starts a fresh
 /// tap sequence.
 const LEFT_DOUBLE_TAP_MAX_GAP: Duration = Duration::from_millis(500);
 /// How long a background clipboard read may take before the paste is
 /// abandoned.
 const CLIPBOARD_READ_TIMEOUT: Duration = Duration::from_secs(8);
-/// pi `process.exit(130)`: a second Ctrl+C while teardown hangs.
+/// `process.exit(130)`: a second Ctrl+C while teardown hangs.
 const HARD_ABORT_CODE: i32 = 130;
 
 /// Which side-channel spawn a slash command asked for.
@@ -272,7 +266,7 @@ pub enum HostCommand {
 	Submit(Str),
 	/// Begin or steer with a discovered skill's typed prompt.
 	SkillPrompt(omp_journal::data::SkillPrompt),
-	/// Begin a turn with user media (pi `pendingImages`): the controller
+	/// Begin a turn with user media ( `pendingImages`): the controller
 	/// content-addresses each input in the session's blob store and journals
 	/// the prompt with the references, `[Image #N]` in `text` naming
 	/// `attachments[N-1]`.
@@ -300,7 +294,7 @@ pub enum HostCommand {
 		/// Whether the overlay opened (`true`) or closed (`false`).
 		open: bool,
 	},
-	/// Engage or exit the plan Director (pi `app.plan.toggle`).
+	/// Engage or exit the plan Director ( `app.plan.toggle`).
 	PlanMode {
 		/// `true` engages plan mode; `false` exits it.
 		engage: bool,
@@ -391,7 +385,7 @@ pub enum HostCommand {
 		active: bool,
 	},
 	/// Mark queued prompts as dequeued: the host pulled their text back into
-	/// the composer (pi `app.message.dequeue`).
+	/// the composer ( `app.message.dequeue`).
 	Dequeue {
 		/// `<prompt id>` values under `<queues><prompts>`.
 		prompts: Vec<Str>,
@@ -403,7 +397,7 @@ pub enum HostCommand {
 		/// `true` starts recording; `false` stops it and transcribes.
 		active: bool,
 	},
-	/// Duplex live-voice control (pi `/live`, Ctrl+L): the app owns the
+	/// Duplex live-voice control ( `/live`, Ctrl+L): the app owns the
 	/// microphone lease and the realtime transport.
 	LiveVoice(crate::overlays::live::LiveControl),
 	/// Forward one finalized live utterance into the controller. The
@@ -415,13 +409,13 @@ pub enum HostCommand {
 		/// Final recognized user text.
 		request: Str,
 	},
-	/// Drop the model context in place, keeping the session (`/clear`, pi
+	/// Drop the model context in place, keeping the session (`/clear`,
 	/// `resetSessionContext`): journal a `compaction@1` at the head whose
 	/// summary is empty, so the projection starts over after it.
 	ContextReset,
 	/// Relocate the session to another project directory (`/move`, `/wt`):
 	/// the journal moves into that directory's session bucket and the
-	/// process working directory follows (pi `moveSession` + `setProjectDir`).
+	/// process working directory follows ( `moveSession` + `setProjectDir`).
 	Move {
 		/// Target project directory.
 		path:   PathBuf,
@@ -430,7 +424,7 @@ pub enum HostCommand {
 		create: bool,
 	},
 	/// Run one tool locally without a model turn (the `!` / `$` composer
-	/// prefixes, pi `handleBashCommand` / `handlePythonCommand`).
+	/// prefixes).
 	RunLocal {
 		/// What to run.
 		input: crate::composer::LocalInput,
@@ -438,7 +432,7 @@ pub enum HostCommand {
 		/// [`HostAction::LocalRefused`] when the controller cannot run it.
 		draft: Str,
 	},
-	/// Re-run the tool batch the last turn died on (pi `viewSession.retry()`
+	/// Re-run the tool batch the last turn died on ( `viewSession.retry()`
 	/// over `hasAbortedToolCallTail`): the controller rewinds to the
 	/// tool-calling assistant's tail (`Session::tool_tail_retry_target`) and
 	/// resumes the turn, re-dispatching the same calls without a model
@@ -471,7 +465,7 @@ pub enum HostCommand {
 	/// Start, join, leave, or inspect a collaboration room. Relay and
 	/// journal authority stay in the controller.
 	Collab(crate::overlays::services::CollabOp),
-	/// Arm pi's one-shot `@smol` prewalk for the next edit/write action.
+	/// Arm  one-shot `@smol` prewalk for the next edit/write action.
 	Prewalk,
 	/// Supervise one agent from the hub: revive a parked one, kill a live
 	/// one, or deliver text to it. The controller answers with
@@ -553,7 +547,7 @@ pub struct HostOptions {
 	pub ui:            UiContext,
 	/// Application-supplied data feeds for dashboards and account commands.
 	pub services:      Arc<dyn Services>,
-	/// Text-to-speech backend for the assistant vocalizer (pi `speech.*`);
+	/// Text-to-speech backend for the assistant vocalizer ( `speech.*`);
 	/// `None` leaves every speech mode silent.
 	pub speech:        Option<Arc<dyn SpeechSynth>>,
 	/// Whether startup resumed, forked, or imported a session. This explicit
@@ -587,7 +581,7 @@ pub enum HostError {
 	Delivery(#[from] omp_tui::DeliveryError),
 }
 
-/// pi `#detectLeftDoubleTap`: two Left taps a human-plausible interval
+/// `#detectLeftDoubleTap`: two Left taps a human-plausible interval
 /// apart, never a terminal-synthesized burst.
 #[derive(Clone, Copy, Debug, Default)]
 struct LeftTaps {
@@ -687,14 +681,14 @@ pub(crate) struct Presenter {
 	pub(crate) turn_started: Option<Duration>,
 	/// Cached local clock label and its visible-unit boundary.
 	wall_clock: WallClock,
-	/// Last `cl_clear` press, for pi's double-press exit window.
+	/// Last `cl_clear` press, for  double-press exit window.
 	pub(crate) last_clear: Option<Instant>,
-	/// Double-Left gesture state (pi `#detectLeftDoubleTap`).
+	/// Double-Left gesture state ( `#detectLeftDoubleTap`).
 	left_taps: LeftTaps,
 	pub(crate) clock: Instant,
 	/// Launch facts painted in the welcome box's right column.
 	pub(crate) welcome: WelcomeFacts,
-	/// Presentation-clock start of pi's 3000ms brand intro; `None` once a
+	/// Presentation-clock start of  3000ms brand intro; `None` once a
 	/// rebuilt welcome should rest.
 	intro: Option<Duration>,
 	/// The one console mailbox: bound commands post actions here.
@@ -721,9 +715,9 @@ pub(crate) struct Presenter {
 	agents: AgentRoster,
 	/// Registered Esc hooks (rungs 1 and 4 of the ladder).
 	pub(crate) escape_hooks: Vec<EscapeHook>,
-	/// Subagent whose session the view shows (pi `focusedAgentId`).
+	/// Subagent whose session the view shows ( `focusedAgentId`).
 	pub(crate) focused_agent: Option<Str>,
-	/// This actor is a collaboration guest (pi `collabGuest`).
+	/// This actor is a collaboration guest ( `collabGuest`).
 	pub(crate) collab_guest: bool,
 	/// Runtime-published collaboration role, real presence, and guest view of
 	/// the authoritative host status.
@@ -732,7 +726,7 @@ pub(crate) struct Presenter {
 	pub(crate) space_hold: SpaceHold,
 	/// Whether push-to-talk is recording (space hold or `cl_stt_toggle`).
 	pub(crate) stt_recording: bool,
-	/// Whether a live-voice session is on (pi `liveVoiceActive`).
+	/// Whether a live-voice session is on ( `liveVoiceActive`).
 	pub(crate) live_active: bool,
 	/// Last archived dark/light palette names applied to `ui`.
 	palette_names: [Str; 2],
@@ -747,13 +741,13 @@ pub(crate) struct Presenter {
 	approval_shown: Option<Duration>,
 	/// Last presented terminal height, for panel viewports.
 	viewport_height: u16,
-	/// Terminal title run-state machine (pi `title-generator.ts`); the
+	/// Terminal title run-state machine ( `title-generator.ts`); the
 	/// terminal actor writes its output, the native actor never reads it.
 	title: TerminalTitle,
-	/// Whether native OSC 9;4 progress is currently shown (pi
+	/// Whether native OSC 9;4 progress is currently shown (
 	/// `#terminalProgressActive`).
 	progress_shown: bool,
-	/// pi `startup.quiet`: the welcome block is never projected.
+	/// `startup.quiet`: the welcome block is never projected.
 	quiet: bool,
 	/// Launch project directory: the title label's fallback until the
 	/// kernel projects a cwd.
@@ -761,7 +755,7 @@ pub(crate) struct Presenter {
 	/// Observer-local transcript facts: tool start instants, the thinking
 	/// speed gauge, and the reset banner.
 	pub(crate) transcript: crate::transcript::Local,
-	/// Decides which desktop toasts a settled turn earns (pi
+	/// Decides which desktop toasts a settled turn earns (
 	/// `sendCompletionNotification` / `sendErrorNotification`).
 	pub(crate) notifier: crate::notify::Notifier,
 	/// Toasts decided since the last terminal delivery.
@@ -770,15 +764,15 @@ pub(crate) struct Presenter {
 	quota: crate::celebrate::QuotaWatch,
 	/// Exact-account quota snapshot for the live provider/model route.
 	account_usage: AccountUsageCache,
-	/// Same-route provider retry the transport scheduled (pi
+	/// Same-route provider retry the transport scheduled (
 	/// `#retryPending`): pre-commit, so observer-local, cleared by the next
 	/// inference start or turn end.
 	pub(crate) retrying: Option<RetryState>,
-	/// Elements of a failed attempt that a retry superseded (pi
+	/// Elements of a failed attempt that a retry superseded (
 	/// `#syntheticFailureCards`): their blocks leave the live projection so
 	/// the re-streamed attempt never shows the same call twice.
 	superseded: Vec<Handle>,
-	/// Pinned error the user dismissed by sending the next message (pi
+	/// Pinned error the user dismissed by sending the next message (
 	/// `clearPinnedError`), so the banner drops before the DOM catches up.
 	dismissed_error: Option<Handle>,
 	/// Streaming assistant speech, when the app supplied a synthesizer.
@@ -801,7 +795,7 @@ pub struct LocalFacts {
 	pub pull_request:          Option<PullRequest>,
 	/// Linked-worktree identity.
 	pub worktree:              Option<WorktreeLabel>,
-	/// Platform temp directory, for pi's scratch-project labeling.
+	/// Platform temp directory, for  scratch-project labeling.
 	pub tmp:                   Option<Str>,
 	/// Live reasoning level when the model can reason.
 	pub thinking:              Option<Str>,
@@ -819,7 +813,7 @@ pub struct LocalFacts {
 	/// Effective status-line appearance, including observer preview.
 	pub status_appearance:     StatusAppearance,
 	/// The active route's provider has a stored OAuth credential, so spend
-	/// bills to a subscription (pi `modelRegistry.isUsingOAuth`). Read from
+	/// bills to a subscription ( `modelRegistry.isUsingOAuth`). Read from
 	/// the account service at launch, on every model switch, and whenever a
 	/// panel that may have signed in or out closes — never per frame.
 	pub subscription:          bool,
@@ -895,7 +889,7 @@ impl LocalFacts {
 	}
 
 	/// Re-reads whether the primary route is served by a stored OAuth
-	/// credential (pi `authStorage.hasOAuth(provider)`). An unavailable
+	/// credential ( `authStorage.hasOAuth(provider)`). An unavailable
 	/// account service reads as metered.
 	fn sync_primary_billing(&mut self, services: &dyn Services, badge: &ModelBadge) {
 		self.subscription = services.accounts().is_ok_and(|accounts| {
@@ -996,7 +990,7 @@ fn finish_terminal_epoch(
 	run
 }
 
-/// pi `handleCtrlC` during shutdown: once the chat has quit and the tty is
+/// `handleCtrlC` during shutdown: once the chat has quit and the tty is
 /// restored, a further Ctrl+C (SIGINT) exits the process with 130 at once
 /// instead of waiting for a hanging teardown (a wedged tool, a slow
 /// `process_exit`). Defense in depth: the controller's own teardown still
@@ -1026,7 +1020,7 @@ enum SuspendError {
 	},
 }
 
-/// pi `handleCtrlZ`: stop the whole foreground process group with `SIGSTOP`.
+/// `handleCtrlZ`: stop the whole foreground process group with `SIGSTOP`.
 ///
 /// `SIGTSTP` is intentionally not used: any Tokio listener installed by a
 /// child-process waiter replaces its default stop action process-wide.
@@ -1103,7 +1097,7 @@ impl Presenter {
 			url_completer(&options.services, &agents),
 			project_root(&replica).as_deref(),
 		);
-		// pi `setHistoryStorage`: every editor starts from durable history.
+		// `setHistoryStorage`: every editor starts from durable history.
 		// Merge the live session's journal-derived prompts without writing
 		// them back, so a migrated/empty database still recalls a resumed
 		// session and transcript rebuilds never duplicate persistent rows.
@@ -1119,9 +1113,9 @@ impl Presenter {
 		}
 		composer.seed_history(prompt_history);
 		composer.set_spelling_features(spelling_features(&options.con));
-		// A resumed or already-running session starts active (pi derives
+		// A resumed or already-running session starts active ( derives
 		// `isStreaming` from the session, never from a local edge).
-		// pi `suppressWelcomeIntro: resuming`: a session opened with history
+		// `suppressWelcomeIntro: resuming`: a session opened with history
 		// (`--continue`, `--resume`, `--fork`, an import) rests at once; a
 		// quiet startup (`cl_startup_quiet`) shows no welcome at all.
 		let quiet = CL_STARTUP_QUIET.get(&options.con);
@@ -1236,7 +1230,7 @@ impl Presenter {
 				self.retrying =
 					Some(RetryState::new(*attempt, *max_attempts, *delay, reason.clone(), now));
 				self.notifier.set_retry_pending(true);
-				// pi `#handleAutoRetryStart`: the failed attempt's synthetic
+				// `#handleAutoRetryStart`: the failed attempt's synthetic
 				// cards leave the transcript before the retry streams.
 				for handle in superseded_notice_keys(&self.replica) {
 					if !self.superseded.contains(&handle) {
@@ -1278,7 +1272,7 @@ impl Presenter {
 					speech.lock().push_thinking(mode, delta);
 				}
 			},
-			// pi `compactionSpeculation`: the gauge tick pulses while the
+			// `compactionSpeculation`: the gauge tick pulses while the
 			// summary is produced and rests once the boundary lands.
 			KernelEvent::CompactionSpeculating { .. } => {
 				self.local.speculation = Speculation::Running;
@@ -1315,7 +1309,7 @@ impl Presenter {
 		}
 	}
 
-	/// Stops speech at once: a new user message or an interrupt (pi
+	/// Stops speech at once: a new user message or an interrupt (
 	/// `vocalizer.clear`).
 	fn silence_speech(&self) {
 		if let Some(speech) = &self.speech {
@@ -1325,7 +1319,7 @@ impl Presenter {
 
 	/// Whether a DOM patch closed an assistant message (its `stop-reason`
 	/// landed) with a reason other than cancellation — the vocalizer flushes
-	/// the buffered partial then (pi `message_end`).
+	/// the buffered partial then ( `message_end`).
 	fn assistant_completed(event: &Event) -> bool {
 		let Event::Patch(patch) = event else {
 			return false;
@@ -1340,7 +1334,7 @@ impl Presenter {
 		})
 	}
 
-	/// pi `notifyAsk`: the first `ask` call blocked on the user earns one
+	/// `notifyAsk`: the first `ask` call blocked on the user earns one
 	/// toast with its first question.
 	fn notify_ask(&mut self) {
 		let Some(ask) = waiting_ask(&self.replica) else {
@@ -1359,7 +1353,7 @@ impl Presenter {
 		}
 	}
 
-	/// Projects the `ask` dialog from the running `<ask>` element (pi
+	/// Projects the `ask` dialog from the running `<ask>` element (
 	/// `AskDialogComponent` over the tool's `askDialog` request): opened once
 	/// per element, closed when the element settles or the turn moves on.
 	/// An answered dialog stays closed while its call finishes.
@@ -1403,7 +1397,7 @@ impl Presenter {
 		});
 	}
 
-	/// Chord label of the `cl_retry` binding for the idle retry hint (pi
+	/// Chord label of the `cl_retry` binding for the idle retry hint (
 	/// `keybindings.getKeys("app.retry")[0] ?? "f5"`).
 	fn retry_key_label(&self) -> Str {
 		self
@@ -1417,7 +1411,7 @@ impl Presenter {
 	}
 
 	/// The pinned error banner above the editor: the error notice that ended
-	/// the last turn, until the next message is sent (pi `setErrorPinned` /
+	/// the last turn, until the next message is sent ( `setErrorPinned` /
 	/// `clearPinnedError`).
 	fn banner_frame(&self, width: u16) -> Option<Frame> {
 		let (handle, text) = pinned_error(&self.replica)?;
@@ -1431,7 +1425,7 @@ impl Presenter {
 		)
 	}
 
-	/// pi's status container row above the editor: the retry countdown
+	///  status container row above the editor: the retry countdown
 	/// loader while a retry is scheduled, else the transient notice, else
 	/// the idle `<key> to Retry` hint after a turn died on a tool call.
 	fn status_frame(&self, width: u16) -> Option<Frame> {
@@ -1467,7 +1461,7 @@ impl Presenter {
 	}
 
 	/// The editor band: the pinned error banner stacked over the composer
-	/// (pi `errorBannerContainer` directly above `editorContainer`).
+	/// ( `errorBannerContainer` directly above `editorContainer`).
 	fn chrome_frame(&self, width: u16) -> Frame {
 		let composer = self.composer.frame();
 		let Some(banner) = self.banner_frame(width) else {
@@ -1496,7 +1490,7 @@ impl Presenter {
 		CL_SHOWTHINKING.get(&self.con)
 	}
 
-	/// Retires the intro clock once pi's 3000ms brand intro has played; the
+	/// Retires the intro clock once  3000ms brand intro has played; the
 	/// caller reconciles so the welcome block flips to finalized (and may
 	/// retire under row pressure) without waiting for a DOM event.
 	fn settle_intro(&mut self, now: Duration) -> bool {
@@ -1509,7 +1503,7 @@ impl Presenter {
 		}
 	}
 
-	/// The welcome block. While pi's 3000ms brand intro runs the block stays
+	/// The welcome block. While  3000ms brand intro runs the block stays
 	/// mutable and unfinalized so it cannot retire into scrollback
 	/// (ADR 0034); the block mounts with the intro time already elapsed, since
 	/// a mounted block's clock starts at its epoch. Once the intro settles
@@ -1557,7 +1551,7 @@ impl Presenter {
 	}
 
 	fn blocks(&self) -> Vec<RenderedBlock> {
-		// pi `startup.quiet` skips the welcome screen.
+		// `startup.quiet` skips the welcome screen.
 		let mut blocks = Vec::new();
 		if !self.quiet {
 			blocks.push(self.welcome());
@@ -1580,7 +1574,7 @@ impl Presenter {
 			let next = Dom::from_snapshot(snapshot);
 			self.transcript.on_reset(&self.replica, &next);
 			// A replaced document drops every observer-local transcript fact
-			// keyed to the old one (pi `resetTranscript`).
+			// keyed to the old one ( `resetTranscript`).
 			self.superseded.clear();
 			self.dismissed_error = None;
 			self.ask_notified = None;
@@ -1627,8 +1621,8 @@ impl Presenter {
 			self.active_time.reset(self.clock.elapsed(), active);
 		}
 		self.set_turn_active(active);
-		// pi `sessionName || "Oh My Pi"` / `setSessionTerminalTitle`: a
-		// rename, `/new`, or `/resume` retitles later toasts and the tab.
+		// A session rename, `/new`, or `/resume` retitles later toasts and
+		// the tab.
 		if Self::sets_session_title(event, self.replica.meta()) {
 			self.sync_session_name();
 		}
@@ -1750,7 +1744,7 @@ impl Presenter {
 			.collect()
 	}
 
-	/// pi `model_changed`: when `ai_model` names a catalog row other than the
+	/// `model_changed`: when `ai_model` names a catalog row other than the
 	/// badge's, the badge is rebuilt from that row so the welcome box, the
 	/// context gauge, the thinking gate, and quota polling follow the switch
 	/// (picker, role cycle, console write, or a Director bind alike). A
@@ -1859,7 +1853,7 @@ impl Presenter {
 			&self.con,
 			&self.extension_status,
 		);
-		// The composer wears the rail while the plan Director is engaged. pi's
+		// The composer wears the rail while the plan Director is engaged.
 		// status row collapses the editor top gap (`EditorTopGap` /
 		// `statusRowOccupied`); this host paints the notice *in* the gap row
 		// instead (see `present`), so the gap stays and the band sits flush
@@ -1877,12 +1871,12 @@ impl Presenter {
 		let ime = self
 			.composer
 			.set_ime_safe_cursor(CL_IME_SAFE_CURSOR.get(&self.con));
-		// pi `applySpellingSettings`: the `cl_spelling_*` convars reach the
+		// `applySpellingSettings`: the `cl_spelling_*` convars reach the
 		// live editor on every settings write (`/settings`, cfg, console).
 		let spelling = self
 			.composer
 			.set_spelling_features(spelling_features(&self.con));
-		// pi `setAutocompleteMaxVisible` / `emojiAutocomplete` /
+		// `setAutocompleteMaxVisible` / `emojiAutocomplete` /
 		// `paste.largeMenuThreshold`: same live path as the spelling gates.
 		let knobs = self.composer.set_settings(composer_settings(&self.con));
 		self.composer.set_status(facts) || reshaped || ime || spelling || knobs
@@ -2118,7 +2112,7 @@ impl Presenter {
 	}
 
 	/// Lands pasted text in the composer, or holds it behind the large-paste
-	/// menu when it reaches `cl_paste_large_menu_threshold` lines (pi
+	/// menu when it reaches `cl_paste_large_menu_threshold` lines (
 	/// `handleLargePaste`).
 	fn paste_into_composer(&mut self, text: &str) -> Routed {
 		self.paste_into_composer_with_options(text, PasteOptions::default())
@@ -2140,7 +2134,7 @@ impl Presenter {
 		Routed::Repaint
 	}
 
-	/// Applies a large-paste menu choice (pi `presentLargePasteMenu`): a
+	/// Applies a large-paste menu choice ( `presentLargePasteMenu`): a
 	/// failed file save falls back to the chip so the paste is never lost.
 	fn land_paste(&mut self, text: &Str, choice: PasteChoice) -> Routed {
 		let routed = match choice {
@@ -2328,7 +2322,7 @@ impl Presenter {
 						);
 					}
 					if self.collab_guest {
-						// Pi consumes host-only local input from a guest rather
+						// Host-only local input from a guest is consumed rather
 						// than leaving an executable command in its editor.
 						let _ = self.commit_submission();
 						return Ok(self.notice("Local execution is host-only during a collab session"));
@@ -2408,7 +2402,7 @@ impl Presenter {
 		}
 	}
 
-	/// pi `onEscape`: autocomplete first, then the eleven global rungs.
+	/// `onEscape`: autocomplete first, then the eleven global rungs.
 	/// Every applicable rung consumes the key.
 	fn escape(&mut self) -> Result<Routed, HostError> {
 		// 0. The editor popup owns the first Esc; it must never leak through
@@ -2490,7 +2484,7 @@ impl Presenter {
 			return Ok(Routed::Repaint);
 		}
 		// 8. A running local command uses the typed interrupt path. An idle
-		// prefix draft is cleared only when it matches pi's real prefix
+		// prefix draft is cleared only when it matches  real prefix
 		// grammar (`$HOME` and `${x}` are prose).
 		if active_local_run(&self.replica).is_some() {
 			let _ = self.commands.send(HostCommand::Interrupt);
@@ -2540,7 +2534,7 @@ impl Presenter {
 		Routed::Ignored
 	}
 
-	/// pi `restoreQueuedMessagesToEditor`: pulls queued prompts (and, while
+	/// `restoreQueuedMessagesToEditor`: pulls queued prompts (and, while
 	/// a turn runs, undelivered steering) back into the composer ahead of
 	/// the current draft. `abort` is the Esc path; a plain dequeue keeps the
 	/// stream running.
@@ -2798,7 +2792,7 @@ impl Presenter {
 	}
 
 	/// A `!` / `$` line that cannot run right now goes back into the
-	/// composer verbatim (pi `editor.setText(text)`) with the reason shown.
+	/// composer verbatim ( `editor.setText(text)`) with the reason shown.
 	fn refuse_local(&mut self, draft: &str, reason: impl Into<Str>) -> Routed {
 		self.composer.set_text(draft);
 		self.sync_pending_input();
@@ -2812,12 +2806,12 @@ impl Presenter {
 		if text.trim().is_empty() {
 			return Routed::Ignored;
 		}
-		// pi `handleSubmit`: `!cmd` / `$ code` run locally through the tool
+		// `handleSubmit`: `!cmd` / `$ code` run locally through the tool
 		// and never reach the model. Local execution belongs to the main
-		// session: while a subagent is focused the draft stays (pi
+		// session: while a subagent is focused the draft stays (
 		// `#submitToFocusedSession`), a collaboration guest is refused
 		// outright, and the same runner identity already in flight hands the
-		// draft back (pi keeps independent `isBashRunning` / `isEvalRunning`
+		// draft back ( keeps independent `isBashRunning` / `isEvalRunning`
 		// gates).
 		if let Some(local) = crate::composer::parse_local_input(&text) {
 			if self.focused_agent.is_some() {
@@ -2848,7 +2842,7 @@ impl Presenter {
 			self.set_turn_active(true);
 			self.last_prompt = Some(text.clone());
 		}
-		// pi `clearPinnedError` + `vocalizer.clear()` on every send.
+		// `clearPinnedError` + `vocalizer.clear()` on every send.
 		self.dismissed_error = pinned_error(&self.replica).map(|(handle, _)| handle);
 		self.silence_speech();
 		let _ = self.commands.send(HostCommand::Submit(text));
@@ -3013,7 +3007,7 @@ impl Presenter {
 				Routed::Repaint
 			},
 			HostAction::ModelSet(selector) => {
-				// pi `/model <id>`: exact key (`provider/model`), bare model id,
+				// `/model <id>`: exact key (`provider/model`), bare model id,
 				// or display name; anything else is "Unknown model".
 				let wanted = selector.as_str().trim();
 				let found = self.models.iter().find(|row| {
@@ -3029,7 +3023,7 @@ impl Presenter {
 				}
 			},
 			HostAction::FollowUp => {
-				// pi `handleFollowUp`: same classification as Enter (`/`
+				// `handleFollowUp`: same classification as Enter (`/`
 				// commands still run, `!`/`$` still run locally), but a plain
 				// prompt during a turn queues behind the stream instead of
 				// steering it. Previewing first preserves the exact draft and
@@ -3042,7 +3036,7 @@ impl Presenter {
 						self.queue_with_attachments(text, Vec::new())
 					},
 					// Media chips queue with their text instead of steering
-					// the stream (pi `prompt(text, { streamingBehavior:
+					// the stream ( `prompt(text, { streamingBehavior:
 					// "followUp", images })`).
 					ComposerAction::SubmitWithMedia { text, media }
 						if self.turn_active && crate::composer::parse_local_input(&text).is_none() =>
@@ -3718,7 +3712,7 @@ impl Presenter {
 		}
 	}
 
-	/// pi `cycleThinkingLevel`: off → each catalog effort → off.
+	/// `cycleThinkingLevel`: off → each catalog effort → off.
 	fn cycle_thinking(&mut self) -> Routed {
 		let live = self.live_model();
 		let efforts = self
@@ -3745,7 +3739,7 @@ impl Presenter {
 		}
 	}
 
-	/// pi `cycleRoleModels`: step `ai_model` through the role roster and
+	/// `cycleRoleModels`: step `ai_model` through the role roster and
 	/// show the role track with the active role bracketed.
 	fn cycle_model(&mut self, backward: bool) -> Routed {
 		let distinct = self
@@ -3937,7 +3931,7 @@ impl Presenter {
 	}
 
 	/// Polls the Codex quota watch and opens the reset fireworks when
-	/// consecutive reports show an unscheduled weekly reset (pi
+	/// consecutive reports show an unscheduled weekly reset (
 	/// `#applyUsageRefreshReports` → `showCodexResetFireworks`).
 	fn tick_quota(&mut self, now: Duration) -> Result<bool, HostError> {
 		if !crate::celebrate::CL_CODEX_FIREWORKS.get(&self.con) {
@@ -4059,7 +4053,7 @@ impl Host {
 					}
 				},
 				Pause::ExternalEditor => {
-					// pi `handleExternalEditor`: chips expand to their pasted text
+					// `handleExternalEditor`: chips expand to their pasted text
 					// before the draft reaches `$EDITOR`; the result lands verbatim.
 					let draft = self.presenter.composer.text();
 					let editor = self
@@ -4246,7 +4240,7 @@ impl Host {
 	) -> Result<Option<Pause>, HostError> {
 		if terminal.handle_input_event(&event, renderer)? {
 			// A completed OSC 5522 offer carries an image or text paste out
-			// of band (pi enhanced paste).
+			// of band ( enhanced paste).
 			if let Some(pasted) = terminal.take_paste() {
 				let clipboard = match pasted {
 					omp_tui::Pasted::Text(text) => Clipboard::Text(text.to_string()),
@@ -4589,7 +4583,7 @@ impl Host {
 
 	/// A session reset (`/new`, `/drop`, rewind, resume): the live document is
 	/// replaced in place while rows already in native scrollback stay put
-	/// (ADR 0034; pi `resetTranscript` minus its `clearScrollback`).
+	/// (ADR 0034).
 	fn reset_projection(&mut self, size: Size) {
 		let now = self.presenter.clock.elapsed();
 		let blocks = self.presenter.blocks();
@@ -4617,7 +4611,7 @@ impl Host {
 			.expect("projection initialized before presentation");
 		projection.retire_under_pressure(chrome_rows, size.height);
 		let document = projection.document(&chrome, size);
-		// pi's status row sits directly above the editor and collapses the
+		//  status row sits directly above the editor and collapses the
 		// editor top gap (`EditorTopGap`): here the retry loader / notice /
 		// retry hint paints over the composer's gap row itself, wherever the
 		// composer lands — under the live content while it fits, else at the
@@ -5205,7 +5199,7 @@ impl NativeHost {
 		let tree = omp_tui::dom! { <col gap=1>{components}</col> };
 		let transcript = Ui::from_root(tree, self.size.width, self.presenter.ui.clone());
 		let rows = transcript.frame().size().height;
-		// pi's status container sits between the transcript and the editor
+		//  status container sits between the transcript and the editor
 		// band in every actor: the retry countdown loader, the transient
 		// notice, or the idle `<key> to Retry` hint after an aborted tool tail.
 		let status = self.presenter.status_frame(self.size.width);
@@ -5582,7 +5576,7 @@ fn tool_settled(node: &omp_dom::Node) -> bool {
 		.is_some_and(|status| matches!(status, "ok" | "error" | "cancelled" | "aborted"))
 }
 
-/// Identity of the newest active host-run `!`/`$` command. Pi owns these as
+/// Identity of the newest active host-run `!`/`$` command. These are
 /// two independent runners (`session.isBashRunning` / `isEvalRunning`), so a
 /// busy shell rejects only another shell line and a busy evaluator rejects
 /// only another evaluator line.
@@ -5625,7 +5619,7 @@ fn approval_frame(
 	let title = approval.title.clone();
 	let reason = approval.reason.clone();
 	let scope = Str::new(approval.scope.as_str());
-	// pi `CountdownTimer`: the modal shows `(Ns remaining)` ticking once a
+	// `CountdownTimer`: the modal shows `(Ns remaining)` ticking once a
 	// second until the kernel answers with the prompt's default.
 	let remaining =
 		countdown.map_or_else(Str::default, |seconds| Str::new(format!("  ({seconds}s remaining)")));
@@ -5721,8 +5715,8 @@ pub fn render_surface(
 }
 
 /// Compositing options of the focused overlay layer and whether it takes
-/// the keyboard: pickers replace the composer band (pi swaps the editor
-/// slot); dialogs center at 80% width; dashboards cover the viewport; side
+/// the keyboard: pickers replace the composer band and swap the editor
+/// slot; dialogs center at 80% width; dashboards cover the viewport; side
 /// panels sit above the still-live composer of `composer_rows`. One
 /// resolver feeds both presentation and pointer translation so a click
 /// lands on the row it was painted on.

@@ -1015,7 +1015,7 @@ fn selector_arguments(node: &KdlNode, file: &str) -> Result<Vec<Selector>, Casca
 		if name == Some("priority") {
 			continue;
 		}
-		let value = entry.value().as_string().ok_or_else(|| malformed())?;
+		let value = entry.value().as_string().ok_or_else(&malformed)?;
 		match name {
 			None => selectors.push(Selector::new(value)),
 			Some("token") => {

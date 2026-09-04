@@ -1,5 +1,4 @@
-//! Prompt templates: Markdown files that become `/name` slash commands (pi
-//! `config/prompt-templates.ts` + `utils/command-args.ts`).
+//! Prompt templates: Markdown files that become `/name` slash commands.
 //!
 //! Sources, in order: the user directory `<config root>/agent/prompts`, the
 //! project directory `<project>/.omp/prompts` (both scanned recursively; a
@@ -9,7 +8,7 @@
 //! `--no-prompt-templates` drops the discovered directories; explicit paths
 //! always load.
 //!
-//! Expansion (pi `expandPromptTemplate`): `$1`, `$2`, … are positional words,
+//! Expansion: `$1`, `$2`, … are positional words,
 //! `$ARGUMENTS` / `$@` every word, `$@[n]` words from `n`, `$@[n:len]` a
 //! window; the substituted body then renders through `omp_scribe` with
 //! `args`, `ARGUMENTS`, and `arguments` bound, and when the template names no
@@ -26,7 +25,7 @@ use serde::Deserialize;
 
 use super::rules::{Level, Warning, split_frontmatter};
 
-/// One loaded template (pi `PromptTemplate`).
+/// One loaded template.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PromptTemplate {
 	/// Command name: the file stem.
@@ -100,7 +99,7 @@ impl PromptTemplates {
 	}
 
 	/// Expands a submitted line when it is `/name [args]` for a known
-	/// template (pi `expandPromptTemplate`); `None` leaves the line as typed.
+	/// template; `None` leaves the line as typed.
 	#[must_use]
 	pub fn expand_line(&self, text: &str) -> Option<Str> {
 		let command = text.strip_prefix('/')?;
@@ -141,7 +140,7 @@ impl PromptTemplates {
 			})
 			.collect::<Vec<_>>();
 		paths.sort();
-		// pi orders shallower entries first so a top-level template claims
+		// Shallower entries are ordered first so a top-level template claims
 		// its name before a nested namesake.
 		for path in paths
 			.iter()
@@ -262,7 +261,7 @@ fn is_markdown(path: &Path) -> bool {
 		.is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
 }
 
-/// Expands one template with `args` (pi `expandPromptTemplate` body).
+/// Expands one template with `args`.
 #[must_use]
 pub fn expand(template: &PromptTemplate, args: &[Str]) -> Str {
 	let joined = args.join(" ");
@@ -272,9 +271,9 @@ pub fn expand(template: &PromptTemplate, args: &[Str]) -> Str {
 	Str::new(append_inline_args_fallback(rendered, &joined, uses_placeholders))
 }
 
-/// Renders the substituted body through `omp_scribe` with pi's bound names;
-/// a template that is not valid scribe syntax is used verbatim (pi renders
-/// leniently too).
+/// Renders the substituted body through `omp_scribe` with `args`,
+/// `ARGUMENTS`, and `arguments` bound. A template that is not valid scribe
+/// syntax is used verbatim.
 fn render(source: &str, args: &[Str], joined: &str) -> String {
 	let engine = omp_scribe::Engine::new();
 	let Ok(template) = engine.compile_owned(Str::new_static("prompt-template"), source) else {
@@ -289,7 +288,7 @@ fn render(source: &str, args: &[Str], joined: &str) -> String {
 		.map_or_else(|_| source.to_owned(), |rendered| rendered.to_string())
 }
 
-/// pi `templateUsesInlineArgPlaceholders`: `$ARGUMENTS`, `$@`, `$@[n]`,
+/// Recognizes `$ARGUMENTS`, `$@`, `$@[n]`,
 /// `$@[n:len]`, `$1`…, or a `{{ … }}` expression over `args`/`arguments`/
 /// `ARGUMENTS`.
 #[must_use]
@@ -325,8 +324,7 @@ pub fn uses_inline_arg_placeholders(source: &str) -> bool {
 	false
 }
 
-/// pi `appendInlineArgsFallback`: words the template never referenced are
-/// appended after a blank line.
+/// Appends words the template never referenced after a blank line.
 #[must_use]
 pub fn append_inline_args_fallback(
 	rendered: String,
@@ -345,7 +343,7 @@ pub fn append_inline_args_fallback(
 	out
 }
 
-/// pi `parseCommandArgs`: whitespace-split words with `"…"` / `'…'` quoting.
+/// Splits whitespace-separated words with `"…"` / `'…'` quoting.
 #[must_use]
 pub fn parse_command_args(text: &str) -> Vec<Str> {
 	let mut args = Vec::new();
@@ -370,8 +368,8 @@ pub fn parse_command_args(text: &str) -> Vec<Str> {
 	args
 }
 
-/// pi `substituteArgs`: replaces placeholders on the template text only —
-/// argument values are never re-scanned.
+/// Replaces placeholders on the template text only; argument values are never
+/// re-scanned.
 #[must_use]
 pub fn substitute_args(content: &str, args: &[Str]) -> String {
 	let mut out = String::with_capacity(content.len());

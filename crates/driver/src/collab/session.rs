@@ -19,9 +19,9 @@ use omp_dom::{Dom, Event, Snapshot, SnapshotDecodeError};
 use omp_journal::EntryId;
 use omp_proto::collab::v1::{
 	AbortRequest, AgentCommand, AgentViewCancel, AgentViewEnd, AgentViewEvent, AgentViewRequest,
-	AgentViewSnapshot, CollabFrame, ErrorMessage, Hello, ImageAttachment, JournalRecord, Participant,
-	PromptRequest, RegistrySnapshot, SessionHeader, SessionStateUpdate, SnapshotChunk, UiRequest,
-	UiResponse, VisibilityClass, Welcome, collab_frame,
+	AgentViewSnapshot, CollabFrame, ErrorMessage, Hello, ImageAttachment, JournalRecord,
+	Participant, PromptRequest, RegistrySnapshot, SessionHeader, SessionStateUpdate, SnapshotChunk,
+	UiRequest, UiResponse, VisibilityClass, Welcome, collab_frame,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -169,7 +169,7 @@ pub enum CollabCommandFault {
 	#[error("collaboration snapshot uses {actual} bytes; maximum is {maximum}")]
 	SnapshotTooLarge {
 		/// Observed byte count.
-		actual: usize,
+		actual:  usize,
 		/// Maximum accepted byte count.
 		maximum: usize,
 	},
@@ -274,10 +274,7 @@ impl CollabCommandHandle {
 	) -> Result<RemoteAgentView, RemoteAgentViewError> {
 		let (reply, result) = flume::bounded(1);
 		self
-			.request(CollabOwnerCommand::ObserveAgent {
-				agent_id: agent_id.into(),
-				reply,
-			})
+			.request(CollabOwnerCommand::ObserveAgent { agent_id: agent_id.into(), reply })
 			.await
 			.map_err(|error| match error {
 				CollabCommandFault::RequestCapacity => RemoteAgentViewError::Capacity,
@@ -624,7 +621,10 @@ fn enqueue_agent_view(
 	reply: flume::Sender<Result<RemoteAgentView, RemoteAgentViewError>>,
 ) -> Result<CollabCommandResult, CollabCommandFault> {
 	let active = active.ok_or(CollabCommandFault::NotJoined)?;
-	let sender = active.agent_views.as_ref().ok_or(CollabCommandFault::NotGuest)?;
+	let sender = active
+		.agent_views
+		.as_ref()
+		.ok_or(CollabCommandFault::NotGuest)?;
 	sender
 		.try_send(AgentViewOpen { agent_id, reply })
 		.map_err(|error| match error {
@@ -740,10 +740,8 @@ async fn start_host(
 		let mut ui = HostUiDispatcher::default();
 		let mut ui_answers = BTreeMap::<u32, HostUiWaiter>::new();
 		let (ui_cancel, ui_cancel_rx) = flume::bounded::<u32>(HOST_UI_REQUEST_CAP);
-		let (view_ready, view_ready_rx) =
-			flume::bounded::<HostViewReady>(AGENT_VIEW_REQUEST_CAP);
-		let (view_event, view_event_rx) =
-			flume::bounded::<HostViewEvent>(AGENT_VIEW_EVENT_CAP);
+		let (view_ready, view_ready_rx) = flume::bounded::<HostViewReady>(AGENT_VIEW_REQUEST_CAP);
+		let (view_event, view_event_rx) = flume::bounded::<HostViewEvent>(AGENT_VIEW_EVENT_CAP);
 		let mut views = BTreeMap::<(u32, u32), ActiveHostView>::new();
 		let mut view_generation = 0_u64;
 		let mut sequence = 0_u64;
@@ -831,10 +829,8 @@ async fn start_host(
 								cancelled.cancelled().await;
 								let _ = tx.send_async(request_id).await;
 							});
-							ui_answers.insert(request_id, HostUiWaiter {
-								answer: open.answer,
-								cancellation,
-							});
+							ui_answers
+								.insert(request_id, HostUiWaiter { answer: open.answer, cancellation });
 							for mut target in frames {
 								sequence = sequence.saturating_add(1);
 								target.frame.sequence = sequence;
@@ -955,17 +951,19 @@ async fn start_host(
 									}
 									let _ = tx
 										.send_async(HostViewEvent {
-											peer_id: ready.peer_id,
+											peer_id:    ready.peer_id,
 											request_id: ready.request_id,
 											generation: ready.generation,
-											event: None,
+											event:      None,
 										})
 										.await;
 								});
 							} else {
 								sequence = sequence.saturating_add(1);
 								let frame = agent_view_end_frame(sequence, ready.request_id, None);
-								let _ = relay.send(RelayRoute { peer_id: ready.peer_id }, &frame).await;
+								let _ = relay
+									.send(RelayRoute { peer_id: ready.peer_id }, &frame)
+									.await;
 								views.remove(&key);
 							}
 						},
@@ -980,7 +978,9 @@ async fn start_host(
 							};
 							sequence = sequence.saturating_add(1);
 							let frame = agent_view_end_frame(sequence, ready.request_id, Some(code));
-							let _ = relay.send(RelayRoute { peer_id: ready.peer_id }, &frame).await;
+							let _ = relay
+								.send(RelayRoute { peer_id: ready.peer_id }, &frame)
+								.await;
 							views.remove(&key);
 						},
 					}
@@ -1016,8 +1016,7 @@ async fn start_host(
 							if relay
 								.send(RelayRoute { peer_id: update.peer_id }, &frame)
 								.await
-								.is_err()
-								&& let Some(active) = views.remove(&key)
+								.is_err() && let Some(active) = views.remove(&key)
 							{
 								active.cancel.cancel();
 							}
@@ -1025,7 +1024,9 @@ async fn start_host(
 						None => {
 							sequence = sequence.saturating_add(1);
 							let frame = agent_view_end_frame(sequence, update.request_id, None);
-							let _ = relay.send(RelayRoute { peer_id: update.peer_id }, &frame).await;
+							let _ = relay
+								.send(RelayRoute { peer_id: update.peer_id }, &frame)
+								.await;
 							views.remove(&key);
 						},
 					}
@@ -1159,12 +1160,7 @@ async fn start_host(
 							tokio::spawn(async move {
 								let result = bridge.view(&agent_id).await;
 								let _ = ready
-									.send_async(HostViewReady {
-										peer_id,
-										request_id,
-										generation,
-										result,
-									})
+									.send_async(HostViewReady { peer_id, request_id, generation, result })
 									.await;
 							});
 						},
@@ -1253,7 +1249,9 @@ async fn start_host(
 		}
 		for (_, waiter) in ui_answers {
 			waiter.cancellation.abort();
-			let _ = waiter.answer.try_send(Err(HostUiRequestError::OwnerStopped));
+			let _ = waiter
+				.answer
+				.try_send(Err(HostUiRequestError::OwnerStopped));
 		}
 		for (_, active) in views {
 			active.cancel.cancel();
@@ -1369,10 +1367,10 @@ async fn start_guest(
 					}
 					views.insert(request_id, GuestView {
 						agent_id: open.agent_id,
-						reply: Some(open.reply),
-						events: None,
-						chunks: Vec::new(),
-						next: 0,
+						reply:    Some(open.reply),
+						events:   None,
+						chunks:   Vec::new(),
+						next:     0,
 					});
 				},
 				Wake::AgentView(Err(_)) => break,
@@ -1380,7 +1378,11 @@ async fn start_guest(
 					let closed = views
 						.iter()
 						.filter_map(|(&id, view)| {
-							view.events.as_ref().is_some_and(flume::Sender::is_disconnected).then_some(id)
+							view
+								.events
+								.as_ref()
+								.is_some_and(flume::Sender::is_disconnected)
+								.then_some(id)
 						})
 						.collect::<Vec<_>>();
 					for request_id in closed {
@@ -1428,7 +1430,7 @@ async fn start_guest(
 							{
 								if initial {
 									let _ = ready_tx.send(Err(CollabCommandFault::SnapshotTooLarge {
-										actual: snapshot_records.len().saturating_add(chunk.entries.len())
+										actual:  snapshot_records.len().saturating_add(chunk.entries.len())
 											* SNAPSHOT_CHUNK_BYTES,
 										maximum: SNAPSHOT_MAX_BYTES,
 									}));
@@ -1508,7 +1510,7 @@ async fn start_guest(
 							if remote_ui
 								.try_send(RemoteUiRequest {
 									request: request.clone(),
-									cancel: cancel.clone(),
+									cancel:  cancel.clone(),
 								})
 								.is_ok()
 							{
@@ -1564,10 +1566,8 @@ async fn start_guest(
 								if let Some(reply) = view.reply.take() {
 									let (events, observed) = flume::bounded(AGENT_VIEW_EVENT_CAP);
 									view.events = Some(events);
-									let _ = reply.try_send(Ok(RemoteAgentView {
-										snapshot,
-										events: Some(observed),
-									}));
+									let _ = reply
+										.try_send(Ok(RemoteAgentView { snapshot, events: Some(observed) }));
 								} else if let Some(events) = &view.events
 									&& events.try_send(Event::Reset { snapshot }).is_err()
 								{
@@ -1608,15 +1608,16 @@ async fn start_guest(
 							if let Some(view) = views.remove(&end.request_id)
 								&& let Some(reply) = view.reply
 							{
-								let error = end.error.map_or(
-									RemoteAgentViewError::Disconnected,
-									|error| RemoteAgentViewError::Refused {
-										code: error
-											.code
-											.parse()
-											.unwrap_or(AgentViewFailureCode::Unavailable),
-									},
-								);
+								let error = end
+									.error
+									.map_or(RemoteAgentViewError::Disconnected, |error| {
+										RemoteAgentViewError::Refused {
+											code: error
+												.code
+												.parse()
+												.unwrap_or(AgentViewFailureCode::Unavailable),
+										}
+									});
 								let _ = reply.try_send(Err(error));
 							}
 						},
@@ -1825,11 +1826,7 @@ fn agent_view_snapshot_frame(
 	}
 }
 
-fn agent_view_event_frame(
-	sequence: u64,
-	request_id: u32,
-	event: JournalRecord,
-) -> CollabFrame {
+fn agent_view_event_frame(sequence: u64, request_id: u32, event: JournalRecord) -> CollabFrame {
 	CollabFrame {
 		protocol_revision: PROTOCOL_REVISION,
 		sequence,
@@ -1851,10 +1848,8 @@ fn agent_view_end_frame(
 		sequence,
 		payload: Some(collab_frame::Payload::AgentViewEnd(AgentViewEnd {
 			request_id,
-			error: error.map(|code| ErrorMessage {
-				code: code.to_string(),
-				message: code.to_string(),
-			}),
+			error: error
+				.map(|code| ErrorMessage { code: code.to_string(), message: code.to_string() }),
 		})),
 		..CollabFrame::default()
 	}
@@ -1909,7 +1904,7 @@ fn snapshot_chunks(bytes: &[u8]) -> Vec<Bytes> {
 fn decode_snapshot_chunks(records: &[JournalRecord]) -> Result<Vec<u8>, CollabCommandFault> {
 	if records.len() > SNAPSHOT_CHUNK_MAX_COUNT {
 		return Err(CollabCommandFault::SnapshotTooLarge {
-			actual: records.len().saturating_mul(SNAPSHOT_CHUNK_BYTES),
+			actual:  records.len().saturating_mul(SNAPSHOT_CHUNK_BYTES),
 			maximum: SNAPSHOT_MAX_BYTES,
 		});
 	}
@@ -1930,10 +1925,7 @@ fn decode_snapshot_chunks(records: &[JournalRecord]) -> Result<Vec<u8>, CollabCo
 			.map_err(|_| CollabCommandFault::InvalidSnapshotFragment)?;
 		let actual = decoded.len().saturating_add(bytes.len());
 		if actual > SNAPSHOT_MAX_BYTES {
-			return Err(CollabCommandFault::SnapshotTooLarge {
-				actual,
-				maximum: SNAPSHOT_MAX_BYTES,
-			});
+			return Err(CollabCommandFault::SnapshotTooLarge { actual, maximum: SNAPSHOT_MAX_BYTES });
 		}
 		decoded.extend_from_slice(&bytes);
 	}
@@ -2035,10 +2027,10 @@ mod tests {
 		let (reply, _) = flume::bounded(1);
 		GuestView {
 			agent_id: Str::new_static(id),
-			reply: Some(reply),
-			events: None,
-			chunks: Vec::new(),
-			next: 0,
+			reply:    Some(reply),
+			events:   None,
+			chunks:   Vec::new(),
+			next:     0,
 		}
 	}
 
@@ -2057,10 +2049,7 @@ mod tests {
 			.collect::<Vec<_>>();
 		assert!(matches!(
 			decode_snapshot_chunks(&records),
-			Err(CollabCommandFault::SnapshotTooLarge {
-				maximum: SNAPSHOT_MAX_BYTES,
-				..
-			})
+			Err(CollabCommandFault::SnapshotTooLarge { maximum: SNAPSHOT_MAX_BYTES, .. })
 		));
 	}
 }

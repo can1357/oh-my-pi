@@ -10,7 +10,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 /// Definition lifetime: thirty days.
-pub const MCP_DEFINITION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+pub const MCP_DEFINITION_TTL: Duration = Duration::from_hours(720);
 const SCHEMA_VERSION: i64 = 1;
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS mcp_cache_meta (
@@ -298,7 +298,12 @@ mod tests {
 				params![b"{broken".as_slice(), "alpha"],
 			)
 			.expect("corrupt fixture");
-		assert!(cache.get("alpha", config, 1_001).expect("corrupt get").is_none());
+		assert!(
+			cache
+				.get("alpha", config, 1_001)
+				.expect("corrupt get")
+				.is_none()
+		);
 		let remaining = cache
 			.connection
 			.lock()

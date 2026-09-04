@@ -334,7 +334,8 @@ pub enum OAuthExchangeKind {
 	GoogleGeminiCli,
 	/// Exchanges a Z.AI authorization result for an API key.
 	ZaiApiKey,
-	/// Exchanges an OpenRouter PKCE authorization result for a durable API key.
+	/// Exchanges an `OpenRouter` PKCE authorization result for a durable API
+	/// key.
 	OpenRouterApiKey,
 	/// Exchanges a Devin CLI authorization result for a token.
 	DevinCliToken,

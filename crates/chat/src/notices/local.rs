@@ -12,8 +12,7 @@ use omp_tui::{IntoComponent as _, dom};
 
 use crate::cards::Component;
 
-/// Logical rows retained by a collapsed local execution, matching pi's local
-/// bash/eval components.
+/// Logical rows retained by a collapsed local execution.
 const PREVIEW_LINES: usize = 20;
 
 /// One local executor flavor.
@@ -42,7 +41,7 @@ impl LocalExecution {
 		matches!(self.status.as_str(), "ok" | "error" | "cancelled" | "aborted")
 	}
 
-	/// Whole-message clipboard payload used by pi's copy selector.
+	/// Whole-message clipboard payload.
 	pub(crate) fn copy_text(&self) -> Str {
 		let mut text = StrMut::new(self.command.as_str());
 		if !self.output.trim().is_empty() {
@@ -204,7 +203,7 @@ pub(crate) fn execution_block(run: &LocalExecution, expanded: bool) -> Component
 }
 
 /// Last `PREVIEW_LINES` logical rows; the caller places the hidden-count hint
-/// after them, matching pi's local execution components.
+/// after them.
 fn output_tail(output: &Str, expanded: bool) -> (usize, Str) {
 	let trimmed = output.as_str().trim_end();
 	if trimmed.is_empty() {

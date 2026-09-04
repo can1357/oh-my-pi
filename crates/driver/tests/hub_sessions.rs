@@ -14,16 +14,16 @@ use omp_agent::{
 	AutoreplyRequest, EnvEvent, Inference, Kernel, PeerAutoreply, RunControl, SessionTopology,
 	StaticPrompt, TurnInput, Up,
 };
+use omp_ai::{
+	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ExecutionReceipt, FinishReason,
+	RequestId, ResponseMeta, Usage,
+};
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
 use omp_dom::{KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
 use omp_driver::{
 	sessions::{IrcRelayPolicy, KernelHandle, SessionId, SessionRegistry},
 	subagent::hub::SessionHub,
-};
-use omp_inference::{
-	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ExecutionReceipt, FinishReason,
-	RequestId, ResponseMeta, Usage,
 };
 use omp_journal::data::{IrcDirection, IrcTraffic};
 use omp_session::{ComponentRegistry, Session};
@@ -55,7 +55,7 @@ impl Inference for OneTurn {
 	fn chat(
 		&mut self,
 		_request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		let events = [
 			ChatEvent::Started(ResponseMeta {
 				request_id:          RequestId::from("hub-test"),

@@ -1,6 +1,5 @@
-//! Provider account slash commands (pi `builtin-session.ts` `/login`,
-//! `/logout`; `builtin-modes.ts` `/setup`, `/providers`;
-//! `builtin-lifecycle.ts` `/pin`).
+//! Provider account slash commands: `/login`, `/logout`, `/setup`,
+//! `/providers`, and `/pin`.
 //!
 //! Every command reads stored accounts and providers through the
 //! [`Services`] seam and opens an observer-local panel
@@ -33,9 +32,9 @@ pub const PALETTE: &[PaletteEntry] = &[
 	PaletteEntry { name: "pin", icon: Icon::Pin },
 ];
 
-/// pi `/login <url>` while no dialog owns a flow.
+/// Shown when a manual OAuth callback arrives without a pending login flow.
 const NO_PENDING_CALLBACK: &str = "No OAuth login is waiting for a manual callback.";
-/// pi `showOAuthSelector("logout")` with nothing stored.
+/// Shown when logout finds no stored credentials.
 const NOTHING_TO_LOG_OUT: &str =
 	"No stored provider credentials to log out. Remove env or config auth at its source.";
 
@@ -118,7 +117,7 @@ fn logout_panel(cx: &PanelCx<'_>, provider: Option<&str>) -> Result<Box<dyn Pane
 	Ok(boxed(LogoutSelector::open(name, rows, cx.ui)))
 }
 
-/// `/pin` target: a session (pi) or a provider account.
+/// `/pin` target: a session or a provider account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PinTarget {
 	/// Toggle the live session's pin.

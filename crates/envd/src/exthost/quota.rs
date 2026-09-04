@@ -2,11 +2,13 @@
 
 use std::{
 	collections::{BTreeMap, VecDeque},
+	sync::Arc,
 	time,
 	time::Instant,
 };
 
 use omp_core::{Duration, Str};
+use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::worker::HostKey;
@@ -214,6 +216,13 @@ impl ControlQuotaLedger {
 		Ok(())
 	}
 
+	fn contains(&self, extension: &HostKey, quota: &str) -> bool {
+		self
+			.specs
+			.get(extension)
+			.is_some_and(|specs| specs.contains_key(quota))
+	}
+
 	/// Charges one operation against its extension and session allocations.
 	///
 	/// Hard exhaustion returns [`QuotaError::Exceeded`]. Soft exhaustion does
@@ -325,6 +334,99 @@ impl ControlQuotaLedger {
 			}
 		}
 		Ok(receipt)
+	}
+}
+
+/// One receipt update emitted after an accounted CONTROL operation.
+#[derive(Clone, Debug)]
+pub struct QuotaReceiptUpdate {
+	/// Session whose accounting changed.
+	pub session: Str,
+	/// Extension whose local receipt changed.
+	pub owner:   HostKey,
+	/// Current immutable receipt.
+	pub receipt: ResourceReceipt,
+}
+
+/// Cloneable owner of the sole daemon CONTROL quota ledger.
+#[derive(Clone)]
+pub struct ControlQuotaRuntime {
+	ledger:  Arc<Mutex<ControlQuotaLedger>>,
+	updates: flume::Sender<QuotaReceiptUpdate>,
+	changed: flume::Receiver<QuotaReceiptUpdate>,
+}
+
+impl Default for ControlQuotaRuntime {
+	fn default() -> Self {
+		let (updates, changed) = flume::unbounded();
+		Self { ledger: Arc::new(Mutex::new(ControlQuotaLedger::new())), updates, changed }
+	}
+}
+
+impl ControlQuotaRuntime {
+	/// Creates one empty shared runtime.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Returns the receipt update stream consumed by the host supervisor.
+	pub fn updates(&self) -> flume::Receiver<QuotaReceiptUpdate> {
+		self.changed.clone()
+	}
+
+	/// Returns the sole shared ledger for typed accounting composition.
+	pub fn ledger(&self) -> Arc<Mutex<ControlQuotaLedger>> {
+		Arc::clone(&self.ledger)
+	}
+
+	/// Registers one authenticated manifest resource-limit table.
+	pub fn register_limits(
+		&self,
+		owner: HostKey,
+		specs: impl IntoIterator<Item = QuotaSpec>,
+	) -> Result<(), QuotaError> {
+		self.ledger.lock().register_limits(owner, specs)
+	}
+
+	/// Charges a canonical operation when that manifest declared its quota.
+	pub fn charge(
+		&self,
+		session: &str,
+		owner: &HostKey,
+		quota: &str,
+		amount: u64,
+	) -> Result<ChargeOutcome, QuotaError> {
+		let mut ledger = self.ledger.lock();
+		if !ledger.contains(owner, quota) {
+			return Ok(ChargeOutcome::Accepted);
+		}
+		let now = Instant::now();
+		let result = ledger.charge(session, owner, quota, amount, now);
+		let receipt = ledger.resources(session, owner, now)?;
+		drop(ledger);
+		let _ = self.updates.send(QuotaReceiptUpdate {
+			session: Str::new(session),
+			owner: owner.clone(),
+			receipt,
+		});
+		result
+	}
+
+	/// Returns the current extension-local receipt.
+	pub fn receipt(&self, session: &str, owner: &HostKey) -> Result<ResourceReceipt, QuotaError> {
+		self.ledger.lock().resources(session, owner, Instant::now())
+	}
+}
+
+/// Returns the canonical quota charged by one reverse CONTROL operation.
+pub fn request_quota(operation: &str) -> Option<&'static str> {
+	match operation {
+		"omp.ui.effect" | "omp.ui.emit" => Some(names::UI_EFFECTS),
+		"omp.ui.update" => Some(names::UI_UPDATES),
+		"omp.journal.append" => Some(names::JOURNAL_APPENDS),
+		"omp.approvals.request" | "omp.policy.request_approval" => Some(names::APPROVAL_REQUESTS),
+		"omp.provider.discover" | "omp.provider.replace" => Some(names::PROVIDER_DISCOVERY),
+		_ => None,
 	}
 }
 
@@ -440,5 +542,37 @@ impl<T> FairControlQueue<T> {
 		}
 		self.len -= 1;
 		Some(value)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn shared_runtime_emits_current_receipt_after_charge() {
+		let runtime = ControlQuotaRuntime::new();
+		let owner = HostKey::new("project", "trusted", "fixture");
+		runtime
+			.register_limits(owner.clone(), [QuotaSpec::new(
+				"ui.effects",
+				2,
+				2,
+				None,
+				QuotaBehavior::Hard,
+			)])
+			.expect("register quota");
+		assert_eq!(runtime.charge("session", &owner, "ui.effects", 1), Ok(ChargeOutcome::Accepted));
+		let update = runtime.updates().try_recv().expect("receipt update");
+		assert_eq!(update.session, "session");
+		assert_eq!(update.owner, owner);
+		assert_eq!(update.receipt.quotas["ui.effects"].used, 1);
+	}
+
+	#[test]
+	fn canonical_reverse_operations_map_only_to_owned_quotas() {
+		assert_eq!(request_quota("omp.journal.append"), Some(names::JOURNAL_APPENDS));
+		assert_eq!(request_quota("omp.provider.discover"), Some(names::PROVIDER_DISCOVERY));
+		assert_eq!(request_quota("omp.sessions.get"), None);
 	}
 }

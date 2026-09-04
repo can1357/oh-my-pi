@@ -41,12 +41,10 @@ pub const PROVIDER_BLOCK_INDEX_PROP: &str = "index";
 /// [`omp_journal::data::FileMentions`] payload.
 pub const FILE_MENTION_PROP: &str = "file_mention";
 
-/// Prop marking a `<user>` turn child that arrived as steering at a safe
-/// point (pi `steering: true`).
+/// Prop marking a `<user>` turn child that arrived as steering at a safe point.
 pub const STEERING_PROP: &str = "steering";
 
-/// Notice prepended to every steering user message at projection time (pi
-/// `prompts/steering/user-interjection.md`, `wrapSteeringForModel`). The
+/// Notice prepended to every steering user message at projection time. The
 /// journaled text stays raw; the wrapper is a pure function of the element so
 /// the wire bytes never change once the reply buries the interjection.
 pub const STEERING_ENVELOPE: &str = "<system-notice>\nUser interjection during work: priority; \
@@ -266,7 +264,7 @@ fn history_tool_parts(parts: &[ToolPart]) -> Result<Vec<thread::Part>, Projectio
 	for value in parts {
 		match value {
 			ToolPart::Text { text } => {
-				projected.push(thread::Part { kind: Some(part::Kind::Text(text.as_str().to_owned())) })
+				projected.push(thread::Part { kind: Some(part::Kind::Text(text.as_str().to_owned())) });
 			},
 			ToolPart::Json { json } => projected
 				.push(thread::Part { kind: Some(part::Kind::Text(str::from_utf8(json)?.to_owned())) }),
@@ -339,15 +337,14 @@ fn project_window(dom: &Dom, window: Window, items: &mut Vec<Item>) {
 		}
 		// A tool element before any message in its turn is a local run (the
 		// host's `!`/`$` prefix modes): no assistant issued it, so the model
-		// sees what ran as a user message (pi `bashExecutionToText`).
+		// sees what ran as a user message.
 		let mut local = true;
 		let children = dom.children(*turn);
 		let mut receipts = BTreeMap::new();
 		let mut awaiting_receipt = None;
-		// Assistants that issued at least one tool call: they stay in the
-		// projection even without text (pi keeps `toolCall` content), whereas
-		// an assistant with nothing at all is the empty turn pi's recovery
-		// drops (`turn-recovery.ts`), together with its receipt.
+		// Assistants that issued at least one tool call stay in the projection
+		// even without text. An assistant with nothing at all is omitted with
+		// its receipt.
 		let mut issuing = BTreeSet::new();
 		let mut last_assistant = None;
 		for child in children {
@@ -424,15 +421,14 @@ fn project_window(dom: &Dom, window: Window, items: &mut Vec<Item>) {
 	}
 }
 
-/// Prop a local run carries when the host excluded it from the model's
-/// context (pi `!!` / `$$`).
+/// Prop a local run carries when the host excludes it from the model's context
+/// (`!!` / `$$`).
 pub const LOCAL_CONTEXT_PROP: &str = "context";
 /// [`LOCAL_CONTEXT_PROP`] value hiding the run.
 pub const LOCAL_CONTEXT_EXCLUDED: &str = "excluded";
 
-/// Projects a host-run tool element as the user message pi builds for a
-/// `bashExecution` / `pythonExecution` entry. A run still in flight or one
-/// excluded from context contributes nothing.
+/// Projects a host-run tool element as a user message. A run still in flight
+/// or one excluded from context contributes nothing.
 fn project_local_tool(dom: &Dom, handle: Handle, name: &str, node: &Node, items: &mut Vec<Item>) {
 	let excluded = node
 		.prop(&PropKey::Custom(Str::new_static(LOCAL_CONTEXT_PROP)))
@@ -571,7 +567,7 @@ fn project_message(node: &Node, role: thread::Role, items: &mut Vec<Item>) {
 		.as_deref()
 		.or_else(|| prop_text(node, PropId::Text))
 	{
-		// pi `wrapSteeringUserMessage`: an empty interjection is sent as-is.
+		// An empty steering interjection is sent as-is.
 		let text = if is_steering(node) && !text.is_empty() {
 			let mut wrapped = String::with_capacity(STEERING_ENVELOPE.len() + text.len());
 			wrapped.push_str(STEERING_ENVELOPE);
@@ -582,10 +578,9 @@ fn project_message(node: &Node, role: thread::Role, items: &mut Vec<Item>) {
 		};
 		parts.push(thread::Part { kind: Some(part::Kind::Text(text)) });
 	}
-	// Journaled attachments become typed media parts (pi `ImageContent`):
-	// the reference and its MIME are the projection's whole output; the
-	// kernel resolves the bytes at request time so this stays a pure
-	// function of the tree.
+	// Journaled attachments become typed media parts: the reference and its MIME
+	// are the projection's whole output; the kernel resolves the bytes at
+	// request time so this stays a pure function of the tree.
 	if let Some(Value::Json(raw)) = node.prop(&PropKey::from(PropId::Data))
 		&& let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(raw.get())
 	{
@@ -619,9 +614,9 @@ fn project_assistant(
 	items: &mut Vec<Item>,
 ) {
 	let parts = assistant_parts(dom, handle, node);
-	// An assistant that produced neither content nor a call is the empty
-	// turn pi's recovery drops before retrying; providers reject empty
-	// assistant content and its receipt belongs to no surviving message.
+	// An assistant that produced neither content nor a call is omitted before
+	// retrying; providers reject empty assistant content and its receipt belongs
+	// to no surviving message.
 	if parts.is_empty() && !issued_calls {
 		return;
 	}
@@ -783,12 +778,25 @@ fn project_tool(dom: &Dom, handle: Handle, name: &str, node: &Node, items: &mut 
 		props:         None,
 	});
 	let result_node = terminal_node(dom, handle, status);
-	let parts = result_node
+	let mut parts = result_node
 		.and_then(projected_tool_parts)
 		.unwrap_or_else(|| {
 			let result = result_node.and_then(node_text).unwrap_or_default();
 			vec![thread::Part { kind: Some(part::Kind::Text(result.to_owned())) }]
 		});
+	// Every non-terminal `<diag>` reaches the model as one uniform trailing
+	// part (ADR 0008/0009): never interpolated into the result body, never
+	// dropped on the floor.
+	parts.extend(
+		dom.children(handle)
+			.iter()
+			.filter_map(|child| dom.get(*child))
+			.filter(|node| {
+				node.tag == Tag::Known(KnownTag::Diag)
+					&& !result_node.is_some_and(|terminal| std::ptr::eq(terminal, *node))
+			})
+			.map(|node| thread::Part { kind: Some(part::Kind::Text(render_diag(node))) }),
+	);
 	items.push(Item {
 		seq:           0,
 		created_at_ms: 0,
@@ -825,6 +833,32 @@ fn terminal_node<'a>(dom: &'a Dom, call: Handle, status: &str) -> Option<&'a Nod
 		.copied()
 }
 
+/// Model-facing rendering of one `<diag>`: fixed attribute vocabulary so the
+/// model learns a single notice shape across every tool.
+fn render_diag(node: &Node) -> String {
+	let mut text = String::from("<diag");
+	for prop in [PropId::Severity, PropId::Kind, PropId::Continuation, PropId::Recovery] {
+		if let Some(value) = prop_text(node, prop) {
+			let name = match prop {
+				PropId::Recovery => "artifact",
+				other => <&'static str>::from(other),
+			};
+			let _ = write!(text, " {name}=\"{value}\"");
+		}
+	}
+	if let Some(Value::Int(count)) = node.prop(&PropKey::from(PropId::Omitted)) {
+		let _ = write!(text, " omitted=\"{count}");
+		if let Some(unit) = prop_text(node, PropId::Unit) {
+			let _ = write!(text, " {unit}");
+		}
+		text.push('"');
+	}
+	text.push('>');
+	text.push_str(prop_text(node, PropId::Text).unwrap_or_default());
+	text.push_str("</diag>");
+	text
+}
+
 fn projected_tool_parts(node: &Node) -> Option<Vec<thread::Part>> {
 	let Value::Json(raw) = node.prop(&PropKey::from(PropId::Data))? else {
 		return None;
@@ -834,7 +868,7 @@ fn projected_tool_parts(node: &Node) -> Option<Vec<thread::Part>> {
 	for part in parts {
 		match part {
 			ToolPart::Text { text } => {
-				projected.push(thread::Part { kind: Some(part::Kind::Text(text.as_str().to_owned())) })
+				projected.push(thread::Part { kind: Some(part::Kind::Text(text.as_str().to_owned())) });
 			},
 			ToolPart::Json { json } => projected.push(thread::Part {
 				kind: Some(part::Kind::Text(std::str::from_utf8(&json).ok()?.to_owned())),

@@ -12,8 +12,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use omp_agent::{JobBoard, JobSettlement};
 pub use omp_agent::jobs::WORKPOOL_STATE;
+use omp_agent::{JobBoard, JobSettlement};
 use omp_core::{FastHashMap, Str, sf};
 use omp_dom::{Handle, KnownTag, Op, PropId, PropKey, Tag, Txn, Value};
 use omp_journal::blob::BlobStore;
@@ -126,11 +126,11 @@ impl WorkpoolPolicy for ConWorkpoolPolicy {
 	}
 
 	fn fresh_agents(&self) -> bool {
-		omp_tools::pi_settings::SV_EVAL_WORKPOOL_FRESH_AGENTS.get(&self.ctx)
+		omp_tools::settings::SV_EVAL_WORKPOOL_FRESH_AGENTS.get(&self.ctx)
 	}
 
 	fn eval_tools_enabled(&self) -> bool {
-		omp_tools::pi_settings::SV_EVAL_TOOLS_ENABLED.get(&self.ctx)
+		omp_tools::settings::SV_EVAL_TOOLS_ENABLED.get(&self.ctx)
 	}
 }
 
@@ -148,9 +148,9 @@ pub struct WorkerBatch {
 /// Driver-owned live worker returned after its child endpoint is registered.
 pub struct WorkerHandle {
 	/// Authenticated child-session id.
-	pub id:      Str,
+	pub id:       Str,
 	/// Batch input for the persistent kernel.
-	pub batches: flume::Sender<WorkerBatch>,
+	pub batches:  flume::Sender<WorkerBatch>,
 	/// Kill boundary for the worker execution unit.
 	pub cancel:   CancellationToken,
 	/// Closes only after the worker's ordinary [`JobSettlement`] has been
@@ -360,12 +360,12 @@ struct Snapshot {
 	closed:          bool,
 	terminal_status: Option<Str>,
 	items:           Vec<Item>,
-	workers:      Vec<Worker>,
-	batches:      Vec<Batch>,
-	next_seq:     u64,
-	next_worker:  u64,
-	rr_cursor:    usize,
-	last_receipt: Option<WorkpoolReceipt>,
+	workers:         Vec<Worker>,
+	batches:         Vec<Batch>,
+	next_seq:        u64,
+	next_worker:     u64,
+	rr_cursor:       usize,
+	last_receipt:    Option<WorkpoolReceipt>,
 }
 
 impl Default for Snapshot {
@@ -375,12 +375,12 @@ impl Default for Snapshot {
 			closed:          false,
 			terminal_status: None,
 			items:           Vec::new(),
-			workers:      Vec::new(),
-			batches:      Vec::new(),
-			next_seq:     1,
-			next_worker:  1,
-			rr_cursor:    0,
-			last_receipt: None,
+			workers:         Vec::new(),
+			batches:         Vec::new(),
+			next_seq:        1,
+			next_worker:     1,
+			rr_cursor:       0,
+			last_receipt:    None,
 		}
 	}
 }
@@ -830,7 +830,7 @@ impl omp_envd::eval::ParentSessionHost for WorkpoolSessionHost {
 		&self,
 	) -> Result<omp_envd::eval::EvalSessionConfig, omp_envd::eval::BridgeHostError> {
 		Ok(omp_envd::eval::EvalSessionConfig {
-			cwd: self.cwd.clone(),
+			cwd:              self.cwd.clone(),
 			local_roots_json: None,
 		})
 	}
@@ -867,10 +867,7 @@ impl omp_envd::eval::ParentSessionHost for WorkpoolSessionHost {
 		false
 	}
 
-	async fn concurrency(
-		&self,
-		_args: Json,
-	) -> Result<Json, omp_envd::eval::BridgeHostError> {
+	async fn concurrency(&self, _args: Json) -> Result<Json, omp_envd::eval::BridgeHostError> {
 		Err(omp_envd::eval::BridgeHostError::message(
 			"eval concurrency is unavailable for this parent session",
 		))
@@ -1074,8 +1071,8 @@ impl PoolActor {
 					cause,
 					label: Some(Str::new_static(label)),
 					ops: vec![Op::Set {
-						h: handle,
-						prop: PropKey::Custom(Str::new_static(WORKPOOL_STATE)),
+						h:     handle,
+						prop:  PropKey::Custom(Str::new_static(WORKPOOL_STATE)),
 						value: Value::Json(data),
 					}],
 				})?;
@@ -1502,7 +1499,9 @@ impl PoolActor {
 		if retry {
 			worker.handle.cancel.cancel();
 		}
-		self.retired.push((worker.handle.finished, worker.handle.abort));
+		self
+			.retired
+			.push((worker.handle.finished, worker.handle.abort));
 		if retry {
 			for item in requeue {
 				self.schedule(item).await;
@@ -1547,11 +1546,8 @@ impl PoolActor {
 		let (last, workers, summary) = {
 			let mut state = self.state.lock();
 			state.closed = true;
-			state.terminal_status = Some(Str::new_static(if cancelled {
-				"cancelled"
-			} else {
-				"completed"
-			}));
+			state.terminal_status =
+				Some(Str::new_static(if cancelled { "cancelled" } else { "completed" }));
 			if cancelled {
 				for item in &mut state.items {
 					if matches!(item.state, ItemState::Queued | ItemState::Running) {
@@ -1569,12 +1565,10 @@ impl PoolActor {
 			for worker in &mut state.workers {
 				let (replacement_batches, replacement_batch_rx) = flume::unbounded();
 				drop(replacement_batch_rx);
-				let batches =
-					std::mem::replace(&mut worker.handle.batches, replacement_batches);
+				let batches = std::mem::replace(&mut worker.handle.batches, replacement_batches);
 				let (replacement_finished_tx, replacement_finished) = flume::unbounded();
 				drop(replacement_finished_tx);
-				let finished =
-					std::mem::replace(&mut worker.handle.finished, replacement_finished);
+				let finished = std::mem::replace(&mut worker.handle.finished, replacement_finished);
 				workers.push((
 					worker.handle.cancel.clone(),
 					batches,
@@ -1603,8 +1597,7 @@ impl PoolActor {
 			drop(batches);
 			completions.push((finished, abort));
 		}
-		let cancellation_deadline =
-			tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+		let cancellation_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
 		for (completion, abort) in completions {
 			if cancelled {
 				let remaining =

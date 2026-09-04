@@ -8,7 +8,7 @@
 //! its streamed text is updated in place through [`Slots::STREAM_ID`]
 //! instead of being rebuilt.
 //!
-//! [`Local`] holds what pi keeps in its controllers: when each tool call was
+//! [`Local`] holds observer-local facts: when each tool call was
 //! first seen executing (the elapsed badge), the streaming speed gauge and
 //! reasoning-token counter behind the hidden-thinking pulse, the transcript
 //! row a session reset leaves behind, and validated startup advisories.
@@ -31,22 +31,34 @@ use crate::{
 	status_line::StatusLine,
 };
 
-/// Reveal catch-up horizon: pi drains a backlog over `CATCHUP_FRAMES` (8)
+/// Reveal catch-up horizon: a backlog drains over `CATCHUP_FRAMES` (8)
 /// frames, so the exponential regime's e-folding time is eight frames.
 pub const REVEAL_HORIZON: Duration = Duration::from_millis(FRAME.as_millis() as u64 * 8);
 
 omp_con::var! {
-	/// Types streamed assistant text out at the reveal cadence instead of
-	/// painting each chunk at once (pi `display.smoothStreaming`).
+	/// Reveal assistant text and streamed tool input smoothly while chunks
+	/// arrive.
 	pub static CL_SMOOTH_STREAMING = cl_smooth_streaming: bool {
 		default: true,
 		flags: archive | session,
+		meta: {
+			"ui.tab": "appearance",
+			"ui.group": "Display",
+			"ui.label": "Smooth Streaming",
+			"legacy.path": "display.smoothStreaming",
+		},
 	};
-	/// Shows reasoning as prose only: fenced code in the trace collapses to
-	/// an ellipsis (pi `proseOnlyThinking`).
+	/// Omit code blocks from thinking summaries and replace them with an
+	/// ellipsis.
 	pub static CL_THINKING_PROSE_ONLY = cl_thinking_prose_only: bool {
 		default: true,
 		flags: archive | session,
+		meta: {
+			"ui.tab": "model",
+			"ui.group": "Thinking",
+			"ui.label": "Prose Only Thinking",
+			"legacy.path": "proseOnlyThinking",
+		},
 	};
 }
 
@@ -73,8 +85,8 @@ pub struct Local {
 	banner_serial:   u64,
 }
 
-/// The assistant content stream that received the newest delta (pi
-/// `#shouldAnimateThinking`'s `tail`): the DOM keeps reasoning and answer
+/// The assistant content stream that received the newest delta: the DOM keeps
+/// reasoning and answer
 /// text as two properties, so which one the model is writing right now is
 /// an observer-local fact read off the delta events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,8 +97,7 @@ pub enum StreamHead {
 	Text,
 }
 
-/// A transcript row that exists only in this observer (pi `present(...)`
-/// after a session flow).
+/// A transcript row that exists only in this observer after a session flow.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Banner {
 	/// Stable block key.
@@ -164,14 +175,16 @@ impl Local {
 	/// for the same channel/version are coalesced in the observer.
 	#[must_use]
 	pub fn update_available(&mut self, update: UpdateAvailable) -> bool {
-		if self.update.as_ref().is_some_and(|banner| banner.notice.eq(&update)) {
+		if self
+			.update
+			.as_ref()
+			.is_some_and(|banner| banner.notice.eq(&update))
+		{
 			return false;
 		}
 		self.banner_serial = self.banner_serial.wrapping_add(1);
-		self.update = Some(UpdateBanner {
-			key: Self::BANNER_KEY_BASE + self.banner_serial,
-			notice: update,
-		});
+		self.update =
+			Some(UpdateBanner { key: Self::BANNER_KEY_BASE + self.banner_serial, notice: update });
 		true
 	}
 
@@ -221,14 +234,14 @@ impl Local {
 				self.head = None;
 				false
 			},
-			// pi `#shouldAnimateThinking`: the pulse follows the active tail
+			// The pulse follows the active tail
 			// block, so the projection re-runs only when the head moves.
 			KernelEvent::ThinkingDelta(_) => {
 				self.head.replace(StreamHead::Thinking) != Some(StreamHead::Thinking)
 			},
 			KernelEvent::TextDelta(_) => self.head.replace(StreamHead::Text) != Some(StreamHead::Text),
 			KernelEvent::Usage { output_tokens, reasoning_tokens } => {
-				// pi: `usage.reasoningTokens ?? usage.output`, fed as deltas so
+				// `usage.reasoningTokens ?? usage.output`, fed as deltas so
 				// a fresh turn restarting at zero never spikes the gauge.
 				let tokens = if *reasoning_tokens > 0 {
 					*reasoning_tokens
@@ -251,8 +264,7 @@ impl Local {
 	}
 
 	/// Classifies a `Reset` snapshot against the replica it replaces and
-	/// records the transcript row it leaves behind (pi `#runNewSessionFlow`
-	/// / `handleResetContextCommand`).
+	/// records the transcript row it leaves behind.
 	pub fn on_reset(&mut self, previous: &Dom, next: &Dom) -> ResetKind {
 		let kind = classify_reset(previous, next);
 		let text = match kind {
@@ -598,7 +610,7 @@ impl Projection {
 
 	/// First row of the composer inside the document [`Self::document`]
 	/// composes: the end of the live content while it fits, else the tail
-	/// anchor. Rows above it are where pi's status/notice row lives.
+	/// anchor. Rows above it hold the status/notice row.
 	pub(crate) fn composer_top(&self, chrome_rows: u16, size: Size) -> u16 {
 		let chrome_rows = chrome_rows.min(size.height);
 		let available = u32::from(size.height.saturating_sub(chrome_rows));
@@ -669,9 +681,7 @@ impl Projection {
 mod tests {
 	use omp_dom::PropId;
 	use omp_tui::{
-		Color, IntoComponent as _, Prop, Style, UiContext,
-		components::TextLeaf,
-		slots::Delivered,
+		Color, IntoComponent as _, Prop, Style, UiContext, components::TextLeaf, slots::Delivered,
 	};
 
 	use super::*;
@@ -1405,9 +1415,9 @@ mod tests {
 		assert!(dom.children(dom.body()).is_empty(), "the card never enters session state");
 		assert!(!local.update_available(notice));
 		assert_eq!(local.update().expect("same update").key, first_key);
-		assert!(local.update_available(
-			UpdateAvailable::new("19.0.1", "stable").expect("valid notice")
-		));
+		assert!(
+			local.update_available(UpdateAvailable::new("19.0.1", "stable").expect("valid notice"))
+		);
 		assert_ne!(local.update().expect("new update").key, first_key);
 		assert_eq!(
 			local.update().expect("text").notice.text(),

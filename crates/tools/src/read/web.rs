@@ -14,9 +14,9 @@ use html_to_markdown_rs::{
 	convert as convert_html,
 };
 use omp_core::{Str, sf};
+use omp_tool::{Diag, DiagKind, Unit};
 use quick_xml::{Reader, events::Event};
 use rusqlite::{Connection, MAIN_DB};
-use smallvec::SmallVec;
 use url::Url;
 
 use super::{archive, image, markit, notebook, selector, sqlite};
@@ -131,15 +131,17 @@ pub async fn read_resource<C: HttpClient + Sync>(
 	let final_url = response.final_url.clone();
 	let content_type = normalized_content_type(&response);
 	if !response.is_success() {
-		let mut notes = SmallVec::new();
-		notes.push(sf!("Failed to fetch URL (HTTP {})", response.status));
+		let diags = vec![Diag::warn(
+			DiagKind::FetchFailed,
+			sf!("Failed to fetch URL (HTTP {})", response.status),
+		)];
 		return Ok(WebRead {
 			final_url,
 			render: RenderResult {
 				content: Default::default(),
 				content_type: Some(content_type),
 				method: sf!("failed"),
-				notes,
+				diags,
 			},
 			image: None,
 		});
@@ -162,7 +164,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 				content,
 				content_type: Some(processed.media_type.clone()),
 				method: sf!("image"),
-				notes: smallvec::smallvec![sf!("Fetched image binary")],
+				diags: vec![Diag::info(DiagKind::Provenance, "Fetched image binary")],
 			}),
 			image: Some(processed),
 		});
@@ -180,10 +182,9 @@ pub async fn read_resource<C: HttpClient + Sync>(
 		{
 			Ok(Some(converted)) => {
 				let converted = converted.conversion;
-				let mut notes = SmallVec::new();
-				notes.push(sf!("Converted with markit"));
+				let mut diags = vec![Diag::info(DiagKind::Provenance, "Converted with markit")];
 				if let Some(note) = converted.note {
-					notes.push(note);
+					diags.push(Diag::info(DiagKind::Provenance, note));
 				}
 				return Ok(WebRead {
 					final_url,
@@ -191,7 +192,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 						content: converted.text,
 						content_type: Some(content_type),
 						method: sf!("markit"),
-						notes,
+						diags,
 					}),
 					image: None,
 				});
@@ -202,7 +203,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 					final_url,
 					content_type,
 					response.body.len(),
-					sf!("markit conversion failed: {error}"),
+					Diag::warn(DiagKind::Fallback, sf!("markit conversion failed: {error}")),
 				));
 			},
 		}
@@ -216,7 +217,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 					content:      rendered.text.into(),
 					content_type: Some(content_type),
 					method:       sf!("notebook"),
-					notes:        SmallVec::new(),
+					diags:        Vec::new(),
 				}),
 				image: None,
 			}),
@@ -224,7 +225,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 				final_url,
 				content_type,
 				response.body.len(),
-				sf!("Notebook rendering failed: {}", error.message()),
+				Diag::warn(DiagKind::Fallback, sf!("Notebook rendering failed: {}", error.message())),
 			)),
 		};
 	}
@@ -237,7 +238,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 					content:      content.into(),
 					content_type: Some(content_type),
 					method:       sf!("sqlite"),
-					notes:        SmallVec::new(),
+					diags:        Vec::new(),
 				}),
 				image: None,
 			}),
@@ -245,7 +246,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 				final_url,
 				content_type,
 				response.body.len(),
-				sf!("SQLite rendering failed: {error}"),
+				Diag::warn(DiagKind::Fallback, sf!("SQLite rendering failed: {error}")),
 			)),
 		};
 	}
@@ -254,13 +255,19 @@ pub async fn read_resource<C: HttpClient + Sync>(
 		|| archive::sniff_archive_format(&response.body).is_some()
 	{
 		return match render_archive(response.body.clone(), &extension) {
-			Ok(content) => Ok(WebRead {
+			Ok((content, omitted)) => Ok(WebRead {
 				final_url,
 				render: finish(RenderResult {
 					content:      content.into(),
 					content_type: Some(content_type),
 					method:       sf!("archive"),
-					notes:        SmallVec::new(),
+					diags:        (omitted != 0)
+						.then(|| {
+							Diag::info(DiagKind::LimitReached, "archive entries omitted")
+								.omitted(omitted as u64, Unit::Items)
+						})
+						.into_iter()
+						.collect(),
 				}),
 				image: None,
 			}),
@@ -268,7 +275,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 				final_url,
 				content_type,
 				response.body.len(),
-				sf!("Archive rendering failed: {error}"),
+				Diag::warn(DiagKind::Fallback, sf!("Archive rendering failed: {error}")),
 			)),
 		};
 	}
@@ -280,7 +287,7 @@ pub async fn read_resource<C: HttpClient + Sync>(
 				content:      decode_response(&response),
 				content_type: Some(content_type),
 				method:       sf!("raw"),
-				notes:        SmallVec::new(),
+				diags:        Vec::new(),
 			}),
 			image: None,
 		});
@@ -357,7 +364,10 @@ async fn render_html<C: HttpClient + Sync>(
 				content,
 				content_type: Some(sf!("text/markdown")),
 				method: sf!("alternate-markdown"),
-				notes: smallvec::smallvec![sf!("Used markdown alternate: {}", alternate.url)],
+				diags: vec![Diag::info(
+					DiagKind::Provenance,
+					sf!("Used markdown alternate: {}", alternate.url),
+				)],
 			};
 			return Ok(WebRead { final_url, render: finish(render), image: None });
 		}
@@ -374,7 +384,7 @@ async fn render_html<C: HttpClient + Sync>(
 					content,
 					content_type: Some(sf!("text/markdown")),
 					method: sf!("md-suffix"),
-					notes: smallvec::smallvec![sf!("Found .md suffix version")],
+					diags: vec![Diag::info(DiagKind::Provenance, "Found .md suffix version")],
 				}),
 				image: None,
 			});
@@ -395,7 +405,10 @@ async fn render_html<C: HttpClient + Sync>(
 					content,
 					content_type: Some(negotiated_type.clone()),
 					method: sf!("content-negotiation"),
-					notes: smallvec::smallvec![sf!("Content negotiation returned {negotiated_type}")],
+					diags: vec![Diag::info(
+						DiagKind::Provenance,
+						sf!("Content negotiation returned {negotiated_type}"),
+					)],
 				}),
 				image: None,
 			});
@@ -418,7 +431,10 @@ async fn render_html<C: HttpClient + Sync>(
 						content:      render_feed(&content).into(),
 						content_type: Some(sf!("application/feed")),
 						method:       sf!("alternate-feed"),
-						notes:        smallvec::smallvec![sf!("Used feed alternate: {}", alternate.url)],
+						diags:        vec![Diag::info(
+							DiagKind::Provenance,
+							sf!("Used feed alternate: {}", alternate.url),
+						)],
 					}),
 					image: None,
 				});
@@ -433,27 +449,33 @@ async fn render_html<C: HttpClient + Sync>(
 				content:      markdown,
 				content_type: Some(content_type),
 				method:       sf!("native"),
-				notes:        SmallVec::new(),
+				diags:        Vec::new(),
 			}),
 			image: None,
 		}),
 		converted => {
-			let mut notes = SmallVec::new();
+			let mut diags = Vec::new();
 			match converted {
-				Ok(_) => notes.push(sf!("Page appears to require JavaScript or is mostly navigation")),
+				Ok(_) => diags.push(Diag::warn(
+					DiagKind::Fallback,
+					"Page appears to require JavaScript or is mostly navigation",
+				)),
 				Err(_) => {
-					notes.push(sf!("html rendering failed (no reader backend produced usable output)",));
+					diags.push(Diag::warn(
+						DiagKind::Fallback,
+						"HTML rendering failed because no reader backend produced usable output",
+					));
 				},
 			}
 			if let Some((endpoint, content)) = try_llms(client, &final_parsed).await {
-				notes.push(sf!("Used llms.txt fallback: {endpoint}"));
+				diags.push(Diag::warn(DiagKind::Fallback, sf!("Used llms.txt fallback: {endpoint}")));
 				return Ok(WebRead {
 					final_url,
 					render: finish(RenderResult {
 						content,
 						content_type: Some(sf!("text/plain")),
 						method: sf!("llms.txt"),
-						notes,
+						diags,
 					}),
 					image: None,
 				});
@@ -464,7 +486,7 @@ async fn render_html<C: HttpClient + Sync>(
 					content: Str::new(html),
 					content_type: Some(content_type),
 					method: sf!("raw-html"),
-					notes,
+					diags,
 				}),
 				image: None,
 			})
@@ -489,12 +511,13 @@ async fn fetch_page<C: HttpClient + Sync>(
 }
 
 fn finish(mut result: RenderResult) -> RenderResult {
-	let (content, truncated) = finalize_output(&result.content);
+	let (content, omitted) = finalize_output(&result.content);
 	result.content = content;
-	if truncated {
-		result
-			.notes
-			.push(sf!("Output truncated to 500000 characters"));
+	if omitted != 0 {
+		result.diags.push(
+			Diag::warn(DiagKind::OutputBounded, "scraper output truncated")
+				.omitted(omitted as u64, Unit::Chars),
+		);
 	}
 	result
 }
@@ -511,13 +534,13 @@ fn text_result(
 			content:      content.into(),
 			content_type: Some(content_type),
 			method:       sf!(method),
-			notes:        SmallVec::new(),
+			diags:        Vec::new(),
 		}),
 		image: None,
 	}
 }
 
-fn binary_fallback(final_url: Str, content_type: Str, bytes: usize, note: Str) -> WebRead {
+fn binary_fallback(final_url: Str, content_type: Str, bytes: usize, diag: Diag) -> WebRead {
 	WebRead {
 		render: RenderResult {
 			content:      sf!(
@@ -528,14 +551,14 @@ fn binary_fallback(final_url: Str, content_type: Str, bytes: usize, note: Str) -
 			),
 			content_type: Some(content_type),
 			method:       sf!("binary"),
-			notes:        smallvec::smallvec![note],
+			diags:        vec![diag],
 		},
 		final_url,
 		image: None,
 	}
 }
 
-fn render_archive(bytes: Bytes, extension: &str) -> Result<String, archive::ArchiveError> {
+fn render_archive(bytes: Bytes, extension: &str) -> Result<(String, usize), archive::ArchiveError> {
 	let hinted = match extension {
 		".zip" | ".jar" | ".war" | ".ear" | ".apk" => Some(archive::ArchiveFormat::Zip),
 		".tar" => Some(archive::ArchiveFormat::Tar),
@@ -552,15 +575,12 @@ fn render_archive(bytes: Bytes, extension: &str) -> Result<String, archive::Arch
 	let mut entries = reader.list_directory("")?;
 	let truncated = entries.len().saturating_sub(ARCHIVE_LIST_LIMIT);
 	entries.truncate(ARCHIVE_LIST_LIMIT);
-	let mut rendered = if entries.is_empty() {
+	let rendered = if entries.is_empty() {
 		"(empty archive directory)".to_owned()
 	} else {
 		archive::format_archive_entry_lines(&entries).join("\n")
 	};
-	if truncated != 0 {
-		write!(rendered, "\n… {truncated} more").expect("writing to a String cannot fail");
-	}
-	Ok(rendered)
+	Ok((rendered, truncated))
 }
 
 fn render_sqlite(bytes: &[u8]) -> Result<String, sqlite::Error> {

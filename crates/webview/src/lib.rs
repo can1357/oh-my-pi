@@ -87,7 +87,7 @@ pub use wk::request_screen_capture;
 
 pub use crate::{
 	discover::{BrowserKind, EngineFamily, InstalledBrowser, discover},
-	error::{Error, Result},
+	error::{CdpDiscoveryError, Error, Result},
 	event::{Frame, WebViewEvent},
 	geometry::Rect,
 	input::{Input, Key, Modifiers, MouseButton},
@@ -143,6 +143,14 @@ pub enum Engine {
 		/// Optional URL/title substring selecting an existing page target.
 		target:   Option<Str>,
 	},
+	/// An OMP Chromium relay endpoint. Relay identity is explicit so generic
+	/// CDP proxies are never sent relay-private commands.
+	ChromiumRelay {
+		/// Relay HTTP discovery URL or websocket URL.
+		endpoint: Str,
+		/// Optional URL/title substring selecting an existing page target.
+		target:   Option<Str>,
+	},
 	/// An installed Gecko-family browser, driven over `WebDriver` `BiDi`.
 	Firefox {
 		/// Path to the browser binary.
@@ -165,6 +173,14 @@ impl Engine {
 	/// Attach to an existing Chromium-compatible CDP endpoint.
 	pub fn chromium_cdp(endpoint: impl IntoStr, target: Option<Str>) -> Self {
 		Self::ChromiumCdp { endpoint: endpoint.to_str(), target }
+	}
+
+	/// Attach through an OMP Chromium relay.
+	///
+	/// Unlike [`Self::chromium_cdp`], this explicitly enables the relay
+	/// handshake and user-tab focus protections independently of URL shape.
+	pub fn chromium_relay(endpoint: impl IntoStr, target: Option<Str>) -> Self {
+		Self::ChromiumRelay { endpoint: endpoint.to_str(), target }
 	}
 
 	/// A Gecko-family browser at `binary`.
@@ -224,7 +240,9 @@ impl Engine {
 		match self {
 			#[cfg(target_os = "macos")]
 			Self::System => EngineKind::System,
-			Self::Chromium { .. } | Self::ChromiumCdp { .. } => EngineKind::Chromium,
+			Self::Chromium { .. } | Self::ChromiumCdp { .. } | Self::ChromiumRelay { .. } => {
+				EngineKind::Chromium
+			},
 			Self::Firefox { .. } => EngineKind::Firefox,
 		}
 	}
@@ -334,6 +352,16 @@ impl WebViewBuilder {
 		self
 	}
 
+	/// Mark the frame viewport as explicitly requested by the caller.
+	///
+	/// OMP relay attachments otherwise preserve the viewport of the
+	/// user-owned tab. Other engines continue to apply their normal viewport
+	/// behavior.
+	pub const fn viewport_explicit(mut self, explicit: bool) -> Self {
+		self.page.viewport_explicit = explicit;
+		self
+	}
+
 	/// Embed as a native child view of `parent` at `bounds` (system engine).
 	///
 	/// # Errors
@@ -410,19 +438,28 @@ impl WebViewBuilder {
 						);
 					})?
 			},
-			Engine::ChromiumCdp { endpoint, target } => {
-				remote::spawn(self.page, move |ctx| {
-					chromium::drive_attached(endpoint, target, config, ctx)
-				})
-				.inspect_err(|error| {
-					tracing::warn!(
-						engine = %engine,
-						surface = "frames",
-						error = error.kind(),
-						"attached webview initialization failed"
-					);
-				})?
-			},
+			Engine::ChromiumCdp { endpoint, target } => remote::spawn(self.page, move |ctx| {
+				chromium::drive_attached(endpoint, target, config, ctx)
+			})
+			.inspect_err(|error| {
+				tracing::warn!(
+					engine = %engine,
+					surface = "frames",
+					error = error.kind(),
+					"attached webview initialization failed"
+				);
+			})?,
+			Engine::ChromiumRelay { endpoint, target } => remote::spawn(self.page, move |ctx| {
+				chromium::drive_relay_attached(endpoint, target, config, ctx)
+			})
+			.inspect_err(|error| {
+				tracing::warn!(
+					engine = %engine,
+					surface = "frames",
+					error = error.kind(),
+					"relay webview initialization failed"
+				);
+			})?,
 			Engine::Firefox { binary } => {
 				remote::spawn(self.page, move |ctx| firefox::drive_frames(binary, config, ctx))
 					.inspect_err(|error| {
@@ -492,23 +529,38 @@ impl WebViewBuilder {
 						);
 					})?
 			},
-			Engine::ChromiumCdp { endpoint, target } => {
-				remote::spawn(self.page, move |ctx| {
-					chromium::drive_attached(endpoint, target, FrameConfig {
-						width: config.width,
-						height: config.height,
-						..FrameConfig::default()
-					}, ctx)
-				})
-				.inspect_err(|error| {
-					tracing::warn!(
-						engine = %engine,
-						surface = "window",
-						error = error.kind(),
-						"attached webview initialization failed"
-					);
-				})?
-			},
+			Engine::ChromiumCdp { endpoint, target } => remote::spawn(self.page, move |ctx| {
+				chromium::drive_attached(
+					endpoint,
+					target,
+					FrameConfig { width: config.width, height: config.height, ..FrameConfig::default() },
+					ctx,
+				)
+			})
+			.inspect_err(|error| {
+				tracing::warn!(
+					engine = %engine,
+					surface = "window",
+					error = error.kind(),
+					"attached webview initialization failed"
+				);
+			})?,
+			Engine::ChromiumRelay { endpoint, target } => remote::spawn(self.page, move |ctx| {
+				chromium::drive_relay_attached(
+					endpoint,
+					target,
+					FrameConfig { width: config.width, height: config.height, ..FrameConfig::default() },
+					ctx,
+				)
+			})
+			.inspect_err(|error| {
+				tracing::warn!(
+					engine = %engine,
+					surface = "window",
+					error = error.kind(),
+					"relay webview initialization failed"
+				);
+			})?,
 			Engine::Firefox { binary } => {
 				remote::spawn(self.page, move |ctx| firefox::drive_window(binary, config, ctx))
 					.inspect_err(|error| {
@@ -752,5 +804,19 @@ impl WebView {
 	/// How this view is presented.
 	pub const fn surface(&self) -> SurfaceKind {
 		self.surface
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn relay_identity_is_explicit_and_independent_of_endpoint_path() {
+		let generic = Engine::chromium_cdp("ws://proxy.example/cdp", None);
+		let relay = Engine::chromium_relay("wss://proxy.example/rewritten/browser", None);
+
+		assert!(matches!(generic, Engine::ChromiumCdp { .. }));
+		assert!(matches!(relay, Engine::ChromiumRelay { .. }));
 	}
 }

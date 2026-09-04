@@ -204,7 +204,7 @@ struct Block {
 }
 
 impl Block {
-	fn new(mode: Mode) -> Self {
+	const fn new(mode: Mode) -> Self {
 		Self {
 			mode,
 			state: BlockState::Active,
@@ -669,10 +669,7 @@ impl Slots {
 		for ordinal in block.emitted..end {
 			let rendered = &frames[ordinal];
 			let frame = Arc::clone(&rendered.frame);
-			out.push(PlannedRow {
-				logical: Self::logical_row(id, ordinal, rendered),
-				frame,
-			});
+			out.push(PlannedRow { logical: Self::logical_row(id, ordinal, rendered), frame });
 		}
 	}
 
@@ -807,10 +804,7 @@ impl Slots {
 					.take_while(|row| row.block == id)
 					.count();
 			let block = self.block(id);
-			if block.state == BlockState::Committed
-				&& !block.frozen
-				&& !block.commit_rows.is_empty()
-			{
+			if block.state == BlockState::Committed && !block.frozen && !block.commit_rows.is_empty() {
 				for (ordinal, rendered) in block.commit_rows.iter().enumerate() {
 					rows.push(PlannedRow {
 						logical: Self::logical_row(id, ordinal, rendered),
@@ -844,13 +838,7 @@ impl Slots {
 						let mut frame = Frame::new(Size::new(self.width, 1));
 						let mut x = 0;
 						for (style, text) in wrapped.row_runs(physical) {
-							x = frame.put_clipped(
-								x,
-								0,
-								self.width.saturating_sub(x),
-								text,
-								style,
-							);
+							x = frame.put_clipped(x, 0, self.width.saturating_sub(x), text, style);
 						}
 						if prompt_start && physical == 0 {
 							frame.mark_row(0, RowMark::PromptStart);
@@ -858,10 +846,7 @@ impl Slots {
 						if prompt_end && physical + 1 == count {
 							frame.mark_row(0, RowMark::PromptEnd);
 						}
-						rows.push(PlannedRow {
-							logical: first.clone(),
-							frame:   Arc::new(frame),
-						});
+						rows.push(PlannedRow { logical: first.clone(), frame: Arc::new(frame) });
 					}
 				}
 			}
@@ -1058,7 +1043,16 @@ mod tests {
 			.find(|row| row.logical().text().contains("colored"))
 			.expect("styled row is staged");
 		assert_eq!(styled.frame().cell(0, 0).style(), expected);
-		assert_eq!(styled.logical().rich.row_runs(0).next().expect("styled run").0, expected);
+		assert_eq!(
+			styled
+				.logical()
+				.rich
+				.row_runs(0)
+				.next()
+				.expect("styled run")
+				.0,
+			expected
+		);
 		assert!(!styled.logical().text().contains('\x1b'), "cached text remains escape-free");
 		slots.commit(initial, Delivered::All);
 

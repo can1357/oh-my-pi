@@ -1,4 +1,4 @@
-//! Full-screen `/usage` dashboard (pi `usage-dashboard.ts`): a compact
+//! Full-screen `/usage` dashboard: a compact
 //! subscriptions grid (one card per provider, worst window per quota
 //! bucket) above a GitHub-style daily activity heatmap, with Enter flipping
 //! into the classic per-account report scrollable in place.
@@ -25,13 +25,13 @@ use super::{
 };
 use crate::notices::{format_duration, format_number};
 
-/// Narrowest provider card (pi `CARD_MIN_WIDTH`).
+/// Narrowest provider card.
 const CARD_MIN_WIDTH: u16 = 32;
-/// Cells between card columns (pi `CARD_GUTTER`).
+/// Cells between card columns.
 const CARD_GUTTER: u16 = 3;
-/// Window rows shown per card before `+N more` (pi `CARD_MAX_WINDOWS`).
+/// Window rows shown per card before `+N more`.
 const CARD_MAX_WINDOWS: usize = 4;
-/// Fraction below which a window counts as untouched (pi `IDLE_FRACTION`).
+/// Fraction below which a window counts as untouched.
 const IDLE_FRACTION: f64 = 0.005;
 /// Border rows, the `checked … ago` row, the rule, and the hint row.
 const CHROME_ROWS: u16 = 5;
@@ -282,7 +282,7 @@ fn unix_now_ms() -> u64 {
 // Subscriptions grid model
 // =============================================================================
 
-/// One quota bucket row on a provider card (pi `CardWindowRow`).
+/// One quota bucket row on a provider card.
 #[derive(Clone, Debug, PartialEq)]
 struct WindowRow {
 	label:    Str,
@@ -291,7 +291,7 @@ struct WindowRow {
 	reset:    Option<String>,
 }
 
-/// Compact per-provider summary backing one card (pi `ProviderCard`).
+/// Compact per-provider summary backing one card.
 #[derive(Clone, Debug, PartialEq)]
 struct Card {
 	name:      Str,
@@ -303,7 +303,7 @@ struct Card {
 	error:     Option<Str>,
 }
 
-/// Card-level status from its rows (pi `aggregateRowStatus`): a mix of
+/// Card-level status from its rows: a mix of
 /// healthy and pressured windows reads as a warning, not as the worst.
 fn aggregate_status(windows: &[WindowRow]) -> UsageStatus {
 	let has = |status| windows.iter().any(|window| window.status == status);
@@ -322,8 +322,8 @@ fn aggregate_status(windows: &[WindowRow]) -> UsageStatus {
 	}
 }
 
-/// Collapses the report's accounts into cards sorted most-pressing first
-/// (pi `buildProviderCards`); fully idle providers collapse into a tick.
+/// Collapses the report's accounts into cards sorted most-pressing first;
+/// fully idle providers collapse into a tick.
 fn build_cards(accounts: &[UsageAccount]) -> Vec<Card> {
 	let mut cards = accounts
 		.iter()
@@ -390,7 +390,7 @@ fn build_cards(accounts: &[UsageAccount]) -> Vec<Card> {
 // Activity heatmap model
 // =============================================================================
 
-/// Week-per-column heatmap grid (pi `HeatmapLayout`): 7 rows × N week
+/// Week-per-column heatmap grid: 7 rows × N week
 /// columns, `None` = future day, else intensity `0..=4`.
 struct Heatmap {
 	month_labels:   Vec<Option<&'static str>>,
@@ -406,7 +406,7 @@ fn utc_date(day_ms: u64) -> Option<Date> {
 }
 
 /// Lays daily activity into a Monday-first grid ending at `today`'s week
-/// (pi `buildHeatmapLayout`). Intensity is square-root scaled against the
+/// Intensity is square-root scaled against the
 /// busiest day over cost, falling back to requests when nothing is priced.
 fn build_heatmap(points: &[UsageDay], weeks: usize, today: Date) -> Heatmap {
 	let any_cost = points.iter().any(|point| point.cost_nano_usd > 0);
@@ -480,7 +480,7 @@ fn build_heatmap(points: &[UsageDay], weeks: usize, today: Date) -> Heatmap {
 	}
 }
 
-/// `$12` at or above one dollar, else `$0.34` (pi heatmap summary).
+/// `$12` at or above one dollar, else `$0.34`.
 fn format_cost(nano_usd: u64) -> String {
 	let dollars = nano_usd / 1_000_000_000;
 	if dollars >= 1 {

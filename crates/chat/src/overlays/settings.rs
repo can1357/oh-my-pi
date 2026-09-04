@@ -6,11 +6,7 @@
 
 use std::fmt::Write as _;
 
-use omp_con::{
-	Ctx, DynamicUiWidget, RegItem, SETTING_TABS, SettingTab, TypeSpec, UiCondition, UiOption,
-	UiRuntimeOptions, UiSpec, UiValueCodec, UiWidget, Value, ValueKind, VarFlags,
-	builtin_ui_entries,
-};
+use omp_con::{Ctx, Hint, Value, ValueKind, VarFlags, VarView};
 use omp_core::{Str, StrMut, sf};
 use omp_tui::{
 	Component, Frame, IntoComponent as _, Key, MouseReport, Prop, Size, Ui, UiContext, UiEvent,
@@ -33,21 +29,146 @@ const PROVIDER_FOOTER: &str = "Enter to edit provider · Esc to go back";
 const EMPTY: &str = "(empty)";
 const CHROME_ROWS: u16 = 11;
 
+/// Settings declaration metadata understood by this projection:
+///
+/// - `ui.tab` and `ui.group` opt an archived variable into this layout.
+/// - `ui.label`, `ui.warning`, and `ui.unit` control presentation.
+/// - `ui.secret`, `ui.ordered`, and `ui.widget=provider-limits` refine widgets.
+/// - `ui.choices` selects a runtime roster (`themes`, `composer-shapes`, or
+///   `thinking-levels`).
+/// - `ui.option.<value>` and `ui.option.<value>.desc` describe finite choices.
+/// - `ui.when` accepts `<convar>=<value>`, `os=macos`, or `term=images`.
+///
+/// Types and [`Hint`] select the ordinary widget; values are always read and
+/// written in their raw convar representation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, strum::EnumString, strum::IntoStaticStr)]
+#[strum(serialize_all = "lowercase")]
+enum SettingTab {
+	Appearance,
+	Model,
+	Interaction,
+	Context,
+	Memory,
+	Files,
+	Shell,
+	Tools,
+	Tasks,
+	Providers,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TabSpec {
+	tab:    SettingTab,
+	label:  &'static str,
+	icon:   &'static str,
+	groups: &'static [&'static str],
+}
+
+const SETTING_TABS: &[TabSpec] = &[
+	TabSpec {
+		tab:    SettingTab::Appearance,
+		label:  "Appearance",
+		icon:   "tab.appearance",
+		groups: &["Theme", "Composer", "Status Line", "Display", "Images"],
+	},
+	TabSpec {
+		tab:    SettingTab::Model,
+		label:  "Model",
+		icon:   "tab.model",
+		groups: &[
+			"Thinking",
+			"Sampling",
+			"Prompt",
+			"Retry & Fallback",
+			"Advisor",
+			"Prewalk",
+			"Vision",
+		],
+	},
+	TabSpec {
+		tab:    SettingTab::Interaction,
+		label:  "Interaction",
+		icon:   "tab.interaction",
+		groups: &[
+			"Input",
+			"Approvals",
+			"Notifications",
+			"Speech",
+			"Collab",
+			"Magic Keywords",
+			"Startup & Updates",
+			"Power",
+			"Agent",
+			"Git",
+		],
+	},
+	TabSpec {
+		tab:    SettingTab::Context,
+		label:  "Context",
+		icon:   "tab.context",
+		groups: &["General", "Compaction", "Rules (TTSR)", "Experimental"],
+	},
+	TabSpec {
+		tab:    SettingTab::Memory,
+		label:  "Memory",
+		icon:   "tab.memory",
+		groups: &["General", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
+	},
+	TabSpec {
+		tab:    SettingTab::Files,
+		label:  "Files",
+		icon:   "tab.files",
+		groups: &["Editing", "Reading", "Read Summaries", "LSP"],
+	},
+	TabSpec {
+		tab:    SettingTab::Shell,
+		label:  "Shell",
+		icon:   "tab.shell",
+		groups: &["Bash", "Eval & Runtimes"],
+	},
+	TabSpec {
+		tab:    SettingTab::Tools,
+		label:  "Tools",
+		icon:   "tab.tools",
+		groups: &[
+			"Available Tools",
+			"Todos",
+			"Grep & Browser",
+			"Computer",
+			"GitHub",
+			"Output Limits",
+			"Execution",
+			"Discovery & MCP",
+			"Extensions",
+			"Developer",
+		],
+	},
+	TabSpec {
+		tab:    SettingTab::Tasks,
+		label:  "Tasks",
+		icon:   "tab.tasks",
+		groups: &["Modes", "Subagents", "Isolation", "Commands & Skills"],
+	},
+	TabSpec {
+		tab:    SettingTab::Providers,
+		label:  "Providers",
+		icon:   "tab.providers",
+		groups: &["Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
+	},
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeChoices {
+	Themes,
+	ComposerShapes,
+	ThinkingLevels,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Choice {
 	value:       Str,
 	label:       Str,
 	description: Str,
-}
-
-impl From<&UiOption> for Choice {
-	fn from(option: &UiOption) -> Self {
-		Self {
-			value:       Str::new_static(option.value),
-			label:       Str::new_static(option.label),
-			description: Str::new_static(option.description),
-		}
-	}
 }
 
 impl From<&SettingsChoice> for Choice {
@@ -63,9 +184,8 @@ impl From<&SettingsChoice> for Choice {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RowWidget {
 	Boolean,
-	Enum(Vec<Str>),
 	Submenu(Vec<Choice>),
-	RuntimeSubmenu(UiRuntimeOptions, Vec<Choice>),
+	RuntimeSubmenu(RuntimeChoices, Vec<Choice>),
 	ProviderLimits,
 	Text { secret: bool },
 	MultiSelect { options: Vec<Choice>, ordered: bool },
@@ -84,20 +204,18 @@ enum RowValue {
 /// display label.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SettingRow {
-	convar:        Str,
-	pi_path:       Option<Str>,
-	label:         Str,
-	description:   Str,
-	warning:       Option<Str>,
-	tab:           SettingTab,
-	group:         Str,
-	widget:        RowWidget,
-	value:         RowValue,
-	default:       RowValue,
-	value_kind:    ValueKind,
-	codec:         UiValueCodec,
-	condition:     Option<UiCondition>,
-	condition_met: bool,
+	convar:      Str,
+	label:       Str,
+	description: Str,
+	warning:     Option<Str>,
+	unit:        Option<Str>,
+	tab:         SettingTab,
+	group:       Str,
+	widget:      RowWidget,
+	value:       RowValue,
+	default:     RowValue,
+	value_kind:  ValueKind,
+	visibility:  Option<(Str, bool)>,
 }
 
 impl SettingRow {
@@ -106,7 +224,7 @@ impl SettingRow {
 	}
 
 	fn display(&self) -> Str {
-		match (&self.widget, &self.value) {
+		let display = match (&self.widget, &self.value) {
 			(RowWidget::Boolean, RowValue::Boolean(value)) => {
 				Str::new_static(if *value { "On" } else { "Off" })
 			},
@@ -148,17 +266,35 @@ impl SettingRow {
 				text.freeze()
 			},
 			(RowWidget::Text { secret: true }, RowValue::Text(value)) => {
-				Str::new_static(if value.is_empty() {
+				return Str::new_static(if value.is_empty() {
 					EMPTY
 				} else {
 					"••••••••"
-				})
+				});
 			},
 			(_, RowValue::Scalar(value) | RowValue::Text(value)) if value.is_empty() => {
-				Str::new_static(EMPTY)
+				return Str::new_static(EMPTY);
 			},
 			(_, RowValue::Scalar(value) | RowValue::Text(value)) => value.clone(),
-			_ => Str::new_static(EMPTY),
+			_ => return Str::new_static(EMPTY),
+		};
+		let Some(unit) = self.unit.as_deref() else {
+			return display;
+		};
+		if self.value_kind == ValueKind::Duration {
+			return display;
+		}
+		let (suffix, already_labeled) = match unit {
+			"kib" => (" KiB", display.ends_with("KiB") || display.ends_with("KB")),
+			"percent" => ("%", display.ends_with('%')),
+			"s" => (" s", display.ends_with('s')),
+			"ms" => (" ms", display.ends_with("ms")),
+			_ => return display,
+		};
+		if already_labeled {
+			display
+		} else {
+			sf!("{display}{suffix}")
 		}
 	}
 
@@ -172,273 +308,256 @@ impl SettingRow {
 	}
 }
 
-fn static_widget(widget: UiWidget) -> Option<RowWidget> {
-	match widget {
-		UiWidget::Boolean => Some(RowWidget::Boolean),
-		UiWidget::Enum(values) => {
-			Some(RowWidget::Enum(values.iter().copied().map(Str::new_static).collect()))
-		},
-		UiWidget::Submenu(options) => {
-			Some(RowWidget::Submenu(options.iter().map(Choice::from).collect()))
-		},
-		UiWidget::RuntimeSubmenu(source) => Some(RowWidget::RuntimeSubmenu(source, Vec::new())),
-		UiWidget::ProviderLimits => Some(RowWidget::ProviderLimits),
-		UiWidget::ConfigOnly => None,
-		UiWidget::Text { secret } => Some(RowWidget::Text { secret }),
-		UiWidget::MultiSelect { options, ordered } => Some(RowWidget::MultiSelect {
-			options: options.iter().map(Choice::from).collect(),
-			ordered,
-		}),
+fn static_choice(spec: &VarView<'_>, value: &'static str) -> Choice {
+	let label_key = sf!("ui.option.{value}");
+	let description_key = sf!("ui.option.{value}.desc");
+	Choice {
+		value:       Str::new_static(value),
+		label:       spec
+			.meta_get(label_key.as_str())
+			.map_or_else(|| Str::new_static(value), Str::new),
+		description: spec
+			.meta_get(description_key.as_str())
+			.map_or_else(Str::default, Str::new),
 	}
 }
 
-fn dynamic_widget(widget: &DynamicUiWidget, ty: &TypeSpec) -> RowWidget {
-	match widget {
-		DynamicUiWidget::Auto => match ty.kind {
-			ValueKind::Bool => RowWidget::Boolean,
-			ValueKind::Enum => {
-				RowWidget::Enum(ty.variants.iter().copied().map(Str::new_static).collect())
-			},
-			_ => RowWidget::Text { secret: false },
-		},
-		DynamicUiWidget::Submenu(options) => RowWidget::Submenu(
-			options
-				.iter()
-				.map(|option| Choice {
-					value:       option.value.clone(),
-					label:       option.label.clone(),
-					description: option.description.clone(),
-				})
-				.collect(),
-		),
-		DynamicUiWidget::MultiSelect { options, ordered } => RowWidget::MultiSelect {
-			options: options
-				.iter()
-				.map(|option| Choice {
-					value:       option.value.clone(),
-					label:       option.label.clone(),
-					description: option.description.clone(),
-				})
-				.collect(),
-			ordered: *ordered,
-		},
+fn suggested_values(spec: &VarView<'_>) -> Option<&'static [&'static str]> {
+	match spec.hint {
+		Hint::Suggest(values) => Some(values),
+		Hint::None | Hint::Group(_) => None,
 	}
 }
 
-fn decimal(value: f64) -> Str {
-	if value.fract().abs() < f64::EPSILON {
-		sf!("{value:.0}")
-	} else {
-		let mut text = sf!("{value:.6}").to_string();
-		while text.ends_with('0') {
-			text.pop();
-		}
-		if text.ends_with('.') {
-			text.pop();
-		}
-		Str::new(text)
+fn finite_values(spec: &VarView<'_>) -> Option<&'static [&'static str]> {
+	match spec.ty.kind {
+		ValueKind::Enum => Some(spec.ty.variants),
+		ValueKind::Str => suggested_values(spec),
+		ValueKind::List => match spec.ty.elem {
+			Some(elem) if elem.kind == ValueKind::Enum => Some(elem.variants),
+			Some(elem) if elem.kind == ValueKind::Str => suggested_values(spec),
+			_ => None,
+		},
+		_ => None,
 	}
 }
 
-fn span_units(value: &Value, unit_ms: bool) -> Str {
-	let Value::Duration(span) = value else {
-		return Str::new(value.to_string());
-	};
-	let Some(duration) = span.as_finite() else {
-		return Str::new_static("0");
-	};
-	let milliseconds = duration.to_std().map_or(0, |duration| duration.as_millis());
-	if unit_ms {
-		sf!("{milliseconds}")
-	} else {
-		sf!("{}", milliseconds / 1000)
-	}
-}
-
-fn project_value(codec: UiValueCodec, widget: &RowWidget, value: &Value) -> RowValue {
-	match codec {
-		UiValueCodec::InvertedBoolean => RowValue::Boolean(!value.as_bool().unwrap_or(false)),
-		UiValueCodec::OnOffBoolean => {
-			RowValue::Scalar(Str::new_static(if value.as_bool().unwrap_or(false) {
-				"on"
-			} else {
-				"off"
-			}))
-		},
-		UiValueCodec::IsolationEnabled => {
-			RowValue::Boolean(value.as_str().is_some_and(|value| value != "none"))
-		},
-		UiValueCodec::Kibibytes => {
-			let bytes = value.as_int().map_or(0.0, |value| value as f64);
-			RowValue::Scalar(decimal(bytes / 1024.0))
-		},
-		UiValueCodec::PercentFraction => {
-			let fraction = value.as_float().unwrap_or(0.0);
-			RowValue::Scalar(decimal(fraction * 100.0))
-		},
-		UiValueCodec::DefaultMinusOne => RowValue::Scalar(if value.as_int() == Some(-1) {
-			Str::new_static("default")
-		} else {
-			Str::new(value.to_string())
-		}),
-		UiValueCodec::OnlineTinyModel => RowValue::Scalar(value.as_str().map_or_else(
-			|| Str::new(value.to_string()),
-			|value| {
-				if value == "@tiny" {
-					Str::new_static("online")
-				} else {
-					Str::new(value)
+fn declared_choices(spec: &VarView<'_>) -> Vec<Choice> {
+	if let Some(values) = finite_values(spec) {
+		let constrained = spec.metadata().any(|(key, _)| {
+			key.strip_prefix("ui.option.")
+				.is_some_and(|value| !value.ends_with(".desc"))
+		});
+		return values
+			.iter()
+			.copied()
+			.filter(|value| {
+				if !constrained {
+					return true;
 				}
-			},
-		)),
-		UiValueCodec::EditModeRevision => RowValue::Scalar(value.as_str().map_or_else(
-			|| Str::new(value.to_string()),
-			|value| match value {
-				"" | "hl.1" => Str::new_static("hashline"),
-				"rep.2" => Str::new_static("replace"),
-				"patch.2" => Str::new_static("patch"),
-				"apply_patch.1" => Str::new_static("apply_patch"),
-				"sloppy.1" => Str::new_static("sloppy"),
-				value => Str::new(value),
-			},
-		)),
-		UiValueCodec::SecondsDuration => RowValue::Scalar(span_units(value, false)),
-		UiValueCodec::MillisecondsDuration => RowValue::Scalar(span_units(value, true)),
-		UiValueCodec::Identity => match (widget, value) {
-			(RowWidget::Boolean, Value::Bool(value)) => RowValue::Boolean(*value),
-			(RowWidget::MultiSelect { .. }, Value::List(values)) => RowValue::Multi(
-				values
-					.iter()
-					.filter_map(|value| value.as_str().map(Str::new))
-					.collect(),
-			),
-			(RowWidget::ProviderLimits, Value::Kv(values)) => {
-				let mut limits = values
-					.iter()
-					.filter_map(|(provider, value)| {
-						value
-							.as_int()
-							.filter(|limit| *limit > 0)
-							.map(|limit| (provider.clone(), limit))
-					})
-					.collect::<Vec<_>>();
-				limits.sort_by(|left, right| left.0.cmp(&right.0));
-				RowValue::ProviderLimits(limits)
-			},
-			(RowWidget::Text { .. }, Value::Str(value)) => RowValue::Text(value.clone()),
-			(RowWidget::Text { .. }, value) => RowValue::Text(Str::new(value.to_string())),
-			(_, value) => RowValue::Scalar(
-				value
-					.as_str()
-					.map_or_else(|| Str::new(value.to_string()), Str::new),
-			),
-		},
+				let label_key = sf!("ui.option.{value}");
+				spec.meta_get(label_key.as_str()).is_some()
+			})
+			.map(|value| static_choice(spec, value))
+			.collect();
 	}
-}
-
-fn static_row(con: &Ctx, ui: &UiSpec) -> Option<SettingRow> {
-	let RegItem::Var(spec) = con.find(ui.convar)? else {
-		return None;
-	};
-	if !spec.flags.contains(VarFlags::ARCHIVE) {
-		return None;
-	}
-	let widget = static_widget(ui.widget)?;
-	let value = con.get(spec.name).unwrap_or_else(|| (spec.default)());
-	let default = (spec.default)();
-	Some(SettingRow {
-		convar: Str::new_static(ui.convar),
-		pi_path: Some(Str::new_static(ui.pi_path)),
-		label: Str::new_static(ui.label),
-		description: Str::new_static(ui.description),
-		warning: ui.warning.map(Str::new_static),
-		tab: ui.tab,
-		group: Str::new_static(ui.group),
-		value: project_value(ui.codec, &widget, &value),
-		default: project_value(ui.codec, &widget, &default),
-		value_kind: spec.ty.kind,
-		widget,
-		codec: ui.codec,
-		condition: ui.condition,
-		condition_met: ui.condition.is_none_or(|condition| condition.visible(con)),
-	})
-}
-
-fn dynamic_row(con: &Ctx, spec: &omp_con::DynamicVarSpec) -> Option<SettingRow> {
-	let ui = spec.ui.as_ref()?;
-	if !spec.flags.contains(VarFlags::ARCHIVE) || !ui.is_valid(spec.name.as_str()) {
-		return None;
-	}
-	let widget = dynamic_widget(&ui.widget, spec.ty);
-	let value = con
-		.get(spec.name.as_str())
-		.unwrap_or_else(|| spec.default.clone());
-	Some(SettingRow {
-		convar: spec.name.clone(),
-		pi_path: None,
-		label: ui.label.clone(),
-		description: ui.description.clone(),
-		warning: ui.warning.clone(),
-		tab: ui.tab,
-		group: ui.group.clone(),
-		value: project_value(UiValueCodec::Identity, &widget, &value),
-		default: project_value(UiValueCodec::Identity, &widget, &spec.default),
-		value_kind: spec.ty.kind,
-		widget,
-		codec: UiValueCodec::Identity,
-		condition: None,
-		condition_met: true,
-	})
-}
-
-/// Curated built-in rows plus extension rows whose admitted manifest carries
-/// equivalent typed UI metadata. ARCHIVE alone never creates a row.
-#[must_use]
-pub fn settings_rows(con: &Ctx) -> Vec<SettingRow> {
-	builtin_ui_entries()
-		.filter_map(|ui| static_row(con, ui))
-		.chain(con.dynamic_vars().filter_map(|spec| dynamic_row(con, spec)))
+	spec
+		.metadata()
+		.filter_map(|(key, label)| {
+			let value = key.strip_prefix("ui.option.")?;
+			if value.ends_with(".desc") {
+				return None;
+			}
+			let description_key = sf!("ui.option.{value}.desc");
+			Some(Choice {
+				value:       Str::new(value),
+				label:       Str::new(label),
+				description: spec
+					.meta_get(description_key.as_str())
+					.map_or_else(Str::default, Str::new),
+			})
+		})
 		.collect()
 }
 
-fn condition_visible(condition: UiCondition, rows: &[SettingRow], fallback: bool) -> bool {
-	let scalar = |name: &str| {
-		rows
-			.iter()
-			.find(|row| row.convar == name)
-			.and_then(|row| match &row.value {
-				RowValue::Boolean(value) => {
-					Some(Str::new_static(if *value { "true" } else { "false" }))
-				},
-				RowValue::Scalar(value) | RowValue::Text(value) => Some(value.clone()),
-				RowValue::Multi(_) | RowValue::ProviderLimits(_) => None,
+fn runtime_choices(spec: &VarView<'_>) -> Option<RuntimeChoices> {
+	match spec.meta_get("ui.choices")? {
+		"themes" => Some(RuntimeChoices::Themes),
+		"composer-shapes" => Some(RuntimeChoices::ComposerShapes),
+		"thinking-levels" => Some(RuntimeChoices::ThinkingLevels),
+		_ => None,
+	}
+}
+
+fn widget(spec: &VarView<'_>) -> Option<RowWidget> {
+	if spec.meta_get("ui.widget") == Some("provider-limits") {
+		return (spec.ty.kind == ValueKind::Kv).then_some(RowWidget::ProviderLimits);
+	}
+	if let Some(source) = runtime_choices(spec) {
+		return Some(RowWidget::RuntimeSubmenu(source, Vec::new()));
+	}
+	match spec.ty.kind {
+		ValueKind::Bool => Some(RowWidget::Boolean),
+		ValueKind::Enum => {
+			let options = declared_choices(spec);
+			(!options.is_empty()).then_some(RowWidget::Submenu(options))
+		},
+		ValueKind::Str => {
+			let options = declared_choices(spec);
+			if options.is_empty() {
+				Some(RowWidget::Text { secret: spec.meta_get("ui.secret") == Some("true") })
+			} else {
+				Some(RowWidget::Submenu(options))
+			}
+		},
+		ValueKind::List => {
+			let options = declared_choices(spec);
+			(!options.is_empty()).then_some(RowWidget::MultiSelect {
+				options,
+				ordered: spec.meta_get("ui.ordered") == Some("true"),
 			})
+		},
+		ValueKind::Int | ValueKind::Float => {
+			let options = declared_choices(spec);
+			if options.is_empty() {
+				Some(RowWidget::Text { secret: spec.meta_get("ui.secret") == Some("true") })
+			} else {
+				Some(RowWidget::Submenu(options))
+			}
+		},
+		ValueKind::Duration => {
+			Some(RowWidget::Text { secret: spec.meta_get("ui.secret") == Some("true") })
+		},
+		ValueKind::Kv => None,
+	}
+}
+
+fn project_value(widget: &RowWidget, value: &Value) -> RowValue {
+	match (widget, value) {
+		(RowWidget::Boolean, Value::Bool(value)) => RowValue::Boolean(*value),
+		(RowWidget::MultiSelect { .. }, Value::List(values)) => RowValue::Multi(
+			values
+				.iter()
+				.filter_map(|value| value.as_str().map(Str::new))
+				.collect(),
+		),
+		(RowWidget::ProviderLimits, Value::Kv(values)) => {
+			let mut limits = values
+				.iter()
+				.filter_map(|(provider, value)| {
+					value
+						.as_int()
+						.filter(|limit| *limit > 0)
+						.map(|limit| (provider.clone(), limit))
+				})
+				.collect::<Vec<_>>();
+			limits.sort_by(|left, right| left.0.cmp(&right.0));
+			RowValue::ProviderLimits(limits)
+		},
+		(RowWidget::Text { .. }, Value::Str(value)) => RowValue::Text(value.clone()),
+		(RowWidget::Text { .. }, value) => RowValue::Text(Str::new(value.to_string())),
+		(_, value) => RowValue::Scalar(
+			value
+				.as_str()
+				.map_or_else(|| Str::new(value.to_string()), Str::new),
+		),
+	}
+}
+
+fn raw_scalar(value: &Value) -> Str {
+	match value {
+		Value::Bool(value) => Str::new_static(if *value { "true" } else { "false" }),
+		Value::Str(value) | Value::Enum(value) => value.clone(),
+		value => Str::new(value.to_string()),
+	}
+}
+
+fn initial_visibility(con: &Ctx, expression: &str) -> bool {
+	match expression {
+		"os=macos" => cfg!(target_os = "macos"),
+		"term=images" => false,
+		_ => expression
+			.split_once('=')
+			.and_then(|(name, expected)| con.get(name).map(|value| (value, expected)))
+			.is_some_and(|(value, expected)| raw_scalar(&value) == expected),
+	}
+}
+
+fn row(con: &Ctx, spec: &VarView<'_>) -> Option<SettingRow> {
+	if !spec.flags.contains(VarFlags::ARCHIVE) {
+		return None;
+	}
+	let tab = spec.meta_get("ui.tab")?.parse::<SettingTab>().ok()?;
+	let group = spec.meta_get("ui.group")?;
+	let label = spec.meta_get("ui.label")?;
+	let tab_spec = SETTING_TABS.iter().find(|candidate| candidate.tab == tab)?;
+	if label.trim().is_empty()
+		|| label == spec.name
+		|| label.contains("::")
+		|| !tab_spec.groups.contains(&group)
+	{
+		return None;
+	}
+	let widget = widget(spec)?;
+	let value = con.get(spec.name).unwrap_or_else(|| spec.default());
+	let default = spec.default();
+	let visibility = spec
+		.meta_get("ui.when")
+		.map(|expression| (Str::new(expression), initial_visibility(con, expression)));
+	let description = if spec.desc.is_empty() {
+		spec.meta_get("ui.description").unwrap_or_default()
+	} else {
+		spec.desc
 	};
-	match condition {
-		UiCondition::MacOs => cfg!(target_os = "macos"),
-		UiCondition::HasImageProtocol => fallback,
-		UiCondition::AdvisorEnabled => {
-			scalar("ai_advisor_enabled").is_some_and(|value| matches!(value.as_str(), "true" | "on"))
-		},
-		UiCondition::HindsightActive => {
-			scalar("ai_memory_backend").is_some_and(|value| value == "hindsight")
-		},
-		UiCondition::MnemopiActive => {
-			scalar("ai_memory_backend").is_some_and(|value| value == "mnemopi")
-		},
-		UiCondition::AutolearnActive => {
-			scalar("ai_autolearn_enabled").is_some_and(|value| matches!(value.as_str(), "true" | "on"))
-		},
-		UiCondition::AutoThinkingActive => {
-			scalar("ai_default_thinking").is_some_and(|value| value == "auto")
-		},
-		UiCondition::UsageAwareFallbackEnabled => scalar("ai_retry_usage_aware_fallback")
-			.is_some_and(|value| matches!(value.as_str(), "true" | "on")),
-		UiCondition::PlanModeEnabled => {
-			scalar("ai_plan_enabled").is_some_and(|value| matches!(value.as_str(), "true" | "on"))
-		},
-		UiCondition::UnexpectedStopSmart => {
-			scalar("ai_features_unexpected_stop_detection").map_or(fallback, |value| value == "smart")
+	Some(SettingRow {
+		convar: Str::new(spec.name),
+		label: Str::new(label),
+		description: Str::new(description),
+		warning: spec.meta_get("ui.warning").map(Str::new),
+		unit: spec.meta_get("ui.unit").map(Str::new),
+		tab,
+		group: Str::new(group),
+		value: project_value(&widget, &value),
+		default: project_value(&widget, &default),
+		value_kind: spec.ty.kind,
+		widget,
+		visibility,
+	})
+}
+
+/// Projects archived declarations carrying valid `ui.tab` and `ui.group`
+/// metadata into the curated chat layout.
+#[must_use]
+pub fn settings_rows(con: &Ctx) -> Vec<SettingRow> {
+	con.vars().filter_map(|spec| row(con, &spec)).collect()
+}
+
+fn row_scalar(row: &SettingRow) -> Option<Str> {
+	match &row.value {
+		RowValue::Boolean(value) => Some(Str::new_static(if *value { "true" } else { "false" })),
+		RowValue::Scalar(value) | RowValue::Text(value) => Some(value.clone()),
+		RowValue::Multi(_) | RowValue::ProviderLimits(_) => None,
+	}
+}
+
+fn visibility_matches(
+	expression: &str,
+	rows: &[SettingRow],
+	initial: bool,
+	has_image_protocol: bool,
+) -> bool {
+	match expression {
+		"os=macos" => cfg!(target_os = "macos"),
+		"term=images" => has_image_protocol,
+		_ => {
+			let Some((name, expected)) = expression.split_once('=') else {
+				return false;
+			};
+			rows
+				.iter()
+				.find(|row| row.convar == name)
+				.and_then(row_scalar)
+				.map_or(initial, |value| value == expected)
 		},
 	}
 }
@@ -529,61 +648,50 @@ impl SettingsPanel {
 		inventory: SettingsInventory,
 		ctx: &UiContext,
 	) -> Self {
-		const COMPOSER_SHAPES: &[UiOption] = &[
-			UiOption::new(
+		const COMPOSER_SHAPES: &[(&str, &str, &str)] = &[
+			(
 				"band",
 				"Status Band (Default)",
 				"Flush soft-capped status band above a curved prompt, no frame",
 			),
-			UiOption::new(
-				"box",
-				"Rounded Box",
-				"Status line embedded in top border, compact 2-line prompt",
-			),
-			UiOption::new(
+			("box", "Rounded Box", "Status line embedded in top border, compact 2-line prompt"),
+			(
 				"claude",
 				"Claude Code",
 				"Full-width horizontal rules above and below, status line at bottom",
 			),
-			UiOption::new("pi", "Pi", "Framed horizontal rules with status line at bottom"),
-			UiOption::new(
+			("pi", "Pi", "Framed horizontal rules with status line at bottom"),
+			(
 				"borderless",
 				"Borderless",
 				"Clean prompt glyph with status line at bottom, no box borders",
 			),
-			UiOption::new(
-				"rule",
-				"Top Rule Dock",
-				"Single top rule with status docked onto it and below",
-			),
-			UiOption::new("field", "Compact Field", "Filled one-row field with accent end caps"),
-			UiOption::new(
-				"rail",
-				"Accent Rail",
-				"Filled one-row field anchored by a single accent rail",
-			),
+			("rule", "Top Rule Dock", "Single top rule with status docked onto it and below"),
+			("field", "Compact Field", "Filled one-row field with accent end caps"),
+			("rail", "Accent Rail", "Filled one-row field anchored by a single accent rail"),
 		];
 		for row in &mut rows {
 			let RowWidget::RuntimeSubmenu(source, options) = &mut row.widget else {
 				continue;
 			};
 			let runtime = match source {
-				UiRuntimeOptions::Themes => &inventory.themes,
-				UiRuntimeOptions::ComposerShapes => &inventory.composer_shapes,
-				UiRuntimeOptions::ThinkingLevels => &inventory.thinking_levels,
+				RuntimeChoices::Themes => &inventory.themes,
+				RuntimeChoices::ComposerShapes => &inventory.composer_shapes,
+				RuntimeChoices::ThinkingLevels => &inventory.thinking_levels,
 			};
 			options.extend(runtime.iter().map(Choice::from));
-			if *source == UiRuntimeOptions::ComposerShapes {
-				for option in COMPOSER_SHAPES {
-					if !options
-						.iter()
-						.any(|candidate| candidate.value == option.value)
-					{
-						options.push(Choice::from(option));
+			if *source == RuntimeChoices::ComposerShapes {
+				for &(value, label, description) in COMPOSER_SHAPES {
+					if !options.iter().any(|candidate| candidate.value == value) {
+						options.push(Choice {
+							value:       Str::new_static(value),
+							label:       Str::new_static(label),
+							description: Str::new_static(description),
+						});
 					}
 				}
 			}
-			if *source != UiRuntimeOptions::ThinkingLevels {
+			if *source != RuntimeChoices::ThinkingLevels {
 				for value in [&row.value, &row.default] {
 					let RowValue::Scalar(value) = value else {
 						continue;
@@ -674,12 +782,8 @@ impl SettingsPanel {
 	}
 
 	fn row_visible(&self, row: &SettingRow) -> bool {
-		row.condition.is_none_or(|condition| {
-			if condition == UiCondition::HasImageProtocol {
-				self.has_image_protocol
-			} else {
-				condition_visible(condition, &self.rows, row.condition_met)
-			}
+		row.visibility.as_ref().is_none_or(|(expression, initial)| {
+			visibility_matches(expression, &self.rows, *initial, self.has_image_protocol)
 		})
 	}
 
@@ -869,11 +973,7 @@ impl SettingsPanel {
 
 	fn end_search(&mut self, jump_to_selection: bool) {
 		let keep = jump_to_selection
-			.then(|| {
-				self
-					.selected()
-					.map(|row| row.pi_path.clone().unwrap_or_else(|| row.convar.clone()))
-			})
+			.then(|| self.selected().map(|row| row.convar.clone()))
 			.flatten();
 		if !jump_to_selection {
 			self.tab = self.pre_search_tab;
@@ -882,7 +982,10 @@ impl SettingsPanel {
 		self.query_cursor = 0;
 		self.reflow_items();
 		if let Some(keep) = keep
-			&& let Some(index) = self.items.iter().position(|item| matches!(item, Item::Row(row) if self.rows[*row].pi_path.as_ref().unwrap_or(&self.rows[*row].convar) == &keep))
+			&& let Some(index) = self
+				.items
+				.iter()
+				.position(|item| matches!(item, Item::Row(row) if self.rows[*row].convar == keep))
 		{
 			self.selected = index;
 			self.clamp_scroll();
@@ -899,20 +1002,6 @@ impl SettingsPanel {
 					return PanelEvent::Consumed;
 				};
 				self.commit(index, RowValue::Boolean(!value))
-			},
-			RowWidget::Enum(values) => {
-				if values.is_empty() {
-					return PanelEvent::Consumed;
-				}
-				let current = match &self.rows[index].value {
-					RowValue::Scalar(value) => value,
-					_ => return PanelEvent::Consumed,
-				};
-				let next = values
-					.iter()
-					.position(|value| value == current)
-					.map_or(0, |at| (at + 1) % values.len());
-				self.commit(index, RowValue::Scalar(values[next].clone()))
 			},
 			RowWidget::Submenu(options) | RowWidget::RuntimeSubmenu(_, options) => {
 				let current = match &self.rows[index].value {
@@ -973,66 +1062,14 @@ impl SettingsPanel {
 	}
 
 	fn command_value(row: &SettingRow, value: &RowValue) -> Result<Str, Str> {
-		match (row.codec, value) {
-			(UiValueCodec::InvertedBoolean, RowValue::Boolean(value)) => {
-				Ok(Str::new_static(if *value { "false" } else { "true" }))
-			},
-			(UiValueCodec::OnOffBoolean, RowValue::Scalar(value)) => {
-				Ok(Str::new_static(if value == "on" { "true" } else { "false" }))
-			},
-			(UiValueCodec::IsolationEnabled, RowValue::Boolean(value)) => {
-				Ok(Str::new_static(if *value { "auto" } else { "none" }))
-			},
-			(UiValueCodec::Kibibytes, RowValue::Scalar(value)) => value
-				.parse::<f64>()
-				.map(|value| sf!("{:.0}", value * 1024.0))
-				.map_err(|_| Str::new_static("Invalid kilobyte value")),
-			(UiValueCodec::PercentFraction, RowValue::Scalar(value)) => {
-				if value == "default" {
-					return Ok(Str::new_static("0.8"));
-				}
-				value
-					.parse::<f64>()
-					.map(|value| decimal(value / 100.0))
-					.map_err(|_| Str::new_static("Invalid percent value"))
-			},
-			(UiValueCodec::DefaultMinusOne, RowValue::Scalar(value)) => Ok(if value == "default" {
-				Str::new_static("-1")
-			} else {
-				value.clone()
-			}),
-			(UiValueCodec::OnlineTinyModel, RowValue::Scalar(value)) => Ok(if value == "online" {
-				Str::new_static("@tiny")
-			} else {
-				value.clone()
-			}),
-			(UiValueCodec::EditModeRevision, RowValue::Scalar(value)) => match value.as_str() {
-				"apply_patch" => Ok(Str::new_static("apply_patch.1")),
-				"hashline" => Ok(Str::new_static("hl.1")),
-				"patch" => Ok(Str::new_static("patch.2")),
-				"replace" => Ok(Str::new_static("rep.2")),
-				"sloppy" => Ok(Str::new_static("sloppy.1")),
-				_ => Err(Str::new_static("Unknown edit mode")),
-			},
-			(UiValueCodec::SecondsDuration, RowValue::Scalar(value)) => Ok(if value == "0" {
-				Str::new_static("never")
-			} else {
-				sf!("{value}s")
-			}),
-			(UiValueCodec::MillisecondsDuration, RowValue::Scalar(value)) => Ok(if value == "0" {
-				Str::new_static("never")
-			} else {
-				sf!("{value}ms")
-			}),
-			(UiValueCodec::Identity, RowValue::Boolean(value)) => {
-				Ok(Str::new_static(if *value { "true" } else { "false" }))
-			},
-			(UiValueCodec::Identity, RowValue::Scalar(value)) => Ok(value.clone()),
-			(UiValueCodec::Identity, RowValue::Text(value)) if row.value_kind == ValueKind::Str => {
+		match value {
+			RowValue::Boolean(value) => Ok(Str::new_static(if *value { "true" } else { "false" })),
+			RowValue::Scalar(value) => Ok(value.clone()),
+			RowValue::Text(value) if row.value_kind == ValueKind::Str => {
 				Ok(Str::new(Value::Str(value.clone()).to_string()))
 			},
-			(UiValueCodec::Identity, RowValue::Text(value)) => Ok(value.clone()),
-			(UiValueCodec::Identity, RowValue::Multi(values)) => {
+			RowValue::Text(value) => Ok(value.clone()),
+			RowValue::Multi(values) => {
 				let mut text = StrMut::new("[");
 				for (index, value) in values.iter().enumerate() {
 					if index > 0 {
@@ -1043,7 +1080,7 @@ impl SettingsPanel {
 				text.push(']');
 				Ok(text.freeze())
 			},
-			(UiValueCodec::Identity, RowValue::ProviderLimits(limits)) => {
+			RowValue::ProviderLimits(limits) => {
 				let value = Value::Kv(omp_con::Kv(
 					limits
 						.iter()
@@ -1052,7 +1089,6 @@ impl SettingsPanel {
 				));
 				Ok(Str::new(value.to_string()))
 			},
-			_ => Err(Str::new_static("Setting value does not match its UI control")),
 		}
 	}
 
@@ -1151,15 +1187,13 @@ impl SettingsPanel {
 
 	fn previewable(row: &SettingRow) -> bool {
 		matches!(
-			row.pi_path.as_deref(),
-			Some(
-				"theme.dark"
-					| "theme.light"
-					| "composer.shape"
-					| "statusLine.preset"
-					| "statusLine.separator"
-					| "statusLine.contextLine"
-			)
+			row.convar.as_str(),
+			"cl_theme_dark"
+				| "cl_theme_light"
+				| "cl_composer_shape"
+				| "cl_status_line_preset"
+				| "cl_status_line_separator"
+				| "cl_status_line_context_line"
 		)
 	}
 
@@ -2130,10 +2164,7 @@ impl Panel for SettingsPanel {
 			Key::Enter => self.activate(),
 			Key::Space
 				if self.query.is_empty()
-					&& matches!(
-						self.selected().map(|row| &row.widget),
-						Some(RowWidget::Boolean | RowWidget::Enum(_))
-					) =>
+					&& matches!(self.selected().map(|row| &row.widget), Some(RowWidget::Boolean)) =>
 			{
 				self.activate()
 			},
@@ -2311,7 +2342,9 @@ impl Panel for SettingsPanel {
 
 #[cfg(test)]
 mod tests {
-	use omp_con::{DynamicUiSpec, DynamicUiWidget, DynamicVarSpec, SettingTab, TypeSpec, VarFlags};
+	use std::sync::Arc;
+
+	use omp_con::{DynamicVarSpec, TypeSpec, VarFlags};
 	use omp_tui::{Mods, Mouse, MouseButton, frame_text};
 
 	use super::*;
@@ -2333,19 +2366,17 @@ mod tests {
 	) -> SettingRow {
 		SettingRow {
 			convar: sf!("internal_{}", label.to_ascii_lowercase().replace(' ', "_")),
-			pi_path: None,
 			label: Str::new_static(label),
 			description: sf!("Human description for {label}"),
 			warning: None,
+			unit: None,
 			tab,
 			group: Str::new_static(group),
 			widget,
 			value: value.clone(),
 			default: value,
 			value_kind: ValueKind::Str,
-			codec: UiValueCodec::Identity,
-			condition: None,
-			condition_met: true,
+			visibility: None,
 		}
 	}
 
@@ -2400,7 +2431,7 @@ mod tests {
 	}
 
 	#[test]
-	fn all_ten_pi_tabs_are_present_and_rows_use_human_labels() {
+	fn all_ten_tabs_are_present_and_rows_use_human_labels() {
 		let mut panel = SettingsPanel::from_rows(fixture(), &UiContext::default());
 		assert_eq!(SETTING_TABS.len(), 10);
 		let screen = text(&mut panel);
@@ -2439,60 +2470,96 @@ mod tests {
 	}
 
 	#[test]
-	fn archive_without_ui_is_absent_and_dynamic_ui_is_opt_in() {
+	fn archive_without_metadata_is_absent_and_dynamic_metadata_is_opt_in() {
+		static STRING_LIST: TypeSpec = TypeSpec {
+			kind:        ValueKind::List,
+			elem:        Some(TypeSpec::STR),
+			variants:    &[],
+			finite_only: false,
+		};
+
 		let ctx = Ctx::new();
-		assert!(
-			omp_con::AI_FASTMODE
-				.spec()
-				.flags
-				.contains(VarFlags::ARCHIVE)
-		);
-		assert!(
-			settings_rows(&ctx)
-				.iter()
-				.all(|row| row.convar != "ai_fastmode")
-		);
 		ctx.register_dynamic_var(DynamicVarSpec {
 			name:    Str::new_static("ext::demo::hidden"),
 			desc:    Str::new_static("hidden"),
 			ty:      TypeSpec::BOOL,
 			flags:   VarFlags::ARCHIVE,
 			default: Value::Bool(false),
-			ui:      None,
+			meta:    Arc::from([]),
 		})
 		.unwrap();
 		ctx.register_dynamic_var(DynamicVarSpec {
 			name:    Str::new_static("ext::demo::visible"),
-			desc:    Str::new_static("visible"),
-			ty:      TypeSpec::BOOL,
+			desc:    Str::new_static("Fallback description"),
+			ty:      &STRING_LIST,
 			flags:   VarFlags::ARCHIVE,
-			default: Value::Bool(false),
-			ui:      Some(DynamicUiSpec {
-				tab:         SettingTab::Tools,
-				group:       Str::new_static("Extensions"),
-				label:       Str::new_static("Demo Extension"),
-				description: Str::new_static("Enable the demo extension"),
-				warning:     None,
-				widget:      DynamicUiWidget::Auto,
-			}),
+			default: Value::List(vec![Value::Str(Str::new_static("fast"))]),
+			meta:    Arc::from([
+				(Str::new_static("ui.tab"), Str::new_static("tools")),
+				(Str::new_static("ui.group"), Str::new_static("Extensions")),
+				(Str::new_static("ui.label"), Str::new_static("Demo Extension")),
+				(Str::new_static("ui.warning"), Str::new_static("Use carefully")),
+				(Str::new_static("ui.option.fast"), Str::new_static("Fast")),
+				(Str::new_static("ui.option.fast.desc"), Str::new_static("Lower latency")),
+				(Str::new_static("ui.option.safe"), Str::new_static("Safe")),
+				(Str::new_static("ui.ordered"), Str::new_static("true")),
+			]),
 		})
 		.unwrap();
 		let rows = settings_rows(&ctx);
 		assert!(rows.iter().all(|row| row.convar != "ext::demo::hidden"));
-		assert!(rows.iter().any(|row| row.label == "Demo Extension"));
+		let row = rows
+			.into_iter()
+			.find(|row| row.label == "Demo Extension")
+			.expect("metadata opts the extension into settings");
+		assert_eq!(row.description, "Fallback description");
+		assert_eq!(row.warning.as_deref(), Some("Use carefully"));
+
+		let mut panel = SettingsPanel::from_rows(vec![row], &UiContext::default());
+		panel.tab = SETTING_TABS
+			.iter()
+			.position(|tab| tab.tab == SettingTab::Tools)
+			.expect("tools tab");
+		panel.reflow_items();
+		panel.rebuild();
+		let screen = text(&mut panel);
+		assert!(screen.contains("Demo Extension"));
+		assert!(screen.contains("Use carefully"));
+		panel.key(Key::Enter);
+		let editor = text(&mut panel);
+		assert!(editor.contains("Fast — Lower latency"));
+		assert!(editor.contains("Safe"));
 	}
 
 	#[test]
-	fn bool_enum_submenu_text_and_multiselect_emit_typed_commands() {
-		let mut rows = fixture();
-		rows.push(row(
-			"Mode",
-			SettingTab::Appearance,
-			"Display",
-			RowWidget::Enum(vec![Str::new_static("one"), Str::new_static("two")]),
-			RowValue::Scalar(Str::new_static("one")),
-		));
-		let mut panel = SettingsPanel::from_rows(rows, &UiContext::default());
+	fn steering_enum_projects_declaration_metadata() {
+		let _ = omp_agent::AI_STEERING_MODE.spec();
+		let ctx = Ctx::new();
+		let row = settings_rows(&ctx)
+			.into_iter()
+			.find(|row| row.convar == "ai_steering_mode")
+			.expect("steering declaration is curated");
+		assert_eq!(row.tab, SettingTab::Interaction);
+		assert_eq!(row.group, "Input");
+		assert_eq!(row.label, "Steering Mode");
+
+		let mut panel = SettingsPanel::from_rows(vec![row], &UiContext::default());
+		panel.tab = SETTING_TABS
+			.iter()
+			.position(|tab| tab.tab == SettingTab::Interaction)
+			.expect("interaction tab");
+		panel.reflow_items();
+		panel.rebuild();
+		assert!(text(&mut panel).contains("Steering Mode"));
+		panel.key(Key::Enter);
+		let editor = text(&mut panel);
+		assert!(editor.contains("one-at-a-time"));
+		assert!(editor.contains("all"));
+	}
+
+	#[test]
+	fn bool_submenu_text_and_multiselect_emit_typed_commands() {
+		let mut panel = SettingsPanel::from_rows(fixture(), &UiContext::default());
 		let event = panel.key(Key::Enter);
 		assert!(matches!(event, PanelEvent::RunSetting { .. }));
 		accept_setting(&mut panel, &event);
@@ -2528,77 +2595,27 @@ mod tests {
 	}
 
 	#[test]
-	fn pi_value_codecs_write_underlying_convar_types() {
+	fn edited_values_are_written_in_their_raw_convar_representation() {
 		let mut setting = row(
-			"Converted",
+			"Raw",
 			SettingTab::Appearance,
 			"Display",
-			RowWidget::Submenu(vec![choice("50", "50 KB")]),
-			RowValue::Scalar(Str::new_static("50")),
+			RowWidget::Submenu(vec![choice("hl.1", "Hashline")]),
+			RowValue::Scalar(Str::new_static("hl.1")),
 		);
-		setting.codec = UiValueCodec::Kibibytes;
-		assert_eq!(SettingsPanel::command_value(&setting, &setting.value).unwrap(), "51200");
-		setting.codec = UiValueCodec::PercentFraction;
+		assert_eq!(SettingsPanel::command_value(&setting, &setting.value).unwrap(), "hl.1");
 		assert_eq!(
-			SettingsPanel::command_value(&setting, &RowValue::Scalar(Str::new_static("80")),).unwrap(),
-			"0.8"
+			project_value(&setting.widget, &Value::Str(Str::new_static("hl.1"))),
+			RowValue::Scalar(Str::new_static("hl.1"))
 		);
-		setting.codec = UiValueCodec::DefaultMinusOne;
+
+		setting.widget = RowWidget::Text { secret: false };
+		setting.value_kind = ValueKind::Duration;
 		assert_eq!(
-			project_value(setting.codec, &setting.widget, &Value::Int(-1),),
-			RowValue::Scalar(Str::new_static("default"))
-		);
-		assert_eq!(
-			SettingsPanel::command_value(&setting, &RowValue::Scalar(Str::new_static("default")),)
-				.unwrap(),
-			"-1"
-		);
-		setting.codec = UiValueCodec::SecondsDuration;
-		assert_eq!(
-			SettingsPanel::command_value(&setting, &RowValue::Scalar(Str::new_static("30")),).unwrap(),
+			SettingsPanel::command_value(&setting, &RowValue::Text(Str::new_static("30s"))).unwrap(),
 			"30s"
 		);
-		setting.codec = UiValueCodec::MillisecondsDuration;
-		assert_eq!(
-			SettingsPanel::command_value(&setting, &RowValue::Scalar(Str::new_static("300000")),)
-				.unwrap(),
-			"300000ms"
-		);
-		setting.codec = UiValueCodec::EditModeRevision;
-		for (stored, displayed) in [
-			("", "hashline"),
-			("hl.1", "hashline"),
-			("rep.2", "replace"),
-			("patch.2", "patch"),
-			("apply_patch.1", "apply_patch"),
-			("sloppy.1", "sloppy"),
-		] {
-			assert_eq!(
-				project_value(setting.codec, &setting.widget, &Value::Str(Str::new_static(stored)),),
-				RowValue::Scalar(Str::new_static(displayed))
-			);
-		}
-		for (displayed, stored) in [
-			("apply_patch", "apply_patch.1"),
-			("hashline", "hl.1"),
-			("patch", "patch.2"),
-			("replace", "rep.2"),
-			("sloppy", "sloppy.1"),
-		] {
-			assert_eq!(
-				SettingsPanel::command_value(&setting, &RowValue::Scalar(Str::new_static(displayed)),)
-					.unwrap(),
-				stored
-			);
-		}
-		setting.widget = RowWidget::Boolean;
-		setting.codec = UiValueCodec::InvertedBoolean;
-		assert_eq!(
-			SettingsPanel::command_value(&setting, &RowValue::Boolean(true)).unwrap(),
-			"false"
-		);
-		setting.codec = UiValueCodec::IsolationEnabled;
-		assert_eq!(SettingsPanel::command_value(&setting, &RowValue::Boolean(true)).unwrap(), "auto");
+		assert_eq!(SettingsPanel::command_value(&setting, &RowValue::Boolean(true)).unwrap(), "true");
 	}
 
 	#[test]
@@ -2813,62 +2830,54 @@ mod tests {
 	}
 
 	#[test]
-	fn conditions_follow_live_human_controls() {
-		let mut driver = row(
-			"Usage-Aware Fallback",
-			SettingTab::Appearance,
-			"Display",
-			RowWidget::Boolean,
-			RowValue::Boolean(false),
-		);
-		driver.convar = Str::new_static("ai_retry_usage_aware_fallback");
-		let widgets = [
-			("Conditional Bool", RowWidget::Boolean, RowValue::Boolean(false)),
-			(
-				"Conditional Enum",
-				RowWidget::Enum(vec![Str::new_static("a")]),
-				RowValue::Scalar(Str::new_static("a")),
-			),
-			(
-				"Conditional Submenu",
-				RowWidget::Submenu(vec![choice("a", "Alpha")]),
-				RowValue::Scalar(Str::new_static("a")),
-			),
-			(
-				"Conditional Text",
-				RowWidget::Text { secret: false },
-				RowValue::Text(Str::new_static("text")),
-			),
-			(
-				"Conditional Multiselect",
-				RowWidget::MultiSelect { options: vec![choice("a", "Alpha")], ordered: false },
-				RowValue::Multi(vec![Str::new_static("a")]),
-			),
-		];
-		let mut rows = vec![driver];
-		rows.extend(widgets.into_iter().map(|(label, widget, value)| {
-			let mut dependent = row(label, SettingTab::Appearance, "Display", widget, value);
-			dependent.condition = Some(UiCondition::UsageAwareFallbackEnabled);
-			dependent.condition_met = false;
-			dependent
-		}));
+	fn generic_visibility_follows_live_declared_control() {
+		let ctx = Ctx::new();
+		ctx.register_dynamic_var(DynamicVarSpec {
+			name:    Str::new_static("ext::demo::driver"),
+			desc:    Str::new_static("Controls the dependent setting."),
+			ty:      TypeSpec::BOOL,
+			flags:   VarFlags::ARCHIVE,
+			default: Value::Bool(false),
+			meta:    Arc::from([
+				(Str::new_static("ui.tab"), Str::new_static("appearance")),
+				(Str::new_static("ui.group"), Str::new_static("Display")),
+				(Str::new_static("ui.label"), Str::new_static("Driver")),
+			]),
+		})
+		.unwrap();
+		ctx.register_dynamic_var(DynamicVarSpec {
+			name:    Str::new_static("ext::demo::dependent"),
+			desc:    Str::new_static("Visible only while Driver is enabled."),
+			ty:      TypeSpec::BOOL,
+			flags:   VarFlags::ARCHIVE,
+			default: Value::Bool(false),
+			meta:    Arc::from([
+				(Str::new_static("ui.tab"), Str::new_static("appearance")),
+				(Str::new_static("ui.group"), Str::new_static("Display")),
+				(Str::new_static("ui.label"), Str::new_static("Dependent")),
+				(Str::new_static("ui.when"), Str::new_static("ext::demo::driver=true")),
+			]),
+		})
+		.unwrap();
+
+		let rows = settings_rows(&ctx)
+			.into_iter()
+			.filter(|row| row.convar.starts_with("ext::demo::"))
+			.collect();
 		let mut panel = SettingsPanel::from_rows(rows, &UiContext::default());
-		assert_eq!(
+		let visible_rows = |panel: &SettingsPanel| {
 			panel
 				.items
 				.iter()
 				.filter(|item| matches!(item, Item::Row(_)))
-				.count(),
-			1
-		);
-		panel.key(Key::Enter);
-		assert_eq!(
-			panel
-				.items
-				.iter()
-				.filter(|item| matches!(item, Item::Row(_)))
-				.count(),
-			6
-		);
+				.count()
+		};
+		assert_eq!(visible_rows(&panel), 1);
+		assert_eq!(panel.selected().map(|row| row.label.as_str()), Some("Driver"));
+
+		let event = panel.key(Key::Enter);
+		assert!(matches!(event, PanelEvent::RunSetting { .. }));
+		assert_eq!(visible_rows(&panel), 2);
+		assert!(text(&mut panel).contains("Dependent"));
 	}
 }

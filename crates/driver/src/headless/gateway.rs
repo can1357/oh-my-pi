@@ -4,8 +4,7 @@ use std::{collections::BTreeMap, time::SystemTime};
 
 use bytes::Bytes;
 use futures::StreamExt as _;
-use omp_core::{Str, Ulid, sf};
-use omp_inference::{
+use omp_ai::{
 	ChatRequest, ChatStream,
 	answer::ResponseMeta,
 	call::{
@@ -16,6 +15,7 @@ use omp_inference::{
 	id::{RequestId, ToolCallId},
 	receipt::{Cost, ExecutionReceipt, ReasonId, Usage, UsageSource},
 };
+use omp_core::{Str, Ulid, sf};
 use omp_proto::{
 	inference::v1::{
 		self as pb, inference_client::InferenceClient, part_start, tool_choice, turn_event,
@@ -116,7 +116,7 @@ impl omp_agent::Inference for GatewayInference {
 								match serde_json::from_slice(&arguments) {
 									Ok(arguments) => yield Ok(ChatEvent::ToolCallReady {
 										index: end.index,
-										call: ToolCall { id, name, arguments: omp_inference::OpaqueJson::new(arguments) },
+										call: ToolCall { id, name, arguments: omp_ai::OpaqueJson::new(arguments) },
 									}),
 									Err(_) => { yield Err(protocol("gateway_tool_arguments_invalid")); break; },
 								}
@@ -170,13 +170,13 @@ fn request_frame(request: &ChatRequest, model: &str) -> Result<pb::TurnFrame, Er
 				ToolInputConstraint::Grammar { grammar, fallback } => {
 					pb::tool_def::Input::Grammar(pb::tool_def::Grammar {
 						syntax:               match grammar.syntax {
-							omp_inference::call::ToolGrammarSyntax::Lark => {
+							omp_ai::call::ToolGrammarSyntax::Lark => {
 								pb::tool_def::grammar::Syntax::Lark as i32
 							},
-							omp_inference::call::ToolGrammarSyntax::Regex => {
+							omp_ai::call::ToolGrammarSyntax::Regex => {
 								pb::tool_def::grammar::Syntax::Regex as i32
 							},
-							omp_inference::call::ToolGrammarSyntax::Ebnf => {
+							omp_ai::call::ToolGrammarSyntax::Ebnf => {
 								pb::tool_def::grammar::Syntax::Ebnf as i32
 							},
 						},
@@ -247,7 +247,7 @@ fn request_frame(request: &ChatRequest, model: &str) -> Result<pb::TurnFrame, Er
 	})
 }
 
-fn message_items(message: &omp_inference::Message) -> Vec<thread::Item> {
+fn message_items(message: &omp_ai::Message) -> Vec<thread::Item> {
 	let role = match message.role {
 		Role::System | Role::Developer => thread::Role::System,
 		Role::User => thread::Role::User,

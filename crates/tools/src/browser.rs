@@ -41,7 +41,7 @@ pub enum Action {
 pub struct App {
 	/// Binary path to spawn.
 	pub path:    Option<Str>,
-	/// Existing Chrome DevTools Protocol endpoint.
+	/// Existing Chrome `DevTools` Protocol endpoint.
 	pub cdp_url: Option<Str>,
 	/// Drive the user's own browser through the relay.
 	pub relay:   Option<bool>,
@@ -129,11 +129,11 @@ pub struct Params {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Artifact {
 	/// Content-addressed artifact URI.
-	pub uri:  Str,
+	pub uri:      Str,
 	/// Media type.
-	pub mime: Str,
+	pub mime:     Str,
 	/// Stable origin (`screenshot` or `download`).
-	pub kind:    Str,
+	pub kind:     Str,
 	/// Whether transcript actors should reveal the artifact inline.
 	pub visible:  bool,
 	/// Exact retained byte count.
@@ -147,11 +147,11 @@ impl<'de> Deserialize<'de> for Artifact {
 		enum Wire {
 			Legacy(Str),
 			Current {
-				uri: Str,
-				mime: Str,
-				kind: Str,
+				uri:      Str,
+				mime:     Str,
+				kind:     Str,
 				#[serde(default = "visible")]
-				visible: bool,
+				visible:  bool,
 				#[serde(default)]
 				byte_len: u64,
 			},
@@ -193,15 +193,15 @@ pub struct Payload {
 	pub result:    Option<Value>,
 	/// Content-addressed artifacts created by the operation.
 	pub artifacts: Vec<Artifact>,
-	/// Backend mode the tab runs under (`headless` or `window`); pi's
-	/// `describeBrowser` meta. Absent on payloads journaled before it existed.
+	/// Backend mode the tab runs under (`headless` or `window`). Absent on
+	/// payloads journaled before it existed.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub browser:   Option<Str>,
 }
 
 /// Human name of a backend mode for [`Payload::browser`].
 #[must_use]
-pub fn mode_name(headless: bool) -> Str {
+pub const fn mode_name(headless: bool) -> Str {
 	if headless {
 		Str::new_static("headless")
 	} else {
@@ -214,21 +214,21 @@ pub fn mode_name(headless: bool) -> Str {
 #[error("{message}")]
 pub struct Fault {
 	/// Stable failure category.
-	pub code:    Str,
+	pub code:      Str,
 	/// Secret-free diagnostic.
-	pub message: Str,
+	pub message:   Str,
 	/// Stable tab name when failure happened after tab lookup.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub name:    Option<Str>,
+	pub name:      Option<Str>,
 	/// Current committed URL when available.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub url:     Option<Str>,
+	pub url:       Option<Str>,
 	/// Current document title when available.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub title:   Option<Str>,
+	pub title:     Option<Str>,
 	/// Backend mode when known.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub browser: Option<Str>,
+	pub browser:   Option<Str>,
 	/// Helper or lifecycle phase that failed.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub operation: Option<Str>,
@@ -241,11 +241,11 @@ pub enum Update {
 	/// Lifecycle work began.
 	Started {
 		/// Stable tab name.
-		name:      Str,
+		name:    Str,
 		/// Lifecycle action.
-		action:    Action,
+		action:  Action,
 		/// Selected backend mode.
-		browser:   Str,
+		browser: Str,
 	},
 	/// One lifted JavaScript helper is running.
 	Helper {
@@ -293,12 +293,13 @@ pub fn spec() -> ToolSpec {
 		description:     sf!(
 			"Drives persistent, session-owned browser tabs through a composable JavaScript surface. \
 			 Call open before run and close when finished. run exposes page, browser, tab, display, \
-			 assert, and wait. tab provides url/title/goto, observe/ariaSnapshot, click/type/fill/\
-			 press/scroll/scrollIntoView/drag/select/uploadFile, evaluate/extract, screenshot/\
-			 download, waitFor/waitForSelector/waitForUrl/waitForResponse/waitForNavigation, and \
-			 id/ref element handles. app.path spawns an owned browser; app.cdp_url attaches without \
-			 owning the page; app.relay uses the logged-in relay browser. Request interception is \
-			 scoped to one run and is removed before settlement."
+			 assert, and wait. tab provides url/title/goto, observe/ariaSnapshot, \
+			 click/type/fill/press/scroll/scrollIntoView/drag/select/uploadFile, evaluate/extract, \
+			 screenshot/download, \
+			 waitFor/waitForSelector/waitForUrl/waitForResponse/waitForNavigation, and id/ref \
+			 element handles. app.path spawns an owned browser; app.cdp_url attaches without owning \
+			 the page; app.relay uses the logged-in relay browser. Request interception is scoped to \
+			 one run and is removed before settlement."
 		),
 		schema:          omp_tool::schema::<Params>(),
 		constraint:      Constraint::Schema {
@@ -414,28 +415,20 @@ impl Tool for Browser {
 		match view {
 			Ok(payload) => {
 				let mut parts = vec![Part::Text {
-					text: Str::new(
-						serde_json::to_string(payload).expect("browser payload serializes"),
-					),
+					text: Str::new(serde_json::to_string(payload).expect("browser payload serializes")),
 				}];
 				if caps.media {
-					for artifact in payload
-						.artifacts
-						.iter()
-						.filter(|artifact| {
-							artifact.visible
-								&& artifact.byte_len != 0
-								&& artifact.mime.starts_with("image/")
-						})
-					{
+					for artifact in payload.artifacts.iter().filter(|artifact| {
+						artifact.visible && artifact.byte_len != 0 && artifact.mime.starts_with("image/")
+					}) {
 						if let Some(hash) = artifact.uri.strip_prefix("artifact://sha256/") {
 							parts.push(Part::Blob {
 								blob: omp_tool::BlobRef {
-									hash: Str::new(hash),
+									hash:       Str::new(hash),
 									media_type: artifact.mime.clone(),
-									byte_len: artifact.byte_len,
+									byte_len:   artifact.byte_len,
 								},
-								alt: Some(sf!("Browser {}", artifact.kind)),
+								alt:  Some(sf!("Browser {}", artifact.kind)),
 							});
 						}
 					}
@@ -595,33 +588,35 @@ mod tests {
 	fn revision_two_calls_lift_typed_artifact_metadata() {
 		let args = br#"{"i":"Capturing page","action":"run","code":"return 1"}"#;
 		let payload = Payload {
-			action: Action::Run,
-			name: "main".into(),
-			url: None,
-			title: None,
-			display: Vec::new(),
-			result: Some(json!(1)),
+			action:    Action::Run,
+			name:      "main".into(),
+			url:       None,
+			title:     None,
+			display:   Vec::new(),
+			result:    Some(json!(1)),
 			artifacts: vec![Artifact {
-				uri: "artifact://sha256/abc".into(),
-				mime: "image/png".into(),
-				kind: "screenshot".into(),
-				visible: true,
+				uri:      "artifact://sha256/abc".into(),
+				mime:     "image/png".into(),
+				kind:     "screenshot".into(),
+				visible:  true,
 				byte_len: 0,
 			}],
-			browser: Some("headless".into()),
+			browser:   Some("headless".into()),
 		};
 		let mut verdict = serde_json::to_value(CallOutcome::<Payload, super::Fault>::Ok(payload))
 			.expect("verdict value");
 		verdict["value"]["artifacts"] = json!(["artifact://sha256/abc"]);
 		let verdict = serde_json::to_vec(&verdict).expect("legacy verdict");
-		let lifted = lift_legacy_call(
-			&Rev { family: Str::default(), n: 2 },
-			RecordedCall { raw_args: args, verdict: &verdict },
-		)
+		let lifted = lift_legacy_call(&Rev { family: Str::default(), n: 2 }, RecordedCall {
+			raw_args: args,
+			verdict:  &verdict,
+		})
 		.expect("lift");
 		let lifted: CallOutcome<Payload, super::Fault> =
 			serde_json::from_slice(&lifted.verdict).expect("typed lifted verdict");
-		let CallOutcome::Ok(payload) = lifted else { panic!("expected ok") };
+		let CallOutcome::Ok(payload) = lifted else {
+			panic!("expected ok")
+		};
 		assert_eq!(payload.artifacts[0].kind, "screenshot");
 	}
 }

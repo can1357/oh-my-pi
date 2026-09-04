@@ -46,7 +46,7 @@ pub(super) fn run(state: &ServiceState, request: DebugRequest) -> ServiceResult<
 
 pub(super) fn dump_raw_sse(state: &ServiceState) -> ServiceResult<PathBuf> {
 	let session = session_id(state);
-	let snapshot = omp_inference::transport::global_provider_capture().snapshot(session.as_deref());
+	let snapshot = omp_ai::transport::global_provider_capture().snapshot(session.as_deref());
 	let mut text = String::new();
 	for frame in snapshot.frames {
 		use std::fmt::Write as _;
@@ -88,7 +88,7 @@ fn report(state: &ServiceState, mode: ReportMode) -> ServiceResult<DebugOutput> 
 	spec.artifacts = session_artifacts(state);
 	spec.logs = log_files();
 	let session = session_id(state);
-	let raw = omp_inference::transport::global_provider_capture().snapshot(session.as_deref());
+	let raw = omp_ai::transport::global_provider_capture().snapshot(session.as_deref());
 	if !raw.frames.is_empty() {
 		let mut text = String::new();
 		for frame in raw.frames {
@@ -258,7 +258,7 @@ fn protocols(state: &ServiceState, request: &DebugRequest) -> ServiceResult<Debu
 
 fn raw_sse(state: &ServiceState) -> ServiceResult<DebugOutput> {
 	let session = session_id(state);
-	let capture = omp_inference::transport::global_provider_capture();
+	let capture = omp_ai::transport::global_provider_capture();
 	let initial = capture
 		.snapshot(session.as_deref())
 		.frames
@@ -277,7 +277,7 @@ fn raw_sse(state: &ServiceState) -> ServiceResult<DebugOutput> {
 	Ok(DebugOutput::RawSse { initial, events })
 }
 
-fn map_frame(frame: omp_inference::transport::CapturedFrame) -> DebugSseFrame {
+fn map_frame(frame: omp_ai::transport::CapturedFrame) -> DebugSseFrame {
 	DebugSseFrame { sequence: frame.sequence, event: frame.event, payload: frame.payload }
 }
 

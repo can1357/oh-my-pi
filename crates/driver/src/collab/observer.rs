@@ -1,4 +1,5 @@
-//! Controller-owned agent registry and transcript projections for collaboration.
+//! Controller-owned agent registry and transcript projections for
+//! collaboration.
 //!
 //! Remote actors receive the same detached DOM snapshot plus ordered event
 //! stream as local actors. Journal files are opened only here, on the
@@ -33,7 +34,8 @@ pub struct HostAgentBridge {
 }
 
 impl HostAgentBridge {
-	/// Creates a bridge over the process routing cache and durable child journals.
+	/// Creates a bridge over the process routing cache and durable child
+	/// journals.
 	#[must_use]
 	pub const fn new(sessions: Arc<SessionRegistry>, sessions_dir: PathBuf) -> Self {
 		Self { sessions, sessions_dir }
@@ -72,10 +74,8 @@ impl HostAgentBridge {
 		if !journal.exists() {
 			return Err(AgentViewError::UnknownAgent);
 		}
-		let session = omp_session::Session::open(
-			journal,
-			omp_session::ComponentRegistry::standard(),
-		)?;
+		let session =
+			omp_session::Session::open(journal, omp_session::ComponentRegistry::standard())?;
 		Ok(RemoteAgentView { snapshot: session.dom().snapshot(), events: None })
 	}
 }
@@ -156,7 +156,11 @@ pub fn registry_snapshot(dom: &Dom, state: &SessionStateUpdate) -> RegistrySnaps
 	}) else {
 		return RegistrySnapshot { agents };
 	};
-	for node in dom.children(jobs).iter().filter_map(|handle| dom.get(*handle)) {
+	for node in dom
+		.children(jobs)
+		.iter()
+		.filter_map(|handle| dom.get(*handle))
+	{
 		if node.tag != omp_dom::Tag::Known(KnownTag::Subagent) {
 			continue;
 		}
@@ -176,13 +180,15 @@ pub fn registry_snapshot(dom: &Dom, state: &SessionStateUpdate) -> RegistrySnaps
 			break;
 		}
 		agents.push(AgentSummary {
-			id: id.to_string(),
-			display_name: custom(node, "agent").unwrap_or_else(|| id.clone()).to_string(),
-			kind: agent_summary::Kind::Sub as i32,
-			parent_id: custom(node, "owner").map(|owner| owner.to_string()),
-			status: status as i32,
+			id:               id.to_string(),
+			display_name:     custom(node, "agent")
+				.unwrap_or_else(|| id.clone())
+				.to_string(),
+			kind:             agent_summary::Kind::Sub as i32,
+			parent_id:        custom(node, "owner").map(|owner| owner.to_string()),
+			status:           status as i32,
 			has_session_file: true,
-			created_at_ms: started,
+			created_at_ms:    started,
 			last_activity_ms: started,
 		});
 	}
@@ -217,10 +223,8 @@ mod tests {
 			.user(Str::new_static("inspect this"), Vec::new())
 			.expect("user");
 		drop(session);
-		let bridge = HostAgentBridge::new(
-			Arc::new(SessionRegistry::new()),
-			directory.path().to_path_buf(),
-		);
+		let bridge =
+			HostAgentBridge::new(Arc::new(SessionRegistry::new()), directory.path().to_path_buf());
 		let view = bridge.view("child").await.expect("view");
 		assert!(view.events.is_none());
 		let dom = Dom::from_snapshot(&view.snapshot);

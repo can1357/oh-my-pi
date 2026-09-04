@@ -999,8 +999,7 @@ terminal status with output collected. The convenience path for the overwhelming
 `None` unsets them. The delta overlays the session environment only while this run executes; it
 does not alter the workspace snapshot or any later command.
 
-Pi's `ToolDefinition.shellEnv(ctx)` splits at the ownership boundary rather than becoming a new
-device declaration field. To modify a user-issued shell command, declare a fail-closed
+To modify a user-issued shell command, declare a fail-closed
 `user_bash/TRANSFORM` hook and return
 `omp.Modify(env_overrides={**event.env_overrides, "TOKEN_FILE": token_file})`; ordered REPLACE
 composition means the next TRANSFORM receives that updated mapping. Use `None` as a value to unset
@@ -1746,13 +1745,13 @@ once the edge exists*.
 | `env/v1` typed client, request correlation, `RunGuard` | `crates/env/src/client.rs`, `crates/env/src/guard.rs` | Complete. `RunGuard::relinquish` already models detached work; drop already queues cancellation on a separate unbounded control channel so drop never blocks. |
 | `env/v1` server dispatch, UDS + in-process serving, hello/retire, connection ownership tables | `crates/app/src/envd/server.rs` | Complete for the frames that exist. `MIN_SCHEMA_REV = 4`, 64 MiB frame limit, 300 s default tool deadline, 250 ms native cancel grace. |
 | Exec host: persistent sessions, PTY, per-command `ExecRun` with TERM-then-KILL drop, spawn-observed process groups, named processes with restart and readiness | `crates/app/src/envd/exec.rs` | Complete. `ExecRun::drop` → `cancel(250 ms)`; `SpawnBook` implements `SpawnObserver` so every process group is tracked from birth. |
-| In-process bash: full AST, expansion, 51 Bash builtins, 58 coreutils, 8 process builtins, job control | `crates/shell-engine/src/builtins/factory.rs`, `crates/shell-builtins/src/factory.rs`, `crates/shell/` | Complete. `sh.parse` is a thin projection of `parser::ast`. Counts are registration-site names, several platform-gated (`exec`, `ulimit`, `umask`, `errno` are Unix-only; `kill`/`printf` Unix-or-Windows). |
-| Document authority: leases, `Revision` (BLAKE3-256 + sequence), transactions, fuzzy 3-way rebase, LSP mux, formatting roundtrip, `workspace/applyEdit` lowering, native watches, tree-sitter summaries, hashline/replace edit adapters | `crates/docserver/` | Complete, over `document/v1`. |
+| In-process bash: full AST, expansion, 51 Bash builtins, 58 coreutils, 8 process builtins, job control | `crates/shell-engine/src/builtins/factory.rs`, `crates/shell-builtins/src/factory.rs` | Complete. `sh.parse` is a thin projection of `parser::ast`. Counts are registration-site names, several platform-gated (`exec`, `ulimit`, `umask`, `errno` are Unix-only; `kill`/`printf` Unix-or-Windows). |
+| Document authority: leases, `Revision` (BLAKE3-256 + sequence), transactions, fuzzy 3-way rebase, LSP mux, formatting roundtrip, `workspace/applyEdit` lowering, native watches, tree-sitter summaries, hashline/replace edit adapters | `crates/envd/src/docserver/` | Complete, over `document/v1`. |
 | Env-side document client with revision-pinned lease type whose `Drop` sends a best-effort close | `crates/app/src/envd/docs.rs` | Complete. `DocumentLease`, `DocumentHost::{open,read,summarize,commit,commit_transaction,close}` — this is exactly the Rust shape `omp.env.docs` mirrors. |
 | Walker: cached, gitignore-layered, parallel, cancellation-heartbeat, glob filters, ranking | `crates/walker/` | Complete. `WorkspaceHost` in `crates/app/src/envd/workspace.rs` already enforces root containment by canonicalization. |
 | Grep engine: ripgrep regex with PCRE2 fallback, bounded leading-window reads, binary detection, context | `crates/grep/` | Complete. |
 | Blob store over `omp.blob.v1`, streaming put/get with commit-gated visibility | `crates/proto/proto/omp/blob/v1/blob.proto`, `crates/app/src/envd/blobs.rs` | Complete. |
-| Hashline: `#TAG` as `{:04X}` of `normalized_file_xxh32(bytes) & 0xffff` with the UTF-8 BOM stripped and pre-newline whitespace ignored, full op vocabulary, strict/partial apply, named registers, numbered diff | `crates/hashline/src/snapshots.rs`, `crates/hashline/src/apply.rs`, `crates/hashline/src/clipboard.rs` | Complete. |
+| Hashline: `#TAG` as `{:04X}` of `normalized_file_xxh32(bytes) & 0xffff` with the UTF-8 BOM stripped and pre-newline whitespace ignored, full op vocabulary, strict/partial apply, named registers, numbered diff | `crates/edit/src/store.rs`, `crates/edit/src/modes/hashline/apply.rs`, `crates/edit/src/modes/hashline/clipboard.rs` | Complete. |
 | Free-threaded CPython 3.14t embedding and the child-worker re-exec pattern | `crates/py/`, `crates/tools/src/eval/kernel.rs` | Complete. |
 | Python worker protocol: `toolhost/v1` over varint-delimited protobuf on stdio, with `WorkerHello`, `RegisterTools`/`ToolDecl` (carrying `rev` and `ToolConstraint`), `InvokeTool`, `CancelTool`, `ToolUpdate`, `ToolComplete`, `ToolAborted`, `Ping`/`Pong`, `ProtocolError` | `crates/proto/proto/omp/toolhost/v1/toolhost.proto`, `crates/app/src/envd/worker.rs` | Complete as a **CONTROL-shaped** channel. Supervisor with bounded-backoff respawn and registration-equality checks on restart; `sys.stdout` is redirected to stderr in the child so `print()` cannot corrupt the frame stream. |
 

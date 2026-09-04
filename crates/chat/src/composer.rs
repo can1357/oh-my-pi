@@ -19,7 +19,7 @@ use crate::{
 	},
 };
 
-/// Editor row budget for a terminal of `rows` rows (pi
+/// Editor row budget for a terminal of `rows` rows (
 /// `computeEditorMaxHeight`): roomy terminals get the comfortable `[6, 18]`
 /// band below twelve reserved rows; small terminals shrink the cap so the
 /// editor leaves at least four rows for the transcript and status, never
@@ -67,7 +67,7 @@ pub enum ComposerAction {
 	Changed,
 	/// Submit the current draft as a prompt.
 	Submit(Str),
-	/// Submit the draft with the media chips it references (pi
+	/// Submit the draft with the media chips it references (
 	/// `pendingImages`): `[Image #N]` / `[Video #N]` in `text` is positional
 	/// against `media[N-1]`, each a local source the host reads once.
 	SubmitWithMedia {
@@ -84,7 +84,7 @@ pub enum ComposerAction {
 		/// accept media refuse before commit instead of silently dropping it.
 		media:     Vec<ComposerMediaSource>,
 	},
-	/// Queue the draft behind the active turn (pi `->` / `=>` yield-queue
+	/// Queue the draft behind the active turn ( `->` / `=>` yield-queue
 	/// shorthand): the body runs when the agent yields, or at once when it
 	/// is idle with an empty queue. Media chips travel with it exactly as
 	/// they do for [`ComposerAction::SubmitWithMedia`].
@@ -100,7 +100,7 @@ pub enum ComposerAction {
 	Ignored,
 }
 
-/// pi `compactImageMarkers`: submitted media are the visible chips in marker
+/// `compactImageMarkers`: submitted media are the visible chips in marker
 /// order, so `[Image #M…]` or `[Video #M…]` for the K-th surviving marker M
 /// is rewritten to K. A matching legacy `attachment://M` link moves with the
 /// marker. The positional marker-to-source contract therefore survives chip
@@ -189,10 +189,10 @@ fn rewrite_media_markers(text: &str, mut mapped: impl FnMut(usize) -> Option<usi
 	out
 }
 
-/// pi `QUEUE_PREFIXES`: the yield-queue shorthand sigils.
+/// `QUEUE_PREFIXES`: the yield-queue shorthand sigils.
 const QUEUE_PREFIXES: [&str; 2] = ["->", "=>"];
 
-/// pi `parseQueueShorthand`: the message body behind a leading `->` / `=>`
+/// `parseQueueShorthand`: the message body behind a leading `->` / `=>`
 /// on the trimmed draft, `None` when the draft carries no shorthand.
 #[must_use]
 pub fn parse_queue_shorthand(text: &str) -> Option<&str> {
@@ -209,7 +209,7 @@ pub struct PasteOptions {
 	/// A submit key followed the bracketed paste in the same terminal read.
 	///
 	/// The paste must land synchronously instead of opening a modal that
-	/// would consume that key (pi `PasteOptions.submitAfterPaste`).
+	/// would consume that key ( `PasteOptions.submitAfterPaste`).
 	pub submit_after_paste: bool,
 }
 
@@ -220,21 +220,21 @@ pub enum PasteOutcome {
 	Inserted,
 	/// A marker-sized paste of `lines` lines reached
 	/// `cl_paste_large_menu_threshold`: nothing was inserted and the host
-	/// presents the large-paste menu (pi `handleLargePaste`).
+	/// presents the large-paste menu ( `handleLargePaste`).
 	Menu {
 		/// Line count of the paste, for the menu title.
 		lines: usize,
 	},
 }
 
-/// Composer knobs mirrored from convars (pi editor preferences).
+/// Composer knobs mirrored from convars ( editor preferences).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ComposerSettings {
-	/// pi `autocompleteMaxVisible`: dropdown window rows.
+	/// `autocompleteMaxVisible`: dropdown window rows.
 	pub autocomplete_max_visible: i64,
-	/// pi `emojiAutocomplete`: `:shortcode:` dropdown and emoticon expansion.
+	/// `emojiAutocomplete`: `:shortcode:` dropdown and emoticon expansion.
 	pub emoji_autocomplete:       bool,
-	/// pi `paste.largeMenuThreshold`: line count at which a marker-sized
+	/// `paste.largeMenuThreshold`: line count at which a marker-sized
 	/// paste opens the large-paste menu; `<= 0` disables the menu.
 	pub paste_large_menu_lines:   i64,
 }
@@ -249,12 +249,12 @@ impl Default for ComposerSettings {
 	}
 }
 
-/// pi `shouldSkipHistory`: whether a submitted line is kept out of Up/Down
+/// `shouldSkipHistory`: whether a submitted line is kept out of Up/Down
 /// recall.
 ///
 /// A `/login`, `/join`, or `/mcp add --token` line carries a secret (OAuth
 /// callback, room key, bearer token). The command name is split exactly
-/// like pi's `parseSlashCommand`: at the earliest whitespace or colon.
+/// like  `parseSlashCommand`: at the earliest whitespace or colon.
 #[must_use]
 pub fn should_skip_history(text: &str) -> bool {
 	let Some(body) = text.strip_prefix('/') else {
@@ -280,7 +280,7 @@ pub fn should_skip_history(text: &str) -> bool {
 }
 
 /// Composer prefix mode: the leading sigil recolors the chrome and Esc
-/// clears the draft instead of interrupting (pi rung 8).
+/// clears the draft instead of interrupting ( rung 8).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrefixMode {
 	/// `!` — shell command.
@@ -290,7 +290,7 @@ pub enum PrefixMode {
 }
 
 /// One submitted prefix-mode line: what to run locally and whether the
-/// model may see it (pi `!!` / `$$` `excludeFromContext`).
+/// model may see it ( `!!` / `$$` `excludeFromContext`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalInput {
 	/// Which executor the sigil selects.
@@ -304,13 +304,13 @@ pub struct LocalInput {
 /// Selector opened by a completed empty-composer double-Esc gesture.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DoubleEscapeTarget {
-	/// The transcript rewind selector (pi `doubleEscapeAction=rewind`).
+	/// The transcript rewind selector ( `doubleEscapeAction=rewind`).
 	Rewind,
-	/// The session tree selector (pi `doubleEscapeAction=tree`).
+	/// The session tree selector ( `doubleEscapeAction=tree`).
 	Tree,
 }
 
-/// Composer-local outcome of one rung in pi's Esc ladder.
+/// Composer-local outcome of one rung in  Esc ladder.
 ///
 /// Host-owned rungs (maintenance, speech, loop mode, collaboration, and
 /// running work) stay outside the composer. The host executes them in order,
@@ -337,7 +337,7 @@ pub enum ComposerEscape {
 
 const DOUBLE_ESCAPE_WINDOW: Duration = Duration::from_millis(500);
 
-/// pi `pythonCommandPrefixLength`: `$` / `$$` starts eval mode only when
+/// `pythonCommandPrefixLength`: `$` / `$$` starts eval mode only when
 /// followed by whitespace or the end of input, so `$HOME is set` and `${x}`
 /// stay prose.
 fn eval_prefix_len(trimmed: &str) -> usize {
@@ -353,7 +353,7 @@ fn eval_prefix_len(trimmed: &str) -> usize {
 	}
 }
 
-/// Commands a pasted shell prompt typically starts with (pi
+/// Commands a pasted shell prompt typically starts with (
 /// `SHELL_PROMPT_COMMAND_RE`, minus the path forms handled inline).
 const SHELL_PROMPT_COMMANDS: &[&str] = &[
 	"cd", "sudo", "git", "bun", "npm", "pnpm", "yarn", "node", "cargo", "go", "make", "docker",
@@ -362,7 +362,7 @@ const SHELL_PROMPT_COMMANDS: &[&str] = &[
 
 /// Whether `word` is a shell-prompt command: one of [`SHELL_PROMPT_COMMANDS`]
 /// or `python` with an optional version suffix (`python`, `python3`,
-/// `python3.12` is not: pi's `python\d*` stops at the digits).
+/// `python3.12` is not:  `python\d*` stops at the digits).
 fn is_shell_prompt_command(word: &str) -> bool {
 	SHELL_PROMPT_COMMANDS.contains(&word)
 		|| word
@@ -371,7 +371,7 @@ fn is_shell_prompt_command(word: &str) -> bool {
 }
 
 /// Whether `token` is a shell operator standing alone between whitespace
-/// (pi `SHELL_PROMPT_OPERATOR_RE`: `&&`, `||`, `|`, `2>&1`, and one or two
+/// ( `SHELL_PROMPT_OPERATOR_RE`: `&&`, `||`, `|`, `2>&1`, and one or two
 /// redirection chevrons).
 fn is_shell_operator(token: &str) -> bool {
 	matches!(token, "&&" | "||" | "|" | "2>&1")
@@ -379,7 +379,7 @@ fn is_shell_operator(token: &str) -> bool {
 }
 
 /// Whether `line` is omp's own status line (`in: 12 out: 34 [cache …] t: …
-/// tok/s: …`, pi `OMP_STATUS_LINE_RE`), the tell of a pasted transcript.
+/// tok/s: …`), the tell of a pasted transcript.
 fn is_status_line(line: &str) -> bool {
 	fn number(word: &str) -> bool {
 		!word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit())
@@ -404,7 +404,7 @@ fn is_status_line(line: &str) -> bool {
 		&& words.next().is_some()
 }
 
-/// pi `looksLikePastedShellPrompt`: a single-`$` body shaped like a copied
+/// `looksLikePastedShellPrompt`: a single-`$` body shaped like a copied
 /// terminal line (`$ cd ~/project && cargo test`, `$ git status`) stays an
 /// ordinary prompt instead of being run as Python.
 #[must_use]
@@ -424,7 +424,7 @@ pub fn looks_like_pasted_shell_prompt(code: &str) -> bool {
 		|| code.lines().any(is_status_line)
 }
 
-/// Splits a draft into its sigil and body (pi `parsePythonCommandInput`
+/// Splits a draft into its sigil and body ( `parsePythonCommandInput`
 /// plus the `!` branch of `handleSubmit`): the mode, the prefix length, and
 /// the trimmed code. `None` is prose.
 fn split_local(text: &str) -> Option<(PrefixMode, usize, &str)> {
@@ -444,7 +444,7 @@ fn split_local(text: &str) -> Option<(PrefixMode, usize, &str)> {
 	Some((mode, prefix, code))
 }
 
-/// Classifies a draft's leading sigil (pi `isBashMode` / `isPythonMode`);
+/// Classifies a draft's leading sigil ( `isBashMode` / `isPythonMode`);
 /// a pasted shell prompt behind a single `$` is prose.
 #[must_use]
 pub fn prefix_mode_of(text: &str) -> Option<PrefixMode> {
@@ -461,7 +461,7 @@ fn prefix_accent_of(text: &str) -> Option<PrefixAccent> {
 	})
 }
 
-/// Dims the leading `->` / `=>` of a yield-queue shorthand draft (pi's
+/// Dims the leading `->` / `=>` of a yield-queue shorthand draft (
 /// `QUEUE_LIST_MARKER_RE` editor highlighting).
 fn queue_shorthand_spans(text: &str) -> smallvec::SmallVec<(usize, usize, InlineAccent), 4> {
 	let mut spans = smallvec::SmallVec::new();
@@ -475,7 +475,7 @@ fn queue_shorthand_spans(text: &str) -> smallvec::SmallVec<(usize, usize, Inline
 	spans
 }
 
-/// Parses a submitted line into a local run (pi `input-controller.ts`
+/// Parses a submitted line into a local run ( `input-controller.ts`
 /// `handleSubmit`: `!cmd`, `!!cmd`, `$ code`, `$$ code`). `None` is an
 /// ordinary prompt, including a bare sigil with nothing to run and a
 /// single-`$` line that [`looks_like_pasted_shell_prompt`].
@@ -489,18 +489,18 @@ pub fn parse_local_input(text: &str) -> Option<LocalInput> {
 }
 
 /// Max gap between two spaces for the later one to count as OS auto-repeat
-/// (pi `SPACE_REPEAT_MAX_GAP_MS`).
+/// ( `SPACE_REPEAT_MAX_GAP_MS`).
 pub const SPACE_REPEAT_MAX_GAP: Duration = Duration::from_millis(120);
-/// Absolute jitter floor between two mechanical gaps (pi
+/// Absolute jitter floor between two mechanical gaps (
 /// `SPACE_REPEAT_JITTER_MS`).
 pub const SPACE_REPEAT_JITTER: Duration = Duration::from_millis(18);
-/// Proportional jitter tolerance for slower repeat rates (pi
+/// Proportional jitter tolerance for slower repeat rates (
 /// `SPACE_REPEAT_JITTER_RATIO`).
 pub const SPACE_REPEAT_JITTER_RATIO: f64 = 0.35;
-/// Consecutive mechanical gaps that confirm a held bar (pi
+/// Consecutive mechanical gaps that confirm a held bar (
 /// `SPACE_HOLD_MECHANICAL_RUN`).
 pub const SPACE_HOLD_MECHANICAL_RUN: u8 = 2;
-/// Idle gap after the last repeated space that counts as release (pi
+/// Idle gap after the last repeated space that counts as release (
 /// `SPACE_HOLD_RELEASE_MS`).
 pub const SPACE_HOLD_RELEASE: Duration = Duration::from_millis(250);
 
@@ -523,7 +523,7 @@ pub enum SpaceHoldEvent {
 	EndThenPass,
 }
 
-/// pi `#handleSpaceHold`: recognizes a held space bar from the metronomic
+/// `#handleSpaceHold`: recognizes a held space bar from the metronomic
 /// OS auto-repeat cadence, never from taps or smashing.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SpaceHold {
@@ -638,7 +638,7 @@ pub struct Composer {
 	/// Director is engaged.
 	shape:       ComposerStyle,
 	/// Whether the host paints a status/notice row directly above the
-	/// composer (drives pi's `EditorTopGap`).
+	/// composer (drives  `EditorTopGap`).
 	occupied:    bool,
 	/// IME-safe caret-row layout (`cl_ime_safe_cursor`).
 	ime_safe:    bool,
@@ -674,7 +674,7 @@ impl Composer {
 		ui.with_component_mut::<EditorPane, _>(COMPOSER_ID, |pane| {
 			pane.set_completion(Box::new(chain));
 			// The chrome recolors on the composer's own sigil grammar, not
-			// on a bare leading byte (pi `isPythonMode` after
+			// on a bare leading byte ( `isPythonMode` after
 			// `pythonCommandPrefixLength` + the pasted-shell-prompt guard).
 			pane.set_prefix_classifier(prefix_accent_of);
 			pane.set_inline_decorator(Some(Box::new(queue_shorthand_spans)));
@@ -728,7 +728,7 @@ impl Composer {
 	}
 
 	/// Tells the composer whether a status/notice row is painted directly
-	/// above it (pi `statusRowOccupied`); the band then sits flush under it.
+	/// above it ( `statusRowOccupied`); the band then sits flush under it.
 	/// Returns whether the top gap changed.
 	pub fn set_status_row_occupied(&mut self, occupied: bool) -> bool {
 		if self.occupied == occupied {
@@ -758,7 +758,7 @@ impl Composer {
 		self.spelling
 	}
 
-	/// Seeds Up/Down prompt recall with `prompts`, newest first (pi
+	/// Seeds Up/Down prompt recall with `prompts`, newest first (
 	/// `setHistoryStorage` on a resumed session).
 	pub fn seed_history(&mut self, prompts: impl IntoIterator<Item = Str>) {
 		self
@@ -766,7 +766,7 @@ impl Composer {
 			.with_component_mut::<EditorPane, _>(COMPOSER_ID, |pane| pane.seed_history(prompts));
 	}
 
-	/// Toggles pi's IME-safe cursor layout (`cl_ime_safe_cursor`); returns
+	/// Toggles  IME-safe cursor layout (`cl_ime_safe_cursor`); returns
 	/// whether it changed.
 	pub fn set_ime_safe_cursor(&mut self, enabled: bool) -> bool {
 		if self.ime_safe == enabled {
@@ -786,7 +786,7 @@ impl Composer {
 		self.shape
 	}
 
-	/// Switches the chrome shape, re-evaluating the top gap (pi
+	/// Switches the chrome shape, re-evaluating the top gap (
 	/// `syncComposerShape` + `EditorTopGap`); returns whether it changed.
 	pub fn set_shape(&mut self, shape: ComposerStyle) -> bool {
 		if self.shape == shape {
@@ -818,7 +818,7 @@ impl Composer {
 		self.ui.height() != before
 	}
 
-	/// Whether the completion dropdown is open (pi routes `Esc` to it before
+	/// Whether the completion dropdown is open ( routes `Esc` to it before
 	/// any global interrupt).
 	#[must_use]
 	pub fn popup_open(&self) -> bool {
@@ -830,7 +830,7 @@ impl Composer {
 
 	/// Gives Esc to autocomplete before the host starts the global ladder.
 	///
-	/// Pi deliberately lets the editor's base handler dismiss autocomplete:
+	/// The editor's base handler dismisses autocomplete:
 	/// the same Esc must never also cancel maintenance or a streaming turn.
 	pub fn dismiss_completion_on_escape(&mut self) -> ComposerEscape {
 		if !self.popup_open() {
@@ -856,7 +856,7 @@ impl Composer {
 	/// Clears an idle local-command prefix draft.
 	///
 	/// The caller must check a running local command first and interrupt that
-	/// execution through its typed cancellation path. Only pi's real prefix
+	/// execution through its typed cancellation path. Only  real prefix
 	/// grammar is cleared here: prose such as `$HOME` remains a draft.
 	pub fn clear_prefix_on_escape(&mut self) -> ComposerEscape {
 		if self.prefix_mode().is_none() {
@@ -897,7 +897,7 @@ impl Composer {
 
 	/// Disarms a pending empty-composer double-Esc gesture.
 	///
-	/// Speech cancellation and focus changes call this because pi resets the
+	/// Speech cancellation and focus changes reset the
 	/// gesture at those transitions.
 	pub fn reset_escape_sequence(&mut self) {
 		self.last_escape = None;
@@ -927,7 +927,7 @@ impl Composer {
 	}
 
 	/// Current unsent draft in its submitted form: every collapsed paste or
-	/// attachment chip is expanded to its full text (pi expands `[Paste #N]`
+	/// attachment chip is expanded to its full text ( expands `[Paste #N]`
 	/// markers before handing the draft to `$EDITOR` or the model).
 	#[must_use]
 	pub fn text(&self) -> String {
@@ -949,7 +949,7 @@ impl Composer {
 			.unwrap_or_default()
 	}
 
-	/// Replaces the draft with text edited outside the composer (pi
+	/// Replaces the draft with text edited outside the composer (
 	/// `handleExternalEditor`): the chips were expanded into `text`, so the
 	/// staged attachment cards are dropped rather than re-collapsed, and the
 	/// edited text lands verbatim with the caret at its end.
@@ -974,7 +974,7 @@ impl Composer {
 
 	/// Inserts sanitized pasted text at the caret, unless the paste is
 	/// marker-sized and reaches `cl_paste_large_menu_threshold` lines: then
-	/// nothing is inserted and the host shows the large-paste menu (pi
+	/// nothing is inserted and the host shows the large-paste menu (
 	/// `handleLargePaste`), which lands the text through
 	/// [`Composer::paste_chip`] once the user chooses.
 	pub fn paste(&mut self, text: &str) -> PasteOutcome {
@@ -998,7 +998,7 @@ impl Composer {
 		PasteOutcome::Inserted
 	}
 
-	/// Stages pasted text as an attachment chip (pi `insertTextAttachment`):
+	/// Stages pasted text as an attachment chip ( `insertTextAttachment`):
 	/// the buffer holds a compact token and the submitted form is
 	/// `expansion` (default: the text itself). The large-paste menu's
 	/// "wrapped block" choice passes the `<attachment>`-wrapped text.
@@ -1029,11 +1029,7 @@ impl Composer {
 
 	/// Shows or replaces native-IME marked text and its byte-indexed
 	/// selection without adding an undo entry.
-	pub fn set_volatile_text_selection(
-		&mut self,
-		text: &str,
-		selection: Option<Range<usize>>,
-	) {
+	pub fn set_volatile_text_selection(&mut self, text: &str, selection: Option<Range<usize>>) {
 		self
 			.ui
 			.with_component_mut::<EditorPane, _>(COMPOSER_ID, |pane| {
@@ -1058,13 +1054,13 @@ impl Composer {
 		self.ui.resize(self.width);
 	}
 
-	/// Inserts pasted text verbatim (pi `app.clipboard.pasteTextRaw`): no
+	/// Inserts pasted text verbatim ( `app.clipboard.pasteTextRaw`): no
 	/// chip collapse, no drop classification, newlines kept.
 	pub fn paste_raw(&mut self, text: &str) {
 		let _ = self.ui.handle_paste_raw(text);
 	}
 
-	/// Whether the draft is in a `!` (bash) or `$` (eval) prefix mode (pi
+	/// Whether the draft is in a `!` (bash) or `$` (eval) prefix mode (
 	/// `isBashMode` / `isPythonMode`).
 	#[must_use]
 	pub fn prefix_mode(&self) -> Option<PrefixMode> {
@@ -1213,12 +1209,12 @@ impl Composer {
 			})
 			.unzip();
 		let text = Str::from(compact_media_markers(&text, &markers));
-		// pi `parseQueueShorthand` runs before slash commands: `-> body`
+		// `parseQueueShorthand` runs before slash commands: `-> body`
 		// queues `body` for the next yield.
 		let action = if let Some(body) = parse_queue_shorthand(&text) {
 			ComposerAction::Queue { text: Str::new(body), media }
 		} else {
-			// pi: a leading `/` line is a command, never a prompt.
+			// A leading `/` line is a command, never a prompt.
 			match text.trim_start().strip_prefix("/") {
 				Some(command) if !command.starts_with('/') => {
 					ComposerAction::Command { statement: Str::new(command.trim()), media }
@@ -1395,7 +1391,7 @@ mod tests {
 		}
 		assert_eq!(composer.text(), "hi");
 		assert_eq!(composer.frame().cursor(), Some((5, 2)));
-		// pi `band` shape: `╰─ ` gutter at column 0, paddingX 0, no frame.
+		// `band` shape: `╰─ ` gutter at column 0, paddingX 0, no frame.
 		assert_eq!(rows(&composer)[2], "╰─ hi");
 		assert_eq!(composer.key(Key::Enter), ComposerAction::Submit(Str::new_static("hi")));
 		assert_eq!(composer.text(), "");
@@ -1488,7 +1484,7 @@ mod tests {
 		assert!(composer.text().contains("heard tail"));
 	}
 
-	/// pi `addToHistory` + `navigateHistory`: every submission (prompt,
+	/// `addToHistory` + `navigateHistory`: every submission (prompt,
 	/// `/command`, `!shell`) is recalled by Up on an empty draft; Down walks
 	/// back to the draft the user was writing.
 	#[test]
@@ -1530,7 +1526,7 @@ mod tests {
 		assert_eq!(composer.text(), "/help");
 	}
 
-	/// pi `shouldSkipHistory`: secret-bearing commands never enter recall.
+	/// `shouldSkipHistory`: secret-bearing commands never enter recall.
 	#[test]
 	fn secret_bearing_commands_are_kept_out_of_history() {
 		assert!(should_skip_history("/login https://x?code=abc&state=1"));
@@ -1554,7 +1550,7 @@ mod tests {
 		assert_eq!(composer.text(), "safe", "the login line is absent");
 	}
 
-	/// pi `setHistoryStorage`: a resumed session seeds recall newest first.
+	/// `setHistoryStorage`: a resumed session seeds recall newest first.
 	#[test]
 	fn seeded_history_is_recalled_newest_first() {
 		let mut composer = composer();
@@ -1590,10 +1586,7 @@ mod tests {
 			assert_eq!(composer.ui.focused_id().as_deref(), Some(COMPOSER_ID));
 		}
 
-		assert_eq!(
-			composer.apply_prompt_action(PromptAction::MessageEnd),
-			ComposerAction::Changed
-		);
+		assert_eq!(composer.apply_prompt_action(PromptAction::MessageEnd), ComposerAction::Changed);
 		assert_eq!(composer.key(Key::Down), ComposerAction::Changed);
 		assert_eq!(composer.text(), "", "history navigation survives every reflow");
 	}
@@ -1615,7 +1608,7 @@ mod tests {
 		assert_eq!(pane, off);
 	}
 
-	/// pi `useTerminalCursor`: the caret cell is never painted as a block;
+	/// `useTerminalCursor`: the caret cell is never painted as a block;
 	/// only the frame's hardware cursor moves.
 	#[test]
 	fn caret_cell_stays_unstyled_while_typing() {
@@ -1671,7 +1664,7 @@ mod tests {
 		assert!(composer.popup_open(), "# opens prompt actions");
 		let rows = rows(&composer);
 		assert!(rows.iter().any(|row| row.contains("Copy current line")), "{rows:?}");
-		// pi: a space ends the `#query` token, so the query is one word.
+		// A space ends the `#query` token, so the query is one word.
 		for character in "msgend".chars() {
 			composer.key(Key::Char(character));
 		}
@@ -1743,7 +1736,7 @@ mod tests {
 		assert!(composer.next_wake().is_some(), "spinner schedules a wake");
 	}
 
-	/// Plan mode swaps the band for the rail and back; pi `EditorTopGap`
+	/// Plan mode swaps the band for the rail and back; `EditorTopGap`
 	/// keeps the one-row gap for the rail and collapses it for the band
 	/// only while a status row is painted directly above.
 	#[test]
@@ -1778,7 +1771,7 @@ mod tests {
 		assert_eq!(rows(&composer)[2], "╰─ hi", "notice gone: the gap returns");
 	}
 
-	/// pi `computeEditorMaxHeight`, then the composer grows with content up
+	/// `computeEditorMaxHeight`, then the composer grows with content up
 	/// to that budget.
 	#[test]
 	fn editor_height_budget_follows_pi_and_caps_growth() {
@@ -1846,7 +1839,7 @@ mod tests {
 		);
 	}
 
-	/// pi `handleExternalEditor`: the draft handed to `$EDITOR` expands every
+	/// `handleExternalEditor`: the draft handed to `$EDITOR` expands every
 	/// chip; the edited text comes back verbatim with the cards dropped.
 	#[test]
 	fn external_editor_round_trip_expands_chips_and_lands_verbatim() {
@@ -1904,7 +1897,7 @@ mod tests {
 		assert_eq!(prefix_mode_of("!"), Some(PrefixMode::Bash));
 	}
 
-	/// pi `looksLikePastedShellPrompt`: every branch of the three regexes.
+	/// `looksLikePastedShellPrompt`: every branch of the three regexes.
 	#[test]
 	fn pasted_shell_prompts_behind_a_single_dollar_stay_prose() {
 		// SHELL_PROMPT_COMMAND_RE: path forms and the command roster.
@@ -1940,7 +1933,7 @@ mod tests {
 			assert_eq!(parsed.mode, PrefixMode::Eval);
 			assert_eq!(prefix_mode_of(line), Some(PrefixMode::Eval));
 		}
-		// `$$` is explicit: pi skips the guard for the excluded form.
+		// `$$` is explicit: the excluded form skips the guard.
 		let forced = parse_local_input("$$ git status").expect("explicit eval");
 		assert!(forced.exclude);
 		assert_eq!(forced.code, "git status");
@@ -1952,7 +1945,7 @@ mod tests {
 
 	/// The editor chrome recolors on the composer's grammar, not on a bare
 	/// leading `$`: shell variables and pasted shell prompts stay prose
-	/// (pi `isPythonMode` after `pythonCommandPrefixLength` + the guard).
+	/// ( `isPythonMode` after `pythonCommandPrefixLength` + the guard).
 	#[test]
 	fn editor_chrome_follows_the_composer_sigil_grammar() {
 		let info = UiContext::default().theme.info;
@@ -1983,7 +1976,7 @@ mod tests {
 		}
 	}
 
-	/// pi `parseQueueShorthand`: `->` / `=>` on the trimmed draft queues the
+	/// `parseQueueShorthand`: `->` / `=>` on the trimmed draft queues the
 	/// body for the next yield; it wins over `/` classification and the
 	/// draft is still recalled by Up.
 	#[test]
@@ -2013,7 +2006,7 @@ mod tests {
 		assert!(matches!(composer.key(Key::Enter), ComposerAction::Submit(_)));
 	}
 
-	/// pi `#queueForYield(text, { images })`: the yield-queue shorthand
+	/// `#queueForYield(text, { images })`: the yield-queue shorthand
 	/// carries staged media chips with the body, positional against the
 	/// markers that survive the stripped sigil.
 	#[test]
@@ -2104,7 +2097,7 @@ mod tests {
 		assert_eq!(composer.text(), "local://paste-1.md");
 	}
 
-	/// pi `compactImageMarkers`: surviving media markers renumber densely
+	/// `compactImageMarkers`: surviving media markers renumber densely
 	/// against the sources actually submitted without changing their kind.
 	#[test]
 	fn media_markers_compact_to_the_submitted_source_order() {
@@ -2138,7 +2131,7 @@ mod tests {
 		assert_eq!(composer.text(), text);
 	}
 
-	/// Pi's follow-up path reads expanded composer text, not the visible
+	/// The follow-up path reads expanded composer text, not the visible
 	/// `[Paste]` chip label (issue #3737).
 	#[test]
 	fn follow_up_queue_expands_collapsed_paste_text() {

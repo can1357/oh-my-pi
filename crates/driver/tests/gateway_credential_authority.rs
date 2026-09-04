@@ -6,12 +6,12 @@ use std::{
 	sync::Arc,
 };
 
+use omp_ai::auth::{CredentialGrants, CredentialScope};
 use omp_core::{Principal, SecretString, Str, sf};
 use omp_driver::auth_backend::{CredentialControlGrant, gateway_credential_control_factory};
 use omp_envd::exthost::control::{
 	ControlAuthorityFactory as _, ControlConnectionIdentity, ControlRequestContext,
 };
-use omp_inference::auth::{CredentialGrants, CredentialScope};
 use serde_json::{Map, Value, json};
 use tonic::transport::Endpoint;
 
@@ -52,7 +52,7 @@ fn factory(reveal: &[&str]) -> omp_driver::auth_backend::GatewayCredentialSecret
 	gateway_credential_control_factory(
 		Endpoint::from_static("http://127.0.0.1:9").connect_lazy(),
 		Some(SecretString::from("gateway-token-marker")),
-		omp_inference::auth::UsageAttribution::new("test-install", "test-app", Some("test-host")),
+		omp_ai::auth::UsageAttribution::new("test-install", "test-app", Some("test-host")),
 		BTreeMap::from([(sf!("fixture.gateway"), grant)]),
 		Arc::from([]),
 		Arc::<str>::from("gateway-test-placeholder"),

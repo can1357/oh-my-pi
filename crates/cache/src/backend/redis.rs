@@ -10,8 +10,8 @@ use thiserror::Error;
 
 use super::ByteJournalStore;
 
-const APPEND_SCRIPT: &str = r#"local n=redis.call('STRLEN',KEYS[1]);if n~=tonumber(ARGV[1]) then return {-1,n} end;local next=redis.call('APPEND',KEYS[1],ARGV[2]);return {next,n}"#;
-const TRUNCATE_SCRIPT: &str = r#"local n=redis.call('STRLEN',KEYS[1]);local target=tonumber(ARGV[1]);if target>n then return {-1,n} end;if target==0 then redis.call('DEL',KEYS[1]);return {0,n} end;local value=redis.call('GETRANGE',KEYS[1],0,target-1);redis.call('SET',KEYS[1],value);return {target,n}"#;
+const APPEND_SCRIPT: &str = r"local n=redis.call('STRLEN',KEYS[1]);if n~=tonumber(ARGV[1]) then return {-1,n} end;local next=redis.call('APPEND',KEYS[1],ARGV[2]);return {next,n}";
+const TRUNCATE_SCRIPT: &str = r"local n=redis.call('STRLEN',KEYS[1]);local target=tonumber(ARGV[1]);if target>n then return {-1,n} end;if target==0 then redis.call('DEL',KEYS[1]);return {0,n} end;local value=redis.call('GETRANGE',KEYS[1],0,target-1);redis.call('SET',KEYS[1],value);return {target,n}";
 
 /// Borrowed Redis command needed by the byte backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

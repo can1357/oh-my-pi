@@ -2,11 +2,10 @@
 //! previous TypeScript implementation.
 //!
 //! Wire compatibility is the contract: span names, attribute keys, metric
-//! instruments, log-record shapes, and environment-variable knobs are
-//! **identical** to `pi`'s, so existing dashboards, collectors, and alerts
-//! keep working across the rewrite. Where `pi` extends the OpenTelemetry
-//! `GenAI` semantic conventions it does so under the `omp.gen_ai.*` /
-//! `omp.*` prefixes.
+//! instruments, log-record shapes, and environment-variable knobs remain
+//! stable so existing dashboards, collectors, and alerts keep working.
+//! OMP-specific OpenTelemetry `GenAI` semantic-convention extensions use the
+//! `omp.gen_ai.*` / `omp.*` prefixes.
 //!
 //! Layering mirrors the original split:
 //! - [`attrs`] / [`semconv`] — the constant vocabulary (attribute keys, span
@@ -115,7 +114,7 @@ pub mod authority {
 	}
 
 	/// One canonical event retained in a subscription ring.
-	#[derive(Clone, Debug, PartialEq, Serialize)]
+	#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 	pub struct RetainedTelemetryEvent {
 		/// Owner-issued monotonic event sequence.
 		pub sequence: u64,

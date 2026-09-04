@@ -2,8 +2,9 @@
 //! and chat scene.
 
 use std::{
-	env, fs,
+	env,
 	fmt::Write as _,
+	fs,
 	io::{self, Write as _},
 	path::{Path, PathBuf},
 	sync::Arc,
@@ -29,7 +30,7 @@ pub enum RenderFormat {
 	Text,
 	/// Stable provider-payload-free JSON document.
 	Json,
-	/// Concise pi-compatible Markdown history.
+	/// Concise Markdown history.
 	Markdown,
 }
 
@@ -38,28 +39,28 @@ pub enum RenderFormat {
 pub struct RenderArgs {
 	/// Session journal path or project-local session ID prefix.
 	#[arg(value_name = "SESSION")]
-	pub session: Option<Str>,
+	pub session:  Option<Str>,
 	/// Render width in terminal columns.
 	#[arg(long, short = 'w')]
-	pub width:   Option<u16>,
+	pub width:    Option<u16>,
 	/// Print phase timings and rendered row counts to standard error.
 	#[arg(long, short = 't')]
-	pub timing:  bool,
+	pub timing:   bool,
 	/// Benchmark this many extra pure finalized-history batch renders.
 	#[arg(long, value_name = "N")]
-	pub repaint: Option<u32>,
+	pub repaint:  Option<u32>,
 	/// Output projection.
 	#[arg(long, value_enum, default_value = "terminal")]
-	pub format:  RenderFormat,
+	pub format:   RenderFormat,
 	/// Include reasoning in Markdown output.
 	#[arg(long)]
 	pub thinking: bool,
 	/// Strip ANSI styling from terminal transcript output.
 	#[arg(long)]
-	pub plain:   bool,
+	pub plain:    bool,
 	/// Suppress transcript output for timing-only runs.
 	#[arg(long, short = 'q')]
-	pub quiet:   bool,
+	pub quiet:    bool,
 }
 
 /// File produced by `omp --export <SESSION_OMS>`.
@@ -100,9 +101,8 @@ pub fn export_session(
 
 /// Writes a standalone HTML transcript for an already-resolved journal.
 pub fn export_html(source: &Path, output: &Path) -> miette::Result<()> {
-	let session =
-		omp_session::Session::open(source, omp_session::ComponentRegistry::standard())
-			.into_diagnostic()?;
+	let session = omp_session::Session::open(source, omp_session::ComponentRegistry::standard())
+		.into_diagnostic()?;
 	export_html_snapshot(source, session.dom(), session.blobs(), output)
 }
 
@@ -120,7 +120,10 @@ pub fn export_html_snapshot(
 	let document = crate::print_mode::transcript_json(dom, blobs);
 	let entries = omp_journal::Journal::scan(source).into_diagnostic()?;
 	let html = standalone_html(
-		source.file_stem().and_then(|value| value.to_str()).unwrap_or("session"),
+		source
+			.file_stem()
+			.and_then(|value| value.to_str())
+			.unwrap_or("session"),
 		&document,
 		&entries,
 	);
@@ -181,11 +184,9 @@ fn render_session(args: &RenderArgs, data_dir: &Path, cwd: &Path) -> miette::Res
 			session.blobs(),
 		))
 		.into_diagnostic()?,
-		RenderFormat::Markdown => crate::print_mode::transcript_markdown(
-			session.dom(),
-			session.blobs(),
-			args.thinking,
-		),
+		RenderFormat::Markdown => {
+			crate::print_mode::transcript_markdown(session.dom(), session.blobs(), args.thinking)
+		},
 	};
 	let project = project_start.elapsed();
 
@@ -201,8 +202,7 @@ fn render_session(args: &RenderArgs, data_dir: &Path, cwd: &Path) -> miette::Res
 				let _ = production_transcript(&mut session, width, args.plain, cwd)?;
 			},
 			RenderFormat::Text => {
-				let _ =
-					crate::print_mode::transcript_text_with_blobs(session.dom(), session.blobs());
+				let _ = crate::print_mode::transcript_text_with_blobs(session.dom(), session.blobs());
 			},
 			RenderFormat::Json => {
 				let _ = crate::print_mode::transcript_json(session.dom(), session.blobs());
@@ -315,31 +315,32 @@ fn standalone_html(
 		serde_json::to_string(document).map_or(16_384, |value| value.len().saturating_add(16_384)),
 	);
 	html.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
-	html.push_str(
-		"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>",
-	);
+	html.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>");
 	escape_html(&mut html, title);
 	html.push_str(
-		"</title><style>\
-		:root{color-scheme:dark;--bg:#111318;--panel:#191c23;--text:#e8e9ed;--muted:#969ba8;\
-		--line:#30343e;--user:#242936;--accent:#72a7ff;--error:#ff7b86}\
-		*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);\
-		font:14px/1.55 ui-sans-serif,system-ui,sans-serif}main{display:grid;\
-		grid-template-columns:minmax(15rem,22rem) minmax(0,52rem);gap:2rem;max-width:78rem;\
-		margin:auto;padding:2rem}.timeline{position:sticky;top:1rem;align-self:start;max-height:calc(100vh - 2rem);\
-		overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:1rem}\
-		h1{font-size:1.1rem;margin:0 0 1rem}.timeline ol{list-style:none;margin:0;padding:0}.timeline li{\
-		padding:.3rem .45rem;border-left:2px solid var(--accent);color:var(--muted);white-space:nowrap;\
-		overflow:hidden;text-overflow:ellipsis}.timeline li.abandoned{border-color:var(--line);opacity:.55}\
-		.transcript{min-width:0}.message,.notice{margin:0 0 1rem;padding:1rem;border-radius:10px;\
-		background:var(--panel);border:1px solid var(--line)}.user{background:var(--user)}\
-		.label{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;\
-		margin-bottom:.55rem}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:.4rem 0;font:inherit}\
-		details{margin:.55rem 0;border-left:2px solid var(--line);padding-left:.8rem}\
-		summary{cursor:pointer;color:var(--accent)}.thinking{color:var(--muted);font-style:italic}\
-		.error{color:var(--error)}img{display:block;max-width:100%;max-height:36rem;border-radius:8px;\
-		margin:.5rem 0}@media(max-width:760px){main{grid-template-columns:1fr;padding:1rem}.timeline{\
-		position:static;max-height:16rem}}</style></head><body><main>",
+		"</title><style>:root{color-scheme:dark;--bg:#111318;--panel:#191c23;--text:#e8e9ed;--muted:\
+		 #969ba8;--line:#30343e;--user:#242936;--accent:#72a7ff;--error:#ff7b86}*{box-sizing:\
+		 border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 \
+		 ui-sans-serif,system-ui,sans-serif}main{display:grid;grid-template-columns:minmax(15rem,\
+		 22rem) minmax(0,52rem);gap:2rem;max-width:78rem;margin:auto;padding:2rem}.\
+		 timeline{position:sticky;top:1rem;align-self:start;max-height:calc(100vh - \
+		 2rem);overflow:auto;border:1px solid \
+		 var(--line);border-radius:10px;background:var(--panel);padding:1rem}h1{font-size:1.1rem;\
+		 margin:0 0 1rem}.timeline ol{list-style:none;margin:0;padding:0}.timeline li{padding:.3rem \
+		 .45rem;border-left:2px solid \
+		 var(--accent);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:\
+		 ellipsis}.timeline \
+		 li.abandoned{border-color:var(--line);opacity:.55}.transcript{min-width:0}.message,.\
+		 notice{margin:0 0 1rem;padding:1rem;border-radius:10px;background:var(--panel);border:1px \
+		 solid var(--line)}.user{background:var(--user)}.label{font-size:.75rem;color:var(--muted);\
+		 text-transform:uppercase;letter-spacing:.08em;margin-bottom:.55rem}pre{white-space:\
+		 pre-wrap;overflow-wrap:anywhere;margin:.4rem 0;font:inherit}details{margin:.55rem \
+		 0;border-left:2px solid \
+		 var(--line);padding-left:.8rem}summary{cursor:pointer;color:var(--accent)}.thinking{color:\
+		 var(--muted);font-style:italic}.error{color:var(--error)}img{display:block;max-width:100%;\
+		 max-height:36rem;border-radius:8px;margin:.5rem \
+		 0}@media(max-width:760px){main{grid-template-columns:1fr;padding:1rem}.timeline{position:\
+		 static;max-height:16rem}}</style></head><body><main>",
 	);
 	let live = omp_journal::live_chain(entries)
 		.map(|entry| entry.id)
@@ -348,7 +349,11 @@ fn standalone_html(
 	escape_html(&mut html, title);
 	html.push_str("</h1><ol>");
 	for entry in entries {
-		let class = if live.contains(&entry.id) { "live" } else { "abandoned" };
+		let class = if live.contains(&entry.id) {
+			"live"
+		} else {
+			"abandoned"
+		};
 		let _ = write!(html, "<li class=\"{class}\" title=\"");
 		escape_html(&mut html, &entry.id.to_string());
 		html.push_str("\">");
@@ -408,7 +413,9 @@ fn render_html_messages(html: &mut String, document: &serde_json::Value) {
 				html.push_str("</article>");
 			},
 			Some("assistant") => {
-				html.push_str("<article class=\"message assistant\"><div class=\"label\">Assistant</div>");
+				html.push_str(
+					"<article class=\"message assistant\"><div class=\"label\">Assistant</div>",
+				);
 				render_html_content(html, &message["content"], &results, &mut consumed);
 				if let Some(error) = message["errorMessage"].as_str() {
 					html.push_str("<pre class=\"error\">");
@@ -481,7 +488,9 @@ fn render_html_content<'a>(
 				html.push_str("</details>");
 			},
 			Some("image") => {
-				let mime = part["mimeType"].as_str().unwrap_or("application/octet-stream");
+				let mime = part["mimeType"]
+					.as_str()
+					.unwrap_or("application/octet-stream");
 				let data = part["data"].as_str().unwrap_or_default();
 				if data.is_empty() {
 					html.push_str("<pre>[image]</pre>");
@@ -654,7 +663,11 @@ mod tests {
 		session
 			.assistant_start("fixture/model", "fixture", "fixture/model")
 			.expect("assistant");
-		let turn = *session.dom().children(session.dom().body()).last().expect("turn");
+		let turn = *session
+			.dom()
+			.children(session.dom().body())
+			.last()
+			.expect("turn");
 		let assistant = session
 			.dom()
 			.children(turn)
@@ -749,14 +762,14 @@ mod tests {
 			.expect("tool result");
 		drop(session);
 		let args = RenderArgs {
-			session: Some(Str::from(path.to_string_lossy().as_ref())),
-			width:   Some(80),
-			timing:  true,
-			repaint: Some(1),
-			format:  RenderFormat::Terminal,
+			session:  Some(Str::from(path.to_string_lossy().as_ref())),
+			width:    Some(80),
+			timing:   true,
+			repaint:  Some(1),
+			format:   RenderFormat::Terminal,
 			thinking: false,
-			plain:   true,
-			quiet:   false,
+			plain:    true,
+			quiet:    false,
 		};
 		let first = render_session(&args, scratch.path(), &root).expect("first replay");
 		let second = render_session(&args, scratch.path(), &root).expect("second replay");
@@ -798,11 +811,11 @@ mod tests {
 		let document: serde_json::Value =
 			serde_json::from_str(&json.transcript).expect("JSON transcript");
 		assert_eq!(document["format"], "omp-transcript@1");
-		assert!(
-			document["messages"]
-				.as_array()
-				.is_some_and(|messages| messages.iter().any(|message| message["role"] == "toolResult"))
-		);
+		assert!(document["messages"].as_array().is_some_and(|messages| {
+			messages
+				.iter()
+				.any(|message| message["role"] == "toolResult")
+		}));
 
 		let exported = root.join("fixture.html");
 		export_html(&path, &exported).expect("HTML export");
@@ -871,7 +884,10 @@ mod tests {
 		assert!(html.contains("before &lt;script&gt;alert(1)&lt;/script&gt;"));
 		assert!(!html.contains("<script>alert(1)</script>"));
 		let before = html.find("before &lt;script").expect("first text");
-		let tool = html[before..].find("<details class=\"tool\"").expect("tool") + before;
+		let tool = html[before..]
+			.find("<details class=\"tool\"")
+			.expect("tool")
+			+ before;
 		let thinking = html[tool..].find("private trace").expect("thinking") + tool;
 		let image = html[thinking..].find("<img ").expect("image") + thinking;
 		let after = html[image..].find(">after</pre>").expect("last text") + image;

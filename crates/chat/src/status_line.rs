@@ -43,7 +43,7 @@ pub struct StatusLine {
 	/// session has been named.
 	pub name: Option<Str>,
 	/// Prompt size of the most recent receipt — uncached input plus the
-	/// cache read/write tokens — the live context size (pi
+	/// cache read/write tokens — the live context size (
 	/// `calculatePromptTokens`).
 	pub context: u64,
 	/// Total input tokens across visible turns.
@@ -60,7 +60,7 @@ pub struct StatusLine {
 	/// receipts.
 	pub advisor: Option<AdvisorSpend>,
 	/// Total premium-request units billed across visible primary turns at
-	/// millionth precision (GitHub Copilot `premium_interactions`; pi
+	/// millionth precision (GitHub Copilot `premium_interactions`;
 	/// `usage.premiumRequests`).
 	pub premium_requests_millionths: u64,
 	/// Output throughput of the most recent receipt (`tokens_out` over
@@ -209,7 +209,7 @@ impl StatusLine {
 
 /// Highest-precedence active workflow in `<meta><directors>`, projected as
 /// the semantic status-band chip. Paused frames remain visible; queued and
-/// exited frames do not. Precedence matches pi's `mode` segment.
+/// exited frames do not. Precedence follows the `mode` segment.
 #[must_use]
 pub fn director_mode(dom: &Dom) -> Option<ModeChip> {
 	let root = dom.children(dom.meta()).iter().copied().find(|handle| {
@@ -294,7 +294,7 @@ pub fn director_mode(dom: &Dom) -> Option<ModeChip> {
 	})
 }
 
-/// The advisor roster badge (pi `getAdvisorStatusOverview`): the engaged
+/// The advisor roster badge: the engaged
 /// `advisor` Director's journaled health and whether it finished reviewing
 /// the yielded turn. `None` when no advisor is configured, so the model chip
 /// carries no badge.
@@ -366,7 +366,7 @@ fn prompt_fact(dom: &Dom, outer: &str, inner: &str) -> Option<Str> {
 }
 
 /// Output tokens per second of one receipt; `None` without a journaled
-/// duration (pi `calculateTokensPerSecond`).
+/// duration.
 fn throughput(tokens_out: u64, duration_ms: u64) -> Option<f32> {
 	(duration_ms > 0).then(|| (tokens_out as f64 * 1_000.0 / duration_ms as f64) as f32)
 }

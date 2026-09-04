@@ -1,5 +1,4 @@
-//! Per-turn usage row: pi `usage-row.ts` (`formatUsageRow`,
-//! `createUsageRowBlock`, `turnElapsedMs`) projected from a `<usage>`
+//! Per-turn usage row projected from a `<usage>`
 //! element and its enclosing `<turn>`.
 
 use std::fmt::Write as _;
@@ -12,12 +11,11 @@ use omp_tui::{Icon, IntoComponent as _, UiContext, dom};
 use super::{entry_ms, format_duration, format_number, prop_u64};
 use crate::cards::Component;
 
-/// pi `usage-row.ts:7` `MIN_DURATION_MS`: below this the throughput figure
+/// Below this, the throughput figure
 /// is nonsense (cached or instant responses yield absurd tok/s).
 const MIN_DURATION_MS: u64 = 100;
 
-/// Local `YYYY-MM-DD HH:mm:ss` layout of pi `formatUsageTimestamp`
-/// (`usage-row.ts:10-16`).
+/// Local `YYYY-MM-DD HH:mm:ss` timestamp layout.
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 /// Everything the usage row reads, lifted off the DOM once per projection.
@@ -35,14 +33,14 @@ pub struct UsageFacts {
 	pub ttft_ms:      Option<u64>,
 	/// Milliseconds from request start to completion.
 	pub duration_ms:  Option<u64>,
-	/// Unix milliseconds of the `<usage>` entry (pi `completedAt`).
+	/// Unix milliseconds of the `<usage>` entry.
 	pub completed_ms: Option<u64>,
-	/// Unix milliseconds of the turn's `<user>` entry (pi `turnStartedAt`).
+	/// Unix milliseconds of the turn's `<user>` entry.
 	pub started_ms:   Option<u64>,
 }
 
 impl UsageFacts {
-	/// pi `turnElapsedMs` (`usage-row.ts:25-32`): prompt→yield wall time,
+	/// Prompt→yield wall time,
 	/// `None` when either end is unknown or the span is not positive.
 	#[must_use]
 	pub fn elapsed_ms(&self) -> Option<u64> {
@@ -84,7 +82,7 @@ fn optional(node: &omp_dom::Node, prop: PropId) -> Option<u64> {
 		.then(|| prop_u64(node, prop))
 }
 
-/// pi `formatUsageRow` (`usage-row.ts:37-77`): timestamp, `Δ` wait badge,
+/// Timestamp, `Δ` wait badge,
 /// input (`input + cacheWrite`), output, cache read when non-zero, TTFT
 /// when known, and throughput above [`MIN_DURATION_MS`] — joined by two
 /// spaces. Icons resolve through the charset so the line inlines anywhere.
@@ -143,7 +141,7 @@ pub fn usage_line(facts: &UsageFacts, ui: &UiContext) -> Str {
 	line.freeze()
 }
 
-/// pi `createUsageRowBlock` (`usage-row.ts:88-100`): one blank row, then
+/// One blank row, then
 /// the muted usage line inset by one cell.
 #[must_use]
 pub fn usage_block(facts: &UsageFacts, ui: &UiContext) -> Component {

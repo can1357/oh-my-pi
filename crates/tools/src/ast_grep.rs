@@ -15,9 +15,9 @@ use bytes::Bytes;
 use futures::{FutureExt as _, Stream, pin_mut, select_biased};
 use omp_core::{Str, sf};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, DocEffects, Effects, Ev,
-	IncomingParams, InterruptWaitError, LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev,
-	Tool, ToolSpec, ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, Diag, DiagKind, DocEffects,
+	Effects, Ev, IncomingParams, InterruptWaitError, LiftedCall, ParamError, Part, PromptCaps,
+	RecordedCall, Rev, Tool, ToolSpec, ToolTerminal, Unit,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -604,7 +604,7 @@ impl<R: AstSearchResolver> Tool for AstGrep<R> {
 
 			let page_end = skip.saturating_add(matches.len());
 			let limit_reached = page_end < total;
-			yield done(Ok(Payload {
+			let payload = Payload {
 				matches,
 				advisories,
 				advisories_total,
@@ -617,7 +617,11 @@ impl<R: AstSearchResolver> Tool for AstGrep<R> {
 				limit,
 				limit_reached,
 				next_skip: limit_reached.then_some(page_end),
-			}));
+			};
+			for diag in diags(&payload) {
+				yield Ev::Diag(diag);
+			}
+			yield done(Ok(payload));
 		}
 	}
 
@@ -702,12 +706,7 @@ fn render_payload(payload: &Payload) -> String {
 		}
 	}
 	if payload.matches.is_empty() {
-		output.push_str(if payload.parse_errors.is_empty() {
-			"No matches found\n"
-		} else {
-			"No matches found. Parse issues mean the query may be mis-scoped; narrow `path` before \
-			 concluding absence.\n"
-		});
+		output.push_str("No matches found\n");
 	}
 	{
 		use std::fmt::Write as _;
@@ -716,33 +715,54 @@ fn render_payload(payload: &Payload) -> String {
 			"[{} matches in {} files; searched {} files]",
 			payload.total, payload.files_with_matches, payload.files_searched
 		);
-		if let Some(skip) = payload.next_skip {
-			let _ = writeln!(output, "[next skip: {skip}; page limit: {}]", payload.limit);
-		}
-		for advisory in &payload.advisories {
-			let _ = writeln!(output, "[advisory {}] {}", advisory.path, advisory.message);
-		}
-		if payload.advisories_total > payload.advisories.len() {
-			let _ = writeln!(
-				output,
-				"[{} additional advisories omitted]",
-				payload.advisories_total - payload.advisories.len()
-			);
-		}
-		if !payload.parse_errors.is_empty() {
-			let _ = writeln!(
-				output,
-				"Parse issues ({} / {}):",
-				payload.parse_errors.len(),
-				payload.parse_errors_total
-			);
-			for error in &payload.parse_errors {
-				let _ = writeln!(output, "- {error}");
-			}
-		}
 	}
 	output.pop();
 	output
+}
+
+fn diags(payload: &Payload) -> Vec<Diag> {
+	let mut diags = Vec::with_capacity(
+		payload
+			.advisories
+			.len()
+			.saturating_add(payload.parse_errors.len())
+			.saturating_add(4),
+	);
+	if payload.matches.is_empty() && !payload.parse_errors.is_empty() {
+		diags.push(Diag::warn(
+			DiagKind::Advisory,
+			"Parse issues mean the query may be mis-scoped; narrow `path` before concluding absence.",
+		));
+	}
+	if let Some(skip) = payload.next_skip {
+		diags.push(
+			Diag::info(DiagKind::Pagination, "AST matches continue beyond this page")
+				.continuation(sf!("skip={skip}")),
+		);
+	}
+	diags.extend(payload.advisories.iter().map(|advisory| {
+		Diag::warn(DiagKind::Advisory, sf!("{}: {}", advisory.path, advisory.message))
+	}));
+	if payload.advisories_total > payload.advisories.len() {
+		diags.push(Diag::info(DiagKind::LimitReached, "advisories").omitted(
+			u64::try_from(payload.advisories_total - payload.advisories.len()).unwrap_or(u64::MAX),
+			Unit::Items,
+		));
+	}
+	diags.extend(
+		payload
+			.parse_errors
+			.iter()
+			.cloned()
+			.map(|error| Diag::warn(DiagKind::ParseIssue, error)),
+	);
+	if payload.parse_errors_total > payload.parse_errors.len() {
+		diags.push(Diag::info(DiagKind::LimitReached, "parse issues").omitted(
+			u64::try_from(payload.parse_errors_total - payload.parse_errors.len()).unwrap_or(u64::MAX),
+			Unit::Files,
+		));
+	}
+	diags
 }
 
 fn render_bindings(bindings: &[omp_ast::ops::AstBinding]) -> Str {
@@ -944,7 +964,7 @@ fn protocol_issue(message: Str) -> ArgIssue {
 	}
 }
 
-fn fault(message: &'static str) -> Fault {
+const fn fault(message: &'static str) -> Fault {
 	Fault { message: Str::new_static(message) }
 }
 
@@ -952,21 +972,31 @@ fn fault(message: &'static str) -> Fault {
 mod tests {
 	use futures::{StreamExt as _, executor::block_on};
 	use omp_ast::ops::AstBinding;
-	use omp_tool::Interrupt;
+	use omp_tool::{Interrupt, Severity};
 
 	use super::*;
 
-	fn search(root: PathBuf, raw: &str) -> Result<Payload, Fault> {
+	fn search_events(root: PathBuf, raw: &str) -> Vec<Ev<Update, Payload, Fault>> {
 		let tool = tool(root);
 		let (feed, params) = IncomingParams::channel();
 		feed
 			.args_committed(Str::new(raw))
 			.expect("invocation consumer remains live");
-		let events = block_on(tool.call(params).collect::<Vec<_>>());
-		let [Ev::Done(ToolTerminal::Done { result, .. })] = events.as_slice() else {
-			panic!("expected one terminal ast_grep outcome: {events:?}");
-		};
-		result.clone()
+		block_on(tool.call(params).collect())
+	}
+
+	fn result(events: &[Ev<Update, Payload, Fault>]) -> Result<Payload, Fault> {
+		events
+			.iter()
+			.find_map(|event| match event {
+				Ev::Done(ToolTerminal::Done { result, .. }) => Some(result.clone()),
+				_ => None,
+			})
+			.unwrap_or_else(|| panic!("expected terminal ast_grep outcome: {events:?}"))
+	}
+
+	fn search(root: PathBuf, raw: &str) -> Result<Payload, Fault> {
+		result(&search_events(root, raw))
 	}
 
 	#[test]
@@ -1034,11 +1064,19 @@ mod tests {
 				.collect::<String>(),
 		)
 		.expect("write z");
-		let first = search(dir.path().to_path_buf(), r#"{"pat":"call($A)","path":"*.ts","limit":8}"#)
-			.expect("first page");
+		let first_events =
+			search_events(dir.path().to_path_buf(), r#"{"pat":"call($A)","path":"*.ts","limit":8}"#);
+		let first = result(&first_events).expect("first page");
 		assert_eq!(first.total, 16);
 		assert_eq!(first.next_skip, Some(8));
 		assert!(first.matches.iter().all(|matched| matched.path == "a.ts"));
+		assert!(first_events.iter().any(|event| matches!(
+			event,
+			Ev::Diag(diag)
+				if diag.native_kind() == Some(DiagKind::Pagination)
+					&& diag.severity == Severity::Info
+					&& diag.continuation.as_deref() == Some("skip=8")
+		)));
 		let second =
 			search(dir.path().to_path_buf(), r#"{"pat":"call($A)","path":"*.ts","skip":8,"limit":8}"#)
 				.expect("second page");
@@ -1053,13 +1091,71 @@ mod tests {
 		let dir = tempfile::tempdir().expect("tempdir");
 		fs::write(dir.path().join("broken.ts"), "export function broken( { return 1; }")
 			.expect("write broken source");
-		let payload =
-			search(dir.path().to_path_buf(), r#"{"pat":"unlikely($A)","path":"broken.ts"}"#)
-				.expect("parse issue is not terminal");
+		let events =
+			search_events(dir.path().to_path_buf(), r#"{"pat":"unlikely($A)","path":"broken.ts"}"#);
+		let payload = result(&events).expect("parse issue is not terminal");
 		assert_eq!(payload.total, 0);
 		assert_eq!(payload.parse_errors_total, 1);
 		assert!(payload.parse_errors[0].contains("broken.ts: parse error"));
-		assert!(render_payload(&payload).contains("query may be mis-scoped"));
+		assert_eq!(
+			render_payload(&payload),
+			"No matches found\n[0 matches in 0 files; searched 1 files]"
+		);
+		assert!(events.iter().any(|event| matches!(
+			event,
+			Ev::Diag(diag)
+				if diag.native_kind() == Some(DiagKind::ParseIssue)
+					&& diag.severity == Severity::Warn
+					&& diag.text.contains("broken.ts: parse error")
+		)));
+		assert!(events.iter().any(|event| matches!(
+			event,
+			Ev::Diag(diag)
+				if diag.native_kind() == Some(DiagKind::Advisory)
+					&& diag.severity == Severity::Warn
+					&& diag.text.contains("query may be mis-scoped")
+		)));
+	}
+
+	#[test]
+	fn diagnostic_caps_report_typed_omissions() {
+		let payload = Payload {
+			matches:            Vec::new(),
+			advisories:         vec![Advisory {
+				path:    sf!("unknown.ext"),
+				message: sf!("unsupported language"),
+			}],
+			advisories_total:   3,
+			parse_errors:       vec![sf!("broken.ts: parse error")],
+			parse_errors_total: 4,
+			total:              0,
+			files_with_matches: 0,
+			files_searched:     7,
+			skip:               0,
+			limit:              2,
+			limit_reached:      false,
+			next_skip:          None,
+		};
+		let diagnostics = diags(&payload);
+		assert!(diagnostics.iter().any(|diag| {
+			diag.native_kind() == Some(DiagKind::Advisory)
+				&& diag.severity == Severity::Warn
+				&& diag.text == "unknown.ext: unsupported language"
+		}));
+		assert!(diagnostics.iter().any(|diag| {
+			diag.native_kind() == Some(DiagKind::LimitReached)
+				&& diag.severity == Severity::Info
+				&& diag
+					.omitted
+					.is_some_and(|omitted| omitted.count == 2 && omitted.unit == Unit::Items)
+		}));
+		assert!(diagnostics.iter().any(|diag| {
+			diag.native_kind() == Some(DiagKind::LimitReached)
+				&& diag.severity == Severity::Info
+				&& diag
+					.omitted
+					.is_some_and(|omitted| omitted.count == 3 && omitted.unit == Unit::Files)
+		}));
 	}
 
 	#[test]

@@ -34,7 +34,7 @@ impl RenderFold for AskRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		let Some(questions) = args.get("questions").and_then(|value| value.as_array()) else {
 			return;
 		};
@@ -93,7 +93,7 @@ impl RenderFold for TodoRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		if let Some(op) = args.get("op").and_then(|value| value.as_str()) {
 			state.op = Some(Str::new(op));
 		}
@@ -158,7 +158,7 @@ impl RenderFold for ThinkRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		if let Some(thoughts) = args.get("thoughts").and_then(|value| value.as_str()) {
 			state.thoughts = Some(Str::new(thoughts));
 		}
@@ -324,7 +324,7 @@ fn render_thought(thoughts: &str) -> El {
 }
 /// Native ask, todo, and think renderer lifecycle fixtures for the visual QA
 /// gallery.
-pub(crate) fn gallery_fixtures(
+pub fn gallery_fixtures(
 	ask: ToolIdentity,
 	todo: ToolIdentity,
 	think: ToolIdentity,
@@ -377,7 +377,7 @@ mod tests {
 			serde_json::from_slice::<CallOutcome<AskPayload, AskFault>>(fixtures[0].error_outcome)
 				.expect("ask fault decodes");
 		let mut ask_state = AskState::default();
-		let streaming = omp_slopjson::parse_streaming(fixtures[0].streaming_args);
+		let streaming = omp_core::slopjson::parse_streaming(fixtures[0].streaming_args);
 		AskRenderer.fold_args(&mut ask_state, &streaming, false);
 		let live = AskRenderer
 			.view(&ask_state, None)
@@ -387,7 +387,7 @@ mod tests {
 		assert!(live.contains("<choice>Postgres</choice>"));
 		assert!(live.contains("Relational, strong consistency, JSONB support"));
 		assert!(!live.contains('↳'));
-		let committed = omp_slopjson::parse(fixtures[0].args).expect("ask args decode");
+		let committed = omp_core::slopjson::parse(fixtures[0].args).expect("ask args decode");
 		AskRenderer.fold_args(&mut ask_state, &committed, true);
 		let success = AskRenderer
 			.view(&ask_state, Some(&ask_outcome))
@@ -413,14 +413,14 @@ mod tests {
 			serde_json::from_slice::<CallOutcome<TodoPayload, TodoFault>>(fixtures[1].error_outcome)
 				.expect("todo fault decodes");
 		let mut todo_state = TodoState::default();
-		let streaming = omp_slopjson::parse_streaming(fixtures[1].streaming_args);
+		let streaming = omp_core::slopjson::parse_streaming(fixtures[1].streaming_args);
 		TodoRenderer.fold_args(&mut todo_state, &streaming, false);
 		let live = TodoRenderer
 			.view(&todo_state, None)
 			.expect("todo live view renders");
 		assert!(live.contains("label=Foundation"));
 		assert!(live.contains("<todo guides=round numbering=roman>"));
-		let committed = omp_slopjson::parse(fixtures[1].args).expect("todo args decode");
+		let committed = omp_core::slopjson::parse(fixtures[1].args).expect("todo args decode");
 		TodoRenderer.fold_args(&mut todo_state, &committed, true);
 		let todo = TodoRenderer
 			.view(&todo_state, Some(&todo_outcome))
@@ -444,14 +444,14 @@ mod tests {
 			serde_json::from_slice::<CallOutcome<ThinkPayload, ThinkFault>>(fixtures[2].error_outcome)
 				.expect("think fault decodes");
 		let mut think_state = ThinkState::default();
-		let streaming = omp_slopjson::parse_streaming(fixtures[2].streaming_args);
+		let streaming = omp_core::slopjson::parse_streaming(fixtures[2].streaming_args);
 		ThinkRenderer.fold_args(&mut think_state, &streaming, false);
 		let live = ThinkRenderer
 			.view(&think_state, None)
 			.expect("think live view renders");
 		assert!(live.starts_with("<text fg=muted dim italic"));
 		assert!(live.contains("doubled lat"));
-		let committed = omp_slopjson::parse(fixtures[2].args).expect("think args decode");
+		let committed = omp_core::slopjson::parse(fixtures[2].args).expect("think args decode");
 		ThinkRenderer.fold_args(&mut think_state, &committed, true);
 		let success = ThinkRenderer
 			.view(&think_state, Some(&think_outcome))

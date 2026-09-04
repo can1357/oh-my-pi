@@ -32,11 +32,14 @@ pub struct PromptFacts {
 }
 
 omp_con::var! {
-	/// pi `disabledExtensions`: extension and resource ids the runtime never
+	/// Extension and resource ids the runtime never
 	/// loads. Native extension manifest ids disable the whole extension;
 	/// `skill:<name>` drops one skill (`omp ext config` edits this list).
 	pub static CL_DISABLED_EXTENSIONS = cl_disabled_extensions: Vec<Str> {
 		default: Vec::new(),
 		flags: archive,
+		meta: {
+			"legacy.path": "disabledExtensions",
+		},
 	};
 }

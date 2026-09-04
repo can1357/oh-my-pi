@@ -28,7 +28,7 @@
 //!   skill_prompt=true data={SkillPrompt}>` projects the framed skill
 //!   invocation while its body remains an ordinary model-facing user message;
 //!   `<user author=guest>` renders as the collaboration guest bubble; `<user
-//!   synthetic=true>` collapses to pi's `Synthetic input · size · lines ·
+//!   synthetic=true>` collapses to the `Synthetic input · size · lines ·
 //!   ctrl+o` row.
 //! - `<usage tokens-in tokens-out cost-nano-usd cache-read cache-write ttft-ms
 //!   duration-ms>`; the row timestamp and prompt→yield wait derive from the
@@ -101,7 +101,8 @@ pub fn entry_ms(node: &Node) -> Option<u64> {
 		.map(Ulid::timestamp_ms)
 }
 
-/// pi `formatNumber`: `999`, `1K`, `1.5K`, `25K`, `1M`, `1.5M`, `25M`, `1.5B`.
+/// Formats numbers as `999`, `1K`, `1.5K`, `25K`, `1M`, `1.5M`, `25M`, or
+/// `1.5B`.
 #[must_use]
 pub fn format_number(value: u64) -> String {
 	fn trim1(value: f64) -> String {
@@ -127,7 +128,7 @@ pub fn format_number(value: u64) -> String {
 	}
 }
 
-/// Writes pi `formatDuration`: `0ms`, `347ms`, `2.5s`, `1m20s`, `1h5m`, `2d`.
+/// Writes durations as `0ms`, `347ms`, `2.5s`, `1m20s`, `1h5m`, or `2d`.
 pub fn write_duration(out: &mut impl std::fmt::Write, ms: u64) -> std::fmt::Result {
 	const SEC: u64 = 1_000;
 	const MIN: u64 = 60 * SEC;

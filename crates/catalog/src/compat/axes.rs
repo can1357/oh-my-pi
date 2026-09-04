@@ -30,9 +30,9 @@ pub enum AxisShape {
 #[derive(Clone, Copy, Debug, Display, EnumString, Eq, IntoStaticStr, PartialEq)]
 #[strum(serialize_all = "kebab-case")]
 pub enum CompatRecord {
-	/// OpenAI chat completions.
+	/// `OpenAI` chat completions.
 	OpenAi,
-	/// OpenAI Responses.
+	/// `OpenAI` Responses.
 	OpenAiResponses,
 	/// Anthropic Messages.
 	Anthropic,

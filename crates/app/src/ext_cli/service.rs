@@ -911,8 +911,7 @@ fn read_catalog(state: &StatePaths) -> miette::Result<SignedIndex> {
 }
 
 pub(crate) fn installed_views(state: &StatePaths) -> miette::Result<Vec<InstalledExtensionView>> {
-	let client =
-		InstalledRecord::read(&state.client_installed).map_err(super::extension_failure)?;
+	let client = InstalledRecord::read(&state.client_installed).map_err(super::extension_failure)?;
 	let workspace =
 		InstalledRecord::read(&state.workspace_installed).map_err(super::extension_failure)?;
 	let client_lock = read_lock_or_empty(&state.client_lock, BackendLayer::Client)?;
@@ -951,18 +950,19 @@ pub(crate) fn installed_views(state: &StatePaths) -> miette::Result<Vec<Installe
 		let version = locked
 			.map(|locked| locked.version.clone())
 			.or_else(|| source_version(&entry.source));
-		let admitted = !entry.enabled || locked.is_none_or(|locked| {
-			grant_covers(
-				&grants,
-				&locked.id,
-				&locked.publisher,
-				BackendLayer::Client,
-				None,
-				&locked.capability_digest,
-				locked.tier,
-				&locked.ship,
-			)
-		});
+		let admitted = !entry.enabled
+			|| locked.is_none_or(|locked| {
+				grant_covers(
+					&grants,
+					&locked.id,
+					&locked.publisher,
+					BackendLayer::Client,
+					None,
+					&locked.capability_digest,
+					locked.tier,
+					&locked.ship,
+				)
+			});
 		InstalledExtensionView {
 			version,
 			marketplace: source_index(&entry.source),
@@ -987,18 +987,19 @@ pub(crate) fn installed_views(state: &StatePaths) -> miette::Result<Vec<Installe
 		let version = locked
 			.map(|locked| locked.version.clone())
 			.or_else(|| source_version(&entry.source));
-		let admitted = !entry.enabled || locked.is_none_or(|locked| {
-			grant_covers(
-				&grants,
-				&locked.id,
-				&locked.publisher,
-				BackendLayer::Workspace,
-				Some(&state.workspace),
-				&locked.capability_digest,
-				locked.tier,
-				&locked.ship,
-			)
-		});
+		let admitted = !entry.enabled
+			|| locked.is_none_or(|locked| {
+				grant_covers(
+					&grants,
+					&locked.id,
+					&locked.publisher,
+					BackendLayer::Workspace,
+					Some(&state.workspace),
+					&locked.capability_digest,
+					locked.tier,
+					&locked.ship,
+				)
+			});
 		InstalledExtensionView {
 			version,
 			marketplace: source_index(&entry.source),

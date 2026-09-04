@@ -65,7 +65,7 @@ pub mod matchers {
 		use std::fs;
 
 		#[cfg(windows)]
-		use omp_shell_engine::sys::fs::PathExt;
+		use omp_shell::sys::fs::PathExt;
 		#[cfg(unix)]
 		use rustix::fs::{Access, AtFlags, CWD, accessat};
 
@@ -4648,7 +4648,7 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::OsStringValueParser};
 use matchers::{Follow, Matcher, WalkEntry};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::{Host, Utility, matches_parser, util};
 

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use omp_shell_engine::builtins::{self, builtin};
+use omp_shell::builtins::{self, builtin};
 
 #[allow(
 	clippy::wildcard_imports,
@@ -13,7 +13,7 @@ use crate::host::DynHost;
 ///
 /// The registration stays fixed while the host's catalog remains live, so
 /// discovery never mutates the model-facing tool roster.
-pub fn dyn_builtin<SE: omp_shell_engine::ShellExtensions>(
+pub fn dyn_builtin<SE: omp_shell::ShellExtensions>(
 	host: Arc<dyn DynHost>,
 ) -> builtins::Registration<SE> {
 	r#dyn::registration(host)
@@ -26,7 +26,7 @@ pub fn dyn_builtin<SE: omp_shell_engine::ShellExtensions>(
 /// whether to install them and may withhold destructive utilities such as
 /// `rm`, `mv`, and `ln`.
 #[allow(clippy::too_many_lines, reason = "one line per utility")]
-pub fn utility_builtins<SE: omp_shell_engine::ShellExtensions>()
+pub fn utility_builtins<SE: omp_shell::ShellExtensions>()
 -> Vec<(&'static str, builtins::Registration<SE>)> {
 	let mut m = Vec::<(&'static str, builtins::Registration<SE>)>::new();
 
@@ -99,7 +99,7 @@ pub fn utility_builtins<SE: omp_shell_engine::ShellExtensions>()
 ///
 /// Kept separate from [`utility_builtins`] because an embedding shell may make
 /// an independent registration choice for process-control commands.
-pub fn process_builtins<SE: omp_shell_engine::ShellExtensions>()
+pub fn process_builtins<SE: omp_shell::ShellExtensions>()
 -> Vec<(&'static str, builtins::Registration<SE>)> {
 	let mut m = Vec::<(&'static str, builtins::Registration<SE>)>::new();
 

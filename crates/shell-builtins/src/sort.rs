@@ -2493,7 +2493,7 @@ use custom_str_cmp::custom_str_cmp;
 use ext_sort::ext_sort;
 use numeric_str_cmp::{NumInfo, NumInfoParseSettings, human_numeric_str_cmp, numeric_str_cmp};
 use omp_core::{FastHashMap, FastState};
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use rand::{RngExt as _, rng};
 #[cfg(not(target_os = "wasi"))]
 use rayon::slice::ParallelSliceMut;
@@ -5594,7 +5594,7 @@ fn format_error_message(error: &ParseSizeError, s: &str, option: &str) -> String
 #[cfg(test)]
 mod tests {
 
-	use omp_shell_engine::{OpenRequest, PathAccess, PathDenied, PathPolicy};
+	use omp_shell::{OpenRequest, PathAccess, PathDenied, PathPolicy};
 
 	use super::*;
 	use crate::host::{run_util, run_util_with_policy};

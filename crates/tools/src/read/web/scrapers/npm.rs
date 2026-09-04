@@ -2,7 +2,8 @@
 
 use std::vec;
 
-use omp_core::{Str, sf};
+use omp_core::Str;
+use omp_tool::{Diag, DiagKind};
 use serde::{Deserialize, Deserializer, de};
 use serde_json::{Map, Value};
 use url::Url;
@@ -133,7 +134,9 @@ pub(super) async fn render<C: HttpClient + Sync>(
 	}
 
 	let mut result = RenderResult::markdown(&markdown, "npm");
-	result.notes.push(sf!("Fetched via npm registry"));
+	result
+		.diags
+		.push(Diag::info(DiagKind::Provenance, "Fetched via npm registry"));
 	Ok(Some(result))
 }
 

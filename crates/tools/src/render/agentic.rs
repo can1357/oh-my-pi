@@ -29,14 +29,14 @@ impl RenderFold for GoalRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		state.op = args
 			.get("op")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.and_then(|value| value.parse().ok());
 		state.objective = args
 			.get("objective")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::from);
 	}
 
@@ -129,7 +129,7 @@ fn render_goal_payload(payload: &GoalPayload) -> El {
 }
 
 /// Native goal renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(goal: ToolIdentity) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(goal: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![RendererGalleryFixture {
 		identity: goal,
 		streaming_args: r#"{"op":"create","objective":"Ship the auth hardening pass: per-account rate"#,
@@ -153,7 +153,7 @@ mod tests {
 			ToolIdentity { name: Str::new_static("goal"), rev: Rev { family: Str::default(), n: 1 } };
 		let fixture = gallery_fixtures(identity).pop().expect("goal fixture");
 		assert!(fixture.progress_update.is_none());
-		let args = omp_slopjson::parse_streaming(fixture.streaming_args);
+		let args = omp_core::slopjson::parse_streaming(fixture.streaming_args);
 		let mut state = GoalState::default();
 		GoalRenderer.fold_args(&mut state, &args, false);
 		assert!(
@@ -246,7 +246,7 @@ mod tests {
 	#[test]
 	fn live_objective_is_semantically_bounded_and_escaped() {
 		let mut state = GoalState::default();
-		let args = omp_slopjson::parse_streaming(
+		let args = omp_core::slopjson::parse_streaming(
 			"{\"op\":\"create\",\"objective\":\"Harden <session> & cookie validation while rotating \
 			 every signing key without interrupting active requests END\\nsecond line\"",
 		);

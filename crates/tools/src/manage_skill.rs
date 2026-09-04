@@ -43,7 +43,7 @@ pub enum Action {
 }
 
 /// Arguments accepted by `manage_skill@1`.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Params {
 	/// Mutation action.
@@ -244,7 +244,7 @@ fn render_outcome(outcome: &MutationOutcome) -> Str {
 	text.freeze()
 }
 
-fn done(result: Result<MutationOutcome, Fault>) -> Ev<Update, MutationOutcome, Fault> {
+const fn done(result: Result<MutationOutcome, Fault>) -> Ev<Update, MutationOutcome, Fault> {
 	Ev::Done(ToolTerminal::Done { result, useless: false })
 }
 

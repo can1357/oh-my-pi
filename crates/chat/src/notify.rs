@@ -5,14 +5,14 @@
 //! `notify-send` fallbacks) lives in `omp_tui::notify`; this module only
 //! decides *whether* to toast and builds the [`Notification`].
 //!
-//! pi `event-controller.ts:2356-2424`: on `agent_end` the error toast fires
-//! when the last assistant stopped with `error`, gated by `error.notify` and
+//! On `agent_end`, the error toast fires when the last assistant stopped with
+//! `error`, gated by `error.notify` and
 //! suppressed while an auto-retry is outstanding; the completion toast fires
 //! otherwise, gated by `completion.notify`, and never for an aborted or
 //! errored turn — so one settled turn yields at most one of the two. The
 //! title is the session name, else the app name; bodies are `Stopped with
-//! error` and `Complete`; both request window focus. pi `tools/ask.ts:838`
-//! toasts `ask.notify` when the ask tool blocks on the user.
+//! error` and `Complete`; both request window focus. `ask.notify` toasts
+//! when the ask tool blocks on the user.
 
 use omp_con::Ctx;
 use omp_core::Str;
@@ -22,30 +22,46 @@ use omp_tui::{Notification, NotificationAction, NotificationSound, Urgency, cell
 use crate::notices::{prop_text, retry::last_turn};
 
 omp_con::var! {
-	/// Toasts when a turn completes (pi `completion.notify`, `on|off`).
+	/// Notify when the agent finishes a turn.
 	pub static CL_NOTIFY_COMPLETION = cl_notify_completion: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"ui.tab": "interaction",
+			"ui.group": "Notifications",
+			"ui.label": "Completion Notification",
+			"legacy.path": "completion.notify",
+		},
 	};
-	/// Toasts when a turn stops with a terminal provider error (pi
-	/// `error.notify`, default `off`: opt-in, unlike completion and ask).
+	/// Notify when the agent stops with an error.
 	pub static CL_NOTIFY_ERROR = cl_notify_error: bool {
 		default: false,
 		flags: archive,
+		meta: {
+			"ui.tab": "interaction",
+			"ui.group": "Notifications",
+			"ui.label": "Error Notification",
+			"legacy.path": "error.notify",
+		},
 	};
-	/// Toasts when a tool waits for interactive input (pi `ask.notify`,
-	/// `on|off`).
+	/// Notify when the ask tool is waiting for input.
 	pub static CL_NOTIFY_ASK = cl_notify_ask: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"ui.tab": "interaction",
+			"ui.group": "Notifications",
+			"ui.label": "Ask Notification",
+			"legacy.path": "ask.notify",
+		},
 	};
 }
 
-/// pi `TERMINAL.sendNotification({ title: sessionName || "Oh My Pi" })`.
+/// Default notification title.
 const APP_TITLE: &str = "omp";
-/// pi `sendCompletionNotification` body.
+/// Completion notification body.
 const COMPLETION_BODY: &str = "Complete";
-/// pi `sendErrorNotification` body.
+/// Error notification body.
 const ERROR_BODY: &str = "Stopped with error";
 /// Cells kept from the first line of an ask question.
 const ASK_BODY_CELLS: u16 = 120;
@@ -79,7 +95,7 @@ impl Notifier {
 		Self { session_name, retry_pending: false }
 	}
 
-	/// Marks whether an auto-retry is outstanding; pi `#retryPending` (set on
+	/// Marks whether an auto-retry is outstanding (set on
 	/// `auto_retry_start`, cleared on `auto_retry_end`) mutes the error toast
 	/// for a failure the retry may still recover from.
 	pub const fn set_retry_pending(&mut self, pending: bool) {
@@ -269,7 +285,7 @@ mod tests {
 		assert_eq!(
 			notifier.turn_ended(&con, TurnEnd::Errored),
 			None,
-			"pi `error.notify` defaults to off"
+			"error notifications default to off"
 		);
 		assert!(notifier.turn_ended(&con, TurnEnd::Completed).is_some());
 		con.exec("cl_notify_error 1", Source::Console).expect("set");

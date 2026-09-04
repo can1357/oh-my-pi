@@ -1,12 +1,11 @@
-//! `ask@2` dialog: pi `modes/components/ask-dialog.ts` as an observer-local
-//! [`Panel`] (ADR 0005).
+//! `ask@2` dialog as an observer-local [`Panel`] (ADR 0005).
 //!
 //! The dialog is projected from the tool's own `<ask status=running>`
 //! element — its `<input>` carries the questions — and closes when that
 //! element settles; nothing about the dialog enters the DOM. Answers go back
 //! through [`PanelEvent::Ask`] and become the call's result (ADR 0008).
 //!
-//! Shape (pi): one tab per question plus a `Submit` tab when there is more
+//! Shape: one tab per question plus a `Submit` tab when there is more
 //! than one question or any multi-select; a radio/checkbox list per
 //! question with the recommended option highlighted first, an `Other (type
 //! your own)` row that takes free text inline, `n` attaches a note to the
@@ -24,13 +23,19 @@ use omp_tui::{Frame, Key, Size, Ui, UiContext, UiEvent, cell_width, dom};
 use super::{Panel, PanelAction, PanelAnchor, PanelCx, PanelEvent};
 
 omp_con::var! {
-	/// Auto-select the recommended `ask` option after this many seconds; 0
-	/// disables the countdown (pi `ask.timeout`). Plan mode never counts
-	/// down.
+	/// Auto-select the recommended ask option after this many seconds. Zero
+	/// disables the countdown, and Plan mode never counts down.
 	pub static CL_ASK_TIMEOUT = cl_ask_timeout: i64 {
 		default: 0,
 		min: 0,
 		flags: archive,
+		meta: {
+			"ui.tab": "interaction",
+			"ui.group": "Notifications",
+			"ui.label": "Ask Timeout",
+			"ui.unit": "s",
+			"legacy.path": "ask.timeout",
+		},
 	};
 }
 
@@ -80,20 +85,19 @@ fn director_engaged(cx: &PanelCx<'_>, family: &str) -> bool {
 	}
 	false
 }
-/// pi `DIALOG_HEIGHT_RATIO`: the dialog may occupy this much of the
-/// terminal.
+/// The dialog may occupy this fraction of the terminal.
 const HEIGHT_RATIO: (u16, u16) = (7, 10);
-/// pi `MIN_DIALOG_ROWS`.
+/// Minimum number of dialog rows.
 const MIN_DIALOG_ROWS: u16 = 12;
-/// pi `MIN_BODY_ROWS`.
+/// Minimum number of selectable body rows.
 const MIN_BODY_ROWS: u16 = 5;
-/// pi `MAX_HEADER_ROWS`: a longer question truncates until Ctrl+O.
+/// Maximum visible question-header rows; Ctrl+O expands a longer question.
 const MAX_HEADER_ROWS: u16 = 4;
-/// pi `MAX_HEADER_CHIP_WIDTH`.
+/// Maximum tab-label width in cells.
 const MAX_TAB_CELLS: usize = 16;
-/// pi `SUBMIT_OPTION`.
+/// Label for the final submission tab.
 const SUBMIT_LABEL: &str = "Submit";
-/// pi `optionLabel` recommended suffix.
+/// Suffix shown on a recommended option.
 const RECOMMENDED_SUFFIX: &str = " (Recommended)";
 /// Border rows, header rule, footer rule, and footer.
 const CHROME_ROWS: u16 = 5;
@@ -105,7 +109,7 @@ enum RowKey {
 	Other,
 }
 
-/// Per-question answer state (pi `QuestionState`).
+/// Per-question answer state.
 #[derive(Clone, Debug, Default)]
 struct QuestionState {
 	/// Selected option labels in selection order.
@@ -204,8 +208,8 @@ impl AskDialog {
 		&self.questions
 	}
 
-	/// Body rows: pi measures the tallest tab and clamps to 70% of the
-	/// terminal; the select scrolls inside that.
+	/// Body rows clamp to 70% of the terminal after reserving the tallest tab.
+	/// The select scrolls inside that region.
 	fn body_rows(viewport: Size) -> u16 {
 		let cap = (viewport.height * HEIGHT_RATIO.0 / HEIGHT_RATIO.1).max(MIN_DIALOG_ROWS);
 		cap.saturating_sub(CHROME_ROWS + MAX_HEADER_ROWS + 1)
@@ -286,7 +290,7 @@ impl AskDialog {
 			.count()
 	}
 
-	/// pi `renderAnswerSummary`.
+	/// Summarizes the submitted answer and whether it is answered.
 	fn summary(question: &Question, state: &QuestionState) -> (Str, bool) {
 		let selected = question
 			.options
@@ -314,7 +318,7 @@ impl AskDialog {
 		}
 	}
 
-	/// pi `noteForSubmittedAnswer`: a note survives only with its row's
+	/// A note survives only with its row's
 	/// answer.
 	fn submitted_note(question: &Question, state: &QuestionState) -> Option<Str> {
 		let (row, note) = state.note.as_ref()?;
@@ -571,7 +575,7 @@ impl AskDialog {
 		PanelEvent::Consumed
 	}
 
-	/// pi `#switchTab`.
+	/// Moves to the next or previous tab.
 	fn switch_tab(&mut self, forward: bool) -> PanelEvent {
 		self.custom_editing = false;
 		let count = self.questions.len() + 1;
@@ -583,7 +587,7 @@ impl AskDialog {
 		self.mark()
 	}
 
-	/// pi `#advanceAfterQuestion`: a lone question submits; otherwise the
+	/// A lone question submits; otherwise advances to the
 	/// next question, then the Submit tab.
 	fn advance(&mut self) -> PanelEvent {
 		if self.questions.len() == 1 && !self.has_submit_tab() {
@@ -598,7 +602,7 @@ impl AskDialog {
 		self.mark()
 	}
 
-	/// pi `#buildResults` + `onSubmit`.
+	/// Builds the submitted answers.
 	fn finish(&mut self, timed_out: bool) -> PanelEvent {
 		let answers = self
 			.questions
@@ -624,7 +628,7 @@ impl AskDialog {
 		PanelEvent::Ask { id: self.id.clone(), answers: None }
 	}
 
-	/// pi `#handleTimeout`: unanswered questions take their noted option,
+	/// On timeout, unanswered questions take their noted option,
 	/// else the recommended one, and the dialog submits.
 	fn timed_out(&mut self) -> PanelEvent {
 		for (question, state) in self.questions.iter().zip(&mut self.states) {
@@ -683,7 +687,7 @@ impl AskDialog {
 			}
 			return self.advance();
 		}
-		// pi `#promptForCustomInput`: an empty value unselects the custom
+		// An empty value unselects the custom
 		// answer.
 		if value.trim().is_empty() {
 			state.custom = None;
@@ -825,7 +829,7 @@ impl Panel for AskDialog {
 
 	fn key(&mut self, key: Key) -> PanelEvent {
 		self.sync();
-		// Any key restarts the inactivity countdown (pi `countdown.reset()`).
+		// Any key restarts the inactivity countdown.
 		if let Some(timeout) = self.timeout {
 			self.deadline = self.now_hint.saturating_add(timeout);
 		}

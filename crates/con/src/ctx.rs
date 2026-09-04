@@ -16,7 +16,7 @@ use parking_lot::RwLock;
 use strum::Display;
 
 use crate::{
-	Arg, ConError, ConResult, DumpOptions, LayerId, Origin, ParseError, RegItem, Role, Seed,
+	Arg, ConError, ConResult, DumpOptions, Hint, LayerId, Origin, ParseError, RegItem, Role, Seed,
 	SetReport, Statement, Value, ValueKind, VarFlags, VarSpec,
 	layers::Layers,
 	script::{self, CoerceIssue},
@@ -167,9 +167,26 @@ pub struct DynamicVarSpec {
 	pub flags:   VarFlags,
 	/// Registration-time default.
 	pub default: Value,
-	/// Optional curated product settings metadata. Dynamic variables without
-	/// this projection remain console/config-only.
-	pub ui:      Option<crate::DynamicUiSpec>,
+	/// Consumer-owned declaration metadata in declaration order.
+	pub meta:    Arc<[(Str, Str)]>,
+}
+
+impl DynamicVarSpec {
+	/// Returns the first value declared for `key`.
+	#[must_use]
+	pub fn meta_get(&self, key: &str) -> Option<&str> {
+		self
+			.meta
+			.iter()
+			.find_map(|(candidate, value)| (candidate.as_str() == key).then_some(value.as_str()))
+	}
+
+	/// Iterates every value declared for `key` in declaration order.
+	pub fn meta_all<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+		self.meta.iter().filter_map(move |(candidate, value)| {
+			(candidate.as_str() == key).then_some(value.as_str())
+		})
+	}
 }
 
 impl PartialEq for DynamicVarSpec {
@@ -179,7 +196,95 @@ impl PartialEq for DynamicVarSpec {
 			&& std::ptr::eq(self.ty, other.ty)
 			&& self.flags == other.flags
 			&& self.default == other.default
-			&& self.ui == other.ui
+			&& self.meta == other.meta
+	}
+}
+
+#[derive(Clone, Copy)]
+enum MetaRef<'a> {
+	Static(&'static [(&'static str, &'static str)]),
+	Dynamic(&'a [(Str, Str)]),
+}
+
+impl<'a> MetaRef<'a> {
+	const fn len(self) -> usize {
+		match self {
+			Self::Static(meta) => meta.len(),
+			Self::Dynamic(meta) => meta.len(),
+		}
+	}
+
+	fn get(self, index: usize) -> Option<(&'a str, &'a str)> {
+		match self {
+			Self::Static(meta) => meta.get(index).map(|&(key, value)| (key, value)),
+			Self::Dynamic(meta) => meta
+				.get(index)
+				.map(|(key, value)| (key.as_str(), value.as_str())),
+		}
+	}
+}
+
+#[derive(Clone, Copy)]
+enum DefaultRef<'a> {
+	Static(fn() -> Value),
+	Dynamic(&'a Value),
+}
+
+/// Borrowed view over one declared variable, static or dynamic.
+#[derive(Clone, Copy)]
+pub struct VarView<'a> {
+	/// Canonical console name.
+	pub name:  &'a str,
+	/// Human description.
+	pub desc:  &'a str,
+	/// Value type descriptor.
+	pub ty:    &'static crate::TypeSpec,
+	/// Behavior flags.
+	pub flags: VarFlags,
+	/// Value completion hint.
+	pub hint:  Hint,
+	/// Inclusive numeric lower clamp.
+	pub min:   Option<f64>,
+	/// Inclusive numeric upper clamp.
+	pub max:   Option<f64>,
+	meta:      MetaRef<'a>,
+	default:   DefaultRef<'a>,
+}
+
+impl VarView<'_> {
+	/// Iterates every metadata key/value pair in declaration order.
+	pub fn metadata(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
+		(0..self.meta.len()).filter_map(|index| self.meta.get(index))
+	}
+
+	/// Returns the first metadata value declared for `key`.
+	#[must_use]
+	pub fn meta_get(&self, key: &str) -> Option<&str> {
+		(0..self.meta.len()).find_map(|index| {
+			self
+				.meta
+				.get(index)
+				.and_then(|(candidate, value)| (candidate == key).then_some(value))
+		})
+	}
+
+	/// Iterates every metadata value declared for `key` in declaration order.
+	pub fn meta_all<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+		(0..self.meta.len()).filter_map(move |index| {
+			self
+				.meta
+				.get(index)
+				.and_then(|(candidate, value)| (candidate == key).then_some(value))
+		})
+	}
+
+	/// Produces this declaration's default value.
+	#[must_use]
+	pub fn default(&self) -> Value {
+		match self.default {
+			DefaultRef::Static(default) => default(),
+			DefaultRef::Dynamic(default) => default.clone(),
+		}
 	}
 }
 
@@ -454,13 +559,6 @@ impl Ctx {
 				got:      spec.default.to_str(),
 			});
 		}
-		if spec
-			.ui
-			.as_ref()
-			.is_some_and(|ui| !ui.is_valid(key.as_str()))
-		{
-			return Err(ConError::InvalidUi { name: key });
-		}
 		let initial = spec.default.clone();
 		let idx = self
 			.dynamic_vars
@@ -534,9 +632,35 @@ impl Ctx {
 		self.items.iter().map(|item| item.spec)
 	}
 
-	/// All dynamically registered variables in registration order.
-	pub fn dynamic_vars(&self) -> impl Iterator<Item = &DynamicVarSpec> + '_ {
-		self.dynamic_vars.iter().map(|item| &item.spec)
+	/// All declared variables, static registration order followed by dynamic
+	/// registration order.
+	pub fn vars(&self) -> impl Iterator<Item = VarView<'_>> + '_ {
+		let static_vars = self.items.iter().filter_map(|item| match item.spec {
+			RegItem::Var(spec) => Some(VarView {
+				name:    spec.name,
+				desc:    spec.desc,
+				ty:      spec.ty,
+				flags:   spec.flags,
+				hint:    spec.hint,
+				min:     spec.min,
+				max:     spec.max,
+				meta:    MetaRef::Static(spec.meta),
+				default: DefaultRef::Static(spec.default),
+			}),
+			_ => None,
+		});
+		let dynamic_vars = self.dynamic_vars.iter().map(|item| VarView {
+			name:    item.spec.name.as_str(),
+			desc:    item.spec.desc.as_str(),
+			ty:      item.spec.ty,
+			flags:   item.spec.flags,
+			hint:    Hint::None,
+			min:     None,
+			max:     None,
+			meta:    MetaRef::Dynamic(&item.spec.meta),
+			default: DefaultRef::Dynamic(&item.spec.default),
+		});
+		static_vars.chain(dynamic_vars)
 	}
 
 	/// All dynamically registered commands in registration order (the
@@ -812,7 +936,7 @@ impl Ctx {
 	#[must_use]
 	pub fn seed_child(&self) -> Seed {
 		let mut values = FastHashMap::default();
-		for item in self.items.iter() {
+		for item in &self.items {
 			if let RegItem::Var(spec) = item.spec {
 				let value = item.state.value();
 				if value != *item.state.default_value() {
@@ -820,7 +944,7 @@ impl Ctx {
 				}
 			}
 		}
-		for item in self.dynamic_vars.iter() {
+		for item in &self.dynamic_vars {
 			let value = item.state.value();
 			if value != *item.state.default_value() {
 				values.insert(item.spec.name.clone(), value);
@@ -906,15 +1030,12 @@ impl Ctx {
 					Origin::Default
 				},
 				Origin::Engagement(id) => {
-					match layers.engagements.iter_mut().find(|layer| layer.id == id) {
-						Some(layer) => {
-							layer.values.insert(name.clone(), value);
-							Origin::Engagement(id)
-						},
-						None => {
-							layers.session.insert(name.clone(), value);
-							Origin::Session
-						},
+					if let Some(layer) = layers.engagements.iter_mut().find(|layer| layer.id == id) {
+						layer.values.insert(name.clone(), value);
+						Origin::Engagement(id)
+					} else {
+						layers.session.insert(name.clone(), value);
+						Origin::Session
 					}
 				},
 				Origin::Session | Origin::Script(_) | Origin::Host => {

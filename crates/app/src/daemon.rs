@@ -9,8 +9,7 @@ use std::{
 	time::Duration,
 };
 
-use omp_core::{ExposeSecret as _, SecretString, sf};
-use omp_inference::{
+use omp_ai::{
 	Client, ProviderService, Registry,
 	account::AccountStateStoreError,
 	auth::{
@@ -21,6 +20,7 @@ use omp_inference::{
 	router::Router,
 	session::{ConversationError, ConversationSessionPlanner},
 };
+use omp_core::{ExposeSecret as _, SecretString, sf};
 use omp_journal::blob::{self, BlobStore};
 use omp_proto::{
 	auth::v1::auth_server::AuthServer,
@@ -98,7 +98,7 @@ pub enum DaemonError {
 	Catalog(#[source] &'static omp_catalog::snapshot::SnapshotError),
 	/// Registry construction or route service failed.
 	#[error(transparent)]
-	Inference(#[from] Box<omp_inference::Error>),
+	Inference(#[from] Box<omp_ai::Error>),
 	/// Encrypted credential state could not be opened.
 	#[error(transparent)]
 	CredentialStore(#[from] StoreError),
@@ -126,7 +126,7 @@ pub enum DaemonError {
 	OAuthCustom(#[from] OAuthCustomDispatchError),
 	/// Refresh coordination policy was invalid.
 	#[error(transparent)]
-	RefreshPolicy(#[from] omp_inference::account::RefreshPolicyError),
+	RefreshPolicy(#[from] omp_ai::account::RefreshPolicyError),
 	/// The catalog advertised an authentication method without a concrete
 	/// engine.
 	#[error(transparent)]
@@ -169,8 +169,8 @@ pub enum DaemonError {
 	Registry(#[from] omp_driver::registry::RegistryError),
 }
 
-impl From<omp_inference::Error> for DaemonError {
-	fn from(error: omp_inference::Error) -> Self {
+impl From<omp_ai::Error> for DaemonError {
+	fn from(error: omp_ai::Error) -> Self {
 		Self::Inference(Box::new(error))
 	}
 }
@@ -298,7 +298,7 @@ impl DaemonHandle {
 		registry: Registry,
 		sessions: ConversationSessionPlanner,
 		tool_registry: Arc<omp_tool::Registry>,
-		live_responses: flume::Sender<omp_inference::event::WorkflowResponse>,
+		live_responses: flume::Sender<omp_ai::event::WorkflowResponse>,
 	) -> Result<Self, DaemonError> {
 		let data_dir = config
 			.data_dir
@@ -315,7 +315,7 @@ impl DaemonHandle {
 		data_dir: PathBuf,
 		registry: Registry,
 		inference: InferenceRpc,
-		auth_control: Option<omp_inference::auth::AuthControlHandle>,
+		auth_control: Option<omp_ai::auth::AuthControlHandle>,
 	) -> Result<Self, DaemonError> {
 		let routes = registry
 			.catalog()
@@ -429,7 +429,7 @@ impl DaemonHandle {
 	}
 
 	/// Creates a typed client using caller-provided call metadata.
-	pub fn client(&self, meta: omp_inference::CallMeta) -> Client<ProviderService, Router> {
+	pub fn client(&self, meta: omp_ai::CallMeta) -> Client<ProviderService, Router> {
 		Client::new(self.service(), Router::new(self.registry.clone(), Duration::from_secs(30)), meta)
 	}
 

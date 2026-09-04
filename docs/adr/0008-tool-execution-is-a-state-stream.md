@@ -97,6 +97,20 @@ requirements and native tool-admission requirements are merged before filing, pr
 prompt per invocation; timeout or cancellation settles the call as never-started and replay
 reconstructs the same decided or withdrawn ticket and skipped terminal.
 
+The `<diag>` channel is typed end to end. `omp_tool::Diag` (`crates/tool/src/diag.rs`) carries
+`severity`, a closed native `DiagKind` vocabulary, `text`, and the typed facts a consumer acts on
+without parsing prose: `continuation` (selector or argument fetching the next slice), `artifact`
+(full-result address), and `omitted` (count + unit). Native tools yield `Ev::Diag` before their
+terminal; erasure serializes it as the `{"diag": …}` update envelope that extension tools and the
+dispatcher's own `output_bounded` notice also emit, so one journal shape folds into one `<diag>`
+child with `severity`/`kind`/`text`/`continuation`/`recovery`/`omitted`/`unit` props. The model
+projection (`crates/session/src/projection.rs`) renders every non-terminal diag as one trailing
+`<diag severity kind continuation artifact omitted>text</diag>` part after the result — the channel
+was previously card-only, which is why tools had appended prose to their data. Environment-side
+facts (exec sandbox policy, dynamic-device notices, stale GitHub cache, path recovery) cross
+`env/v1` as `ToolDiag` and are yielded by the owning tool, never written into process output or
+document bytes.
+
 ## References
 
 - The Harness Playbook, "The runtime" — "What omp taught us: one call, three disconnected APIs",

@@ -113,22 +113,20 @@ async fn wait_for_process_terminal(
 	process: &ProcessInfo,
 	timeout: Duration,
 ) -> miette::Result<ProcessInfo> {
-	if matches!(
-		process.state(),
-		ProcessState::Exited | ProcessState::Stopped | ProcessState::Failed
-	) {
+	if matches!(process.state(), ProcessState::Exited | ProcessState::Stopped | ProcessState::Failed)
+	{
 		return Ok(process.clone());
 	}
 	let mut attachment = env
 		.attach_output(AttachOutput {
-			name: process.name.clone(),
-			after_sequence: process.log_end_offset,
-			generation: process.generation,
-			max_bytes: 1,
-			terminal_text: false,
+			name:             process.name.clone(),
+			after_sequence:   process.log_end_offset,
+			generation:       process.generation,
+			max_bytes:        1,
+			terminal_text:    false,
 			terminal_columns: 1,
-			terminal_rows: 1,
-			props: None,
+			terminal_rows:    1,
+			props:            None,
 		})
 		.await
 		.into_diagnostic()?;
@@ -164,8 +162,7 @@ async fn wait_for_process_terminal(
 			&& matches!(
 				settled.state(),
 				ProcessState::Exited | ProcessState::Stopped | ProcessState::Failed
-			)
-		{
+			) {
 			return Ok(settled);
 		}
 	}

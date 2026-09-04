@@ -154,8 +154,8 @@ pub fn scraper_for(url: &Url) -> Option<Scraper> {
 
 /// Renders a URL with the first site-specific scraper that accepts it.
 ///
-/// Pi invokes handlers in registry order and treats `None` as a decline, so a
-/// later handler may still accept the same URL. `None` from the full registry
+/// Handlers run in registry order and treat `None` as a decline, so a later
+/// handler may still accept the same URL. `None` from the full registry
 /// allows the caller to use the ordinary fetch pipeline. Typed scraper errors
 /// stop dispatch and propagate unchanged.
 pub async fn render<C: HttpClient + Sync>(

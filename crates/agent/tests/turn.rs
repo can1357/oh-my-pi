@@ -14,12 +14,12 @@ use omp_agent::{
 	DispatchPolicy, Inference, Kernel, KernelEvent, RunControl, StaticPrompt, ToolScopedAbortReason,
 	TurnInput, TurnStop, Up,
 };
-use omp_core::Str;
-use omp_dom::{PropId, PropKey};
-use omp_inference::{
+use omp_ai::{
 	BlockKind, ChatEvent, ChatRequest, ChatStream, ContentPart, FinishReason, ProviderId, RequestId,
 	ResponseMeta, Role, RouteId, ToolCall, ToolCallId, call::OpaqueJson,
 };
+use omp_core::Str;
+use omp_dom::{PropId, PropKey};
 use omp_journal::{blob::BlobStore, kind};
 
 mod support;
@@ -34,7 +34,7 @@ impl Inference for PendingCallInference {
 	fn chat(
 		&mut self,
 		_: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		ready(Ok(ChatStream::ordinary(Box::pin(async_stream::stream! {
 			yield Ok(ChatEvent::Started(ResponseMeta {
 				request_id: RequestId::from("cancel-pending"),
@@ -62,7 +62,7 @@ impl Inference for ScopedAbortInference {
 	fn chat(
 		&mut self,
 		_: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		let calls_ready = Arc::clone(&self.ready);
 		ready(Ok(ChatStream::ordinary(Box::pin(async_stream::stream! {
 			yield Ok(ChatEvent::Started(ResponseMeta {
@@ -166,8 +166,8 @@ async fn user_turn_journals_assistant_text_in_the_explicit_turn() {
 		1
 	);
 	assert_eq!(prop_text(&session, "body turn assistant", PropId::Text), "pong");
-	// pi's usage row needs TTFT and duration on the receipt; both are
-	// kernel-clock measurements the projection cannot derive later.
+	// The receipt needs TTFT and duration; both are kernel-clock measurements
+	// the projection cannot derive later.
 	let usage = session
 		.dom()
 		.select("body turn usage")
@@ -315,7 +315,9 @@ async fn paused_completion_caps_consecutive_resamples_without_spinning() {
 async fn tool_progress_rearms_paused_completion_cap() {
 	let directory = tempfile::tempdir().expect("temporary directory");
 	let journal_path = directory.path().join("paused-rearm.oms");
-	let mut scripts = (0..8).map(|_| pause_script("phase one")).collect::<Vec<_>>();
+	let mut scripts = (0..8)
+		.map(|_| pause_script("phase one"))
+		.collect::<Vec<_>>();
 	scripts.push(tool_script("echo-1", "echo", serde_json::json!({})));
 	scripts.extend((0..8).map(|_| pause_script("phase two")));
 	scripts.push(text_script("done"));
@@ -334,22 +336,20 @@ async fn tool_progress_rearms_paused_completion_cap() {
 		.expect("tool progress rearms continuation cap");
 	assert_eq!(outcome.stop, TurnStop::Completed);
 	assert_eq!(requests.lock().len(), 18);
-	let attempts = session
-		.dom()
-		.select("body turn assistant[stop-reason=pause_turn]")
-		.expect("selector")
-		.map(|handle| {
-			match session
-				.dom()
-				.get(handle)
-				.and_then(|node| {
+	let attempts =
+		session
+			.dom()
+			.select("body turn assistant[stop-reason=pause_turn]")
+			.expect("selector")
+			.map(|handle| {
+				match session.dom().get(handle).and_then(|node| {
 					node.prop(&PropKey::Custom(Str::new_static("continuation-attempt")))
 				}) {
-				Some(omp_dom::Value::Int(attempt)) => *attempt,
-				_ => panic!("paused completion carries an attempt"),
-			}
-		})
-		.collect::<Vec<_>>();
+					Some(omp_dom::Value::Int(attempt)) => *attempt,
+					_ => panic!("paused completion carries an attempt"),
+				}
+			})
+			.collect::<Vec<_>>();
 	assert_eq!(attempts, [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8]);
 }
 
@@ -366,10 +366,7 @@ async fn queued_follow_up_blocks_paused_completion_resample() {
 	);
 	kernel
 		.mailbox()
-		.send(Up::Queue {
-			text:        Str::new_static("next user turn"),
-			attachments: Vec::new(),
-		})
+		.send(Up::Queue { text: Str::new_static("next user turn"), attachments: Vec::new() })
 		.expect("follow-up queues");
 	let mut session = fresh_session(&journal_path);
 
@@ -386,14 +383,11 @@ async fn queued_follow_up_blocks_paused_completion_resample() {
 		.next()
 		.expect("paused assistant");
 	assert_eq!(
-		session
-			.dom()
-			.get(paused)
-			.and_then(|node| {
-				node
-					.prop(&PropKey::Custom(Str::new_static("continuation-decision")))
-					.and_then(omp_dom::Value::as_str)
-			}),
+		session.dom().get(paused).and_then(|node| {
+			node
+				.prop(&PropKey::Custom(Str::new_static("continuation-decision")))
+				.and_then(omp_dom::Value::as_str)
+		}),
 		Some("pending-input")
 	);
 }
@@ -482,7 +476,7 @@ async fn tool_call_round_settles_in_the_dom_then_runs_second_inference() {
 	}));
 	assert!(requests[1].messages.iter().any(|message| {
 		message.content.iter().any(|part| matches!(part, ContentPart::ToolResult { content, .. }
-			if content.iter().any(|part| matches!(part, omp_inference::ToolResultContent::Text(text) if text == "hello"))))
+			if content.iter().any(|part| matches!(part, omp_ai::ToolResultContent::Text(text) if text == "hello"))))
 	}));
 	drop(requests);
 	assert_eq!(
@@ -584,10 +578,7 @@ async fn scoped_stream_abort_labels_siblings_in_call_order_and_replays() {
 		.collect::<Vec<_>>();
 	assert_eq!(results, calls, "placeholder settlement follows provider call order");
 	let execution_started = PropKey::Custom(Str::new_static("execution-started"));
-	for selector in [
-		"body turn read[id=innocent-read]",
-		"body turn edit[id=invalid-edit]",
-	] {
+	for selector in ["body turn read[id=innocent-read]", "body turn edit[id=invalid-edit]"] {
 		let call = session
 			.dom()
 			.select(selector)
@@ -601,7 +592,8 @@ async fn scoped_stream_abort_labels_siblings_in_call_order_and_replays() {
 			"inference placeholders must not claim execution started"
 		);
 		assert_eq!(
-			node.prop(&PropKey::from(PropId::Status))
+			node
+				.prop(&PropKey::from(PropId::Status))
 				.and_then(omp_dom::Value::as_str),
 			Some("error")
 		);
@@ -615,19 +607,16 @@ async fn scoped_stream_abort_labels_siblings_in_call_order_and_replays() {
 
 	let live = session.dom().snapshot();
 	drop(session);
-	let replayed = omp_session::Session::open(
-		&journal_path,
-		omp_session::ComponentRegistry::default(),
-	)
-	.expect("journal replays");
+	let replayed =
+		omp_session::Session::open(&journal_path, omp_session::ComponentRegistry::default())
+			.expect("journal replays");
 	assert_eq!(replayed.dom().snapshot(), live);
 	assert!(
 		support::result_text(&replayed, "innocent-read")[0]
 			.contains("TTSR interrupt on another tool call")
 	);
 	assert!(
-		support::result_text(&replayed, "invalid-edit")[0]
-			.contains("TTSR matched rule: no-unwrap")
+		support::result_text(&replayed, "invalid-edit")[0].contains("TTSR matched rule: no-unwrap")
 	);
 }
 
@@ -647,7 +636,7 @@ async fn independent_calls_from_one_turn_execute_concurrently() {
 	let tool_round = vec![
 		ChatEvent::ToolCallReady { index: 0, call: first },
 		ChatEvent::ToolCallReady { index: 1, call: second },
-		completed(omp_inference::FinishReason::ToolCalls, 2),
+		completed(omp_ai::FinishReason::ToolCalls, 2),
 	];
 	let (inference, _) = ScriptedInference::new([tool_round, text_script("done")]);
 	let barrier = Arc::new(tokio::sync::Barrier::new(3));
@@ -860,7 +849,7 @@ async fn interrupt_returns_cancelled_without_journaling_a_false_completion() {
 	let directory = tempfile::tempdir().expect("temporary directory");
 	let journal_path = directory.path().join("interrupt.oms");
 	let (inference, _requests) =
-		ScriptedInference::new([vec![completed(omp_inference::FinishReason::Stop, 0)]]);
+		ScriptedInference::new([vec![completed(omp_ai::FinishReason::Stop, 0)]]);
 	let mut kernel = Kernel::new(
 		inference,
 		registry(std::iter::empty()),
@@ -905,8 +894,8 @@ async fn interrupt_returns_cancelled_without_journaling_a_false_completion() {
 }
 
 /// R2Kernel #1: a subagent/detached job settling while the parent idles is
-/// journaled from the turn loop and delivered to the model as pi's
-/// async-result follow-up, so the parent never has to `hub wait`.
+/// journaled from the turn loop and delivered to the model as an async-result
+/// follow-up, so the parent never has to `hub wait`.
 #[tokio::test]
 async fn settled_background_job_is_delivered_to_the_model_as_a_follow_up_turn() {
 	let directory = tempfile::tempdir().expect("temporary directory");
@@ -1004,9 +993,9 @@ async fn settled_background_job_is_delivered_to_the_model_as_a_follow_up_turn() 
 }
 
 /// R2 (Fx2Transcript): an interrupted tool tail is re-executable without a
-/// model round trip (pi `retry()` + `toolReplayStart`): the journal rewinds
-/// past the aborted result, the same call id runs again, and the live chain
-/// ends with exactly one `tool.result@1` for it.
+/// model round trip: the journal rewinds past the aborted result, the same
+/// call id runs again, and the live chain ends with exactly one
+/// `tool.result@1` for it.
 #[tokio::test]
 async fn retry_tool_tail_reruns_the_aborted_call_and_continues_the_turn() {
 	let directory = tempfile::tempdir().expect("temporary directory");
@@ -1075,10 +1064,10 @@ async fn retry_tool_tail_reruns_the_aborted_call_and_continues_the_turn() {
 	));
 }
 
-/// A user image attachment reaches the provider as pi's `ImageContent`: the
-/// request carries the blob's bytes inline with the journaled MIME, read
-/// from the session's blob store at request build (no process-local
-/// attachment index), and the resumed session projects the same request.
+/// A user image attachment reaches the provider with the blob's bytes inline
+/// and its journaled MIME, read from the session's blob store at request build
+/// (no process-local attachment index); the resumed session projects the same
+/// request.
 #[tokio::test]
 async fn user_image_attachment_reaches_the_request_with_its_bytes_and_mime() {
 	let directory = tempfile::tempdir().expect("temporary directory");
@@ -1117,7 +1106,7 @@ async fn user_image_attachment_reaches_the_request_with_its_bytes_and_mime() {
 			.filter(|message| message.role == Role::User)
 			.flat_map(|message| message.content.iter())
 			.filter_map(|part| match part {
-				ContentPart::Image(omp_inference::MediaInput::Bytes { media_type, data }) => {
+				ContentPart::Image(omp_ai::MediaInput::Bytes { media_type, data }) => {
 					Some((media_type.clone(), data.clone()))
 				},
 				ContentPart::Image(other) => panic!("image must be inline bytes, got {other:?}"),
@@ -1176,9 +1165,9 @@ async fn user_image_attachment_reaches_the_request_with_its_bytes_and_mime() {
 	assert_eq!(images(&requests.lock()[0]), live);
 }
 
-/// A steering aside with an image (pi `steer(text, images)`) keeps its
-/// attachment through the queue and the safe point: the second request's
-/// steered user message carries the bytes and MIME, not a dangling marker.
+/// A steering aside with an image keeps its attachment through the queue and
+/// the safe point: the second request's steered user message carries the
+/// bytes and MIME, not a dangling marker.
 #[tokio::test]
 async fn steered_image_attachment_reaches_the_next_request() {
 	let directory = tempfile::tempdir().expect("temporary directory");
@@ -1229,7 +1218,7 @@ async fn steered_image_attachment_reaches_the_next_request() {
 		.content
 		.iter()
 		.find_map(|part| match part {
-			ContentPart::Image(omp_inference::MediaInput::Bytes { media_type, data }) => {
+			ContentPart::Image(omp_ai::MediaInput::Bytes { media_type, data }) => {
 				Some((media_type.as_str(), data.as_ref()))
 			},
 			_ => None,

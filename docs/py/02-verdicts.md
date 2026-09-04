@@ -1574,11 +1574,11 @@ Vec<Conflict> }` is the typed failure (`:234-275`); `prompt()` handles both bran
 finish}` (`crates/tools/src/render/mod.rs:9-45`) is `omp.Budget` in Rust, including the
 single `\n[truncated]` marker.
 
-**`crates/docserver`** supplies the dialect-neutral revision that makes edit verdicts
+**`crates/envd/src/docserver`** supplies the dialect-neutral revision that makes edit verdicts
 liftable: `Revision { sequence: u64, content_hash: [u8; 32] }`, `LeaseId`,
 `TransactionOutcome::{Committed, Rejected, PartiallyCommitted}`, and `DocumentConflict`
-carrying `expected`/`current`/`conflicting_ranges` (`crates/docserver/src/types.rs:69-80`,
-`transaction.rs:679-758`). `crates/hashline` supplies `compute_snapshot_tag` (xxHash32 over
+carrying `expected`/`current`/`conflicting_ranges` (`crates/envd/src/docserver/types.rs:69-80`,
+`transaction.rs:679-758`). `crates/edit` supplies `omp_edit::store::file_hash` (xxHash32 over
 normalized bytes, masked to 4 hex digits, `snapshots.rs:566-570`) and the dialect-neutral
 `ApplyResult { bytes, edits, first_changed_line, warnings, block_resolutions }`
 (`apply.rs:33-41`).

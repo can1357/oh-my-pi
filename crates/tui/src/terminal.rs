@@ -919,7 +919,7 @@ pub fn simulate_resize_signal() {
 	let _ = pump::send_event(TerminalEvent::Resize);
 }
 
-pub(crate) fn record_resize_signal() {
+pub fn record_resize_signal() {
 	RESIZE_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -2041,7 +2041,7 @@ impl Terminal {
 	/// The caller must deliver and flush this prefix with the main-screen
 	/// repaint, then call [`Terminal::commit_alt_leave`]. Keeping ownership
 	/// live until that commit lets [`Drop`] recover when the repaint fails.
-	pub fn stage_alt_leave(&self) -> Option<&'static str> {
+	pub const fn stage_alt_leave(&self) -> Option<&'static str> {
 		if !self.alt_screen {
 			return None;
 		}

@@ -93,8 +93,9 @@ impl Color {
 			return self;
 		};
 		let amount = amount.clamp(0.0, 1.0);
-		let channel =
-			|a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * amount).round() as u8;
+		let channel = |a: u8, b: u8| {
+			f32::mul_add(f32::from(b) - f32::from(a), amount, f32::from(a)).round() as u8
+		};
 		Self::Rgb(channel(ar, br), channel(ag, bg), channel(ab, bb))
 	}
 
@@ -106,7 +107,8 @@ impl Color {
 		let Self::Rgb(red, green, blue) = self else {
 			return 0.0;
 		};
-		(0.2126 * f32::from(red) + 0.7152 * f32::from(green) + 0.0722 * f32::from(blue)) / 255.0
+		(0.7152f32.mul_add(f32::from(green), 0.2126 * f32::from(red)) + 0.0722 * f32::from(blue))
+			/ 255.0
 	}
 
 	/// Derives a readable label color from this fill.
@@ -713,8 +715,8 @@ impl Cell {
 }
 
 /// A semantic mark on one frame row, materialized by the terminal renderer
-/// as an OSC 133 shell-integration zone around the row's cells (pi
-/// `user-message.ts`). Marks are row metadata like soft-wrap flags: they
+/// as an OSC 133 shell-integration zone around the row's cells. Marks are row
+/// metadata like soft-wrap flags: they
 /// ride along with single-row blits and never touch cell content.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RowMark {

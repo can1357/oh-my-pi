@@ -25,7 +25,7 @@ use crate::{
 /// Network and cache cadence. Cached availability is still presented on each
 /// eligible launch; only the official metadata request is rate-limited.
 const CHECK_CADENCE: Duration = Duration::from_secs(6 * 60 * 60);
-/// The same bounded request budget as pi's startup check.
+/// Bounded request budget for the startup check.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Cache files contain three scalar fields. Refuse oversized or hand-edited
 /// input before allocating for it.
@@ -46,8 +46,8 @@ enum Due {
 }
 
 struct Lease {
-	_lock: File,
-	state: PathBuf,
+	_lock:  File,
+	state:  PathBuf,
 	now_ms: u64,
 }
 
@@ -175,7 +175,10 @@ fn read_cache(path: &Path) -> io::Result<Option<CachedCheck>> {
 }
 
 fn unix_millis(now: SystemTime) -> io::Result<u64> {
-	let millis = now.duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_millis();
+	let millis = now
+		.duration_since(UNIX_EPOCH)
+		.map_err(io::Error::other)?
+		.as_millis();
 	u64::try_from(millis).map_err(io::Error::other)
 }
 
@@ -189,8 +192,7 @@ fn try_lock(file: &File) -> io::Result<bool> {
 		return Ok(true);
 	}
 	let error = io::Error::last_os_error();
-	if error.raw_os_error() == Some(libc::EWOULDBLOCK)
-		|| error.raw_os_error() == Some(libc::EAGAIN)
+	if error.raw_os_error() == Some(libc::EWOULDBLOCK) || error.raw_os_error() == Some(libc::EAGAIN)
 	{
 		Ok(false)
 	} else {
@@ -295,8 +297,8 @@ mod tests {
 	fn due_checks_are_channel_scoped_coalesced_and_cached() {
 		let root = tempfile::tempdir().expect("cache");
 		let now = 1_000_000;
-		let Due::Lease(stable) = acquire_due(root.path(), UpdateChannel::Stable, now, CHECK_CADENCE)
-			.expect("first lease")
+		let Due::Lease(stable) =
+			acquire_due(root.path(), UpdateChannel::Stable, now, CHECK_CADENCE).expect("first lease")
 		else {
 			panic!("first stable check must be due");
 		};
@@ -305,7 +307,9 @@ mod tests {
 			Due::Busy
 		));
 		let version = Str::new_static("999.0.0");
-		stable.complete(Some(version.clone())).expect("persist cache");
+		stable
+			.complete(Some(version.clone()))
+			.expect("persist cache");
 
 		let Due::Fresh(cached) = acquire_due(
 			root.path(),
@@ -313,14 +317,12 @@ mod tests {
 			now + u64::try_from(CHECK_CADENCE.as_millis()).expect("cadence fits") - 1,
 			CHECK_CADENCE,
 		)
-		.expect("fresh cache")
-		else {
+		.expect("fresh cache") else {
 			panic!("stable cache must suppress a request inside the cadence");
 		};
 		assert_eq!(cached, Some(version));
 		let Due::Lease(canary) =
-			acquire_due(root.path(), UpdateChannel::Canary, now, CHECK_CADENCE)
-				.expect("canary lease")
+			acquire_due(root.path(), UpdateChannel::Canary, now, CHECK_CADENCE).expect("canary lease")
 		else {
 			panic!("channels must have independent leases");
 		};
@@ -337,9 +339,9 @@ mod tests {
 		let root = tempfile::tempdir().expect("cache");
 		let channel = "stable";
 		let state = CachedCheck {
-			schema: CACHE_SCHEMA,
+			schema:        CACHE_SCHEMA,
 			checked_at_ms: 50,
-			latest: Some(Str::new_static("1.2.3\nforged")),
+			latest:        Some(Str::new_static("1.2.3\nforged")),
 		};
 		fs::write(
 			root.path().join(format!("startup-check-{channel}.toml")),
@@ -347,8 +349,7 @@ mod tests {
 		)
 		.expect("write");
 		assert!(matches!(
-			acquire_due(root.path(), UpdateChannel::Stable, 51, CHECK_CADENCE)
-				.expect("cache"),
+			acquire_due(root.path(), UpdateChannel::Stable, 51, CHECK_CADENCE).expect("cache"),
 			Due::Lease(_)
 		));
 	}

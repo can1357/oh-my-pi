@@ -26,8 +26,8 @@ impl CliUsageError {
 		}
 	}
 
-	/// Creates a reserved-command redirect, which pi classifies as exit status
-	/// 1 rather than a parser usage failure.
+	/// Creates a reserved-command redirect with exit status 1 rather than a
+	/// parser usage failure.
 	pub fn redirect(message: impl Into<String>) -> Self {
 		Self { message: message.into(), help: "", exit_code: 1, lowercase: true }
 	}
@@ -37,7 +37,7 @@ impl CliUsageError {
 		Self { message: message.into(), help: "", exit_code: 1, lowercase: false }
 	}
 
-	/// Whether the stable pi-compatible prefix is lowercase `error:`.
+	/// Whether the stable prefix is lowercase `error:`.
 	pub const fn lowercase(&self) -> bool {
 		self.lowercase
 	}

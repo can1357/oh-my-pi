@@ -1,5 +1,5 @@
 //! Pure assembly of a child's `yield` calls into the payload that output-schema
-//! validation consumes (pi `task/yield-assembly.ts`).
+//! validation consumes.
 //!
 //! An array-typed `type` contributes an incremental section and never decides
 //! termination on its own; a string-typed `type` with an empty `result` makes
@@ -316,7 +316,7 @@ pub(crate) fn assemble(
 	let Some(last) = yields.last() else {
 		return Assembled::Missing;
 	};
-	// pi `finalizeSubprocessOutput`: an aborting final yield ends the run
+	// An aborting final yield ends the run
 	// with its error regardless of what was accumulated before it.
 	if let ResultEnvelope::Error { error } = &last.result {
 		return Assembled::Error(error.to_string());

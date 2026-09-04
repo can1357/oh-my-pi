@@ -59,8 +59,8 @@ pub struct MetricRecorder {
 }
 
 impl MetricRecorder {
-	/// Creates all instruments from the global meter named by pi and binds the
-	/// configured courtesy-interrupt grace to every emitted series.
+	/// Creates all instruments from the global meter and binds the configured
+	/// courtesy-interrupt grace to every emitted series.
 	///
 	/// # Errors
 	/// Returns [`DurationError::Overflow`] when the exact nanosecond value

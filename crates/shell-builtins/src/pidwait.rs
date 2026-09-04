@@ -1,7 +1,7 @@
 //! `pidwait` process-waiting builtin.
 
 use clap::Parser;
-use omp_shell_engine::builtins;
+use omp_shell::builtins;
 
 use crate::proc_match;
 
@@ -14,12 +14,12 @@ pub(crate) struct PidwaitCommand {
 }
 
 impl builtins::Command for PidwaitCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
-	async fn execute<SE: omp_shell_engine::ShellExtensions>(
+	async fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
-		context: omp_shell_engine::ExecutionContext<'_, SE>,
-	) -> Result<omp_shell_engine::ExecutionResult, Self::Error> {
+		context: omp_shell::ExecutionContext<'_, SE>,
+	) -> Result<omp_shell::ExecutionResult, Self::Error> {
 		proc_match::run(proc_match::ProcMatchMode::Wait, self.argv.clone(), context).await
 	}
 }
@@ -28,18 +28,18 @@ impl builtins::Command for PidwaitCommand {
 mod tests {
 	use std::{error, process::Command as ProcessCommand, time::Duration};
 
-	use omp_shell_engine::builtins::Command as _;
+	use omp_shell::builtins::Command as _;
 	use tokio::time;
 
 	use super::PidwaitCommand;
 
 	async fn execute_bounded(
 		argv: Vec<String>,
-	) -> Result<omp_shell_engine::ExecutionResult, Box<dyn error::Error>> {
-		let mut shell = omp_shell_engine::Shell::builder().build().await?;
+	) -> Result<omp_shell::ExecutionResult, Box<dyn error::Error>> {
+		let mut shell = omp_shell::Shell::builder().build().await?;
 		let params = shell.default_exec_params();
 		let command = PidwaitCommand { argv };
-		let context = omp_shell_engine::ExecutionContext {
+		let context = omp_shell::ExecutionContext {
 			shell: &mut shell,
 			command_name: "pidwait".to_string(),
 			params,

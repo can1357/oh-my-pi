@@ -2,9 +2,9 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use omp_ai::auth::AuthControlHandle;
 use omp_core::Str;
 use omp_envd::worker::ExtHostSpec;
-use omp_inference::auth::AuthControlHandle;
 use omp_secrets::SecretMaskingAuthority;
 
 use crate::auth_backend::{CredentialControlGrant, CredentialSecretControlFactory};
@@ -25,7 +25,7 @@ use session::SecretSessionSnapshot;
 pub fn credential_control_grants(
 	extensions: &[ExtHostSpec],
 ) -> BTreeMap<Str, CredentialControlGrant> {
-	use omp_inference::auth::{CredentialGrants, CredentialScope};
+	use omp_ai::auth::{CredentialGrants, CredentialScope};
 
 	fn scope(value: Option<&serde_json::Value>) -> Arc<[Str]> {
 		match value {

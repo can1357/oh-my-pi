@@ -14,7 +14,7 @@ use crate::{
 
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const DEFAULT_DEVICE_LIFETIME: Duration = Duration::from_secs(600);
-const MAX_DEVICE_LIFETIME: Duration = Duration::from_secs(900);
+const MAX_DEVICE_LIFETIME: Duration = Duration::from_mins(15);
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_POLL_INTERVAL: Duration = Duration::from_secs(30);
 

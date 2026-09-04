@@ -1,7 +1,7 @@
 //! `/extensions`, `/reload-plugins`: extension and MCP server status joined
 //! from the live envd authorities and the persisted enable switches.
 //!
-//! Row ids follow pi (`mcp:<server>`, `ext:<id>`, `plugin:<name@market>`) so
+//! Row ids use `mcp:<server>`, `ext:<id>`, and `plugin:<name@market>` so
 //! the dashboard's toggle routes back to the switch that owns the row: the
 //! MCP config stores (`~/.o2/mcp.json`, `.omp/mcp.json`, `.mcp.json`), the
 //! extension installation record (`omp ext enable|disable`), or the
@@ -214,7 +214,12 @@ fn python_rows(state: &ServiceState, paths: &StatePaths) -> ServiceResult<Vec<Ex
 				evidence
 					.tools
 					.iter()
-					.map(|tool| tool.name.clone())
+					.filter_map(|tool| {
+						tool
+							.definition
+							.as_ref()
+							.map(|definition| Str::new(&definition.name))
+					})
 					.collect()
 			});
 			let version = live
@@ -236,7 +241,8 @@ fn python_rows(state: &ServiceState, paths: &StatePaths) -> ServiceResult<Vec<Ex
 			}
 			let error = (!view.admitted).then(|| {
 				Str::new_static(
-					"E-CONSENT: current publisher, capability digest, tier, or shipping level is ungranted",
+					"E-CONSENT: current publisher, capability digest, tier, or shipping level is \
+					 ungranted",
 				)
 			});
 			ExtensionRow {

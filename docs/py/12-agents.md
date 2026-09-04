@@ -801,9 +801,8 @@ further continuation, and no policy can exceed it without a configured session
 override plus the manifest grant. A policy asking for `100` on a default
 session gets `8` and sees it in `ContinuationLedger.cap`; it is not an error,
 because a goal loop must be able to declare its ambition without knowing the
-deployment. Eight is deliberately low: it is the ported value of pi's
-`SESSION_STOP_CONTINUATION_CAP`, and a loop that genuinely needs a hundred
-turns of autonomy should be raising the session ceiling in configuration where
+deployment. Eight is deliberately low: a loop that genuinely needs a hundred turns of autonomy
+should be raising the session ceiling in configuration where
 a human can see it, not asserting it from a plugin.
 
 #### `@dataclass(frozen=True, slots=True) class omp.agents.ContinuationLedger`
@@ -943,8 +942,7 @@ async def handoff(_: omp.CommandContext) -> None:
 ```
 
 `create` publishes and requests the UI switch first; the targeted injection is
-then durably queued under the same authenticated client ownership. This is the
-OMP equivalent of pi's `newSession`/`withSession` continuation handoff.
+then durably queued under the same authenticated client ownership.
 
 ### Scheduling
 
@@ -2371,7 +2369,7 @@ exactly as the model issued it: no batch-level admission scheduler, no
 parallelism detection, no reordering." `AgentTree::admit` is not that. It
 does not order, delay, or inspect tool calls, and it does not sit on the batch
 path at all; it is a resource ceiling on how many *LLM sessions* run at once —
-the ported behavior of pi's `task.maxConcurrency` semaphore, and the thing that
+and the thing that
 stops a forty-step fan-out from opening forty concurrent provider streams. D6's
 justifying clause — "safety lives in env invariants" — does not reach it either:
 a docserver revision and a serialized exec session say nothing about how many

@@ -5,8 +5,8 @@
 //! package maps to one module here — add an `include!` module when you add a
 //! new package.
 //!
-//! These are transport bindings: in-process consumers use the native types
-//! in their owning crates and only touch `omp-proto` at process boundaries.
+//! Generated modules are transport bindings. Small hand-written modules hold
+//! transport-neutral values that must remain identical across crate boundaries.
 //! Message types are always available. Enable the `tonic` feature to also
 //! generate gRPC clients and servers; pure-type consumers keep those runtime
 //! dependencies out of their graph.
@@ -38,6 +38,9 @@ pub use prost;
 pub mod bounds;
 /// Serde adapters rendering protobuf byte fields as lossless text.
 pub mod bytes_text;
+/// LSP-compatible position, range, severity, and diagnostic value types shared
+/// by the document authority and tools.
+pub mod lsp;
 /// JSON projections of `omp.inference.v1.Value` trees.
 pub mod value_json;
 

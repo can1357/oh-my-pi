@@ -18,12 +18,12 @@ use crate::{
 	runner::COMMAND_WRAPPER_PLACEHOLDER,
 };
 
-pub(crate) const FILE_MASK_PLACEHOLDER: &str = "@omp-bwrap-file-mask@";
-pub(crate) const DIRECTORY_MASK_PLACEHOLDER: &str = "@omp-bwrap-directory-mask@";
+pub const FILE_MASK_PLACEHOLDER: &str = "@omp-bwrap-file-mask@";
+pub const DIRECTORY_MASK_PLACEHOLDER: &str = "@omp-bwrap-directory-mask@";
 
 const LAUNCHERS: [&str; 2] = ["/usr/bin/bwrap", "/bin/bwrap"];
 
-pub(crate) fn compile(
+pub fn compile(
 	spec: &SandboxSpec,
 	program: &Path,
 	requested: CapabilitySet,
@@ -66,10 +66,8 @@ pub(crate) fn compile(
 	if spec.network == NetworkMode::Enabled {
 		enforced = enforced.difference(CapabilitySet::one(Capability::IpcRestrict));
 	}
-	if spec.degradation == DegradationPolicy::AllowCaveats {
-		if spec.write == WriteMode::Ephemeral {
-			enforced = enforced.union(CapabilitySet::one(Capability::FsWriteDeny));
-		}
+	if spec.degradation == DegradationPolicy::AllowCaveats && spec.write == WriteMode::Ephemeral {
+		enforced = enforced.union(CapabilitySet::one(Capability::FsWriteDeny));
 	}
 
 	let mut temporary_writable = spec.allow_temp.then(temp_roots).unwrap_or_default();
@@ -259,7 +257,7 @@ fn launcher() -> OsString {
 		.unwrap_or_else(|| OsString::from(LAUNCHERS[0]))
 }
 
-pub(crate) fn runtime_closure(program: &Path) -> Vec<PathBuf> {
+pub fn runtime_closure(program: &Path) -> Vec<PathBuf> {
 	let mut paths = if program == Path::new(COMMAND_WRAPPER_PLACEHOLDER) {
 		Vec::new()
 	} else {
@@ -319,13 +317,13 @@ fn add_degradation_caveats(
 	}
 }
 
-pub(crate) fn probe() -> BackendStatus {
+pub fn probe() -> BackendStatus {
 	#[cfg(not(target_os = "linux"))]
 	{
-		return BackendStatus::unavailable(Backend::Bubblewrap, ProbeFailure::WrongHost {
+		BackendStatus::unavailable(Backend::Bubblewrap, ProbeFailure::WrongHost {
 			backend: Backend::Bubblewrap,
 			os:      std::env::consts::OS,
-		});
+		})
 	}
 	#[cfg(target_os = "linux")]
 	{

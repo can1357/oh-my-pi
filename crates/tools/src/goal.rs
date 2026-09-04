@@ -248,7 +248,7 @@ impl<C: GoalControl> Tool for GoalTool<C> {
 						goal.token_budget.map(|budget| budget.saturating_sub(goal.tokens_used))
 					});
 					let completion_report = (op == Operation::Complete)
-						.then(|| goal.as_ref())
+						.then_some(goal.as_ref())
 						.flatten()
 						.map(completion_report);
 					yield Ev::Done(ToolTerminal::Done {

@@ -4,7 +4,7 @@
 
 #[cfg(any(unix, windows))]
 use imp::Stat;
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::util;
 #[cfg(not(any(unix, windows)))]

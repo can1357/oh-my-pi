@@ -2,7 +2,7 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 
 use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, util};
 

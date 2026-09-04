@@ -608,7 +608,7 @@ struct SinkShared {
 }
 
 impl SinkShared {
-	fn new(session: Bytes, events: Sender<Result<RunEvent, Fault>>) -> Self {
+	const fn new(session: Bytes, events: Sender<Result<RunEvent, Fault>>) -> Self {
 		Self { session, events, state: Mutex::new(SinkState { open: true, sequence: 0 }) }
 	}
 
@@ -1372,7 +1372,7 @@ impl IdleSigint {
 				return Err(error);
 			}
 			state.executing += 1;
-			return Ok(ExecutingSigint { idle: self, target });
+			Ok(ExecutingSigint { idle: self, target })
 		}
 		#[cfg(not(unix))]
 		{

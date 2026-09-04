@@ -21,7 +21,7 @@ pub const OTHER_OPTION: &str = "Other (type your own)";
 const RESERVED_LABELS: [&str; 3] = [OTHER_OPTION, "Chat about this", "Next →"];
 
 /// Arguments for `ask@2`.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Params {
 	/// Questions presented in order.
@@ -128,8 +128,7 @@ pub enum Fault {
 		/// Stable bridge failure explanation.
 		message: Str,
 	},
-	/// The user dismissed the dialog without answering (pi `ToolAbortError
-	/// "Ask tool was cancelled by the user"`).
+	/// The user dismissed the dialog without answering.
 	#[error("{message}")]
 	Cancelled {
 		/// Stable cancellation explanation.
@@ -145,7 +144,7 @@ pub enum Fault {
 impl Fault {
 	/// The user-cancel fault every interactive presenter reports on Esc.
 	#[must_use]
-	pub fn cancelled() -> Self {
+	pub const fn cancelled() -> Self {
 		Self::Cancelled { message: Str::new_static("Ask tool was cancelled by the user") }
 	}
 }

@@ -57,6 +57,15 @@ stream 2 GB back, and nothing on that side can be trusted to stop it.
 
 **Implemented.** Primary implementation: `crates/agent/src/dispatch.rs`. Central output and line bounds spill full results to the same project/session `omp_journal::blob` store used by provider media, user attachments, and compaction summaries. Journal-derived GC roots the complete retained result across transcript, model, debug, and remote projections; a put-before-journal grace window and namespace lock prevent premature collection. `notrunc` is a caller request for complete inline output up to a fixed 8 MiB host security ceiling; it never disables host memory bounds, and larger results carry the same typed artifact-backed projection receipt as ordinary bounded calls. Source-backed projections carry typed byte spans through `omp-tool`; after the single central bound, the dispatcher returns only fully retained source lines in a `VisibilityReceipt`. `grep` stages revision-pinned bytes with the document authority before dispatch but authorizes lines only from that receipt, so it has no local byte heuristic or truncation footer. `crates/envd/src/exec.rs` enforces 64 KiB ordinary and 8 MiB complete-request limits before shell bytes enter the bounded event channel, while staging the complete byte stream directly into the environment CAS. Native-device and process-worker verdicts retain the full structured outcome in that CAS, bound model-facing parts at the environment boundary, and publish typed `OutputProjection` facts over `env/v1`. The driver verifies the request, byte counts, ceiling, and artifact identity before adopting a verdict. Its cross-host replication retains one staged session-CAS write across interrupted ranges, resumes from the last persisted byte, and re-verifies the whole digest before publication. Detached-job settlement copies a runtime-spill artifact into the session CAS before the journal patch names it, so restart reconciliation cannot publish a dangling reference. The remote environment keeps durable session/invocation-scoped delivery leases until replication is acknowledged and journal-derived roots permit collection.
 
+Harness notices are structured, not prose. The dispatcher's spill notice is
+`Diag::info(DiagKind::OutputBounded)` with `artifact` and `omitted` attributes; the address is no
+longer appended to the result parts, because the model projection renders the diag itself (0008).
+Per-tool pagination footers, path-recovery notes, search caveats, edit warnings, scraper provenance,
+and the like all moved to `Ev::Diag` with the shared `DiagKind` vocabulary
+(`Pagination`/`RangeOutOfBounds`/`SummaryElided`/`LimitReached`/`PathRecovered`/`Conflicts`/…), each
+carrying `continuation` and `omitted` where a next slice exists. The sloppy hashline parser no longer
+recognizes read-output footers, since they cannot appear in pasted result text.
+
 ## References
 
 - The Harness Playbook, "The runtime" — "Limits are part of the primitive", "Bound output once"

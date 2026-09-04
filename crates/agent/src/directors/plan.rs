@@ -10,8 +10,8 @@ use crate::director::{
 
 const CLAIMS: &[Slot] = &[Slot::Mode, Slot::Worktree];
 /// Tools a planning turn may use: read-only discovery plus the plan file
-/// write and the decision request (pi plan mode keeps the built-in `write`
-/// active and relies on the read-only guard for everything else).
+/// write and the decision request. The built-in `write` stays active while
+/// the read-only guard handles every other tool.
 pub const PLAN_TOOLS: &[&str] = &[
 	"read",
 	"grep",
@@ -35,8 +35,8 @@ pub struct Plan {
 	decision_made:     bool,
 	write_attempts:    u32,
 	decision_attempts: u32,
-	/// pi `--plan-yolo-into`: once the plan is written and presented, hand
-	/// off to this model and keep going instead of yielding for approval.
+	/// Once the plan is written and presented, hand off to this model and keep
+	/// going instead of yielding for approval.
 	yolo_into:         Option<Str>,
 	yolo_thinking:     Option<Str>,
 	binds:             Vec<(Str, BindValue)>,
@@ -59,8 +59,8 @@ impl Plan {
 	}
 
 	/// Enables the yolo handoff: after the plan is written and presented the
-	/// Director exits, re-targets `ai_model` (and `ai_thinking` when given)
-	/// and continues implementing (pi `prewalk.ts` `#finalizePlanYoloProposal`).
+	/// Director exits, re-targets `ai_model` (and `ai_thinking` when given),
+	/// and continues implementing.
 	#[must_use]
 	pub fn with_yolo(mut self, target: impl Into<Str>, thinking: Option<Str>) -> Self {
 		self.yolo_into = Some(target.into());

@@ -46,19 +46,22 @@ impl RenderFold for HubRenderer {
 		state.latest = Some(update);
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, complete: bool) {
 		let string = |key| {
 			args
 				.get(key)
-				.and_then(omp_slopjson::Value::as_str)
+				.and_then(omp_core::slopjson::Value::as_str)
 				.map(Str::from)
 		};
 		let application = args
 			.get("application")
-			.and_then(omp_slopjson::Value::as_str);
+			.and_then(omp_core::slopjson::Value::as_str);
 		let command = application.map(|application| {
 			let mut command = String::from(application);
-			if let Some(values) = args.get("args").and_then(omp_slopjson::Value::as_array) {
+			if let Some(values) = args
+				.get("args")
+				.and_then(omp_core::slopjson::Value::as_array)
+			{
 				for value in values {
 					if let Some(value) = value.as_str() {
 						command.push(' ');
@@ -77,12 +80,14 @@ impl RenderFold for HubRenderer {
 			command,
 			ids: args
 				.get("ids")
-				.and_then(omp_slopjson::Value::as_array)
+				.and_then(omp_core::slopjson::Value::as_array)
 				.map_or(0, |ids| ids.len()),
-			cursor: args.get("cursor").and_then(omp_slopjson::Value::as_u64),
+			cursor: args
+				.get("cursor")
+				.and_then(omp_core::slopjson::Value::as_u64),
 			await_reply: args
 				.get("await")
-				.and_then(omp_slopjson::Value::as_bool)
+				.and_then(omp_core::slopjson::Value::as_bool)
 				.unwrap_or(false),
 			complete,
 		};
@@ -819,7 +824,7 @@ fn json_compact(value: &serde_json::Value) -> String {
 }
 
 /// Native hub renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(hub: ToolIdentity) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(hub: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
 			identity: hub.clone(),
@@ -1017,7 +1022,7 @@ mod tests {
 		let mut state = HubState::default();
 		HubRenderer.fold_args(
 			&mut state,
-			&omp_slopjson::parse_streaming(
+			&omp_core::slopjson::parse_streaming(
 				r#"{"op":"send","to":"AuthLoader","message":"Check the refresh-tok"#,
 			),
 			false,
@@ -1031,7 +1036,7 @@ mod tests {
 
 		HubRenderer.fold_args(
 			&mut state,
-			&omp_slopjson::parse(
+			&omp_core::slopjson::parse(
 				r#"{"op":"send","to":"AuthLoader","message":"Check the refresh-token race","await":true}"#,
 			)
 			.expect("committed args parse"),
@@ -1057,8 +1062,8 @@ mod tests {
 		for fixture in fixtures {
 			assert!(!fixture.streaming_args.is_empty());
 			assert!(!fixture.args.is_empty());
-			let _ = omp_slopjson::parse_streaming(fixture.streaming_args);
-			omp_slopjson::parse(fixture.args).expect("fixture committed args decode");
+			let _ = omp_core::slopjson::parse_streaming(fixture.streaming_args);
+			omp_core::slopjson::parse(fixture.args).expect("fixture committed args decode");
 			if let Some(update) = fixture.progress_update {
 				serde_json::from_slice::<HubResponse>(update).expect("fixture update decodes");
 			}

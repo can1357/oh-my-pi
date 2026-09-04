@@ -1,4 +1,4 @@
-//! Nested active repository detection (pi `resolveActiveRepoContext`).
+//! Nested active repository detection.
 //!
 //! When the session cwd sits outside any git repository but holds exactly
 //! one direct-child git repository, that child is the active project and the
@@ -20,7 +20,7 @@ pub struct ActiveRepository {
 	pub relative_root: PathBuf,
 }
 
-/// Resolves the active repository for `cwd`, pi `resolveActiveRepoContext`.
+/// Resolves the active repository for `cwd`.
 ///
 /// Returns `None` when `cwd` (or any ancestor) carries a `.git` marker, when
 /// it holds no direct-child repository, or when it holds more than one.

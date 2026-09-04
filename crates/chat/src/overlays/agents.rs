@@ -1,15 +1,15 @@
-//! `/agents` definitions browser: pi `agents-hub.ts` as a full-screen
-//! observer-local [`Panel`] (ADR 0005). A sidebar of scopes (`All agents`,
+//! `/agents` definitions browser as a full-screen observer-local [`Panel`]
+//! (ADR 0005). A sidebar of scopes (`All agents`,
 //! one row per definition source), a body listing agents with
 //! type-to-filter search and a pinned detail block, and a footer that turns
-//! into a chip strip while configuring one agent (pi `#openAgentStrip`).
+//! into a chip strip while configuring one agent.
 //!
 //! omp agent definitions are `<agent>.cfg` class scripts (ADR 0013), so the
 //! strip carries only the two knobs the class file owns: `enabled`
 //! (`sv_task_disabled_agents`, flipped by the controller through
 //! `HostCommand::Service` with [`Mutation::SetAgentEnabled`]; the row
 //! changes when the outcome arrives in [`Panel::notify`]) and the read-only
-//! `model` shown from the cfg's `ai_model` line. pi's per-agent
+//! `model` shown from the cfg's `ai_model` line. Per-agent
 //! model/prewalk/advisor overrides
 //! and the AI-drafted "New agent" flow have no cfg-side seam here.
 
@@ -24,7 +24,7 @@ use super::{
 };
 use crate::host::HostCommand;
 
-/// pi `agents-hub.ts` sidebar width clamp.
+/// Sidebar width clamp.
 const SIDEBAR_MIN_WIDTH: u16 = 16;
 const SIDEBAR_MAX_WIDTH: u16 = 24;
 /// Rows the pinned detail block occupies (rule + three lines).
@@ -32,7 +32,7 @@ const DETAIL_ROWS: u16 = 4;
 /// Border, rule, and footer rows around the panes.
 const CHROME_ROWS: u16 = 4;
 const TITLE: &str = "Agents";
-/// pi `agents-hub.ts` `#footerHint` variants.
+/// Footer hints for each focus region.
 const LIST_HINT: &str =
 	"Enter configure · Space enable/disable · ↑/↓ rows · type to search · Ctrl+R reload · Esc close";
 const SCOPE_HINT: &str = "↑/↓ scopes · →/Enter agents · Esc close";
@@ -40,7 +40,7 @@ const STRIP_HINT: &str = "←/→ choose · Enter open · Esc cancel";
 const SEARCH_PLACEHOLDER: &str = "type to filter";
 const SELECT_HINT: &str = "Select an agent to inspect";
 
-/// Definition sources in pi's sidebar order.
+/// Definition sources in sidebar order.
 const SOURCES: [(&str, &str); 3] =
 	[("project", "Project"), ("user", "User"), ("bundled", "Bundled")];
 
@@ -59,7 +59,7 @@ enum Focus {
 	List,
 }
 
-/// Chip strip opened by Enter on an agent (pi level-1 strip).
+/// Chip strip opened by Enter on an agent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Chip {
 	Enabled,
@@ -204,7 +204,7 @@ impl AgentsHub {
 	}
 
 	/// Type-to-filter: any printable character extends the query and
-	/// moves the cursor to the first match (pi `handleInput` tail).
+	/// moves the cursor to the first match.
 	fn type_query(&mut self, ch: char) {
 		self.query.push(ch);
 		self.focus = Focus::List;
@@ -560,7 +560,7 @@ impl Panel for AgentsHub {
 
 	fn action(&mut self, action: PanelAction) -> PanelEvent {
 		match action {
-			// pi binds Ctrl+R to reload here; the host lowers it to `Rename`.
+			// Ctrl+R reloads here; the host lowers it to `Rename`.
 			PanelAction::Rename if self.strip.is_none() => {
 				self.reload();
 				self.rebuild();

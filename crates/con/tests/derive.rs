@@ -2,6 +2,8 @@
 //! chain, session writes as a journaling stream, and whole-picture child
 //! seeding.
 
+use std::sync::Arc;
+
 use omp_con::{ConError, Ctx, DynamicVarSpec, Origin, TypeSpec, Value, VarFlags};
 use omp_core::Str;
 
@@ -15,6 +17,21 @@ omp_con::var! {
 	pub static ARCHIVED = test_archived_only: bool {
 		default: false,
 		flags: archive,
+	};
+	/// String target projected from the active layer stack.
+	pub static LAYER_MODE = test_layer_mode: Str {
+		default: Str::new_static(""),
+		flags: session,
+	};
+	/// Route-like string target projected from the active layer stack.
+	pub static LAYER_ROUTE = test_layer_route: Str {
+		default: Str::new_static(""),
+		flags: session,
+	};
+	/// List target projected from the active layer stack.
+	pub static LAYER_TOOLS = test_layer_tools: Vec<Str> {
+		default: Vec::new(),
+		flags: session,
 	};
 }
 
@@ -54,13 +71,10 @@ fn derive_layers_replaces_the_stack_from_the_director_chain() {
 	assert!(ctx.layer_owners().is_empty());
 }
 
-/// The built-in Directors bind the mode prompt, the model route, and the
-/// advertised tool roster (ADR 0015: binds are the engagement layer of real
-/// convars). Every one of those names must be a registered variable of the
-/// bound type, or `derive_layers` drops the bind with an error reply and the
-/// Director has no runtime effect.
+/// Layer bindings must name registered variables of the bound type, or
+/// `derive_layers` drops the binding with an error reply.
 #[test]
-fn director_binds_name_registered_variables_and_derive_without_being_dropped() {
+fn registered_variables_derive_without_being_dropped() {
 	let log: std::sync::Arc<parking_lot::Mutex<Vec<String>>> = std::sync::Arc::default();
 	let sink = std::sync::Arc::clone(&log);
 	let ctx = Ctx::builder()
@@ -70,29 +84,29 @@ fn director_binds_name_registered_variables_and_derive_without_being_dropped() {
 		Value::List(vec![Value::Str(Str::new_static("read")), Value::Str(Str::new_static("todo"))]);
 	ctx.derive_layers(&[
 		(Str::new_static("plan#1"), vec![
-			(Str::new_static("ai_prompt_mode"), Value::Str(Str::new_static("plan"))),
-			(Str::new_static("ai_model"), Value::Str(Str::new_static("@plan"))),
+			(Str::new_static("test_layer_mode"), Value::Str(Str::new_static("plan"))),
+			(Str::new_static("test_layer_route"), Value::Str(Str::new_static("@plan"))),
 		]),
 		(Str::new_static("vibe#2"), vec![
-			(Str::new_static("ai_prompt_mode"), Value::Str(Str::new_static("vibe"))),
-			(Str::new_static("sv_tools"), roster.clone()),
+			(Str::new_static("test_layer_mode"), Value::Str(Str::new_static("vibe"))),
+			(Str::new_static("test_layer_tools"), roster.clone()),
 		]),
 	]);
 	assert!(log.lock().is_empty(), "binds were dropped: {:?}", log.lock());
-	assert_eq!(omp_con::AI_PROMPT_MODE.get(&ctx).as_str(), "vibe");
-	assert_eq!(omp_con::AI_MODEL.get(&ctx).as_str(), "@plan");
-	assert_eq!(ctx.get("sv_tools"), Some(roster));
-	assert_eq!(omp_con::SV_TOOLS.get(&ctx), vec![Str::new_static("read"), Str::new_static("todo")]);
-	// The mode prompt derives from the live stack: popping the inner
-	// engagement restores the outer value, an empty chain the default.
+	assert_eq!(LAYER_MODE.get(&ctx).as_str(), "vibe");
+	assert_eq!(LAYER_ROUTE.get(&ctx).as_str(), "@plan");
+	assert_eq!(ctx.get("test_layer_tools"), Some(roster));
+	assert_eq!(LAYER_TOOLS.get(&ctx), vec![Str::new_static("read"), Str::new_static("todo")]);
+	// Popping the inner engagement restores the outer value; an empty chain
+	// restores the default.
 	ctx.derive_layers(&[(Str::new_static("plan#1"), vec![(
-		Str::new_static("ai_prompt_mode"),
+		Str::new_static("test_layer_mode"),
 		Value::Str(Str::new_static("plan")),
 	)])]);
-	assert_eq!(omp_con::AI_PROMPT_MODE.get(&ctx).as_str(), "plan");
-	assert!(omp_con::SV_TOOLS.get(&ctx).is_empty());
+	assert_eq!(LAYER_MODE.get(&ctx).as_str(), "plan");
+	assert!(LAYER_TOOLS.get(&ctx).is_empty());
 	ctx.derive_layers(&[]);
-	assert!(omp_con::AI_PROMPT_MODE.get(&ctx).is_empty());
+	assert!(LAYER_MODE.get(&ctx).is_empty());
 }
 
 #[test]
@@ -156,7 +170,7 @@ fn seed_child_carries_every_diverging_variable_regardless_of_flags() {
 	assert_eq!(seed.get("test_archived_only"), Some(&Value::Bool(true)));
 	assert_eq!(seed.get("test_derived"), Some(&Value::Int(3)));
 	// Values at their default are not restated.
-	assert_eq!(seed.get("ai_fastmode"), None);
+	assert_eq!(seed.get("test_layer_mode"), None);
 	// The seed is the parent's *effective* picture, engagement included.
 	parent.derive_layers(&chain(&[("plan#1", &[("test_derived", 8)])]));
 	assert_eq!(parent.seed_child().get("test_derived"), Some(&Value::Int(8)));
@@ -172,7 +186,7 @@ fn seed_child_carries_dynamic_declarations_before_values() {
 			ty:      TypeSpec::BOOL,
 			flags:   VarFlags::SESSION,
 			default: Value::Bool(false),
-			ui:      None,
+			meta:    Arc::from([]),
 		})
 		.unwrap();
 

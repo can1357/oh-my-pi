@@ -549,16 +549,16 @@ async fn resize_readable(resize: &mut Option<tokio::signal::unix::Signal>) {
 	match resize {
 		Some(signal) => {
 			if signal.recv().await.is_none() {
-				future::pending().await
+				future::pending::<()>().await;
 			}
 		},
-		None => future::pending().await,
+		None => future::pending::<()>().await,
 	}
 }
 
 #[cfg(windows)]
 async fn resize_readable(_resize: ()) {
-	future::pending().await
+	future::pending::<()>().await
 }
 
 /// Sleeps until `at`; `None` disables the branch.
@@ -567,6 +567,6 @@ async fn deadline(at: Option<Instant>) {
 		Some(at) => {
 			tokio::time::sleep_until(at.into()).await;
 		},
-		None => future::pending().await,
+		None => future::pending::<()>().await,
 	}
 }

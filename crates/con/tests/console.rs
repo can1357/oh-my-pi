@@ -34,6 +34,11 @@ omp_con::var! {
 		min: 100,
 		max: 2000,
 		flags: archive,
+		meta: {
+			"ui.tab": "model",
+			"legacy.path": "gravity",
+			"legacy.path": "physics.gravity",
+		},
 	};
 	/// Unsafe-gated impulse.
 	pub static IMPULSE = test::impulse: i32 {
@@ -78,6 +83,11 @@ omp_con::var! {
 	/// Boolean toggle target.
 	pub static FLAG = test::flag: bool {
 		default: false,
+	};
+	/// Archived boolean used to exercise aliases, binds, and persistence.
+	pub static SHOW_THINKING = test::show_thinking: bool {
+		default: true,
+		flags: archive | session,
 	};
 	/// Map name with a custom completion group.
 	pub static MAP = test::map: Str {
@@ -125,6 +135,72 @@ fn capture_ctx() -> (Ctx, Log) {
 fn logged(log: &Log) -> Vec<String> {
 	log.lock().iter().map(|(_, text)| text.clone()).collect()
 }
+
+#[test]
+fn static_metadata_from_var_macro_preserves_declaration_order() {
+	let spec = GRAVITY.spec();
+	assert_eq!(spec.meta_get("legacy.path"), Some("gravity"));
+	assert_eq!(spec.meta_all("legacy.path").collect::<Vec<_>>(), ["gravity", "physics.gravity"]);
+	assert_eq!(spec.meta_get("missing"), None);
+}
+
+#[test]
+fn dynamic_metadata_preserves_declaration_order() {
+	let spec = DynamicVarSpec {
+		name:    "product::metadata".into(),
+		desc:    "metadata contract".into(),
+		ty:      TypeSpec::BOOL,
+		flags:   VarFlags::NONE,
+		default: Value::Bool(false),
+		meta:    Arc::from([
+			(Str::new_static("legacy.path"), Str::new_static("enabled")),
+			(Str::new_static("ui.tab"), Str::new_static("tools")),
+			(Str::new_static("legacy.path"), Str::new_static("active")),
+		]),
+	};
+	assert_eq!(spec.meta_get("legacy.path"), Some("enabled"));
+	assert_eq!(spec.meta_all("legacy.path").collect::<Vec<_>>(), ["enabled", "active"]);
+	assert_eq!(spec.meta_get("missing"), None);
+}
+
+#[test]
+fn unified_variable_inventory_exposes_declarations_and_completes_dynamic_enums() {
+	let ctx = Ctx::builder().isolated().build();
+	ctx.register(omp_con::RegItem::Var(GRAVITY.spec())).unwrap();
+	ctx.register_dynamic_var(DynamicVarSpec {
+		name:    "product::difficulty".into(),
+		desc:    "Runtime difficulty".into(),
+		ty:      <Difficulty as omp_con::ConType>::SPEC,
+		flags:   VarFlags::ARCHIVE,
+		default: Value::Enum(Str::new_static("normal")),
+		meta:    Arc::from([
+			(Str::new_static("ui.tab"), Str::new_static("model")),
+			(Str::new_static("legacy.path"), Str::new_static("difficulty")),
+		]),
+	})
+	.unwrap();
+
+	let vars = ctx.vars().collect::<Vec<_>>();
+	assert_eq!(vars.iter().map(|var| var.name).collect::<Vec<_>>(), [
+		"test::gravity",
+		"product::difficulty"
+	]);
+	assert_eq!(vars[0].meta_get("legacy.path"), Some("gravity"));
+	assert_eq!(vars[0].meta_all("legacy.path").collect::<Vec<_>>(), ["gravity", "physics.gravity"]);
+	assert_eq!(vars[0].default(), Value::Int(800));
+	assert_eq!(vars[1].meta_get("legacy.path"), Some("difficulty"));
+	assert_eq!(vars[1].metadata().collect::<Vec<_>>(), [
+		("ui.tab", "model"),
+		("legacy.path", "difficulty")
+	]);
+	assert_eq!(vars[1].default(), Value::Enum(Str::new_static("normal")));
+
+	let name = "product::diff";
+	assert_eq!(ctx.complete(name, name.len())[0].text.as_str(), "product::difficulty");
+	let value = "product::difficulty h";
+	assert_eq!(ctx.complete(value, value.len())[0].text.as_str(), "hard");
+}
+
 #[allow(
 	clippy::unnecessary_wraps,
 	reason = "dynamic command handlers must use the fallible DynamicCmdHandler signature"
@@ -149,32 +225,6 @@ fn owned_dynamic_command_registers_and_dispatches() {
 
 	ctx.run("product::record hello").unwrap();
 	assert_eq!(logged(&log), ["product::record:hello"]);
-}
-
-#[test]
-fn starter_vars_are_declared_with_control_plane_flags() {
-	let ctx = Ctx::new();
-	for name in [
-		"ai_model",
-		"ai_thinking",
-		"ai_fastmode",
-		"ai_compact_threshold",
-		"cl_showthinking",
-		"cl_charset",
-		"cl_theme",
-		"cl_resize_policy",
-		"sv_approval_mode",
-		"sv_tools",
-	] {
-		let Some(omp_con::RegItem::Var(spec)) = ctx.find(name) else {
-			panic!("missing starter convar {name}");
-		};
-		assert!(spec.flags.contains(VarFlags::ARCHIVE), "{name}");
-		assert!(spec.flags.contains(VarFlags::SESSION), "{name}");
-	}
-	assert_eq!(ctx.get("ai_compact_threshold"), Some(Value::Float(0.8)));
-	assert_eq!(ctx.get("cl_resize_policy"), Some(Value::Enum(Str::new_static("rebuild"))));
-	assert_eq!(ctx.get("sv_cheats"), Some(Value::Bool(false)));
 }
 
 #[test]
@@ -380,14 +430,14 @@ fn binds_drive_actions_with_press_release_inversion() {
 	assert!(!JUMP.is_active(&ctx));
 
 	ctx.run(
-		"cl_showthinking 0; alias +peek \"cl_showthinking 1\"; alias -peek \"cl_showthinking 0\"; \
-		 bind h +peek",
+		"test::show_thinking 0; alias +peek \"test::show_thinking 1\"; alias -peek \
+		 \"test::show_thinking 0\"; bind h +peek",
 	)
 	.unwrap();
 	ctx.key("h", true).unwrap();
-	assert!(omp_con::CL_SHOWTHINKING.get(&ctx));
+	assert!(SHOW_THINKING.get(&ctx));
 	ctx.key("h", false).unwrap();
-	assert!(!omp_con::CL_SHOWTHINKING.get(&ctx));
+	assert!(!SHOW_THINKING.get(&ctx));
 }
 
 #[test]
@@ -465,7 +515,7 @@ fn dynamic_registration_uses_explicit_default_for_diff_dump() {
 		desc:    "unchanged".into(),
 		ty:      TypeSpec::INT,
 		flags:   VarFlags::ARCHIVE,
-		ui:      None,
+		meta:    Arc::from([]),
 		default: Value::Int(7),
 	})
 	.unwrap();
@@ -474,7 +524,7 @@ fn dynamic_registration_uses_explicit_default_for_diff_dump() {
 		desc:    "changed".into(),
 		ty:      TypeSpec::INT,
 		flags:   VarFlags::ARCHIVE,
-		ui:      None,
+		meta:    Arc::from([]),
 		default: Value::Int(9),
 	})
 	.unwrap();
@@ -558,14 +608,14 @@ fn exec_uses_loader_and_writecfg_uses_saver() {
 	let err = ctx.run("exec nonexistent").unwrap_err();
 	assert!(matches!(err, ConError::MissingCfg { .. }), "{err:?}");
 
-	ctx.run("cl_showthinking true").unwrap();
+	ctx.run("test::show_thinking true").unwrap();
 	ctx.run("writecfg backup").unwrap();
 	let saved = saved.lock();
 	assert_eq!(saved.len(), 1);
 	assert_eq!(saved[0].0, "backup");
 	assert!(saved[0].1.contains("test::gravity 300"));
 	assert!(
-		saved[0].1.contains("cl_showthinking true"),
+		saved[0].1.contains("test::show_thinking true"),
 		"explicit defaults survive future schema-default changes"
 	);
 

@@ -1,9 +1,8 @@
-//! `/stats` feed: folds every stored journal into the usage index
-//! (`omp_cache::stats_cache`) the way pi's `syncAllSessions` folds session
-//! transcripts into `stats.db`, then reads the aggregate.
+//! `/stats` folds every stored journal into the usage index
+//! (`omp_cache::stats_cache`), then reads the aggregate.
 //!
-//! Every project's `sessions/` under the data directory is scanned (pi's
-//! "By Folder" spans every project), plus the launch session directory when
+//! Every project's `sessions/` under the data directory is scanned, plus the
+//! launch session directory when
 //! it lives elsewhere (`--session-dir`). A journal is re-read only when its
 //! size or mtime moved since the last sync; a journal that vanished drops
 //! its rows. Rows come from the whole file, not just the live chain: a
@@ -31,7 +30,7 @@ use super::ServiceState;
 
 /// Usage index file under the data directory.
 const STATS_DB: &str = "stats.sqlite3";
-/// Rows per grouping in the report (pi `slice(0, 10)`).
+/// Rows per grouping in the report.
 const GROUP_LIMIT: usize = 10;
 
 /// Starts the sync on the runtime; the receiver settles with the report.

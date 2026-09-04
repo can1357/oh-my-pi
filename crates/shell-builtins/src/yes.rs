@@ -9,7 +9,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
@@ -178,7 +178,7 @@ mod tests {
 	};
 
 	use clap::Parser;
-	use omp_shell_engine::{
+	use omp_shell::{
 		error,
 		openfiles::{OpenFile, Stream},
 	};
@@ -227,12 +227,12 @@ mod tests {
 		}
 
 		#[cfg(unix)]
-		fn try_clone_to_owned(&self) -> Result<fd::OwnedFd, omp_shell_engine::Error> {
+		fn try_clone_to_owned(&self) -> Result<fd::OwnedFd, omp_shell::Error> {
 			Err(error::ErrorKind::CannotConvertToNativeFd.into())
 		}
 
 		#[cfg(unix)]
-		fn try_borrow_as_fd(&self) -> Result<fd::BorrowedFd<'_>, omp_shell_engine::Error> {
+		fn try_borrow_as_fd(&self) -> Result<fd::BorrowedFd<'_>, omp_shell::Error> {
 			Err(error::ErrorKind::CannotConvertToNativeFd.into())
 		}
 	}

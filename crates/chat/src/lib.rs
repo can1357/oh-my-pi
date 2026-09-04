@@ -23,10 +23,10 @@ pub mod editor;
 pub mod extension_status;
 /// Journal-derived tool-card gallery.
 pub mod gallery;
-/// Durable, searchable prompt history.
-pub mod history;
 /// Live git branch/dirty facts for the status band.
 pub mod gitwatch;
+/// Durable, searchable prompt history.
+pub mod history;
 /// Interactive terminal actor.
 pub mod host;
 /// Terminal input and command bindings.
@@ -45,7 +45,7 @@ pub mod overlays;
 pub mod project;
 /// Agent reactions: an emoji line opening a reply badges the prompt before it.
 pub mod reaction;
-/// Presentation and interaction pi setting convars.
+/// Presentation and interaction setting convars.
 pub mod settings;
 /// Composer status band.
 pub mod status_band;

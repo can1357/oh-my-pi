@@ -41,17 +41,17 @@ impl RenderFold for GithubRenderer {
 		state.progress = Some(update.output);
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		state.op = args
 			.get("op")
 			.and_then(|value| value.deserialize_into::<GithubOperation>().ok());
 		state.repo = args
 			.get("repo")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new);
 		state.query = args
 			.get("query")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new);
 	}
 
@@ -271,21 +271,21 @@ impl RenderFold for BrowserRenderer {
 		}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		state.action = args
 			.get("action")
 			.and_then(|value| value.deserialize_into::<BrowserAction>().ok());
 		state.name = args
 			.get("name")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new);
 		state.url = args
 			.get("url")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new);
 		state.code = args
 			.get("code")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new);
 	}
 
@@ -470,14 +470,14 @@ impl RenderFold for ComputerRenderer {
 		}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		state.action = args
 			.get("action")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map_or_else(|| Str::new_static("run"), Str::new);
 		state.code = args
 			.get("code")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map_or_else(Str::default, Str::new);
 		state.summary = computer_arg_summary(args);
 	}
@@ -492,29 +492,32 @@ impl RenderFold for ComputerRenderer {
 	}
 }
 
-fn computer_arg_summary(args: &omp_slopjson::Value) -> Str {
+fn computer_arg_summary(args: &omp_core::slopjson::Value) -> Str {
 	let mut summary = String::new();
 	if let Some(action) = args
 		.get("action")
-		.and_then(omp_slopjson::Value::as_str)
+		.and_then(omp_core::slopjson::Value::as_str)
 		.filter(|action| *action != "run")
 	{
 		summary.push_str(action);
 	}
 	if args
 		.get("read_only")
-		.and_then(omp_slopjson::Value::as_bool)
+		.and_then(omp_core::slopjson::Value::as_bool)
 		.unwrap_or(false)
 	{
 		summary.push_str("read-only");
 	}
-	if let Some(timeout) = args.get("timeout").and_then(omp_slopjson::Value::as_f64) {
+	if let Some(timeout) = args
+		.get("timeout")
+		.and_then(omp_core::slopjson::Value::as_f64)
+	{
 		if !summary.is_empty() {
 			summary.push_str(" · ");
 		}
 		write!(summary, "{timeout}s").expect("writing to String cannot fail");
 	}
-	if let Some(code) = args.get("code").and_then(omp_slopjson::Value::as_str) {
+	if let Some(code) = args.get("code").and_then(omp_core::slopjson::Value::as_str) {
 		let first_line = code.lines().next().unwrap_or_default().trim();
 		if !first_line.is_empty() {
 			let mut end = first_line.len().min(80);
@@ -608,7 +611,7 @@ fn json_view(value: &Value, max_depth: usize, max_rows: usize, max_chars: usize)
 
 /// Native GitHub, browser, and computer lifecycle fixtures for the visual QA
 /// gallery.
-pub(crate) fn gallery_fixtures(
+pub fn gallery_fixtures(
 	github: ToolIdentity,
 	browser: ToolIdentity,
 	computer: ToolIdentity,
@@ -651,7 +654,7 @@ mod tests {
 	fn identity(name: &'static str) -> ToolIdentity {
 		ToolIdentity {
 			name: Str::new_static(name),
-			rev: Rev { family: Str::default(), n: if name == "github" { 3 } else { 1 } },
+			rev:  Rev { family: Str::default(), n: if name == "github" { 3 } else { 1 } },
 		}
 	}
 
@@ -660,15 +663,15 @@ mod tests {
 		let fixtures =
 			gallery_fixtures(identity("github"), identity("browser"), identity("computer"));
 		for fixture in &fixtures {
-			assert!(omp_slopjson::parse(fixture.streaming_args).is_err());
-			omp_slopjson::parse(fixture.args).expect("committed args decode");
+			assert!(omp_core::slopjson::parse(fixture.streaming_args).is_err());
+			omp_core::slopjson::parse(fixture.args).expect("committed args decode");
 			assert!(fixture.progress_update.is_none());
 		}
 
 		let mut github_state = GithubState::default();
 		GithubRenderer.fold_args(
 			&mut github_state,
-			&omp_slopjson::parse_streaming(fixtures[0].streaming_args),
+			&omp_core::slopjson::parse_streaming(fixtures[0].streaming_args),
 			false,
 		);
 		assert!(
@@ -680,7 +683,7 @@ mod tests {
 		let mut browser_state = BrowserState::default();
 		BrowserRenderer.fold_args(
 			&mut browser_state,
-			&omp_slopjson::parse_streaming(fixtures[1].streaming_args),
+			&omp_core::slopjson::parse_streaming(fixtures[1].streaming_args),
 			false,
 		);
 		assert!(
@@ -692,7 +695,7 @@ mod tests {
 		let mut computer_state = ComputerState::default();
 		ComputerRenderer.fold_args(
 			&mut computer_state,
-			&omp_slopjson::parse_streaming(fixtures[2].streaming_args),
+			&omp_core::slopjson::parse_streaming(fixtures[2].streaming_args),
 			false,
 		);
 		assert!(
@@ -802,19 +805,19 @@ mod tests {
 		let mut state = BrowserState::default();
 		BrowserRenderer.fold_args(
 			&mut state,
-			&omp_slopjson::parse(
+			&omp_core::slopjson::parse(
 				r#"{"action":"run","name":"docs","url":"https://bun.sh/docs","code":"await tab.waitFor('aria/Sign in')"}"#,
 			)
 			.expect("browser args decode"),
 			true,
 		);
 		let fault = BrowserFault {
-			code:    Str::new_static("browser_timeout"),
-			message: Str::new_static("TimeoutError: selector <missing>"),
-			name:    Some(Str::new_static("docs")),
-			url:     Some(Str::new_static("https://bun.sh/docs")),
-			title:   None,
-			browser: Some(Str::new_static("headless")),
+			code:      Str::new_static("browser_timeout"),
+			message:   Str::new_static("TimeoutError: selector <missing>"),
+			name:      Some(Str::new_static("docs")),
+			url:       Some(Str::new_static("https://bun.sh/docs")),
+			title:     None,
+			browser:   Some(Str::new_static("headless")),
 			operation: None,
 		};
 		let rendered = BrowserRenderer
@@ -842,12 +845,12 @@ mod tests {
 				"return_value": true
 			})),
 			artifacts: vec![crate::browser::Artifact {
-				uri: Str::new_static(
+				uri:      Str::new_static(
 					"artifact://sha256/0000000000000000000000000000000000000000000000000000000000000000",
 				),
-				mime: Str::new_static("image/png"),
-				kind: Str::new_static("screenshot"),
-				visible: true,
+				mime:     Str::new_static("image/png"),
+				kind:     Str::new_static("screenshot"),
+				visible:  true,
 				byte_len: 1,
 			}],
 			browser:   Some(Str::new_static("headless")),
@@ -884,21 +887,21 @@ mod tests {
 	#[test]
 	fn computer_structured_result_artifact_and_fault_are_semantic() {
 		let payload = ComputerPayload {
-			action: crate::computer::Action::Run,
-			code: Some(Str::new_static("await desktop.screenshot()")),
-			results: vec![serde_json::json!({"width": 1440, "height": 900})],
-			artifacts: vec![crate::computer::Artifact {
-				uri: Str::new_static(
+			action:       crate::computer::Action::Run,
+			code:         Some(Str::new_static("await desktop.screenshot()")),
+			results:      vec![serde_json::json!({"width": 1440, "height": 900})],
+			artifacts:    vec![crate::computer::Artifact {
+				uri:           Str::new_static(
 					"artifact://sha256/0000000000000000000000000000000000000000000000000000000000000000",
 				),
-				mime: Str::new_static("image/png"),
-				visible: true,
-				byte_len: 1,
-				width: 1440,
-				height: 900,
-				source_width: 1440,
+				mime:          Str::new_static("image/png"),
+				visible:       true,
+				byte_len:      1,
+				width:         1440,
+				height:        900,
+				source_width:  1440,
 				source_height: 900,
-				target: Str::new_static("desktop"),
+				target:        Str::new_static("desktop"),
 			}],
 			capabilities: None,
 		};
@@ -910,8 +913,8 @@ mod tests {
 		assert!(rendered.contains("artifact://sha256/"));
 
 		let fault = ComputerFault {
-			code: crate::computer::FaultCode::PermissionDenied,
-			message: Str::new_static("Screen Recording <required>"),
+			code:      crate::computer::FaultCode::PermissionDenied,
+			message:   Str::new_static("Screen Recording <required>"),
 			operation: Some(crate::computer::Operation::Capture),
 		};
 		let rendered = ComputerRenderer

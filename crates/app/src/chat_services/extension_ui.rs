@@ -1,6 +1,5 @@
 //! Production [`UiControlOwner`] for the interactive chat: extension
-//! `omp.ui.*` CONTROL requests become host dialogs and presentation facts
-//! (pi `extension-ui-controller.ts`).
+//! `omp.ui.*` CONTROL requests become host dialogs and presentation facts.
 //!
 //! Dialogs ride the `ask` path end to end: the owner registers the request
 //! id with the environment's [`AskRoute`], opens an [`AskDialog`] /
@@ -23,18 +22,20 @@ use omp_chat::{
 };
 use omp_con::{Ctx, RegItem};
 use omp_core::{Str, Ulid};
-use omp_driver::collab::session::{CollabCommandHandle, HostUiRequestError};
-use omp_driver::headless::AskRoute;
+use omp_driver::{
+	collab::session::{CollabCommandHandle, HostUiRequestError},
+	headless::AskRoute,
+};
 use omp_envd::exthost::{
 	ControlAuthority, ControlAuthorityFactory, ControlCompositionError, UiControlAuthority,
 	UiControlOwner, UiControlRequest, UiControlResult,
 	control::{ControlConnectionIdentity, ControlProtocolError, ControlRequestContext},
 };
-use omp_tools::ask::{
-	AskPresenter, Fault as AskFault, OptionItem, Presentation, Question, Selection,
-};
 use omp_proto::collab::v1::{
 	EditorSpec, SelectOption, SelectSpec, UiRequest, select_spec, ui_request,
+};
+use omp_tools::ask::{
+	AskPresenter, Fault as AskFault, OptionItem, Presentation, Question, Selection,
 };
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
@@ -52,24 +53,24 @@ fn remote_select(questions: &[Question]) -> Option<UiRequest> {
 	Some(UiRequest {
 		title: question.question.to_string(),
 		spec: Some(ui_request::Spec::Select(SelectSpec {
-			options: question
+			options:         question
 				.options
 				.iter()
 				.map(|option| SelectOption {
-					label: option.label.to_string(),
+					label:       option.label.to_string(),
 					description: option.description.as_ref().map(ToString::to_string),
 				})
 				.collect(),
-			initial_index: u32::try_from(question.recommended.unwrap_or_default())
+			initial_index:   u32::try_from(question.recommended.unwrap_or_default())
 				.unwrap_or(u32::MAX),
-			marker: if question.multi {
+			marker:          if question.multi {
 				select_spec::Marker::Checkbox
 			} else {
 				select_spec::Marker::Radio
 			} as i32,
 			checked_indices: Vec::new(),
-			markable_count: u32::try_from(question.options.len()).unwrap_or(u32::MAX),
-			help_text: None,
+			markable_count:  u32::try_from(question.options.len()).unwrap_or(u32::MAX),
+			help_text:       None,
 		})),
 		..UiRequest::default()
 	})
@@ -79,11 +80,15 @@ fn remote_selection(question: &Question, value: String) -> Selection {
 	let value = Str::new(value);
 	let known = question.options.iter().any(|option| option.label == value);
 	Selection {
-		id: question.id.clone(),
-		selected: if known { vec![value.clone()] } else { Vec::new() },
+		id:           question.id.clone(),
+		selected:     if known {
+			vec![value.clone()]
+		} else {
+			Vec::new()
+		},
 		custom_input: (!known).then_some(value),
-		note: None,
-		timed_out: false,
+		note:         None,
+		timed_out:    false,
 	}
 }
 
@@ -1219,11 +1224,11 @@ mod tests {
 	#[test]
 	fn collaboration_select_projection_is_correlated_and_single_choice_only() {
 		let single = Question {
-			id: Str::new_static("release"),
-			question: Str::new_static("Ship?"),
-			header: None,
-			options: vec![option("Yes", None), option("No", None)],
-			multi: false,
+			id:          Str::new_static("release"),
+			question:    Str::new_static("Ship?"),
+			header:      None,
+			options:     vec![option("Yes", None), option("No", None)],
+			multi:       false,
 			recommended: Some(1),
 		};
 		let request = remote_select(std::slice::from_ref(&single)).expect("remote request");

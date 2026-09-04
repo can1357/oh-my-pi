@@ -1,10 +1,10 @@
-//! Focused proof that sealed decorator declarations reach the worker
+//! Focused proof that sealed decorator declarations reach the CONTROL
 //! projection.
 
 use omp_py::{Engine, pyo3::ffi::c_str};
 
 #[test]
-fn decorated_tools_project_as_runnable_worker_declarations() {
+fn decorated_tools_project_as_runnable_control_declarations() {
 	let engine = Engine::builder().init().expect("embedded Python boots");
 	engine
 		.attach(|py| {
@@ -14,7 +14,6 @@ fn decorated_tools_project_as_runnable_worker_declarations() {
 import asyncio
 import dataclasses
 import enum
-import json
 
 import omp
 import omp._registry as registry_module
@@ -84,6 +83,15 @@ registry_module.configure_manifest(
             "trigger": "lazy",
             "api": 1,
             "failure": "fail-open",
+        },
+        {
+            "id": "contract-memory",
+            "kind": "prompt_slot",
+            "module": "__main__",
+            "key": "memory",
+            "trigger": "eager-prompt",
+            "api": 1,
+            "failure": "fail-closed",
         },
     ),
 )
@@ -194,6 +202,11 @@ class ContractService:
         return {"value": value}
 
 
+@omp.prompt_slot("memory", priority=4, cls=omp.SlotClass.EPOCHAL)
+def contract_memory(context):
+    return f"{context.session_id}:{context.cls.value}"
+
+
 class Marker:
     def __init__(self):
         self.updates = []
@@ -204,7 +217,8 @@ class Marker:
 
 marker = Marker()
 snapshot = registry_module.freeze_declarations()
-tools, metadata_json = registry_module.project_worker_registry()
+tools = registry_module.registry.worker_tool_definitions()
+publication = registry_module.project_control_registry()
 assert skill_evaluations == 1
 assert len(snapshot.skills) == 1
 assert snapshot.skills[0].declaration.path == (
@@ -257,12 +271,43 @@ assert asyncio.run(tool_row.handler({"count": 4}, marker)) == {
 }
 assert marker.updates == [{"count": 4}]
 
-metadata = json.loads(metadata_json)
+metadata = publication
 assert metadata["skills"] == [{
     "metadata": skill_metadata,
     "path": "extension/.omp-generated/skills/review/SKILL.md",
 }]
 assert metadata["tools"][0]["rev"] == 7
+assert metadata["prompt_slots"] == [{
+    "slot": "memory",
+    "priority": 4,
+    "class": "epochal",
+    "callback": {"$omp.callable": "__main__.contract_memory"},
+    "trigger": "eager-prompt",
+}]
+prompt_result = registry_module.dispatch_prompt_slot(
+    "memory",
+    "__main__.contract_memory",
+    {
+        "session_id": "session",
+        "model": "model",
+        "provider": "provider",
+        "context_window": 32000,
+        "epoch": 3,
+        "cwd": "/workspace",
+        "roots": ["/workspace"],
+        "vcs_branch": "main",
+        "vcs_commit": None,
+        "is_subagent": False,
+        "agent_kind": None,
+        "cls": "epochal",
+        "budget_bytes": 1024,
+    },
+)
+assert prompt_result == {
+    "slot": "memory",
+    "callback": "__main__.contract_memory",
+    "content": "session:epochal",
+}
 assert metadata["verdict_renderers"] == [{
     "kind": "verdict_renderer",
     "name": ["contract_device", "wire", 7],
@@ -291,6 +336,7 @@ assert metadata["services"] == [{
     "name": "acme.contract",
     "rev": 2,
     "source_module": "__main__",
+    "callback": {"operation": "omp.services.dispatch"},
 }]
 class ContractKind(enum.Enum):
     OK = "ok"
@@ -333,5 +379,5 @@ else:
 				None,
 			)
 		})
-		.expect("registry worker contract");
+		.expect("registry CONTROL contract");
 }

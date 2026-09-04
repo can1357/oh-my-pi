@@ -21,34 +21,34 @@ use self::{
 };
 
 /// Native goal renderer views.
-pub(crate) mod agentic;
+pub mod agentic;
 /// Native structural search and rewrite renderer views.
-pub(crate) mod ast;
+pub mod ast;
 /// Native LSP and debugger renderer views.
-pub(crate) mod codeintel;
+pub mod codeintel;
 /// Native ask, todo, and think renderer views.
-pub(crate) mod interaction;
+pub mod interaction;
 /// Native GitHub, browser, and computer renderer views.
-pub(crate) mod misc;
+pub mod misc;
 
 /// Native edit renderer views.
-pub(crate) mod edit;
+pub mod edit;
 /// Native shell and eval renderer views.
-pub(crate) mod exec;
+pub mod exec;
 /// Native read and write renderer views.
-pub(crate) mod fs;
+pub mod fs;
 /// Native hub renderer views.
-pub(crate) mod hub;
+pub mod hub;
 /// Grouped path and directory-tree rendering.
 pub mod paths;
 /// Native grep and glob renderer views.
-pub(crate) mod search;
+pub mod search;
 /// Shared line, byte, and column truncation.
 pub mod truncate;
 /// Typed renderer view construction and canonical serialization.
 pub mod view;
 /// Native web search renderer views.
-pub(crate) mod web;
+pub mod web;
 
 /// Exact production identities associated with enabled native renderer
 /// implementations.

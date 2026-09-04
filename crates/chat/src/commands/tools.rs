@@ -1,8 +1,8 @@
-//! Tool and extension commands (pi `builtin-session.ts` `/tools`,
-//! `/extensions`; `builtin-marketplace.ts` `/marketplace`, `/plugins`,
-//! `/reload-plugins`). Each handler posts a panel opener or a host call;
-//! the data comes from the application's [`Services`] feeds, the presentation
-//! is a report, a dashboard, or a selector — never a journal entry.
+//! Tool and extension commands: `/tools`, `/extensions`, `/marketplace`,
+//! `/plugins`, and `/reload-plugins`. Each handler posts a panel opener or a
+//! host call; the data comes from the application's [`Services`] feeds, the
+//! presentation is a report, a dashboard, or a selector — never a journal
+//! entry.
 
 use std::fmt::Write as _;
 
@@ -37,7 +37,7 @@ pub const PALETTE: &[PaletteEntry] = &[
 /// A panel a command opened, or the notice explaining why it could not.
 type Opened = Result<Box<dyn Panel>, Str>;
 
-/// pi `/marketplace help` text (TUI variant), verbatim.
+/// `/marketplace` help text for the TUI.
 const MARKETPLACE_HELP: &str = "Marketplace commands:
   /marketplace                              Browse and install plugins
   /marketplace add <source>                  Add a marketplace (e.g. owner/repo)
@@ -54,7 +54,7 @@ Quick start:
   /marketplace add anthropics/claude-plugins-official
   /marketplace                               (opens interactive browser)";
 
-/// `/plugins` subcommands (pi `builtin-marketplace.ts`).
+/// `/plugins` subcommands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginsOp {
 	/// List installed plugins.
@@ -68,7 +68,7 @@ pub enum PluginsOp {
 	},
 }
 
-/// `/marketplace` subcommands (pi `builtin-marketplace.ts`).
+/// `/marketplace` subcommands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MarketplaceOp {
 	/// No argument: the interactive install browser.
@@ -152,7 +152,7 @@ pub fn marketplace_op(words: Option<Str>) -> Result<MarketplaceOp, ConError> {
 	})
 }
 
-/// pi `/tools` report: `* name` for tools in the session roster, `- name`
+/// `/tools` report: `* name` for tools in the session roster, `- name`
 /// for the rest, with revision, tier, and the first description line.
 /// `None` when the kernel has no tools.
 #[must_use]
@@ -192,7 +192,7 @@ pub fn tools_report(rows: &[ToolRow], roster: &[Str]) -> Option<Str> {
 	Some(Str::new(body))
 }
 
-/// pi `/plugins` list: installed marketplace plugins with version, state,
+/// `/plugins` list: installed marketplace plugins with version, state,
 /// scope, and shadowing. `None` when nothing is installed.
 #[must_use]
 pub fn plugins_report(report: &PluginsReport) -> Option<Str> {
@@ -223,7 +223,7 @@ pub fn plugins_report(report: &PluginsReport) -> Option<Str> {
 	Some(Str::new(body))
 }
 
-/// pi `/marketplace list` / bare `/marketplace` (non-TUI) text.
+/// `/marketplace list` / bare `/marketplace` (non-TUI) text.
 fn marketplaces_text(report: &PluginsReport) -> Str {
 	if report.sources.is_empty() {
 		return Str::new_static("No marketplaces configured.");
@@ -235,7 +235,7 @@ fn marketplaces_text(report: &PluginsReport) -> Str {
 	Str::new(body)
 }
 
-/// pi `/marketplace discover` text.
+/// `/marketplace discover` text.
 fn discover_text(report: &PluginsReport, marketplace: Option<&str>) -> Str {
 	let plugins = report
 		.plugins
@@ -266,7 +266,7 @@ fn discover_text(report: &PluginsReport, marketplace: Option<&str>) -> Str {
 	Str::new(body)
 }
 
-/// pi `/marketplace installed` text.
+/// `/marketplace installed` text.
 fn installed_text(report: &PluginsReport) -> Str {
 	let installed = report
 		.plugins

@@ -7,7 +7,7 @@ use crate::{Handle, PropKey};
 pub type Sid = u32;
 
 #[derive(Clone)]
-pub(crate) struct OpenStream {
+pub struct OpenStream {
 	pub(crate) node:           Handle,
 	pub(crate) prop:           PropKey,
 	pub(crate) text:           StrMut,
@@ -16,7 +16,7 @@ pub(crate) struct OpenStream {
 
 /// Serializable stream metadata used by snapshots.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct SnapshotStream {
+pub struct SnapshotStream {
 	pub(crate) sid:            Sid,
 	pub(crate) node:           Handle,
 	pub(crate) prop:           PropKey,

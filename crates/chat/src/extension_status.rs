@@ -141,7 +141,7 @@ impl ExtensionStatuses {
 }
 
 /// Strips ANSI/VT sequences, maps C0/C1 controls to spaces, collapses ASCII
-/// spaces, and trims. This is pi's `sanitizeStatusText` contract at the actor
+/// spaces, and trims at the actor
 /// boundary rather than in a paint path.
 fn sanitize_status(value: &str) -> Str {
 	let stripped = value.to_owned().into_ansi_stripped();

@@ -3,13 +3,13 @@
 
 use std::{fs, path::Path};
 
-use omp_docserver::{
-	Environment, ServerConfig,
-	connection::{ConnectionConfig, serve_connection},
-};
 use omp_envd::{
 	blobs::BlobHost,
 	docs::DocumentHost,
+	docserver::{
+		Environment, ServerConfig,
+		connection::{ConnectionConfig, serve_connection},
+	},
 	workspace::{WorkspaceHost, WorkspaceOperations},
 };
 use omp_proto::env::v1::{CreateWorktree, DestroyWorktree};

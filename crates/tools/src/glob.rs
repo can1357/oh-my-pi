@@ -6,8 +6,9 @@ use async_stream::stream;
 use futures::Stream;
 use omp_core::{Str, sf};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, DocEffects, Effects, Ev, IncomingParams,
-	InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool, ToolSpec, ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, Diag, DiagKind, DocEffects, Effects, Ev,
+	IncomingParams, InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool, ToolSpec,
+	ToolTerminal, Unit,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -309,7 +310,15 @@ impl<W: WorkspaceSearch> Tool for Glob<W> {
 					yield interrupt_event(interrupt, "glob traversal owner disappeared");
 				},
 				result = &mut operation => {
-					yield done(result);
+					match result {
+						Ok(payload) => {
+							for diag in payload_diags(&payload) {
+								yield Ev::Diag(diag);
+							}
+							yield done(Ok(payload));
+						},
+						Err(fault) => yield done(Err(fault)),
+					}
 				},
 			}
 		}
@@ -432,77 +441,46 @@ fn render_payload(payload: &Payload) -> String {
 		.iter()
 		.map(|entry| entry.path.as_ref())
 		.collect();
-	let missing_note = (!payload.missing_paths.is_empty()).then(|| {
-		format!(
-			"Skipped missing paths: {}",
-			payload
-				.missing_paths
-				.iter()
-				.map(AsRef::as_ref)
-				.collect::<Vec<&str>>()
-				.join(", ")
-		)
-	});
-	let timeout_note = payload.timed_out.then(|| timeout_notice(payload));
-	let result_limit_note = payload.result_limit_reached.map(|limit| {
-		format!("{limit} results limit reached. Use limit={} for more.", limit.saturating_mul(2))
-	});
-
 	if paths.is_empty() {
-		let mut parts = Vec::with_capacity(4);
-		if !payload.timed_out {
-			parts.push(String::from("No files found matching pattern"));
-		}
-		if let Some(note) = timeout_note {
-			parts.push(note);
-		}
-		if let Some(note) = missing_note {
-			parts.push(note);
-		}
-		if let Some(note) = result_limit_note {
-			parts.push(note);
-		}
-		return parts.join("\n");
+		return if payload.timed_out {
+			String::new()
+		} else {
+			String::from("No files found matching pattern")
+		};
 	}
-
-	let mut output = format_grouped_paths(&paths);
-	let mut notes = Vec::with_capacity(3);
-	if let Some(note) = timeout_note {
-		notes.push(note);
-	}
-	if let Some(note) = missing_note {
-		notes.push(note);
-	}
-	if let Some(note) = result_limit_note {
-		notes.push(note);
-	}
-	if !notes.is_empty() {
-		output.push_str("\n\n");
-		output.push_str(&notes.join("\n"));
-	}
-	output
+	format_grouped_paths(&paths)
 }
 
-fn timeout_notice(payload: &Payload) -> String {
-	let seconds = if payload.timeout_ms.is_multiple_of(1_000) {
-		(payload.timeout_ms / 1_000).to_string()
-	} else {
-		format!("{:.1}", payload.timeout_ms as f64 / 1_000.0)
-	};
-	if payload.partial_match_count > 0 {
-		format!(
-			"glob timed out after {seconds}s; returning {} partial matches — results are incomplete, \
-			 scope to a deeper directory instead of retrying blindly",
-			payload.partial_match_count
+fn payload_diags(payload: &Payload) -> impl Iterator<Item = Diag> {
+	let timeout = payload.timed_out.then(|| {
+		let elapsed = if payload.timeout_ms.is_multiple_of(1_000) {
+			sf!("{}s", payload.timeout_ms / 1_000)
+		} else {
+			sf!("{:.1}s", payload.timeout_ms as f64 / 1_000.0)
+		};
+		Diag::warn(
+			DiagKind::Timeout,
+			sf!(
+				"Glob reached its {elapsed} timeout after finding {} partial matches",
+				payload.partial_match_count
+			),
 		)
-	} else {
-		format!(
-			"Glob timed out after {seconds}s before finding any matches — the scan is incomplete, \
-			 NOT proof of absence. The walk is bounded by directory size, not pattern width; scope \
-			 the search to a deeper directory (e.g. `sub/dir/*.ext` instead of `*.ext` at a huge \
-			 root)."
-		)
-	}
+	});
+	let limit = payload.result_limit_reached.map(|limit| {
+		let diag = Diag::info(DiagKind::LimitReached, sf!("{limit} result limit reached"))
+			.continuation(sf!("limit={}", limit.saturating_mul(2)));
+		let omitted = payload
+			.partial_match_count
+			.saturating_sub(u64::try_from(payload.matches.len()).unwrap_or(u64::MAX));
+		if omitted == 0 {
+			diag
+		} else {
+			diag.omitted(omitted, Unit::Files)
+		}
+	});
+	let missing = (!payload.missing_paths.is_empty())
+		.then(|| Diag::warn(DiagKind::MissingPaths, Str::new(join_strs(&payload.missing_paths))));
+	[timeout, limit, missing].into_iter().flatten()
 }
 
 const fn done(result: Result<Payload, Fault>) -> Ev<Update, Payload, Fault> {
@@ -646,16 +624,13 @@ mod tests {
 		assert!(ranked.truncated);
 		assert_eq!(
 			render_payload(&ranked),
-			[
-				"# docs/generated/",
-				"# src/",
-				"new.rs",
-				"mid.rs",
-				"",
-				"3 results limit reached. Use limit=6 for more.",
-			]
-			.join("\n")
+			["# docs/generated/", "# src/", "new.rs", "mid.rs"].join("\n")
 		);
+		let diags = payload_diags(&ranked).collect::<Vec<_>>();
+		assert_eq!(diags.len(), 1);
+		assert_eq!(diags[0].native_kind(), Some(DiagKind::LimitReached));
+		assert_eq!(diags[0].continuation.as_deref(), Some("limit=6"));
+		assert_eq!(diags[0].omitted, Some(omp_tool::Omitted { count: 1, unit: Unit::Files }));
 	}
 
 	#[test]

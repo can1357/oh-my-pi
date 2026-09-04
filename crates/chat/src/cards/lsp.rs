@@ -5,8 +5,7 @@ use serde_json::Value;
 
 use super::{Card, CardStatus, CardView, Component, elapsed_badge, typed_input, typed_result};
 
-/// Collapsed generic responses show the first line plus this many more (pi
-/// `renderGeneric`: `lines.slice(1, 4)`).
+/// Collapsed generic responses show the first line plus this many more.
 const GENERIC_PREVIEW_LINES: usize = 3;
 
 /// Language-server request and reference-result card.
@@ -66,8 +65,8 @@ impl Card for LspCard {
 		};
 		let count: usize = files.iter().map(|file| file.locations.len()).sum();
 		// Hover text, symbol tables, diagnostics, and "OK" all ride the
-		// bounded `output` projection (pi `renderGeneric` over the result
-		// text); a zero-reference search never leaves the Response empty.
+		// bounded `output` projection; a zero-reference search never leaves
+		// the Response empty.
 		let output_lines = result
 			.as_ref()
 			.and_then(|value| value.get("output"))

@@ -12,8 +12,14 @@ use std::{
 
 use bytes::Bytes;
 use omp_ar::{Archive, Entry, Error as ArError, Limits};
+use omp_core::sf;
+use omp_tool::{Diag, DiagKind, Unit};
+use smallvec::SmallVec;
 
-use super::selector::{ParsedSelector, SelectorError, parse_selector, split_path_and_selector};
+use super::{
+	format::Rendered,
+	selector::{ParsedSelector, SelectorError, parse_selector, split_path_and_selector},
+};
 
 /// Default number of archive-directory entries returned by one read.
 pub const DEFAULT_ARCHIVE_LIST_LIMIT: usize = 500;
@@ -78,26 +84,37 @@ pub struct ArchiveListing {
 	pub total_entries: usize,
 	/// One-based offset used for this listing.
 	pub offset:        usize,
-	/// Result-limit truth for callers that render shared limit notices.
+	/// Result-limit truth for callers that emit pagination diagnostics.
 	pub result_limit:  Option<ArchiveListLimit>,
 }
 
 impl ArchiveListing {
-	/// Renders entries using archive-listing size suffixes.
-	pub fn render(&self) -> String {
-		let mut rendered = if self.entries.is_empty() {
+	/// Renders entries and keeps pagination metadata out of the result body.
+	pub fn render(&self) -> Rendered {
+		let text = if self.entries.is_empty() {
 			"(empty archive directory)".to_owned()
 		} else {
 			format_archive_entry_lines(&self.entries).join("\n")
 		};
+		let mut diags = SmallVec::new();
 		if let Some(limit) = self.result_limit {
 			let next_offset = self.offset.saturating_add(self.entries.len());
-			rendered.push_str(&format!(
-				"\n\n[Archive listing limited to {} entries out of {}. Use :{}+{} for the next page.]",
-				limit.reached, self.total_entries, next_offset, limit.suggestion
-			));
+			let omitted = self.total_entries.saturating_sub(
+				self
+					.offset
+					.saturating_sub(1)
+					.saturating_add(self.entries.len()),
+			);
+			diags.push(
+				Diag::info(
+					DiagKind::Pagination,
+					sf!("Archive listing returned {} of {} entries.", limit.reached, self.total_entries),
+				)
+				.continuation(sf!(":{next_offset}+{}", limit.suggestion))
+				.omitted(omitted as u64, Unit::Entries),
+			);
 		}
-		rendered
+		Rendered { text: text.into(), diags }
 	}
 }
 
@@ -502,7 +519,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
 				let notice = binary_member_notice(&member.node.path, member.node.size);
 				ArchiveContent::Binary(ArchiveBinaryContent {
 					member: ArchiveBinaryMember { node: member.node, notice },
-					bytes: member.bytes,
+					bytes:  member.bytes,
 				})
 			}
 		};
@@ -708,10 +725,14 @@ mod tests {
 			offset:        1,
 			result_limit:  Some(ArchiveListLimit { reached: 1, suggestion: 2 }),
 		};
-		assert_eq!(
-			listing.render(),
-			"first.txt (1B)\n\n[Archive listing limited to 1 entries out of 3. Use :2+2 for the next \
-			 page.]"
-		);
+		let rendered = listing.render();
+		assert_eq!(rendered.text, "first.txt (1B)");
+		let [diag] = rendered.diags.as_slice() else {
+			panic!("capped archive listing emits one diagnostic");
+		};
+		assert_eq!(diag.native_kind(), Some(DiagKind::Pagination));
+		assert_eq!(diag.severity, omp_tool::Severity::Info);
+		assert_eq!(diag.continuation.as_deref(), Some(":2+2"));
+		assert_eq!(diag.omitted, Some(omp_tool::Omitted { count: 2, unit: omp_tool::Unit::Entries }));
 	}
 }

@@ -3,7 +3,7 @@
 use std::{cell::Cell, collections::BTreeMap, fs};
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_inference::local::{
+use omp_ai::local::{
 	ArtifactStore, LocalCancellation, SystemArtifactFetcher,
 	artifact::ArtifactCacheState,
 	tiny_catalog::{MEMORY_MODELS, TITLE_MODELS, TinyModelSpec},

@@ -9,9 +9,9 @@ use std::{sync::Arc, time::SystemTime};
 
 use bytes::Bytes;
 use http::Request;
+use omp_ai::auth::{AuthSpec, CredentialNeed, CredentialSource as _};
 use omp_catalog::provider::AuthSpecKind;
 use omp_driver::registry::{InferenceSessionOverrides, production_inference_for_session};
-use omp_inference::auth::{AuthSpec, CredentialNeed, CredentialSource as _};
 
 const VENDOR_NAME: &str = "ANTHROPIC_API_KEY";
 const VENDOR_SECRET: &str = "vendor-env-test-secret";

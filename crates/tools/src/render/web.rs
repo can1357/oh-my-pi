@@ -21,7 +21,7 @@ impl RenderFold for WebSearchRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		if let Some(query) = args.get("query").and_then(|value| value.as_str()) {
 			*state = Some(Str::new(query));
 		}
@@ -144,9 +144,7 @@ fn source_domain(url: &str) -> Option<&str> {
 	let remainder = url
 		.strip_prefix("https://")
 		.or_else(|| url.strip_prefix("http://"))?;
-	let authority = remainder
-		.split(|character| matches!(character, '/' | '?' | '#'))
-		.next()?;
+	let authority = remainder.split(['/', '?', '#']).next()?;
 	let host = authority.rsplit('@').next()?.split(':').next()?;
 	(!host.is_empty()).then_some(host)
 }
@@ -163,7 +161,7 @@ fn render_web_search_fault(fault: &WebSearchFault) -> El {
 }
 
 /// Native web search renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(web_search: ToolIdentity) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(web_search: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
 			identity: web_search,
@@ -197,14 +195,18 @@ mod tests {
 			serde_json::from_slice(web.error_outcome).expect("web search fault decodes");
 		let renderer = WebSearchRenderer;
 		let mut state = None;
-		renderer.fold_args(&mut state, &omp_slopjson::parse_streaming(web.streaming_args), false);
+		renderer.fold_args(
+			&mut state,
+			&omp_core::slopjson::parse_streaming(web.streaming_args),
+			false,
+		);
 		assert!(
 			renderer
 				.view(&state, None)
 				.expect("streaming query renders")
 				.contains("Bun vs Node.js performance bench"),
 		);
-		renderer.fold_args(&mut state, &omp_slopjson::parse_streaming(web.args), true);
+		renderer.fold_args(&mut state, &omp_core::slopjson::parse_streaming(web.args), true);
 		let view = renderer
 			.view(&state, Some(&success))
 			.expect("success renders");
@@ -225,7 +227,9 @@ mod tests {
 			renderer
 				.view(&state, Some(&error))
 				.expect("fault renders")
-				.contains("<callout kind=error>Provider error (rate_limited: resource_exhausted) HTTP 429"),
+				.contains(
+					"<callout kind=error>Provider error (rate_limited: resource_exhausted) HTTP 429"
+				),
 		);
 
 		let mut empty = match &success {

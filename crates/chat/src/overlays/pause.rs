@@ -1,4 +1,4 @@
-//! `/pause` hold screen (pi `pause-screen.ts`): a full-screen `P A U S E D`
+//! `/pause` hold screen: a full-screen `P A U S E D`
 //! banner with a `paused for M:SS` clock ticking every second; Esc, Enter,
 //! Space, or Ctrl+C resume. The gate itself is controller-owned
 //! (`HostCommand::Pause`); this panel only shows the hold and reports how
@@ -11,12 +11,12 @@ use omp_tui::{Frame, Key, Size, Ui, UiContext, dom};
 
 use super::{Panel, PanelAnchor, PanelCx, PanelEvent};
 
-/// pi `TICK_MS`.
+/// Pause-clock update cadence.
 const TICK: Duration = Duration::from_secs(1);
-/// pi compact-layout thresholds.
+/// Compact-layout thresholds.
 const COMPACT_WIDTH: u16 = 64;
 const COMPACT_HEIGHT: u16 = 18;
-/// pi pause bar geometry: two blocks of `BAR_WIDTH` separated by `BAR_GAP`,
+/// Pause-bar geometry: two blocks of `BAR_WIDTH` separated by `BAR_GAP`,
 /// `BAR_ROWS` tall.
 const BAR_WIDTH: usize = 5;
 const BAR_GAP: usize = 4;
@@ -63,7 +63,7 @@ impl PausePanel {
 			.map_or(Duration::ZERO, |opened| self.now.saturating_sub(opened))
 	}
 
-	/// pi `formatClock`: `M:SS`, or `H:MM:SS` past an hour.
+	/// Formats `M:SS`, or `H:MM:SS` past an hour.
 	#[must_use]
 	pub fn clock(elapsed: Duration) -> Str {
 		let total = elapsed.as_secs();
@@ -75,7 +75,7 @@ impl PausePanel {
 		}
 	}
 
-	/// pi `formatDuration` for the resume notice: `Ns`, `Nm Ss`, `Nh Mm`.
+	/// Formats the resume notice as `Ns`, `Nm Ss`, or `Nh Mm`.
 	#[must_use]
 	pub fn duration(elapsed: Duration) -> Str {
 		let total = elapsed.as_secs();

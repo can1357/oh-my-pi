@@ -9,7 +9,7 @@
 use std::{future::Future, io::Write, result};
 
 use clap::Parser;
-use omp_shell_engine::{
+use omp_shell::{
 	ExecutionContext, ExecutionExitCode, ExecutionResult, ProcessGroupPolicy, SourceInfo, builtins,
 };
 
@@ -49,7 +49,7 @@ impl NohupCommand {
 }
 
 impl builtins::Command for NohupCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
 	fn new<I>(args: I) -> result::Result<Self, clap::Error>
 	where
@@ -59,10 +59,10 @@ impl builtins::Command for NohupCommand {
 		Ok(Self::from_argv(args.into_iter().skip(1).collect()))
 	}
 
-	fn execute<SE: omp_shell_engine::ShellExtensions>(
+	fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell_engine::Error>> + Send {
+	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell::Error>> + Send {
 		let command = self.command.clone();
 		let (help, version) = (self.help, self.version);
 		async move {
@@ -170,7 +170,7 @@ mod tests {
 
 	#[test]
 	fn new_skips_command_name() {
-		use omp_shell_engine::builtins::Command as _;
+		use omp_shell::builtins::Command as _;
 
 		let cmd = NohupCommand::new(["nohup", "--", "sleep", "1"].map(String::from))
 			.expect("nohup argv parsing is infallible");

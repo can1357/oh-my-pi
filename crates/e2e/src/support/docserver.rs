@@ -6,8 +6,10 @@ use std::{
 	time::Duration,
 };
 
-use omp_docserver::daemon::{self, ServeOptions, Transport};
-use omp_envd::docs::DocumentHost;
+use omp_envd::{
+	docs::DocumentHost,
+	docserver::daemon::{self, ServeOptions, Transport},
+};
 use tokio::{net::UnixStream, task::JoinHandle, time};
 
 use super::{DEFAULT_TIMEOUT, within};
@@ -38,7 +40,10 @@ impl DocServerTask {
 		let task = tokio::spawn(async move {
 			daemon::serve(project, Transport::Socket(task_socket), ServeOptions {
 				lsp_config_paths: lsp_configs,
-				lsp:              omp_docserver::NativeLspOptions { enabled: false, lazy: true },
+				lsp:              omp_envd::docserver::NativeLspOptions {
+					enabled: false,
+					lazy:    true,
+				},
 				user_config_root: None,
 				shutdown:         None,
 				server_build:     Default::default(),

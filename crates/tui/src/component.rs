@@ -410,7 +410,7 @@ impl Cached {
 			&& chrome.height > 0
 		{
 			// The chrome's first and last painted rows bracket an OSC 133
-			// prompt zone (pi `user-message.ts`); rows past the paint clip
+			// prompt zone; rows past the paint clip
 			// are not on screen, so the zone closes on the last visible one.
 			let bottom = chrome
 				.y

@@ -96,7 +96,7 @@ impl Markdown {
 				.is_some_and(|reveal| reveal.covers(&self.text))
 	}
 
-	fn bump(&mut self) {
+	const fn bump(&mut self) {
 		self.version = self.version.wrapping_add(1);
 		self.shape = self.shape.wrapping_add(1);
 	}

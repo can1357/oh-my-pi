@@ -91,13 +91,13 @@ pub enum TierSetting {
 	Inherit,
 	/// Provider standard tier.
 	Standard,
-	/// OpenAI `auto` tier: the provider picks the processing tier.
+	/// `OpenAI` `auto` tier: the provider picks the processing tier.
 	Auto,
-	/// OpenAI `default` tier: explicit standard processing.
+	/// `OpenAI` `default` tier: explicit standard processing.
 	Default,
 	/// Provider flex tier.
 	Flex,
-	/// OpenAI `scale` tier.
+	/// `OpenAI` `scale` tier.
 	Scale,
 	/// Provider priority tier.
 	Priority,
@@ -109,8 +109,8 @@ impl TierSetting {
 			Self::None => None,
 			Self::Inherit => parent.cloned(),
 			Self::Standard => Some(ServiceTier { name: Str::new_static("standard"), priority: 0 }),
-			// Pi `SERVICE_TIER_OPENAI_VALUES`: auto/default/flex/scale are
-			// OpenAI-family wire names and mean nothing elsewhere.
+			// auto/default/flex/scale are OpenAI-family wire names and mean nothing
+			// elsewhere.
 			Self::Auto if family == ProviderFamily::OpenAi => {
 				Some(ServiceTier { name: Str::new_static("auto"), priority: 0 })
 			},
@@ -131,7 +131,7 @@ impl TierSetting {
 	}
 }
 
-/// Default OpenRouter routing suffix.
+/// Default `OpenRouter` routing suffix.
 #[derive(
 	Clone,
 	Copy,
@@ -156,9 +156,9 @@ pub enum OpenRouterVariant {
 	Nitro,
 	/// Prefer lowest price.
 	Floor,
-	/// Enable OpenRouter online routing.
+	/// Enable `OpenRouter` online routing.
 	Online,
-	/// Use OpenRouter's curated exacto route.
+	/// Use `OpenRouter`'s curated exacto route.
 	Exacto,
 }
 
@@ -331,9 +331,9 @@ pub struct ModelSettings {
 	pub tier_fireworks:           TierSetting,
 	/// Prompt-cache retention policy.
 	pub cache_retention:          CacheRetentionSetting,
-	/// OpenAI Codex websocket preference.
+	/// `OpenAI` Codex websocket preference.
 	pub openai_websockets:        WireToggle,
-	/// Default OpenRouter routing suffix.
+	/// Default `OpenRouter` routing suffix.
 	pub openrouter_variant:       OpenRouterVariant,
 	/// Kimi wire format preference.
 	pub kimi_api_format:          KimiApiFormat,
@@ -658,7 +658,7 @@ impl ModelSettings {
 		websocket_allowed && kimi_allowed
 	}
 
-	/// Applies the configured OpenRouter suffix only when the model has no
+	/// Applies the configured `OpenRouter` suffix only when the model has no
 	/// explicit variant.
 	pub fn openrouter_wire_model(&self, provider: &str, model: &WireModelId<str>) -> WireModelId {
 		if provider != "openrouter"
@@ -1107,7 +1107,7 @@ fn path_scoped_from_kv(entries: Vec<Kv>) -> PathScopedStrList {
 		.into()
 }
 
-fn invalid(reason: &'static str) -> Result<(), Str> {
+const fn invalid(reason: &'static str) -> Result<(), Str> {
 	Err(Str::new_static(reason))
 }
 
@@ -1198,150 +1198,357 @@ omp_con::var! {
 		default: roles_to_kv(&ModelSettings::default().roles),
 		validate: validate_roles,
 		flags: archive,
+		meta: {
+			"legacy.path": "model.roles",
+		},
 	};
-	/// Persistence scope for model role assignments.
+	/// Where model selector role assignments are saved.
 	pub static AI_MODEL_ROLE_STORAGE = ai_model_role_storage: ModelRoleStorage {
 		default: ModelRoleStorage::Global,
 		flags: archive,
+		meta: {
+			"ui.tab": "model",
+			"ui.group": "Prompt",
+			"ui.label": "Model Role Storage",
+			"ui.option.global": "Global",
+			"ui.option.global.desc": "Save role models in the active profile config (current behavior)",
+			"ui.option.project": "Per-project",
+			"ui.option.project.desc": "Save project role models in .omp/config.yml; missing project roles use global defaults",
+			"legacy.path": "modelRoleStorage",
+			"legacy.path": "model.role_storage",
+		},
 	};
 	/// Presentation metadata keyed by model role.
 	pub static AI_MODEL_TAGS = ai_model_tags: Kv {
 		default: tags_to_kv(&ModelSettings::default().tags),
 		validate: validate_tags,
 		flags: archive,
+		meta: {
+			"legacy.path": "model.tags",
+		},
 	};
 	/// Role names in quick-cycle order.
 	pub static AI_MODEL_CYCLE_ORDER = ai_model_cycle_order: Vec<Str> {
 		default: vec![Str::new_static("smol"), Str::new_static("default"), Str::new_static("slow")],
 		validate: validate_unique,
 		flags: archive,
+		meta: {
+			"legacy.path": "model.cycle_order",
+		},
 	};
 	/// Optional canonical model selector allow-list.
 	pub static AI_MODEL_ENABLED_MODELS = ai_model_enabled_models: Vec<Kv> {
 		default: path_scoped_to_kv(&ModelSettings::default().enabled_models),
 		validate: validate_path_scoped_models,
 		flags: archive,
+		meta: {
+			"legacy.path": "model.enabled_models",
+		},
 	};
 	/// Provider ids excluded from discovery, selection, and routing.
 	pub static AI_MODEL_DISABLED_PROVIDERS = ai_model_disabled_providers: Vec<Kv> {
 		default: path_scoped_to_kv(&ModelSettings::default().disabled_providers),
 		validate: validate_path_scoped_providers,
 		flags: archive,
+		meta: {
+			"legacy.path": "model.disabled_providers",
+		},
 	};
-	/// Default thinking effort used when a caller leaves effort unset (pi
-	/// `defaultThinkingLevel`, default `high`).
+	/// Reasoning depth for thinking-capable models.
 	pub static AI_DEFAULT_THINKING = ai_default_thinking: ThinkingEffort {
 		default: ThinkingEffort::High,
 		flags: archive,
+		meta: {
+			"ui.tab": "model",
+			"ui.group": "Thinking",
+			"ui.label": "Thinking Level",
+			"ui.choices": "thinking-levels",
+			"legacy.path": "defaultThinkingLevel",
+			"legacy.path": "model.default_thinking",
+		},
 	};
 	/// Universal configured reasoning ceiling.
 	pub static AI_THINKING_CEILING = ai_thinking_ceiling: ThinkingEffort {
 		default: ThinkingEffort::Max,
 		flags: archive,
+		meta: {
+			"legacy.path": "model.thinking_ceiling",
+		},
 	};
 	/// Per-effort reasoning token budgets.
 	pub static AI_THINKING_BUDGETS = ai_thinking_budgets: Kv {
 		default: thinking_budgets_to_kv(ThinkingBudgets::default()),
 		validate: validate_budgets,
 		flags: archive,
+		meta: {
+			"legacy.path": "model.thinking_budgets",
+		},
 	};
 	/// Provider ids in preferred routing order.
 	pub static AI_PROVIDER_ORDER = ai_provider_order: Vec<Str> {
 		default: Vec::new(),
 		validate: validate_unique,
 		flags: archive,
+		meta: {
+			"legacy.path": "model.provider_order",
+		},
 	};
-	/// OpenAI-family service tier.
+	/// Processing tier for OpenAI / OpenAI-Codex requests, and OpenAI-family models routed via OpenRouter (none = omit). Sent as `service_tier`.
 	pub static AI_TIER_OPENAI = ai_tier_openai: TierSetting {
 		default: TierSetting::None,
 		flags: archive,
+		meta: {
+			"ui.tab": "model",
+			"ui.group": "Sampling",
+			"ui.label": "Service Tier — OpenAI",
+			"ui.option.none": "None",
+			"ui.option.none.desc": "Omit service_tier (standard processing)",
+			"ui.option.auto": "Auto",
+			"ui.option.auto.desc": "Provider default tier selection",
+			"ui.option.default": "Default",
+			"ui.option.default.desc": "Standard priority processing",
+			"ui.option.flex": "Flex",
+			"ui.option.flex.desc": "Lower cost, higher latency when available",
+			"ui.option.scale": "Scale",
+			"ui.option.scale.desc": "Scale Tier credits when available",
+			"ui.option.priority": "Priority",
+			"ui.option.priority.desc": "Faster, higher cost (premium request)",
+			"legacy.path": "tier.openai",
+			"legacy.path": "model.tier_openai",
+		},
 	};
-	/// Anthropic-family service tier.
+	/// Processing tier for Claude requests. `priority` realizes fast mode (`speed: "fast"`) on supported direct Anthropic models; ignored on Bedrock/Vertex Claude and via OpenRouter.
 	pub static AI_TIER_ANTHROPIC = ai_tier_anthropic: TierSetting {
 		default: TierSetting::None,
 		flags: archive,
+		meta: {
+			"ui.tab": "model",
+			"ui.group": "Sampling",
+			"ui.label": "Service Tier — Anthropic",
+			"ui.option.none": "None",
+			"ui.option.none.desc": "Standard processing",
+			"ui.option.priority": "Priority",
+			"ui.option.priority.desc": "Fast mode (`speed: \"fast\"`) on supported direct Claude models; ignored on Bedrock/Vertex",
+			"legacy.path": "tier.anthropic",
+			"legacy.path": "model.tier_anthropic",
+		},
 	};
-	/// Google-family service tier.
+	/// Processing tier for Gemini (Google AI Studio + Vertex) requests, and Google-family models routed via OpenRouter (none = omit). Sent as the top-level `serviceTier` field.
 	pub static AI_TIER_GOOGLE = ai_tier_google: TierSetting {
 		default: TierSetting::None,
 		flags: archive,
+		meta: {
+			"ui.tab": "model",
+			"ui.group": "Sampling",
+			"ui.label": "Service Tier — Google",
+			"ui.option.none": "None",
+			"ui.option.none.desc": "Standard processing",
+			"ui.option.flex": "Flex",
+			"ui.option.flex.desc": "Lower cost, higher latency (Gemini API + Vertex)",
+			"ui.option.priority": "Priority",
+			"ui.option.priority.desc": "Faster, higher reliability (Gemini API + Vertex)",
+			"legacy.path": "tier.google",
+			"legacy.path": "model.tier_google",
+		},
 	};
-	/// Fireworks serving tier.
+	/// Serving path for Fireworks requests. Priority sends `service_tier: "priority"` for higher reliability during peak traffic at a higher price; Standard omits it. Fast (`-fast`) models ignore this — Fast is its own serving path.
 	pub static AI_TIER_FIREWORKS = ai_tier_fireworks: TierSetting {
 		default: TierSetting::None,
 		flags: archive,
+		meta: {
+			"ui.tab": "providers",
+			"ui.group": "Fireworks",
+			"ui.label": "Fireworks Tier",
+			"ui.option.none": "Standard",
+			"ui.option.none.desc": "Default serving path (no service_tier)",
+			"ui.option.priority": "Priority",
+			"ui.option.priority.desc": "Priority serving path: higher reliability, premium per-token pricing",
+			"legacy.path": "providers.fireworksTier",
+			"legacy.path": "model.tier_fireworks",
+		},
 	};
-	/// Prompt-cache retention policy.
+	/// Prompt-cache retention forwarded to providers that support it (Anthropic, Bedrock, OpenRouter, OpenAI).
 	pub static AI_CACHE_RETENTION = ai_cache_retention: CacheRetentionSetting {
 		default: CacheRetentionSetting::Auto,
 		flags: archive,
+		meta: {
+			"ui.tab": "providers",
+			"ui.group": "Protocol",
+			"ui.label": "Prompt Cache Retention",
+			"ui.option.auto": "Auto",
+			"ui.option.auto.desc": "Provider default — Anthropic uses 5m entries kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
+			"ui.option.short": "Short (5m)",
+			"ui.option.short.desc": "Cheapest cache writes; Anthropic keeps the entry warm with bounded keep-alive refreshes while idle",
+			"ui.option.long": "Long (1h)",
+			"ui.option.long.desc": "1h TTL where the provider supports it; pricier writes, no keep-alive refresh requests",
+			"ui.option.none": "Off",
+			"ui.option.none.desc": "Disable prompt caching and cache-affinity routing",
+			"legacy.path": "providers.cacheRetention",
+			"legacy.path": "model.cache_retention",
+		},
 	};
-	/// OpenAI Codex websocket preference.
+	/// Websocket policy for OpenAI Codex models (auto uses model defaults, on forces, off disables).
 	pub static AI_OPENAI_WEBSOCKETS = ai_openai_websockets: WireToggle {
 		default: WireToggle::Auto,
 		flags: archive,
+		meta: {
+			"ui.tab": "providers",
+			"ui.group": "Protocol",
+			"ui.label": "OpenAI WebSockets",
+			"ui.option.auto": "Auto",
+			"ui.option.auto.desc": "Use model/provider default websocket behavior",
+			"ui.option.off": "Off",
+			"ui.option.off.desc": "Disable websockets for OpenAI Codex models",
+			"ui.option.on": "On",
+			"ui.option.on.desc": "Force websockets for OpenAI Codex models",
+			"legacy.path": "providers.openaiWebsockets",
+			"legacy.path": "model.openai_websockets",
+		},
 	};
-	/// Default OpenRouter routing suffix.
+	/// Default routing-variant suffix appended to OpenRouter model IDs (overridden when the selector already names a variant).
 	pub static AI_OPENROUTER_VARIANT = ai_openrouter_variant: OpenRouterVariant {
 		default: OpenRouterVariant::Default,
 		flags: archive,
+		meta: {
+			"ui.tab": "providers",
+			"ui.group": "Protocol",
+			"ui.label": "OpenRouter Routing",
+			"ui.option.default": "Default",
+			"ui.option.default.desc": "No suffix; use OpenRouter's default routing",
+			"ui.option.nitro": ":nitro",
+			"ui.option.nitro.desc": "Prioritize throughput / lowest latency",
+			"ui.option.floor": ":floor",
+			"ui.option.floor.desc": "Prioritize cheapest available provider",
+			"ui.option.online": ":online",
+			"ui.option.online.desc": "Enable OpenRouter's web-search plugin",
+			"ui.option.exacto": ":exacto",
+			"ui.option.exacto.desc": "Cherry-picked high-quality providers (only defined for select models)",
+			"legacy.path": "providers.openrouterVariant",
+			"legacy.path": "model.openrouter_variant",
+		},
 	};
-	/// Kimi wire format preference.
+	/// API format for Kimi Code provider (auto follows live model metadata).
 	pub static AI_KIMI_API_FORMAT = ai_kimi_api_format: KimiApiFormat {
 		default: KimiApiFormat::Auto,
 		flags: archive,
+		meta: {
+			"ui.tab": "providers",
+			"ui.group": "Protocol",
+			"ui.label": "Kimi API Format",
+			"ui.option.auto": "Auto",
+			"ui.option.auto.desc": "Use the model's server-declared protocol",
+			"ui.option.openai": "OpenAI",
+			"ui.option.openai.desc": "api.kimi.com",
+			"ui.option.anthropic": "Anthropic",
+			"ui.option.anthropic.desc": "api.moonshot.ai",
+			"legacy.path": "providers.kimiApiFormat",
+			"legacy.path": "model.kimi_api_format",
+		},
 	};
-	/// Model selector for tiny/title work.
+	/// Session-title model: online (the TINY role from /models, else @smol) by default, or a local on-device model.
 	pub static AI_TINY_SELECTOR = ai_tiny_selector: Str {
 		default: Str::new_static("@tiny"),
+		suggest: ["@tiny", "lfm2.5-230m", "lfm2.5-350m", "falcon-h1-90m"],
 		validate: validate_selector,
 		flags: archive,
+		meta: {
+			"ui.tab": "providers",
+			"ui.group": "Tiny Model",
+			"ui.label": "Tiny Model",
+			"ui.option.@tiny": "Online (TINY role, else @smol)",
+			"ui.option.@tiny.desc": "Online title generation: the TINY model role (set one in /models) when assigned, otherwise the online fallback (commit role, then @smol). No local download or on-device inference.",
+			"ui.option.lfm2.5-230m": "LFM2.5 230M",
+			"ui.option.lfm2.5-230m.desc": "Recommended local model; fastest LFM2.5 option, about 214 MB cached.",
+			"ui.option.lfm2.5-350m": "LFM2.5 350M",
+			"ui.option.lfm2.5-350m.desc": "Larger LFM2.5 option, about 292 MB cached; tends toward terse titles.",
+			"ui.option.falcon-h1-90m": "Falcon H1 Tiny 90M",
+			"ui.option.falcon-h1-90m.desc": "Smallest option, about 147 MB cached; lower fidelity on complex prompts.",
+			"legacy.path": "providers.tinyModel",
+			"legacy.path": "model.tiny_selector",
+		},
 	};
-	/// Model selector for memory inference.
+	/// Mnemopi LLM for fact extraction + consolidation: online (the TINY role from /models, else smol/remote) by default, or a local on-device model.
 	pub static AI_MEMORY_SELECTOR = ai_memory_selector: Str {
 		default: Str::new_static("@tiny"),
+		suggest: ["@tiny", "qwen3-1.7b", "llama3.2:3b", "gemma-3-1b", "qwen2.5-1.5b", "lfm2-1.2b"],
 		validate: validate_selector,
 		flags: archive,
+		meta: {
+			"ui.tab": "memory",
+			"ui.group": "General",
+			"ui.label": "Memory Model",
+			"ui.when": "ai_memory_backend=mnemopi",
+			"ui.option.@tiny": "Online (TINY role, else @smol)",
+			"ui.option.@tiny.desc": "Use the online model: the TINY role from /models when set, otherwise @smol. No local model download or on-device inference.",
+			"ui.option.qwen3-1.7b": "Qwen3 1.7B",
+			"ui.option.qwen3-1.7b.desc": "MLX only (providers.tinyModelDevice=mlx): onnxruntime-node cannot run this ONNX export's RotaryEmbedding cache updates.",
+			"ui.option.llama3.2:3b": "Llama 3.2 3B",
+			"ui.option.llama3.2:3b.desc": "Larger Llama 3.2 option for local memory/classifier tasks; higher quality potential at higher disk/RAM/latency cost.",
+			"ui.option.gemma-3-1b": "Gemma 3 1B",
+			"ui.option.gemma-3-1b.desc": "Best consolidation/dedup; lighter footprint, but leaks small talk during extraction.",
+			"ui.option.qwen2.5-1.5b": "Qwen2.5 1.5B",
+			"ui.option.qwen2.5-1.5b.desc": "Best extraction granularity (atomic facts); weaker consolidation.",
+			"ui.option.lfm2-1.2b": "LFM2 1.2B",
+			"ui.option.lfm2-1.2b.desc": "Fastest load; solid all-rounder, slightly noisier extraction labels.",
+			"legacy.path": "providers.memoryModel",
+			"legacy.path": "model.memory_selector",
+		},
 	};
-	/// Model selector for automatic-thinking classification.
+	/// Difficulty classifier for the `auto` thinking level: online (the TINY role from /models, else smol) by default, or a local on-device model.
 	pub static AI_AUTO_THINKING_SELECTOR = ai_auto_thinking_selector: Str {
 		default: Str::new_static("@tiny"),
+		suggest: ["@tiny", "qwen3-1.7b", "llama3.2:3b", "gemma-3-1b", "qwen2.5-1.5b", "lfm2-1.2b"],
 		validate: validate_selector,
 		flags: archive,
+		meta: {
+			"ui.tab": "model",
+			"ui.group": "Thinking",
+			"ui.label": "Auto Thinking Model",
+			"ui.when": "ai_default_thinking=auto",
+			"ui.option.@tiny": "Online (TINY role, else @smol)",
+			"ui.option.@tiny.desc": "Classify prompt difficulty online with the TINY role model (set one in /models) or @smol; no local download or on-device inference.",
+			"ui.option.qwen3-1.7b": "Qwen3 1.7B",
+			"ui.option.qwen3-1.7b.desc": "MLX only (providers.tinyModelDevice=mlx): onnxruntime-node cannot run this ONNX export's RotaryEmbedding cache updates.",
+			"ui.option.llama3.2:3b": "Llama 3.2 3B",
+			"ui.option.llama3.2:3b.desc": "Larger Llama 3.2 option for local memory/classifier tasks; higher quality potential at higher disk/RAM/latency cost.",
+			"ui.option.gemma-3-1b": "Gemma 3 1B",
+			"ui.option.gemma-3-1b.desc": "Best consolidation/dedup; lighter footprint, but leaks small talk during extraction.",
+			"ui.option.qwen2.5-1.5b": "Qwen2.5 1.5B",
+			"ui.option.qwen2.5-1.5b.desc": "Best extraction granularity (atomic facts); weaker consolidation.",
+			"ui.option.lfm2-1.2b": "LFM2 1.2B",
+			"ui.option.lfm2-1.2b.desc": "Fastest load; solid all-rounder, slightly noisier extraction labels.",
+			"legacy.path": "providers.autoThinkingModel",
+			"legacy.path": "model.auto_thinking_selector",
+		},
 	};
-	/// Model selector for unexpected-stop classification.
+	/// Classifier for Smart unexpected-stop detection: online (the TINY role from /models, else smol) by default, or a local on-device model.
 	pub static AI_UNEXPECTED_STOP_SELECTOR = ai_unexpected_stop_selector: Str {
 		default: Str::new_static("@tiny"),
+		suggest: ["@tiny", "qwen3-1.7b", "llama3.2:3b", "gemma-3-1b", "qwen2.5-1.5b", "lfm2-1.2b"],
 		validate: validate_selector,
 		flags: archive,
+		meta: {
+			"ui.tab": "providers",
+			"ui.group": "Tiny Model",
+			"ui.label": "Unexpected Stop Model",
+			"ui.when": "ai_features_unexpected_stop_detection=smart",
+			"ui.option.@tiny": "Online (TINY role, else @smol)",
+			"ui.option.@tiny.desc": "Use the online model: the TINY role from /models when set, otherwise @smol. No local model download or on-device inference.",
+			"ui.option.qwen3-1.7b": "Qwen3 1.7B",
+			"ui.option.qwen3-1.7b.desc": "MLX only (providers.tinyModelDevice=mlx): onnxruntime-node cannot run this ONNX export's RotaryEmbedding cache updates.",
+			"ui.option.llama3.2:3b": "Llama 3.2 3B",
+			"ui.option.llama3.2:3b.desc": "Larger Llama 3.2 option for local memory/classifier tasks; higher quality potential at higher disk/RAM/latency cost.",
+			"ui.option.gemma-3-1b": "Gemma 3 1B",
+			"ui.option.gemma-3-1b.desc": "Best consolidation/dedup; lighter footprint, but leaks small talk during extraction.",
+			"ui.option.qwen2.5-1.5b": "Qwen2.5 1.5B",
+			"ui.option.qwen2.5-1.5b.desc": "Best extraction granularity (atomic facts); weaker consolidation.",
+			"ui.option.lfm2-1.2b": "LFM2 1.2B",
+			"ui.option.lfm2-1.2b.desc": "Fastest load; solid all-rounder, slightly noisier extraction labels.",
+			"legacy.path": "providers.unexpectedStopModel",
+			"legacy.path": "model.unexpected_stop_selector",
+		},
 	};
 }
-
-/// One-shot migration map from reflected TOML paths to convar names.
-pub const LEGACY_CONVAR_MAPPINGS: &[(&str, &str)] = &[
-	("model.roles", "ai_model_roles"),
-	("model.role_storage", "ai_model_role_storage"),
-	("model.tags", "ai_model_tags"),
-	("model.cycle_order", "ai_model_cycle_order"),
-	("model.enabled_models", "ai_model_enabled_models"),
-	("model.disabled_providers", "ai_model_disabled_providers"),
-	("model.default_thinking", "ai_default_thinking"),
-	("model.thinking_ceiling", "ai_thinking_ceiling"),
-	("model.thinking_budgets", "ai_thinking_budgets"),
-	("model.provider_order", "ai_provider_order"),
-	("model.tier_openai", "ai_tier_openai"),
-	("model.tier_anthropic", "ai_tier_anthropic"),
-	("model.tier_google", "ai_tier_google"),
-	("model.tier_fireworks", "ai_tier_fireworks"),
-	("model.cache_retention", "ai_cache_retention"),
-	("model.openai_websockets", "ai_openai_websockets"),
-	("model.openrouter_variant", "ai_openrouter_variant"),
-	("model.kimi_api_format", "ai_kimi_api_format"),
-	("model.tiny_selector", "ai_tiny_selector"),
-	("model.memory_selector", "ai_memory_selector"),
-	("model.auto_thinking_selector", "ai_auto_thinking_selector"),
-	("model.unexpected_stop_selector", "ai_unexpected_stop_selector"),
-];
 
 /// Resolves provider family from canonical route and model identities.
 pub fn provider_family(provider: &str, model: Option<&str>) -> ProviderFamily {
@@ -1477,66 +1684,6 @@ mod tests {
 			settings.enabled_models.last(),
 			Some(PathScopedStringEntry::Bare(value)) if value == "openai/gpt-5.6"
 		));
-	}
-
-	#[test]
-	fn vars_declare_every_former_schema_field() {
-		let old_fields = [
-			"model.roles",
-			"model.role_storage",
-			"model.tags",
-			"model.cycle_order",
-			"model.enabled_models",
-			"model.disabled_providers",
-			"model.default_thinking",
-			"model.thinking_ceiling",
-			"model.thinking_budgets",
-			"model.provider_order",
-			"model.tier_openai",
-			"model.tier_anthropic",
-			"model.tier_google",
-			"model.tier_fireworks",
-			"model.cache_retention",
-			"model.openai_websockets",
-			"model.openrouter_variant",
-			"model.kimi_api_format",
-			"model.tiny_selector",
-			"model.memory_selector",
-			"model.auto_thinking_selector",
-			"model.unexpected_stop_selector",
-		];
-		let vars = [
-			AI_MODEL_ROLES.name(),
-			AI_MODEL_ROLE_STORAGE.name(),
-			AI_MODEL_TAGS.name(),
-			AI_MODEL_CYCLE_ORDER.name(),
-			AI_MODEL_ENABLED_MODELS.name(),
-			AI_MODEL_DISABLED_PROVIDERS.name(),
-			AI_DEFAULT_THINKING.name(),
-			AI_THINKING_CEILING.name(),
-			AI_THINKING_BUDGETS.name(),
-			AI_PROVIDER_ORDER.name(),
-			AI_TIER_OPENAI.name(),
-			AI_TIER_ANTHROPIC.name(),
-			AI_TIER_GOOGLE.name(),
-			AI_TIER_FIREWORKS.name(),
-			AI_CACHE_RETENTION.name(),
-			AI_OPENAI_WEBSOCKETS.name(),
-			AI_OPENROUTER_VARIANT.name(),
-			AI_KIMI_API_FORMAT.name(),
-			AI_TINY_SELECTOR.name(),
-			AI_MEMORY_SELECTOR.name(),
-			AI_AUTO_THINKING_SELECTOR.name(),
-			AI_UNEXPECTED_STOP_SELECTOR.name(),
-		];
-		assert_eq!(
-			LEGACY_CONVAR_MAPPINGS,
-			old_fields
-				.into_iter()
-				.zip(vars)
-				.collect::<Vec<_>>()
-				.as_slice()
-		);
 	}
 
 	#[test]

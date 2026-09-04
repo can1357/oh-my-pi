@@ -60,7 +60,10 @@ express.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/con/src/builtins.rs`. Bindings, toggles, aliases, actions, exec, `dumpcfg`, and `writecfg` share the con command stream (`dump` is pi's transcript dump, `crates/chat/src/commands/control.rs`). Pause/resume use the same typed host command locally and the RPC `pause`/`resume` commands remotely; both journal the same DOM transition.
+**Implemented.** Primary implementation: `crates/con/src/builtins.rs`. Bindings, toggles, aliases,
+actions, exec, `dumpcfg`, and `writecfg` share the con command stream (`dump` writes the
+transcript; `crates/chat/src/commands/control.rs`). Pause/resume use the same typed host command
+locally and the RPC `pause`/`resume` commands remotely; both journal the same DOM transition.
 
 ## References
 

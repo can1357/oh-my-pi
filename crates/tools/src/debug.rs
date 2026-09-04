@@ -7,16 +7,14 @@ use bytes::Bytes;
 use futures::Stream;
 use omp_core::{Str, sf};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, Effects, Ev, ExecEffects,
-	ExecutionMode, IncomingParams, LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev, Tool,
-	ToolSpec, ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, Diag, Effects, Ev,
+	ExecEffects, ExecutionMode, IncomingParams, LiftedCall, ParamError, Part, PromptCaps,
+	RecordedCall, Rev, Tool, ToolSpec, ToolTerminal,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-
-use crate::debug_render;
 
 /// One discoverable debugger operation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, strum::Display)]
@@ -243,6 +241,9 @@ pub struct Payload {
 	pub output:   Str,
 	/// Structured snapshot for enhanced views.
 	pub data:     Value,
+	/// Harness diagnostics produced while bounding the projection.
+	#[serde(skip)]
+	pub diags:    Vec<Diag>,
 }
 
 /// Debug operations do not stream speculative updates.
@@ -386,7 +387,12 @@ impl<C: DebugControl> Tool for DebugTool<C> {
 					}
 				},
 				result = &mut execution => match result {
-					Ok(payload) => yield done(Ok(payload), false),
+					Ok(mut payload) => {
+						for diag in payload.diags.drain(..) {
+							yield Ev::Diag(diag);
+						}
+						yield done(Ok(payload), false);
+					},
 					Err(fault) => yield done(Err(fault), true),
 				},
 				() = &mut deadline => {
@@ -429,7 +435,15 @@ fn lift_legacy_call(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 	}
 	if let Some(path) = object.remove("path") {
 		let action = object.get("action").and_then(Value::as_str)?;
-		object.insert(if action == "launch" { "program" } else { "file" }.to_owned(), path);
+		object.insert(
+			if action == "launch" {
+				"program"
+			} else {
+				"file"
+			}
+			.to_owned(),
+			path,
+		);
 	}
 	if let Some(reference) = object.remove("variables_reference") {
 		object.insert("variable_ref".to_owned(), reference);
@@ -468,15 +482,24 @@ fn valid(params: &Params) -> bool {
 		return false;
 	}
 	match params.action {
-		Action::Launch => params.program.as_ref().is_some_and(|value| !value.is_empty()),
+		Action::Launch => params
+			.program
+			.as_ref()
+			.is_some_and(|value| !value.is_empty()),
 		Action::Attach => {
-			params.adapter.as_ref().is_some_and(|value| !value.is_empty())
+			params
+				.adapter
+				.as_ref()
+				.is_some_and(|value| !value.is_empty())
 				|| params.pid.is_some()
 				|| params.port.is_some()
 		},
 		Action::Sessions | Action::Output | Action::Terminate => true,
 		Action::SetBreakpoint | Action::RemoveBreakpoint => {
-			params.function.as_ref().is_some_and(|value| !value.is_empty())
+			params
+				.function
+				.as_ref()
+				.is_some_and(|value| !value.is_empty())
 				|| (params.file.is_some() && params.line.is_some())
 		},
 		Action::SetInstructionBreakpoint | Action::RemoveInstructionBreakpoint => {
@@ -503,7 +526,7 @@ fn valid(params: &Params) -> bool {
 	}
 }
 
-fn done(result: Result<Payload, Fault>, useless: bool) -> Ev<Update, Payload, Fault> {
+const fn done(result: Result<Payload, Fault>, useless: bool) -> Ev<Update, Payload, Fault> {
 	Ev::Done(ToolTerminal::Done { result, useless })
 }
 
@@ -535,11 +558,6 @@ fn protocol_issue(message: Str) -> ArgIssue {
 		example:  Some(Str::new_static(r#"{"action":"sessions"}"#)),
 		found:    Some(message),
 	}
-}
-
-/// Builds the bounded model projection used by environment bridges.
-pub fn render(action: Action, data: &Value) -> Str {
-	debug_render::render(action, data)
 }
 
 #[cfg(test)]
@@ -663,10 +681,7 @@ mod tests {
 			.into_iter()
 			.collect()
 		);
-		assert_eq!(
-			schema["properties"]["arguments"]["type"],
-			serde_json::json!(["object", "null"])
-		);
+		assert_eq!(schema["properties"]["arguments"]["type"], serde_json::json!(["object", "null"]));
 		assert!(schema["properties"]["timeout"].get("minimum").is_none());
 		assert!(schema["properties"]["timeout"].get("maximum").is_none());
 	}
@@ -681,7 +696,7 @@ mod tests {
 		feed.args_committed(raw.into()).expect("commit args");
 		feed
 			.interrupt(omp_tool::Interrupt {
-				class: Str::new_static(omp_tool::Interrupt::ESCAPE),
+				class:  Str::new_static(omp_tool::Interrupt::ESCAPE),
 				reason: Str::new_static("user interrupted debug"),
 			})
 			.expect("interrupt request");
@@ -706,42 +721,100 @@ mod tests {
 		let args =
 			br#"{"i":"Reading memory","action":"read_memory","session":"old","memory_reference":"0x10","count":8}"#;
 		let verdict = serde_json::to_vec(&CallOutcome::<Payload, Fault>::Ok(Payload {
-			action: Action::ReadMemory,
-			session: Some(Str::new_static("old")),
+			action:   Action::ReadMemory,
+			session:  Some(Str::new_static("old")),
 			revision: Some(4),
-			output: Str::new_static("0x10+0000  00"),
-			data: serde_json::json!({"address":"0x10","data":"AA=="}),
+			output:   Str::new_static("0x10+0000  00"),
+			data:     serde_json::json!({"address":"0x10","data":"AA=="}),
+			diags:    Vec::new(),
 		}))
 		.expect("verdict JSON");
 		let lifted = debug
-			.lift(
-				&Rev { family: Str::default(), n: 1 },
-				RecordedCall { raw_args: args, verdict: &verdict },
-			)
+			.lift(&Rev { family: Str::default(), n: 1 }, RecordedCall {
+				raw_args: args,
+				verdict:  &verdict,
+			})
 			.expect("compatible debug@1 call");
 		let lifted_args: Value = serde_json::from_slice(&lifted.raw_args).expect("lifted args");
 		assert_eq!(lifted_args["i"], "Reading memory");
 		assert!(lifted_args.get("session").is_none());
 		assert!(
 			debug
-				.lift(
-					&Rev { family: Str::default(), n: 1 },
-					RecordedCall {
-						raw_args: br#"{"action":"launch"}"#,
-						verdict: &verdict,
-					},
-				)
+				.lift(&Rev { family: Str::default(), n: 1 }, RecordedCall {
+					raw_args: br#"{"action":"launch"}"#,
+					verdict:  &verdict,
+				},)
 				.is_none()
 		);
 	}
 
-	#[test]
-	fn semantic_projection_is_bounded_after_formatting() {
+	#[tokio::test]
+	async fn semantic_projection_is_bounded_after_formatting() {
+		#[derive(Clone)]
+		struct ImmediateControl {
+			data: Value,
+		}
+
+		impl DebugControl for ImmediateControl {
+			fn execute(
+				&self,
+				_: Params,
+				_: Duration,
+				_: CancellationToken,
+			) -> impl Future<Output = Result<Payload, Fault>> + Send + '_ {
+				let rendered = debug_render::render(Action::Variables, &self.data);
+				std::future::ready(Ok(Payload {
+					action:   Action::Variables,
+					session:  None,
+					revision: None,
+					output:   rendered.text,
+					data:     self.data.clone(),
+					diags:    rendered.diags,
+				}))
+			}
+		}
+
 		let huge = "x".repeat(128 * 1024);
-		let rendered = render(Action::Variables, &serde_json::json!({
-			"variables": [{"name":"value","type":"str","value":huge,"variablesReference":0}]
-		}));
-		assert!(rendered.len() < 34 * 1024);
-		assert!(rendered.contains("semantic debug projection truncated"));
+		let debug = tool(
+			ImmediateControl {
+				data: serde_json::json!({
+					"variables": [{
+						"name":"value",
+						"type":"str",
+						"value":huge,
+						"variablesReference":0
+					}]
+				}),
+			},
+			Duration::from_secs(300),
+		);
+		let raw = r#"{"action":"variables","variable_ref":1}"#;
+		let (feed, incoming) = IncomingParams::channel();
+		feed.arg_text(raw.into()).expect("stream args");
+		feed.args_committed(raw.into()).expect("commit args");
+		let events = debug.call(incoming).collect::<Vec<_>>().await;
+		let diag = events
+			.iter()
+			.find_map(|event| match event {
+				Ev::Diag(diag) => Some(diag),
+				_ => None,
+			})
+			.expect("output-bounded diagnostic");
+		assert_eq!(diag.native_kind(), Some(omp_tool::DiagKind::OutputBounded));
+		assert_eq!(diag.severity, omp_tool::Severity::Info);
+		assert!(matches!(
+			diag.omitted.as_ref(),
+			Some(omp_tool::Omitted { count, unit: omp_tool::Unit::Bytes }) if *count > 0
+		));
+		let output = events
+			.iter()
+			.find_map(|event| match event {
+				Ev::Done(ToolTerminal::Done { result: Ok(payload), .. }) => Some(&payload.output),
+				_ => None,
+			})
+			.expect("terminal debug payload");
+		assert!(output.len() < 34 * 1024);
+		assert!(!output.contains("omitted"));
+		assert!(!output.contains("truncated"));
 	}
 }

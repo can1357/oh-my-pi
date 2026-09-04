@@ -1,6 +1,6 @@
 //! Envd-owned authority bridges behind the embedded shell's `dyn` builtin.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 use bytes::Bytes;
 use futures::StreamExt as _;
@@ -8,16 +8,17 @@ use omp_agent::{ApprovalRoute, GateEvent, GateOutcome, HookGate};
 use omp_core::{Duration, DurationUnit, Hash32, Str, sf};
 use omp_proto::toolhost::v1::HookEventId;
 use omp_shell_builtins::{
-	DynDevice, DynFault, DynFuture, DynHost as ShellDynHost, DynOutput, DynSchema,
+	DynCallOutput, DynDevice, DynFault, DynFuture, DynHost as ShellDynHost, DynOutput, DynSchema,
 };
 use omp_tool::{
-	DevicePath, ErasedEv, ErasedOutcome, ErasedStream, IncomingParams, Part, PromptCaps, Registry,
-	RegistryError, ToolIdentity, ToolRoute,
+	DevicePath, Diag, DiagEnvelope, DiagKind, ErasedEv, ErasedOutcome, ErasedStream, IncomingParams,
+	Part, PromptCaps, Registry, RegistryError, ToolIdentity, ToolRoute,
 };
 use omp_tools::{
 	device::{DeviceCatalog, DeviceInvokeRequest, ErasedDeviceInvoker},
 	staging::{ProposalDecision, ProposalRejection, StagedProposalRegistry},
 };
+use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -26,6 +27,25 @@ use super::{
 	blobs::{BlobHost, BlobId},
 	mcp::manager::McpManager,
 };
+
+tokio::task_local! {
+	static EXEC_DIAGS: Arc<Mutex<Vec<Diag>>>;
+}
+
+/// Runs one shell execution with a concurrency-safe diagnostic sink.
+pub(crate) async fn scope_exec_diags<T>(
+	sink: Arc<Mutex<Vec<Diag>>>,
+	future: impl Future<Output = T>,
+) -> T {
+	EXEC_DIAGS.scope(sink, future).await
+}
+
+fn capture_exec_diags(diags: &[Diag]) {
+	if diags.is_empty() {
+		return;
+	}
+	let _ = EXEC_DIAGS.try_with(|sink| sink.lock().extend_from_slice(diags));
+}
 
 /// Envd-owned loopback bridge behind the `dyn` shell builtin.
 pub struct DynHost {
@@ -145,7 +165,7 @@ impl DynHost {
 		name: Str,
 		args: Value,
 		cancellation: CancellationToken,
-	) -> Result<DynOutput, DynFault> {
+	) -> Result<DynCallOutput, DynFault> {
 		if let Some(effects) = self.mcp.dynamic_effects(name.as_str()) {
 			self
 				.admission
@@ -186,7 +206,7 @@ impl DynHost {
 		})
 	}
 
-	fn finalize_proposal(&self, name: &str, args: &Value) -> Result<DynOutput, DynFault> {
+	fn finalize_proposal(&self, name: &str, args: &Value) -> Result<DynCallOutput, DynFault> {
 		let object = args
 			.as_object()
 			.ok_or_else(|| DynFault::new("proposal finalization arguments must be an object"))?;
@@ -219,10 +239,22 @@ impl DynHost {
 			.proposals
 			.finalize(id, decision)
 			.map_err(|error| DynFault::new(error.to_string()))?;
+		let diags = recovery_snapshot_diag(&outcome.payload)
+			.into_iter()
+			.collect();
 		let payload =
 			serde_json::to_value(outcome).map_err(|error| DynFault::new(error.to_string()))?;
-		Ok(DynOutput::Json(payload))
+		Ok(DynCallOutput { output: DynOutput::Json(payload), diags })
 	}
+}
+
+fn recovery_snapshot_diag(payload: &Value) -> Option<Diag> {
+	let recovery = payload.get("recovery_root").and_then(Value::as_str)?;
+	Some(if recovery.starts_with("artifact://") {
+		Diag::info(DiagKind::Snapshot, "Recovery snapshot recorded").artifact(Str::new(recovery))
+	} else {
+		Diag::info(DiagKind::Snapshot, sf!("Recovery snapshot recorded at {recovery}"))
+	})
 }
 
 impl ShellDynHost for DynHost {
@@ -293,82 +325,92 @@ impl ShellDynHost for DynHost {
 		name: &str,
 		args: Value,
 		cancellation: CancellationToken,
-	) -> DynFuture<'_, DynOutput> {
+	) -> DynFuture<'_, DynCallOutput> {
 		let name = Str::new(name);
 		Box::pin(async move {
-			if matches!(name.as_str(), "resolve" | "reject") {
-				if cancellation.is_cancelled() {
-					return Err(DynFault::new("staged proposal finalization was cancelled"));
+			let result = async {
+				if matches!(name.as_str(), "resolve" | "reject") {
+					if cancellation.is_cancelled() {
+						return Err(DynFault::new("staged proposal finalization was cancelled"));
+					}
+					// Finalization is the foreground mutation boundary: once the
+					// exact transaction starts, it runs through commit or rollback.
+					return self.finalize_proposal(name.as_str(), &args);
 				}
-				// Finalization is the foreground mutation boundary: once the
-				// exact transaction starts, it runs through commit or rollback.
-				return self.finalize_proposal(name.as_str(), &args);
+				let registry = self
+					.catalog
+					.registry()
+					.ok_or_else(|| DynFault::new("device catalog is not available in this session"))?;
+				let Ok(path) = DevicePath::parse(name.as_str()) else {
+					return self.call_mcp(name, args, cancellation).await;
+				};
+				let target = match registry.resolve_device(&path) {
+					Ok(target) => target,
+					Err(_)
+						if registry
+							.devices()
+							.any(|device| device.name.as_str() == path.root()) =>
+					{
+						return Err(DynFault::new(format!(
+							"device `{name}` rejected its path arguments"
+						)));
+					},
+					Err(_) => return self.call_mcp(name, args, cancellation).await,
+				};
+				let identity = target.identity();
+				let effects = target.effects.clone();
+				let invocation_id = self.invocation_id();
+				self
+					.admission
+					.admit(
+						invocation_id.clone(),
+						target.name.clone(),
+						&effects,
+						DynamicInvocationSource::ShellDyn,
+						cancellation.clone(),
+					)
+					.await
+					.map_err(|error| DynFault::new(error.to_string()))?;
+				let raw = Str::new(args.to_string());
+				let args_json = Bytes::from(raw.clone());
+				let mut stream = match target.route.clone() {
+					ToolRoute::Native => {
+						let (feed, params) =
+							IncomingParams::channel_for(None, Some(invocation_id.clone()));
+						feed.args_committed(raw).map_err(|_| {
+							DynFault::new("device argument channel closed before dispatch")
+						})?;
+						registry
+							.invoke_device(&path, params)
+							.map_err(|error| DynFault::new(format!("device dispatch failed: {error}")))?
+					},
+					ToolRoute::Remote => {
+						return Err(DynFault::new("device is owned by the remote environment host"));
+					},
+					ToolRoute::Worker { site, name: worker } => {
+						self
+							.invoker
+							.invoke(DeviceInvokeRequest {
+								path,
+								name: target.name.clone(),
+								rev: Str::from(target.rev.to_string()),
+								owner: Some(target.claimant.clone()),
+								site: Some(site),
+								worker: Some(worker),
+								invocation_id,
+								deadline: Duration::new(5, DurationUnit::Minutes),
+								args_json,
+							})
+							.await
+					},
+				};
+				consume(&registry, &self.blobs, &identity, &mut stream, cancellation).await
 			}
-			let registry = self
-				.catalog
-				.registry()
-				.ok_or_else(|| DynFault::new("device catalog is not available in this session"))?;
-			let Ok(path) = DevicePath::parse(name.as_str()) else {
-				return self.call_mcp(name, args, cancellation).await;
-			};
-			let target = match registry.resolve_device(&path) {
-				Ok(target) => target,
-				Err(_)
-					if registry
-						.devices()
-						.any(|device| device.name.as_str() == path.root()) =>
-				{
-					return Err(DynFault::new(format!("device `{name}` rejected its path arguments")));
-				},
-				Err(_) => return self.call_mcp(name, args, cancellation).await,
-			};
-			let identity = target.identity();
-			let effects = target.effects.clone();
-			let invocation_id = self.invocation_id();
-			self
-				.admission
-				.admit(
-					invocation_id.clone(),
-					target.name.clone(),
-					&effects,
-					DynamicInvocationSource::ShellDyn,
-					cancellation.clone(),
-				)
-				.await
-				.map_err(|error| DynFault::new(error.to_string()))?;
-			let raw = Str::new(args.to_string());
-			let args_json = Bytes::from(raw.clone());
-			let mut stream = match target.route.clone() {
-				ToolRoute::Native => {
-					let (feed, params) = IncomingParams::channel_for(None, Some(invocation_id.clone()));
-					feed
-						.args_committed(raw)
-						.map_err(|_| DynFault::new("device argument channel closed before dispatch"))?;
-					registry
-						.invoke_device(&path, params)
-						.map_err(|error| DynFault::new(format!("device dispatch failed: {error}")))?
-				},
-				ToolRoute::Remote => {
-					return Err(DynFault::new("device is owned by the remote environment host"));
-				},
-				ToolRoute::Worker { site, name: worker } => {
-					self
-						.invoker
-						.invoke(DeviceInvokeRequest {
-							path,
-							name: target.name.clone(),
-							rev: Str::from(target.rev.to_string()),
-							owner: Some(target.claimant.clone()),
-							site: Some(site),
-							worker: Some(worker),
-							invocation_id,
-							deadline: Duration::new(5, DurationUnit::Minutes),
-							args_json,
-						})
-						.await
-				},
-			};
-			consume(&registry, &self.blobs, &identity, &mut stream, cancellation).await
+			.await;
+			if let Ok(call) = &result {
+				capture_exec_diags(&call.diags);
+			}
+			result
 		})
 	}
 }
@@ -379,7 +421,8 @@ async fn consume(
 	identity: &ToolIdentity,
 	stream: &mut ErasedStream<'_>,
 	cancellation: CancellationToken,
-) -> Result<DynOutput, DynFault> {
+) -> Result<DynCallOutput, DynFault> {
+	let mut diags = Vec::new();
 	loop {
 		let event = tokio::select! {
 			biased;
@@ -389,12 +432,20 @@ async fn consume(
 			event = stream.next() => event,
 		};
 		match event {
-			Some(Ok(ErasedEv::Update(_))) => {},
+			Some(Ok(ErasedEv::Update(update))) => {
+				if let Ok(envelope) = serde_json::from_slice::<DiagEnvelope>(&update) {
+					diags.push(envelope.diag);
+				}
+			},
 			Some(Ok(ErasedEv::Done(ErasedOutcome::Done { verdict, .. }))) => {
-				return project_result(registry, blobs, identity, &verdict);
+				let output = project_result(registry, blobs, identity, &verdict)?;
+				return Ok(DynCallOutput { output, diags });
 			},
 			Some(Ok(ErasedEv::Done(ErasedOutcome::Detached(job)))) => {
-				return Ok(DynOutput::Text(sf!("detached job: {}", job.id)));
+				return Ok(DynCallOutput {
+					output: DynOutput::Text(sf!("detached job: {}", job.id)),
+					diags,
+				});
 			},
 			Some(Err(error)) => {
 				return Err(DynFault::new(format!("device dispatch failed: {error}")));
@@ -618,6 +669,23 @@ mod tests {
 				"Exact pending proposal id printed by the staging tool."
 			);
 		}
+	}
+
+	#[tokio::test]
+	async fn recovery_snapshot_is_captured_out_of_band() {
+		let artifact =
+			"artifact://sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+		let diag = recovery_snapshot_diag(&json!({ "recovery_root": artifact }))
+			.expect("snapshot diagnostic");
+		assert_eq!(diag.native_kind(), Some(DiagKind::Snapshot));
+		assert_eq!(diag.artifact.as_deref(), Some(artifact));
+
+		let sink = Arc::new(Mutex::new(Vec::new()));
+		scope_exec_diags(Arc::clone(&sink), async {
+			capture_exec_diags(std::slice::from_ref(&diag));
+		})
+		.await;
+		assert_eq!(sink.lock().as_slice(), &[diag]);
 	}
 
 	#[test]

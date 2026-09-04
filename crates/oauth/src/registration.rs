@@ -25,7 +25,7 @@ pub struct ClientRegistrationRequest<'a> {
 
 impl<'a> ClientRegistrationRequest<'a> {
 	/// Constructs the native authorization-code PKCE declaration.
-	pub fn native(client_name: &'a str, redirect_uris: &'a [&'a str]) -> Self {
+	pub const fn native(client_name: &'a str, redirect_uris: &'a [&'a str]) -> Self {
 		Self {
 			redirect_uris,
 			client_name,

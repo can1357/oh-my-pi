@@ -256,4 +256,8 @@ Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `
 
 ## Vendoring provenance
 
-The upstream vocabulary was synchronized from pi; omp-only provider files remain from the o2 catalog census (`census 2026-08`), pruned of providers pi does not ship (agnes, agnes-plan, cohere, crofai, friendli, inception, ovhai, poolside, sarvam, scaleway, stepfun, stepfun-plan, yandex — provider files and `on` tokens only; class/taxonomy files remain), and re-authored where pi's baked `models.json` values are the ground truth. No provider-id renames were required.
+The upstream vocabulary was synchronized. OMP-only provider files remain from the o2 catalog
+census (`census 2026-08`), pruned of unavailable providers (agnes, agnes-plan, cohere, crofai,
+friendli, inception, ovhai, poolside, sarvam, scaleway, stepfun, stepfun-plan, yandex — provider
+files and `on` tokens only; class/taxonomy files remain), and re-authored where baked
+`models.json` values are authoritative. No provider-id renames were required.

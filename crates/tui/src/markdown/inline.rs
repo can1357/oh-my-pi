@@ -1050,8 +1050,8 @@ fn decoded_entity(text: &str) -> Option<(DecodedEntity, usize)> {
 	} else if body.eq_ignore_ascii_case("apos") {
 		DecodedEntity::Text("'")
 	} else if body.eq_ignore_ascii_case("nbsp") {
-		// pi decodes to a plain space; the run survives because prose
-		// whitespace is never collapsed
+		// Decode to a plain space; the run survives because prose whitespace
+		// is never collapsed.
 		DecodedEntity::Text(" ")
 	} else if let Some(hex) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
 		if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {

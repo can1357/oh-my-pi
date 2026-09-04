@@ -71,8 +71,7 @@ fn snapshot(session: &Session) -> Vec<GoldenItem> {
 		.collect()
 }
 
-const TOOL_NAMES: [&str; 8] =
-	["ast_edit", "bash", "edit", "glob", "grep", "read", "task", "write"];
+const TOOL_NAMES: [&str; 8] = ["ast_edit", "bash", "edit", "glob", "grep", "read", "task", "write"];
 
 fn inventory(full: bool) -> String {
 	let mut out = String::new();

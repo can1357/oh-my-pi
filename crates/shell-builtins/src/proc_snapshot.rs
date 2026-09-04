@@ -3,7 +3,7 @@
 //!
 //! One [`ProcInfo`] implementation per platform exposes the same accessors so
 //! process builtins stay platform-agnostic. Shell session and teardown process
-//! management remains a separate concern in `omp-shell`.
+//! management remains a separate application concern.
 
 #![allow(
 	dead_code,

@@ -48,7 +48,7 @@ pub(crate) fn traffic_text(traffic: &IrcTraffic) -> Str {
 	text.freeze()
 }
 
-/// Direction-specific pi IRC card with a three-line folded body and twelve-line
+/// Direction-specific IRC card with a three-line folded body and twelve-line
 /// expanded body.
 #[must_use]
 pub(crate) fn traffic_card(traffic: &IrcTraffic, expanded: bool) -> Component {

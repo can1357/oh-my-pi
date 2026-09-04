@@ -67,4 +67,4 @@ variables, exit codes, and `$!` do not survive between calls.
 
 - The Harness Playbook, "The tool surface" — "Deep builtins: Bash"
 - 0006 (host policy / sandbox stub), 0010 (jobs), 0012 (convar policy), 0025 (`dyn` builtin)
-- `crates/shell-engine`, `crates/shell-builtins`, `crates/shell`, `crates/tools/src/shell.rs`
+- `crates/shell-engine`, `crates/shell-builtins`, `crates/tools/src/shell.rs`

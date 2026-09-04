@@ -34,7 +34,7 @@ pub struct Applied {
 }
 
 /// A rejected DOM or stream mutation.
-#[derive(Clone, Debug, Error, PartialEq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum DomError {
 	/// An operation references a node that does not exist in its post-state.
 	#[error("operation {op_index} references missing handle {handle}")]

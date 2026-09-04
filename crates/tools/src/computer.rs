@@ -8,8 +8,8 @@ use bytes::Bytes;
 use futures::Stream;
 use omp_core::{Str, sf};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, DesktopEffects, Effects, Ev,
-	IncomingParams, LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev, Tool, ToolSpec,
+	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, DesktopEffects, Effects,
+	Ev, IncomingParams, LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev, Tool, ToolSpec,
 	ToolTerminal,
 };
 use schemars::JsonSchema;
@@ -45,15 +45,7 @@ pub enum Action {
 
 /// One native operation available to the computer program.
 #[derive(
-	Clone,
-	Copy,
-	Debug,
-	Deserialize,
-	Eq,
-	PartialEq,
-	Serialize,
-	strum::Display,
-	strum::IntoStaticStr,
+	Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, strum::Display, strum::IntoStaticStr,
 )]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
@@ -127,15 +119,16 @@ pub enum Operation {
 #[serde(deny_unknown_fields)]
 pub struct Params {
 	/// Session action.
-	pub action:     Action,
+	pub action:    Action,
 	/// JavaScript-like domain program executed for `run`. Top-level `await` is
-	/// accepted and `desktop`, `wait`, `assert`, `display`, and `print` are in scope.
-	pub code:       Option<Str>,
+	/// accepted and `desktop`, `wait`, `assert`, `display`, and `print` are in
+	/// scope.
+	pub code:      Option<Str>,
 	/// Prohibit input, focus, accessibility mutation, and clipboard writes.
 	#[serde(default)]
-	pub read_only:  bool,
+	pub read_only: bool,
 	/// Whole-program run budget in seconds.
-	pub timeout:    Option<f64>,
+	pub timeout:   Option<f64>,
 }
 
 /// One native desktop operation after lifting a program call.
@@ -143,50 +136,50 @@ pub struct Params {
 #[serde(deny_unknown_fields)]
 pub struct NativeParams {
 	/// Operation to perform.
-	pub operation:       Operation,
+	pub operation:   Operation,
 	/// Window id; absence selects the complete desktop.
-	pub window:          Option<Str>,
+	pub window:      Option<Str>,
 	/// Accessibility reference or window id depending on the action.
-	pub reference:       Option<Str>,
+	pub reference:   Option<Str>,
 	/// Text, key chord, action name, or query role.
-	pub value:           Option<Str>,
+	pub value:       Option<Str>,
 	/// Window application filter.
-	pub app:             Option<Str>,
+	pub app:         Option<Str>,
 	/// Window title or accessibility title filter.
-	pub title:           Option<Str>,
+	pub title:       Option<Str>,
 	/// Accessibility value filter.
-	pub query_value:     Option<Str>,
+	pub query_value: Option<Str>,
 	/// Primary x coordinate.
-	pub x:               Option<f64>,
+	pub x:           Option<f64>,
 	/// Primary y coordinate.
-	pub y:               Option<f64>,
+	pub y:           Option<f64>,
 	/// Horizontal scroll delta.
-	pub dx:              Option<f64>,
+	pub dx:          Option<f64>,
 	/// Vertical scroll delta.
-	pub dy:              Option<f64>,
+	pub dy:          Option<f64>,
 	/// Drag path as ordered `[x, y]` pairs.
-	pub points:          Option<Vec<[f64; 2]>>,
+	pub points:      Option<Vec<[f64; 2]>>,
 	/// Pointer button.
-	pub button:          Option<Str>,
+	pub button:      Option<Str>,
 	/// Click count.
-	pub count:           Option<u32>,
+	pub count:       Option<u32>,
 	/// Modifier chord members.
-	pub modifiers:       Option<Vec<Str>>,
+	pub modifiers:   Option<Vec<Str>>,
 	/// Native delivery mode (`background` or `foreground`).
-	pub delivery:        Option<Str>,
+	pub delivery:    Option<Str>,
 	/// Capture width cap.
-	pub max_width:       Option<u32>,
+	pub max_width:   Option<u32>,
 	/// Capture height cap.
-	pub max_height:      Option<u32>,
+	pub max_height:  Option<u32>,
 	/// Accessibility tree depth cap.
-	pub max_depth:       Option<u32>,
+	pub max_depth:   Option<u32>,
 	/// Accessibility result cap.
-	pub limit:           Option<u32>,
+	pub limit:       Option<u32>,
 	/// Retain otherwise-filtered accessibility nodes.
-	pub all:             Option<bool>,
+	pub all:         Option<bool>,
 	/// Suppress transcript image reveal while retaining the screenshot artifact.
 	#[serde(default)]
-	pub silent:          bool,
+	pub silent:      bool,
 }
 
 impl NativeParams {
@@ -218,10 +211,7 @@ impl NativeParams {
 			| Operation::AxParent => {
 				DesktopEffects { capture: false, accessibility: true, input: false }
 			},
-			Operation::AxPerform
-			| Operation::AxSetValue
-			| Operation::AxFocus
-			| Operation::AxClick => {
+			Operation::AxPerform | Operation::AxSetValue | Operation::AxFocus | Operation::AxClick => {
 				DesktopEffects { capture: false, accessibility: true, input: true }
 			},
 			Operation::Click
@@ -268,22 +258,22 @@ impl<'de> Deserialize<'de> for Artifact {
 		enum Wire {
 			Legacy(Str),
 			Current {
-				uri: Str,
-				mime: Str,
+				uri:           Str,
+				mime:          Str,
 				#[serde(default = "visible")]
-				visible: bool,
+				visible:       bool,
 				#[serde(default)]
-				byte_len: u64,
+				byte_len:      u64,
 				#[serde(default)]
-				width: u32,
+				width:         u32,
 				#[serde(default)]
-				height: u32,
+				height:        u32,
 				#[serde(default)]
-				source_width: u32,
+				source_width:  u32,
 				#[serde(default)]
 				source_height: u32,
 				#[serde(default = "desktop_target")]
-				target: Str,
+				target:        Str,
 			},
 		}
 		Ok(match Wire::deserialize(deserializer)? {
@@ -299,9 +289,25 @@ impl<'de> Deserialize<'de> for Artifact {
 				target: desktop_target(),
 			},
 			Wire::Current {
-				uri, mime, visible, byte_len, width, height, source_width, source_height, target,
+				uri,
+				mime,
+				visible,
+				byte_len,
+				width,
+				height,
+				source_width,
+				source_height,
+				target,
 			} => Self {
-				uri, mime, visible, byte_len, width, height, source_width, source_height, target,
+				uri,
+				mime,
+				visible,
+				byte_len,
+				width,
+				height,
+				source_width,
+				source_height,
+				target,
 			},
 		})
 	}
@@ -319,27 +325,27 @@ fn desktop_target() -> Str {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Capabilities {
 	/// Backend implementation name.
-	pub backend:                 Str,
+	pub backend: Str,
 	/// Display-server name when applicable.
-	pub display_server:          Option<Str>,
+	pub display_server: Option<Str>,
 	/// Screenshot capture availability.
-	pub capture:                 bool,
+	pub capture: bool,
 	/// Pointer and keyboard input availability.
-	pub input:                   bool,
+	pub input: bool,
 	/// Accessibility availability.
-	pub ax:                      bool,
+	pub ax: bool,
 	/// Background-window input support.
 	pub background_window_input: bool,
 	/// Supported delivery modes.
-	pub delivery_modes:          Vec<Str>,
+	pub delivery_modes: Vec<Str>,
 	/// Capture permission status.
-	pub capture_permission:      Str,
+	pub capture_permission: Str,
 	/// Input permission status.
-	pub input_permission:        Str,
+	pub input_permission: Str,
 	/// Accessibility permission status.
-	pub ax_permission:           Str,
+	pub ax_permission: Str,
 	/// Attached display count.
-	pub display_count:           u32,
+	pub display_count: u32,
 }
 
 /// Computer operation result.
@@ -440,7 +446,7 @@ pub enum Update {
 	/// A screenshot was retained.
 	Artifact {
 		/// Content-addressed artifact URI.
-		uri: Str,
+		uri:     Str,
 		/// Whether this capture is visible inline.
 		visible: bool,
 	},
@@ -473,12 +479,13 @@ pub fn spec() -> ToolSpec {
 		rev:             Rev { family: Str::default(), n: 3 },
 		description:     sf!(
 			"Controls one persistent, session-owned native desktop. action=run executes a bounded \
-			 domain program with desktop, wait, assert, display, and print in scope; action=capabilities \
-			 reports backend permissions; action=close permanently releases the session. Desktop \
-			 programs can list/resolve windows and displays; capture screenshots; deliver pointer, \
-			 keyboard, and clipboard input; inspect/query/act on accessibility elements; and wait for \
-			 assertions. Pointer coordinates are pixels in the most recent screenshot of the same \
-			 target, while accessibility bounds and hit tests use global logical coordinates."
+			 domain program with desktop, wait, assert, display, and print in scope; \
+			 action=capabilities reports backend permissions; action=close permanently releases the \
+			 session. Desktop programs can list/resolve windows and displays; capture screenshots; \
+			 deliver pointer, keyboard, and clipboard input; inspect/query/act on accessibility \
+			 elements; and wait for assertions. Pointer coordinates are pixels in the most recent \
+			 screenshot of the same target, while accessibility bounds and hit tests use global \
+			 logical coordinates."
 		),
 		schema:          omp_tool::schema::<Params>(),
 		constraint:      Constraint::Schema {
@@ -585,11 +592,11 @@ impl Tool for Computer {
 						if let Some(hash) = artifact.uri.strip_prefix("artifact://sha256/") {
 							parts.push(Part::Blob {
 								blob: omp_tool::BlobRef {
-									hash: Str::new(hash),
+									hash:       Str::new(hash),
 									media_type: artifact.mime.clone(),
-									byte_len: artifact.byte_len,
+									byte_len:   artifact.byte_len,
 								},
-								alt: Some(sf!("Computer screenshot of {}", artifact.target)),
+								alt:  Some(sf!("Computer screenshot of {}", artifact.target)),
 							});
 						}
 					}
@@ -616,8 +623,7 @@ fn lift_legacy_call(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 		code:    Str,
 		message: Str,
 	}
-	let verdict =
-		serde_json::from_slice::<CallOutcome<Payload, LegacyFault>>(call.verdict).ok()?;
+	let verdict = serde_json::from_slice::<CallOutcome<Payload, LegacyFault>>(call.verdict).ok()?;
 	let verdict = match verdict {
 		CallOutcome::Ok(payload) => CallOutcome::Ok(payload),
 		CallOutcome::Faulted(legacy) => {
@@ -649,9 +655,7 @@ fn lift_legacy_call(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 			CallOutcome::Faulted(Fault { code, message, operation: None })
 		},
 		CallOutcome::ArgsRejected(issue) => CallOutcome::ArgsRejected(issue),
-		CallOutcome::Aborted { abort, kind, policy } => {
-			CallOutcome::Aborted { abort, kind, policy }
-		},
+		CallOutcome::Aborted { abort, kind, policy } => CallOutcome::Aborted { abort, kind, policy },
 	};
 	Some(LiftedCall {
 		raw_args: Bytes::from(serde_json::to_vec(&raw_args).ok()?),
@@ -709,7 +713,9 @@ mod tests {
 		domain.sort_unstable();
 		assert_eq!(domain, ["action", "code", "read_only", "timeout"]);
 		assert_eq!(schema["required"], json!(["i", "action"]));
-		let description = properties["code"]["description"].as_str().expect("code description");
+		let description = properties["code"]["description"]
+			.as_str()
+			.expect("code description");
 		for binding in ["desktop", "wait", "assert", "display", "print"] {
 			assert!(description.contains(binding));
 		}
@@ -727,7 +733,11 @@ mod tests {
 		assert_eq!(run.action, Action::Run);
 		assert!(run.read_only);
 		assert_eq!(run.timeout, Some(12.5));
-		assert!(run.code.as_deref().is_some_and(|code| code.contains("desktop.windows")));
+		assert!(
+			run.code
+				.as_deref()
+				.is_some_and(|code| code.contains("desktop.windows"))
+		);
 		for action in ["capabilities", "close"] {
 			let params: Params = serde_json::from_value(json!({"action": action})).expect(action);
 			assert!(params.code.is_none());
@@ -737,17 +747,18 @@ mod tests {
 	#[test]
 	fn computer_two_lifts_to_explicit_run_action() {
 		let payload = Payload {
-			action: Action::Run,
-			code: Some(Str::new_static("return 1")),
-			results: vec![json!(1)],
-			artifacts: Vec::new(),
+			action:       Action::Run,
+			code:         Some(Str::new_static("return 1")),
+			results:      vec![json!(1)],
+			artifacts:    Vec::new(),
 			capabilities: None,
 		};
-		let verdict = serde_json::to_vec(&CallOutcome::<Payload, Fault>::Ok(payload)).expect("verdict");
-		let lifted = lift_legacy_call(
-			&Rev { family: Str::default(), n: 2 },
-			RecordedCall { raw_args: br#"{"i":"Checking desktop","code":"return 1"}"#, verdict: &verdict },
-		)
+		let verdict =
+			serde_json::to_vec(&CallOutcome::<Payload, Fault>::Ok(payload)).expect("verdict");
+		let lifted = lift_legacy_call(&Rev { family: Str::default(), n: 2 }, RecordedCall {
+			raw_args: br#"{"i":"Checking desktop","code":"return 1"}"#,
+			verdict:  &verdict,
+		})
 		.expect("lift");
 		let args: Value = serde_json::from_slice(&lifted.raw_args).expect("lifted args");
 		assert_eq!(args["action"], "run");
@@ -756,8 +767,8 @@ mod tests {
 	#[test]
 	fn fault_codes_are_typed_and_redacted() {
 		let fault = Fault {
-			code: FaultCode::PermissionDenied,
-			message: Str::new_static("screen capture permission is unavailable"),
+			code:      FaultCode::PermissionDenied,
+			message:   Str::new_static("screen capture permission is unavailable"),
 			operation: None,
 		};
 		let value = serde_json::to_value(fault).expect("fault");

@@ -43,14 +43,10 @@ impl Component for TodoComponent {
 		for child in dom.children(todo) {
 			draft.remove(*child);
 		}
-		if let Ok(order) =
-			serde_json::value::to_raw_value(&phases.iter().map(|phase| &phase.name).collect::<Vec<_>>())
-		{
-			draft.set(
-				todo,
-				PropKey::Custom(Str::new_static("phase-order")),
-				Value::Json(order),
-			);
+		if let Ok(order) = serde_json::value::to_raw_value(
+			&phases.iter().map(|phase| &phase.name).collect::<Vec<_>>(),
+		) {
+			draft.set(todo, PropKey::Custom(Str::new_static("phase-order")), Value::Json(order));
 		}
 		let mut after = None;
 		let mut next = dom.high_water() + 1;
@@ -117,8 +113,7 @@ fn decode_phases(phases: &[serde_json::Value]) -> Option<Vec<PhaseSnapshot>> {
 				.get("status")
 				.and_then(serde_json::Value::as_str)
 				.unwrap_or("pending");
-			if !matches!(status, "pending" | "in_progress" | "completed" | "abandoned" | "blocked")
-			{
+			if !matches!(status, "pending" | "in_progress" | "completed" | "abandoned" | "blocked") {
 				return None;
 			}
 			let blocker = match task.get("blocker").or_else(|| task.get("reason")) {
@@ -127,7 +122,7 @@ fn decode_phases(phases: &[serde_json::Value]) -> Option<Vec<PhaseSnapshot>> {
 			};
 			items.push(ItemSnapshot {
 				content: Str::new(content),
-				status: Str::new(status),
+				status:  Str::new(status),
 				blocker: blocker.map(Str::new),
 			});
 		}

@@ -58,7 +58,13 @@ impl Card for CheckpointCard {
 			.and_then(|checkpoint| checkpoint.get("goal"))
 			.and_then(Value::as_str)
 			.or_else(|| args.as_ref()?.get("goal")?.as_str())
-			.unwrap_or_else(|| if action == "list" { "selected branch" } else { "" });
+			.unwrap_or_else(|| {
+				if action == "list" {
+					"selected branch"
+				} else {
+					""
+				}
+			});
 		let receipt = created
 			.and_then(|checkpoint| checkpoint.get("label"))
 			.and_then(Value::as_str)
@@ -66,7 +72,11 @@ impl Card for CheckpointCard {
 			.or_else(|| listed.map(|rows| sf!("{} checkpoint(s)", rows.len())));
 		let card = semantic_row(
 			"checkpoint",
-			if action == "list" { "Checkpoints" } else { "Checkpoint" },
+			if action == "list" {
+				"Checkpoints"
+			} else {
+				"Checkpoint"
+			},
 			detail,
 			receipt.as_deref(),
 			typed_fault::<omp_tools::checkpoint::Fault>(view),
@@ -133,9 +143,18 @@ impl Card for RewindCard {
 				sf!(
 					"{} · {} written · {} deleted · {} unchanged",
 					label.unwrap_or_default(),
-					workspace.get("written").and_then(Value::as_u64).unwrap_or_default(),
-					workspace.get("deleted").and_then(Value::as_u64).unwrap_or_default(),
-					workspace.get("unchanged").and_then(Value::as_u64).unwrap_or_default(),
+					workspace
+						.get("written")
+						.and_then(Value::as_u64)
+						.unwrap_or_default(),
+					workspace
+						.get("deleted")
+						.and_then(Value::as_u64)
+						.unwrap_or_default(),
+					workspace
+						.get("unchanged")
+						.and_then(Value::as_u64)
+						.unwrap_or_default(),
 				)
 			})
 			.or_else(|| label.map(Str::new));

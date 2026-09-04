@@ -1,4 +1,4 @@
-//! Slash-command registry: every pi `/command` is an `omp_con` `cmd!`
+//! Slash-command registry: every `/command` is an `omp_con` `cmd!`
 //! declaration (ADR 0014) whose handler posts one typed [`CommandAction`]
 //! into the actor's console mailbox ([`HostMailbox`]). A `/name args`
 //! composer line, a bound key, and a cfg script all run the same words.
@@ -102,27 +102,25 @@ pub fn palette_icon(name: &str) -> Option<Icon> {
 /// Which selector `/branch` (`/rewind`) or `/tree` opens.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Selector {
-	/// pi `rewind-selector`: user turns on the live chain, newest last.
+	/// User turns on the live chain, newest last.
 	Rewind,
-	/// pi `tree-selector`: the whole journal branch DAG.
+	/// The whole journal branch DAG.
 	Tree,
 }
 
-/// How `/compact` and `/handoff` summarize (pi `compaction-methods.ts`).
+/// How `/compact` and `/handoff` summarize.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompactionMethod {
-	/// `/compact`: summarize in place with the active model (pi
-	/// `soft-compacted`).
+	/// `/compact`: summarize in place with the active model.
 	Compact,
-	/// `/handoff`: generate a handoff document and continue from it (pi
-	/// `handed-off`).
+	/// `/handoff`: generate a handoff document and continue from it.
 	Handoff,
 	/// `/shake`: drop recoverable heavy content in place without an LLM
-	/// call (pi `shaken`); the hint is a [`ShakeMode`] word.
+	/// call; the hint is a [`ShakeMode`] word.
 	Shake,
 }
 
-/// `/goal` subcommands (pi `builtin-modes.ts`).
+/// `/goal` subcommands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GoalOp {
 	/// Bare `/goal`: menu when a goal exists, else prompt for an objective.
@@ -141,7 +139,7 @@ pub enum GoalOp {
 	Budget(Option<u64>),
 }
 
-/// `/session` subcommands (pi `builtin-session.ts`).
+/// `/session` subcommands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionOp {
 	/// `info` (default).
@@ -152,7 +150,7 @@ pub enum SessionOp {
 	Pin(Option<Str>),
 }
 
-/// `/todo` subcommands (pi `helpers/todo.ts`).
+/// `/todo` subcommands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TodoOp {
 	/// Bare `/todo`: print the list.
@@ -175,7 +173,7 @@ pub enum TodoOp {
 	Import(Option<Str>),
 }
 
-/// `/loop` budget parsed with pi's `loop-limit.ts` grammar.
+/// `/loop` budget.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoopLimit {
 	/// Stop after this many loop iterations.
@@ -184,7 +182,7 @@ pub enum LoopLimit {
 	DurationMs(u64),
 }
 
-/// `/shake` modes (pi `shake-types.ts`).
+/// `/shake` modes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display, strum::EnumString)]
 #[strum(serialize_all = "lowercase")]
 pub enum ShakeMode {
@@ -240,8 +238,8 @@ pub enum CommandAction {
 		/// Prompt text run after the active turn.
 		prompt: Str,
 	},
-	/// A prompt-template command (`/<template> args`, pi
-	/// `promptTemplateCommands`): submit the expanded text exactly as a
+	/// A prompt-template command (`/<template> args`): submit the expanded text
+	/// exactly as a
 	/// typed prompt — a turn when idle, steering while one runs.
 	Prompt {
 		/// The expanded template.
@@ -298,8 +296,7 @@ pub enum CommandAction {
 	Rewind {
 		/// Entry to make the new head.
 		target: EntryId,
-		/// Text placed in the composer afterwards (pi prefills the rewound
-		/// user message).
+		/// Text placed in the composer afterwards from the rewound user message.
 		recall: Option<Str>,
 	},
 	/// Session picker Ctrl+R: rename a stored session in the index.
@@ -349,7 +346,7 @@ pub enum CommandAction {
 	},
 	/// `/wt [branch]`: fork the checkout into a worktree and move there.
 	Worktree {
-		/// Branch name; `None` picks pi's `wt/<yyyymmdd-hhmmss>`.
+		/// Branch name; `None` picks `wt/<yyyymmdd-hhmmss>`.
 		branch: Option<Str>,
 	},
 }
@@ -370,7 +367,7 @@ pub fn post(ctx: &Ctx, action: CommandAction) -> ConResult<()> {
 }
 
 /// Joins the declared arguments plus any surplus words back into the one
-/// free-text argument pi's commands take (`/queue fix the tests`).
+/// free-text argument commands take (`/queue fix the tests`).
 #[must_use]
 pub fn rest(args: &omp_con::Args<'_>, from: usize) -> Option<Str> {
 	if args.len() <= from {

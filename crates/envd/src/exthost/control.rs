@@ -225,10 +225,7 @@ pub fn admit_direct_filesystem(
 use std::{env, io, iter, mem};
 
 use async_trait::async_trait;
-use omp_con::{
-	Ctx, DynamicUiOption, DynamicUiSpec, DynamicUiWidget, DynamicVarSpec, SettingTab, TypeSpec,
-	Value as ConValue, ValueKind, VarFlags,
-};
+use omp_con::{Ctx, DynamicVarSpec, TypeSpec, Value as ConValue, ValueKind, VarFlags};
 use omp_core::{
 	Hash32, InvocationPhase, LifecyclePhase, Principal, Provenance, Str, encoding::hex, sf,
 };
@@ -266,8 +263,9 @@ use tokio::{
 	task::AbortHandle,
 };
 
-use super::dispatch::{
-	CallbackConcurrency, DispatchError, DispatchRequest, DispatchRouter, EventDeadline,
+use super::{
+	dispatch::{CallbackConcurrency, DispatchError, DispatchRequest, DispatchRouter, EventDeadline},
+	quota::{ChargeOutcome, ControlQuotaRuntime, QuotaError, ResourceReceipt, names, request_quota},
 };
 use crate::worker::HostKey;
 
@@ -1033,6 +1031,16 @@ fn fuse_rows<T: Default>(
 
 /// Maximum length of one JSON CONTROL frame.
 pub const MAX_CONTROL_FRAME_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum encoded size of one correlated dispatch progress frame.
+pub const MAX_DISPATCH_PROGRESS_FRAME_BYTES: usize = 1024 * 1024;
+/// Maximum progress events accepted from one invocation.
+pub const MAX_DISPATCH_PROGRESS_EVENTS: usize = 1024;
+/// Maximum aggregate bytes accepted across one invocation's progress frames.
+pub const MAX_DISPATCH_PROGRESS_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum reassembled terminal dispatch body accepted before result spilling.
+pub const MAX_DISPATCH_RESULT_BYTES: usize = 256 * 1024 * 1024;
+/// Maximum decoded bytes accepted in one terminal-result chunk.
+pub const MAX_DISPATCH_RESULT_CHUNK_BYTES: usize = 512 * 1024;
 
 /// Core-authenticated identity for one extension-host CONTROL connection.
 ///
@@ -1364,8 +1372,6 @@ fn session_transition_denied(
 /// One authoritative fire-and-forget child observation.
 #[derive(Clone, Debug)]
 pub enum ControlEffect {
-	/// Frozen runtime declaration evidence requiring manifest verification.
-	Registry(Value),
 	/// Session intent contribution requiring provider arbitration.
 	Intent(Value),
 	/// Retained UI effect data.
@@ -1643,7 +1649,7 @@ impl ConvarControlAuthority {
 				.with(VarFlags::SESSION)
 				.with(VarFlags::REPLICATED),
 			default,
-			ui: declaration_ui(arguments, name.as_str(), ty)?,
+			meta: declaration_metadata(arguments, name.as_str(), ty)?,
 		};
 		if let Some(existing) = self.ctx.dynamic_var_spec(name.as_str()) {
 			if existing != spec {
@@ -1715,13 +1721,13 @@ fn required_convar_argument<'a>(
 		})
 }
 
-fn declaration_ui(
+fn declaration_metadata(
 	arguments: &serde_json::Map<String, Value>,
 	convar: &str,
 	ty: &TypeSpec,
-) -> Result<Option<DynamicUiSpec>, ControlProtocolError> {
+) -> Result<Arc<[(Str, Str)]>, ControlProtocolError> {
 	let Some(value) = arguments.get("ui") else {
-		return Ok(None);
+		return Ok(Arc::from([]));
 	};
 	let object = value.as_object().ok_or_else(|| {
 		ControlProtocolError::new(
@@ -1729,14 +1735,7 @@ fn declaration_ui(
 			"extension convar ui metadata must be an object",
 		)
 	})?;
-	let tab = required_convar_argument(object, "tab")?
-		.parse::<SettingTab>()
-		.map_err(|_| {
-			ControlProtocolError::new(
-				"InvalidConvarDeclaration",
-				"extension convar ui metadata names an unknown tab",
-			)
-		})?;
+	let tab = Str::new(required_convar_argument(object, "tab")?);
 	let group = Str::new(required_convar_argument(object, "group")?);
 	let label = Str::new(required_convar_argument(object, "label")?);
 	let description = Str::new(required_convar_argument(object, "description")?);
@@ -1758,55 +1757,57 @@ fn declaration_ui(
 						"extension convar ui option must be an object",
 					)
 				})?;
-				Ok(DynamicUiOption {
-					value:       Str::new(required_convar_argument(option, "value")?),
-					label:       Str::new(required_convar_argument(option, "label")?),
-					description: option
+				Ok((
+					Str::new(required_convar_argument(option, "value")?),
+					Str::new(required_convar_argument(option, "label")?),
+					option
 						.get("description")
 						.and_then(Value::as_str)
 						.map_or_else(Str::default, Str::new),
-				})
+				))
 			})
 			.collect::<Result<Vec<_>, ControlProtocolError>>()
 	})?;
-	if options.iter().enumerate().any(|(index, option)| {
-		option.label.trim().is_empty()
-			|| options[..index]
-				.iter()
-				.any(|previous| previous.value == option.value)
-	}) {
+	if tab.trim().is_empty()
+		|| group.trim().is_empty()
+		|| label.trim().is_empty()
+		|| label == convar
+		|| label.contains("::")
+		|| options.iter().enumerate().any(|(index, option)| {
+			option.1.trim().is_empty()
+				|| options[..index]
+					.iter()
+					.any(|previous| previous.0 == option.0)
+		}) {
 		return Err(ControlProtocolError::new(
 			"InvalidConvarDeclaration",
-			"extension convar ui options require non-empty labels and unique values",
+			"extension convar ui metadata requires a non-technical label and unique option values",
 		));
 	}
-	let widget = if options.is_empty() {
-		if ty.kind == ValueKind::List {
-			return Err(ControlProtocolError::new(
-				"InvalidConvarDeclaration",
-				"list convar ui metadata requires finite options",
-			));
-		}
-		DynamicUiWidget::Auto
-	} else if ty.kind == ValueKind::List {
-		DynamicUiWidget::MultiSelect {
-			options,
-			ordered: object
-				.get("ordered")
-				.and_then(Value::as_bool)
-				.unwrap_or(false),
-		}
-	} else {
-		DynamicUiWidget::Submenu(options)
-	};
-	let ui = DynamicUiSpec { tab, group, label, description, warning, widget };
-	if !ui.is_valid(convar) {
+	if options.is_empty() && ty.kind == ValueKind::List {
 		return Err(ControlProtocolError::new(
 			"InvalidConvarDeclaration",
-			"extension convar ui metadata requires a curated label and a valid tab section",
+			"list convar ui metadata requires finite options",
 		));
 	}
-	Ok(Some(ui))
+
+	let mut meta = vec![
+		(Str::new("ui.tab"), tab),
+		(Str::new("ui.group"), group),
+		(Str::new("ui.label"), label),
+		(Str::new("ui.description"), description),
+	];
+	if let Some(warning) = warning {
+		meta.push((Str::new("ui.warning"), warning));
+	}
+	for (value, label, description) in options {
+		meta.push((sf!("ui.option.{value}"), label));
+		meta.push((sf!("ui.option.{value}.desc"), description));
+	}
+	if object.get("ordered").and_then(Value::as_bool) == Some(true) {
+		meta.push((Str::new("ui.ordered"), Str::new("true")));
+	}
+	Ok(meta.into())
 }
 
 fn declaration_value(
@@ -1932,21 +1933,19 @@ fn control_convar_error(source: omp_con::ConError) -> ControlProtocolError {
 	}
 }
 
-/// Registry, device, and hook authorities owned by envd.
+/// Device and hook authorities owned by envd.
 pub struct RegistryControlAuthorities {
-	registry: Arc<dyn ControlAuthorityFactory>,
-	devices:  Arc<dyn ControlAuthorityFactory>,
-	hooks:    Arc<dyn ControlAuthorityFactory>,
+	devices: Arc<dyn ControlAuthorityFactory>,
+	hooks:   Arc<dyn ControlAuthorityFactory>,
 }
 
 impl RegistryControlAuthorities {
-	/// Installs every declaration and device-routing owner.
+	/// Installs device-routing and hook owners.
 	pub fn new(
-		registry: Arc<dyn ControlAuthorityFactory>,
 		devices: Arc<dyn ControlAuthorityFactory>,
 		hooks: Arc<dyn ControlAuthorityFactory>,
 	) -> Self {
-		Self { registry, devices, hooks }
+		Self { devices, hooks }
 	}
 }
 
@@ -2064,12 +2063,20 @@ impl ExternalControlAuthorities {
 pub struct HostControlAuthorityFactory {
 	envd:     EnvdControlAuthorities,
 	external: ExternalControlAuthorities,
+	quota:    Option<ControlQuotaRuntime>,
 }
 
 impl HostControlAuthorityFactory {
 	/// Combines envd authorities with the required app/driver hooks.
 	pub fn new(envd: EnvdControlAuthorities, external: ExternalControlAuthorities) -> Self {
-		Self { envd, external }
+		Self { envd, external, quota: None }
+	}
+
+	/// Installs the sole shared quota runtime around every authenticated domain.
+	#[must_use]
+	pub fn with_quota_runtime(mut self, quota: ControlQuotaRuntime) -> Self {
+		self.quota = Some(quota);
+		self
 	}
 
 	/// Binds every required owner and returns the live disjoint router.
@@ -2088,7 +2095,6 @@ impl HostControlAuthorityFactory {
 		agents: Arc<dyn ControlAuthorityFactory>,
 	) -> Result<Arc<dyn ControlAuthority>, ControlCompositionError> {
 		let factories = [
-			(ControlDomain::Registry, "registry", &self.envd.registry.registry),
 			(ControlDomain::Devices, "devices", &self.envd.registry.devices),
 			(ControlDomain::Hooks, "hooks", &self.envd.registry.hooks),
 			(ControlDomain::Sessions, "sessions", &self.envd.persistence.sessions),
@@ -2106,7 +2112,6 @@ impl HostControlAuthorityFactory {
 			(ControlDomain::Mcp, "mcp", &self.external.mcp),
 		];
 		let mut domains = Vec::<Arc<dyn ControlAuthority>>::with_capacity(factories.len());
-		let mut registry_effect = None;
 		let mut ui_effect = None;
 		let mut telemetry_effect = None;
 		for (domain, name, factory) in factories {
@@ -2114,7 +2119,6 @@ impl HostControlAuthorityFactory {
 				.bind(Arc::clone(&identity))
 				.map_err(|error| error.in_domain(name))?;
 			match domain {
-				ControlDomain::Registry => registry_effect = Some(Arc::clone(&authority)),
 				ControlDomain::Ui => ui_effect = Some(Arc::clone(&authority)),
 				ControlDomain::Telemetry => telemetry_effect = Some(Arc::clone(&authority)),
 				_ => {},
@@ -2124,19 +2128,151 @@ impl HostControlAuthorityFactory {
 		let effect_owner = self
 			.envd
 			.effects
-			.bind(identity)
+			.bind(Arc::clone(&identity))
 			.map_err(|error| error.in_domain("effects"))?;
 		let effect_owner = Arc::new(DomainEffectAuthority {
-			registry:  registry_effect.expect("registry domain was bound"),
 			ui:        ui_effect.expect("UI domain was bound"),
 			telemetry: telemetry_effect.expect("telemetry domain was bound"),
 			fallback:  effect_owner,
 		});
-		Ok(Arc::new(CompositeControlAuthority::new(domains, effect_owner)))
+		let authority: Arc<dyn ControlAuthority> =
+			Arc::new(CompositeControlAuthority::new(domains, effect_owner));
+		Ok(if let Some(quota) = &self.quota {
+			Arc::new(QuotaControlAuthority {
+				inner: authority,
+				owner: HostKey::new(
+					identity.layer.clone(),
+					identity.tier.clone(),
+					identity.extension.clone(),
+				),
+				quota: quota.clone(),
+			})
+		} else {
+			authority
+		})
 	}
 }
+
+struct QuotaControlAuthority {
+	inner: Arc<dyn ControlAuthority>,
+	owner: HostKey,
+	quota: ControlQuotaRuntime,
+}
+
+impl QuotaControlAuthority {
+	fn charge(
+		&self,
+		context: &ControlRequestContext,
+		quota: &str,
+	) -> Result<ChargeOutcome, ControlProtocolError> {
+		let session = context
+			.invocation
+			.as_ref()
+			.map(|authority| authority.session.as_str())
+			.ok_or_else(|| {
+				ControlProtocolError::new(
+					"InvalidPhase",
+					"quota-accounted CONTROL work requires live invocation authority",
+				)
+			})?;
+		self
+			.quota
+			.charge(session, &self.owner, quota, 1)
+			.map_err(quota_protocol_error)
+	}
+}
+
+#[async_trait]
+impl ControlAuthority for QuotaControlAuthority {
+	fn handles(&self, operation: &str) -> bool {
+		self.inner.handles(operation)
+	}
+
+	fn authorize(
+		&self,
+		context: &ControlRequestContext,
+		operation: &str,
+		arguments: &serde_json::Map<String, Value>,
+	) -> Result<(), ControlProtocolError> {
+		self.inner.authorize(context, operation, arguments)
+	}
+
+	async fn request(
+		&self,
+		context: ControlRequestContext,
+		operation: Str,
+		arguments: serde_json::Map<String, Value>,
+	) -> Result<Value, ControlProtocolError> {
+		if let Some(quota) = request_quota(operation.as_str())
+			&& self.charge(&context, quota)? == ChargeOutcome::Dropped
+		{
+			return Ok(Value::Null);
+		}
+		self.inner.request(context, operation, arguments).await
+	}
+
+	async fn effect(
+		&self,
+		context: ControlRequestContext,
+		effect: ControlEffect,
+	) -> Result<(), ControlProtocolError> {
+		let quota = match &effect {
+			ControlEffect::Ui(_) => Some(names::UI_EFFECTS),
+			ControlEffect::Instrument(_) => Some(names::TELEMETRY_CARDINALITY),
+			ControlEffect::Intent(payload) => payload
+				.get("operation")
+				.and_then(Value::as_str)
+				.and_then(request_quota),
+			ControlEffect::Log(_) => None,
+		};
+		if let Some(quota) = quota
+			&& self.charge(&context, quota)? == ChargeOutcome::Dropped
+		{
+			return Ok(());
+		}
+		self.inner.effect(context, effect).await
+	}
+}
+
+fn quota_protocol_error(error: QuotaError) -> ControlProtocolError {
+	match error {
+		QuotaError::Exceeded(exceeded) => {
+			ControlProtocolError::new("QuotaExceeded", "extension CONTROL resource quota was exceeded")
+				.with_details(json!({
+					"quota": exceeded.quota.as_str(),
+					"scope": match exceeded.scope {
+						super::quota::QuotaScope::Extension => "extension",
+						super::quota::QuotaScope::Session => "session",
+					},
+					"receipt": resource_receipt_json(&exceeded.receipt),
+				}))
+		},
+		_ => ControlProtocolError::new(
+			"QuotaUnavailable",
+			"extension CONTROL resource accounting is unavailable",
+		),
+	}
+}
+
+fn resource_receipt_json(receipt: &ResourceReceipt) -> Value {
+	json!({
+		"quotas": receipt.quotas.iter().map(|(name, status)| {
+			(
+				name.to_string(),
+				json!({
+					"limit": status.limit,
+					"used": status.used,
+					"window": status.window.map(|window| window.to_string()),
+				}),
+			)
+		}).collect::<serde_json::Map<_, _>>(),
+		"dropped": receipt.dropped.iter().map(|(name, count)| {
+			(name.to_string(), Value::from(*count))
+		}).collect::<serde_json::Map<_, _>>(),
+	})
+}
+
 struct DomainEffectAuthority {
-	registry:  Arc<dyn ControlAuthority>,
 	ui:        Arc<dyn ControlAuthority>,
 	telemetry: Arc<dyn ControlAuthority>,
 	fallback:  Arc<dyn ControlAuthority>,
@@ -2178,7 +2314,6 @@ impl ControlAuthority for DomainEffectAuthority {
 		effect: ControlEffect,
 	) -> Result<(), ControlProtocolError> {
 		let owner = match &effect {
-			ControlEffect::Registry(_) => &self.registry,
 			ControlEffect::Ui(_) => &self.ui,
 			ControlEffect::Instrument(_) => &self.telemetry,
 			ControlEffect::Intent(_) => &self.fallback,
@@ -2190,7 +2325,6 @@ impl ControlAuthority for DomainEffectAuthority {
 
 #[derive(Clone, Copy)]
 enum ControlDomain {
-	Registry,
 	Devices,
 	Hooks,
 	Sessions,
@@ -2211,7 +2345,6 @@ enum ControlDomain {
 impl ControlDomain {
 	fn handles(self, operation: &str) -> bool {
 		match self {
-			Self::Registry => operation.starts_with("omp.registry."),
 			Self::Devices => operation.starts_with("omp.devices."),
 			Self::Hooks => operation.starts_with("omp.hooks."),
 			Self::Sessions => operation.starts_with("omp.sessions."),
@@ -2392,15 +2525,108 @@ struct JsonControlFrame {
 	body:        serde_json::Map<String, Value>,
 }
 
+struct DispatchProgressState {
+	invocation: Str,
+	sender:     Option<flume::Sender<Value>>,
+	events:     usize,
+	bytes:      usize,
+}
+
+struct DispatchChunkState {
+	invocation: Str,
+	next_index: u64,
+	body:       Vec<u8>,
+}
+
+fn dispatch_frame_invocation_for_identity<'a>(
+	identity: &ControlConnectionIdentity,
+	authority: &'a serde_json::Map<String, Value>,
+) -> Result<&'a str, ControlProtocolError> {
+	let host_generation = wire_u64(authority, "host_generation")?;
+	if host_generation != identity.host_generation {
+		return Err(ControlProtocolError::stale_generation(
+			identity.host_generation,
+			host_generation,
+			"host_generation",
+		));
+	}
+	let session_generation = wire_u64(authority, "session_generation")?;
+	if session_generation != identity.session_generation {
+		return Err(ControlProtocolError::stale_generation(
+			identity.session_generation,
+			session_generation,
+			"session_generation",
+		));
+	}
+	authority
+		.get("invocation")
+		.and_then(Value::as_str)
+		.filter(|invocation| !invocation.is_empty())
+		.ok_or_else(|| ControlProtocolError::malformed("dispatch frame invocation is missing"))
+}
+
+fn checked_progress_bytes(
+	state: &DispatchProgressState,
+	encoded: usize,
+) -> Result<usize, ControlProtocolError> {
+	if state.events >= MAX_DISPATCH_PROGRESS_EVENTS {
+		return Err(ControlProtocolError::new(
+			"progress_overflow",
+			format!("dispatch progress exceeds {MAX_DISPATCH_PROGRESS_EVENTS} events"),
+		));
+	}
+	let bytes = state.bytes.checked_add(encoded).ok_or_else(|| {
+		ControlProtocolError::new("progress_overflow", "dispatch progress byte count overflow")
+	})?;
+	if bytes > MAX_DISPATCH_PROGRESS_BYTES {
+		return Err(ControlProtocolError::new(
+			"progress_overflow",
+			format!("dispatch progress exceeds {MAX_DISPATCH_PROGRESS_BYTES} bytes"),
+		));
+	}
+	Ok(bytes)
+}
+
+fn append_dispatch_result_chunk(
+	state: &mut DispatchChunkState,
+	invocation: &Str,
+	index: u64,
+	data: &[u8],
+) -> Result<(), ControlProtocolError> {
+	if state.invocation.as_str() != invocation.as_str() || state.next_index != index {
+		return Err(ControlProtocolError::new(
+			"result_chunk_order",
+			format!(
+				"dispatch result chunk index {index} does not follow {}",
+				state.next_index
+			),
+		));
+	}
+	let length = state.body.len().checked_add(data.len()).ok_or_else(|| {
+		ControlProtocolError::new("result_too_large", "dispatch result length overflow")
+	})?;
+	if length > MAX_DISPATCH_RESULT_BYTES {
+		return Err(ControlProtocolError::new(
+			"result_too_large",
+			format!("dispatch result exceeds {MAX_DISPATCH_RESULT_BYTES} bytes"),
+		));
+	}
+	state.body.extend_from_slice(data);
+	state.next_index += 1;
+	Ok(())
+}
+
 struct ControlShared {
-	writer:           AsyncMutex<OwnedWriteHalf>,
-	identity:         Arc<ControlConnectionIdentity>,
-	authority:        Arc<dyn ControlAuthority>,
-	router:           Mutex<DispatchRouter>,
-	invocations:      Mutex<BTreeMap<Str, ControlInvocationAuthority>>,
-	dispatch_by_id:   Mutex<BTreeMap<u64, Str>>,
-	child_requests:   Mutex<BTreeMap<u64, AbortHandle>>,
-	next_dispatch_id: AtomicU64,
+	writer:            AsyncMutex<OwnedWriteHalf>,
+	identity:          Arc<ControlConnectionIdentity>,
+	authority:         Arc<dyn ControlAuthority>,
+	router:            Mutex<DispatchRouter>,
+	invocations:       Mutex<BTreeMap<Str, ControlInvocationAuthority>>,
+	dispatch_by_id:    Mutex<BTreeMap<u64, Str>>,
+	dispatch_progress: Mutex<BTreeMap<u64, DispatchProgressState>>,
+	dispatch_chunks:   Mutex<BTreeMap<u64, DispatchChunkState>>,
+	child_requests:    Mutex<BTreeMap<u64, AbortHandle>>,
+	next_dispatch_id:  AtomicU64,
 }
 
 /// Parent-side pump for the dedicated, multiplexed CONTROL descriptor.
@@ -2441,6 +2667,8 @@ impl Drop for LiveDispatchGuard {
 		if queued {
 			self.shared.invocations.lock().remove(&self.invocation);
 			self.shared.dispatch_by_id.lock().remove(&self.id);
+			self.shared.dispatch_progress.lock().remove(&self.id);
+			self.shared.dispatch_chunks.lock().remove(&self.id);
 			return;
 		}
 		if let Ok(runtime) = runtime::Handle::try_current() {
@@ -2544,6 +2772,8 @@ impl ControlRuntime {
 			router: Mutex::new(DispatchRouter::new(host, generation)),
 			invocations: Mutex::new(BTreeMap::new()),
 			dispatch_by_id: Mutex::new(BTreeMap::new()),
+			dispatch_progress: Mutex::new(BTreeMap::new()),
+			dispatch_chunks: Mutex::new(BTreeMap::new()),
 			child_requests: Mutex::new(BTreeMap::new()),
 			next_dispatch_id: AtomicU64::new(1),
 		});
@@ -2555,6 +2785,10 @@ impl ControlRuntime {
 		loop {
 			let Some(frame) = read_json_control_frame(&mut self.reader).await? else {
 				self.shared.router.lock().disconnect();
+				self.shared.invocations.lock().clear();
+				self.shared.dispatch_by_id.lock().clear();
+				self.shared.dispatch_progress.lock().clear();
+				self.shared.dispatch_chunks.lock().clear();
 				for (_, request) in mem::take(&mut *self.shared.child_requests.lock()) {
 					request.abort();
 				}
@@ -2563,12 +2797,9 @@ impl ControlRuntime {
 			match frame.kind.as_str() {
 				"Request" => self.accept_request(frame).await?,
 				"CancelRequest" => self.accept_request_cancel(frame)?,
+				"DispatchProgress" => self.accept_dispatch_progress(frame)?,
+				"DispatchResultChunk" => self.accept_dispatch_result_chunk(frame)?,
 				"DispatchResponse" => self.accept_dispatch_response(frame).await?,
-				"Registry" => {
-					self
-						.accept_effect(frame, ControlEffectKind::Registry)
-						.await?
-				},
 				"IntentEffect" => {
 					if let Err(error) = self.accept_effect(frame, ControlEffectKind::Intent).await {
 						tracing::warn!(%error, "extension intent effect was rejected");
@@ -2669,7 +2900,6 @@ impl ControlRuntime {
 				ControlProtocolError::malformed(format!("{field} payload is missing"))
 			})?;
 		let effect = match kind {
-			ControlEffectKind::Registry => ControlEffect::Registry(payload),
 			ControlEffectKind::Intent => ControlEffect::Intent(payload),
 			ControlEffectKind::Ui => ControlEffect::Ui(payload),
 			ControlEffectKind::Log => ControlEffect::Log(payload),
@@ -2679,9 +2909,174 @@ impl ControlRuntime {
 		Ok(())
 	}
 
+	fn dispatch_frame_invocation(
+		&self,
+		correlation: u64,
+		body: &serde_json::Map<String, Value>,
+	) -> Result<Str, ControlProtocolError> {
+		let authority = body
+			.get("authority")
+			.and_then(Value::as_object)
+			.ok_or_else(|| ControlProtocolError::malformed("dispatch frame authority is missing"))?;
+		let invocation =
+			dispatch_frame_invocation_for_identity(&self.shared.identity, authority)?;
+		let expected = self
+			.shared
+			.dispatch_by_id
+			.lock()
+			.get(&correlation)
+			.cloned()
+			.ok_or_else(|| {
+				ControlProtocolError::new(
+					"stale_correlation",
+					format!("unknown dispatch frame correlation {correlation}"),
+				)
+			})?;
+		if invocation != expected.as_str() {
+			return Err(ControlProtocolError::new(
+				"stale_invocation",
+				format!(
+					"dispatch frame invocation {invocation} does not own correlation {correlation}"
+				),
+			));
+		}
+		Ok(expected)
+	}
+
+	fn accept_dispatch_progress(&self, mut frame: JsonControlFrame) -> Result<(), ControlRuntimeError> {
+		let Some(correlation) = frame.correlation.filter(|id| *id != 0) else {
+			return Err(
+				ControlProtocolError::malformed("dispatch progress has no correlation").into(),
+			);
+		};
+		let encoded = serde_json::to_vec(&frame.body)?;
+		if encoded.len() > MAX_DISPATCH_PROGRESS_FRAME_BYTES {
+			return Err(
+				ControlProtocolError::new(
+					"progress_too_large",
+					format!(
+						"dispatch progress is {} bytes; limit is {MAX_DISPATCH_PROGRESS_FRAME_BYTES}",
+						encoded.len()
+					),
+				)
+				.into(),
+			);
+		}
+		let invocation = self.dispatch_frame_invocation(correlation, &frame.body)?;
+		let update = frame
+			.body
+			.remove("update")
+			.ok_or_else(|| ControlProtocolError::malformed("dispatch progress update is missing"))?;
+		if frame.body.len() != 1 || !frame.body.contains_key("authority") {
+			return Err(
+				ControlProtocolError::malformed("dispatch progress has unexpected fields").into(),
+			);
+		}
+		let mut progress = self.shared.dispatch_progress.lock();
+		let state = progress.get_mut(&correlation).ok_or_else(|| {
+			ControlProtocolError::new(
+				"progress_unhandled",
+				format!("dispatch {correlation} has no progress owner"),
+			)
+		})?;
+		if state.invocation != invocation {
+			return Err(ControlProtocolError::new(
+				"stale_invocation",
+				"dispatch progress state belongs to another invocation",
+			)
+			.into());
+		}
+		let bytes = checked_progress_bytes(state, encoded.len())?;
+		let sender = state.sender.as_ref().ok_or_else(|| {
+			ControlProtocolError::new(
+				"progress_unhandled",
+				format!("dispatch {correlation} did not install a progress sink"),
+			)
+		})?;
+		sender.try_send(update).map_err(|error| {
+			ControlProtocolError::new(
+				"progress_overflow",
+				format!("dispatch progress owner rejected an update: {error}"),
+			)
+		})?;
+		state.events += 1;
+		state.bytes = bytes;
+		Ok(())
+	}
+
+	fn accept_dispatch_result_chunk(
+		&self,
+		mut frame: JsonControlFrame,
+	) -> Result<(), ControlRuntimeError> {
+		let Some(correlation) = frame.correlation.filter(|id| *id != 0) else {
+			return Err(
+				ControlProtocolError::malformed("dispatch result chunk has no correlation").into(),
+			);
+		};
+		let invocation = self.dispatch_frame_invocation(correlation, &frame.body)?;
+		let index = frame
+			.body
+			.remove("index")
+			.and_then(|value| value.as_u64())
+			.ok_or_else(|| ControlProtocolError::malformed("dispatch chunk index is missing"))?;
+		let encoded = frame
+			.body
+			.remove("data")
+			.and_then(|value| value.as_object().cloned())
+			.and_then(|mut value| {
+				(value.len() == 1)
+					.then(|| value.remove("$bytes"))
+					.flatten()
+					.and_then(|value| value.as_str().map(ToOwned::to_owned))
+			})
+			.ok_or_else(|| ControlProtocolError::malformed("dispatch chunk data is malformed"))?;
+		if frame.body.len() != 1 || !frame.body.contains_key("authority") {
+			return Err(
+				ControlProtocolError::malformed("dispatch chunk has unexpected fields").into(),
+			);
+		}
+		let maximum_encoded = MAX_DISPATCH_RESULT_CHUNK_BYTES
+			.saturating_add(2)
+			.saturating_div(3)
+			.saturating_mul(4);
+		if encoded.len() > maximum_encoded {
+			return Err(
+				ControlProtocolError::new(
+					"result_chunk_too_large",
+					"dispatch result chunk encoding exceeds its bound",
+				)
+				.into(),
+			);
+		}
+		let data = omp_core::base64::decode(encoded.as_bytes())
+			.into_vec()
+			.map_err(|_| ControlProtocolError::malformed("dispatch chunk base64 is invalid"))?;
+		if data.len() > MAX_DISPATCH_RESULT_CHUNK_BYTES {
+			return Err(
+				ControlProtocolError::new(
+					"result_chunk_too_large",
+					format!(
+						"dispatch result chunk is {} bytes; limit is \
+						 {MAX_DISPATCH_RESULT_CHUNK_BYTES}",
+						data.len()
+					),
+				)
+				.into(),
+			);
+		}
+		let mut chunks = self.shared.dispatch_chunks.lock();
+		let state = chunks.entry(correlation).or_insert_with(|| DispatchChunkState {
+			invocation: invocation.clone(),
+			next_index: 0,
+			body: Vec::new(),
+		});
+		append_dispatch_result_chunk(state, &invocation, index, &data)?;
+		Ok(())
+	}
+
 	async fn accept_dispatch_response(
 		&self,
-		frame: JsonControlFrame,
+		mut frame: JsonControlFrame,
 	) -> Result<(), ControlRuntimeError> {
 		let Some(correlation) = frame.correlation.filter(|id| *id != 0) else {
 			return Err(
@@ -2699,7 +3094,55 @@ impl ControlRuntime {
 					format!("unknown dispatch response correlation {correlation}"),
 				)
 			})?;
-		let payload = serde_json::to_vec(&Value::Object(frame.body))?;
+		let body = if let Some(chunked) = frame.body.remove("chunked") {
+			if !frame.body.is_empty() {
+				return Err(
+					ControlProtocolError::malformed(
+						"chunked dispatch response has unexpected fields",
+					)
+					.into(),
+				);
+			}
+			let chunked = chunked.as_object().ok_or_else(|| {
+				ControlProtocolError::malformed("chunked dispatch response metadata is malformed")
+			})?;
+			let expected_chunks = wire_u64(chunked, "chunks")?;
+			let expected_bytes = wire_u64(chunked, "bytes")?;
+			let state = self
+				.shared
+				.dispatch_chunks
+				.lock()
+				.remove(&correlation)
+				.ok_or_else(|| {
+					ControlProtocolError::malformed("chunked dispatch response has no chunks")
+				})?;
+			if state.invocation != invocation
+				|| state.next_index != expected_chunks
+				|| u64::try_from(state.body.len()).ok() != Some(expected_bytes)
+			{
+				return Err(
+					ControlProtocolError::new(
+						"result_chunk_mismatch",
+						"chunked dispatch response metadata does not match received bytes",
+					)
+					.into(),
+				);
+			}
+			serde_json::from_slice::<serde_json::Map<String, Value>>(&state.body)?
+		} else {
+			if self.shared.dispatch_chunks.lock().remove(&correlation).is_some() {
+				return Err(
+					ControlProtocolError::new(
+						"result_chunk_incomplete",
+						"dispatch response omitted chunk completion metadata",
+					)
+					.into(),
+				);
+			}
+			frame.body
+		};
+		self.shared.dispatch_progress.lock().remove(&correlation);
+		let payload = serde_json::to_vec(&Value::Object(body))?;
 		let extension = self.shared.identity.extension.clone();
 		let next = self.shared.router.lock().complete(
 			extension.as_str(),
@@ -2719,7 +3162,6 @@ impl ControlRuntime {
 
 #[derive(Clone, Copy)]
 enum ControlEffectKind {
-	Registry,
 	Intent,
 	Ui,
 	Log,
@@ -2729,7 +3171,6 @@ enum ControlEffectKind {
 impl ControlEffectKind {
 	const fn field(self) -> &'static str {
 		match self {
-			Self::Registry => "registry",
 			Self::Intent => "effect",
 			Self::Ui => "effect",
 			Self::Log => "log",
@@ -2799,9 +3240,50 @@ impl ControlHandle {
 		.await
 	}
 
+	/// Pushes the current daemon-owned quota receipt into the child cache.
+	pub async fn install_resource_receipt(
+		&self,
+		receipt: &ResourceReceipt,
+	) -> Result<(), ControlRuntimeError> {
+		let mut body = serde_json::Map::new();
+		body.insert(
+			String::from("host_generation"),
+			Value::from(self.shared.identity.host_generation),
+		);
+		body.insert(
+			String::from("session_generation"),
+			Value::from(self.shared.identity.session_generation),
+		);
+		body.insert(String::from("receipt"), resource_receipt_json(receipt));
+		write_json_control_frame(&self.shared, JsonControlFrame {
+			kind: String::from("ResourceReceipt"),
+			correlation: None,
+			body,
+		})
+		.await
+	}
+
 	/// Dispatches one callback and waits for its exactly correlated Python
 	/// reply.
 	pub async fn dispatch(&self, dispatch: ControlDispatch) -> Result<Value, ControlRuntimeError> {
+		self.dispatch_inner(dispatch, None).await
+	}
+
+	/// Dispatches one callback while forwarding bounded correlated progress to
+	/// the invocation owner before returning its terminal reply.
+	pub async fn dispatch_with_progress(
+		&self,
+		dispatch: ControlDispatch,
+		progress: flume::Sender<Value>,
+	) -> Result<Value, ControlRuntimeError> {
+		self.dispatch_inner(dispatch, Some(progress)).await
+	}
+
+	async fn dispatch_inner(
+		&self,
+		dispatch: ControlDispatch,
+		progress: Option<flume::Sender<Value>>,
+	) -> Result<Value, ControlRuntimeError> {
 		if !dispatch.operation.as_str().starts_with("omp.") {
 			return Err(
 				ControlProtocolError::new(
@@ -2864,6 +3346,12 @@ impl ControlHandle {
 			.dispatch_by_id
 			.lock()
 			.insert(id, invocation.clone());
+		self.shared.dispatch_progress.lock().insert(id, DispatchProgressState {
+			invocation: invocation.clone(),
+			sender: progress,
+			events: 0,
+			bytes: 0,
+		});
 		let mut guard = LiveDispatchGuard {
 			shared: Arc::clone(&self.shared),
 			id,
@@ -2874,6 +3362,8 @@ impl ControlHandle {
 			if let Err(error) = write_dispatch_request(&self.shared, ready).await {
 				self.shared.invocations.lock().remove(&invocation);
 				self.shared.dispatch_by_id.lock().remove(&id);
+				self.shared.dispatch_progress.lock().remove(&id);
+				self.shared.dispatch_chunks.lock().remove(&id);
 				guard.disarm();
 				let _ = self.shared.router.lock().complete(
 					self.shared.identity.extension.as_str(),
@@ -2886,7 +3376,16 @@ impl ControlHandle {
 		}
 		let response = pending.response().await;
 		guard.disarm();
-		let payload = response?;
+		let payload = match response {
+			Ok(payload) => payload,
+			Err(error) => {
+				self.shared.invocations.lock().remove(&invocation);
+				self.shared.dispatch_by_id.lock().remove(&id);
+				self.shared.dispatch_progress.lock().remove(&id);
+				self.shared.dispatch_chunks.lock().remove(&id);
+				return Err(error.into());
+			},
+		};
 		let body: Value = serde_json::from_slice(payload.as_ref())?;
 		let object = body
 			.as_object()
@@ -3180,7 +3679,10 @@ async fn write_json_control_frame(
 
 #[cfg(test)]
 mod convar_tests {
-	use std::{collections::BTreeSet, sync::Arc};
+	use std::{
+		collections::{BTreeMap, BTreeSet},
+		sync::Arc,
+	};
 
 	use omp_con::{Ctx, Origin, Value as ConValue};
 	use omp_core::{Principal, sf};
@@ -3189,6 +3691,12 @@ mod convar_tests {
 	use super::{
 		CompositeControlAuthority, ControlAuthority, ControlAuthorityFactory,
 		ControlConnectionIdentity, ControlRequestContext, ConvarControlFactory,
+		DispatchChunkState, DispatchProgressState, MAX_DISPATCH_PROGRESS_BYTES,
+		MAX_DISPATCH_PROGRESS_EVENTS, append_dispatch_result_chunk, checked_progress_bytes,
+		dispatch_frame_invocation_for_identity, quota_protocol_error,
+	};
+	use crate::exthost::{
+		QuotaError, QuotaExceeded, QuotaScope, QuotaStatus, ResourceReceipt,
 	};
 
 	fn identity() -> Arc<ControlConnectionIdentity> {
@@ -3217,6 +3725,73 @@ mod convar_tests {
 		Arc::new(CompositeControlAuthority::new([Arc::clone(&convars)], convars))
 	}
 
+	#[test]
+	fn dispatch_progress_is_generation_fenced_and_bounded() {
+		let identity = identity();
+		let stale = json!({
+			"host_generation": 2,
+			"session_generation": 1,
+			"invocation": "call",
+		});
+		let error = dispatch_frame_invocation_for_identity(
+			&identity,
+			stale.as_object().expect("authority"),
+		)
+		.expect_err("stale generation");
+		assert_eq!(error.code.as_str(), "StaleGeneration");
+
+		let state = DispatchProgressState {
+			invocation: sf!("call"),
+			sender: None,
+			events: MAX_DISPATCH_PROGRESS_EVENTS,
+			bytes: 0,
+		};
+		let error = checked_progress_bytes(&state, 1).expect_err("progress count overflow");
+		assert_eq!(error.code.as_str(), "progress_overflow");
+		let oversized = DispatchProgressState {
+			invocation: sf!("call"),
+			sender: None,
+			events: 0,
+			bytes: MAX_DISPATCH_PROGRESS_BYTES,
+		};
+		let error = checked_progress_bytes(&oversized, 1).expect_err("progress byte overflow");
+		assert_eq!(error.code.as_str(), "progress_overflow");
+	}
+
+	#[test]
+	fn dispatch_result_chunks_require_contiguous_order() {
+		let invocation = sf!("call");
+		let mut state = DispatchChunkState {
+			invocation: invocation.clone(),
+			next_index: 0,
+			body: Vec::new(),
+		};
+		append_dispatch_result_chunk(&mut state, &invocation, 0, b"one")
+			.expect("first result chunk");
+		let error = append_dispatch_result_chunk(&mut state, &invocation, 2, b"three")
+			.expect_err("out-of-order result chunk");
+		assert_eq!(error.code.as_str(), "result_chunk_order");
+		assert_eq!(state.body, b"one");
+	}
+
+	#[test]
+	fn hard_quota_error_carries_the_current_receipt() {
+		let receipt = ResourceReceipt {
+			quotas: BTreeMap::from([(
+				sf!("ui.updates"),
+				QuotaStatus { limit: 3, used: 3, window: None },
+			)]),
+			dropped: BTreeMap::from([(sf!("ui.updates"), 1)]),
+		};
+		let error = quota_protocol_error(QuotaError::Exceeded(QuotaExceeded {
+			quota: sf!("ui.updates"),
+			scope: QuotaScope::Extension,
+			receipt,
+		}));
+		assert_eq!(error.details["receipt"]["quotas"]["ui.updates"]["used"], 3);
+		assert_eq!(error.details["receipt"]["dropped"]["ui.updates"], 1);
+	}
+
 	#[tokio::test]
 	async fn extension_declarations_are_qualified_queryable_and_observable() {
 		let ctx = Arc::new(Ctx::new());
@@ -3233,10 +3808,20 @@ mod convar_tests {
 					"default": false,
 					"description": "Enable demo behavior",
 					"ui": {
-						"tab": "tools",
-						"group": "Extensions",
+						"tab": "extension-tools",
+						"group": "Extension Controls",
 						"label": "Demo Behavior",
 						"description": "Enable demo behavior",
+						"warning": "Changes take effect immediately",
+						"options": [
+							{
+								"value": "false",
+								"label": "Disabled",
+								"description": "Keep demo behavior disabled",
+							},
+							{"value": "true", "label": "Enabled"},
+						],
+						"ordered": true,
 					},
 				})
 				.as_object()
@@ -3247,11 +3832,27 @@ mod convar_tests {
 			.expect("declare convar");
 		assert_eq!(declared["name"], "ext::dev.example.demo::enabled");
 		assert_eq!(ctx.get("ext::dev.example.demo::enabled"), Some(ConValue::Bool(false)),);
+		let spec = ctx
+			.dynamic_var_spec("ext::dev.example.demo::enabled")
+			.expect("dynamic declaration");
 		assert_eq!(
-			ctx.dynamic_var_spec("ext::dev.example.demo::enabled")
-				.and_then(|spec| spec.ui)
-				.map(|ui| ui.label),
-			Some(sf!("Demo Behavior")),
+			spec
+				.meta
+				.iter()
+				.map(|(key, value)| (key.as_str(), value.as_str()))
+				.collect::<Vec<_>>(),
+			vec![
+				("ui.tab", "extension-tools"),
+				("ui.group", "Extension Controls"),
+				("ui.label", "Demo Behavior"),
+				("ui.description", "Enable demo behavior"),
+				("ui.warning", "Changes take effect immediately"),
+				("ui.option.false", "Disabled"),
+				("ui.option.false.desc", "Keep demo behavior disabled"),
+				("ui.option.true", "Enabled"),
+				("ui.option.true.desc", ""),
+				("ui.ordered", "true"),
+			]
 		);
 
 		let observed = authority.request(

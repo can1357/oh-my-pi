@@ -9,14 +9,14 @@ use std::{
 
 use futures::StreamExt as _;
 use omp_agent::{DispatchPolicy, Inference, Kernel, StaticPrompt};
+use omp_ai::{
+	Artifact, ArtifactBody, BlockKind, ChatEvent, ChatRequest, ChatStream, Completion,
+	ExecutionReceipt, FinishReason, ProviderId, RequestId, ResponseMeta, RouteId, Usage,
+};
 use omp_core::Str;
 use omp_driver::{
 	headless::kernel::{KernelOptions, SessionHome},
 	sessions::SessionRegistry,
-};
-use omp_inference::{
-	Artifact, ArtifactBody, BlockKind, ChatEvent, ChatRequest, ChatStream, Completion,
-	ExecutionReceipt, FinishReason, ProviderId, RequestId, ResponseMeta, RouteId, Usage,
 };
 use omp_journal::blob::BlobStore;
 use omp_session::{ComponentRegistry, Session};
@@ -39,7 +39,7 @@ impl Inference for ScriptedInference {
 	fn chat(
 		&mut self,
 		_request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		let script = self
 			.scripts
 			.get_mut()
@@ -49,7 +49,7 @@ impl Inference for ScriptedInference {
 		ready(Ok(match script {
 			Script::Pending => {
 				let events = futures::stream::once(ready(Ok(started())))
-					.chain(futures::stream::pending::<Result<ChatEvent, omp_inference::Error>>());
+					.chain(futures::stream::pending::<Result<ChatEvent, omp_ai::Error>>());
 				ChatStream::ordinary(Box::pin(events))
 			},
 			Script::Text(text) => {
@@ -303,7 +303,7 @@ async fn content_block_prompts_journal_text_and_image_attachments() {
 	assert_eq!(
 		user.content.as_deref(),
 		Some("describe this\n\nembedded notes\n\nspec.md"),
-		"text, embedded text resources, and resource links join as pi does"
+		"text, embedded text resources, and resource links join in order"
 	);
 	let attachments = match user.prop(&omp_dom::PropKey::Known(omp_dom::PropId::Data)) {
 		Some(omp_dom::Value::Json(raw)) => {
@@ -448,8 +448,8 @@ async fn new_load_and_resume_switch_the_authoritative_durable_session() {
 	);
 }
 
-/// pi `listSessions` / `unstable_forkSession`: `session/list` pages the
-/// stored journals (newest first, offset cursor, `cwd` scoping) and
+/// `session/list` pages stored journals (newest first, offset cursor,
+/// `cwd` scoping) and
 /// `session/fork` copies a stored session into a fresh one that becomes the
 /// authority, with both capabilities advertised by `initialize`.
 #[tokio::test]

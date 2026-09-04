@@ -6,7 +6,9 @@ use std::{
 };
 
 use futures::future::join_all;
-use omp_core::{Str, sf};
+#[cfg(test)]
+use omp_tool::Severity;
+use omp_tool::{Diag, DiagKind};
 use serde::Deserialize;
 use url::Url;
 
@@ -57,8 +59,8 @@ pub(super) async fn render<C: HttpClient + Sync>(
 			return Ok(Some(error_result(&format!("Failed to fetch item {item_id}"))));
 		};
 		let content = render_item(client, &item).await;
-		let note = format!("Fetched HN item {item_id} with top-level comments (depth 2)");
-		return Ok(Some(markdown_result(&content, note)));
+		let provenance = format!("Fetched HN item {item_id} with top-level comments (depth 2)");
+		return Ok(Some(markdown_result(&content, provenance)));
 	}
 
 	let (endpoint, title, success_note, fetch_error, parse_error) = match url.path() {
@@ -396,16 +398,20 @@ fn item_id_text(item: &HnItem) -> String {
 		.map_or_else(|| "undefined".to_owned(), |id| id.to_string())
 }
 
-fn markdown_result(content: &str, note: String) -> RenderResult {
+fn markdown_result(content: &str, provenance: String) -> RenderResult {
 	let mut result = RenderResult::markdown(content, "hackernews");
-	result.notes.insert(0, Str::new(note));
+	result
+		.diags
+		.insert(0, Diag::info(DiagKind::Provenance, provenance));
 	result
 }
 
 fn error_result(message: &str) -> RenderResult {
 	let content = format!("# Error fetching Hacker News content\n\n{message}");
 	let mut result = RenderResult::markdown(&content, "hackernews");
-	result.notes.insert(0, sf!("Error: {message}"));
+	result
+		.diags
+		.insert(0, Diag::warn(DiagKind::FetchFailed, message));
 	result
 }
 
@@ -534,10 +540,9 @@ mod tests {
 			 [2]\nParent *thought*\n\nParent *thought*\n\n  **bob** (1970-01-01)\n  Child \
 			 `code`\n\n  **carol** (1970-01-01)\n  Later"
 		);
-		assert_eq!(
-			result.notes.first().map(Str::as_str),
-			Some("Fetched HN item 42 with top-level comments (depth 2)")
-		);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 		assert!(client.requested("/item/119.json"));
 		assert!(!client.requested("/item/120.json"));
 		assert!(client.requested("/item/209.json"));
@@ -577,10 +582,9 @@ mod tests {
 			 https://news.ycombinator.com/item?id=3\n\n2. **Fourth**\n   0 points by dog | \
 			 1970-01-01\n   https://news.ycombinator.com/item?id=4"
 		);
-		assert_eq!(
-			result.notes.first().map(Str::as_str),
-			Some("Fetched top 20 stories from HN front page")
-		);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 		assert!(client.requested("/item/20.json"));
 		assert!(!client.requested("/item/21.json"));
 		assert!(!client.requested("/item/22.json"));
@@ -600,10 +604,9 @@ mod tests {
 			result.content.as_str(),
 			"# undefined\n\n**Posted by:** reader | **Score:** 0 | **Time:** 1970-01-01\n\nReply <ok>"
 		);
-		assert_eq!(
-			result.notes.first().map(Str::as_str),
-			Some("Fetched HN item 6 with top-level comments (depth 2)")
-		);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 	}
 
 	#[tokio::test]
@@ -637,7 +640,9 @@ mod tests {
 			result.content.as_str(),
 			"# Error fetching Hacker News content\n\nFailed to fetch item 9"
 		);
-		assert_eq!(result.notes.first().map(Str::as_str), Some("Error: Failed to fetch item 9"));
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::FetchFailed));
+		assert_eq!(result.diags[0].severity, Severity::Warn);
 
 		let malformed_listing = FakeClient::new([(
 			format!("{API_BASE}/newstories.json"),
@@ -652,7 +657,9 @@ mod tests {
 			result.content.as_str(),
 			"# Error fetching Hacker News content\n\nFailed to parse new stories"
 		);
-		assert_eq!(result.notes.first().map(Str::as_str), Some("Error: Failed to parse new stories"));
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::FetchFailed));
+		assert_eq!(result.diags[0].severity, Severity::Warn);
 
 		let missing_fields = FakeClient::new([(item_url(10), "{}".to_owned())]);
 		let result =

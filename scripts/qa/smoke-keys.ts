@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// PTY proof for the chat key semantics: pi's Escape ladder, double-Esc
+// PTY proof for the chat key semantics: the Escape ladder, double-Esc
 // selector, prefix-mode Esc, Ctrl+C clear/quit, dequeue, clipboard chords,
 // Alt+A / Ctrl+S overlays, space-hold push-to-talk, and the hard-abort exit.
 // No provider is contacted: every step is observer-local.

@@ -242,9 +242,8 @@ impl Charset {
 
 	/// Status-band chrome: `(left cap, segment separator, right cap)`.
 	///
-	/// Mirrors pi's symbol presets: the thin powerline separator between
-	/// segments and the solid powerline cap closing the group; only the
-	/// Nerd Font tier has a soft opening cap.
+	/// Uses a thin powerline separator between segments and a solid powerline
+	/// cap closing the group; only the Nerd Font tier has a soft opening cap.
 	pub const fn status_band(self) -> (&'static str, &'static str, &'static str) {
 		match self {
 			Self::Ascii => ("", ">", ">"),
@@ -281,9 +280,8 @@ impl Charset {
 		}
 	}
 
-	/// Tool-status spinner frames for this tier: pi's `status` spinner set,
-	/// advancing every 80 ms (`SPINNER_GLYPH_ADVANCE_MS`) on the shared clock
-	/// so every live tool card shows the same glyph at the same instant.
+	/// Tool-status spinner frames for this tier, advancing every 80ms on the
+	/// shared clock so every live tool card shows the same glyph at once.
 	pub const fn status_spinner(self) -> Frames {
 		const STEP: Duration = Duration::from_millis(80);
 		match self {
@@ -309,8 +307,8 @@ impl Charset {
 		}
 	}
 
-	/// Starburst facets for the breathing thinking pulse (pi
-	/// `THINKING_DOTS_FRAMES`): eight single-cell glyphs cycled in place.
+	/// Starburst facets for the breathing thinking pulse: eight single-cell
+	/// glyphs cycled in place.
 	pub const fn starburst(self) -> &'static [&'static str; 8] {
 		match self {
 			Self::Ascii => &["*", "+", "x", "#", "*", "+", "x", "#"],
@@ -893,7 +891,11 @@ impl UiContext {
 				|| Theme::for_appearance(self.appearance),
 				|palette| palette.for_appearance(self.appearance),
 			);
-		let theme = if indexed { resolved.quantized_256() } else { resolved };
+		let theme = if indexed {
+			resolved.quantized_256()
+		} else {
+			resolved
+		};
 		let changed = self.theme != theme || self.palettes != palettes;
 		self.theme = theme;
 		self.palettes = palettes;

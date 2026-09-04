@@ -3,11 +3,9 @@
 use std::{collections::BTreeMap, sync, time::SystemTime};
 
 use miette::{IntoDiagnostic as _, miette};
+use omp_ai::account::{AccountPool, AccountSelectionRequest, AccountStateStore, RotationPolicy};
 use omp_catalog::{ModelKey, snapshot::Catalog};
 use omp_core::{Str, fast_hash64};
-use omp_inference::account::{
-	AccountPool, AccountSelectionRequest, AccountStateStore, RotationPolicy,
-};
 use serde_json::json;
 
 use crate::{

@@ -9,18 +9,16 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_catalog::{DiscoveredModel, ModelSpec, OperationBits, ProviderId, snapshot::Catalog};
-use omp_core::Str;
-use omp_inference::{
+use omp_ai::{
 	Client,
 	call::{CallMeta, DiscoveryRequest, Target},
-	discovery::{
-		DiscoveryCacheKey, DiscoveryStore, ProviderDiscoveryState, ProviderLifecycle,
-	},
+	discovery::{DiscoveryCacheKey, DiscoveryStore, ProviderDiscoveryState, ProviderLifecycle},
 	id::RequestId,
 	receipt::ExecutionBudget,
 	router,
 };
+use omp_catalog::{DiscoveredModel, ModelSpec, OperationBits, ProviderId, snapshot::Catalog};
+use omp_core::Str;
 
 use crate::cli::{LaunchExtensions, ModelRole, ModelsArgs, ModelsCommand};
 
@@ -79,8 +77,8 @@ async fn refresh() -> miette::Result<()> {
 		.try_into()
 		.map_err(|_| miette!("system clock exceeds discovery timestamp range"))?;
 	store.prune_expired(now_ms).into_diagnostic()?;
-	let loaded_config = omp_driver::discovery::models::load_or_import_legacy(&data_dir)
-		.into_diagnostic()?;
+	let loaded_config =
+		omp_driver::discovery::models::load_or_import_legacy(&data_dir).into_diagnostic()?;
 	let mut refreshed = refresh_local_providers(
 		&store,
 		catalog,
@@ -163,7 +161,8 @@ async fn refresh_local_providers(
 	config: Option<&omp_driver::discovery::models::ModelsConfig>,
 	now_ms: u64,
 ) -> miette::Result<usize> {
-	let probes = omp_driver::discovery::models::discovery_probes(config, catalog).into_diagnostic()?;
+	let probes =
+		omp_driver::discovery::models::discovery_probes(config, catalog).into_diagnostic()?;
 	let http = omp_envd::model_discovery::ModelDiscoveryHttpHost::new();
 	let mut refreshed = 0_usize;
 	for probe in probes {
@@ -184,10 +183,7 @@ async fn refresh_local_providers(
 			.await
 		{
 			Ok(mut rows) => {
-				omp_driver::discovery::models::apply_runtime_discovery_overrides(
-					&probe,
-					&mut rows,
-				);
+				omp_driver::discovery::models::apply_runtime_discovery_overrides(&probe, &mut rows);
 				for row in &mut rows {
 					row.observed_at_ms = Some(now_ms);
 				}
@@ -208,10 +204,7 @@ async fn refresh_local_providers(
 						retry_at_ms:    Some(now_ms.saturating_add(5 * 60 * 1000)),
 					})
 					.into_diagnostic()?;
-				eprintln!(
-					"warning: local model discovery failed for {}: {error}",
-					provider.as_str()
-				);
+				eprintln!("warning: local model discovery failed for {}: {error}", provider.as_str());
 			},
 		}
 	}

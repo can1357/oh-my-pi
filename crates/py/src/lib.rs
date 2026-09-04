@@ -111,7 +111,7 @@ pub enum SitePolicy {
 	PthFilesAndSiteCustomize,
 }
 
-/// Configures the isolated embedded CPython runtime and its authorized-site
+/// Configures the isolated embedded `CPython` runtime and its authorized-site
 /// policy. Created by [`Engine::builder`].
 #[derive(Debug, Default)]
 pub struct Builder {
@@ -168,16 +168,15 @@ impl Builder {
 			},
 			None => default_site_packages(),
 		};
-		let site_c = match CString::new(site.as_os_str().as_bytes()) {
-			Ok(site_c) => site_c,
-			Err(_) => {
-				tracing::warn!(
-					site.path = %site.display(),
-					reason = "interior_nul",
-					"Python engine initialization rejected"
-				);
-				return Err(InitError::InvalidPath(site));
-			},
+		let site_c = if let Ok(site_c) = CString::new(site.as_os_str().as_bytes()) {
+			site_c
+		} else {
+			tracing::warn!(
+				site.path = %site.display(),
+				reason = "interior_nul",
+				"Python engine initialization rejected"
+			);
+			return Err(InitError::InvalidPath(site));
 		};
 		tracing::debug_span!("python_inittab").in_scope(bindings::register);
 		tracing::debug_span!(
@@ -314,7 +313,7 @@ fn check(status: ffi::PyStatus) {
 
 /// Applies the selected policy only to the configured site directory.
 ///
-/// Initialization failures follow CPython's embedding convention and abort
+/// Initialization failures follow `CPython`'s embedding convention and abort
 /// with its diagnostic, like failures from [`init_python`]. `addsitedir`
 /// deliberately retains standard `.pth` semantics because this directory is
 /// the explicit installation authority selected by the host.

@@ -3,6 +3,9 @@
 use std::fmt::Write as _;
 
 use omp_core::sf;
+#[cfg(test)]
+use omp_tool::Severity;
+use omp_tool::{Diag, DiagKind, Unit};
 use quick_xml::{
 	Reader, XmlVersion,
 	events::{BytesStart, Event},
@@ -53,14 +56,19 @@ pub(super) async fn render<C: HttpClient + Sync>(
 			continue;
 		};
 		let markdown = render_tweet(&tweet);
-		let (content, _) = finalize_output(&markdown);
-		let mut notes = SmallVec::new();
-		notes.push(sf!("Via Nitter: {instance}"));
+		let (content, omitted) = finalize_output(&markdown);
+		let mut diags = vec![Diag::info(DiagKind::Provenance, sf!("Via Nitter: {instance}"))];
+		if omitted != 0 {
+			diags.push(
+				Diag::warn(DiagKind::OutputBounded, "scraper output truncated")
+					.omitted(omitted as u64, Unit::Chars),
+			);
+		}
 		return Ok(Some(RenderResult {
 			content,
 			content_type: Some(sf!("text/markdown")),
 			method: sf!("twitter-nitter"),
-			notes,
+			diags,
 		}));
 	}
 
@@ -68,8 +76,8 @@ pub(super) async fn render<C: HttpClient + Sync>(
 }
 
 fn blocked_result() -> RenderResult {
-	let mut notes = SmallVec::new();
-	notes.push(sf!("X.com blocks bots; Nitter instances unavailable"));
+	let diags =
+		vec![Diag::warn(DiagKind::Fallback, "X.com blocks bots; Nitter instances unavailable")];
 	RenderResult {
 		content: sf!(
 			"Twitter/X blocks automated access. Nitter instances were unavailable.\n\nTry:\n- \
@@ -78,7 +86,7 @@ fn blocked_result() -> RenderResult {
 		),
 		content_type: Some(sf!("text/plain")),
 		method: sf!("twitter-blocked"),
-		notes,
+		diags,
 	}
 }
 
@@ -690,8 +698,9 @@ mod tests {
 		assert_eq!(result.content.as_str(), "# Tweet by OMP (@omp)\n\nHello");
 		assert_eq!(result.method.as_str(), "twitter-nitter");
 		assert_eq!(result.content_type.as_deref(), Some("text/markdown"));
-		assert_eq!(result.notes.len(), 1);
-		assert_eq!(result.notes[0].as_str(), "Via Nitter: nitter.privacyredirect.com");
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 		let requests = client.requests.lock();
 		assert_eq!(requests.len(), 1);
 		assert_eq!(requests[0].as_str(), "https://nitter.privacyredirect.com/omp/status/42");
@@ -731,8 +740,9 @@ mod tests {
 			 Opening the link in a browser\n- Using a different Nitter instance manually\n- Checking \
 			 if the tweet is available via an archive service"
 		);
-		assert_eq!(result.notes.len(), 1);
-		assert_eq!(result.notes[0].as_str(), "X.com blocks bots; Nitter instances unavailable");
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Fallback));
+		assert_eq!(result.diags[0].severity, Severity::Warn);
 		let requests = client.requests.lock();
 		let requests: Vec<&str> = requests.iter().map(Str::as_str).collect();
 		assert_eq!(requests, [

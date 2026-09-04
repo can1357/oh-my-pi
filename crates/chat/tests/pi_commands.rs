@@ -293,12 +293,12 @@ fn settings_command_opens_curated_rows_and_applies_a_human_label_toggle() {
 	assert!(!text.contains("ai_") && !text.contains("cl_") && !text.contains("sv_"), "{text}");
 	assert!(matches!(h.commands.try_recv(), Ok(HostCommand::Overlay { open: true, .. })));
 
-	for character in "hide thinking".chars() {
+	for character in "show thinking".chars() {
 		h.host.key(Key::Char(character)).expect("type");
 	}
 	let frame = h.host.picker_frame().expect("search frame");
 	let text = frame_text(&frame);
-	assert!(text.contains("Hide Thinking Blocks"), "{text}");
+	assert!(text.contains("Show Thinking Blocks"), "{text}");
 	assert!(!text.contains("cl_showthinking"), "{text}");
 	assert_eq!(h.con.get("cl_showthinking"), Some(Value::Bool(true)));
 	h.host.key(Key::Enter).expect("toggle");
@@ -366,7 +366,7 @@ fn ai_model_write_to_an_unlisted_route_replaces_the_badge() {
 	assert!(h.host.model_badge().reasoning);
 	let band = band_row(&h);
 	assert!(band.contains("Listed Model") && band.contains("200K"), "{band}");
-	// pi `model_changed`: a route the picker never listed (custom provider,
+	// A route the picker never listed (custom provider,
 	// direct `provider/model` syntax) still becomes the live badge, so the
 	// gauge, the thinking gate, and the welcome box stop describing the
 	// previous model.
@@ -393,7 +393,7 @@ fn band_marks_subscription_billing_from_the_stored_oauth_account() {
 	h.host.console("ai_model test/model").expect("metered");
 	let band = band_row(&h);
 	assert!(!band.contains("(sub)"), "an api-key provider is metered: {band}");
-	// pi `isUsingOAuth`: a provider served by a stored OAuth credential
+	// A provider served by a stored OAuth credential
 	// bills to its subscription; with no spend the `(sub)` marker alone
 	// shows in the cost chip.
 	h.host.console("ai_model sub/plan").expect("subscribed");

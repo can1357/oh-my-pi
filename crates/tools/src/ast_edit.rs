@@ -14,9 +14,9 @@ use bytes::Bytes;
 use futures::{FutureExt as _, Stream};
 use omp_core::{FastHashMap, FastHashSet, Hash32, Str, sf};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, DocEffects, Effects, Ev,
-	IncomingParams, InterruptWaitError, LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev,
-	Tool, ToolSpec, ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, Diag, DiagKind, DocEffects,
+	Effects, Ev, IncomingParams, InterruptWaitError, LiftedCall, ParamError, Part, PromptCaps,
+	RecordedCall, Rev, Tool, ToolSpec, ToolTerminal, Unit,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -411,17 +411,14 @@ impl Tool for AstEdit {
 					)));
 					return;
 				}
-				let source = match str::from_utf8(&original) {
-					Ok(source) => source,
-					Err(_) => {
-						push_advisory(
-							&mut advisories,
-							&mut advisories_total,
-							file.relative_path,
-							sf!("non-UTF-8 file skipped"),
-						);
-						continue;
-					},
+				let source = if let Ok(source) = str::from_utf8(&original) { source } else {
+					push_advisory(
+						&mut advisories,
+						&mut advisories_total,
+						file.relative_path,
+						sf!("non-UTF-8 file skipped"),
+					);
+					continue;
 				};
 				let (updated, replacements, has_parse_errors) =
 					match omp_ast::ops::rewrite_source_with_parse_status(source, language, rules) {
@@ -477,7 +474,7 @@ impl Tool for AstEdit {
 				return;
 			}
 			if prepared.is_empty() {
-				yield done(Ok(Payload {
+				let payload = Payload {
 					files,
 					advisories,
 					advisories_total,
@@ -488,7 +485,11 @@ impl Tool for AstEdit {
 					total_replacements,
 					recovery_root: None,
 					pending_proposal: None,
-				}));
+				};
+				for diag in diags(&payload) {
+					yield Ev::Diag(diag);
+				}
+				yield done(Ok(payload));
 				return;
 			}
 
@@ -516,7 +517,7 @@ impl Tool for AstEdit {
 					return;
 				},
 			};
-			yield done(Ok(Payload {
+			let payload = Payload {
 				files,
 				advisories,
 				advisories_total,
@@ -527,7 +528,11 @@ impl Tool for AstEdit {
 				total_replacements,
 				recovery_root: None,
 				pending_proposal: Some(pending.id),
-			}));
+			};
+			for diag in diags(&payload) {
+				yield Ev::Diag(diag);
+			}
+			yield done(Ok(payload));
 		}
 	}
 
@@ -712,12 +717,7 @@ fn push_parse_error(
 fn render_payload(payload: &Payload) -> String {
 	let mut output = String::new();
 	if payload.files.is_empty() {
-		output.push_str(if payload.parse_errors.is_empty() {
-			"No replacements made\n"
-		} else {
-			"No replacements made. Parse issues mean the rewrite may be mis-scoped; narrow `paths` \
-			 before concluding absence.\n"
-		});
+		output.push_str("No replacements made\n");
 	}
 	for file in &payload.files {
 		use std::fmt::Write as _;
@@ -742,42 +742,60 @@ fn render_payload(payload: &Payload) -> String {
 			"[{} replacements in {} files; searched {} files]",
 			payload.total_replacements, payload.files_touched, payload.files_searched
 		);
-		for advisory in &payload.advisories {
-			let _ = writeln!(output, "[advisory {}] {}", advisory.path, advisory.message);
-		}
-		if payload.advisories_total > payload.advisories.len() {
-			let _ = writeln!(
-				output,
-				"[{} additional advisories omitted]",
-				payload.advisories_total - payload.advisories.len()
-			);
-		}
-		if !payload.parse_errors.is_empty() {
-			let _ = writeln!(
-				output,
-				"Parse issues ({} / {}):",
-				payload.parse_errors.len(),
-				payload.parse_errors_total
-			);
-			for error in &payload.parse_errors {
-				let _ = writeln!(output, "- {error}");
-			}
-		}
-		if payload.parse_errors_total > payload.parse_errors.len() {
-			let _ = writeln!(
-				output,
-				"[{} additional parse issues omitted]",
-				payload.parse_errors_total - payload.parse_errors.len()
-			);
-		}
 		if let Some(id) = &payload.pending_proposal {
 			let _ = writeln!(output, "{}", proposal_pending_notice(id));
-		} else if let Some(recovery) = &payload.recovery_root {
-			let _ = writeln!(output, "[applied; recovery snapshot: {recovery}]");
 		}
 	}
 	output.pop();
 	output
+}
+
+fn diags(payload: &Payload) -> Vec<Diag> {
+	let mut diags = Vec::with_capacity(
+		payload
+			.advisories
+			.len()
+			.saturating_add(payload.parse_errors.len())
+			.saturating_add(4),
+	);
+	if payload.files.is_empty() && !payload.parse_errors.is_empty() {
+		diags.push(Diag::warn(
+			DiagKind::Advisory,
+			"Parse issues mean the rewrite may be mis-scoped; narrow `paths` before concluding \
+			 absence.",
+		));
+	}
+	diags.extend(payload.advisories.iter().map(|advisory| {
+		Diag::warn(DiagKind::Advisory, sf!("{}: {}", advisory.path, advisory.message))
+	}));
+	if payload.advisories_total > payload.advisories.len() {
+		diags.push(Diag::info(DiagKind::LimitReached, "advisories").omitted(
+			u64::try_from(payload.advisories_total - payload.advisories.len()).unwrap_or(u64::MAX),
+			Unit::Items,
+		));
+	}
+	diags.extend(
+		payload
+			.parse_errors
+			.iter()
+			.cloned()
+			.map(|error| Diag::warn(DiagKind::ParseIssue, error)),
+	);
+	if payload.parse_errors_total > payload.parse_errors.len() {
+		diags.push(Diag::info(DiagKind::LimitReached, "parse issues").omitted(
+			u64::try_from(payload.parse_errors_total - payload.parse_errors.len()).unwrap_or(u64::MAX),
+			Unit::Files,
+		));
+	}
+	if let Some(recovery) = &payload.recovery_root {
+		let diag = Diag::info(DiagKind::Snapshot, "Recovery snapshot recorded");
+		diags.push(if recovery.starts_with("artifact://") {
+			diag.artifact(recovery.clone())
+		} else {
+			Diag::info(DiagKind::Snapshot, sf!("Recovery snapshot recorded at {recovery}"))
+		});
+	}
+	diags
 }
 
 fn lift_legacy_call(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
@@ -832,12 +850,20 @@ fn lift_legacy_call(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 }
 
 fn prepared_diff(prepared: &Prepared) -> Str {
-	omp_hashline::numbered_diff(
-		&prepared.original,
-		prepared.updated.as_bytes(),
-		Some(Path::new(prepared.relative.as_str())),
+	let original = str::from_utf8(&prepared.original).unwrap_or_default();
+	let original = omp_edit::text::normalize_to_lf(omp_edit::text::strip_bom(original).1);
+	let updated = omp_edit::text::normalize_to_lf(omp_edit::text::strip_bom(&prepared.updated).1);
+	omp_edit::diff_string::generate_diff_string(
+		&original,
+		&updated,
+		None,
+		&omp_edit::diff_string::BlockContextSource {
+			path: Some(prepared.relative.as_str()),
+			lang: None,
+		},
 	)
-	.map_or_else(|_| Str::new(""), |diff| diff.text)
+	.diff
+	.into()
 }
 
 fn short_hash(hash: &[u8; 32]) -> Str {
@@ -846,7 +872,7 @@ fn short_hash(hash: &[u8; 32]) -> Str {
 	let count = hex::encode_mut(hash, &mut out);
 	Str::new(str::from_utf8(&out[..count.min(12)]).expect("hex is UTF-8"))
 }
-fn fault(message: &'static str) -> Fault {
+const fn fault(message: &'static str) -> Fault {
 	Fault { message: Str::new_static(message) }
 }
 fn done(result: Result<Payload, Fault>) -> Ev<Update, Payload, Fault> {
@@ -900,25 +926,39 @@ fn issue(message: Str) -> ArgIssue {
 #[cfg(test)]
 mod tests {
 	use futures::{StreamExt as _, executor::block_on};
-	use omp_tool::Interrupt;
+	use omp_tool::{Interrupt, Severity};
 
 	use super::*;
+
+	fn invoke_events(
+		root: PathBuf,
+		proposals: StagedProposalRegistry,
+		raw: &str,
+	) -> Vec<Ev<Update, Payload, Fault>> {
+		let tool = tool(root, proposals);
+		let (feed, incoming) = IncomingParams::channel();
+		feed
+			.args_committed(Str::new(raw))
+			.expect("invocation consumer remains live");
+		block_on(tool.call(incoming).collect())
+	}
+
+	fn result(events: &[Ev<Update, Payload, Fault>]) -> Result<Payload, Fault> {
+		events
+			.iter()
+			.find_map(|event| match event {
+				Ev::Done(ToolTerminal::Done { result, .. }) => Some(result.clone()),
+				_ => None,
+			})
+			.unwrap_or_else(|| panic!("expected terminal ast_edit outcome: {events:?}"))
+	}
 
 	fn invoke(
 		root: PathBuf,
 		proposals: StagedProposalRegistry,
 		raw: &str,
 	) -> Result<Payload, Fault> {
-		let tool = tool(root, proposals);
-		let (feed, incoming) = IncomingParams::channel();
-		feed
-			.args_committed(Str::new(raw))
-			.expect("invocation consumer remains live");
-		let events = block_on(tool.call(incoming).collect::<Vec<_>>());
-		let [Ev::Done(ToolTerminal::Done { result, .. })] = events.as_slice() else {
-			panic!("expected one terminal ast_edit outcome: {events:?}");
-		};
-		result.clone()
+		result(&invoke_events(root, proposals, raw))
 	}
 
 	fn accepting_registry() -> StagedProposalRegistry {
@@ -1005,6 +1045,16 @@ mod tests {
 		let applied: Payload = serde_json::from_value(outcome.payload).expect("typed apply payload");
 		assert_eq!(applied.total_replacements, 2);
 		assert!(applied.recovery_root.is_some());
+		let applied_diags = diags(&applied);
+		assert!(applied_diags.iter().any(|diag| {
+			diag.native_kind() == Some(DiagKind::Snapshot)
+				&& diag.severity == Severity::Info
+				&& diag.artifact.is_none()
+				&& diag
+					.text
+					.contains(applied.recovery_root.as_deref().expect("recovery root"))
+		}));
+		assert!(!render_payload(&applied).contains("recovery snapshot"));
 		assert_eq!(
 			fs::read_to_string(&typescript).expect("applied TypeScript"),
 			"const value = new(1);\n"
@@ -1032,16 +1082,33 @@ mod tests {
 		let temp = tempfile::tempdir().expect("temporary workspace");
 		fs::write(temp.path().join("broken.ts"), "export function broken( { return 1; }")
 			.expect("seed broken source");
-		let payload = invoke(
+		let events = invoke_events(
 			temp.path().to_path_buf(),
 			accepting_registry(),
 			r#"{"ops":[{"pat":"unlikely($A)","out":"likely($A)"}],"paths":["broken.ts"]}"#,
-		)
-		.expect("parse issue remains non-terminal");
+		);
+		let payload = result(&events).expect("parse issue remains non-terminal");
 		assert_eq!(payload.total_replacements, 0);
 		assert_eq!(payload.parse_errors_total, 1);
 		assert!(payload.parse_errors[0].contains("broken.ts: parse error"));
-		assert!(render_payload(&payload).contains("rewrite may be mis-scoped"));
+		assert_eq!(
+			render_payload(&payload),
+			"No replacements made\n[0 replacements in 0 files; searched 1 files]"
+		);
+		assert!(events.iter().any(|event| matches!(
+			event,
+			Ev::Diag(diag)
+				if diag.native_kind() == Some(DiagKind::ParseIssue)
+					&& diag.severity == Severity::Warn
+					&& diag.text.contains("broken.ts: parse error")
+		)));
+		assert!(events.iter().any(|event| matches!(
+			event,
+			Ev::Diag(diag)
+				if diag.native_kind() == Some(DiagKind::Advisory)
+					&& diag.severity == Severity::Warn
+					&& diag.text.contains("rewrite may be mis-scoped")
+		)));
 	}
 
 	#[test]
@@ -1052,14 +1119,68 @@ mod tests {
 		file
 			.set_len(MAX_FILE_BYTES + 1)
 			.expect("make sparse large source");
-		let payload = invoke(
+		let events = invoke_events(
 			temp.path().to_path_buf(),
 			accepting_registry(),
 			r#"{"ops":[{"pat":"old($A)","out":"new($A)"}],"paths":["large.ts"]}"#,
-		)
-		.expect("large file produces advisory");
+		);
+		let payload = result(&events).expect("large file produces advisory");
 		assert_eq!(payload.advisories_total, 1);
 		assert!(payload.advisories[0].message.contains("8 MiB"));
+		assert!(events.iter().any(|event| matches!(
+			event,
+			Ev::Diag(diag)
+				if diag.native_kind() == Some(DiagKind::Advisory)
+					&& diag.severity == Severity::Warn
+					&& diag.text.contains("large.ts")
+					&& diag.text.contains("8 MiB")
+		)));
+	}
+
+	#[test]
+	fn diagnostic_caps_and_artifact_snapshot_keep_typed_fields() {
+		let payload = Payload {
+			files:              Vec::new(),
+			advisories:         vec![Advisory {
+				path:    sf!("unknown.ext"),
+				message: sf!("unsupported language"),
+			}],
+			advisories_total:   3,
+			parse_errors:       vec![sf!("broken.ts: parse error")],
+			parse_errors_total: 4,
+			files_searched:     7,
+			files_touched:      0,
+			total_replacements: 0,
+			recovery_root:      Some(sf!(
+				"artifact://sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+			)),
+			pending_proposal:   None,
+		};
+		let diagnostics = diags(&payload);
+		assert!(diagnostics.iter().any(|diag| {
+			diag.native_kind() == Some(DiagKind::LimitReached)
+				&& diag.severity == Severity::Info
+				&& diag
+					.omitted
+					.is_some_and(|omitted| omitted.count == 2 && omitted.unit == Unit::Items)
+		}));
+		assert!(diagnostics.iter().any(|diag| {
+			diag.native_kind() == Some(DiagKind::LimitReached)
+				&& diag.severity == Severity::Info
+				&& diag
+					.omitted
+					.is_some_and(|omitted| omitted.count == 3 && omitted.unit == Unit::Files)
+		}));
+		assert!(diagnostics.iter().any(|diag| {
+			diag.native_kind() == Some(DiagKind::Snapshot)
+				&& diag.severity == Severity::Info
+				&& diag.artifact.as_deref() == payload.recovery_root.as_deref()
+				&& !diag.text.contains("artifact://")
+		}));
+		assert_eq!(
+			render_payload(&payload),
+			"No replacements made\n[0 replacements in 0 files; searched 7 files]"
+		);
 	}
 
 	#[test]

@@ -205,13 +205,8 @@ pub(crate) async fn run(
 		});
 	}
 	let idle_timeout = Duration::from_secs(args.idle_timeout);
-	let idle = wait_idle(
-		env_connection_rx,
-		doc_connection_rx,
-		1,
-		idle_timeout,
-		server.process_host(),
-	);
+	let idle =
+		wait_idle(env_connection_rx, doc_connection_rx, 1, idle_timeout, server.process_host());
 	tokio::pin!(idle);
 	tokio::select! {
 		() = process_shutdown.cancelled() => {

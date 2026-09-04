@@ -63,5 +63,5 @@ Everything between the wire and that turn is inference's job.
 - The Harness Playbook, "The inference" — "Corrective inference"
 - blog.can.ac, "The minutiae of tool calling" (2026-08-03)
 - 0008, 0017, 0020, 0021, 0034
-- `crates/inference/src/recovery/`, `crates/inference/src/event.rs`, `crates/slopjson/src/lib.rs`,
+- `crates/inference/src/recovery/`, `crates/inference/src/event.rs`, `crates/core/src/slopjson/mod.rs`,
   `docs/architecture/agent-loop.md`

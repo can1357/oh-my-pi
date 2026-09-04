@@ -1,5 +1,5 @@
-//! Bordered, cancellable loader: pi's `BorderedLoader` (`bordered-loader.ts`)
-//! — a full-width rule, an accent spinner with a muted message, a blank
+//! Bordered, cancellable loader: a full-width rule, an accent spinner with
+//! a muted message, a blank
 //! row, a muted cancel hint, a blank row, and a closing rule.
 //!
 //! The component owns no timer: the spinner glyph derives from
@@ -31,7 +31,7 @@ pub struct Loader {
 }
 
 impl Loader {
-	/// Creates a loader for `message` with pi's default `esc cancel` hint.
+	/// Creates a loader for `message` with the default `esc cancel` hint.
 	pub fn new(message: impl IntoStr) -> Self {
 		Self {
 			props:   Props::new(),

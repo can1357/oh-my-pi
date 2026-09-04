@@ -1,0 +1,10 @@
+omp-audio contains audio capture and playback backend code ported from the
+MIT-licensed pi-voice crate in Oh My Pi.
+
+Copyright (c) 2025-2026 Can Bölük
+Copyright (c) 2026 Stencil Labs, Inc.
+
+The complete MIT license is provided in LICENSE. OMP-specific changes include
+typed errors, audio level streams, explicit drain and abort semantics, target-
+gated unsupported-device behavior, OMP process branding, and domain-owned
+audio lease coordination.

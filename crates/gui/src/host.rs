@@ -548,7 +548,7 @@ fn ime_cursor_area(
 			let band = layer.band(scene.viewport);
 			(row >= band.src_top && row < band.src_top.saturating_add(band.rows))
 				.then_some((band.x.saturating_add(col), band.y.saturating_add(row - band.src_top)))
-	});
+		});
 	let (col, row) = match layer_cursor {
 		Some(cursor) => cursor,
 		None if scene.layers.iter().any(|layer| layer.active) => return None,
@@ -556,8 +556,7 @@ fn ime_cursor_area(
 			let (col, row) = scene.frame.cursor()?;
 			let document_rows = scene.frame.size().height;
 			let scroll_rows = scroll / metrics.line_height;
-			let end =
-				(f32::from(document_rows) - scroll_rows).clamp(0.0, f32::from(document_rows));
+			let end = (f32::from(document_rows) - scroll_rows).clamp(0.0, f32::from(document_rows));
 			let start = (end - f32::from(scene.viewport.height)).max(0.0);
 			let viewport_row = f32::from(row) - start;
 			if viewport_row < 0.0 || viewport_row >= f32::from(scene.viewport.height) {
@@ -567,8 +566,8 @@ fn ime_cursor_area(
 		},
 	};
 	let position = PhysicalPosition::new(
-		(origin[0] + f32::from(col) * metrics.advance).round() as i32,
-		(origin[1] + f32::from(row) * metrics.line_height).round() as i32,
+		f32::mul_add(f32::from(col), metrics.advance, origin[0]).round() as i32,
+		f32::mul_add(f32::from(row), metrics.line_height, origin[1]).round() as i32,
 	);
 	let size =
 		PhysicalSize::new(metrics.advance.ceil().max(1.0) as u32, metrics.line_height.ceil() as u32);
@@ -2206,10 +2205,10 @@ mod tests {
 		let mut frame = Frame::new(Size::new(20, 10));
 		frame.set_cursor(3, 8);
 		let scene = SceneFrame {
-			frame: &frame,
-			viewport: Size::new(20, 4),
+			frame:       &frame,
+			viewport:    Size::new(20, 4),
 			editor_rows: 2,
-			layers: SmallVec::new(),
+			layers:      SmallVec::new(),
 		};
 		let metrics =
 			CellMetrics { advance: 8.0, ascent: 11.0, descent: 3.0, line_height: 16.0 };

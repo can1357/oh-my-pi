@@ -427,8 +427,7 @@ fn lower_data_child(
 ) -> syn::Result<TokenStream2> {
 	let valid_owner = matches!(
 		(owner, data.name.text.as_str()),
-		("select", "option")
-			| ("segmented", "option")
+		("select" | "segmented", "option")
 			| ("status", "segment")
 			| ("tabs", "tab")
 			| ("tree", "node")

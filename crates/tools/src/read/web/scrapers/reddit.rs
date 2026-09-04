@@ -2,7 +2,12 @@
 
 use std::fmt::{self, Display, Write as _};
 
-use omp_core::{Str, sf};
+use omp_core::Str;
+#[cfg(test)]
+use omp_core::sf;
+#[cfg(test)]
+use omp_tool::Severity;
+use omp_tool::{Diag, DiagKind};
 use serde_json::Value;
 use smallvec::SmallVec;
 use url::Url;
@@ -51,7 +56,9 @@ pub(super) async fn render<C: HttpClient + Sync>(
 	};
 
 	let mut result = RenderResult::markdown(&content, "reddit");
-	result.notes.insert(0, sf!("Fetched via Reddit JSON API"));
+	result
+		.diags
+		.insert(0, Diag::info(DiagKind::Provenance, "Fetched via Reddit JSON API"));
 	Ok(Some(result))
 }
 
@@ -299,7 +306,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn post_fixture_matches_pi_metadata_selftext_comments_and_note_order() {
+	async fn post_fixture_matches_pi_metadata_selftext_comments_and_diag_order() {
 		let client = FakeClient::json(Bytes::from_static(SELF_POST.as_bytes()));
 		let url =
 			Url::parse("https://old.reddit.com/r/rust/comments/abc/a_self_post/?sort=top").unwrap();
@@ -317,7 +324,9 @@ mod tests {
 			 Comments\n\n### u/bob · 7 points\n\nUseful answer.\n\n---\n\n### u/carol · 3 \
 			 points\n\nAnother answer.\n\n---"
 		);
-		assert_eq!(result.notes.as_slice(), [sf!("Fetched via Reddit JSON API")].as_slice());
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 	}
 
 	#[tokio::test]

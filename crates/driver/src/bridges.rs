@@ -7,11 +7,11 @@ use std::{
 };
 
 use futures::StreamExt as _;
+use omp_ai::auth::command::CommandCredentialExecutor;
 use omp_cache::telemetry_cache::TelemetryIndex;
 use omp_core::{EnvPath, Str, sf};
 use omp_env::EnvClient;
 use omp_envd::github_url::GithubCredentialBridge;
-use omp_inference::auth::command::CommandCredentialExecutor;
 use omp_proto::{
 	inference::v1::{
 		self as pb, image_event, inference_client::InferenceClient,
@@ -171,11 +171,7 @@ where
 }
 
 fn incomplete(code: &'static str) -> BackendError {
-	BackendError {
-		kind: BackendErrorKind::Provider,
-		code: Str::new_static(code),
-		status: None,
-	}
+	BackendError { kind: BackendErrorKind::Provider, code: Str::new_static(code), status: None }
 }
 
 /// Session goal-control binding.
@@ -184,8 +180,7 @@ pub struct AgentGoalControl;
 
 /// Runs `!command` credential sources inside the project Environment.
 ///
-/// Bounds mirror pi `model-config-values.ts` (`execSync` with a 10 s timeout
-/// and Node's 1 MiB default `maxBuffer`).
+/// Runs credential commands with a 10-second timeout and a 1 MiB stdout limit.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CommandCredentials;
 

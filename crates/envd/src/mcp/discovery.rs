@@ -5,12 +5,22 @@
 //! missing or malformed foreign file is contained to that source and cannot
 //! suppress independent sources.
 
-use std::{collections::BTreeMap, fs, io, path::{Path, PathBuf}};
+use std::{
+	collections::BTreeMap,
+	fs, io,
+	path::{Path, PathBuf},
+};
 
 use omp_core::Str;
 use serde::Deserialize;
 
-use super::{McpConfigPaths, config::{ConfigSource, ConfigSourceKind, McpConfigFile, McpServerConfig, RequestIdFormat, TransportKind}};
+use super::{
+	McpConfigPaths,
+	config::{
+		ConfigSource, ConfigSourceKind, McpConfigFile, McpServerConfig, RequestIdFormat,
+		TransportKind,
+	},
+};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,7 +28,7 @@ struct ServerDocument {
 	#[serde(default)]
 	mcp_servers: BTreeMap<Str, ForeignServer>,
 	#[serde(default)]
-	servers: BTreeMap<Str, ForeignServer>,
+	servers:     BTreeMap<Str, ForeignServer>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -32,7 +42,7 @@ struct VsCodeDocument {
 	#[serde(default)]
 	servers: BTreeMap<Str, ForeignServer>,
 	#[serde(default)]
-	mcp: VsCodeMcp,
+	mcp:     VsCodeMcp,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -45,31 +55,31 @@ struct VsCodeMcp {
 #[serde(rename_all = "camelCase")]
 struct ForeignServer {
 	#[serde(default)]
-	enabled: Option<bool>,
+	enabled:           Option<bool>,
 	#[serde(default, rename = "type")]
-	kind: Option<Str>,
+	kind:              Option<Str>,
 	#[serde(default)]
-	transport: Option<Str>,
+	transport:         Option<Str>,
 	#[serde(default)]
-	command: Option<ForeignCommand>,
+	command:           Option<ForeignCommand>,
 	#[serde(default)]
-	args: Vec<Str>,
+	args:              Vec<Str>,
 	#[serde(default)]
-	env: BTreeMap<Str, Str>,
+	env:               BTreeMap<Str, Str>,
 	#[serde(default)]
-	environment: BTreeMap<Str, Str>,
+	environment:       BTreeMap<Str, Str>,
 	#[serde(default)]
-	cwd: Option<PathBuf>,
+	cwd:               Option<PathBuf>,
 	#[serde(default)]
-	url: Option<Str>,
+	url:               Option<Str>,
 	#[serde(default)]
-	headers: BTreeMap<Str, Str>,
+	headers:           BTreeMap<Str, Str>,
 	#[serde(default)]
-	timeout: Option<u64>,
+	timeout:           Option<u64>,
 	#[serde(default)]
 	request_id_format: Option<RequestIdFormat>,
 	#[serde(skip)]
-	plugin_data: Option<PathBuf>,
+	plugin_data:       Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -88,19 +98,19 @@ struct CodexDocument {
 #[derive(Debug, Default, Deserialize)]
 struct CodexServer {
 	#[serde(default)]
-	enabled: Option<bool>,
+	enabled:          Option<bool>,
 	#[serde(default)]
-	command: Option<Str>,
+	command:          Option<Str>,
 	#[serde(default)]
-	args: Vec<Str>,
+	args:             Vec<Str>,
 	#[serde(default)]
-	env: BTreeMap<Str, Str>,
+	env:              BTreeMap<Str, Str>,
 	#[serde(default)]
-	url: Option<Str>,
+	url:              Option<Str>,
 	#[serde(default)]
-	http_headers: BTreeMap<Str, Str>,
+	http_headers:     BTreeMap<Str, Str>,
 	#[serde(default)]
-	cwd: Option<PathBuf>,
+	cwd:              Option<PathBuf>,
 	#[serde(default)]
 	tool_timeout_sec: Option<u64>,
 }
@@ -110,7 +120,7 @@ struct ClaudeUserDocument {
 	#[serde(default, rename = "mcpServers")]
 	mcp_servers: BTreeMap<Str, ForeignServer>,
 	#[serde(default)]
-	projects: BTreeMap<PathBuf, ServerDocument>,
+	projects:    BTreeMap<PathBuf, ServerDocument>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,7 +134,7 @@ struct AgentPluginManifest {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct AgentPluginMcpDocument {
 	#[serde(rename = "$schema")]
-	schema:       Str,
+	schema:      Str,
 	mcp_servers: BTreeMap<Str, ForeignServer>,
 }
 
@@ -161,12 +171,7 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 				project_document.mcp_servers.clone(),
 			);
 		}
-		push_document(
-			&mut sources,
-			claude_user,
-			ConfigSourceKind::ClaudeUser,
-			document.mcp_servers,
-		);
+		push_document(&mut sources, claude_user, ConfigSourceKind::ClaudeUser, document.mcp_servers);
 	}
 	push_json(
 		&mut sources,
@@ -177,17 +182,13 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 
 	let user_config_root = paths.user.parent().unwrap_or(home);
 	let plugin_data_root = user_config_root.join("agent/plugin-data");
-	push_agent_plugins(
-		&mut sources,
-		&plugin_data_root,
-		&[
-			(project.join(".omp/extensions"), ConfigSourceKind::AgentPluginProject),
-			(project.join(".agent/plugins"), ConfigSourceKind::AgentPluginProject),
-			(project.join(".agents/plugins"), ConfigSourceKind::AgentPluginProject),
-			(user_config_root.join("extensions"), ConfigSourceKind::AgentPluginUser),
-			(user_config_root.join("agent/plugins"), ConfigSourceKind::AgentPluginUser),
-		],
-	);
+	push_agent_plugins(&mut sources, &plugin_data_root, &[
+		(project.join(".omp/extensions"), ConfigSourceKind::AgentPluginProject),
+		(project.join(".agent/plugins"), ConfigSourceKind::AgentPluginProject),
+		(project.join(".agents/plugins"), ConfigSourceKind::AgentPluginProject),
+		(user_config_root.join("extensions"), ConfigSourceKind::AgentPluginUser),
+		(user_config_root.join("agent/plugins"), ConfigSourceKind::AgentPluginUser),
+	]);
 	for root in &paths.agent_plugin_roots {
 		push_agent_plugin_root(
 			&mut sources,
@@ -197,16 +198,8 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 		);
 	}
 
-	push_codex(
-		&mut sources,
-		project.join(".codex/config.toml"),
-		ConfigSourceKind::CodexProject,
-	);
-	push_codex(
-		&mut sources,
-		home.join(".codex/config.toml"),
-		ConfigSourceKind::CodexUser,
-	);
+	push_codex(&mut sources, project.join(".codex/config.toml"), ConfigSourceKind::CodexProject);
+	push_codex(&mut sources, home.join(".codex/config.toml"), ConfigSourceKind::CodexUser);
 	push_json(
 		&mut sources,
 		project.join(".gemini/settings.json"),
@@ -230,10 +223,9 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 	] {
 		push_json(&mut sources, path, ConfigSourceKind::OpenCodeProject, JsonShape::OpenCode);
 	}
-	for path in [
-		home.join(".config/opencode/opencode.jsonc"),
-		home.join(".config/opencode/opencode.json"),
-	] {
+	for path in
+		[home.join(".config/opencode/opencode.jsonc"), home.join(".config/opencode/opencode.json")]
+	{
 		push_json(&mut sources, path, ConfigSourceKind::OpenCodeUser, JsonShape::OpenCode);
 	}
 	push_json(
@@ -267,12 +259,7 @@ pub(super) fn sources(paths: &McpConfigPaths) -> Vec<ConfigSource> {
 		JsonShape::VsCode,
 	);
 	for path in [project.join("mcp.json"), project.join("mcp.config.json")] {
-		push_json(
-			&mut sources,
-			path,
-			ConfigSourceKind::StandaloneProject,
-			JsonShape::Common,
-		);
+		push_json(&mut sources, path, ConfigSourceKind::StandaloneProject, JsonShape::Common);
 	}
 	sources
 }
@@ -283,12 +270,18 @@ fn push_agent_plugins(
 	containers: &[(PathBuf, ConfigSourceKind)],
 ) {
 	for (container, kind) in containers {
-		let Ok(container_root) = fs::canonicalize(container) else { continue };
-		let Ok(entries) = fs::read_dir(container) else { continue };
+		let Ok(container_root) = fs::canonicalize(container) else {
+			continue;
+		};
+		let Ok(entries) = fs::read_dir(container) else {
+			continue;
+		};
 		let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
 		entries.sort_by_key(std::fs::DirEntry::file_name);
 		for entry in entries {
-			let Ok(root) = fs::canonicalize(entry.path()) else { continue };
+			let Ok(root) = fs::canonicalize(entry.path()) else {
+				continue;
+			};
 			if !root.starts_with(&container_root) || !root.is_dir() {
 				tracing::warn!(path = %entry.path().display(), "ignored Agent Plugin outside its discovery root");
 				continue;
@@ -304,24 +297,36 @@ fn push_agent_plugin_root(
 	root: &Path,
 	kind: ConfigSourceKind,
 ) {
-	let Ok(root) = fs::canonicalize(root) else { return };
-	let Ok(manifest_path) = fs::canonicalize(root.join("plugin.json")) else { return };
+	let Ok(root) = fs::canonicalize(root) else {
+		return;
+	};
+	let Ok(manifest_path) = fs::canonicalize(root.join("plugin.json")) else {
+		return;
+	};
 	if !manifest_path.starts_with(&root) {
 		tracing::warn!(path = %manifest_path.display(), "ignored Agent Plugin manifest outside its package");
 		return;
 	}
-	let Ok(body) = fs::read_to_string(manifest_path) else { return };
-	let Ok(manifest) = serde_json::from_str::<AgentPluginManifest>(&body) else { return };
+	let Ok(body) = fs::read_to_string(manifest_path) else {
+		return;
+	};
+	let Ok(manifest) = serde_json::from_str::<AgentPluginManifest>(&body) else {
+		return;
+	};
 	if manifest.schema != AGENT_PLUGIN_SCHEMA || !safe_plugin_name(&manifest.name) {
 		return;
 	}
 	let configured = root.join("mcp.json");
-	let Ok(real) = fs::canonicalize(&configured) else { return };
+	let Ok(real) = fs::canonicalize(&configured) else {
+		return;
+	};
 	if !real.starts_with(&root) {
 		tracing::warn!(path = %configured.display(), "ignored Agent Plugin MCP file outside its package");
 		return;
 	}
-	let Some(mut document) = read_json::<AgentPluginMcpDocument>(&real) else { return };
+	let Some(mut document) = read_json::<AgentPluginMcpDocument>(&real) else {
+		return;
+	};
 	if document.schema != AGENT_PLUGIN_MCP_SCHEMA {
 		tracing::warn!(path = %real.display(), "ignored unsupported Agent Plugin MCP schema");
 		return;
@@ -352,16 +357,30 @@ enum JsonShape {
 fn push_json(out: &mut Vec<ConfigSource>, path: PathBuf, kind: ConfigSourceKind, shape: JsonShape) {
 	let servers = match shape {
 		JsonShape::Common => {
-			let Some(document) = read_jsonc::<ServerDocument>(&path) else { return };
-			if document.mcp_servers.is_empty() { document.servers } else { document.mcp_servers }
+			let Some(document) = read_jsonc::<ServerDocument>(&path) else {
+				return;
+			};
+			if document.mcp_servers.is_empty() {
+				document.servers
+			} else {
+				document.mcp_servers
+			}
 		},
 		JsonShape::OpenCode => {
-			let Some(document) = read_jsonc::<OpenCodeDocument>(&path) else { return };
+			let Some(document) = read_jsonc::<OpenCodeDocument>(&path) else {
+				return;
+			};
 			document.mcp
 		},
 		JsonShape::VsCode => {
-			let Some(document) = read_jsonc::<VsCodeDocument>(&path) else { return };
-			if document.servers.is_empty() { document.mcp.servers } else { document.servers }
+			let Some(document) = read_jsonc::<VsCodeDocument>(&path) else {
+				return;
+			};
+			if document.servers.is_empty() {
+				document.mcp.servers
+			} else {
+				document.servers
+			}
 		},
 	};
 	push_document(out, path, kind, servers);
@@ -373,13 +392,19 @@ fn push_document(
 	kind: ConfigSourceKind,
 	servers: BTreeMap<Str, ForeignServer>,
 ) {
-	if servers.is_empty() { return }
+	if servers.is_empty() {
+		return;
+	}
 	let base = path.parent().unwrap_or(Path::new("."));
 	let mut file = McpConfigFile::default();
 	for (name, server) in servers {
 		match server.normalize(base) {
-			Some(server) => { file.mcp_servers.insert(name, server); },
-			None => tracing::warn!(path = %path.display(), server = %name, "ignored malformed foreign MCP declaration"),
+			Some(server) => {
+				file.mcp_servers.insert(name, server);
+			},
+			None => {
+				tracing::warn!(path = %path.display(), server = %name, "ignored malformed foreign MCP declaration")
+			},
 		}
 	}
 	if !file.mcp_servers.is_empty() {
@@ -402,12 +427,7 @@ impl ForeignServer {
 			},
 			_ => (None, Vec::new()),
 		};
-		command_args.extend(
-			self
-				.args
-				.into_iter()
-				.map(replace),
-		);
+		command_args.extend(self.args.into_iter().map(replace));
 		let mut env = self.environment;
 		env.extend(self.env);
 		for value in env.values_mut() {
@@ -425,7 +445,11 @@ impl ForeignServer {
 			let cwd = encoded
 				.map(|value| PathBuf::from(replace(Str::new(value)).as_str()))
 				.unwrap_or(cwd);
-			if cwd.is_absolute() { cwd } else { base.join(cwd) }
+			if cwd.is_absolute() {
+				cwd
+			} else {
+				base.join(cwd)
+			}
 		});
 		Some(McpServerConfig {
 			transport,
@@ -456,11 +480,17 @@ fn safe_plugin_name(name: &str) -> bool {
 	(1..=64).contains(&name.len())
 		&& !name.contains("..")
 		&& !name.contains("--")
-		&& !name.as_bytes().first().is_some_and(|byte| matches!(*byte, b'.' | b'-'))
-		&& !name.as_bytes().last().is_some_and(|byte| matches!(*byte, b'.' | b'-'))
-		&& name
-			.bytes()
-			.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-'))
+		&& !name
+			.as_bytes()
+			.first()
+			.is_some_and(|byte| matches!(*byte, b'.' | b'-'))
+		&& !name
+			.as_bytes()
+			.last()
+			.is_some_and(|byte| matches!(*byte, b'.' | b'-'))
+		&& name.bytes().all(|byte| {
+			byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+		})
 }
 
 fn replace_plugin_vars(value: Str, root: &Path, data: Option<&Path>) -> Str {
@@ -483,14 +513,28 @@ fn replace_plugin_vars(value: Str, root: &Path, data: Option<&Path>) -> Str {
 }
 
 fn push_codex(out: &mut Vec<ConfigSource>, path: PathBuf, kind: ConfigSourceKind) {
-	let Some(document) = read_toml::<CodexDocument>(&path) else { return };
-	if document.mcp_servers.is_empty() { return }
+	let Some(document) = read_toml::<CodexDocument>(&path) else {
+		return;
+	};
+	if document.mcp_servers.is_empty() {
+		return;
+	}
 	let base = path.parent().unwrap_or(Path::new("."));
 	let mut file = McpConfigFile::default();
 	for (name, server) in document.mcp_servers {
-		let cwd = server.cwd.map(|cwd| if cwd.is_absolute() { cwd } else { base.join(cwd) });
+		let cwd = server.cwd.map(|cwd| {
+			if cwd.is_absolute() {
+				cwd
+			} else {
+				base.join(cwd)
+			}
+		});
 		file.mcp_servers.insert(name, McpServerConfig {
-			transport: Some(if server.url.is_some() { TransportKind::Http } else { TransportKind::Stdio }),
+			transport: Some(if server.url.is_some() {
+				TransportKind::Http
+			} else {
+				TransportKind::Stdio
+			}),
 			enabled: server.enabled.unwrap_or(true),
 			command: server.command,
 			args: server.args,
@@ -501,7 +545,9 @@ fn push_codex(out: &mut Vec<ConfigSource>, path: PathBuf, kind: ConfigSourceKind
 			url: server.url,
 			headers: server.http_headers,
 			header_policy: None,
-			timeout: server.tool_timeout_sec.and_then(|seconds| seconds.checked_mul(1_000)),
+			timeout: server
+				.tool_timeout_sec
+				.and_then(|seconds| seconds.checked_mul(1_000)),
 			request_id_format: None,
 			auth: None,
 			oauth: None,
@@ -529,7 +575,11 @@ fn read_toml<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
 fn read_source<T>(path: &Path, parse: impl FnOnce(&str) -> Result<T, ReadError>) -> Option<T> {
 	let body = match fs::read_to_string(path) {
 		Ok(body) => body,
-		Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => return None,
+		Err(error)
+			if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) =>
+		{
+			return None;
+		},
 		Err(error) => {
 			tracing::warn!(path = %path.display(), %error, "failed to read foreign MCP configuration");
 			return None;
@@ -560,9 +610,13 @@ fn strip_json_comments(source: &str) -> String {
 		let byte = bytes[index];
 		if string {
 			out.push(byte);
-			if escaped { escaped = false; }
-			else if byte == b'\\' { escaped = true; }
-			else if byte == b'"' { string = false; }
+			if escaped {
+				escaped = false;
+			} else if byte == b'\\' {
+				escaped = true;
+			} else if byte == b'"' {
+				string = false;
+			}
 			index += 1;
 			continue;
 		}
@@ -572,11 +626,15 @@ fn strip_json_comments(source: &str) -> String {
 			index += 1;
 		} else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
 			index += 2;
-			while index < bytes.len() && bytes[index] != b'\n' { index += 1; }
+			while index < bytes.len() && bytes[index] != b'\n' {
+				index += 1;
+			}
 		} else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
 			index += 2;
 			while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
-				if bytes[index] == b'\n' { out.push(b'\n'); }
+				if bytes[index] == b'\n' {
+					out.push(b'\n');
+				}
 				index += 1;
 			}
 			index = (index + 2).min(bytes.len());
@@ -615,9 +673,15 @@ mod tests {
 		let project = temp.path().join("project");
 		let user_root = home.join(".o2");
 		write(&project.join(".claude/.mcp.json"), r#"{"mcpServers":{"same":{"command":"claude"}}}"#);
-		write(&project.join(".gemini/settings.json"), r#"{"mcpServers":{"same":{"command":"gemini"},"gemini":{"command":"g"}}}"#);
+		write(
+			&project.join(".gemini/settings.json"),
+			r#"{"mcpServers":{"same":{"command":"gemini"},"gemini":{"command":"g"}}}"#,
+		);
 		write(&project.join(".cursor/mcp.json"), "{");
-		write(&project.join(".vscode/mcp.json"), r#"{"servers":{"vscode":{"type":"stdio","command":"v"}}}"#);
+		write(
+			&project.join(".vscode/mcp.json"),
+			r#"{"servers":{"vscode":{"type":"stdio","command":"v"}}}"#,
+		);
 		let paths = McpConfigPaths::new(&user_root, &project);
 		let sources = sources(&paths);
 		let resolved = super::super::config::resolve_sources(&sources, true);
@@ -664,7 +728,11 @@ mod tests {
 		);
 		assert_eq!(
 			resolved.servers["portable"].config.env["PLUGIN_DATA"],
-			Str::new(home.join(".o2/agent/plugin-data/portable").to_string_lossy())
+			Str::new(
+				home
+					.join(".o2/agent/plugin-data/portable")
+					.to_string_lossy()
+			)
 		);
 		assert!(!resolved.servers.contains_key("escaped"));
 	}
@@ -674,9 +742,15 @@ mod tests {
 		let temp = tempfile::tempdir().unwrap();
 		let home = temp.path().join("home");
 		let project = temp.path().join("project");
-		write(&project.join(".opencode/opencode.jsonc"), r#"{// comment
-			"mcp":{"open":{"type":"local","command":["runner","serve"],"environment":{"A":"B"}}}}"#);
-		write(&project.join(".codex/config.toml"), "[mcp_servers.codex]\ncommand = \"runner\"\nargs = [\"serve\"]\ntool_timeout_sec = 3\n");
+		write(
+			&project.join(".opencode/opencode.jsonc"),
+			r#"{// comment
+			"mcp":{"open":{"type":"local","command":["runner","serve"],"environment":{"A":"B"}}}}"#,
+		);
+		write(
+			&project.join(".codex/config.toml"),
+			"[mcp_servers.codex]\ncommand = \"runner\"\nargs = [\"serve\"]\ntool_timeout_sec = 3\n",
+		);
 		let sources = sources(&McpConfigPaths::new(&home.join(".o2"), &project));
 		let resolved = super::super::config::resolve_sources(&sources, true);
 		assert_eq!(resolved.servers["open"].config.args, [Str::new("serve")]);

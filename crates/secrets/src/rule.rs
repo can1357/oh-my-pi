@@ -107,7 +107,7 @@ impl SecretRule {
 	}
 
 	/// Returns the compiled expression for a regex rule.
-	pub fn regex(&self) -> Option<&Regex> {
+	pub const fn regex(&self) -> Option<&Regex> {
 		self.regex.as_ref()
 	}
 
@@ -228,7 +228,7 @@ fn split_regex_literal(pattern: &str) -> (&str, &str) {
 	(pattern, "")
 }
 
-fn is_escaped(bytes: &[u8], index: usize) -> bool {
+const fn is_escaped(bytes: &[u8], index: usize) -> bool {
 	let mut slash_count = 0;
 	let mut cursor = index;
 	while cursor > 0 && bytes[cursor - 1] == b'\\' {

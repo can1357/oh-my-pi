@@ -1,8 +1,8 @@
 //! Forced-tool Director and its bounded escalation ladder.
 
+use omp_ai::{ChatRequest, ForcedCall, Setting, ToolChoice};
 use omp_core::Str;
 use omp_dom::{Dom, KnownTag, Node, PropId, PropKey, Tag, Value};
-use omp_inference::{ChatRequest, ForcedCall, Setting, ToolChoice};
 
 use crate::director::{
 	BindValue, Director, DirectorCx, DirectorEffect, ForceUntil, StateUpdate, TurnView, Verdict,
@@ -17,9 +17,9 @@ pub struct ForceTool {
 	retries:   u32,
 	attempts:  u32,
 	satisfied: bool,
-	/// The first request runs unforced; the ladder starts only after the
-	/// model stops idle once (pi's subagent yield reminder demands the call
-	/// after the run settles, never on the first step).
+	/// The first request runs unforced; the ladder starts only after the model
+	/// stops idle once, demanding the call after the run settles rather than
+	/// on the first step.
 	deferred:  bool,
 }
 

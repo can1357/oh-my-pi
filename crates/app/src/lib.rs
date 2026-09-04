@@ -38,7 +38,6 @@ pub mod gallery_cmd;
 pub mod gateway_rpc;
 pub mod gc_cmd;
 pub mod git_cmd;
-pub mod grep_cmd;
 pub mod grievances_cmd;
 #[cfg(feature = "gui")]
 mod gui;
@@ -57,7 +56,7 @@ pub mod render_cmd;
 pub mod rpc_mode;
 #[cfg(feature = "local-tts")]
 pub mod say_cmd;
-/// Process- and presentation-level pi setting convars.
+/// Process- and presentation-level setting convars.
 pub mod settings;
 /// Feature-disabled local speech command.
 #[cfg(not(feature = "local-tts"))]

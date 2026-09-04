@@ -33,13 +33,12 @@ pub enum RowBound {
 	Aspect,
 	/// Exactly this many rows, stretching the source.
 	Fixed(u16),
-	/// Aspect-derived rows capped here; columns shrink to keep the aspect
-	/// (pi `maxHeightCells`).
+	/// Aspect-derived rows capped here; columns shrink to keep the aspect.
 	Max(u16),
 }
 
 impl RowBound {
-	fn from_props(props: &Props) -> Self {
+	const fn from_props(props: &Props) -> Self {
 		match (props.h(), props.max_rows()) {
 			(Some(rows), _) => Self::Fixed(rows),
 			(None, Some(cap)) => Self::Max(cap),

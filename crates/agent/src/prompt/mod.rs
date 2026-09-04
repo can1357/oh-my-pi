@@ -42,7 +42,7 @@ pub struct CanonicalPromptSource;
 
 impl crate::PromptSource for CanonicalPromptSource {
 	fn system_items(&self, dom: &Dom) -> Result<Vec<Item>, PromptError> {
-		CanonicalPromptSource::system_items(self, dom)
+		Self::system_items(self, dom)
 	}
 }
 

@@ -16,7 +16,7 @@ use std::{
 };
 
 use clap::{ArgAction, Parser};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use omp_walker::glob::CompiledPattern;
 use similar::{Algorithm, DiffOp, DiffTag, capture_diff_slices};
 

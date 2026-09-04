@@ -14,10 +14,12 @@ use std::{
 
 use flume::{Receiver, Sender};
 use futures::{FutureExt, pin_mut, select_biased};
-use omp_core::{SparseMap, Str, sf};
-use omp_slopjson::{
-	IncomingCursor as SlopCursor, IncomingDoc, IncomingError, IncomingFeed, PullIssue,
-	PullIssueKind, PullMode, PullPathSegment, Pulled, PulledKind, Value,
+use omp_core::{
+	SparseMap, Str, sf,
+	slopjson::{
+		IncomingCursor as SlopCursor, IncomingDoc, IncomingError, IncomingFeed, PullIssue,
+		PullIssueKind, PullMode, PullPathSegment, Pulled, PulledKind, Value,
+	},
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -87,7 +89,7 @@ fn commit_supersedes_stream(streamed: &str, committed: &str) -> bool {
 	if committed_doc.get("input").and_then(Value::as_str) == Some(streamed) {
 		return true;
 	}
-	match (omp_slopjson::parse(streamed), omp_slopjson::parse(committed)) {
+	match (omp_core::slopjson::parse(streamed), omp_core::slopjson::parse(committed)) {
 		(Ok(streamed), Ok(committed)) => repaired_value_eq(&streamed, &committed),
 		_ => false,
 	}
@@ -558,7 +560,7 @@ fn coerce_once(coercion: Coerce, value: &Value, allow_lossy: bool) -> Option<Coe
 			Value::String(value) => value
 				.parse::<f64>()
 				.ok()
-				.and_then(omp_slopjson::Number::from_f64)
+				.and_then(omp_core::slopjson::Number::from_f64)
 				.map(Value::from)
 				.map(CoercionResult::Value),
 			_ => None,
@@ -571,7 +573,9 @@ fn coerce_once(coercion: Coerce, value: &Value, allow_lossy: bool) -> Option<Coe
 		Coerce::Singleton if !allow_lossy || matches!(value, Value::Array(_)) => None,
 		Coerce::Singleton => Some(CoercionResult::Value(Value::Array(vec![value.clone()]))),
 		Coerce::JsonString => match value {
-			Value::String(value) => omp_slopjson::parse(value).ok().map(CoercionResult::Value),
+			Value::String(value) => omp_core::slopjson::parse(value)
+				.ok()
+				.map(CoercionResult::Value),
 			_ => None,
 		},
 		Coerce::Strip => match value {
@@ -701,7 +705,7 @@ fn canonicalize(
 	}
 	match value {
 		Value::Object(object) => {
-			let mut canonical = omp_slopjson::Object::with_capacity(object.len());
+			let mut canonical = omp_core::slopjson::Object::with_capacity(object.len());
 			let parent = arg_specs.and_then(|(rev, specs)| specs.get(rev, path));
 			for (key, value) in object {
 				let candidate = child_path(path, ArgPath::Key(key.clone()));
@@ -1025,8 +1029,10 @@ impl<'c> IncomingParams<'c> {
 						.path
 						.iter()
 						.map(|part| match part {
-							omp_slopjson::RepairPathSegment::Key(key) => ArgPath::Key(key.clone()),
-							omp_slopjson::RepairPathSegment::Index(index) => ArgPath::Index(*index as u64),
+							omp_core::slopjson::RepairPathSegment::Key(key) => ArgPath::Key(key.clone()),
+							omp_core::slopjson::RepairPathSegment::Index(index) => {
+								ArgPath::Index(*index as u64)
+							},
 						})
 						.collect();
 					repairs.push(Repair {

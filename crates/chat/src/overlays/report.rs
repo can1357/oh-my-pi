@@ -1,7 +1,7 @@
 //! Centered scrollable report panel: the one presentation for slash
 //! commands that answer with a multi-line markdown report (`/tools`,
-//! `/security`, `/hotkeys`, `/changelog`, `/context`, …). pi renders these
-//! as custom transcript messages; on this host they are observer-local
+//! `/security`, `/hotkeys`, `/changelog`, `/context`, …). They are
+//! observer-local
 //! panels (ADR 0005) until the local-block seam lands, so they never enter
 //! the journal either way.
 
@@ -137,8 +137,8 @@ enum PendingState<T> {
 }
 
 /// A report whose body settles asynchronously (`/stats` syncs every stored
-/// journal first): a cancellable loader while the feed runs (pi's
-/// `Syncing session files...` status), then the [`ReportPanel`] over the
+/// journal first): a cancellable loader while the feed runs, then the
+/// [`ReportPanel`] over the
 /// rendered result.
 pub struct PendingReportPanel<T> {
 	id:        &'static str,

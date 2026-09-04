@@ -96,7 +96,8 @@ impl UvRequest {
 				return Err(ExtensionError::new(
 					ExtensionCode::EUrlRequire,
 					format!(
-						"{} declares a direct URL; extension requirements must resolve through a configured index",
+						"{} declares a direct URL; extension requirements must resolve through a \
+						 configured index",
 						requirement.requirement
 					),
 				));
@@ -204,15 +205,27 @@ impl<'a> TargetEnvironment<'a> {
 			"linux"
 		};
 		let platform_machine = if target.starts_with("aarch64") {
-			if sys_platform == "darwin" { "arm64" } else { "aarch64" }
+			if sys_platform == "darwin" {
+				"arm64"
+			} else {
+				"aarch64"
+			}
 		} else if target.starts_with("x86_64") {
-			if sys_platform == "win32" { "AMD64" } else { "x86_64" }
+			if sys_platform == "win32" {
+				"AMD64"
+			} else {
+				"x86_64"
+			}
 		} else if target.starts_with("i686") || target.starts_with("i386") {
 			"x86"
 		} else {
 			target.split('-').next().unwrap_or(target)
 		};
-		let os_name = if sys_platform == "win32" { "nt" } else { "posix" };
+		let os_name = if sys_platform == "win32" {
+			"nt"
+		} else {
+			"posix"
+		};
 		TargetEnvironment { sys_platform, platform_machine, os_name }
 	}
 }

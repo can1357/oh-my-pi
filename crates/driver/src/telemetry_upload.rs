@@ -3,12 +3,12 @@
 use std::{env, sync::Arc, time, time::Duration};
 
 use http::{HeaderMap, HeaderValue, header::USER_AGENT};
+use omp_ai::auth::HeaderPlacement;
 use omp_cache::{
 	telemetry_cache,
 	telemetry_cache::{PendingIssue, TelemetryIndex},
 };
 use omp_envd::github_url::GithubCredentialBridge;
-use omp_inference::auth::HeaderPlacement;
 use serde_json::{Value, json};
 
 const ENDPOINT: &str = "https://qa.omp.sh/v1/grievances";

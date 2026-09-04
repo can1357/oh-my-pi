@@ -110,18 +110,6 @@ async fn main() -> ExitCode {
 			},
 		};
 	}
-	if env::args_os()
-		.nth(1)
-		.is_some_and(|arg| arg == omp_envd::worker::WORKER_ARG)
-	{
-		return match omp_envd::worker::run_py_worker_entry() {
-			Ok(()) => ExitCode::SUCCESS,
-			Err(error) => {
-				eprintln!("omp Python worker: {error}");
-				ExitCode::FAILURE
-			},
-		};
-	}
 	omp_observability::export::init();
 	omp_app::startup_notice::start_watchdog();
 	let result = omp_app::run().await;
@@ -135,7 +123,10 @@ async fn main() -> ExitCode {
 			// Usage diagnostics are stack-free and carry their explicit status.
 			if let Some(signal) = error.downcast_ref::<omp_app::exit_diagnostics::SignalExit>() {
 				ExitCode::from(signal.exit_code())
-			} else if error.downcast_ref::<omp_app::print_mode::PrintFailure>().is_some() {
+			} else if error
+				.downcast_ref::<omp_app::print_mode::PrintFailure>()
+				.is_some()
+			{
 				ExitCode::FAILURE
 			} else if let Some(usage) = error.downcast_ref::<omp_app::usage_error::CliUsageError>() {
 				if usage.lowercase() {

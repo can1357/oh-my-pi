@@ -16,7 +16,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command as ClapCommand, builder::ValueParser};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::{Host, Utility, matches_parser, util};
 

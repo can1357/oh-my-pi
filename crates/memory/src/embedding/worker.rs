@@ -1,4 +1,4 @@
-//! Isolated FastEmbed worker state machine.
+//! Isolated `FastEmbed` worker state machine.
 
 use std::path::Path;
 #[cfg(feature = "local-embedding")]
@@ -92,7 +92,7 @@ impl EmbeddingWorker {
 	}
 
 	#[cfg(not(feature = "local-embedding"))]
-	fn ensure_loaded(&mut self, _id: &Str, _cache_dir: Option<&Path>) -> Result<()> {
+	const fn ensure_loaded(&mut self, _id: &Str, _cache_dir: Option<&Path>) -> Result<()> {
 		Err(Error::UnsupportedEmbeddingModel)
 	}
 

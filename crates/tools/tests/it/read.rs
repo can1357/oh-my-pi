@@ -21,8 +21,8 @@ use futures::StreamExt as _;
 use omp_ar::zip;
 use omp_core::{CowBytes, Str, sf};
 use omp_tool::{
-	Abort, ArtifactLifetime, BlobRef, CallOutcome, CapsBase, Ev, IncomingParams, Interrupt,
-	ModelClass, Part, PromptCaps, RecordedCall, Rev, Tool, ToolTerminal,
+	Abort, ArtifactLifetime, BlobRef, CallOutcome, CapsBase, Diag, DiagKind, Ev, IncomingParams,
+	Interrupt, ModelClass, Part, PromptCaps, RecordedCall, Rev, Severity, Tool, ToolTerminal, Unit,
 };
 use omp_tools::read::{
 	self, DirectoryEntry, DirectorySource, Fault, ReadBlobs, ReadLease, ReadSources, SnapshotRecord,
@@ -373,6 +373,18 @@ async fn project_with_policy(
 	media: bool,
 	policy: read::ReadPolicy,
 ) -> Vec<Part> {
+	project_with_policy_and_diags(sources, blobs, raw, media, policy)
+		.await
+		.0
+}
+
+async fn project_with_policy_and_diags(
+	sources: Sources,
+	blobs: Blobs,
+	raw: &str,
+	media: bool,
+	policy: read::ReadPolicy,
+) -> (Vec<Part>, Vec<Diag>) {
 	let tool = read::tool_with_policy(
 		sources,
 		blobs,
@@ -385,10 +397,17 @@ async fn project_with_policy(
 		.args_committed(Str::new(raw))
 		.expect("read invocation remains live");
 	let events = tool.call(params).collect::<Vec<_>>().await;
-	let [Ev::Done(ToolTerminal::Done { result, .. })] = events.as_slice() else {
-		panic!("expected one terminal read event: {events:?}");
-	};
-	tool.prompt(
+	let mut diags = Vec::new();
+	let mut terminal = None;
+	for event in events {
+		match event {
+			Ev::Diag(diag) => diags.push(diag),
+			Ev::Done(ToolTerminal::Done { result, .. }) => terminal = Some(result),
+			other => panic!("unexpected read event: {other:?}"),
+		}
+	}
+	let result = terminal.expect("one terminal read event");
+	let parts = tool.prompt(
 		result.as_ref(),
 		&PromptCaps::for_tool(
 			CapsBase {
@@ -399,15 +418,27 @@ async fn project_with_policy(
 			},
 			&tool.spec().rev,
 		),
-	)
+	);
+	(parts, diags)
 }
 
 async fn text(sources: Sources, raw: &str) -> String {
-	let parts = project(sources, Blobs::default(), raw, false).await;
+	text_with_diags(sources, raw).await.0
+}
+
+async fn text_with_diags(sources: Sources, raw: &str) -> (String, Vec<Diag>) {
+	let (parts, diags) = project_with_policy_and_diags(
+		sources,
+		Blobs::default(),
+		raw,
+		false,
+		read::ReadPolicy::default(),
+	)
+	.await;
 	let [Part::Text { text }] = parts.as_slice() else {
 		panic!("expected exactly one model-facing text part: {parts:?}");
 	};
-	text.to_string()
+	(text.to_string(), diags)
 }
 async fn payload(sources: Sources, blobs: Blobs, raw: &str) -> read::Payload {
 	let tool = read::tool(sources, blobs);
@@ -416,10 +447,13 @@ async fn payload(sources: Sources, blobs: Blobs, raw: &str) -> read::Payload {
 		.args_committed(Str::new(raw))
 		.expect("read invocation remains live");
 	let events = tool.call(params).collect::<Vec<_>>().await;
-	let [Ev::Done(ToolTerminal::Done { result: Ok(payload), .. })] = events.as_slice() else {
-		panic!("expected one successful read event: {events:?}");
-	};
-	payload.clone()
+	events
+		.into_iter()
+		.find_map(|event| match event {
+			Ev::Done(ToolTerminal::Done { result: Ok(payload), .. }) => Some(payload),
+			_ => None,
+		})
+		.expect("one successful read event")
 }
 
 /// Asserts that an oversized read returns its complete text with no
@@ -631,8 +665,9 @@ async fn directory_listing_is_depth_two_and_elides_nested_children() {
 		modified_ms: Some(u64::MAX),
 	});
 	sources.directory("tree", entries);
+	let (output, diags) = text_with_diags(sources, r#"{"path":"tree"}"#).await;
 	assert_eq!(
-		text(sources, r#"{"path":"tree"}"#).await,
+		output,
 		concat!(
 			".\n",
 			"  - dir/\n",
@@ -647,10 +682,15 @@ async fn directory_listing_is_depth_two_and_elides_nested_children() {
 			"    - child-08.txt\n",
 			"    - child-09.txt\n",
 			"    - child-10.txt\n",
-			"    - child-11.txt\n",
-			"    - … 2 more",
+			"    - child-11.txt",
 		)
 	);
+	let [diag] = diags.as_slice() else {
+		panic!("child cap emits one diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::LimitReached));
+	assert_eq!(diag.severity, Severity::Info);
+	assert_eq!(diag.omitted, Some(omp_tool::Omitted { count: 2, unit: Unit::Entries }));
 }
 
 #[tokio::test]
@@ -707,14 +747,21 @@ async fn file_symlink_keeps_the_authored_alias_in_headers_and_snapshot_keys() {
 async fn line_range_adds_context_header_and_records_the_exposed_snapshot() {
 	let sources = Sources::default();
 	sources.file("file.txt", numbered_lines(12));
+	let (output, diags) = text_with_diags(sources.clone(), r#"{"path":"file.txt:5-8"}"#).await;
 	assert_eq!(
-		text(sources.clone(), r#"{"path":"file.txt:5-8"}"#).await,
+		output,
 		concat!(
 			"[file.txt#A1B2]\n",
-			"4:line 4\n5:line 5\n6:line 6\n7:line 7\n8:line 8\n9:line 9\n10:line 10\n11:line 11\n\n",
-			"[1 more lines in file. Use :12 to continue]",
+			"4:line 4\n5:line 5\n6:line 6\n7:line 7\n8:line 8\n9:line 9\n10:line 10\n11:line 11",
 		)
 	);
+	let [diag] = diags.as_slice() else {
+		panic!("bounded line range emits one diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::Pagination));
+	assert_eq!(diag.severity, Severity::Info);
+	assert_eq!(diag.continuation.as_deref(), Some(":12"));
+	assert_eq!(diag.omitted, Some(omp_tool::Omitted { count: 1, unit: Unit::Lines }));
 	let snapshots = sources.snapshots.lock();
 	let [snapshot] = snapshots.as_slice() else {
 		panic!("one snapshot must be recorded")
@@ -889,7 +936,7 @@ async fn final_projection_authorizes_every_source_line() {
 }
 
 #[tokio::test]
-async fn structural_summary_has_a_concrete_recovery_footer() {
+async fn structural_summary_has_a_concrete_recovery_diag() {
 	let sources = Sources::default();
 	let mut body = String::from("pub fn giant() {\n");
 	for line in 0..120 {
@@ -897,14 +944,15 @@ async fn structural_summary_has_a_concrete_recovery_footer() {
 	}
 	body.push_str("}\n");
 	sources.file("big.rs", body);
-	assert_eq!(
-		text(sources, r#"{"path":"big.rs"}"#).await,
-		concat!(
-			"[big.rs#A1B2]\n",
-			"1-122:pub fn giant() { … }\n\n",
-			"[…120ln elided; re-read needed ranges with big.rs:2-121]",
-		)
-	);
+	let (output, diags) = text_with_diags(sources, r#"{"path":"big.rs"}"#).await;
+	assert_eq!(output, "[big.rs#A1B2]\n1-122:pub fn giant() { … }");
+	let [diag] = diags.as_slice() else {
+		panic!("structural summary emits one diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::SummaryElided));
+	assert_eq!(diag.severity, Severity::Info);
+	assert_eq!(diag.continuation.as_deref(), Some("big.rs:2-121"));
+	assert_eq!(diag.omitted, Some(omp_tool::Omitted { count: 120, unit: Unit::Lines }));
 }
 
 #[tokio::test]
@@ -968,7 +1016,7 @@ async fn files_over_twenty_thousand_lines_skip_structural_summary() {
 	sources.file("too-many.rs", body);
 	let output = text(sources, r#"{"path":"too-many.rs"}"#).await;
 	assert!(output.starts_with("[too-many.rs#A1B2]\n1:pub fn too_many_lines() {\n"), "{output}");
-	assert!(!output.contains("ln elided; re-read needed ranges"), "{output}");
+	assert!(!output.contains("structural summary"), "{output}");
 }
 
 struct TempDb(PathBuf);
@@ -1017,6 +1065,16 @@ async fn sqlite_root_table_key_where_and_forbidden_where_are_model_text() {
 			"| 3   | Linus | 30    |",
 		)
 	);
+	let (page, diags) =
+		text_with_diags(sources.clone(), r#"{"path":"data.sqlite:people?limit=2"}"#).await;
+	assert!(page.contains("| 1   | Ada"), "{page}");
+	let [diag] = diags.as_slice() else {
+		panic!("SQLite pagination emits one diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::Pagination));
+	assert_eq!(diag.severity, Severity::Info);
+	assert_eq!(diag.continuation.as_deref(), Some(":people?limit=2&offset=2"));
+	assert_eq!(diag.omitted, Some(omp_tool::Omitted { count: 1, unit: Unit::Rows }));
 	let schema = text(sources.clone(), r#"{"path":"data.sqlite:people"}"#).await;
 	assert_eq!(
 		schema,
@@ -1059,7 +1117,7 @@ async fn oversized_sqlite_output_returns_the_complete_rendered_table() {
 	let authored = "wide.sqlite?q=SELECT%20id,alpha,beta%20FROM%20wide%20ORDER%20BY%20id";
 	let expected =
 		read::sqlite::read(&db.0, authored).expect("render complete oversized SQLite output");
-	assert!(expected.len() > 50 * 1024, "SQLite fixture must exceed the shared byte limit");
+	assert!(expected.text.len() > 50 * 1024, "SQLite fixture must exceed the shared byte limit");
 
 	let sources = Sources::default();
 	sources.file_as(
@@ -1071,13 +1129,13 @@ async fn oversized_sqlite_output_returns_the_complete_rendered_table() {
 	assert_complete_text(
 		sources,
 		r#"{"path":"wide.sqlite?q=SELECT%20id,alpha,beta%20FROM%20wide%20ORDER%20BY%20id"}"#,
-		&expected,
+		&expected.text,
 	)
 	.await;
 }
 
 #[tokio::test]
-async fn suffix_resolved_sqlite_container_dispatches_with_exact_notice() {
+async fn suffix_resolved_sqlite_container_emits_path_recovered_diag() {
 	let db = sqlite_fixture();
 	let sources = Sources::default();
 	sources.file_as(
@@ -1088,14 +1146,13 @@ async fn suffix_resolved_sqlite_container_dispatches_with_exact_notice() {
 	);
 	sources.suffix("missing/data.sqlite", "resolved/data.sqlite");
 
-	assert_eq!(
-		text(sources, r#"{"path":"missing/data.sqlite"}"#).await,
-		concat!(
-			"[Path 'missing/data.sqlite' not found; resolved to 'resolved/data.sqlite' via suffix \
-			 match]\n",
-			"packages (2 rows)\npeople (3 rows)",
-		)
-	);
+	let (output, diags) = text_with_diags(sources, r#"{"path":"missing/data.sqlite"}"#).await;
+	assert_eq!(output, "packages (2 rows)\npeople (3 rows)");
+	let [diag] = diags.as_slice() else {
+		panic!("suffix recovery emits one diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::PathRecovered));
+	assert_eq!(diag.severity, Severity::Info);
 }
 
 #[tokio::test]
@@ -1310,17 +1367,26 @@ async fn absent_selector_shaped_members_fall_back_to_text_selectors() {
 			"55:line 55\n56:line 56\n57:line 57\n58:line 58\n59:line 59\n60:line 60",
 		)
 	);
+	let (output, diags) =
+		text_with_diags(sources, r#"{"path":"fallback.zip:member.txt:10-12"}"#).await;
 	assert_eq!(
-		text(sources, r#"{"path":"fallback.zip:member.txt:10-12"}"#).await,
+		output,
 		concat!(
 			"9:line 9\n10:line 10\n11:line 11\n12:line 12\n13:line 13\n14:line 14\n",
-			"15:line 15\n\n[45 more lines in file. Use :16 to continue]",
+			"15:line 15",
 		)
 	);
+	let [diag] = diags.as_slice() else {
+		panic!("archive member pagination emits one diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::Pagination));
+	assert_eq!(diag.severity, Severity::Info);
+	assert_eq!(diag.continuation.as_deref(), Some(":16"));
+	assert_eq!(diag.omitted, Some(omp_tool::Omitted { count: 45, unit: Unit::Lines }));
 }
 
 #[tokio::test]
-async fn suffix_resolved_archive_container_dispatches_with_exact_notice() {
+async fn suffix_resolved_archive_container_emits_path_recovered_diag() {
 	let sources = Sources::default();
 	sources.file_as(
 		"resolved/bundle.zip",
@@ -1330,14 +1396,14 @@ async fn suffix_resolved_archive_container_dispatches_with_exact_notice() {
 	);
 	sources.suffix("missing/bundle.zip", "resolved/bundle.zip");
 
-	assert_eq!(
-		text(sources, r#"{"path":"missing/bundle.zip:dir/member.txt"}"#).await,
-		concat!(
-			"[Path 'missing/bundle.zip' not found; resolved to 'resolved/bundle.zip' via suffix \
-			 match]\n",
-			"1:one\n2:two\n3:three\n4:four\n5:five",
-		)
-	);
+	let (output, diags) =
+		text_with_diags(sources, r#"{"path":"missing/bundle.zip:dir/member.txt"}"#).await;
+	assert_eq!(output, "1:one\n2:two\n3:three\n4:four\n5:five");
+	let [diag] = diags.as_slice() else {
+		panic!("archive suffix recovery emits one diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::PathRecovered));
+	assert_eq!(diag.severity, Severity::Info);
 }
 
 #[tokio::test]
@@ -1406,7 +1472,7 @@ async fn document_raw_selector_returns_converted_markdown_without_line_projectio
 const CONFLICTED: &str = include_str!("../fixtures/special-sources/conflicts/merge.txt");
 
 #[tokio::test]
-async fn conflict_selector_is_a_compact_index_and_normal_read_appends_warning() {
+async fn conflict_selector_is_data_and_normal_read_emits_diag() {
 	let sources = Sources::default();
 	sources.file("conflicted.txt", CONFLICTED);
 	let summary = text(sources.clone(), r#"{"path":"conflicted.txt:conflicts"}"#).await;
@@ -1426,30 +1492,30 @@ async fn conflict_selector_is_a_compact_index_and_normal_read_appends_warning() 
 	);
 	assert!(summary.contains("conflict://"));
 	let warning = read::conflicts::render_conflict_warning(CONFLICTED);
-	assert_eq!(
-		warning.text,
-		concat!(
-			"\n⚠ 1 unresolved conflict detected\n",
-			"- ours = HEAD\n",
-			"- theirs = feature/source\n",
-			"- base = base\n",
-			"NOTICE: Read `path:conflicts` for the conflict index and `conflict://<id>` (or ",
-			"`/ours`, `/base`, `/theirs`, `/both`) for exact sides. Resolve with `write` targeting ",
-			"`conflict://<id>` and content `@ours`, `@base`, `@theirs`, `@both`, or custom text; ",
-			"re-read `path:conflicts` to verify.\n\n",
-			"──── #1  L2-8 ────\n",
-			"<<< ours\n",
-			"ours\n",
-			"=== base\n",
-			"ancestor\n",
-			">>> theirs\n",
-			"theirs",
-		)
-	);
-	assert!(warning.text.contains("conflict://"));
-	let ordinary = text(sources, r#"{"path":"conflicted.txt"}"#).await;
+	assert!(warning.text.is_empty());
+	let [warning_diag] = warning.diags.as_slice() else {
+		panic!("ordinary conflict render emits one diagnostic");
+	};
+	assert_eq!(warning_diag.native_kind(), Some(DiagKind::Conflicts));
+	assert_eq!(warning_diag.severity, Severity::Warn);
+	assert_eq!(warning_diag.continuation.as_deref(), Some("path:conflicts"));
+
+	let (ordinary, diags) = text_with_diags(sources, r#"{"path":"conflicted.txt"}"#).await;
 	assert!(ordinary.starts_with("[conflicted.txt#A1B2]\n1:before\n2:<<<<<<< HEAD"), "{ordinary}");
-	assert!(ordinary.ends_with(warning.text.as_str()), "{ordinary}");
+	let final_line = CONFLICTED
+		.lines()
+		.last()
+		.expect("conflict fixture has source text");
+	assert!(
+		ordinary.ends_with(&format!("{}:{final_line}", CONFLICTED.lines().count())),
+		"{ordinary}"
+	);
+	let [diag] = diags.as_slice() else {
+		panic!("ordinary read emits one conflict diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::Conflicts));
+	assert_eq!(diag.severity, Severity::Warn);
+	assert_eq!(diag.continuation.as_deref(), Some("conflicted.txt:conflicts"));
 }
 
 #[tokio::test]
@@ -1593,10 +1659,7 @@ async fn image_question_materializes_archive_internal_and_url_images() {
 	let question = "What color is the pixel?";
 
 	let archive_sources = Sources::default();
-	archive_sources.file(
-		"images.zip",
-		encoded_binary_zip("nested/pixel.png", &png_fixture()),
-	);
+	archive_sources.file("images.zip", encoded_binary_zip("nested/pixel.png", &png_fixture()));
 	let archive = payload(
 		archive_sources,
 		Blobs::default(),
@@ -1618,9 +1681,7 @@ async fn image_question_materializes_archive_internal_and_url_images() {
 
 	let calls = Arc::new(AtomicU64::new(0));
 	let resolver = StaticResolver {
-		bytes: CowBytes::from_static(include_bytes!(
-			"../fixtures/special-sources/images/pixel.png"
-		)),
+		bytes: CowBytes::from_static(include_bytes!("../fixtures/special-sources/images/pixel.png")),
 		lines: Arc::new(LineOffsetCache::default()),
 		calls,
 	};
@@ -1635,14 +1696,16 @@ async fn image_question_materializes_archive_internal_and_url_images() {
 		read::tool_with_resolvers(Sources::default(), Blobs::default(), Arc::new(builder.build()));
 	let (feed, params) = IncomingParams::channel();
 	feed
-		.args_committed(sf!(
-			r#"{{"path":"artifact://7","question":"{question}"}}"#
-		))
+		.args_committed(sf!(r#"{{"path":"artifact://7","question":"{question}"}}"#))
 		.expect("internal image question remains live");
 	let events = internal_tool.call(params).collect::<Vec<_>>().await;
-	let [Ev::Done(ToolTerminal::Done { result: Ok(internal), .. })] = events.as_slice() else {
-		panic!("internal image question succeeds: {events:?}");
-	};
+	let internal = events
+		.iter()
+		.find_map(|event| match event {
+			Ev::Done(ToolTerminal::Done { result: Ok(payload), .. }) => Some(payload),
+			_ => None,
+		})
+		.unwrap_or_else(|| panic!("internal image question succeeds: {events:?}"));
 	assert!(matches!(
 		internal.parts.as_slice(),
 		[
@@ -1778,17 +1841,23 @@ async fn scheme_faults_suffix_recovery_and_semicolon_sections_are_exact() {
 
 	sources.file("nested/lost.txt", "found");
 	sources.suffix("lost.txt", "nested/lost.txt");
-	assert_eq!(
-		text(sources.clone(), r#"{"path":"lost.txt:raw"}"#).await,
-		"[Path 'lost.txt' not found; resolved to 'nested/lost.txt' via suffix match]\nfound"
-	);
+	let (output, diags) = text_with_diags(sources.clone(), r#"{"path":"lost.txt:raw"}"#).await;
+	assert_eq!(output, "found");
+	let [diag] = diags.as_slice() else {
+		panic!("suffix recovery emits one diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::PathRecovered));
+	assert_eq!(diag.severity, Severity::Info);
 
 	sources.file("one.txt", "alpha");
 	sources.file("two.txt", "beta");
-	assert_eq!(
-		text(sources, r#"{"path":"one.txt:raw;two.txt:raw"}"#).await,
-		"Note: interpreted as 2 paths: one.txt:raw, two.txt:raw\n\nalpha\n\nbeta"
-	);
+	let (output, diags) = text_with_diags(sources, r#"{"path":"one.txt:raw;two.txt:raw"}"#).await;
+	assert_eq!(output, "alpha\n\nbeta");
+	let [diag] = diags.as_slice() else {
+		panic!("batch path interpretation emits one diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::Advisory));
+	assert_eq!(diag.severity, Severity::Info);
 }
 
 #[tokio::test]
@@ -1822,9 +1891,13 @@ async fn dense_resolver_dispatch_applies_the_shared_selector_without_copying_the
 		.args_committed(sf!(r#"{{"path":"artifact://7:2-3"}}"#))
 		.expect("resolver invocation remains live");
 	let events = tool.call(params).collect::<Vec<_>>().await;
-	let [Ev::Done(ToolTerminal::Done { result: Ok(payload), .. })] = events.as_slice() else {
-		panic!("expected resolved payload: {events:?}");
-	};
+	let payload = events
+		.iter()
+		.find_map(|event| match event {
+			Ev::Done(ToolTerminal::Done { result: Ok(payload), .. }) => Some(payload),
+			_ => None,
+		})
+		.unwrap_or_else(|| panic!("expected resolved payload: {events:?}"));
 	let [read::PayloadPart::Text { text }] = payload.parts.as_slice() else {
 		panic!("expected one resolved text part: {:?}", payload.parts);
 	};
@@ -1928,11 +2001,31 @@ async fn artifact_ranges_format_disjoint_spans_and_do_not_address_terminal_newli
 	assert_eq!(&*resolver.read("7", &numbered).await.unwrap(), b"1:one\n\xe2\x80\xa6\n3:three");
 	let raw = read::selector::parse_selector(Some("raw:2-2,4-4")).unwrap();
 	assert_eq!(&*resolver.read("7", &raw).await.unwrap(), b"two\n\n\xe2\x80\xa6\n\nfour");
-	let phantom = read::selector::parse_selector(Some("5-5")).unwrap();
-	assert_eq!(
-		String::from_utf8_lossy(&resolver.read("7", &phantom).await.unwrap()),
-		"[Range 5-5 is beyond end of artifact://7 (4 lines total); skipped]"
-	);
+	let mut builder = ResolverTable::builder();
+	builder
+		.register(
+			SchemeEntry::new(Scheme::Artifact, true, true, "Session and durable artifacts"),
+			resolver,
+		)
+		.expect("register artifact resolver");
+	let tool =
+		read::tool_with_resolvers(Sources::default(), Blobs::default(), Arc::new(builder.build()));
+	let (feed, params) = IncomingParams::channel();
+	feed
+		.args_committed(sf!(r#"{{"path":"artifact://7:5-5"}}"#))
+		.expect("artifact range invocation remains live");
+	let events = tool.call(params).collect::<Vec<_>>().await;
+	let [Ev::Diag(diag), Ev::Done(ToolTerminal::Done { result: Ok(payload), .. })] =
+		events.as_slice()
+	else {
+		panic!("out-of-range artifact selector emits a diagnostic then completes: {events:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::RangeOutOfBounds));
+	assert_eq!(diag.severity, Severity::Warn);
+	let [read::PayloadPart::Text { text }] = payload.parts.as_slice() else {
+		panic!("out-of-range artifact read returns one empty text part");
+	};
+	assert!(text.is_empty());
 }
 
 #[tokio::test]
@@ -1943,10 +2036,14 @@ async fn unknown_scheme_is_a_typed_fault() {
 		.args_committed(sf!(r#"{{"path":"custom://pending"}}"#))
 		.expect("unknown-scheme invocation remains live");
 	let events = tool.call(params).collect::<Vec<_>>().await;
-	let [Ev::Done(ToolTerminal::Done { result: Err(Fault::UnknownScheme { scheme, .. }), .. })] =
-		events.as_slice()
-	else {
-		panic!("expected typed unknown-scheme fault: {events:?}");
-	};
+	let scheme = events
+		.iter()
+		.find_map(|event| match event {
+			Ev::Done(ToolTerminal::Done {
+				result: Err(Fault::UnknownScheme { scheme, .. }), ..
+			}) => Some(scheme),
+			_ => None,
+		})
+		.unwrap_or_else(|| panic!("expected typed unknown-scheme fault: {events:?}"));
 	assert_eq!(scheme.as_str(), "custom");
 }

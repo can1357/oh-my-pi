@@ -5,7 +5,7 @@
 //! through `patch@1` at the mailbox drain that receives it, so a crash or
 //! session switch while inference or a tool runs never loses accepted input.
 //! The safe point then moves the queued items into the current turn in one
-//! atomic patch (pi `getSteeringMessages` dequeue).
+//! atomic patch.
 
 use std::sync::Arc;
 
@@ -48,8 +48,8 @@ impl ToolScopedAbortReason {
 	) -> Self {
 		let message = message.into();
 		Self {
-			message: message.clone(),
-			tool_call_messages: Arc::from([(call_id.into(), message)]),
+			message:                   message.clone(),
+			tool_call_messages:        Arc::from([(call_id.into(), message)]),
 			default_tool_call_message: default_tool_call_message.into(),
 		}
 	}
@@ -78,9 +78,8 @@ impl ToolScopedAbortReason {
 /// authoritative [`Session`].
 #[derive(Clone)]
 pub struct SessionMutation {
-	apply: std::sync::Arc<
-		parking_lot::Mutex<Option<Box<dyn FnOnce(&mut Session) + Send + 'static>>>,
-	>,
+	apply:
+		std::sync::Arc<parking_lot::Mutex<Option<Box<dyn FnOnce(&mut Session) + Send + 'static>>>>,
 }
 
 impl SessionMutation {
@@ -100,16 +99,18 @@ impl SessionMutation {
 
 impl std::fmt::Debug for SessionMutation {
 	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		formatter.debug_struct("SessionMutation").finish_non_exhaustive()
+		formatter
+			.debug_struct("SessionMutation")
+			.finish_non_exhaustive()
 	}
 }
 
 /// Control sent to a running kernel turn.
 #[derive(Clone, Debug)]
 pub enum Up {
-	/// Adds a user steering aside at the next safe point (pi
-	/// `steer(text, images)`): `attachments` are already in the session's
-	/// blob store and positional against `[Image #N]` in `text`.
+	/// Adds a user steering aside at the next safe point. `attachments` are
+	/// already in the session's blob store and positional against `[Image #N]`
+	/// in `text`.
 	Steer {
 		/// The aside.
 		text:        Str,
@@ -134,9 +135,9 @@ pub enum Up {
 	/// Queues a peer/hub message for explicit inbox consumption; unlike
 	/// steering, it does not redirect the active turn.
 	Peer(Str),
-	/// Queues a follow-up prompt behind the active turn (pi `followUp`):
-	/// journaled into `<queues><prompts>` at the drain that receives it; the
-	/// controller pops it when the turn yields. Never steering: it does not
+	/// Queues a follow-up prompt behind the active turn, journaled into
+	/// `<queues><prompts>` at the drain that receives it; the controller pops
+	/// it when the turn yields. Never steering: it does not
 	/// re-run a safe point. `attachments` are already in the session's blob
 	/// store and positional against `[Image #N]` in `text`.
 	Queue {
@@ -145,8 +146,8 @@ pub enum Up {
 		/// Media journaled beside it.
 		attachments: Vec<Attachment>,
 	},
-	/// Hands back every steering aside not yet consumed at a safe point (pi
-	/// `app.message.dequeue`): the host restores them to its composer.
+	/// Hands back every steering aside not yet consumed at a safe point; the
+	/// host restores them to its composer.
 	Unqueue(flume::Sender<Vec<Str>>),
 	/// Journals the global runtime gate. Active inference and execution units
 	/// settle to their next safe point; no continuation starts while paused.
@@ -315,10 +316,10 @@ pub fn queue_prompt(
 }
 
 /// Takes the oldest `<prompt kind=queued status=pending>` under
-/// `<queues><prompts>`, journaling it `sent` (the controller's `queue.pop`
-/// shape), and returns its text with the attachments [`queue_prompt`] stored.
-/// A follow-up runs "when the agent yields" (pi `followUp`), so hosts call
-/// this once a turn settles and start the next turn from the result.
+/// `<queues><prompts>`, journaling it `sent`, and returns its text with the
+/// attachments [`queue_prompt`] stored. A follow-up runs "when the agent
+/// yields", so hosts call this once a turn settles and start the next turn
+/// from the result.
 pub fn pop_queued_prompt(
 	session: &mut Session,
 ) -> Result<Option<(Str, Vec<Attachment>)>, SessionError> {
@@ -397,12 +398,11 @@ pub(crate) fn steering_pending(session: &Session) -> bool {
 }
 
 /// Moves queued steering into `turn` in one atomic patch: the queue items are
-/// removed and re-inserted as `<user steering=true>` turn children (user
-/// authorship is preserved, pi queues steering as `role: "user"`). Under
-/// [`SteeringMode::OneAtATime`] only the oldest item moves and the rest stay
-/// queued (so [`steering_pending`] keeps the loop reaching further safe
-/// points); [`SteeringMode::All`] moves every item (pi
-/// `#dequeueSteeringMessages`). Returns the consumed texts in queue order.
+/// removed and re-inserted as `<user steering=true>` turn children, preserving
+/// user authorship. Under [`SteeringMode::OneAtATime`] only the oldest item
+/// moves and the rest stay queued (so [`steering_pending`] keeps the loop
+/// reaching further safe points); [`SteeringMode::All`] moves every item.
+/// Returns the consumed texts in queue order.
 pub(crate) fn consume_steering(
 	session: &mut Session,
 	turn: Handle,
@@ -761,9 +761,9 @@ mod tests {
 		assert!(node.prop(&PropKey::from(PropId::Data)).is_none(), "no attachments, no data prop");
 	}
 
-	/// pi `followUp(text, images)`: a queued prompt keeps its images in the
-	/// same `data` shape a `msg.user@1` fold writes, so the pop that starts
-	/// the next turn carries them typed instead of dropping them.
+	/// A queued prompt keeps its images in the same `data` shape a
+	/// `msg.user@1` fold writes, so the pop that starts the next turn carries
+	/// them typed instead of dropping them.
 	#[test]
 	fn queue_journals_attachments_beside_the_prompt() {
 		let directory = tempfile::tempdir().expect("temporary session directory");

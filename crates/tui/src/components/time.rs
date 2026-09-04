@@ -24,8 +24,8 @@ const YEAR_MS: u64 = 365 * DAY_MS;
 enum Mode {
 	Duration,
 	Relative,
-	/// Whole seconds since a presentation-clock instant (`ms`): pi's running
-	/// tool-card badge, ` Ns`.
+	/// Whole seconds since a presentation-clock instant (`ms`), shown as
+	/// ` Ns` in a running tool-card badge.
 	Elapsed,
 }
 
@@ -219,7 +219,7 @@ impl Component for Time {
 	}
 }
 
-fn relative_parts(age: u64) -> (RelativeUnit, u64, u64) {
+const fn relative_parts(age: u64) -> (RelativeUnit, u64, u64) {
 	if age < SECOND_MS {
 		(RelativeUnit::Now, 0, SECOND_MS)
 	} else if age < MINUTE_MS {
@@ -253,7 +253,7 @@ fn write_relative(out: &mut String, unit: RelativeUnit, value: u64) {
 	match unit {
 		RelativeUnit::Now => out.push_str("now"),
 		unit => {
-			write!(out, "{value}{} ago", <&str>::from(unit)).expect("writing to String cannot fail")
+			write!(out, "{value}{} ago", <&str>::from(unit)).expect("writing to String cannot fail");
 		},
 	}
 }

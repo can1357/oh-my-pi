@@ -11,7 +11,7 @@ use std::{
 
 use clap::Parser;
 use omp_core::Str;
-use omp_shell_engine::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
+use omp_shell::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
 use tokio::time::sleep;
 
 use crate::proc_snapshot::{ProcInfo, sanitize_process_command};
@@ -202,7 +202,7 @@ fn normalize_top_flag(arg: String) -> String {
 }
 
 impl builtins::Command for TopCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
 	fn new<I>(args: I) -> Result<Self, clap::Error>
 	where
@@ -219,10 +219,10 @@ impl builtins::Command for TopCommand {
 		})
 	}
 
-	fn execute<SE: omp_shell_engine::ShellExtensions>(
+	fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell_engine::Error>> + Send {
+	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell::Error>> + Send {
 		let iterations = self.iterations;
 		let delay = self.delay;
 		let row_limit = self.rows;
@@ -633,7 +633,7 @@ mod tests {
 
 	#[test]
 	fn parses_macos_single_dash_long_options() {
-		use omp_shell_engine::builtins::Command as _;
+		use omp_shell::builtins::Command as _;
 		let cmd = TopCommand::new(
 			["top", "-pid", "56943,101", "-stats", "pid,cpu,th,mem,pstate"]
 				.into_iter()

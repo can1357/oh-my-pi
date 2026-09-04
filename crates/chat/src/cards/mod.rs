@@ -31,10 +31,10 @@ pub mod web_search;
 mod workpool;
 pub mod write;
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fmt::Write as _, sync::Arc, time::Duration};
 
 pub use generic::GenericCard;
-use omp_core::{Str, sf};
+use omp_core::{Str, StrMut, sf};
 use omp_dom::{Node, PropId};
 use omp_tool::{ArgPath, CallOutcome};
 use omp_tui::{Graphics, IntoComponent as _, UiContext, dom};
@@ -44,16 +44,15 @@ use smallvec::SmallVec;
 /// A boxed retained TUI component.
 pub type Component = Box<dyn omp_tui::Component>;
 
-/// Inline tool-result image column cap (pi `tui.maxInlineImageColumns`
-/// default); the layout further bounds it by the card's width.
+/// Inline tool-result image column cap (`tui.maxInlineImageColumns` default);
+/// the layout further bounds it by the card's width.
 pub(crate) const INLINE_IMAGE_MAX_COLS: u16 = 100;
-/// Inline tool-result image row cap (pi `tui.maxInlineImageRows` default,
-/// the explicit bound pi takes when it is tighter than 60% of the
-/// viewport).
+/// Inline tool-result image row cap (`tui.maxInlineImageRows` default, the
+/// explicit bound when it is tighter than 60% of the viewport).
 pub(crate) const INLINE_IMAGE_MAX_ROWS: u16 = 20;
 
-/// Whether the terminal renders real inline images (pi
-/// `TERMINAL.imageProtocol`): Kitty, Sixel, or iTerm2 graphics.
+/// Whether the terminal renders real inline images: Kitty, Sixel, or iTerm2
+/// graphics.
 pub(crate) const fn inline_images(ui: &UiContext) -> bool {
 	!matches!(ui.graphics, Graphics::Cells)
 }
@@ -64,8 +63,8 @@ pub(crate) fn file_link(path: &str) -> Str {
 		.map_or_else(|_| sf!("file://{path}"), |absolute| sf!("file://{}", absolute.display()))
 }
 
-/// pi `imageFallback`: `[Image: <name> [<mime>] <WxH>]`, the text stand-in
-/// for a result image the terminal cannot draw.
+/// `[Image: <name> [<mime>] <WxH>]`, the text stand-in for a result image
+/// the terminal cannot draw.
 pub(crate) fn image_placeholder(
 	mime: &str,
 	dimensions: Option<(u32, u32)>,
@@ -86,9 +85,9 @@ pub(crate) fn image_placeholder(
 	Str::new(text)
 }
 
-/// A tool-result image (pi `tool-execution.ts` image blocks): the image
-/// itself through `<img>` when the terminal supports a graphics protocol,
-/// else pi's text placeholder in the tool-output color.
+/// A tool-result image: the image itself through `<img>` when the terminal
+/// supports a graphics protocol, else the text placeholder in tool-output
+/// color.
 pub(crate) fn result_image(
 	src: &Str,
 	mime: &str,
@@ -160,7 +159,7 @@ pub struct CardView<'a> {
 	/// settled result materializes into `result`.
 	pub output:  Option<&'a str>,
 	/// Presentation-clock instant the observer first saw the call executing
-	/// (pi `executionStartedAtNow`); `None` while streaming arguments or once
+	/// `None` while streaming arguments or once
 	/// settled. Cards paint a live elapsed badge against
 	/// [`omp_tui::PaintCtx::now`] from it.
 	pub started: Option<Duration>,
@@ -259,8 +258,8 @@ impl CardView<'_> {
 	}
 }
 
-/// Live elapsed badge for a running call: pi's dim ` Ns` after a muted ` · `
-/// (tool-execution.ts `#renderCompact`), counting whole seconds from
+/// Live elapsed badge for a running call: dim ` Ns` after a muted ` · `,
+/// counting whole seconds from
 /// [`CardView::started`] on the shared clock. Absent unless the call is
 /// executing and the projection recorded when it started, so gallery and
 /// settled cards paint no badge.
@@ -275,15 +274,14 @@ pub(crate) fn elapsed_badge(view: &CardView<'_>) -> Option<Component> {
 	)
 }
 
-/// pi `getLanguageFromPath` composed with `Theme.getLangIcon`: the `lang.*`
-/// icon name a file path is painted with in edit, write, and file-list rows.
+/// Determines the `lang.*` icon name a file path is painted with in edit,
+/// write, and file-list rows.
 ///
 /// The key is the text after the last `.` of the file name (so `.gitignore`
 /// resolves as `gitignore`), else the whole lowercased file name for
-/// extensionless files such as `Dockerfile` and `justfile`. Languages pi
-/// recognises but has no icon for (`zig`, `perl`, …) paint `lang.default`;
-/// paths pi does not recognise at all paint `lang.text`, pi's `?? "text"`
-/// fallback.
+/// extensionless files such as `Dockerfile` and `justfile`. Languages
+/// recognised but without an icon (`zig`, `perl`, …) paint `lang.default`;
+/// unrecognised paths paint `lang.text`.
 pub(crate) fn path_language_icon(path: &str) -> &'static str {
 	let name = path
 		.rsplit(['/', '\\'])
@@ -381,8 +379,7 @@ pub(crate) fn partial_string(json: &str, key: &str) -> Option<Str> {
 	Some(Str::from(out))
 }
 
-/// pi `previewLines` / `renderCodeCell` `*MaxLines`: the first `limit`
-/// lines and a `… N more lines` marker when more follow.
+/// The first `limit` lines and a `… N more lines` marker when more follow.
 pub(crate) fn preview_lines(text: &str, limit: usize) -> Str {
 	let total = text.lines().count();
 	if total <= limit {
@@ -541,63 +538,67 @@ fn node_text(node: &Node) -> Option<&str> {
 /// object. Output bounding is an informational artifact continuation, not a
 /// tool failure (ADR 0009).
 fn render_notice(node: &Node) -> Option<Component> {
-	let severity = node
-		.prop(&PropId::Severity.into())
-		.and_then(omp_dom::Value::as_str)
+	let value = node_data(node)
+		.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+		.unwrap_or(serde_json::Value::Null);
+	let data_text = |key| value.get(key).and_then(serde_json::Value::as_str);
+	let prop_text = |prop: PropId| node.prop(&prop.into()).and_then(omp_dom::Value::as_str);
+
+	let severity = prop_text(PropId::Severity)
+		.or_else(|| data_text("severity"))
 		.unwrap_or("info");
 	if severity == "error" {
 		return None;
 	}
-	let value = node_data(node)
-		.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-		.unwrap_or(serde_json::Value::Null);
-	let kind = node
-		.prop(&PropId::Kind.into())
-		.and_then(omp_dom::Value::as_str)
-		.or_else(|| value.get("kind").and_then(serde_json::Value::as_str))
+	let kind = prop_text(PropId::Kind)
+		.or_else(|| data_text("kind"))
 		.unwrap_or_default();
-	let artifact = value
-		.get("artifact")
-		.and_then(serde_json::Value::as_str)
-		.map(Str::new);
-	let clamped = value
-		.get("lines_clamped")
-		.and_then(serde_json::Value::as_u64)
-		.unwrap_or(0);
-	let message = value
-		.get("text")
-		.or_else(|| value.get("message"))
-		.and_then(serde_json::Value::as_str)
+	let message = prop_text(PropId::Text)
 		.filter(|text| !text.is_empty())
+		.or_else(|| {
+			data_text("text")
+				.or_else(|| data_text("message"))
+				.filter(|text| !text.is_empty())
+		})
 		.map(Str::new)
-		.or_else(|| {
-			matches!(kind, "output_bounded" | "truncated").then(|| {
-				if clamped == 0 {
-					Str::new_static("Output was bounded")
-				} else if clamped == 1 {
-					Str::new_static("1 output line was clipped")
-				} else {
-					sf!("{clamped} output lines were clipped")
-				}
-			})
-		})
-		.or_else(|| {
-			node_text(node)
-				.filter(|text| !text.trim_start().starts_with(['{', '[']))
-				.map(Str::new)
-		})
-		.or_else(|| (!kind.is_empty()).then(|| Str::new(kind.replace(['_', '-'], " "))))?;
+		.or_else(|| (kind == "output_bounded").then(|| Str::new_static("Output was bounded")))
+		.or_else(|| (!kind.is_empty()).then(|| Str::from(kind.replace(['_', '-'], " "))))?;
+	let continuation = prop_text(PropId::Continuation).or_else(|| data_text("continuation"));
+	let artifact = prop_text(PropId::Recovery)
+		.or_else(|| data_text("artifact"))
+		.or_else(|| data_text("recovery"));
+	let omitted = match node.prop(&PropId::Omitted.into()) {
+		Some(omp_dom::Value::Int(count)) => u64::try_from(*count).ok(),
+		_ => value
+			.get("omitted")
+			.and_then(|omitted| omitted.get("count"))
+			.and_then(serde_json::Value::as_u64),
+	};
+	let unit = prop_text(PropId::Unit).or_else(|| {
+		value
+			.get("omitted")
+			.and_then(|omitted| omitted.get("unit"))
+			.and_then(serde_json::Value::as_str)
+	});
+
+	let mut content = StrMut::from(message);
+	if let Some(count) = omitted {
+		let _ = write!(content, " ({count} {} not shown)", unit.unwrap_or("items"));
+	}
+	if let Some(continuation) = continuation {
+		let _ = write!(content, "\nContinue with {continuation}");
+	}
+	if let Some(artifact) = artifact {
+		let _ = write!(content, "\n\n[Read {artifact} for full output]({artifact})");
+	}
 	let tone = if matches!(severity, "warn" | "warning") {
 		"warn"
 	} else {
 		"info"
 	};
-	Some(if let Some(artifact) = artifact {
-		let content = sf!("{message}\n\n[Read {artifact} for full output]({artifact})");
-		dom! { <callout kind={tone}>{content}</callout> }.into_component()
-	} else {
-		dom! { <callout kind={tone}>{message}</callout> }.into_component()
-	})
+	dom! { <callout kind={tone}>{content.freeze()}</callout> }
+		.into_component()
+		.into()
 }
 
 /// One typed renderer for a tool identity.

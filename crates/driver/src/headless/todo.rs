@@ -110,7 +110,9 @@ fn phases_from_dom(dom: &omp_dom::Dom) -> Vec<Phase> {
 	}
 	let mut seen_tasks = FastHashSet::<Str>::default();
 	for handle in dom.children(todo) {
-		let Some(node) = dom.get(*handle) else { continue };
+		let Some(node) = dom.get(*handle) else {
+			continue;
+		};
 		if node.tag != Tag::Known(KnownTag::Item) {
 			continue;
 		}
@@ -145,7 +147,9 @@ fn phases_from_dom(dom: &omp_dom::Dom) -> Vec<Phase> {
 			.prop(&PropId::Detail.into())
 			.and_then(DomValue::as_str)
 			.map(Str::new);
-		phases[phase_index].tasks.push(Task { content, status, blocker });
+		phases[phase_index]
+			.tasks
+			.push(Task { content, status, blocker });
 	}
 	phases
 }
@@ -160,11 +164,9 @@ mod tests {
 
 	fn session() -> (tempfile::TempDir, Session) {
 		let directory = tempfile::tempdir().expect("temporary directory");
-		let session = Session::create(
-			directory.path().join("todo.oms"),
-			ComponentRegistry::standard(),
-		)
-		.expect("session");
+		let session =
+			Session::create(directory.path().join("todo.oms"), ComponentRegistry::standard())
+				.expect("session");
 		(directory, session)
 	}
 
@@ -172,21 +174,19 @@ mod tests {
 	fn model_projection_is_the_todo_summary_not_raw_json() {
 		let tool = TodoSessionTool::new();
 		let payload = todo::Payload {
-			op: todo::Op::View,
-			phases: vec![Phase {
-				name: sf!("Build"),
+			op:              todo::Op::View,
+			phases:          vec![Phase {
+				name:  sf!("Build"),
 				tasks: vec![Task {
 					content: sf!("Compile crate"),
-					status: Status::InProgress,
+					status:  Status::InProgress,
 					blocker: None,
 				}],
 			}],
 			completed_tasks: Vec::new(),
 		};
-		let outcome: CallOutcome<
-			Box<serde_json::value::RawValue>,
-			Box<serde_json::value::RawValue>,
-		> = CallOutcome::Ok(serde_json::value::to_raw_value(&payload).expect("todo payload"));
+		let outcome: CallOutcome<Box<serde_json::value::RawValue>, Box<serde_json::value::RawValue>> =
+			CallOutcome::Ok(serde_json::value::to_raw_value(&payload).expect("todo payload"));
 		let parts = tool.project(&outcome).expect("model projection");
 		assert!(matches!(
 			parts.as_slice(),
@@ -210,29 +210,26 @@ mod tests {
 					.is_some_and(|node| node.tag == Tag::Known(KnownTag::Todo))
 			})
 			.expect("todo root");
-		let order = serde_json::value::to_raw_value(&vec![sf!("Build"), sf!("Ship")])
-			.expect("phase order");
+		let order =
+			serde_json::value::to_raw_value(&vec![sf!("Build"), sf!("Ship")]).expect("phase order");
 		session
 			.patch(Txn {
 				cause,
 				label: Some(sf!("todo.fixture")),
 				ops: vec![
 					Op::Set {
-						h: todo,
-						prop: PropKey::Custom(sf!(PHASE_ORDER)),
+						h:     todo,
+						prop:  PropKey::Custom(sf!(PHASE_ORDER)),
 						value: DomValue::Json(order),
 					},
 					Op::Ins {
 						parent: todo,
-						after: None,
-						node: NodeSpec::new(KnownTag::Item)
+						after:  None,
+						node:   NodeSpec::new(KnownTag::Item)
 							.with_prop(PropId::Label, DomValue::Str(sf!("Compile crate")))
 							.with_prop(PropId::Status, DomValue::Str(sf!("blocked")))
 							.with_prop(PropId::Detail, DomValue::Str(sf!("waiting")))
-							.with_prop(
-								PropKey::Custom(sf!(PHASE)),
-								DomValue::Str(sf!("Build")),
-							),
+							.with_prop(PropKey::Custom(sf!(PHASE)), DomValue::Str(sf!("Build"))),
 					},
 				],
 			})

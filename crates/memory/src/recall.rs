@@ -165,19 +165,17 @@ impl<'a> RecallEngine<'a> {
 				false,
 				&mut voices,
 			)?;
-			if shared {
-				if let Some(fallback) = broadened.as_deref() {
-					let fallback_terms = query_terms(fallback);
-					self.collect_store(
-						store,
-						fallback,
-						&fallback_terms,
-						query_embedding,
-						bounds.voice_limit,
-						true,
-						&mut voices,
-					)?;
-				}
+			if shared && let Some(fallback) = broadened.as_deref() {
+				let fallback_terms = query_terms(fallback);
+				self.collect_store(
+					store,
+					fallback,
+					&fallback_terms,
+					query_embedding,
+					bounds.voice_limit,
+					true,
+					&mut voices,
+				)?;
 			}
 		}
 		Ok(fuse(voices, bounds))
@@ -267,7 +265,7 @@ fn vector_candidates(
 			.map(|(left, right)| f64::from(*left) * f64::from(*right))
 			.sum::<f64>();
 		if let Some(record) = store.get(stored.memory_id.as_str())? {
-			output.push(RankedCandidate { record, score: ((cosine + 1.0) * 0.5).clamp(0.0, 1.0) });
+			output.push(RankedCandidate { record, score: f64::midpoint(cosine, 1.0).clamp(0.0, 1.0) });
 		}
 	}
 	output.sort_by(|left, right| {
@@ -303,8 +301,11 @@ fn fuse(
 			.filter(|candidate| seen.insert(candidate.record.id.clone()))
 			.enumerate()
 		{
-			let contribution =
-				voice.weight() / (RRF_K + (rank + 1) as f64) + voice.weight() * candidate.native * 0.01;
+			let contribution = f64::mul_add(
+				(voice.weight() * candidate.native),
+				0.01,
+				voice.weight() / (RRF_K + (rank + 1) as f64),
+			);
 			let result = fused
 				.entry(candidate.record.id.clone())
 				.or_insert_with(|| RecallResult {

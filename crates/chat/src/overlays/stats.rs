@@ -1,10 +1,9 @@
 //! Pure report builders behind `/stats` and `/trace`: markdown for a
 //! [`ReportPanel`](super::report::ReportPanel).
 //!
-//! `/stats` renders the application's usage index the way pi's stats CLI
-//! prints its summary (`packages/stats/src/index.ts` `printStats`: Overall,
-//! By Model, By Folder). `/trace` renders the last turn as pi's trace
-//! dashboard summarizes it (`packages/stats/src/trace.ts`: wall / model /
+//! `/stats` renders the application's usage index as an Overall, By Model,
+//! and By Folder summary. `/trace` renders the last turn as a dashboard
+//! summary (wall / model /
 //! tool / idle time, one span per request and tool call, tool aggregates)
 //! from the replica alone — every element's `id`/`order` ULIDs carry the
 //! journal's own timestamps — interleaved with the kernel notifications
@@ -18,7 +17,7 @@ use omp_journal::EntryId;
 
 use super::services::{StatsGroup, StatsReport, TraceEvent};
 
-/// Rows shown per `/stats` grouping (pi `slice(0, 10)`).
+/// Rows shown per `/stats` grouping.
 pub const STATS_GROUP_LIMIT: usize = 10;
 
 /// `/stats` markdown.
@@ -362,7 +361,7 @@ fn plural(count: u64) -> &'static str {
 	if count == 1 { "" } else { "s" }
 }
 
-/// Thousands-grouped integer (pi `formatNumber`).
+/// Thousands-grouped integer.
 fn number(value: u64) -> String {
 	let digits = value.to_string();
 	let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -384,7 +383,7 @@ fn percent(part: u64, whole: u64) -> String {
 	format!("{:.1}%", ratio * 100.0)
 }
 
-/// pi `formatCost`: `N/A` when nothing was priced, more decimals for tiny
+/// Formats cost as `N/A` when nothing was priced, with more decimals for tiny
 /// amounts.
 fn cost(nano_usd: u64, unpriced: u64) -> String {
 	if nano_usd == 0 && unpriced > 0 {
@@ -406,7 +405,7 @@ fn cost(nano_usd: u64, unpriced: u64) -> String {
 	}
 }
 
-/// pi `formatDuration`: `Nms` under a second, else `N.Ns`, else `NmNs`.
+/// Formats duration as `Nms` under a second, then `N.Ns`, then `NmNs`.
 fn duration(ms: u64) -> String {
 	if ms < 1000 {
 		format!("{ms}ms")

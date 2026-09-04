@@ -165,8 +165,7 @@ pub fn custom_notice(kind: &str, node: &Node, expanded: bool) -> Option<Componen
 	}
 }
 
-/// One parsed `path:line:col [severity] [source] message (code)` line
-/// (pi `parseDiagnosticMessage`, `tools/render-utils.ts:346-359`).
+/// One parsed `path:line:col [severity] [source] message (code)` line.
 struct Diagnostic<'a> {
 	path:     &'a str,
 	line:     &'a str,
@@ -385,10 +384,10 @@ pub fn diagnostics_card(node: &Node, expanded: bool) -> Component {
 	.into_component()
 }
 
-/// pi `TAN_WORK_PREVIEW_LENGTH` (`background-tan-message.ts:7`).
+/// Maximum preview length for background-tangent work.
 const TAN_WORK_PREVIEW_LENGTH: usize = 56;
 
-/// pi `previewWork` (`background-tan-message.ts:9-13`): tabs to spaces,
+/// Previews work with tabs converted to spaces,
 /// whitespace runs collapsed, cut to 55 characters plus `…`.
 fn preview_work(work: &str) -> Str {
 	let mut text = StrMut::with_capacity(work.len());
@@ -407,7 +406,7 @@ fn preview_work(work: &str) -> Str {
 	cut.freeze()
 }
 
-/// `/tan` background-dispatch breadcrumb (pi `background-tan-message.ts`):
+/// `/tan` background-dispatch breadcrumb:
 /// one muted row `<output> Tangent dispatched [task] <id> — <work>`, with the
 /// job id in accent and the work preview dimmed.
 #[must_use]
@@ -499,8 +498,8 @@ fn severity_color(severity: AdvisorSeverity) -> &'static str {
 	}
 }
 
-/// Batched advisor notes injected into the primary session (pi
-/// `advisor-message.ts`): a counted header, one attributed severity rail per
+/// Batched advisor notes injected into the primary session: a counted header,
+/// one attributed severity rail per
 /// note, three-note collapsed preview, and every paragraph when expanded.
 #[must_use]
 pub fn advisor_card(node: &Node, expanded: bool) -> Component {
@@ -586,7 +585,7 @@ pub fn advisor_card(node: &Node, expanded: bool) -> Component {
 	.into_component()
 }
 
-/// Collaboration guest prompt (pi `collab-prompt-message.ts`): the user
+/// Collaboration guest prompt: the user
 /// bubble under a bold accent `«author» ›` tag naming who typed it.
 #[must_use]
 pub fn guest_bubble(author: &str, text: Str) -> Component {
@@ -601,13 +600,13 @@ pub fn guest_bubble(author: &str, text: Str) -> Component {
 	.into_component()
 }
 
-/// pi `user-message.ts` bubble: Markdown on the `userMessageBg` tint with
+/// User-message bubble: Markdown on the `userMessageBg` tint with
 /// one cell of padding on every side.
 fn bubble(text: Str) -> Component {
 	dom! { <md bg=surface pad="1 1">{text}</md> }.into_component()
 }
 
-/// pi `formatBytes` (`utils/format.ts:54-59`): `512B`, `1.5KB`, `2.3MB`.
+/// Formats bytes as `512B`, `1.5KB`, or `2.3MB`.
 pub(crate) fn format_bytes(bytes: usize) -> String {
 	const KB: f64 = 1024.0;
 	#[allow(clippy::cast_precision_loss, reason = "display rounding only")]
@@ -623,7 +622,7 @@ pub(crate) fn format_bytes(bytes: usize) -> String {
 	}
 }
 
-/// pi `syntheticInputLabel` (`user-message.ts:184-192`): the first Markdown
+/// The first Markdown
 /// heading's text, else `Synthetic input`.
 fn synthetic_label(text: &str) -> &str {
 	for raw in text.lines() {
@@ -647,7 +646,7 @@ fn synthetic_label(text: &str) -> &str {
 	"Synthetic input"
 }
 
-/// pi `summarizeSyntheticInput` (`user-message.ts:176-181`):
+/// Summarizes synthetic input as
 /// `<label> · <size> · <n> lines`.
 fn synthetic_summary(text: &str) -> Str {
 	let lines = if text.is_empty() {
@@ -663,8 +662,7 @@ fn synthetic_summary(text: &str) -> Str {
 	)
 }
 
-/// Synthetic (agent-attributed) user input (pi
-/// `CollapsedSyntheticMessageComponent`, `user-message.ts:100-150`): one dim
+/// Synthetic (agent-attributed) user input: one dim
 /// `<label> · <size> · <n> lines · ctrl+o` row; expanded, the full bubble
 /// follows it.
 #[must_use]
@@ -906,7 +904,7 @@ mod tests {
 		assert_eq!(collapsed, " Session update · 1.2KB · 14 lines · ctrl+o");
 		let expanded = render(synthetic_row(&text, true), 60);
 		assert!(expanded.starts_with(" Session update · 1.2KB · 14 lines · ctrl+o\n"));
-		// pi `CollapsedSyntheticMessageComponent#renderExpanded`: the body is
+		// The expanded body is
 		// the Markdown `UserMessageComponent`, so the heading renders as a
 		// heading rather than its raw `#` source.
 		assert!(expanded.contains("\n Session update\n\n line 0 of the replay dump"), "{expanded:?}");

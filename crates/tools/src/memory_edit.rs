@@ -6,6 +6,7 @@ use async_stream::stream;
 use bytes::Bytes;
 use futures::Stream;
 use omp_core::{Str, StrMut, sf};
+pub use omp_memory::runtime::EditOutcome;
 use omp_memory::{
 	MemoryRuntime,
 	runtime::{EditOperation, EditStatus, MAX_MEMORY_CONTENT_BYTES},
@@ -16,8 +17,6 @@ use omp_tool::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-pub use omp_memory::runtime::EditOutcome;
 
 /// Arguments accepted by `memory_edit@2`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -249,7 +248,7 @@ fn render_outcome(outcome: &EditOutcome) -> Str {
 	text.freeze()
 }
 
-fn done(result: Result<EditOutcome, Fault>, useless: bool) -> Ev<Update, EditOutcome, Fault> {
+const fn done(result: Result<EditOutcome, Fault>, useless: bool) -> Ev<Update, EditOutcome, Fault> {
 	Ev::Done(ToolTerminal::Done { result, useless })
 }
 

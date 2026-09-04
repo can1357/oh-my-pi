@@ -4,7 +4,7 @@ use std::io::Write;
 
 use clap::Parser;
 use omp_core::Str;
-use omp_shell_engine::{ShellExtensions, builtins::Registration, pathsearch, sys};
+use omp_shell::{ShellExtensions, builtins::Registration, pathsearch, sys};
 
 use crate::host::{Host, Utility, util};
 

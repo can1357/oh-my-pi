@@ -405,7 +405,7 @@ pub fn verify_publisher_rotation(
 	new_key: &str,
 	rotation: &KeyRotation,
 ) -> Result<(), ExtensionError> {
-	let result = (|| {
+	(|| {
 		if rotation.id != *id || rotation.new_key != new_key {
 			return Err(ExtensionError::new(
 				ExtensionCode::EKeyChanged,
@@ -417,8 +417,7 @@ pub fn verify_publisher_rotation(
 			format!("{}\n{}", rotation.id, rotation.new_key).as_bytes(),
 			rotation.signature.as_str(),
 		)
-	})();
-	result
+	})()
 }
 /// A revoked extension version predicate. Version matching is deliberately
 /// delegated to the resolver; materialization compares exact lock versions.
@@ -500,15 +499,15 @@ impl RevocationsFile {
 			valid_until: &'a Str,
 			revoked:     &'a [RevokedVersion],
 		}
-		let result = serde_json::to_vec(&Unsigned {
+
+		serde_json::to_vec(&Unsigned {
 			version:     self.version,
 			issued_at:   &self.issued_at,
 			valid_until: &self.valid_until,
 			revoked:     &self.revoked,
 		})
 		.map_err(|error| ExtensionError::new(ExtensionCode::ESig, error.to_string()))
-		.and_then(|payload| verify_signature(index_key, &payload, self.signature.as_str()));
-		result
+		.and_then(|payload| verify_signature(index_key, &payload, self.signature.as_str()))
 	}
 
 	/// Returns the matching revocation predicate for an exact locked version.
@@ -592,7 +591,7 @@ pub fn verify_artifact_signature(
 	capability_digest: &str,
 	signature: &str,
 ) -> Result<(), ExtensionError> {
-	let result = (|| {
+	(|| {
 		let decode_digest = |digest: &str, prefix: &str| {
 			hex::decode(digest.strip_prefix(prefix).unwrap_or(digest).as_bytes())
 				.into_vec()
@@ -608,8 +607,7 @@ pub fn verify_artifact_signature(
 		message.extend_from_slice(&sha256);
 		message.extend_from_slice(&capability);
 		verify_signature(key, &message, signature)
-	})();
-	result
+	})()
 }
 
 /// Verifies a detached Ed25519 signature over canonical authority-owned bytes.

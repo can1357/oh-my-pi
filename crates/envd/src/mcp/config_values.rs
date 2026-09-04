@@ -6,8 +6,8 @@
 
 use std::{collections::BTreeMap, fmt};
 
+use omp_ai::auth::command::{CommandCredentialError, CommandCredentialResolver};
 use omp_core::{ExposeSecret as _, SecretString, Str};
-use omp_inference::auth::command::{CommandCredentialError, CommandCredentialResolver};
 use tokio_util::sync::CancellationToken;
 
 use super::config::{HeaderPolicy, McpServerConfig};
@@ -61,8 +61,7 @@ pub async fn resolve_transport_values(
 	commands: Option<&CommandCredentialResolver>,
 	cancellation: &CancellationToken,
 ) -> Result<ResolvedTransportValues, ConfigValueError> {
-	let env =
-		resolve_map(&config.env, Some(config), environment, commands, cancellation).await?;
+	let env = resolve_map(&config.env, Some(config), environment, commands, cancellation).await?;
 	let headers = if config.header_policy == Some(HeaderPolicy::OriginLocked) {
 		config
 			.headers
@@ -141,7 +140,7 @@ mod tests {
 		time::Duration,
 	};
 
-	use omp_inference::auth::command::{CommandCredentialExecutor, CommandExecutionFuture};
+	use omp_ai::auth::command::{CommandCredentialExecutor, CommandExecutionFuture};
 
 	use super::*;
 	use crate::mcp::config::{EnvironmentPolicy, McpServerConfig, TransportKind};

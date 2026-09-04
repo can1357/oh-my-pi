@@ -10,7 +10,6 @@ fn python_extensions_project_directors_and_components() {
 			py.run(
 				c_str!(
 					r#"
-import json
 import omp
 from omp._registry import registry
 
@@ -29,9 +28,8 @@ def ext_state(entry, dom):
     return (("set", "ext-state", "seen", True),)
 
 registry.freeze()
-from omp._registry import project_worker_registry
-_, encoded = project_worker_registry()
-payload = json.loads(encoded)
+from omp._registry import project_control_registry
+payload = project_control_registry()
 assert payload["directors"] == [{
     "binds": {"ai_fastmode": True},
     "callable": {"$omp.callable": "__main__.ContinueOnce"},

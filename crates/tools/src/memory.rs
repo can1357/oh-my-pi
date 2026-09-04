@@ -519,13 +519,13 @@ fn render_reflection_evidence(memories: &[RecallResult]) -> Str {
 	use std::fmt::Write as _;
 	for item in memories {
 		let source = item.memory.source.as_deref().unwrap_or("unknown");
-		let date = item.memory.timestamp.get(..10).unwrap_or(item.memory.timestamp.as_str());
-		let _ = writeln!(
-			output,
-			"- {} [{source}] ({date}, c:{:.2})",
-			item.memory.content,
-			item.score,
-		);
+		let date = item
+			.memory
+			.timestamp
+			.get(..10)
+			.unwrap_or(item.memory.timestamp.as_str());
+		let _ =
+			writeln!(output, "- {} [{source}] ({date}, c:{:.2})", item.memory.content, item.score);
 	}
 	output.freeze()
 }
@@ -539,20 +539,21 @@ fn render_recall(payload: &RecallPayload) -> Str {
 	let _ = writeln!(output, "Found {} relevant memories:\n", payload.items.len());
 	for item in &payload.items {
 		let source = item.memory.source.as_deref().unwrap_or("unknown");
-		let date = item.memory.timestamp.get(..10).unwrap_or(item.memory.timestamp.as_str());
+		let date = item
+			.memory
+			.timestamp
+			.get(..10)
+			.unwrap_or(item.memory.timestamp.as_str());
 		let _ = writeln!(
 			output,
 			"- [{}] {} (memory://{}) [{source}] ({date}, c:{:.2})",
-			item.memory.bank,
-			item.memory.content,
-			item.memory.id,
-			item.score,
+			item.memory.bank, item.memory.content, item.memory.id, item.score,
 		);
 	}
 	output.freeze()
 }
 
-fn terminal<U, P>(result: Result<P, Fault>, useless: bool) -> Ev<U, P, Fault> {
+const fn terminal<U, P>(result: Result<P, Fault>, useless: bool) -> Ev<U, P, Fault> {
 	Ev::Done(ToolTerminal::Done { result, useless })
 }
 

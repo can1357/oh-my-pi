@@ -12,6 +12,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
+use omp_audio::audio::PlaybackStream;
 use omp_core::{ArtifactUrl, Str, sf};
 use omp_proto::{
 	inference::v1::{self as inference_pb, generate_image_request},
@@ -23,7 +24,6 @@ use omp_tool::{
 	ToolTerminal,
 };
 use omp_tools::{ask, read::image::sniff_metadata};
-use omp_voice::audio::PlaybackStream;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

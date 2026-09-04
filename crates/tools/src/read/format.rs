@@ -3,15 +3,17 @@
 use std::{
 	collections::BTreeSet,
 	fmt::Write as _,
-	mem,
 	path::{MAIN_SEPARATOR, Path},
 };
 
 use omp_ast::block::{
 	EnclosingBoundaryOptions, LineRange as AstLineRange, enclosing_block_boundaries,
 };
-use omp_core::Str;
-use omp_hashline::{format_hashline_header, format_numbered_line, split_addressable_file_lines};
+use omp_core::{Str, sf};
+use omp_edit::modes::hashline::format::{
+	format_hashline_header, format_numbered_line, split_addressable_file_lines,
+};
+use omp_tool::{Diag, DiagKind, Unit};
 use smallvec::{SmallVec, smallvec};
 
 use super::selector::{LineRange as SelectorLineRange, ParsedSelector};
@@ -44,9 +46,18 @@ pub struct ResolvedRangeText<'a> {
 pub type SourceLines = SmallVec<usize, 2>;
 /// Exact source-line provenance for each rendered output line.
 ///
-/// An empty entry denotes framing, notices, or ellipses. Most content rows map
-/// to one source line; structural renderers may map one row to several lines.
+/// An empty entry denotes framing or ellipses. Most content rows map to one
+/// source line; structural renderers may map one row to several lines.
 pub type SourceLineMap = Box<[SourceLines]>;
+
+/// Model-facing text plus harness diagnostics kept outside the result body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Rendered {
+	/// Result data.
+	pub text:  Str,
+	/// Structured harness notices.
+	pub diags: SmallVec<Diag, 2>,
+}
 
 /// Optional editable snapshot framing for a text result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,8 +110,10 @@ impl<'a> TextFormatOptions<'a> {
 /// Bounding happens exactly once, in the dispatcher's central spill gate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FormattedText {
-	/// Complete model-facing text, including headers and continuation notices.
+	/// Complete model-facing text.
 	pub text:           String,
+	/// Structured harness notices collected while formatting.
+	pub diags:          SmallVec<Diag, 2>,
 	/// Exact source-line provenance for every line in `text`.
 	pub source_lines:   SourceLineMap,
 	/// Number of addressable lines in the source under the requested raw mode.
@@ -111,25 +124,6 @@ pub struct FormattedText {
 	pub selected_spans: Box<[LineSpan]>,
 	/// Snapshot tag associated with the output, when one was supplied.
 	pub snapshot_tag:   Option<Str>,
-}
-
-impl FormattedText {
-	/// Prepends the suffix-match resolution notice to this result.
-	pub fn prepend_suffix_resolution_notice(&mut self, from: &str, to: &str) {
-		let resolution = Some(SuffixResolution { from, to });
-		self.text = prepend_suffix_resolution_notice(&self.text, resolution);
-		prepend_unmapped_line(&mut self.source_lines);
-		normalize_map_to_text(&self.text, &mut self.source_lines);
-	}
-
-	/// Append a pre-rendered normal-read conflict warning verbatim.
-	///
-	/// Conflict warnings intentionally begin with a newline; keeping composition
-	/// here avoids making the generic formatter depend on conflict registry
-	/// state.
-	pub fn append_conflict_warning(&mut self, warning: &str) {
-		append_unmapped_text(&mut self.text, &mut self.source_lines, warning);
-	}
 }
 
 /// One line or elision marker in a bracket-enriched projection.
@@ -155,15 +149,6 @@ pub struct ElidedRange {
 	pub start: usize,
 	/// Last elided source line.
 	pub end:   usize,
-}
-
-/// A suffix-match recovery included ahead of the formatted source.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SuffixResolution<'a> {
-	/// Original unresolved path.
-	pub from: &'a str,
-	/// Recovered path displayed to the model.
-	pub to:   &'a str,
 }
 
 /// Model and display forms of a merged structural-summary brace pair.
@@ -208,7 +193,7 @@ pub fn format_read_anchor(path: &Path, workspace: &Path, home: Option<&Path>) ->
 
 /// Format one hashline read header from its already-resolvable anchor and tag.
 pub fn format_read_hashline_header(anchor: &str, tag: &str) -> Str {
-	format_hashline_header(anchor, tag)
+	format_hashline_header(anchor, tag).into()
 }
 
 /// Formats resolver-loaded line spans without rebasing their source numbers.
@@ -222,8 +207,9 @@ pub fn format_resolved_ranges(
 	raw: bool,
 	total_lines: usize,
 	options: TextFormatOptions<'_>,
-) -> String {
+) -> Rendered {
 	let mut output = String::new();
+	let mut diags = SmallVec::new();
 	for (piece_index, piece) in pieces.iter().enumerate() {
 		if piece_index > 0 {
 			output.push_str(if raw { "\n\n…\n\n" } else { "\n…\n" });
@@ -242,9 +228,9 @@ pub fn format_resolved_ranges(
 			if raw {
 				output.push_str(line);
 			} else {
-				output.push_str(
-					format_numbered_line(piece.span.start_line.saturating_add(offset), line).as_ref(),
-				);
+				let line_number =
+					u32::try_from(piece.span.start_line.saturating_add(offset)).unwrap_or(u32::MAX);
+				output.push_str(&format_numbered_line(line_number, line));
 			}
 		}
 	}
@@ -254,17 +240,16 @@ pub fn format_resolved_ranges(
 		if start <= total_lines {
 			continue;
 		}
-		if !output.is_empty() {
-			output.push('\n');
-		}
 		let bound = range
 			.end_line
 			.map_or_else(|| range.start_line.to_string(), |end| format!("{}-{end}", range.start_line));
-		let _ = write!(
-			output,
-			"[Range {bound} is beyond end of {} ({total_lines} lines total); skipped]",
-			options.entity_label,
-		);
+		diags.push(Diag::warn(
+			DiagKind::RangeOutOfBounds,
+			sf!(
+				"Requested range {bound} is beyond end of {} ({total_lines} lines total).",
+				options.entity_label
+			),
+		));
 	}
 
 	if !raw
@@ -275,13 +260,16 @@ pub fn format_resolved_ranges(
 	{
 		let remaining = total_lines - last.span.end_line;
 		let next_offset = last.span.end_line + 1;
-		let _ = write!(
-			output,
-			"\n\n[{remaining} more lines in {}. Use :{next_offset} to continue]",
-			options.entity_label,
+		diags.push(
+			Diag::info(
+				DiagKind::Pagination,
+				sf!("{remaining} lines remain in {}.", options.entity_label),
+			)
+			.continuation(sf!(":{next_offset}"))
+			.omitted(remaining as u64, Unit::Lines),
 		);
 	}
-	output
+	Rendered { text: output.into(), diags }
 }
 
 /// Render text selected by a parsed path selector.
@@ -299,7 +287,7 @@ pub fn format_text(
 	let lines: Vec<&str> = if raw {
 		text.split('\n').collect()
 	} else {
-		split_addressable_file_lines(text).collect()
+		split_addressable_file_lines(text)
 	};
 	let total_lines = lines.len();
 	let snapshot_tag = options.snapshot.map(|snapshot| Str::new(snapshot.tag));
@@ -316,18 +304,19 @@ pub fn format_text(
 		.unwrap_or(1)
 		.saturating_sub(1);
 	if requested_start >= total_lines {
-		let suggestion = if total_lines == 0 {
-			format!("The {} is empty.", options.entity_label)
-		} else {
-			format!("Use :1 to read from the start, or :{total_lines} to read the last line.")
-		};
-		return FormattedText {
-			text: format!(
-				"Line {} is beyond end of {} ({total_lines} lines total). {suggestion}",
+		let diag = Diag::warn(
+			DiagKind::RangeOutOfBounds,
+			sf!(
+				"Line {} is beyond end of {} ({total_lines} lines total).",
 				requested_start + 1,
-				options.entity_label,
+				options.entity_label
 			),
-			source_lines: Box::new([SmallVec::new()]),
+		)
+		.continuation(":1");
+		return FormattedText {
+			text: String::new(),
+			diags: smallvec![diag],
+			source_lines: Box::new([]),
 			total_lines,
 			seen_lines: Box::new([]),
 			selected_spans: Box::new([]),
@@ -373,13 +362,17 @@ pub fn format_text(
 		}
 		prepend_snapshot_header(&mut output, options.snapshot);
 	}
+	let mut diags = SmallVec::new();
 	if !raw && finite_limit.is_some() && end < total_lines {
 		let remaining = total_lines - end;
 		let next_offset = end + 1;
-		let _ = write!(
-			output,
-			"\n\n[{remaining} more lines in {}. Use :{next_offset} to continue]",
-			options.entity_label,
+		diags.push(
+			Diag::info(
+				DiagKind::Pagination,
+				sf!("{remaining} lines remain in {}.", options.entity_label),
+			)
+			.continuation(sf!(":{next_offset}"))
+			.omitted(remaining as u64, Unit::Lines),
 		);
 	}
 	pad_unmapped_to_text(&output, &mut source_lines);
@@ -390,6 +383,7 @@ pub fn format_text(
 
 	FormattedText {
 		text: output,
+		diags,
 		source_lines: source_lines.into_boxed_slice(),
 		total_lines,
 		seen_lines: seen_lines.into_boxed_slice(),
@@ -426,7 +420,8 @@ fn format_multiple_ranges(
 	}
 
 	let mut source_lines: Vec<SourceLines> = Vec::new();
-	let mut output = if raw {
+	let mut diags = SmallVec::new();
+	let output = if raw {
 		let mut output = String::new();
 		for (index, span) in visible_spans.iter().enumerate() {
 			if index > 0 {
@@ -456,14 +451,13 @@ fn format_multiple_ranges(
 		let bound = range
 			.end_line
 			.map_or_else(|| range.start_line.to_string(), |end| format!("{}-{end}", range.start_line));
-		if !output.is_empty() {
-			output.push('\n');
-		}
-		let _ = write!(
-			output,
-			"[Range {bound} is beyond end of {} ({total_lines} lines total); skipped]",
-			options.entity_label,
-		);
+		diags.push(Diag::warn(
+			DiagKind::RangeOutOfBounds,
+			sf!(
+				"Requested range {bound} is beyond end of {} ({total_lines} lines total).",
+				options.entity_label
+			),
+		));
 	}
 	pad_unmapped_to_text(&output, &mut source_lines);
 	let seen_lines = source_lines
@@ -472,6 +466,7 @@ fn format_multiple_ranges(
 		.collect::<Vec<_>>();
 	FormattedText {
 		text: output,
+		diags,
 		source_lines: source_lines.into_boxed_slice(),
 		total_lines,
 		seen_lines: seen_lines.into_boxed_slice(),
@@ -524,7 +519,8 @@ fn format_line_entries_mode(entries: &[LineEntry<'_>], line_numbers: bool) -> St
 		}
 		match entry {
 			LineEntry::Line { line_number, text, .. } if line_numbers => {
-				output.push_str(format_numbered_line(*line_number, text).as_ref());
+				let line_number = u32::try_from(*line_number).unwrap_or(u32::MAX);
+				output.push_str(&format_numbered_line(line_number, text));
 			},
 			LineEntry::Line { text, .. } => output.push_str(text),
 			LineEntry::Ellipsis => output.push_str(BRACKET_CONTEXT_ELLIPSIS),
@@ -548,14 +544,14 @@ pub fn line_entries_to_plain_text(entries: &[LineEntry<'_>]) -> String {
 	output
 }
 
-/// Format the concrete recovery hint appended to a structural summary.
-pub fn format_summary_elision_footer(
+/// Format the concrete recovery diagnostic for a structural summary.
+pub fn summary_elision_diag(
 	read_path: &str,
 	elided_ranges: &[ElidedRange],
 	elided_lines: usize,
-) -> String {
+) -> Option<Diag> {
 	if elided_ranges.is_empty() {
-		return String::new();
+		return None;
 	}
 	let mut selector = String::new();
 	for (index, range) in elided_ranges.iter().enumerate() {
@@ -564,7 +560,14 @@ pub fn format_summary_elision_footer(
 		}
 		let _ = write!(selector, "{}-{}", range.start, range.end);
 	}
-	format!("[…{elided_lines}ln elided; re-read needed ranges with {read_path}:{selector}]")
+	Some(
+		Diag::info(
+			DiagKind::SummaryElided,
+			sf!("{elided_lines} lines elided from structural summary."),
+		)
+		.continuation(sf!("{read_path}:{selector}"))
+		.omitted(elided_lines as u64, Unit::Lines),
+	)
 }
 
 /// Decide whether an elided structural body can collapse its brace endpoints.
@@ -598,24 +601,6 @@ pub fn format_merged_brace_line(
 	MergedBraceLine { model: format!("{start_line}-{end_line}:{display}"), display }
 }
 
-/// Prefixes a formatted result with the exact suffix-match notice.
-pub fn prepend_suffix_resolution_notice(
-	text: &str,
-	resolution: Option<SuffixResolution<'_>>,
-) -> String {
-	let Some(resolution) = resolution else {
-		return text.to_owned();
-	};
-	let notice = format!(
-		"[Path '{}' not found; resolved to '{}' via suffix match]",
-		resolution.from, resolution.to,
-	);
-	if text.is_empty() {
-		notice
-	} else {
-		format!("{notice}\n{text}")
-	}
-}
 fn single_source_line(line: usize) -> SourceLines {
 	smallvec![line]
 }
@@ -636,32 +621,6 @@ fn rendered_line_count(text: &str) -> usize {
 
 fn pad_unmapped_to_text(text: &str, source_lines: &mut Vec<SourceLines>) {
 	source_lines.resize_with(rendered_line_count(text), SmallVec::new);
-}
-
-fn normalize_map_to_text(text: &str, source_lines: &mut SourceLineMap) {
-	let desired = rendered_line_count(text);
-	let mut lines = mem::take(source_lines).into_vec();
-	lines.resize_with(desired, SmallVec::new);
-	lines.truncate(desired);
-	*source_lines = lines.into_boxed_slice();
-}
-
-fn prepend_unmapped_line(source_lines: &mut SourceLineMap) {
-	let mut lines = mem::take(source_lines).into_vec();
-	lines.insert(0, SmallVec::new());
-	*source_lines = lines.into_boxed_slice();
-}
-
-fn append_unmapped_text(text: &mut String, source_lines: &mut SourceLineMap, suffix: &str) {
-	if suffix.is_empty() {
-		return;
-	}
-	let previous_lines = rendered_line_count(text);
-	text.push_str(suffix);
-	let added = rendered_line_count(text).saturating_sub(previous_lines);
-	let mut lines = mem::take(source_lines).into_vec();
-	lines.resize_with(lines.len() + added, SmallVec::new);
-	*source_lines = lines.into_boxed_slice();
 }
 
 fn prepend_snapshot_header(output: &mut String, snapshot: Option<SnapshotHeader<'_>>) {
@@ -889,14 +848,29 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn summary_footer_names_the_exact_multi_range_recovery_selector() {
-		assert_eq!(
-			format_summary_elision_footer(
-				"src/lib.rs",
-				&[ElidedRange { start: 5, end: 16 }, ElidedRange { start: 960, end: 973 }],
-				26,
-			),
-			"[…26ln elided; re-read needed ranges with src/lib.rs:5-16,960-973]"
-		);
+	fn out_of_bounds_offset_is_only_a_structured_diag() {
+		let selector = super::super::selector::parse_selector(Some("9")).unwrap();
+		let rendered = format_text("one\ntwo", &selector, TextFormatOptions::new("file"));
+		assert!(rendered.text.is_empty());
+		let [diag] = rendered.diags.as_slice() else {
+			panic!("out-of-bounds offset emits one diagnostic");
+		};
+		assert_eq!(diag.native_kind(), Some(DiagKind::RangeOutOfBounds));
+		assert_eq!(diag.severity, omp_tool::Severity::Warn);
+		assert_eq!(diag.continuation.as_deref(), Some(":1"));
+	}
+
+	#[test]
+	fn summary_diag_names_the_exact_multi_range_recovery_selector() {
+		let diag = summary_elision_diag(
+			"src/lib.rs",
+			&[ElidedRange { start: 5, end: 16 }, ElidedRange { start: 960, end: 973 }],
+			26,
+		)
+		.expect("elided ranges produce a diagnostic");
+		assert_eq!(diag.native_kind(), Some(DiagKind::SummaryElided));
+		assert_eq!(diag.severity, omp_tool::Severity::Info);
+		assert_eq!(diag.continuation.as_deref(), Some("src/lib.rs:5-16,960-973"));
+		assert_eq!(diag.omitted, Some(omp_tool::Omitted { count: 26, unit: omp_tool::Unit::Lines }));
 	}
 }

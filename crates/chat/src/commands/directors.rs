@@ -1,5 +1,4 @@
-//! Director-shaped mode commands (pi `builtin-modes.ts:259-336`,
-//! `builtin-control.ts:7-73`): each engages or exits one ADR 0015 Director
+//! Director-shaped mode commands: each engages or exits one ADR 0015 Director
 //! frame under `<meta><directors>` through the controller.
 
 use omp_con::ConError;
@@ -19,12 +18,12 @@ pub const PALETTE: &[PaletteEntry] = &[
 	PaletteEntry { name: "pause", icon: Icon::Pause },
 ];
 
-/// pi `loop-limit.ts` usage error.
+/// Usage text for an invalid loop limit.
 pub const LOOP_USAGE: &str =
 	"Usage: /loop [count|duration]. Examples: /loop 10, /loop 10m, /loop 10min.";
 
-/// Parses `/loop [count|duration] [prompt]` exactly like pi
-/// `modes/loop-limit.ts`. Prose starts an unbounded loop; a limit-shaped
+/// Parses `/loop [count|duration] [prompt]`. Prose starts an unbounded loop; a
+/// limit-shaped
 /// token that cannot be parsed is a usage error.
 pub fn loop_args(words: Option<Str>) -> Result<(Option<LoopLimit>, Option<Str>), ConError> {
 	let Some(words) = words else {
@@ -198,7 +197,7 @@ omp_con::cmd! {
 		post(ctx, CommandAction::Force { tool: args.get::<Str>(0)?, prompt: rest(args, 1) })
 	};
 
-	/// Alias of `/force`, preserved for pi's terse `/force:<tool>` palette path.
+	/// Alias of `/force`, preserving the terse `/force:<tool>` palette path.
 	"force:"(tool @ "sv::tool": Str, ?prompt: Str) = |ctx, args| {
 		post(ctx, CommandAction::Force { tool: args.get::<Str>(0)?, prompt: rest(args, 1) })
 	};

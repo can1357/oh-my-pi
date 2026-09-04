@@ -1,6 +1,6 @@
 //! History-collapse dividers: compaction, branch summary, and handoff.
 //!
-//! Port of pi `compaction-summary-message.ts`. Every collapse point renders
+//! Every collapse point renders
 //! as one slim centered banner framed by rules —
 //! `──── 📷 remote-compacted · 256K→20K · ctrl+o ────` — and `ctrl+o`
 //! reveals the summary Markdown in a tinted box below it.
@@ -45,9 +45,8 @@ pub enum Method {
 }
 
 impl Method {
-	/// Divider label per pi `COMPACTION_METHOD_LABELS`
-	/// (`compaction-summary-message.ts:6-13`, `:117`); unknown methods fall
-	/// back to `compacted`, branches read `branch` (`:216`).
+	/// Divider label; unknown methods fall back to `compacted`, branches read
+	/// `branch`.
 	#[must_use]
 	pub const fn label(self) -> &'static str {
 		match self {
@@ -163,9 +162,8 @@ impl SummaryDivider {
 	}
 }
 
-/// pi `#detailMarkdown` (`compaction-summary-message.ts:138-153`): a bold
-/// token line, the optional warning paragraph, then the summary. The warning
-/// glyph pi prefixes lives on the banner as `<icon name="warning">` instead;
+/// A bold token line, the optional warning paragraph, then the summary. The
+/// warning glyph lives on the banner as `<icon name="warning">` instead;
 /// Markdown bodies built from props cannot host icon markup.
 fn compaction_detail(
 	before: u64,
@@ -321,7 +319,7 @@ impl Divider {
 		ctx.charset.icon_named("warning").unwrap_or("!")
 	}
 
-	/// pi `theme.sep.dot.trim()`.
+	/// The trimmed separator dot.
 	fn dot(ctx: &UiContext) -> &'static str {
 		ctx.charset.icon_named("dot").unwrap_or("·").trim()
 	}
@@ -515,7 +513,7 @@ mod tests {
 			)
 			.label,
 			"compacted",
-			"an unknown method reads `compacted` like pi"
+			"an unknown method reads `compacted`"
 		);
 		assert_eq!(
 			SummaryDivider::compaction(&compaction_node(None, 0, 0, None), false).label,

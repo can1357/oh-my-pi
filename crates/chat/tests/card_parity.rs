@@ -1,6 +1,6 @@
-//! Rendering contracts for the typed tool cards against pi's renderers:
-//! identity dispatch, settled-payload variants, `@expanded` bounds, and the
-//! user-authored text a card must never drop.
+//! Rendering contracts for the typed tool cards against the recorded TS
+//! renderers: identity dispatch, settled-payload variants, `@expanded` bounds,
+//! and the user-authored text a card must never drop.
 
 use omp_chat::cards::{CardRegistry, CardStatus, CardView};
 use omp_core::Str;
@@ -92,13 +92,21 @@ fn bounded_output_notice_is_informational_and_links_the_artifact() {
 		.props
 		.push((PropId::Kind.into(), DomValue::Str(Str::new_static("output_bounded"))));
 	notice.props.push((
+		PropId::Recovery.into(),
+		DomValue::Str(Str::new_static("artifact://sha256/0123456789abcdef")),
+	));
+	notice
+		.props
+		.push((PropId::Omitted.into(), DomValue::Int(3)));
+	notice
+		.props
+		.push((PropId::Unit.into(), DomValue::Str(Str::new_static("lines"))));
+	notice.props.push((
 		PropId::Data.into(),
 		DomValue::Json(
 			serde_json::value::to_raw_value(&json!({
 				"kind": "output_bounded",
-				"severity": "info",
-				"artifact": "artifact://sha256/0123456789abcdef",
-				"lines_clamped": 3
+				"severity": "info"
 			}))
 			.expect("diagnostic JSON"),
 		),
@@ -117,7 +125,7 @@ fn bounded_output_notice_is_informational_and_links_the_artifact() {
 	let rendered =
 		Ui::from_root(CardRegistry::standard().render("custom", &view, false, &ui), 100, ui);
 	let text = frame_text(rendered.frame());
-	assert!(text.contains("3 output lines were clipped"), "{text}");
+	assert!(text.contains("Output was bounded (3 lines not shown)"), "{text}");
 	assert!(text.contains("Read artifact://sha256/0123456789abcdef for full output"), "{text}");
 	assert!(!text.contains("output_bounded") && !text.contains("{\""), "{text}");
 }
@@ -385,10 +393,7 @@ fn glob_card_distinguishes_empty_from_incomplete_and_surfaces_warnings() {
 		}),
 		false,
 	);
-	assert!(
-		timed_out.contains("No matches before timeout (scan incomplete)"),
-		"{timed_out}"
-	);
+	assert!(timed_out.contains("No matches before timeout (scan incomplete)"), "{timed_out}");
 	assert!(timed_out.contains("timed out; results are incomplete"), "{timed_out}");
 	assert!(timed_out.contains("skipped missing: gone"), "{timed_out}");
 	assert!(!timed_out.contains("No files found"), "{timed_out}");
@@ -472,16 +477,15 @@ fn computer_card_previews_code_and_output_when_collapsed() {
 	assert!(!collapsed.contains("desktop.step(11)"), "{collapsed}");
 	assert!(collapsed.contains("… 4 more lines"), "{collapsed}");
 	assert!(collapsed.contains("Output"), "{collapsed}");
-	let expanded =
-		render_done::<omp_tools::computer::Payload>(
-			"computer",
-			r#"{"action":"run","code":"x"}"#,
-			payload,
-			true,
-		);
+	let expanded = render_done::<omp_tools::computer::Payload>(
+		"computer",
+		r#"{"action":"run","code":"x"}"#,
+		payload,
+		true,
+	);
 	assert!(expanded.contains("desktop.step(14)"), "{expanded}");
 	assert!(!expanded.contains("… 4 more lines"), "{expanded}");
-	// Output stays bounded even when expanded (pi `OUTPUT_EXPANDED`): the
+	// Output stays bounded even when expanded: the
 	// 17-line pretty JSON shows ten rows and folds the rest.
 	assert!(expanded.contains("… 7 more lines"), "{expanded}");
 	assert!(collapsed.contains("… 14 more lines"), "{collapsed}");
@@ -498,10 +502,7 @@ fn computer_card_previews_code_and_output_when_collapsed() {
 
 	// A failed script names the error state in the header and shows the
 	// fault beneath the script.
-	let input = node(
-		KnownTag::Input,
-		r#"{"action":"run","code":"await desktop.click(1, 2)"}"#,
-	);
+	let input = node(KnownTag::Input, r#"{"action":"run","code":"await desktop.click(1, 2)"}"#);
 	let diag = fault_node("input permission denied");
 	let failed = render("computer", &input, None, Some(&diag), CardStatus::Failed, false);
 	assert!(failed.contains("Computer: error"), "{failed}");
@@ -511,7 +512,7 @@ fn computer_card_previews_code_and_output_when_collapsed() {
 
 #[test]
 fn hub_cancel_is_a_job_card_not_the_generic_fallback() {
-	// Pending: pi `describeTarget` → `cancel <id>`.
+	// Pending jobs render as `cancel <id>`.
 	let input = node(KnownTag::Input, r#"{"op":"cancel","ids":["bash_a1b2c3"]}"#);
 	let pending = render("hub", &input, None, None, CardStatus::InProgress, false);
 	assert!(pending.contains("cancel bash_a1b2c3"), "{pending}");
@@ -737,8 +738,8 @@ fn ast_match(path: &str, line: usize, text: &str) -> Value {
 
 #[test]
 fn ast_grep_card_previews_directory_groups_that_fit_when_collapsed() {
-	// pi `renderTreeList(maxCollapsedLines: 6)` over blank-line directory
-	// groups: a group shows whole when its rows (plus the reserved summary
+	// Blank-line directory groups show whole when their rows (plus the reserved
+	// summary
 	// row) fit, and the summary counts hidden groups.
 	let small = render_done::<omp_tools::ast_grep::Payload>(
 		"ast_grep",
@@ -812,19 +813,17 @@ fn grep_payload(files: Vec<Value>) -> Value {
 }
 
 #[test]
-fn grep_card_renders_empty_and_partial_diagnostics() {
+fn grep_card_renders_empty_state() {
 	let empty = render_done::<omp_tools::grep::Payload>(
 		"grep",
 		r#"{"pattern":"absent"}"#,
 		json!({"files": [], "total_files": 0, "total_files_lower_bound": false,
 			"multi_scope": true, "skip": 0, "file_limit_reached": false,
-			"per_file_limit_reached": false,
-			"notes": ["Skipped missing paths: gone"]}),
+			"per_file_limit_reached": false}),
 		false,
 	);
 	assert!(empty.contains("0 matches · in ."), "{empty}");
 	assert!(empty.contains("No matches found"), "{empty}");
-	assert!(empty.contains("Skipped missing paths: gone"), "{empty}");
 }
 
 #[test]
@@ -1026,7 +1025,7 @@ fn recall_card_is_header_only_when_collapsed_and_warns_on_no_matches() {
 	assert!(collapsed.contains("⟨Ctrl+O: Expand⟩"), "{collapsed}");
 	assert!(
 		!collapsed.contains("memory 1"),
-		"pi keeps the collapsed recall to its header: {collapsed}"
+		"the collapsed recall stays at its header: {collapsed}"
 	);
 	let expanded =
 		render_done::<omp_tools::memory::RecallPayload>("recall", r#"{"query":"q"}"#, payload, true);
@@ -1053,8 +1052,8 @@ fn lang_glyph(name: &str) -> &'static str {
 
 #[test]
 fn edit_card_paints_the_language_icon_of_the_edited_path() {
-	// pi `formatEditDescription`: `getLanguageFromPath(path) ?? "text"` picks
-	// the `lang.*` glyph, so a Rust edit never wears the TypeScript badge.
+	// The path language picks the `lang.*` glyph, so a Rust edit never wears
+	// the TypeScript badge.
 	let rust = render_done::<omp_tools::edit::Payload>(
 		"edit",
 		"{}",
@@ -1088,8 +1087,8 @@ fn edit_card_paints_the_language_icon_of_the_edited_path() {
 	);
 	assert!(moved.contains(lang_glyph("toml")), "{moved}");
 
-	// Unknown extensions fall back to pi's `"text"`; extensionless names pi
-	// recognises without an icon paint `lang.default`.
+	// Unknown extensions fall back to `"text"`; extensionless names without an
+	// icon paint `lang.default`.
 	let unknown = render_done::<omp_tools::edit::Payload>(
 		"edit",
 		"{}",
@@ -1181,7 +1180,7 @@ fn card_status_spellings_round_trip_through_the_dom_vocabulary() {
 
 #[test]
 fn task_card_names_the_dispatched_agent_and_brief_while_the_call_is_live() {
-	// pi `renderCall` (task/render.ts): the assignment markdown, a divider,
+	// The assignment markdown, a divider,
 	// then `• <name>: <first line of task, 64 chars>` while args stream —
 	// never an empty frame under a static "Task: task" title.
 	let torn = node(

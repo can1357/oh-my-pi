@@ -1,4 +1,4 @@
-//! `#<number>` GitHub references (pi `github-ref-autocomplete.ts`): a
+//! `#<number>` GitHub references: a
 //! standalone `#3164` token at the cursor offers `pr://3164` and
 //! `issue://3164`; a `pr`/`pull`/`issue` word before the `#` constrains the
 //! kind. No network at suggestion time.
@@ -8,7 +8,7 @@ use omp_tui::{EditorCompletion, Icon, Suggestion, Suggestions};
 
 use super::is_token_start;
 
-/// Candidate kinds, in pi's display order.
+/// Candidate kinds, in display order.
 const KINDS: [Kind; 2] = [
 	Kind {
 		qualifier:   "pr",
@@ -43,8 +43,7 @@ pub struct RefContext {
 	pub number:    Str,
 }
 
-/// Parses the GitHub reference token ending at `cursor`, if any
-/// (pi `GITHUB_REF_TOKEN_RE`).
+/// Parses the GitHub reference token ending at `cursor`, if any.
 #[must_use]
 pub fn ref_context(text: &str, cursor: usize) -> Option<RefContext> {
 	let before = text.get(..cursor)?;

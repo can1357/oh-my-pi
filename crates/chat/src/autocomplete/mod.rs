@@ -1,5 +1,4 @@
-//! Composer autocomplete providers, chained in pi's precedence
-//! (`prompt-action-autocomplete.ts` + `CombinedAutocompleteProvider`):
+//! Composer autocomplete providers, chained in precedence:
 //! slash commands and their arguments, `#<number>` GitHub references,
 //! `#` prompt actions, `scheme://` internal URLs, then `@` project files.
 //! The `:emoji` dropdown is the editor's built-in (`omp_tui::Editor`),
@@ -115,14 +114,14 @@ pub fn composer_chain(
 }
 
 /// Whether `at` starts a token: text start, or preceded by whitespace or
-/// one of pi's opening boundary characters (`"'`(<=`).
+/// one of the opening boundary characters (`"'`(<=`).
 pub(crate) fn is_token_start(text: &str, at: usize) -> bool {
 	text[..at].chars().next_back().is_none_or(|previous| {
 		previous.is_whitespace() || matches!(previous, '"' | '\'' | '`' | '(' | '<' | '=')
 	})
 }
 
-/// pi `fuzzyMatch` (subsequence) + `fuzzyScore`: exact 100, prefix 80,
+/// Subsequence fuzzy scoring: exact 100, prefix 80,
 /// substring 60, otherwise a gap-penalized subsequence score; `None` when
 /// the query is not a subsequence of `target`. Both sides are compared as
 /// given, so callers lowercase first.

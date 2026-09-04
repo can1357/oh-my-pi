@@ -87,7 +87,7 @@ pub struct ConfigIoError {
 impl ConfigIoError {
 	/// Creates an attributed filesystem failure.
 	#[must_use]
-	pub fn new(operation: ConfigOperation, path: PathBuf, source: io::Error) -> Self {
+	pub const fn new(operation: ConfigOperation, path: PathBuf, source: io::Error) -> Self {
 		Self { operation, path, source }
 	}
 }
@@ -229,12 +229,6 @@ pub enum ConError {
 	#[error("`{name}` is already registered")]
 	Duplicate {
 		/// The colliding name.
-		name: Str,
-	},
-	/// Dynamic settings UI metadata is incomplete or names an unknown group.
-	#[error("`{name}` has invalid settings UI metadata")]
-	InvalidUi {
-		/// The variable carrying invalid UI metadata.
 		name: Str,
 	},
 	/// Replication API called on a context with the wrong [`Role`].

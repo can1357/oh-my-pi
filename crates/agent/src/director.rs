@@ -2,9 +2,9 @@
 
 use std::{future, future::Future, pin::Pin, sync::Arc};
 
+use omp_ai::{ChatRequest, ChatStream, ContentPart, Message, Role};
 use omp_core::{FastHashMap, Str};
 use omp_dom::{Dom, Handle, KnownTag, Node, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
-use omp_inference::{ChatRequest, ChatStream, ContentPart, Message, Role};
 use omp_journal::blob::{BlobStore, Error as BlobError};
 use omp_session::{Session, SessionError};
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
@@ -188,7 +188,7 @@ impl<'a> DirectorCx<'a> {
 		self.node
 	}
 
-	fn for_director<'b>(&'b self, director: Handle, node: &'b Node) -> DirectorCx<'b> {
+	const fn for_director<'b>(&'b self, director: Handle, node: &'b Node) -> DirectorCx<'b> {
 		DirectorCx {
 			turn:     self.turn,
 			route:    self.route,
@@ -267,8 +267,8 @@ pub struct DirectorEffect {
 	/// console bridge like any other session write.
 	pub writes:              Vec<(Str, BindValue)>,
 	/// With [`Verdict::Done`]: after this Director exits, run another turn
-	/// instead of re-offering the candidate yield (pi's plan-yolo handoff
-	/// finalizes the plan and immediately starts implementing).
+	/// instead of re-offering the candidate yield, finalizing the plan and
+	/// immediately starting implementation.
 	pub continue_after_exit: bool,
 }
 
@@ -380,10 +380,7 @@ impl MutDirectorCx<'_> {
 /// Cold-path inference capability used by asynchronous Directors.
 pub trait ErasedInference: Send {
 	/// Executes one isolated canonical chat request.
-	fn execute<'a>(
-		&'a mut self,
-		request: ChatRequest,
-	) -> BoxFut<'a, Result<ChatStream, omp_inference::Error>>;
+	fn execute(&mut self, request: ChatRequest) -> BoxFut<'_, Result<ChatStream, omp_ai::Error>>;
 
 	/// Executes one isolated request on the model `selector` names (a
 	/// catalog key or `@role`), leaving the live route untouched; stacks
@@ -392,7 +389,7 @@ pub trait ErasedInference: Send {
 		&'a mut self,
 		selector: &str,
 		request: ChatRequest,
-	) -> BoxFut<'a, Result<ChatStream, omp_inference::Error>> {
+	) -> BoxFut<'a, Result<ChatStream, omp_ai::Error>> {
 		let _ = selector;
 		self.execute(request)
 	}
@@ -402,10 +399,7 @@ impl<T> ErasedInference for T
 where
 	T: Inference,
 {
-	fn execute<'a>(
-		&'a mut self,
-		request: ChatRequest,
-	) -> BoxFut<'a, Result<ChatStream, omp_inference::Error>> {
+	fn execute(&mut self, request: ChatRequest) -> BoxFut<'_, Result<ChatStream, omp_ai::Error>> {
 		Box::pin(self.chat(request))
 	}
 
@@ -413,7 +407,7 @@ where
 		&'a mut self,
 		selector: &str,
 		request: ChatRequest,
-	) -> BoxFut<'a, Result<ChatStream, omp_inference::Error>> {
+	) -> BoxFut<'a, Result<ChatStream, omp_ai::Error>> {
 		let selector = Str::new(selector);
 		Box::pin(async move { self.chat_on(selector.as_str(), request).await })
 	}
@@ -517,7 +511,7 @@ pub enum DirectorError {
 	Session(#[from] SessionError),
 	/// Inference planning or streaming failed.
 	#[error(transparent)]
-	Inference(#[from] omp_inference::Error),
+	Inference(#[from] omp_ai::Error),
 	/// Blob persistence failed.
 	#[error(transparent)]
 	Blob(#[from] BlobError),
@@ -529,7 +523,7 @@ pub enum DirectorError {
 	Hook(#[from] crate::LifecycleHookError),
 	/// Projecting hidden history into inference messages failed.
 	#[error(transparent)]
-	ThreadProjection(#[from] omp_inference::ThreadProjectionError),
+	ThreadProjection(#[from] omp_ai::ThreadProjectionError),
 	/// A typed Director payload could not be encoded for the session DOM.
 	#[error(transparent)]
 	Json(#[from] serde_json::Error),

@@ -2154,8 +2154,7 @@ merge behavior. Exit 0 if already in the requested state.
 | `--list` | Print available features with defaults, descriptions, and per-feature `requires`. |
 
 Any mutation re-resolves (R11) and may therefore fail with exit 3 or require consent
-(a feature's capabilities change the digest). Forward-ports pi's `plugin features`
-(`/work/pi/packages/coding-agent/src/cli/plugin-cli.ts:25-39`).
+(a feature's capabilities change the digest).
 **`omp ext config`** opens the native alternate-buffer resource selector. `--layer
 workspace` starts in workspace mode; other layer selections start in client mode. Tab switches
 between the exact user `config.toml` and project `.omp/config.toml` layers without writing.
@@ -2259,7 +2258,7 @@ does not override a pin (use `unpin`).
 
 | Flag | Meaning |
 |---|---|
-| `--apply` | Actually delete. Default is a dry run, matching pi's `omp gc` convention (`.plan/feature-map/cli.md:224`). |
+| `--apply` | Actually delete. Default is a dry run. |
 | `--keep-generations <N>` | Retain the last N resolution directories per host key. Default 2, which is "current plus rollback". |
 | `--keep-cache` | Do not prune the download cache. |
 | `--all-projects` | Consider every known workspace's locks when computing reachability, not just `--project`. |
@@ -2332,7 +2331,7 @@ vendored tree containing native objects (`E-VENDOR-NATIVE`).
 
 **`search <QUERY>`** — query the catalog. `--limit <N>` (default 20), `--capability <cap>` to
 filter by declared capability, `--attested` for reviewed only, `--json`. `omp ext discover`
-is a visible alias, matching pi's vocabulary (`.plan/feature-map/FEATURES.md:72`).
+is a visible alias.
 
 **`index <add|remove|list>`** — manage the index list. `add <NAME> <URL> [--first]`,
 `remove <NAME>`, `list [--json]`. Order is resolution order (R8).
@@ -2568,7 +2567,7 @@ member's value is the corresponding `E-*` or `W-*` spelling in the table below.
 | `E-CONSENT` | admit | 5 | Consent declined | Extension omitted; session continues normally. |
 | `E-GRANT-UNKNOWN` | admit | 5 | `--grant` names an undeclared capability | Refused; likely a typo hiding an ungranted capability. |
 | `E-SETTING-SECRET` | admit | 1 | A secret in `[extensions.settings]` | Refused; use `omp.creds.*`. |
-| `E-TRUSTED-LOAD` | admit | 1 | A `trusted` or `--ext-only` extension fails to load | **Fatal.** Session does not start. pi parity (`/work/pi/…/main.ts:1644-1647`). |
+| `E-TRUSTED-LOAD` | admit | 1 | A `trusted` or `--ext-only` extension fails to load | **Fatal.** Session does not start. |
 | `E-ABI-EXPORT` | admit | 1 | Native module `dlopen` fails for missing CPython symbols | Host binary was not linked with `-Wl,-export_dynamic`. Diagnosed by `omp ext doctor`. |
 | `W-YANKED` | resolve | 0 | Lock pins a yanked version | Proceeds. |
 | `W-KEY-ROTATED` | materialize | 0 | Signed key rotation accepted | Proceeds; logged. |

@@ -31,7 +31,7 @@ pub enum DataUrlContext {
 
 const DAMAGED_PAYLOAD_MIN_CHARS: usize = 40;
 
-fn ascii_eq(left: u8, right: u8) -> bool {
+const fn ascii_eq(left: u8, right: u8) -> bool {
 	left.eq_ignore_ascii_case(&right)
 }
 
@@ -43,7 +43,7 @@ fn starts_ascii_case_insensitive(bytes: &[u8], needle: &[u8]) -> bool {
 			.all(|(&left, &right)| ascii_eq(left, right))
 }
 
-fn media_token(byte: u8) -> bool {
+const fn media_token(byte: u8) -> bool {
 	byte.is_ascii_alphanumeric()
 		|| matches!(
 			byte,
@@ -283,7 +283,7 @@ pub enum BillingFamily {
 	Anthropic,
 	/// Google fixed media-resolution billing.
 	Google,
-	/// OpenAI patch billing.
+	/// `OpenAI` patch billing.
 	OpenAi,
 	/// Conservative unknown-provider billing.
 	Unknown,
@@ -497,7 +497,7 @@ fn shape_options(shape: Shape) -> SnapcompactRenderOptions {
 	}
 }
 
-fn frame_capacity(shape: Shape) -> (usize, u32, u32) {
+const fn frame_capacity(shape: Shape) -> (usize, u32, u32) {
 	let cols = shape.frame_size / shape.cell_width;
 	let rows = shape.frame_size / shape.cell_height / shape.line_repeat;
 	((cols as usize).saturating_mul(rows as usize), cols, rows)

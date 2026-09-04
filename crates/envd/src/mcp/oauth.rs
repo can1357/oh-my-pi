@@ -9,8 +9,8 @@ use std::{
 };
 
 use http::HeaderMap;
+use omp_ai::{auth::StoreError, id::PrincipalId};
 use omp_core::{ExposeSecret as _, SecretString, Str};
-use omp_inference::{auth::StoreError, id::PrincipalId};
 use omp_oauth::{
 	AuthChallenge, AuthorizationRequest, CallbackBindError, CallbackError, ClientConfiguration,
 	ClientRegistrationError, CompleteAuthorizationError, DeviceAuthorizationError,

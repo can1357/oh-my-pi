@@ -1,7 +1,7 @@
 //! Interactive extension and skill enablement.
 //!
-//! The selector edits one convar, `cl_disabled_extensions` (pi
-//! `disabledExtensions`; declared in `omp_driver::discovery`): native
+//! The selector edits one convar, `cl_disabled_extensions` (declared in
+//! `omp_driver::discovery`): native
 //! extension manifest ids disable a whole extension, `skill:<name>` drops one
 //! skill. The user scope persists to `~/.o2/config.cfg`, the workspace scope
 //! to `<project>/.omp/config.cfg`, through the same lenient load and dump

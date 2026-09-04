@@ -1,4 +1,4 @@
-//! Reasoning text prepared for display (pi `thinking-display.ts`).
+//! Reasoning text prepared for display.
 //!
 //! Both modes drop the empty `<!-- -->` sentinel lines gpt-5.x pads reasoning
 //! summaries with (outside code fences); prose-only mode additionally elides
@@ -11,8 +11,8 @@ use std::borrow::Cow;
 
 use omp_core::Str;
 
-/// Whether `text` carries anything but dots, ellipses, and whitespace (pi
-/// `canonicalizeMessage`): placeholder-only traces stay hidden.
+/// Whether `text` carries anything but dots, ellipses, and whitespace:
+/// placeholder-only traces stay hidden.
 #[must_use]
 pub fn has_content(text: &str) -> bool {
 	text
@@ -116,7 +116,7 @@ fn fence_marker(line: &str) -> Option<(usize, &str)> {
 }
 
 /// Output accumulator: committed lines plus a mutable last non-blank line
-/// the prose ellipsis may rewrite (pi `FoldState`).
+/// the prose ellipsis may rewrite.
 #[derive(Default)]
 struct Fold<'a> {
 	committed: String,

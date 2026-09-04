@@ -244,14 +244,12 @@ impl HostUiDispatcher {
 		});
 		if encoded > FIELD_MAX_BYTES || options > REPEATED_MAX_COUNT {
 			return Err(HostUiBeginError::PayloadTooLarge {
-				actual: encoded,
+				actual:  encoded,
 				maximum: FIELD_MAX_BYTES,
 			});
 		}
 		if self.pending.len() >= MAX_PENDING_UI_REQUESTS {
-			return Err(HostUiBeginError::Capacity {
-				maximum: MAX_PENDING_UI_REQUESTS,
-			});
+			return Err(HostUiBeginError::Capacity { maximum: MAX_PENDING_UI_REQUESTS });
 		}
 		let writable = peers
 			.into_iter()
@@ -270,12 +268,10 @@ impl HostUiDispatcher {
 		request.request_id = request_id;
 		let frame = collab_frame(request.clone(), collab_frame::Payload::UiRequest);
 		self.pending.insert(request_id, request);
-		Ok(
-			writable
-				.into_iter()
-				.map(|peer_id| TargetedFrame { peer_id, frame: frame.clone() })
-				.collect(),
-		)
+		Ok(writable
+			.into_iter()
+			.map(|peer_id| TargetedFrame { peer_id, frame: frame.clone() })
+			.collect())
 	}
 
 	/// Replays every pending request to a newly authenticated writable guest.
@@ -427,7 +423,7 @@ pub enum HostUiBeginError {
 	#[error("collaboration UI request uses {actual} bytes; maximum is {maximum}")]
 	PayloadTooLarge {
 		/// Encoded protobuf byte count.
-		actual: usize,
+		actual:  usize,
 		/// Maximum accepted byte count.
 		maximum: usize,
 	},
@@ -482,7 +478,7 @@ pub const fn registry_visibility(is_advisor: bool) -> VisibilityClass {
 	}
 }
 
-/// Classifies EventBus channels; only the two task channels are peer-visible.
+/// Classifies `EventBus` channels; only the two task channels are peer-visible.
 pub fn bus_visibility(channel: i32) -> VisibilityClass {
 	use omp_proto::collab::v1::bus_event::Channel;
 	match Channel::try_from(channel) {
@@ -555,29 +551,31 @@ mod tests {
 		let viewer = authority
 			.authenticate(2, &Hello {
 				protocol_revision: PROTOCOL_REVISION,
-				display_name: "viewer".to_owned(),
-				write_token: None,
-				client_version: String::new(),
+				display_name:      "viewer".to_owned(),
+				write_token:       None,
+				client_version:    String::new(),
 			})
 			.expect("authenticate");
 		let writable = authority
 			.authenticate(7, &Hello {
 				protocol_revision: PROTOCOL_REVISION,
-				display_name: "editor".to_owned(),
-				write_token: Some(vec![9; 16].into()),
-				client_version: String::new(),
+				display_name:      "editor".to_owned(),
+				write_token:       Some(vec![9; 16].into()),
+				client_version:    String::new(),
 			})
 			.expect("authenticate");
 		let mut dispatcher = HostUiDispatcher::default();
 		assert_eq!(
-			dispatcher.begin(UiRequest::default(), [(2, &viewer)]).unwrap_err(),
+			dispatcher
+				.begin(UiRequest::default(), [(2, &viewer)])
+				.unwrap_err(),
 			HostUiBeginError::NoWritablePeer
 		);
 		assert!(matches!(
-			dispatcher.begin(UiRequest {
-				title: "x".repeat(FIELD_MAX_BYTES + 1),
-				..UiRequest::default()
-			}, [(7, &writable)]),
+			dispatcher
+				.begin(UiRequest { title: "x".repeat(FIELD_MAX_BYTES + 1), ..UiRequest::default() }, [
+					(7, &writable)
+				]),
 			Err(HostUiBeginError::PayloadTooLarge { .. })
 		));
 		for _ in 0..MAX_PENDING_UI_REQUESTS {
@@ -586,7 +584,9 @@ mod tests {
 				.expect("within cap");
 		}
 		assert_eq!(
-			dispatcher.begin(UiRequest::default(), [(7, &writable)]).unwrap_err(),
+			dispatcher
+				.begin(UiRequest::default(), [(7, &writable)])
+				.unwrap_err(),
 			HostUiBeginError::Capacity { maximum: MAX_PENDING_UI_REQUESTS }
 		);
 	}

@@ -13,6 +13,10 @@
 
 The crate root re-exports the principal collection, string, byte, and encoding types so callers usually do not need to depend on module layout.
 
+## slopjson
+
+The `slopjson` module parses imperfect JSON commonly produced incrementally by language models, including single-quoted strings, unquoted keys, comments, trailing commas, invalid escapes, and bareword values. It provides tolerant Serde deserialization, strict prefix classification, streaming recovery, text-level repair, and a JSON value model while still rejecting incomplete or untrustworthy final documents.
+
 ## Philosophy
 
 The implementations favor predictable, allocation-conscious primitives for frequently used infrastructure. Short strings stay inline, owned bytes remain cheaply shareable, append-only storage grows in segmented buckets, and encoding supports fixed-size and streaming forms. Specialized representations are kept behind conventional collection, iterator, conversion, and Serde interfaces so callers can use these optimizations without carrying their internal bookkeeping.

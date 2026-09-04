@@ -60,13 +60,13 @@ pub struct Seed {
 impl Seed {
 	/// Creates a value-only seed.
 	#[must_use]
-	pub fn new(values: FastHashMap<Str, Value>) -> Self {
+	pub const fn new(values: FastHashMap<Str, Value>) -> Self {
 		Self { dynamic_vars: Vec::new(), values }
 	}
 
 	/// Creates a seed which registers dynamic variables before applying values.
 	#[must_use]
-	pub fn with_dynamic_vars(
+	pub const fn with_dynamic_vars(
 		values: FastHashMap<Str, Value>,
 		dynamic_vars: Vec<DynamicVarSpec>,
 	) -> Self {
@@ -103,14 +103,14 @@ impl Seed {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct EngagementLayer {
+pub struct EngagementLayer {
 	pub(crate) id:     LayerId,
 	pub(crate) owner:  Str,
 	pub(crate) values: FastHashMap<Str, Value>,
 }
 
 #[derive(Default)]
-pub(crate) struct Layers {
+pub struct Layers {
 	pub(crate) archive:     FastHashMap<Str, Value>,
 	pub(crate) session:     FastHashMap<Str, Value>,
 	pub(crate) engagements: Vec<EngagementLayer>,

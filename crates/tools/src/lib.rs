@@ -75,8 +75,6 @@ pub mod checkpoint;
 pub mod computer;
 /// Workspace-confinement and selector path utilities.
 pub mod path;
-/// Additional literal pi tool-setting convars.
-pub mod pi_settings;
 mod render;
 /// Typed policy projection owned by file tools.
 pub mod settings;

@@ -1,5 +1,4 @@
-//! Git workbench and transcript copy commands (pi `builtin-session.ts`
-//! `/git`, `builtin-collaboration.ts` `/copy` and `/open`). `/git` opens
+//! Git workbench and transcript copy commands. `/git` opens
 //! the fullscreen workbench over the session's project root; `/copy` opens
 //! the transcript picker, or with `code`/`cmd`/`link` copies the last fenced
 //! block, shell command, or hyperlink straight from the replica through a
@@ -40,8 +39,7 @@ pub enum CopyOp {
 	Link,
 }
 
-/// Parses `/copy [code|cmd|link]`; pi rejects anything else with its usage
-/// line.
+/// Parses `/copy [code|cmd|link]`; other input returns its usage line.
 pub fn copy_op(words: Option<Str>) -> Result<CopyOp, ConError> {
 	let arg = words.unwrap_or_default();
 	let arg = arg.as_str().trim().to_ascii_lowercase();
@@ -54,7 +52,7 @@ pub fn copy_op(words: Option<Str>) -> Result<CopyOp, ConError> {
 	})
 }
 
-/// Validates `/open [link]`; pi points anything else at the picker's `o`.
+/// Validates `/open [link]`; other input points at the picker's `o`.
 pub fn open_op(words: Option<Str>) -> Result<(), ConError> {
 	let arg = words.unwrap_or_default();
 	match arg.as_str().trim().to_ascii_lowercase().as_str() {
@@ -78,7 +76,8 @@ omp_con::cmd! {
 	copy(?what: Str) = |ctx, args| {
 		match copy_op(rest(args, 0))? {
 			CopyOp::Picker => post(ctx, HostAction::Open(PanelOpener::new(|cx| {
-				let show_thinking = omp_con::CL_SHOWTHINKING.try_get(cx.con).unwrap_or(true);
+				let show_thinking =
+					crate::settings::CL_SHOWTHINKING.try_get(cx.con).unwrap_or(true);
 				let show_tools = crate::actions::CL_SHOWTOOLS.try_get(cx.con).unwrap_or(true);
 				let prose_only =
 					crate::transcript::CL_THINKING_PROSE_ONLY.try_get(cx.con).unwrap_or(true);

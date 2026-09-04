@@ -1,6 +1,6 @@
 //! `/move` directory editor and missing-directory confirmation.
 //!
-//! The editor mirrors pi's `MoveOverlay`: it keeps a real one-line editor
+//! The editor keeps a real one-line editor
 //! focused, lists matching child directories, accepts the highlighted path
 //! with Tab or Enter, and sends the chosen path back through the console
 //! command stream. Filesystem mutation remains in the application controller

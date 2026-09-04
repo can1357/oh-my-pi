@@ -1,5 +1,5 @@
-//! Extension text prompts (`omp.ui.input` / `omp.ui.editor`, pi
-//! `extension-ui-controller.ts` `input` / `editor` requests): one titled
+//! Extension text prompts (`omp.ui.input` / `omp.ui.editor` requests): one
+//! titled
 //! field the user fills and submits. The reply travels the `ask` path
 //! (`PanelEvent::Ask` → `HostCommand::AskAnswer`), so the application pairs
 //! it with the waiting extension request by the dialog id exactly like a

@@ -151,7 +151,7 @@ pub enum SourceTransport {
 }
 
 /// Typed source price components in decimal US dollars.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceCost {
 	/// Input price per million tokens.
@@ -172,7 +172,7 @@ pub struct SourceCost {
 }
 
 /// Typed long-context source price schedule.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceLongContextCost {
 	/// Exclusive prompt-token threshold.
@@ -197,7 +197,7 @@ pub struct SourceLongContextCost {
 	pub cache_write:               Number,
 }
 
-/// Source-declared model identity emitted by pi's catalog compiler.
+/// Source-declared model identity emitted by the catalog compiler.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceModelIdentity {
@@ -550,7 +550,7 @@ pub struct SourceDiscovery {
 }
 
 /// Sparse typed provider/model wire-policy source.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SourceWirePolicy {
 	/// Reversible private-use glyph tokenization at the provider wire boundary.
@@ -3666,17 +3666,19 @@ fn compile_models(
 				.as_ref()
 				.map(|family| family.name.clone())
 				.or_else(|| first.1.name.clone())
-				.map(|name| {
-					if provider == "cursor"
-						&& logical_id.as_str().starts_with("cursor-grok-")
-						&& !name.as_str().starts_with("Cursor ")
-					{
-						Str::from(format!("Cursor {name}"))
-					} else {
-						name
-					}
-				})
-				.unwrap_or_else(|| humanize(&logical_id));
+				.map_or_else(
+					|| humanize(&logical_id),
+					|name| {
+						if provider == "cursor"
+							&& logical_id.as_str().starts_with("cursor-grok-")
+							&& !name.as_str().starts_with("Cursor ")
+						{
+							Str::from(format!("Cursor {name}"))
+						} else {
+							name
+						}
+					},
+				);
 			let context_window = members
 				.iter()
 				.filter_map(|(_, row, _)| row.context_window)
@@ -5102,13 +5104,7 @@ fn conservative_capabilities(
 			} else {
 				Availability::Native(modalities(&row.input))
 			},
-			image_input:       if !row.input.contains(&SourceModality::Image) {
-				if row.input.is_empty() {
-					Availability::Unknown
-				} else {
-					Availability::Unsupported
-				}
-			} else {
+			image_input:       if row.input.contains(&SourceModality::Image) {
 				let decoder = row
 					.image_input_decoder
 					.unwrap_or(ImageDecoderFamily::Native);
@@ -5117,6 +5113,10 @@ fn conservative_capabilities(
 					ImageDecoderFamily::Stb => ImageInputFormatBits::STB,
 				};
 				Availability::Native(ImageInputCapabilities { formats, decoder })
+			} else if row.input.is_empty() {
+				Availability::Unknown
+			} else {
+				Availability::Unsupported
 			},
 			tools:             match row.supports_tools {
 				Some(true) => Availability::Native(ToolCapabilities {
@@ -5225,7 +5225,7 @@ fn conservative_capabilities(
 	}
 }
 
-fn reasoning_effort(effort: ThinkingEffort) -> ReasoningEffort {
+const fn reasoning_effort(effort: ThinkingEffort) -> ReasoningEffort {
 	match effort {
 		ThinkingEffort::Off => ReasoningEffort::Off,
 		ThinkingEffort::Minimal => ReasoningEffort::Minimal,
@@ -6907,7 +6907,7 @@ facets = ["chat"]
 		assert!(!features.contains(ToolFeatureBits::STRICT_SCHEMA));
 		assert!(!features.contains(ToolFeatureBits::PARALLEL));
 
-		let mut policy = baseline.tool.clone();
+		let mut policy = baseline.tool;
 		policy.supports_tool_choice = Some(true);
 		policy.supports_strict_mode = Some(true);
 		policy.supports_parallel_calls = Some(true);

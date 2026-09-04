@@ -261,7 +261,7 @@ impl BlobRange {
 /// journal entry has not committed yet. Collection keeps younger files even
 /// when a crashed producer released its active retention lease before the
 /// authoritative journal root became visible.
-pub const DEFAULT_GC_GRACE: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_GC_GRACE: Duration = Duration::from_mins(5);
 
 /// Policy for one mark-and-sweep pass over a blob namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -469,8 +469,7 @@ impl BlobStore {
 				match fs::remove_file(path) {
 					Ok(()) => {
 						report.blobs_removed += 1;
-						report.blob_bytes_reclaimed =
-							report.blob_bytes_reclaimed.saturating_add(bytes);
+						report.blob_bytes_reclaimed = report.blob_bytes_reclaimed.saturating_add(bytes);
 					},
 					Err(error) if error.kind() == io::ErrorKind::NotFound => {},
 					Err(error) => return Err(error.into()),
@@ -907,13 +906,8 @@ impl BlobStore {
 				directory_bytes(&path, 1, walk)?
 			};
 			report.temporaries_eligible += 1;
-			report.temporary_bytes_eligible =
-				report.temporary_bytes_eligible.saturating_add(bytes);
-			candidates.push(TemporaryCandidate {
-				path,
-				directory: file_type.is_dir(),
-				bytes,
-			});
+			report.temporary_bytes_eligible = report.temporary_bytes_eligible.saturating_add(bytes);
+			candidates.push(TemporaryCandidate { path, directory: file_type.is_dir(), bytes });
 		}
 		Ok(())
 	}

@@ -14,7 +14,7 @@ use crate::overlays::{Services, services::ExtensionKind};
 
 /// Palette icons for the host's console-level commands that no command
 /// module declares in its `PALETTE`; anything else shows no type
-/// indicator, like pi's extension-registered commands.
+/// indicator, like extension-registered commands.
 const ICONS: [(&str, Icon); 14] = [
 	("cl_model_select", Icon::Model),
 	("cl_model_cycle", Icon::Model),
@@ -93,7 +93,7 @@ const MCP_SUBCOMMANDS: &[McpSubcommand] = &[
 
 /// Builds the slash palette from `con`'s registered commands: the link-time
 /// `cmd!` declarations, then the dynamic long tail (prompt templates) with
-/// no type indicator, like pi's extension-registered commands.
+/// no type indicator, like extension-registered commands.
 #[must_use]
 pub fn roster(con: &Arc<Ctx>) -> Vec<Command> {
 	let dynamic = con
@@ -317,7 +317,7 @@ mod tests {
 
 	#[test]
 	fn product_commands_carry_their_module_palette_icon() {
-		// pi `autocomplete.ts:316`: every `/command` row shows its type
+		// Every `/command` row shows its type
 		// indicator; the icon comes from the declaring module's `PALETTE`,
 		// not from the console-level side table.
 		let con = Arc::new(CtxBuilder::default().build());

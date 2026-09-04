@@ -75,49 +75,102 @@ impl Default for InterceptorSettings {
 }
 
 omp_con::var! {
-	/// Enable environment-owned shell execution.
-	pub static SV_SHELL_ENABLED = sv_shell_enabled: bool { default: true, flags: archive };
+	/// Enable the bash tool for shell command execution.
+	pub static SV_SHELL_ENABLED = sv_shell_enabled: bool {
+		default: true,
+		flags: archive,
+		meta: {
+			"ui.tab": "shell",
+			"ui.group": "Bash",
+			"ui.label": "Bash",
+			"legacy.path": "shell.enabled",
+			"legacy.path": "bash.enabled",
+		},
+	};
 	/// Wrapper placed before every admitted shell command; empty disables the wrapper.
 	pub static SV_SHELL_COMMAND_PREFIX = sv_shell_command_prefix: Str {
 		default: Str::default(),
 		flags: archive,
+		meta: {
+			"legacy.path": "shell.command_prefix",
+		},
 	};
 	/// Advertise and enable the embedded builtin command set.
 	pub static SV_SHELL_EMBEDDED_BUILTINS = sv_shell_embedded_builtins: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"legacy.path": "shell.embedded_builtins",
+		},
 	};
-	/// Detach eligible long-running commands after the foreground threshold.
+	/// Automatically background long-running bash commands and deliver the result later.
 	pub static SV_SHELL_AUTO_BACKGROUND_ENABLED = sv_shell_auto_background_enabled: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"ui.tab": "shell",
+			"ui.group": "Bash",
+			"ui.label": "Bash Auto-Background",
+			"legacy.path": "shell.auto_background.enabled",
+			"legacy.path": "bash.autoBackground.enabled",
+		},
 	};
 	/// Foreground milliseconds before eligible shell execution detaches.
 	pub static SV_SHELL_AUTO_BACKGROUND_THRESHOLD_MS = sv_shell_auto_background_threshold_ms: i64 {
 		default: 60_000,
 		min: 0,
 		flags: archive,
+		meta: {
+			"legacy.path": "shell.auto_background.threshold_ms",
+		},
 	};
-	/// Return dedicated-tool guidance for configured command intents.
+	/// Block shell commands that have dedicated tools.
 	pub static SV_SHELL_INTERCEPTOR_ENABLED = sv_shell_interceptor_enabled: bool {
 		default: false,
 		flags: archive,
+		meta: {
+			"ui.tab": "shell",
+			"ui.group": "Bash",
+			"ui.label": "Bash Interceptor",
+			"legacy.path": "shell.interceptor.enabled",
+			"legacy.path": "bashInterceptor.enabled",
+		},
 	};
 	/// Ordered regular-expression rules gated by live sibling tools.
 	pub static SV_SHELL_INTERCEPTOR_PATTERNS = sv_shell_interceptor_patterns: Vec<Kv> {
 		default: default_interceptor_kv(),
 		flags: archive,
+		meta: {
+			"legacy.path": "shell.interceptor.patterns",
+		},
 	};
-	/// Load the nearest allowed `.envrc` before shell execution.
+	/// Auto-load a repo's allowed direnv/devenv `.envrc` into the bash session.
 	pub static SV_SHELL_DIRENV = sv_shell_direnv: DirenvMode {
 		default: DirenvMode::Auto,
 		flags: archive,
+		meta: {
+			"ui.tab": "shell",
+			"ui.group": "Bash",
+			"ui.label": "direnv Auto-Load",
+			"ui.option.auto": "Auto",
+			"ui.option.off": "Off",
+			"legacy.path": "shell.direnv",
+			"legacy.path": "bash.direnv",
+		},
 	};
-	/// Maximum milliseconds allowed for direnv export.
+	/// Max wait for the first `direnv export`; on timeout the session runs without the direnv env.
 	pub static SV_SHELL_DIRENV_LOAD_TIMEOUT_MS = sv_shell_direnv_load_timeout_ms: i64 {
 		default: 30_000,
 		min: 1,
 		flags: archive,
+		meta: {
+			"ui.tab": "shell",
+			"ui.group": "Bash",
+			"ui.label": "direnv Load Timeout (ms)",
+			"ui.unit": "ms",
+			"legacy.path": "shell.direnv_load_timeout_ms",
+			"legacy.path": "bash.direnvLoadTimeoutMs",
+		},
 	};
 }
 

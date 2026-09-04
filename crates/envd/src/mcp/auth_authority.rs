@@ -3,9 +3,7 @@
 use std::{fmt, mem, sync::Arc, time::SystemTime};
 
 use futures::future::BoxFuture;
-use omp_catalog::AuthSpecId;
-use omp_core::{ExposeSecret as _, Hash32, SecretBox, SecretString, Str};
-use omp_inference::{
+use omp_ai::{
 	auth::{
 		AuditedCredentialReveal, AuthRejection, CredentialError, CredentialFuture, CredentialLease,
 		CredentialNeed, CredentialOrigin, CredentialSource, CredentialStore, CredentialWrite,
@@ -13,6 +11,8 @@ use omp_inference::{
 	},
 	id::{AccountId, PrincipalId},
 };
+use omp_catalog::AuthSpecId;
+use omp_core::{ExposeSecret as _, Hash32, SecretBox, SecretString, Str};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -341,7 +341,7 @@ impl fmt::Debug for CombinedAuthAuthority {
 
 #[cfg(test)]
 mod tests {
-	use omp_inference::auth::{CredentialKind, HeadlessKeySource, KeyId};
+	use omp_ai::auth::{CredentialKind, HeadlessKeySource, KeyId};
 
 	use super::*;
 

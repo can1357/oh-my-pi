@@ -60,18 +60,14 @@ fn render_done(
 				.filter(|row| row.matched)
 				.count() as u64
 		});
-	let file_count = groups.iter().map(|group| group.files.len() as u64).sum::<u64>();
+	let file_count = groups
+		.iter()
+		.map(|group| group.files.len() as u64)
+		.sum::<u64>();
 	let truncated = ["total_files_lower_bound", "file_limit_reached", "per_file_limit_reached"]
 		.into_iter()
 		.any(|field| result.get(field).and_then(Value::as_bool).unwrap_or(false));
 	let scope = path.unwrap_or(".");
-	let notes = result
-		.get("notes")
-		.and_then(Value::as_array)
-		.into_iter()
-		.flatten()
-		.filter_map(Value::as_str)
-		.collect::<Vec<_>>();
 	if match_count == 0 {
 		return dom! {
 			<col pad-x=1 w="100%">
@@ -80,7 +76,6 @@ fn render_done(
 					<text fg=muted>{format!("0 matches · in {scope}")}</text>
 				</row>
 				<text fg=muted>{"No matches found"}</text>
-				for note in notes { <text fg=warn>{note}</text> }
 			</col>
 		}
 		.into_component();
@@ -164,28 +159,29 @@ fn render_done(
 						}
 					}</text></row>
 				}
-				for note in notes { <text fg=warn>{note}</text> }
 			</col>
 		</col>
 	}
 	.into_component()
 }
 
-/// Collapsed row budget for the match tree (pi `COLLAPSED_TEXT_LIMIT =
-/// PREVIEW_LIMITS.COLLAPSED_LINES * 2`), including directory and file
+/// Collapsed row budget for the match tree, including directory and file
 /// header rows; one row is reserved for the `… N more matches` summary
 /// whenever the tree overflows.
 const COLLAPSED_ROWS: usize = 6;
 
-/// Expanded previews remain bounded like pi's
-/// `PREVIEW_LIMITS.EXPANDED_LINES * 2`.
+/// Expanded previews remain bounded.
 const EXPANDED_ROWS: usize = 24;
 
 /// Rows to paint per group and file: `plan[group][file]` is the number of
 /// source rows shown for that file, and only the leading groups/files that fit
 /// the budget appear. Collapsed mode omits context; expanded mode includes it.
 fn plan_rows(groups: &[Group], expanded: bool) -> Vec<Vec<usize>> {
-	let row_limit = if expanded { EXPANDED_ROWS } else { COLLAPSED_ROWS };
+	let row_limit = if expanded {
+		EXPANDED_ROWS
+	} else {
+		COLLAPSED_ROWS
+	};
 	let total_rows: usize = groups
 		.iter()
 		.map(|group| {
@@ -227,10 +223,7 @@ fn icon<'a>(ui: &'a UiContext, name: &str) -> &'a str {
 }
 
 fn display_rows(file: &FileMatches, expanded: bool) -> impl Iterator<Item = &Match> {
-	file
-		.rows
-		.iter()
-		.filter(move |row| expanded || row.matched)
+	file.rows.iter().filter(move |row| expanded || row.matched)
 }
 
 fn line_padding(file: &FileMatches, row: &Match) -> u16 {
@@ -315,8 +308,8 @@ fn normalize_groups(result: &Value) -> Vec<Group> {
 				files.last_mut().expect("file was just inserted")
 			};
 			file.rows.push(Match {
-				line: row.get("line").and_then(Value::as_u64).unwrap_or_default(),
-				text: Str::new(string_at(row, "text").unwrap_or_default()),
+				line:    row.get("line").and_then(Value::as_u64).unwrap_or_default(),
+				text:    Str::new(string_at(row, "text").unwrap_or_default()),
 				matched: true,
 			});
 		}
@@ -339,7 +332,10 @@ fn normalize_groups(result: &Value) -> Vec<Group> {
 				{
 					push_source_row(
 						&mut rows,
-						context.get("line_number").and_then(Value::as_u64).unwrap_or_default(),
+						context
+							.get("line_number")
+							.and_then(Value::as_u64)
+							.unwrap_or_default(),
 						string_at(context, "line").unwrap_or_default(),
 						false,
 					);
@@ -361,7 +357,10 @@ fn normalize_groups(result: &Value) -> Vec<Group> {
 				{
 					push_source_row(
 						&mut rows,
-						context.get("line_number").and_then(Value::as_u64).unwrap_or_default(),
+						context
+							.get("line_number")
+							.and_then(Value::as_u64)
+							.unwrap_or_default(),
 						string_at(context, "line").unwrap_or_default(),
 						false,
 					);

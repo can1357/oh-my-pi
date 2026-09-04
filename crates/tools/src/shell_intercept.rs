@@ -92,7 +92,7 @@ pub fn analyze(command: &str, live_tools: &[Str]) -> Option<Guidance> {
 
 fn candidates(command: &str) -> impl Iterator<Item = &str> {
 	iter::once(command.trim()).chain(
-		omp_shell_engine::parser::flat_shell_segments(command)
+		omp_shell::parser::flat_shell_segments(command)
 			.into_iter()
 			.filter(|segment| !segment.piped_stdin)
 			.map(|segment| segment.text),

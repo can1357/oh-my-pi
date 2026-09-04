@@ -9,13 +9,13 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use omp_core::{FastHashMap, Hash32, Str, sf};
-use omp_dom::{Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
-use omp_inference::{
+use omp_ai::{
 	ArtifactBody, BlockKind, ChatEvent, ChatRequest, ChatStream, Client, Completion, FinishReason,
 	Message as InferenceMessage, NegotiationPolicy, Planner, RecoveryKind, RecoveryRecord,
 	SafetySetting, Sampling, Setting, Usage,
 };
+use omp_core::{FastHashMap, Hash32, Str, sf};
+use omp_dom::{Handle, KnownTag, NodeSpec, Op, PropId, PropKey, Tag, Txn, Value};
 use omp_journal::{
 	EntryId,
 	blob::BlobStore,
@@ -51,7 +51,7 @@ use crate::{
 };
 
 /// Maximum consecutive provider-declared non-terminal completions without a
-/// tool call. Mirrors pi's `MAX_PAUSED_TURN_CONTINUATIONS`.
+/// tool call.
 const PAUSED_TURN_CONTINUATION_CAP: u8 = 8;
 const PAUSED_TURN_KIND: &str = "pause_turn";
 
@@ -103,7 +103,7 @@ pub trait Inference: Send {
 	fn chat(
 		&mut self,
 		request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send;
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send;
 
 	/// Starts one isolated chat operation on the model `selector` names (a
 	/// catalog key or `@role`) without re-targeting the live route: an
@@ -113,7 +113,7 @@ pub trait Inference: Send {
 		&mut self,
 		selector: &str,
 		request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		let _ = selector;
 		self.chat(request)
 	}
@@ -135,7 +135,7 @@ pub trait Inference: Send {
 	/// Installs the observer that receives same-route retry notices for
 	/// every subsequent chat. Inference stacks without a retry layer keep the
 	/// default no-op.
-	fn install_retry_sink(&mut self, sink: omp_inference::RetrySink) {
+	fn install_retry_sink(&mut self, sink: omp_ai::RetrySink) {
 		let _ = sink;
 	}
 
@@ -154,22 +154,18 @@ pub trait Inference: Send {
 
 impl<S, P> Inference for Client<S, P>
 where
-	S: Service<
-			omp_inference::call::Call,
-			Response = omp_inference::Answer,
-			Error = omp_inference::Error,
-		> + Send,
+	S: Service<omp_ai::call::Call, Response = omp_ai::Answer, Error = omp_ai::Error> + Send,
 	S::Future: Send,
 	P: Planner + Send,
 {
 	fn chat(
 		&mut self,
 		request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		self.execute(request)
 	}
 
-	fn install_retry_sink(&mut self, sink: omp_inference::RetrySink) {
+	fn install_retry_sink(&mut self, sink: omp_ai::RetrySink) {
 		let mut meta = self.call_meta().clone();
 		meta.response_hooks = meta.response_hooks.with_retry_sink(sink);
 		self.set_call_meta(meta);
@@ -293,13 +289,13 @@ pub enum KernelError {
 	Session(#[from] SessionError),
 	/// Inference planning or streaming failed.
 	#[error(transparent)]
-	Inference(#[from] omp_inference::Error),
+	Inference(#[from] omp_ai::Error),
 	/// Tool registry operation failed.
 	#[error(transparent)]
 	Registry(#[from] RegistryError),
 	/// Canonical thread projection failed.
 	#[error(transparent)]
-	ThreadProjection(#[from] omp_inference::ThreadProjectionError),
+	ThreadProjection(#[from] omp_ai::ThreadProjectionError),
 	/// Blob persistence failed.
 	#[error(transparent)]
 	Blob(#[from] omp_journal::blob::Error),
@@ -352,7 +348,7 @@ pub enum KernelError {
 	NothingToRetry,
 	/// A provider workflow action could not be answered on its live session.
 	#[error("provider workflow action response failed: {0:?}")]
-	WorkflowResponse(omp_inference::ChatControlError),
+	WorkflowResponse(omp_ai::ChatControlError),
 }
 
 /// Journal-backed host state which must flush and rehydrate with the session.
@@ -428,7 +424,7 @@ impl<C> Kernel<C> {
 		let (mailbox_tx, mailbox_rx) = flume::unbounded();
 		let events = crate::events::KernelEvents::default();
 		let retry_events = events.clone();
-		client.install_retry_sink(Arc::new(move |notice: omp_inference::RetryNotice| {
+		client.install_retry_sink(Arc::new(move |notice: omp_ai::RetryNotice| {
 			retry_events.publish(KernelEvent::InferenceRetry {
 				attempt:      notice.attempt,
 				max_attempts: notice.max_attempts,
@@ -594,7 +590,7 @@ impl<C> Kernel<C> {
 
 	/// Borrows the composed runtime tool registry.
 	#[must_use]
-	pub fn tool_registry(&self) -> &Arc<Registry> {
+	pub const fn tool_registry(&self) -> &Arc<Registry> {
 		self.dispatcher.registry()
 	}
 
@@ -611,7 +607,7 @@ impl<C> Kernel<C> {
 	/// Borrows the runtime job board supervising detached tools, subagents,
 	/// and processes.
 	#[must_use]
-	pub fn jobs(&self) -> &Arc<crate::JobBoard> {
+	pub const fn jobs(&self) -> &Arc<crate::JobBoard> {
 		self.dispatcher.jobs()
 	}
 
@@ -1042,11 +1038,11 @@ impl<C: Inference> Kernel<C> {
 	}
 
 	/// Re-executes the last turn's aborted tool tail without a model round
-	/// trip (pi `turn-recovery.ts` `retry()` + `toolReplayStart`): the
-	/// journal rewinds to just after the batch was authorized (abandoning the
-	/// aborted results and the interrupt notice so `replay(journal) == state`
-	/// still holds), the same call ids and arguments are dispatched again,
-	/// and the normal loop continues (steering, Directors, yield).
+	/// trip: the journal rewinds to just after the batch was authorized,
+	/// abandoning aborted results and the interrupt notice so
+	/// `replay(journal) == state` still holds. The same call ids and arguments
+	/// are dispatched again, then the normal loop continues (steering,
+	/// Directors, yield).
 	pub async fn retry_tool_tail(
 		&mut self,
 		session: &mut Session,
@@ -1221,7 +1217,7 @@ impl<C: Inference> Kernel<C> {
 				route = self.current_route();
 			}
 			// A settled background job or subagent re-wakes the loop with its
-			// result before the next request (pi `async-result` follow-up).
+			// result before the next request as an async-result follow-up.
 			if self.deliver_settlements(session, turn)? {
 				self.apply_live_components(session)?;
 			}
@@ -1254,9 +1250,8 @@ impl<C: Inference> Kernel<C> {
 					)?;
 					request_budget_notice_sent = true;
 				}
-				// pi `agent-loop.ts:1069-1076, 1154-1163`: steering accepted
-				// before the request leaves is flushed into context first, so
-				// the model never answers the stale request.
+				// Steering accepted before the request leaves is flushed into
+				// context first, so the model never answers the stale request.
 				if steering_pending(session) {
 					was_steered = true;
 					let _ = consume_steering(session, turn, self.steering_mode())?;
@@ -1586,8 +1581,7 @@ impl<C: Inference> Kernel<C> {
 				// pause has been released, and a queued follow-up prevents this
 				// turn from claiming another request. The count is re-derived
 				// from durable assistant evidence, never kept as shadow state.
-				let paused_turn_continuations =
-					paused_turn_continuation_count(session.dom(), turn);
+				let paused_turn_continuations = paused_turn_continuation_count(session.dom(), turn);
 				if queued_follow_up(session.dom()) {
 					record_paused_turn_decision(
 						session,
@@ -1617,15 +1611,9 @@ impl<C: Inference> Kernel<C> {
 					// controller between mailbox safe points.
 					tokio::task::yield_now().await;
 					continue;
-				} else {
-					record_paused_turn_decision(
-						session,
-						turn,
-						paused_turn_continuations,
-						"capped",
-					)?;
-					self.apply_live_components(session)?;
 				}
+				record_paused_turn_decision(session, turn, paused_turn_continuations, "capped")?;
+				self.apply_live_components(session)?;
 			}
 			if turn_view.assistant_text.is_empty()
 				&& !terminal_tool_yield
@@ -1666,9 +1654,9 @@ impl<C: Inference> Kernel<C> {
 				self.apply_live_components(session)?;
 				continue;
 			}
-			// pi `#hasPendingAsyncWake`: owned background work still running
-			// makes this candidate yield a scheduling pause, not a stop. The
-			// turn waits for the first settlement (or steering / an
+			// Owned background work still running makes this candidate yield a
+			// scheduling pause, not a stop. The turn waits for the first
+			// settlement (or steering / an
 			// interrupt) and re-enters with the async-result follow-up.
 			if crate::jobs::pending_wake(session.dom()) {
 				match self.await_settlement(session, turn_cancel, control).await? {
@@ -1768,8 +1756,7 @@ impl<C: Inference> Kernel<C> {
 			match decision {
 				LoopDecision::Continue { .. } => continue,
 				LoopDecision::Yield => {
-					// pi `session_stop`: an extension may block the stop and
-					// demand another turn.
+					// An extension may block the stop and demand another turn.
 					if let Some(hooks) = &self.lifecycle_hooks
 						&& hooks
 							.agent_settled(serde_json::json!({
@@ -1804,9 +1791,9 @@ impl<C: Inference> Kernel<C> {
 			.map_or_else(crate::SteeringMode::default, |con| crate::AI_STEERING_MODE.get(con))
 	}
 
-	/// Journals every finished owned job and injects the async-result
-	/// follow-up for settlements the model has not seen (pi
-	/// `async-job-delivery.ts`). Returns whether anything was delivered.
+	/// Journals every finished owned job and injects the async-result follow-up
+	/// for settlements the model has not seen. Returns whether anything was
+	/// delivered.
 	fn deliver_settlements(
 		&mut self,
 		session: &mut Session,
@@ -1969,8 +1956,8 @@ fn notify_deadline_or_interrupt(
 impl<C: Inference> Kernel<C> {
 	/// Dispatches one ready call and journals its outcome. The mailbox stays
 	/// live while the tool runs: an interrupt cancels the turn scope the tool
-	/// observes (pi aborts running tools on ctrl+c) instead of waiting for
-	/// the tool to finish on its own; steering arriving meanwhile lands in
+	/// observes instead of waiting for the tool to finish on its own; steering
+	/// arriving meanwhile lands in
 	/// `streamed_steering` for the next safe point.
 	pub(crate) async fn dispatch_call(
 		&mut self,
@@ -2065,7 +2052,7 @@ impl<C: Inference> Kernel<C> {
 		if let Some(text) = self
 			.con
 			.as_deref()
-			.map(|con| omp_con::AI_PROMPT_MODE.get(con))
+			.map(|con| crate::AI_PROMPT_MODE.get(con))
 			.filter(|mode| !mode.is_empty())
 			.and_then(|mode| crate::directors::mode_prompt(mode.as_str()))
 		{
@@ -2098,7 +2085,7 @@ impl<C: Inference> Kernel<C> {
 			threshold_fraction: self
 				.con
 				.as_deref()
-				.map_or(0.8, |con| omp_con::AI_COMPACT_THRESHOLD.get(con)),
+				.map_or(0.8, |con| crate::AI_COMPACT_THRESHOLD.get(con)),
 			prompt_hash:        Str::new(prompt_hash_of(&messages)),
 			prompt_head_tokens: crate::context::prompt_head_tokens(&messages),
 		};
@@ -2115,7 +2102,7 @@ impl<C: Inference> Kernel<C> {
 		// `sv_tools` is the effective roster: the user's allowlist or a mode
 		// Director's bind (plan/vibe restrict what the model may call).
 		if let Some(roster) = crate::tool_allowlist(self.con.as_deref()) {
-			tools.retain(|tool| roster.iter().any(|name| *name == tool.definition.name));
+			tools.retain(|tool| roster.contains(&tool.definition.name));
 		}
 		// Goal engagement mounts its hidden lifecycle tool in addition to the
 		// user's ordinary roster; pause, completion, drop, rewind, and resume
@@ -2127,12 +2114,12 @@ impl<C: Inference> Kernel<C> {
 		{
 			tools.extend(registry.advertise_selected(caps, &[Str::new_static("goal")])?);
 		}
-		// pi `externalThinking`: provider reasoning is off and the hidden
-		// `think` slot is advertised so the model reasons through a tool.
+		// When provider reasoning is off, advertise the hidden `think` slot so
+		// the model reasons through a tool.
 		if self
 			.con
 			.as_deref()
-			.is_some_and(|con| omp_inference::pi_settings::AI_EXTERNAL_THINKING.get(con))
+			.is_some_and(|con| omp_ai::settings::AI_EXTERNAL_THINKING.get(con))
 			&& !tools
 				.iter()
 				.any(|tool| tool.definition.name.as_str() == "think")
@@ -2170,8 +2157,8 @@ impl<C: Inference> Kernel<C> {
 			Some(control.clone()),
 			self.approvals.clone(),
 		);
-		// pi `message.ttft`: first visible or reasoning byte (or the first
-		// streamed tool-call fragment) after the request left the kernel.
+		// First visible or reasoning byte (or the first streamed tool-call
+		// fragment) after the request left the kernel.
 		let mut first_token: Option<Instant> = None;
 		let fold: Result<Fold, KernelError> = async {
 			loop {
@@ -2211,14 +2198,13 @@ impl<C: Inference> Kernel<C> {
 				};
 				match event {
 					ChatEvent::Started(meta) => {
-						let model = meta.model.map_or_else(
-							|| Str::new_static("unknown"),
-							|value| Str::new(value.to_string()),
-						);
+						let model = meta
+							.model
+							.map_or_else(|| Str::new_static("unknown"), |value| Str::new(&value));
 						session.assistant_start(
 							model,
-							Str::new(meta.provider.to_string()),
-							Str::new(meta.route.to_string()),
+							Str::new(&meta.provider),
+							Str::new(&meta.route),
 						)?;
 						self.apply_live_components(session)?;
 						assistant = Some(current_assistant(session)?);
@@ -2300,12 +2286,12 @@ impl<C: Inference> Kernel<C> {
 						let (entry, sid) = session.call_streaming(
 							name.clone(),
 							crate::journal_revision(&identity.rev),
-							Str::new(id.to_string()),
+							Str::new(&id),
 							None,
 						)?;
 						record_provider_tool_index(session, entry, index)?;
 						self.apply_live_components(session)?;
-						let call_id = Str::new(id.to_string());
+						let call_id = Str::new(&id);
 						let cancellation = tool_cancellation(
 							self.dispatcher.registry(),
 							identity.name.as_str(),
@@ -2376,7 +2362,7 @@ impl<C: Inference> Kernel<C> {
 						let (entry, identity, mut prepared) = if let Some(streaming) =
 							pending.remove(&index)
 						{
-							if streaming.call_id.as_str() != call.id.to_string()
+							if call.id != streaming.call_id.as_str()
 								|| streaming.identity.name != call.name
 							{
 								return Err(KernelError::ToolCallMismatch);
@@ -2394,7 +2380,7 @@ impl<C: Inference> Kernel<C> {
 								.get("i")
 								.and_then(serde_json::Value::as_str)
 								.map(Str::new);
-							let call_id = Str::new(call.id.to_string());
+							let call_id = Str::new(&call.id);
 							let (entry, _) = session.call_streaming(
 								call.name.clone(),
 								crate::journal_revision(&identity.rev),
@@ -2414,16 +2400,17 @@ impl<C: Inference> Kernel<C> {
 									.prepare(identity.clone(), call_id, entry, cancellation)?;
 							(entry, identity, prepared)
 						};
-						let call_id = Str::new(call.id.to_string());
+						let call_id = Str::new(&call.id);
 						let denied_args = args.clone();
 						let session_id = session
 							.journal_path()
 							.file_stem()
 							.and_then(|value| value.to_str())
 							.map_or_else(|| Str::new_static("session"), Str::new);
-						let turn_id = current_turn(session)
-							.map(|handle| Str::new(handle.to_string()))
-							.unwrap_or_else(|_| Str::new_static("turn"));
+						let turn_id = current_turn(session).map_or_else(
+							|_| Str::new_static("turn"),
+							|handle| Str::new(handle.to_string()),
+						);
 						let (identity, args, approvals) = match Self::gate_tool_call(
 							self.lifecycle_hooks.clone(),
 							Arc::clone(self.dispatcher.registry()),
@@ -2435,9 +2422,7 @@ impl<C: Inference> Kernel<C> {
 						)
 						.await
 						{
-							ToolGate::Allow { identity, args, approvals } => {
-								(identity, args, approvals)
-							},
+							ToolGate::Allow { identity, args, approvals } => (identity, args, approvals),
 							ToolGate::Deny(reason) => {
 								session.call_ready(entry, denied_args.clone())?;
 								prepared.commit(denied_args);
@@ -2642,9 +2627,9 @@ impl<C: Inference> Kernel<C> {
 					Fold::Cancelled | Fold::Ended => None,
 				};
 				close_streams(session, &mut content_streams)?;
-				// pi `buildToolCallAbortMessages`: placeholder results follow
-				// provider call order even when some calls completed argument
-				// streaming and others did not. They are never marked as
+				// Placeholder results follow provider call order even when some
+				// calls completed argument streaming and others did not. They
+				// are never marked as
 				// executed: no execution unit was admitted
 				// before this inference fold ended.
 				let mut aborted = Vec::with_capacity(pending.len() + ready.len());
@@ -2657,30 +2642,23 @@ impl<C: Inference> Kernel<C> {
 						.drain(..)
 						.map(|prepared| (prepared.index, true, prepared.call)),
 				);
-				aborted.sort_unstable_by_key(|(index, _, _)| *index);
+				aborted.sort_unstable_by_key(|(index, ..)| *index);
 				for (_, authorized, prepared) in aborted {
 					let reason = scoped.map_or_else(
 						|| {
 							if authorized {
 								Str::new_static("inference cancelled before tool execution")
 							} else {
-								Str::new_static(
-									"inference cancelled before tool arguments settled",
-								)
+								Str::new_static("inference cancelled before tool arguments settled")
 							}
 						},
 						|reason| {
-							sf!(
-								"Tool execution was aborted: {}",
-								reason.message_for(prepared.call_id())
-							)
+							sf!("Tool execution was aborted: {}", reason.message_for(prepared.call_id()))
 						},
 					);
-					self.dispatcher.abort_prepared(
-						session,
-						prepared,
-						Abort::Skipped { reason },
-					)?;
+					self
+						.dispatcher
+						.abort_prepared(session, prepared, Abort::Skipped { reason })?;
 				}
 				return Ok(DrivenInference::cancelled(text, usage));
 			},
@@ -2774,11 +2752,7 @@ impl<C: Inference> Kernel<C> {
 		args: Box<RawValue>,
 	) -> ToolGate {
 		let Some(hooks) = hooks else {
-			return ToolGate::Allow {
-				identity: identity.clone(),
-				args,
-				approvals: Vec::new(),
-			};
+			return ToolGate::Allow { identity: identity.clone(), args, approvals: Vec::new() };
 		};
 		let Ok(args_value) = serde_json::from_str::<serde_json::Value>(args.get()) else {
 			return ToolGate::Deny(Str::new_static("tool-call arguments are not valid JSON"));
@@ -2808,7 +2782,10 @@ impl<C: Inference> Kernel<C> {
 			"deadline": serde_json::Value::Null,
 			"bash": serde_json::Value::Null,
 		});
-		let admission = match hooks.evaluate(HookEventId::HookEventToolCall, payload).await {
+		let admission = match hooks
+			.evaluate(HookEventId::HookEventToolCall, payload)
+			.await
+		{
 			Ok(admission) => admission,
 			Err(crate::LifecycleHookError::Denied { reason, .. }) => return ToolGate::Deny(reason),
 			Err(error) => {
@@ -2841,7 +2818,7 @@ impl<C: Inference> Kernel<C> {
 
 	async fn artifact_blob(
 		blobs: &BlobStore,
-		artifact: omp_inference::Artifact,
+		artifact: omp_ai::Artifact,
 	) -> Result<omp_journal::blob::BlobRef, KernelError> {
 		let declared = artifact.size;
 		let blob = match artifact.body {
@@ -2877,26 +2854,26 @@ impl<C: Inference> Kernel<C> {
 	}
 
 	/// Executes one provider workflow action as a journaled tool call and
-	/// submits its outcome on the live provider session (pi answers Devin /
-	/// GitLab agentic actions inline). An unknown target or a failed dispatch
-	/// is reported to the provider as an error response, never silently
+	/// submits its outcome on the live provider session. An unknown target or
+	/// a failed dispatch is reported to the provider as an error response,
+	/// never silently
 	/// dropped, so the provider can end its workflow.
 	async fn answer_workflow_action(
 		&mut self,
 		session: &mut Session,
-		action: omp_inference::WorkflowAction,
-		stream_control: &omp_inference::ChatControl,
+		action: omp_ai::WorkflowAction,
+		stream_control: &omp_ai::ChatControl,
 		turn_cancel: &crate::TurnCancellation,
 		control: &RunControl,
 	) -> Result<(), KernelError> {
-		use omp_inference::{
+		use omp_ai::{
 			InvokeComplete, InvokeInput, WorkflowActionResponse, WorkflowResponse,
 			WorkflowResponseKind,
 		};
 		let call_id = action
 			.call
 			.as_ref()
-			.map_or_else(|| action.invocation.clone(), |call| Str::new(call.to_string()));
+			.map_or_else(|| action.invocation.clone(), Str::new);
 		let args = match std::str::from_utf8(&action.arguments)
 			.ok()
 			.and_then(|text| RawValue::from_string(text.to_owned()).ok())
@@ -2904,64 +2881,58 @@ impl<C: Inference> Kernel<C> {
 			Some(args) => args,
 			None => RawValue::from_string("{}".to_owned())?,
 		};
-		let (outcome, is_error) = match self
+		let (outcome, is_error) = if let Some(identity) = self
 			.dispatcher
 			.registry()
 			.resolved_identity(action.name.as_str())
 		{
-			Some(identity) => {
-				let entry = session.call(
-					identity.name.clone(),
-					crate::journal_revision(&identity.rev),
-					call_id.clone(),
-					None,
-					Some(args.clone()),
-					None,
-				)?;
-				self.apply_live_components(session)?;
-				let cancellation =
-					tool_cancellation(self.dispatcher.registry(), identity.name.as_str(), turn_cancel)?;
-				let mut prepared =
-					self
-						.dispatcher
-						.prepare(identity, call_id.clone(), entry, cancellation)?;
-				prepared.arg_delta(args.get());
-				prepared.commit(args);
-				let call_control = CallControl::new(
-					self.mailbox_rx.clone(),
-					turn_cancel.clone(),
-					self.cancel.clone(),
-					Some(control.clone()),
-					self.approvals.clone(),
-				);
-				let mut reports = self
+			let entry = session.call(
+				identity.name.clone(),
+				crate::journal_revision(&identity.rev),
+				call_id.clone(),
+				None,
+				Some(args.clone()),
+				None,
+			)?;
+			self.apply_live_components(session)?;
+			let cancellation =
+				tool_cancellation(self.dispatcher.registry(), identity.name.as_str(), turn_cancel)?;
+			let mut prepared =
+				self
 					.dispatcher
-					.drive(session, vec![prepared], Some(&call_control))
-					.await?;
-				self.apply_live_components(session)?;
-				let report = reports.remove(0);
-				let outcome = crate::dispatch::result_handle(session, entry)
-					.ok()
-					.and_then(|handle| session.dom().get(handle))
-					.and_then(|node| match node.prop(&omp_dom::PropKey::from(PropId::Data)) {
-						Some(omp_dom::Value::Json(raw)) => Some(raw.get().to_owned()),
-						_ => node.content.as_deref().map(str::to_owned),
-					})
-					.unwrap_or_else(|| "{}".to_owned());
-				(outcome, report.is_error)
-			},
-			None => {
-				append_notice(
-					session,
-					current_turn(session)?,
-					Str::new(format!("provider workflow action names unknown tool {}", action.name)),
-				)?;
-				self.apply_live_components(session)?;
-				(
-					serde_json::json!({"error": format!("unknown tool {}", action.name)}).to_string(),
-					true,
-				)
-			},
+					.prepare(identity, call_id.clone(), entry, cancellation)?;
+			prepared.arg_delta(args.get());
+			prepared.commit(args);
+			let call_control = CallControl::new(
+				self.mailbox_rx.clone(),
+				turn_cancel.clone(),
+				self.cancel.clone(),
+				Some(control.clone()),
+				self.approvals.clone(),
+			);
+			let mut reports = self
+				.dispatcher
+				.drive(session, vec![prepared], Some(&call_control))
+				.await?;
+			self.apply_live_components(session)?;
+			let report = reports.remove(0);
+			let outcome = crate::dispatch::result_handle(session, entry)
+				.ok()
+				.and_then(|handle| session.dom().get(handle))
+				.and_then(|node| match node.prop(&omp_dom::PropKey::from(PropId::Data)) {
+					Some(omp_dom::Value::Json(raw)) => Some(raw.get().to_owned()),
+					_ => node.content.as_deref().map(str::to_owned),
+				})
+				.unwrap_or_else(|| "{}".to_owned());
+			(outcome, report.is_error)
+		} else {
+			append_notice(
+				session,
+				current_turn(session)?,
+				Str::new(format!("provider workflow action names unknown tool {}", action.name)),
+			)?;
+			self.apply_live_components(session)?;
+			(serde_json::json!({"error": format!("unknown tool {}", action.name)}).to_string(), true)
 		};
 		let response = match action.response_kind {
 			WorkflowResponseKind::Action => {
@@ -3145,7 +3116,7 @@ impl<C: Inference> Kernel<C> {
 
 	/// [`Self::compact`] under caller-owned cancellation: an interrupt or
 	/// cancel on the mailbox, or the control token, abandons the summary
-	/// inference (pi `abortCompaction`) and journals nothing.
+	/// inference and journals nothing.
 	pub async fn compact_with(
 		&mut self,
 		session: &mut Session,
@@ -3231,7 +3202,7 @@ impl<C: Inference> Kernel<C> {
 struct ProjectedRequest {
 	facts:    crate::context::ContextFacts,
 	messages: Vec<InferenceMessage>,
-	tools:    Vec<omp_inference::ToolDefinition>,
+	tools:    Vec<omp_ai::ToolDefinition>,
 }
 
 struct StreamingCall {
@@ -3305,9 +3276,9 @@ enum AwaitSignal {
 	Finished,
 }
 
-/// The model-facing text of one settled job (pi `AsyncJobManager` result
-/// text): a subagent's final text and structured verdict, a detached
-/// tool's artifact address, or its terminal error.
+/// The model-facing text of one settled job: a subagent's final text and
+/// structured verdict, a detached tool's artifact address, or its terminal
+/// error.
 fn settlement_text(record: &crate::JobRecord) -> String {
 	let mut text = String::new();
 	let output = record
@@ -3394,7 +3365,6 @@ fn async_job_delivery(record: &crate::JobRecord) -> AsyncJobDelivery {
 	}
 }
 
-/// pi `prompts/tools/async-result.md`.
 fn async_result_notice(jobs: &[(Str, Str, String)]) -> String {
 	let mut body = String::from("<system-notice>\n");
 	if jobs.len() > 1 {
@@ -3418,9 +3388,9 @@ fn async_result_notice(jobs: &[(Str, Str, String)]) -> String {
 }
 
 /// Whether the last turn ends in an aborted or unsettled tool tail that
-/// [`Kernel::retry_tool_tail`] can re-execute (pi `turn-recovery.ts`
-/// `retry()` precondition): the newest tool element is cancelled/aborted,
-/// errored by a harness abort, or still running after the interrupt.
+/// [`Kernel::retry_tool_tail`] can re-execute: the newest tool element is
+/// cancelled/aborted, errored by a harness abort, or still running after the
+/// interrupt.
 #[must_use]
 pub fn aborted_tool_tail(dom: &omp_dom::Dom, turn: Handle) -> bool {
 	let Some(node) = dom
@@ -3497,10 +3467,10 @@ fn prompt_hash_of(messages: &[InferenceMessage]) -> String {
 	let mut hasher = std::collections::hash_map::DefaultHasher::new();
 	for message in messages
 		.iter()
-		.take_while(|message| message.role == omp_inference::Role::System)
+		.take_while(|message| message.role == omp_ai::Role::System)
 	{
 		for part in message.content.iter() {
-			if let omp_inference::ContentPart::Text { text, .. } = part {
+			if let omp_ai::ContentPart::Text { text, .. } = part {
 				std::hash::Hasher::write(&mut hasher, text.as_bytes());
 			}
 		}
@@ -3568,11 +3538,7 @@ fn session_usage_json(session: &Session, turn: Handle) -> serde_json::Value {
 }
 
 enum ToolGate {
-	Allow {
-		identity:  ToolIdentity,
-		args:      Box<RawValue>,
-		approvals: Vec<crate::ApprovalSpec>,
-	},
+	Allow { identity: ToolIdentity, args: Box<RawValue>, approvals: Vec<crate::ApprovalSpec> },
 	Deny(Str),
 }
 
@@ -3583,7 +3549,7 @@ enum PreflightSignal<T> {
 }
 
 enum StreamSignal {
-	Event(Option<Result<ChatEvent, omp_inference::Error>>),
+	Event(Option<Result<ChatEvent, omp_ai::Error>>),
 	Control(Option<Up>),
 	Cancelled,
 }
@@ -3933,8 +3899,7 @@ fn queued_follow_up(dom: &omp_dom::Dom) -> bool {
 				dom.get(*prompt).is_some_and(|node| {
 					node.tag == Tag::Known(KnownTag::Prompt)
 						&& node.prop(&PropId::Kind.into()).and_then(Value::as_str) == Some("queued")
-						&& node.prop(&PropId::Status.into()).and_then(Value::as_str)
-							== Some("pending")
+						&& node.prop(&PropId::Status.into()).and_then(Value::as_str) == Some("pending")
 				})
 			})
 	})
@@ -3943,9 +3908,8 @@ fn queued_follow_up(dom: &omp_dom::Dom) -> bool {
 /// Counts consecutive pause continuations since the latest tool element.
 ///
 /// The current pause assistant has not been marked yet and is ignored. A tool
-/// element carries `rev`; encountering one re-arms the budget exactly as pi's
-/// completed-tool-call branch does. Reading the DOM makes crash replay retain
-/// the same remaining budget.
+/// element carries `rev`; encountering one re-arms the budget. Reading the
+/// DOM makes crash replay retain the same remaining budget.
 fn paused_turn_continuation_count(dom: &omp_dom::Dom, turn: Handle) -> u8 {
 	let count = dom
 		.children(turn)
@@ -4020,8 +3984,7 @@ fn record_paused_turn_decision(
 }
 
 /// The `turn.receipt@1` payload for one completed inference: provider usage
-/// plus the kernel-clock timings pi's usage row shows (TTFT, duration →
-/// tok/s).
+/// plus kernel-clock timings (TTFT, duration → tok/s).
 fn receipt_facts(
 	usage: &Usage,
 	cost_nano_usd: u64,
@@ -4108,7 +4071,7 @@ mod streaming_edit_tests {
 			ty:      TypeSpec::BOOL,
 			flags:   VarFlags::SESSION,
 			default: Value::Bool(false),
-			ui:      None,
+			meta:    std::sync::Arc::from([]),
 		})
 		.expect("setting registers");
 		ctx.set("sv_tools_edit_streaming_abort", Value::Bool(enabled), Origin::Session)
@@ -4219,7 +4182,7 @@ mod streaming_edit_tests {
 	}
 }
 
-pub(crate) fn cancelled_outcome() -> TurnOutcome {
+pub(crate) const fn cancelled_outcome() -> TurnOutcome {
 	TurnOutcome {
 		stop:           TurnStop::Cancelled,
 		assistant_text: Str::new_static(""),

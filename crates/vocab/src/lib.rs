@@ -390,9 +390,7 @@ impl FromStr for Tag {
 		if let Some(name) = value.strip_prefix("tool:") {
 			return Ok(Self::Custom(Str::new(name)));
 		}
-		Ok(KnownTag::from_str(value)
-			.map(Self::Known)
-			.unwrap_or_else(|_| Self::Custom(Str::new(value))))
+		Ok(KnownTag::from_str(value).map_or_else(|_| Self::Custom(Str::new(value)), Self::Known))
 	}
 }
 
@@ -422,7 +420,7 @@ impl<'de> Deserialize<'de> for Tag {
 		D: Deserializer<'de>,
 	{
 		let value = Str::deserialize(deserializer)?;
-		Tag::from_str(value.as_str()).map_err(de::Error::custom)
+		Self::from_str(value.as_str()).map_err(de::Error::custom)
 	}
 }
 
@@ -562,6 +560,12 @@ pub enum PropId {
 	Truncated,
 	/// Full-result recovery address.
 	Recovery,
+	/// Selector or argument that fetches the next slice of a bounded result.
+	Continuation,
+	/// Count of content elided from an inline result.
+	Omitted,
+	/// Unit of an elided count (lines, rows, entries, …).
+	Unit,
 }
 
 impl PropId {
@@ -602,9 +606,7 @@ impl FromStr for PropKey {
 		if let Some(name) = value.strip_prefix("custom:") {
 			return Ok(Self::Custom(Str::new(name)));
 		}
-		Ok(PropId::from_str(value)
-			.map(Self::Known)
-			.unwrap_or_else(|_| Self::Custom(Str::new(value))))
+		Ok(PropId::from_str(value).map_or_else(|_| Self::Custom(Str::new(value)), Self::Known))
 	}
 }
 
@@ -646,7 +648,7 @@ impl<'de> Deserialize<'de> for PropKey {
 		D: Deserializer<'de>,
 	{
 		let value = Str::deserialize(deserializer)?;
-		PropKey::from_str(value.as_str()).map_err(de::Error::custom)
+		Self::from_str(value.as_str()).map_err(de::Error::custom)
 	}
 }
 

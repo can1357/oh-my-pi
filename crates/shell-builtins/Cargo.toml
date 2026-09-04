@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "In-process command-line utility and process builtins for the OMP shell"
+description = "In-process builtins and the standalone omp-sh shell"
 
 [lints]
 workspace = true
@@ -49,7 +49,8 @@ memmap2.workspace = true
 num-bigint.workspace = true
 num-traits.workspace = true
 omp-core.workspace = true
-omp-shell-engine.workspace = true
+omp-shell.workspace = true
+omp-tool.workspace = true
 omp-walker.workspace = true
 parking_lot.workspace = true
 parse_datetime.workspace = true

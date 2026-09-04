@@ -11,8 +11,9 @@ use omp_chat::{
 	overlays::services::{
 		AccountRow, ActiveAccountUsage, ActiveUsageRequest, AgentRow, AgentView, CleanseRequest,
 		CleanseRun, ExtensionRow, ForeignSessionRow, ForeignSessionSource, LoginFlow, MemoryOp,
-		Mutation, Mutations, Pending, PluginsReport, ServiceError, ServiceResult, Services, SessionRow,
-		SessionScope, SettingsChoice, SettingsInventory, SshHostRow, SshHostSpec, ToolRow, UsageReport,
+		Mutation, Mutations, Pending, PluginsReport, ServiceError, ServiceResult, Services,
+		SessionRow, SessionScope, SettingsChoice, SettingsInventory, SshHostRow, SshHostSpec,
+		ToolRow, UsageReport,
 	},
 };
 use omp_core::{Str, sf};
@@ -88,11 +89,11 @@ pub struct ServiceState {
 #[derive(Clone)]
 pub struct StackHandles {
 	/// Authentication owner.
-	pub auth:                 omp_inference::auth::AuthManager,
+	pub auth:                 omp_ai::auth::AuthManager,
 	/// Lifecycle CONTROL view of the same owner.
-	pub auth_control:         omp_inference::auth::AuthControlHandle,
+	pub auth_control:         omp_ai::auth::AuthControlHandle,
 	/// Provider usage fetchers.
-	pub usage:                omp_inference::operation::usage::UsageFetcherRegistry,
+	pub usage:                omp_ai::operation::usage::UsageFetcherRegistry,
 	/// Combined credential authority (GitHub gist uploads for `/share`).
 	pub credential_authority: Arc<dyn omp_envd::github_url::CredentialAuthority>,
 }
@@ -309,11 +310,7 @@ impl Services for AppServices {
 		Ok(collab_state(&self.state.collab))
 	}
 
-	fn export(
-		&self,
-		dom: &omp_dom::Dom,
-		path: Option<&std::path::Path>,
-	) -> ServiceResult<PathBuf> {
+	fn export(&self, dom: &omp_dom::Dom, path: Option<&std::path::Path>) -> ServiceResult<PathBuf> {
 		misc::export(&self.state, dom, path)
 	}
 

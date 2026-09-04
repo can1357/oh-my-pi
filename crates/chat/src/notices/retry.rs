@@ -1,7 +1,7 @@
 //! Auto-retry countdown loader (ERR-07) and the retry-superseded failure
 //! elements (ERR-08).
 //!
-//! pi `event-controller.ts:2098-2140` (`#handleAutoRetryStart`): when the
+//! When the
 //! provider schedules a retry the status container shows one `Loader` row —
 //! a warning-colored spinner and the muted text
 //! `Retrying (attempt/maxAttempts) in <remaining>… (esc to cancel)` where
@@ -18,7 +18,7 @@ use omp_tui::{Component, PaintCtx, Props, Rect, Slot, UiContext, cell_width, nex
 
 use crate::notices::prop_text;
 
-/// pi `#maintenanceEscHint`: appended while the primary agent is focused.
+/// Appended while the primary agent is focused.
 const ESC_HINT: &str = " (esc to cancel)";
 
 /// One scheduled provider retry on the presentation clock.
@@ -49,7 +49,7 @@ impl RetryState {
 		Self { attempt, max_attempts, delay, reason, started: now }
 	}
 
-	/// Backoff still to wait at `now`; pi `Math.max(0, delayMs - elapsed)`.
+	/// Backoff still to wait at `now`, clamped to zero.
 	#[must_use]
 	pub const fn remaining(&self, now: Duration) -> Duration {
 		self.delay.saturating_sub(now.saturating_sub(self.started))
@@ -75,7 +75,7 @@ impl RetryState {
 	}
 
 	fn write_label(&self, out: &mut impl std::fmt::Write, now: Duration, esc_hint: bool) {
-		// pi: `${retryLabel} in ${formatDuration(remaining)}…${escHint}`.
+		// `<label> in <remaining>…<esc hint>`.
 		let _ = write!(out, "Retrying ({}/{}) in ", self.attempt, self.max_attempts);
 		let _ = crate::notices::write_duration(out, self.remaining_ms(now));
 		let _ = out.write_char('…');
@@ -103,7 +103,7 @@ impl RetryState {
 	}
 }
 
-/// pi `Loader` for a pending retry: a warning-colored spinner and the muted
+/// Loader for a pending retry: a warning-colored spinner and the muted
 /// countdown label on one row, repainted on every spinner frame and on
 /// every whole second of the backoff.
 pub struct RetryLoader {
@@ -193,7 +193,7 @@ impl Component for RetryLoader {
 
 /// Elements of the last turn that a retry supersedes.
 ///
-/// pi `#syntheticFailureCards`: the trailing `<notice kind=error>` and every
+/// The trailing `<notice kind=error>` and every
 /// tool call settled `error | aborted | cancelled` without ever producing
 /// result or diagnostic text. The host drops these blocks from the live
 /// projection when the retry starts so the re-streamed attempt does not

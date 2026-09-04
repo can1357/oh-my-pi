@@ -82,6 +82,11 @@ impl Ctx {
 			Some(b'-') => ("-", &partial[1..]),
 			_ => ("", partial),
 		};
+		if sign.is_empty() {
+			for var in self.vars().filter(|var| starts_with_ci(var.name, base)) {
+				out.push(Suggestion { text: Str::from(var.name), help: first_line(var.desc) });
+			}
+		}
 		for item in self.items() {
 			match item {
 				RegItem::Action(spec) => {
@@ -94,16 +99,21 @@ impl Ctx {
 						out.push(Suggestion { text: text.freeze(), help: first_line(spec.desc) });
 					}
 				},
-				_ if sign.is_empty() && starts_with_ci(item.name(), base) => {
+				RegItem::Cmd(spec) if sign.is_empty() && starts_with_ci(spec.name, base) => {
 					out.push(Suggestion {
-						text: Str::new_static(item.name()),
-						help: first_line(item.desc()),
+						text: Str::new_static(spec.name),
+						help: first_line(spec.desc),
 					});
 				},
 				_ => {},
 			}
 		}
 		if sign.is_empty() {
+			for (name, desc) in self.dynamic_cmds() {
+				if starts_with_ci(name, base) {
+					out.push(Suggestion { text: name.clone(), help: first_line(desc) });
+				}
+			}
 			for (name, body) in self.aliases() {
 				if starts_with_ci(name.as_str(), base) {
 					out.push(Suggestion { text: name, help: body });
@@ -115,20 +125,23 @@ impl Ctx {
 
 	/// Candidates for an argument position of `tokens[0]`.
 	fn complete_arg(&self, tokens: &[Str], index: usize, partial: &str) -> Vec<Suggestion> {
-		let Some(item) = self.find(tokens[0].as_str()) else {
+		if index == 1
+			&& let Some(var) = self
+				.vars()
+				.find(|var| var.name.eq_ignore_ascii_case(tokens[0].as_str()))
+		{
+			return self.complete_typed(var.ty, var.hint, partial);
+		}
+		let Some(RegItem::Cmd(spec)) = self.find(tokens[0].as_str()) else {
 			return Vec::new();
 		};
-		match item {
-			RegItem::Var(spec) if index == 1 => self.complete_typed(spec.ty, spec.hint, partial),
-			RegItem::Cmd(spec) => match spec.args.get(index - 1) {
-				Some(arg) if matches!(arg.hint, Hint::Group("con::script")) => {
-					// Recursive statement completion for bind/alias bodies.
-					self.complete_name(partial)
-				},
-				Some(arg) => self.complete_typed(arg.ty, arg.hint, partial),
-				None => Vec::new(),
+		match spec.args.get(index - 1) {
+			Some(arg) if matches!(arg.hint, Hint::Group("con::script")) => {
+				// Recursive statement completion for bind/alias bodies.
+				self.complete_name(partial)
 			},
-			_ => Vec::new(),
+			Some(arg) => self.complete_typed(arg.ty, arg.hint, partial),
+			None => Vec::new(),
 		}
 	}
 
@@ -182,8 +195,19 @@ impl Ctx {
 	fn complete_group(&self, group: &str, partial: &str) -> Vec<Suggestion> {
 		match group {
 			"con::name" | "con::script" => self.complete_name(partial),
-			"con::var" => self.filter_items(partial, |item| matches!(item, RegItem::Var(_))),
-			"con::cmd" => self.filter_items(partial, |item| matches!(item, RegItem::Cmd(_))),
+			"con::var" => self
+				.vars()
+				.filter(|var| starts_with_ci(var.name, partial))
+				.map(|var| Suggestion { text: Str::from(var.name), help: first_line(var.desc) })
+				.collect(),
+			"con::cmd" => {
+				let static_cmds = self.filter_items(partial, |item| matches!(item, RegItem::Cmd(_)));
+				let dynamic_cmds = self
+					.dynamic_cmds()
+					.filter(|(name, _)| starts_with_ci(name, partial))
+					.map(|(name, desc)| Suggestion { text: name.clone(), help: first_line(desc) });
+				static_cmds.into_iter().chain(dynamic_cmds).collect()
+			},
 			"con::alias" => self
 				.aliases()
 				.into_iter()

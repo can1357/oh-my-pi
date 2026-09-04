@@ -47,11 +47,11 @@ pub struct DoctorFinding {
 #[derive(Clone, Debug)]
 pub struct DoctorRequest<'a> {
 	/// Owning lock layer.
-	pub layer:            Layer,
+	pub layer:                 Layer,
 	/// Portable lock path.
-	pub lock_path:        &'a Path,
+	pub lock_path:             &'a Path,
 	/// Local install-record path.
-	pub installed_path:   &'a Path,
+	pub installed_path:        &'a Path,
 	/// Local TOFU key path.
 	pub keys_path:             &'a Path,
 	/// Local operator-grant path.
@@ -148,10 +148,7 @@ pub fn diagnose(request: &DoctorRequest<'_>, health: &impl RuntimeHealth) -> Vec
 			Some(ExtensionCode::WForeignRoot),
 			DoctorSeverity::Warning,
 			None,
-			Str::new(format!(
-				"foreign extension-shaped root {} is ignored",
-				root.display()
-			)),
+			Str::new(format!("foreign extension-shaped root {} is ignored", root.display())),
 			false,
 		));
 	}
@@ -253,8 +250,7 @@ pub fn diagnose(request: &DoctorRequest<'_>, health: &impl RuntimeHealth) -> Vec
 					locked.tier,
 					&locked.ship,
 				)
-			})
-		{
+			}) {
 			findings.push(finding(
 				Some(ExtensionCode::WUngranted),
 				DoctorSeverity::Warning,
@@ -355,7 +351,7 @@ fn inspect_site(request: &DoctorRequest<'_>, findings: &mut Vec<DoctorFinding>) 
 	));
 }
 
-fn finding(
+const fn finding(
 	code: Option<ExtensionCode>,
 	severity: DoctorSeverity,
 	extension_id: Option<Str>,

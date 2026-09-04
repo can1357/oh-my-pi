@@ -13,8 +13,6 @@ pub mod contrib;
 pub mod discover;
 pub mod id;
 pub mod model;
-/// Additional literal pi catalog-setting convars.
-pub mod pi_settings;
 pub mod policy;
 pub mod pricing;
 pub mod provider;

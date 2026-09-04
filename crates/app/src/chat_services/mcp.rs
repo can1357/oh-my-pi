@@ -1,5 +1,5 @@
-//! `/mcp`: pi's `MCPCommandController` over the Environment's MCP
-//! authorities — the persisted config stores (`~/.o2/mcp.json`,
+//! `/mcp` operates over the Environment's MCP authorities — the persisted
+//! config stores (`~/.o2/mcp.json`,
 //! `.omp/mcp.json`, `.mcp.json`) for `add`/`remove`/`enable`/`disable`,
 //! the live manager for `list`/`test`/`reconnect`/`reload`/`resources`/
 //! `prompts`/`notifications`, the OAuth authority for `reauth`/`unauth`, and
@@ -27,11 +27,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::ServiceState;
 
-/// pi waits this long for `/mcp test` before giving up on a server.
+/// Maximum time `/mcp test` waits for a server.
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Poll cadence while a reconnecting server settles.
 const TEST_POLL: Duration = Duration::from_millis(200);
-/// pi lists tool names only up to this many.
+/// Maximum number of tool names shown in a test report.
 const LISTED_TOOLS: usize = 10;
 
 fn failed(error: impl std::fmt::Display) -> ServiceError {
@@ -611,7 +611,7 @@ fn declared_config(state: &ServiceState, name: &str) -> ServiceResult<Option<Mcp
 	Ok(None)
 }
 
-/// pi `#handleList`: user-level, project-level, then discovered servers,
+/// Lists user-level, project-level, then discovered servers,
 /// each with its connection state.
 fn list(state: &ServiceState) -> ServiceResult<Str> {
 	let (user, project, root) = stores(state)?;
@@ -681,7 +681,7 @@ fn shorten(path: &Path, project: &Path) -> String {
 		.map_or_else(|_| path.display().to_string(), |rest| rest.display().to_string())
 }
 
-/// pi `#handleAdd` (non-interactive form): validate, write, report.
+/// Validates, writes, and reports a non-interactive server addition.
 fn add_server(state: &ServiceState, add: &McpAdd) -> ServiceResult<Str> {
 	let store = store_for(state, add.scope)?;
 	let mut config = empty_server_config();
@@ -703,7 +703,7 @@ fn add_server(state: &ServiceState, add: &McpAdd) -> ServiceResult<Str> {
 	))
 }
 
-/// pi `#handleRemove`.
+/// Removes a configured server and schedules a reload.
 fn remove_server(state: &ServiceState, name: &str, scope: McpScope) -> ServiceResult<Str> {
 	let store = store_for(state, scope)?;
 	if store.get(name).map_err(failed)?.is_none() {
@@ -716,7 +716,7 @@ fn remove_server(state: &ServiceState, name: &str, scope: McpScope) -> ServiceRe
 	Ok(sf!("Removed MCP server \"{name}\" from {scope} config."))
 }
 
-/// pi `#handleSetEnabled`.
+/// Changes a server's enabled state and schedules a reload.
 fn set_enabled(state: &ServiceState, name: &str, enabled: bool) -> ServiceResult<Str> {
 	let known = declared_config(state, name)?.is_some()
 		|| state
@@ -748,7 +748,7 @@ fn schedule_reload(state: &ServiceState) {
 	});
 }
 
-/// pi `#handleTest`: reconnect and wait for the catalog, then report the
+/// Reconnects, waits for the catalog, then reports the
 /// server and its tools.
 async fn test_server(
 	mcp: &omp_envd::McpInspectorHandle,
@@ -800,7 +800,7 @@ async fn test_server(
 	}
 }
 
-/// pi's helpful error suffixes.
+/// Helpful error suffixes for common connection failures.
 fn tip(message: &str) -> &'static str {
 	if message.contains("ENOENT") || message.contains("not found") {
 		"\n\nTip: Check that the command or URL is correct."
@@ -835,7 +835,7 @@ fn test_report(name: &str, server: &McpInspectorSnapshot) -> Str {
 	Str::new(out)
 }
 
-/// pi `#handleResources`.
+/// Renders resources from connected servers.
 fn resources(state: &ServiceState) -> Str {
 	let mut out = String::new();
 	for server in state.mcp.snapshots() {
@@ -853,7 +853,7 @@ fn resources(state: &ServiceState) -> Str {
 	Str::new(out.trim_end())
 }
 
-/// pi `#handlePrompts`.
+/// Renders prompts from connected servers.
 fn prompts(state: &ServiceState) -> Str {
 	let mut out = String::new();
 	for server in state.mcp.snapshots() {
@@ -878,7 +878,7 @@ fn prompts(state: &ServiceState) -> Str {
 	Str::new(out.trim_end())
 }
 
-/// pi `#handleNotifications`: per-server capability summary.
+/// Renders a per-server capability summary.
 fn notifications(state: &ServiceState) -> Str {
 	let mut out = String::new();
 	for server in state.mcp.snapshots() {

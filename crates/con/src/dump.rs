@@ -64,23 +64,20 @@ impl Ctx {
 			let _ = write_atom(out, script);
 			out.push('\n');
 		};
-		match self.bind_diff() {
-			Some((removed, changed)) => {
-				for key in removed {
-					out.push_str("unbind ");
-					let _ = write_atom(&mut out, key.as_str());
-					out.push('\n');
-				}
-				for (key, script) in changed {
-					bind_line(&mut out, key.as_str(), script.as_str());
-				}
-			},
-			None => {
-				out.push_str("unbindall\n");
-				for (key, script) in self.binds() {
-					bind_line(&mut out, key.as_str(), script.as_str());
-				}
-			},
+		if let Some((removed, changed)) = self.bind_diff() {
+			for key in removed {
+				out.push_str("unbind ");
+				let _ = write_atom(&mut out, key.as_str());
+				out.push('\n');
+			}
+			for (key, script) in changed {
+				bind_line(&mut out, key.as_str(), script.as_str());
+			}
+		} else {
+			out.push_str("unbindall\n");
+			for (key, script) in self.binds() {
+				bind_line(&mut out, key.as_str(), script.as_str());
+			}
 		}
 
 		out.push_str("unaliasall\n");

@@ -325,7 +325,7 @@ pub fn mutate_sqlite_row(
 			disposition: WriteDisposition::Overwrote,
 		}
 	} else {
-		let parsed: Value = omp_slopjson::from_str(content).map_err(|error| {
+		let parsed: Value = omp_core::slopjson::from_str(content).map_err(|error| {
 			Fault::new(format!("SQLite write content must be valid JSON5: {error}"))
 		})?;
 		let object = parsed

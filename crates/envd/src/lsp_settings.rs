@@ -4,15 +4,27 @@ use omp_con::Ctx;
 use serde::{Deserialize, Serialize};
 
 omp_con::var! {
-	/// Enable project language-server bindings and tools.
+	/// Enable the lsp tool for code intelligence (definitions, references, diagnostics, rename).
 	pub static SV_LSP_ENABLED = sv_lsp_enabled: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"ui.tab": "files",
+			"ui.group": "LSP",
+			"ui.label": "LSP",
+			"legacy.path": "lsp.enabled",
+		},
 	};
-	/// Start matching language servers on first use.
+	/// Start language servers on first use (lsp tool or editing a matching file type) instead of at session startup.
 	pub static SV_LSP_LAZY = sv_lsp_lazy: bool {
 		default: true,
 		flags: archive,
+		meta: {
+			"ui.tab": "files",
+			"ui.group": "LSP",
+			"ui.label": "Lazy LSP Startup",
+			"legacy.path": "lsp.lazy",
+		},
 	};
 }
 

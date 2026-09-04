@@ -530,15 +530,13 @@ pub fn model_operation_overrides(provider: &str, model: &str) -> OperationBits {
 		.fold(OperationBits::empty(), |operations, rule| operations | rule.operations)
 }
 
-/// Splits a Cursor effort-suffixed OpenAI sibling id into its base id and
+/// Splits a Cursor effort-suffixed `OpenAI` sibling id into its base id and
 /// catalog-declared effort tier.
 ///
 /// The family gate requires a `gpt-` prefix followed immediately by an ASCII
 /// version digit. Matching remains
 /// case-sensitive to preserve Cursor wire-id behavior.
-pub fn cursor_openai_effort_suffix<'model>(
-	model: &'model str,
-) -> Option<(&'model str, &'static str)> {
+pub fn cursor_openai_effort_suffix(model: &str) -> Option<(&str, &'static str)> {
 	let rule = &runtime_behavior().cursor_effort;
 	for tier in &rule.tiers {
 		let Some(base) = model
@@ -564,9 +562,9 @@ pub fn cursor_openai_effort_suffix<'model>(
 }
 /// Returns fixed Cursor `requestedModel` parameters declared for an exact wire
 /// model.
-pub fn cursor_model_parameters<'model>(
-	model: &'model str,
-) -> impl Iterator<Item = (&'static str, &'static str)> + 'model {
+pub fn cursor_model_parameters(
+	model: &str,
+) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
 	runtime_behavior()
 		.cursor_parameters
 		.iter()

@@ -49,10 +49,9 @@ pub fn export(
 			state.project.join(format!("omp-session-{stem}.html"))
 		},
 	};
-	let blobs = omp_journal::blob::BlobStore::open(
-		journal.parent().unwrap_or_else(|| Path::new(".")),
-	)
-	.map_err(failed)?;
+	let blobs =
+		omp_journal::blob::BlobStore::open(journal.parent().unwrap_or_else(|| Path::new(".")))
+			.map_err(failed)?;
 	crate::render_cmd::export_html_snapshot(&journal, dom, &blobs, &target).map_err(failed)?;
 	Ok(target)
 }
@@ -206,7 +205,7 @@ pub fn secrets_files(project: &Path) -> Result<[PathBuf; 2], omp_core::dirs::Dat
 }
 
 /// `/share`: redact, seal, and upload the snapshot; settles with the viewer
-/// URL (pi `Share URL: …`).
+/// URL.
 pub fn share(state: &ServiceState, snapshot: serde_json::Value) -> ServiceResult<Pending<Str>> {
 	let Some(stack) = state.stack.as_ref() else {
 		return Err(ServiceError::Unavailable("share (credentials live on the remote gateway host)"));

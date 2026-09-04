@@ -21,7 +21,7 @@ use crate::{
 	cli::{AcpArgs, ChatArgs},
 };
 
-/// `session/list` page size (pi `acp-agent.ts` `SESSION_PAGE_SIZE`).
+/// Maximum number of sessions returned by one `session/list` request.
 const SESSION_PAGE_SIZE: usize = 50;
 
 /// Runs ACP using stdin for NDJSON requests and stdout for NDJSON responses.
@@ -190,7 +190,7 @@ where
 		.await?,
 	);
 	let mailbox = kernel.mailbox();
-	// pi `acp-permission-gate.ts`: every journaled approval prompt becomes
+	// Every journaled approval prompt becomes
 	// one `session/request_permission` request; the client's selected
 	// option answers the prompt (`session/approve` remains for clients that
 	// answer by prompt id).
@@ -386,7 +386,7 @@ where
 					Ok(session_state(home.model.as_str()))
 				}
 			},
-			// pi `listSessions`: stored sessions newest first, paged by an
+			// Stored sessions are newest first, paged by an
 			// offset cursor, optionally scoped to one `cwd`. The live session
 			// is flushed to disk by construction (journal-first), so the scan
 			// already sees it.
@@ -394,7 +394,7 @@ where
 				Ok(page) => Ok(page),
 				Err(message) => Err((-32602, message)),
 			},
-			// pi `unstable_forkSession`: copy the source journal (the whole
+			// Copy the source journal (the whole
 			// branch tree travels) and switch authority to the copy.
 			"session/fork" if active.is_some() => Err((-32001, "a turn is already running")),
 			"session/fork" => {
@@ -568,7 +568,7 @@ where
 					output_tx.send(success(id, json!({}))).into_diagnostic()?;
 				}
 				if let Some(turn) = active.take() {
-					// ACP shutdown is graceful: pi waits for the active prompt's
+					// ACP shutdown is graceful: it waits for the active prompt's
 					// delivery handlers before disposing the session. EOF remains
 					// the abrupt transport-loss path that interrupts the turn.
 					restore_turn(
@@ -625,7 +625,7 @@ struct PermissionRequests {
 }
 
 impl PermissionRequests {
-	/// Maps a client response to the prompt it answers: pi's option ids
+	/// Maps a client response to the prompt it answers: option ids
 	/// `allow_once`/`allow_always`/`reject_once`/`reject_always`; a
 	/// `cancelled` outcome or an unknown option fails closed.
 	fn answer(&self, id: Option<&Value>, result: Option<&Value>) -> Option<(Str, ApprovalDecision)> {
@@ -895,10 +895,9 @@ fn validate_session_cwd(
 	Ok(())
 }
 
-/// `session/list {cwd?, cursor?}` → `{sessions, nextCursor?}` (pi
-/// `listSessions` / `#toSessionInfo`): every journal under the session
-/// directory, newest first, `cwd` scoping by the genesis working directory
-/// and `cursor` an offset into that ordering.
+/// `session/list {cwd?, cursor?}` → `{sessions, nextCursor?}` pages every
+/// journal in the session directory, newest first; `cwd` scopes by genesis
+/// working directory and `cursor` offsets that ordering.
 fn list_sessions(home: &SessionHome, params: &Map<String, Value>) -> Result<Value, &'static str> {
 	let cwd = match params.get("cwd").and_then(Value::as_str) {
 		Some(cwd) => {
@@ -1089,9 +1088,8 @@ fn error_stop_reason(message: &str) -> &'static str {
 	}
 }
 
-/// A `session/prompt` request reduced to the turn text and its image blocks
-/// (pi `acp-agent.ts` `#convertPromptBlocks`), each block decoded with the
-/// `mimeType` it declared.
+/// A `session/prompt` request reduced to the turn text and its image blocks,
+/// each decoded with its declared `mimeType`.
 struct PromptInput {
 	text:   Str,
 	images: Vec<AttachmentInput>,

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use omp_core::{Str, StrMut};
-use omp_docserver::position::PositionEncoding;
+use omp_proto::lsp::PositionEncoding;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
@@ -61,10 +61,13 @@ pub fn resolve_symbol_column(
 		if left_boundary && right_boundary {
 			occurrence += 1;
 			if occurrence == target.occurrence {
-				return encoding
-					.offset_to_position(line, start)
-					.ok()
-					.map(|position| position.character);
+				let prefix = line.get(..start)?;
+				let units = match encoding {
+					PositionEncoding::Utf8 => prefix.len(),
+					PositionEncoding::Utf16 => prefix.encode_utf16().count(),
+					PositionEncoding::Utf32 => prefix.chars().count(),
+				};
+				return u32::try_from(units).ok();
 			}
 		}
 		offset = end;
@@ -129,7 +132,8 @@ pub struct LocationGroup {
 	pub locations: Vec<LocationPoint>,
 }
 
-/// Normalizes LSP Location and LocationLink results to a bounded location list.
+/// Normalizes LSP Location and `LocationLink` results to a bounded location
+/// list.
 pub fn normalize_locations(value: &Value, limit: usize) -> Vec<Value> {
 	let values = value
 		.as_array()
@@ -184,12 +188,12 @@ pub fn group_locations(value: &Value) -> Vec<LocationGroup> {
 }
 
 /// Renders definition-style results with explicit counts and one-based
-/// locations, matching pi's semantic model projection.
+/// locations.
 pub fn render_locations(noun: &str, value: &Value) -> Str {
 	render_locations_with_empty(noun, noun, value)
 }
 
-/// Renders reference results using pi's plural empty-state wording.
+/// Renders reference results with a plural empty state.
 pub fn render_references(value: &Value) -> Str {
 	render_locations_with_empty("reference", "references", value)
 }
@@ -231,7 +235,7 @@ fn display_path(uri: &str) -> Str {
 		.map_or_else(|| Str::from(uri), |path| Str::from(path.to_string_lossy().as_ref()))
 }
 
-/// Extracts Markdown, MarkedString, and plaintext hover contents.
+/// Extracts Markdown, `MarkedString`, and plaintext hover contents.
 pub fn hover_text(contents: &Value) -> Str {
 	fn append(value: &Value, output: &mut String) {
 		match value {

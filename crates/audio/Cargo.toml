@@ -1,0 +1,40 @@
+[package]
+name = "omp-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors = [
+	"Can Bölük",
+	"Stencil Labs, Inc.",
+]
+homepage.workspace = true
+repository.workspace = true
+description = "Cross-platform audio capture, playback, metering, and ownership coordination for OMP audio features"
+readme = "README.md"
+
+[features]
+default = ["native-audio"]
+native-audio = ["dep:libc", "dep:windows-sys", "dep:block2", "dep:objc2"]
+
+[lints]
+workspace = true
+
+[dependencies]
+flume.workspace = true
+omp-core.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { workspace = true, optional = true }
+objc2 = { workspace = true, optional = true }

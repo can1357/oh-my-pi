@@ -284,7 +284,7 @@ fn link_definition(line: &str) -> Option<(String, String)> {
 	(!destination.is_empty()).then(|| (normalize_reference_label(label), destination.to_owned()))
 }
 
-fn reference_bracket_close(text: &str, start: usize) -> Option<usize> {
+const fn reference_bracket_close(text: &str, start: usize) -> Option<usize> {
 	let bytes = text.as_bytes();
 	let mut at = start;
 	while at < bytes.len() {
@@ -1222,8 +1222,8 @@ fn render_list(
 					if list_marker(lines[*index]).is_some_and(|next| next.indent >= root_indent)
 						|| next_indent > root_indent
 					{
-						// pi renders loose lists tight: blank lines between
-						// items or item paragraphs never survive
+						// Render loose lists tight: blank lines between items or
+						// item paragraphs never survive.
 						continue;
 					}
 				}
@@ -1890,8 +1890,8 @@ pub(crate) fn decode_entities(text: &str, output: &mut StrMut) {
 		} else if entity.eq_ignore_ascii_case("apos") {
 			Some('\'')
 		} else if entity.eq_ignore_ascii_case("nbsp") {
-			// pi decodes to a plain space; the run survives because prose
-			// whitespace is never collapsed
+			// Decode to a plain space; the run survives because prose whitespace
+			// is never collapsed.
 			Some(' ')
 		} else if let Some(hex) = entity
 			.strip_prefix("#x")
@@ -2008,7 +2008,7 @@ mod tests {
 		);
 		let rows = plain(source.as_str(), 80);
 		assert!(!rows.iter().any(|row| row.contains("|:---|")), "delimiter stayed literal: {rows:?}");
-		// Without the heading the shape is ambiguous and pi keeps the fence.
+		// Without the heading the shape is ambiguous, so keep the fence.
 		let table_only = Str::new("Results below\n```\n| Name | Value |\n|:---|---:|\n| a | 1 |");
 		assert_eq!(repair_orphan_closing_fence(&table_only), table_only);
 	}
@@ -2190,7 +2190,7 @@ mod tests {
 			"  - second",
 			"11. next"
 		]);
-		// pi renders loose lists tight: the separating blank never survives
+		// Loose lists render tight: the separating blank never survives.
 		assert_eq!(plain("- first\n\n- second", 80), ["- first", "- second"]);
 	}
 
@@ -2269,8 +2269,8 @@ mod tests {
 
 	#[test]
 	fn lazy_continuation_boundaries_match_marked() {
-		// pi utils-marked-lazy-indent boundary shapes (cross-checked against
-		// marked v18): a line indented by at least four spaces directly
+		// Lazy-indent boundary shapes (cross-checked against marked v18): a
+		// line indented by at least four spaces directly
 		// attached to paragraph text stays a lazy continuation even when a
 		// block probe matches downstream, while a whitespace-padded blank
 		// line detaches it so the next indented run still opens indented

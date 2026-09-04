@@ -69,11 +69,10 @@ pub enum Msg {
 
 /// Ordering discipline for one in-flight background clipboard read.
 ///
-/// pi queues keystrokes typed behind an unsettled paste so a trailing Enter
-/// cannot submit before the payload lands (`custom-editor.ts` pending-input
-/// queue); this gate reproduces that contract for [`App`]. Input admitted
-/// while a read is in flight is buffered and replayed in order once the
-/// read settles or expires; quit chords bypass the buffer so a hung backend
+/// Keystrokes typed behind an unsettled paste queue so a trailing Enter
+/// cannot submit before the payload lands. Input admitted
+/// while a read is in flight is buffered and replayed in order once the read
+/// settles or expires; quit chords bypass the buffer so a hung backend
 /// can never lock the user in, and results from an expired read are dropped
 /// by generation.
 #[derive(Default)]

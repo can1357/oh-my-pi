@@ -6,7 +6,7 @@ use std::{
 };
 
 use omp_core::Str;
-use omp_docserver::diagnostics::{Diagnostic, Position, Range, Severity};
+use omp_proto::lsp::{Diagnostic, Position, Range, Severity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -96,7 +96,7 @@ pub enum Preset {
 	Pyright,
 	/// Biome JSON lint.
 	Biome,
-	/// SwiftLint JSON lint.
+	/// `SwiftLint` JSON lint.
 	SwiftLint,
 	/// An installed LSP binding acting as checker.
 	LspBinding,

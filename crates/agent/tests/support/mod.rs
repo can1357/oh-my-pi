@@ -17,11 +17,11 @@ use async_stream::stream;
 use bytes::Bytes;
 use futures::Stream;
 use omp_agent::{DispatchOptions, DispatchRequest, Inference, ToolCancellation};
-use omp_core::Str;
-use omp_inference::{
+use omp_ai::{
 	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ExecutionReceipt, FinishReason,
 	ProviderId, RequestId, ResponseMeta, RouteId, ToolCall, Usage, call::OpaqueJson,
 };
+use omp_core::Str;
 use omp_journal::{Entry, EntryId, Journal, kind};
 use omp_proto::thread::v1::{item, part};
 use omp_session::{ComponentRegistry, Session, project_thread};
@@ -322,7 +322,7 @@ impl Inference for ScriptedInference {
 	fn chat(
 		&mut self,
 		request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		self.requests.lock().push(request);
 		let events = self
 			.scripts

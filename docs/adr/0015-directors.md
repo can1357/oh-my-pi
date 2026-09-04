@@ -104,7 +104,22 @@ MUST run on this public surface so holes in it cannot be ignored.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/agent/src/director.rs`. Director stacks, verdicts, slot arbitration, binds, and journal-derived state are implemented and covered by the ported acceptance suite. Goal's Director retains ownership but yields on a prose-only candidate; `crates/app/src/chat_control.rs` revalidates the live session pause, Plan, configured presentation mode, and actor-local pending-input gate after pi's 800 ms idle boundary, then submits at most one hidden continuation as a distinct session turn. Continuation arming, Goal identity, token accounting baselines, finite-budget state, pause, completion, and drop are durable Director properties; `crates/driver/src/headless/goal.rs` executes the hidden `goal@1` session tool directly against that selected-branch state, and `crates/agent/src/loop.rs` derives the model-visible Goal tool roster from it on every request. A prose-only continuation journals its hold, replay preserves it, tool progress or genuine user input re-arms it, interruption and session selection pause the Goal, and budget exhaustion holds as `budget-limited` rather than claiming completion. Separately, `crates/agent/src/loop.rs` treats canonical `pause_turn` completions as non-terminal only at the mailbox-safe boundary, caps consecutive pause-only re-samples at eight, re-arms the cap after tool progress, yields to queued user input, and journals the eligibility decision on the originating assistant node for replay.
+**Implemented.** Primary implementation: `crates/agent/src/director.rs`. Director stacks, verdicts,
+slot arbitration, binds, and journal-derived state are implemented and covered by the ported
+acceptance suite. Goal's Director retains ownership but yields on a prose-only candidate;
+`crates/app/src/chat_control.rs` revalidates the live session pause, Plan, configured presentation
+mode, and actor-local pending-input gate after an 800 ms idle boundary, then submits at most one
+hidden continuation as a distinct session turn. Continuation arming, Goal identity, token
+accounting baselines, finite-budget state, pause, completion, and drop are durable Director
+properties; `crates/driver/src/headless/goal.rs` executes the hidden `goal@1` session tool directly
+against that selected-branch state, and `crates/agent/src/loop.rs` derives the model-visible Goal
+tool roster from it on every request. A prose-only continuation journals its hold, replay preserves
+it, tool progress or genuine user input re-arms it, interruption and session selection pause the
+Goal, and budget exhaustion holds as `budget-limited` rather than claiming completion. Separately,
+`crates/agent/src/loop.rs` treats canonical `pause_turn` completions as non-terminal only at the
+mailbox-safe boundary, caps consecutive pause-only re-samples at eight, re-arms the cap after tool
+progress, yields to queued user input, and journals the eligibility decision on the originating
+assistant node for replay.
 
 ## References
 

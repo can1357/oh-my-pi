@@ -231,7 +231,7 @@ impl Projector<'_> {
 		});
 	}
 
-	fn full(&self) -> bool {
+	const fn full(&self) -> bool {
 		self.rows.len() >= self.bounds.max_rows
 	}
 
@@ -441,7 +441,7 @@ enum ScalarKind {
 }
 
 impl ScalarKind {
-	fn color(self, ctx: &UiContext) -> crate::Color {
+	const fn color(self, ctx: &UiContext) -> crate::Color {
 		match self {
 			Self::Null => ctx.theme.muted,
 			Self::Bool => ctx.theme.warn,

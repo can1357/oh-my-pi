@@ -124,33 +124,25 @@ pub fn restart(cause: EntryId, handle: Handle, started: impl Into<Str>) -> Txn {
 		label: Some(Str::new_static("jobs.restart")),
 		ops: vec![
 			Op::Set {
-				h: handle,
-				prop: PropId::Status.into(),
+				h:     handle,
+				prop:  PropId::Status.into(),
 				value: Value::Str(Str::new_static("running")),
 			},
 			Op::Set {
-				h: handle,
-				prop: PropKey::Custom(Str::new_static("started")),
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static("started")),
 				value: Value::Str(started.into()),
 			},
+			Op::Set { h: handle, prop: PropId::Data.into(), value: Value::Null },
+			Op::Set { h: handle, prop: PropId::DurationMs.into(), value: Value::Null },
 			Op::Set {
-				h: handle,
-				prop: PropId::Data.into(),
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static("error")),
 				value: Value::Null,
 			},
 			Op::Set {
-				h: handle,
-				prop: PropId::DurationMs.into(),
-				value: Value::Null,
-			},
-			Op::Set {
-				h: handle,
-				prop: PropKey::Custom(Str::new_static("error")),
-				value: Value::Null,
-			},
-			Op::Set {
-				h: handle,
-				prop: PropKey::Custom(Str::new_static("delivered")),
+				h:     handle,
+				prop:  PropKey::Custom(Str::new_static("delivered")),
 				value: Value::Bool(false),
 			},
 		],
@@ -192,21 +184,18 @@ impl Component for JobsComponent {
 		let id = detached
 			.get("id")
 			.and_then(serde_json::Value::as_str)
-			.map(Str::new)
-			.unwrap_or_else(|| Str::new(entry.id.to_string()));
+			.map_or_else(|| Str::new(entry.id.to_string()), Str::new);
 		let metadata = detached.get("job").and_then(|job| job.get("metadata"));
 		let label = metadata
 			.and_then(|metadata| metadata.get("label"))
 			.and_then(serde_json::Value::as_str)
 			.filter(|label| !label.is_empty())
-			.map(Str::new)
-			.unwrap_or_else(|| id.clone());
+			.map_or_else(|| id.clone(), Str::new);
 		let job_type = metadata
 			.and_then(|metadata| metadata.get("kind"))
 			.and_then(serde_json::Value::as_str)
 			.and_then(|kind| kind.parse::<DetachedJobKind>().ok())
-			.map(DeliveryJobType::from)
-			.unwrap_or(DeliveryJobType::Tool);
+			.map_or(DeliveryJobType::Tool, DeliveryJobType::from);
 		let job_type: &'static str = job_type.into();
 		let started = metadata
 			.and_then(|metadata| metadata.get("started_at_ms"))

@@ -1,6 +1,6 @@
 //! Production speech synthesis for the chat vocalizer: local Kokoro (or the
 //! configured provider) through the Environment's media bridge, decoded to
-//! the mono `f32` contract `omp-voice` plays.
+//! the mono `f32` contract `omp-audio` plays.
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
@@ -97,7 +97,7 @@ impl SpeechSynth for EnvSpeechSynth {
 				return Ok(None);
 			};
 			rewriter
-				.rewrite(omp_voice::rewrite::SPEECH_REWRITE_PROMPT, request.text, request.cancel)
+				.rewrite(omp_ai::realtime::rewrite::SPEECH_REWRITE_PROMPT, request.text, request.cancel)
 				.await
 				.map(Some)
 				.map_err(|error| {

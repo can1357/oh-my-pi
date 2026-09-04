@@ -43,7 +43,7 @@ use std::{ffi::OsStr, os::fd};
 use bytes::Bytes;
 use im::HashMap;
 use omp_core::Str;
-use omp_shell_engine::{
+use omp_shell::{
 	Error, ExecutionContext, ExecutionResult, PathPolicy, ProcessScope, ShellExtensions,
 	SpawnObserver, SpawnWrapper,
 	builtins::{self, Registration},
@@ -51,7 +51,8 @@ use omp_shell_engine::{
 	sys::fs,
 };
 #[cfg(test)]
-use omp_shell_engine::{OpenRequest, PathAccess, PathDenied};
+use omp_shell::{OpenRequest, PathAccess, PathDenied};
+use omp_tool::Diag;
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -81,6 +82,21 @@ pub struct DynSchema {
 	pub description: Option<Str>,
 	/// JSON Schema describing the operation's argument object.
 	pub schema:      Value,
+}
+
+/// One dynamic operation result plus out-of-band harness diagnostics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynCallOutput {
+	/// Successful output written to stdout by the builtin.
+	pub output: DynOutput,
+	/// Structured harness notices that must not be written to stdout.
+	pub diags:  Vec<Diag>,
+}
+
+impl From<DynOutput> for DynCallOutput {
+	fn from(output: DynOutput) -> Self {
+		Self { output, diags: Vec::new() }
+	}
 }
 
 /// A successful dynamic operation result.
@@ -138,7 +154,12 @@ pub trait DynHost: Send + Sync + 'static {
 
 	/// Invokes one operation with schema-shaped JSON arguments and the shell
 	/// command's cancellation token.
-	fn call(&self, name: &str, args: Value, cancel: CancellationToken) -> DynFuture<'_, DynOutput>;
+	fn call(
+		&self,
+		name: &str,
+		args: Value,
+		cancel: CancellationToken,
+	) -> DynFuture<'_, DynCallOutput>;
 }
 
 /// A command-line utility implemented as a shell builtin.
@@ -1124,10 +1145,10 @@ fn or_null(file: Option<OpenFile>) -> Result<OpenFile, Error> {
 
 /// Recognizes brush's process-substitution arguments (`/dev/fd/<shell fd>`).
 #[cfg(unix)]
-fn process_substitution_fd(arg: &OsStr) -> Option<omp_shell_engine::ShellFd> {
+fn process_substitution_fd(arg: &OsStr) -> Option<omp_shell::ShellFd> {
 	arg.to_str()?
 		.strip_prefix("/dev/fd/")?
-		.parse::<omp_shell_engine::ShellFd>()
+		.parse::<omp_shell::ShellFd>()
 		.ok()
 }
 
@@ -1207,7 +1228,7 @@ mod testing {
 	#[cfg(unix)]
 	use std::os::fd;
 
-	use omp_shell_engine::error;
+	use omp_shell::error;
 	use parking_lot::Mutex;
 
 	use super::{

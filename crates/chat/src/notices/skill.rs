@@ -26,7 +26,7 @@ pub fn prompt(node: &Node) -> Option<SkillPrompt> {
 	serde_json::from_str(raw.get()).ok()
 }
 
-/// Renders pi's rounded `skill <name> <args>` frame.
+/// Renders a rounded `skill <name> <args>` frame.
 ///
 /// The source path keeps its full `file://` target while its label shortens
 /// the home prefix. The expanded form reveals the exact model-facing prompt

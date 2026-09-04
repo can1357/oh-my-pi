@@ -32,7 +32,7 @@ static DOCKER_STATUS: LazyLock<BackendStatus> =
 static DOCKER_RUNSC_STATUS: LazyLock<BackendStatus> =
 	LazyLock::new(|| docker::probe(Backend::DockerRunscEphemeral));
 static APP_CONTAINER_STATUS: LazyLock<BackendStatus> = LazyLock::new(appcontainer::probe);
-pub(crate) const COMMAND_WRAPPER_PLACEHOLDER: &str = "<omp-sandbox-command>";
+pub const COMMAND_WRAPPER_PLACEHOLDER: &str = "<omp-sandbox-command>";
 
 /// Returns the cached live status for one backend.
 #[must_use]
@@ -735,7 +735,7 @@ impl Drop for PreparedSandbox {
 	}
 }
 
-pub(crate) enum PreparedResource {
+pub enum PreparedResource {
 	Directory(Option<tempfile::TempDir>),
 	File(Option<tempfile::NamedTempFile>),
 }
@@ -932,9 +932,10 @@ async fn run_command(
 	let stdout = capture(child.child_mut().stdout.take());
 	let stderr = capture(child.child_mut().stderr.take());
 	let status = match options.timeout {
-		Some(timeout) => match time::timeout(timeout, child.wait()).await {
-			Ok(status) => status?,
-			Err(_) => {
+		Some(timeout) => {
+			if let Ok(status) = time::timeout(timeout, child.wait()).await {
+				status?
+			} else {
 				if let CommandRuntime::Docker(state) = &mut runtime {
 					let _ = state.terminate_and_reap(child.child_mut()).await;
 					let _ = child.wait().await;
@@ -950,7 +951,7 @@ async fn run_command(
 				let _ = join_output(stdout, prepared.backend).await;
 				let _ = join_output(stderr, prepared.backend).await;
 				return Err(SandboxError::Timeout { backend: prepared.backend });
-			},
+			}
 		},
 		None => child.wait().await?,
 	};
@@ -1033,11 +1034,11 @@ struct ChildGuard {
 }
 
 impl ChildGuard {
-	fn new(child: Child, backend: Backend) -> Self {
+	const fn new(child: Child, backend: Backend) -> Self {
 		Self { child: Some(child), backend, reaped: false }
 	}
 
-	fn child_mut(&mut self) -> &mut Child {
+	const fn child_mut(&mut self) -> &mut Child {
 		self.child.as_mut().expect("child exists until reaped")
 	}
 
@@ -1097,7 +1098,7 @@ fn sandbox_exit(status: ExitStatus) -> SandboxExit {
 	#[cfg(unix)]
 	{
 		use std::os::unix::process::ExitStatusExt as _;
-		return SandboxExit { code: status.code(), signal: status.signal() };
+		SandboxExit { code: status.code(), signal: status.signal() }
 	}
 	#[cfg(not(unix))]
 	{

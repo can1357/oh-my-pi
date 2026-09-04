@@ -209,8 +209,8 @@ impl Pricing {
 			let charge = ceil_div(product, divisor);
 			total = total.checked_add(charge).ok_or(CostError::Overflow)?;
 		}
-		// One-hour cache writes bill at twice the base input rate (pi
-		// `cacheWriteCost`); `MtokCacheWrite` is the five-minute rate and only
+		// One-hour cache writes bill at twice the base input rate; `MtokCacheWrite` is
+		// the five-minute rate and only
 		// covers the remainder. A schedule without an input price keeps the
 		// flat cache-write rate so write tokens never become free.
 		if usage.cache_write_1h_tokens > 0 {

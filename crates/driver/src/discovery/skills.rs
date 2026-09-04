@@ -1,9 +1,8 @@
 //! Skill discovery: `SKILL.md` declarations the runtime lists in the system
 //! prompt (`<skills>`) and serves as `skill://<name>`.
 //!
-//! Sources follow pi (`packages/coding-agent/src/extensibility/skills.ts`,
-//! `discovery/{builtin,agents,claude,codex,opencode}.ts`): native `.omp/skills`
-//! (project walk-up) and `<config root>/agent/skills`, then `.claude/skills`,
+//! Sources: native `.omp/skills` (project walk-up) and
+//! `<config root>/agent/skills`, then `.claude/skills`,
 //! `.agent[s]/skills`, opted-in user/project `.codex/skills`, project OpenCode
 //! skills, then
 //! `sv_skills_custom_directories`, then the isolated managed-skills root dead
@@ -19,7 +18,7 @@ use std::{
 };
 
 use omp_core::{CowBytes, Str};
-use omp_envd::{ContentResolver, pi_settings as envd_settings};
+use omp_envd::{self as envd_settings, ContentResolver};
 use omp_tools::read::{
 	Fault,
 	resolver::{
@@ -30,7 +29,7 @@ use omp_tools::read::{
 };
 use serde::Deserialize;
 
-use crate::pi_settings as driver_settings;
+use crate::settings as driver_settings;
 
 /// Where a skill source sits in the precedence ladder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
@@ -243,11 +242,7 @@ impl ActiveSkills {
 	/// Interactive hosts may pre-discover authored skills before kernel
 	/// composition. This merge preserves that precedence while still
 	/// registering manifest-sealed extension skills in the shared resolver.
-	pub fn merge_extension_sources(
-		&mut self,
-		sources: &[SkillSource],
-		policy: &SkillPolicy,
-	) {
+	pub fn merge_extension_sources(&mut self, sources: &[SkillSource], policy: &SkillPolicy) {
 		let mut discovered = discover(sources, policy);
 		self.warnings.append(&mut discovered.warnings);
 		for skill in discovered.skills {
@@ -258,13 +253,8 @@ impl ActiveSkills {
 			{
 				let existing = &self.skills[index];
 				let plugin_wins = skill.provider.as_str() == "agent-plugins"
-					&& [
-						"agents",
-						"codex",
-						"opencode",
-						omp_envd::managed_skills_domain::PROVIDER_ID,
-					]
-					.contains(&existing.provider.as_str());
+					&& ["agents", "codex", "opencode", omp_envd::managed_skills_domain::PROVIDER_ID]
+						.contains(&existing.provider.as_str());
 				if plugin_wins {
 					self.skills[index] = skill;
 				} else {
@@ -402,15 +392,13 @@ pub fn sources(
 			push("claude", dir.join(".claude/skills"), SkillLevel::Project);
 		}
 	}
-	for root in agent_plugin_skill_roots(
-		&[
-			(project_root.join(".omp/extensions"), SkillLevel::Project),
-			(project_root.join(".agent/plugins"), SkillLevel::Project),
-			(project_root.join(".agents/plugins"), SkillLevel::Project),
-			(config_root.join("extensions"), SkillLevel::User),
-			(config_root.join("agent/plugins"), SkillLevel::User),
-		],
-	) {
+	for root in agent_plugin_skill_roots(&[
+		(project_root.join(".omp/extensions"), SkillLevel::Project),
+		(project_root.join(".agent/plugins"), SkillLevel::Project),
+		(project_root.join(".agents/plugins"), SkillLevel::Project),
+		(config_root.join("extensions"), SkillLevel::User),
+		(config_root.join("agent/plugins"), SkillLevel::User),
+	]) {
 		push("agent-plugins", root.0, root.1);
 	}
 	if policy.agents_project {
@@ -453,12 +441,18 @@ struct AgentPluginHeader {
 fn agent_plugin_skill_roots(containers: &[(PathBuf, SkillLevel)]) -> Vec<(PathBuf, SkillLevel)> {
 	let mut roots = Vec::new();
 	for (container, level) in containers {
-		let Ok(container_root) = fs::canonicalize(container) else { continue };
-		let Ok(entries) = fs::read_dir(container) else { continue };
+		let Ok(container_root) = fs::canonicalize(container) else {
+			continue;
+		};
+		let Ok(entries) = fs::read_dir(container) else {
+			continue;
+		};
 		let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
 		entries.sort_by_key(std::fs::DirEntry::file_name);
 		for entry in entries {
-			let Ok(root) = fs::canonicalize(entry.path()) else { continue };
+			let Ok(root) = fs::canonicalize(entry.path()) else {
+				continue;
+			};
 			if !root.starts_with(&container_root) || !root.is_dir() {
 				continue;
 			}
@@ -473,13 +467,21 @@ fn agent_plugin_skill_roots(containers: &[(PathBuf, SkillLevel)]) -> Vec<(PathBu
 /// Reports whether `root` is a supported, contained Agent Plugins package.
 #[must_use]
 pub fn is_agent_plugin_root(root: &Path) -> bool {
-	let Ok(root) = fs::canonicalize(root) else { return false };
-	let Ok(manifest) = fs::canonicalize(root.join("plugin.json")) else { return false };
+	let Ok(root) = fs::canonicalize(root) else {
+		return false;
+	};
+	let Ok(manifest) = fs::canonicalize(root.join("plugin.json")) else {
+		return false;
+	};
 	if !manifest.starts_with(&root) {
 		return false;
 	}
-	let Ok(body) = fs::read_to_string(manifest) else { return false };
-	let Ok(header) = serde_json::from_str::<AgentPluginHeader>(&body) else { return false };
+	let Ok(body) = fs::read_to_string(manifest) else {
+		return false;
+	};
+	let Ok(header) = serde_json::from_str::<AgentPluginHeader>(&body) else {
+		return false;
+	};
 	header.schema == AGENT_PLUGIN_SCHEMA && safe_skill_name(&header.name)
 }
 
@@ -497,11 +499,7 @@ pub fn agent_plugin_skill_source(root: &Path, level: SkillLevel) -> Option<Skill
 	if !skills.starts_with(&root) || !skills.is_dir() {
 		return None;
 	}
-	Some(SkillSource {
-		provider: Str::new_static("agent-plugins"),
-		root: skills,
-		level,
-	})
+	Some(SkillSource { provider: Str::new_static("agent-plugins"), root: skills, level })
 }
 
 /// Scans `sources` in precedence order, admits each declaration through
@@ -586,7 +584,7 @@ fn ancestors(project_root: &Path, home: &Path) -> Vec<PathBuf> {
 }
 
 /// Direct `<child>/SKILL.md` declarations below `root`, sorted; hidden
-/// children are skipped like pi's scanner.
+/// children are skipped.
 fn skill_files(root: &Path, warnings: &mut Vec<SkillWarning>) -> Vec<PathBuf> {
 	let entries = match fs::read_dir(root) {
 		Ok(entries) => entries,
@@ -653,8 +651,7 @@ fn load_skill(
 			return None;
 		},
 	};
-	let contained = fs::canonicalize(&source.root)
-		.is_ok_and(|root| canonical.starts_with(root));
+	let contained = fs::canonicalize(&source.root).is_ok_and(|root| canonical.starts_with(root));
 	if !contained {
 		warnings.push(SkillWarning {
 			path:    path.to_path_buf(),
@@ -682,7 +679,7 @@ fn load_skill(
 	let header = if source.provider.as_str() == "agent-plugins" {
 		let (Some(frontmatter), _) = super::rules::split_frontmatter(&text) else {
 			warnings.push(SkillWarning {
-				path: canonical,
+				path:    canonical,
 				message: Str::new_static("Agent Plugin skill requires YAML frontmatter"),
 			});
 			return None;
@@ -691,11 +688,14 @@ fn load_skill(
 			Ok(header) => {
 				if header.license.as_deref().is_some_and(str::is_empty)
 					|| header.allowed_tools.as_deref().is_some_and(str::is_empty)
-					|| header.compatibility.as_deref().is_some_and(|value| value.len() > 500)
+					|| header
+						.compatibility
+						.as_deref()
+						.is_some_and(|value| value.len() > 500)
 					|| header.metadata.keys().any(String::is_empty)
 				{
 					warnings.push(SkillWarning {
-						path: canonical,
+						path:    canonical,
 						message: Str::new_static("Agent Plugin skill frontmatter is invalid"),
 					});
 					return None;
@@ -708,8 +708,10 @@ fn load_skill(
 			},
 			Err(error) => {
 				warnings.push(SkillWarning {
-					path: canonical,
-					message: Str::new(format!("failed to parse Agent Plugin skill frontmatter: {error}")),
+					path:    canonical,
+					message: Str::new(format!(
+						"failed to parse Agent Plugin skill frontmatter: {error}"
+					)),
 				});
 				return None;
 			},
@@ -719,7 +721,7 @@ fn load_skill(
 			Ok(header) => header,
 			Err(error) => {
 				warnings.push(SkillWarning {
-					path: canonical,
+					path:    canonical,
 					message: Str::new(format!("failed to parse SKILL.md frontmatter: {error}")),
 				});
 				return None;
@@ -749,7 +751,7 @@ fn load_skill(
 			|| name.len() > 64)
 	{
 		warnings.push(SkillWarning {
-			path: canonical,
+			path:    canonical,
 			message: Str::new_static("Agent Plugin skill name must match its lowercase directory"),
 		});
 		return None;
@@ -879,8 +881,7 @@ pub fn glob_matches(pattern: &str, candidate: &str) -> bool {
 }
 
 /// `skill://<name>` reads `SKILL.md`; `skill://<name>/<path>` reads a file
-/// or lists a directory inside the skill's base directory, realpath-contained
-/// (pi `internal-urls/skill-protocol.ts`).
+/// or lists a directory inside the skill's base directory, realpath-contained.
 struct SkillResolver {
 	skills: Arc<ActiveSkills>,
 	lines:  LineOffsetCache,
@@ -1178,11 +1179,15 @@ mod tests {
 			.collect::<Vec<_>>();
 		let codex = providers
 			.iter()
-			.position(|(provider, path)| provider == &"codex" && path == &project.join(".codex/skills"))
+			.position(|(provider, path)| {
+				provider == &"codex" && path == &project.join(".codex/skills")
+			})
 			.expect("Codex project source");
 		let opencode = providers
 			.iter()
-			.position(|(provider, path)| provider == &"opencode" && path == &project.join(".opencode/skills"))
+			.position(|(provider, path)| {
+				provider == &"opencode" && path == &project.join(".opencode/skills")
+			})
 			.expect("OpenCode project source");
 		let plugin = providers
 			.iter()
@@ -1229,10 +1234,8 @@ mod tests {
 		write_skill(&authored, "review", "description: authored", "authored");
 		write_skill(&extension, "review", "description: extension", "extension");
 		write_skill(&extension, "deploy", "description: deploy", "deploy");
-		let mut active = discover(
-			&[source(&authored, "native", SkillLevel::Project)],
-			&SkillPolicy::default(),
-		);
+		let mut active =
+			discover(&[source(&authored, "native", SkillLevel::Project)], &SkillPolicy::default());
 		active.merge_extension_sources(
 			&[source(&extension, "extension:test", SkillLevel::Project)],
 			&SkillPolicy::default(),

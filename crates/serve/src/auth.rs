@@ -13,9 +13,7 @@ use std::{
 
 use flume::Receiver;
 use futures::{Stream, StreamExt as _};
-use omp_catalog::ProviderId;
-use omp_core::{ExposeSecret as _, Hash32, Secret, SecretString, Str};
-use omp_inference::{
+use omp_ai::{
 	Client, Error as InferenceError, ErrorKind, Registry,
 	account::AccountPoolEvent,
 	answer::{
@@ -31,6 +29,8 @@ use omp_inference::{
 	receipt::{ExecutionBudget, UsageSource},
 	router::Router,
 };
+use omp_catalog::ProviderId;
+use omp_core::{ExposeSecret as _, Hash32, Secret, SecretString, Str};
 use omp_proto::omp::{
 	auth::v1::{
 		self as pb, begin_login_response, credential_event, credential_health, credential_meta,
@@ -42,7 +42,7 @@ use parking_lot::Mutex;
 use tonic::{Request, Response, Status};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-const AUTH_FLOW_TTL: Duration = Duration::from_secs(60 * 60);
+const AUTH_FLOW_TTL: Duration = Duration::from_hours(1);
 type AuthEventStream =
 	Pin<Box<dyn Stream<Item = Result<pb::CredentialEvent, Status>> + Send + 'static>>;
 
@@ -53,11 +53,11 @@ struct AuthFlow {
 struct ActiveFlow(Option<AuthSession>);
 
 impl ActiveFlow {
-	fn new(session: AuthSession) -> Self {
+	const fn new(session: AuthSession) -> Self {
 		Self(Some(session))
 	}
 
-	fn session(&self) -> &AuthSession {
+	const fn session(&self) -> &AuthSession {
 		self.0.as_ref().expect("active auth flow")
 	}
 
@@ -123,7 +123,7 @@ impl AuthenticatedRevealContext {
 	fn audited_reveal(
 		&self,
 		request: &pb::RevealCredentialRequest,
-	) -> Result<omp_inference::auth::AuditedCredentialReveal, Status> {
+	) -> Result<omp_ai::auth::AuditedCredentialReveal, Status> {
 		let provider = ProviderId::from(request.provider.as_str());
 		if request.extension != self.extension.as_str()
 			|| request.caller_principal != self.caller_principal.as_str()
@@ -140,7 +140,7 @@ impl AuthenticatedRevealContext {
 				"credential reveal identity or provider scope is not authenticated",
 			));
 		}
-		Ok(omp_inference::auth::AuditedCredentialReveal {
+		Ok(omp_ai::auth::AuditedCredentialReveal {
 			extension:          self.extension.clone(),
 			caller_principal:   self.caller_principal.clone(),
 			provider:           provider.into(),
@@ -240,7 +240,7 @@ impl AuthRpc {
 
 	fn control_meta(
 		&self,
-		account: omp_inference::account::AccountRecord,
+		account: omp_ai::account::AccountRecord,
 	) -> Result<pb::CredentialMeta, Status> {
 		let metadata = self
 			.control()?
@@ -299,7 +299,7 @@ impl AuthRpc {
 			.ok_or_else(|| Status::failed_precondition("no constructed route supports authentication"))
 	}
 
-	fn client(&self, provider: ProviderId) -> Client<omp_inference::ProviderService, Router> {
+	fn client(&self, provider: ProviderId) -> Client<omp_ai::ProviderService, Router> {
 		let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
 		Client::new(
 			self.registry.service(),
@@ -414,7 +414,7 @@ impl pb::auth_server::Auth for AuthRpc {
 			let requested =
 				(!request.provider.is_empty()).then(|| ProviderId::from(request.provider.as_str()));
 			let credentials = control
-				.accounts(requested.as_ref().map(|provider| &**provider))
+				.accounts(requested.as_deref())
 				.into_iter()
 				.map(|account| self.control_meta(account))
 				.collect::<Result<Vec<_>, _>>()?;
@@ -533,7 +533,7 @@ impl pb::auth_server::Auth for AuthRpc {
 		flow
 			.session()
 			.responses
-			.send_async(omp_inference::answer::AuthResponse {
+			.send_async(omp_ai::answer::AuthResponse {
 				session,
 				input: AuthInput::AuthorizationCode(SecretString::from(request.code)),
 			})
@@ -578,7 +578,7 @@ impl pb::auth_server::Auth for AuthRpc {
 		};
 		session
 			.responses
-			.send_async(omp_inference::answer::AuthResponse {
+			.send_async(omp_ai::answer::AuthResponse {
 				session: session.id.clone(),
 				input:   AuthInput::ApiKey(SecretString::from(request.api_key)),
 			})
@@ -763,7 +763,7 @@ impl pb::auth_server::Auth for AuthRpc {
 	) -> Result<Response<pb::CredentialMeta>, Status> {
 		let request = request.into_inner();
 		let provider = ProviderId::from(request.provider.as_str());
-		let principal = omp_inference::PrincipalId::from(request.identity.as_str());
+		let principal = omp_ai::PrincipalId::from(request.identity.as_str());
 		let mut material = Vec::with_capacity(
 			request.access_key_id.len()
 				+ request.secret_access_key.len()
@@ -807,7 +807,7 @@ impl pb::auth_server::Auth for AuthRpc {
 		let provider = ProviderId::from(request.provider.as_str());
 		let identity = (!request.identity.is_empty()).then(|| request.identity.into());
 		let principal =
-			omp_inference::PrincipalId::from(identity.as_ref().map_or(provider.as_str(), Str::as_str));
+			omp_ai::PrincipalId::from(identity.as_ref().map_or(provider.as_str(), Str::as_str));
 		let (_, account) = self
 			.control()?
 			.import_oauth(OAuthControlImport {
@@ -1077,7 +1077,7 @@ impl pb::auth_server::Auth for AuthRpc {
 }
 
 async fn await_account(
-	events: Receiver<Result<AuthEvent, omp_inference::Error>>,
+	events: Receiver<Result<AuthEvent, omp_ai::Error>>,
 ) -> Result<AccountSummary, Status> {
 	while let Ok(event) = events.recv_async().await {
 		if let AuthEvent::Complete(account) = event.map_err(inference_status)? {
@@ -1357,7 +1357,7 @@ fn elapsed_ms(elapsed: Duration) -> u64 {
 	elapsed.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
-fn error_class(error: &InferenceError) -> credential_health::ErrorClass {
+const fn error_class(error: &InferenceError) -> credential_health::ErrorClass {
 	match error.status {
 		Some(401) => return credential_health::ErrorClass::Authentication,
 		Some(403) => return credential_health::ErrorClass::Authorization,
@@ -1414,12 +1414,12 @@ fn error_class(error: &InferenceError) -> credential_health::ErrorClass {
 		},
 	}
 }
-fn inference_status(error: omp_inference::Error) -> Status {
+fn inference_status(error: omp_ai::Error) -> Status {
 	Status::failed_precondition(error.to_string())
 }
 #[cfg(test)]
 mod tests {
-	use omp_inference::{
+	use omp_ai::{
 		Error, ErrorKind,
 		error::{ErrorPhase, RetryAction},
 		receipt::ExecutionReceipt,
@@ -1481,9 +1481,8 @@ mod tests {
 
 	#[test]
 	fn expired_auth_flow_is_removed_and_cancelled() {
-		let (session, driver, _) = omp_inference::auth::default_login_channels(
-			omp_inference::LoginSessionId::from("expired-flow"),
-		);
+		let (session, driver, _) =
+			omp_ai::auth::default_login_channels(omp_ai::LoginSessionId::from("expired-flow"));
 		let flows = parking_lot::Mutex::new(std::collections::BTreeMap::from([(
 			"expired-flow".to_owned(),
 			AuthFlow { session, expires_at: std::time::Instant::now() },

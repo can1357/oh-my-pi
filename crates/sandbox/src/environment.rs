@@ -99,7 +99,7 @@ impl EnvironmentPolicy {
 		}
 	}
 
-	pub(crate) fn scrubs(&self) -> bool {
+	pub(crate) const fn scrubs(&self) -> bool {
 		!matches!(self.source, EnvironmentSource::Inherit)
 			|| !self.allow.is_empty()
 			|| !self.deny.is_empty()
@@ -268,7 +268,7 @@ fn env_name(entry: &OsStr) -> Cow<'_, OsStr> {
 			.iter()
 			.position(|byte| *byte == b'=')
 			.unwrap_or(bytes.len());
-		return Cow::Borrowed(OsStr::from_bytes(&bytes[..end]));
+		Cow::Borrowed(OsStr::from_bytes(&bytes[..end]))
 	}
 	#[cfg(not(unix))]
 	{
@@ -278,7 +278,7 @@ fn env_name(entry: &OsStr) -> Cow<'_, OsStr> {
 	}
 }
 
-pub(crate) fn split_entry(entry: &OsStr) -> (OsString, OsString) {
+pub fn split_entry(entry: &OsStr) -> (OsString, OsString) {
 	#[cfg(unix)]
 	{
 		use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
@@ -294,7 +294,7 @@ pub(crate) fn split_entry(entry: &OsStr) -> (OsString, OsString) {
 		} else {
 			OsString::from_vec(bytes[split + 1..].to_vec())
 		};
-		return (name, value);
+		(name, value)
 	}
 	#[cfg(windows)]
 	{

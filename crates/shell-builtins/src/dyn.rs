@@ -43,7 +43,7 @@ use std::{
 };
 
 use omp_core::Str;
-use omp_shell_engine::{
+use omp_shell::{
 	ShellExtensions,
 	builtins::{ContentOptions, ContentType, Registration},
 	commands::{CommandArg, ExecutionContext},
@@ -178,9 +178,9 @@ async fn run<SE: ShellExtensions>(
 		.cancel_token()
 		.unwrap_or_else(CancellationToken::new);
 	match host.call(first, Value::Object(parsed), cancel).await {
-		Ok(output) => {
+		Ok(call) => {
 			let mut stdout = context.stdout();
-			write_output(&mut stdout, &output)?;
+			write_output(&mut stdout, &call.output)?;
 		},
 		Err(fault) => return host_fault(&context, &fault),
 	}
@@ -836,7 +836,7 @@ fn parse_args(
 	schema: &Value,
 	argv: &[Str],
 	cwd: &Path,
-	path_policy: Option<&dyn omp_shell_engine::PathPolicy>,
+	path_policy: Option<&dyn omp_shell::PathPolicy>,
 	stdin: &mut impl Read,
 ) -> Result<Map<String, Value>, ArgError> {
 	let normalized = normalize_schema(schema);
@@ -931,7 +931,7 @@ fn parse_args(
 fn read_argument_source(
 	argument: &str,
 	cwd: &Path,
-	path_policy: Option<&dyn omp_shell_engine::PathPolicy>,
+	path_policy: Option<&dyn omp_shell::PathPolicy>,
 	stdin: &mut impl Read,
 ) -> Result<Option<(Str, String)>, ArgError> {
 	if argument == "-" {
@@ -1604,11 +1604,8 @@ mod tests {
 		assert_eq!(stdout, b"\xff\xfbID3");
 
 		let mut stdout = Vec::new();
-		write_output(
-			&mut stdout,
-			&DynOutput::Markdown(Str::new_static("**render me**")),
-		)
-		.expect("write Markdown");
+		write_output(&mut stdout, &DynOutput::Markdown(Str::new_static("**render me**")))
+			.expect("write Markdown");
 		assert_eq!(stdout, b"**render me**\n");
 	}
 }

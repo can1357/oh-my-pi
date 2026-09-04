@@ -320,9 +320,9 @@ impl HookEvent for ProviderErrorEvent {
 	}
 }
 
-/// Hook payload emitted at the candidate-yield seam (`agent_settled`, pi
-/// `session_stop`): extensions answer `continue` to run another turn or
-/// `settle` (the fail-open default) to let the yield stand.
+/// Hook payload emitted at the candidate-yield seam. Extensions answer
+/// `continue` to run another turn or `settle` (the fail-open default) to let
+/// the yield stand.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentSettledEvent {
 	/// Revision-1 JSON `AgentSettledEvent` payload.
@@ -439,9 +439,7 @@ impl GateDecision {
 			Self::Deny(_) | Self::DenyPolicy(_) => HookDecision::Deny,
 			Self::Modify(_) => HookDecision::Modify,
 			Self::Defer => HookDecision::Defer,
-			Self::RequireApproval(_) | Self::RequireApprovals { .. } => {
-				HookDecision::RequireApproval
-			},
+			Self::RequireApproval(_) | Self::RequireApprovals { .. } => HookDecision::RequireApproval,
 			Self::Domain(_) => return None,
 		})
 	}
@@ -514,7 +512,7 @@ pub enum GateOutcome {
 
 /// Typed result of a gateable lifecycle seam before its caller performs the
 /// admitted operation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LifecycleAdmission {
 	/// Effective payload after the one ordered transform pass.
 	pub payload:   JsonValue,
@@ -603,11 +601,7 @@ impl LifecycleHooks {
 		payload: JsonValue,
 	) -> Result<LifecycleAdmission, LifecycleHookError> {
 		if !self.gate.subscribed(event) {
-			return Ok(LifecycleAdmission {
-				payload,
-				approvals: Vec::new(),
-				trail: Vec::new(),
-			});
+			return Ok(LifecycleAdmission { payload, approvals: Vec::new(), trail: Vec::new() });
 		}
 		let encoded = serde_json::to_vec(&payload)
 			.map_err(|source| LifecycleHookError::MalformedPayload { event, source })?;
@@ -706,13 +700,13 @@ impl Drop for PendingGuard<'_> {
 /// Unsubscribed emission performs only one relaxed load, one bit-and, and a
 /// branch; it does not construct a payload or frame.
 pub struct HookGate {
-	mask:             [AtomicU64; MASK_WORDS],
-	fail_closed:      [AtomicU64; MASK_WORDS],
-	dispatch:         flume::Sender<HookDispatch>,
-	pending:          Mutex<omp_core::SparseMap<u64, Pending>>,
-	next_id:          AtomicU64,
-	subscriptions:    Mutex<Vec<Subscription>>,
-	dropped_notifies: AtomicU64,
+	mask:              [AtomicU64; MASK_WORDS],
+	fail_closed:       [AtomicU64; MASK_WORDS],
+	dispatch:          flume::Sender<HookDispatch>,
+	pending:           Mutex<omp_core::SparseMap<u64, Pending>>,
+	next_id:           AtomicU64,
+	subscriptions:     Mutex<Vec<Subscription>>,
+	dropped_notifies:  AtomicU64,
 	delegated:         bool,
 	timeout_override:  Option<Duration>,
 	tool_call_timeout: Duration,
@@ -1005,11 +999,7 @@ impl HookGate {
 				},
 			};
 		let Some((subscription_id, decision)) = decisions.into_iter().next() else {
-			return self.delegated_failure(
-				event_id,
-				event,
-				"required hook host returned no decision",
-			);
+			return self.delegated_failure(event_id, event, "required hook host returned no decision");
 		};
 		match decision {
 			GateDecision::Allow | GateDecision::Defer => {
@@ -1191,7 +1181,8 @@ impl HookGate {
 					replies.push((subscription, GateDecision::Deny(sf!("required hook host failed"))));
 				},
 				Err(_) if subscription.on_failure == OnFailure::Deny => {
-					replies.push((subscription, GateDecision::Deny(sf!("required hook host timed out"))));
+					replies
+						.push((subscription, GateDecision::Deny(sf!("required hook host timed out"))));
 				},
 				Ok(Err(_)) | Err(_) => {},
 			}
@@ -1244,14 +1235,8 @@ mod tests {
 	fn delegated_tool_call_timeout_does_not_change_other_hook_deadlines() {
 		let configured = Duration::from_millis(125);
 		let (gate, _receiver) = HookGate::delegated_channel_with_tool_call_timeout(configured);
-		assert_eq!(
-			gate.decision_timeout(HookEventId::HookEventToolCall),
-			configured
-		);
-		assert_eq!(
-			gate.decision_timeout(HookEventId::HookEventToolResult),
-			Duration::from_secs(30)
-		);
+		assert_eq!(gate.decision_timeout(HookEventId::HookEventToolCall), configured);
+		assert_eq!(gate.decision_timeout(HookEventId::HookEventToolResult), Duration::from_secs(30));
 	}
 
 	#[tokio::test]

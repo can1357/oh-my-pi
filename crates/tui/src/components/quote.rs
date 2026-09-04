@@ -119,7 +119,7 @@ impl Component for Quote {
 			.text
 			.as_str()
 			.split('\n')
-			.map(|line| cell_width(line))
+			.map(cell_width)
 			.max()
 			.unwrap_or(0);
 		(gutter.saturating_add(1), gutter.saturating_add(body).max(gutter.saturating_add(1)))

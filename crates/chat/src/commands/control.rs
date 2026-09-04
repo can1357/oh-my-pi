@@ -1,6 +1,5 @@
-//! Model, lifecycle, and MCP slash commands (pi `builtin-modes.ts`,
-//! `builtin-lifecycle.ts`, `builtin-control.ts`, `builtin-collaboration.ts`,
-//! `builtin-session.ts`): `/model` (`/models`), `/switch`, `/fast`,
+//! Model, lifecycle, and MCP slash commands: `/model` (`/models`), `/switch`,
+//! `/fast`,
 //! `/retry`, `/clear`, `/exit`, `/quit` (`/q`), `/restart`, `/dump`,
 //! `/mcp`.
 //!
@@ -9,8 +8,8 @@
 //! the `ai_fastmode` convar (ADR 0012: the convar *is* the setting);
 //! `/clear` asks the controller for a context reset; `/restart` marks the
 //! process for re-exec and leaves through the same exit path as `/quit`;
-//! `/dump` copies the transcript pi-style and writes the request sidecar
-//! through the [`Services`] seam; `/mcp` runs every pi subcommand through
+//! `/dump` copies the transcript and writes the request sidecar through the
+//! [`Services`] seam; `/mcp` runs every subcommand through
 //! [`Services::mcp`] in a loader panel.
 //!
 //! [`Services`]: crate::overlays::services::Services
@@ -50,7 +49,7 @@ pub const PALETTE: &[PaletteEntry] = &[
 	PaletteEntry { name: "mcp", icon: Icon::Mcp },
 ];
 
-/// pi `MCPCommandController.#showHelp`.
+/// Help text for `/mcp`.
 const MCP_HELP: &str =
 	"**MCP Server Management**\n\n`/mcp add <name> [--scope project|user] [--url <url>] [-- \
 	 <command...>]` — Add a new MCP server\n`/mcp list` — List all configured MCP servers\n`/mcp \
@@ -83,7 +82,7 @@ fn notice(text: impl Into<Str>) -> PanelEvent {
 	PanelEvent::Notice(text.into())
 }
 
-/// `/fast` argument (pi accepts `toggle`, `on`, `off`, `status`).
+/// `/fast` argument: `toggle`, `on`, `off`, or `status`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FastOp {
 	/// Bare `/fast` or `toggle`.
@@ -107,9 +106,9 @@ pub fn fast_op(word: Option<&str>) -> Result<FastOp, ConError> {
 	})
 }
 
-/// Applies a `/fast` word against the live convar and returns pi's line.
+/// Applies a `/fast` word against the live convar and returns a status line.
 fn apply_fast(cx: &PanelCx<'_>, op: FastOp) -> PanelEvent {
-	let current = omp_con::AI_FASTMODE.get(cx.con);
+	let current = omp_agent::AI_FASTMODE.get(cx.con);
 	let next = match op {
 		FastOp::Toggle => Some(!current),
 		FastOp::On => Some(true),
@@ -134,7 +133,7 @@ fn apply_fast(cx: &PanelCx<'_>, op: FastOp) -> PanelEvent {
 	})
 }
 
-/// pi `formatSessionAsText`: the transcript as role-labelled plain text.
+/// Formats the transcript as role-labelled plain text.
 #[must_use]
 pub fn transcript_text(dom: &omp_dom::Dom) -> Str {
 	let mut out = String::new();
@@ -156,7 +155,7 @@ pub fn transcript_text(dom: &omp_dom::Dom) -> Str {
 	Str::new(out)
 }
 
-/// `/dump`: copies the transcript (plus the sidecar path and pi's warning)
+/// `/dump`: copies the transcript and appends the sidecar path and warning,
 /// and reports through the console reply sink, which the host shows as a
 /// status notice.
 fn dump(cx: &PanelCx<'_>) -> PanelEvent {
@@ -183,7 +182,7 @@ fn dump(cx: &PanelCx<'_>) -> PanelEvent {
 }
 
 /// Parses `/mcp <sub> [args…]` into the operation the services run, the
-/// help report, or pi's error line.
+/// help report, or a usage error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum McpCommand {
 	/// Bare `/mcp` or `help`.
@@ -192,7 +191,7 @@ pub enum McpCommand {
 	Run(McpOp),
 }
 
-/// pi `MCPCommandController.handle` dispatch.
+/// Dispatches an `/mcp` subcommand.
 pub fn mcp_command(words: &[&str]) -> Result<McpCommand, ConError> {
 	let Some((verb, tail)) = words.split_first() else {
 		return Ok(McpCommand::Help);
@@ -336,7 +335,7 @@ fn scope(words: &[&str]) -> Result<McpScope, ConError> {
 	Ok(scope)
 }
 
-/// pi `parseAddArgs`: `<name> [--scope project|user] [--url <url>] [--
+/// Parses `<name> [--scope project|user] [--url <url>] [--
 /// <command…>]`.
 fn parse_add(words: &[&str]) -> Result<McpAdd, ConError> {
 	const USAGE: &str =

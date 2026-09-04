@@ -1,7 +1,7 @@
 //! `pkill` process-signalling builtin.
 
 use clap::Parser;
-use omp_shell_engine::builtins;
+use omp_shell::builtins;
 
 use crate::proc_match;
 
@@ -15,25 +15,25 @@ pub(crate) struct PkillCommand {
 }
 
 impl builtins::Command for PkillCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
-	async fn execute<SE: omp_shell_engine::ShellExtensions>(
+	async fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
-		context: omp_shell_engine::ExecutionContext<'_, SE>,
-	) -> Result<omp_shell_engine::ExecutionResult, Self::Error> {
+		context: omp_shell::ExecutionContext<'_, SE>,
+	) -> Result<omp_shell::ExecutionResult, Self::Error> {
 		proc_match::run(proc_match::ProcMatchMode::Kill, self.argv.clone(), context).await
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use omp_shell_engine::{Shell, builtins};
+	use omp_shell::{Shell, builtins};
 
 	use super::PkillCommand;
 
 	const NO_MATCH: &str = "^__brush_pkill_test_no_such_process_6f239a1d__$";
 
-	async fn run(args: &str) -> omp_shell_engine::ExecutionResult {
+	async fn run(args: &str) -> omp_shell::ExecutionResult {
 		let mut shell = Shell::builder()
 			.builtin("pkill", builtins::builtin::<PkillCommand, _>())
 			.build()

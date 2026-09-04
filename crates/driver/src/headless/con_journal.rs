@@ -211,8 +211,8 @@ mod tests {
 		let restored = Arc::new(Ctx::new());
 		let reopened = open(&path);
 		let rejournal = ConJournal::attach(Arc::clone(&restored), reopened.dom());
-		assert!(omp_con::AI_FASTMODE.get(&restored));
-		assert_eq!(omp_con::AI_THINKING.get(&restored), "low");
+		assert!(omp_agent::AI_FASTMODE.get(&restored));
+		assert_eq!(omp_agent::AI_THINKING.get(&restored), "low");
 		assert!(
 			restored
 				.session_writes()
@@ -236,10 +236,10 @@ mod tests {
 		let before = session.head().expect("genesis head");
 		ctx.run("ai_fastmode 1").expect("session write");
 		journal.flush(&mut session).expect("flush");
-		assert!(omp_con::AI_FASTMODE.get(&ctx));
+		assert!(omp_agent::AI_FASTMODE.get(&ctx));
 		session.rewind(before).expect("rewind to genesis");
 		omp_agent::SessionStateBridge::resync(&journal, session.dom());
-		assert!(!omp_con::AI_FASTMODE.get(&ctx), "the rewound write is gone");
+		assert!(!omp_agent::AI_FASTMODE.get(&ctx), "the rewound write is gone");
 		assert!(!ctx.session_writes().any(|(name, _)| name == "ai_fastmode"));
 	}
 

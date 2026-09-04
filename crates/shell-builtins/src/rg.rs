@@ -1954,7 +1954,7 @@ impl Utility for Rg {
 mod tests {
 	use std::{fs, io};
 
-	use omp_shell_engine::openfiles::OpenFile;
+	use omp_shell::openfiles::OpenFile;
 
 	use super::*;
 	use crate::host::{Host, run_util};
@@ -2163,7 +2163,7 @@ mod tests {
 
 use std::{cell, fs, mem, sync::atomic};
 
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::{grep::pcre2_jit_enabled, host::util};
 

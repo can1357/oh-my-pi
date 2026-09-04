@@ -65,8 +65,8 @@ fn render_recall(view: &CardView<'_>, expanded: bool) -> Component {
 		.map(Vec::as_slice)
 		.unwrap_or_default();
 	let result_query = field(&result, "query").unwrap_or(query);
-	// pi `recallToolRenderer`: the collapsed view is the header alone with
-	// the expand hint; zero matches is a warning header and nothing else;
+	// The collapsed view is the header alone with the expand hint; zero
+	// matches is a warning header and nothing else;
 	// expanded bodies stop at `PREVIEW_LIMITS.OUTPUT_EXPANDED`.
 	let found = items.len();
 	let hidden = found.saturating_sub(RECALL_EXPANDED_ITEMS);
@@ -101,8 +101,7 @@ fn render_recall(view: &CardView<'_>, expanded: bool) -> Component {
 	}.into_component()
 }
 
-/// Expanded recall bodies show this many memories (pi
-/// `PREVIEW_LIMITS.OUTPUT_EXPANDED`).
+/// Expanded recall bodies show this many memories.
 const RECALL_EXPANDED_ITEMS: usize = 10;
 
 fn render_reflect(view: &CardView<'_>, expanded: bool) -> Component {
@@ -128,8 +127,14 @@ fn render_reflect(view: &CardView<'_>, expanded: bool) -> Component {
 		}
 		.into_component();
 	};
-	let answer = result.get("answer").and_then(Value::as_str).unwrap_or_default();
-	let line_count = answer.lines().filter(|line| !line.trim().is_empty()).count();
+	let answer = result
+		.get("answer")
+		.and_then(Value::as_str)
+		.unwrap_or_default();
+	let line_count = answer
+		.lines()
+		.filter(|line| !line.trim().is_empty())
+		.count();
 	let shown = if expanded {
 		line_count.min(REFLECT_EXPANDED_LINES)
 	} else {
@@ -165,7 +170,11 @@ fn render_retain(view: &CardView<'_>, expanded: bool) -> Component {
 		format!(
 			"{} {} stored",
 			items.len(),
-			if items.len() == 1 { "memory" } else { "memories" }
+			if items.len() == 1 {
+				"memory"
+			} else {
+				"memories"
+			}
 		)
 	});
 	let shown = if expanded {

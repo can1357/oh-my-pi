@@ -430,8 +430,8 @@ fn render_roster(view: &CardView<'_>) -> Component {
 	.into_component()
 }
 
-/// Job snapshots for `wait`/`jobs` and the `cancel` receipt (pi
-/// `jobsRenderCall`/`jobsRenderResult`: `cancel` is a job-style op whose
+/// Job snapshots for `wait`/`jobs` and the `cancel` receipt: `cancel` is a
+/// job-style op whose
 /// pending frame reads `cancel <id>` and whose result counts the cancelled
 /// rows instead of falling back to the generic card).
 fn render_jobs(view: &CardView<'_>, args: Option<&Value>, raw: &str, cancel: bool) -> Component {
@@ -523,8 +523,8 @@ fn render_jobs(view: &CardView<'_>, args: Option<&Value>, raw: &str, cancel: boo
 }
 
 /// Settled `cancel` without job rows: the backend answers `{cancelled: N}`,
-/// so the card lists the requested ids under the count (pi lists the
-/// `cancelled` outcomes as a warning-tinted meta beside the title).
+/// so the card lists the requested ids under the count as warning-tinted
+/// metadata beside the title.
 fn render_cancel_receipt(view: &CardView<'_>, result: Option<&Value>, ids: &[Value]) -> Component {
 	let requested = ids.len();
 	let title = match ids {

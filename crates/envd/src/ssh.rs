@@ -100,13 +100,13 @@ struct HostFile {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostPaths {
 	/// User-owned `<config root>/hosts.toml`.
-	pub user:    PathBuf,
+	pub user:              PathBuf,
 	/// Project-owned `<project>/.omp/hosts.toml`.
-	pub project: PathBuf,
+	pub project:           PathBuf,
 	/// Legacy user JSON source, read-only and lower precedence than TOML.
-	legacy_user: PathBuf,
+	legacy_user:           PathBuf,
 	/// Legacy project JSON source, read-only and lower precedence than TOML.
-	legacy_project: PathBuf,
+	legacy_project:        PathBuf,
 	/// Legacy hidden project JSON source.
 	legacy_project_hidden: PathBuf,
 }
@@ -117,10 +117,10 @@ impl HostPaths {
 	#[must_use]
 	pub fn new(user_config_root: &Path, project_root: &Path) -> Self {
 		Self {
-			user: user_config_root.join("hosts.toml"),
-			project: project_root.join(".omp/hosts.toml"),
-			legacy_user: user_config_root.join("ssh.json"),
-			legacy_project: project_root.join("ssh.json"),
+			user:                  user_config_root.join("hosts.toml"),
+			project:               project_root.join(".omp/hosts.toml"),
+			legacy_user:           user_config_root.join("ssh.json"),
+			legacy_project:        project_root.join("ssh.json"),
 			legacy_project_hidden: project_root.join(".ssh.json"),
 		}
 	}
@@ -146,10 +146,7 @@ impl HostStore {
 
 	/// Loads `hosts.toml`. A missing file produces an empty store.
 	pub fn load(path: &Path) -> Result<Self, SshError> {
-		Ok(Self {
-			hosts: Arc::new(RwLock::new(parse_hosts(path)?)),
-			paths: None,
-		})
+		Ok(Self { hosts: Arc::new(RwLock::new(parse_hosts(path)?)), paths: None })
 	}
 
 	/// Atomically refreshes a layered store from every retained source.
@@ -158,7 +155,9 @@ impl HostStore {
 	/// contained to that source, and a malformed native file leaves the
 	/// previously published snapshot intact.
 	pub fn refresh(&self) -> Result<(), SshError> {
-		let Some(paths) = &self.paths else { return Ok(()) };
+		let Some(paths) = &self.paths else {
+			return Ok(());
+		};
 		let hosts = load_effective_hosts(paths)?;
 		*self.hosts.write() = hosts;
 		Ok(())
@@ -235,7 +234,9 @@ struct LegacyHostConfig {
 fn parse_legacy_hosts(path: &Path) -> BTreeMap<Str, HostConfig> {
 	let body = match fs::read_to_string(path) {
 		Ok(body) => body,
-		Err(source) if matches!(source.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => {
+		Err(source)
+			if matches!(source.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) =>
+		{
 			return BTreeMap::new();
 		},
 		Err(source) => {
@@ -263,11 +264,11 @@ fn parse_legacy_hosts(path: &Path) -> BTreeMap<Str, HostConfig> {
 				}
 			});
 			let host = HostConfig {
-				address: legacy.host,
-				port: legacy.port,
-				user: legacy.username,
-				host_key: legacy.host_key,
-				auth: key.map_or(AuthPolicy::Agent, |path| AuthPolicy::Key { path }),
+				address:      legacy.host,
+				port:         legacy.port,
+				user:         legacy.username,
+				host_key:     legacy.host_key,
+				auth:         key.map_or(AuthPolicy::Agent, |path| AuthPolicy::Key { path }),
 				timeout_secs: default_timeout(),
 			};
 			if validate_alias(&alias).is_err() || validate_host(&host).is_err() {
@@ -1224,10 +1225,7 @@ mod tests {
 		)
 		.expect("write legacy project source");
 		fs::write(&paths.legacy_project_hidden, "{").expect("write malformed independent source");
-		assert_eq!(
-			layered.aliases(),
-			vec![sf!("legacy"), sf!("shared"), sf!("user-only")]
-		);
+		assert_eq!(layered.aliases(), vec![sf!("legacy"), sf!("shared"), sf!("user-only")]);
 		assert_eq!(layered.get("legacy").expect("legacy").user, "legacy");
 		assert_eq!(layered.get("shared").expect("shared").user, "from-project");
 

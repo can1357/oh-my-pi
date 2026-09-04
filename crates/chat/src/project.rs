@@ -83,14 +83,15 @@ pub struct Options<'a> {
 	/// Collapse fenced code in reasoning to an ellipsis
 	/// (`cl_thinking_prose_only`).
 	pub prose_only:    bool,
-	/// Show token and timing telemetry (`cl_display_show_token_usage` / `cl_display_show_turn_time`).
+	/// Show token and timing telemetry (`cl_display_show_token_usage` /
+	/// `cl_display_show_turn_time`).
 	pub show_usage:    bool,
 	/// Tool start instants, speed gauge, and reset banner.
 	pub local:         &'a Local,
 }
 
 impl<'a> Options<'a> {
-	/// pi's defaults: thinking shown, cards collapsed, smooth streaming and
+	///  defaults: thinking shown, cards collapsed, smooth streaming and
 	/// prose-only reasoning on.
 	#[must_use]
 	pub const fn new(local: &'a Local) -> Self {
@@ -127,12 +128,12 @@ pub(crate) fn project(
 	if let Some(banner) = options.local.banner() {
 		blocks.push(banner_block(banner));
 	}
-			if let Some(update) = options.local.update() {
-			blocks.push(update_block(update, options.expanded));
-		}
+	if let Some(update) = options.local.update() {
+		blocks.push(update_block(update, options.expanded));
+	}
 	let turns = dom.children(dom.body());
 	let cache_misses = cache::cache_invalidations(dom);
-	// pi `pickReactionTarget`: the nearest preceding user bubble, looking
+	// `pickReactionTarget`: the nearest preceding user bubble, looking
 	// past notices and tool cards but never past an earlier reply.
 	let mut reaction_target: Option<ReactionTarget> = None;
 	for (index, turn) in turns.iter().enumerate() {
@@ -235,7 +236,8 @@ pub(crate) fn project(
 					let ordered_start = blocks.len();
 					assistant_blocks(dom, *handle, node, ui, options, &mut blocks, &mut reaction_target);
 					let siblings = dom.children(*turn);
-					let Some(position) = siblings.iter().position(|candidate| candidate == handle) else {
+					let Some(position) = siblings.iter().position(|candidate| candidate == handle)
+					else {
 						continue;
 					};
 					for tool_handle in siblings.iter().skip(position + 1) {
@@ -661,7 +663,7 @@ fn assistant_blocks(
 	}
 }
 
-/// The user bubble a reply may react to (pi `ReactionTarget`): its block
+/// The user bubble a reply may react to: its block
 /// key plus the facts needed to redraw it with the badge.
 struct ReactionTarget {
 	key:   u64,
@@ -669,7 +671,7 @@ struct ReactionTarget {
 	chips: Vec<Str>,
 }
 
-/// pi `#displayMessage`: the reply's display text with the reaction line
+/// `#displayMessage`: the reply's display text with the reaction line
 /// handled — stripped and badged onto the target bubble once resolved,
 /// withheld entirely while a streaming prefix could still become one, and
 /// left verbatim when there is no target. A reply consumes the target
@@ -700,7 +702,7 @@ fn apply_reaction(
 	}
 }
 
-/// pi `#shouldAnimateThinking`: the pulse shows while the model is reasoning
+/// `#shouldAnimateThinking`: the pulse shows while the model is reasoning
 /// right now — the newest delta was reasoning — so a second reasoning phase
 /// after visible text pulses again. Ordered children give replicas the tail
 /// kind; legacy live actors use their kernel-event stream head.
@@ -718,8 +720,7 @@ fn reasoning_is_head(local: &Local, ordered: bool, tail_is_thinking: bool) -> bo
 const REVEAL_HORIZON_PROP: &str = "264ms";
 const _: () = assert!(REVEAL_HORIZON.as_millis() == 264);
 
-/// Whether a tool element follows this assistant message in its turn (pi
-/// `splitAssistantMessageToolTimeline().hasToolCalls`).
+/// Whether a tool element follows this assistant message in its turn.
 fn has_tool_calls(dom: &Dom, assistant: Handle) -> bool {
 	let Some(turn) = dom.parent(assistant) else {
 		return false;
@@ -741,10 +742,10 @@ fn banner_block(banner: &Banner) -> RenderedBlock {
 	};
 	RenderedBlock {
 		view:      BlockView {
-			key: banner.key,
-			kind: BlockKind::Notice,
-			text: banner.text.clone(),
-			mode: Mode::Mutable,
+			key:       banner.key,
+			kind:      BlockKind::Notice,
+			text:      banner.text.clone(),
+			mode:      Mode::Mutable,
 			finalized: true,
 		},
 		component: component.into_component(),
@@ -756,10 +757,10 @@ fn banner_block(banner: &Banner) -> RenderedBlock {
 fn update_block(update: &UpdateBanner, expanded: bool) -> RenderedBlock {
 	RenderedBlock {
 		view:      BlockView {
-			key: update.key,
-			kind: BlockKind::Notice,
-			text: update.notice.text(),
-			mode: Mode::Mutable,
+			key:       update.key,
+			kind:      BlockKind::Notice,
+			text:      update.notice.text(),
+			mode:      Mode::Mutable,
 			finalized: true,
 		},
 		component: update::card(&update.notice, expanded),
@@ -767,7 +768,7 @@ fn update_block(update: &UpdateBanner, expanded: bool) -> RenderedBlock {
 	}
 }
 
-/// pi `displaceableByToolName`: a waiting `hub` poll card is displaced by
+/// `displaceableByToolName`: a waiting `hub` poll card is displaced by
 /// the next `hub` call, and a `todo` snapshot card by the next `todo` call
 /// or the next user prompt, so the transcript keeps one live copy.
 fn displace_cards(dom: &Dom, blocks: &mut Vec<RenderedBlock>, start: usize, last_turn: bool) {
@@ -838,7 +839,7 @@ fn hub_is_wait(dom: &Dom, handle: Handle, _node: &Node) -> bool {
 		.is_some_and(|op| op == "wait")
 }
 
-/// pi `read-tool-group.ts`: consecutive `read` calls in one turn collapse
+/// `read-tool-group.ts`: consecutive `read` calls in one turn collapse
 /// into one compact tree block, and when the turn contains only reads the
 /// turn's usage row attaches to the group instead of standing alone.
 fn group_reads(
@@ -1002,9 +1003,9 @@ fn card_view<'a>(
 	})
 }
 
-/// User message: pi renders the text as Markdown on the `userMessageBg`
-/// tint with one cell of padding on every side (`new Markdown(text, 1, 1,
-/// …)` in `user-message.ts`: a tinted blank row above and below) and no
+/// User message: the text renders as Markdown on the `userMessageBg` tint
+/// with one cell of padding on every side and a tinted blank row above and
+/// below, with no
 /// border; the chrome brackets an OSC 133 prompt zone. An agent reaction
 /// replaces the top padding row with the emoji right-aligned inside the
 /// horizontal padding (`#reactionRow`); journaled attachments the text does
@@ -1094,7 +1095,7 @@ fn text_references_attachment(text: &str, ordinal: usize) -> bool {
 	follows("[Image #") || follows("[Video #") || follows("attachment://")
 }
 
-/// pi `collapseImageMarkers` (`composer-attachments.ts`, called with an
+/// `collapseImageMarkers` (`composer-attachments.ts`, called with an
 /// unbounded image count from `user-message.ts`): the stored text carries
 /// bracketed `[Image #N, WxH]` / `[Video #N]` markers, optionally followed
 /// by their ` attachment://N` reference, but the transcript shows the same
@@ -2121,7 +2122,7 @@ mod tests {
 		);
 	}
 
-	/// pi `user-message.ts`: `new Markdown(text, 1, 1, …)` on the tinted
+	/// `user-message.ts`: `new Markdown(text, 1, 1, …)` on the tinted
 	/// background — inline emphasis renders, fences render as code, and a
 	/// padded blank row sits above and below the text.
 	#[test]
@@ -2156,7 +2157,7 @@ mod tests {
 		);
 	}
 
-	/// pi `assistant-message.ts`: the reasoning trace is a Markdown block
+	/// `assistant-message.ts`: the reasoning trace is a Markdown block
 	/// (`new Markdown(text, 1, 0, …, { italic: true })`), so list bullets and
 	/// emphasis in the trace render instead of leaking their markers.
 	#[test]
@@ -2329,11 +2330,17 @@ mod tests {
 		session
 			.assistant_start("test/model", "test", "test/model")
 			.expect("assistant");
-		let turn = *session.dom().children(session.dom().body()).last().expect("turn");
+		let turn = *session
+			.dom()
+			.children(session.dom().body())
+			.last()
+			.expect("turn");
 		let assistant = *session.dom().children(turn).last().expect("assistant");
 
 		let before = insert_assistant_part(&mut session, assistant, 0, "text");
-		let sid = session.stream_open(before, PropId::Text.into()).expect("before stream");
+		let sid = session
+			.stream_open(before, PropId::Text.into())
+			.expect("before stream");
 		session.stream_append(sid, "before").expect("before text");
 		session.stream_close(sid).expect("before close");
 		let call = session
@@ -2371,7 +2378,9 @@ mod tests {
 			)
 			.expect("settle");
 		let after = insert_assistant_part(&mut session, assistant, 2, "text");
-		let sid = session.stream_open(after, PropId::Text.into()).expect("after stream");
+		let sid = session
+			.stream_open(after, PropId::Text.into())
+			.expect("after stream");
 		session.stream_append(sid, "after").expect("after text");
 		session.stream_close(sid).expect("after close");
 		session.assistant_end("stop").expect("assistant end");
@@ -2380,21 +2389,13 @@ mod tests {
 		let replayed = Session::open(path, ComponentRegistry::standard()).expect("replay");
 		let ordered = projected(&replayed, &options)
 			.into_iter()
-			.filter(|block| {
-				matches!(
-					block.view.kind,
-					BlockKind::Assistant | BlockKind::Tool
-				)
-			})
+			.filter(|block| matches!(block.view.kind, BlockKind::Assistant | BlockKind::Tool))
 			.map(|block| block.view.kind)
 			.collect::<Vec<_>>();
-		assert_eq!(
-			ordered,
-			[BlockKind::Assistant, BlockKind::Tool, BlockKind::Assistant],
-		);
+		assert_eq!(ordered, [BlockKind::Assistant, BlockKind::Tool, BlockKind::Assistant],);
 	}
 
-	/// pi `#shouldAnimateThinking`: with reasoning hidden, the pulse shows
+	/// `#shouldAnimateThinking`: with reasoning hidden, the pulse shows
 	/// while the model's newest delta is reasoning — including a second
 	/// reasoning phase after visible text — and ends once text is the tail.
 	#[test]
@@ -2550,7 +2551,7 @@ mod tests {
 		);
 	}
 
-	/// pi `reaction.ts` + `#reactionRow`: a reply opening with a lone emoji
+	/// `reaction.ts` + `#reactionRow`: a reply opening with a lone emoji
 	/// line badges the preceding user bubble (right-aligned in its top
 	/// padding row) and the emoji leaves the prose; the badge survives a
 	/// re-projection because it derives from the journaled text.
@@ -2623,7 +2624,7 @@ mod tests {
 		assert_eq!(assistant.as_deref(), Some("sure"), "remaining prose streams through");
 	}
 
-	/// pi `collapseImageMarkers`: bracketed vision markers (and their paired
+	/// `collapseImageMarkers`: bracketed vision markers (and their paired
 	/// `attachment://N` reference) become the composer's `<icon> #N` chip;
 	/// malformed markers and ordinary brackets stay verbatim.
 	#[test]

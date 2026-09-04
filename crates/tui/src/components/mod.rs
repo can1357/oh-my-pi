@@ -101,11 +101,11 @@ impl fmt::Write for FooterText {
 }
 
 /// Plans a container-local clamp, reserving its last row for shared chrome.
-pub(super) fn overflow_plan<'a>(
-	props: &'a Props,
+pub(super) fn overflow_plan(
+	props: &Props,
 	natural_rows: u16,
 	available_rows: u16,
-) -> Option<OverflowPlan<'a>> {
+) -> Option<OverflowPlan<'_>> {
 	let cap = props.max_rows()?.min(available_rows);
 	if natural_rows <= cap {
 		return None;

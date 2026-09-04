@@ -22,8 +22,8 @@ use omp_tools::read::{
 	conflicts::{ConflictRegistry, ConflictResolver},
 	json_query::{apply_query, parse_query, path_to_query, render_value},
 	resolver::{
-		LineOffsetCache, Resolve, ResolverTable, ResourceCompletion, ResourceEntry, ResourceList,
-		Scheme, SchemeEntry, fuzzy_score,
+		LineOffsetCache, Resolve, ResolvedRead, ResolverTable, ResourceCompletion, ResourceEntry,
+		ResourceList, Scheme, SchemeEntry, fuzzy_score,
 	},
 	selector::ParsedSelector,
 };
@@ -256,6 +256,22 @@ impl Resolve for UrlResolver {
 		}
 	}
 
+	async fn read_with_diags<'a>(
+		&'a self,
+		resource: &'a str,
+		selector: &'a ParsedSelector,
+	) -> Result<ResolvedRead, Fault> {
+		match self {
+			Self::Issue(resolver) | Self::Pr(resolver) => {
+				resolver.read_with_diags(resource, selector).await
+			},
+			_ => self
+				.read(resource, selector)
+				.await
+				.map(|data| ResolvedRead { data, diags: Default::default() }),
+		}
+	}
+
 	async fn read_query<'a>(
 		&'a self,
 		resource: &'a str,
@@ -279,6 +295,25 @@ impl Resolve for UrlResolver {
 			},
 			Self::Content(resolver) => resolver.read_query(resource, query, selector).await,
 			_ => self.read(resource, selector).await,
+		}
+	}
+
+	async fn read_query_with_diags<'a>(
+		&'a self,
+		resource: &'a str,
+		query: Option<&'a str>,
+		selector: &'a ParsedSelector,
+	) -> Result<ResolvedRead, Fault> {
+		match self {
+			Self::Issue(resolver) | Self::Pr(resolver) => {
+				resolver
+					.read_query_with_diags(resource, query, selector)
+					.await
+			},
+			_ => self
+				.read_query(resource, query, selector)
+				.await
+				.map(|data| ResolvedRead { data, diags: Default::default() }),
 		}
 	}
 
@@ -675,7 +710,9 @@ fn session_projection(endpoint: &SessionEndpoint) -> serde_json::Value {
 			let node = dom.get(*child)?;
 			(node.tag == Tag::Known(KnownTag::Assistant)).then(|| {
 				(
-					dom_str(node, PropId::Text).or(node.content.as_deref()).unwrap_or(""),
+					dom_str(node, PropId::Text)
+						.or(node.content.as_deref())
+						.unwrap_or(""),
 					node.prop(&PropKey::from(PropId::StopReason)).is_some(),
 				)
 			})

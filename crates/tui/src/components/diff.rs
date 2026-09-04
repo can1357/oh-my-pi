@@ -26,7 +26,7 @@ use crate::{
 	rich::{Pipeline, Prefix, RichSink, RichText, width_config_epoch},
 };
 
-/// Display cells one tab occupies, matching pi's `DEFAULT_TAB_WIDTH`.
+/// Display cells one tab occupies.
 const TAB_WIDTH: usize = 3;
 /// Cells rendered for one expanded tab.
 const TAB_SPACES: &str = "   ";
@@ -295,7 +295,7 @@ impl Continuation {
 		Self { numbered, bare }
 	}
 
-	fn for_row(&self, numbered: bool) -> &Prefix {
+	const fn for_row(&self, numbered: bool) -> &Prefix {
 		if numbered { &self.numbered } else { &self.bare }
 	}
 }
@@ -307,7 +307,7 @@ struct Highlights {
 	row_of: Vec<u16>,
 }
 
-/// Paints parsed rows into a [`RichText`] following pi's `renderDiff`.
+/// Paints parsed rows into a [`RichText`].
 struct Painter {
 	width:           u16,
 	gutter:          usize,
@@ -438,8 +438,8 @@ impl Painter {
 		}
 	}
 
-	/// Fills `scratch` with pi's `formatCodeFrameLine` gutter (`-88│`, `  88│`,
-	/// or a blanked repeat), returning whether the row carries a number.
+	/// Fills `scratch` with a gutter (`-88│`, `  88│`, or a blanked repeat),
+	/// returning whether the row carries a number.
 	fn gutter(&mut self, marker: char, number: Option<u32>) -> bool {
 		self.scratch.clear();
 		let Some(number) = number else {
@@ -465,8 +465,8 @@ impl Painter {
 		true
 	}
 
-	/// Paints one added or removed row. `expand_tabs` mirrors pi's paired
-	/// path, where tabs become spaces before indentation is visualized, so a
+	/// Paints one added or removed row. With `expand_tabs`, tabs become spaces
+	/// before indentation is visualized, so a
 	/// leading tab reads as three dots instead of an arrow.
 	fn paint_change(
 		&mut self,
@@ -499,17 +499,14 @@ impl Painter {
 		let mut wrap = out.wrap_chars_prefixed(self.width, Prefix::empty_ref(), continuation);
 		wrap.run(style, &self.scratch);
 		let content = line.text.as_str();
-		match self.highlight_row(index) {
-			Some((rows, row)) => {
-				for (run_style, text) in rows.row_runs(row) {
-					paint_plain(&mut wrap, run_style, text);
-				}
-			},
-			None => {
-				let indent = indent_len(content);
-				self.paint_indent(&mut wrap, style.dim(), &content[..indent], false);
-				paint_plain(&mut wrap, style, &content[indent..]);
-			},
+		if let Some((rows, row)) = self.highlight_row(index) {
+			for (run_style, text) in rows.row_runs(row) {
+				paint_plain(&mut wrap, run_style, text);
+			}
+		} else {
+			let indent = indent_len(content);
+			self.paint_indent(&mut wrap, style.dim(), &content[..indent], false);
+			paint_plain(&mut wrap, style, &content[indent..]);
 		}
 		wrap.newline();
 	}
@@ -562,8 +559,8 @@ impl Painter {
 		wrap.newline();
 	}
 
-	/// pi `visualizeIndent`: leading tabs paint as a centered arrow, leading
-	/// spaces as dots, both dim in the row color.
+	/// Leading tabs paint as a centered arrow and leading spaces as dots, both
+	/// dim in the row color.
 	fn paint_indent(&self, sink: &mut dyn RichSink, style: Style, indent: &str, expand_tabs: bool) {
 		for ch in indent.chars() {
 			if ch != '\t' {
@@ -719,7 +716,7 @@ const fn is_word_char(ch: char) -> bool {
 	)
 }
 
-fn token_class(ch: char) -> TokenClass {
+const fn token_class(ch: char) -> TokenClass {
 	if is_word_char(ch) {
 		TokenClass::Word
 	} else if ch.is_whitespace() {
@@ -958,7 +955,7 @@ mod tests {
 		assert_eq!(frame_row_text(&grown, 1), " +10│ten");
 		assert_eq!(frame_row_text(&grown, 2), "+100│hundred");
 		let gutter = frame_cell_style(&grown, 3, 0);
-		assert!(!gutter.dim, "pi dims indentation glyphs, not the gutter");
+		assert!(!gutter.dim, "indentation glyphs, not the gutter, are dim");
 		assert_eq!(
 			gutter.foreground, ctx.theme.tool_diff_added,
 			"gutter uses the semantic added-line color"
@@ -978,7 +975,7 @@ mod tests {
 		let frame = paint(&mut bare, 20, 3);
 		assert_eq!(frame_row_text(&frame, 0), "-···old");
 		assert_eq!(frame_row_text(&frame, 1), "+···new");
-		assert_eq!(frame_row_text(&frame, 2), " same", "unnumbered rows keep pi's bare marker");
+		assert_eq!(frame_row_text(&frame, 2), " same", "unnumbered rows keep their bare marker");
 	}
 
 	#[test]
@@ -1105,7 +1102,6 @@ mod tests {
 	}
 
 	/// The `edit` and `apply_patch` gallery fixtures must paint exactly as
-	/// pi's `renderDiff` does in
 	/// `scripts/qa/fixtures/gallery/tools/{edit,apply_patch}.txt`.
 	#[test]
 	fn gallery_edit_fixtures_match_pi_rows() {

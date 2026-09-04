@@ -74,7 +74,11 @@ impl Resolve for VaultResolver {
 		use super::select_bytes;
 
 		let bytes = if resource.is_empty() {
-			let names = self.service.names_with_obsidian().await.map_err(vault_fault)?;
+			let names = self
+				.service
+				.names_with_obsidian()
+				.await
+				.map_err(vault_fault)?;
 			let mut body = String::from("# Vaults\n\n");
 			if names.is_empty() {
 				body.push_str("(none)\n");
@@ -90,7 +94,11 @@ impl Resolve for VaultResolver {
 			CowBytes::from(body.into_bytes())
 		} else {
 			let parsed = parse_resource(resource).map_err(vault_url_fault)?;
-			match self.service.read(&parsed.vault, &parsed.path, INLINE_LIMIT).await {
+			match self
+				.service
+				.read(&parsed.vault, &parsed.path, INLINE_LIMIT)
+				.await
+			{
 				Ok(bytes) => bytes,
 				Err(VaultError::IsDirectory { .. }) => {
 					self.directory_bytes(&parsed, DIRECTORY_ENTRY_LIMIT).await?
@@ -141,11 +149,12 @@ impl Resolve for VaultResolver {
 					.stdout
 			},
 			ObsidianOperation::Search => {
-				let query = params.get("q").filter(|value| !value.is_empty()).ok_or_else(|| {
-					Fault::Invalid {
+				let query = params
+					.get("q")
+					.filter(|value| !value.is_empty())
+					.ok_or_else(|| Fault::Invalid {
 						message: Str::new_static("vault://?op=search requires a non-empty 'q' parameter"),
-					}
-				})?;
+					})?;
 				let path = params
 					.get("path")
 					.filter(|value| !value.is_empty())
@@ -163,15 +172,12 @@ impl Resolve for VaultResolver {
 					.transpose()?;
 				self
 					.service
-					.obsidian_search(
-						&parsed.vault,
-						&VaultSearch {
-							query,
-							path,
-							limit,
-							case_sensitive: params.contains_key("case"),
-						},
-					)
+					.obsidian_search(&parsed.vault, &VaultSearch {
+						query,
+						path,
+						limit,
+						case_sensitive: params.contains_key("case"),
+					})
 					.await
 					.map_err(vault_fault)?
 					.stdout
@@ -181,9 +187,7 @@ impl Resolve for VaultResolver {
 			| ObsidianOperation::Delete
 			| ObsidianOperation::Open => {
 				return Err(Fault::Invalid {
-					message: Str::new_static(
-						"mutating Obsidian operations use Write, not Read",
-					),
+					message: Str::new_static("mutating Obsidian operations use Write, not Read"),
 				});
 			},
 			ObsidianOperation::Discover => {
@@ -202,7 +206,11 @@ impl Resolve for VaultResolver {
 		max_bytes: usize,
 	) -> Result<ResourceList, Fault> {
 		if resource.is_empty() {
-			let names = self.service.names_with_obsidian().await.map_err(vault_fault)?;
+			let names = self
+				.service
+				.names_with_obsidian()
+				.await
+				.map_err(vault_fault)?;
 			let mut used = 0usize;
 			let mut entries = Vec::new();
 			let mut truncated = false;
@@ -257,14 +265,17 @@ impl Resolve for VaultResolver {
 			.into_iter()
 			.filter_map(|name| {
 				Some(ResourceCompletion {
-					score: fuzzy_score(query, &name)?,
-					value: Str::new(format!("vault://{}/", encode_component(&name))),
+					score:       fuzzy_score(query, &name)?,
+					value:       Str::new(format!("vault://{}/", encode_component(&name))),
 					description: Str::new_static("configured or Obsidian-discovered vault"),
 				})
 			})
 			.collect::<Vec<_>>();
 		values.sort_unstable_by(|left, right| {
-			right.score.cmp(&left.score).then_with(|| left.value.cmp(&right.value))
+			right
+				.score
+				.cmp(&left.score)
+				.then_with(|| left.value.cmp(&right.value))
 		});
 		values.truncate(max_results);
 		Ok(values)
@@ -280,7 +291,9 @@ pub(crate) struct ParsedVaultResource {
 }
 
 fn parse_query(query: &str) -> BTreeMap<String, String> {
-	url::form_urlencoded::parse(query.as_bytes()).into_owned().collect()
+	url::form_urlencoded::parse(query.as_bytes())
+		.into_owned()
+		.collect()
 }
 
 pub(crate) fn parse_resource(resource: &str) -> Result<ParsedVaultResource, VaultUrlError> {
@@ -288,19 +301,16 @@ pub(crate) fn parse_resource(resource: &str) -> Result<ParsedVaultResource, Vaul
 	if raw_vault.is_empty() {
 		return Err(VaultUrlError::MissingName);
 	}
-	let vault = percent_decode(raw_vault).map_err(|_| VaultUrlError::InvalidEncoding {
-		component: Str::new(raw_vault),
-	})?;
+	let vault = percent_decode(raw_vault)
+		.map_err(|_| VaultUrlError::InvalidEncoding { component: Str::new(raw_vault) })?;
 	if vault.is_empty()
-		|| vault
-			.bytes()
-			.any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\' | b':' | b'@' | b'?' | b'#'))
-	{
+		|| vault.bytes().any(|byte| {
+			byte.is_ascii_control() || matches!(byte, b'/' | b'\\' | b':' | b'@' | b'?' | b'#')
+		}) {
 		return Err(VaultUrlError::InvalidName { name: Str::new(vault) });
 	}
-	let decoded_path = percent_decode(raw_path).map_err(|_| VaultUrlError::InvalidEncoding {
-		component: Str::new(raw_path),
-	})?;
+	let decoded_path = percent_decode(raw_path)
+		.map_err(|_| VaultUrlError::InvalidEncoding { component: Str::new(raw_path) })?;
 	let directory = raw_path.is_empty() || decoded_path.ends_with('/');
 	let path = decoded_path.trim_end_matches('/');
 	if !path.is_empty()
@@ -312,11 +322,7 @@ pub(crate) fn parse_resource(resource: &str) -> Result<ParsedVaultResource, Vaul
 	{
 		return Err(VaultUrlError::InvalidPath { path: Str::new(decoded_path) });
 	}
-	Ok(ParsedVaultResource {
-		vault: Str::new(vault),
-		path: Str::new(path),
-		directory,
-	})
+	Ok(ParsedVaultResource { vault: Str::new(vault), path: Str::new(path), directory })
 }
 
 fn percent_decode(value: &str) -> Result<String, ()> {
@@ -329,8 +335,16 @@ fn percent_decode(value: &str) -> Result<String, ()> {
 			index += 1;
 			continue;
 		}
-		let high = bytes.get(index + 1).copied().and_then(hex_value).ok_or(())?;
-		let low = bytes.get(index + 2).copied().and_then(hex_value).ok_or(())?;
+		let high = bytes
+			.get(index + 1)
+			.copied()
+			.and_then(hex_value)
+			.ok_or(())?;
+		let low = bytes
+			.get(index + 2)
+			.copied()
+			.and_then(hex_value)
+			.ok_or(())?;
 		decoded.push((high << 4) | low);
 		index += 3;
 	}
@@ -389,8 +403,8 @@ pub(crate) enum VaultUrlError {
 
 pub(crate) fn vault_url_fault(error: VaultUrlError) -> Fault {
 	match error {
-		VaultUrlError::MissingName => Fault::Invalid {
-			message: Str::new_static("vault:// URL requires a vault name"),
+		VaultUrlError::MissingName => {
+			Fault::Invalid { message: Str::new_static("vault:// URL requires a vault name") }
 		},
 		VaultUrlError::InvalidEncoding { component } => Fault::Invalid {
 			message: sf!("Invalid percent encoding in vault:// component '{component}'"),
@@ -507,7 +521,7 @@ mod tests {
 		)
 		.expect("vault config");
 		let service = VaultService::load_layered(&VaultPaths {
-			user: temp.path().join("vaults.toml"),
+			user:    temp.path().join("vaults.toml"),
 			project: temp.path().join("missing"),
 		})
 		.expect("vault service");
@@ -519,8 +533,8 @@ mod tests {
 		assert_eq!(
 			parse_resource("My%20Notes/folder/a%3Ab.md").expect("decoded resource"),
 			ParsedVaultResource {
-				vault: sf!("My Notes"),
-				path: sf!("folder/a:b.md"),
+				vault:     sf!("My Notes"),
+				path:      sf!("folder/a:b.md"),
 				directory: false,
 			}
 		);
@@ -529,13 +543,8 @@ mod tests {
 				.expect("encoded directory suffix")
 				.directory
 		);
-		for resource in [
-			"/note",
-			"notes/../secret",
-			"notes/a//b",
-			"notes/%2E%2E/secret",
-			"notes/%GG",
-		] {
+		for resource in ["/note", "notes/../secret", "notes/a//b", "notes/%2E%2E/secret", "notes/%GG"]
+		{
 			assert!(parse_resource(resource).is_err(), "{resource}");
 		}
 	}
@@ -556,16 +565,14 @@ mod tests {
 			),
 		)
 		.expect("script");
-		let mut permissions = fs::metadata(&script).expect("script metadata").permissions();
+		let mut permissions = fs::metadata(&script)
+			.expect("script metadata")
+			.permissions();
 		permissions.set_mode(0o700);
 		fs::set_permissions(&script, permissions).expect("script permissions");
 		let resolver = VaultResolver::new(service.with_obsidian_binary(Some(script)));
 		let read = resolver
-			.read_query(
-				"My%20Notes/folder/a%3Ab.md",
-				Some("op=read"),
-				&ParsedSelector::None,
-			)
+			.read_query("My%20Notes/folder/a%3Ab.md", Some("op=read"), &ParsedSelector::None)
 			.await
 			.expect("CLI read");
 		assert_eq!(read.as_ref(), br#"{"matches":[]}"#);
@@ -587,11 +594,7 @@ mod tests {
 		);
 		assert!(
 			resolver
-				.read_query(
-					"My%20Notes/folder/a%3Ab.md",
-					Some("op=delete"),
-					&ParsedSelector::None,
-				)
+				.read_query("My%20Notes/folder/a%3Ab.md", Some("op=delete"), &ParsedSelector::None,)
 				.await
 				.is_err()
 		);
@@ -601,11 +604,10 @@ mod tests {
 	async fn read_routes_files_directories_roots_and_line_selectors() {
 		let (_temp, service) = service();
 		let resolver = VaultResolver::new(service);
-		let parsed = omp_tools::read::selector::parse_uri(
-			"vault://My%20Notes/folder/a%3Ab.md:raw:2-2",
-		)
-		.expect("valid URI")
-		.expect("absolute URI");
+		let parsed =
+			omp_tools::read::selector::parse_uri("vault://My%20Notes/folder/a%3Ab.md:raw:2-2")
+				.expect("valid URI")
+				.expect("absolute URI");
 		assert_eq!(parsed.resource, "My%20Notes/folder/a%3Ab.md");
 		let selected = resolver
 			.read(parsed.resource, &parsed.selector)
@@ -616,14 +618,25 @@ mod tests {
 			.read("My%20Notes/folder/", &ParsedSelector::None)
 			.await
 			.expect("directory read");
-		assert!(std::str::from_utf8(&directory).unwrap().contains("a%3Ab.md"));
+		assert!(
+			std::str::from_utf8(&directory)
+				.unwrap()
+				.contains("a%3Ab.md")
+		);
 		let listed = resolver
 			.list("My%20Notes/folder/", 8, 1024)
 			.await
 			.expect("bounded list");
 		assert_eq!(listed.entries[0].uri, "vault://My%20Notes/folder/a%3Ab.md");
 		assert!(!listed.truncated);
-		let root = resolver.read("", &ParsedSelector::None).await.expect("root read");
-		assert!(std::str::from_utf8(&root).unwrap().contains("vault://My%20Notes/"));
+		let root = resolver
+			.read("", &ParsedSelector::None)
+			.await
+			.expect("root read");
+		assert!(
+			std::str::from_utf8(&root)
+				.unwrap()
+				.contains("vault://My%20Notes/")
+		);
 	}
 }

@@ -416,7 +416,7 @@ A terminal image with a cell-rendered fallback.
 
 #### `<diff>`
 
-A unified diff painted the way pi's transcript paints tool edits.
+A unified diff painted for tool edits.
 
 - **Content:** Diff source, one row per line. `+`/`-`/space markers may carry a canonical `123|` or legacy `123 ` line-number gutter (`DiffLine::parse`); `!` rows are diagnostics; hunk headers and other unmarked rows stay verbatim; blank or `...` rows become a gap marker.
 - **Props:** Shared; `path`; `context`; `max-rows`; `overflow`.
@@ -1131,7 +1131,7 @@ let ui = Ui::from_root(dom! { <text fg=accent>{"portable"}</text> }, 40, context
 
 The context stays swappable after construction: `Ui::set_context` applies a new context to the retained tree and every stacked overlay, discarding cached themed output and relaying out — no rebuild, and widget state (scroll, selection, filter queries, animations) survives. `App` does this automatically when the terminal flips between dark and light: a stock palette follows the flip, a custom theme is preserved, and either way the host surfaces `AppEvent::Appearance` so the app can refresh colors it derived outside the theme. Structure parsed from markup is retained; swapping `elements` affects future parses only.
 
-Named themes come from JSON files. `JsonTheme::parse` accepts omp's compact `dark`/`light` token patches or pi's rich `colors` palette (with `vars`), and `ThemeCatalog::load(explicit, dirs)` loads the files or directories an operator named (`--theme`; a broken one is an error) ahead of discovered theme directories (`<config root>/agent/themes`, `<project>/.omp/themes`; a broken one is a warning), keyed by file stem. `UiContext::with_palette(Some(theme))` selects the variant for the current appearance and remembers the theme, so a later `apply_appearance` re-selects its dark or light side instead of falling back to the stock palette; `with_palette(None)` returns to stock.
+Named themes come from JSON files. `JsonTheme::parse` accepts omp's compact `dark`/`light` token patches or a rich `colors` palette (with `vars`), and `ThemeCatalog::load(explicit, dirs)` loads the files or directories an operator named (`--theme`; a broken one is an error) ahead of discovered theme directories (`<config root>/agent/themes`, `<project>/.omp/themes`; a broken one is a warning), keyed by file stem. `UiContext::with_palette(Some(theme))` selects the variant for the current appearance and remembers the theme, so a later `apply_appearance` re-selects its dark or light side instead of falling back to the stock palette; `with_palette(None)` returns to stock.
 
 ## Graphics protocols and images
 

@@ -79,7 +79,7 @@ const LANG_ALIASES: &[(&[&str], &str)] = &[
 
 /// Semantic styles applied to parsed syntax scopes.
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) struct HighlightStyles {
+pub struct HighlightStyles {
 	base:        Style,
 	comment:     Style,
 	keyword:     Style,
@@ -132,7 +132,7 @@ impl HighlightStyles {
 }
 
 /// Reports whether `language` resolves to a bundled syntax.
-pub(crate) fn supports_language(language: &str) -> bool {
+pub fn supports_language(language: &str) -> bool {
 	!language.is_empty() && find_syntax(syntaxes(), language).is_some()
 }
 
@@ -140,7 +140,7 @@ pub(crate) fn supports_language(language: &str) -> bool {
 ///
 /// One instance must be retained for the whole source side so scope state
 /// survives batch boundaries.
-pub(crate) struct HighlightStream {
+pub struct HighlightStream {
 	parse_state: ParseState,
 	scope_stack: ScopeStack,
 }
@@ -196,7 +196,7 @@ impl HighlightStream {
 	}
 }
 
-pub(crate) fn render(
+pub fn render(
 	source: &str,
 	language: &str,
 	line_count: usize,

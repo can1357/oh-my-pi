@@ -27,8 +27,11 @@ impl RenderFold for EditRenderer {
 		state.latest = Some(update);
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
-		if let Some(input) = args.get("input").and_then(omp_slopjson::Value::as_str) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
+		if let Some(input) = args
+			.get("input")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.input = Some(Str::new(input));
 		}
 	}
@@ -43,7 +46,7 @@ impl RenderFold for EditRenderer {
 	}
 }
 
-const COLLAPSED_EDIT_DIFF_ROWS: u16 = omp_hashline::diff_preview::COLLAPSED_DIFF_ROWS;
+const COLLAPSED_EDIT_DIFF_ROWS: u16 = omp_edit::COLLAPSED_DIFF_ROWS;
 
 fn render_edit_live(update: Option<&EditUpdate>, input: Option<&str>) -> El {
 	if let Some(update) = update {
@@ -246,7 +249,7 @@ fn render_edit_fault(fault: &EditFault) -> El {
 }
 
 /// Native edit renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(edit: ToolIdentity) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(edit: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
 			identity: edit,
@@ -308,8 +311,9 @@ mod tests {
 	fn edit_streaming_args_render_partial_hashline_preview() {
 		let (registry, identities) = registry(identities());
 		let identity = identities.edit.as_ref().expect("edit identity");
-		let args =
-			omp_slopjson::parse_streaming(r#"{"input":"[src/read.rs#1234]\nPUT 4.=4:\n+fn new_name("#);
+		let args = omp_core::slopjson::parse_streaming(
+			r#"{"input":"[src/read.rs#1234]\nPUT 4.=4:\n+fn new_name("#,
+		);
 		let mut state = ViewState::new();
 		registry
 			.fold_args(identity, &mut state, &args, false)

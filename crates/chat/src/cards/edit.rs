@@ -41,8 +41,8 @@ pub(crate) fn render_edit(
 		.and_then(Value::as_array)
 		.map(Vec::as_slice)
 		.unwrap_or_default();
-	// A multi-section transaction (pi `renderMultiFileResult`): every
-	// section is its own card, stacked with one blank row between them, so a
+	// A multi-section transaction gives every section its own card, stacked
+	// with one blank row between them, so a
 	// five-file edit shows five diffs, never just the first.
 	if sections.len() > 1 {
 		let cards = sections
@@ -208,8 +208,7 @@ fn presented_diff(status: CardStatus, diff: &str) -> &str {
 	}
 }
 
-/// Drops trailing `-` and `@@` rows that no `+` row has answered yet (pi
-/// `stripTrailingUnbalancedRemoval`).
+/// Drops trailing `-` and `@@` rows that no `+` row has answered yet.
 ///
 /// A streaming preview shows removals before the matching additions arrive;
 /// without this the card would paint `-old` alone and then grow `+new`

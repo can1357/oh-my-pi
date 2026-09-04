@@ -4,6 +4,7 @@ use std::future::{Future, ready};
 
 use bytes::Bytes;
 use omp_core::{Hash32, IntoStr, Str, sf};
+use omp_tool::{Diag, DiagKind, Unit};
 use smallvec::SmallVec;
 use xutf::{TextBuf as _, Utf8};
 
@@ -95,19 +96,22 @@ pub struct RenderResult {
 	pub content_type: Option<Str>,
 	/// Human-readable extraction method.
 	pub method:       Str,
-	/// Ordered extraction notes.
-	pub notes:        SmallVec<Str, 4>,
+	/// Ordered structured diagnostics emitted alongside the rendered content.
+	pub diags:        Vec<Diag>,
 }
 
 impl RenderResult {
 	/// Builds a markdown result and applies the shared cleanup and size cap.
 	pub fn markdown(content: &str, method: impl IntoStr) -> Self {
-		let (content, truncated) = finalize_output(content);
-		let mut notes = SmallVec::new();
-		if truncated {
-			notes.push(sf!("Output truncated to 500000 characters"));
+		let (content, omitted) = finalize_output(content);
+		let mut diags = Vec::new();
+		if omitted != 0 {
+			diags.push(
+				Diag::warn(DiagKind::OutputBounded, "scraper output truncated")
+					.omitted(omitted as u64, Unit::Chars),
+			);
 		}
-		Self { content, content_type: Some(sf!("text/markdown")), method: method.into_str(), notes }
+		Self { content, content_type: Some(sf!("text/markdown")), method: method.into_str(), diags }
 	}
 }
 
@@ -226,7 +230,7 @@ pub trait HttpClient {
 }
 
 /// Cleans repeated blank lines and caps rendered output.
-pub fn finalize_output(content: &str) -> (Str, bool) {
+pub fn finalize_output(content: &str) -> (Str, usize) {
 	let mut cleaned = String::with_capacity(content.len());
 	let mut newline_run = 0_u8;
 	for character in content.trim().chars() {
@@ -250,11 +254,14 @@ pub fn finalize_output(content: &str) -> (Str, bool) {
 		}
 		count += 1;
 	}
-	let truncated = count == MAX_OUTPUT_CHARS && end < cleaned.len();
-	if truncated {
+	let omitted = if count == MAX_OUTPUT_CHARS && end < cleaned.len() {
+		let omitted = cleaned[end..].chars().count();
 		cleaned.truncate(end);
-	}
-	(cleaned.into(), truncated)
+		omitted
+	} else {
+		0
+	};
+	(cleaned.into(), omitted)
 }
 
 /// Returns whether a response is a recognizable bot-block page worth retrying.

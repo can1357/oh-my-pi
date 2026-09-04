@@ -101,11 +101,7 @@ fn identity() -> Arc<ControlConnectionIdentity> {
 async fn configured_composition_routes_every_owned_namespace() {
 	let calls = Arc::new(Mutex::new(Vec::new()));
 	let envd = EnvdControlAuthorities::new(
-		RegistryControlAuthorities::new(
-			factory("registry", &calls),
-			factory("devices", &calls),
-			factory("hooks", &calls),
-		),
+		RegistryControlAuthorities::new(factory("devices", &calls), factory("hooks", &calls)),
 		PersistenceControlAuthorities::new(
 			factory("sessions", &calls),
 			factory("artifacts", &calls),
@@ -141,7 +137,6 @@ async fn configured_composition_routes_every_owned_namespace() {
 		.control_authority(Arc::clone(&identity))
 		.expect("lifecycle-bound composition");
 	let routes = [
-		("omp.registry.freeze", "registry"),
 		("omp.devices.invoke", "devices"),
 		("omp.hooks.dispatch", "hooks"),
 		("omp.state_dir", "auxiliary"),
@@ -179,6 +174,7 @@ async fn configured_composition_routes_every_owned_namespace() {
 		assert_eq!(result["host_generation"], 7);
 		assert_eq!(result["session_generation"], 11);
 	}
+	assert!(!authority.handles("omp.registry.freeze"));
 	assert!(!authority.handles("omp.context.view"));
 	assert!(!authority.handles("omp.journal.append"));
 	assert!(!authority.handles("omp.state.latest"));

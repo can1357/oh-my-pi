@@ -125,22 +125,21 @@ omp-chat = { path = "crates/chat", version = "0.1.0" }
 omp-con = { path = "crates/con", version = "0.1.0" }
 omp-ar = { path = "crates/ar", version = "0.1.0" }
 omp-ast = { path = "crates/ast", version = "0.1.0" }
+omp-audio = { path = "crates/audio", version = "0.1.0" }
 omp-core = { path = "crates/core", version = "0.1.0", features = ["schemars"] }
 omp-dom = { path = "crates/dom", version = "0.1.0" }
 omp-journal = { path = "crates/journal", version = "0.1.0" }
 objc2-core-graphics = "=0.3.2"
-omp-docserver = { path = "crates/docserver", version = "0.1.0" }
 omp-desktop = { path = "crates/desktop", version = "0.1.0" }
 omp-driver = { path = "crates/driver", version = "0.1.0", default-features = false }
 omp-env = { path = "crates/env", version = "0.1.0" }
 omp-envd = { path = "crates/envd", version = "0.1.0" }
 omp-ext = { path = "crates/ext", version = "0.1.0" }
-omp-grep = { path = "crates/grep", version = "0.1.0" }
 omp-gui = { path = "crates/gui", version = "0.1.0" }
-omp-hashline = { path = "crates/hashline", version = "0.1.0" }
+omp-edit = { path = "crates/edit", version = "0.1.0" }
 omp-http = { path = "crates/http", version = "0.1.0" }
 omp-catalog = { path = "crates/catalog", version = "0.1.0" }
-omp-inference = { path = "crates/inference", version = "0.1.0", features = ["test-support"] }
+omp-ai = { path = "crates/ai", version = "0.1.0", features = ["test-support"] }
 omp-serve = { path = "crates/serve", version = "0.1.0" }
 omp-memory = { path = "crates/memory", version = "0.1.0", default-features = false }
 omp-oauth = { path = "crates/oauth", version = "0.1.0" }
@@ -155,10 +154,8 @@ omp-session = { path = "crates/session", version = "0.1.0" }
 omp-snapcompact = { path = "crates/snapcompact", version = "0.1.0" }
 omp-secrets = { path = "crates/secrets", version = "0.1.0" }
 omp-sandbox = { path = "crates/sandbox", version = "0.1.0" }
-omp-shell = { path = "crates/shell", version = "0.1.0" }
 omp-shell-builtins = { path = "crates/shell-builtins", version = "0.1.0" }
-omp-shell-engine = { path = "crates/shell-engine", version = "0.1.0" }
-omp-slopjson = { path = "crates/slopjson", version = "0.1.0" }
+omp-shell = { path = "crates/shell", version = "0.1.0" }
 omp-cache = { path = "crates/cache", version = "0.1.0" }
 omp-observability = { path = "crates/observability", version = "0.1.0" }
 omp-tool = { path = "crates/tool", version = "0.1.0" }
@@ -166,8 +163,6 @@ omp-tools = { path = "crates/tools", version = "0.1.0" }
 omp-tui = { path = "crates/tui", version = "0.1.0" }
 omp-vocab = { path = "crates/vocab", version = "0.1.0" }
 omp-vcs = { path = "crates/vcs", version = "0.1.0" }
-omp-voice-kokoro = { path = "crates/voice-kokoro", version = "0.1.0" }
-omp-voice = { path = "crates/voice", version = "0.1.0" }
 omp-webview = { path = "crates/webview", version = "0.1.0" }
 omp-walker = { path = "crates/walker", version = "0.1.0" }
 opentelemetry = "0.32.0"
@@ -230,6 +225,9 @@ syntect = { version = "5.3", default-features = false, features = ["default-synt
 swash = "0.2"
 tempfile = "3"
 thiserror = "2.0.20"
+# Not used directly: pins tinyvec to 1.12.0 because 1.13.0 was published broken
+# (cannot find macro `vec` in alloc-only context).
+tinyvec = "=1.12.0"
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
@@ -316,13 +314,13 @@ zune-jpeg = "0.5"
 zeroize = { version = "1.9", features = ["derive"] }
 zstd = "0.13"
 xutf = "1.4"
-xxhash-rust = { version = "0.8", features = ["xxh32"] }
+xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }
 
 [workspace.metadata.omp.dependency-lints.omp-agent]
 # D2: the agent reaches the world through omp-env; implementation crates stay
 # behind env/v1.
 allowed-world-boundary = ["omp-env"]
-denied-direct = ["omp-docserver", "omp-shell-engine", "omp-walker"]
+denied-direct = ["omp-envd", "omp-shell", "omp-walker"]
 
 [workspace.lints.rust]
 # ──────────────────────────────────────────────────────────────────────────────

@@ -14,18 +14,20 @@ use futures::{
 	Future, FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesUnordered,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, header::WWW_AUTHENTICATE};
-use omp_con::Ctx;
-use omp_core::{Hash32, Str, StrMut, sf};
-use omp_inference::{
+use omp_ai::{
 	auth::{
 		AuthControlHandle, StoreError,
 		command::{CommandCredentialExecutor, CommandCredentialResolver},
 	},
 	id::PrincipalId,
 };
+use omp_con::Ctx;
+use omp_core::{Hash32, Str, StrMut, sf};
 use omp_oauth::{AuthChallenge, ChallengeKind, discover_auth_challenge};
 use omp_proto::env::v1 as pb;
-use omp_shell_builtins::{DynDevice, DynFault, DynFuture, DynHost, DynOutput, DynSchema};
+use omp_shell_builtins::{
+	DynCallOutput, DynDevice, DynFault, DynFuture, DynHost, DynOutput, DynSchema,
+};
 use omp_tool::{
 	DocEffects, Effects, ExecEffects, LeafCatalogSnapshot, LeafOwner, LeafVersion, PublishedLeaf,
 };
@@ -851,30 +853,30 @@ struct PendingResourceUpdate {
 
 /// Environment-owned multiprocess MCP supervisor.
 pub struct McpManager {
-	service:       Arc<McpService>,
-	connector:     Arc<dyn McpConnector>,
-	workspace:     Arc<[Str]>,
-	local_root:    PathBuf,
-	environment:   BTreeMap<Str, Str>,
-	commands:      RwLock<Option<Arc<CommandCredentialResolver>>>,
-	authority:     RwLock<Option<Arc<CombinedAuthAuthority>>>,
-	native_auth:   RwLock<Option<AuthControlHandle>>,
-	oauth:         RwLock<Option<Arc<McpOAuth>>>,
-	state:                       Mutex<ManagerState>,
-	subscriptions:               Mutex<SubscriptionState>,
-	auth:                        RwLock<Option<Arc<dyn McpAuthChallengeHandler>>>,
-	notifications:               RwLock<Option<Arc<dyn McpNotificationSink>>>,
-	pending_notifications:       Mutex<VecDeque<McpHookNotification>>,
-	definition_subscribers:      RwLock<Vec<flume::Sender<McpDefinitionDiff>>>,
+	service: Arc<McpService>,
+	connector: Arc<dyn McpConnector>,
+	workspace: Arc<[Str]>,
+	local_root: PathBuf,
+	environment: BTreeMap<Str, Str>,
+	commands: RwLock<Option<Arc<CommandCredentialResolver>>>,
+	authority: RwLock<Option<Arc<CombinedAuthAuthority>>>,
+	native_auth: RwLock<Option<AuthControlHandle>>,
+	oauth: RwLock<Option<Arc<McpOAuth>>>,
+	state: Mutex<ManagerState>,
+	subscriptions: Mutex<SubscriptionState>,
+	auth: RwLock<Option<Arc<dyn McpAuthChallengeHandler>>>,
+	notifications: RwLock<Option<Arc<dyn McpNotificationSink>>>,
+	pending_notifications: Mutex<VecDeque<McpHookNotification>>,
+	definition_subscribers: RwLock<Vec<flume::Sender<McpDefinitionDiff>>>,
 	resource_update_subscribers: RwLock<Vec<flume::Sender<McpResourceUpdate>>>,
-	resource_update_buffer:      Mutex<VecDeque<McpResourceUpdate>>,
-	pending_resource_updates:    Mutex<BTreeMap<(Str, Str), PendingResourceUpdate>>,
-	render_markdown_results:     atomic::AtomicBool,
-	notification_debounce_ms:    atomic::AtomicU64,
-	control_gate:                ControlGate,
-	changed:                     Notify,
-	shutdown:                    CancellationToken,
-	generation:                  atomic::AtomicU64,
+	resource_update_buffer: Mutex<VecDeque<McpResourceUpdate>>,
+	pending_resource_updates: Mutex<BTreeMap<(Str, Str), PendingResourceUpdate>>,
+	render_markdown_results: atomic::AtomicBool,
+	notification_debounce_ms: atomic::AtomicU64,
+	control_gate: ControlGate,
+	changed: Notify,
+	shutdown: CancellationToken,
+	generation: atomic::AtomicU64,
 }
 
 impl McpManager {
@@ -940,14 +942,12 @@ impl McpManager {
 	/// Applies the MCP convars and keeps live subscription, debounce, and result
 	/// presentation policy synchronized with later console writes.
 	pub fn bind_runtime_settings(self: &Arc<Self>, ctx: &Ctx) {
-		self.set_notifications_enabled(crate::pi_settings::SV_MCP_NOTIFICATIONS.get(ctx));
-		self.render_markdown_results.store(
-			crate::pi_settings::SV_MCP_RENDER_MARKDOWN_RESULTS.get(ctx),
-			atomic::Ordering::Release,
-		);
+		self.set_notifications_enabled(crate::SV_MCP_NOTIFICATIONS.get(ctx));
+		self
+			.render_markdown_results
+			.store(crate::SV_MCP_RENDER_MARKDOWN_RESULTS.get(ctx), atomic::Ordering::Release);
 		self.notification_debounce_ms.store(
-			u64::try_from(crate::pi_settings::SV_MCP_NOTIFICATION_DEBOUNCE_MS.get(ctx))
-				.unwrap_or(0),
+			u64::try_from(crate::SV_MCP_NOTIFICATION_DEBOUNCE_MS.get(ctx)).unwrap_or(0),
 			atomic::Ordering::Release,
 		);
 		let manager = Arc::downgrade(self);
@@ -970,10 +970,9 @@ impl McpManager {
 				},
 				"sv_mcp_notification_debounce_ms" => {
 					if let Some(milliseconds) = new.as_int() {
-						manager.notification_debounce_ms.store(
-							u64::try_from(milliseconds).unwrap_or(0),
-							atomic::Ordering::Release,
-						);
+						manager
+							.notification_debounce_ms
+							.store(u64::try_from(milliseconds).unwrap_or(0), atomic::Ordering::Release);
 					}
 				},
 				_ => {},
@@ -1272,10 +1271,7 @@ impl McpManager {
 		)?;
 		let after = self.service.leaf_snapshot();
 		self.emit_definition_diff(name, removed.generation, epoch, &before, &after);
-		let server = pb::McpServerRef {
-			name:             name.to_owned(),
-			definition_epoch: epoch,
-		};
+		let server = pb::McpServerRef { name: name.to_owned(), definition_epoch: epoch };
 		let _ = self.service.remove(&server);
 		drop(state);
 		if let Some(connection) = removed.connection {
@@ -2173,13 +2169,11 @@ impl McpManager {
 					.connection
 					.as_ref()
 					.is_some_and(|current| Arc::ptr_eq(current, expected))
-			})
-		{
+			}) {
 			return Err(ManagerError::StaleGeneration);
 		}
 		mount.definition_version = mount.definition_version.saturating_add(1);
-		let cached_tools =
-			(source == DefinitionSource::Cache).then(|| Arc::from(tools.clone()));
+		let cached_tools = (source == DefinitionSource::Cache).then(|| Arc::from(tools.clone()));
 		let definition_version = mount.definition_version;
 		let protocol_version = Str::from(
 			mount
@@ -2217,9 +2211,10 @@ impl McpManager {
 
 	fn publish_cached_status_if_pending(&self, name: &str, generation: u64) {
 		let state = self.state.lock();
-		let pending = state.mounts.get(name).is_some_and(|mount| {
-			mount.generation == generation && mount.connection.is_none()
-		});
+		let pending = state
+			.mounts
+			.get(name)
+			.is_some_and(|mount| mount.generation == generation && mount.connection.is_none());
 		if pending {
 			self.publish_status_unchecked(
 				name,
@@ -2420,10 +2415,11 @@ impl McpManager {
 		if !subscribed {
 			return;
 		}
-		let update =
-			McpResourceUpdate { server: Str::from(name), uri: uri.clone(), sequence };
+		let update = McpResourceUpdate { server: Str::from(name), uri: uri.clone(), sequence };
 		let delay = Duration::from_millis(
-			self.notification_debounce_ms.load(atomic::Ordering::Acquire),
+			self
+				.notification_debounce_ms
+				.load(atomic::Ordering::Acquire),
 		);
 		if delay.is_zero() {
 			self.publish_resource_update(update);
@@ -2453,8 +2449,7 @@ impl McpManager {
 						.get(&pending.update.server)
 						.is_some_and(|uris| uris.contains(&pending.update.uri))
 			};
-			if subscribed
-				&& manager.is_current_generation(&pending.update.server, pending.generation)
+			if subscribed && manager.is_current_generation(&pending.update.server, pending.generation)
 			{
 				manager.publish_resource_update(pending.update);
 			}
@@ -2700,11 +2695,7 @@ impl McpManager {
 				ReconnectStart::Wait => {
 					notified.await;
 					let settled = self.state.lock().mounts.get(name).map(|mount| {
-						(
-							mount.connection.clone(),
-							mount.reconnecting,
-							mount.terminal_failure,
-						)
+						(mount.connection.clone(), mount.reconnecting, mount.terminal_failure)
 					});
 					match settled {
 						Some((Some(connection), false, _)) => return Ok(connection),
@@ -2875,8 +2866,7 @@ impl McpManager {
 		after: &LeafCatalogSnapshot<McpLeaf>,
 	) {
 		let tools = definition_delta(before, after, name, &["tool"]);
-		let resources =
-			definition_delta(before, after, name, &["resource", "resource-template"]);
+		let resources = definition_delta(before, after, name, &["resource", "resource-template"]);
 		let prompts = definition_delta(before, after, name, &["prompt"]);
 		if tools.is_empty() && resources.is_empty() && prompts.is_empty() {
 			return;
@@ -2915,10 +2905,7 @@ fn definition_delta(
 			.leaves
 			.iter()
 			.filter(|leaf| {
-				leaf.owner.root == server
-					&& kinds
-						.iter()
-						.any(|kind| leaf.value.kind.as_str() == *kind)
+				leaf.owner.root == server && kinds.iter().any(|kind| leaf.value.kind.as_str() == *kind)
 			})
 			.map(|leaf| (leaf.name.clone(), leaf.code))
 			.collect()
@@ -2941,7 +2928,7 @@ fn definition_delta(
 		.map(|(name, _)| name.clone())
 		.collect::<Vec<_>>();
 	McpDefinitionDelta {
-		added: Arc::from(added),
+		added:   Arc::from(added),
 		removed: Arc::from(removed),
 		changed: Arc::from(changed),
 	}
@@ -2975,7 +2962,7 @@ impl DynHost for McpManager {
 		name: &str,
 		args: Value,
 		cancellation: CancellationToken,
-	) -> DynFuture<'_, DynOutput> {
+	) -> DynFuture<'_, DynCallOutput> {
 		let snapshot = self.catalog_snapshot();
 		let target = snapshot
 			.leaves
@@ -2989,10 +2976,7 @@ impl DynHost for McpManager {
 			);
 		};
 		let request = pb::McpInvokeRequest {
-			server:         Some(pb::McpServerRef {
-				name: server.to_string(),
-				definition_epoch,
-			}),
+			server:         Some(pb::McpServerRef { name: server.to_string(), definition_epoch }),
 			tool:           tool.to_string(),
 			arguments_json: match serde_json::to_vec(&args) {
 				Ok(arguments) => Bytes::from(arguments),
@@ -3013,7 +2997,7 @@ impl DynHost for McpManager {
 				.invoke(request, cancellation)
 				.await
 				.map_err(|error| DynFault::new(format!("MCP device invocation failed: {error}")))?;
-			mcp_dyn_output(&result, render_markdown)
+			mcp_dyn_output(&result, render_markdown).map(Into::into)
 		})
 	}
 }
@@ -3900,23 +3884,27 @@ mod tests {
 		assert!(manager.render_markdown_results());
 		assert!(!manager.subscriptions.lock().enabled);
 		assert_eq!(
-			manager.notification_debounce_ms.load(atomic::Ordering::Acquire),
+			manager
+				.notification_debounce_ms
+				.load(atomic::Ordering::Acquire),
 			500
 		);
 
-		crate::pi_settings::SV_MCP_NOTIFICATIONS
+		crate::SV_MCP_NOTIFICATIONS
 			.set(&ctx, true)
 			.expect("enable notifications");
-		crate::pi_settings::SV_MCP_RENDER_MARKDOWN_RESULTS
+		crate::SV_MCP_RENDER_MARKDOWN_RESULTS
 			.set(&ctx, false)
 			.expect("disable Markdown");
-		crate::pi_settings::SV_MCP_NOTIFICATION_DEBOUNCE_MS
+		crate::SV_MCP_NOTIFICATION_DEBOUNCE_MS
 			.set(&ctx, 17)
 			.expect("set debounce");
 		assert!(manager.subscriptions.lock().enabled);
 		assert!(!manager.render_markdown_results());
 		assert_eq!(
-			manager.notification_debounce_ms.load(atomic::Ordering::Acquire),
+			manager
+				.notification_debounce_ms
+				.load(atomic::Ordering::Acquire),
 			17
 		);
 	}
@@ -3961,10 +3949,7 @@ mod tests {
 		let scratch = tempfile::tempdir().expect("scratch");
 		let service = McpService::open(scratch.path().join("cache.sqlite3")).expect("service");
 		let transport = Arc::new(DynTransport { call_cancellation: Mutex::new(None) });
-		let connector = Arc::new(FlakyConnector {
-			transport,
-			attempts: atomic::AtomicUsize::new(0),
-		});
+		let connector = Arc::new(FlakyConnector { transport, attempts: atomic::AtomicUsize::new(0) });
 		let manager = McpManager::new(
 			Arc::clone(&service),
 			connector.clone(),
@@ -3977,10 +3962,7 @@ mod tests {
 			.await;
 		assert!(snapshot.completed);
 		assert_eq!(connector.attempts.load(atomic::Ordering::Acquire), 2);
-		assert_eq!(
-			snapshot.status.servers[0].state,
-			pb::McpLifecycleState::Ready as i32
-		);
+		assert_eq!(snapshot.status.servers[0].state, pb::McpLifecycleState::Ready as i32);
 	}
 
 	#[test]
@@ -4071,12 +4053,12 @@ mod tests {
 		assert!(observed.is_cancelled());
 		service
 			.notify(pb::McpNotification {
-				server: Some(pb::McpServerRef {
-					name: "live".to_owned(),
+				server:      Some(pb::McpServerRef {
+					name:             "live".to_owned(),
 					definition_epoch: service.definition_epoch(),
 				}),
-				sequence: 7,
-				method: "notifications/test".to_owned(),
+				sequence:    7,
+				method:      "notifications/test".to_owned(),
 				params_json: Bytes::from_static(b"{}"),
 			})
 			.expect("pre-unmount notification");
@@ -4133,12 +4115,12 @@ mod tests {
 			.await;
 		service
 			.notify(pb::McpNotification {
-				server: Some(pb::McpServerRef {
-					name: "live".to_owned(),
+				server:      Some(pb::McpServerRef {
+					name:             "live".to_owned(),
 					definition_epoch: service.definition_epoch(),
 				}),
-				sequence: 1,
-				method: "notifications/test".to_owned(),
+				sequence:    1,
+				method:      "notifications/test".to_owned(),
 				params_json: Bytes::from_static(b"{}"),
 			})
 			.expect("remounted generation restarts notification sequence");
@@ -4158,10 +4140,7 @@ mod tests {
 		service.bind_manager(&manager);
 		let (_, diffs) = manager.subscribe_definitions();
 		manager
-			.start(vec![mount_spec(
-				"resource-only",
-				McpRestartPolicy::Never,
-			)])
+			.start(vec![mount_spec("resource-only", McpRestartPolicy::Never)])
 			.await;
 		assert_eq!(transport.methods.lock().clone(), vec![
 			Str::from("resources/list"),
@@ -4171,21 +4150,18 @@ mod tests {
 		let (generation, connection) = {
 			let state = manager.state.lock();
 			let mount = state.mounts.get("resource-only").expect("resource mount");
-			(
-				mount.generation,
-				mount.connection.clone().expect("resource connection"),
-			)
+			(mount.generation, mount.connection.clone().expect("resource connection"))
 		};
 		let resource = ResourceDefinition {
-			uri: sf!("file:///guide"),
-			name: sf!("guide"),
+			uri:         sf!("file:///guide"),
+			name:        sf!("guide"),
 			description: Some(sf!("Guide")),
-			mime_type: Some(sf!("text/markdown")),
+			mime_type:   Some(sf!("text/markdown")),
 		};
 		let prompt = PromptDefinition {
-			name: sf!("review"),
+			name:        sf!("review"),
 			description: Some(sf!("Review changes")),
-			arguments: Vec::new(),
+			arguments:   Vec::new(),
 		};
 		manager
 			.publish_definitions(

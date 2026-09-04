@@ -219,9 +219,10 @@ impl McpService {
 		*self.manager.write() = Some(Arc::downgrade(manager));
 	}
 
-	/// Loads, precedence-resolves, and mounts native plus discovered foreign sources.
-	/// This must be called once after transport credential authorities are
-	/// bound; subsequent config mutations reuse the retained discovery policy.
+	/// Loads, precedence-resolves, and mounts native plus discovered foreign
+	/// sources. This must be called once after transport credential authorities
+	/// are bound; subsequent config mutations reuse the retained discovery
+	/// policy.
 	pub async fn start_native_configs(
 		&self,
 		enable_project_config: bool,
@@ -232,9 +233,9 @@ impl McpService {
 		self.reload_native_configs().await
 	}
 
-	/// Reloads persisted native and foreign sources using the retained settings policy.
-	/// Late-bound credential authorities call this after composition so OAuth
-	/// headers and native Exa imports participate in the mounted specs.
+	/// Reloads persisted native and foreign sources using the retained settings
+	/// policy. Late-bound credential authorities call this after composition so
+	/// OAuth headers and native Exa imports participate in the mounted specs.
 	pub async fn reload_native_configs(&self) -> Result<manager::StartupSnapshot, McpServiceError> {
 		let paths = self
 			.config_paths
@@ -655,11 +656,11 @@ impl McpService {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McpConfigPaths {
 	/// User-owned `<config root>/mcp.json` (`~/.o2/mcp.json`, profile-aware).
-	pub user:    PathBuf,
+	pub user: PathBuf,
 	/// Project-owned `<project>/.omp/mcp.json`.
 	pub project: PathBuf,
 	/// Project-root `<project>/.mcp.json` fallback.
-	pub root:    PathBuf,
+	pub root: PathBuf,
 	/// Home root used by read-only foreign-provider discovery.
 	pub(crate) home: PathBuf,
 	/// Explicit contained Agent Plugins package roots.
@@ -682,7 +683,12 @@ impl McpConfigPaths {
 		let home = omp_core::dirs::home_dir()
 			.filter(|home| user_config_root.starts_with(home))
 			.or(configured_home)
-			.unwrap_or_else(|| user_config_root.parent().unwrap_or(user_config_root).to_path_buf());
+			.unwrap_or_else(|| {
+				user_config_root
+					.parent()
+					.unwrap_or(user_config_root)
+					.to_path_buf()
+			});
 		Self {
 			user: user_config_root.join("mcp.json"),
 			project: project_root.join(".omp/mcp.json"),
@@ -993,12 +999,8 @@ mod config_tests {
 
 		let service = McpService::open(scratch.path().join("cache.sqlite3")).expect("service");
 		service.bind_config_paths(McpConfigPaths::new(&user_root, &project));
-		let manager = McpManager::new(
-			Arc::clone(&service),
-			Arc::new(RejectConnector),
-			Arc::from([]),
-			project,
-		);
+		let manager =
+			McpManager::new(Arc::clone(&service), Arc::new(RejectConnector), Arc::from([]), project);
 		service.bind_manager(&manager);
 
 		let error = service

@@ -155,7 +155,7 @@ struct SelectState {
 
 impl SelectState {
 	/// Recomputes the visible rows: every option for an empty query,
-	/// otherwise pi's word-local ranking (contiguous literal matches ahead
+	/// otherwise word-local ranking (contiguous literal matches ahead
 	/// of fuzzy-only ones), the recommended option first within a relevance
 	/// bucket, then declaration order.
 	fn refilter(&mut self) {
@@ -170,7 +170,7 @@ impl SelectState {
 			.enumerate()
 			.filter_map(|(index, option)| {
 				let score = option.search.score(&query)?;
-				// pi `model-browser.ts` buckets `Math.round(score / 10)`.
+				// Bucket scores by rounded tenths.
 				Some(((score + 500).div_euclid(1000), !option.recommended, index as u16))
 			})
 			.collect();
@@ -211,7 +211,7 @@ impl Select {
 	}
 
 	#[allow(dead_code, reason = "acceptance-suite probe")]
-	pub(crate) fn visible_len(&self) -> usize {
+	pub(crate) const fn visible_len(&self) -> usize {
 		self.state.visible.len()
 	}
 
@@ -460,7 +460,7 @@ impl Select {
 	/// Re-filters after a query edit and wraps it into an event for
 	/// identified selects. The cursor stays on its row only while every
 	/// visible row up to it survives unchanged; otherwise it returns to the
-	/// best match (pi `#applyQuery("reset-changed-prefix")`).
+	/// best match.
 	fn filter_flow(&mut self) -> Flow {
 		let cursor = usize::from(self.state.cursor);
 		let previous: SmallVec<u16, 16> = self

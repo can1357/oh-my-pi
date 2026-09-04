@@ -18,28 +18,43 @@ client and framing boundary; it does not contain an alternate host.
   commands, named processes, logs, and shell environment setup.
 - `tools` and the `tool_*` modules implement daemon-backed tool operations.
 - `exthost` owns extension manifests, lifecycle, CONTROL routing, quotas,
-  service routing, cancellation, and the extension-host child entry point.
-  `worker` supervises the same-binary free-threaded Python extension hosts and
-  Python tool workers; `worker_pool` owns named-worker routing and
-  generation-fenced DATA transport.
+  service routing, cancellation, and the sole Python extension child role,
+  `__omp-ext-host`.
+- `eval` owns the lazy, killable `__omp-eval-child` machinery. The built-in
+  `py_eval` is an Environment-routed tool backed by a fresh disposable eval
+  namespace for each call.
+- `worker_pool` owns named-worker placement and generation-fenced DATA
+  transport. Named workers are distinct from extension hosts and eval
+  children; they are not a legacy Python tool-child route.
 - `policy`, `admission`, `http_egress`, `vault`, and `recovery` enforce access
   decisions and manage durable runtime state.
 - `run` starts the platform transport. `ProjectEnvironment::attach` joins the
   build-keyed detached daemon and composes session-only tools locally.
 
-The `omp` executable recognizes the hidden eval, extension-host, and Python
-worker child arguments because those children re-enter the same binary.
-Their entry functions and runtime implementations remain owned by
-`omp-envd`; `omp-app` only performs process-level dispatch.
+## Document authority (docserver module)
+
+The `docserver` module is the project-scoped authority over document state,
+portable filesystem values, revision-aware edits, transactions, file watching,
+and language-server sessions. Connection-specific behavior remains isolated in
+sessions, while bounded protocol framing and adapters keep LSP and edit formats
+from becoming independent sources of state.
+
+The `omp` executable recognizes the hidden `__omp-eval-child` and
+`__omp-ext-host` arguments because those children re-enter the same binary.
+Their entry functions and runtime implementations remain owned by `omp-envd`;
+`omp-app` only performs process-level dispatch. Parent processes do not
+preflight-boot CPython: each Python child initializes its own interpreter.
 
 ## Philosophy
 
 Each project and executable generation has one detached environment daemon.
-Environment-locus tools and filesystem, process, document, browser, debugger,
-and memory effects execute there. Session-locus tools, extension workers, MCP,
-presenters, and agent controls stay in the attaching process behind the same
-partitioned `EnvClient`. An embedded full host is used only as a loud spawn
-fallback or by explicitly isolated compositions.
+Environment-locus tools — including opt-in `py_eval` — and filesystem,
+process, document, browser, debugger, and memory effects execute there.
+Session-locus tools, client-layer extension hosts, MCP, presenters, and agent
+controls stay in the attaching process behind the same partitioned
+`EnvClient`. Named-worker placement remains a separate execution facility. An
+embedded full host is used only as a loud spawn fallback or by explicitly
+isolated compositions.
 
 The document socket is build-stable while environment sockets are build-keyed.
 `DocumentHost` reconnects after a server restart, and a surviving current-build

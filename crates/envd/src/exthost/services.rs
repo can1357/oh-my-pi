@@ -10,8 +10,8 @@ use std::{
 
 use async_trait::async_trait;
 use flume::Receiver;
+use omp_ai::recovery::tools::{ToolAssemblyLimits, validate_schema};
 use omp_core::{CowBytes, Duration, DurationUnit, LifecyclePhase, SparseMap, Str, sf};
-use omp_inference::recovery::tools::{ToolAssemblyLimits, validate_schema};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};

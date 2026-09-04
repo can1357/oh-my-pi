@@ -296,13 +296,13 @@ mod tests {
 				panic!("string request ID");
 			};
 			assert_eq!(id.len(), 16);
-			assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+			assert!(
+				id.bytes()
+					.all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+			);
 		}
 		allocator.previous_numeric = u64::MAX;
-		assert_eq!(
-			allocator.next(RequestIdFormat::Number),
-			Err(RequestIdError::Exhausted)
-		);
+		assert_eq!(allocator.next(RequestIdFormat::Number), Err(RequestIdError::Exhausted));
 	}
 
 	#[test]

@@ -1,11 +1,11 @@
 //! User-local execution for the interactive `!` (bash) and `$` (eval)
 //! prefix modes.
 //!
-//! pi runs these through its local runners without asking the provider. The
-//! executor is shared with the corresponding tool, but the durable element is
-//! explicitly marked as a local run so actors never present it as a
-//! model-issued tool call. Its optional context projection remains the
-//! user-authored `bashExecution` / `pythonExecution` message pi builds.
+//! These execute locally without asking the provider. The executor is shared
+//! with the corresponding tool, but the durable element is explicitly marked
+//! as a local run so actors never present it as a model-issued tool call. Its
+//! optional context projection remains a user-authored local-execution
+//! message.
 
 use omp_core::{Str, Ulid};
 use omp_dom::{Op, PropKey, Txn, Value};

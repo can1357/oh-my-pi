@@ -17,7 +17,6 @@ use omp_session::{ComponentRegistry, Session};
 
 use super::ServiceState;
 
-/// pi `btw-user.md`.
 const BTW_PROMPT: &str = include_str!("../../../chat/prompts/btw-user.md");
 /// Preview clip for tree rows.
 const PREVIEW: usize = 160;

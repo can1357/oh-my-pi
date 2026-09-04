@@ -34,11 +34,14 @@ impl RenderFold for WriteRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
-		if let Some(path) = args.get("path").and_then(omp_slopjson::Value::as_str) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
+		if let Some(path) = args.get("path").and_then(omp_core::slopjson::Value::as_str) {
 			state.path = Str::new(path);
 		}
-		if let Some(content) = args.get("content").and_then(omp_slopjson::Value::as_str) {
+		if let Some(content) = args
+			.get("content")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.content = Str::new(content);
 		}
 	}
@@ -73,8 +76,8 @@ impl RenderFold for ReadRenderer {
 		state.phase = Some(update.phase);
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
-		if let Some(path) = args.get("path").and_then(omp_slopjson::Value::as_str) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
+		if let Some(path) = args.get("path").and_then(omp_core::slopjson::Value::as_str) {
 			state.path = Str::new(path);
 		}
 	}
@@ -283,10 +286,7 @@ fn is_read_header(line: &str) -> bool {
 }
 
 /// Native write and read renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(
-	write: ToolIdentity,
-	read: ToolIdentity,
-) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(write: ToolIdentity, read: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
 			identity: write,
@@ -387,7 +387,7 @@ mod tests {
 			.fold_args(
 				identity,
 				&mut state,
-				&omp_slopjson::parse_streaming(r#"{"path":"src/<&>.rs:9-"}"#),
+				&omp_core::slopjson::parse_streaming(r#"{"path":"src/<&>.rs:9-"}"#),
 				false,
 			)
 			.expect("streaming read args fold");
@@ -422,7 +422,7 @@ mod tests {
 			.fold_args(
 				identity,
 				&mut state,
-				&omp_slopjson::parse_streaming(
+				&omp_core::slopjson::parse_streaming(
 					r#"{"path":"tests/session.test.ts","content":"import { descr"#,
 				),
 				false,
@@ -465,7 +465,7 @@ mod tests {
 			.fold_args(
 				write_identity,
 				&mut state,
-				&omp_slopjson::parse_streaming(r#"{"path":"a<&.txt","content":"a<&>\nline"}"#),
+				&omp_core::slopjson::parse_streaming(r#"{"path":"a<&.txt","content":"a<&>\nline"}"#),
 				true,
 			)
 			.expect("write args fold");
@@ -501,7 +501,7 @@ mod tests {
 			.fold_args(
 				read_identity,
 				&mut state,
-				&omp_slopjson::parse_streaming(r#"{"path":"skill://react"}"#),
+				&omp_core::slopjson::parse_streaming(r#"{"path":"skill://react"}"#),
 				true,
 			)
 			.expect("read args fold");
@@ -571,7 +571,7 @@ mod tests {
 			.fold_args(
 				read_identity,
 				&mut state,
-				&omp_slopjson::parse_streaming(r#"{"path":"assets/<&>.bin"}"#),
+				&omp_core::slopjson::parse_streaming(r#"{"path":"assets/<&>.bin"}"#),
 				true,
 			)
 			.expect("read args fold");

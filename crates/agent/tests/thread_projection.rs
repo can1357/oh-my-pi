@@ -8,8 +8,8 @@ use omp_agent::{
 	DispatchPolicy, GateDecision, HookGate, HookPatch, HookPhase, Kernel, OnFailure, RunControl,
 	SourceRef, StaticPrompt, TurnInput, When,
 };
+use omp_ai::{ContentPart, Role};
 use omp_core::sf;
-use omp_inference::{ContentPart, Role};
 use omp_journal::blob::BlobStore;
 use omp_proto::toolhost::v1::HookEventId;
 use omp_tool::Registry;

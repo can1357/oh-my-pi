@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 /// GitHub operation.
 ///
 /// The `message` is the human title a transcript card paints after the shared
-/// `GitHub` prefix (pi `OP_TITLES`).
+/// `GitHub` prefix.
 #[derive(
 	Clone,
 	Copy,
@@ -220,14 +220,15 @@ pub struct Fault {
 }
 
 impl Fault {
-	/// Whether GitHub classified this failure as a primary or secondary rate limit.
+	/// Whether GitHub classified this failure as a primary or secondary rate
+	/// limit.
 	pub fn is_rate_limited(&self) -> bool {
 		self.code == "github_rate_limited"
 	}
 }
 
 /// Ephemeral Actions-watch state.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Update {
 	/// Operation producing the update.
 	pub op:     Operation,
@@ -348,11 +349,11 @@ impl Tool for Github {
 				{
 					parts.push(Part::Blob {
 						blob: omp_tool::BlobRef {
-							hash: Str::new(hash),
+							hash:       Str::new(hash),
 							media_type: artifact.media_type.clone(),
-							byte_len: artifact.size,
+							byte_len:   artifact.size,
 						},
-						alt: payload
+						alt:  payload
 							.result
 							.get("path")
 							.and_then(Value::as_str)
@@ -517,13 +518,10 @@ mod tests {
 		let tool = tool(std::sync::Arc::new(PanicHost));
 		assert!(
 			tool
-				.lift(
-					&Rev { family: Str::default(), n: 2 },
-					omp_tool::RecordedCall {
-						raw_args: br#"{"op":"repo_view","repo":"owner/repo"}"#,
-						verdict: br#"{"kind":"ok","value":{"op":"repo_view","result":{}}}"#,
-					},
-				)
+				.lift(&Rev { family: Str::default(), n: 2 }, omp_tool::RecordedCall {
+					raw_args: br#"{"op":"repo_view","repo":"owner/repo"}"#,
+					verdict:  br#"{"kind":"ok","value":{"op":"repo_view","result":{}}}"#,
+				},)
 				.is_none()
 		);
 	}

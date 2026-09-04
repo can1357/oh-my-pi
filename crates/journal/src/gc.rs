@@ -16,9 +16,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-	EntryId, Journal, JournalError, JournalNamespaceLock, WriterLock, decode_committed,
+	EntryId, Journal, JournalError, JournalNamespaceLock, WriterLock,
 	blob::{BlobRef, BlobStore, GcPolicy, GcSweep},
-	live_chain, sse,
+	decode_committed, live_chain, sse,
 };
 
 /// Result of pruning one journal to its selected live chain.
@@ -53,7 +53,7 @@ impl GcReport {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BlobGcReport {
 	/// Session, child-job, checkpoint, or imported journals scanned.
-	pub journals_scanned: usize,
+	pub journals_scanned:        usize,
 	/// Committed entries inspected across complete branch DAGs.
 	pub entries_scanned:         usize,
 	/// Journals containing abandoned branch history.
@@ -65,7 +65,7 @@ pub struct BlobGcReport {
 	/// Distinct content digests retained by at least one journal history.
 	pub roots_retained:          usize,
 	/// Blob-store files inspected, selected, and possibly reclaimed.
-	pub storage:          crate::blob::GcReport,
+	pub storage:                 crate::blob::GcReport,
 }
 
 /// Hard bounds and mutation policy for one journal-rooted CAS pass.
@@ -128,7 +128,8 @@ impl GcCancellation {
 	}
 }
 
-/// Failure to inventory, collect, encode, or atomically replace journal storage.
+/// Failure to inventory, collect, encode, or atomically replace journal
+/// storage.
 #[derive(Debug, Error)]
 pub enum GcError {
 	/// Existing journal validation or recovery failed.
@@ -199,12 +200,7 @@ pub fn collect_blobs(
 	journals: &[PathBuf],
 	policy: GcPolicy,
 ) -> Result<BlobGcReport, GcError> {
-	collect_blobs_with(
-		store,
-		journals,
-		BlobGcOptions::apply(policy),
-		&GcCancellation::default(),
-	)
+	collect_blobs_with(store, journals, BlobGcOptions::apply(policy), &GcCancellation::default())
 }
 
 /// Marks complete histories while holding every journal writer lease, then
@@ -271,7 +267,10 @@ pub fn collect_blobs_with(
 		let (entries, clean_len) = decode_committed(&bytes)?;
 		entries_scanned = entries_scanned.saturating_add(entries.len());
 		if entries_scanned > options.max_entries {
-			return Err(GcError::Limit { resource: "journal-entry-count", limit: options.max_entries });
+			return Err(GcError::Limit {
+				resource: "journal-entry-count",
+				limit:    options.max_entries,
+			});
 		}
 		let retained: Vec<_> = live_chain(&entries).collect();
 		let abandoned = entries.len().saturating_sub(retained.len());
@@ -285,8 +284,8 @@ pub fn collect_blobs_with(
 			let retained_bytes =
 				u64::try_from(encoded.len()).map_err(|_| io::Error::other("journal is too large"))?;
 			let current_bytes = u64::try_from(clean_len).unwrap_or(u64::MAX);
-			journal_bytes_eligible = journal_bytes_eligible
-				.saturating_add(current_bytes.saturating_sub(retained_bytes));
+			journal_bytes_eligible =
+				journal_bytes_eligible.saturating_add(current_bytes.saturating_sub(retained_bytes));
 		}
 		if options.retain_abandoned {
 			for entry in &entries {
@@ -308,10 +307,10 @@ pub fn collect_blobs_with(
 
 	let roots_retained = roots.len();
 	let sweep = GcSweep {
-		policy: options.policy,
-		apply: options.apply,
+		policy:      options.policy,
+		apply:       options.apply,
 		max_entries: options.max_blob_entries,
-		max_depth: options.max_blob_depth,
+		max_depth:   options.max_blob_depth,
 	};
 	let storage = match store.sweep_unreferenced(&roots, sweep, &cancel.cancelled) {
 		Ok(storage) => storage,
@@ -349,15 +348,14 @@ fn discover_namespace_journals(
 		if visited >= max_entries {
 			return Err(GcError::Limit {
 				resource: "journal-discovery-entry-count",
-				limit: max_entries,
+				limit:    max_entries,
 			});
 		}
 		let entry = entry?;
 		let file_type = entry.file_type()?;
 		let path = entry.path();
 		if file_type.is_file()
-			&& path.extension().and_then(|extension| extension.to_str())
-				== Some(crate::FILE_EXTENSION)
+			&& path.extension().and_then(|extension| extension.to_str()) == Some(crate::FILE_EXTENSION)
 		{
 			output.push(path);
 			if output.len() > max_journals {

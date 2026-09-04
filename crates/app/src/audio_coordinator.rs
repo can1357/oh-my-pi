@@ -1,12 +1,12 @@
 //! Production composition boundary for shared audio ownership.
 //!
-//! The policy state machine remains in [`omp_voice::coordinator`]. This module
+//! The policy state machine remains in [`omp_audio::coordinator`]. This module
 //! only adapts its suspension and gain transitions to the application's local
 //! text-to-speech controller.
 
 use std::sync::Arc;
 
-use omp_voice::coordinator::{
+use omp_audio::coordinator::{
 	AudioCoordinator, AudioEffects, MicrophoneLease, PushToTalkLease, TtsSuspensionLease,
 };
 use parking_lot::Mutex;
@@ -150,7 +150,7 @@ impl InteractiveAudioController {
 	}
 
 	/// Acquires the STT microphone lease. Repeated starts are idempotent.
-	pub fn start_stt(&self) -> Result<(), omp_voice::coordinator::CoordinatorError> {
+	pub fn start_stt(&self) -> Result<(), omp_audio::coordinator::CoordinatorError> {
 		let mut state = self.inner.state.lock();
 		if state.stt.is_none() {
 			let lease = self.inner.coordinator.domain().acquire_speech_to_text()?;
@@ -173,7 +173,7 @@ impl InteractiveAudioController {
 	}
 
 	/// Toggles the real STT microphone lease and returns its new state.
-	pub fn toggle_stt(&self) -> Result<bool, omp_voice::coordinator::CoordinatorError> {
+	pub fn toggle_stt(&self) -> Result<bool, omp_audio::coordinator::CoordinatorError> {
 		if self.stt_active() {
 			self.stop_stt();
 			Ok(false)
@@ -184,7 +184,7 @@ impl InteractiveAudioController {
 	}
 
 	/// Starts live voice after acquiring exclusive microphone ownership.
-	pub fn start_live(&self) -> Result<(), omp_voice::coordinator::CoordinatorError> {
+	pub fn start_live(&self) -> Result<(), omp_audio::coordinator::CoordinatorError> {
 		let mut state = self.inner.state.lock();
 		if state.live.is_some() {
 			return Ok(());

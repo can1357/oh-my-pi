@@ -2,7 +2,7 @@
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
-use omp_inference::discovery::{
+use omp_ai::discovery::{
 	DiscoveryHttpClient, ProbeError, ProbeHttpFuture, ProbeHttpRequest, ProbeTransportError,
 };
 use tokio_util::sync::CancellationToken;
@@ -16,7 +16,8 @@ pub struct ModelDiscoveryHttpHost {
 }
 
 impl ModelDiscoveryHttpHost {
-	/// Creates a host client whose transport never forwards credentials across redirects.
+	/// Creates a host client whose transport never forwards credentials across
+	/// redirects.
 	pub fn new() -> Self {
 		Self { client: omp_http::no_redirect_client() }
 	}
@@ -70,8 +71,7 @@ impl DiscoveryHttpClient for ModelDiscoveryHttpHost {
 				let Some(chunk) = chunk else {
 					break;
 				};
-				let chunk = chunk
-					.map_err(|_| ProbeError::Transport(ProbeTransportError::Response))?;
+				let chunk = chunk.map_err(|_| ProbeError::Transport(ProbeTransportError::Response))?;
 				if body.len().saturating_add(chunk.len()) > MAX_DISCOVERY_RESPONSE_BYTES {
 					return Err(ProbeError::ResponseTooLarge);
 				}

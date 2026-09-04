@@ -1,11 +1,11 @@
 //! `/dump` and `/restart` behind the chat host.
 //!
-//! `/dump` writes pi's LLM-request sidecar: the projected provider thread
+//! `/dump` writes an LLM-request sidecar: the projected provider thread
 //! of the live journal (post-compaction items, tool results included) as
 //! JSON in the temp directory. `/restart` records the intent; once the
 //! host hands the terminal back, [`exec_restart`] replaces the process
 //! image with the launch argv, session-source flags stripped and this
-//! session resumed (pi `interactive-mode.ts` `restart()` / `restartArgv`).
+//! session resumed.
 
 use std::{
 	ffi::OsString,
@@ -21,7 +21,7 @@ use super::ServiceState;
 /// Set by `/restart`; read by the chat launcher after the host exits.
 static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// pi `dumpLlmRequestToTmpDir`: `<tmp>/omp-request-<stem>.json`.
+/// Writes the projected request to `<tmp>/omp-request-<stem>.json`.
 pub(super) fn dump_request(state: &ServiceState, dom: &omp_dom::Dom) -> ServiceResult<PathBuf> {
 	let journal = state.live_journal.read().clone();
 	let items = omp_session::project_thread(dom);
@@ -56,7 +56,7 @@ const SESSION_SOURCE_FLAGS_WITH_VALUE: &[&str] = &["--resume", "-r", "--session"
 const SESSION_SOURCE_FLAGS: &[&str] =
 	&["--continue", "-c", "--no-session", "--from-claude", "--from-codex"];
 
-/// pi `restartArgv`: the launch argv minus session-source flags and the
+/// The launch argv minus session-source flags and the
 /// positional prompt messages and `@file` arguments clap parsed (`prompts`,
 /// removed once each from the end), plus `--resume <path>` when the journal
 /// exists.

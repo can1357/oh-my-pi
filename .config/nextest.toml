@@ -5,8 +5,8 @@
 # Doctests are NOT run by nextest (upstream limitation: they have no stable
 # libtest-json interface). The `just test` / CI recipes pair every nextest
 # invocation with `cargo test --doc`; omp has doctests in 25+ modules under
-# crates/core, crates/shell-*, and crates/slopjson, so dropping that step
-# silently deletes real coverage.
+# crates/core and crates/shell-*, so dropping that step silently deletes real
+# coverage.
 
 [profile.default]
 # Print each failure when it happens and again in the final summary — a run

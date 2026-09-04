@@ -6,6 +6,7 @@ use std::{
 	fmt::Display,
 	fs, io,
 	path::{Component, Path, PathBuf},
+	str,
 	sync::{
 		self, Arc,
 		atomic::{AtomicBool, Ordering},
@@ -14,8 +15,8 @@ use std::{
 };
 
 use bytes::Bytes;
-use omp_core::{Hash32, Str};
-use omp_hashline::{RevisionToken, compute_snapshot_tag};
+use omp_core::Str;
+use omp_edit::store::file_hash;
 use omp_tools::{
 	glob::{self, WalkMatch, WalkResult},
 	grep::{
@@ -36,8 +37,8 @@ use tokio::{task, time};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-	docs::DocumentHost, tool_read_sources::ReadSourceAdapter, tool_url::UrlResolver,
-	workspace::WorkspaceHost,
+	docs::DocumentHost, tool_document::snapshot_text, tool_read_sources::ReadSourceAdapter,
+	tool_url::UrlResolver, workspace::WorkspaceHost,
 };
 
 const CANCELLED_REASON: &str = "workspace traversal future was dropped";
@@ -101,8 +102,10 @@ impl WorkspaceSearch for WorkspaceSearchAdapter {
 		async move {
 			let cancel = CancellationToken::new();
 			let blocking_cancel = Arc::new(AtomicBool::new(false));
-			let cancel_on_drop =
-				BlockingCancelOnDrop { token: cancel.clone(), blocking: Arc::clone(&blocking_cancel) };
+			let cancel_on_drop = BlockingCancelOnDrop {
+				token:    cancel.clone(),
+				blocking: Arc::clone(&blocking_cancel),
+			};
 			let deadline = Instant::now()
 				.checked_add(Duration::from_millis(u64::from(request.timeout_ms)))
 				.unwrap_or_else(Instant::now);
@@ -127,34 +130,36 @@ impl WorkspaceSearch for WorkspaceSearchAdapter {
 	}
 
 	fn stage_snapshots(&self, snapshots: Vec<SearchSnapshot>) -> Result<(), grep::Fault> {
-		let mut store = self.documents.snapshot_store().lock();
+		let store = self.documents.snapshot_store();
 		for snapshot in snapshots {
-			store
-				.record(
-					snapshot.source_key,
-					RevisionToken::new(&snapshot.revision),
-					snapshot.bytes,
-					std::iter::empty(),
-				)
-				.map_err(grep_workspace_message)?;
+			let text = snapshot_text(&snapshot.bytes).ok_or_else(|| grep::Fault::Workspace {
+				message: Str::new_static("grep snapshot content is not UTF-8"),
+			})?;
+			store.record(Path::new(snapshot.source_key.as_str()), &text, None);
 		}
 		Ok(())
 	}
 
 	fn record_snapshots(&self, records: Vec<grep::SnapshotRecord>) -> Result<(), grep::Fault> {
-		let mut store = self.documents.snapshot_store().lock();
+		let store = self.documents.snapshot_store();
 		for record in records {
-			let revision = RevisionToken::new(&record.revision);
-			let Some(snapshot) = store.by_revision(&record.source_key, &revision) else {
+			let tag = str::from_utf8(&record.revision).map_err(|_| grep::Fault::Workspace {
+				message: Str::new_static("grep snapshot identity is invalid"),
+			})?;
+			let path = Path::new(record.source_key.as_str());
+			let Some(snapshot) = store.by_hash(path, tag) else {
 				return Err(grep::Fault::Workspace {
 					message: Str::new_static(
 						"grep snapshot revision expired before visibility authorization",
 					),
 				});
 			};
-			store
-				.record(record.source_key, revision, snapshot.bytes().clone(), record.seen_lines)
-				.map_err(grep_workspace_message)?;
+			let seen_lines = record
+				.seen_lines
+				.into_iter()
+				.filter_map(|line| u32::try_from(line).ok())
+				.collect::<Vec<_>>();
+			store.record_seen_lines(path, &snapshot.hash, &seen_lines);
 		}
 		Ok(())
 	}
@@ -167,8 +172,7 @@ impl WorkspaceSearch for WorkspaceSearchAdapter {
 		let host = self.host.clone();
 		async move {
 			let cancel_on_drop = CancelOnDrop(cancellation.clone());
-			let operation =
-				task::spawn_blocking(move || glob_blocking(&host, request, &cancellation));
+			let operation = task::spawn_blocking(move || glob_blocking(&host, request, &cancellation));
 			let result = operation.await.map_err(|error| glob::Fault::Workspace {
 				message: Str::from(format!("workspace walk task failed: {error}")),
 			})?;
@@ -445,8 +449,7 @@ async fn materialize_external_roots(
 						.map_err(|_| grep::Fault::TimedOut)?;
 				match archive {
 					Ok((targets, unreadable)) => {
-						if !root.ranges.is_empty()
-							&& targets.len().saturating_add(unreadable.len()) != 1
+						if !root.ranges.is_empty() && targets.len().saturating_add(unreadable.len()) != 1
 						{
 							return Err(grep::Fault::InvalidSelector {
 								message: Str::from(format!(
@@ -662,8 +665,8 @@ async fn materialize_internal_root(
 	Ok(vec![MemorySearchTarget {
 		root_index,
 		source_key: root.path.clone(),
-		path:       root.path.clone(),
-		content:    content.into_bytes(),
+		path: root.path.clone(),
+		content: content.into_bytes(),
 	}])
 }
 
@@ -766,7 +769,8 @@ fn search_blocking(
 		let (display_path, glob) = match target {
 			GrepTarget::Filesystem { path, glob, is_file, .. } => {
 				if *is_file
-					&& fs::metadata(path).is_ok_and(|metadata| metadata.len() > omp_grep::MAX_FILE_BYTES)
+					&& fs::metadata(path)
+						.is_ok_and(|metadata| metadata.len() > crate::grep::MAX_FILE_BYTES)
 				{
 					oversized_files.push(workspace_relative(host.root(), path)?);
 				}
@@ -774,7 +778,7 @@ fn search_blocking(
 			},
 			GrepTarget::Memory(memory) => (memory.path.clone(), None),
 		};
-		let options = omp_grep::GrepOptions {
+		let options = crate::grep::GrepOptions {
 			pattern: request.pattern.clone(),
 			path: display_path,
 			glob,
@@ -787,22 +791,20 @@ fn search_blocking(
 			context_before: request.context_before,
 			context_after: request.context_after,
 			max_columns: Some(request.max_columns),
-			mode: omp_grep::GrepOutputMode::Content,
+			mode: crate::grep::GrepOutputMode::Content,
 			timeout_ms: Some(timeout_ms),
 		};
 		let native = match target {
 			GrepTarget::Filesystem { .. } => {
-				omp_grep::grep_with_cancellation(&options, blocking_cancel.as_ref())
+				crate::grep::grep_with_cancellation(&options, blocking_cancel.as_ref())
 					.map_err(map_native_grep_fault)?
 			},
-			GrepTarget::Memory(memory) => {
-				omp_grep::search_with_cancellation(
-					&memory.content,
-					&options,
-					blocking_cancel.as_ref(),
-				)
-				.map_err(map_native_grep_fault)?
-			},
+			GrepTarget::Memory(memory) => crate::grep::search_with_cancellation(
+				&memory.content,
+				&options,
+				blocking_cancel.as_ref(),
+			)
+			.map_err(map_native_grep_fault)?,
 		};
 		skipped_oversized = skipped_oversized.saturating_add(native.skipped_oversized);
 		limit_reached |= native.limit_reached;
@@ -864,7 +866,10 @@ fn search_blocking(
 	let mut snapshot_tags = HashMap::with_capacity(pending_snapshots.len());
 	for (source_key, pending) in pending_snapshots {
 		if let Some(snapshot) = prepare_grep_snapshot(source_key.clone(), &pending.path) {
-			snapshot_tags.insert(source_key, compute_snapshot_tag(&snapshot.bytes));
+			snapshot_tags.insert(
+				source_key,
+				Str::from(str::from_utf8(&snapshot.revision).expect("prepared tag is UTF-8")),
+			);
 			snapshots.push(snapshot);
 		}
 	}
@@ -952,26 +957,27 @@ fn prepare_grep_snapshot(source_key: Str, path: &Path) -> Option<SearchSnapshot>
 		return None;
 	}
 	let bytes = Bytes::from(fs::read(path).ok()?);
-	let revision = Bytes::copy_from_slice(Hash32::sum(&bytes).as_bytes());
+	let text = snapshot_text(&bytes)?;
+	let revision = Bytes::from(file_hash(&text));
 	Some(SearchSnapshot { source_key, revision, bytes })
 }
 
-fn map_native_grep_fault(error: omp_grep::GrepError) -> grep::Fault {
+fn map_native_grep_fault(error: crate::grep::GrepError) -> grep::Fault {
 	match error {
-		omp_grep::GrepError::InvalidRegex { regex, pcre2 } => {
+		crate::grep::GrepError::InvalidRegex { regex, pcre2 } => {
 			let message = format!("{regex}; PCRE2 fallback: {pcre2}");
 			grep::Fault::InvalidRegex { message: Str::from(strip_regex_error_prefix(&message)) }
 		},
-		omp_grep::GrepError::Timeout { .. } => grep::Fault::TimedOut,
-		omp_grep::GrepError::Cancelled => {
+		crate::grep::GrepError::Timeout { .. } => grep::Fault::TimedOut,
+		crate::grep::GrepError::Cancelled => {
 			grep::Fault::Cancelled { reason: Str::from(CANCELLED_REASON) }
 		},
-		omp_grep::GrepError::PathNotFound { path } => {
+		crate::grep::GrepError::PathNotFound { path } => {
 			grep::Fault::AllPathsMissing { paths: vec![path] }
 		},
-		omp_grep::GrepError::InvalidGlob { message }
-		| omp_grep::GrepError::Walk { message }
-		| omp_grep::GrepError::Search { message } => grep::Fault::Workspace { message },
+		crate::grep::GrepError::InvalidGlob { message }
+		| crate::grep::GrepError::Walk { message }
+		| crate::grep::GrepError::Search { message } => grep::Fault::Workspace { message },
 	}
 }
 fn strip_regex_error_prefix(message: &str) -> &str {
@@ -1518,10 +1524,6 @@ mod tests {
 	use std::future;
 
 	use omp_core::sf;
-	use omp_docserver::{
-		Environment, ServerConfig,
-		connection::{ConnectionConfig, serve_connection},
-	};
 	use omp_tools::read::{resolver::SchemeEntry, web::types::WebError};
 	use tokio::{
 		io::{AsyncReadExt as _, AsyncWriteExt as _, duplex},
@@ -1530,6 +1532,10 @@ mod tests {
 
 	use super::*;
 	use crate::{
+		docserver::{
+			Environment, ServerConfig,
+			connection::{ConnectionConfig, serve_connection},
+		},
 		document_cache::project_document_cache,
 		tool_url::{UrlResolver, docs::DocsResolver, vault::VaultResolver},
 		vault::{VaultPaths, VaultService},
@@ -1567,15 +1573,19 @@ mod tests {
 		let table = builder.build();
 		let root = SearchRoot {
 			original: sf!("omp://"),
-			path: sf!("omp://"),
-			kind: SearchRootKind::Internal,
-			ranges: Box::default(),
+			path:     sf!("omp://"),
+			kind:     SearchRootKind::Internal,
+			ranges:   Box::default(),
 		};
 		let targets = materialize_internal_root(&table, &root, 3)
 			.await
 			.expect("materialize docs");
 		assert!(targets.len() > 1);
-		assert!(targets.iter().all(|target| target.path.starts_with("omp://")));
+		assert!(
+			targets
+				.iter()
+				.all(|target| target.path.starts_with("omp://"))
+		);
 		assert!(targets.iter().all(|target| target.root_index == 3));
 		assert!(targets.windows(2).all(|pair| pair[0].path < pair[1].path));
 	}
@@ -1588,22 +1598,22 @@ mod tests {
 		let roots = vec![
 			SearchRoot {
 				original: sf!("semi"),
-				path: sf!("semi"),
-				kind: SearchRootKind::Filesystem,
-				ranges: Box::default(),
+				path:     sf!("semi"),
+				kind:     SearchRootKind::Filesystem,
+				ranges:   Box::default(),
 			},
 			SearchRoot {
 				original: sf!("colon.txt"),
-				path: sf!("colon.txt"),
-				kind: SearchRootKind::Filesystem,
-				ranges: Box::default(),
+				path:     sf!("colon.txt"),
+				kind:     SearchRootKind::Filesystem,
+				ranges:   Box::default(),
 			},
 		];
 		let unsplit = SearchRoot {
 			original: sf!("semi;colon.txt"),
-			path: sf!("semi;colon.txt"),
-			kind: SearchRootKind::Filesystem,
-			ranges: Box::default(),
+			path:     sf!("semi;colon.txt"),
+			kind:     SearchRootKind::Filesystem,
+			ranges:   Box::default(),
 		};
 		let prepared = adapter
 			.prepare_roots(roots, Some(unsplit))
@@ -1614,7 +1624,10 @@ mod tests {
 
 		let mut request = search_request("semi;colon.txt", SearchRootKind::Filesystem, 5_000);
 		request.roots = prepared;
-		let result = adapter.search(request).await.expect("literal semicolon search");
+		let result = adapter
+			.search(request)
+			.await
+			.expect("literal semicolon search");
 		assert_eq!(result.matches.len(), 1);
 		assert_eq!(result.matches[0].path, "semi;colon.txt");
 	}
@@ -1636,9 +1649,9 @@ mod tests {
 		let mut mixed = search_request("gone.txt", SearchRootKind::Filesystem, 5_000);
 		mixed.roots.push(SearchRoot {
 			original: sf!("live.txt"),
-			path: sf!("live.txt"),
-			kind: SearchRootKind::Filesystem,
-			ranges: Box::default(),
+			path:     sf!("live.txt"),
+			kind:     SearchRootKind::Filesystem,
+			ranges:   Box::default(),
 		});
 		let result = adapter.search(mixed).await.expect("surviving root");
 		assert_eq!(result.matches.len(), 1);
@@ -1657,9 +1670,9 @@ mod tests {
 			.into_iter()
 			.map(|path| SearchRoot {
 				original: Str::new(path),
-				path: Str::new(path),
-				kind: SearchRootKind::Filesystem,
-				ranges: Box::default(),
+				path:     Str::new(path),
+				kind:     SearchRootKind::Filesystem,
+				ranges:   Box::default(),
 			})
 			.collect();
 		let result = adapter.search(request).await.expect("overlap search");
@@ -1679,10 +1692,7 @@ mod tests {
 		request.roots[0].ranges =
 			vec![omp_tools::read::selector::LineRange { start_line: 1, end_line: Some(2) }]
 				.into_boxed_slice();
-		assert!(matches!(
-			adapter.search(request).await,
-			Err(grep::Fault::InvalidSelector { .. })
-		));
+		assert!(matches!(adapter.search(request).await, Err(grep::Fault::InvalidSelector { .. })));
 	}
 
 	fn search_request(
@@ -1790,13 +1800,11 @@ mod tests {
 		fs::write(fixture.path().join("route[id].rs"), "").expect("literal glob characters");
 		let host = WorkspaceHost::open(fixture.path()).expect("workspace host");
 
+		assert_eq!(split_glob_inputs(&host, "literal;name.rs").expect("literal path"), [
+			"literal;name.rs"
+		]);
 		assert_eq!(
-			split_glob_inputs(&host, "literal;name.rs").expect("literal path"),
-			["literal;name.rs"]
-		);
-		assert_eq!(
-			split_glob_inputs(&host, "src/{one;two}.rs; tests/**/*.rs")
-				.expect("top-level roots"),
+			split_glob_inputs(&host, "src/{one;two}.rs; tests/**/*.rs").expect("top-level roots"),
 			["src/{one;two}.rs", "tests/**/*.rs"]
 		);
 		assert_eq!(
@@ -1928,10 +1936,10 @@ mod tests {
 			glob_blocking(
 				&host,
 				glob::WalkRequest {
-					path: sf!("one/**/*.rs"),
-					hidden: true,
-					gitignore: false,
-					limit: 200,
+					path:       sf!("one/**/*.rs"),
+					hidden:     true,
+					gitignore:  false,
+					limit:      200,
 					timeout_ms: 5_000,
 				},
 				&cancellation,
@@ -1984,10 +1992,10 @@ mod tests {
 		let GrepTarget::Filesystem { path, .. } = target else {
 			panic!("external file resolved to memory");
 		};
-		let result = omp_grep::grep(&omp_grep::GrepOptions {
+		let result = crate::grep::grep(&crate::grep::GrepOptions {
 			pattern: sf!("needle"),
 			path: Str::from(path.to_string_lossy().into_owned()),
-			..omp_grep::GrepOptions::default()
+			..crate::grep::GrepOptions::default()
 		})
 		.expect("grep external file");
 
@@ -2060,8 +2068,7 @@ mod tests {
 			adapter
 				.documents
 				.snapshot_store()
-				.lock()
-				.head(source_key.as_str())
+				.head(Path::new(source_key.as_str()))
 				.is_none(),
 			"native overfetch must not authorize lines before final projection"
 		);
@@ -2074,9 +2081,8 @@ mod tests {
 			adapter
 				.documents
 				.snapshot_store()
-				.lock()
-				.head(source_key.as_str())
-				.is_some_and(|snapshot| snapshot.seen_lines().is_empty()),
+				.head(Path::new(source_key.as_str()))
+				.is_some_and(|snapshot| snapshot.seen_lines.is_none()),
 			"staging bytes must not authorize any source line"
 		);
 		WorkspaceSearch::record_snapshots(&adapter, vec![grep::SnapshotRecord {
@@ -2088,11 +2094,17 @@ mod tests {
 		let retained = adapter
 			.documents
 			.snapshot_store()
-			.lock()
-			.head(source_key.as_str())
+			.head(Path::new(source_key.as_str()))
 			.expect("visible snapshot retained");
 
-		assert_eq!(retained.seen_lines().iter().copied().collect::<Vec<_>>(), vec![2]);
+		assert_eq!(
+			retained
+				.seen_lines
+				.expect("visible lines recorded")
+				.into_iter()
+				.collect::<Vec<_>>(),
+			vec![2]
+		);
 	}
 
 	#[test]
@@ -2152,10 +2164,10 @@ mod tests {
 		assert_eq!(targets.len(), 1);
 		assert_eq!(targets[0].path, "fixture.zip:docs/readme.txt");
 		assert_eq!(unreadable, vec![sf!("fixture.zip:docs/blob.bin (binary archive entry)")]);
-		let result = omp_grep::search(&targets[0].content, &omp_grep::GrepOptions {
+		let result = crate::grep::search(&targets[0].content, &crate::grep::GrepOptions {
 			pattern: sf!("needle"),
 			path: targets[0].path.clone(),
-			..omp_grep::GrepOptions::default()
+			..crate::grep::GrepOptions::default()
 		})
 		.expect("search materialized member");
 		assert_eq!(result.matches.len(), 1);
@@ -2193,10 +2205,10 @@ mod tests {
 		let target = materialize_url_root(&CannedHttpClient, &root, 3)
 			.await
 			.expect("materialize URL");
-		let result = omp_grep::search(&target.content, &omp_grep::GrepOptions {
+		let result = crate::grep::search(&target.content, &crate::grep::GrepOptions {
 			pattern: sf!("needle"),
 			path: target.path.clone(),
-			..omp_grep::GrepOptions::default()
+			..crate::grep::GrepOptions::default()
 		})
 		.expect("search URL");
 
@@ -2283,13 +2295,17 @@ mod tests {
 		let authored = format!("{external}/a/../b/**/*.rs;{external}/b/**/*.rs");
 		let adapter = connected_search_adapter(&workspace).await;
 
-		let result = WorkspaceSearch::glob(&adapter, glob::WalkRequest {
-			path:       Str::from(authored),
-			hidden:     true,
-			gitignore:  false,
-			limit:      200,
-			timeout_ms: 5_000,
-		}, tokio_util::sync::CancellationToken::new())
+		let result = WorkspaceSearch::glob(
+			&adapter,
+			glob::WalkRequest {
+				path:       Str::from(authored),
+				hidden:     true,
+				gitignore:  false,
+				limit:      200,
+				timeout_ms: 5_000,
+			},
+			tokio_util::sync::CancellationToken::new(),
+		)
 		.await
 		.expect("glob equivalent external absolute targets");
 
@@ -2316,13 +2332,17 @@ mod tests {
 		let alias = alias.to_string_lossy().replace('\\', "/");
 		let adapter = connected_search_adapter(&workspace).await;
 
-		let result = WorkspaceSearch::glob(&adapter, glob::WalkRequest {
-			path:       Str::from(format!("{alias}/**/*.rs")),
-			hidden:     true,
-			gitignore:  false,
-			limit:      200,
-			timeout_ms: 5_000,
-		}, tokio_util::sync::CancellationToken::new())
+		let result = WorkspaceSearch::glob(
+			&adapter,
+			glob::WalkRequest {
+				path:       Str::from(format!("{alias}/**/*.rs")),
+				hidden:     true,
+				gitignore:  false,
+				limit:      200,
+				timeout_ms: 5_000,
+			},
+			tokio_util::sync::CancellationToken::new(),
+		)
 		.await
 		.expect("glob authored external symlink alias");
 
@@ -2340,13 +2360,17 @@ mod tests {
 		let source = external.join("lib.rs");
 		fs::write(&source, "fn external() {}\n").expect("external source");
 		let adapter = connected_search_adapter(&workspace).await;
-		let result = WorkspaceSearch::glob(&adapter, glob::WalkRequest {
-			path:       sf!("../external/**/*.rs"),
-			hidden:     true,
-			gitignore:  false,
-			limit:      200,
-			timeout_ms: 5_000,
-		}, tokio_util::sync::CancellationToken::new())
+		let result = WorkspaceSearch::glob(
+			&adapter,
+			glob::WalkRequest {
+				path:       sf!("../external/**/*.rs"),
+				hidden:     true,
+				gitignore:  false,
+				limit:      200,
+				timeout_ms: 5_000,
+			},
+			tokio_util::sync::CancellationToken::new(),
+		)
 		.await
 		.expect("glob external parent-relative directory through adapter");
 

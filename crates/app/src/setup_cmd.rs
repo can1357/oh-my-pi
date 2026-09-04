@@ -3,12 +3,12 @@
 use std::{cell::Cell, fs, io, io::IsTerminal as _, path::Path, str::FromStr as _};
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_core::Str;
-use omp_inference::local::{
+use omp_ai::local::{
 	ArtifactStore, LocalCancellation, SystemArtifactFetcher,
 	artifact::ArtifactCacheStatus,
 	speech_catalog::{STT_PRESETS, SpeechArtifactManifests, SpeechCatalog, SttPreset},
 };
+use omp_core::Str;
 use serde_json::json;
 
 use crate::{

@@ -138,7 +138,7 @@ pub fn replace(input: &str, paths: &BTreeMap<Str, Str>) -> Str {
 			match occurrence.quote {
 				QuoteContext::Double => push_double_escaped(&mut output, path),
 				QuoteContext::Single | QuoteContext::Unquoted | QuoteContext::Substitution => {
-					push_single_quoted(&mut output, path)
+					push_single_quoted(&mut output, path);
 				},
 			}
 		}
@@ -292,7 +292,7 @@ mod tests {
 		]);
 		assert_eq!(
 			replace("wc 'artifact://7' \"artifact://7\"; cp attachment://1 out", &paths),
-			r#"wc '/tmp/artifact 7' '/tmp/artifact 7'; cp '/tmp/image'\''s.png' out"#,
+			r"wc '/tmp/artifact 7' '/tmp/artifact 7'; cp '/tmp/image'\''s.png' out",
 		);
 		assert_eq!(replace("echo 'see artifact://7 later'", &paths), "echo 'see artifact://7 later'",);
 	}

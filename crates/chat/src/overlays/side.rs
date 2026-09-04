@@ -1,5 +1,5 @@
-//! Side-channel panel above the editor for `/btw` (pi `btw-panel.ts`,
-//! `btw-controller.ts`): the question as a header with a status
+//! Side-channel panel above the editor for `/btw`: the question as a header
+//! with a status
 //! indicator, the answer streamed in below it, `c` to copy, Esc to close
 //! (aborting the side kernel when it is still answering). The composer
 //! stays live underneath (`PanelAnchor::Side`).
@@ -21,7 +21,7 @@ const CHROME_ROWS: u16 = 5;
 /// Answer pane cap: the side panel never eats the transcript.
 const MAX_ROWS: u16 = 12;
 
-/// pi `BtwPanelComponent` status badge.
+/// Side-panel status badge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SideStatus {
 	/// The side kernel is still streaming.

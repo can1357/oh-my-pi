@@ -1,4 +1,4 @@
-//! Composer status band: pi's band-layout status line docked to the
+//! Composer status band docked to the
 //! composer (`status-line/component.ts` `#buildStatusLine`).
 
 use core::fmt::Write as _;
@@ -23,13 +23,13 @@ use smallvec::SmallVec;
 
 use crate::chrome::STATUS_ID;
 
-/// Longest path label in the status band (pi `clampPathLength` default).
+/// Longest path label in the status band ( `clampPathLength` default).
 const PATH_MAX: u16 = 40;
 
 /// Status-line segment preset.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum StatusPreset {
-	/// Pi's balanced launch/runtime bar.
+	/// Balanced launch/runtime bar.
 	#[default]
 	Default,
 	/// Path, branch, title, mode, and context only.
@@ -42,7 +42,7 @@ pub enum StatusPreset {
 	Nerd,
 	/// ASCII-safe compact status.
 	Ascii,
-	/// Host-supplied custom order; until arrays are supplied it follows pi's
+	/// Host-supplied custom order; until arrays are supplied it follows the
 	/// custom defaults.
 	Custom,
 }
@@ -83,7 +83,7 @@ pub enum ContextLine {
 
 /// One configurable status-line segment.
 ///
-/// String forms are pi's public `StatusLineSegmentId` vocabulary. Unknown
+/// String forms are the public `StatusLineSegmentId` vocabulary. Unknown
 /// strings are intentionally rejected by `FromStr`; the host drops them
 /// while retaining every known occurrence in declaration order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString, strum::IntoStaticStr)]
@@ -199,7 +199,7 @@ pub struct StatusSegmentOptions {
 }
 
 impl StatusSegmentOptions {
-	/// Parses pi's nested `segmentOptions` record.
+	/// Parses the nested `segmentOptions` record.
 	#[must_use]
 	pub fn from_kv(options: &Kv) -> Option<Self> {
 		let mut parsed = Self::default();
@@ -324,7 +324,7 @@ impl Default for StatusAppearance {
 }
 
 impl StatusAppearance {
-	/// Pi's default separator for a preset.
+	/// Default separator for a preset.
 	#[must_use]
 	pub fn for_preset(preset: StatusPreset) -> Self {
 		let separator = match preset {
@@ -386,7 +386,7 @@ impl StatusAppearance {
 		preset.overlay(self.segment_options)
 	}
 
-	/// Resolves pi's preset defaults, nested `segmentOptions.time` values,
+	/// Resolves preset defaults, nested `segmentOptions.time` values,
 	/// and the two curated clock overrides. Presets without a configured
 	/// `time` segment return `None`, so an invisible clock owns no timer.
 	#[must_use]
@@ -429,7 +429,7 @@ impl StatusAppearance {
 	}
 }
 
-/// User override for the clock's hour format. `Preset` preserves pi's
+/// User override for the clock's hour format. `Preset` preserves the
 /// per-preset option.
 #[derive(
 	Clone,
@@ -461,7 +461,7 @@ pub enum WallClockFormatSetting {
 omp_con::con_enum!(WallClockFormatSetting);
 
 /// User override for whether the clock includes seconds. `Preset` preserves
-/// pi's full/nerd distinction.
+/// 's full/nerd distinction.
 #[derive(
 	Clone,
 	Copy,
@@ -552,7 +552,7 @@ pub(crate) fn wall_clock_next_wake(
 	host_now.saturating_add(Duration::from_nanos(remaining))
 }
 
-/// Background compaction speculation state shown on the gauge tick (pi
+/// Background compaction speculation state shown on the gauge tick (
 /// `compactionSpeculation`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Speculation {
@@ -565,7 +565,7 @@ pub enum Speculation {
 	Armed,
 }
 
-/// Worst status across the advisor roster (pi `getAdvisorStatusOverview`).
+/// Worst status across the advisor roster ( `getAdvisorStatusOverview`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdvisorHealth {
 	/// Every advisor is running.
@@ -587,7 +587,7 @@ pub struct AdvisorBadge {
 	pub yielded: bool,
 }
 
-/// Exact porcelain counts shown after the branch (pi's `git` segment).
+/// Exact porcelain counts shown after the branch ('s `git` segment).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GitStatus {
 	/// Files staged in the index.
@@ -626,7 +626,7 @@ pub struct WorktreeLabel {
 	pub worktree: Str,
 }
 
-/// One provider-account quota window for pi's `usage` segment.
+/// One provider-account quota window for the `usage` segment.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UsageWindow {
 	/// Used percentage.
@@ -651,7 +651,7 @@ pub struct AccountUsage {
 	pub monthly:   Option<UsageWindow>,
 }
 
-/// Local collaboration role shown by pi's `collab` segment.
+/// Local collaboration role shown by the `collab` segment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CollabStatusRole {
 	/// This controller owns the authoritative session.
@@ -718,7 +718,7 @@ impl CollabStatus {
 	}
 }
 
-/// Lifecycle of an engaged goal Director (pi `goalMode.status`).
+/// Lifecycle of an engaged goal Director ( `goalMode.status`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GoalState {
 	/// Working toward the objective.
@@ -747,8 +747,8 @@ pub enum LoopLimit {
 	Duration(Duration),
 }
 
-/// The active Director workflow shown as the band's mode chip (pi `mode`
-/// segment). At most one shows, in pi's precedence: plan, prewalk, goal,
+/// The active Director workflow shown as the band's mode chip ( `mode`
+/// segment). At most one shows, in precedence: plan, prewalk, goal,
 /// vibe, loop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModeChip {
@@ -790,7 +790,7 @@ pub struct StatusFacts {
 	/// `None` for models without thinking.
 	pub thinking: Option<Str>,
 	/// Whether the thinking glyph replaces the model icon instead of trailing
-	/// the name as ` · <level>` (pi `statusLine.compactThinkingLevel`).
+	/// the name as ` · <level>` ( `statusLine.compactThinkingLevel`).
 	pub compact_thinking: bool,
 	/// Fast mode is on (`ai_fastmode`); the fast icon trails the model name.
 	pub fast: bool,
@@ -804,7 +804,7 @@ pub struct StatusFacts {
 	pub raw_cwd: Option<Str>,
 	/// Exact home directory used by path abbreviation.
 	pub home: Option<Str>,
-	/// Whether the project lives under a scratch root (pi `scratchFolder`
+	/// Whether the project lives under a scratch root ( `scratchFolder`
 	/// icon instead of the folder icon).
 	pub scratch: bool,
 	/// Absolute `file://` hyperlink target for the displayed path.
@@ -879,7 +879,7 @@ pub struct StatusFacts {
 	/// Start of the in-flight turn on the presentation clock; `Some` swaps
 	/// the brand glyph for the spinner and elapsed-time timer.
 	pub working: Option<Duration>,
-	/// Subagent whose session the view shows (pi `focusedAgentId`): the
+	/// Subagent whose session the view shows ( `focusedAgentId`): the
 	/// brand slot carries the ghost and the agent id in the warning color
 	/// for as long as input goes to that agent.
 	pub focused_agent: Option<Str>,
@@ -980,10 +980,10 @@ pub struct PathLabel {
 	pub scratch: bool,
 }
 
-/// Scratch roots pi's `path` segment relabels with the trash icon: the
+/// Scratch roots relabeled with the trash icon: the
 /// platform temp dir plus the conventional temp locations.
 const SCRATCH_ROOTS: [&str; 4] = ["/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp"];
-/// Roots pi's `stripWorkPrefix` drops from the label.
+/// Roots dropped from the label.
 const DISPLAY_ROOTS: [&str; 1] = ["/work"];
 
 /// Path relative to `root` when `path` sits strictly inside it.
@@ -998,7 +998,7 @@ fn within_root<'a>(root: &str, path: &'a str) -> Option<&'a str> {
 		.filter(|rest| !rest.is_empty())
 }
 
-/// Labels a project path for the status band like pi's `path` segment.
+/// Labels a project path for the status band.
 ///
 /// Scratch roots become relative labels with the scratch icon, `/work` and
 /// `~/Projects` are stripped, and the home prefix becomes `~`. `tmp` is the
@@ -1028,7 +1028,7 @@ pub fn display_path(path: &str, home: Option<&str>, tmp: Option<&str>) -> PathLa
 	PathLabel { text: shorten_home(path, home), scratch: false }
 }
 
-/// `~` for the home prefix (pi `shortenPath`).
+/// `~` for the home prefix ( `shortenPath`).
 fn shorten_home(path: &str, home: Option<&str>) -> Str {
 	match home {
 		Some(home) if path == home => Str::new_static("~"),
@@ -1048,7 +1048,7 @@ fn expand_home(path: &str, home: Option<&str>) -> Str {
 	}
 }
 
-/// Left-clamps a label to `max` cells with a leading ellipsis (pi
+/// Left-clamps a label to `max` cells with a leading ellipsis (
 /// `clampPathLength`).
 fn clamp_path(text: &str, max: u16) -> Str {
 	if cell_width(text) <= max {
@@ -1068,7 +1068,7 @@ fn clamp_path(text: &str, max: u16) -> Str {
 	Str::new(format!("…{}", &text[start..]))
 }
 
-/// Right-clamps a label to `max` cells with a trailing ellipsis (pi
+/// Right-clamps a label to `max` cells with a trailing ellipsis (
 /// `truncateToWidth` on the session title).
 fn clamp_end(text: &str, max: u16) -> Str {
 	if cell_width(text) <= max {
@@ -1089,7 +1089,7 @@ fn clamp_end(text: &str, max: u16) -> Str {
 }
 
 /// Turn timer in the brand slot: whole seconds, then minutes, then hours
-/// capped at 99 (pi `brandTimer`).
+/// capped at 99 ( `brandTimer`).
 fn elapsed_label(out: &mut String, elapsed: Duration) {
 	let seconds = elapsed.as_secs();
 	if seconds < 60 {
@@ -1102,7 +1102,7 @@ fn elapsed_label(out: &mut String, elapsed: Duration) {
 }
 
 /// Premium-request count from millionths, rounded to two decimals with
-/// trailing zeros dropped (pi `normalizePremiumRequests` + `formatNumber`:
+/// trailing zeros dropped ( `normalizePremiumRequests` + `formatNumber`:
 /// `330_000` → `0.33`, `1_500_000` → `1.5`, `2_000_000` → `2`); whole counts
 /// of a thousand or more compact like every other count.
 fn write_premium_requests(out: &mut String, millionths: u64) {
@@ -1345,7 +1345,7 @@ fn account_usage_label(
 	Some((Str::new(text), parts))
 }
 
-/// Themed icon of a reasoning level (pi `theme.thinking[level]`).
+/// Themed icon of a reasoning level ( `theme.thinking[level]`).
 fn thinking_icon(level: &str) -> Icon {
 	match level {
 		"off" => Icon::Disabled,
@@ -1360,7 +1360,7 @@ fn thinking_icon(level: &str) -> Icon {
 	}
 }
 
-/// Glyph of a reasoning level for the compact model icon (pi
+/// Glyph of a reasoning level for the compact model icon (
 /// `thinkingGlyph`): the first token of the themed level label.
 fn thinking_glyph(charset: Charset, level: &str) -> &'static str {
 	charset
@@ -1370,20 +1370,20 @@ fn thinking_glyph(charset: Charset, level: &str) -> &'static str {
 		.unwrap_or_default()
 }
 
-/// Brand-color fade across working-state edges (pi `BRAND_FADE_MS`).
+/// Brand-color fade across working-state edges ( `BRAND_FADE_MS`).
 const BRAND_FADE: Duration = Duration::from_millis(450);
-/// Repaint cadence while the brand fade is in flight (pi
+/// Repaint cadence while the brand fade is in flight (
 /// `BRAND_FADE_FRAME_MS`).
 const BRAND_FADE_FRAME: Duration = Duration::from_millis(40);
-/// Narrowest path label pi keeps before dropping other segments.
+/// Narrowest path label retained before dropping other segments.
 const PATH_MIN: u16 = 4;
-/// Narrowest session title pi keeps before dropping right segments.
+/// Narrowest session title retained before dropping right segments.
 const SESSION_NAME_MIN: u16 = 8;
-/// Half-period of the compaction speculation pulse (pi
+/// Half-period of the compaction speculation pulse (
 /// `#syncSpeculationBlink` `setInterval(…, 600)`).
 const SPECULATION_BLINK: Duration = Duration::from_millis(600);
 
-/// Whether the speculation pulse shows the accent phase at `now`: pi starts
+/// Whether the speculation pulse shows the accent phase at `now`: it starts
 /// `on` and toggles every blink period.
 const fn speculation_on(now: Duration) -> bool {
 	(now.as_millis() / SPECULATION_BLINK.as_millis()).is_multiple_of(2)
@@ -1443,7 +1443,7 @@ impl ActiveTime {
 		let visible_ms = if millis < 1_000 {
 			0
 		} else if millis < 60_000 {
-			// Pi uses `toFixed(1)`: round to the nearest tenth while retaining
+			// Round to the nearest tenth while retaining
 			// the sub-minute formatting branch for a rounded `60.0s`.
 			((millis + 50) / 100 * 100).min(59_999)
 		} else if millis < 3_600_000 {
@@ -1576,11 +1576,11 @@ struct LayoutCache {
 	layout: Layout,
 }
 
-/// One-row composer status in pi's band layout.
+/// One-row composer status in the band layout.
 ///
 /// The powerline group (brand, model, path, git) is bridged by the embedded
 /// context gauge to the right-docked group (session title, token counts,
-/// throughput, spend). Overflow follows pi's `#buildStatusLine`: the gauge
+/// throughput, spend). Overflow keeps the gauge
 /// keeps room for its labels, the session title shrinks first, then right
 /// chips pop from the right. Collaboration yields before the protected path;
 /// the path then shrinks before other left chips drop from the configured
@@ -1641,7 +1641,7 @@ impl StatusBand {
 	}
 
 	/// Writes the brand label for `now` into the scratch: the ghost and
-	/// agent id while a subagent is focused (pi `piSegment`), else the
+	/// agent id while a subagent is focused ( `piSegment`), else the
 	/// spinner and elapsed timer while working, else the brand glyph; one
 	/// trailing pad.
 	fn write_brand(&mut self, charset: Charset, now: Duration) {
@@ -1664,7 +1664,7 @@ impl StatusBand {
 		self.brand.push(' ');
 	}
 
-	/// Mode chip text and color (pi `modeSegment`), when a Director owns
+	/// Mode chip text and color ( `modeSegment`), when a Director owns
 	/// subsequent turns.
 	fn mode_label(&self, charset: Charset, theme: &Theme, accent: Color) -> Option<(Str, Color)> {
 		let mode = self.facts.mode?;
@@ -1766,7 +1766,7 @@ impl StatusBand {
 	}
 
 	/// Advisor badge glyph and its cell offset inside the model chip, when
-	/// advisors are configured (pi paints it as its own span between the
+	/// advisors are configured ( paints it as its own span between the
 	/// name and the tail).
 	fn advisor_span(&self, charset: Charset) -> Option<(u16, &'static str)> {
 		let badge = self.facts.advisor?;
@@ -1786,7 +1786,7 @@ impl StatusBand {
 		Some((offset.saturating_add(1), icon))
 	}
 
-	/// Model chip text (pi `modelSegment`): icon, name, fast icon, advisor
+	/// Model chip text ( `modelSegment`): icon, name, fast icon, advisor
 	/// badge, and the ` · <level>` tail when the level is not compact.
 	fn model_label(&self, charset: Charset) -> Str {
 		let model = if self.facts.model.is_empty() {
@@ -1818,7 +1818,7 @@ impl StatusBand {
 		Str::new(text)
 	}
 
-	/// Left-group labels at `path_max`, in pi's segment order. The brand
+	/// Left-group labels at `path_max`, in segment order. The brand
 	/// label is the scratch written by [`Self::write_brand`] for this frame;
 	/// its color is patched per frame by the caller.
 	fn git_parts(&self, pc: &PaintCtx<'_>) -> SmallVec<(u16, Str, Color), 3> {
@@ -2249,7 +2249,7 @@ impl StatusBand {
 				let wanted = segment.chip();
 				selected_right.extend(pool.iter().filter(|(chip, ..)| *chip == wanted).cloned());
 			}
-			// Pi treats live lifecycle badges as semantic right-group prefixes:
+			// Live lifecycle badges are semantic right-group prefixes:
 			// configuration cannot hide, duplicate, or relocate them.
 			for wanted in [Chip::Jobs, Chip::Subagents] {
 				if let Some(label) = pool.iter().find(|(chip, ..)| *chip == wanted) {
@@ -2277,7 +2277,7 @@ impl StatusBand {
 				}
 			}
 		}
-		// Pi's `showHookStatus` is orthogonal to status-line presets: a
+		// `showHookStatus` is orthogonal to status-line presets: a
 		// producer update remains visible without requiring users to add the
 		// optional `status` segment to a custom layout.
 		if !selected_left.iter().any(|(chip, ..)| *chip == Chip::Hook)
@@ -2364,7 +2364,7 @@ impl StatusBand {
 	}
 
 	/// Cells a group needs: labels, separators with their pads, the interior
-	/// pads, and both caps (pi `groupWidth`); zero for an empty group.
+	/// pads, and both caps ( `groupWidth`); zero for an empty group.
 	fn group_width(labels: &[Label], chrome: (&str, &str, &str)) -> u16 {
 		if labels.is_empty() {
 			return 0;
@@ -2383,7 +2383,7 @@ impl StatusBand {
 			.saturating_add(cell_width(cap))
 	}
 
-	/// Narrowest gauge that still carries both labels (pi
+	/// Narrowest gauge that still carries both labels (
 	/// `embeddedContextGaugeMinWidth`); one cell without a window.
 	fn gauge_min_width(&self) -> u16 {
 		if self.facts.appearance.context_line != ContextLine::Embedded {
@@ -2406,7 +2406,7 @@ impl StatusBand {
 			.saturating_add(4)
 	}
 
-	/// Fits both groups into `width` around the gauge (pi `#buildStatusLine`):
+	/// Fits both groups into `width` around the gauge ( `#buildStatusLine`):
 	/// clamp the session title, pop right chips, yield collaboration, shrink
 	/// the path, then shed left chips from the declared right edge.
 	fn fitted(&self, pc: &PaintCtx<'_>, width: u16) -> Layout {
@@ -2451,7 +2451,7 @@ impl StatusBand {
 			1
 		};
 		let custom = self.facts.appearance.preset == StatusPreset::Custom;
-		// pi `minimumGapWidth`: a lone surviving chip that cannot share the
+		// A lone surviving chip that cannot share the
 		// row with both gauge labels keeps the one-cell gauge instead of
 		// losing the whole band.
 		let overflow = |left: &[Label], right: &[Label]| {
@@ -2485,7 +2485,7 @@ impl StatusBand {
 			right.pop();
 		}
 		// Collaboration is optional presence metadata, while the project path
-		// is the stable location anchor. Keep pi's configured order for every
+		// is the stable location anchor. Keep the configured order for every
 		// other chip, but apply those semantic roles before spending any of the
 		// path's elastic width. Custom layouts may repeat either segment.
 		if left.iter().any(|(chip, ..)| *chip == Chip::Path) {
@@ -2682,7 +2682,7 @@ impl Component for StatusBand {
 		}
 		let theme = pc.ctx.theme;
 		let charset = pc.ctx.charset;
-		// Brand color eases between idle and working (pi `brandFgAnsi`); a
+		// Brand color eases between idle and working ( `brandFgAnsi`); a
 		// focused subagent holds the warning color instead.
 		let target = if self.facts.focused_agent.is_some() {
 			theme.warn
@@ -2857,7 +2857,7 @@ impl Component for StatusBand {
 		let speculation_marker = dim(Style::new().fg(theme.muted));
 		// Background speculation animates the compaction tick: pulsing
 		// accent/muted while a summary is produced, solid accent once armed
-		// (pi `contextPctSegment`).
+		// ( `contextPctSegment`).
 		let threshold = match speculation {
 			Speculation::None => boundary,
 			Speculation::Armed => dim(Style::new().fg(speculation_accent)),
@@ -3771,7 +3771,8 @@ pub(crate) mod tests {
 		};
 		let mut ui = Ui::from_root(StatusBand::new(focused.clone()), 80, ctx);
 		let row = frame_text(ui.frame()).lines().next().unwrap().to_owned();
-		// pi `piSegment`: the ghost and the agent id replace the brand glyph
+		// The `piSegment` identifier: the ghost and the agent id replace the
+		// brand glyph
 		// and the spinner alike while input goes to the subagent.
 		assert!(row.starts_with(" 👻 Fx2Cards  > ⬢ Sonnet 4.5"), "{row}");
 		assert!(!row.contains('⠋'), "no spinner while focused: {row}");

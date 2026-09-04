@@ -105,19 +105,19 @@ pub enum Command {
 /// Everything a driver needs to run a session.
 pub struct DriverCtx {
 	/// Commands from the public handle; disconnect means shut down.
-	pub commands: Receiver<Command>,
+	pub commands:  Receiver<Command>,
 	/// Out-of-band forced-close signal observed even while a protocol call is
 	/// waiting for its reply.
 	pub cancelled: Arc<AtomicBool>,
 	/// Event sink towards the host.
-	pub events:   flume::Sender<WebViewEvent>,
+	pub events:    flume::Sender<WebViewEvent>,
 	/// Shared url/title cache to keep current.
-	pub state:    SharedState,
+	pub state:     SharedState,
 	/// Page configuration from the builder.
-	pub page:     PageOptions,
+	pub page:      PageOptions,
 	/// Readiness signal; a driver MUST send exactly one result here once the
 	/// session is operational (or failed to become so).
-	pub ready:    flume::Sender<Result<()>>,
+	pub ready:     flume::Sender<Result<()>>,
 }
 
 /// Handle side of a remote driver: command sender plus the driver thread.
@@ -153,10 +153,7 @@ impl RemoteView {
 
 	/// Clone a cancellation-only handle.
 	pub fn close_handle(&self) -> CloseHandle {
-		CloseHandle {
-			commands:  self.commands.clone(),
-			cancelled: Arc::clone(&self.cancelled),
-		}
+		CloseHandle { commands: self.commands.clone(), cancelled: Arc::clone(&self.cancelled) }
 	}
 }
 
@@ -221,11 +218,9 @@ where
 		.map_err(Error::Io)?;
 
 	match ready_rx.recv_timeout(launch_timeout) {
-		Ok(Ok(())) => Ok((
-			RemoteView { commands: cmd_tx, cancelled, thread: Some(thread) },
-			evt_rx,
-			state,
-		)),
+		Ok(Ok(())) => {
+			Ok((RemoteView { commands: cmd_tx, cancelled, thread: Some(thread) }, evt_rx, state))
+		},
 		Ok(Err(err)) => {
 			let _ = thread.join();
 			Err(err)

@@ -733,19 +733,6 @@ impl SuffixMatchCache {
 	}
 }
 
-/// Prefixes rendered output with the exact suffix-resolution notice.
-pub fn prepend_suffix_resolution_notice(text: &str, from: &str, resolved: &SuffixMatch) -> String {
-	let notice = format!(
-		"[Path '{from}' not found; resolved to '{}' via suffix match]",
-		resolved.display_path
-	);
-	if text.is_empty() {
-		notice
-	} else {
-		format!("{notice}\n{text}")
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use omp_core::sf;

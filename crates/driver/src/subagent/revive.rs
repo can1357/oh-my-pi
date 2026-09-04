@@ -1,8 +1,8 @@
 //! Reviving a settled `<subagent>` into a live kernel that waits for work.
 //!
-//! pi `AgentLifecycleManager.ensureLive`: a parked agent comes back over
-//! its own session file and accepts prompts again. Here the child's journal
-//! is reopened and its kernel composed exactly as at spawn (ADR 0013 cfg
+//! A parked agent comes back over its own session file and accepts prompts
+//! again. The child's journal is reopened and its kernel composed exactly as
+//! at spawn (ADR 0013 cfg
 //! order, ADR 0007 isolation); one loop then drives it: while idle every
 //! `Up::Steer`/`Up::Peer` becomes the next turn, `Up::Subscribe` is
 //! answered from the child session, and after `sv_task_agent_idle_ttl`
@@ -125,8 +125,8 @@ pub fn revive_child(parent: &mut Session, request: ReviveRequest<'_>) -> Result<
 	SV_TASK_RECURSION_DEPTH.set(&ctx, depth.saturating_add(1))?;
 	let settings = TaskSettings::from_con(&ctx);
 	configure_child_route(&ctx, &settings, agent.as_str(), None)?;
-	if omp_con::AI_MODEL.get(&ctx).is_empty() {
-		omp_con::AI_MODEL.set(&ctx, Str::new(request.model))?;
+	if omp_agent::AI_MODEL.get(&ctx).is_empty() {
+		omp_agent::AI_MODEL.set(&ctx, Str::new(request.model))?;
 	}
 	let parent_id = parent
 		.journal_path()
@@ -282,7 +282,7 @@ async fn drive(
 	mut prompt: Option<Str>,
 	cancel: CancellationToken,
 ) -> Result<LiveRun, SpawnError> {
-	let model = omp_con::AI_MODEL.get(&child.ctx);
+	let model = omp_agent::AI_MODEL.get(&child.ctx);
 	let options = KernelOptions {
 		session: Some(child.session_path.clone()),
 		sessions_dir: Some(child.sessions_dir.clone()),

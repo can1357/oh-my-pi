@@ -39,14 +39,14 @@ impl RenderFold for GrepRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, complete: bool) {
 		state.pattern = args
 			.get("pattern")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new);
 		state.scope = args
 			.get("path")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new)
 			.or_else(|| complete.then(|| Str::new(".")));
 	}
@@ -79,16 +79,16 @@ impl RenderFold for GlobRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, complete: bool) {
 		state.pattern = args
 			.get("path")
-			.and_then(omp_slopjson::Value::as_str)
+			.and_then(omp_core::slopjson::Value::as_str)
 			.map(Str::new)
 			.or_else(|| complete.then(|| Str::new(".")));
 		state.scope = state.pattern.as_deref().map(display_scope);
 		state.limit = args
 			.get("limit")
-			.and_then(omp_slopjson::Value::as_u64)
+			.and_then(omp_core::slopjson::Value::as_u64)
 			.or_else(|| complete.then_some(GLOB_DEFAULT_LIMIT));
 	}
 
@@ -185,9 +185,6 @@ fn render_grep_payload(payload: &GrepPayload) -> El {
 					}
 				}
 			</col>
-			for note in &payload.notes {
-				<text fg=warn>{note}</text>
-			}
 		</col>
 	}
 }
@@ -224,10 +221,7 @@ fn render_glob_payload(state: &GlobState, payload: &GlobPayload) -> El {
 }
 
 /// Native grep and glob renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(
-	grep: ToolIdentity,
-	glob: ToolIdentity,
-) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(grep: ToolIdentity, glob: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
 			identity:       grep,
@@ -266,7 +260,7 @@ mod tests {
 		let mut state = GrepState::default();
 		GrepRenderer.fold_args(
 			&mut state,
-			&omp_slopjson::parse_streaming(fixture.streaming_args),
+			&omp_core::slopjson::parse_streaming(fixture.streaming_args),
 			false,
 		);
 		assert!(
@@ -275,7 +269,7 @@ mod tests {
 				.expect("streaming grep renders")
 				.contains("useSta")
 		);
-		GrepRenderer.fold_args(&mut state, &omp_slopjson::parse_streaming(fixture.args), true);
+		GrepRenderer.fold_args(&mut state, &omp_core::slopjson::parse_streaming(fixture.args), true);
 		let view = GrepRenderer
 			.view(&state, Some(&outcome))
 			.expect("grep renders");
@@ -298,7 +292,7 @@ mod tests {
 		let mut state = GlobState::default();
 		GlobRenderer.fold_args(
 			&mut state,
-			&omp_slopjson::parse_streaming(fixture.streaming_args),
+			&omp_core::slopjson::parse_streaming(fixture.streaming_args),
 			false,
 		);
 		assert!(
@@ -307,7 +301,7 @@ mod tests {
 				.expect("streaming glob renders")
 				.contains("test,sp")
 		);
-		GlobRenderer.fold_args(&mut state, &omp_slopjson::parse_streaming(fixture.args), true);
+		GlobRenderer.fold_args(&mut state, &omp_core::slopjson::parse_streaming(fixture.args), true);
 		let view = GlobRenderer
 			.view(&state, Some(&outcome))
 			.expect("glob renders");
@@ -328,7 +322,7 @@ mod tests {
 		let mut state = GlobState::default();
 		GlobRenderer.fold_args(
 			&mut state,
-			&omp_slopjson::parse_streaming(r#"{"path":"src/**","limit":1}"#),
+			&omp_core::slopjson::parse_streaming(r#"{"path":"src/**","limit":1}"#),
 			true,
 		);
 		let view = GlobRenderer

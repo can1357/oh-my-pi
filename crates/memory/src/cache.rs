@@ -103,7 +103,11 @@ impl RecallCache {
 		let mut entries = self.entries.lock();
 		entries.retain(|entry| entry.stamps == current);
 		let mut best: Option<(usize, f32)> = None;
-		for (index, entry) in entries.iter().enumerate().filter(|(_, entry)| entry.bounds == bounds) {
+		for (index, entry) in entries
+			.iter()
+			.enumerate()
+			.filter(|(_, entry)| entry.bounds == bounds)
+		{
 			let score = match (embedding.as_deref(), entry.embedding.as_deref()) {
 				(Some(left), Some(right)) if left.len() == right.len() => cosine(left, right),
 				_ => jaccard(&tokens, &entry.tokens),
@@ -150,9 +154,7 @@ impl RecallCache {
 			results,
 		};
 		let mut entries = self.entries.lock();
-		entries.retain(|existing| {
-			existing.query != entry.query || existing.bounds != entry.bounds
-		});
+		entries.retain(|existing| existing.query != entry.query || existing.bounds != entry.bounds);
 		entries.push_back(entry);
 		while entries.len() > self.capacity {
 			entries.pop_front();

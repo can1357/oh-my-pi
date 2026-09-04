@@ -282,7 +282,7 @@ impl Bits {
 
 	fn push(&mut self, value: u32, count: usize) {
 		for shift in (0..count).rev() {
-			if self.len % 8 == 0 {
+			if self.len.is_multiple_of(8) {
 				self.bytes.push(0);
 			}
 			let bit = (value >> shift) & 1;
@@ -336,7 +336,7 @@ fn codewords(payload: &[u8], mode: Mode, version: u8, level: QrEc) -> Vec<u8> {
 	// Terminator, byte alignment, then alternating pad codewords.
 	let remaining = capacity * 8 - bits.len;
 	bits.push(0, remaining.min(4));
-	if bits.len % 8 != 0 {
+	if !bits.len.is_multiple_of(8) {
 		bits.push(0, 8 - bits.len % 8);
 	}
 	let mut pad = [0xec_u8, 0x11].iter().copied().cycle();

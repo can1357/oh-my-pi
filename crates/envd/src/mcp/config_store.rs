@@ -82,9 +82,8 @@ impl McpConfigStore {
 		}
 		let legacy = fs::read(legacy_path)
 			.map_err(|source| ConfigStoreError::Io { path: legacy_path.to_path_buf(), source })?;
-		let file: McpConfigFile = serde_json::from_slice(&legacy).map_err(|source| {
-			ConfigStoreError::Json { path: legacy_path.to_path_buf(), source }
-		})?;
+		let file: McpConfigFile = serde_json::from_slice(&legacy)
+			.map_err(|source| ConfigStoreError::Json { path: legacy_path.to_path_buf(), source })?;
 		validate_file(legacy_path, &file)?;
 		self.write_unlocked(&file)?;
 		fs::remove_file(legacy_path)
@@ -251,7 +250,7 @@ fn update_enabled_if_present(
 
 fn validate_name(path: &Path, name: &str) -> Result<(), ConfigStoreError> {
 	config::validate_server_name(name).map_err(|issue| ConfigStoreError::Validation {
-		path: path.to_path_buf(),
+		path:   path.to_path_buf(),
 		issues: Box::new([issue]),
 	})
 }
@@ -266,7 +265,7 @@ fn validate_server(
 		Ok(())
 	} else {
 		Err(ConfigStoreError::Validation {
-			path: path.to_path_buf(),
+			path:   path.to_path_buf(),
 			issues: issues.into_boxed_slice(),
 		})
 	}
@@ -278,7 +277,7 @@ fn validate_file(path: &Path, file: &McpConfigFile) -> Result<(), ConfigStoreErr
 		Ok(())
 	} else {
 		Err(ConfigStoreError::Validation {
-			path: path.to_path_buf(),
+			path:   path.to_path_buf(),
 			issues: issues.into_boxed_slice(),
 		})
 	}
@@ -452,7 +451,7 @@ pub enum ConfigStoreError {
 	#[error("MCP configuration `{path}` failed schema validation")]
 	Validation {
 		/// Exact scoped configuration path containing invalid declarations.
-		path: PathBuf,
+		path:   PathBuf,
 		/// Every independently actionable schema issue in the document.
 		issues: Box<[config::ConfigValidationError]>,
 	},
@@ -611,7 +610,13 @@ mod tests {
 		root.add("shared", stdio("root")).expect("root");
 
 		set_server_enabled(&user, &project, Some(&root), "shared", false).expect("disable");
-		assert!(!project.get("shared").expect("project").expect("shared").enabled);
+		assert!(
+			!project
+				.get("shared")
+				.expect("project")
+				.expect("shared")
+				.enabled
+		);
 		assert!(user.get("shared").expect("user").expect("shared").enabled);
 		assert!(root.get("shared").expect("root").expect("shared").enabled);
 	}
@@ -637,11 +642,8 @@ mod tests {
 		let legacy = scratch.path().join(".omp/mcp.json");
 		let destination = scratch.path().join(".o2/mcp.json");
 		fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy parent");
-		fs::write(
-			&legacy,
-			br#"{"mcpServers":{"legacy":{"type":"stdio","command":"legacy"}}}"#,
-		)
-		.expect("legacy config");
+		fs::write(&legacy, br#"{"mcpServers":{"legacy":{"type":"stdio","command":"legacy"}}}"#)
+			.expect("legacy config");
 
 		let store = McpConfigStore::new(destination.clone());
 		assert!(store.migrate_from(&legacy).expect("migration"));
@@ -668,8 +670,7 @@ mod tests {
 
 		let invalid_legacy = scratch.path().join("invalid/mcp.json");
 		let invalid_destination = scratch.path().join("fresh/mcp.json");
-		fs::create_dir_all(invalid_legacy.parent().expect("invalid parent"))
-			.expect("invalid parent");
+		fs::create_dir_all(invalid_legacy.parent().expect("invalid parent")).expect("invalid parent");
 		fs::write(
 			&invalid_legacy,
 			br#"{"mcpServers":{"broken":{"type":"stdio","url":"https://example.test"}}}"#,

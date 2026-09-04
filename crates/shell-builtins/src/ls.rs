@@ -27,7 +27,7 @@ use lscolors::Colorable;
 #[cfg(unix)]
 use omp_core::FastHashMap;
 use omp_core::FastHashSet;
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use thiserror::Error;
 
 use crate::{
@@ -3981,7 +3981,7 @@ struct LsRuntime {
 
 impl LsRuntime {
 	fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
-		use omp_shell_engine::sys::fs;
+		use omp_shell::sys::fs;
 		let normalized_path = fs::normalize_shell_path(path.as_ref());
 		let path = normalized_path.as_ref();
 		if path.is_absolute() {

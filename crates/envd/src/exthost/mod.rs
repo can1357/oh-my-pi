@@ -31,11 +31,12 @@ pub use dispatch::{
 	PromptPullContext, PromptSlotBinding, UiCallbackDispatch, UiCallbackOwner, UiCommandRosterEntry,
 	UiCompletionRosterEntry, UiDispatchError, UiMessageRendererRosterEntry, UiRendererRosterEntry,
 	UiRoster, UiRosterConflict, UiShortcutRosterEntry, decode_ui_dispatch_result,
-	shortcut_dispatch_succeeded,
+	prompt_dispatch_arguments, shortcut_dispatch_succeeded,
 };
 pub use extensions::{
 	DEFAULT_EXTENSION_HOOK_TIMEOUT, ExtensionConvarError, PyComponent, PyDirector, PyExtensionError,
-	register_extension_setting_convars,
+	SealedHookRegistration, SealedRegistryEvidence, SealedRegistryEvidenceError,
+	register_extension_setting_convars, seal_registry_evidence,
 };
 pub use lifecycle::{
 	ActivateReason, ActivationCause, ActivationDisposition, ActivationEvent, ActivationTrigger,
@@ -59,8 +60,9 @@ pub use presentation::{
 	UiControlAuthority, UiControlOwner, UiControlRequest, UiControlResult,
 };
 pub use quota::{
-	ChargeOutcome, ControlQuotaLedger, FairControlQueue, QuotaBehavior, QuotaError, QuotaExceeded,
-	QuotaScope, QuotaSpec, QuotaStatus, ResourceReceipt,
+	ChargeOutcome, ControlQuotaLedger, ControlQuotaRuntime, FairControlQueue, QuotaBehavior,
+	QuotaError, QuotaExceeded, QuotaReceiptUpdate, QuotaScope, QuotaSpec, QuotaStatus,
+	ResourceReceipt, request_quota,
 };
 pub use services::{
 	PendingServiceCall, ServiceBroker, ServiceCallError, ServiceCallId, ServiceCancellation,

@@ -1,12 +1,12 @@
 //! Standalone canonical read and web-search tool invocations.
 
-use std::{env, sync::Arc};
+use std::{env, fmt::Write as _, sync::Arc};
 
 use futures::StreamExt as _;
 use miette::{IntoDiagnostic as _, miette};
 use omp_core::{Str, sf};
 use omp_driver::headless::kernel::{ComposedInference, KernelOptions, compose_kernel};
-use omp_tool::{CallOutcome, ErasedEv, ErasedOutcome, Registry};
+use omp_tool::{CallOutcome, DiagEnvelope, ErasedEv, ErasedOutcome, Registry};
 
 use crate::cli::{ReadCliArgs, SearchCliArgs};
 
@@ -175,7 +175,19 @@ where
 	let mut stream = registry.invoke(name, incoming).into_diagnostic()?;
 	while let Some(event) = stream.next().await {
 		match event.into_diagnostic()? {
-			ErasedEv::Update(_) => {},
+			ErasedEv::Update(update) => {
+				if let Ok(envelope) = serde_json::from_slice::<DiagEnvelope>(&update) {
+					let diag = envelope.diag;
+					let mut notice = format!("[{}] {}: {}", diag.severity, diag.kind, diag.text);
+					if let Some(continuation) = diag.continuation {
+						let _ = write!(notice, " continuation={continuation}");
+					}
+					if let Some(artifact) = diag.artifact {
+						let _ = write!(notice, " artifact={artifact}");
+					}
+					eprintln!("{notice}");
+				}
+			},
 			ErasedEv::Done(ErasedOutcome::Detached(_)) => {
 				return Err(miette!("{name} detached unexpectedly"));
 			},

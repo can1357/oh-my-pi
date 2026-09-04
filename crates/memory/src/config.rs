@@ -166,7 +166,7 @@ pub struct RemoteLlmSettings {
 
 /// Mnemopi settings. [`Self::normalize`] applies floors and hard safety
 /// ceilings.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MnemopiSettings {
 	/// Optional primary database path; otherwise the app supplies its memory
 	/// data root.
@@ -315,7 +315,7 @@ impl MnemopiSettings {
 }
 
 /// Persisted memory selector and backend settings.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemorySettings {
 	/// Active backend; omitted means [`MemoryBackend::Off`].
 	#[serde(default)]

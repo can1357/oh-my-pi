@@ -13,14 +13,11 @@ use crate::{
 	rich::cell_width,
 };
 
-/// Frames the text holds unstruck before the sweep starts (pi
-/// `TODO_STRIKE_HOLD_FRAMES`).
+/// Frames the text holds unstruck before the sweep starts.
 pub const STRIKE_HOLD_FRAMES: u32 = 2;
-/// Frames the strike takes to cross the whole text (pi
-/// `TODO_STRIKE_REVEAL_FRAMES`).
+/// Frames the strike takes to cross the whole text.
 pub const STRIKE_REVEAL_FRAMES: u32 = 12;
-/// Frames from the first paint until the text is fully struck (pi
-/// `TODO_STRIKE_TOTAL_FRAMES`).
+/// Frames from the first paint until the text is fully struck.
 pub const STRIKE_TOTAL_FRAMES: u32 = STRIKE_HOLD_FRAMES + STRIKE_REVEAL_FRAMES;
 
 /// One line of struck-through text.
@@ -223,7 +220,7 @@ mod tests {
 
 	#[test]
 	fn todo_strike_reveals_progressively_then_settles() {
-		// pi: 14 frames of 65 ms — two held plain, twelve sweeping.
+		// Fourteen 65ms frames: two held plain, twelve sweeping.
 		let mut ui = Ui::from_root(
 			Strike::new()
 				.with(Prop::Reveal, "910ms")

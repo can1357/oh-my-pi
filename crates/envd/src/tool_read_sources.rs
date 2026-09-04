@@ -21,7 +21,6 @@ use http::{
 };
 use omp_cache::document_cache::{DocumentCache, DocumentCacheKey};
 use omp_core::{Hash32, Str, dirs::home_dir, sf, shorten_home_path};
-use omp_hashline::RevisionToken;
 use omp_tools::read::{
 	DirectoryEntry, DirectorySource, Fault, ReadLease, ReadSources, SNAPSHOT_MAX_BYTES,
 	SnapshotRecord, SourceKind, SourceStat,
@@ -38,7 +37,7 @@ use url::Url;
 
 use super::{
 	docs::{DocumentHost, DocumentLease},
-	tool_document::{read_document_metadata, read_whole, resolve_read_document},
+	tool_document::{read_document_metadata, read_whole, resolve_read_document, snapshot_text},
 	workspace::WorkspaceHost,
 };
 
@@ -856,18 +855,21 @@ impl ReadSources for ReadSourceAdapter {
 			let canonical = fs::canonicalize(&authored).unwrap_or(authored);
 			Str::from(canonical.to_string_lossy().into_owned())
 		};
-		let revision = RevisionToken::new(record.revision.as_bytes());
+		let text = snapshot_text(&record.bytes)
+			.ok_or_else(|| Fault::source("snapshot content is not UTF-8"))?;
 		let seen = record
 			.seen
 			.into_iter()
 			.flat_map(|range| range.start_line..=range.end_line)
-			.filter_map(|line| usize::try_from(line).ok());
-		Ok(self
-			.documents
-			.snapshot_store()
-			.lock()
-			.record(snapshot_path, revision, record.bytes, seen)
-			.ok())
+			.filter_map(|line| u32::try_from(line).ok())
+			.collect::<Vec<_>>();
+		Ok(Some(
+			self
+				.documents
+				.snapshot_store()
+				.record(Path::new(snapshot_path.as_str()), &text, Some(&seen))
+				.into(),
+		))
 	}
 }
 

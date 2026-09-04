@@ -24,10 +24,9 @@ pub struct TurnStart {}
 
 /// One user attachment in a `msg.user@1` payload.
 ///
-/// The content-addressed bytes plus the media type pi's
-/// `ImageContent.mimeType` carries, so the projection can hand providers a
-/// typed media part without reopening the blob. Serialized flat beside the
-/// reference: `{"h","n","mime"}`.
+/// The content-addressed bytes plus their media type let the projection hand
+/// providers a typed media part without reopening the blob. Serialized flat
+/// beside the reference: `{"h","n","mime"}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
 	/// Content-addressed bytes (digest + byte length).

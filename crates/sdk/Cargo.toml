@@ -20,7 +20,7 @@ thiserror.workspace = true
 [dev-dependencies]
 futures.workspace = true
 omp-catalog.workspace = true
-omp-inference.workspace = true
+omp-ai.workspace = true
 omp-journal.workspace = true
 omp-tool.workspace = true
 tempfile.workspace = true

@@ -310,7 +310,7 @@ fn workpool_yield_spec(items: &[WorkpoolItem]) -> Result<ToolSpec, SchemaContrac
 		),
 		schema,
 		// Per-item `data` is deliberately unconstrained. Keep native strict
-		// sampling off (matching pi) while runtime validation strictly closes
+		// sampling off while runtime validation strictly closes
 		// keys, envelopes, duplicates, and final assembled ids.
 		constraint: Constraint::None,
 		effects: Effects::empty(),

@@ -2,23 +2,22 @@
 //! carries (`<repo-rules>`, `<generic-rules>`, `<domain-rules>`) and serves
 //! as `rule://<name>`.
 //!
-//! Two pi capabilities, ported from `packages/coding-agent/src/capability/
-//! {context-file,rule}.ts` and their `discovery/*` providers:
+//! The runtime discovers two capabilities:
 //!
-//! * **Context files** (pi `--no-context-files`): `AGENTS.md`, `CLAUDE.md` and
-//!   friends walked up from the project root — one file per directory depth,
-//!   the highest-priority provider winning a tie (`.omp/AGENTS.md`, Claude,
-//!   Gemini, then standalone `AGENTS.md` / `CLAUDE.md`) — plus
-//!   one user-level winner from native, Claude, Codex, Gemini, and OpenCode.
-//!   Injected whole, farthest first so the closest file reads last.
-//! * **Rules** (pi `--no-rules`): Markdown documents with optional frontmatter
-//!   (`description`, `globs`, `alwaysApply`, `condition`, `scope`, `agents`)
-//!   from `.omp/rules`, `<config root>/agent/rules`, the sticky `RULES.md`,
-//!   `.agent[s]/rules`, `.cursor/rules`, `.windsurf/rules`, `.clinerules`, and
-//!   the legacy `.cursorrules` / `.windsurfrules` files. Name conflicts resolve
-//!   first-source-wins in that order (pi provider priority). `alwaysApply`
-//!   rules are injected in full; described rules are listed by name and globs
-//!   for the model to read through `rule://<name>` (pi `bucketRules`).
+//! * **Context files**: `AGENTS.md`, `CLAUDE.md` and friends walked up from the
+//!   project root — one file per directory depth, the highest-priority provider
+//!   winning a tie (`.omp/AGENTS.md`, Claude, Gemini, then standalone
+//!   `AGENTS.md` / `CLAUDE.md`) — plus one user-level winner from native,
+//!   Claude, Codex, Gemini, and OpenCode. Injected whole, farthest first so the
+//!   closest file reads last.
+//! * **Rules**: Markdown documents with optional frontmatter (`description`,
+//!   `globs`, `alwaysApply`, `condition`, `scope`, `agents`) from `.omp/rules`,
+//!   `<config root>/agent/rules`, the sticky `RULES.md`, `.agent[s]/rules`,
+//!   `.cursor/rules`, `.windsurf/rules`, `.clinerules`, and the legacy
+//!   `.cursorrules` / `.windsurfrules` files. Name conflicts resolve
+//!   first-source-wins in that order. `alwaysApply` rules are injected in full;
+//!   described rules are listed by name and globs for the model to read through
+//!   `rule://<name>`.
 
 use std::{
 	collections::BTreeSet,
@@ -58,7 +57,7 @@ pub struct Warning {
 	pub message: Str,
 }
 
-/// One persistent-instruction file (pi `ContextFile`).
+/// One persistent-instruction file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextFile {
 	/// Canonical path.
@@ -75,7 +74,7 @@ pub struct ContextFile {
 }
 
 /// The context files one session injects, user level first, then project
-/// files farthest first (pi `discoverContextFiles`).
+/// files farthest first.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ContextFiles {
 	/// Winning files in injection order.
@@ -107,8 +106,7 @@ const USER_CONTEXT_PROVIDERS: [(&str, &str); 5] = [
 ];
 
 impl ContextFiles {
-	/// Discovers context files for `project_root` (pi `loadContextFiles` +
-	/// `loadStandaloneContextFiles`).
+	/// Discovers context files for `project_root`.
 	#[must_use]
 	pub fn discover(project_root: &Path, home: &Path, config_root: &Path) -> Self {
 		let mut out = Self::default();
@@ -132,7 +130,7 @@ impl ContextFiles {
 		}
 		let mut project = Vec::new();
 		let ancestors = walk_up(project_root, home);
-		// pi `findNearestProjectConfigDir`: `.omp/AGENTS.md` is read from the
+		// `.omp/AGENTS.md` is read from the
 		// nearest `.omp/` directory only; the standalone files walk every
 		// level.
 		let nearest_config = ancestors.iter().position(|dir| dir.join(".omp").is_dir());
@@ -182,7 +180,7 @@ impl ContextFiles {
 	}
 }
 
-/// One rule document (pi `Rule`).
+/// One rule document.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rule {
 	/// Unique name: the file stem, or a provider-fixed name for whole-file
@@ -220,13 +218,12 @@ pub struct ActiveRules {
 	pub warnings: Vec<Warning>,
 }
 
-/// Agent name the top-level session evaluates `agents:` scopes with (pi
-/// `MAIN_AGENT_RULE_NAME`).
+/// Agent name the top-level session evaluates `agents:` scopes with.
 pub const MAIN_AGENT: &str = "main";
 
 impl ActiveRules {
-	/// Discovers rules for `project_root` (pi `native`, `agents`, `cursor`,
-	/// `windsurf`, and `cline` rule providers, in priority order).
+	/// Discovers rules for `project_root` from the native, agents, cursor,
+	/// windsurf, and cline providers in priority order.
 	#[must_use]
 	pub fn discover(project_root: &Path, home: &Path, config_root: &Path) -> Self {
 		let mut out = Self::default();
@@ -294,15 +291,21 @@ impl ActiveRules {
 		// agents: `.agent/rules` and `.agents/rules` (project walk-up + home).
 		for dir in &ancestors {
 			for name in [".agent/rules", ".agents/rules"] {
-				for rule in
-					rules_in_dir(&dir.join(name), "agents", Level::Project, &["md", "mdc"], &mut warnings)
-				{
+				for rule in rules_in_dir(
+					&dir.join(name),
+					"agents",
+					Level::Project,
+					&["md", "mdc"],
+					&mut warnings,
+				) {
 					admit(rule, &mut warnings);
 				}
 			}
 		}
 		for name in [".agent/rules", ".agents/rules"] {
-			for rule in rules_in_dir(&home.join(name), "agents", Level::User, &["md", "mdc"], &mut warnings) {
+			for rule in
+				rules_in_dir(&home.join(name), "agents", Level::User, &["md", "mdc"], &mut warnings)
+			{
 				admit(rule, &mut warnings);
 			}
 		}
@@ -389,8 +392,7 @@ impl ActiveRules {
 		self.rules.iter().find(|rule| rule.name.as_str() == name)
 	}
 
-	/// Rules admitted for `agent` (pi `ruleAppliesToAgent`): a rule without
-	/// `agents:` applies everywhere.
+	/// Rules admitted for `agent`: a rule without `agents:` applies everywhere.
 	pub fn for_agent<'a>(&'a self, agent: &'a str) -> impl Iterator<Item = &'a Rule> + 'a {
 		let agent = agent.to_ascii_lowercase();
 		self.rules.iter().filter(move |rule| {
@@ -402,8 +404,8 @@ impl ActiveRules {
 		})
 	}
 
-	/// Prompt rows for `agent` (pi `bucketRules`): `always_apply_rules` are
-	/// `{name, content, path}` injected whole; `rules` are the described
+	/// Prompt rows for `agent`: `always_apply_rules` are `{name, content, path}`
+	/// injected whole; `rules` are the described
 	/// rulebook entries `{name, description, globs, path}` the model reads on
 	/// demand. A rule with neither `alwaysApply` nor a description is reachable
 	/// only through `rule://`.
@@ -447,8 +449,8 @@ pub struct RulePromptFacts {
 }
 
 /// Project walk-up directories from `project_root` outward, closest first,
-/// with pi's boundary (`loadStandaloneContextFiles`): stop at the repository
-/// root (nearest `.git`), except that a repository nested below the home
+/// with this boundary: stop at the repository root (nearest `.git`), except
+/// that a repository nested below the home
 /// directory keeps walking up to — but never into — the home directory; a
 /// project outside any repository stops at the home directory inclusive when
 /// beneath it, and never reaches the filesystem root otherwise.
@@ -489,7 +491,7 @@ fn walk_up(project_root: &Path, home: &Path) -> Vec<PathBuf> {
 }
 
 /// Reads `path` when it is a non-empty file outside a hidden directory
-/// (pi: "Empty files contribute nothing and must not claim the depth scope").
+/// Empty files contribute nothing and must not claim the depth scope.
 fn read_non_empty(path: &Path, warnings: &mut Vec<Warning>) -> Option<Str> {
 	if !path.is_file() {
 		return None;
@@ -523,8 +525,7 @@ struct RuleHeader {
 	agents:       OneOrMany,
 }
 
-/// A frontmatter field pi accepts as one string, a comma-separated string,
-/// or a list.
+/// A frontmatter field accepts one string, a comma-separated string, or a list.
 #[derive(Default, Deserialize)]
 #[serde(untagged)]
 enum OneOrMany {
@@ -551,7 +552,7 @@ impl OneOrMany {
 	}
 }
 
-/// Splits `---` frontmatter from a Markdown document (pi `parseFrontmatter`).
+/// Splits `---` frontmatter from a Markdown document.
 pub(super) fn split_frontmatter(source: &str) -> (Option<&str>, &str) {
 	let Some(rest) = source
 		.strip_prefix("---\n")
@@ -571,7 +572,7 @@ pub(super) fn split_frontmatter(source: &str) -> (Option<&str>, &str) {
 	(Some(header), body)
 }
 
-/// Builds a rule from a Markdown document (pi `buildRuleFromMarkdown`).
+/// Builds a rule from a Markdown document.
 fn load_rule(
 	path: &Path,
 	name: Str,
@@ -637,7 +638,7 @@ fn load_rule(
 }
 
 /// Rules from the files directly below `dir` with one of `extensions`, in
-/// name order (pi `loadFilesFromDir`, non-recursive).
+/// name order, without recursion.
 fn rules_in_dir(
 	dir: &Path,
 	provider: &'static str,
@@ -660,7 +661,7 @@ fn rules_in_dir(
 		Ok(path) => path,
 		Err(error) => {
 			warnings.push(Warning {
-				path: dir.to_path_buf(),
+				path:    dir.to_path_buf(),
 				message: Str::new(format!("Failed to resolve rules directory: {error}")),
 			});
 			return Vec::new();
@@ -708,8 +709,8 @@ fn rules_in_dir(
 }
 
 /// A whole file as one rule under a fixed `name`: the sticky `RULES.md`
-/// (pi `loadStickyRulesFile`: always applies regardless of frontmatter), and
-/// the single-file forms `.clinerules`, `global_rules.md`, and the legacy
+/// always applies regardless of frontmatter, and the single-file forms
+/// `.clinerules`, `global_rules.md`, and the legacy
 /// `.cursorrules` / `.windsurfrules`. Those are project-wide instructions by
 /// construction, so they always apply unless their frontmatter opts them into
 /// the rulebook with a description.
@@ -732,8 +733,7 @@ fn whole_file_rule(
 	Some(rule)
 }
 
-/// `rule://<name>` reads a rule body; bare `rule://` lists every rule (pi
-/// `internal-urls/rule-protocol.ts`).
+/// `rule://<name>` reads a rule body; bare `rule://` lists every rule.
 struct RuleResolver {
 	rules: Arc<ActiveRules>,
 	lines: LineOffsetCache,

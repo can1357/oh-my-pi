@@ -49,11 +49,11 @@ use crate::headless::{
 /// Standard prefix when a run ends without a yield.
 const WARNING_MISSING_YIELD: &str = "[subagent missing yield] the run ended without finalization";
 /// Reminder turns demanded from a schema-bound child that stops without a
-/// `yield` call before the run is failed (pi `MAX_YIELD_RETRIES`): two soft
-/// reminders, then one natively forced choice.
+/// `yield` call before the run is failed: two soft reminders, then one
+/// natively forced choice.
 const MAX_YIELD_RETRIES: u32 = 3;
 /// Developer reminder appended to a schema-bound child's turn when it stops
-/// idle without finalizing (pi `subagent-yield-reminder.md`).
+/// idle without finalizing.
 const YIELD_REMINDER: &str =
 	"Last turn had no yield call; the session is idle. Every turn MUST end with a tool call. First \
 	 applicable: resume work with the next intended tool if the assignment is incomplete; yield \
@@ -779,8 +779,8 @@ fn prepare_child(
 		.map_err(SpawnError::Con)?;
 	let settings = TaskSettings::from_con(&ctx);
 	configure_child_route(&ctx, &settings, agent.as_str(), request.child.effort)?;
-	if omp_con::AI_MODEL.get(&ctx).is_empty() {
-		omp_con::AI_MODEL
+	if omp_agent::AI_MODEL.get(&ctx).is_empty() {
+		omp_agent::AI_MODEL
 			.set(&ctx, Str::new(request.model))
 			.map_err(SpawnError::Con)?;
 	}
@@ -849,7 +849,7 @@ fn spawn_child_task(
 }
 
 async fn run_child(prepared: PreparedChild) -> Result<ChildExecution, SpawnError> {
-	let selected_model = omp_con::AI_MODEL.get(&prepared.ctx);
+	let selected_model = omp_agent::AI_MODEL.get(&prepared.ctx);
 	// Every composed child receives mutation-capable tools, so ADR 0007
 	// requires isolation even when a caller attempts to opt out.
 	let isolation = Some(create_isolation(&prepared.env, &prepared.id).await?);
@@ -1054,7 +1054,7 @@ pub(crate) fn configure_child_route(
 			TaskEffort::Med => "medium",
 			TaskEffort::Hi => "high",
 		};
-		omp_con::AI_THINKING
+		omp_agent::AI_THINKING
 			.set(ctx, Str::new_static(thinking))
 			.map_err(SpawnError::Con)?;
 	}
@@ -1065,11 +1065,13 @@ pub(crate) fn configure_child_route(
 		.find(|(name, _)| name.as_str().eq_ignore_ascii_case(agent))
 		.map(|(_, model)| model.clone())
 	{
-		omp_con::AI_MODEL.set(ctx, model).map_err(SpawnError::Con)?;
+		omp_agent::AI_MODEL
+			.set(ctx, model)
+			.map_err(SpawnError::Con)?;
 	} else {
-		let task_model = omp_con::AI_TASK_MODEL.get(ctx);
+		let task_model = omp_agent::AI_TASK_MODEL.get(ctx);
 		if !task_model.is_empty() {
-			omp_con::AI_MODEL
+			omp_agent::AI_MODEL
 				.set(ctx, task_model)
 				.map_err(SpawnError::Con)?;
 		}
@@ -1088,7 +1090,7 @@ fn child_status(stop: TurnStop, error: Option<&Str>) -> Str {
 }
 
 fn clamp_effort(ctx: &Ctx, ceiling: TaskEffortCeiling) -> Result<(), SpawnError> {
-	let current = omp_con::AI_THINKING.get(ctx);
+	let current = omp_agent::AI_THINKING.get(ctx);
 	let rank = |value: &str| match value {
 		"off" => 0,
 		"minimal" => 1,
@@ -1101,14 +1103,14 @@ fn clamp_effort(ctx: &Ctx, ceiling: TaskEffortCeiling) -> Result<(), SpawnError>
 	};
 	let maximum: &'static str = ceiling.into();
 	if rank(current.as_str()) > rank(maximum) {
-		omp_con::AI_THINKING
+		omp_agent::AI_THINKING
 			.set(ctx, Str::new_static(maximum))
 			.map_err(SpawnError::Con)?;
 	}
 	Ok(())
 }
 
-/// Engages pi's yield ladder on a schema-bound child before its first turn: a
+/// Engages the yield ladder on a schema-bound child before its first turn: a
 /// deferred `ForceTool("yield")` leaves the working requests unforced and,
 /// once the child stops idle without finalizing, reminds it
 /// [`MAX_YIELD_RETRIES`] times (the last rung natively forced) before the
@@ -1667,10 +1669,10 @@ mod tests {
 	#[test]
 	fn agent_model_override_wins_over_task_model_and_effort_is_clamped() {
 		let ctx = Ctx::new();
-		omp_con::AI_TASK_MODEL
+		omp_agent::AI_TASK_MODEL
 			.set(&ctx, Str::new_static("task/model"))
 			.expect("task model");
-		omp_con::AI_THINKING
+		omp_agent::AI_THINKING
 			.set(&ctx, Str::new_static("xhigh"))
 			.expect("thinking");
 		let mut settings =
@@ -1679,8 +1681,8 @@ mod tests {
 			.agent_model_overrides
 			.insert(Str::new_static("Review"), Str::new_static("agent/model"));
 		configure_child_route(&ctx, &settings, "review", Some(TaskEffort::Hi)).expect("child route");
-		assert_eq!(omp_con::AI_MODEL.get(&ctx).as_str(), "agent/model");
-		assert_eq!(omp_con::AI_THINKING.get(&ctx).as_str(), "low");
+		assert_eq!(omp_agent::AI_MODEL.get(&ctx).as_str(), "agent/model");
+		assert_eq!(omp_agent::AI_THINKING.get(&ctx).as_str(), "low");
 	}
 
 	#[tokio::test]

@@ -55,7 +55,7 @@ pub enum ProposalDecision {
 }
 
 /// Successful terminal result from a staged action.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct ProposalOutcome {
 	/// Unique proposal identity.
 	pub id:       Str,
@@ -224,9 +224,7 @@ impl StagedProposalRegistry {
 		let Some(observer) = observer else {
 			return Err(ProposalActivationError::Unavailable);
 		};
-		if let Err(error) = observer(pending.clone()).await {
-			return Err(error);
-		}
+		observer(pending.clone()).await?;
 		rollback.armed = false;
 		Ok(pending)
 	}

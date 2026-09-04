@@ -7,9 +7,8 @@ use super::{
 	Card, CardStatus, CardView, Component, elapsed_badge, typed_fault, typed_input, typed_result,
 };
 
-/// Collapsed output rows shown while a command runs (pi
-/// `BASH_DEFAULT_PREVIEW_LINES` = `DEFAULT_TERMINAL_PREVIEW_LINES`): the tail
-/// of the live output behind an "earlier lines" marker.
+/// Collapsed output rows shown while a command runs: the tail of the live
+/// output behind an "earlier lines" marker.
 pub const BASH_DEFAULT_PREVIEW_LINES: usize = 10;
 
 /// Shell-command card with durable transcript and terminal metadata.
@@ -17,7 +16,7 @@ pub struct BashCard;
 
 /// The live output window while a command runs: the last
 /// [`BASH_DEFAULT_PREVIEW_LINES`] logical lines (all of them when expanded)
-/// and, when lines were skipped, pi's dim marker
+/// and, when lines were skipped, the dim marker
 /// `… (N earlier lines, showing M of T) (ctrl+o to expand)`.
 fn output_tail(output: &str, expanded: bool) -> Option<(Option<String>, String)> {
 	let output = output.trim_end();
@@ -59,8 +58,8 @@ impl Card for BashCard {
 			.and_then(Value::as_str);
 		let shown_command =
 			cwd.map_or_else(|| command.clone(), |cwd| format!("cd {cwd} && {command}"));
-		// A non-zero exit is `Fault::CommandFailed { payload }`: pi paints it
-		// as the ordinary output box with `Exit: N`, so the failed payload is
+		// A non-zero exit is `Fault::CommandFailed { payload }`: paint it as
+		// the ordinary output box with `Exit: N`, so the failed payload is
 		// the result and the fault line is dropped.
 		let failed = view
 			.fault::<omp_tools::shell::Fault>()
@@ -114,8 +113,8 @@ impl Card for BashCard {
 		let tail = (view.status == CardStatus::InProgress)
 			.then(|| view.output.and_then(|output| output_tail(output, expanded)))
 			.flatten();
-		// pi bash.ts: the collapsed window applies after completion too, so the
-		// block never jumps when the call settles; only ctrl+o uncaps.
+		// The collapsed window applies after completion too, so the block never
+		// jumps when the call settles; only ctrl+o uncaps.
 		let settled = output_tail(&output, expanded);
 		dom! {
 			<box border=round bc={match view.status { CardStatus::Failed => "err", CardStatus::Done => "muted", CardStatus::StreamingArgs | CardStatus::InProgress => "accent" }} bg={if view.status == CardStatus::Failed { "error_surface" } else { "panel" }} bleed>
@@ -287,8 +286,8 @@ mod tests {
 	}
 
 	/// A settled call carries the journaled `CallOutcome` envelope on its
-	/// `<result>`; the collapsed card windows the output exactly like the
-	/// streaming tail (pi bash.ts) so the block never jumps on settle.
+	/// `<result>`; the collapsed card windows the output like the streaming
+	/// tail so the block never jumps on settle.
 	#[test]
 	fn settled_bash_card_reads_the_outcome_envelope_and_keeps_the_tail_window() {
 		let input = text_node(KnownTag::Input, r#"{"command":"cargo build"}"#);
@@ -334,8 +333,8 @@ mod tests {
 		assert!(expanded.contains("line 1 ") && !expanded.contains("earlier lines"), "{expanded}");
 	}
 
-	/// pi bash.ts: a non-zero exit is still the ordinary output box, with
-	/// `Exit: N` in the meta row and no raw fault JSON.
+	/// A non-zero exit is still the ordinary output box, with `Exit: N` in
+	/// the meta row and no raw fault JSON.
 	#[test]
 	fn failed_bash_card_renders_the_command_failed_payload_as_output() {
 		let input = text_node(KnownTag::Input, r#"{"command":"false"}"#);

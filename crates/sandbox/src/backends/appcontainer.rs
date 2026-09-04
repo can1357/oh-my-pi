@@ -21,7 +21,7 @@ const PRIVATE_NETWORK_CLIENT_SERVER_SID: u32 = 87;
 const CPU_RATE_MAX: u32 = 10_000;
 
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
-pub(crate) enum CapabilitySid {
+pub enum CapabilitySid {
 	#[strum(serialize = "WinCapabilityInternetClientSid")]
 	InternetClient,
 	#[strum(serialize = "WinCapabilityInternetClientServerSid")]
@@ -41,9 +41,9 @@ impl CapabilitySid {
 	}
 }
 
-/// Purely compiles the inspectable AppContainer preview. Environment values are
-/// deliberately absent; they are resolved only during runtime preparation.
-pub(crate) fn compile(
+/// Purely compiles the inspectable `AppContainer` preview. Environment values
+/// are deliberately absent; they are resolved only during runtime preparation.
+pub fn compile(
 	spec: &SandboxSpec,
 	program: &Path,
 	requested: CapabilitySet,
@@ -195,7 +195,7 @@ pub(crate) fn compile(
 	Ok(plan)
 }
 
-pub(crate) fn probe() -> BackendStatus {
+pub fn probe() -> BackendStatus {
 	#[cfg(windows)]
 	{
 		return crate::runtime::windows::probe_appcontainer();
@@ -209,7 +209,7 @@ pub(crate) fn probe() -> BackendStatus {
 	}
 }
 
-pub(crate) fn capability_sids(network: NetworkMode) -> Vec<CapabilitySid> {
+pub fn capability_sids(network: NetworkMode) -> Vec<CapabilitySid> {
 	match network {
 		NetworkMode::Disabled => Vec::new(),
 		NetworkMode::Enabled => {

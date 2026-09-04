@@ -106,19 +106,18 @@ pub fn discover_auth_challenge_with_base(
 			values.insert(canonical.to_owned(), value.to_owned());
 		}
 	}
-	if !values.contains_key("scope") {
-		if let Some(scopes) = object
+	if !values.contains_key("scope")
+		&& let Some(scopes) = object
 			.and_then(|object| object.get("scopes_supported"))
 			.and_then(Value::as_array)
-		{
-			let joined = scopes
-				.iter()
-				.filter_map(Value::as_str)
-				.collect::<Vec<_>>()
-				.join(" ");
-			if !joined.is_empty() {
-				values.insert("scope".to_owned(), joined);
-			}
+	{
+		let joined = scopes
+			.iter()
+			.filter_map(Value::as_str)
+			.collect::<Vec<_>>()
+			.join(" ");
+		if !joined.is_empty() {
+			values.insert("scope".to_owned(), joined);
 		}
 	}
 	let resource_metadata = header_url(headers, "resource_metadata", server_url).or_else(|| {

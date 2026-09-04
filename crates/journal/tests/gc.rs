@@ -129,10 +129,7 @@ fn gc_namespace_lock_subprocess_helper() {
 		&GcCancellation::default(),
 	)
 	.expect_err("parent process owns a shared namespace writer lease");
-	assert!(matches!(
-		error,
-		GcError::Journal(omp_journal::JournalError::NamespaceLocked { .. })
-	));
+	assert!(matches!(error, GcError::Journal(omp_journal::JournalError::NamespaceLocked { .. })));
 }
 
 /// A writer in another process excludes inventory and sweep as one boundary.
@@ -560,13 +557,9 @@ fn hypothetical_branch_pruning_releases_only_abandoned_roots_in_dry_run() {
 
 	let mut options = BlobGcOptions::dry_run(no_grace());
 	options.retain_abandoned = false;
-	let report = collect_blobs_with(
-		&store,
-		std::slice::from_ref(&path),
-		options,
-		&GcCancellation::default(),
-	)
-	.expect("preview branch collection");
+	let report =
+		collect_blobs_with(&store, std::slice::from_ref(&path), options, &GcCancellation::default())
+			.expect("preview branch collection");
 	assert_eq!(report.journals_with_abandoned, 1);
 	assert_eq!(report.abandoned_entries, 1);
 	assert_eq!(report.storage.blobs_eligible, 1);
@@ -586,18 +579,10 @@ fn collection_refuses_an_active_put_before_journal_stage() {
 		&GcCancellation::default(),
 	)
 	.expect_err("active put lease must exclude collection");
-	assert!(matches!(
-		error,
-		GcError::Blob(omp_journal::blob::Error::GcBusy)
-	));
+	assert!(matches!(error, GcError::Blob(omp_journal::blob::Error::GcBusy)));
 	drop(stage);
-	collect_blobs_with(
-		&store,
-		&[],
-		BlobGcOptions::dry_run(no_grace()),
-		&GcCancellation::default(),
-	)
-	.expect("collection resumes after the stage is dropped");
+	collect_blobs_with(&store, &[], BlobGcOptions::dry_run(no_grace()), &GcCancellation::default())
+		.expect("collection resumes after the stage is dropped");
 }
 
 #[test]
@@ -618,10 +603,7 @@ fn collection_refuses_live_writers_and_honors_cancellation_and_bounds() {
 		&GcCancellation::default(),
 	)
 	.expect_err("live namespace writer must exclude collection");
-	assert!(matches!(
-		locked,
-		GcError::Journal(omp_journal::JournalError::NamespaceLocked { .. })
-	));
+	assert!(matches!(locked, GcError::Journal(omp_journal::JournalError::NamespaceLocked { .. })));
 	drop(journal);
 
 	let cancelled = GcCancellation::default();
@@ -639,12 +621,7 @@ fn collection_refuses_live_writers_and_honors_cancellation_and_bounds() {
 	let mut bounded = BlobGcOptions::dry_run(no_grace());
 	bounded.max_entries = 0;
 	assert!(matches!(
-		collect_blobs_with(
-			&store,
-			std::slice::from_ref(&path),
-			bounded,
-			&GcCancellation::default(),
-		),
+		collect_blobs_with(&store, std::slice::from_ref(&path), bounded, &GcCancellation::default(),),
 		Err(GcError::Limit { resource: "journal-entry-count", limit: 0 })
 	));
 	assert!(store.has(&orphan), "journal bound failure is fail-closed");

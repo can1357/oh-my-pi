@@ -5,6 +5,7 @@
 //! projection and revision lifting remain deterministic shared code.
 
 mod device_path;
+mod diag;
 mod incoming;
 mod registry;
 pub mod render;
@@ -24,15 +25,16 @@ use std::{
 
 use bytes::Bytes;
 pub use device_path::{DevicePath, DevicePathError};
+pub use diag::{Diag, DiagEnvelope, DiagKind, Omitted, Severity, Unit};
 use futures::Stream;
 pub use incoming::{
 	CommitError, FinalizedArgs, IncomingCursor, IncomingParams, Interrupt, InterruptWaitError,
 	InterruptibleParams, InvocationEvent, InvocationFeed, InvocationSendError, ParamError,
 };
+pub use omp_core::slopjson::{PullMode, Pulled, PulledKind, PulledValueKind};
 use omp_core::{Hash32, InvocationPhase, SparseMap, Str, sf};
 pub use omp_proto::inference::v1::{Fallback, InvokeInput};
 use omp_proto::policy::v1;
-pub use omp_slopjson::{PullMode, Pulled, PulledKind, PulledValueKind};
 pub use registry::{
 	AvailabilityDelta, Claim, Claims, ConstraintDisposition, DeviceMetadata, DeviceTarget, ErasedEv,
 	ErasedOutcome, ErasedStream, GoalToolState, HostToolExecutor, HostToolInvocation,
@@ -1267,6 +1269,9 @@ pub trait Tool: Send + Sync + 'static {
 pub enum Ev<U, P, F> {
 	/// Ephemeral progress, never transcript history.
 	Update(U),
+	/// Durable harness notice materialized as a `<diag>` child of the call
+	/// (ADR 0008); never interpolated into the result body.
+	Diag(Diag),
 	/// Terminal structured failure of a parameter the tool pulled.
 	Args(ArgIssue),
 	/// Terminal structured cancellation or effect-uncertainty report.
@@ -1960,7 +1965,7 @@ pub struct JobMetadata {
 
 impl JobMetadata {
 	/// Builds metadata for work that begins running as it is registered.
-	pub fn running(kind: JobKind, label: Str, started_at_ms: u64) -> Self {
+	pub const fn running(kind: JobKind, label: Str, started_at_ms: u64) -> Self {
 		Self {
 			kind,
 			status: JobStatus::Running,

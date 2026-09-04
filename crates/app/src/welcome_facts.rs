@@ -10,7 +10,7 @@ use std::{
 };
 
 use omp_chat::welcome::{LspServer, LspStatus, RecentSession};
-use omp_docserver::{
+use omp_envd::docserver::{
 	lsp_binary::{BinaryPlatform, resolve_lsp_binary},
 	lsp_config::{
 		ResolvedLspConfig, ResolvedLspServer, discover_native_lsp_sources, load_lsp_config,
@@ -19,7 +19,7 @@ use omp_docserver::{
 };
 use omp_proto::document::v1::{LspServerStage, LspStatusResponse};
 
-/// pi `WELCOME_SESSION_SLOTS`: rows the welcome box reserves.
+/// Rows reserved by the welcome box.
 pub const RECENT_LIMIT: usize = 4;
 
 /// Longest the launch path waits on the Environment's roster before falling
@@ -82,7 +82,7 @@ pub fn lsp_from_status(status: &LspStatusResponse) -> Vec<LspServer> {
 /// language servers declared for `project` (bundled, user, project layers —
 /// the same sources the Environment's supervisor discovers), filtered to
 /// enabled primary servers whose root markers match the checkout. A server
-/// whose binary resolves is `Available` (pi's "not started" state); one
+/// whose binary resolves is `Available`; one
 /// whose binary is missing is `Error`.
 pub fn lsp_servers(project: &Path, user_root: Option<&Path>) -> Vec<LspServer> {
 	let config =
@@ -142,7 +142,7 @@ fn project_lsp(
 mod tests {
 	use std::fs;
 
-	use omp_docserver::lsp_config::LspConfigSource;
+	use omp_envd::docserver::lsp_config::LspConfigSource;
 
 	use super::*;
 

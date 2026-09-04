@@ -5,7 +5,7 @@ use super::{MdTheme, decode_entities, replace_tabs};
 use crate::rich::{Pipeline, RichSink, RichText};
 
 /// Captured plain-paragraph tail used by the append-only streaming fast path.
-pub(crate) struct FastTail {
+pub struct FastTail {
 	source:  Str,
 	row_raw: StrMut,
 	width:   u16,
@@ -127,7 +127,7 @@ pub(super) fn hazard(raw: &str, delta: &str) -> bool {
 		return true;
 	}
 	let word_start = raw
-		.rfind(|character| matches!(character, ' ' | '\t'))
+		.rfind([' ', '\t'])
 		.map_or(0, |offset| offset.saturating_add(1));
 	url_anywhere(&grown[word_start..])
 }

@@ -82,8 +82,7 @@ impl JsonTheme {
 /// One theme file loaded into a [`ThemeCatalog`].
 #[derive(Clone, Debug)]
 pub struct LoadedTheme {
-	/// Lookup name: the file stem (pi `loadThemeJson(name)` reads
-	/// `<themes>/<name>.json`).
+	/// Lookup name: the file stem of `<themes>/<name>.json`.
 	pub name:  Str,
 	/// Source file.
 	pub path:  PathBuf,
@@ -184,8 +183,7 @@ impl ThemeCatalog {
 	fn push(&mut self, path: PathBuf, theme: JsonTheme) {
 		let name = path
 			.file_stem()
-			.map(|stem| Str::new(stem.to_string_lossy()))
-			.unwrap_or_else(|| theme.name.clone());
+			.map_or_else(|| theme.name.clone(), |stem| Str::new(stem.to_string_lossy()));
 		if self.get(&name).is_some() {
 			return;
 		}
@@ -449,7 +447,7 @@ fn apply_rich(
 		}
 	}
 
-	// Rich pi themes name concrete presentation roles while omp components
+	// Rich themes name concrete presentation roles while omp components
 	// consume a smaller semantic palette. Preserve an explicitly authored
 	// semantic slot, otherwise use the closest concrete role as its fallback.
 	if !colors.contains_key("accent")
@@ -539,7 +537,7 @@ fn fence_border_with_contrast(border: Color, background: Color) -> Color {
 	let mut insufficient = 0.0_f32;
 	let mut sufficient = 1.0_f32;
 	for _ in 0..16 {
-		let amount = (insufficient + sufficient) / 2.0;
+		let amount = f32::midpoint(insufficient, sufficient);
 		let candidate = border.mix(target, amount);
 		if color_contrast(candidate, background).is_some_and(|ratio| ratio >= MIN_FENCE_CONTRAST) {
 			sufficient = amount;
@@ -567,7 +565,7 @@ fn color_contrast(left: Color, right: Color) -> Option<f64> {
 	Some((lighter + 0.05) / (darker + 0.05))
 }
 
-/// Derives a stable TrueColor accent from a session name and active theme.
+/// Derives a stable `TrueColor` accent from a session name and active theme.
 ///
 /// Dark surfaces use the warm 0–120° band. Supplying a light-surface
 /// luminance selects the cool 180–300° band and lowers lightness until WCAG
@@ -620,7 +618,7 @@ pub fn session_accent_color(
 			let mut low = 0.0;
 			let mut high = lightness;
 			for _ in 0..20 {
-				let middle = (low + high) / 2.0;
+				let middle = f64::midpoint(low, high);
 				if relative_luminance(hsl_rgb(f64::from(hue), 0.9, middle)) > cap {
 					high = middle;
 				} else {
@@ -660,7 +658,7 @@ fn hue_distance(left: f64, right: f64) -> f64 {
 }
 
 fn hsl_rgb(hue: f64, saturation: f64, lightness: f64) -> [u8; 3] {
-	let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+	let chroma = (1.0 - 2.0f64.mul_add(lightness, -1.0).abs()) * saturation;
 	let sector = hue / 60.0;
 	let secondary = chroma * (1.0 - (sector.rem_euclid(2.0) - 1.0).abs());
 	let (red, green, blue) = match sector as u8 {
@@ -688,7 +686,7 @@ fn relative_luminance([red, green, blue]: [u8; 3]) -> f64 {
 			((value + 0.055) / 1.055).powf(2.4)
 		}
 	};
-	0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+	0.7152f64.mul_add(linear(green), 0.2126 * linear(red)) + 0.0722 * linear(blue)
 }
 
 #[cfg(test)]

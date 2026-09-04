@@ -472,7 +472,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Response>, pending: Arc<Mutex<Pendin
 }
 
 /// First platform completion that extends `prefix` case-insensitively,
-/// returned as the ghost-text suffix (pi `#fetchWordCompletion`).
+/// returned as the ghost-text suffix.
 fn completion_suffix(prefix: &str, completions: impl IntoIterator<Item = Str>) -> Option<Str> {
 	let lower_prefix = prefix.to_lowercase();
 	completions.into_iter().find_map(|completion| {
@@ -588,7 +588,7 @@ mod platform {
 			)
 		};
 		let mut typos = Vec::new();
-		for result in results.iter() {
+		for result in &results {
 			if result.resultType() != NSTextCheckingType::Spelling {
 				continue;
 			}
@@ -629,7 +629,7 @@ mod platform {
 			)
 			.map(|values| {
 				let mut items = SmallVec::new();
-				for value in values.iter() {
+				for value in &values {
 					let item = Str::new(value.to_string());
 					if item.is_empty() || items.iter().any(|seen| seen == &item) {
 						continue;
@@ -694,7 +694,7 @@ mod platform {
 		}
 		Some(NSRange {
 			location: text[..range.start].encode_utf16().count(),
-			length:   text[range.start..range.end].encode_utf16().count(),
+			length:   text[range].encode_utf16().count(),
 		})
 	}
 

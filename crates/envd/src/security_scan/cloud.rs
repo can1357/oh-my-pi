@@ -5,8 +5,8 @@ use std::{
 };
 
 use bytes::Bytes;
+use omp_ai::auth::HeaderPlacement;
 use omp_core::{Hash32, Str, Ulid};
-use omp_inference::auth::HeaderPlacement;
 use omp_tools::security_scan::{Fault, LookbackDays, TargetKind, ValidationStatus};
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{Value, json};

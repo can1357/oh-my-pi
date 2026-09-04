@@ -5,14 +5,14 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use omp_core::{ExposeSecret as _, SecretBox, Str};
-use omp_inference::{
+use omp_ai::{
 	auth::{
 		AuditedCredentialReveal, CredentialOrigin, CredentialStore, CredentialWrite,
 		HeadlessKeySource, KeyId, ScopedCredentialGrant, StoreError,
 	},
 	id::{AccountId, PrincipalId},
 };
+use omp_core::{ExposeSecret as _, SecretBox, Str};
 use omp_secrets::{
 	SecretMaskingAuthority, SecretMaskingError,
 	rule::{SecretKind, SecretMode, SecretRule},

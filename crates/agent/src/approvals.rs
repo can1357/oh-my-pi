@@ -413,7 +413,7 @@ impl Default for ApprovalBook {
 	}
 }
 
-fn custom(name: &'static str) -> PropKey {
+const fn custom(name: &'static str) -> PropKey {
 	PropKey::Custom(Str::new_static(name))
 }
 
@@ -464,8 +464,8 @@ struct RouteInner {
 	next_id: AtomicU64,
 	tx:      RouteSink,
 	pending: Mutex<std::collections::BTreeMap<Str, PendingRequest>>,
-	/// `tool_approval_requested` / `tool_approval_resolved` observers (pi
-	/// `wrapper.ts` emits both around every prompted approval).
+	/// `tool_approval_requested` / `tool_approval_resolved` observers around
+	/// every prompted approval.
 	hooks:   Option<crate::LifecycleHooks>,
 }
 
@@ -874,23 +874,22 @@ impl ApprovalRoute {
 			return ticket;
 		}
 		self.inner.notify_requested(&ticket);
-		let decision = match timeout_ms {
-			Some(timeout_ms) => {
-				tokio::select! {
-					biased;
-					() = cancellation.cancelled() => {
-						unreachable_decision(&ticket, "approval request cancelled")
-					},
-					result = time::timeout(Duration::from_millis(timeout_ms), response.recv_async()) => {
-						match result {
-							Ok(Ok(decision)) => decision,
-							Ok(Err(_)) => unreachable_decision(&ticket, "approval host became unreachable"),
-							Err(_) => timeout_decision(&ticket),
-						}
-					},
-				}
-			},
-			None => tokio::select! {
+		let decision = if let Some(timeout_ms) = timeout_ms {
+			tokio::select! {
+				biased;
+				() = cancellation.cancelled() => {
+					unreachable_decision(&ticket, "approval request cancelled")
+				},
+				result = time::timeout(Duration::from_millis(timeout_ms), response.recv_async()) => {
+					match result {
+						Ok(Ok(decision)) => decision,
+						Ok(Err(_)) => unreachable_decision(&ticket, "approval host became unreachable"),
+						Err(_) => timeout_decision(&ticket),
+					}
+				},
+			}
+		} else {
+			tokio::select! {
 				biased;
 				() = cancellation.cancelled() => {
 					unreachable_decision(&ticket, "approval request cancelled")
@@ -898,7 +897,7 @@ impl ApprovalRoute {
 				result = response.recv_async() => result.unwrap_or_else(|_| {
 					unreachable_decision(&ticket, "approval host became unreachable")
 				}),
-			},
+			}
 		};
 		self.inner.pending.lock().remove(&ticket_id);
 		self

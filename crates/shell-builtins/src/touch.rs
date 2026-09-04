@@ -25,7 +25,7 @@ use clap::{
 use jiff::{Timestamp, ToSpan, Zoned, civil::Time, fmt::strtime, tz::TimeZone};
 #[cfg(unix)]
 use libc::O_NONBLOCK;
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 #[cfg(unix)]
 use rustix::fs::Timestamps;
 #[cfg(unix)]

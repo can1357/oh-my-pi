@@ -25,7 +25,7 @@ const DESCRIPTION: &str = "Runs one child or a concurrent batch as detached jobs
                            `hub wait` can block on it.";
 
 /// Non-blocking advisory appended to every started batch so the model knows
-/// what it is waiting on (pi `task-async-contract.md`).
+/// what it is waiting on.
 pub const STARTED_ADVISORY: &str =
 	"No polling needed: each child's result auto-delivers as an async-result follow-up when it \
 	 settles, unless a settled `hub jobs`/`hub wait` snapshot consumes it first (no duplicate \
@@ -45,7 +45,7 @@ pub enum TaskEffort {
 }
 
 /// One requested child run.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChildRequest {
 	/// Complete child assignment.
@@ -69,7 +69,7 @@ pub struct ChildRequest {
 }
 
 /// One concurrent batch request.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BatchRequest {
 	/// Shared goal, constraints, and interface contract for every child.
@@ -168,7 +168,7 @@ impl Params {
 
 	/// Returns the number of requested children without allocating.
 	#[must_use]
-	pub fn len(&self) -> usize {
+	pub const fn len(&self) -> usize {
 		match self {
 			Self::Single(_) => 1,
 			Self::Batch(batch) => batch.tasks.len(),
@@ -177,7 +177,7 @@ impl Params {
 
 	/// Returns whether the batch form omitted every child.
 	#[must_use]
-	pub fn is_empty(&self) -> bool {
+	pub const fn is_empty(&self) -> bool {
 		matches!(self, Self::Batch(batch) if batch.tasks.is_empty())
 	}
 }
@@ -435,7 +435,7 @@ fn started_parts(jobs: &[StartedChild]) -> Vec<Part> {
 		.collect()
 }
 
-fn done(result: Result<Payload, Fault>) -> Ev<Update, Payload, Fault> {
+const fn done(result: Result<Payload, Fault>) -> Ev<Update, Payload, Fault> {
 	Ev::Done(ToolTerminal::Done { result, useless: false })
 }
 

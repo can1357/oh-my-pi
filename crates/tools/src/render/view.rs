@@ -358,7 +358,7 @@ impl From<String> for Kid {
 
 impl El {
 	/// Creates an empty element.
-	pub fn new(tag: Tag) -> Self {
+	pub const fn new(tag: Tag) -> Self {
 		Self { tag, props: SmallVec::new(), children: Vec::new() }
 	}
 

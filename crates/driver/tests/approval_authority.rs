@@ -10,14 +10,14 @@ use omp_agent::{
 	ApprovalDecision, ApprovalScope, ApprovalSource, DispatchPolicy, Inference, Kernel, KernelEvent,
 	RunControl, StaticPrompt, TicketState, TurnInput, Up,
 };
+use omp_ai::{
+	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ExecutionReceipt, FinishReason,
+	RequestId, ResponseMeta, ToolCall, ToolCallId, Usage,
+};
 use omp_catalog::{ProviderId, RouteId};
 use omp_core::Str;
 use omp_driver::headless::kernel::{EnvToolExecutor, SettingsAdmission};
 use omp_envd::{AttachOptions, ProjectEnvironment, RegistryBridges, tool_settings::ApprovalMode};
-use omp_inference::{
-	BlockKind, ChatEvent, ChatRequest, ChatStream, Completion, ExecutionReceipt, FinishReason,
-	RequestId, ResponseMeta, ToolCall, ToolCallId, Usage,
-};
 use omp_journal::kind;
 use omp_session::{ComponentRegistry, Session};
 
@@ -34,7 +34,7 @@ impl Inference for WriteThenText {
 	fn chat(
 		&mut self,
 		_request: ChatRequest,
-	) -> impl Future<Output = Result<ChatStream, omp_inference::Error>> + Send {
+	) -> impl Future<Output = Result<ChatStream, omp_ai::Error>> + Send {
 		self.turns += 1;
 		let meta = ResponseMeta {
 			request_id:          RequestId::from("approval-test"),
@@ -53,7 +53,7 @@ impl Inference for WriteThenText {
 			let call = ToolCall {
 				id:        ToolCallId::from("write-1"),
 				name:      Str::new_static("write"),
-				arguments: omp_inference::OpaqueJson::new(arguments.clone()),
+				arguments: omp_ai::OpaqueJson::new(arguments.clone()),
 			};
 			vec![
 				ChatEvent::Started(meta),

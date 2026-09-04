@@ -18,10 +18,7 @@ use crate::{
 
 /// Materializes Seatbelt runtime state. The prepared sandbox owns the clone's
 /// temporary directory, so its profile and cwd cannot outlive the clone.
-pub(crate) fn prepare(
-	spec: &SandboxSpec,
-	prepared: &mut PreparedSandbox,
-) -> Result<(), SandboxError> {
+pub fn prepare(spec: &SandboxSpec, prepared: &mut PreparedSandbox) -> Result<(), SandboxError> {
 	if spec.write != WriteMode::Ephemeral {
 		return Ok(());
 	}

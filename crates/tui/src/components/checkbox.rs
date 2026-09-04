@@ -39,7 +39,7 @@ impl Checkbox {
 		self
 	}
 
-	fn toggle(&mut self) -> Flow {
+	const fn toggle(&mut self) -> Flow {
 		self.checked = !self.checked;
 		Flow::Consumed
 	}

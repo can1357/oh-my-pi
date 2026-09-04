@@ -109,8 +109,7 @@ fn run_sync(args: GcArgs, cancel: &GcCancellation) -> miette::Result<()> {
 		}
 		blobs_examined += report.storage.blobs_examined;
 		blobs_eligible += report.storage.blobs_eligible;
-		blob_bytes_eligible =
-			blob_bytes_eligible.saturating_add(report.storage.blob_bytes_eligible);
+		blob_bytes_eligible = blob_bytes_eligible.saturating_add(report.storage.blob_bytes_eligible);
 		blobs_removed += report.storage.blobs_removed;
 		blob_bytes_reclaimed =
 			blob_bytes_reclaimed.saturating_add(report.storage.blob_bytes_reclaimed);
@@ -175,9 +174,9 @@ fn run_sync(args: GcArgs, cancel: &GcCancellation) -> miette::Result<()> {
 		);
 	} else if args.apply {
 		println!(
-			"pruned {entries_pruned} abandoned entries from {journals_pruned} of \
-			 {journals_scanned} journals; removed {blobs_removed}/{blobs_eligible} unreferenced \
-			 blobs and {temporaries_removed}/{temporaries_eligible} stale CAS temporaries; reclaimed \
+			"pruned {entries_pruned} abandoned entries from {journals_pruned} of {journals_scanned} \
+			 journals; removed {blobs_removed}/{blobs_eligible} unreferenced blobs and \
+			 {temporaries_removed}/{temporaries_eligible} stale CAS temporaries; reclaimed \
 			 {bytes_reclaimed}/{bytes_eligible} eligible bytes"
 		);
 	} else {
@@ -199,10 +198,7 @@ fn check_cancelled(cancel: &GcCancellation) -> miette::Result<()> {
 	}
 }
 
-fn project_session_roots(
-	data_dir: &Path,
-	cancel: &GcCancellation,
-) -> io::Result<Vec<PathBuf>> {
+fn project_session_roots(data_dir: &Path, cancel: &GcCancellation) -> io::Result<Vec<PathBuf>> {
 	let projects = data_dir.join("projects");
 	let entries = match fs::read_dir(&projects) {
 		Ok(entries) => entries,
@@ -260,24 +256,17 @@ fn collect_local_artifacts(
 			.with_extension(omp_journal::FILE_EXTENSION);
 		if !journal.is_file() {
 			report.session_dirs += 1;
-			report.bytes = report
-				.bytes
-				.saturating_add(directory_bytes(&session_root, 1, cancel, &mut visited)?);
+			report.bytes =
+				report
+					.bytes
+					.saturating_add(directory_bytes(&session_root, 1, cancel, &mut visited)?);
 			if apply {
 				check_io_cancelled(cancel)?;
 				fs::remove_dir_all(&session_root)?;
 			}
 			continue;
 		}
-		collect_stale_local_temporaries(
-			&local,
-			now,
-			apply,
-			cancel,
-			1,
-			&mut visited,
-			&mut report,
-		)?;
+		collect_stale_local_temporaries(&local, now, apply, cancel, 1, &mut visited, &mut report)?;
 	}
 	Ok(report)
 }
@@ -385,15 +374,11 @@ fn collect_journals(directory: &Path, cancel: &GcCancellation) -> io::Result<Vec
 		let entry = entry?;
 		let path = entry.path();
 		if entry.file_type()?.is_file()
-			&& path.extension().and_then(|value| value.to_str())
-				== Some(omp_journal::FILE_EXTENSION)
+			&& path.extension().and_then(|value| value.to_str()) == Some(omp_journal::FILE_EXTENSION)
 		{
 			output.push(path);
 			if output.len() > MAX_JOURNALS_PER_NAMESPACE {
-				return Err(io::Error::new(
-					io::ErrorKind::InvalidData,
-					"journal-count limit exceeded",
-				));
+				return Err(io::Error::new(io::ErrorKind::InvalidData, "journal-count limit exceeded"));
 			}
 		}
 	}
@@ -469,40 +454,42 @@ mod tests {
 		let mut retained = Vec::new();
 		let mut orphans = Vec::new();
 		for project in ["first", "second"] {
-			let sessions = scratch.path().join("projects").join(project).join("sessions");
+			let sessions = scratch
+				.path()
+				.join("projects")
+				.join(project)
+				.join("sessions");
 			let store = BlobStore::open(&sessions).expect("store");
-			let keep = store.put(format!("{project}-keep").as_bytes()).expect("keep");
-			let orphan = store.put(format!("{project}-orphan").as_bytes()).expect("orphan");
+			let keep = store
+				.put(format!("{project}-keep").as_bytes())
+				.expect("keep");
+			let orphan = store
+				.put(format!("{project}-orphan").as_bytes())
+				.expect("orphan");
 			std::fs::OpenOptions::new()
 				.write(true)
 				.open(store.path(&orphan))
 				.expect("orphan file")
-				.set_times(
-					std::fs::FileTimes::new()
-						.set_modified(std::time::SystemTime::UNIX_EPOCH),
-				)
+				.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
 				.expect("age orphan");
 			let path = sessions.join(format!("{project}.oms"));
 			let mut journal = Journal::create(path).expect("journal");
 			let genesis = journal
 				.append(EntryDraft {
-					kind: Kind::known(KindName::Journal),
-					by: None,
+					kind:  Kind::known(KindName::Journal),
+					by:    None,
 					prior: None,
 					label: None,
-					data: Str::new_static("{}"),
+					data:  Str::new_static("{}"),
 				})
 				.expect("genesis");
 			journal
 				.append(EntryDraft {
-					kind: Kind::known(KindName::Patch),
-					by: Some(genesis.id),
+					kind:  Kind::known(KindName::Patch),
+					by:    Some(genesis.id),
 					prior: None,
 					label: None,
-					data: Str::new(format!(
-						"{{\"artifact\":\"artifact://sha256/{}\"}}",
-						keep.to_hex()
-					)),
+					data:  Str::new(format!("{{\"artifact\":\"artifact://sha256/{}\"}}", keep.to_hex())),
 				})
 				.expect("root");
 			retained.push((store.clone(), keep));
@@ -511,10 +498,10 @@ mod tests {
 
 		run_sync(
 			GcArgs {
-				data_dir: Some(scratch.path().to_path_buf()),
+				data_dir:     Some(scratch.path().to_path_buf()),
 				sessions_dir: None,
-				apply: true,
-				json: true,
+				apply:        true,
+				json:         true,
 			},
 			&GcCancellation::default(),
 		)

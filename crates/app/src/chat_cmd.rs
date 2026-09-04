@@ -29,8 +29,7 @@ omp_con::var! {
 	};
 }
 
-/// pi `DEFAULT_PREWALK_TARGET` and the `--plan-yolo-into` default: the fast
-/// role.
+/// Default model role for prewalk and `--plan-yolo-into`.
 const SMOL_ROLE: &str = "@smol";
 /// Sandbox root allow-lists `--add-dir` extends (envd `exec_settings`).
 const SANDBOX_READABLE_ROOTS: &str = "sv_sandbox_readable_roots";
@@ -196,8 +195,8 @@ pub(crate) struct Launch {
 	pub catalog:       Arc<Catalog>,
 	/// Configured model policy after `--config` overlays.
 	pub settings:      ModelSettings,
-	/// `settings` narrowed to the `--models` roster (pi `resolveModelScope`);
-	/// identical to `settings` without the flag.
+	/// `settings` narrowed to the `--models` roster; identical to `settings`
+	/// without the flag.
 	pub scoped:        ModelSettings,
 	pub roles:         roles::LaunchRoles,
 	/// Primary model selector handed to the kernel.
@@ -395,7 +394,7 @@ impl Launch {
 		let model_override = model.is_some();
 		let model = model
 			.or_else(|| {
-				// pi `main.ts`: a `--models` scope pins the first scoped model
+				// A `--models` scope pins the first scoped model
 				// unless the remembered default role resolves inside it.
 				let first = scope.first()?;
 				let remembered = roles.primary.as_ref().filter(|remembered| {
@@ -430,17 +429,17 @@ impl Launch {
 					.map_err(|source| miette!("--plan-yolo-into: {selector} did not resolve: {source}"))
 			})
 			.transpose()?;
-		let prewalk_target = if omp_inference::pi_settings::AI_PREWALK_ENABLED.get(&ctx)
+		let prewalk_target = if omp_ai::settings::AI_PREWALK_ENABLED.get(&ctx)
 			&& (prewalk || prewalk_into.is_some() || !resuming)
 		{
-			// pi: an unresolvable prewalk target warns and disarms rather than
+			// An unresolvable prewalk target warns and disarms rather than
 			// locking the operator out of the app (issue #6064).
 			let selector = prewalk_into.as_deref().unwrap_or(SMOL_ROLE);
 			match handoff(selector) {
 				Ok(target) => Some(target),
 				Err(source) => {
 					eprintln!("warning: prewalk disabled: {selector} did not resolve: {source}");
-					omp_inference::pi_settings::AI_PREWALK_ENABLED
+					omp_ai::settings::AI_PREWALK_ENABLED
 						.set(&ctx, false)
 						.into_diagnostic()?;
 					None
@@ -610,8 +609,8 @@ const STOCK_THEME: &str = "default";
 
 /// Resolves the interactive dark and light palettes from their archived
 /// `cl_theme_dark` / `cl_theme_light` profile choices against `--theme` paths,
-/// then `<config root>/agent/themes`, then `<project>/.omp/themes` (pi
-/// `loadThemeJson`). `cl_theme` (`--use-theme`) remains an explicit fixed
+/// then `<config root>/agent/themes`, then `<project>/.omp/themes`.
+/// `cl_theme` (`--use-theme`) remains an explicit fixed
 /// override and therefore fills both appearance slots with the same theme.
 ///
 /// With the stock override name, the first `--theme` file is a fixed theme; an
@@ -627,7 +626,7 @@ fn resolve_theme(
 	Option<Arc<omp_tui::JsonTheme>>,
 	Arc<omp_tui::ThemeCatalog>,
 )> {
-	let override_name = omp_con::CL_THEME.get(ctx);
+	let override_name = omp_chat::settings::CL_THEME.get(ctx);
 	let automatic = override_name.is_empty() || override_name == STOCK_THEME;
 	let catalog = omp_tui::ThemeCatalog::load(explicit, &[
 		config_root.join("agent/themes"),
@@ -639,11 +638,7 @@ fn resolve_theme(
 	}
 	let (dark, light) = if automatic && explicit.is_empty() {
 		(
-			resolve_named_theme(
-				&catalog,
-				&omp_chat::settings::CL_THEME_DARK.get(ctx),
-				"titanium",
-			),
+			resolve_named_theme(&catalog, &omp_chat::settings::CL_THEME_DARK.get(ctx), "titanium"),
 			resolve_named_theme(&catalog, &omp_chat::settings::CL_THEME_LIGHT.get(ctx), "light"),
 		)
 	} else {
@@ -736,43 +731,42 @@ pub(crate) fn apply_launch_convars(
 	flags: &LaunchConvars<'_>,
 ) -> omp_con::ConResult<()> {
 	if flags.hide_thinking {
-		omp_con::CL_SHOWTHINKING.set(ctx, false)?;
+		omp_chat::settings::CL_SHOWTHINKING.set(ctx, false)?;
 	}
 	if let Some(tier) = flags.service_tier.clone() {
-		// pi `--service-tier` is the OpenAI-family session tier
-		// (`options.openAIServiceTier`).
+		// `--service-tier` sets the OpenAI-family session tier.
 		omp_catalog::settings::AI_TIER_OPENAI.set(ctx, tier)?;
 	}
 	if flags.external_thinking {
-		omp_inference::pi_settings::AI_EXTERNAL_THINKING.set(ctx, true)?;
+		omp_ai::settings::AI_EXTERNAL_THINKING.set(ctx, true)?;
 	}
 	if flags.advisor {
-		omp_inference::pi_settings::AI_ADVISOR_ENABLED.set(ctx, true)?;
+		omp_ai::settings::AI_ADVISOR_ENABLED.set(ctx, true)?;
 	}
 	if let Some(enabled) = flags.prewalk {
-		omp_inference::pi_settings::AI_PREWALK_ENABLED.set(ctx, enabled)?;
+		omp_ai::settings::AI_PREWALK_ENABLED.set(ctx, enabled)?;
 	}
 	if flags.no_lsp {
 		omp_envd::lsp_settings::SV_LSP_ENABLED.set(ctx, false)?;
 	}
 	if flags.no_skills {
-		omp_envd::pi_settings::SV_SKILLS_ENABLED.set(ctx, false)?;
+		omp_envd::SV_SKILLS_ENABLED.set(ctx, false)?;
 	}
 	if !flags.skills.is_empty() {
-		omp_envd::pi_settings::SV_SKILLS_INCLUDE.set(ctx, flags.skills.clone())?;
+		omp_envd::SV_SKILLS_INCLUDE.set(ctx, flags.skills.clone())?;
 	}
 	if !flags.skill.is_empty() {
-		let mut roots = omp_envd::pi_settings::SV_SKILLS_CUSTOM_DIRECTORIES.get(ctx);
+		let mut roots = omp_envd::SV_SKILLS_CUSTOM_DIRECTORIES.get(ctx);
 		roots.extend(
 			flags
 				.skill
 				.iter()
 				.map(|root| Str::new(root.to_string_lossy())),
 		);
-		omp_envd::pi_settings::SV_SKILLS_CUSTOM_DIRECTORIES.set(ctx, roots)?;
+		omp_envd::SV_SKILLS_CUSTOM_DIRECTORIES.set(ctx, roots)?;
 	}
 	if let Some(theme) = flags.use_theme.clone() {
-		omp_con::CL_THEME.set(ctx, theme)?;
+		omp_chat::settings::CL_THEME.set(ctx, theme)?;
 	}
 	if flags.no_title {
 		omp_chat::chrome::CL_TITLE_STATE.set(ctx, false)?;
@@ -799,8 +793,8 @@ pub(crate) fn apply_launch_convars(
 }
 
 /// Narrows `settings` to the `--models` patterns and lists the admitted
-/// models in pattern order (pi `resolveModelScope`): each pattern contributes
-/// the catalog models it admits, once, carrying its explicit `:effort` suffix.
+/// models in pattern order: each pattern contributes the catalog models it
+/// admits once, carrying its explicit `:effort` suffix.
 pub(crate) fn model_scope(
 	catalog: &Catalog,
 	settings: &ModelSettings,
@@ -848,19 +842,19 @@ fn apply_launch_session(
 	launch: &Launch,
 ) -> miette::Result<()> {
 	if let Some(level) = launch.thinking.clone() {
-		omp_con::AI_THINKING.set(ctx, level).into_diagnostic()?;
+		omp_agent::AI_THINKING.set(ctx, level).into_diagnostic()?;
 	}
 	if let Some(target) = &launch.prewalk {
 		AI_PREWALK_MODEL
 			.set(ctx, selector_with_thinking(target))
 			.into_diagnostic()?;
-		let configured_model = omp_con::AI_MODEL.get(ctx);
+		let configured_model = omp_agent::AI_MODEL.get(ctx);
 		let current_model = if configured_model.is_empty() {
 			launch.model.as_str()
 		} else {
 			configured_model.as_str()
 		};
-		let current_thinking = omp_con::AI_THINKING.get(ctx);
+		let current_thinking = omp_agent::AI_THINKING.get(ctx);
 		let changes_model = current_model != target.model.as_str();
 		let changes_thinking = target
 			.thinking
@@ -935,9 +929,8 @@ pub(crate) async fn run(
 		..
 	} = &launch;
 	let resuming = launch.resuming || imported;
-	// Prompt templates are `/name` console commands (pi
-	// `promptTemplateCommands`); a template named like a built-in command
-	// is dropped, as pi drops reserved names.
+	// Prompt templates are `/name` console commands; a template named like a
+	// built-in command is dropped.
 	let interactive_prompts = Arc::new(InteractivePrompts {
 		templates: Arc::clone(&launch.templates),
 		skills:    Arc::clone(&launch.skills),
@@ -945,7 +938,7 @@ pub(crate) async fn run(
 	for reserved in omp_chat::commands::prompts::register(ctx, interactive_prompts.clone()) {
 		eprintln!("warning: prompt template `{reserved}` shadows a built-in command; skipped");
 	}
-	if omp_driver::pi_settings::SV_SKILLS_ENABLE_SKILL_COMMANDS.get(ctx) {
+	if omp_driver::settings::SV_SKILLS_ENABLE_SKILL_COMMANDS.get(ctx) {
 		for reserved in omp_chat::commands::prompts::register_skills(ctx, interactive_prompts) {
 			eprintln!("warning: skill command `{reserved}` shadows a built-in command; skipped");
 		}
@@ -971,15 +964,15 @@ pub(crate) async fn run(
 	);
 	let up = kernel.mailbox();
 	let (commands, command_rx) = flume::unbounded();
-	let resize_policy = match omp_con::CL_RESIZE_POLICY.get(&ctx) {
-		omp_con::ResizePolicy::Preserve => omp_tui::slots::ResizePolicy::Preserve,
-		omp_con::ResizePolicy::Append => omp_tui::slots::ResizePolicy::Append,
-		omp_con::ResizePolicy::Rebuild => omp_tui::slots::ResizePolicy::Rebuild,
+	let resize_policy = match omp_chat::settings::CL_RESIZE_POLICY.get(&ctx) {
+		omp_chat::settings::ResizePolicy::Preserve => omp_tui::slots::ResizePolicy::Preserve,
+		omp_chat::settings::ResizePolicy::Append => omp_tui::slots::ResizePolicy::Append,
+		omp_chat::settings::ResizePolicy::Rebuild => omp_tui::slots::ResizePolicy::Rebuild,
 	};
 	let model_badge = {
 		// A resumed session restores its journaled `ai_model` route; the
 		// badge follows it rather than the launch default.
-		let route = Some(omp_con::AI_MODEL.get(&ctx))
+		let route = Some(omp_agent::AI_MODEL.get(&ctx))
 			.filter(|route| !route.is_empty())
 			.unwrap_or_else(|| model.clone());
 		let spec = catalog
@@ -1232,7 +1225,7 @@ pub(crate) async fn run(
 		let _ = fs::remove_file(path);
 	}
 	terminal_result?;
-	// `/restart` (pi `interactive-mode.ts` `restart()`): the terminal is
+	// `/restart`: the terminal is
 	// restored and the session journaled its exit, so replace the process
 	// image with the launch argv resuming this session. Returns only on
 	// exec failure.
@@ -1335,15 +1328,15 @@ mod tests {
 			"--advisor engages the journal-backed Director exactly once"
 		);
 
-		assert_eq!(omp_con::AI_COMPACT_THRESHOLD.get(&ctx), 0.5, "--config overlay ran");
+		assert_eq!(omp_agent::AI_COMPACT_THRESHOLD.get(&ctx), 0.5, "--config overlay ran");
 		assert_eq!(omp_catalog::settings::AI_TIER_OPENAI.get(&ctx), TierSetting::Priority);
-		assert!(omp_inference::pi_settings::AI_EXTERNAL_THINKING.get(&ctx));
-		assert!(omp_inference::pi_settings::AI_ADVISOR_ENABLED.get(&ctx));
-		assert!(omp_inference::pi_settings::AI_PREWALK_ENABLED.get(&ctx));
+		assert!(omp_ai::settings::AI_EXTERNAL_THINKING.get(&ctx));
+		assert!(omp_ai::settings::AI_ADVISOR_ENABLED.get(&ctx));
+		assert!(omp_ai::settings::AI_PREWALK_ENABLED.get(&ctx));
 		assert!(!omp_envd::lsp_settings::SV_LSP_ENABLED.get(&ctx));
-		assert!(!omp_con::CL_SHOWTHINKING.get(&ctx));
+		assert!(!omp_chat::settings::CL_SHOWTHINKING.get(&ctx));
 		assert!(!omp_chat::chrome::CL_TITLE_STATE.get(&ctx));
-		assert_eq!(omp_con::CL_THEME.get(&ctx), "ocean");
+		assert_eq!(omp_chat::settings::CL_THEME.get(&ctx), "ocean");
 		assert_eq!(
 			launch.theme.as_ref().map(|theme| theme.name.as_str()),
 			Some("Ocean"),
@@ -1354,15 +1347,13 @@ mod tests {
 			Some("Ocean"),
 			"the explicit theme remains fixed across appearance changes",
 		);
-		assert_eq!(omp_envd::pi_settings::SV_SKILLS_INCLUDE.get(&ctx), vec![Str::new_static(
-			"rust*"
-		)]);
+		assert_eq!(omp_envd::SV_SKILLS_INCLUDE.get(&ctx), vec![Str::new_static("rust*")]);
 		let canonical = Str::new(fs::canonicalize(&extra).unwrap().to_string_lossy());
 		assert!(
-			omp_envd::pi_settings::SV_SKILLS_CUSTOM_DIRECTORIES
+			omp_envd::SV_SKILLS_CUSTOM_DIRECTORIES
 				.get(&ctx)
 				.contains(&canonical)
-				|| omp_envd::pi_settings::SV_SKILLS_CUSTOM_DIRECTORIES
+				|| omp_envd::SV_SKILLS_CUSTOM_DIRECTORIES
 					.get(&ctx)
 					.contains(&Str::new(extra.to_string_lossy()))
 		);
@@ -1592,7 +1583,7 @@ mod tests {
 	#[test]
 	fn no_prewalk_disables_a_configured_prewalk() {
 		let ctx = omp_con::Ctx::new();
-		omp_inference::pi_settings::AI_PREWALK_ENABLED
+		omp_ai::settings::AI_PREWALK_ENABLED
 			.set(&ctx, true)
 			.unwrap();
 		apply_launch_convars(&ctx, &LaunchConvars {
@@ -1610,8 +1601,8 @@ mod tests {
 			add_dir:           &[],
 		})
 		.unwrap();
-		assert!(!omp_inference::pi_settings::AI_PREWALK_ENABLED.get(&ctx));
-		assert!(!omp_envd::pi_settings::SV_SKILLS_ENABLED.get(&ctx));
+		assert!(!omp_ai::settings::AI_PREWALK_ENABLED.get(&ctx));
+		assert!(!omp_envd::SV_SKILLS_ENABLED.get(&ctx));
 	}
 
 	#[test]
@@ -1679,10 +1670,7 @@ mod tests {
 			.await
 			.unwrap();
 		assert!(launch.prewalk.is_none());
-		assert!(
-			!omp_inference::pi_settings::AI_PREWALK_ENABLED.get(&ctx),
-			"disarmed, not armed blind"
-		);
+		assert!(!omp_ai::settings::AI_PREWALK_ENABLED.get(&ctx), "disarmed, not armed blind");
 	}
 
 	#[test]
@@ -1719,9 +1707,8 @@ mod tests {
 }
 
 /// `--plan-mode` / `--plan-yolo`: engages the plan Director before the first
-/// turn; `--plan-yolo` arms its approval hand-off to `yolo` (pi
-/// `options.planYolo`: plan, auto-approve the proposal, switch to the target
-/// and keep going).
+/// turn; `--plan-yolo` arms its approval hand-off to `yolo`: plan,
+/// auto-approve the proposal, switch to the target, and keep going.
 pub(crate) fn apply_launch_plan(
 	session: &mut omp_session::Session,
 	plan_mode: bool,
@@ -1753,8 +1740,8 @@ fn engage_plan(
 	stack.engage(session, Box::new(plan)).map(drop)
 }
 
-/// pi `app.plan.toggle`: engages/resumes the plan Director or pauses its
-/// journaled subtree between turns. Approval exits it through the generic
+/// Engages or resumes the plan Director, or pauses its journaled subtree
+/// between turns. Approval exits it through the generic
 /// Director command; a pause deliberately preserves plan and child state.
 pub(crate) fn set_plan_mode(
 	session: &mut omp_session::Session,

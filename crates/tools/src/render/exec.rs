@@ -58,11 +58,17 @@ impl RenderFold for ShellRenderer {
 		state.cached = Some(render_shell_live(state).into());
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, complete: bool) {
-		if let Some(command) = args.get("command").and_then(omp_slopjson::Value::as_str) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, complete: bool) {
+		if let Some(command) = args
+			.get("command")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.shell_command = Some(Str::new(command));
 		}
-		if let Some(timeout_seconds) = args.get("timeout").and_then(omp_slopjson::Value::as_f64) {
+		if let Some(timeout_seconds) = args
+			.get("timeout")
+			.and_then(omp_core::slopjson::Value::as_f64)
+		{
 			state.shell_timeout_known = true;
 			state.shell_timeout_ms =
 				(timeout_seconds != 0.0).then_some((timeout_seconds * 1_000.0).ceil() as u64);
@@ -81,23 +87,25 @@ impl RenderFold for ShellRenderer {
 					.clone()
 					.unwrap_or_else(|| render_shell_live(state).into()),
 			),
-			Some(ShellRenderOutcome::Call(CallOutcome::Ok(payload)))
-			| Some(ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
-				result: Ok(payload),
-				..
-			})) => Some(render_shell_payload(payload, state).into()),
-			Some(ShellRenderOutcome::Call(CallOutcome::Faulted(ShellFault::CommandFailed {
-				payload,
-			})))
-			| Some(ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
-				result: Err(ShellFault::CommandFailed { payload }),
-				..
-			})) => Some(render_shell_payload(payload, state).into()),
-			Some(ShellRenderOutcome::Call(CallOutcome::Faulted(fault)))
-			| Some(ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
-				result: Err(fault),
-				..
-			})) => Some(render_fault("bash", &shell_fault(fault)).into()),
+			Some(
+				ShellRenderOutcome::Call(CallOutcome::Ok(payload))
+				| ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
+					result: Ok(payload), ..
+				}),
+			) => Some(render_shell_payload(payload, state).into()),
+			Some(
+				ShellRenderOutcome::Call(CallOutcome::Faulted(ShellFault::CommandFailed { payload }))
+				| ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
+					result: Err(ShellFault::CommandFailed { payload }),
+					..
+				}),
+			) => Some(render_shell_payload(payload, state).into()),
+			Some(
+				ShellRenderOutcome::Call(CallOutcome::Faulted(fault))
+				| ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
+					result: Err(fault), ..
+				}),
+			) => Some(render_fault("bash", &shell_fault(fault)).into()),
 			Some(ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Detached(job))) => {
 				Some(render_shell_detached(job).into())
 			},
@@ -123,17 +131,20 @@ impl RenderFold for EvalRenderer {
 		append_bounded_tail(&mut state.tail, update.data.as_ref());
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, complete: bool) {
 		if let Some(language) = args
 			.get("language")
 			.and_then(|value| value.deserialize_into::<EvalLanguage>().ok())
 		{
 			state.eval_language = Some(language);
 		}
-		if let Some(code) = args.get("code").and_then(omp_slopjson::Value::as_str) {
+		if let Some(code) = args.get("code").and_then(omp_core::slopjson::Value::as_str) {
 			state.eval_code = Some(Str::new(code));
 		}
-		if let Some(title) = args.get("title").and_then(omp_slopjson::Value::as_str) {
+		if let Some(title) = args
+			.get("title")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.eval_title = Some(Str::new(title));
 		} else if complete {
 			state.eval_title = None;
@@ -323,7 +334,7 @@ fn render_shell_payload(payload: &ShellPayload, state: &StreamState) -> El {
 	}
 }
 
-fn shell_state_status(payload: &ShellPayload) -> &'static str {
+const fn shell_state_status(payload: &ShellPayload) -> &'static str {
 	match (payload.status.outcome, payload.status.exit_code) {
 		(ExecOutcome::Exited, Some(0) | None) => "completed",
 		(ExecOutcome::Cancelled | ExecOutcome::Timeout, _) => "stopped",
@@ -331,7 +342,7 @@ fn shell_state_status(payload: &ShellPayload) -> &'static str {
 	}
 }
 
-fn shell_status_tone(payload: &ShellPayload) -> Tone {
+const fn shell_status_tone(payload: &ShellPayload) -> Tone {
 	match (payload.status.outcome, payload.status.exit_code) {
 		(ExecOutcome::Exited, Some(0) | None) => Tone::Ok,
 		(ExecOutcome::Cancelled | ExecOutcome::Timeout, _) => Tone::Warn,
@@ -375,7 +386,7 @@ fn eval_fault(fault: &EvalFault) -> String {
 	}
 }
 
-fn eval_state_status(outcome: CellOutcome) -> &'static str {
+const fn eval_state_status(outcome: CellOutcome) -> &'static str {
 	match outcome {
 		CellOutcome::Complete => "completed",
 		CellOutcome::Error => "failed",
@@ -383,7 +394,7 @@ fn eval_state_status(outcome: CellOutcome) -> &'static str {
 	}
 }
 
-fn eval_status_tone(outcome: CellOutcome) -> Tone {
+const fn eval_status_tone(outcome: CellOutcome) -> Tone {
 	match outcome {
 		CellOutcome::Complete => Tone::Ok,
 		CellOutcome::Error => Tone::Err,
@@ -461,10 +472,7 @@ fn render_eval_payload(payload: &EvalPayload, state: &StreamState) -> El {
 }
 
 /// Native shell and eval renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(
-	shell: ToolIdentity,
-	eval: ToolIdentity,
-) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(shell: ToolIdentity, eval: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
 			identity: shell,
@@ -540,7 +548,7 @@ mod tests {
 			serde_json::from_slice(shell.progress_update.expect("shell progress")).unwrap();
 		let shell_renderer = ShellRenderer;
 		let mut shell_state = StreamState::default();
-		let streaming_args = omp_slopjson::parse_streaming(shell.streaming_args);
+		let streaming_args = omp_core::slopjson::parse_streaming(shell.streaming_args);
 		shell_renderer.fold_args(&mut shell_state, &streaming_args, false);
 		shell_renderer.fold(&mut shell_state, shell_update);
 		let live = shell_renderer.view(&shell_state, None).unwrap();
@@ -549,7 +557,7 @@ mod tests {
 		assert!(live.contains("<hr label=Output/>"));
 		assert!(live.contains("<pre max-rows=12 overflow=output>"));
 		assert!(!live.contains("ctrl+o"));
-		let args = omp_slopjson::parse(shell.args).unwrap();
+		let args = omp_core::slopjson::parse(shell.args).unwrap();
 		shell_renderer.fold_args(&mut shell_state, &args, true);
 		let shell_ok: ShellRenderOutcome = serde_json::from_slice(shell.success_outcome).unwrap();
 		let shell_error: ShellRenderOutcome = serde_json::from_slice(shell.error_outcome).unwrap();
@@ -584,7 +592,7 @@ mod tests {
 			serde_json::from_slice(eval.progress_update.expect("eval progress")).unwrap();
 		let eval_renderer = EvalRenderer;
 		let mut eval_state = StreamState::default();
-		let streaming_args = omp_slopjson::parse_streaming(eval.streaming_args);
+		let streaming_args = omp_core::slopjson::parse_streaming(eval.streaming_args);
 		eval_renderer.fold_args(&mut eval_state, &streaming_args, false);
 		eval_renderer.fold(&mut eval_state, update);
 		let live = eval_renderer.view(&eval_state, None).unwrap();
@@ -593,7 +601,7 @@ mod tests {
 		assert!(live.contains("label=running"));
 		assert!(live.contains("<bytes value=31/>"), "{live}");
 		assert!(live.contains("<pre fg=accent max-rows=12 overflow=code>"));
-		let args = omp_slopjson::parse(eval.args).unwrap();
+		let args = omp_core::slopjson::parse(eval.args).unwrap();
 		eval_renderer.fold_args(&mut eval_state, &args, true);
 		let eval_ok: CallOutcome<EvalPayload, EvalFault> =
 			serde_json::from_slice(eval.success_outcome).unwrap();

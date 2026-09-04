@@ -1,4 +1,4 @@
-//! Key semantics of the interactive actor: pi's Escape ladder, Ctrl+C,
+//! Key semantics of the interactive actor: Escape ladder, Ctrl+C,
 //! dequeue, clipboard chords, panel routing, gestures, and Esc hooks.
 
 use std::{
@@ -505,7 +505,7 @@ fn first_ctrl_c_with_an_empty_active_composer_is_non_destructive_then_repeat_qui
 		!h.commands
 			.try_iter()
 			.any(|command| matches!(command, HostCommand::Interrupt)),
-		"pi's first Ctrl+C clears; it does not interrupt solely because a turn is active"
+		"the first Ctrl+C clears; it does not interrupt solely because a turn is active"
 	);
 	assert_eq!(h.host.key(Key::Ctrl('c')).expect("second ctrl+c"), NativeEffect::Quit);
 }
@@ -569,8 +569,7 @@ fn alt_up_restores_queued_prompts_ahead_of_the_draft() {
 
 // ---------------------------------------------------------------- follow-up
 
-/// pi `handleFollowUp` (`app.message.followUp`): while a turn streams the
-/// draft is queued behind it (`streamingBehavior: "followUp"`), never sent
+/// While a turn streams, the draft is queued behind it, never sent
 /// as mid-turn steering; idle, it starts a turn like Enter.
 #[test]
 fn follow_up_queues_behind_a_streaming_turn_and_submits_when_idle() {
@@ -612,7 +611,7 @@ fn follow_up_queues_behind_a_streaming_turn_and_submits_when_idle() {
 }
 
 /// The keymap's decoded `Key::FollowUp` (Ctrl+Enter or Alt+Enter on the
-/// wire) lowers to pi's primary `app.message.followUp` chord, `ctrl+enter`,
+/// wire) lowers to the primary `ctrl+enter` chord,
 /// so a decoded-key caller (headless, RPC, debug injection) reaches the
 /// same `cl_followup` bind as the physical chord.
 #[test]
@@ -646,7 +645,7 @@ fn ctrl_shift_d_opens_the_debug_selector() {
 	assert_eq!(h.host.overlay_id(), Some("debug"));
 }
 
-/// pi `parseQueueShorthand` + `#queueForYield`: `-> body` starts at once
+/// `-> body` starts at once
 /// when the agent is idle with an empty queue, otherwise queues behind the
 /// stream / earlier follow-ups.
 #[test]
@@ -683,7 +682,7 @@ fn queue_shorthand_starts_immediately_when_idle_else_queues() {
 	assert!(h.up.try_recv().is_err());
 }
 
-/// pi `handleFollowUp` / `#queueForYield(text, { images })`: an image chip
+/// An image chip
 /// in the draft goes with the text — queued behind the stream through the
 /// follow-up chord and the `->` shorthand (never steered), and submitted
 /// with its attachments when the agent is idle.
@@ -794,7 +793,7 @@ fn commands_with_media_refuse_without_losing_draft_or_chip() {
 	assert_eq!(attachments.len(), 1);
 	assert!(goal.host.composer_text().is_empty());
 
-	// pi's Python command grammar requires ASCII whitespace after `$`;
+	// The Python command grammar requires ASCII whitespace after `$`;
 	// `$print(...)` is prose and must remain eligible for ordinary media
 	// submission.
 	for draft in ["!echo hi ", "$ print('hi') "] {
@@ -949,12 +948,12 @@ fn physical_release_runs_the_minus_action_from_the_latched_bind() {
 	h.host
 		.chord(KeyEvent { chord, key: Some(Key::Ctrl('h')), pressed: true })
 		.expect("press");
-	assert!(omp_con::CL_SHOWTHINKING.get(&h.con));
+	assert!(omp_chat::settings::CL_SHOWTHINKING.get(&h.con));
 	h.con.run("unbind ctrl+h").expect("remove while held");
 	h.host
 		.chord(KeyEvent { chord, key: Some(Key::Ctrl('h')), pressed: false })
 		.expect("release");
-	assert!(!omp_con::CL_SHOWTHINKING.get(&h.con));
+	assert!(!omp_chat::settings::CL_SHOWTHINKING.get(&h.con));
 }
 
 #[test]
@@ -965,7 +964,7 @@ fn semantic_key_calls_close_a_held_action_edge_immediately() {
 		.expect("hold action");
 	h.host.key(Key::Ctrl('h')).expect("semantic key");
 	assert!(
-		!omp_con::CL_SHOWTHINKING.get(&h.con),
+		!omp_chat::settings::CL_SHOWTHINKING.get(&h.con),
 		"press-only callers synthesize release rather than stranding +actions"
 	);
 }
@@ -982,7 +981,7 @@ fn paste_chords_request_the_matching_clipboard_read_and_deliver_it() {
 		.deliver_clipboard(ClipboardReadOutcome::Payload(Clipboard::Text("a\nb".into())), true);
 	assert_eq!(h.host.composer_text(), "a\nb");
 	// An image persists to a temp file and lands as an attachment chip whose
-	// submitted form is pi's positional marker (the file travels as the
+	// submitted form is the positional marker (the file travels as the
 	// chip's source on submit, never as draft text).
 	// A 1x1 PNG: signature, IHDR, IDAT, IEND.
 	let png = omp_tui::PastedImage::from_bytes(vec![
@@ -1185,7 +1184,7 @@ fn interrupt_bind_offers_escape_to_a_modal_panel_before_dismissing_it() {
 	);
 }
 
-/// pi `handleLargePaste`: a marker-sized paste of at least
+/// A marker-sized paste of at least
 /// `cl_paste_large_menu_threshold` lines opens the large-paste menu instead
 /// of landing; each choice lands it differently, Esc keeps the chip, and a
 /// threshold of 0 disables the menu.
@@ -1251,8 +1250,8 @@ fn large_paste_menu_gates_on_the_threshold_and_lands_the_choice() {
 	assert_eq!(h.host.composer_text().trim_end(), big);
 }
 
-/// Pasted text goes to the active side panel (pi `side-panel.ts`
-/// `handlePaste`) instead of leaking into the composer behind it.
+/// Pasted text goes to the active side panel instead of leaking into the
+/// composer behind it.
 #[test]
 fn paste_reaches_the_active_side_panel_before_the_composer() {
 	let mut h = harness(idle_session());
