@@ -80,6 +80,56 @@ test("renders profile plus compact metric status line", () => {
 	expect(rendered).not.toContain("100K");
 });
 
+test("compact context percentage preserves an explicitly configured context total", () => {
+	const component = new StatusLineComponent({
+		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+		messages: [],
+		model: { name: "M", contextWindow: 100000 },
+		systemPrompt: [],
+		agent: { state: { tools: [] } },
+		skills: [],
+		isStreaming: false,
+		isAutoThinking: false,
+		autoResolvedThinkingLevel: () => undefined,
+		isFastModeActive: () => false,
+		isAdvisorActive: () => false,
+		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+		getAsyncJobSnapshot: () => ({ running: [] }),
+		settings: { get: () => false },
+		modelRegistry: { isUsingOAuth: () => false },
+		sessionManager: {
+			getSessionName: () => "status demo",
+			getUsageStatistics: () => ({
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				orchestrationInput: 0,
+				orchestrationOutput: 0,
+				orchestrationCacheRead: 0,
+				premiumRequests: 0,
+				cost: 0,
+			}),
+		},
+		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+
+	component.updateSettings({
+		preset: "custom",
+		leftSegments: ["model", "context_pct"],
+		rightSegments: ["context_total", "session_name"],
+		separator: "pipe",
+		sessionAccent: false,
+		contextLine: "embedded",
+		segmentOptions: { context_pct: { compact: true } },
+	});
+
+	const rendered = stripVTControlCharacters(component.getTopBorder(80).content);
+	expect(rendered).toContain("ctx:8%");
+	expect(rendered).toContain("100K");
+});
+
 test("breakdown keeps orchestration usage out of in/out labels", () => {
 	setProfile("work");
 	const component = new StatusLineComponent({

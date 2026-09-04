@@ -345,9 +345,15 @@ function formatEmbeddedContextPercent(percent: number): string {
 	return `${percent > 0 && percent < 1 ? percent.toFixed(1) : Math.round(percent)}%`;
 }
 
-function embeddedContextGaugeMinWidth(percent: number, contextWindow: number, compact: boolean): number {
-	if (compact) return `ctx:${formatCompactContextPercent(percent)}`.length;
-	return formatEmbeddedContextPercent(percent).length + formatNumber(contextWindow).length + 4;
+function embeddedContextGaugeMinWidth(
+	percent: number,
+	contextWindow: number,
+	compact: boolean,
+	showWindow: boolean,
+): number {
+	const percentLabel = compact ? `ctx:${formatCompactContextPercent(percent)}` : formatEmbeddedContextPercent(percent);
+	if (!showWindow) return percentLabel.length;
+	return percentLabel.length + formatNumber(contextWindow).length + 4;
 }
 
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
@@ -2059,6 +2065,9 @@ export class StatusLineComponent implements Component {
 			embedContext &&
 			ctx.options.context_pct?.compact === true &&
 			(leftSegIds.includes("context_pct") || rightSegIds.includes("context_pct"));
+		const showEmbeddedContextWindow =
+			embedContext &&
+			(!embedCompactContext || leftSegIds.includes("context_total") || rightSegIds.includes("context_total"));
 		if (embedContext) {
 			removeContextSegments(leftParts, leftSegIds);
 			removeContextSegments(rightParts, rightSegIds);
@@ -2117,7 +2126,12 @@ export class StatusLineComponent implements Component {
 				? embedCompactContext
 					? "ctx:…".length
 					: "…%".length + "…".length + 4
-				: embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow, embedCompactContext)
+				: embeddedContextGaugeMinWidth(
+						ctx.contextPercent ?? 0,
+						ctx.contextWindow,
+						embedCompactContext,
+						showEmbeddedContextWindow,
+					)
 			: 0;
 		const minimumGapWidth = (): number => {
 			if (!embeddedContextWidth) return left.length > 0 && right.length > 0 ? 1 : 0;
@@ -2247,7 +2261,14 @@ export class StatusLineComponent implements Component {
 		// labels don't fall back to a context chip until the session is titled.
 		return (
 			leftGroup +
-			this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext, embedCompactContext) +
+			this.#buildContextGaugeFill(
+				gapWidth,
+				ctx,
+				effectiveSettings,
+				embedContext,
+				embedCompactContext,
+				showEmbeddedContextWindow,
+			) +
 			rightGroup
 		);
 	}
@@ -2268,6 +2289,7 @@ export class StatusLineComponent implements Component {
 		effectiveSettings: EffectiveStatusLineSettings,
 		embedContext: boolean,
 		embedCompactContext: boolean,
+		showEmbeddedContextWindow: boolean,
 	): string {
 		const sessionName =
 			effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
@@ -2298,17 +2320,17 @@ export class StatusLineComponent implements Component {
 				: ctx.startupPlaceholder
 					? "…%"
 					: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
-			const candidateWindow = embedCompactContext
-				? ""
-				: ctx.startupPlaceholder
+			const candidateWindow = showEmbeddedContextWindow
+				? ctx.startupPlaceholder
 					? "…"
-					: formatNumber(ctx.contextWindow);
-			const minimumLabelWidth = embedCompactContext
-				? candidatePercent.length
-				: candidatePercent.length + candidateWindow.length + 4;
+					: formatNumber(ctx.contextWindow)
+				: "";
+			const minimumLabelWidth = showEmbeddedContextWindow
+				? candidatePercent.length + candidateWindow.length + 4
+				: candidatePercent.length;
 			if (gapWidth >= minimumLabelWidth) {
 				percentLabel = candidatePercent;
-				if (embedCompactContext) {
+				if (!showEmbeddedContextWindow) {
 					if (percentOverflow) percentStart = gapWidth - percentLabel.length;
 				} else {
 					windowLabel = candidateWindow;
@@ -2346,8 +2368,10 @@ export class StatusLineComponent implements Component {
 		}
 
 		if (percentLabel && percentStart < 0) {
-			const minStart = embedCompactContext ? 0 : 1;
-			const maxStart = embedCompactContext ? scaleWidth - percentLabel.length : scaleWidth - percentLabel.length - 1;
+			const minStart = showEmbeddedContextWindow ? 1 : 0;
+			const maxStart = showEmbeddedContextWindow
+				? scaleWidth - percentLabel.length - 1
+				: scaleWidth - percentLabel.length;
 			const preferredStart = Math.min(maxStart, Math.max(minStart, usedCount));
 			const overlapsBoundary = (start: number): boolean => {
 				const end = start + percentLabel.length;
