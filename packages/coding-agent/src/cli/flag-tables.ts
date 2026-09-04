@@ -394,7 +394,9 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
  * resuming the session. The credentials do not survive `/restart`; a named
  * `--provider-api-keys` path is re-readable and is replayed normally.
  */
-const CONSUMED_ONCE_FLAGS: ReadonlySet<string> = new Set(["--provider-api-keys-fd"]);
+export const PROVIDER_API_KEYS_FD_FLAG = "--provider-api-keys-fd";
+
+const CONSUMED_ONCE_FLAGS: ReadonlySet<string> = new Set([PROVIDER_API_KEYS_FD_FLAG]);
 
 /**
  * The one flag whose value is a filesystem path resolved against the *launch*

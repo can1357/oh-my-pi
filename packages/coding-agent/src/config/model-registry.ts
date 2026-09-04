@@ -2139,27 +2139,35 @@ export class ModelRegistry {
 		});
 	}
 
+	/** A configured-discovery model carries the bearer that authenticated its
+	 *  probe, materialized by `toModelSpec`. Rebuild those headers as a live
+	 *  proxy so the credential is re-read per request instead of frozen: gating
+	 *  this on a *present* runtime key left a removed key frozen on the model —
+	 *  beside the configured header and ahead of it for a case-insensitive
+	 *  reader — and gating it on a configured fallback still kept a removed key
+	 *  whenever the provider's real fallback lived in AuthStorage (OAuth, stored
+	 *  key, environment), which `getApiKey` resolves only when no Authorization
+	 *  header is already set. Every configured header source is folded back in,
+	 *  so nothing legitimately static is lost by rebuilding unconditionally. */
 	#restoreRuntimeDiscoveryAuthPrecedence(model: Model<Api>): Model<Api> {
 		if (!model.headers) return model;
 		const providerOverride = this.#providerOverrides.get(model.provider);
-		// Gating on a *present* runtime key left the bearer that started the probe
-		// frozen on the model whenever the key was removed while discovery was in
-		// flight — beside the configured header, ahead of it for a
-		// case-insensitive reader. Rebuild whenever some live source can supply an
-		// authorization again; rebuilding without one would strip the materialized
-		// header and leave the model with no credential at all.
-		const restorable =
-			!!this.authStorage.getRuntimeApiKey(model.provider) ||
-			(providerOverride?.authHeader === true && !!providerOverride.apiKey) ||
-			Object.keys(providerOverride?.headers ?? {}).some(name => name.toLowerCase() === "authorization");
-		if (!restorable) return model;
+		// SDK-registered providers keep their configured headers here rather than
+		// in `#providerOverrides`; `models.yml` stays the higher-priority layer.
+		const runtimeOverride = this.#runtimeProviderOverrides.get(model.provider);
 		const fallbackHeaders = { ...model.headers };
 		for (const name in fallbackHeaders) {
 			if (name.toLowerCase() === "authorization") delete fallbackHeaders[name];
 		}
-		const headers = createLiveConfigHeaders([fallbackHeaders, providerOverride?.headers], {
+		const configuredBearer =
+			providerOverride?.authHeader === true
+				? providerOverride.apiKey
+				: runtimeOverride?.authHeader === true
+					? runtimeOverride.apiKey
+					: undefined;
+		const headers = createLiveConfigHeaders([fallbackHeaders, runtimeOverride?.headers, providerOverride?.headers], {
 			authHeader: true,
-			apiKeyConfig: providerOverride?.authHeader === true ? providerOverride.apiKey : undefined,
+			apiKeyConfig: configuredBearer,
 			apiKeyOverride: () => this.authStorage.getRuntimeApiKey(model.provider),
 		});
 		return buildModel({ ...toModelSpec(model), headers });

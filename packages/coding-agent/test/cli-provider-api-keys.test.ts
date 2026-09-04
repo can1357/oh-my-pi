@@ -347,25 +347,25 @@ describe("--provider-api-keys", () => {
 	it.skipIf(process.platform !== "linux")("closes a transferred descriptor when fstat fails", async () => {
 		// EIO/EOVERFLOW on a still-open descriptor: the refusal must not leave the
 		// launcher's credential fd inheritable by later child processes.
+		//
+		// The failure arrives through the injected stat seam. Spying on the shared
+		// `node:fs` export would stay installed across the await and fail any
+		// concurrent stat elsewhere in the run, making the suite order-dependent.
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-provider-api-keys-fstat-"));
 		roots.push(root);
 		const bundle = path.join(root, "bundle.json");
-		fs.writeFileSync(bundle, JSON.stringify({ anthropic: "token" }));
-		fs.chmodSync(bundle, 0o600);
+		fs.writeFileSync(bundle, JSON.stringify({ anthropic: "token" }), { mode: 0o600 });
 		const fd = fs.openSync(bundle, fs.constants.O_RDONLY);
-		const failure = Object.assign(new Error("simulated stat failure"), { code: "EIO" });
-		const fstat = spyOn(fs, "fstat").mockImplementation(((
-			_fd: number,
-			callback: (error: NodeJS.ErrnoException | null, stats?: fs.Stats) => void,
-		) => {
-			callback(failure);
-		}) as unknown as typeof fs.fstat);
 		try {
-			await expect(readProviderApiKeyBundleFd(fd)).rejects.toThrow("must name a readable open descriptor");
+			await expect(
+				readProviderApiKeyBundleFd(fd, {
+					fstatFd: () => Promise.reject(Object.assign(new Error("simulated stat failure"), { code: "EIO" })),
+				}),
+			).rejects.toThrow("must name a readable open descriptor");
+			expect(fdIsOpen(fd)).toBe(false);
 		} finally {
-			fstat.mockRestore();
+			if (fdIsOpen(fd)) fs.closeSync(fd);
 		}
-		expect(fdIsOpen(fd)).toBe(false);
 	});
 
 	it("materializes runtime-only auth headers for authHeader providers without a configured key", () => {

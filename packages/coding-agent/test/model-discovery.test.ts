@@ -2603,6 +2603,33 @@ providers:
 		});
 	});
 
+	test("a removed runtime key is dropped even with no configured header to fall back to", async () => {
+		// No `headers` block and no `authHeader` bearer: the provider's fallback
+		// credential lives in AuthStorage (OAuth, stored key, environment), which
+		// `getApiKey()` resolves. Keeping the materialized bearer meant the
+		// OpenAI-compatible transport preserved an explicitly removed credential
+		// and never consulted that fallback.
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				discovery: { type: "proxy" },
+			},
+		});
+		authStorage.setRuntimeApiKey("proxy-test", "runtime-token");
+		const fetchMock: FetchImpl = async (_input, init) => {
+			expect(new Headers(init?.headers).get("authorization")).toBe("Bearer runtime-token");
+			authStorage.removeRuntimeApiKey("proxy-test");
+			return Response.json({
+				data: [{ id: "anthropic-model", supported_endpoint_types: ["anthropic"], context_length: 200000 }],
+			});
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("proxy-test", "anthropic-model");
+		const authNames = Object.keys({ ...model?.headers }).filter(name => name.toLowerCase() === "authorization");
+		expect(authNames).toEqual([]);
+	});
+
 	test("proxy discovery uses proxy-reported name over bundled placeholder", async () => {
 		writeRawModelsJson({
 			"proxy-test": {

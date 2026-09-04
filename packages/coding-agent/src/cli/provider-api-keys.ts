@@ -10,8 +10,9 @@ const OPEN_FLAGS = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (fs.constan
 
 // fs/promises has no fstat/close for a bare descriptor, and the launcher's fd
 // is not ours to adopt as a FileHandle, so promisify the callback forms rather
-// than block the event loop with the sync ones. `fs.fstat` is promisified at
-// the callsite so a test can substitute it through the module object.
+// than block the event loop with the sync ones. A failing stat is injected
+// through {@link ProviderApiKeyFdOptions}, never by replacing `fs.fstat` on the
+// shared module object, which would fail every concurrent stat in a test run.
 const closeByFd = promisify(fs.close);
 
 /** Provider name / API key pairs recovered from a validated bundle. */
@@ -63,8 +64,18 @@ export async function closeProviderApiKeyBundleFd(value: string | number): Promi
 	}
 }
 
+/** Stat seam for the descriptor path, injectable so a test can force a failing
+ *  `fstat` without replacing the shared `node:fs` export for the whole
+ *  process. */
+export interface ProviderApiKeyFdOptions {
+	fstatFd?: (fd: number) => Promise<fs.Stats>;
+}
+
 /** Reads, validates and consumes the exact launcher descriptor N. */
-export async function readProviderApiKeyBundleFd(value: string | number): Promise<ProviderApiKeyEntries> {
+export async function readProviderApiKeyBundleFd(
+	value: string | number,
+	options?: ProviderApiKeyFdOptions,
+): Promise<ProviderApiKeyEntries> {
 	const fd = typeof value === "number" ? value : Number(value);
 	if (!Number.isSafeInteger(fd) || fd <= 2) {
 		throw new CliUsageError("--provider-api-keys-fd must be an integer descriptor greater than 2");
@@ -73,10 +84,11 @@ export async function readProviderApiKeyBundleFd(value: string | number): Promis
 	// still-open descriptor (EIO, EOVERFLOW) must not leave the launcher's
 	// credential fd inheritable by later child processes. `closeByFd` swallows
 	// EBADF, so an already-invalid descriptor costs nothing here.
+	const statFd = options?.fstatFd ?? promisify(fs.fstat);
 	try {
 		let stat: fs.Stats;
 		try {
-			stat = await promisify(fs.fstat)(fd);
+			stat = await statFd(fd);
 		} catch {
 			throw new CliUsageError("--provider-api-keys-fd must name a readable open descriptor");
 		}

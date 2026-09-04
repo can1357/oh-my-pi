@@ -92,3 +92,37 @@ describe("resolveCliArgv strips launch-global flags before non-launch subcommand
 		expect(resolveCliArgv(["--cwd", "/x", "acp"])).toEqual({ argv: ["acp", "--cwd", "/x"] });
 	});
 });
+
+describe("resolveCliArgv reports credential descriptors it strips", () => {
+	// A launcher may prepend `--provider-api-keys-fd` to any command. Silently
+	// dropping it before a non-launch subcommand left the descriptor open and
+	// inheritable, so `update`'s package-manager children inherited a live
+	// credential fd. The caller closes whatever is reported here.
+	test("`--provider-api-keys-fd <n> update` reports the orphaned descriptor", () => {
+		expect(resolveCliArgv(["--provider-api-keys-fd", "7", "update"])).toEqual({
+			argv: ["update"],
+			orphanedKeyDescriptors: [7],
+		});
+	});
+
+	test("the inline form is reported too", () => {
+		expect(resolveCliArgv(["--provider-api-keys-fd=7", "update"])).toEqual({
+			argv: ["update"],
+			orphanedKeyDescriptors: [7],
+		});
+	});
+
+	test("a launch-shaped subcommand keeps the flag and orphans nothing", () => {
+		expect(resolveCliArgv(["--provider-api-keys-fd", "7", "acp"])).toEqual({
+			argv: ["acp", "--provider-api-keys-fd", "7"],
+		});
+	});
+
+	test("a non-descriptor value is not reported as a descriptor to close", () => {
+		expect(resolveCliArgv(["--provider-api-keys-fd", "not-a-number", "update"])).toEqual({ argv: ["update"] });
+	});
+
+	test("standard input, output and error are never closed as orphans", () => {
+		expect(resolveCliArgv(["--provider-api-keys-fd", "2", "update"])).toEqual({ argv: ["update"] });
+	});
+});
