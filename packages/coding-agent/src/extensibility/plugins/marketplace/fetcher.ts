@@ -237,12 +237,20 @@ function expandHome(p: string): string {
  * Fetch a marketplace catalog from a source.
  *
  * Dispatches on the source type: local filesystem paths are read directly;
- * GitHub/git sources are cloned with `git`; URL sources are fetched over HTTP.
+ * GitHub/git sources are cloned with `git`; URL sources are fetched over HTTP
+ * and their raw bytes persisted to `<cacheDir>/<name>/marketplace.json`.
  *
  * @param source   Source identifier: path, GitHub shorthand, git URL, or HTTP URL.
  * @param cacheDir Cache directory root for non-local sources.
+ * @param options  `persistCache: false` skips the URL cache write, for callers
+ *                 that snapshot the old cached bytes before persisting themselves
+ *                 (the manager's forced-repoint rollback).
  */
-export async function fetchMarketplace(source: string, cacheDir: string): Promise<FetchResult> {
+export async function fetchMarketplace(
+	source: string,
+	cacheDir: string,
+	options: { persistCache?: boolean } = {},
+): Promise<FetchResult> {
 	const type = classifySource(source);
 
 	if (type === "local") {
@@ -271,9 +279,9 @@ export async function fetchMarketplace(source: string, cacheDir: string): Promis
 	const text = await response.text();
 	const catalog = parseMarketplaceCatalog(text, source);
 
-	const catalogDir = path.join(cacheDir, catalog.name);
-	await Bun.write(path.join(catalogDir, "marketplace.json"), text);
-
+	if (options.persistCache !== false) {
+		await Bun.write(path.join(cacheDir, catalog.name, "marketplace.json"), text);
+	}
 	return { catalog };
 }
 

@@ -206,7 +206,7 @@ async function makeMarketplaceManager(): Promise<MarketplaceManager> {
 	});
 }
 
-async function handleMarketplace(args: string[], _flags: PluginCommandArgs["flags"]): Promise<void> {
+async function handleMarketplace(args: string[], flags: PluginCommandArgs["flags"]): Promise<void> {
 	const subcommand = args[0] ?? "list";
 	const manager = await makeMarketplaceManager();
 
@@ -214,14 +214,17 @@ async function handleMarketplace(args: string[], _flags: PluginCommandArgs["flag
 		case "add": {
 			const source = args[1];
 			if (!source) {
-				console.error(chalk.red(`Usage: ${APP_NAME} plugin marketplace add <source>`));
+				console.error(chalk.red(`Usage: ${APP_NAME} plugin marketplace add <source> [--force]`));
 				process.exit(1);
 			}
 			try {
-				await manager.addMarketplace(source);
-				console.log(chalk.green(`${theme.status.success} Added marketplace: ${source}`));
+				const entry = await manager.addMarketplace(source, { force: flags.force });
+				console.log(chalk.green(`${theme.status.success} Marketplace ${entry.name} now sources from ${source}`));
 			} catch (err) {
 				console.error(chalk.red(`${theme.status.error} Failed to add marketplace: ${err}`));
+				if (String(err).includes("already exists")) {
+					console.error(chalk.dim("  Pass --force to repoint it at this source."));
+				}
 				process.exit(1);
 			}
 			break;
@@ -1062,7 +1065,7 @@ ${chalk.bold("Config Subcommands:")}
 ${chalk.bold("Options:")}
   --json           Output as JSON
   --fix            Attempt automatic fixes (doctor)
-  --force          Overwrite without prompting (install)
+  --force          Overwrite without prompting (install); repoint an existing marketplace (marketplace add)
   --scope <scope>  Install scope: user (default) or project (install name@marketplace)
   --dry-run        Preview changes without applying (install)
   -l, --local      Use project-local overrides

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	parseAddArgs,
 	parseMarketplaceInstallArgs,
 	parsePluginScopeArgs,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/marketplace-install-parser";
@@ -168,5 +169,21 @@ describe("parsePluginScopeArgs — errors", () => {
 describe("parsePluginScopeArgs — valid flags, missing id", () => {
 	it("--scope with no plugin id → usage hint", () => {
 		expect(scopeErr("--scope project")).toMatch(/Usage:/);
+	});
+});
+
+describe("parseAddArgs", () => {
+	it("strips --force from either edge and keeps the source bytes intact", () => {
+		expect(parseAddArgs("./market --force")).toEqual({ source: "./market", force: true });
+		expect(parseAddArgs("--force ./market")).toEqual({ source: "./market", force: true });
+		// Interior whitespace is part of the path, not token noise.
+		expect(parseAddArgs("/tmp/foo  bar --force")).toEqual({ source: "/tmp/foo  bar", force: true });
+		expect(parseAddArgs("https://x.test/m.git")).toEqual({ source: "https://x.test/m.git", force: false });
+	});
+
+	it("rejects a flag with no source instead of fetching an empty string", () => {
+		expect(parseAddArgs("--force")).toEqual({ error: "Usage: /marketplace add <source> [--force]" });
+		expect(parseAddArgs("")).toEqual({ error: "Usage: /marketplace add <source> [--force]" });
+		expect(parseAddArgs("   ")).toEqual({ error: "Usage: /marketplace add <source> [--force]" });
 	});
 });
