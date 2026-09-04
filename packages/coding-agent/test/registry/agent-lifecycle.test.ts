@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -700,6 +701,101 @@ describe("AgentLifecycleManager", () => {
 		const restoredRegistry = new AgentRegistry();
 		await registerPersistedSubagents(restoredRegistry, rootSessionFile);
 		expect(restoredRegistry.get(workerId)?.status).toBe("aborted");
+	});
+
+	it("publishes an aborted status only after the session is detached", async () => {
+		const stub = makeSessionStub();
+		const ref = registry.register({
+			id: "Published-Aborted",
+			displayName: "task",
+			kind: "sub",
+			session: stub.session,
+			sessionFile: null,
+			status: "running",
+		});
+		let observed: { status: string; session: AgentSession | null } | undefined;
+		const unsubscribe = registry.onChange(event => {
+			if (event.type === "status_changed" && event.ref.id === ref.id) {
+				observed = { status: event.ref.status, session: event.ref.session };
+			}
+		});
+
+		await lifecycle.release(ref.id, ref, { tombstone: true });
+		unsubscribe();
+
+		expect(observed).toEqual({ status: "aborted", session: null });
+	});
+
+	it("tombstone release survives the dispose-path unregister racing the sidecar write (#10531)", async () => {
+		using tempDir = TempDir.createSync("@omp-lifecycle-tombstone-race-");
+		const workerId = "Raced-Sub";
+		const workerSessionFile = path.join(tempDir.path(), `${workerId}.jsonl`);
+		await Bun.write(workerSessionFile, "");
+
+		let disposeCalls = 0;
+		const session = {
+			dispose: async () => {
+				disposeCalls++;
+			},
+		} as unknown as AgentSession;
+		const ref = registry.register({
+			id: workerId,
+			displayName: "task",
+			kind: "sub",
+			session,
+			sessionFile: workerSessionFile,
+			status: "running",
+		});
+
+		// The dying subagent's own dispose finally-block runs unregisterUnlessParked
+		// (sdk.ts) on a separate async chain. Fire it during the sidecar write await —
+		// the exact window the reporter observed — mirroring its real bail-out guard:
+		// spare a ref only when it is already parked, or aborted AND detached.
+		const disposePathUnregister = () => {
+			const cur = registry.get(workerId);
+			if (!cur) return;
+			if (cur.status === "parked" || (cur.status === "aborted" && !cur.session)) return;
+			registry.unregister(workerId, cur);
+		};
+		let injected = false;
+		vi.spyOn(fsp, "writeFile").mockImplementation((async (target: string) => {
+			if (!injected && target.endsWith(".tombstone")) {
+				injected = true;
+				disposePathUnregister();
+				await Bun.write(target, "");
+			}
+		}) as typeof fsp.writeFile);
+
+		expect(await lifecycle.release(workerId, ref, { tombstone: true })).toBe(true);
+		expect(injected).toBe(true);
+		// The terminal transition ran before the await, so the racing unregister
+		// saw an aborted, detached ref and bailed: the row survives as `aborted`
+		// instead of vanishing from the registry.
+		expect(registry.get(workerId)?.status).toBe("aborted");
+		expect(registry.get(workerId)?.session).toBeNull();
+		expect(disposeCalls).toBe(1);
+		expect(await Bun.file(`${workerSessionFile}.tombstone`).exists()).toBe(true);
+	});
+
+	it("tombstone release disposes the detached session when sidecar persistence fails", async () => {
+		const stub = makeSessionStub();
+		const ref = registry.register({
+			id: "Persist-Failure",
+			displayName: "task",
+			kind: "sub",
+			session: stub.session,
+			sessionFile: "/tmp/Persist-Failure.jsonl",
+			status: "running",
+		});
+		const failure = Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+		vi.spyOn(fsp, "writeFile").mockRejectedValueOnce(failure);
+
+		await expect(lifecycle.release("Persist-Failure", ref, { tombstone: true })).rejects.toBe(failure);
+
+		// Persistence still surfaces to the caller, but the detached session cannot
+		// leak its MCP, kernel, browser, or nested-job resources.
+		expect(stub.disposeCalls()).toBe(1);
+		expect(registry.get("Persist-Failure")).toMatchObject({ status: "aborted", session: null });
 	});
 
 	it("a cold revive whose factory resolves after dispose rejects without adopting or arming a TTL", async () => {

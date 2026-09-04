@@ -9,6 +9,7 @@
 import {
 	getCellDimensions,
 	ImageProtocol,
+	isInsideHerdr,
 	isOsc99Supported,
 	NotifyProtocol,
 	TERMINAL,
@@ -55,9 +56,11 @@ const NOTIFY_PROTOCOL_NAMES: Record<NotifyProtocol, string> = {
 
 /** Identify the multiplexer wrapping the session, if any (mirrors the renderer's gate). */
 function detectMultiplexer(env: NodeJS.ProcessEnv): string | null {
+	if (isInsideHerdr(env)) return "herdr";
 	if (env.TMUX) return "tmux";
 	if (env.STY) return "screen";
 	if (env.ZELLIJ) return "zellij";
+	if (env.CMUX_WORKSPACE_ID || env.CMUX_SURFACE_ID || env.CMUX_REMOTE_TRANSPORT) return "cmux";
 	const term = env.TERM?.toLowerCase() ?? "";
 	if (term.startsWith("tmux")) return "tmux";
 	if (term.startsWith("screen")) return "screen";

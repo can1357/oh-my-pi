@@ -207,6 +207,7 @@ export class SelectList implements Component, MouseRoutable {
 		// every count is 1, so visualTotal == #filteredItems and overflow falls
 		// back to the original `N > maxVisible` predicate exactly.
 		const conservativeRowWidth = Math.max(0, width - 1);
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const rowCounts = new Array<number>(this.#filteredItems.length);
 		let visualTotal = 0;
 		for (let i = 0; i < this.#filteredItems.length; i++) {

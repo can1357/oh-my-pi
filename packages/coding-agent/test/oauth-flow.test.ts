@@ -316,7 +316,7 @@ describe("mcp oauth flow", () => {
 		expect(authResource).toBe("https://mcp.example.com/mcp");
 		expect(tokenParams.get("resource")).toBe("https://mcp.example.com/mcp");
 	});
-	it("uses an authorization URL resource for the matching token request", async () => {
+	it("prefers the configured resource over one embedded in the authorization URL", async () => {
 		let authResource = "";
 		let tokenRequestBody = "";
 
@@ -349,8 +349,8 @@ describe("mcp oauth flow", () => {
 		await flow.login();
 		const tokenParams = new URLSearchParams(tokenRequestBody);
 
-		expect(authResource).toBe("https://auth-url-resource.example/mcp");
-		expect(tokenParams.get("resource")).toBe("https://auth-url-resource.example/mcp");
+		expect(authResource).toBe("https://config-resource.example/mcp");
+		expect(tokenParams.get("resource")).toBe("https://config-resource.example/mcp");
 	});
 
 	it("uses exact redirectUri and clientSecret for provider requests", async () => {

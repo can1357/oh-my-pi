@@ -85,7 +85,6 @@ async function createHarness(
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5") ?? mock;
 	const sessionManager = SessionManager.inMemory(tempDir.path());
 	const tools = [recordTool as AgentTool];
-	let session: AgentSession | undefined;
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: {
@@ -106,7 +105,7 @@ async function createHarness(
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 	});
-	session = agentSession;
+	const session = agentSession;
 	const harness = { session: agentSession, tempDir };
 	activeHarnesses.push(harness);
 	return { ...harness, mock };

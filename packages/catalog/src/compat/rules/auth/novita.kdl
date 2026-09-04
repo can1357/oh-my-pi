@@ -1,0 +1,12 @@
+auth "novita" {
+	name "Novita"
+	login "api-key" {
+		auth-url "https://novita.ai/settings/key-management"
+		instructions "Create or copy your API key from the Novita dashboard"
+		prompt "Paste your Novita API key" placeholder="sk_..."
+		// Validate against inference, not billing: `/openapi/v1/billing/balance/detail`
+		// requires the account-level Balance permission, which Novita's Developer and
+		// Basic team roles don't hold, so their valid inference keys were rejected.
+		validate "chat-completions" base-url="https://api.novita.ai/openai/v1" model="moonshotai/kimi-k2.7-code"
+	}
+}

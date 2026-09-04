@@ -1,0 +1,24 @@
+// Provider-wire compat for "anthropic"; regenerated from the frozen census using deployment contract selectors.
+
+provider "anthropic" {
+	class "anthropic" {
+		revision ">=3.7 <4.6" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*20240229" "claude-3-7-sonnet-20250219" {
+		disable-adaptive-thinking #false
+		escape-builtin-tool-names #false
+		official-endpoint #true
+		replay-unsigned-thinking #false
+		requires-thinking-enabled #false
+		requires-tool-result-id #false
+		signing-endpoint #true
+		supports-eager-tool-input-streaming #true
+		supports-forced-tool-choice #true
+		supports-long-cache-retention #true
+		supports-mid-conversation-system #false
+		supports-sampling-params #true
+	}
+}

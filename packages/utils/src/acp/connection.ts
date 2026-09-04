@@ -67,13 +67,11 @@ export class AgentSideConnection {
 	#connection: RpcConnection;
 
 	constructor(toAgent: (connection: AgentSideConnection) => Agent, stream: Stream) {
-		let agent: Agent | undefined;
 		this.#connection = new RpcConnection(stream, async (method, params, notification) => {
-			const target = agent;
-			if (!target) throw RequestError.internalError(undefined, "Agent is not initialized");
-			return dispatchAgent(target, method, params, notification);
+			if (!agent) throw RequestError.internalError(undefined, "Agent is not initialized");
+			return dispatchAgent(agent, method, params, notification);
 		});
-		agent = toAgent(this);
+		const agent = toAgent(this);
 	}
 
 	/** Signal aborted when the transport closes. */
@@ -170,13 +168,11 @@ export class ClientSideConnection {
 	#connection: RpcConnection;
 
 	constructor(toClient: (connection: ClientSideConnection) => Client, stream: Stream) {
-		let client: Client | undefined;
 		this.#connection = new RpcConnection(stream, async (method, params, notification) => {
-			const target = client;
-			if (!target) throw RequestError.internalError(undefined, "Client is not initialized");
-			return dispatchClient(target, method, params, notification);
+			if (!client) throw RequestError.internalError(undefined, "Client is not initialized");
+			return dispatchClient(client, method, params, notification);
 		});
-		client = toClient(this);
+		const client = toClient(this);
 	}
 	/** Signal aborted when the transport closes. */
 	get signal(): AbortSignal {

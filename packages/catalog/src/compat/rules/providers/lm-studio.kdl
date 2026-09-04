@@ -1,0 +1,6 @@
+// Provider-wire compat for "lm-studio".
+
+provider "lm-studio" {
+	// Replaces the string-only named-tool-choice provider table.
+	supports-named-tool-choice #false
+}

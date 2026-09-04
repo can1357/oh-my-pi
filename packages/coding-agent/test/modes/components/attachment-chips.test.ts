@@ -67,6 +67,19 @@ describe("AttachmentChipsBand", () => {
 		expect(rows[5]).toContain("5 chars");
 	});
 
+	it("renders a contact-sheet preview under a distinct video chip", () => {
+		const { editor, band } = makeBand();
+		editor.pendingImages.push({ type: "image", data: TINY_PNG, mimeType: "image/png" });
+		editor.pendingImageLinks.push("/tmp/launch.mp4");
+		editor.insertAtom(chipLabel("video", 1), "[Video #1, 2x2]");
+
+		const rows = band.render(80).map(Bun.stripANSI);
+
+		expect(rows[0]).toContain(chipLabel("video", 1));
+		expect(rows[0]).not.toContain(chipLabel("image", 1));
+		expect(rows[5]).toContain("2x2");
+	});
+
 	it("omits cards that do not fit the terminal width instead of wrapping", () => {
 		const { editor, band } = makeBand();
 		editor.insertTextAttachment("first");

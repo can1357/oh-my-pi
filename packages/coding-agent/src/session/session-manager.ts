@@ -44,6 +44,7 @@ import {
 	type LabelEntry,
 	type ModeChangeEntry,
 	type ModelChangeEntry,
+	type ModelUsageEntry,
 	type NewSessionOptions,
 	type ResetBoundaryEntry,
 	type ServiceTierChangeEntry,
@@ -177,6 +178,7 @@ function taskUsageFrom(details: unknown): Usage | undefined {
 }
 
 function entryUsage(entry: SessionEntry): Usage | undefined {
+	if (entry.type === "model_usage") return entry.usage;
 	if (entry.type !== "message") return undefined;
 	const message = entry.message;
 	if (message.role === "assistant") return message.usage;
@@ -196,6 +198,19 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
 	target.orchestrationCacheRead += usage.orchestration?.cacheRead ?? 0;
 	target.premiumRequests += usage.premiumRequests ?? 0;
 	target.cost += usage.cost.total;
+}
+
+/**
+ * Zero the monetary attribution on one usage record in place, leaving token
+ * counts untouched. Cost, credit meters, and premium-request counts describe
+ * billing; forks that must not inherit spend (see {@link SessionManager.forkFrom}
+ * `resetInheritedCost`) drop them while keeping the tokens compaction relies on.
+ */
+function resetUsageCost(usage: Usage | undefined): void {
+	if (!usage) return;
+	usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+	usage.credits = undefined;
+	usage.premiumRequests = undefined;
 }
 
 function isAssistantEntry(entry: SessionEntry): boolean {
@@ -546,7 +561,7 @@ export class SessionManager {
 
 	#suppressBreadcrumb = false;
 	/**
-	 * The last breadcrumb this manager wrote marked a lazy `/new` boundary whose
+	 * The last breadcrumb this manager wrote marked a lazy fresh session whose
 	 * JSONL is not yet on disk. Cleared (and the crumb re-stamped non-fresh) once
 	 * the session materializes, so a materialized-then-deleted session still falls
 	 * back to the most-recent session instead of being treated as a fresh crumb.
@@ -571,7 +586,7 @@ export class SessionManager {
 	}
 
 	/**
-	 * Re-stamp a fresh `/new` breadcrumb as non-fresh once the session has
+	 * Re-stamp a fresh-session breadcrumb as non-fresh once the session has
 	 * materialized on disk. A no-op unless the current breadcrumb is still fresh.
 	 */
 	#materializeBreadcrumb(): void {
@@ -1259,7 +1274,7 @@ export class SessionManager {
 	}
 
 	#notifySessionNameListeners(): void {
-		for (const callback of [...this.#sessionNameChangedCallbacks]) {
+		for (const callback of Array.from(this.#sessionNameChangedCallbacks)) {
 			try {
 				callback();
 			} catch (err) {
@@ -1460,10 +1475,17 @@ export class SessionManager {
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
 	}
 
-	/** Start a new session. Drains and closes any existing writer first. */
+	/**
+	 * Start a new session and persist its header before returning.
+	 *
+	 * The durable empty boundary prevents a later process on another terminal
+	 * from selecting the previous conversation as the most recent session.
+	 */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
 		await this.#drainAndCloseWriter();
-		return this.#resetToNewSession(options);
+		const sessionFile = this.#resetToNewSession(options);
+		await this.ensureOnDisk();
+		return sessionFile;
 	}
 
 	/** Delete a session file and its artifact directory. ENOENT is treated as success. */
@@ -2298,6 +2320,30 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/** Record usage on its initiating branch without moving a successor branch or session. */
+	appendModelUsage(
+		usage: Pick<
+			ModelUsageEntry,
+			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
+		>,
+		owner: { sessionId: string; parentId: string | null },
+	): string | undefined {
+		if (this.#sessionId !== owner.sessionId || (owner.parentId !== null && !this.#index.has(owner.parentId))) {
+			return undefined;
+		}
+		const activeLeafId = this.#index.leafId();
+		const entry: ModelUsageEntry = {
+			type: "model_usage",
+			id: generateId(this.#index),
+			parentId: owner.parentId,
+			timestamp: nowIso(),
+			...usage,
+		};
+		this.#recordEntry(entry);
+		if (activeLeafId !== owner.parentId) this.#index.setLeaf(activeLeafId);
+		return entry.id;
+	}
+
 	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
 	appendThinkingLevelChange(thinkingLevel?: string, configured?: string): string {
 		const entry: ThinkingLevelChangeEntry = {
@@ -2799,7 +2845,12 @@ export class SessionManager {
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { copyArtifacts?: boolean; suppressBreadcrumb?: boolean; sessionFile?: string },
+		options?: {
+			copyArtifacts?: boolean;
+			suppressBreadcrumb?: boolean;
+			sessionFile?: string;
+			resetInheritedCost?: boolean;
+		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
@@ -2811,6 +2862,7 @@ export class SessionManager {
 
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+		if (options?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(history);
 		manager.#resetToNewSession(
 			{
 				parentSession: sourceHeader?.id,
@@ -2836,6 +2888,21 @@ export class SessionManager {
 			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
 		}
 		return manager;
+	}
+
+	/**
+	 * Zero the monetary attribution (cost, credits, premium requests) on the
+	 * forked history's assistant turns and completed `task` results, in place.
+	 *
+	 * A tan fork is a fresh agent that inherits the parent's transcript purely
+	 * for context; its spend must reflect only its own work. Session cost is
+	 * derived by summing `usage.cost` over the transcript, so without this the
+	 * clone's Agent Hub row would open at the parent's entire accumulated cost.
+	 * Token counts are left intact — compaction anchors and context math depend
+	 * on them — since only billing attribution is inherited, not context size.
+	 */
+	static #resetInheritedUsageCost(history: SessionEntry[]): void {
+		for (const entry of history) resetUsageCost(entryUsage(entry));
 	}
 
 	/**
@@ -2962,12 +3029,12 @@ export class SessionManager {
 		let chosenSession: string | null | undefined;
 
 		if (breadcrumb) {
-			// A fresh `/new` boundary whose JSONL was never materialized (lazy
-			// new-session persistence, then a process exit before any assistant
-			// output). Honor the boundary: start fresh rather than falling back to
-			// findMostRecentSession(), which would resurrect the pre-`/new`
-			// transcript. A materialized (or genuinely stale/deleted) crumb reports
-			// exists=false only when fresh, so this never masks a real stale crumb.
+			// A lazy fresh-session boundary whose JSONL was never materialized
+			// (for example, initial creation followed by exit before any assistant
+			// output). Honor the boundary rather than falling back to
+			// findMostRecentSession(), which would resurrect an older transcript.
+			// Explicit newSession() boundaries are materialized before it returns so
+			// this remains correct even when the relaunch has a different terminal id.
 			if (breadcrumb.fresh && !breadcrumb.exists) {
 				const manager = new SessionManager(cwd, dir, true, storage);
 				manager.#resetToNewSession();

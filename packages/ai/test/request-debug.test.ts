@@ -3,10 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai/api-registry";
-import { stream } from "@oh-my-pi/pi-ai/stream";
+import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { wrapFetchForRequestDebug } from "@oh-my-pi/pi-ai/utils/request-debug";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { removeWithRetries } from "../../utils/src/temp";
 
@@ -91,10 +91,12 @@ async function findDebugFiles(): Promise<{ requestPath: string; responsePath: st
 }
 
 describe("PI_REQ_DEBUG request/response recording", () => {
-	it("leaves fetch untouched when the flag is disabled", () => {
+	it("writes nothing when the flag is disabled", async () => {
 		delete Bun.env.PI_REQ_DEBUG;
 		const fetchImpl: FetchImpl = async () => new Response("ok");
-		expect(wrapFetchForRequestDebug(fetchImpl)).toBe(fetchImpl);
+		const response = await transportFetch(debugModel(), fetchImpl)("https://provider.test/off", { method: "POST" });
+		await response.text();
+		expect(await fs.readdir(tempDir!)).toEqual([]);
 	});
 
 	it("records every fetch while the env flag is enabled", async () => {
@@ -104,7 +106,7 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 			calls += 1;
 			return new Response(calls === 1 ? "first" : "second", { headers: { "x-call": String(calls) } });
 		};
-		const wrapped = wrapFetchForRequestDebug(fetchImpl);
+		const wrapped = transportFetch(debugModel(), fetchImpl);
 
 		const first = await wrapped("https://provider.test/first", {
 			method: "POST",
@@ -137,7 +139,7 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 		Bun.env.PI_REQ_DEBUG = "1";
 		const responseBody = new Uint8Array([0x66, 0x69, 0x72, 0x73, 0x74, 0x00, 0xff, 0x0a]);
 		const fetchImpl: FetchImpl = async () => chunkedResponse([responseBody.subarray(0, 5), responseBody.subarray(5)]);
-		const wrapped = wrapFetchForRequestDebug(fetchImpl);
+		const wrapped = transportFetch(debugModel(), fetchImpl);
 
 		const response = await wrapped("https://provider.test/v1/messages", {
 			method: "POST",
@@ -178,7 +180,9 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 				}),
 				{ status: 201, statusText: "Created", headers: { "content-type": "text/plain" } },
 			);
-		const response = await wrapFetchForRequestDebug(fetchImpl)("https://provider.test/stream", { method: "POST" });
+		const response = await transportFetch(debugModel(), fetchImpl)("https://provider.test/stream", {
+			method: "POST",
+		});
 
 		const reader = response.body!.getReader();
 		const firstRead = await reader.read();
@@ -194,53 +198,10 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 	it("wraps provider fetch options with request debug recording", async () => {
 		Bun.env.PI_REQ_DEBUG = "1";
 		const fetchMock: FetchImpl = async () => new Response("ok", { headers: { "x-debug": "yes" } });
-		registerCustomApi("req-debug-test", (_model, _context, options) => {
-			const events = new AssistantMessageEventStream();
-			void (async () => {
-				const fetchImpl = options?.fetch;
-				if (!fetchImpl) throw new Error("missing fetch");
-				const response = await fetchImpl("https://provider.test/custom", {
-					method: "POST",
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify({ ok: true }),
-				});
-				await response.text();
-				const message: AssistantMessage = {
-					role: "assistant",
-					content: [{ type: "text", text: "done" }],
-					provider: "test",
-					api: "req-debug-test",
-					model: "debug-model",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "stop",
-					timestamp: Date.now(),
-				};
-				events.end(message);
-			})().catch(error => events.fail(error));
-			return events;
-		});
+		registerDebugApi();
 
-		const model: Model = buildModel({
-			id: "debug-model",
-			name: "Debug Model",
-			api: "req-debug-test",
-			provider: "test",
-			baseUrl: "https://provider.test",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 4096,
-			maxTokens: 1024,
-		} as ModelSpec);
 		const events = stream(
-			model,
+			debugModel(),
 			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
 			{ apiKey: "key", fetch: fetchMock },
 		);
@@ -254,4 +215,78 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 		expect(log.headers).toContain("x-debug: yes");
 		expect(new TextDecoder().decode(log.body)).toBe("ok");
 	});
+
+	it("records one dump per request when streamSimple re-enters the request path for auth retry", async () => {
+		Bun.env.PI_REQ_DEBUG = "1";
+		let calls = 0;
+		const fetchMock: FetchImpl = async () => {
+			calls += 1;
+			return new Response("ok");
+		};
+		registerDebugApi();
+
+		// A resolver-form apiKey routes streamSimpleRequest through its retry
+		// wrapper, which calls streamSimpleRequest again with the same options.
+		const events = streamSimple(
+			debugModel(),
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: async () => "key", fetch: fetchMock },
+		);
+		await events.result();
+
+		expect(calls).toBe(1);
+		const entries = await fs.readdir(tempDir!);
+		expect(entries.filter(f => /^rr-session-\d+\.json$/.test(f))).toHaveLength(1);
+	});
 });
+
+function debugModel(): Model {
+	return buildModel({
+		id: "debug-model",
+		name: "Debug Model",
+		api: "req-debug-test",
+		provider: "test",
+		baseUrl: "https://provider.test",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 4096,
+		maxTokens: 1024,
+	} as ModelSpec);
+}
+
+/** Custom API whose only side effect is one POST through `options.fetch`. */
+function registerDebugApi(): void {
+	registerCustomApi("req-debug-test", (_model, _context, options) => {
+		const events = new AssistantMessageEventStream();
+		void (async () => {
+			const fetchImpl = options?.fetch;
+			if (!fetchImpl) throw new Error("missing fetch");
+			const response = await fetchImpl("https://provider.test/custom", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ ok: true }),
+			});
+			await response.text();
+			const message: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				provider: "test",
+				api: "req-debug-test",
+				model: "debug-model",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			};
+			events.end(message);
+		})().catch(error => events.fail(error));
+		return events;
+	});
+}

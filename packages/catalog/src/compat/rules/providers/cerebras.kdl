@@ -1,0 +1,19 @@
+// Provider-wire compat for "cerebras"; regenerated from the frozen census using deployment contract selectors.
+
+provider "cerebras" {
+	// Replaces the strict-mode provider whitelist entry.
+	supports-strict-mode #true
+	// Replaces the Cerebras provider branches in the completions baseline.
+	supports-usage-in-streaming #false
+	tool-strict-mode "all_strict"
+	// Cerebras serves Gemma 4 with vision enabled; its /v1/models rows carry
+	// no modality metadata.
+	models "gemma-4-31b" {
+		input-modalities "text" "image"
+	}
+	thinking-mode "effort"
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "zai-glm-4.7" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+}

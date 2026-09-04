@@ -16,6 +16,7 @@ import { type } from "@oh-my-pi/omptype";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 
 import {
@@ -24,9 +25,9 @@ import {
 	getModelMatchPreferences,
 	resolveModelFromString,
 } from "../config/model-resolver";
+import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
-import { withBridgeTimeoutPause } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `completion()` helper across both runtimes. */
@@ -59,6 +60,40 @@ export interface EvalCompletionBridgeOptions {
 export interface EvalCompletionResult {
 	text: string;
 	details: { model: string; tier: CompletionTier; structured: boolean };
+}
+
+/** Handle returned immediately after an eval completion starts. */
+export interface EvalCompletionHandleResult {
+	id: string;
+}
+
+/** Process-local state retained for one eval completion handle. */
+export interface CompletionHandleEntry {
+	ownerId: string;
+	controller: AbortController;
+	promise: Promise<void>;
+	settled: boolean;
+	result?: EvalCompletionResult;
+	error?: string;
+	evictionTimer?: NodeJS.Timeout;
+}
+
+const COMPLETION_HANDLE_RETENTION_MS = 30 * 60 * 1000;
+const completionHandles = new Map<string, CompletionHandleEntry>();
+
+/** Resolve a retained completion handle by id. */
+export function getCompletionHandle(id: string): CompletionHandleEntry | undefined {
+	return completionHandles.get(id);
+}
+
+/** Cancel and remove every completion handle owned by an agent session. */
+export function releaseCompletionHandles(ownerId: string): void {
+	for (const [id, entry] of completionHandles) {
+		if (entry.ownerId !== ownerId) continue;
+		entry.controller.abort(new ToolError("Completion handle owner released"));
+		clearTimeout(entry.evictionTimer);
+		completionHandles.delete(id);
+	}
 }
 
 /**
@@ -99,31 +134,16 @@ function reasoningForTier(tier: CompletionTier, model: Model<Api>): Effort | und
 	return efforts.includes(Effort.High) ? Effort.High : efforts[efforts.length - 1];
 }
 
-/**
- * Run a single stateless completion on behalf of an eval cell's `completion()` call.
- * Returns a `{ text, details }` value shaped like a {@link callSessionTool}
- * result so the existing bridge transport carries it to either runtime.
- */
-export async function runEvalCompletion(
-	args: unknown,
-	options: EvalCompletionBridgeOptions,
+async function executeCompletion(
+	prompt: string,
+	finalTier: CompletionTier,
+	system: string | undefined,
+	schema: Record<string, unknown> | undefined,
+	model: Model<Api>,
+	session: ToolSession,
+	signal: AbortSignal,
 ): Promise<EvalCompletionResult> {
-	const parsed = completionArgsSchema(args);
-	if (parsed instanceof type.errors) {
-		throw new ToolError(`completion() received invalid arguments: ${parsed.summary}`);
-	}
-	const { prompt, model: modelTier, system, schema } = parsed;
-	// Apply default value for model if not provided
-	const finalTier: CompletionTier = modelTier ?? "default";
-
-	const model = resolveTierModel(finalTier, options.session);
-	if (!model) {
-		throw new ToolError(
-			`completion() could not resolve a model for the "${finalTier}" tier. Configure modelRoles.${finalTier === "default" ? "default" : finalTier} or ensure a provider is available.`,
-		);
-	}
-
-	const registry = options.session.modelRegistry;
+	const registry = session.modelRegistry;
 	const apiKey = await registry?.getApiKey(model);
 	if (!registry || !apiKey) {
 		throw new ToolError(
@@ -141,33 +161,22 @@ export async function runEvalCompletion(
 				},
 			]
 		: undefined;
-
-	const telemetry = resolveTelemetry(options.session.getTelemetry?.(), options.session.getSessionId?.() ?? undefined);
-
-	// Some providers (notably openai-codex) require a non-empty `instructions`
-	// field on every Responses request and 400 with "Instructions are required"
-	// when it is missing. Fall back to a minimal default so `completion(prompt)` works
-	// without forcing every caller to pass a `system` prompt.
+	const telemetry = resolveTelemetry(session.getTelemetry?.(), session.getSessionId?.() ?? undefined);
 	const systemPrompt = system ? [system] : ["You are a helpful assistant."];
-
-	// Suspend eval timeout accounting while the model request owns control. The
-	// timeout clock restarts once the bridge returns to the cell runtime.
-	const response = await withBridgeTimeoutPause(options.emitStatus, () =>
-		instrumentedCompleteSimple(
-			model,
-			{
-				systemPrompt,
-				messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
-				tools,
-			},
-			{
-				apiKey: registry.resolver(model, options.session.getSessionId?.() ?? undefined),
-				signal: options.signal,
-				reasoning: reasoningForTier(finalTier, model),
-				toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
-			},
-			{ telemetry, oneshotKind: "eval_completion" },
-		),
+	const response = await instrumentedCompleteSimple(
+		model,
+		{
+			systemPrompt,
+			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
+			tools,
+		},
+		{
+			apiKey: registry.resolver(model, session.getSessionId?.() ?? undefined),
+			signal,
+			reasoning: reasoningForTier(finalTier, model),
+			toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
+		},
+		{ telemetry, oneshotKind: "eval_completion" },
 	);
 
 	if (response.stopReason === "error") {
@@ -198,15 +207,57 @@ export async function runEvalCompletion(
 		if (!resultText) throw new ToolError("completion() returned no text output.");
 	}
 
-	options.emitStatus?.({
-		op: "completion",
-		model: formatModelString(model),
-		tier: finalTier,
-		chars: resultText.length,
-	});
-
 	return {
 		text: resultText,
 		details: { model: formatModelString(model), tier: finalTier, structured: Boolean(schema) },
 	};
+}
+
+/** Start a stateless completion and return its process-local handle immediately. */
+export async function runEvalCompletion(
+	args: unknown,
+	options: EvalCompletionBridgeOptions,
+): Promise<EvalCompletionHandleResult> {
+	const parsed = completionArgsSchema(args);
+	if (parsed instanceof type.errors) {
+		throw new ToolError(`completion() received invalid arguments: ${parsed.summary}`);
+	}
+	const { prompt, model: modelTier, system, schema } = parsed;
+	const finalTier: CompletionTier = modelTier ?? "default";
+	const model = resolveTierModel(finalTier, options.session);
+	if (!model) {
+		throw new ToolError(
+			`completion() could not resolve a model for the "${finalTier}" tier. Configure modelRoles.${finalTier === "default" ? "default" : finalTier} or ensure a provider is available.`,
+		);
+	}
+
+	const id = `cmp-${Snowflake.next()}`;
+	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
+	const controller = new AbortController();
+	const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+	const entry: CompletionHandleEntry = {
+		ownerId,
+		controller,
+		promise: Promise.resolve(),
+		settled: false,
+	};
+	completionHandles.set(id, entry);
+	entry.promise = executeCompletion(prompt, finalTier, system, schema, model, options.session, signal)
+		.then(
+			result => {
+				entry.result = result;
+			},
+			error => {
+				entry.error = error instanceof Error ? error.message : String(error);
+			},
+		)
+		.finally(() => {
+			entry.settled = true;
+			const timer = setTimeout(() => {
+				if (completionHandles.get(id) === entry) completionHandles.delete(id);
+			}, COMPLETION_HANDLE_RETENTION_MS);
+			timer.unref?.();
+			entry.evictionTimer = timer;
+		});
+	return { id };
 }

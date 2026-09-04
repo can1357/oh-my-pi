@@ -1,0 +1,30 @@
+{
+	"source": "packages/hashline/test/diff-preview.test.ts",
+	"cases": [
+		{
+			"name": "renders current lines and omits removed content while preserving counts",
+			"input": " 1|alpha\n-2|beta\n+2|DELTA\n+3|EPSILON\n 3|gamma",
+			"expect": { "preview": "1:alpha\n2:DELTA\n3:EPSILON\n4:gamma", "addedLines": 2, "removedLines": 1 }
+		},
+		{
+			"name": "renumbers context lines against the post-edit file after range expansion",
+			"input": " 1|a1\n 2|a2\n-3|a3\n-4|a4\n+3|X\n+4|Y\n+5|Z\n 5|a5\n 6|a6\n 7|a7",
+			"expect": { "preview": "1:a1\n2:a2\n3:X\n4:Y\n5:Z\n6:a5\n7:a6\n8:a7", "addedLines": 3, "removedLines": 2 }
+		},
+		{
+			"name": "collapses long contiguous added runs to head, marker, and tail",
+			"input": "+10|line 1\n+11|line 2\n+12|line 3\n+13|line 4\n+14|line 5\n+15|line 6\n+16|line 7",
+			"expect": { "preview": "10:line 1\n11:line 2\n…\n15:line 6\n16:line 7", "addedLines": 7, "removedLines": 0 }
+		},
+		{
+			"name": "normalizes adjacent elision markers to one unicode marker",
+			"input": " 1|alpha\n...\n...\n…\n 20|omega",
+			"expect": { "preview": "1:alpha\n…\n20:omega", "addedLines": 0, "removedLines": 0 }
+		},
+		{
+			"name": "dedupes blank gap rows left adjacent by omitted removed lines and trims edge separators",
+			"input": "\n 1|alpha\n\n-5|beta\n\n 9|gamma\n\n-12|omitted",
+			"expect": { "preview": "1:alpha\n\n8:gamma", "addedLines": 0, "removedLines": 2 }
+		}
+	]
+}

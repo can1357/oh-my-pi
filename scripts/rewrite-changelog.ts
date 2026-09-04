@@ -338,6 +338,7 @@ async function run(options: RunOptions): Promise<RunResult> {
 		throw lastError;
 	}
 	const concurrency = options.concurrency ?? 4;
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const results: Array<RewrittenFile | undefined> = new Array(paths.length);
 
 	let pathIndex = 0;

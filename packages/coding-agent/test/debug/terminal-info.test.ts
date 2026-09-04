@@ -68,6 +68,45 @@ describe("formatTerminalState", () => {
 });
 
 describe("collectTerminalState", () => {
+	it("reports herdr from pane identity vars, not client-only socket paths", () => {
+		const keys = [
+			"HERDR_ENV",
+			"HERDR_PANE_ID",
+			"HERDR_TAB_ID",
+			"HERDR_WORKSPACE_ID",
+			"HERDR_SOCKET_PATH",
+			"TMUX",
+			"STY",
+			"ZELLIJ",
+			"CMUX_WORKSPACE_ID",
+			"CMUX_SURFACE_ID",
+			"CMUX_REMOTE_TRANSPORT",
+		] as const;
+		const previous = new Map<string, string | undefined>();
+		for (const key of keys) {
+			previous.set(key, Bun.env[key]);
+			delete Bun.env[key];
+		}
+		const runtime = { columns: 80, rows: 24, synchronizedOutput: true };
+		try {
+			expect(collectTerminalState(runtime).multiplexer).toBeNull();
+			Bun.env.HERDR_ENV = "1";
+			expect(collectTerminalState(runtime).multiplexer).toBe("herdr");
+			delete Bun.env.HERDR_ENV;
+			Bun.env.HERDR_PANE_ID = "p1";
+			expect(collectTerminalState(runtime).multiplexer).toBe("herdr");
+			delete Bun.env.HERDR_PANE_ID;
+			Bun.env.HERDR_SOCKET_PATH = "/tmp/x";
+			expect(collectTerminalState(runtime).multiplexer).toBeNull();
+		} finally {
+			for (const key of keys) {
+				const value = previous.get(key);
+				if (value === undefined) delete Bun.env[key];
+				else Bun.env[key] = value;
+			}
+		}
+	});
+
 	it("passes live geometry through and maps protocols to human-readable names (never raw escapes)", () => {
 		const info = collectTerminalState({ columns: 88, rows: 25, synchronizedOutput: true });
 		expect(info.columns).toBe(88);

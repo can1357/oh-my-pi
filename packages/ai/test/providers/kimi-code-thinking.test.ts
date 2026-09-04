@@ -43,7 +43,7 @@ const TITLE_CONTEXT: Context = {
 };
 
 const K3_MODEL = buildModel({
-	id: "k3",
+	id: "kimi-k3",
 	name: "K3",
 	api: "openai-completions",
 	provider: "kimi-code",
@@ -299,8 +299,7 @@ describe("Kimi K3 thinking transport", () => {
 
 	it("downgrades named tool choice to required for K3 thinking", async () => {
 		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
-		const bundledModel = getBundledModel<"openai-completions">("kimi-code", "k3");
-		expect(bundledModel.compat.thinkingFormat).toBe("kimi");
+		expect(K3_MODEL.compat.nativeKimiK3Reasoning).toBe(true);
 		let payload: unknown;
 		const capturePayload = async (
 			model: Model<"openai-completions">,
@@ -324,21 +323,19 @@ describe("Kimi K3 thinking transport", () => {
 			await stream.result();
 		};
 
-		for (const model of [K3_MODEL, bundledModel]) {
-			await capturePayload(model, { type: "tool", name: "set_title" });
-			expect(payload).toMatchObject({
-				thinking: { type: "enabled" },
-				tool_choice: "required",
-				tools: [{ type: "function", function: { name: "set_title" } }],
-			});
+		await capturePayload(K3_MODEL, { type: "tool", name: "set_title" });
+		expect(payload).toMatchObject({
+			thinking: { type: "enabled" },
+			tool_choice: "required",
+			tools: [{ type: "function", function: { name: "set_title" } }],
+		});
 
-			await capturePayload(model, "required");
-			expect(payload).toMatchObject({
-				thinking: { type: "enabled" },
-				tool_choice: "required",
-				tools: [{ type: "function", function: { name: "set_title" } }],
-			});
-		}
+		await capturePayload(K3_MODEL, "required");
+		expect(payload).toMatchObject({
+			thinking: { type: "enabled" },
+			tool_choice: "required",
+			tools: [{ type: "function", function: { name: "set_title" } }],
+		});
 
 		await capturePayload(K3_MODEL, { type: "tool", name: "missing_tool" }, []);
 		expect((payload as { tool_choice?: unknown }).tool_choice).toBeUndefined();
@@ -366,7 +363,7 @@ describe("Kimi K2.7 Code thinking policy", () => {
 		expect(model.compat.disableReasoningOnForcedToolChoice).toBe(true);
 	});
 
-	it("downgrades the forced tool choice on Kimi Code's Anthropic endpoint", async () => {
+	it("preserves the forced tool choice on Kimi Code's Anthropic endpoint", async () => {
 		const model = getBundledModel<"openai-completions">("kimi-code", "kimi-for-coding");
 		let payload: MessageCreateParamsStreaming | undefined;
 		const stream = streamOpenAIAnthropicShim(
@@ -390,20 +387,14 @@ describe("Kimi K2.7 Code thinking policy", () => {
 
 		await stream.result();
 
-		// api.kimi.com keeps thinking enabled server-side no matter what the
-		// request carries: an omitted thinking block defaults to enabled, and an
-		// explicit disabled block is rejected (#3852). Either way a forced
-		// tool_choice 400s (`tool_choice 'specified' is incompatible with
-		// thinking enabled`), so the only viable path is downgrading the choice
-		// to auto while keeping the tool available — thinking stays on.
-		expect(payload?.tool_choice).toEqual({ type: "auto" });
-		expect(payload?.thinking).toBeDefined();
+		// The resolved Kimi Code policy honors the caller's named choice while
+		// explicitly disabling thinking for this title-generation request.
+		expect(payload?.tool_choice).toEqual({ type: "tool", name: "set_title" });
+		expect(payload?.thinking).toBeUndefined();
 	});
 
-	it("downgrades forced tool choice for every thinking-locked Kimi Code alias", async () => {
-		// The kimi-code catalog aliases the mandatory-thinking K2.7 Code family
-		// as `kimi-for-coding[-highspeed]` and K3 as `k3`; none match the native
-		// `kimi-k2.7-code*` id pattern, so each must be recognised explicitly.
+	it("preserves forced tool choice for the reviewed Kimi Code aliases", async () => {
+		// The catalog bakes each alias's reviewed identity and wire policy.
 		for (const id of ["k3", "kimi-for-coding", "kimi-for-coding-highspeed"]) {
 			const model = getBundledModel<"openai-completions">("kimi-code", id);
 			let payload: MessageCreateParamsStreaming | undefined;
@@ -427,7 +418,7 @@ describe("Kimi K2.7 Code thinking policy", () => {
 
 			await stream.result();
 
-			expect(payload?.tool_choice).toEqual({ type: "auto" });
+			expect(payload?.tool_choice).toEqual({ type: "tool", name: "set_title" });
 		}
 	});
 

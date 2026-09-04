@@ -1553,6 +1553,12 @@ providers:
 		expect(ProviderDiscoverySchema.allows({ type: "llama.cpp", timeoutMs: Number.NaN })).toBe(false);
 		expect(ProviderDiscoverySchema.allows({ type: "llama.cpp", timeoutMs: "30000" as any })).toBe(false);
 	});
+	test("ProviderDiscoverySchema restricts injectV1 to openai-models-list", () => {
+		expect(ProviderDiscoverySchema.allows({ type: "openai-models-list", injectV1: false })).toBe(true);
+		expect(ProviderDiscoverySchema.allows({ type: "openai-models-list", injectV1: true })).toBe(true);
+		expect(ProviderDiscoverySchema.allows({ type: "lm-studio", injectV1: false })).toBe(false);
+		expect(ProviderDiscoverySchema.allows({ type: "proxy", injectV1: false })).toBe(false);
+	});
 	test("llama.cpp discovery marks per-model architecture image modalities as vision-capable", async () => {
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
@@ -2398,6 +2404,65 @@ providers:
 		expect(registry.find("openai-test", "low")?.input).toEqual(["text"]);
 		// Silent server → default text-only fallback.
 		expect(registry.find("openai-test", "medium")?.input).toEqual(["text"]);
+	});
+
+	test("openai-models-list with injectV1: false hits {baseUrl}/models verbatim", async () => {
+		// Gateways like opper.ai root their OpenAI-compatible surface at a
+		// versioned path (`https://api.opper.ai/v3/compat`); the default
+		// normalizer would force `/v1/models` onto that root and land on a
+		// different (much smaller) model list than chat uses.
+		writeRawModelsJson({
+			"opper-test": {
+				baseUrl: "https://api.opper.ai/v3/compat",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list", injectV1: false },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "https://api.opper.ai/v3/compat/models") {
+				return new Response(JSON.stringify({ data: [{ id: "opper-full-a" }, { id: "opper-full-b" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		// Discovered models carry the configured URL as their chat base —
+		// discovery and chat share the same endpoint root.
+		expect(registry.find("opper-test", "opper-full-a")?.baseUrl).toBe("https://api.opper.ai/v3/compat");
+		expect(registry.find("opper-test", "opper-full-b")?.baseUrl).toBe("https://api.opper.ai/v3/compat");
+	});
+
+	test("openai-models-list with injectV1: false strips query strings from the base URL", async () => {
+		// Chat builds the inference URL by appending `/chat/completions` to the
+		// base string, so a query in `baseUrl` would corrupt it
+		// (`?token=x/chat/completions`). The bare normalizer drops queries and
+		// hashes, matching the default mode's normalizer.
+		writeRawModelsJson({
+			"opper-test": {
+				baseUrl: "https://api.opper.ai/v3/compat?token=gateway",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list", injectV1: false },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "https://api.opper.ai/v3/compat/models") {
+				return new Response(JSON.stringify({ data: [{ id: "opper-full-a" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		expect(registry.find("opper-test", "opper-full-a")?.baseUrl).toBe("https://api.opper.ai/v3/compat");
 	});
 
 	test("lm-studio discovery keeps native VLM modalities over a thin OpenAI row", async () => {

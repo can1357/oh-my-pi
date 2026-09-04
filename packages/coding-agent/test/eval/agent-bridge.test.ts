@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { runEvalAgent } from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
+import {
+	runEvalAgent,
+	type EvalAgentBridgeOptions,
+	type EvalAgentResult,
+} from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
+import { runEvalWait } from "@oh-my-pi/pi-coding-agent/eval/handle-bridge";
 import type { LocalProtocolOptions } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -10,6 +16,39 @@ import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runne
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition, SingleResult, StructuredSubagentOutput } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+
+const jobManagers = new Set<AsyncJobManager>();
+
+function isEvalAgentResult(value: unknown): value is EvalAgentResult {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		"details" in value &&
+		"text" in value &&
+		typeof value.text === "string" &&
+		value.details !== null &&
+		typeof value.details === "object"
+	);
+}
+
+async function runEvalAgentAndWait(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
+	let manager = options.session.asyncJobManager;
+	if (!manager) {
+		manager = new AsyncJobManager({});
+		Object.assign(options.session, { asyncJobManager: manager });
+	}
+	jobManagers.add(manager);
+	const handle = await runEvalAgent(args, options);
+	const waited = await runEvalWait({ items: [{ kind: "agent", id: handle.id }] }, options);
+	const snapshot = waited.items[0];
+	if (!snapshot || snapshot.status === "running") throw new Error(`Agent handle ${handle.id} did not settle`);
+	if (snapshot.status === "failed" || snapshot.status === "cancelled") {
+		throw new Error(snapshot.error || `Agent handle ${handle.id} failed`);
+	}
+	const result = manager.getJob(handle.id)?.latestDetails?.evalResult;
+	if (!isEvalAgentResult(result)) throw new Error(`Agent handle ${handle.id} returned no eval result`);
+	return result;
+}
 
 function createResult(overrides: Partial<SingleResult> = {}): SingleResult {
 	return {
@@ -52,8 +91,10 @@ function createBudgetSession(sessionManager: SessionManager): ToolSession {
 }
 
 describe("runEvalAgent", () => {
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
+		await Promise.all([...jobManagers].map(manager => manager.dispose()));
+		jobManagers.clear();
 	});
 
 	it("forwards session-scoped MCP and local protocol options", async () => {
@@ -81,7 +122,7 @@ describe("runEvalAgent", () => {
 			getAgentId: () => "BridgeParent",
 		} as unknown as ToolSession;
 
-		await runEvalAgent({ prompt: "do work", agent: "task" }, { session });
+		await runEvalAgentAndWait({ prompt: "do work", agent: "task" }, { session });
 
 		expect(runSubprocessSpy).toHaveBeenCalledTimes(1);
 		const options = runSubprocessSpy.mock.calls[0]?.[0];
@@ -113,7 +154,7 @@ describe("runEvalAgent", () => {
 			getSessionFile: () => null,
 		} as unknown as ToolSession;
 
-		const result = await runEvalAgent({ prompt: "do work", agent: "task", schemaMode: "strict" }, { session });
+		const result = await runEvalAgentAndWait({ prompt: "do work", agent: "task", schemaMode: "strict" }, { session });
 
 		expect(result.data).toEqual({ status: "ok" });
 		expect(result.details).toMatchObject({ structured: true, schemaSource: "agent", schemaMode: "strict" });
@@ -131,7 +172,7 @@ describe("runEvalAgent", () => {
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(createResult({ usage: createUsage(1_234) }));
 
-		await runEvalAgent({ prompt: "do work", agent: "task" }, { session: createBudgetSession(sessionManager) });
+		await runEvalAgentAndWait({ prompt: "do work", agent: "task" }, { session: createBudgetSession(sessionManager) });
 
 		expect(sessionManager.getTurnBudget()).toEqual({
 			total: 100_000,
@@ -160,7 +201,7 @@ describe("runEvalAgent", () => {
 		);
 
 		await expect(
-			runEvalAgent({ prompt: "do work", agent: "task" }, { session: createBudgetSession(sessionManager) }),
+			runEvalAgentAndWait({ prompt: "do work", agent: "task" }, { session: createBudgetSession(sessionManager) }),
 		).rejects.toThrow("agent failed");
 
 		expect(sessionManager.getTurnBudget().spent).toBe(2_345);
@@ -176,7 +217,7 @@ describe("runEvalAgent", () => {
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.beginTurnBudget(100_000, true);
 		const session = createBudgetSession(sessionManager);
-		session.settings.set("task.isolation.mode", "auto");
+		session.settings.set("task.isolation.enabled", true);
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
 			repoRoot: "/tmp",
@@ -197,9 +238,9 @@ describe("runEvalAgent", () => {
 			throw new Error("cleanup failed");
 		});
 
-		await expect(runEvalAgent({ prompt: "do work", agent: "task", isolated: true }, { session })).rejects.toThrow(
-			"cleanup failed",
-		);
+		await expect(
+			runEvalAgentAndWait({ prompt: "do work", agent: "task", isolated: true }, { session }),
+		).rejects.toThrow("cleanup failed");
 
 		expect(sessionManager.getTurnBudget().spent).toBe(4_567);
 	});
