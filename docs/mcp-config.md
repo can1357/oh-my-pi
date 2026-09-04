@@ -103,6 +103,8 @@ Shared fields for every transport:
 - `requestIdFormat?: "number" | "string"` — outgoing JSON-RPC request-id encoding; defaults to per-transport integers. `"string"` uses collision-resistant snowflake IDs. This OMP-specific field is read only from OMP-native files, root `mcp.json` / `.mcp.json`, and OMP extension packages; configs translated from other tools ignore it.
 - `auth?: { ... }` — stored-credential metadata; managed credential injection is implemented for OAuth
 - `oauth?: { ... }` — explicit OAuth client and callback settings used during auth/reauth
+- `enabledTools?: string[]` — per-server tool allowlist. Entries are raw advertised tool names or glob patterns (`*`, `?`, `[...]`, `{a,b}`); only matching tools are contributed to the session. This OMP-specific field follows the same scoping rule as `requestIdFormat`.
+- `disabledTools?: string[]` — per-server tool denylist; matching tools are excluded. When both fields are set, `disabledTools` wins (deny subtracts from allow).
 
 `OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the 30-second default; invalid values are logged and ignored.
 

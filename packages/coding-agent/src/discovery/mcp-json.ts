@@ -12,7 +12,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, parseRequestIdFormat } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, parseMCPToolFilterEntry, parseRequestIdFormat } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
@@ -27,6 +27,8 @@ interface MCPConfigFile {
 			enabled?: boolean;
 			timeout?: number;
 			requestIdFormat?: "string" | "number";
+			enabledTools?: unknown;
+			disabledTools?: unknown;
 			command?: string;
 			args?: string[];
 			env?: Record<string, string>;
@@ -92,11 +94,16 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				});
 			}
 
+			const enabledTools = parseMCPToolFilterEntry(serverConfig.enabledTools);
+			const disabledTools = parseMCPToolFilterEntry(serverConfig.disabledTools);
+
 			const server: MCPServer = {
 				name,
 				enabled,
 				timeout,
 				requestIdFormat,
+				enabledTools,
+				disabledTools,
 				command: serverConfig.command,
 				args: serverConfig.args,
 				env: serverConfig.env,

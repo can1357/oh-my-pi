@@ -1,11 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
-import { loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
-import { parseFrontmatter, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { loadFilesFromDir, parseMCPToolFilterEntry } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { logger, parseFrontmatter, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("parseFrontmatter", () => {
 	const parse = (content: string) => parseFrontmatter(content, { source: "tests:frontmatter", level: "off" });
@@ -201,5 +201,36 @@ describe("loadFilesFromDir recursion", () => {
 			path.join("mineru", "Lib", "site-packages", "gradio", "assets", "svelte", "media-query-D37ajmZt.js"),
 			"my-tool.ts",
 		]);
+	});
+});
+
+describe("parseMCPToolFilterEntry", () => {
+	test("accepts arrays of non-empty strings", () => {
+		expect(parseMCPToolFilterEntry(["read", "write_*"])).toEqual(["read", "write_*"]);
+		expect(parseMCPToolFilterEntry([])).toBeUndefined();
+		expect(parseMCPToolFilterEntry(undefined)).toBeUndefined();
+	});
+
+	test("warns and rejects non-array values (the allowlist failure mode is silent over-permission)", () => {
+		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			expect(parseMCPToolFilterEntry("read, write")).toBeUndefined();
+			expect(parseMCPToolFilterEntry({ read: true })).toBeUndefined();
+			expect(warnSpy).toHaveBeenCalledTimes(2);
+			expect(String(warnSpy.mock.calls[0]?.[0])).toContain("invalid tool filter value");
+			expect(String(warnSpy.mock.calls[0]?.[0])).toContain("read, write");
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	test("dropping empty string members does not warn (valid array with filtered members)", () => {
+		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			expect(parseMCPToolFilterEntry(["read", ""])).toEqual(["read"]);
+			expect(warnSpy).not.toHaveBeenCalled();
+		} finally {
+			warnSpy.mockRestore();
+		}
 	});
 });
