@@ -2812,6 +2812,13 @@ export interface FollowUpTurnOptions {
 }
 
 async function installWorkPoolYieldItems(session: AgentSession, items: readonly WorkPoolYieldItem[]): Promise<void> {
+	const current = session.getWorkPoolYieldItems();
+	if (
+		current.length === items.length &&
+		current.every((item, index) => item.id === items[index]?.id && item.index === items[index]?.index)
+	) {
+		return;
+	}
 	session.setWorkPoolYieldItems(items);
 	await session.refreshBaseSystemPrompt();
 }

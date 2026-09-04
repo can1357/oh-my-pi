@@ -206,8 +206,9 @@ describe("runSubprocess yield reminders", () => {
 		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("refreshes the provider-facing prompt after installing workpool yield items", async () => {
+	it("refreshes the provider-facing prompt only when workpool yield items change", async () => {
 		const calls: string[] = [];
+		let installedItems: Array<{ id: string; index: number }> = [];
 		const session = createMockSession(({ emit }) => {
 			emit({
 				type: "tool_execution_end",
@@ -221,26 +222,41 @@ describe("runSubprocess yield reminders", () => {
 			});
 		});
 		const mutableSession = session as unknown as {
+			getWorkPoolYieldItems: AgentSession["getWorkPoolYieldItems"];
 			setWorkPoolYieldItems: AgentSession["setWorkPoolYieldItems"];
 			refreshBaseSystemPrompt: AgentSession["refreshBaseSystemPrompt"];
 		};
+		mutableSession.getWorkPoolYieldItems = () => installedItems;
 		mutableSession.setWorkPoolYieldItems = items => {
-			calls.push("set:" + items.map(item => item.id).join(","));
+			installedItems = items.map(item => ({ ...item }));
+			calls.push("set:" + items.map(item => item.index + ":" + item.id).join(","));
 		};
 		mutableSession.refreshBaseSystemPrompt = async () => {
 			calls.push("refresh");
 		};
 		mockCreateAgentSession(session);
 
-		const result = await runSubprocess({
+		const first = await runSubprocess({
 			...baseOptions,
-			id: "subagent-workpool-yield-schema",
+			id: "subagent-workpool-yield-schema-first",
 			workPoolYieldItems: [{ id: "pool#1", index: 1 }],
 		});
+		const unchanged = await runSubprocess({
+			...baseOptions,
+			id: "subagent-workpool-yield-schema-unchanged",
+			workPoolYieldItems: [{ id: "pool#1", index: 1 }],
+		});
+		const changed = await runSubprocess({
+			...baseOptions,
+			id: "subagent-workpool-yield-schema-changed",
+			workPoolYieldItems: [{ id: "pool#2", index: 2 }],
+		});
 
-		expect(result.error).toBeUndefined();
-		expect(result.exitCode).toBe(0);
-		expect(calls).toEqual(["set:pool#1", "refresh"]);
+		for (const result of [first, unchanged, changed]) {
+			expect(result.error).toBeUndefined();
+			expect(result.exitCode).toBe(0);
+		}
+		expect(calls).toEqual(["set:1:pool#1", "refresh", "set:2:pool#2", "refresh"]);
 	});
 
 	it("splices the subagent role prompt before the trailing system section", async () => {

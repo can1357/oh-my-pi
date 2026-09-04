@@ -31,39 +31,62 @@ describe("SDK workpool yield schema", () => {
 		if (fs.existsSync(registryDir)) removeSyncWithRetries(registryDir);
 	});
 
-	it("switches the constructed yield tool before a pooled turn starts", async () => {
-		const { session } = await createAgentSession({
-			cwd: registryDir,
-			agentDir: registryDir,
-			modelRegistry,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({}),
-			model: getBundledModel("openai", "gpt-4o-mini"),
-			disableExtensionDiscovery: true,
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-			requireYieldTool: true,
-			toolNames: ["yield"],
-		});
-		sessions.push(session);
-		const tool = session.getToolByName("yield");
-		if (!tool) throw new Error("Missing yield tool");
-		expect(Reflect.get(tool.parameters, "required")).toEqual(["result"]);
+	for (const dialect of ["native", "gemini"] as const) {
+		it("switches the constructed yield tool before a pooled turn starts (" + dialect + ")", async () => {
+			const { session } = await createAgentSession({
+				cwd: registryDir,
+				agentDir: registryDir,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({}),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				requireYieldTool: true,
+				toolNames: ["yield"],
+			});
+			sessions.push(session);
+			if (dialect === "gemini") {
+				session.settings.override("tools.format", "gemini");
+				await session.refreshBaseSystemPrompt();
+			}
+			const tool = session.getToolByName("yield");
+			if (!tool) throw new Error("Missing yield tool");
+			expect(Reflect.get(tool.parameters, "required")).toEqual(["result"]);
 
-		session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
-		expect(Reflect.get(tool.parameters, "required")).toEqual(["key"]);
-		const properties = Reflect.get(tool.parameters, "properties");
-		expect(properties).toHaveProperty("key");
-		expect(properties).not.toHaveProperty("result");
-		const activeTool = session.agent.state.tools.find(candidate => candidate.name === "yield");
-		if (!activeTool) throw new Error("Missing active yield tool");
-		expect(Reflect.get(activeTool.parameters, "required")).toEqual(["key"]);
-		const result = await tool.execute("yield-pool-1", { key: 1, data: { answer: 42 } });
-		expect(result.details).toMatchObject({ type: ["pool#1"], complete: true });
-	});
+			session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
+			await session.refreshBaseSystemPrompt();
+			expect(Reflect.get(tool.parameters, "required")).toEqual(["key"]);
+			const properties = Reflect.get(tool.parameters, "properties");
+			expect(properties).toHaveProperty("key");
+			expect(properties).not.toHaveProperty("result");
+			const activeTool = session.agent.state.tools.find(candidate => candidate.name === "yield");
+			if (!activeTool) throw new Error("Missing active yield tool");
+			expect(Reflect.get(activeTool.parameters, "required")).toEqual(["key"]);
+			const providerContext = await session.agent.buildSideRequestContext([]);
+			if (dialect === "native") {
+				const providerTool = providerContext.tools?.find(candidate => candidate.name === "yield");
+				if (!providerTool) throw new Error("Missing provider yield tool");
+				expect(Reflect.get(providerTool.parameters, "required")).toEqual(["key"]);
+			} else {
+				const providerSystemPrompt = providerContext.systemPrompt;
+				if (!providerSystemPrompt) throw new Error("Missing provider system prompt");
+				const providerPrompt = providerSystemPrompt.join("\n");
+				expect(providerPrompt.match(/type yield =/g)).toHaveLength(1);
+				const yieldStart = providerPrompt.indexOf("type yield =");
+				const nextType = providerPrompt.indexOf("\ntype ", yieldStart + 1);
+				const yieldDeclaration = providerPrompt.slice(yieldStart, nextType < 0 ? providerPrompt.length : nextType);
+				expect(yieldDeclaration).toContain("key: 1,");
+				expect(yieldDeclaration).not.toContain("result:");
+			}
+			const result = await tool.execute("yield-pool-1", { key: 1, data: { answer: 42 } });
+			expect(result.details).toMatchObject({ type: ["pool#1"], complete: true });
+		});
+	}
 });
