@@ -120,6 +120,13 @@ def test_maintainer_logins_normalize_csv_entries(monkeypatch: pytest.MonkeyPatch
     assert cfg.maintainer_logins == frozenset({"can1357", "roboomp", "alice"})
 
 
+def test_pr_review_skip_bots_normalize_csv_entries(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    monkeypatch.setenv("ROBOMP_PR_REVIEW_SKIP_BOTS", " renovate-bot , @Renovate-Bot ,, ")
+    reset_settings_cache()
+    cfg = Settings()  # type: ignore[call-arg]
+    assert cfg.pr_review_skip_bots == frozenset({"renovate-bot"})
+
+
 @pytest.mark.parametrize(
     ("raw_login", "expected"),
     [

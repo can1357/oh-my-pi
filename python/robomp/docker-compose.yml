@@ -50,6 +50,7 @@ services:
 
       # --- PR review ---
       ROBOMP_PR_REVIEW_ENABLED: ${ROBOMP_PR_REVIEW_ENABLED:-true}
+      ROBOMP_PR_REVIEW_SKIP_BOTS: ${ROBOMP_PR_REVIEW_SKIP_BOTS:-}
 
       # --- release sentinel ---
       ROBOMP_RELEASE_SENTINEL_ENABLED: ${ROBOMP_RELEASE_SENTINEL_ENABLED:-false}

@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     git_author_email: str = Field(..., alias="ROBOMP_GIT_AUTHOR_EMAIL")
     repo_allowlist_raw: str = Field("", alias="ROBOMP_REPO_ALLOWLIST")
     pr_review_enabled: bool = Field(True, alias="ROBOMP_PR_REVIEW_ENABLED")
+    # Bot logins (e.g. Forgejo `renovate-bot` — a plain user account with no
+    # `[bot]` suffix or `type: Bot`) whose PRs must never enter the review
+    # queue. Comma-separated; `@` prefix optional.
+    pr_review_skip_bots_raw: str = Field("", alias="ROBOMP_PR_REVIEW_SKIP_BOTS")
 
     # Release sentinel
     release_sentinel_enabled: bool = Field(False, alias="ROBOMP_RELEASE_SENTINEL_ENABLED")
@@ -311,6 +315,11 @@ class Settings(BaseSettings):
     @property
     def reviewer_bots(self) -> frozenset[str]:
         items = [piece.strip().lstrip("@").lower() for piece in self.reviewer_bots_raw.split(",")]
+        return frozenset(item for item in items if item)
+
+    @property
+    def pr_review_skip_bots(self) -> frozenset[str]:
+        items = [piece.strip().lstrip("@").lower() for piece in self.pr_review_skip_bots_raw.split(",")]
         return frozenset(item for item in items if item)
 
     @property

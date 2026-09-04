@@ -417,6 +417,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             maintainers=cfg.maintainer_logins,
             reviewer_bots=cfg.reviewer_bots,
             pr_review_enabled=cfg.pr_review_enabled,
+            pr_review_skip_bots=cfg.pr_review_skip_bots,
             release_sentinel_enabled=cfg.release_sentinel_enabled,
             release_commit_prefix=cfg.release_commit_prefix,
             resolve_issue_from_pr=_resolve,
