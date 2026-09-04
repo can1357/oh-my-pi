@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added three opt-in status-line formatting features for custom presets: a `profile` segment that shows the active named profile as `p:<name>` and hides for the default profile, `segmentOptions.token_total.breakdown` to render labeled traffic totals like `in:25K out:5`, and `segmentOptions.context_pct.compact` to render percentage-only context labels such as `ctx:9.1%` ([#9096](https://github.com/can1357/oh-my-pi/issues/9096))
+
 ## [18.1.9] - 2026-09-04
 
 ### Breaking Changes
@@ -12,9 +16,6 @@
 
 ### Added
 
-- Added three opt-in status-line formatting features for custom presets: a `profile` segment that shows the active named profile as `p:<name>` and hides for the default profile, `segmentOptions.token_total.breakdown` to render labeled traffic totals like `in:25K out:5`, and `segmentOptions.context_pct.compact` to render percentage-only context labels such as `ctx:9.1%` ([#9096](https://github.com/can1357/oh-my-pi/issues/9096))
-- Made Markdown links to existing local files and resources clickable while preserving their displayed URLs.
-- Added the `/switch <model>` command for session-only model changes from the prompt, with support for the same model selectors and completions used by `--model`; ACP `/model <model>` accepts these selectors as well.
 - Bash now extracts Kitty and Sixel terminal graphics as image results for foreground, failed, manual, and background executions.
 - Markdown links to existing local files and resources are now clickable while preserving their displayed URLs.
 - Added `/switch <model>` for session-only model changes, with the same model selectors and completions supported by `--model`; ACP `/model <model>` accepts these selectors as well.

@@ -174,7 +174,7 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 		expect(onBranchChange).not.toHaveBeenCalled();
 	});
 
-	it("suppresses stale PR lookup callbacks after settings are reset", async () => {
+	it("suppresses stale PR lookup callbacks after dispose()", async () => {
 		defaultBranchMock.mockResolvedValue("main");
 		vi.spyOn(github, "run").mockResolvedValue({
 			exitCode: 0,
@@ -182,7 +182,9 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 			stderr: "",
 		});
 
-		const onBranchChange = vi.fn(() => Settings.instance.get("statusLine.preset"));
+		const onBranchChange = vi.fn(() => {
+			throw new Error("disposed PR lookup invoked its stale callback");
+		});
 		const component = new StatusLineComponent(makeSession());
 		component.updateSettings({
 			...gitSegmentSettings,
@@ -192,15 +194,10 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 
 		component.getTopBorder(80);
 		component.dispose();
-		resetSettingsForTest();
 
-		try {
-			await Promise.resolve();
-			await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
 
-			expect(onBranchChange).not.toHaveBeenCalled();
-		} finally {
-			await Settings.init({ inMemory: true });
-		}
+		expect(onBranchChange).not.toHaveBeenCalled();
 	});
 });
