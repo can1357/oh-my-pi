@@ -2755,18 +2755,36 @@ describe("lsp regressions", () => {
 			});
 			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 			vi.spyOn(lspClient, "sendRequest").mockResolvedValue({
-				documentChanges: [],
+				changes: {
+					[fileToUri(sourceFile)]: Array.from({ length: 9 }, (_, index) => ({
+						range: {
+							start: { line: index, character: 13 },
+							end: { line: index, character: 18 },
+						},
+						newText: index === 0 ? "renamed\r\nValue\rTail\nEnd" : `renamedValue${index + 1}`,
+					})),
+				},
 			});
 			const notifySpy = vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
 
 			const tool = new LspTool(makeLspSession(tempDir.path()));
-			await tool.execute("rename-file-preview", {
+			const result = await tool.execute("rename-file-preview", {
 				action: "rename_file",
 				file: sourceFile,
 				new_name: destFile,
 				apply: false,
 				timeout: 5,
 			});
+			const output = result.content
+				.filter(block => block.type === "text")
+				.map(block => block.text)
+				.join("\n");
+			expect(output).toContain("old.ts: 9 edits");
+			expect(output).toContain("line 1:14");
+			expect(output).toContain('"renamed\\r\\nValue\\rTail\\nEnd"');
+			expect(output).not.toContain("\r");
+			expect(output).toContain("INCOMPLETE preview: showing 8/9 text edits; 1 omitted");
+			expect(output).not.toContain('"renamedValue9"');
 
 			expect(fs.existsSync(sourceFile)).toBe(true);
 			expect(fs.existsSync(destFile)).toBe(false);
