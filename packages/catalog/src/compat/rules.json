@@ -10874,6 +10874,21 @@
 				}
 			},
 			{
+				"source": "providers/openai-codex.kdl:124",
+				"providers": [
+					"openai-codex"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-6-astra"
+					}
+				],
+				"catalog": {
+					"maxContextWindow": 872000
+				}
+			},
+			{
 				"source": "providers/openai-codex.kdl:3",
 				"providers": [
 					"openai-codex"
