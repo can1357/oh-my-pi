@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A duration-limited `/loop` (e.g. `/loop 30m fix the tests`) now fires on that fixed interval instead of waiting for the agent to stop before re-prompting it: a turn that is still working gets the prompt steered in — so a long turn is nudged repeatedly as it runs, keeping its cached context — and once the agent has stopped, the same tick simply submits the prompt and it continues. Count-based loops (`/loop 5`) are unchanged.
+
 ## [18.1.15] - 2026-09-08
 
 ### Added
