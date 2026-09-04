@@ -581,9 +581,24 @@ export interface CredentialDisabledEvent {
 	disabledCause: string;
 }
 
+/**
+ * How AuthStorage chooses among several stored credentials for one provider.
+ *
+ * - `balanced` (default): spread load across accounts — a session starts from
+ *   its hashed position, session-less lookups round-robin — and rank by live
+ *   usage headroom.
+ * - `fixed`: always start from the first stored credential and move to the
+ *   next one only when the current credential is blocked (rate-limited,
+ *   exhausted, or failed to refresh). Usage reports are not consulted for
+ *   selection; plan-gated openai-codex models still verify tier eligibility.
+ */
+export type AuthAccountSelection = "balanced" | "fixed";
+
 export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
 	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
+	/** Credential selection policy. Default: `balanced`. */
+	accountSelection?: AuthAccountSelection;
 	usageFetch?: typeof fetch;
 	usageRequestTimeoutMs?: number;
 	usageLogger?: UsageLogger;
@@ -1298,6 +1313,21 @@ type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 type RankedOAuthCandidate = UsageRankedCandidate<OAuthCredential>;
 type RankedApiKeyCandidate = UsageRankedCandidate<ApiKeyCredential>;
 
+/** Credential a session last resolved (or was explicitly pinned to). */
+type SessionCredentialRecord = {
+	type: AuthCredential["type"];
+	index: number;
+	lastUsedAtMs?: number;
+	/**
+	 * Set by an explicit user pin (`pinSessionOAuthAccount` with the default
+	 * `origin: "user"`). Under `fixed` account selection only pinned records may
+	 * keep a session away from the first available stored credential; automatic
+	 * stickiness recorded after a fallthrough must not. Cleared once a different
+	 * credential serves the session.
+	 */
+	pinned?: boolean;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AuthStorage Class
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1317,10 +1347,7 @@ export class AuthStorage {
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
-	#sessionLastCredential: Map<
-		string,
-		Map<string, { type: AuthCredential["type"]; index: number; lastUsedAtMs?: number }>
-	> = new Map();
+	#sessionLastCredential: Map<string, Map<string, SessionCredentialRecord>> = new Map();
 	/** Recent bearer fingerprints resolved for each durable OAuth row; used only for delayed usage-limit attribution. */
 	#oauthBearerFingerprints: Map<string, Map<number, string[]>> = new Map();
 	/** Maps provider:type -> credentialIndex -> blockedUntilMs for temporary backoff. */
@@ -1341,6 +1368,7 @@ export class AuthStorage {
 	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
 	#usageReportCacheKeysByProvider: Map<Provider, Set<string>> = new Map();
 	#rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
+	#accountSelection: AuthAccountSelection;
 	#usageCache: UsageCache;
 	#usageCacheEpoch = 0;
 	#usageRequestInFlight: Map<string, Promise<UsageReport | null>> = new Map();
@@ -1376,6 +1404,7 @@ export class AuthStorage {
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
 		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
+		this.#accountSelection = options.accountSelection ?? "balanced";
 		this.#usageCache = new AuthStorageUsageCache(this.#store);
 		// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
 		// cache rows (24h last-good retention). A cheap indexed DELETE;
@@ -1429,6 +1458,21 @@ export class AuthStorage {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#store.close();
+	}
+
+	/** Credential selection policy currently in effect. */
+	get accountSelection(): AuthAccountSelection {
+		return this.#accountSelection;
+	}
+
+	/**
+	 * Replace the selection policy after construction. The coding-agent applies the
+	 * settings layer here once it has loaded, so config overlays (`--config`,
+	 * `PI_CONFIG_FILES`) and project settings reach credential routing even though
+	 * discovery only saw `<agentDir>/config.yml`.
+	 */
+	setAccountSelection(selection: AuthAccountSelection): void {
+		this.#accountSelection = selection;
 	}
 
 	getGeneration(): number {
@@ -1771,10 +1815,12 @@ export class AuthStorage {
 	 * Returns credential indices in priority order for selection.
 	 * With sessionId: starts from hashed index (consistent per session).
 	 * Without sessionId: starts from round-robin index (load balancing).
+	 * Under `fixed` account selection: always starts from the first stored credential.
 	 * Order wraps around so all credentials are tried if earlier ones are blocked.
 	 */
 	#getCredentialOrder(providerKey: string, sessionId: string | undefined, total: number): number[] {
 		if (total <= 1) return [0];
+		if (this.#accountSelection === "fixed") return Array.from({ length: total }, (_, index) => index);
 		const start = sessionId
 			? this.#getHashedIndex(sessionId, total)
 			: this.#getNextRoundRobinIndex(providerKey, total);
@@ -1990,11 +2036,18 @@ export class AuthStorage {
 		type: AuthCredential["type"],
 		index: number,
 		lastUsedAtMs?: number,
+		options?: { pinned?: boolean },
 	): void {
 		if (!sessionId) return;
 		const nowMs = lastUsedAtMs ?? Date.now();
-		const sessionMap = this.#sessionLastCredential.get(provider) ?? new Map();
-		sessionMap.set(sessionId, { type, index, lastUsedAtMs: nowMs });
+		const sessionMap = this.#sessionLastCredential.get(provider) ?? new Map<string, SessionCredentialRecord>();
+		// An explicit pin survives re-records of the same credential and is dropped as soon as a
+		// different credential serves the session (the pinned one was blocked and fell through).
+		const previous = sessionMap.get(sessionId);
+		const pinned =
+			options?.pinned ?? (previous?.type === type && previous.index === index ? previous.pinned : undefined);
+		const record: SessionCredentialRecord = { type, index, lastUsedAtMs: nowMs, ...(pinned ? { pinned } : {}) };
+		sessionMap.set(sessionId, record);
 		this.#sessionLastCredential.set(provider, sessionMap);
 
 		try {
@@ -2006,6 +2059,7 @@ export class AuthStorage {
 					index,
 					credentialId,
 					lastUsedAtMs: nowMs,
+					...(pinned ? { pinned } : {}),
 				});
 				// Expires in 30 days
 				const expiresAtSec = Math.floor(nowMs / 1000) + 30 * 24 * 60 * 60;
@@ -2017,10 +2071,7 @@ export class AuthStorage {
 	}
 
 	/** Retrieves the last credential used by a session. */
-	#getSessionCredential(
-		provider: string,
-		sessionId: string | undefined,
-	): { type: AuthCredential["type"]; index: number; lastUsedAtMs?: number } | undefined {
+	#getSessionCredential(provider: string, sessionId: string | undefined): SessionCredentialRecord | undefined {
 		if (!sessionId) return undefined;
 		let sessionMap = this.#sessionLastCredential.get(provider);
 		if (sessionMap?.has(sessionId)) {
@@ -2035,6 +2086,7 @@ export class AuthStorage {
 					index: number;
 					credentialId?: number;
 					lastUsedAtMs?: number;
+					pinned?: boolean;
 				};
 
 				if (val.credentialId !== undefined) {
@@ -2055,10 +2107,11 @@ export class AuthStorage {
 					sessionMap = new Map();
 					this.#sessionLastCredential.set(provider, sessionMap);
 				}
-				const sessionVal = {
+				const sessionVal: SessionCredentialRecord = {
 					type: val.type,
 					index: val.index,
 					lastUsedAtMs: val.lastUsedAtMs,
+					...(val.pinned === true ? { pinned: true } : {}),
 				};
 				sessionMap.set(sessionId, sessionVal);
 				return sessionVal;
@@ -2256,21 +2309,25 @@ export class AuthStorage {
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
 		const fallback = credentials[order[0]];
 		const strategy = this.#rankingStrategyResolver?.(provider);
-		if (!strategy) {
+		const rankingContext: CredentialRankingContext = {
+			modelId: options?.modelId,
+		};
+		const blockScope = strategy?.blockScope?.(rankingContext);
+		// Scoped (e.g. per-tier) blocks only exist for providers with a strategy; keep the
+		// strategy-less path on the unscoped check it always used.
+		const blockScopes = strategy
+			? credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope)
+			: undefined;
+		if (!strategy || this.#accountSelection === "fixed") {
 			for (const idx of order) {
 				const candidate = credentials[idx];
-				if (!this.#isCredentialBlocked(provider, providerKey, candidate.index)) {
+				if (!this.#isCredentialBlocked(provider, providerKey, candidate.index, blockScopes)) {
 					return candidate;
 				}
 			}
 			return fallback;
 		}
 
-		const rankingContext: CredentialRankingContext = {
-			modelId: options?.modelId,
-		};
-		const blockScope = strategy.blockScope?.(rankingContext);
-		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const candidates = await this.#rankApiKeySelections({
 			providerKey,
 			provider,
@@ -4752,6 +4809,9 @@ export class AuthStorage {
 		if (planRequirement !== "none" && left.planPriority !== right.planPriority) {
 			return left.planPriority - right.planPriority;
 		}
+		// Fixed selection ranks on availability and plan eligibility only; the
+		// stored-position tie-break in the caller decides the rest.
+		if (this.#accountSelection === "fixed") return 0;
 		if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
 		// Short-window guard: candidates whose primary (e.g. 5h) window is
 		// nearly exhausted rank behind cool ones regardless of drain urgency —
@@ -4976,9 +5036,18 @@ export class AuthStorage {
 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const planRequirement = resolveOpenAICodexPlanRequirement(provider, options?.modelId);
 		const hasPlanRequirement = planRequirement !== "none";
-		const checkUsage = strategy !== undefined && (credentials.length > 1 || hasPlanRequirement);
+		const checkUsage =
+			strategy !== undefined &&
+			(hasPlanRequirement || (credentials.length > 1 && this.#accountSelection !== "fixed"));
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
-		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
+		// Under `fixed`, automatic stickiness must not keep a session on the sibling it fell
+		// through to once an earlier stored credential is available again; only an explicit
+		// user pin may. Dropping the preference here disables every downstream hoist.
+		const sessionPreferredIndex =
+			sessionCredential?.type === "oauth" &&
+			(this.#accountSelection !== "fixed" || sessionCredential.pinned === true)
+				? sessionCredential.index
+				: undefined;
 		const sessionPreferredCredential =
 			sessionPreferredIndex !== undefined
 				? credentials.find(entry => entry.index === sessionPreferredIndex)?.credential
@@ -5971,7 +6040,16 @@ export class AuthStorage {
 		provider: string,
 		sessionId: string,
 		credentialId: number,
-		options?: { lastUsedAtMs?: number },
+		options?: {
+			lastUsedAtMs?: number;
+			/**
+			 * `user` (default): an explicit choice that also holds under `fixed` account
+			 * selection. `restore`: a persisted sticky replayed on session resume — it keeps
+			 * the warm-cache semantics under `balanced` but yields to the first available
+			 * stored credential under `fixed`.
+			 */
+			origin?: "user" | "restore";
+		},
 	): boolean {
 		if (!sessionId || this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
 			return false;
@@ -5980,7 +6058,9 @@ export class AuthStorage {
 		const index = stored.findIndex(entry => entry.id === credentialId);
 		const target = stored[index];
 		if (target?.credential.type !== "oauth") return false;
-		this.#recordSessionCredential(provider, sessionId, "oauth", index, options?.lastUsedAtMs);
+		this.#recordSessionCredential(provider, sessionId, "oauth", index, options?.lastUsedAtMs, {
+			pinned: (options?.origin ?? "user") === "user",
+		});
 		return true;
 	}
 

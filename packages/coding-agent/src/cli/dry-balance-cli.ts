@@ -531,6 +531,7 @@ async function createDefaultRuntime(): Promise<DryBalanceRuntime> {
 	try {
 		const cwd = getProjectDir();
 		const settings = await Settings.init({ cwd });
+		authStorage.setAccountSelection(settings.get("auth.accountSelection"));
 		const modelRegistry = new ModelRegistry(authStorage);
 		await loadCliExtensionProviders(modelRegistry, settings, cwd);
 		return {

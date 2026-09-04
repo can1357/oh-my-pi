@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `accountSelection` AuthStorage option (`balanced` | `fixed`), also read from `auth.accountSelection` in `config.yml` by `discoverAuthStorage`, so multi-account setups can stay on the first stored account and only move to a sibling once it is blocked ([#10766](https://github.com/can1357/oh-my-pi/pull/10766) by [@realitsyourman](https://github.com/realitsyourman)).
+
 ## [18.1.8] - 2026-09-03
 
 ### Added

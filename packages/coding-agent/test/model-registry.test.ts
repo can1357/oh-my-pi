@@ -1688,6 +1688,25 @@ describe("ModelRegistry", () => {
 			expect(registry.getDiscoverableProviders()).not.toContain("ollama");
 		});
 
+		test("applies the settings layer's auth.accountSelection to its AuthStorage", async () => {
+			// Regression: `omp --config` / `PI_CONFIG_FILES` overlays set the policy in
+			// Settings but credential routing keeps whatever discovery read from config.yml.
+			const settingsInstance = await Settings.init({
+				inMemory: true,
+				overrides: { "auth.accountSelection": "fixed" },
+			});
+
+			new ModelRegistry(authStorage, modelsJsonPath, { settings: settingsInstance });
+			expect(authStorage.accountSelection).toBe("fixed");
+
+			// The settings layer is authoritative in both directions.
+			authStorage.setAccountSelection("fixed");
+			resetSettingsForTest();
+			const defaults = await Settings.init({ inMemory: true });
+			new ModelRegistry(authStorage, modelsJsonPath, { settings: defaults });
+			expect(authStorage.accountSelection).toBe("balanced");
+		});
+
 		test("refresh skips discovery probes for disabled local providers", async () => {
 			await Settings.init({
 				inMemory: true,

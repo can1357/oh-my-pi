@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `auth.accountSelection` setting (`balanced` | `fixed`): `fixed` keeps every session on the first logged-in account of a provider and only moves to a sibling when it is rate-limited or exhausted, instead of balancing sessions across accounts by usage headroom; a session returns to the first account once it recovers, and an explicit `/session pin` still wins ([#10766](https://github.com/can1357/oh-my-pi/pull/10766) by [@realitsyourman](https://github.com/realitsyourman)).
+
 ### Fixed
 
 - Fixed two idle subagents exchanging a single IRC message ping-ponging forever: wake-turn relays are now tagged and never relayed back, so each automated relay is delivered exactly once instead of waking a reciprocal relay until manual cancellation.

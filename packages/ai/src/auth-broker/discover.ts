@@ -16,7 +16,7 @@ import {
 	MAIN_CONFIG_FILENAMES,
 } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import { AuthStorage } from "../auth-storage";
+import { type AuthAccountSelection, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { AuthBrokerClient, AuthBrokerError } from "./client";
 import { type AuthBrokerAccountPool, RemoteAuthCredentialStore } from "./remote-store";
@@ -40,6 +40,8 @@ export interface DiscoverAuthStorageOptions {
 	sourceLabel?: string;
 	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
 	accountPool?: AuthBrokerAccountPool;
+	/** Credential selection policy. Defaults to `auth.accountSelection` from config.yml, then `balanced`. */
+	accountSelection?: AuthAccountSelection;
 }
 
 /** Path to the local bearer token file. Created by `omp auth-broker token`. */
@@ -73,7 +75,10 @@ async function readTokenFile(): Promise<string | null> {
 interface ConfigSnapshot {
 	url?: string;
 	token?: string;
+	accountSelection?: AuthAccountSelection;
 }
+
+const ACCOUNT_SELECTION_CONFIG_KEY = "auth.accountSelection";
 
 /**
  * Resolve a dotted config key (e.g. `auth.broker.url`) against a parsed YAML
@@ -95,6 +100,15 @@ function readDottedString(record: Record<string, unknown>, dottedKey: string): s
 	return typeof flat === "string" ? flat : undefined;
 }
 
+/** Parse `auth.accountSelection`; unknown values fall back to the default with a warning. */
+function readAccountSelection(record: Record<string, unknown>, configPath: string): AuthAccountSelection | undefined {
+	const raw = readDottedString(record, ACCOUNT_SELECTION_CONFIG_KEY);
+	if (raw === undefined) return undefined;
+	if (raw === "balanced" || raw === "fixed") return raw;
+	logger.warn(`Invalid ${ACCOUNT_SELECTION_CONFIG_KEY}; using balanced`, { path: configPath, value: raw });
+	return undefined;
+}
+
 async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 	for (const filename of MAIN_CONFIG_FILENAMES) {
 		const configPath = path.join(agentDir, filename);
@@ -105,7 +119,8 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 			const record = parsed as Record<string, unknown>;
 			const url = readDottedString(record, "auth.broker.url");
 			const token = readDottedString(record, "auth.broker.token");
-			return { url, token };
+			const accountSelection = readAccountSelection(record, configPath);
+			return { url, token, accountSelection };
 		} catch (err) {
 			if (isEnoent(err)) continue;
 			logger.warn("auth-broker config unreadable", { path: configPath, error: String(err) });
@@ -191,8 +206,21 @@ function resolveSnapshotTtlMs(): number {
 export async function resolveAuthBrokerConfig(
 	options: ResolveAuthBrokerConfigOptions = {},
 ): Promise<AuthBrokerClientConfig | null> {
+	return (await resolveAuthBrokerConfigWithSnapshot(options)).config;
+}
+
+/**
+ * {@link resolveAuthBrokerConfig} plus a memoised reader for the parsed
+ * `config.yml`, so callers that need other keys from the same file (account
+ * selection) do not parse it a second time.
+ */
+async function resolveAuthBrokerConfigWithSnapshot(
+	options: ResolveAuthBrokerConfigOptions,
+): Promise<{ config: AuthBrokerClientConfig | null; readSnapshot: () => Promise<ConfigSnapshot> }> {
 	const agentDir = options.agentDir ?? getAgentDir();
 	const resolveConfig = options.configValueResolver ?? defaultResolveConfigValue;
+	let snapshot: Promise<ConfigSnapshot> | undefined;
+	const readSnapshot = (): Promise<ConfigSnapshot> => (snapshot ??= readConfigYaml(agentDir));
 
 	const envUrl = process.env.OMP_AUTH_BROKER_URL;
 	const envToken = process.env.OMP_AUTH_BROKER_TOKEN;
@@ -200,7 +228,7 @@ export async function resolveAuthBrokerConfig(
 	let url = envUrl && envUrl.length > 0 ? envUrl : undefined;
 	let configToken: string | undefined;
 	if (!url || !envToken) {
-		const fromConfig = await readConfigYaml(agentDir);
+		const fromConfig = await readSnapshot();
 		if (!url && fromConfig.url) {
 			const resolved = await resolveConfig(fromConfig.url);
 			if (resolved && resolved.length > 0) url = resolved;
@@ -210,7 +238,7 @@ export async function resolveAuthBrokerConfig(
 			if (resolved && resolved.length > 0) configToken = resolved;
 		}
 	}
-	if (!url) return null;
+	if (!url) return { config: null, readSnapshot };
 
 	const token =
 		(envToken && envToken.length > 0 ? envToken : undefined) ?? configToken ?? (await readTokenFile()) ?? undefined;
@@ -221,7 +249,7 @@ export async function resolveAuthBrokerConfig(
 				`Set OMP_AUTH_BROKER_TOKEN, the \`auth.broker.token\` config entry, or place one at ${getAuthBrokerTokenFilePath()}.`,
 		);
 	}
-	return { url, token };
+	return { config: { url, token }, readSnapshot };
 }
 
 /**
@@ -231,10 +259,11 @@ export async function resolveAuthBrokerConfig(
  */
 export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
 	const agentDir = options.agentDir ?? getAgentDir();
-	const brokerConfig = await resolveAuthBrokerConfig({
+	const { config: brokerConfig, readSnapshot } = await resolveAuthBrokerConfigWithSnapshot({
 		agentDir,
 		configValueResolver: options.configValueResolver,
 	});
+	const accountSelection = options.accountSelection ?? (await readSnapshot()).accountSelection;
 
 	if (brokerConfig) {
 		const accountPool = options.accountPool ?? (await loadAuthBrokerAccountPool());
@@ -296,6 +325,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		const storage = new AuthStorage(store, {
 			configValueResolver: options.configValueResolver,
 			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
+			accountSelection,
 		});
 		await storage.reload();
 		return storage;
@@ -305,6 +335,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 	const storage = await AuthStorage.create(dbPath, {
 		configValueResolver: options.configValueResolver,
 		sourceLabel: options.sourceLabel ?? `local ${dbPath}`,
+		accountSelection,
 	});
 	await storage.reload();
 	return storage;
