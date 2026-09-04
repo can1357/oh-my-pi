@@ -326,6 +326,15 @@ export class EventController {
 		} satisfies AgentSessionEventHandlers;
 	}
 
+	/** Rearm idle compaction after a live idle setting changes. */
+	refreshIdleCompactionTimer(): void {
+		if (this.ctx.viewSession.isStreaming) {
+			this.#cancelIdleCompaction();
+			return;
+		}
+		this.#scheduleIdleCompaction();
+	}
+
 	dispose(): void {
 		this.#detachToolApprovalPreviewWaiter?.();
 		this.#detachToolApprovalPreviewWaiter = undefined;

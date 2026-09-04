@@ -270,6 +270,10 @@
 - Fixed top-level errors overwriting the active composer before terminal restoration.
 - Fixed Enter being ignored during the first turn when omp starts with an initial prompt.
 
+### Fixed
+
+- Idle compaction now starts or reschedules when its enabled state, threshold, or delay changes while a session is already idle ([#10242](https://github.com/can1357/oh-my-pi/issues/10242)).
+
 ## [18.0.11] - 2026-08-29
 
 ### Added
