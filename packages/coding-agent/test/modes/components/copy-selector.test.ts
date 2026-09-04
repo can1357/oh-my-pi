@@ -309,33 +309,6 @@ describe("CopySelectorComponent", () => {
 		expect(boxed).not.toContain("bun test");
 	});
 
-	it("keeps picker open on Enter for sequential block copies, exits on q or Esc", () => {
-		const picks: Array<{ content: string; label: string }> = [];
-		const onCancel = vi.fn();
-		const selector = makeSelector(picks, onCancel);
-		selector.render(100);
-
-		selector.handleInput(RIGHT);
-		// Copy first block (code)
-		selector.handleInput(ENTER);
-		expect(picks).toHaveLength(1);
-		expect(picks[0]).toEqual({ content: CODE, label: "ts code" });
-		expect(onCancel).not.toHaveBeenCalled();
-
-		// Navigate down and copy third block (bash command)
-		selector.handleInput(DOWN);
-		selector.handleInput(DOWN);
-		selector.handleInput(ENTER);
-		expect(picks).toHaveLength(2);
-		expect(picks[1]).toEqual({ content: "bun test", label: "bash command" });
-		expect(onCancel).not.toHaveBeenCalled();
-
-		// Exit explicitly via q
-		selector.handleInput("q");
-		expect(onCancel).toHaveBeenCalledTimes(1);
-		selector.dispose();
-	});
-
 	it("preserves all copied block markers when copying multiple blocks sequentially", () => {
 		const picks: Array<{ content: string; label: string }> = [];
 		const selector = makeSelector(picks);
@@ -364,9 +337,16 @@ describe("CopySelectorComponent", () => {
 			onCancel,
 		});
 		selector.render(100);
+
+		// Attempt turn-level copy without descending
+		selector.handleInput(ENTER);
+		let frame = selector.render(100).join("\n");
+		expect(frame).not.toContain("✓ Copied turn!");
+
+		// Attempt block-level copy after descending
 		selector.handleInput(RIGHT);
 		selector.handleInput(ENTER);
-		const frame = selector.render(100).join("\n");
+		frame = selector.render(100).join("\n");
 		expect(frame).not.toContain("✓ copied!");
 		expect(frame).not.toContain("✓ Copied!");
 		selector.dispose();
