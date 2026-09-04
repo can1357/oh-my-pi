@@ -1802,15 +1802,21 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const totalSelectedBytes = collectedBytes;
 					const wasTruncated = collectedLines.length < totalSelectedLines || stoppedByByteLimit;
 					const firstLineExceedsLimit = firstLineByteLength !== undefined && firstLineByteLength > maxBytesForRead;
+					// A first line larger than the byte budget collects no complete
+					// line, yet the window still renders a byte-capped preview.
+					// Account for that preview so the notice/meta describe the
+					// delivered partial line rather than reporting zero over the
+					// ~50 KB shown on screen.
+					const previewBytes = firstLineExceedsLimit ? (firstLinePreview?.bytes ?? 0) : 0;
 
 					const truncation: TruncationResult = {
 						content: selectedContent,
 						truncated: wasTruncated,
 						truncatedBy: stoppedByByteLimit ? "bytes" : wasTruncated ? "lines" : undefined,
 						totalLines: totalSelectedLines,
-						totalBytes: totalSelectedBytes,
-						outputLines: collectedLines.length,
-						outputBytes: collectedBytes,
+						totalBytes: firstLineExceedsLimit ? (firstLineByteLength ?? previewBytes) : totalSelectedBytes,
+						outputLines: firstLineExceedsLimit ? (previewBytes > 0 ? 1 : 0) : collectedLines.length,
+						outputBytes: firstLineExceedsLimit ? previewBytes : collectedBytes,
 						lastLinePartial: false,
 						firstLineExceedsLimit,
 					};
@@ -2215,14 +2221,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const totalSelectedLines = totalFileLines - startLine;
 		const wasTruncated = collectedLines.length < totalSelectedLines || stoppedByByteLimit;
 		const firstLineExceedsLimit = firstLineByteLength !== undefined && firstLineByteLength > maxBytesForRead;
+		// Mirror the plain-file path: a preview-only oversized first line must
+		// count as one delivered partial line, not zero.
+		const previewBytes = firstLineExceedsLimit ? (firstLinePreview?.bytes ?? 0) : 0;
 		const truncation: TruncationResult = {
 			content: selectedContent,
 			truncated: wasTruncated,
 			truncatedBy: stoppedByByteLimit ? "bytes" : wasTruncated ? "lines" : undefined,
 			totalLines: totalSelectedLines,
-			totalBytes: collectedBytes,
-			outputLines: collectedLines.length,
-			outputBytes: collectedBytes,
+			totalBytes: firstLineExceedsLimit ? (firstLineByteLength ?? previewBytes) : collectedBytes,
+			outputLines: firstLineExceedsLimit ? (previewBytes > 0 ? 1 : 0) : collectedLines.length,
+			outputBytes: firstLineExceedsLimit ? previewBytes : collectedBytes,
 			lastLinePartial: false,
 			firstLineExceedsLimit,
 		};
@@ -2288,7 +2297,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			.text(outputText)
 			.sourcePath(artifact.path)
 			.sourceInternal(url.href);
-		if (truncationInfo) resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
+		if (truncationInfo) {
+			resultBuilder.truncation(truncationInfo.result, { ...truncationInfo.options, maxBytes: maxBytesForRead });
+		}
 		return resultBuilder.done();
 	}
 

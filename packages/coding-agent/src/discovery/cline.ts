@@ -10,7 +10,7 @@ import { readDirEntries, readFile } from "../capability/fs";
 import type { Rule } from "../capability/rule";
 import { ruleCapability } from "../capability/rule";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { buildRuleFromMarkdown, createSourceMeta, loadFilesFromDir } from "./helpers";
+import { createSourceMeta, discoverRuleFromMarkdown, loadFilesFromDir } from "./helpers";
 
 const PROVIDER_ID = "cline";
 const DISPLAY_NAME = "Cline";
@@ -53,7 +53,7 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 		const result = await loadFilesFromDir(ctx, found.path, PROVIDER_ID, "project", {
 			extensions: ["md"],
 			transform: (name, content, path, source) =>
-				buildRuleFromMarkdown(name, content, path, source, { stripNamePattern: /\.md$/ }),
+				discoverRuleFromMarkdown(name, content, path, source, { stripNamePattern: /\.md$/ }),
 		});
 
 		items.push(...result.items);
@@ -67,7 +67,8 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 		}
 
 		const source = createSourceMeta(PROVIDER_ID, found.path, "project");
-		items.push(buildRuleFromMarkdown("clinerules.md", content, found.path, source, { ruleName: "clinerules" }));
+		const rule = discoverRuleFromMarkdown("clinerules.md", content, found.path, source, { ruleName: "clinerules" });
+		if (rule) items.push(rule);
 	}
 
 	return { items, warnings };

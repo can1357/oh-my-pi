@@ -951,6 +951,25 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.truncation?.outputLines).toBe(defaultLimit);
 		});
 
+		it("reports the artifact byte budget that truncated a ranged read", async () => {
+			const artifactsDir = path.join(testDir, "artifact-limit-session");
+			fs.mkdirSync(artifactsDir, { recursive: true });
+			fs.writeFileSync(path.join(artifactsDir, "7.mcp.log"), `skip\n{\n${"x".repeat(60 * 1024)}\ntail`);
+			const artifactSession = createTestToolSession(testDir, Settings.isolated(), {
+				localProtocolOptions: {
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "artifact-limit-session",
+				},
+			});
+			const artifactReadTool = wrapToolWithMetaNotice(new ReadTool(artifactSession));
+
+			const result = await artifactReadTool.execute("test-call-artifact-byte-limit", {
+				path: "artifact://7:3-4",
+			});
+
+			expect(getTextOutput(result)).toContain("[Showing lines 2-2 of 4 (50.0KB limit). Use :3 to continue]");
+		});
+
 		it("should spill oversized read output to an artifact", async () => {
 			const testFile = path.join(testDir, "oversized-read.txt");
 			const line = "0123456789".repeat(20);

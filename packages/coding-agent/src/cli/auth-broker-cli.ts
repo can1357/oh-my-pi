@@ -242,7 +242,7 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 	// Drive the per-provider OAuth dance in-process. Persists into the same
 	// SQLite store the broker uses.
 	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	const ask = (msg: string) => promptLine(rl, `${msg} `);
+	const ask = (msg: string, signal?: AbortSignal) => promptLine(rl, `${msg} `, signal);
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
 	await storage.reload();
@@ -250,10 +250,9 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
 		// Agent's vscode:// URI) get the manual paste fallback. An explicit
 		// `onManualCodeInput` is honored for ANY provider (the storage escape hatch),
-		// so for loopback providers we must not pass it: it would make
-		// `OAuthCallbackFlow` race a readline prompt against the HTTP callback and, if
-		// the callback wins, leave that prompt outstanding (dirty/blocked terminal).
-		// `AuthStorage.login` independently refuses to synthesize the default prompt
+		// so for loopback providers we do not pass it: an eager readline prompt adds
+		// noise to a flow that normally completes through HTTP. `AuthStorage.login`
+		// independently refuses to synthesize the default prompt
 		// for non-paste-code providers, so this is defense-in-depth on the same gate.
 		const usesManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider);
 		await storage.login(provider, {
@@ -281,8 +280,8 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 			},
 			...(usesManualInput
 				? {
-						onManualCodeInput() {
-							return ask("Paste the authorization code (or full redirect URL):");
+						onManualCodeInput(signal) {
+							return ask("Paste the authorization code (or full redirect URL):", signal);
 						},
 					}
 				: undefined),
@@ -298,7 +297,7 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
  * Interactive `readline` prompt that cleanly tears down on Ctrl-C / Escape so
  * cancelling a half-finished login flow doesn't leave the terminal in raw mode.
  */
-function promptLine(rl: readline.Interface, question: string): Promise<string> {
+function promptLine(rl: readline.Interface, question: string, signal?: AbortSignal): Promise<string> {
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	const input = process.stdin as NodeJS.ReadStream;
 	const supportsRawMode = input.isTTY && typeof input.setRawMode === "function";
@@ -307,6 +306,7 @@ function promptLine(rl: readline.Interface, question: string): Promise<string> {
 
 	const cleanup = () => {
 		rl.off("SIGINT", onSigint);
+		signal?.removeEventListener("abort", onAbort);
 		if (supportsRawMode) {
 			input.off("keypress", onKeypress);
 			input.setRawMode?.(wasRaw);
@@ -328,6 +328,10 @@ function promptLine(rl: readline.Interface, question: string): Promise<string> {
 		cancel();
 	};
 
+	const onAbort = () => {
+		finish(() => reject(signal?.reason instanceof Error ? signal.reason : new Error("Login input cancelled")));
+	};
+
 	const onKeypress = (_str: string, key: readline.Key) => {
 		if (key.name === "escape" || (key.ctrl && key.name === "c")) {
 			cancel();
@@ -342,9 +346,18 @@ function promptLine(rl: readline.Interface, question: string): Promise<string> {
 	}
 
 	rl.once("SIGINT", onSigint);
-	rl.question(question, answer => {
-		finish(() => resolve(answer));
-	});
+	if (signal?.aborted) {
+		onAbort();
+	} else if (signal) {
+		signal.addEventListener("abort", onAbort, { once: true });
+		rl.question(question, { signal }, answer => {
+			finish(() => resolve(answer));
+		});
+	} else {
+		rl.question(question, answer => {
+			finish(() => resolve(answer));
+		});
+	}
 	return promise;
 }
 

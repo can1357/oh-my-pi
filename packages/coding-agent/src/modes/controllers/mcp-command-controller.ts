@@ -953,7 +953,7 @@ export class MCPCommandController {
 					onProgress: (message: string) => {
 						this.ctx.present([new Spacer(1), new Text(theme.fg("muted", message), 1, 0)]);
 					},
-					onManualCodeInput: () => {
+					onManualCodeInput: signal => {
 						if (manualInputClaim) return manualInputClaim.promise;
 						const pendingInput = manualInput.tryClaimInput(MCP_MANUAL_INPUT_PROVIDER_ID);
 						if (!pendingInput) {
@@ -962,8 +962,18 @@ export class MCPCommandController {
 								`OAuth login already in progress for ${pendingProvider}. Complete or cancel it before starting MCP OAuth.`,
 							);
 						}
-						manualInputClaim = pendingInput;
-						return pendingInput.promise;
+						const onAbort = () => pendingInput.clear("Manual MCP OAuth input cancelled");
+						if (signal?.aborted) onAbort();
+						else signal?.addEventListener("abort", onAbort, { once: true });
+						const claim = {
+							clear: pendingInput.clear,
+							promise: pendingInput.promise.finally(() => {
+								signal?.removeEventListener("abort", onAbort);
+								if (manualInputClaim === claim) manualInputClaim = undefined;
+							}),
+						};
+						manualInputClaim = claim;
+						return claim.promise;
 					},
 					signal: oauthTimeout.signal,
 				},

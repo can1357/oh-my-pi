@@ -27,6 +27,7 @@ export const FileLock = nativeBindings.FileLock;
 export const HighlightStream = nativeBindings.HighlightStream;
 export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
 export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
+export const NativeOAuthCallback = nativeBindings.NativeOAuthCallback;
 export const PowerAssertion = nativeBindings.PowerAssertion;
 export const Process = nativeBindings.Process;
 export const PtySession = nativeBindings.PtySession;

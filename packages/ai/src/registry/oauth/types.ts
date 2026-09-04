@@ -73,7 +73,8 @@ export interface OAuthProviderInfo {
 export interface OAuthController {
 	onAuth?(info: OAuthAuthInfo): void;
 	onProgress?(message: string): void;
-	onManualCodeInput?(): Promise<string>;
+	/** Request pasted callback input; stop any visible prompt when `signal` aborts. */
+	onManualCodeInput?(signal?: AbortSignal): Promise<string>;
 	onPrompt?(prompt: OAuthPrompt): Promise<string>;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;

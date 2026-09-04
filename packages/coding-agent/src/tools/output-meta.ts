@@ -44,6 +44,12 @@ export interface TruncationMeta {
 	artifactId?: string;
 	/** Next offset for pagination (head truncation only) */
 	nextOffset?: number;
+	/**
+	 * The single shown line is a byte-capped preview of one oversized line, not
+	 * a complete line. `outputBytes`/`totalBytes` are the preview vs full line
+	 * size; renders a distinct "partial" notice instead of a line range.
+	 */
+	partialLine?: boolean;
 }
 
 /**
@@ -91,6 +97,8 @@ export interface TruncationOptions {
 	startLine?: number;
 	totalFileLines?: number;
 	artifactId?: string;
+	/** Byte budget that stopped the read, when truncation is byte-limited. */
+	maxBytes?: number;
 }
 
 export interface TruncationSummaryOptions {
@@ -125,7 +133,7 @@ export class OutputMetaBuilder {
 	truncation(result: TruncationResult, options: TruncationOptions): this {
 		if (!result.truncated) return this;
 
-		const { direction, startLine = 1, totalFileLines, artifactId } = options;
+		const { direction, startLine = 1, totalFileLines, artifactId, maxBytes } = options;
 		const outputLines = result.outputLines ?? result.totalLines;
 		const outputBytes = result.outputBytes ?? result.totalBytes;
 		const isMiddle = direction === "middle" || result.truncatedBy === "middle";
@@ -136,6 +144,24 @@ export class OutputMetaBuilder {
 				: "bytes";
 
 		const effectiveTotalLines = totalFileLines ?? result.totalLines;
+
+		if (result.firstLineExceedsLimit) {
+			// The window collected no complete line; the body is a byte-capped
+			// preview of one oversized line. Describe that partial line instead of
+			// deriving an empty range that renders "Showing 0 of N lines".
+			this.#meta.truncation = {
+				direction,
+				truncatedBy: "bytes",
+				totalLines: effectiveTotalLines,
+				totalBytes: result.totalBytes,
+				outputLines,
+				outputBytes,
+				shownRange: { start: startLine, end: startLine },
+				partialLine: true,
+				artifactId,
+			};
+			return this;
+		}
 
 		if (isMiddle) {
 			const elidedLines = result.elidedLines ?? Math.max(0, effectiveTotalLines - outputLines);
@@ -187,6 +213,7 @@ export class OutputMetaBuilder {
 			totalBytes: result.totalBytes,
 			outputLines,
 			outputBytes,
+			maxBytes,
 			shownRange: { start: shownStart, end: shownEnd },
 			artifactId,
 			nextOffset: direction === "head" ? shownEnd + 1 : undefined,
@@ -469,6 +496,15 @@ export function formatTruncationMetaNotice(truncation: TruncationMeta): string {
 		if (truncation.nextOffset != null) {
 			notice += `. Use :${truncation.nextOffset} to continue`;
 		}
+		if (truncation.artifactId != null) {
+			notice += `. ${formatFullOutputReference(truncation.artifactId)}`;
+		}
+		return notice;
+	}
+
+	if (truncation.partialLine) {
+		const line = truncation.shownRange?.start ?? 1;
+		notice = `Showing line ${line} (partial, ${formatBytes(truncation.outputBytes)} of ${formatBytes(truncation.totalBytes)}) of ${truncation.totalLines}`;
 		if (truncation.artifactId != null) {
 			notice += `. ${formatFullOutputReference(truncation.artifactId)}`;
 		}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Markdown hyperlink target resolution while preserving the displayed URL text.
+
 ## [18.1.6] - 2026-09-03
 
 ### Fixed
