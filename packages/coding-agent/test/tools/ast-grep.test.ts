@@ -177,4 +177,47 @@ describe("ast_grep parse errors", () => {
 			await removeWithRetries(tempDir);
 		}
 	});
+
+	it("infers CUDA sources and headers as C++", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-cuda-"));
+		try {
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
+			const tool = tools.find(entry => entry.name === "ast_grep");
+			expect(tool).toBeDefined();
+
+			for (const extension of [".cu", ".cuh"]) {
+				const filePath = path.join(tempDir, `kernel${extension}`);
+				await Bun.write(filePath, "int cuda_value() { return 42; }\n");
+				const result = await tool!.execute(`ast-grep-cuda${extension}`, {
+					pat: "return $VALUE;",
+					path: filePath,
+				});
+				const details = result.details as { matchCount?: number } | undefined;
+				expect(details?.matchCount).toBe(1);
+			}
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("honors an explicit C++ language for ambiguous headers", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-cpp-header-"));
+		try {
+			const filePath = path.join(tempDir, "buffer.h");
+			await Bun.write(filePath, "class Buffer { public: int size() const { return 1; } };\n");
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
+			const tool = tools.find(entry => entry.name === "ast_grep");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-grep-explicit-cpp", {
+				pat: "class Buffer",
+				path: filePath,
+				lang: "cpp",
+			});
+			const details = result.details as { matchCount?: number } | undefined;
+			expect(details?.matchCount).toBe(1);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
 });

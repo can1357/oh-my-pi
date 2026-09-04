@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the built-in clangd registration omitting CUDA source and header files (`.cu` and `.cuh`).
+- Fixed `ast_grep` skipping CUDA headers and ignoring an explicit `lang` override for ambiguous file extensions.
+
 ## [18.1.9] - 2026-09-04
 
 ### Breaking Changes
