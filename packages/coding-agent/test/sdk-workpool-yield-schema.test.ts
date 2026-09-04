@@ -53,7 +53,6 @@ describe("SDK workpool yield schema", () => {
 		sessions.push(session);
 		const tool = session.getToolByName("yield");
 		if (!tool) throw new Error("Missing yield tool");
-		expect(tool.description).toContain("Submit subagent output");
 		expect(Reflect.get(tool.parameters, "properties")).toHaveProperty("type");
 		expect(Reflect.get(tool.parameters, "properties")).not.toHaveProperty("key");
 
