@@ -98,17 +98,25 @@ function captureRecoveryLoaderNavigation(loaderIds, loaderGenerations, tabId, me
   loaderIds.set(tabId, loaderId);
   return true;
 }
-async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations, tabId, enablePage, readMainFrameLoaderId, detach) {
+async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations, tabId, enablePage, readMainFrameLoaderId, detach, onObservedDetachFailure) {
   const loaderGeneration = loaderGenerations.get(tabId) ?? 0;
-  await enablePage().catch(() => {
-    return;
-  });
+  let observingPage = false;
+  try {
+    await enablePage();
+    observingPage = true;
+  } catch {}
   const loaderId = await readMainFrameLoaderId().catch(() => {
     return;
   });
   if (loaderGeneration === loaderGenerations.get(tabId) && typeof loaderId === "string")
     loaderIds.set(tabId, loaderId);
-  await detach();
+  try {
+    await detach();
+  } catch (error) {
+    if (observingPage)
+      await onObservedDetachFailure();
+    throw error;
+  }
 }
 function isAttachmentStateCurrent(epochs, tabId, epoch) {
   return (epochs.get(tabId) ?? 0) === epoch;
@@ -281,9 +289,11 @@ var relayInitiatedDetachTabs = new Set;
 var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 var LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
 var RECOVERY_LOADER_IDS_KEY = "ompRecoveryLoaderIds";
+var FRESH_ROOT_REQUIRED_TAB_IDS_KEY = "ompFreshRootRequiredTabIds";
 var recoverableTabIds = new Set;
 var liveOwnedTabIds = new Set;
 var recoveryLoaderIds = new Map;
+var freshRootRequiredTabIds = new Set;
 var recoveryLoaderGenerations = new Map;
 var recoverableUpdateGeneration = 0;
 var recoverableStartupMutations = new Set;
@@ -296,11 +306,13 @@ var loadRecoverableState = createRetryableLoader(() => {
     [RECOVERABLE_TAB_IDS_KEY]: [],
     [LIVE_OWNED_TAB_IDS_KEY]: [],
     [RECOVERY_LOADER_IDS_KEY]: {},
+    [FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [],
     [ORPHAN_SWEEP_DEADLINE_KEY]: null
   }).then((stored) => {
     const ids = stored[RECOVERABLE_TAB_IDS_KEY];
     restoreRecoverableState(recoverableTabIds, ids, recoverableStartupMutations);
     restoreRecoverableState(liveOwnedTabIds, stored[LIVE_OWNED_TAB_IDS_KEY], recoverableStartupMutations);
+    restoreRecoverableState(freshRootRequiredTabIds, stored[FRESH_ROOT_REQUIRED_TAB_IDS_KEY], recoverableStartupMutations);
     recoverableStartupMutations.clear();
     const storedLoaderIds = stored[RECOVERY_LOADER_IDS_KEY];
     if (storedLoaderIds && typeof storedLoaderIds === "object") {
@@ -356,7 +368,8 @@ function updateRecoverable(tabIds, update) {
   };
   const immediateWrite = loadCurrent().then(() => chrome.storage.session.set({
     [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
-    [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds]
+    [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+    [FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds]
   })).catch(() => {});
   recoverableUpdates = serializeRecoverableStateUpdate(recoverableUpdates, immediateWrite, () => generation === recoverableUpdateGeneration, async () => {
     await loadCurrent();
@@ -368,7 +381,8 @@ function persistRecoveryState() {
   return chrome.storage.session.set({
     [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
     [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
-    [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds)
+    [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
+    [FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds]
   });
 }
 function persistRecoveryLoaderIds() {
@@ -389,6 +403,12 @@ function forgetRecoverable(tabId) {
     recoverableTabIds.delete(tabId);
     liveOwnedTabIds.delete(tabId);
     recoveryLoaderIds.delete(tabId);
+    freshRootRequiredTabIds.delete(tabId);
+  });
+}
+function requireFreshRoot(tabId) {
+  return updateRecoverable(() => [tabId], () => {
+    freshRootRequiredTabIds.add(tabId);
   });
 }
 function forgetLiveOwnership(tabId) {
@@ -492,7 +512,7 @@ var attachmentGuard = new AttachmentGuard({
         const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree");
         const loaderId = frameTree?.frameTree?.frame?.loaderId;
         return typeof loaderId === "string" ? loaderId : undefined;
-      }, () => chrome.debugger.detach({ tabId })).catch(async () => {
+      }, () => chrome.debugger.detach({ tabId }), () => requireFreshRoot(tabId)).catch(async () => {
         guardDetachments.delete(tabId);
         const targets = await chrome.debugger.getTargets().catch(() => null);
         if ((attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch && shouldRetrackAfterDetachFailure(targets, tabId)) {
@@ -695,7 +715,8 @@ async function buildHello() {
     recoveryLoaderIds: Object.fromEntries([...recoveryLoaderIds].map(([tabId, loaderId]) => [
       String(tabId),
       loaderId
-    ]))
+    ])),
+    freshRootRequiredTabIds: [...freshRootRequiredTabIds]
   };
 }
 async function attachTab(tabId, socket) {
@@ -713,6 +734,7 @@ async function attachTab(tabId, socket) {
 }
 async function attachTabOperation(tabId, socket, operation) {
   await chrome.debugger.attach({ tabId }, "1.3");
+  freshRootRequiredTabIds.delete(tabId);
   noteAttachmentStateChange(attachmentStateEpochs, tabId);
   const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
   if (ws !== socket) {

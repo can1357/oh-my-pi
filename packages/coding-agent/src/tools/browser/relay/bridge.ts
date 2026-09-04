@@ -667,6 +667,7 @@ export class RelayBridge {
 		// distinguish a real user detach from a guard detach.
 		const hasRecoveryMetadata = msg.recoverableTabIds !== undefined;
 		const recoverableNow = new Set(msg.recoverableTabIds ?? []);
+		const freshRootRequiredNow = new Set(msg.freshRootRequiredTabIds ?? []);
 		for (const snap of msg.tabs) {
 			seen.add(snap.tabId);
 			this.#onTabUpsert(snap, { silent: true });
@@ -690,6 +691,10 @@ export class RelayBridge {
 			if (!sameSocketReplay) tab.restoring = null;
 			const holders = this.#sessionHolders(tab.tabId);
 			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0);
+			if (freshRootRequiredNow.has(tab.tabId) && holders.length > 0) {
+				tab.forceFreshRootBeforeReplay = true;
+				tab.restorePending = true;
+			}
 			if (tab.attached) {
 				// An interrupted preload add/remove can leave Chrome's surviving root
 				// carrying an orphaned (or already-removed) registration we cannot

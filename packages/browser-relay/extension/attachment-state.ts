@@ -33,20 +33,30 @@ export async function detachWithRecoveryLoaderObservation(
 	enablePage: () => Promise<unknown>,
 	readMainFrameLoaderId: () => Promise<string | undefined>,
 	detach: () => Promise<void>,
+	onObservedDetachFailure: () => Promise<void>,
 ): Promise<void> {
 	const loaderGeneration = loaderGenerations.get(tabId) ?? 0;
 	// Page events may have been disabled after recovery. Observe them for the
 	// entire snapshot-to-detach window so a committed navigation can supersede
 	// the snapshot before debugger ownership ends. Observation is best-effort:
 	// failure to enable Page must not strand the orphaned attachment.
-	await enablePage().catch(() => undefined);
+	let observingPage = false;
+	try {
+		await enablePage();
+		observingPage = true;
+	} catch {}
 	const loaderId = await readMainFrameLoaderId().catch(() => undefined);
 	if (
 		loaderGeneration === loaderGenerations.get(tabId) &&
 		typeof loaderId === "string"
 	)
 		loaderIds.set(tabId, loaderId);
-	await detach();
+	try {
+		await detach();
+	} catch (error) {
+		if (observingPage) await onObservedDetachFailure();
+		throw error;
+	}
 }
 
 export function isAttachmentStateCurrent(

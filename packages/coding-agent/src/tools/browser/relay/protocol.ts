@@ -57,6 +57,8 @@ export type ExtToRelayMessage =
 			recoverableTabIds?: number[];
 			/** Main-frame loader observed when recovery began, keyed by tab id. */
 			recoveryLoaderIds?: Record<string, string>;
+			/** Attached roots dirtied by guard-only CDP state and requiring detach + replay before reuse. */
+			freshRootRequiredTabIds?: number[];
 	  }
 	| {
 			t: "cdpEvent";

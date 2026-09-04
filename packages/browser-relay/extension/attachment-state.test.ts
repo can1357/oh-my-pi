@@ -64,6 +64,9 @@ describe("attachment-state", () => {
 				calls.push("detach");
 				await detach.promise;
 			},
+			async () => {
+				calls.push("fresh-root");
+			},
 		);
 
 		while (!calls.includes("detach")) await Promise.resolve();
@@ -77,6 +80,52 @@ describe("attachment-state", () => {
 		await pending;
 
 		expect(loaderIds.get(1)).toBe("loader-during-detach");
+		expect(calls).not.toContain("fresh-root");
+	});
+
+	it("requires a fresh root when observed orphan detach fails", async () => {
+		const calls: string[] = [];
+		const pending = detachWithRecoveryLoaderObservation(
+			new Map(),
+			new Map(),
+			1,
+			async () => {
+				calls.push("Page.enable");
+			},
+			async () => undefined,
+			async () => {
+				calls.push("detach");
+				throw new Error("detach failed");
+			},
+			async () => {
+				calls.push("fresh-root");
+			},
+		);
+
+		await expect(pending).rejects.toThrow("detach failed");
+		expect(calls).toEqual(["Page.enable", "detach", "fresh-root"]);
+	});
+
+	it("does not require a fresh root when Page observation never started", async () => {
+		let freshRootRequired = false;
+		const pending = detachWithRecoveryLoaderObservation(
+			new Map(),
+			new Map(),
+			1,
+			async () => {
+				throw new Error("Page.enable failed");
+			},
+			async () => undefined,
+			async () => {
+				throw new Error("detach failed");
+			},
+			async () => {
+				freshRootRequired = true;
+			},
+		);
+
+		await expect(pending).rejects.toThrow("detach failed");
+		expect(freshRootRequired).toBe(false);
 	});
 
 	it("keeps unrelated attached tabs fresh when one tab changes after a shared snapshot", () => {

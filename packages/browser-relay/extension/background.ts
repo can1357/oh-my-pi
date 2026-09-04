@@ -82,9 +82,11 @@ const relayInitiatedDetachTabs = new Set<number>();
 const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 const LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
 const RECOVERY_LOADER_IDS_KEY = "ompRecoveryLoaderIds";
+const FRESH_ROOT_REQUIRED_TAB_IDS_KEY = "ompFreshRootRequiredTabIds";
 const recoverableTabIds = new Set<number>();
 const liveOwnedTabIds = new Set<number>();
 const recoveryLoaderIds = new Map<number, string>();
+const freshRootRequiredTabIds = new Set<number>();
 const recoveryLoaderGenerations = new Map<number, number>();
 let recoverableUpdateGeneration = 0;
 const recoverableStartupMutations = new Set<number>();
@@ -102,6 +104,7 @@ const loadRecoverableState = createRetryableLoader(() => {
 			[RECOVERABLE_TAB_IDS_KEY]: [],
 			[LIVE_OWNED_TAB_IDS_KEY]: [],
 			[RECOVERY_LOADER_IDS_KEY]: {},
+			[FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [],
 			[ORPHAN_SWEEP_DEADLINE_KEY]: null,
 		})
 		.then((stored) => {
@@ -116,6 +119,11 @@ const loadRecoverableState = createRetryableLoader(() => {
 			restoreRecoverableState(
 				liveOwnedTabIds,
 				stored[LIVE_OWNED_TAB_IDS_KEY],
+				recoverableStartupMutations,
+			);
+			restoreRecoverableState(
+				freshRootRequiredTabIds,
+				stored[FRESH_ROOT_REQUIRED_TAB_IDS_KEY],
 				recoverableStartupMutations,
 			);
 			recoverableStartupMutations.clear();
@@ -209,6 +217,7 @@ function updateRecoverable(
 			chrome.storage.session.set({
 				[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
 				[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+				[FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds],
 			}),
 		)
 		.catch(() => {});
@@ -229,6 +238,7 @@ function persistRecoveryState(): Promise<void> {
 		[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
 		[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
 		[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
+		[FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds],
 	});
 }
 
@@ -254,6 +264,16 @@ function forgetRecoverable(tabId: number): Promise<void> {
 			recoverableTabIds.delete(tabId);
 			liveOwnedTabIds.delete(tabId);
 			recoveryLoaderIds.delete(tabId);
+			freshRootRequiredTabIds.delete(tabId);
+		},
+	);
+}
+
+function requireFreshRoot(tabId: number): Promise<void> {
+	return updateRecoverable(
+		() => [tabId],
+		() => {
+			freshRootRequiredTabIds.add(tabId);
 		},
 	);
 }
@@ -442,6 +462,7 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 						return typeof loaderId === "string" ? loaderId : undefined;
 					},
 					() => chrome.debugger.detach({ tabId }),
+					() => requireFreshRoot(tabId),
 				).catch(async () => {
 					guardDetachments.delete(tabId);
 					// The detach rejected. If Chrome still reports the tab attached, the
@@ -809,6 +830,7 @@ async function buildHello(): Promise<
 				loaderId,
 			]),
 		),
+		freshRootRequiredTabIds: [...freshRootRequiredTabIds],
 	};
 }
 
@@ -832,6 +854,7 @@ async function attachTabOperation(
 	operation: PendingAttachToken,
 ): Promise<void> {
 	await chrome.debugger.attach({ tabId }, "1.3");
+	freshRootRequiredTabIds.delete(tabId);
 	noteAttachmentStateChange(attachmentStateEpochs, tabId);
 	const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
 	// The relay that requested this attachment disappeared while Chrome was

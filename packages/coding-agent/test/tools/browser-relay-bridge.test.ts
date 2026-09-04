@@ -80,6 +80,7 @@ function connect(
 		attachedTabIds?: number[];
 		recoverableTabIds?: number[];
 		recoveryLoaderIds?: Record<string, string>;
+		freshRootRequiredTabIds?: number[];
 		hardwareConcurrency?: number;
 	} = {},
 ): void {
@@ -95,6 +96,7 @@ function connect(
 			attachedTabIds: options.attachedTabIds ?? [],
 			recoverableTabIds: options.recoverableTabIds ?? [],
 			recoveryLoaderIds: options.recoveryLoaderIds,
+			freshRootRequiredTabIds: options.freshRootRequiredTabIds,
 		}),
 	);
 }
@@ -3948,6 +3950,31 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		// The enable was never journaled, so nothing replays it onto the fresh root.
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Fetch.enable")).toHaveLength(0);
+	});
+
+	it("forces a fresh root when the extension reports guard-only Page state", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+			freshRootRequiredTabIds: [1],
+		});
+
+		await waitFor(() => ext2.rpcs("detach").length === 1, "fresh-root detach after guard failure");
+		ack(bridge, ext2, "detach");
+		await waitFor(() => ext2.rpcs("attach").length === 1, "fresh-root attach after guard failure");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(cdp.messages.some(message => message.method === "Target.detachedFromTarget")).toBe(false);
 	});
 
 	it("forgets and forces a fresh root after an interrupted Runtime.removeBinding", async () => {
