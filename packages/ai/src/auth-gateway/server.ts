@@ -78,6 +78,20 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
 };
 
+function supportsOpenAIImageFileReferences(api: Api): boolean {
+	return api === "openai-responses" || api === "openai-codex-responses" || api === "azure-openai-responses";
+}
+
+function hasOpenAIImageFileReference(context: Context): boolean {
+	for (const message of context.messages) {
+		if (message.role !== "toolResult") continue;
+		for (const block of message.content) {
+			if (block.type === "image" && block.providerFile?.provider === "openai") return true;
+		}
+	}
+	return false;
+}
+
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
 // particular the Anthropic Claude-Code OAuth system-prompt prefix injection.
 // Every request now takes the translate path so credential-specific request
@@ -424,6 +438,13 @@ async function handleFormatEndpoint(
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
 	}
+	if (!supportsOpenAIImageFileReferences(model.api) && hasOpenAIImageFileReference(parsed.context)) {
+		return route.module.formatError(
+			400,
+			"invalid_request_error",
+			`input_image.file_id cannot be forwarded to ${model.api}; target an OpenAI Responses model or use image_url`,
+		);
+	}
 	// Merge gateway-captured passthrough headers under the parser's own
 	// captures. Parsers that set `options.headers` themselves win (they may
 	// have stripped or normalized values); the gateway's allow-list fills in
@@ -434,13 +455,9 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-	const supportsOpenAIImageFileReferences =
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses";
 	if (
 		route.label === "openai-responses" &&
-		!supportsOpenAIImageFileReferences &&
+		!supportsOpenAIImageFileReferences(model.api) &&
 		parsed.context.messages.some(
 			message =>
 				message.role === "toolResult" &&
