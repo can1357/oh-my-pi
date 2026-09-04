@@ -84,7 +84,7 @@ export function createAnalyzeFileTool(options: {
 					});
 					const taskParams: TaskParams = {
 						name: `AnalyzeFile${index + 1}`,
-						agent: "scout",
+						agent: "sonic",
 						task: assignment,
 					};
 					return taskTool.execute(`${toolCallId}-${index + 1}`, taskParams, signal);

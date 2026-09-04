@@ -43,7 +43,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 		types_description: typesDescription,
 	});
 	const state: CommitAgentState = { diffText: input.diffText };
-	const spawns = "scout";
+	const spawns = "sonic";
 	const tools = createCommitTools({
 		cwd: input.cwd,
 		authStorage: input.authStorage,

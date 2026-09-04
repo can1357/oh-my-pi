@@ -189,11 +189,10 @@ pub struct VcsStatusOptions {
 #[napi(object)]
 #[derive(Default)]
 pub struct VcsCommitOptions {
-	pub author:        Option<VcsCommitAuthor>,
-	pub allow_empty:   Option<bool>,
-	pub amend:         Option<bool>,
-	pub files:         Option<Vec<String>>,
-	pub expected_tree: Option<String>,
+	pub author:      Option<VcsCommitAuthor>,
+	pub allow_empty: Option<bool>,
+	pub amend:       Option<bool>,
+	pub files:       Option<Vec<String>>,
 }
 /// Patch application options.
 #[napi(object)]
@@ -259,12 +258,12 @@ pub struct VcsSplitCommitSpec {
 	pub message:    String,
 	pub selections: Vec<VcsHunkSelection>,
 }
+
 /// Options for an atomic split commit.
 #[napi(object)]
 pub struct VcsSplitCommitOptions {
-	pub commits:       Vec<VcsSplitCommitSpec>,
-	pub staged_diff:   String,
-	pub expected_tree: String,
+	pub commits:     Vec<VcsSplitCommitSpec>,
+	pub staged_diff: String,
 }
 
 impl From<core::GitRepoInfo> for VcsGitRepoInfo {
@@ -368,11 +367,10 @@ impl TryFrom<VcsStatusOptions> for core::StatusOptions {
 impl From<VcsCommitOptions> for core::CommitOptions {
 	fn from(v: VcsCommitOptions) -> Self {
 		Self {
-			author:        v.author.map(Into::into),
-			allow_empty:   v.allow_empty.unwrap_or(false),
-			amend:         v.amend.unwrap_or(false),
-			files:         v.files.unwrap_or_default(),
-			expected_tree: v.expected_tree,
+			author:      v.author.map(Into::into),
+			allow_empty: v.allow_empty.unwrap_or(false),
+			amend:       v.amend.unwrap_or(false),
+			files:       v.files.unwrap_or_default(),
 		}
 	}
 }
@@ -464,7 +462,7 @@ impl TryFrom<VcsSplitCommitOptions> for core::SplitCommitOptions {
 			.into_iter()
 			.map(TryInto::try_into)
 			.collect::<Result<_>>()?;
-		Ok(Self { commits, staged_diff: v.staged_diff, expected_tree: v.expected_tree })
+		Ok(Self { commits, staged_diff: v.staged_diff })
 	}
 }
 
@@ -1174,22 +1172,20 @@ impl VcsGitRepo {
 	}
 
 	/// Stage exact content directly into the index for a path without touching
-	/// the worktree, verifying expected tree (CAS), and returning the new tree
-	/// SHA.
+	/// the worktree.
 	#[napi]
 	pub fn stage_content(
 		&self,
 		path: String,
 		content: Either<String, Buffer>,
-		expected_tree: Option<String>,
 		signal: Option<Unknown>,
-	) -> Promise<String> {
+	) -> Promise<()> {
 		let bytes = match content {
 			Either::A(s) => s.into_bytes(),
 			Either::B(b) => b.to_vec(),
 		};
 		blocking("vcs.stageContent", self.inner.clone(), signal, move |r| {
-			r.stage_content(&path, &bytes, expected_tree.as_deref())
+			r.stage_content(&path, &bytes)
 		})
 	}
 
@@ -1207,7 +1203,7 @@ impl VcsGitRepo {
 		})
 	}
 
-	/// Atomic split commit; verifies expected tree; never writes index/worktree.
+	/// Atomic split commit from staged hunks; never writes index/worktree.
 	#[napi]
 	pub fn commit_split(
 		&self,
@@ -1221,12 +1217,6 @@ impl VcsGitRepo {
 				message: error.to_string(),
 			})?)
 		})
-	}
-
-	/// Compute the tree SHA corresponding to the current index state.
-	#[napi]
-	pub fn index_tree_id(&self, signal: Option<Unknown>) -> Promise<String> {
-		blocking("vcs.indexTreeId", self.inner.clone(), signal, move |r| r.index_tree_id())
 	}
 
 	/// Checkout revision.

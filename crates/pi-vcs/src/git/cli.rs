@@ -282,48 +282,33 @@ fn spawn_sync_reader(
 		.ok()
 }
 
-#[derive(Default)]
-struct CappedOutput {
-	retained:  Vec<u8>,
-	truncated: bool,
-}
-
-impl CappedOutput {
-	fn push(&mut self, chunk: &[u8]) {
-		if self.truncated {
-			return;
-		}
-		let remaining = OUTPUT_LIMIT_BYTES - self.retained.len();
-		if chunk.len() <= remaining {
-			self.retained.extend_from_slice(chunk);
-		} else {
-			self.retained.extend_from_slice(&chunk[..remaining]);
-			self.truncated = true;
-		}
-	}
-
-	fn finish(self) -> String {
-		let mut text = String::from_utf8_lossy(&self.retained).into_owned();
-		if self.truncated {
-			text.push_str(TRUNCATION_MARKER);
-		}
-		text
-	}
-}
-
 /// Synchronous mirror of [`read_capped`]: cap retention at
 /// [`OUTPUT_LIMIT_BYTES`] while draining to EOF so the child never blocks.
 fn read_capped_sync(mut stream: impl std::io::Read) -> String {
-	let mut out = CappedOutput::default();
+	let mut retained: Vec<u8> = Vec::new();
 	let mut buf = [0u8; 8 * 1024];
+	let mut truncated = false;
 	loop {
 		let n = match stream.read(&mut buf) {
 			Ok(0) | Err(_) => break,
 			Ok(n) => n,
 		};
-		out.push(&buf[..n]);
+		if truncated {
+			continue;
+		}
+		let remaining = OUTPUT_LIMIT_BYTES - retained.len();
+		if n <= remaining {
+			retained.extend_from_slice(&buf[..n]);
+		} else {
+			retained.extend_from_slice(&buf[..remaining]);
+			truncated = true;
+		}
 	}
-	out.finish()
+	let mut text = String::from_utf8_lossy(&retained).into_owned();
+	if truncated {
+		text.push_str(TRUNCATION_MARKER);
+	}
+	text
 }
 
 fn spawn_error(cwd: &Path, err: std::io::Error) -> Error {
@@ -343,16 +328,30 @@ fn spawn_error(cwd: &Path, err: std::io::Error) -> Error {
 /// Read a stream to completion, capping retention at [`OUTPUT_LIMIT_BYTES`]
 /// while continuing to drain so the child never blocks on a full pipe.
 async fn read_capped(mut stream: impl tokio::io::AsyncRead + Unpin) -> Result<String> {
-	let mut out = CappedOutput::default();
+	let mut retained: Vec<u8> = Vec::new();
 	let mut buf = [0u8; 8 * 1024];
+	let mut truncated = false;
 	loop {
 		let n = stream.read(&mut buf).await.map_err(Error::Io)?;
 		if n == 0 {
 			break;
 		}
-		out.push(&buf[..n]);
+		if truncated {
+			continue;
+		}
+		let remaining = OUTPUT_LIMIT_BYTES - retained.len();
+		if n <= remaining {
+			retained.extend_from_slice(&buf[..n]);
+		} else {
+			retained.extend_from_slice(&buf[..remaining]);
+			truncated = true;
+		}
 	}
-	Ok(out.finish())
+	let mut text = String::from_utf8_lossy(&retained).into_owned();
+	if truncated {
+		text.push_str(TRUNCATION_MARKER);
+	}
+	Ok(text)
 }
 
 /// SIGTERM, grace period, then SIGKILL.

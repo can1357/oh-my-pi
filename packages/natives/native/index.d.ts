@@ -505,16 +505,13 @@ export declare class VcsGitRepo {
   stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
   /**
    * Stage exact content directly into the index for a path without touching
-   * the worktree, verifying expected tree (CAS), and returning the new tree
-   * SHA.
+   * the worktree.
    */
-  stageContent(path: string, content: string | Buffer, expectedTree?: string | undefined | null, signal?: unknown | undefined | null): Promise<string>
+  stageContent(path: string, content: string | Buffer, signal?: unknown | undefined | null): Promise<undefined>
   /** Create commit. */
   commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
-  /** Atomic split commit; verifies expected tree; never writes index/worktree. */
+  /** Atomic split commit from staged hunks; never writes index/worktree. */
   commitSplit(options: VcsSplitCommitOptions, signal?: unknown | undefined | null): Promise<Array<string>>
-  /** Compute the tree SHA corresponding to the current index state. */
-  indexTreeId(signal?: unknown | undefined | null): Promise<string>
   /** Checkout revision. */
   checkout(rev: string, signal?: unknown | undefined | null): Promise<undefined>
   /** Create branch. */
@@ -2770,7 +2767,6 @@ export interface VcsCommitOptions {
   allowEmpty?: boolean
   amend?: boolean
   files?: Array<string>
-  expectedTree?: string
 }
 
 /** Detach copied Git metadata. */
@@ -2878,7 +2874,6 @@ export interface VcsShowResult {
 export interface VcsSplitCommitOptions {
   commits: Array<VcsSplitCommitSpec>
   stagedDiff: string
-  expectedTree: string
 }
 
 /**

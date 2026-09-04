@@ -171,18 +171,12 @@ impl GitRepo {
 	}
 
 	/// Stage exact in-memory content directly into the index for a path without
-	/// touching the worktree, verifying the index matches `expected_tree` under
-	/// lock (CAS), and returning the resulting tree SHA.
+	/// touching the worktree.
 	///
 	/// Note: this bypasses the filter pipeline / attributes and resets entry
 	/// flags. It is intended for generated files (such as changelogs), not as
 	/// a general `git add`.
-	pub fn stage_content(
-		&self,
-		path: &str,
-		content: &[u8],
-		expected_tree: Option<&str>,
-	) -> Result<String> {
+	pub fn stage_content(&self, path: &str, content: &[u8]) -> Result<()> {
 		let repo = self.gix()?;
 		let normalized = normalize_stage_path(path);
 		if normalized.is_empty()
@@ -208,16 +202,6 @@ impl GitRepo {
 		let mut lock = lock_index(&repo.index_path(), "git stage content")?;
 		let mut index = load_index_or_head(&repo, "git stage content")?;
 
-		if let Some(expected) = expected_tree.filter(|s| !s.is_empty()) {
-			let current_tree = write_index_tree(&repo, &index)?;
-			verify_expected_tree(
-				"git stage content",
-				expected,
-				current_tree,
-				"before staging content",
-			)?;
-		}
-
 		let mode = index
 			.entry_by_path(bpath.as_bstr())
 			.map_or(gix::index::entry::Mode::FILE, |e| e.mode);
@@ -230,32 +214,23 @@ impl GitRepo {
 			bpath.as_bstr(),
 		);
 		index.sort_entries();
-		let new_tree = write_index_tree(&repo, &index)?;
 		index
 			.write_to(&mut lock, INDEX_WRITE)
 			.map_err(|err| Error::backend("git stage content", err))?;
 		lock
 			.commit()
 			.map_err(|err| Error::backend("git stage content", err))?;
-		Ok(new_tree.to_string())
+		Ok(())
 	}
 
 	/// Reset selected index entries to HEAD while preserving the worktree.
 	pub fn unstage(&self, files: &[String]) -> Result<()> {
-		let repo = self.gix()?;
-		let mut lock = lock_index(&repo.index_path(), "git reset")?;
-		let head = head_tree(&repo)?;
-		let head_index = index_for_tree(&repo, head.as_ref())?;
-		let mut current = load_index_or_head(&repo, "git reset")?;
-
-		copy_index_paths(&mut current, &head_index, files);
-		current
-			.write_to(&mut lock, INDEX_WRITE)
-			.map_err(|err| Error::backend("git reset", err))?;
-		lock
-			.commit()
-			.map_err(|err| Error::backend("git reset", err))?;
-		Ok(())
+		self.restore(&RestoreOptions {
+			source:   None,
+			staged:   true,
+			worktree: false,
+			files:    files.to_vec(),
+		})
 	}
 
 	/// Create a commit and return its object id.
@@ -268,15 +243,6 @@ impl GitRepo {
 			.try_peel_to_id()
 			.map_err(|err| Error::backend("git commit", err))?
 			.map(|id| id.detach());
-		if let Some(expected) = options
-			.expected_tree
-			.as_deref()
-			.map(str::trim)
-			.filter(|s| !s.is_empty())
-		{
-			let pre_tree = compute_commit_tree(&repo, old_commit.as_ref(), &options.files)?;
-			verify_expected_tree("git commit", expected, pre_tree, "between analysis and commit")?;
-		}
 		run_commit_hook(self, &repo, "pre-commit", &[])?;
 		let tree = compute_commit_tree(&repo, old_commit.as_ref(), &options.files)?;
 		let (parents, inherited_author) = if options.amend {
@@ -336,14 +302,6 @@ impl GitRepo {
 		advance_head(&repo, "git commit", old_commit, id, reflog_message)?;
 		let _ = run_commit_hook(self, &repo, "post-commit", &[]);
 		Ok(id.to_hex().to_string())
-	}
-
-	/// Compute the tree SHA corresponding to the current index state.
-	pub fn index_tree_id(&self) -> Result<String> {
-		let repo = self.gix()?;
-		let index = load_index_or_head(&repo, "git write-tree")?;
-		let tree = write_index_tree(&repo, &index)?;
-		Ok(tree.to_string())
 	}
 
 	/// Checkout a branch or detached revision without overwriting local changes.
@@ -1059,28 +1017,6 @@ pub(crate) fn repo_identity<'a>(
 	Ok((committer, author))
 }
 
-/// Fail with `Index tree shifted <what> …` unless the index hashes to
-/// `expected`.
-pub(crate) fn verify_expected_tree(
-	op: &'static str,
-	expected: &str,
-	actual: gix::hash::ObjectId,
-	what: &str,
-) -> Result<()> {
-	let expected_id =
-		gix::ObjectId::from_hex(expected.trim().as_bytes()).map_err(|err| Error::backend(op, err))?;
-	if actual != expected_id {
-		return Err(Error::backend(
-			op,
-			format!(
-				"Index tree shifted {what} (expected {expected_id}, found {actual}); aborting to \
-				 avoid committing unreviewed changes"
-			),
-		));
-	}
-	Ok(())
-}
-
 fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
 	match fs::read(path) {
 		Ok(bytes) => Ok(Some(bytes)),
@@ -1223,26 +1159,6 @@ fn commit_tree(repo: &gix::Repository, id: &gix::hash::ObjectId) -> Result<gix::
 		.map_err(|e| Error::backend("git commit", e))
 }
 
-fn head_tree(repo: &gix::Repository) -> Result<Option<gix::hash::ObjectId>> {
-	match repo
-		.head()
-		.map_err(|e| Error::backend("git reset", e))?
-		.try_peel_to_id()
-		.map_err(|e| Error::backend("git reset", e))?
-	{
-		Some(id) => Ok(Some(
-			id.object()
-				.map_err(|e| Error::backend("git reset", e))?
-				.peel_to_commit()
-				.map_err(|e| Error::backend("git reset", e))?
-				.tree_id()
-				.map_err(|e| Error::backend("git reset", e))?
-				.detach(),
-		)),
-		None => Ok(None),
-	}
-}
-
 fn index_for_tree(
 	repo: &gix::Repository,
 	tree: Option<&gix::hash::ObjectId>,
@@ -1379,13 +1295,9 @@ fn stage_one(
 	path: &gix::bstr::BStr,
 ) -> Result<()> {
 	let full = bstr_to_path(root, path);
-	let metadata = match fs::symlink_metadata(&full) {
-		Ok(meta) => meta,
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-			index.remove_entries(|_, p, _| p == path);
-			return Ok(());
-		},
-		Err(err) => return Err(Error::backend("git add metadata", err)),
+	let Some(metadata) = super::diff::symlink_metadata_opt(&full)? else {
+		index.remove_entries(|_, p, _| p == path);
+		return Ok(());
 	};
 	if metadata.file_type().is_symlink() {
 		let target = fs::read_link(&full)?
@@ -2004,13 +1916,9 @@ mod tests {
 
 	use super::*;
 	use crate::{
-		test_support::{git as git_raw, init_repo},
+		test_support::{git, init_repo},
 		types::CommitAuthor,
 	};
-
-	fn git(dir: &Path, args: &[&str]) -> String {
-		git_raw(dir, args).trim_end().to_owned()
-	}
 
 	fn fixture() -> (TempDir, GitRepo) {
 		let temp = tempfile::tempdir().unwrap();
@@ -2050,7 +1958,7 @@ mod tests {
 		fs::write(temp.path().join("a"), "changed\n").unwrap();
 		fs::write(temp.path().join("new"), "new\n").unwrap();
 		repo.stage_files(&["a".into()]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "M  a\n?? new");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "M  a\n?? new");
 		let first = repo
 			.commit_create("change", &CommitOptions {
 				author: Some(CommitAuthor {
@@ -2061,9 +1969,9 @@ mod tests {
 				..Default::default()
 			})
 			.unwrap();
-		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), first);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).trim(), first);
 		assert_eq!(
-			git(temp.path(), &["show", "-s", "--format=%an <%ae>", "HEAD"]),
+			git(temp.path(), &["show", "-s", "--format=%an <%ae>", "HEAD"]).trim(),
 			"Other <other@example.com>"
 		);
 		assert!(
@@ -2077,11 +1985,11 @@ mod tests {
 			.commit_create("amended", &CommitOptions { amend: true, ..Default::default() })
 			.unwrap();
 		assert_ne!(first, amended);
-		assert_eq!(git(temp.path(), &["rev-list", "--count", "HEAD"]), "2");
+		assert_eq!(git(temp.path(), &["rev-list", "--count", "HEAD"]).trim(), "2");
 		repo.stage_files(&[]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "A  new");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "A  new");
 		repo.unstage(&[]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "?? new");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "?? new");
 	}
 
 	#[test]
@@ -2193,13 +2101,13 @@ mod tests {
 		assert!(!before.contains('\u{301}'), "git add should store NFC, got {before:?}");
 
 		repo.stage_files(&[]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "");
 		let after = git(temp.path(), &["ls-files", "-z"]);
 		let cafe: Vec<_> = after.split('\0').filter(|p| p.contains("caf")).collect();
 		assert_eq!(cafe, [nfc], "native add created a unicode duplicate: {after:?}");
 
 		repo.stage_files(&[nfd.to_owned()]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "");
 		let after_explicit = git(temp.path(), &["ls-files", "-z"]);
 		let cafe: Vec<_> = after_explicit
 			.split('\0')
@@ -2271,18 +2179,18 @@ mod tests {
 
 		// Blob in object database is normalized to LF
 		let blob_content = git(temp.path(), &["cat-file", "-p", ":fixture.cmd"]);
-		assert_eq!(blob_content, "echo hello\necho world");
+		assert_eq!(blob_content.trim(), "echo hello\necho world");
 		assert!(!blob_content.contains('\r'), "staged blob must not contain CR bytes");
 
 		// Staged diff is clean, unstaged diff is completely empty
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "A  fixture.cmd");
-		assert_eq!(git(temp.path(), &["diff"]), "");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "A  fixture.cmd");
+		assert_eq!(git(temp.path(), &["diff"]).trim(), "");
 
 		// Commit the file
 		repo
 			.commit_create("add fixture", &CommitOptions::default())
 			.unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "");
 
 		// Modifying file with CRLF in worktree and running stage_files(&[]) (stage all)
 		let updated_crlf = "echo hello\r\necho world\r\necho again\r\n";
@@ -2290,42 +2198,8 @@ mod tests {
 		repo.stage_files(&[]).unwrap();
 
 		// Still clean unstaged diff
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "M  fixture.cmd");
-		assert_eq!(git(temp.path(), &["diff"]), "");
-	}
-
-	#[test]
-	fn commit_create_verifies_expected_tree() {
-		let (temp, repo) = fixture();
-		fs::write(temp.path().join("a"), "changed\n").unwrap();
-		repo.stage_files(&["a".into()]).unwrap();
-
-		let initial_tree = repo.index_tree_id().unwrap();
-
-		// Commit with correct expected_tree succeeds
-		let sha = repo
-			.commit_create("commit with matching tree", &CommitOptions {
-				expected_tree: Some(initial_tree),
-				..Default::default()
-			})
-			.unwrap();
-		assert!(!sha.is_empty());
-
-		// Stage another change
-		fs::write(temp.path().join("b"), "changed b\n").unwrap();
-		repo.stage_files(&["b".into()]).unwrap();
-
-		// Passing stale expected_tree fails
-		let err = repo
-			.commit_create("commit with stale tree", &CommitOptions {
-				expected_tree: Some("0123456789abcdef0123456789abcdef01234567".into()),
-				..Default::default()
-			})
-			.unwrap_err();
-		assert!(
-			err.to_string().contains("Index tree shifted"),
-			"must reject commit when index tree does not match expected_tree: {err}"
-		);
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "M  fixture.cmd");
+		assert_eq!(git(temp.path(), &["diff"]).trim(), "");
 	}
 
 	#[test]
@@ -2336,7 +2210,7 @@ mod tests {
 		fs::write(bracketed_dir.join("page.tsx"), "export default function() {}\n").unwrap();
 
 		repo.stage_files(&["app/[id]/page.tsx".into()]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "A  app/[id]/page.tsx");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "A  app/[id]/page.tsx");
 	}
 
 	#[test]
@@ -2345,7 +2219,7 @@ mod tests {
 		fs::write(temp.path().join("a"), "staged edit\n").unwrap();
 		repo.stage_files(&["a".into()]).unwrap();
 
-		let initial_tree = repo.index_tree_id().unwrap();
+		let initial_tree = repo.write_tree(None).unwrap();
 
 		// Mutate changelog and concurrently stage another file
 		fs::write(temp.path().join("changelog"), "new changelog\n").unwrap();
@@ -2365,17 +2239,19 @@ mod tests {
 			.unwrap();
 
 		// unrelated remains staged, a remains staged, changelog is unstaged!
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "M  a\nA  unrelated\n?? changelog");
+		assert_eq!(
+			git(temp.path(), &["status", "--porcelain"]).trim(),
+			"M  a\nA  unrelated\n?? changelog"
+		);
 	}
 
 	#[test]
 	fn stage_content_stages_exact_index_content_without_touching_worktree() {
 		let (temp, repo) = fixture();
 		fs::write(temp.path().join("CHANGELOG.md"), "worktree dirty content\n").unwrap();
-		let new_tree = repo
-			.stage_content("CHANGELOG.md", b"staged exact content\n", None)
+		repo
+			.stage_content("CHANGELOG.md", b"staged exact content\n")
 			.unwrap();
-		assert!(!new_tree.is_empty());
 
 		// Worktree file remains untouched
 		assert_eq!(
@@ -2383,44 +2259,18 @@ mod tests {
 			"worktree dirty content\n"
 		);
 		// Index blob has exact staged content
-		assert_eq!(git(temp.path(), &["show", ":CHANGELOG.md"]), "staged exact content");
+		assert_eq!(git(temp.path(), &["show", ":CHANGELOG.md"]).trim(), "staged exact content");
 		// Porcelain status shows AM (staged new file + unstaged worktree modification)
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "AM CHANGELOG.md");
-	}
-
-	#[test]
-	fn stage_content_verifies_expected_tree_and_returns_new_tree() {
-		let (temp, repo) = fixture();
-		fs::write(temp.path().join("a"), "changed\n").unwrap();
-		repo.stage_files(&["a".into()]).unwrap();
-
-		let initial_tree = repo.index_tree_id().unwrap();
-
-		// Staging content with matching expected_tree succeeds and returns new tree
-		let next_tree = repo
-			.stage_content("CHANGELOG.md", b"v1\n", Some(&initial_tree))
-			.unwrap();
-		assert_ne!(next_tree, initial_tree);
-		assert_eq!(repo.index_tree_id().unwrap(), next_tree);
-
-		// Attempting CAS with stale expected_tree fails and rejects
-		let err = repo
-			.stage_content("CHANGELOG.md", b"v2\n", Some(&initial_tree))
-			.unwrap_err();
-		assert!(
-			err.to_string()
-				.contains("Index tree shifted before staging content"),
-			"expected shifted tree error: {err}"
-		);
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "AM CHANGELOG.md");
 	}
 
 	#[test]
 	fn stage_content_rejects_escaping_or_absolute_paths() {
 		let (_temp, repo) = fixture();
-		assert!(repo.stage_content("", b"test", None).is_err());
-		assert!(repo.stage_content("/etc/passwd", b"test", None).is_err());
-		assert!(repo.stage_content("../outside", b"test", None).is_err());
-		assert!(repo.stage_content("a/../../b", b"test", None).is_err());
+		assert!(repo.stage_content("", b"test").is_err());
+		assert!(repo.stage_content("/etc/passwd", b"test").is_err());
+		assert!(repo.stage_content("../outside", b"test").is_err());
+		assert!(repo.stage_content("a/../../b", b"test").is_err());
 	}
 
 	#[cfg(unix)]
@@ -2451,9 +2301,9 @@ mod tests {
 		let sha = repo
 			.commit_create("change", &CommitOptions::default())
 			.unwrap();
-		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), sha);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).trim(), sha);
 		// The commit must carry the staged content, not the stale base index.
-		assert_eq!(git(temp.path(), &["show", "HEAD:a"]), "changed");
+		assert_eq!(git(temp.path(), &["show", "HEAD:a"]).trim(), "changed");
 	}
 
 	#[cfg(unix)]
@@ -2465,7 +2315,7 @@ mod tests {
 		write_hook(&pre_commit, "echo 'policy says no' >&2\nexit 1", true);
 		fs::write(temp.path().join("a"), "blocked\n").unwrap();
 		repo.stage_files(&["a".into()]).unwrap();
-		let before = git(temp.path(), &["rev-parse", "HEAD"]);
+		let before = git(temp.path(), &["rev-parse", "HEAD"]).trim().to_owned();
 		let error = repo
 			.commit_create("blocked", &CommitOptions::default())
 			.unwrap_err();
@@ -2473,7 +2323,7 @@ mod tests {
 			&error,
 			Error::Cli { stderr, .. } if stderr.contains("policy says no")
 		));
-		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), before);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).trim(), before);
 
 		fs::remove_file(&pre_commit).unwrap();
 		write_hook(
@@ -2485,7 +2335,7 @@ mod tests {
 			.commit_create("original", &CommitOptions::default())
 			.unwrap();
 		assert_eq!(
-			git(temp.path(), &["log", "-1", "--pretty=%B"]),
+			git(temp.path(), &["log", "-1", "--pretty=%B"]).trim(),
 			"rewritten subject\n\nrewritten body"
 		);
 
@@ -2522,32 +2372,11 @@ mod tests {
 		fs::write(temp.path().join("a"), "original edit\n").unwrap();
 		repo.stage_files(&["a".into()]).unwrap();
 
-		let expected_tree = repo.index_tree_id().unwrap();
-
-		// commit_create with matching expected_tree succeeds and commits hook's content
 		let sha = repo
-			.commit_create("hook rewrite commit", &CommitOptions {
-				expected_tree: Some(expected_tree),
-				..Default::default()
-			})
+			.commit_create("hook rewrite commit", &CommitOptions::default())
 			.unwrap();
-		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), sha);
-		assert_eq!(git(temp.path(), &["show", "HEAD:a"]), "rewritten by hook");
-
-		// When index tree is shifted BEFORE the call, commit_create still fails
-		fs::write(temp.path().join("b"), "changed b\n").unwrap();
-		repo.stage_files(&["b".into()]).unwrap();
-		let stale_expected = "0123456789abcdef0123456789abcdef01234567";
-		let err = repo
-			.commit_create("should fail with stale tree", &CommitOptions {
-				expected_tree: Some(stale_expected.into()),
-				..Default::default()
-			})
-			.unwrap_err();
-		assert!(
-			err.to_string().contains("Index tree shifted"),
-			"must reject commit when index tree does not match expected_tree: {err}"
-		);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).trim(), sha);
+		assert_eq!(git(temp.path(), &["show", "HEAD:a"]).trim(), "rewritten by hook");
 	}
 
 	#[test]
@@ -2563,16 +2392,16 @@ mod tests {
 		assert!(matches!(repo.checkout("other"), Err(Error::Conflict { .. })));
 		fs::write(temp.path().join("a"), "main\n").unwrap();
 		repo.checkout("other").unwrap();
-		assert_eq!(git(temp.path(), &["symbolic-ref", "--short", "HEAD"]), "other");
+		assert_eq!(git(temp.path(), &["symbolic-ref", "--short", "HEAD"]).trim(), "other");
 		repo.checkout("main").unwrap();
 		repo.reset(ResetMode::Soft, Some("HEAD^")).unwrap();
 		assert!(git(temp.path(), &["status", "--porcelain"]).starts_with("M  a"));
 		repo.reset(ResetMode::Hard, Some(&main)).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "");
 		fs::write(temp.path().join("a"), "mixed\n").unwrap();
 		repo.stage_files(&["a".into()]).unwrap();
 		repo.reset(ResetMode::Mixed, Some("HEAD^")).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), " M a");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim_end(), " M a");
 		repo.reset(ResetMode::Hard, Some(&main)).unwrap();
 		assert!(repo.delete_branch("other", true).unwrap());
 		assert!(!repo.delete_branch("missing", true).unwrap());
@@ -2606,7 +2435,7 @@ mod tests {
 		repo.read_tree("HEAD", Some(&alternate)).unwrap();
 		assert_eq!(
 			repo.write_tree(Some(&alternate)).unwrap(),
-			git(temp.path(), &["rev-parse", "HEAD^{tree}"])
+			git(temp.path(), &["rev-parse", "HEAD^{tree}"]).trim()
 		);
 	}
 
@@ -2937,7 +2766,7 @@ mod tests {
 			);
 		}
 		assert_eq!(git(&linked, &["rev-parse", "HEAD"]), git(temp.path(), &["rev-parse", "HEAD"]));
-		assert_eq!(git(&linked, &["status", "--porcelain"]), "");
+		assert_eq!(git(&linked, &["status", "--porcelain"]).trim(), "");
 		let _ = repo.worktree_remove(&linked, true);
 	}
 
@@ -2982,7 +2811,7 @@ mod tests {
 				"linked worktree must report the same staged/unstaged/untracked set"
 			);
 			assert_eq!(git(&linked, &["rev-parse", "HEAD"]), git(temp.path(), &["rev-parse", "HEAD"]));
-			assert_eq!(git(&linked, &["symbolic-ref", "HEAD"]), "refs/heads/kept");
+			assert_eq!(git(&linked, &["symbolic-ref", "HEAD"]).trim(), "refs/heads/kept");
 			// The source keeps its own dirty state untouched.
 			assert_eq!(fs::read_to_string(temp.path().join("a")).unwrap(), "staged then edited\n");
 

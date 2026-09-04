@@ -221,16 +221,13 @@ pub struct StatusOptions {
 #[derive(Debug, Clone, Default)]
 pub struct CommitOptions {
 	/// Author override; committer stays the repo identity.
-	pub author:        Option<CommitAuthor>,
+	pub author:      Option<CommitAuthor>,
 	/// Permit an empty commit.
-	pub allow_empty:   bool,
+	pub allow_empty: bool,
 	/// Amend HEAD instead of appending.
-	pub amend:         bool,
+	pub amend:       bool,
 	/// Commit only these paths (pathspec commit).
-	pub files:         Vec<String>,
-	/// Assert that the resulting tree matches this SHA, failing if pre-commit
-	/// hooks or concurrent operations shifted the index.
-	pub expected_tree: Option<String>,
+	pub files:       Vec<String>,
 }
 
 /// Which hunks of a file a selection covers.
@@ -279,12 +276,11 @@ pub struct SplitCommitSpec {
 /// Options for `GitRepo::commit_split`.
 #[derive(Debug, Clone, Default)]
 pub struct SplitCommitOptions {
-	pub commits:       Vec<SplitCommitSpec>,
+	pub commits:     Vec<SplitCommitSpec>,
 	/// `git diff --cached --binary` text the selections were validated against.
-	pub staged_diff:   String,
-	/// Tree SHA the index must still hash to; mismatch aborts before any write.
-	pub expected_tree: String,
+	pub staged_diff: String,
 }
+
 /// Options for patch application (`git apply` semantics).
 #[derive(Debug, Clone, Default)]
 pub struct ApplyOptions {

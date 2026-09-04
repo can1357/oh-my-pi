@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as fs from "node:fs/promises";
-import { CommitAbortedError, runCommitCommand } from "@oh-my-pi/pi-coding-agent/commit";
+import { runCommitCommand } from "@oh-my-pi/pi-coding-agent/commit";
 import { runSplitCommit } from "@oh-my-pi/pi-coding-agent/commit/agentic";
+import type { SplitCommitPlan } from "@oh-my-pi/pi-coding-agent/commit/agentic/state";
 import { applyChangelogProposals } from "@oh-my-pi/pi-coding-agent/commit/changelog";
 import * as changelogModule from "@oh-my-pi/pi-coding-agent/commit/changelog/generate";
 import * as generateModule from "@oh-my-pi/pi-coding-agent/commit/conventional/generate";
@@ -12,6 +12,23 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+
+function commitSpec(
+	summary: string,
+	changes: SplitCommitPlan["commits"][number]["changes"],
+	type: "feat" | "fix" = "feat",
+): SplitCommitPlan["commits"][number] {
+	return {
+		changes,
+		type,
+		scope: null,
+		summary,
+		details: [],
+		issueRefs: [],
+		dependencies: [],
+	};
+}
+
 describe.serial("commit staging safety and non-mutating dry-run", () => {
 	let tmp: TempDir;
 	let origDir: string;
@@ -92,45 +109,31 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 	});
 
 	it("dry-run is strictly non-mutating and does not stage changes", async () => {
-		await Bun.write(tmp.join("tracked.txt"), "modified content\n");
-		await Bun.write(tmp.join("scratch.txt"), "untracked file\n");
+		for (const legacy of [false, true]) {
+			await Bun.write(tmp.join("tracked.txt"), "modified content\n");
+			await Bun.write(tmp.join("scratch.txt"), "untracked file\n");
 
-		const repo = vcs.requireGit(tmp.path());
+			const repo = vcs.requireGit(tmp.path());
 
-		// Dry-run should never alter the index even with --all
-		await runCommitCommand({
-			push: false,
-			dryRun: true,
-			noChangelog: true,
-			all: true,
-		});
+			// Dry-run should never alter the index even with --all
+			await runCommitCommand({
+				push: false,
+				dryRun: true,
+				noChangelog: true,
+				all: true,
+				legacy,
+			});
 
-		const stagedAfter = await repo.changedFiles({ cached: true });
-		expect(stagedAfter).toEqual([]);
+			const stagedAfter = await repo.changedFiles({ cached: true });
+			expect(stagedAfter).toEqual([]);
 
-		const status = await $`git status --porcelain`.cwd(tmp.path()).text();
-		expect(status.trim()).toBe("M tracked.txt\n?? scratch.txt");
-	});
+			const status = await $`git status --porcelain`.cwd(tmp.path()).text();
+			expect(status.trim()).toBe("M tracked.txt\n?? scratch.txt");
 
-	it("legacy dry-run is strictly non-mutating", async () => {
-		await Bun.write(tmp.join("tracked.txt"), "modified content\n");
-		await Bun.write(tmp.join("scratch.txt"), "untracked file\n");
-
-		const repo = vcs.requireGit(tmp.path());
-
-		await runCommitCommand({
-			all: true,
-			push: false,
-			dryRun: true,
-			noChangelog: true,
-			legacy: true,
-		});
-
-		const stagedAfter = await repo.changedFiles({ cached: true });
-		expect(stagedAfter).toEqual([]);
-
-		const status = await $`git status --porcelain`.cwd(tmp.path()).text();
-		expect(status.trim()).toBe("M tracked.txt\n?? scratch.txt");
+			// Clean up scratch file and reset tracked.txt for next iteration
+			await $`git checkout -- tracked.txt`.cwd(tmp.path()).quiet();
+			await $`rm -f scratch.txt`.cwd(tmp.path()).quiet();
+		}
 	});
 
 	it("dry-run with --push never pushes when nothing is staged", async () => {
@@ -177,102 +180,6 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 
 		const log = await $`git log -n 1 --oneline`.cwd(tmp.path()).text();
 		expect(log).toMatch(/docs:|chore:/);
-	});
-
-	it("applyChangelogProposals preserves both pre-staged and unstaged edits on proposal failure", async () => {
-		const changelogPath = tmp.join("CHANGELOG.md");
-		const changelog2Path = tmp.join("CHANGELOG2.md");
-		const initialContent = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Baseline entry\n";
-		await Bun.write(changelogPath, initialContent);
-		await Bun.write(changelog2Path, initialContent);
-		await $`git add -A`.cwd(tmp.path()).quiet();
-		await $`git commit -m "add baselines"`.cwd(tmp.path()).quiet();
-
-		// 1. Add a pre-staged edit to CHANGELOG.md
-		const preStagedContent =
-			"# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Baseline entry\n\n### Fixed\n\n- Pre-staged fix\n";
-		await Bun.write(changelogPath, preStagedContent);
-		await $`git add CHANGELOG.md`.cwd(tmp.path()).quiet();
-		const userDirtyContent = `${preStagedContent}\n- Unstaged user note\n`;
-		await Bun.write(changelogPath, userDirtyContent);
-
-		// Verify pre-call status is MM (both staged and unstaged edits on CHANGELOG.md)
-		const statusBefore = await $`git status --porcelain`.cwd(tmp.path()).text();
-		expect(statusBefore.trim()).toBe("MM CHANGELOG.md");
-
-		const diffCachedBefore = await $`git diff --cached CHANGELOG.md`.cwd(tmp.path()).text();
-		expect(diffCachedBefore).toContain("+### Fixed");
-		expect(diffCachedBefore).toContain("+- Pre-staged fix");
-
-		await fs.chmod(changelog2Path, 0o444);
-		// Proposal 1 updates CHANGELOG.md; Proposal 2 fails on write to read-only CHANGELOG2.md
-		await expect(
-			applyChangelogProposals({
-				cwd: tmp.path(),
-				expectedTree: await vcs.requireGit(tmp.path()).indexTreeId(),
-				proposals: [
-					{
-						path: changelogPath,
-						entries: { Added: ["Generated feature entry"] },
-					},
-					{
-						path: changelog2Path,
-						entries: { Fixed: ["Fails on write"] },
-					},
-				],
-				dryRun: false,
-			}),
-		).rejects.toThrow();
-
-		// Restore write permissions for cleanup
-		await fs.chmod(changelog2Path, 0o644);
-
-		// 1. Worktree content MUST be restored to exact pre-call content (including unstaged note)
-		const onDisk = await Bun.file(changelogPath).text();
-		expect(onDisk).toBe(userDirtyContent);
-
-		// 2. Index state MUST be restored: pre-staged fix is STILL staged!
-		const statusAfter = await $`git status --porcelain`.cwd(tmp.path()).text();
-		expect(statusAfter.trim()).toBe("MM CHANGELOG.md");
-
-		const diffCachedAfter = await $`git diff --cached CHANGELOG.md`.cwd(tmp.path()).text();
-		expect(diffCachedAfter).toBe(diffCachedBefore);
-	});
-
-	it("fallback commit rejects when index shifts concurrently after capture", async () => {
-		await Bun.write(tmp.join("feature.txt"), "feature v1\n");
-		await $`git add feature.txt`.cwd(tmp.path()).quiet();
-
-		const realRequireGit = vcs.requireGit.bind(vcs);
-		let shifted = false;
-		// Relies on runAgenticCommit capturing indexTreeId() before its first diffText(); staging inside diffText must therefore trip the commitCreate expectedTree check.
-		vi.spyOn(vcs, "requireGit").mockImplementation(dir => {
-			const repo = realRequireGit(dir);
-			const realDiffText = repo.diffText.bind(repo);
-			repo.diffText = async opts => {
-				if (!shifted) {
-					shifted = true;
-					await Bun.write(tmp.join("concurrent.txt"), "concurrently staged\n");
-					const r = realRequireGit(dir);
-					await r.stageFiles(["concurrent.txt"]);
-				}
-				return realDiffText(opts);
-			};
-			return repo;
-		});
-
-		process.env.PI_COMMIT_TEST_FALLBACK = "true";
-		await expect(
-			runCommitCommand({
-				all: false,
-				dryRun: false,
-				noChangelog: true,
-				push: false,
-			}),
-		).rejects.toThrow(CommitAbortedError);
-
-		const log = await $`git log -n 1 --oneline`.cwd(tmp.path()).text();
-		expect(log).toContain("initial commit");
 	});
 
 	it("legacy changelog flow does not sweep unstaged changelog edit adjacent in same hunk into commit", async () => {
@@ -338,7 +245,6 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 
 		await applyChangelogProposals({
 			cwd: tmp.path(),
-			expectedTree: await repo.indexTreeId(),
 			proposals: [
 				{
 					path: changelogPath,
@@ -366,132 +272,6 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		expect(status.trim()).toBe("M CHANGELOG.md");
 	});
 
-	it("rejects commit when unrelated file is staged concurrently during changelog application", async () => {
-		const changelogContent = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Baseline feature\n";
-		await Bun.write(tmp.join("CHANGELOG.md"), changelogContent);
-		await Bun.write(tmp.join("tracked.txt"), "v1\n");
-		await $`git add -A`.cwd(tmp.path()).quiet();
-		await $`git commit -m "init"`.cwd(tmp.path()).quiet();
-
-		await Bun.write(tmp.join("tracked.txt"), "v2\n");
-		await $`git add tracked.txt`.cwd(tmp.path()).quiet();
-
-		vi.spyOn(changelogModule, "generateChangelogEntries").mockResolvedValue({
-			entries: {
-				Fixed: ["Fixed bug in tracked file"],
-			},
-		});
-
-		const realRequireGit = vcs.requireGit.bind(vcs);
-		let shifted = false;
-		// Relies on applyChangelogProposals reading the staged baseline via showBlob(":CHANGELOG.md") after the legacy pipeline captured indexTreeId(); staging there must trip the stageContent CAS.
-		vi.spyOn(vcs, "requireGit").mockImplementation(dir => {
-			const repo = realRequireGit(dir);
-			const realShowBlob = repo.showBlob.bind(repo);
-			repo.showBlob = async (spec, maxBytes) => {
-				const res = await realShowBlob(spec, maxBytes);
-				if (!shifted && spec.includes("CHANGELOG.md")) {
-					shifted = true;
-					await Bun.write(tmp.join("unrelated.txt"), "concurrently staged\n");
-					const r = realRequireGit(dir);
-					await r.stageFiles(["unrelated.txt"]);
-				}
-				return res;
-			};
-			return repo;
-		});
-
-		await expect(
-			runCommitCommand({
-				legacy: true,
-				dryRun: false,
-				noChangelog: false,
-				all: false,
-				push: false,
-			}),
-		).rejects.toThrow(CommitAbortedError);
-
-		const headLog = await $`git log -n 1 --oneline`.cwd(tmp.path()).text();
-		expect(headLog).toContain("init");
-
-		const headTree = await $`git ls-tree -r HEAD --name-only`.cwd(tmp.path()).text();
-		expect(headTree).not.toContain("unrelated.txt");
-	});
-
-	it("rejects split commit and preserves index when index shifts concurrently during split preparation", async () => {
-		await Bun.write(tmp.join("file1.txt"), "f1\n");
-		await Bun.write(tmp.join("file2.txt"), "f2\n");
-		await $`git add file1.txt file2.txt`.cwd(tmp.path()).quiet();
-
-		const repo = vcs.requireGit(tmp.path());
-		const initialTree = await repo.indexTreeId();
-
-		const plan = {
-			commits: [
-				{
-					changes: [{ path: "file1.txt", kind: "all" as const }],
-					type: "feat" as const,
-					scope: null,
-					summary: "add file1",
-					details: [],
-					issueRefs: [],
-					dependencies: [],
-				},
-				{
-					changes: [{ path: "file2.txt", kind: "all" as const }],
-					type: "feat" as const,
-					scope: null,
-					summary: "add file2",
-					details: [],
-					issueRefs: [],
-					dependencies: [],
-				},
-			],
-			warnings: [],
-		};
-
-		await expect(
-			runSplitCommit(plan, {
-				cwd: tmp.path(),
-				dryRun: false,
-				push: false,
-				expectedTree: initialTree,
-				confirm: async () => {
-					// Simulate concurrent external staging during user confirmation
-					await Bun.write(tmp.join("unrelated.txt"), "concurrently staged\n");
-					await repo.stageFiles(["unrelated.txt"]);
-					return true;
-				},
-			}),
-		).rejects.toThrow(CommitAbortedError);
-
-		const headLog = await $`git log -n 1 --oneline`.cwd(tmp.path()).text();
-		expect(headLog).toContain("initial commit");
-
-		const headTree = await $`git ls-tree -r HEAD --name-only`.cwd(tmp.path()).text();
-		expect(headTree).not.toContain("unrelated.txt");
-		// Existing staged files were preserved and NOT wiped by unstage
-		const stagedFiles = await repo.changedFiles({ cached: true });
-		expect(stagedFiles).toContain("file1.txt");
-		expect(stagedFiles).toContain("file2.txt");
-		expect(stagedFiles).toContain("unrelated.txt");
-
-		const status = await $`git status --porcelain`.cwd(tmp.path()).text();
-		const statusLines = status
-			.trim()
-			.split("\n")
-			.map(l => l.trimEnd());
-		expect(statusLines).toContain("A  file1.txt");
-		expect(statusLines).toContain("A  file2.txt");
-		expect(statusLines).toContain("A  unrelated.txt");
-		for (const line of statusLines) {
-			expect(line.startsWith("A  ")).toBe(true);
-		}
-
-		const unstagedDiff = await $`git diff`.cwd(tmp.path()).text();
-		expect(unstagedDiff).toBe("");
-	});
-
 	it("user rejecting the split plan leaves HEAD, index, and changelog untouched", async () => {
 		const changelogContent = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Baseline feature\n";
 		await Bun.write(tmp.join("CHANGELOG.md"), changelogContent);
@@ -502,35 +282,24 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 
 		const repo = vcs.requireGit(tmp.path());
 		const headBefore = (await $`git rev-parse HEAD`.cwd(tmp.path()).text()).trim();
-		const initialTree = await repo.indexTreeId();
+		const stagedBefore = await repo.changedFiles({ cached: true });
 
 		await runSplitCommit(
 			{
-				commits: [
-					{
-						changes: [{ path: "file1.txt", kind: "all" as const }],
-						type: "feat" as const,
-						scope: null,
-						summary: "add file1",
-						details: [],
-						issueRefs: [],
-						dependencies: [],
-					},
-				],
+				commits: [commitSpec("add file1", [{ path: "file1.txt", kind: "all" }])],
 				warnings: [],
 			},
 			{
 				cwd: tmp.path(),
 				dryRun: false,
 				push: false,
-				expectedTree: initialTree,
 				changelogProposal: { entries: [{ path: tmp.join("CHANGELOG.md"), entries: { Added: ["Added file1"] } }] },
 				confirm: async () => false,
 			},
 		);
 
 		expect((await $`git rev-parse HEAD`.cwd(tmp.path()).text()).trim()).toBe(headBefore);
-		expect(await repo.indexTreeId()).toBe(initialTree);
+		expect(await repo.changedFiles({ cached: true })).toEqual(stagedBefore);
 		expect(await Bun.file(tmp.join("CHANGELOG.md")).text()).toBe(changelogContent);
 	});
 
@@ -540,40 +309,13 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		await Bun.write(tmp.join("tracked.txt"), "modified tracked content\n");
 		await $`git add file1.txt file2.txt tracked.txt`.cwd(tmp.path()).quiet();
 
-		const repo = vcs.requireGit(tmp.path());
-		const expectedTree = await repo.indexTreeId();
-
 		const countBefore = Number.parseInt((await $`git rev-list --count HEAD`.cwd(tmp.path()).text()).trim(), 10);
 
-		const plan = {
+		const plan: SplitCommitPlan = {
 			commits: [
-				{
-					changes: [{ path: "file1.txt", kind: "all" as const }],
-					type: "feat" as const,
-					scope: null,
-					summary: "add file1",
-					details: [],
-					issueRefs: [],
-					dependencies: [],
-				},
-				{
-					changes: [{ path: "file2.txt", kind: "all" as const }],
-					type: "feat" as const,
-					scope: null,
-					summary: "add file2",
-					details: [],
-					issueRefs: [],
-					dependencies: [],
-				},
-				{
-					changes: [{ path: "tracked.txt", kind: "all" as const }],
-					type: "fix" as const,
-					scope: null,
-					summary: "update tracked",
-					details: [],
-					issueRefs: [],
-					dependencies: [],
-				},
+				commitSpec("add file1", [{ path: "file1.txt", kind: "all" }]),
+				commitSpec("add file2", [{ path: "file2.txt", kind: "all" }]),
+				commitSpec("update tracked", [{ path: "tracked.txt", kind: "all" }], "fix"),
 			],
 			warnings: [],
 		};
@@ -582,7 +324,6 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 			cwd: tmp.path(),
 			dryRun: false,
 			push: false,
-			expectedTree,
 		});
 
 		const countAfter = Number.parseInt((await $`git rev-list --count HEAD`.cwd(tmp.path()).text()).trim(), 10);
@@ -612,29 +353,10 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		await Bun.write(tmp.join("multi.txt"), modifiedLines);
 		await $`git add multi.txt`.cwd(tmp.path()).quiet();
 
-		const repo = vcs.requireGit(tmp.path());
-		const expectedTree = await repo.indexTreeId();
-
-		const plan = {
+		const plan: SplitCommitPlan = {
 			commits: [
-				{
-					changes: [{ path: "multi.txt", kind: "indices" as const, indices: [1] }],
-					type: "feat" as const,
-					scope: null,
-					summary: "update hunk 1",
-					details: [],
-					issueRefs: [],
-					dependencies: [],
-				},
-				{
-					changes: [{ path: "multi.txt", kind: "indices" as const, indices: [2] }],
-					type: "feat" as const,
-					scope: null,
-					summary: "update hunk 2",
-					details: [],
-					issueRefs: [],
-					dependencies: [],
-				},
+				commitSpec("update hunk 1", [{ path: "multi.txt", kind: "indices", indices: [1] }]),
+				commitSpec("update hunk 2", [{ path: "multi.txt", kind: "indices", indices: [2] }]),
 			],
 			warnings: [],
 		};
@@ -643,7 +365,6 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 			cwd: tmp.path(),
 			dryRun: false,
 			push: false,
-			expectedTree,
 		});
 
 		const headMinusOneContent = await $`git show HEAD~1:multi.txt`.cwd(tmp.path()).text();

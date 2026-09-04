@@ -57,8 +57,9 @@ impl GitRepo {
 	}
 }
 
-/// Load the persisted worktree index straight from disk, invoking `fallback`
-/// when no index file exists.
+/// Load the persisted worktree index straight from disk, reconstructing it from
+/// `HEAD^{tree}` (or an empty index when `HEAD` is unborn) if no index file
+/// exists.
 ///
 /// Reads bypass gix's shared, mtime-gated index snapshot. The cached
 /// [`gix`](GitRepo::gix) handle shares one
@@ -72,51 +73,45 @@ impl GitRepo {
 /// a commit right after staging sees an unchanged tree and fails with "nothing
 /// to commit, working tree clean". Reading the index from disk makes
 /// mutate→read deterministic regardless of filesystem timestamp granularity.
-fn load_index_or(
+pub(crate) fn load_index_or_head(
 	repo: &gix::Repository,
 	op: &'static str,
-	fallback: impl FnOnce() -> Result<gix::index::File>,
 ) -> Result<gix::index::File> {
 	match repo.open_index() {
 		Ok(index) => Ok(index),
 		Err(gix::worktree::open_index::Error::IndexFile(gix::index::file::init::Error::Io(err)))
 			if err.kind() == std::io::ErrorKind::NotFound =>
 		{
-			fallback()
+			Ok(repo
+				.index_or_load_from_head_or_empty()
+				.map_err(|err| Error::backend(op, err))?
+				.into_owned())
 		},
 		Err(err) => Err(Error::backend(op, err)),
 	}
 }
 
-/// Load the worktree index from disk, reconstructing it from `HEAD^{tree}` (or
-/// an empty index when `HEAD` is unborn) if no index file exists.
-pub(crate) fn load_index_or_head(
-	repo: &gix::Repository,
-	op: &'static str,
-) -> Result<gix::index::File> {
-	load_index_or(repo, op, || {
-		repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|err| Error::backend(op, err))
-			.map(|idx| idx.into_owned())
-	})
-}
-
 /// Load the persisted worktree index straight from disk, falling back to an
 /// empty index (never `HEAD^{tree}`) when no index file exists.
 ///
-/// Same snapshot-bypass rationale as [`load_index_or`]; the empty-index
+/// Same snapshot-bypass rationale as [`load_index_or_head`]; the empty-index
 /// fallback matches gix's [`index_or_empty`](gix::Repository::index_or_empty).
 pub(crate) fn load_index_or_empty(
 	repo: &gix::Repository,
 	op: &'static str,
 ) -> Result<gix::index::File> {
-	load_index_or(repo, op, || {
-		repo
-			.index_or_empty()
-			.map_err(|err| Error::backend(op, err))
-			.map(|idx| idx.into_owned_or_cloned())
-	})
+	match repo.open_index() {
+		Ok(index) => Ok(index),
+		Err(gix::worktree::open_index::Error::IndexFile(gix::index::file::init::Error::Io(err)))
+			if err.kind() == std::io::ErrorKind::NotFound =>
+		{
+			Ok(repo
+				.index_or_empty()
+				.map_err(|err| Error::backend(op, err))?
+				.into_owned_or_cloned())
+		},
+		Err(err) => Err(Error::backend(op, err)),
+	}
 }
 
 /// Start a status query over an explicitly supplied index.

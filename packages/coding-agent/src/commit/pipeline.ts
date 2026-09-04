@@ -26,7 +26,6 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 	if (args.all && !args.dryRun) {
 		await repo.stageFiles([]);
 	}
-	let expectedTree = await repo.indexTreeId();
 	try {
 		generated = await generateGitCommit({
 			cwd,
@@ -64,14 +63,14 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 
 	if (!args.noChangelog) {
 		try {
-			({ expectedTree } = await updateChangelog(cwd, repo, args, expectedTree));
+			await updateChangelog(cwd, repo, args);
 		} catch (error) {
 			if (vcs.isVcsError(error)) abortOnGitFailure("Changelog update failed", error);
 			throw error;
 		}
 	}
 	try {
-		await repo.commitCreate(commitMessage, { expectedTree });
+		await repo.commitCreate(commitMessage, {});
 	} catch (error) {
 		if (vcs.isVcsError(error)) abortOnGitFailure("Commit failed", error);
 		throw error;
@@ -80,12 +79,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 	if (args.push) await pushOrAbort(cwd);
 }
 
-async function updateChangelog(
-	cwd: string,
-	repo: VcsGitRepo,
-	args: CommitCommandArgs,
-	expectedTree: string,
-): Promise<{ updated: string[]; expectedTree: string }> {
+async function updateChangelog(cwd: string, repo: VcsGitRepo, args: CommitCommandArgs): Promise<void> {
 	const settings = await Settings.init({ cwd });
 	const authStorage = await discoverAuthStorage();
 	const registry = new ModelRegistry(authStorage);
@@ -93,14 +87,13 @@ async function updateChangelog(
 	await loadCliExtensionProviders(registry, settings, cwd);
 	const primary = await resolvePrimaryModel(args.model, settings, registry);
 	const commitSettings = settings.getGroup("commit");
-	return runChangelogFlow({
+	await runChangelogFlow({
 		cwd,
 		model: primary.model,
 		apiKey: primary.apiKey,
 		thinkingLevel: primary.thinkingLevel,
 		stagedFiles: await repo.changedFiles({ cached: true }),
 		dryRun: false,
-		expectedTree,
 		maxDiffChars: commitSettings.changelogMaxDiffChars,
 		onProgress: message => process.stdout.write(`${message}\n`),
 	});
