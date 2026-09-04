@@ -107,6 +107,28 @@ export interface WorkerSpawnCommand {
 export const SMOKE_TEST_TIMEOUT_MS = 30_000;
 
 /**
+ * Resolve the current executable path, falling back to finding the binary on
+ * PATH if the original physical path was unlinked on disk (e.g. Homebrew or a
+ * package manager pruned the prior version directory during an in-flight
+ * upgrade, leaving `process.execPath` pointing at a missing path).
+ */
+export function resolveExecutablePath(): string {
+	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
+	if (isCompiledBinary() && !fs.existsSync(executable)) {
+		const candidates = [
+			Bun.which("omp"),
+			process.argv0 ? Bun.which(process.argv0) : null,
+			process.argv0 ? path.resolve(process.argv0) : null,
+		];
+		for (const candidate of candidates) {
+			if (candidate && fs.existsSync(candidate)) {
+				return candidate;
+			}
+		}
+	}
+	return executable;
+}
+/**
  * Resolve the command that re-enters this CLI's entrypoint: the compiled
  * binary itself, or the runtime plus the declared worker-host entry. Used by
  * the TUI `/restart` relaunch; workers go through {@link resolveWorkerSpawnCmd},
@@ -114,8 +136,9 @@ export const SMOKE_TEST_TIMEOUT_MS = 30_000;
  * package root for `bun test` IPC). Outside a CLI host this falls back to the
  * absolute path of `src/cli.ts` so the relaunch keeps the caller's cwd.
  */
+
 export function resolveCliEntryCmd(): string[] {
-	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
+	const executable = resolveExecutablePath();
 	if (isCompiledBinary()) return [executable];
 	const hostEntry = workerHostEntry();
 	if (hostEntry) return [executable, hostEntry];
@@ -134,7 +157,7 @@ export function resolveCliEntryCmd(): string[] {
  * IPC handles more reliably under `bun test`.
  */
 export function resolveWorkerSpawnCmd(workerArg: string): WorkerSpawnCommand {
-	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
+	const executable = resolveExecutablePath();
 	if (isCompiledBinary()) return { cmd: [executable, workerArg] };
 	const hostEntry = workerHostEntry();
 	if (hostEntry) {
