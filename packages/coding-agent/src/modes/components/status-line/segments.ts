@@ -7,6 +7,7 @@ import { type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { fileHyperlink } from "../../../tui/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
+import { settings } from "../../../config/settings";
 import { sanitizeStatusText } from "../../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./context-thresholds";
 import type { RenderedSegment, SegmentContext, StatusLineSegment, StatusLineSegmentId } from "./types";
@@ -75,9 +76,9 @@ function stripDisplayRoot(pwd: string): string {
 function normalizePremiumRequests(value: number): number {
 	return Math.round((value + Number.EPSILON) * 100) / 100;
 }
-function formatSpend(amount: number, usingSubscription: boolean, uiTheme: Theme): string {
+function formatSpend(amount: number, usingSubscription: boolean, uiTheme: Theme, costPrefix = "$"): string {
 	const formatted = amount.toFixed(2);
-	if (!usingSubscription) return `$${formatted}`;
+	if (!usingSubscription) return `${costPrefix}${formatted}`;
 	if (uiTheme.getSymbolPreset() === "nerd") {
 		const icon = uiTheme.icon.subscription;
 		return icon ? `${icon} ${formatted}` : `S${formatted}`;
@@ -94,8 +95,8 @@ function formatAdvisorSpend(amount: number, usingSubscription: boolean, uiTheme:
 	return `${spend} (adv)`;
 }
 
-function formatSpendPlaceholder(usingSubscription: boolean, uiTheme: Theme): string {
-	if (!usingSubscription) return "$…";
+function formatSpendPlaceholder(usingSubscription: boolean, uiTheme: Theme, costPrefix = "$"): string {
+	if (!usingSubscription) return `${costPrefix}…`;
 	if (uiTheme.getSymbolPreset() === "nerd" && uiTheme.icon.subscription) {
 		return `${uiTheme.icon.subscription} …`;
 	}
@@ -559,6 +560,12 @@ const costSegment: StatusLineSegment = {
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
 		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
+		let costPrefix = "$";
+		try {
+			costPrefix = sanitizeStatusText(settings.get("statusLine.costPrefix") ?? "$");
+		} catch {
+			/* settings not initialized */
+		}
 
 		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
 			return { content: "", visible: false };
@@ -568,8 +575,8 @@ const costSegment: StatusLineSegment = {
 		if (cost) {
 			billingParts.push(
 				ctx.startupPlaceholder
-					? formatSpendPlaceholder(usingSubscription, theme)
-					: formatSpend(cost, usingSubscription, theme),
+					? formatSpendPlaceholder(usingSubscription, theme, costPrefix)
+					: formatSpend(cost, usingSubscription, theme, costPrefix),
 			);
 		} else if (usingSubscription) {
 			billingParts.push(

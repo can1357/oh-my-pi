@@ -969,6 +969,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"statusLine.costPrefix": {
+		type: "string",
+		default: "$",
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Cost Prefix",
+			description:
+				"Prefix displayed before cost amounts (e.g. $, ¥, €, £). Cosmetic only — does not convert values.",
+		},
+	},
+
 	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[] },
 
 	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentId[] },
@@ -6261,6 +6273,7 @@ export interface StatusLineSettings {
 	preset: StatusLinePreset;
 	separator: StatusLineSeparatorStyle;
 	showHookStatus: boolean;
+	costPrefix: string;
 	leftSegments: StatusLineSegmentId[];
 	rightSegments: StatusLineSegmentId[];
 	segmentOptions: Record<string, unknown>;
