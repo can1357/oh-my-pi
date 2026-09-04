@@ -45,7 +45,7 @@
 - Restored mouse clicks, hover, and wheel scrolling in Plan Review.
 ### Changed
 
-- Memory startup now reads only the head slice of past session JSONL files (`collectThreads`) instead of loading and splitting whole files, avoiding large heap allocations when past sessions are large.
+- Reduced startup memory and latency when initializing memory with large session histories by reading only session header metadata instead of loading entire transcripts into memory.
 
 ## [18.1.9] - 2026-09-04
 

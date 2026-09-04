@@ -93,7 +93,7 @@ describe("collectThreads", () => {
 		const filePath = path.join(tempDir, "big-session.jsonl");
 		// Session header line (~70 bytes), then 250 KB of conversation lines
 		const header = '{"type":"session","id":"big-id","cwd":"/big/project"}\n';
-		const bigBody = '{"type":"assistant","message":"' + "x".repeat(1000) + '"}\n'.repeat(250);
+		const bigBody = ('{"type":"assistant","message":"' + "x".repeat(1000) + '"}\n').repeat(250);
 		await Bun.write(filePath, header + bigBody);
 
 		const threads = await collectThreads(makeFakeSession(tempDir));
