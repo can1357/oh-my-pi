@@ -167,7 +167,9 @@ def bot_settings(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Setting
     return settings
 
 
-def _record_bot_review_event(db: Database, *, delivery: str, event_type: str, author: str = _BOT, body: str = "finding") -> None:
+def _record_bot_review_event(
+    db: Database, *, delivery: str, event_type: str, author: str = _BOT, body: str = "finding"
+) -> None:
     db.record_event(
         delivery_id=delivery,
         event_type=event_type,
@@ -221,17 +223,19 @@ async def test_coalescing_never_touches_inflight_key(bot_settings: Settings, db:
     assert by_id["conv-1"].state == "queued"
     assert by_id["inline-1"].state == "queued"
 
-    await pool._release(EventRow(
-        delivery_id="conv-1",
-        event_type="issue_comment",
-        repo="octo/widget",
-        issue_key=_KEY,
-        payload={},
-        received_at="2026-01-01T00:00:00Z",
-        state="running",
-        attempts=1,
-        last_error=None,
-    ))
+    await pool._release(
+        EventRow(
+            delivery_id="conv-1",
+            event_type="issue_comment",
+            repo="octo/widget",
+            issue_key=_KEY,
+            payload={},
+            received_at="2026-01-01T00:00:00Z",
+            state="running",
+            attempts=1,
+            last_error=None,
+        )
+    )
 
     # In-flight cleared: the older sibling coalesces into the newer one,
     # so exactly one run survives, on the newest event.
@@ -294,3 +298,38 @@ async def test_coalescing_scoped_to_same_issue_key(bot_settings: Settings, db: D
     assert second is not None
     assert second.delivery_id == "b-1"
     assert {e.delivery_id: e for e in db.list_events()}["b-1"].state == "running"
+
+
+@pytest.mark.asyncio
+async def test_coalesced_sibling_produces_no_dispatch_run(bot_settings: Settings, db: Database) -> None:
+    """A superseded reviewer-bot review event MUST NOT dispatch a run: draining the
+    whole queue dispatches exactly one `tasks.handle_review` call, on the newest event,
+    while the coalesced sibling ends `skipped` — the observable no-op for a second
+    reviewer-bot reply to an already-addressed point."""
+    _record_bot_review_event(db, delivery="conv-1", event_type="issue_comment", body="first point")
+    await asyncio.sleep(0.01)
+    _record_bot_review_event(db, delivery="inline-1", event_type="pull_request_review_comment", body="second point")
+
+    pool = _make_pool(bot_settings, db)
+    dispatched: list[tuple[str, str]] = []
+
+    async def fake_handle_review(*, payload, **_kwargs) -> None:
+        dispatched.append((str(payload["_robomp_directive"]["body"]), str(payload.get("action"))))
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(tasks, "handle_review", fake_handle_review)
+    try:
+        rows = []
+        while (row := await pool._claim_next_unique()) is not None:  # noqa: SLF001
+            rows.append(row)
+            await pool._dispatch(row)
+            await pool._release(row)
+    finally:
+        monkeypatch.undo()
+
+    assert [r.delivery_id for r in rows] == ["inline-1"]
+    assert dispatched == [("second point", "created")]
+
+    by_id = {e.delivery_id: e for e in db.list_events()}
+    assert by_id["conv-1"].state == "skipped"
+    assert by_id["conv-1"].last_error == "coalesced: superseded by newer review event"
