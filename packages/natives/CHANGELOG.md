@@ -104,6 +104,10 @@
 - Added asynchronous, size-bounded SVG-to-PNG rasterization for terminal media previews.
 - Added the `DiffStream` API for processing text and byte input incrementally, opening files asynchronously, reporting stable-prefix progress, generating exact unified diffs, and warming syntax grammars asynchronously.
 
+### Fixed
+
+- Fixed Windows background keyboard input being silently dropped by classic applications: posted characters and keystrokes now target the window that actually holds keyboard focus (resolved via a brief input-queue attach, with GUI-thread caret/active windows as fallbacks) instead of the frame window.
+
 ## [18.0.3] - 2026-08-23
 
 ### Fixed
