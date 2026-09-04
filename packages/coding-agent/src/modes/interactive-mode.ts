@@ -121,13 +121,33 @@ import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
-import { agentTypeBadge, formatTaskId } from "../task/render";
+import {
+	agentElapsedMs,
+	agentStatParts,
+	agentTypeBadge,
+	estimateAgentEtaMs,
+	formatAgentActivity,
+	formatAgentProgressBar,
+	formatEta,
+	formatTaskId,
+	shortModelLabel,
+} from "../task/render";
+import type { AgentProgress } from "../task/types";
+import { getSubagentDurationHistory } from "../task/run-history";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import { formatMoreItems, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import {
+	formatDuration as formatElapsedDuration,
+	formatMoreItems,
+	formatStatusIcon,
+	replaceTabs,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	formatPhaseDisplayName,
@@ -177,7 +197,13 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "./components/
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "./components/plan-save-overlay";
 import { SessionInfoOverlay } from "./components/session-info-overlay";
 import { StatusLineComponent } from "./components/status-line";
-import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
+import {
+	registerSpinnerBlock,
+	type SpinnerTickTarget,
+	stopSharedSpinnerTicker,
+	type ToolExecutionHandle,
+	unregisterSpinnerBlock,
+} from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
 import type { LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
 import { Composer, type ComposerStatusSnapshot } from "./composer";
@@ -497,7 +523,15 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
 /**
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
  * a bounded set of running-agent rows in the same `Id ⟨role⟩: description` shape
- * the inline task rows use (muted task preview when no description was given).
+ * the inline task rows use (muted task preview when no description was given),
+ * each followed by one dim line: a progress bar with percentage (elapsed over
+ * the estimated total — median runtime of finished agents of the same type
+ * this session, else the cross-session history for that type; empty until any
+ * such run exists), elapsed and eta, what the agent is doing right now
+ * (`tool: intent`), then resolved model, requests, prompt/output volume, cache
+ * hit rate, output rate, context gauge, and cost. Stats appear as soon as the
+ * first assistant turn settles. With `spinnerFrame` the row leads with the
+ * shared spinner glyph; without it (no ticker) the row is static.
  * Layout mirrors the Todos HUD exactly: unindented header, then
  * `renderTreeList` rows (dim connectors) shifted right by one space.
  * Only detached background spawns are listed: a sync task call blocks the
@@ -505,13 +539,26 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
  * eval `agent()` spawns are rendered by their own eval cell tree.
  * Returns an empty array when nothing is running so the container can clear.
  */
-export function renderSubagentHudLines(sessions: ObservableSession[], columns: number): string[] {
+export function renderSubagentHudLines(
+	sessions: ObservableSession[],
+	columns: number,
+	nowMs: number = Date.now(),
+	spinnerFrame?: number,
+): string[] {
 	const running = sessions.filter(
 		session => session.kind === "subagent" && session.status === "active" && session.detached === true,
 	);
 	if (running.length === 0) return [];
+	// Finished peers (any batch this session) are the ETA ground truth.
+	const peers: AgentProgress[] = [];
+	for (const session of sessions) {
+		if (session.kind === "subagent" && session.progress) peers.push(session.progress);
+	}
 
-	const dot = theme.styledSymbol("status.done", "accent");
+	const marker =
+		spinnerFrame === undefined
+			? theme.styledSymbol("status.done", "accent")
+			: theme.fg("accent", formatStatusIcon("running", theme, spinnerFrame));
 	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
 	const hiddenCount = running.length - visible.length;
 	const rows = renderTreeList(
@@ -522,7 +569,7 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 				const displayId = formatTaskId(session.id);
 				const role = session.agent ?? session.progress?.agent;
 				const badge = agentTypeBadge(role, theme);
-				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
+				let line = `${marker} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();
 				const distinctDescription =
 					description && !labelEchoesHandle(session.id, description) ? description : undefined;
@@ -542,7 +589,31 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 						line += ` ${theme.fg("muted", truncateToWidth(formatted, TRUNCATE_LENGTHS.SHORT))}`;
 					}
 				}
-				return line;
+				const progress = session.progress;
+				if (!progress) return line;
+				const elapsedMs = agentElapsedMs(progress, nowMs);
+				const etaMs = estimateAgentEtaMs(progress, peers, elapsedMs, getSubagentDurationHistory(progress.agent));
+				// Liveness first, so a narrow viewport truncates the accounting, not
+				// the motion: bar, elapsed/eta, current tool, then usage.
+				const stats: string[] = [formatAgentProgressBar({ elapsedMs, etaMs }, theme)];
+				if (elapsedMs > 0) stats.push(theme.fg("dim", formatElapsedDuration(elapsedMs)));
+				const eta = formatEta(etaMs);
+				if (eta) stats.push(theme.fg(etaMs !== undefined && etaMs < 0 ? "warning" : "dim", eta));
+				const activity = formatAgentActivity(progress, theme, nowMs);
+				if (activity) stats.push(activity);
+				if (progress.resolvedModel) {
+					stats.push(theme.fg("dim", truncateToWidth(replaceTabs(shortModelLabel(progress.resolvedModel)), 32)));
+				}
+				// Tool count and model badge are covered by the row above / the model
+				// fragment; eta already sits beside the bar.
+				stats.push(
+					...agentStatParts(
+						{ ...progress, toolCount: undefined, resolvedModel: undefined, etaMs: undefined },
+						theme,
+					),
+				);
+				const statsLine = ` ${theme.fg("dim", theme.tree.hook)} ${stats.join(theme.fg("dim", theme.sep.dot))}`;
+				return [line, truncateToWidth(statsLine, Math.max(TRUNCATE_LENGTHS.SHORT, columns - 4))];
 			},
 		},
 		theme,
@@ -551,6 +622,31 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
 	}
 	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
+}
+
+/**
+ * Live HUD component. Registered with the shared tool spinner ticker while any
+ * detached subagent runs, so the spinner glyph, bar, elapsed, and
+ * current-tool fragment advance every glyph step even though detached spawns
+ * leave no live tool block behind to drive repaints. Ticks are
+ * component-scoped so the transcript subtree is reused per frame.
+ */
+class SubagentHudComponent implements Component, SpinnerTickTarget {
+	#frame: number | undefined;
+
+	constructor(
+		private readonly ui: TUI,
+		private readonly sessions: () => ObservableSession[],
+	) {}
+
+	tickSpinner(frame: number): void {
+		this.#frame = frame;
+		this.ui.requestComponentRender(this);
+	}
+
+	render(width: number): readonly string[] {
+		return renderSubagentHudLines(this.sessions(), width, Date.now(), this.#frame);
+	}
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
@@ -832,6 +928,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
+	/** The one live HUD instance; present exactly while it is registered with the spinner ticker. */
+	#subagentHud?: SubagentHudComponent;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentRegistry;
 	#mcpStatusOrder: string[] = [];
@@ -2792,15 +2890,26 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
-	 * editor. Driven entirely by observer-registry change events, so rows appear
-	 * on spawn and the whole block clears itself once the last subagent leaves
-	 * the "active" state.
+	 * editor. Rows appear on observer-registry change events; while any are
+	 * shown the single HUD component stays registered with the shared spinner
+	 * ticker so it repaints per glyph step, and it unregisters (stopping the
+	 * ticker if nothing else is live) once the last subagent leaves "active".
 	 */
 	#renderSubagentList(): void {
+		const sessions = this.#observerRegistry.getSessions();
+		if (renderSubagentHudLines(sessions, this.ui.terminal.columns).length === 0) {
+			if (this.#subagentHud) {
+				unregisterSpinnerBlock(this.#subagentHud);
+				this.#subagentHud = undefined;
+			}
+			this.subagentContainer.clear();
+			return;
+		}
+		if (this.#subagentHud) return;
+		this.#subagentHud = new SubagentHudComponent(this.ui, () => this.#observerRegistry.getSessions());
 		this.subagentContainer.clear();
-		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
-		if (lines.length === 0) return;
-		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
+		this.subagentContainer.addChild(this.#subagentHud);
+		registerSpinnerBlock(this.#subagentHud);
 	}
 
 	async #loadTodoList(source: AgentSession = this.session): Promise<void> {

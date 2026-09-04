@@ -203,12 +203,18 @@ export function sharedSpinnerFrame(frameCount: number, now: number = performance
 	return frameCount > 0 ? Math.floor(now / SPINNER_GLYPH_ADVANCE_MS) % frameCount : 0;
 }
 
-/** Live tool blocks currently driving a spinner. A single shared ticker (below)
- * advances and repaints every registered block per glyph step, so N concurrent
- * live/streaming blocks — e.g. parallel `task` subagents — cost one 80ms timer
- * and one coalesced render frame per tick instead of N unsynchronized timers
- * each independently waking the render scheduler (issue #8731). */
-const liveSpinnerBlocks = new Set<ToolExecutionComponent>();
+/** Anything the shared ticker repaints per glyph step. */
+export interface SpinnerTickTarget {
+	tickSpinner(frame: number): void;
+}
+
+/** Live blocks currently driving a spinner. A single shared ticker (below)
+ * advances and repaints every registered target per glyph step, so N concurrent
+ * live/streaming blocks — e.g. parallel `task` subagents, or the subagent HUD
+ * above the editor — cost one 80ms timer and one coalesced render frame per
+ * tick instead of N unsynchronized timers each independently waking the render
+ * scheduler (issue #8731). */
+const liveSpinnerBlocks = new Set<SpinnerTickTarget>();
 let sharedSpinnerTimer: NodeJS.Timeout | undefined;
 
 /** Arm the shared spinner ticker if it is not already running. */
@@ -216,19 +222,19 @@ function ensureSharedSpinnerTicker(): void {
 	if (sharedSpinnerTimer) return;
 	sharedSpinnerTimer = setInterval(() => {
 		const frame = sharedSpinnerFrame(theme.spinnerFrames.length);
-		// Removing the current block mid-iteration is safe on a Set.
+		// Removing the current target mid-iteration is safe on a Set.
 		for (const block of liveSpinnerBlocks) block.tickSpinner(frame);
 	}, SPINNER_RENDER_INTERVAL_MS);
 }
 
-/** Register a live block with the shared ticker, starting it on first use. */
-function registerSpinnerBlock(block: ToolExecutionComponent): void {
+/** Register a live target with the shared ticker, starting it on first use. */
+export function registerSpinnerBlock(block: SpinnerTickTarget): void {
 	liveSpinnerBlocks.add(block);
 	ensureSharedSpinnerTicker();
 }
 
-/** Drop a block; stop the ticker once no live block remains. */
-function unregisterSpinnerBlock(block: ToolExecutionComponent): void {
+/** Drop a target; stop the ticker once no live target remains. */
+export function unregisterSpinnerBlock(block: SpinnerTickTarget): void {
 	if (!liveSpinnerBlocks.delete(block)) return;
 	if (liveSpinnerBlocks.size === 0 && sharedSpinnerTimer) {
 		clearInterval(sharedSpinnerTimer);

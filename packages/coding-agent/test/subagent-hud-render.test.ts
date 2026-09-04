@@ -15,10 +15,11 @@ import {
 	type ObservableSession,
 	SessionObserverRegistry,
 } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { __resetSubagentRunHistoryForTests, recordSubagentRun } from "@oh-my-pi/pi-coding-agent/task/run-history";
 import {
 	type AgentProgress,
 	type SubagentLifecyclePayload,
@@ -96,6 +97,8 @@ describe("subagent HUD lines", () => {
 	beforeAll(async () => {
 		await initTheme();
 	});
+	// Module-global history: runs finished by other test files in this process would leak in.
+	beforeEach(() => __resetSubagentRunHistoryForTests());
 
 	it("renders running subagents as Id: description under a Subagents header", () => {
 		const out = render([
@@ -317,6 +320,218 @@ describe("subagent HUD lines", () => {
 		}
 		expect(out).toContain("2 more running");
 	});
+
+	it("renders a stats line per row: model, requests, volume, cache, rate, elapsed", () => {
+		const out = render(
+			[
+				makeSession({
+					id: "ExtScout",
+					agent: "scout",
+					description: "Audit the extension loader",
+					progress: makeProgress({
+						id: "ExtScout",
+						agent: "scout",
+						description: "Audit the extension loader",
+						resolvedModel: "anthropic/claude-fable-5-1:high",
+						requests: 3,
+						toolCount: 7,
+						inputTokens: 100,
+						outputTokens: 4_200,
+						cacheReadTokens: 900,
+						cacheWriteTokens: 0,
+						generationMs: 100_000,
+						durationMs: 150_000,
+						cost: 0.42,
+					}),
+				}),
+			],
+			160,
+		);
+		const lines = out.split("\n");
+		const rowIndex = lines.findIndex(line => line.includes("ExtScout ⟦scout⟧: Audit the extension loader"));
+		expect(rowIndex).toBeGreaterThan(0);
+		const stats = lines[rowIndex + 1];
+		expect(stats).toContain("claude-fable-5-1:high");
+		expect(stats).not.toContain("anthropic/");
+		expect(stats).toContain("3 req");
+		expect(stats).toContain("↑1K ↓4.2K");
+		expect(stats).toContain("cache 90%");
+		expect(stats).toContain("42 tok/s");
+		expect(stats).toContain("$0.42");
+		expect(stats).toContain("2m30s");
+		// The tool count already lives on the Task block row; the HUD stats line skips it.
+		expect(stats).not.toContain("7 ");
+		// No finished scout yet: no eta is invented.
+		expect(stats).not.toContain("eta");
+	});
+
+	it("omits the stats line until progress exists and estimates eta from finished peers", () => {
+		const bare = render([makeSession({ id: "Fresh", description: "just spawned" })]);
+		expect(bare.split("\n")).toHaveLength(3);
+
+		const finishedScout = makeSession({
+			id: "DoneScout",
+			agent: "scout",
+			status: "completed",
+			progress: makeProgress({ id: "DoneScout", agent: "scout", status: "completed", durationMs: 120_000 }),
+		});
+		const finishedTask = makeSession({
+			id: "DoneTask",
+			agent: "task",
+			status: "completed",
+			progress: makeProgress({ id: "DoneTask", agent: "task", status: "completed", durationMs: 10_000 }),
+		});
+		const live = makeSession({
+			id: "LiveScout",
+			agent: "scout",
+			description: "still reading",
+			progress: makeProgress({ id: "LiveScout", agent: "scout", description: "still reading", durationMs: 30_000 }),
+		});
+		const out = render([finishedScout, finishedTask, live], 160);
+		expect(out).not.toContain("DoneScout");
+		expect(out).toContain("eta ~1m30s");
+
+		const overrun = render(
+			[finishedScout, makeSession({ ...live, progress: { ...live.progress!, durationMs: 200_000 } })],
+			160,
+		);
+		expect(overrun).toContain("1m20s over");
+	});
+
+	it("derives elapsed and eta from startedAtMs so a quiet agent keeps ticking", () => {
+		const finished = makeSession({
+			id: "DoneScout",
+			agent: "scout",
+			status: "completed",
+			progress: makeProgress({ id: "DoneScout", agent: "scout", status: "completed", durationMs: 60_000 }),
+		});
+		// Last progress emit said 5s, but the wall clock is 45s past the start.
+		const quiet = makeSession({
+			id: "QuietScout",
+			agent: "scout",
+			description: "stuck in a long read",
+			progress: makeProgress({
+				id: "QuietScout",
+				agent: "scout",
+				description: "stuck in a long read",
+				durationMs: 5_000,
+				startedAtMs: 1_000_000,
+			}),
+		});
+		const out = Bun.stripANSI(renderSubagentHudLines([finished, quiet], 160, 1_045_000).join("\n"));
+		expect(out).toContain("45.0s");
+		expect(out).toContain("eta ~15.0s");
+		expect(out).not.toContain("└ 5.0s");
+	});
+
+	it("leads the stats line with a percent bar against the peer median, empty with no estimate", () => {
+		const finished = makeSession({
+			id: "DoneScout",
+			agent: "scout",
+			status: "completed",
+			progress: makeProgress({ id: "DoneScout", agent: "scout", status: "completed", durationMs: 100_000 }),
+		});
+		const live = makeSession({
+			id: "LiveScout",
+			agent: "scout",
+			description: "halfway",
+			progress: makeProgress({ id: "LiveScout", agent: "scout", description: "halfway", durationMs: 50_000 }),
+		});
+		const half = Bun.stripANSI(renderSubagentHudLines([finished, live], 160).join("\n"));
+		expect(half).toContain("└ ━━━━━───── 50%");
+		expect(half).toContain("eta ~50.0s");
+
+		const over = Bun.stripANSI(
+			renderSubagentHudLines(
+				[finished, makeSession({ ...live, progress: { ...live.progress!, durationMs: 130_000 } })],
+				160,
+			).join("\n"),
+		);
+		expect(over).toContain("└ ━━━━━━━━━━ 100%");
+		expect(over).toContain("30.0s over");
+
+		// No finished peer and no history: an empty, unlabelled bar — nothing sweeps or is invented.
+		const bare = Bun.stripANSI(renderSubagentHudLines([live], 160).join("\n"));
+		expect(bare).toContain("└ ────────── · 50.0s");
+		expect(bare).not.toContain("%");
+	});
+
+	it("estimates from cross-session history for the agent type when no peer has finished", () => {
+		recordSubagentRun("scout", 200_000, 12);
+		recordSubagentRun("scout", 100_000, 9);
+		recordSubagentRun("task", 900_000, 40);
+		try {
+			const live = makeSession({
+				id: "FirstScout",
+				agent: "scout",
+				description: "first of its batch",
+				progress: makeProgress({
+					id: "FirstScout",
+					agent: "scout",
+					description: "first of its batch",
+					durationMs: 30_000,
+				}),
+			});
+			// Median of the scout history is 150s; the task run is a different type.
+			const out = Bun.stripANSI(renderSubagentHudLines([live], 160).join("\n"));
+			expect(out).toContain("└ ━━──────── 20%");
+			expect(out).toContain("eta ~2m");
+
+			// A finished peer in this session outranks history.
+			const peer = makeSession({
+				id: "DoneScout",
+				agent: "scout",
+				status: "completed",
+				progress: makeProgress({ id: "DoneScout", agent: "scout", status: "completed", durationMs: 60_000 }),
+			});
+			const withPeer = Bun.stripANSI(renderSubagentHudLines([peer, live], 160).join("\n"));
+			expect(withPeer).toContain("└ ━━━━━───── 50%");
+		} finally {
+			__resetSubagentRunHistoryForTests();
+		}
+	});
+
+	it("swaps the dot for the spinner glyph when a frame is supplied", () => {
+		const live = makeSession({ id: "Spinner", description: "moving" });
+		const frames = theme.spinnerFrames;
+		const still = Bun.stripANSI(renderSubagentHudLines([live], 120).join("\n"));
+		expect(still).toContain(`${theme.status.done} Spinner`);
+		const spun = Bun.stripANSI(renderSubagentHudLines([live], 120, Date.now(), 1).join("\n"));
+		expect(spun).toContain(`${Bun.stripANSI(frames[1])} Spinner`);
+		expect(spun).not.toContain(`${theme.status.done} Spinner`);
+	});
+
+	it("shows the in-flight tool and intent, flagging a call that has run past five seconds", () => {
+		const reading = makeSession({
+			id: "Reader",
+			description: "reading",
+			progress: makeProgress({
+				id: "Reader",
+				description: "reading",
+				durationMs: 20_000,
+				currentTool: "read",
+				lastIntent: "Scanning the loader",
+				currentToolStartMs: 1_000_000,
+			}),
+		});
+		const quick = Bun.stripANSI(renderSubagentHudLines([reading], 160, 1_002_000).join("\n"));
+		expect(quick).toContain("read: Scanning the loader");
+		expect(quick).not.toContain("read: Scanning the loader · 2.0s");
+		const slow = Bun.stripANSI(renderSubagentHudLines([reading], 160, 1_012_000).join("\n"));
+		expect(slow).toContain("read: Scanning the loader · 12.0s");
+
+		const between = makeSession({
+			id: "Thinker",
+			description: "thinking",
+			progress: makeProgress({
+				id: "Thinker",
+				description: "thinking",
+				durationMs: 20_000,
+				recentTools: [{ tool: "grep", args: "pattern=foo", endMs: 5 }],
+			}),
+		});
+		expect(Bun.stripANSI(renderSubagentHudLines([between], 160).join("\n"))).toContain("grep: pattern=foo");
+	});
 });
 
 describe("InteractiveMode subagent observer UI sync", () => {
@@ -384,7 +599,9 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		}
 
 		await Promise.resolve();
-		vi.runAllTimers();
+		// Advance only past the coalesce window: the HUD arms the shared 80ms
+		// spinner interval, which `runAllTimers` would spin on forever.
+		vi.advanceTimersByTime(150);
 		await Promise.resolve();
 
 		const hud = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));

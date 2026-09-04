@@ -2006,6 +2006,11 @@ export class TurnRecovery {
 		if (!this.#activeRetryFallback) return false;
 		if (this.#activeRetryFallback.pinned) return false;
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
+		// A fallback switch is only a routing decision until that model has had a
+		// chance to serve. A slow failed fallback can outlive the primary's
+		// cooldown; restoring here would skip the next selected candidate and
+		// oscillate back to the known-failing primary inside the same retry saga.
+		if (!this.#activeRetryFallback.served) return false;
 
 		const {
 			originalSelector: originalSelectorRaw,

@@ -37,6 +37,7 @@ import {
 import { framedBlock, renderStatusLine } from "../tui";
 import { repairDoubleEncodedJsonString } from "./repair-args";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import { getSubagentDurationHistory } from "./run-history";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails, YieldItem } from "./types";
 import { assembleYieldResult } from "./yield-assembly";
 
@@ -85,43 +86,216 @@ function getStatusIcon(status: AgentProgress["status"], theme: Theme, spinnerFra
 	}
 }
 
+/** Stats an agent row can carry; the inline task rows and the subagent HUD share one formatter. */
+export interface AgentStatOptions {
+	toolCount?: number;
+	requests?: number;
+	/** Cumulative usage breakdown; see {@link AgentProgress.inputTokens}. */
+	inputTokens?: number;
+	outputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+	generationMs?: number;
+	contextTokens?: number;
+	contextWindow?: number;
+	cost: number;
+	/** Remaining-time estimate; negative = past the estimate by that much. See {@link estimateAgentEtaMs}. */
+	etaMs?: number;
+	resolvedModel?: string;
+	showResolvedModelBadge?: boolean;
+}
+
+/** `42 tok/s` mean output rate over the agent's assistant-message wall time; undefined until measurable. */
+export function formatOutputRate(
+	outputTokens: number | undefined,
+	generationMs: number | undefined,
+): string | undefined {
+	if (!outputTokens || !generationMs || generationMs <= 0) return undefined;
+	const rate = (outputTokens / generationMs) * 1000;
+	return `${rate < 10 ? rate.toFixed(1) : Math.round(rate).toString()} tok/s`;
+}
+
+/** `cache 91%`: share of prompt tokens served from the provider cache; undefined before any prompt tokens. */
+export function formatCacheHitRate(opts: {
+	inputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+}): string | undefined {
+	const prompt = (opts.inputTokens ?? 0) + (opts.cacheReadTokens ?? 0) + (opts.cacheWriteTokens ?? 0);
+	if (prompt <= 0) return undefined;
+	return `cache ${Math.round(((opts.cacheReadTokens ?? 0) / prompt) * 100)}%`;
+}
+
 /**
- * Append tool-count, context, and cost stats to a status line string.
+ * `eta ~2m` while under the peer-derived estimate, `1m over` once past it.
+ * Undefined when no estimate exists — never a fabricated countdown.
  */
-function appendAgentStats(
-	line: string,
-	opts: {
-		toolCount?: number;
-		requests?: number;
-		tokens: number;
-		contextTokens?: number;
-		contextWindow?: number;
-		cost: number;
-		resolvedModel?: string;
-		showResolvedModelBadge?: boolean;
-	},
+export function formatEta(etaMs: number | undefined): string | undefined {
+	if (etaMs === undefined || !Number.isFinite(etaMs)) return undefined;
+	if (etaMs >= 0) return `eta ~${formatDuration(Math.max(etaMs, 1000))}`;
+	return `${formatDuration(-etaMs)} over`;
+}
+
+/**
+ * Elapsed ms for a progress row at `nowMs`: live from `startedAtMs` while the
+ * agent is pending/running (the emit-driven `durationMs` stalls when the agent
+ * is quiet), the settled `durationMs` otherwise.
+ */
+export function agentElapsedMs(
+	progress: Pick<AgentProgress, "status" | "durationMs" | "startedAtMs">,
+	nowMs: number,
+): number {
+	if ((progress.status === "running" || progress.status === "pending") && progress.startedAtMs !== undefined) {
+		return Math.max(progress.durationMs, nowMs - progress.startedAtMs);
+	}
+	return progress.durationMs;
+}
+
+/**
+ * Remaining-time estimate for a live agent: median runtime of already-finished
+ * peers of the same agent type this session (same batch, same load) minus
+ * this agent's elapsed time; with no finished peer, the median of the
+ * cross-session {@link getSubagentDurationHistory} samples for that type.
+ * Undefined only when neither exists — never a fabricated countdown.
+ * Negative means the agent has outlived the median by that much.
+ */
+export function estimateAgentEtaMs(
+	progress: Pick<AgentProgress, "id" | "agent" | "durationMs">,
+	peers: Iterable<Pick<AgentProgress, "id" | "agent" | "status" | "durationMs">>,
+	elapsedMs: number = progress.durationMs,
+	history: readonly number[] = [],
+): number | undefined {
+	let durations: number[] = [];
+	for (const peer of peers) {
+		if (peer.id === progress.id || peer.agent !== progress.agent) continue;
+		if (peer.status !== "completed" || !(peer.durationMs > 0)) continue;
+		durations.push(peer.durationMs);
+	}
+	if (durations.length === 0) durations = history.filter(ms => ms > 0);
+	if (durations.length === 0) return undefined;
+	durations.sort((a, b) => a - b);
+	const mid = durations.length >> 1;
+	const median = durations.length % 2 === 1 ? durations[mid] : (durations[mid - 1] + durations[mid]) / 2;
+	return median - elapsedMs;
+}
+
+/** `<provider>/<id>[:level]` → `<id>[:level]`; the HUD has no room for the provider. */
+export function shortModelLabel(selector: string): string {
+	const slash = selector.indexOf("/");
+	return slash === -1 ? selector : selector.slice(slash + 1);
+}
+
+/** Cells in the HUD progress bar. */
+export const AGENT_PROGRESS_BAR_WIDTH = 10;
+/** A single tool call past this reads as stuck; the activity fragment shows its elapsed. */
+const AGENT_SLOW_TOOL_MS = 5000;
+
+/**
+ * Progress bar for a live agent: elapsed over the estimated total (elapsed +
+ * eta, from finished peers this session or cross-session history for the
+ * agent type), with the percentage after it; full and warning-colored once
+ * over. With no estimate at all — the first ever run of an agent type on this
+ * machine — the bar stays empty and unlabelled rather than sweep or invent a
+ * number.
+ */
+export function formatAgentProgressBar(
+	opts: { elapsedMs: number; etaMs?: number },
 	theme: Theme,
+	width = AGENT_PROGRESS_BAR_WIDTH,
 ): string {
+	const { filled, empty } = theme.progress;
+	if (opts.etaMs === undefined || !Number.isFinite(opts.etaMs)) return theme.fg("dim", empty.repeat(width));
+	const over = opts.etaMs < 0;
+	const total = opts.elapsedMs + opts.etaMs;
+	const ratio = over || total <= 0 ? 1 : opts.elapsedMs / total;
+	const cells = Math.min(width, Math.round(ratio * width));
+	const color = over ? "warning" : "accent";
+	return (
+		theme.fg(color, filled.repeat(cells)) +
+		theme.fg("dim", empty.repeat(width - cells)) +
+		` ${theme.fg(color, `${Math.round(ratio * 100)}%`)}`
+	);
+}
+
+/**
+ * What a running agent is doing right now: `tool: intent` for the in-flight
+ * call (plus its elapsed once it passes {@link AGENT_SLOW_TOOL_MS}), or the
+ * most recent finished call, dimmed, while the model is between tools.
+ * Undefined when the agent is not running or has no tool history yet.
+ */
+export function formatAgentActivity(
+	progress: Pick<
+		AgentProgress,
+		"status" | "currentTool" | "currentToolArgs" | "currentToolStartMs" | "lastIntent" | "recentTools"
+	>,
+	theme: Theme,
+	nowMs: number,
+): string | undefined {
+	if (progress.status !== "running") return undefined;
+	if (progress.currentTool) {
+		let fragment = theme.fg("muted", sanitizeText(progress.currentTool));
+		const detail = progress.lastIntent ?? progress.currentToolArgs;
+		if (detail) fragment += `: ${theme.fg("dim", previewLine(sanitizeText(detail), 40))}`;
+		if (progress.currentToolStartMs) {
+			const elapsed = nowMs - progress.currentToolStartMs;
+			if (elapsed > AGENT_SLOW_TOOL_MS)
+				fragment += `${theme.sep.dot}${theme.fg("warning", formatDuration(elapsed))}`;
+		}
+		return fragment;
+	}
+	const recent = progress.recentTools[0];
+	if (!recent) return undefined;
+	let fragment = theme.fg("dim", sanitizeText(recent.tool));
+	const detail = progress.lastIntent ?? recent.args;
+	if (detail) fragment += `: ${theme.fg("dim", previewLine(sanitizeText(detail), 40))}`;
+	return fragment;
+}
+
+/**
+ * Styled stat fragments for an agent row, in display order: tools, requests,
+ * prompt/completion volume, cache hit rate, output rate, context gauge, cost,
+ * eta, model. Each fragment is omitted when its input is absent or zero.
+ */
+export function agentStatParts(opts: AgentStatOptions, theme: Theme): string[] {
+	const parts: string[] = [];
 	if (opts.toolCount) {
-		line += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(opts.toolCount)} ${theme.icon.extensionTool}`)}`;
+		parts.push(theme.fg("dim", `${formatNumber(opts.toolCount)} ${theme.icon.extensionTool}`));
 	}
 	if (opts.requests) {
-		line += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(opts.requests)} req`)}`;
+		parts.push(theme.fg("dim", `${formatNumber(opts.requests)} req`));
 	}
+	// Prompt volume is the full context sent (uncached + cached); the cache
+	// fragment right after says how much of it was a cache hit.
+	const promptTokens = (opts.inputTokens ?? 0) + (opts.cacheReadTokens ?? 0) + (opts.cacheWriteTokens ?? 0);
+	if (promptTokens > 0 || opts.outputTokens) {
+		parts.push(theme.fg("dim", `↑${formatNumber(promptTokens)} ↓${formatNumber(opts.outputTokens ?? 0)}`));
+	}
+	const cache = formatCacheHitRate(opts);
+	if (cache) parts.push(theme.fg("dim", cache));
+	const rate = formatOutputRate(opts.outputTokens, opts.generationMs);
+	if (rate) parts.push(theme.fg("dim", rate));
 	// Current per-turn context — match the status line's `<pct>%/<window>` gauge (e.g. `5.1%/1M`).
 	if (opts.contextTokens && opts.contextTokens > 0) {
 		const ctx =
 			opts.contextWindow && opts.contextWindow > 0
 				? formatContextUsage((opts.contextTokens / opts.contextWindow) * 100, opts.contextWindow)
 				: `${formatNumber(opts.contextTokens)}`;
-		line += `${theme.sep.dot}${theme.fg("dim", ctx)}`;
+		parts.push(theme.fg("dim", ctx));
 	}
 	if (opts.cost > 0) {
-		line += `${theme.sep.dot}${theme.fg("statusLineCost", `$${opts.cost.toFixed(2)}`)}`;
+		parts.push(theme.fg("statusLineCost", `$${opts.cost.toFixed(2)}`));
 	}
+	const eta = formatEta(opts.etaMs);
+	if (eta) parts.push(theme.fg(opts.etaMs !== undefined && opts.etaMs < 0 ? "warning" : "dim", eta));
 	if (opts.resolvedModel && opts.showResolvedModelBadge) {
-		line += `${theme.sep.dot}${theme.fg("dim", truncateToWidth(replaceTabs(opts.resolvedModel), 30))}`;
+		parts.push(theme.fg("dim", truncateToWidth(replaceTabs(opts.resolvedModel), 30)));
 	}
+	return parts;
+}
+
+/** Append {@link agentStatParts} to a status line, dot-separated. */
+function appendAgentStats(line: string, opts: AgentStatOptions, theme: Theme): string {
+	for (const part of agentStatParts(opts, theme)) line += `${theme.sep.dot}${part}`;
 	return line;
 }
 
@@ -896,6 +1070,8 @@ function renderAgentProgress(
 	seenNestedTasks?: WeakSet<object>,
 	nestedDepth = 0,
 	nowMs = Date.now(),
+	/** Sibling rows of the same call; finished peers of the same agent type feed the ETA. */
+	peers?: readonly AgentProgress[],
 ): string[] {
 	const lines: string[] = [];
 
@@ -954,7 +1130,15 @@ function renderAgentProgress(
 			const taskPreview = previewLine(sanitizeText(progress.assignment ?? progress.task), 40);
 			statusLine += ` ${theme.fg("muted", taskPreview)}`;
 		}
-		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
+		const etaMs = peers
+			? estimateAgentEtaMs(
+					progress,
+					peers,
+					agentElapsedMs(progress, nowMs),
+					getSubagentDurationHistory(progress.agent),
+				)
+			: undefined;
+		statusLine = appendAgentStats(statusLine, { ...progress, etaMs, showResolvedModelBadge: showBadge }, theme);
 	} else if (progress.status === "completed") {
 		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
 	}
@@ -964,31 +1148,8 @@ function renderAgentProgress(
 	lines.push(...renderTaskSection(progress.assignment ?? progress.task, continuePrefix, expanded, theme));
 
 	// Current tool (if running) or most recent completed tool
-	if (progress.status === "running") {
-		if (progress.currentTool) {
-			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("muted", sanitizeText(progress.currentTool))}`;
-			const toolDetail = progress.lastIntent ?? progress.currentToolArgs;
-			if (toolDetail) {
-				toolLine += `: ${theme.fg("dim", previewLine(sanitizeText(toolDetail), 40))}`;
-			}
-			if (progress.currentToolStartMs) {
-				const elapsed = nowMs - progress.currentToolStartMs;
-				if (elapsed > 5000) {
-					toolLine += `${theme.sep.dot}${theme.fg("warning", formatDuration(elapsed))}`;
-				}
-			}
-			lines.push(toolLine);
-		} else if (progress.recentTools.length > 0) {
-			// Show most recent completed tool when idle between tools
-			const recent = progress.recentTools[0];
-			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("dim", sanitizeText(recent.tool))}`;
-			const toolDetail = progress.lastIntent ?? recent.args;
-			if (toolDetail) {
-				toolLine += `: ${theme.fg("dim", previewLine(sanitizeText(toolDetail), 40))}`;
-			}
-			lines.push(toolLine);
-		}
-	}
+	const activity = formatAgentActivity(progress, theme, nowMs);
+	if (activity) lines.push(`${continuePrefix}${theme.tree.hook} ${activity}`);
 
 	// Retry detail line: surface why the subagent is paused and roughly how
 	// long until the next attempt. Without this, the parent UI would just
@@ -1257,8 +1418,12 @@ function renderAgentResult(
 	statusLine = appendAgentStats(
 		statusLine,
 		{
-			tokens: result.tokens,
 			requests: result.requests,
+			inputTokens: result.usage?.input,
+			outputTokens: result.usage?.output,
+			cacheReadTokens: result.usage?.cacheRead,
+			cacheWriteTokens: result.usage?.cacheWrite,
+			generationMs: result.generationMs,
 			contextTokens: result.contextTokens,
 			contextWindow: result.contextWindow,
 			cost: result.usage?.cost.total ?? 0,
@@ -1588,7 +1753,19 @@ export function renderResult(
 			}
 			for (const progress of visible) {
 				lines.push(
-					...renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen, undefined, 0, nowMs),
+					...renderAgentProgress(
+						progress,
+						"",
+						"  ",
+						expanded,
+						theme,
+						spinnerFrame,
+						frozen,
+						undefined,
+						0,
+						nowMs,
+						ordered,
+					),
 				);
 			}
 		} else if (details.results && details.results.length > 0) {
@@ -1615,7 +1792,19 @@ export function renderResult(
 				: [];
 			for (const progress of supplementalProgress) {
 				lines.push(
-					...renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen, undefined, 0, nowMs),
+					...renderAgentProgress(
+						progress,
+						"",
+						"  ",
+						expanded,
+						theme,
+						spinnerFrame,
+						frozen,
+						undefined,
+						0,
+						nowMs,
+						supplementalProgress,
+					),
 				);
 			}
 
@@ -1804,6 +1993,7 @@ function renderNestedTaskTree(
 						seen,
 						depth + 1,
 						nowMs,
+						ordered,
 					),
 				);
 			});
