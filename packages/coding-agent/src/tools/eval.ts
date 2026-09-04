@@ -795,19 +795,20 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				const displayText = formatDisplayOutputsForText(cellDisplayOutputs);
 				const visibleDisplayText =
 					displayText && imageText ? `${displayText}\n\n${imageText}` : displayText || imageText;
-				const cellOutput =
+				const modelCellOutput =
 					stdoutTrimmed && visibleDisplayText
 						? `${stdoutTrimmed}\n\n${visibleDisplayText}`
 						: stdoutTrimmed || visibleDisplayText;
-				cellResult.output = cellOutput;
+				cellResult.output =
+					stdoutTrimmed && imageText ? `${stdoutTrimmed}\n\n${imageText}` : stdoutTrimmed || imageText;
 				cellResult.exitCode = result.exitCode;
 				cellResult.durationMs = durationMs;
 				cellResult.statusEvents = cellStatusEvents.length > 0 ? cellStatusEvents : undefined;
 				cellResult.hasMarkdown = cellHasMarkdown || undefined;
 
-				if (cellOutput) {
-					cellOutputs.push(cellOutput);
-					appendTail(cellOutput);
+				if (modelCellOutput) {
+					cellOutputs.push(modelCellOutput);
+					appendTail(modelCellOutput);
 				}
 
 				if (result.cancelled) {

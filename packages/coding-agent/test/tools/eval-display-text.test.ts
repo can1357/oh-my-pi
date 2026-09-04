@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import * as pyKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { EvalTool, evalToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/eval";
 
 function makeSession(): ToolSession {
 	return {
@@ -45,25 +46,33 @@ describe("EvalTool display() text surfacing", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("includes display() JSON values in the text content the model sees", async () => {
+	it("renders structured display values once while preserving model text", async () => {
+		const sentinel = "render-once-sentinel";
 		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
 			baseResult({
-				displayOutputs: [{ type: "json", data: { stdout: "hi", exit_code: 0 } }],
+				displayOutputs: [{ type: "json", data: { text: sentinel, details: { value: 1 } } }],
 			}) as never,
 		);
 
 		const tool = new EvalTool(makeSession());
 		const result = await tool.execute("call-display-json", {
 			language: "js",
-			code: "```js\ndisplay({ stdout: 'hi', exit_code: 0 });\n```\n",
+			code: "display(result);",
 		});
 
-		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
-		expect(text).toContain("display[1]");
-		expect(text).toContain('"stdout": "hi"');
-		expect(text).toContain('"exit_code": 0');
-		expect(text).not.toBe("(no text output)");
+		const modelText = result.content.map(content => (content.type === "text" ? content.text : "")).join("\n");
+		expect(modelText).toContain("display[1]");
+		expect(modelText).toContain(sentinel);
+		expect(modelText).toContain('"value": 1');
+		const theme = (await getThemeByName("dark"))!;
+		expect(theme).toBeDefined();
+		setThemeInstance(theme);
+
+		const rendered = Bun.stripANSI(
+			evalToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme).render(120).join("\n"),
+		);
+		expect(rendered.match(new RegExp(sentinel, "g"))).toHaveLength(1);
 	});
 
 	it("interleaves stdout text and display() JSON values", async () => {
