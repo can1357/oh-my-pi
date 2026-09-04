@@ -28,6 +28,13 @@ export interface Skill {
 	 */
 	hide?: boolean;
 	/**
+	 * Provenance for `hide`: the skill's frontmatter opted out of model
+	 * invocation via `disableModelInvocation: true` (vs a presentation-only
+	 * `hide: true`). `unhideSkills` overrides `hide` for listing but must not
+	 * resurrect model-invocation opt-outs.
+	 */
+	modelInvocationDisabled?: boolean;
+	/**
 	 * Filesystem-resolved plugin root for Agent Plugin skills (spec §4.1):
 	 * every `skill://` resource access must realpath-resolve within it.
 	 */
@@ -111,6 +118,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			source: options.source,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			modelInvocationDisabled: capSkill.frontmatter?.disableModelInvocation === true,
 			_source: capSkill._source,
 		})),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
@@ -255,6 +263,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				source: `${capSkill._source.provider}:${capSkill.level}`,
 				...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+				modelInvocationDisabled: capSkill.frontmatter?.disableModelInvocation === true,
 				_source: capSkill._source,
 			});
 			realPathSet.add(resolvedPath);
@@ -293,6 +302,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					source: "custom:user",
 					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+					modelInvocationDisabled: capSkill.frontmatter?.disableModelInvocation === true,
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
@@ -394,6 +404,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			modelInvocationDisabled: capSkill.frontmatter?.disableModelInvocation === true,
 			_source: capSkill._source,
 		});
 		realPathSet.add(resolvedPath);

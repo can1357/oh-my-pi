@@ -65,6 +65,25 @@ describe("resolveAgentSkills", () => {
 		expect(resolved[1]?.hide).toBe(true);
 	});
 
+	test("unhideSkills does not resurrect a disableModelInvocation opt-out", () => {
+		// Load time normalizes `disableModelInvocation: true` onto `hide`;
+		// that opt-out is a capability revocation, so `unhideSkills` (which
+		// exists to override presentation-only hides) must leave it hidden.
+		const skills = [
+			{ ...skill("alpha", true), modelInvocationDisabled: true },
+			{ ...skill("beta", true), modelInvocationDisabled: true },
+		];
+		const resolved = resolveAgentSkills(skills, agent({ unhideSkills: ["*"] }));
+		expect(listed(resolved)).toEqual([]);
+		expect(resolved.map(s => s.hide)).toEqual([true, true]);
+	});
+
+	test("disableModelInvocation skills remain listed when their hide flag is false", () => {
+		const skills = [{ ...skill("alpha"), modelInvocationDisabled: true }];
+		const resolved = resolveAgentSkills(skills, agent({ unhideSkills: ["*"] }));
+		expect(listed(resolved)).toEqual(["alpha"]);
+	});
+
 	test("does not copy skills that need no change", () => {
 		const skills = [skill("alpha"), skill("beta", true)];
 		const resolved = resolveAgentSkills(skills, agent({ hideSkills: ["none"] }));

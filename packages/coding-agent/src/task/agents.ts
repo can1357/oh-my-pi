@@ -199,10 +199,14 @@ export function resolveAgentSkills(
 		});
 	};
 	return sessionSkills.map(skill => {
+		// `unhideSkills` overrides presentation hides (`SKILL.md` `hide: true`)
+		// only. A `disableModelInvocation: true` opt-out is a capability
+		// revocation the agent author must not silently resurrect.
+		const unhideable = skill.hide === true && skill.modelInvocationDisabled !== true;
 		const listed =
 			!matches(deny, skill.name) &&
 			(allowlist === undefined || matches(allowlist, skill.name)) &&
-			(skill.hide !== true || matches(unhide, skill.name));
+			(skill.hide !== true || (unhideable && matches(unhide, skill.name)));
 		if (listed) {
 			return skill.hide === true ? { ...skill, hide: false } : skill;
 		}
