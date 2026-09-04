@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed concurrent recall calls leaking local embedding initialization failures instead of degrading to FTS-only recall ([#10241](https://github.com/can1357/oh-my-pi/issues/10241)).
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed
