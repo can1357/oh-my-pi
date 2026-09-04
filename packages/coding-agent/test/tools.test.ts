@@ -968,7 +968,7 @@ describe("Coding Agent Tools", () => {
 				path: "artifact://7:3-4",
 			});
 
-			expect(getTextOutput(result)).toContain("[Showing lines 2-2 of 4 (50.0KB limit). Use :3 to continue]");
+			expect(getTextOutput(result)).toContain("[Showing lines 2-2 of 4 (50.0KB limit)]");
 		});
 
 		it("should spill oversized read output to an artifact", async () => {
