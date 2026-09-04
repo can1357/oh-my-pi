@@ -4,6 +4,7 @@ import {
 	formatModelString,
 	getModelMatchPreferences,
 	resolveCliModel,
+	type ResolveCliModelResult,
 } from "../config/model-resolver";
 import type { SettingPath, Settings } from "../config/settings";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
@@ -19,6 +20,27 @@ import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } fro
 export function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
 	ctx.ui.requestRender();
+}
+
+/**
+ * Resolve a `/model` / `/switch` selector the way `omp bench` and `--model`
+ * do: exact `provider/id`, fuzzy ids (`opus`), role aliases (`@smol`, `smol`),
+ * and `:level` thinking suffixes. Unqualified selectors prefer the session's
+ * `--models` scope, else the authenticated set, before the full catalog.
+ */
+function resolveSessionModelSelector(
+	selector: string,
+	session: AgentSession,
+	settings: Settings,
+): ResolveCliModelResult {
+	const scoped = session.scopedModels.map(entry => entry.model);
+	return resolveCliModel({
+		cliModel: selector,
+		modelRegistry: session.modelRegistry,
+		availableModels: scoped.length > 0 ? scoped : undefined,
+		settings,
+		preferences: getModelMatchPreferences(settings),
+	});
 }
 
 async function runWithDetachedModeDraft(
@@ -356,19 +378,18 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handle: async (command, runtime) => {
 			if (command.args) {
-				const modelId = command.args.trim();
-				const availableModels = runtime.session.getAvailableModels?.() ?? [];
-				const match = availableModels.find(
-					model => model.id === modelId || `${model.provider}/${model.id}` === modelId,
-				);
+				const selector = command.args.trim();
+				const resolved = resolveSessionModelSelector(selector, runtime.session, runtime.settings);
+				const match = resolved.model;
 				if (!match) {
 					return usage(
-						`Unknown model: ${modelId}. Use ACP \`session/setModel\` for picker-driven selection or list available models with /model.`,
+						`Unknown model: ${selector}. Use ACP \`session/setModel\` for picker-driven selection or list available models with /model.`,
 						runtime,
 					);
 				}
 				try {
 					await runtime.session.setModel(match);
+					if (resolved.thinkingLevel !== undefined) runtime.session.setThinkingLevel(resolved.thinkingLevel);
 					await runtime.output(`Model set to ${match.provider}/${match.id}.`);
 					await runtime.notifyTitleChanged?.();
 					await runtime.notifyConfigChanged?.();
@@ -392,14 +413,50 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "switch",
 		icon: "swap",
-		description: "Switch model for this session (same as alt+p)",
+		description: "Switch model for this session (same as alt+p); accepts fuzzy ids, provider/id, @role, :level",
+		acpDescription: "Switch model for this session only",
+		acpInputHint: "[model]",
+		inlineHint: "[model]",
+		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const model = runtime.ctx.session.model;
 			return model ? `Model: ${model.provider}/${model.id}` : "Model: none selected";
 		},
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showModelSelector({ temporaryOnly: true });
+		handle: async (command, runtime) => {
+			const selector = command.args.trim();
+			if (!selector) {
+				const model = runtime.session.model;
+				await runtime.output(
+					model ? `Current model: ${model.provider}/${model.id}` : "No model is currently selected.",
+				);
+				return commandConsumed();
+			}
+			const resolved = resolveSessionModelSelector(selector, runtime.session, runtime.settings);
+			if (!resolved.model) return usage(`Unknown model: ${selector}`, runtime);
+			try {
+				await runtime.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
+				await runtime.output(`Session-only model: ${formatModelString(resolved.model)}.`);
+				await runtime.notifyTitleChanged?.();
+				await runtime.notifyConfigChanged?.();
+				return commandConsumed();
+			} catch (err) {
+				return usage(`Failed to switch model: ${errorMessage(err)}`, runtime);
+			}
+		},
+		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
+			const selector = command.args.trim();
+			if (!selector) {
+				runtime.ctx.showModelSelector({ temporaryOnly: true });
+				return;
+			}
+			const resolved = resolveSessionModelSelector(selector, runtime.ctx.session, runtime.ctx.settings);
+			if (!resolved.model) {
+				runtime.ctx.showError(`Unknown model: ${selector}`);
+				return;
+			}
+			if (resolved.warning) runtime.ctx.showStatus(resolved.warning);
+			await runtime.ctx.switchSessionModel(resolved.model, resolved.thinkingLevel);
 		},
 	},
 	{

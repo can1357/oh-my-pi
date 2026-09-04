@@ -735,40 +735,51 @@ impl GitRepo {
 			}
 		}
 
-		let mut changed = target.clone();
-		changed.remove_entries(|_, entry_path, _| !write.contains(entry_path));
-		let mut checkout_options = linked_repo
-			.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
+		// `remove_entries` keeps the path backing even when it drops every
+		// entry, and gix's checkout asserts the two are empty together; a
+		// clone that already matches the target tree must not enter it.
+		let changed = if write.is_empty() {
+			None
+		} else {
+			let mut changed = target.clone();
+			changed.remove_entries(|_, entry_path, _| !write.contains(entry_path));
+			let mut checkout_options = linked_repo
+				.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
+				.map_err(|err| Error::backend("git worktree add", err))?;
+			checkout_options.overwrite_existing = true;
+			let progress = gix::progress::Discard;
+			let interrupt = std::sync::atomic::AtomicBool::new(false);
+			let outcome = gix::worktree::state::checkout(
+				&mut changed,
+				path,
+				linked_repo
+					.objects
+					.into_arc()
+					.map_err(|err| Error::backend("git worktree add", err))?,
+				&progress,
+				&progress,
+				&interrupt,
+				checkout_options,
+			)
 			.map_err(|err| Error::backend("git worktree add", err))?;
-		checkout_options.overwrite_existing = true;
-		let progress = gix::progress::Discard;
-		let interrupt = std::sync::atomic::AtomicBool::new(false);
-		let outcome = gix::worktree::state::checkout(
-			&mut changed,
-			path,
-			linked_repo
-				.objects
-				.into_arc()
-				.map_err(|err| Error::backend("git worktree add", err))?,
-			&progress,
-			&progress,
-			&interrupt,
-			checkout_options,
-		)
-		.map_err(|err| Error::backend("git worktree add", err))?;
-		if !outcome.collisions.is_empty() || !outcome.errors.is_empty() {
-			return Err(Error::backend(
-				"git worktree add",
-				format!(
-					"checkout reported {} collisions and {} errors",
-					outcome.collisions.len(),
-					outcome.errors.len()
-				),
-			));
-		}
+			if !outcome.collisions.is_empty() || !outcome.errors.is_empty() {
+				return Err(Error::backend(
+					"git worktree add",
+					format!(
+						"checkout reported {} collisions and {} errors",
+						outcome.collisions.len(),
+						outcome.errors.len()
+					),
+				));
+			}
+			Some(changed)
+		};
 
 		for (entry, entry_path) in target.entries_mut_with_paths() {
-			if let Some(written) = changed.entry_by_path(entry_path) {
+			if let Some(written) = changed
+				.as_ref()
+				.and_then(|changed| changed.entry_by_path(entry_path))
+			{
 				entry.stat = written.stat;
 			} else {
 				let metadata = gix::index::fs::Metadata::from_path_no_follow(
@@ -2435,6 +2446,29 @@ mod tests {
 				"a failed clone attempt must surface its reason"
 			);
 		}
+		let _ = repo.worktree_remove(&linked, true);
+	}
+
+	#[test]
+	fn clone_first_worktree_at_source_head_needs_no_checkout() {
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "same-as-head"]);
+		let linked = temp.path().join("../linked-clone-noop");
+		let _ = fs::remove_dir_all(&linked);
+		let result = repo
+			.worktree_add(&linked, "same-as-head", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+		assert!(
+			result.clone_error.is_none() || pi_iso::clone_candidates(None).is_empty(),
+			"an identical tree must not fail the clone path: {:?}",
+			result.clone_error
+		);
+		assert_eq!(git(&linked, &["rev-parse", "HEAD"]), git(temp.path(), &["rev-parse", "HEAD"]));
+		assert_eq!(git(&linked, &["status", "--porcelain"]), "");
 		let _ = repo.worktree_remove(&linked, true);
 	}
 

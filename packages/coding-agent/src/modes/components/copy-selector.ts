@@ -56,6 +56,7 @@ export interface CopySelectorDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
 	/** The outlined content was chosen — copy it. `label` feeds the status line. */
 	onPick: (content: string, label: string) => void;
@@ -121,6 +122,7 @@ export class CopySelectorComponent implements Component {
 			cwd: deps.cwd,
 			hideThinkingBlock: deps.hideThinkingBlock,
 			proseOnlyThinking: deps.proseOnlyThinking,
+			linkTargets: deps.linkTargets,
 			requestRender: deps.requestRender,
 		});
 		this.#targets = appendOutlineEntries(this.#builder, entries);

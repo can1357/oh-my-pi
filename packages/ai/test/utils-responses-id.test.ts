@@ -2,14 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { normalizeResponsesToolCallId } from "@oh-my-pi/pi-ai/utils";
 
 describe("normalizeResponsesToolCallId", () => {
-	it("preserves existing item prefix when truncating oversized ids", () => {
-		const callId = `call_${"a".repeat(80)}`;
+	it("preserves opaque call ids while truncating oversized item ids", () => {
+		const callId = `googleai-ts1:${"a".repeat(80)}.signature`;
 		const itemId = `fcr_${"b".repeat(120)}`;
 
 		const normalized = normalizeResponsesToolCallId(`${callId}|${itemId}`);
 
-		expect(normalized.callId.startsWith("call_")).toBe(true);
-		expect(normalized.callId.length).toBeLessThanOrEqual(64);
+		expect(normalized.callId).toBe(callId);
 		expect(normalized.itemId.startsWith("fcr_")).toBe(true);
 		expect(normalized.itemId.length).toBeLessThanOrEqual(64);
 	});
