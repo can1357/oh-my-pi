@@ -2176,7 +2176,25 @@ export class ModelRegistry {
 		for (const name in fallbackHeaders) {
 			if (name.toLowerCase() === "authorization") delete fallbackHeaders[name];
 		}
-		const headers = createLiveConfigHeaders([fallbackHeaders, override.headers], {
+		// The override's Authorization may be a command that fails or returns
+		// empty, which leaves it unresolved. Fold the provider's configured bearer
+		// in as a *lower-priority* live source so an unresolved override degrades
+		// to provider auth instead of to no authorization at all. It cannot ride
+		// `apiKeyConfig`: that one replaces every authorization entry, which would
+		// let the provider key outrank the override the operator pinned.
+		const configuredBearer = createLiveConfigHeaders([], {
+			authHeader: true,
+			apiKeyConfig: this.#providerOverrides.get(provider)?.apiKey,
+		});
+		// Both sources must agree on one spelling, or a lowercase override lands
+		// beside the bearer's canonical name and case-insensitive readers pick by
+		// insertion order again. Canonicalize the override onto `Authorization`,
+		// which is the name the resolver itself installs.
+		const overrideHeaders: Record<string, string> = {};
+		for (const name in override.headers) {
+			overrideHeaders[name.toLowerCase() === "authorization" ? "Authorization" : name] = override.headers[name];
+		}
+		const headers = createLiveConfigHeaders([fallbackHeaders, configuredBearer, overrideHeaders], {
 			authHeader: true,
 			apiKeyOverride: () => this.authStorage.getRuntimeApiKey(provider),
 		});

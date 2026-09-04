@@ -314,6 +314,34 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		);
 	});
 
+	test("a failing modelOverride header command falls back to the provider bearer", async () => {
+		// The override's Authorization is a command, so an empty or failing run
+		// leaves that header unresolved. Rebuilding the merged headers must keep
+		// the provider's configured `apiKey` as a bearer source, or a provider
+		// with perfectly valid credentials sends no authorization at all.
+		const counterFile = path.join(tempDir, "override-header-attempts");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					anthropic: {
+						apiKey: `!${stdoutCommand("cmd-api-key")}`,
+						authHeader: true,
+						modelOverrides: {
+							"claude-sonnet-4-5": { headers: { Authorization: `!${failedTrackingCommand(counterFile)}` } },
+						},
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry
+			.getAll()
+			.find(candidate => candidate.provider === "anthropic" && candidate.id === "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected anthropic claude-sonnet-4-5");
+		expect({ ...model.headers }.Authorization).toBe("Bearer cmd-api-key");
+	});
+
 	test("modelOverrides headers resolve from command stdout", async () => {
 		fs.writeFileSync(
 			modelsPath,
