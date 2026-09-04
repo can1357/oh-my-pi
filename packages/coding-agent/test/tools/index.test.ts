@@ -203,13 +203,14 @@ describe("createTools", () => {
 		const tools = await createTools(session);
 		const yieldTool = tools.find(tool => tool.name === "yield");
 		if (!yieldTool) throw new Error("Missing yield tool");
-		expect(Reflect.get(yieldTool.parameters, "required")).toEqual(["result"]);
+		expect(Reflect.get(yieldTool.parameters, "properties")).toHaveProperty("type");
+		expect(Reflect.get(yieldTool.parameters, "properties")).not.toHaveProperty("key");
 
 		items = [{ id: "pool#1", index: 1 }];
 		expect(Reflect.get(yieldTool.parameters, "required")).toEqual(["key"]);
 		const properties = Reflect.get(yieldTool.parameters, "properties");
 		expect(properties).toHaveProperty("key");
-		expect(properties).not.toHaveProperty("result");
+		expect(properties).not.toHaveProperty("type");
 	});
 	it("excludes todo from yield sessions unless prewalk is armed", async () => {
 		// Subagents (requireYieldTool) never get todo — except when the spawn is
