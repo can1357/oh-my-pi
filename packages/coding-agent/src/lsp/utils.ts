@@ -487,6 +487,25 @@ export function formatSymbolInformation(symbol: SymbolInformation, cwd: string):
 	return `${icon} ${symbol.name}${container} @ ${location}`;
 }
 
+export function filterDocumentSymbols(symbols: DocumentSymbol[], query: string): DocumentSymbol[] {
+	const needle = query.trim().toLowerCase();
+	if (!needle) return symbols;
+
+	return symbols.flatMap(symbol => {
+		if ([symbol.name, symbol.detail ?? ""].some(field => field.toLowerCase().includes(needle))) return [symbol];
+		const children = symbol.children ? filterDocumentSymbols(symbol.children, needle) : [];
+		return children.length > 0 ? [{ ...symbol, children }] : [];
+	});
+}
+
+export function filterDocumentSymbolInformation(symbols: SymbolInformation[], query: string): SymbolInformation[] {
+	const needle = query.trim().toLowerCase();
+	if (!needle) return symbols;
+	return symbols.filter(symbol =>
+		[symbol.name, symbol.containerName ?? ""].some(field => field.toLowerCase().includes(needle)),
+	);
+}
+
 export function filterWorkspaceSymbols(symbols: SymbolInformation[], query: string): SymbolInformation[] {
 	const needle = query.trim().toLowerCase();
 	if (!needle) return symbols;

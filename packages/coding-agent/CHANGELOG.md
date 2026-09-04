@@ -1125,6 +1125,26 @@
 - Fixed `read` hashline headers collapsing nested in-workspace paths to the bare basename, which let a same-basename file at the session cwd capture a verbatim follow-up `edit` and deterministically reject it with `hash is not from this session`. Headers now retain the workspace-relative path (e.g. `[src/settings.json#0063]`) ([#8482](https://github.com/can1357/oh-my-pi/issues/8482)).
 
 ## [17.3.1] - 2026-08-13
+### Added
+
+- Added Astral `ty` as a built-in Python primary LSP server (`ty server`), ordered behind `pyright`/`basedpyright`/`pylsp` so it becomes the primary Python LSP only when the existing servers are unavailable. `ruff` remains the Python linter and coexists alongside `ty` ([#4617](https://github.com/can1357/oh-my-pi/issues/4617)).
+- Added first-party Nix support with reproducible source builds for Linux and macOS on x86-64 and ARM64, a pinned development shell, an overlay, NixOS and Home Manager modules, offline Bun dependencies, and lightweight flake evaluation in CI. Nix-managed installs now direct updates back through Nix instead of replacing store-managed executables.
+- `omp update` and the startup version check now follow an `omp.rename` pointer in the published npm manifest, preparing existing installs for the upcoming npm package rename. Migration is transactional: the renamed agent/natives packages are installed first (npm uses `--force` to take over the `omp` bin), so an install failure leaves the old install untouched; the old-name globals are removed only afterwards, and a broken bin link is restored by re-running the idempotent install before verification decides the outcome.
+- Added per-agent advisors: agent definitions accept an `advisor` frontmatter field (`true` = advise with the `advisor`-role model, `"<pattern>"` = an explicit advisor model with optional `:level` suffix), overridable via the `task.agentAdvisor` settings record. An explicit pattern lands on the spawned session's `modelRoles.advisor`, so different agents can be advised by different models; the effective opt-in is persisted in `session_init` and restored on cold revival, and each subagent advisor keeps its own `<session>/<SubId>/__advisor[.<slug>].jsonl` transcript.
+- Redesigned `/agents` as a fullscreen hub in the `/models` idiom: a scope sidebar (All / Project / User / Bundled / New agent), type-to-filter agent rows with effective model/prewalk/advisor annotations, a pinned detail pane, and mouse support. Enter on an agent opens a property chip strip (enable, model, prewalk, advisor); each property is picked — on/off chips, the real model browser, or a raw pattern input — replacing the old `P`/`A`/`N` letter hotkeys.
+
+### Breaking Changes
+
+- Removed the `advisor.subagents` setting; subagent advisors are now configured per agent (frontmatter `advisor` / `task.agentAdvisor`). An existing `advisor.subagents: true` migrates to `task.agentAdvisor: { task: "on" }` — the bundled generic `task` agent keeps its advisor, other agents start unadvised.
+
+### Changed
+
+- `/usage`, `omp usage`, and the status line now show authoritative OpenCode Go quota from the official `GET /zen/go/v1/usage` endpoint — including usage made outside OMP — instead of dollar estimates summed from OMP-observed request costs. The status line renders all three windows (`5h` / `7d` / `mo`), and the per-turn cost recording special case for `opencode-go` sessions is gone along with the "OMP-observed spend only" disclaimer ([#8337](https://github.com/can1357/oh-my-pi/pull/8337) by [@will-bogusz](https://github.com/will-bogusz)).
+- LSP document-symbol queries can now filter a file's symbol tree by name or detail while preserving matching hierarchy, avoiding unrelated symbol output for targeted lookups.
+- Clarified that the production collab relay source and binaries are not currently published, and documented the source-available local protocol relay ([#8165](https://github.com/can1357/oh-my-pi/issues/8165)).
+- Enabled bounded Anthropic prompt-cache refreshes for the main agent loop while keeping advisor and side-channel requests from taking over the shared refresh timer.
+- Fixed snapcompact compaction shipping its redundant frame archive out of `SessionMaintenance.compact()` on both the manual RPC response (which hard-failed protocol v1 with a transport error after the compaction had already persisted) and the `auto_compaction_end` event payload (which forced the shrink ladder on every unattended pass); the archive is now stripped from both exits while the persisted compaction entry keeps it ([#8168](https://github.com/can1357/oh-my-pi/issues/8168)).
+- Fixed the edit tool showing no diff preview in `apply_patch` mode: the built-in `edit` tool presents on the wire as `apply_patch`, but the renderer-provenance gate did not resolve that alias to its built-in owner, so the edit renderer was skipped ([#8184](https://github.com/can1357/oh-my-pi/issues/8184)).
 
 ### Fixed
 

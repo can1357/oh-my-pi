@@ -26,22 +26,20 @@ import {
 	type CreateFile,
 	type DeleteFile,
 	type Diagnostic,
+	type DocumentSymbol,
 	type LspClient,
 	type LspToolDetails,
 	lspSchema,
 	type RenameFile,
 	type ServerConfig,
-	type SymbolInformation,
 	type TextDocumentEdit,
 	type WorkspaceEdit,
 } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import {
 	applyCodeAction,
 	collectGlobMatches,
-	dedupeWorkspaceSymbols,
 	detectLanguageId,
 	fileToUri,
-	filterWorkspaceSymbols,
 	hasGlobPattern,
 	resolveDiagnosticTargets,
 	resolveSymbolColumn,
@@ -1387,52 +1385,87 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	it("filters and deduplicates workspace symbols by query", () => {
-		const rustUri = fileToUri(path.join(os.tmpdir(), "rust.rs"));
-		const loggerUri = fileToUri(path.join(os.tmpdir(), "logger.ts"));
-
-		const symbols: SymbolInformation[] = [
-			{
-				name: "DisallowOverwritingRegularFilesViaOutputRedirection",
-				kind: 12,
-				location: {
-					uri: rustUri,
-					range: {
-						start: { line: 10, character: 2 },
-						end: { line: 10, character: 60 },
-					},
+	it("filters file symbol output by query", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-document-symbol-query-");
+		try {
+			const filePath = path.join(tempDir.path(), "symbols.ts");
+			await Bun.write(filePath, "export const top = 1;\n");
+			const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client = {
+				name: "test-lsp",
+				cwd: tempDir.path(),
+				config: server,
+				proc: {
+					stdin: { write() {}, flush: async () => {} },
+				} as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				messageBuffer: new Uint8Array(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+			} satisfies LspClient;
+			const documentSymbols: DocumentSymbol[] = [
+				{
+					name: "TopMatches",
+					kind: 23,
+					range: { start: { line: 0, character: 0 }, end: { line: 8, character: 1 } },
+					selectionRange: { start: { line: 0, character: 7 }, end: { line: 0, character: 17 } },
+					children: [
+						{
+							name: "push",
+							kind: 6,
+							range: { start: { line: 3, character: 1 }, end: { line: 5, character: 2 } },
+							selectionRange: { start: { line: 3, character: 4 }, end: { line: 3, character: 8 } },
+						},
+					],
 				},
-			},
-			{
-				name: "logger",
-				kind: 13,
-				location: {
-					uri: loggerUri,
-					range: {
-						start: { line: 5, character: 1 },
-						end: { line: 5, character: 7 },
-					},
+				{
+					name: "FuzzyFindOptions",
+					kind: 23,
+					range: { start: { line: 10, character: 0 }, end: { line: 15, character: 1 } },
+					selectionRange: { start: { line: 10, character: 11 }, end: { line: 10, character: 27 } },
 				},
-			},
-			{
-				name: "logger",
-				kind: 13,
-				location: {
-					uri: loggerUri,
-					range: {
-						start: { line: 5, character: 1 },
-						end: { line: 5, character: 7 },
-					},
-				},
-			},
-		];
+			];
+			configCache.set(tempDir.path(), { servers: { "test-lsp": server }, idleTimeoutMs: undefined });
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			vi.spyOn(lspClient, "ensureFileOpen").mockResolvedValue();
+			vi.spyOn(lspClient, "sendRequest").mockResolvedValue(documentSymbols);
 
-		const filtered = filterWorkspaceSymbols(symbols, "logger");
-		const unique = dedupeWorkspaceSymbols(filtered);
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("document-symbol-query", {
+				action: "symbols",
+				file: filePath,
+				query: "topmatches",
+				timeout: 5,
+			});
+			const output = result.content
+				.filter(block => block.type === "text")
+				.map(block => block.text)
+				.join("\n");
 
-		expect(filtered).toHaveLength(2);
-		expect(unique).toHaveLength(1);
-		expect(unique[0]?.name).toBe("logger");
+			expect(output).toContain("Symbols in symbols.ts:");
+			expect(output).toContain('Matching query: "topmatches"');
+			expect(output).toContain("TopMatches");
+			expect(output).toContain("push");
+			expect(output).not.toContain("FuzzyFindOptions");
+
+			const theme = await getThemeByName("dark");
+			const rendered = sanitizeText(
+				renderResult(result, { expanded: false, isPartial: false }, theme!).render(120).join("\n"),
+			);
+			expect(rendered).toContain("in symbols.ts");
+			expect(rendered).not.toContain("Symbols in symbols.ts:");
+		} finally {
+			configCache.delete(tempDir.path());
+			tempDir.removeSync();
+		}
 	});
 
 	it("applies command-only code actions by executing workspace commands", async () => {

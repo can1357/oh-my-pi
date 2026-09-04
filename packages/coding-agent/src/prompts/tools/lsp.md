@@ -6,7 +6,7 @@ Symbol-aware code intelligence from language servers — navigation, refactors, 
 - `code_actions` — lists by default; apply ONE with `apply: true` + `query` (title substring or index).
 - `rename_file` — moves file AND rewrites all imports/references; applies by default.
 - `diagnostics` — path, glob (`src/**/*.ts`), or `file: "*"` for workspace.
-- `symbols` — `file` lists file symbols; `file: "*"` + `query` searches workspace.
+- `symbols` — `file` lists file symbols; `query` filters them. `file: "*"` + `query` searches workspace symbols.
 - `reload` — restart one server (`file`) or all (`*`); `reload *` re-reads LSP config.
 - `request` — raw: `query` = method, `payload` = JSON params (else auto-built).
 </operations>
