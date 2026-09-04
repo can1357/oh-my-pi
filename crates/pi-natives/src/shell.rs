@@ -236,6 +236,18 @@ impl Shell {
 		})
 	}
 
+	/// Deterministically close this shell session.
+	///
+	/// Active execution is aborted, the persistent session is released, and
+	/// future `run` calls are rejected. Repeated calls are safe.
+	#[napi]
+	pub async fn close(&self) -> Result<()> {
+		self.inner
+			.close()
+			.await
+			.map_err(|err| Error::from_reason(err.to_string()))
+	}
+
 	/// Abort all running commands for this shell session.
 	///
 	/// Returns `Ok(())` even when no commands are running.
