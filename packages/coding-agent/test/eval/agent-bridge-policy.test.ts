@@ -725,7 +725,7 @@ describe("agent() through eval runtimes", () => {
 		expect(overlap.maxInFlight()).toBe(4);
 	});
 
-	it("streams the latest enriched agent progress through onStatus before the cell finishes", async () => {
+	it("emits one latest enriched status when the agent settles before wait", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-progress-");
 		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-progress");
 		mockAgents();
@@ -780,7 +780,7 @@ describe("agent() through eval runtimes", () => {
 
 		const events: Array<{ op: string; [key: string]: unknown }> = [];
 		const result = await executeJs(
-			'const handle = await agent("investigate", { label: "Scout" }); await handle.wait();',
+			'const handle = await agent("investigate", { label: "Scout" }); await Bun.sleep(20); await handle.wait();',
 			{
 				cwd: tempDir.path(),
 				sessionId: sharedJsSessionId,

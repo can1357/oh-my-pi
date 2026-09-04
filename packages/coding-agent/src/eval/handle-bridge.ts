@@ -132,11 +132,17 @@ function cancelResolved(resolved: ResolvedHandle, reason?: unknown): boolean {
 	return true;
 }
 
-function emitProgress(resolved: ResolvedHandle, emitStatus: ((event: JsStatusEvent) => void) | undefined): void {
-	if (!emitStatus || !("job" in resolved)) return;
-	const progress = resolved.job.latestDetails?.progress;
+function emitProgress(
+	resolved: ResolvedHandle,
+	emitStatus: ((event: JsStatusEvent) => void) | undefined,
+	previousDetails: AsyncJob["latestDetails"],
+): AsyncJob["latestDetails"] {
+	if (!emitStatus || !("job" in resolved)) return previousDetails;
+	const details = resolved.job.latestDetails;
+	if (!details || details === previousDetails) return previousDetails;
+	const progress = details.progress;
 	const first = Array.isArray(progress) ? progress[0] : undefined;
-	if (!isUnknownRecord(first)) return;
+	if (!isUnknownRecord(first)) return previousDetails;
 	const task = typeof first.assignment === "string" ? first.assignment : first.task;
 	const taskPreview = typeof task === "string" ? task.split("\n")[0]?.slice(0, 120) : undefined;
 	emitStatus({
@@ -145,6 +151,7 @@ function emitProgress(resolved: ResolvedHandle, emitStatus: ((event: JsStatusEve
 		id: resolved.job.agentId ?? resolved.job.id,
 		taskPreview: taskPreview || undefined,
 	});
+	return details;
 }
 
 async function waitForSettlement(
@@ -186,12 +193,18 @@ export async function runEvalWait(
 ): Promise<{ items: EvalHandleSnapshot[] }> {
 	const { items, timeoutMs } = parseRefs(args);
 	const resolved = items.map(item => resolveHandle(item, options));
+	const emittedDetails = new Map<string, AsyncJob["latestDetails"]>();
+	const emitLatestProgress = (handle: ResolvedHandle): void => {
+		if (!("job" in handle)) return;
+		const details = emitProgress(handle, options.emitStatus, emittedDetails.get(handle.ref.id));
+		if (details) emittedDetails.set(handle.ref.id, details);
+	};
 	return await withBridgeTimeoutPause(
 		options.emitStatus,
 		async () => {
-			for (const handle of resolved) emitProgress(handle, options.emitStatus);
+			for (const handle of resolved) emitLatestProgress(handle);
 			const interval = setInterval(() => {
-				for (const handle of resolved) emitProgress(handle, options.emitStatus);
+				for (const handle of resolved) emitLatestProgress(handle);
 			}, 1_000);
 			interval.unref?.();
 			let outcome: "settled" | "timeout" | "aborted";
@@ -200,7 +213,7 @@ export async function runEvalWait(
 			} finally {
 				clearInterval(interval);
 			}
-			for (const handle of resolved) emitProgress(handle, options.emitStatus);
+			for (const handle of resolved) emitLatestProgress(handle);
 			if (outcome === "aborted") {
 				for (const handle of resolved) cancelResolved(handle, options.signal?.reason);
 				await Promise.allSettled(
