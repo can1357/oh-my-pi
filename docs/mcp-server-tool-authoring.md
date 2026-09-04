@@ -156,6 +156,11 @@ lexicographically comparing the original `<server-name>\0<tool-name>` origin
 key. The losing origin is logged and omitted, so reconnect or discovery order
 cannot change ownership.
 
+Before digits were kept, digit-bearing servers minted digit-stripped names
+(`context7` → `mcp__context_query_docs`). User `tools.approval` `deny`/`prompt`
+policies keyed on such a legacy name still apply to the renamed tool
+(fail-closed); legacy `allow` entries are not inherited and must be re-keyed.
+
 ### Schema mapping
 
 `tool-bridge.ts` passes each MCP `inputSchema` through `normalizeSchemaForMCP()` before registering it as a `CustomTool` schema.

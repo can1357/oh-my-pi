@@ -171,6 +171,47 @@ describe("MCP fallback and prompt formatting", () => {
 		expect(resolveApproval(subject, {}, "always-ask")).toMatchObject({ policy: "prompt", tier: "write" });
 	});
 
+	it("honors deny/prompt policies written against a tool's legacy (pre-rename) name", () => {
+		// MCP mints gained digits (context7 → mcp__context7_*); a forgotten
+		// `tools.approval.mcp__context_query_docs: deny` must keep protecting the
+		// renamed tool instead of silently reverting to the mode default.
+		const renamed = { ...tool("mcp__context7_query_docs", "write"), legacyName: "mcp__context_query_docs" };
+		expect(resolveApproval(renamed, {}, "yolo", { mcp__context_query_docs: "deny" })).toMatchObject({
+			policy: "deny",
+			source: "user",
+			policyKey: "mcp__context_query_docs",
+		});
+		expect(resolveApproval(renamed, {}, "yolo", { mcp__context_query_docs: "prompt" }).policy).toBe("prompt");
+	});
+
+	it("does not inherit a legacy-name allow", () => {
+		// Fail-closed: a stale `allow` under the old name must not mask a deny
+		// set under the new name, so legacy keys only carry deny/prompt.
+		const renamed = { ...tool("mcp__context7_query_docs", "write"), legacyName: "mcp__context_query_docs" };
+		expect(resolveApproval(renamed, {}, "always-ask", { mcp__context_query_docs: "allow" }).policy).toBe("prompt");
+		expect(
+			resolveApproval(renamed, {}, "yolo", {
+				mcp__context_query_docs: "allow",
+				mcp__context7_query_docs: "deny",
+			}).policy,
+		).toBe("deny");
+	});
+
+	it("prefers the current-name policy over the legacy one", () => {
+		const renamed = { ...tool("mcp__context7_query_docs", "write"), legacyName: "mcp__context_query_docs" };
+		expect(
+			resolveApproval(renamed, {}, "yolo", {
+				mcp__context_query_docs: "deny",
+				mcp__context7_query_docs: "allow",
+			}),
+		).toMatchObject({ policy: "allow", policyKey: "mcp__context7_query_docs" });
+	});
+
+	it("ignores legacyName for tools whose mint did not change", () => {
+		const unchanged = { ...tool("mcp__puppeteer_screenshot", "write"), legacyName: "mcp__puppeteer_screenshot" };
+		expect(resolveApproval(unchanged, {}, "yolo", { mcp__puppeteer_screenshot: "deny" }).policy).toBe("deny");
+	});
+
 	it("formats MCP origin, reason, and per-tool details", () => {
 		const subject = tool("mcp__server__dangerous", undefined, () => ["Path: /tmp/out", "Content:\nhello"]);
 		expect(formatApprovalPrompt(subject, {}, "Needs confirmation").split("\n")).toEqual([

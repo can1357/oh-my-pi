@@ -414,6 +414,36 @@ function sanitizeMCPToolNamePart(value: string, fallback: string): string {
 }
 
 /**
+ * Mint the name {@link createMCPToolName} produced before digits were kept in
+ * sanitized parts: same algorithm, but `[^a-z_]+` collapses to `_`. Digit-
+ * bearing servers/tools were renamed by that fix, so user config keys written
+ * against the old form (`tools.approval`, `tools.xdevInlineDevices`) no longer
+ * match. Approval resolution consults this legacy key as a fail-closed
+ * fallback. Returns `undefined` when minting is unchanged (no digits involved).
+ */
+export function createLegacyMCPToolName(serverName: string, toolName: string): string | undefined {
+	const sanitizeLegacy = (value: string, fallback: string): string => {
+		const sanitized = value
+			.toLowerCase()
+			.replace(/[^a-z_]+/g, "_")
+			.replace(/_+/g, "_")
+			.replace(/^_+|_+$/g, "");
+		return sanitized.length > 0 ? sanitized : fallback;
+	};
+
+	const legacyServerName = sanitizeLegacy(serverName, "server");
+	const legacyToolName = sanitizeLegacy(toolName, "tool");
+	const prefixWithUnderscore = `${legacyServerName}_`;
+	const normalizedToolName = legacyToolName.startsWith(prefixWithUnderscore)
+		? legacyToolName.slice(prefixWithUnderscore.length)
+		: legacyToolName;
+	const legacyName = capMCPToolNameLength(`mcp__${legacyServerName}_${normalizedToolName}`);
+	const currentName = createMCPToolName(serverName, toolName);
+
+	return legacyName !== currentName ? legacyName : undefined;
+}
+
+/**
  * Longest tool name strict validators accept. OpenAI Responses/Completions and
  * Meta Responses enforce `^[a-zA-Z0-9_-]{1,64}$`; names over 64 chars are
  * rejected with HTTP 400 `name must be at most 64 characters` (#9130).
@@ -535,6 +565,12 @@ export function parseMCPToolName(name: string): { serverName: string; toolName: 
  */
 export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly name: string;
+	/**
+	 * Name this tool had before digits were kept in minted names, if different.
+	 * Approval resolution honors `deny`/`prompt` user policies written against
+	 * this key so the rename cannot silently unblock a restricted MCP server.
+	 */
+	readonly legacyName?: string;
 	readonly label: string;
 	readonly description: string;
 	readonly parameters: TSchema;
@@ -564,6 +600,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly reconnect?: MCPReconnect,
 	) {
 		this.name = createMCPToolName(connection.name, tool.name);
+		this.legacyName = createLegacyMCPToolName(connection.name, tool.name);
 		this.label = `${connection.name}/${tool.name}`;
 		this.description = tool.description ?? `MCP tool from ${connection.name}`;
 		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;

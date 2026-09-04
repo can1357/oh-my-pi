@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import { createMCPJsonRpcError, MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import type { MCPReconnect } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import {
+	createLegacyMCPToolName,
 	createMCPToolName,
 	DeferredMCPTool,
 	deduplicateMCPToolsByName,
@@ -99,6 +100,13 @@ describe("createMCPToolName", () => {
 		expect(createMCPToolName("context7", "query-docs")).toBe("mcp__context7_query_docs");
 		expect(createMCPToolName("s3-storage", "get_object")).toBe("mcp__s3_storage_get_object");
 		expect(createMCPToolName("foo1", "run")).not.toBe(createMCPToolName("foo2", "run"));
+	});
+
+	it("mints the pre-rename legacy name only for digit-bearing servers/tools", () => {
+		expect(createLegacyMCPToolName("context7", "query-docs")).toBe("mcp__context_query_docs");
+		expect(createLegacyMCPToolName("s3-storage", "get_object")).toBe("mcp__s_storage_get_object");
+		expect(createLegacyMCPToolName("puppeteer", "puppeteer_screenshot")).toBeUndefined();
+		expect(createLegacyMCPToolName("plain", "tool")).toBeUndefined();
 	});
 
 	it("is deterministic and keeps distinct overlong names distinct", () => {
