@@ -1548,7 +1548,7 @@ describe("runEvalAgent isolation", () => {
 		});
 
 		const session = isolatedSession({ "task.isolation.allowNested": true }, true);
-		const result = await runEvalAgent({ prompt: "x", isolated: true }, { session });
+		const result = await runEvalAgentAndWait({ prompt: "x", isolated: true }, { session });
 
 		expect(isolatedSpy).toHaveBeenCalledTimes(1);
 		expect(result.text).toContain("nested-isolated-run");
