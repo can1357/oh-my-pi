@@ -266,7 +266,11 @@ async fn run_inner(args: AcpArgs) -> miette::Result<()> {
 	} else if args.continue_session {
 		HeadlessSessionOpen::ContinueLatest
 	} else if let Some(source) = args.fork.clone() {
-		HeadlessSessionOpen::Fork(source)
+		if args.fork_moved {
+			HeadlessSessionOpen::ForkMoved(source)
+		} else {
+			HeadlessSessionOpen::Fork(source)
+		}
 	} else if let Some(source) = args.resume.clone() {
 		HeadlessSessionOpen::Resume(source)
 	} else {

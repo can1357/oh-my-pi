@@ -392,6 +392,9 @@ pub enum HeadlessSessionOpen {
 	Resume(Str),
 	/// Fork one exact durable session into a new identity.
 	Fork(Str),
+	/// Fork one exact durable session that belongs to another project root
+	/// into a new identity filed under this root.
+	ForkMoved(Str),
 	/// Resume the newest indexed interactive session for the project.
 	ContinueLatest,
 	/// Create process-lifetime state removed when the headless owner drops.
@@ -837,6 +840,7 @@ impl HeadlessSession {
 			HeadlessSessionOpen::New => chat::SessionOpen::New,
 			HeadlessSessionOpen::Resume(source) => chat::SessionOpen::Resume(source),
 			HeadlessSessionOpen::Fork(source) => chat::SessionOpen::Fork(source),
+			HeadlessSessionOpen::ForkMoved(source) => chat::SessionOpen::ForkMoved(source),
 			HeadlessSessionOpen::ContinueLatest => chat::SessionOpen::Resume(
 				continue_latest
 					.as_ref()
@@ -869,6 +873,7 @@ impl HeadlessSession {
 			policy.session,
 			HeadlessSessionOpen::Resume(_)
 				| HeadlessSessionOpen::Fork(_)
+				| HeadlessSessionOpen::ForkMoved(_)
 				| HeadlessSessionOpen::ContinueLatest
 		) {
 			let journal_path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));

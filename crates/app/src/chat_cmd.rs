@@ -1570,7 +1570,11 @@ pub(crate) async fn run(
 	let session_open = if args.no_session {
 		SessionOpen::Ephemeral
 	} else if let Some(source) = fork.as_ref() {
-		SessionOpen::Fork(source)
+		if args.fork_moved {
+			SessionOpen::ForkMoved(source)
+		} else {
+			SessionOpen::Fork(source)
+		}
 	} else if let Some(source) = resume.as_ref() {
 		if resume_moved {
 			SessionOpen::ResumeMoved(source)

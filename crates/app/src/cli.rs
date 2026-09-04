@@ -1855,6 +1855,10 @@ pub struct ChatArgs {
 	/// Fork an existing session before opening the chat.
 	#[arg(long, value_name = "SESSION", conflicts_with_all = ["resume", "continue_session", "no_session"])]
 	pub fork:                Option<Str>,
+	/// With `--fork`, accept a source session that belongs to another project;
+	/// the fork is filed under this project root, as for a git worktree.
+	#[arg(long = "fork-moved", requires = "fork")]
+	pub fork_moved:          bool,
 	/// Import a Claude Code session interactively before opening the chat.
 	#[arg(long = "from-claude", conflicts_with_all = ["from_codex", "resume", "continue_session", "fork", "no_session"])]
 	pub from_claude:         bool,
@@ -2000,6 +2004,7 @@ impl ChatArgs {
 			resume:              None,
 			continue_session:    false,
 			fork:                None,
+			fork_moved:          false,
 			from_claude:         false,
 			from_codex:          false,
 			no_session:          false,

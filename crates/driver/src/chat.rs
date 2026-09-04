@@ -502,6 +502,9 @@ pub enum SessionOpen<'a> {
 	ResumeMoved(&'a Str),
 	/// Fork an existing session.
 	Fork(&'a Str),
+	/// Fork an existing session into this project root even though the
+	/// source belongs to another, such as a git worktree created for the fork.
+	ForkMoved(&'a Str),
 	/// Create a process-lifetime ephemeral session.
 	Ephemeral,
 }
@@ -7375,14 +7378,16 @@ pub fn open_session(
 		SessionOpen::Resume(_) => "resume",
 		SessionOpen::ResumeMoved(_) => "resume_moved",
 		SessionOpen::Fork(_) => "fork",
+		SessionOpen::ForkMoved(_) => "fork_moved",
 		SessionOpen::Ephemeral => "ephemeral",
 	};
 	let span = tracing::Span::current();
 	span.record("operation", operation);
 	let source = match open {
-		SessionOpen::Resume(id) | SessionOpen::ResumeMoved(id) | SessionOpen::Fork(id) => {
-			Some(strict_session_id(id)?)
-		},
+		SessionOpen::Resume(id)
+		| SessionOpen::ResumeMoved(id)
+		| SessionOpen::Fork(id)
+		| SessionOpen::ForkMoved(id) => Some(strict_session_id(id)?),
 		SessionOpen::New | SessionOpen::Ephemeral => None,
 	};
 	let id = if matches!(open, SessionOpen::Resume(_) | SessionOpen::ResumeMoved(_)) {
@@ -7418,7 +7423,7 @@ pub fn open_session(
 			}
 			journal
 		},
-		SessionOpen::Fork(_) => {
+		SessionOpen::Fork(_) | SessionOpen::ForkMoved(_) => {
 			let source_id = source.as_ref().expect("fork has a validated source");
 			let source_path = sessions_dir.join(format!("{}.jsonl", source_id.as_str()));
 			validate_session_file(&source_path).map_err(|source_error| {
@@ -7429,7 +7434,15 @@ pub fn open_session(
 				}
 			})?;
 			let index = session_index.ok_or(ChatError::MissingSessionIndex)?;
-			create_indexed_fork(&source_path, &path, root, &id, source_id, index)?
+			create_indexed_fork(
+				&source_path,
+				&path,
+				root,
+				&id,
+				source_id,
+				index,
+				matches!(open, SessionOpen::ForkMoved(_)),
+			)?
 		},
 		SessionOpen::New => create_indexed_journal(
 			&path,
@@ -7567,6 +7580,7 @@ fn create_indexed_fork(
 	child_id: &Str,
 	source_id: &Str,
 	session_index: Arc<SessionIndex>,
+	allow_moved: bool,
 ) -> Result<Journal, ChatError> {
 	let source = Journal::open(source_path)?;
 	let source_view = source.load()?;
@@ -7575,7 +7589,7 @@ fn create_indexed_fork(
 	}
 	let recorded_root = source_view.header().cwd.clone();
 	drop(source_view);
-	if source.workspace_roots(&recorded_root)?.primary() != root {
+	if !allow_moved && source.workspace_roots(&recorded_root)?.primary() != root {
 		return Err(ChatError::SessionProjectMismatch { session: source_id.clone() });
 	}
 	let session_id = SessionId(child_id.clone());
