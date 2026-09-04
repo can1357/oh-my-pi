@@ -149,7 +149,7 @@ import type { CompactOptions, ContextUsage } from "../extensibility/extensions/t
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
-import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
+import { normalizeToolEventInputForTool, resolveToolEventInput } from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -549,12 +549,19 @@ export class AgentSession {
 		return this.#preparedExtensions;
 	}
 
-	/** Source paths of the parent's loaded extensions; forwarded to `/tan` forks as the prepared-extension fallback. */
+	/** Source paths of the parent's loaded extensions; forwarded to /tan forks as the prepared-extension fallback. */
 	readonly #extensionPaths: readonly string[] | undefined;
 
 	/** Source paths of loaded extensions, forwarded to child sessions when prepared factories are unavailable. */
 	get extensionPaths(): readonly string[] | undefined {
 		return this.#extensionPaths;
+	}
+
+	/** Paths supplied through --trusted-extension, forwarded only to restricted children. */
+	readonly #trustedExtensionPaths: readonly string[] | undefined;
+
+	get trustedExtensionPaths(): readonly string[] | undefined {
+		return this.#trustedExtensionPaths;
 	}
 
 	#powerAssertion: PowerAssertion | undefined;
@@ -1163,6 +1170,7 @@ export class AgentSession {
 			}));
 		this.#preparedExtensions = config.preparedExtensions;
 		this.#extensionPaths = config.extensionPaths;
+		this.#trustedExtensionPaths = config.trustedExtensionPaths;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
@@ -3883,7 +3891,11 @@ export class AgentSession {
 				type: "tool_call",
 				toolName: ctx.tool.name,
 				toolCallId: ctx.toolCall.id,
-				input: normalizeToolEventInput(ctx.tool.name, resolveToolEventInput(ctx.tool, eventArgs)),
+				input: normalizeToolEventInputForTool(
+					ctx.tool,
+					resolveToolEventInput(ctx.tool, eventArgs),
+					this.sessionManager.getCwd(),
+				),
 			},
 			signal,
 		);

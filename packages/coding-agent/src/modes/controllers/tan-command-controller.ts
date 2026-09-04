@@ -167,6 +167,12 @@ export class TanCommandController {
 								? parentPreparedExtensions
 								: undefined,
 							preloadedExtensionPaths: parentExtensionPaths?.length ? [...parentExtensionPaths] : undefined,
+							// The parent's resolved trusted list is what "trusted" means for
+							// the whole session tree. A `--trusted-extension` launch carries
+							// it nowhere else (no setting to fall back on), so without this
+							// forward every restricted subagent the tan spawns binds no
+							// policy — same forward structured-subagent.ts makes.
+							trustedExtensionPaths: session.trustedExtensionPaths,
 							extensionRoots: () => parentExtensionRoots,
 							localProtocolOptions,
 						});

@@ -63,7 +63,8 @@ After plugin extension entries, configured paths are appended and resolved.
 Configured path sources in the main session startup path (`sdk.ts`):
 
 1. CLI-provided paths (`--extension/-e`, and `--hook` is also treated as an extension path)
-2. Merged settings `extensions` array
+2. Trusted paths — `--trusted-extension`, or the `trustedExtensions` setting (see [Trusted extensions](#trusted-extensions))
+3. Merged settings `extensions` array
 
 Settings files:
 
@@ -115,6 +116,10 @@ it is not a whole-process capability-isolation switch. Skills, MCP servers,
 tools, prompts, and rules owned by other discovery subsystems retain their own
 enable/disable controls.
 
+Trusted paths are the exception: `--trusted-extension` and the
+`trustedExtensions` setting both keep loading under `--no-extensions`. See
+[Trusted extensions](#trusted-extensions).
+
 ### Disable specific extension modules
 
 `disabledExtensions` setting filters by extension id format:
@@ -150,6 +155,92 @@ disabledExtensions:
 The id carries no directory and no depth, so a `project` entry disables files of
 that name at every depth the discovery walk reaches. See
 [Context files](./context-files.md#disabling-a-single-context-file).
+
+---
+
+## Trusted extensions
+
+A trusted extension keeps running where ordinary extensions are cut off: inside
+restricted subagents (`task` children with a tool allowlist), which otherwise
+load no extension at all. This is the mechanism for mandatory policy — a gate a
+subagent cannot switch off.
+
+| Form | Discovery | Lifetime |
+| --- | --- | --- |
+| `--trusted-extension <abs-path>` (repeatable) | disabled; the listed paths are the entire extension set | that launch |
+| `trustedExtensions: [...]` in the user `config.yml` | normal merged discovery, plus these paths | every session started from that config |
+
+The flag wins. When both are present the setting is ignored for that launch, so
+a narrowed launch is always available.
+
+### Scope: user-level only
+
+The setting is read from the user-level layers alone — the active agent
+directory's `config.yml`, a `--config` overlay, and runtime overrides. A
+project settings file cannot set it. Entries in one (`<cwd>/.omp/config.yml`,
+`<cwd>/.omp/settings.json`, `.claude/settings.json`, or any other project-level
+provider) are dropped as that file loads, and the log records one warning
+naming the file and the dropped entries.
+
+Without that rule, checking out a repository would nominate a module that binds
+in every restricted subagent and that the policy it enforces cannot switch off.
+The ordinary `extensions` setting stays project-settable, because those modules
+load only in the top-level session, where a trusted handler still sees their
+tool calls.
+
+### Settings form
+
+Entries are normalized like configured `extensions` paths (tilde expansion,
+cwd-relative resolution, `local://` rejected), then required to be an existing
+file. They are added to the session's configured path list, so at top level the
+module loads through ordinary discovery and receives the full extension API —
+tools, commands, providers, everything a normal extension can register.
+
+`--no-extensions` does not drop them. A policy module the operator configured
+must survive a narrowed launch, so the settings form never turns discovery off
+and never removes itself from the load list.
+
+Name the same path discovery would find. A configured path and an
+auto-discovered path that differ only by a symlink hop are two entries to the
+de-duplicator, and the module then binds twice — the same caveat that applies to
+the ordinary `extensions` setting.
+
+### Restricted children
+
+A restricted child session receives only `trustedExtensionPaths` (never the
+parent's `Extension` instances, prepared factories, or ordinary paths) and
+rebinds each module from source through `loadTrustedExtensionHandlers`. Those
+factories run against a handler-only API: `api.on(...)` subscribes as usual and
+every registration call is a no-op, so a trusted module can observe and block
+tool calls in the child without widening its tool, command, or provider
+surface. Each child runs the factory itself, so policy state is per session.
+
+Two groups of members stay live, because they grant nothing and a handler needs
+them: `api.logger`, and the schema builders `api.typebox`, `api.arktype`,
+`api.zod`. A policy module that reports its own failure through `api.logger`
+would otherwise throw inside its own catch block. A handler throw is reported
+as `{ block: true }`, so the module's fail-open path would block every tool
+call instead.
+
+A forwarded list wins, and a restricted session created without one still
+resolves the `trustedExtensions` setting itself. "Restricted" is not
+"trusts nothing": a cold-revived parked subagent, a security scan, an agentic
+commit, and a compression pass are all created restricted with no forwarded
+list, and each must bind the operator's policy. A `--trusted-extension` launch
+has no setting to fall back on, so every session that forks or spawns from it
+forwards the resolved list explicitly.
+
+### Fail closed
+
+Ordinary extension load errors stay non-fatal notifications. Trusted paths do
+not: startup aborts when a trusted path is missing, is not a file, uses the
+`local://` scheme, fails to import, or its factory throws. The error names the
+path and the recovery — `Fix or remove the --trusted-extension path and
+restart.` for the flag, `Fix or remove the trustedExtensions setting entry and
+restart.` for the setting.
+
+A trusted module that quietly failed to load would leave the session running
+with its policy absent, which is worse than a session that refuses to start.
 
 ---
 

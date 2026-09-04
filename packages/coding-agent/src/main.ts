@@ -55,7 +55,11 @@ import {
 } from "./discovery/helpers";
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
-import { loadExtensions } from "./extensibility/extensions/loader";
+import {
+	loadExtensions,
+	resolveTrustedExtensionPath,
+	TRUSTED_EXTENSION_RECOVERY,
+} from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
@@ -85,6 +89,7 @@ import {
 	createAgentSession,
 	discoverAuthStorage,
 	loadSessionExtensions,
+	resolveConfiguredTrustedExtensionPaths,
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
 import { describeAuthBrokerStartupError } from "./session/auth-broker-config";
@@ -384,23 +389,19 @@ export interface AcpSessionFactoryOptions {
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
 
+/**
+ * Re-check and load the `--trusted-extension` allowlist for one ACP session.
+ * The paths were already proven at startup; an ACP host opens a session per
+ * workspace long after that, so the file must still be there now.
+ */
 async function loadTrustedSessionExtensions(
 	options: Pick<CreateAgentSessionOptions, "additionalExtensionPaths">,
 	cwd: string,
 	eventBus: EventBus,
 ) {
-	const paths = options.additionalExtensionPaths ?? [];
-	for (const trustedPath of paths) {
-		let stat: fsSync.Stats;
-		try {
-			stat = fsSync.statSync(trustedPath);
-		} catch {
-			throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
-		}
-		if (!stat.isFile()) {
-			throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
-		}
-	}
+	const paths = (options.additionalExtensionPaths ?? []).map(trustedPath =>
+		resolveTrustedExtensionPath(trustedPath, cwd, "cli"),
+	);
 	return loadExtensions(paths, cwd, eventBus);
 }
 
@@ -433,7 +434,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				: undefined;
 		if (trustedExtensions && trustedExtensions.errors.length > 0) {
 			throw new Error(
-				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
+				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}. ${TRUSTED_EXTENSION_RECOVERY.cli}`,
 			);
 		}
 		const { session: nextSession, setToolUIContext } = await args.createSession({
@@ -1351,29 +1352,31 @@ export async function buildSessionOptions(
 		options.rules = [];
 	}
 
-	// Trusted extension paths are an exact allowlist for extension modules.
+	// `--trusted-extension` is an exact allowlist: discovery off, and every
+	// loaded module is trusted. The `trustedExtensions` setting is the
+	// persistent form and loads inside normal merged discovery instead. The flag
+	// wins when both are present, so a launch can always narrow the surface.
+	const trustedCwd = options.cwd ?? getProjectDir();
 	if (parsed.trustedExtensions && parsed.trustedExtensions.length > 0) {
-		const trustedPaths = parsed.trustedExtensions.map(trustedPath => {
-			let resolvedPath: string;
-			let stat: fsSync.Stats;
-			try {
-				resolvedPath = fsSync.realpathSync.native(trustedPath);
-				stat = fsSync.statSync(resolvedPath);
-			} catch {
-				throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
-			}
-			if (!stat.isFile()) {
-				throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
-			}
-			return resolvedPath;
-		});
+		const trustedPaths = parsed.trustedExtensions.map(trustedPath =>
+			resolveTrustedExtensionPath(trustedPath, trustedCwd, "cli"),
+		);
 		options.disableExtensionDiscovery = true;
 		options.additionalExtensionPaths = trustedPaths;
+		options.trustedExtensionPaths = trustedPaths;
 	} else {
-		// Additional extension paths from CLI
+		// Configured trusted modules load through discovery like any other
+		// extension AND are marked trusted, so restricted subagents rebind their
+		// handlers. `--no-extensions` does not drop them: a mandatory policy
+		// module the operator configured must survive a narrowed launch.
+		const configuredTrustedPaths = resolveConfiguredTrustedExtensionPaths(activeSettings, trustedCwd);
 		const cliExtensionPaths = [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
-		if (cliExtensionPaths.length > 0) {
-			options.additionalExtensionPaths = cliExtensionPaths;
+		const additionalPaths = [...new Set([...cliExtensionPaths, ...configuredTrustedPaths])];
+		if (additionalPaths.length > 0) {
+			options.additionalExtensionPaths = additionalPaths;
+		}
+		if (configuredTrustedPaths.length > 0) {
+			options.trustedExtensionPaths = configuredTrustedPaths;
 		}
 
 		if (parsed.noExtensions) {
@@ -1903,10 +1906,23 @@ export async function runRootCommand(
 			};
 			const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
 			normalizeContinueSessionArgs(initialArgs, rawArgs);
-			if ((parsedArgs.trustedExtensions?.length ?? 0) > 0 && extensionsResult.errors.length > 0) {
-				throw new Error(
-					`Trusted extension failed to load: ${extensionsResult.errors.map(item => item.error).join("; ")}`,
-				);
+			// Flag mode: every loaded module is trusted, so any error is fatal.
+			// Settings mode: only the configured trusted paths are fatal; ordinary
+			// extension failures stay warnings below.
+			if (parsedArgs.trustedExtensions?.length) {
+				if (extensionsResult.errors.length > 0) {
+					throw new Error(
+						`Trusted extension failed to load: ${extensionsResult.errors.map(item => item.error).join("; ")}. ${TRUSTED_EXTENSION_RECOVERY.cli}`,
+					);
+				}
+			} else if (sessionOptions.trustedExtensionPaths?.length) {
+				const trusted = new Set(sessionOptions.trustedExtensionPaths);
+				const failures = extensionsResult.errors.filter(item => trusted.has(item.path));
+				if (failures.length > 0) {
+					throw new Error(
+						`Trusted extension failed to load: ${failures.map(item => `${item.path}: ${item.error}`).join("; ")}. ${TRUSTED_EXTENSION_RECOVERY.settings}`,
+					);
+				}
 			}
 			for (const message of formatExtensionLoadNotifications(extensionsResult.errors)) {
 				if (isInteractive) {

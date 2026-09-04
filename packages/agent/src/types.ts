@@ -849,6 +849,12 @@ export interface AgentTool<
 	matcherPaths?: (args: unknown) => readonly string[] | undefined;
 
 	/**
+	 * Surface mutation targets parsed from a (possibly partial) call. Unlike
+	 * matcherPaths, this includes both sides of file moves and renames.
+	 */
+	mutationPaths?: (args: Partial<Static<TParameters>>) => readonly string[] | undefined;
+
+	/**
 	 * Per-file projection of a (potentially partial) streamed call, pairing each
 	 * touched file path with the digest of only the lines added to that file.
 	 * Path-scoped stream matchers (TTSR) evaluate each entry in isolation, so a

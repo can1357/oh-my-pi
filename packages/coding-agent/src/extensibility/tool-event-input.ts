@@ -1,34 +1,47 @@
+import { type } from "@oh-my-pi/omptype";
 import { HL_FILE_PREFIX, HL_FILE_SUFFIX } from "../tools/hashline-format";
+import { normalizeMutationPaths } from "../tools/path-utils";
 
 const LEGACY_HASHLINE_FILE_PREFIX = "¶";
 const HASHLINE_FILE_TAG_RE = /#[0-9a-fA-F]{4}$/u;
+const nonEmptyString = type("string > 0");
 
+/**
+ * A tool call's arguments as extensions and hooks observe them: the tool's own
+ * fields plus the path projection this module derives. Field values come from
+ * the model, so nothing here is trusted until a boundary parses it — the
+ * omptype guards below and each tool's own schema are those boundaries.
+ */
+export interface ToolEventInput extends Record<string, unknown> {}
+
+/** The tool surface this module reads: its name, its edit-payload resolver, and its mutation-target parser. */
 interface ToolEventInputResolver {
 	name: string;
 	resolveEventInput?: (input: string) => string;
+	/** A method, not a property, so a tool can declare its own parameter type. */
+	mutationPaths?(args: ToolEventInput): readonly string[] | undefined;
 }
 
+/** Tools whose calls write files, and therefore carry `plannedMutationPaths`. */
+const MUTATING_TOOL_NAMES = { ast_edit: true, edit: true, lsp: true, write: true } satisfies Record<string, true>;
+
 /** Resolves mode-specific textual tool input before extension/hook event normalization. */
-export function resolveToolEventInput(
-	tool: ToolEventInputResolver,
-	input: Record<string, unknown>,
-): Record<string, unknown> {
-	if (tool.name !== "edit" || typeof tool.resolveEventInput !== "function") return input;
+export function resolveToolEventInput(tool: ToolEventInputResolver, input: ToolEventInput): ToolEventInput {
+	if (tool.name !== "edit" || tool.resolveEventInput === undefined) return input;
 	let resolved = input;
 	for (const key of ["input", "_input"] as const) {
 		const value = stringField(resolved, key);
 		if (value === undefined) continue;
 		const nextValue = tool.resolveEventInput(value);
 		if (nextValue === value) continue;
-		if (resolved === input) resolved = { ...input };
-		resolved[key] = nextValue;
+		resolved = Object.assign({}, resolved, { [key]: nextValue });
 	}
 	return resolved;
 }
 
-function stringField(input: Record<string, unknown>, key: string): string | undefined {
-	const value = input[key];
-	return typeof value === "string" && value.length > 0 ? value : undefined;
+function stringField(input: ToolEventInput, key: string): string | undefined {
+	const value = nonEmptyString(Object.getOwnPropertyDescriptor(input, key)?.value);
+	return value instanceof type.errors ? undefined : value;
 }
 
 function normalizeHashlineHeaderPath(body: string): string | undefined {
@@ -67,8 +80,8 @@ function extractHashlinePaths(input: string): string[] {
 }
 
 /** Adds derived compatibility fields to tool event input without changing tool execution parameters. */
-export function normalizeToolEventInput(toolName: string, input: Record<string, unknown>): Record<string, unknown> {
-	if (toolName !== "edit" || stringField(input, "path")) return input;
+export function normalizeToolEventInput(toolName: string, input: ToolEventInput): ToolEventInput {
+	if (toolName !== "edit" || stringField(input, "path") !== undefined) return input;
 
 	// Hashline edit mode: the only authoritative target list is the parsed
 	// `[PATH#TAG]` (or legacy `¶PATH#TAG`) headers inside the patch.
@@ -78,14 +91,44 @@ export function normalizeToolEventInput(toolName: string, input: Record<string, 
 	if (rawInput !== undefined) {
 		const hashlinePaths = extractHashlinePaths(rawInput);
 		if (hashlinePaths.length === 0) return input;
-		if (hashlinePaths.length === 1) return { ...input, path: hashlinePaths[0], paths: hashlinePaths };
-		return { ...input, paths: hashlinePaths };
+		return hashlinePaths.length === 1
+			? Object.assign({}, input, { path: hashlinePaths[0], paths: hashlinePaths })
+			: Object.assign({}, input, { paths: hashlinePaths });
 	}
 
 	// Replace/patch modes: `path` is the real parameter; some hosts forward
 	// it as `_path` after schema normalization, so propagate it for gates.
 	const directPath = stringField(input, "_path");
-	if (directPath) return { ...input, path: directPath };
+	return directPath === undefined ? input : Object.assign({}, input, { path: directPath });
+}
 
-	return input;
+/** The tool's own parsed targets, or `undefined` when its parser could not name them. */
+function parsedMutationPaths(tool: ToolEventInputResolver, input: ToolEventInput): readonly string[] {
+	try {
+		return tool.mutationPaths?.(input) ?? [];
+	} catch {
+		// A payload the parser rejects names no target; `[]` reports absence below.
+		return [];
+	}
+}
+
+/**
+ * Add the parser-derived mutation-target contract to an extension event input.
+ *
+ * `plannedMutationPaths` is attached only when the tool named at least one
+ * filesystem target. An empty list would assert that the call writes nothing,
+ * and every empty case here means the opposite — the parser could not tell
+ * (device URL, unparsable payload, whole-tree scope), so a gate must keep
+ * using its own bookkeeping.
+ */
+export function normalizeToolEventInputForTool(
+	tool: ToolEventInputResolver,
+	input: ToolEventInput,
+	cwd: string,
+): ToolEventInput {
+	const normalized = normalizeToolEventInput(tool.name, input);
+	if (!Object.hasOwn(MUTATING_TOOL_NAMES, tool.name)) return normalized;
+	const planned = normalizeMutationPaths(parsedMutationPaths(tool, normalized), cwd);
+	if (planned.length === 0) return normalized;
+	return Object.assign({}, normalized, { plannedMutationPaths: planned });
 }

@@ -502,6 +502,12 @@ export interface ExecutorOptions {
 	/** Parent-imported extension factories rebound to the child runtime. */
 	preloadedPreparedExtensions?: readonly PreparedExtension[];
 	/**
+	 * Parent's trusted extension source paths. A restricted child rebinds these
+	 * modules' event handlers even though it takes no ordinary extension, so
+	 * mandatory policy still runs inside the narrowed session.
+	 */
+	trustedExtensionPaths?: readonly string[];
+	/**
 	 * Parent's discovered custom-tool source paths. Forwarded to skip the
 	 * `.omp/tools/` FS scan in the subagent; the subagent then re-binds each
 	 * tool against its own `CustomToolAPI` (cwd, exec, pushPendingAction, UI).
@@ -3355,6 +3361,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,
 				extensionRoots: options.extensionRoots,
+				// A restricted child takes no ordinary extension, so the trusted list
+				// is the only path by which mandatory policy reaches it. An
+				// unrestricted child already rebinds the parent's full extension set.
+				trustedExtensionPaths: restrictToolNames ? options.trustedExtensionPaths : undefined,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedPreparedExtensions: restrictToolNames ? [] : options.preloadedPreparedExtensions,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,

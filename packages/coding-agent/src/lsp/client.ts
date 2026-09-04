@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
-import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
+import { applyWorkspaceEdit, type ExecutedWorkspaceChange, type WorkspaceEditResult } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
 import type {
@@ -595,15 +595,15 @@ async function reconcileExecutedChanges(
  * when the edit fails partway the already-executed prefix is still reconciled before the
  * error propagates so mutated files never keep stale overlays.
  */
-export async function applyWorkspaceEditWithLsp(
+export async function applyWorkspaceEditWithLspResult(
 	edit: WorkspaceEdit,
 	cwd: string,
 	signal?: AbortSignal,
-): Promise<string[]> {
+): Promise<WorkspaceEditResult> {
 	const executed: ExecutedWorkspaceChange[] = [];
-	let applied: string[];
+	let result: WorkspaceEditResult;
 	try {
-		({ applied } = await applyWorkspaceEdit(edit, cwd, change => executed.push(change)));
+		result = await applyWorkspaceEdit(edit, cwd, change => executed.push(change));
 	} catch (err) {
 		// Best-effort: overlays for the mutated prefix must not stay stale, but
 		// reconciliation problems must not mask the original apply failure.
@@ -617,7 +617,15 @@ export async function applyWorkspaceEditWithLsp(
 		throw err;
 	}
 	await reconcileExecutedChanges(executed, cwd, signal);
-	return applied;
+	return result;
+}
+
+export async function applyWorkspaceEditWithLsp(
+	edit: WorkspaceEdit,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<string[]> {
+	return (await applyWorkspaceEditWithLspResult(edit, cwd, signal)).applied;
 }
 
 interface DynamicCapabilityRegistration {

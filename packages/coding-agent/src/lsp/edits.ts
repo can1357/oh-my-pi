@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { formatPathRelativeToCwd } from "../tools/path-utils";
+import { formatPathRelativeToCwd, normalizeMutationPaths } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 import type {
 	CreateFile,
@@ -289,6 +289,38 @@ function planDocumentChanges(documentChanges: NonNullable<WorkspaceEdit["documen
 	return ops;
 }
 
+function mutationPathsForWorkspaceOps(ops: readonly WorkspaceEditOp[], cwd: string): string[] {
+	const paths: string[] = [];
+	for (const op of ops) {
+		if (op.kind === "rename") paths.push(uriToFile(op.oldUri), uriToFile(op.newUri));
+		else if (op.kind === "text") {
+			if (op.edits.length > 0) paths.push(uriToFile(op.uri));
+		} else paths.push(uriToFile(op.uri));
+	}
+	return normalizeMutationPaths(paths, cwd);
+}
+
+function mutationPathsForExecutedChanges(changes: readonly ExecutedWorkspaceChange[], cwd: string): string[] {
+	const paths: string[] = [];
+	for (const change of changes) {
+		if (change.kind === "rename") paths.push(uriToFile(change.oldUri), uriToFile(change.newUri));
+		else paths.push(uriToFile(change.uri));
+	}
+	return normalizeMutationPaths(paths, cwd);
+}
+
+/** Return the normalized filesystem targets declared by a workspace edit without applying it. */
+export function plannedWorkspaceEditPaths(edit: WorkspaceEdit, cwd: string): string[] {
+	if (edit.documentChanges) return mutationPathsForWorkspaceOps(planDocumentChanges(edit.documentChanges), cwd);
+	if (!edit.changes) return [];
+	return normalizeMutationPaths(
+		Object.entries(edit.changes)
+			.filter(([, textEdits]) => textEdits.length > 0)
+			.map(([uri]) => uriToFile(uri)),
+		cwd,
+	);
+}
+
 /** One filesystem mutation actually performed by {@link applyWorkspaceEdit}. */
 export type ExecutedWorkspaceChange =
 	| { kind: "edit"; uri: string }
@@ -301,6 +333,10 @@ export interface WorkspaceEditResult {
 	applied: string[];
 	/** Ops that mutated the filesystem — skipped `ignoreIfExists`/`ignoreIfNotExists` ops are excluded. */
 	executed: ExecutedWorkspaceChange[];
+	/** Absolute normalized targets declared by the workspace-edit parser. */
+	plannedMutationPaths: string[];
+	/** Absolute normalized targets whose operations actually ran. */
+	changedPaths: string[];
 }
 
 /**
@@ -320,6 +356,7 @@ export async function applyWorkspaceEdit(
 ): Promise<WorkspaceEditResult> {
 	const applied: string[] = [];
 	const executed: ExecutedWorkspaceChange[] = [];
+	let plannedMutationPaths: string[] = [];
 	const record = (change: ExecutedWorkspaceChange) => {
 		executed.push(change);
 		onExecuted?.(change);
@@ -327,6 +364,7 @@ export async function applyWorkspaceEdit(
 
 	if (edit.documentChanges) {
 		const ops = planDocumentChanges(edit.documentChanges);
+		plannedMutationPaths = mutationPathsForWorkspaceOps(ops, cwd);
 		for (const op of ops) {
 			if (op.kind === "text") sortAndValidateTextEdits(op.edits);
 		}
@@ -435,6 +473,12 @@ export async function applyWorkspaceEdit(
 	} else if (edit.changes) {
 		// Legacy changes-map path: validate every file's edits before writing any.
 		const changes = edit.changes;
+		plannedMutationPaths = normalizeMutationPaths(
+			Object.entries(changes)
+				.filter(([, textEdits]) => textEdits.length > 0)
+				.map(([uri]) => uriToFile(uri)),
+			cwd,
+		);
 		for (const uri in changes) {
 			sortAndValidateTextEdits(changes[uri]);
 		}
@@ -448,5 +492,5 @@ export async function applyWorkspaceEdit(
 		}
 	}
 
-	return { applied, executed };
+	return { applied, executed, plannedMutationPaths, changedPaths: mutationPathsForExecutedChanges(executed, cwd) };
 }

@@ -68,6 +68,10 @@ export class HookRunner {
 		this.#hasUI = false;
 	}
 
+	getCwd(): string {
+		return this.cwd;
+	}
+
 	/**
 	 * Initialize HookRunner with all required context.
 	 * Modes call this once the agent session is fully set up.

@@ -21,7 +21,7 @@ import {
 } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
-import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
+import { normalizeToolEventInputForTool, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
 import type { RegisteredTool, ToolCallEventResult } from "./types";
@@ -215,9 +215,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						type: "tool_call",
 						toolName: this.tool.name,
 						toolCallId,
-						input: normalizeToolEventInput(
-							this.tool.name,
+						input: normalizeToolEventInputForTool(
+							this.tool,
 							resolveToolEventInput(this.tool, toolEventArgs(params, context)),
+							this.runner.cwd,
 						),
 					},
 					signal,
@@ -374,9 +375,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				type: "tool_result",
 				toolName: this.tool.name,
 				toolCallId,
-				input: normalizeToolEventInput(
-					this.tool.name,
+				input: normalizeToolEventInputForTool(
+					this.tool,
 					resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
+					this.runner.cwd,
 				),
 				content: result.content,
 				details: result.details,

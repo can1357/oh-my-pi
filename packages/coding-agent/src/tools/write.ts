@@ -35,6 +35,7 @@ import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" w
 import type { ToolSession } from "../sdk";
 import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
+import { normalizeMutationPaths } from "./path-utils";
 import { routeWriteThroughBridge } from "./acp-bridge";
 import { resolveToolTier, truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
@@ -308,6 +309,8 @@ const writeSchema = type({
 	content: type("string").describe("file content"),
 });
 
+const writeMutationSchema = type({ "path?": "string" });
+
 export type WriteToolInput = typeof writeSchema.infer;
 
 /** Details returned by the write tool for TUI rendering */
@@ -321,6 +324,29 @@ export interface WriteToolDetails {
 	resolvedPath?: string;
 	/** Set when the write dispatched an `xd://` tool device; drives renderer delegation. */
 	xdev?: XdevDispatch;
+	/** Absolute normalized targets this write changed. Absent when the branch cannot name them. */
+	changedPaths?: string[];
+}
+
+/** A device dispatch's inner tool result, which reports its own changed targets. */
+const deviceMutationReport = type({ "changedPaths?": "string[]" });
+
+/** A resolve/reject dispatch nests the applied tool's result under `sourceResultDetails`. */
+const resolveMutationReport = type({ "sourceResultDetails?": deviceMutationReport });
+
+/**
+ * Report the file a completed write changed. Every branch that touches the
+ * filesystem already records it as `resolvedPath`, so this reads the executor's
+ * own record rather than re-deriving a target from the request. Branches that
+ * name no path of their own (device dispatches, multi-file conflict
+ * resolution) set `changedPaths` themselves and are left untouched.
+ */
+function withChangedPaths(result: AgentToolResult<WriteToolDetails>, cwd: string): AgentToolResult<WriteToolDetails> {
+	const details = result.details;
+	if (details === undefined || details.changedPaths !== undefined || details.resolvedPath === undefined) {
+		return result;
+	}
+	return { ...result, details: { ...details, changedPaths: normalizeMutationPaths([details.resolvedPath], cwd) } };
 }
 
 /**
@@ -567,6 +593,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const content = typeof params.content === "string" ? params.content : "";
 		return [`Path: ${truncateForPrompt(targetPath)}`, `Content:\n${truncateForPrompt(content)}`];
 	};
+	mutationPaths(args: Partial<WriteParams>): readonly string[] | undefined {
+		const params = writeMutationSchema(args);
+		if (params instanceof type.errors || params.path === undefined) return undefined;
+		return [peelWriteUrlSelector(unwrapHashlineHeaderPath(params.path))];
+	}
 	readonly label = "Write";
 	get description(): string {
 		const deviceOnly = this.session.deviceOnlyWrite === true && this.session.pendingFullWriteDescription !== true;
@@ -980,7 +1011,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			byFile.set(entry.absolutePath, bucket);
 		}
 
-		const succeededFiles: { displayPath: string; count: number; header?: string }[] = [];
+		const succeededFiles: { path: string; displayPath: string; count: number; header?: string }[] = [];
 		const failedFiles: { displayPath: string; count: number; error: string }[] = [];
 		let totalResolvedIds = 0;
 		let totalEchoTrimmed = 0;
@@ -1047,7 +1078,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			for (const entry of resolvedEntries) history.invalidate(entry.id);
 			for (const entry of staleEntries) history.invalidate(entry.id);
 			const header = maybeWriteSnapshotHeader(this.session, absolutePath, text);
-			succeededFiles.push({ displayPath: sample.displayPath, count: resolvedEntries.length, header });
+			succeededFiles.push({
+				path: absolutePath,
+				displayPath: sample.displayPath,
+				count: resolvedEntries.length,
+				header,
+			});
 			totalResolvedIds += resolvedEntries.length;
 		}
 
@@ -1098,7 +1134,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		}
 		return {
 			content: [{ type: "text", text: resultText }],
-			details: {},
+			details: {
+				changedPaths: normalizeMutationPaths(
+					succeededFiles.map(file => file.path),
+					this.session.cwd,
+				),
+			},
 			isError: failedFiles.length > 0 ? true : undefined,
 		};
 	}
@@ -1135,7 +1176,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
 			);
 		}
-		return untilAborted(signal, async () => {
+		const result: AgentToolResult<WriteToolDetails> = await untilAborted(signal, async () => {
 			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
 			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
 			const internalRouter = InternalUrlRouter.instance();
@@ -1169,9 +1210,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 								}
 								if (name && isResolutionDeviceName(name)) {
 									const { result, xdev } = await dispatchResolutionDevice(this.session, name, deviceContent);
+									// The device writes nothing itself; the applied tool's own
+									// result names what changed.
+									const applied = resolveMutationReport(result.details);
+									const changedPaths =
+										applied instanceof type.errors ? undefined : applied.sourceResultDetails?.changedPaths;
 									xdResult = {
 										content: result.content,
-										details: { xdev },
+										details: changedPaths === undefined ? { xdev } : { xdev, changedPaths },
 										isError: result.isError,
 										useless: result.useless,
 									};
@@ -1196,9 +1242,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 									// inner tool does not prompt a second time.
 									context ? { ...context, xdevApproved: true } : undefined,
 								);
+								// A dispatched tool writes through its own executor, so its
+								// result is the authority on what changed.
+								const inner = deviceMutationReport(result.details);
+								const changedPaths = inner instanceof type.errors ? undefined : inner.changedPaths;
 								xdResult = {
 									content: result.content,
-									details: { xdev: dispatch },
+									details: changedPaths === undefined ? { xdev: dispatch } : { xdev: dispatch, changedPaths },
 									isError: result.isError,
 									useless: result.useless,
 								};
@@ -1362,6 +1412,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				},
 			};
 		});
+		return withChangedPaths(result, this.session.cwd);
 	}
 }
 

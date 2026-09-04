@@ -148,6 +148,8 @@ export interface AgentSessionConfig {
 	 * subagent forward) — keeps the child from building an empty extension set.
 	 */
 	extensionPaths?: readonly string[];
+	/** Trusted extension source paths forwarded only to restricted child sessions. */
+	trustedExtensionPaths?: readonly string[];
 	/** Raw SDK `additionalExtensionPaths`; used when no inherited root provider exists. */
 	additionalExtensionPaths?: readonly string[];
 	/** Mirror of `disableExtensionDiscovery`; used when no inherited root provider exists. */

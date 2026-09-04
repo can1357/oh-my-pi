@@ -9,7 +9,7 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
+import type { Static, ToolExample } from "@oh-my-pi/pi-ai";
 import {
 	EditSession,
 	editDescription,
@@ -49,7 +49,7 @@ import {
 	invalidateFsScanAfterWrite,
 } from "../tools/fs-cache-invalidation";
 import { outputMeta } from "../tools/output-meta";
-import { resolveFileWriteApprovalTier } from "../tools/path-utils";
+import { normalizeMutationPaths, resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { planLocalProtocolOptions } from "../tools/plan-mode-guard";
 import { ToolError } from "../tools/tool-errors";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
@@ -227,8 +227,13 @@ function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFile
 	};
 }
 
-function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): EditToolDetails | undefined {
+function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode, cwd: string): EditToolDetails | undefined {
 	if (files.length === 0) return undefined;
+	// The engine reports one outcome per file it wrote; a move names both sides.
+	const changedPaths = normalizeMutationPaths(
+		files.flatMap(file => (file.moveTo ? [file.path, file.moveTo] : [file.path])),
+		cwd,
+	);
 	const perFileResults = files.map(file => toPerFileResult(file, mode));
 	if (perFileResults.length === 1) {
 		const [file] = perFileResults;
@@ -243,6 +248,7 @@ function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): Ed
 			oldText: file.oldText,
 			newText: file.newText,
 			snapshotsPruned: file.snapshotsPruned,
+			changedPaths,
 			meta: file.meta,
 		};
 	}
@@ -252,6 +258,7 @@ function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): Ed
 			.filter(Boolean)
 			.join("\n"),
 		firstChangedLine: perFileResults.find(file => file.firstChangedLine !== undefined)?.firstChangedLine,
+		changedPaths,
 		perFileResults: capPerFileSnapshots(perFileResults),
 	};
 }
@@ -398,6 +405,15 @@ export class EditTool implements AgentTool<TInput> {
 		return entries.length > 0 ? entries : undefined;
 	}
 
+	mutationPaths(args: Partial<Static<TInput>>): readonly string[] | undefined {
+		const inspection = this.#inspect(args);
+		const paths = [
+			...inspection.paths,
+			...inspection.fileOps.flatMap(fileOp => (fileOp.to ? [fileOp.path, fileOp.to] : [fileOp.path])),
+		];
+		return paths.length > 0 ? paths : undefined;
+	}
+
 	openArgStream(init: AgentToolArgStreamInit): AgentToolArgStream {
 		const existing = this.#sessions.get(init.toolCallId);
 		if (existing) existing.close();
@@ -466,7 +482,7 @@ export class EditTool implements AgentTool<TInput> {
 			return { content: [{ type: "text", text: outcome.text }], isError: true };
 		}
 
-		const details = aggregateDetails(outcome.files, this.mode);
+		const details = aggregateDetails(outcome.files, this.mode, this.session.cwd);
 		const result: AgentToolResult<EditToolDetails, TInput> = {
 			content: [{ type: "text", text: outcome.text }],
 			...(details ? { details } : {}),

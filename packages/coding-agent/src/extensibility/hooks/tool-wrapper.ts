@@ -3,7 +3,7 @@
  */
 import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Static, TSchema } from "@oh-my-pi/pi-ai";
-import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
+import { normalizeToolEventInputForTool, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { HookRunner } from "./runner";
 import type { ToolCallEventResult, ToolResultEventResult } from "./types";
@@ -49,9 +49,10 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					type: "tool_call",
 					toolName: this.tool.name,
 					toolCallId,
-					input: normalizeToolEventInput(
-						this.tool.name,
+					input: normalizeToolEventInputForTool(
+						this.tool,
 						resolveToolEventInput(this.tool, params as Record<string, unknown>),
+						this.hookRunner.getCwd(),
 					),
 				})) as ToolCallEventResult | undefined;
 
@@ -84,9 +85,10 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					type: "tool_result",
 					toolName: this.tool.name,
 					toolCallId,
-					input: normalizeToolEventInput(
-						this.tool.name,
+					input: normalizeToolEventInputForTool(
+						this.tool,
 						resolveToolEventInput(this.tool, effectiveParams as Record<string, unknown>),
+						this.hookRunner.getCwd(),
 					),
 					content: result.content,
 					details: result.details,
@@ -110,9 +112,10 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					type: "tool_result",
 					toolName: this.tool.name,
 					toolCallId,
-					input: normalizeToolEventInput(
-						this.tool.name,
+					input: normalizeToolEventInputForTool(
+						this.tool,
 						resolveToolEventInput(this.tool, effectiveParams as Record<string, unknown>),
+						this.hookRunner.getCwd(),
 					),
 					content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
 					details: undefined,

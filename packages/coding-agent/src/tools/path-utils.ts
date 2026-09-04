@@ -22,6 +22,43 @@ const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 export function isFilesystemSourcePath(value: string): boolean {
 	return path.posix.isAbsolute(value) || path.win32.isAbsolute(value);
 }
+
+const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+const FILE_URL_RE = /^file:\/\//i;
+
+/**
+ * Normalize a mutation target without resolving symlinks or requiring it to
+ * exist. Returns `undefined` for anything that is not a filesystem target:
+ * internal URLs (`xd://`, `local://`, `conflict://`) name no file on disk.
+ *
+ * Resolution goes through {@link resolveToCwd} — the same call the mutating
+ * tools make via `resolvePlanPath` — so the reported target is the path the
+ * tool actually opens, `@/`, stray-`:`, drive-alias and `file://` shorthands
+ * included. The extra `path.normalize` collapses `.`/`..` so a gate matching
+ * on the reported path cannot be walked out of its own prefix.
+ */
+export function normalizeMutationPath(value: string, cwd: string): string | undefined {
+	if (value.length === 0 || (URL_SCHEME_RE.test(value) && !FILE_URL_RE.test(value))) return undefined;
+	try {
+		return path.normalize(resolveToCwd(value, cwd));
+	} catch {
+		return undefined;
+	}
+}
+
+/** Normalize, de-duplicate, and preserve the parser's target order. */
+export function normalizeMutationPaths(values: readonly string[], cwd: string): string[] {
+	const seen = new Set<string>();
+	const normalized: string[] = [];
+	for (const value of values) {
+		const target = normalizeMutationPath(value, cwd);
+		if (target !== undefined && !seen.has(target)) {
+			seen.add(target);
+			normalized.push(target);
+		}
+	}
+	return normalized;
+}
 // A single line-range chunk: `N`, `N-M`, `N+K`, or open-ended `N-`. `..` is
 // accepted everywhere `-` is, as a forgiving alias for Rust/Python-style ranges
 // (e.g. `2724..2727` == `2724-2727`, `2724..` == `2724-`); it is normalized to

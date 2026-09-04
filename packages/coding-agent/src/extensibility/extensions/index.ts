@@ -10,7 +10,11 @@ export {
 	ExtensionRuntimeNotInitializedError,
 	loadExtensionFromFactory,
 	loadExtensions,
+	loadTrustedExtensionHandlers,
+	resolveTrustedExtensionPath,
+	TRUSTED_EXTENSION_RECOVERY,
 } from "./loader";
+export type { TrustedExtensionSource } from "./loader";
 export * from "./runner";
 // Type guards
 export * from "./types";

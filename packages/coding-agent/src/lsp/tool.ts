@@ -1,3 +1,4 @@
+import { type } from "@oh-my-pi/omptype";
 import * as fs from "node:fs";
 import path from "node:path";
 import type {
@@ -12,12 +13,12 @@ import { type Theme, theme } from "../modes/theme/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
-import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
+import { formatPathRelativeToCwd, normalizeMutationPaths, resolveToCwd } from "../tools/path-utils";
 import { replaceTabs, shortenPath } from "../tools/render-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
 import {
-	applyWorkspaceEditWithLsp,
+	applyWorkspaceEditWithLspResult,
 	clearInitializationFailure,
 	ensureFileOpen,
 	getActiveClients,
@@ -51,9 +52,11 @@ import {
 import {
 	applyEditsThenRename,
 	flattenWorkspaceTextEdits,
+	plannedWorkspaceEditPaths,
 	type RenameReferenceEdit,
 	rangesOverlap,
 	sortAndValidateTextEdits,
+	type WorkspaceEditResult,
 } from "./edits";
 import { detectLspmux } from "./lspmux";
 import {
@@ -174,6 +177,19 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		const action = typeof rawAction === "string" ? rawAction.toLowerCase() : "";
 		return LSP_READONLY_ACTIONS.has(action) ? "read" : "write";
 	};
+	mutationPaths(args: Partial<LspParams>): readonly string[] | undefined {
+		const params = lspSchema(args);
+		if (params instanceof type.errors || LSP_READONLY_ACTIONS.has(params.action)) return undefined;
+		// A preview leaves the workspace alone, and `code_actions` only writes
+		// when it is asked to apply one. Reporting a target for either would
+		// make a gate treat a look-only call as a mutation.
+		if (params.apply === false || (params.action === "code_actions" && params.apply !== true)) return undefined;
+		if (params.action === "rename_file") {
+			const paths = [params.file, params.new_name].filter((value): value is string => value !== undefined);
+			return paths.length > 0 ? paths : undefined;
+		}
+		return params.file === undefined ? undefined : [params.file];
+	}
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<LspParams>;
 		const lines = [`Action: ${typeof params.action === "string" ? params.action : "(missing)"}`];
@@ -205,6 +221,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<LspToolDetails>> {
 		const { action, file, line, symbol, query, new_name, apply, timeout } = params;
+		let mutationDetails: Pick<LspToolDetails, "plannedMutationPaths" | "changedPaths"> | undefined;
 		if (this.session.lspReadOnly && !LSP_READONLY_ACTIONS.has(action)) {
 			throw new ToolError(`LSP action ${action} is disabled in this read-only session`);
 		}
@@ -465,26 +482,22 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		}
 
 		if (action === "rename_file") {
+			// Every guard below returns before a single file moves. The explicit
+			// empty report is what keeps a mutation gate from grading files this
+			// call never touched.
+			const unmoved = (text: string): AgentToolResult<LspToolDetails> => ({
+				content: [{ type: "text", text }],
+				details: { action, success: false, request: params, changedPaths: [] },
+			});
 			if (!file || !new_name) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: "Error: rename_file requires both `file` (source path) and `new_name` (destination path)",
-						},
-					],
-					details: { action, success: false, request: params },
-				};
+				return unmoved("Error: rename_file requires both `file` (source path) and `new_name` (destination path)");
 			}
 
 			const source = resolveToCwd(file, this.session.cwd);
 			const dest = resolveToCwd(new_name, this.session.cwd);
 
 			if (source === dest) {
-				return {
-					content: [{ type: "text", text: "Error: source and destination paths are identical" }],
-					details: { action, success: false, request: params },
-				};
+				return unmoved("Error: source and destination paths are identical");
 			}
 
 			let sourceStat: fs.Stats;
@@ -495,65 +508,36 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				// missing path sends the caller hunting the wrong problem — and
 				// silently invites them to recreate a file that is already there.
 				const relSource = formatRenameStatPath(source, this.session.cwd);
-				return {
-					content: [
-						{
-							type: "text",
-							text: isEnoent(err)
-								? `Error: source path does not exist: ${relSource}`
-								: `Error: cannot read source path ${relSource}: ${formatRenameStatError(err)}`,
-						},
-					],
-					details: { action, success: false, request: params },
-				};
+				return unmoved(
+					isEnoent(err)
+						? `Error: source path does not exist: ${relSource}`
+						: `Error: cannot read source path ${relSource}: ${formatRenameStatError(err)}`,
+				);
 			}
 
 			try {
 				await fs.promises.lstat(dest);
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Error: destination already exists: ${formatRenameStatPath(dest, this.session.cwd)}`,
-						},
-					],
-					details: { action, success: false, request: params },
-				};
+				return unmoved(`Error: destination already exists: ${formatRenameStatPath(dest, this.session.cwd)}`);
 			} catch (err) {
 				// ENOENT is the success case: the destination is free. Any other
 				// failure means we never established that, so renaming onto it
 				// could clobber a file we simply could not see.
 				if (!isEnoent(err)) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Error: cannot read destination path ${formatRenameStatPath(dest, this.session.cwd)}: ${formatRenameStatError(err)}`,
-							},
-						],
-						details: { action, success: false, request: params },
-					};
+					return unmoved(
+						`Error: cannot read destination path ${formatRenameStatPath(dest, this.session.cwd)}: ${formatRenameStatError(err)}`,
+					);
 				}
 			}
 
 			const enumerated = await enumerateRenamePairs(source, dest);
 			if (enumerated.exceeded) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Error: directory contains more than ${MAX_RENAME_PAIRS} files; rename in smaller batches to keep LSP edits accurate`,
-						},
-					],
-					details: { action, success: false, request: params },
-				};
+				return unmoved(
+					`Error: directory contains more than ${MAX_RENAME_PAIRS} files; rename in smaller batches to keep LSP edits accurate`,
+				);
 			}
 			const { pairs } = enumerated;
 			if (pairs.length === 0) {
-				return {
-					content: [{ type: "text", text: "Error: no files to rename" }],
-					details: { action, success: false, request: params },
-				};
+				return unmoved("Error: no files to rename");
 			}
 
 			const lspParams = { files: pairs };
@@ -664,6 +648,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						serverName: Array.from(respondingServers).join(", "),
 						success: true,
 						request: params,
+						// A preview moves nothing; report what an apply would touch.
+						plannedMutationPaths: normalizeMutationPaths(
+							[
+								...perServerEdits.flatMap(entry => plannedWorkspaceEditPaths(entry.edit, this.session.cwd)),
+								...pairs.flatMap(pair => [uriToFile(pair.oldUri), uriToFile(pair.newUri)]),
+							],
+							this.session.cwd,
+						),
+						changedPaths: [],
 					},
 				};
 			}
@@ -684,6 +677,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						serverName: Array.from(respondingServers).join(", "),
 						success: false,
 						request: params,
+						changedPaths: [],
 					},
 				};
 			}
@@ -779,6 +773,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// the reference edits back so the source, destination, and every
 			// reference file are left unchanged.
 			await applyEditsThenRename(referenceEdits, source, dest);
+			// Same execution source as the write: the coalesced reference edits
+			// that were applied, plus every path the move actually renamed.
+			const renamedPaths = normalizeMutationPaths(
+				[
+					...referenceEdits.map(referenceEdit => referenceEdit.filePath),
+					...pairs.flatMap(pair => [uriToFile(pair.oldUri), uriToFile(pair.newUri)]),
+				],
+				this.session.cwd,
+			);
 			summary.push(`  Renamed ${sourceLabel} → ${destLabel}`);
 
 			for (const [serverName, serverConfig] of servers) {
@@ -813,6 +816,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					serverName: Array.from(respondingServers).join(", "),
 					success: true,
 					request: params,
+					changedPaths: renamedPaths,
 				},
 			};
 		}
@@ -1390,10 +1394,14 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							break;
 						}
 
+						let workspaceEditResult: WorkspaceEditResult | undefined;
 						const appliedAction = await applyCodeAction(selectedAction, {
 							resolveCodeAction: async actionItem =>
 								(await sendRequest(client, "codeAction/resolve", actionItem, signal)) as CodeAction,
-							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, this.session.cwd, signal),
+							applyWorkspaceEdit: async edit => {
+								workspaceEditResult = await applyWorkspaceEditWithLspResult(edit, this.session.cwd, signal);
+								return workspaceEditResult.applied;
+							},
 							executeCommand: async commandItem => {
 								await sendRequest(
 									client,
@@ -1406,6 +1414,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 								);
 							},
 						});
+						if (workspaceEditResult) {
+							mutationDetails = {
+								plannedMutationPaths: workspaceEditResult.plannedMutationPaths,
+								changedPaths: workspaceEditResult.changedPaths,
+							};
+						}
 
 						if (!appliedAction) {
 							output = `Action "${selectedAction.title}" has no workspace edit or command to apply`;
@@ -1489,10 +1503,18 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					} else {
 						const shouldApply = apply !== false;
 						if (shouldApply) {
-							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
-							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
+							const applied = await applyWorkspaceEditWithLspResult(result, this.session.cwd, signal);
+							mutationDetails = {
+								plannedMutationPaths: applied.plannedMutationPaths,
+								changedPaths: applied.changedPaths,
+							};
+							output = `Applied rename:\n${applied.applied.map(a => `  ${a}`).join("\n")}`;
 						} else {
 							const preview = formatWorkspaceEdit(result, this.session.cwd);
+							mutationDetails = {
+								plannedMutationPaths: plannedWorkspaceEditPaths(result, this.session.cwd),
+								changedPaths: [],
+							};
 							output = `Rename preview:\n${preview.map(p => `  ${p}`).join("\n")}`;
 						}
 					}
@@ -1510,7 +1532,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			return {
 				content: [{ type: "text", text: output }],
-				details: { serverName, action, success: true, request: params },
+				details: { serverName, action, success: true, request: params, ...mutationDetails },
 				...(useless ? { useless: true } : {}),
 			};
 		} catch (err) {
@@ -1530,7 +1552,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const errorMessage = err instanceof Error ? err.message : String(err);
 			return {
 				content: [{ type: "text", text: `LSP error: ${errorMessage}` }],
-				details: { serverName, action, success: false, request: params },
+				details: { serverName, action, success: false, request: params, ...mutationDetails },
 			};
 		}
 	}

@@ -113,9 +113,12 @@ import {
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
 	loadExtensions,
+	loadTrustedExtensionHandlers,
 	type PreparedExtension,
 	type RegisteredTool,
+	resolveTrustedExtensionPath,
 	type ToolDefinition,
+	TRUSTED_EXTENSION_RECOVERY,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
 import {
@@ -458,6 +461,14 @@ export interface CreateAgentSessionOptions {
 	extensions?: ExtensionFactory[];
 	/** Additional extension paths to load (merged with discovery). */
 	additionalExtensionPaths?: string[];
+	/**
+	 * Trusted extension paths: `--trusted-extension` (exact allowlist, discovery
+	 * off) or the `trustedExtensions` setting (merged with normal discovery).
+	 * Restricted children bind only these modules, and only their event handlers.
+	 * Omitted on a top-level session means "read the setting"; a restricted child
+	 * takes the parent's resolved list verbatim.
+	 */
+	trustedExtensionPaths?: readonly string[];
 	/** Disable extension discovery (explicit paths still load). */
 	disableExtensionDiscovery?: boolean;
 	/**
@@ -759,6 +770,21 @@ export async function discoverExtensions(cwd?: string): Promise<LoadExtensionsRe
 	const resolvedCwd = cwd ?? getProjectDir();
 
 	return discoverAndLoadExtensions([], resolvedCwd);
+}
+
+/**
+ * Trusted extension paths from the persistent `trustedExtensions` setting,
+ * each proven to be an existing module file. Every entry must ALSO reach
+ * `additionalExtensionPaths`: unlike `--trusted-extension`, the settings form
+ * loads through ordinary merged discovery and only marks those paths trusted,
+ * so restricted subagents rebind their handlers.
+ *
+ * Throws when an entry is missing or is not a file. A policy module that
+ * silently fails to load is worse than a session that refuses to start.
+ */
+export function resolveConfiguredTrustedExtensionPaths(settings: Settings, cwd: string): string[] {
+	const configured = settings.get("trustedExtensions") ?? [];
+	return configured.map(entry => resolveTrustedExtensionPath(entry, cwd, "settings"));
 }
 
 /**
@@ -1993,17 +2019,44 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (event.type === "connecting" && event.serverNames.length === 0) return;
 			eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
 		};
+		// One source decides what "trusted" means for a whole session tree: a
+		// parent that resolved the list forwards it and the child never re-reads
+		// config. A restricted session created without one is not therefore
+		// untrusted-by-default — a cold revive, a security scan, an agentic
+		// commit, and a compression pass all create restricted sessions with no
+		// forwarded list, and each must still bind the operator's policy — so the
+		// setting is the fallback at every level.
+		const trustedExtensionPaths =
+			options.trustedExtensionPaths ?? resolveConfiguredTrustedExtensionPaths(settings, cwd);
+		// Settings-form trusted modules load through ordinary discovery as well,
+		// so they keep their full extension API at top level. A CLI
+		// `--trusted-extension` run already carries them in additionalExtensionPaths.
+		const extensionDiscoveryOptions =
+			trustedExtensionPaths.length > 0
+				? {
+						...options,
+						additionalExtensionPaths: [
+							...new Set([...(options.additionalExtensionPaths ?? []), ...trustedExtensionPaths]),
+						],
+					}
+				: options;
 		// Provider, never a stored value: inherited child policy remains linked to
 		// the owning session, while top-level sessions materialize their own live
 		// settings on every discovery call.
-		const buildSessionExtensionRoots =
-			options.extensionRoots ??
-			((): EffectiveExtensionRoots => ({
-				explicit: options.additionalExtensionPaths ?? [],
-				mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
-				configured: settings.get("extensions") ?? [],
-				configuredLevel: settings.extensionsSourceLevel(),
-			}));
+		const buildSessionExtensionRoots = restrictToolNames
+			? (): EffectiveExtensionRoots => ({
+					explicit: [],
+					mode: "explicit-only",
+					configured: [],
+					configuredLevel: settings.extensionsSourceLevel(),
+				})
+			: (options.extensionRoots ??
+				((): EffectiveExtensionRoots => ({
+					explicit: options.additionalExtensionPaths ?? [],
+					mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
+					configured: settings.get("extensions") ?? [],
+					configuredLevel: settings.extensionsSourceLevel(),
+				})));
 		const mcpDiscoverOptions = {
 			onStatus: onMCPStatus,
 			enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
@@ -2154,7 +2207,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (restrictToolNames) {
+		if (restrictToolNames && trustedExtensionPaths.length > 0) {
+			// Restricted children rebind trusted handlers from source paths. Never
+			// reuse parent Extension instances or prepared factories: each factory
+			// owns session-local policy state.
+			extensionPaths = [];
+			extensionsResult = await logger.time(
+				"loadTrustedExtensionHandlers",
+				loadTrustedExtensionHandlers,
+				trustedExtensionPaths,
+				cwd,
+				eventBus,
+			);
+			if (extensionsResult.errors.length > 0) {
+				const failures = extensionsResult.errors.map(({ path, error }) => `${path}: ${error}`).join("; ");
+				throw new Error(
+					`Trusted extension handlers failed to load for this restricted session: ${failures}. Fix or remove the trusted extension entry and restart.`,
+				);
+			}
+		} else if (restrictToolNames) {
 			// Allocate a session runtime without evaluating caller-provided extension
 			// instances, paths, or factories.
 			extensionPaths = [];
@@ -2189,16 +2260,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		} else {
 			extensionPaths = await logger.time("discoverSessionExtensionPaths", () =>
-				discoverSessionExtensionPaths(options, cwd, settings),
+				discoverSessionExtensionPaths(extensionDiscoveryOptions, cwd, settings),
 			);
 			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
 			}
 		}
-		// Forward the source-path list (NOT the loaded instances) so subagents
-		// rebuild their own session-scoped extensions.
+		// A configured trusted module that fails to load must stop startup:
+		// ordinary extension errors stay non-fatal notifications, but a policy
+		// module that silently went missing would leave the session unguarded.
+		if (!restrictToolNames && trustedExtensionPaths.length > 0) {
+			const trusted = new Set(trustedExtensionPaths);
+			const failures = extensionsResult.errors.filter(item => trusted.has(item.path));
+			if (failures.length > 0) {
+				throw new Error(
+					`Trusted extension failed to load: ${failures.map(item => `${item.path}: ${item.error}`).join("; ")}. ${TRUSTED_EXTENSION_RECOVERY.settings}`,
+				);
+			}
+		}
+		// Forward ordinary source paths separately from trusted handler paths so
+		// restricted descendants cannot rebind full extension capabilities.
 		toolSession.extensionPaths = extensionPaths;
+		toolSession.trustedExtensionPaths = trustedExtensionPaths;
 		toolSession.effectiveExtensionRoots = buildSessionExtensionRoots;
 
 		// Inline source ids must remain stable when caller factories are rebound in
@@ -2233,7 +2317,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			}
 		}
-		toolSession.preparedExtensions = extensionsResult.preparedExtensions;
+		toolSession.preparedExtensions = restrictToolNames ? [] : extensionsResult.preparedExtensions;
 
 		// Process provider registrations queued during extension loading.
 		// This must happen before the runner is created so that models registered by
@@ -2244,12 +2328,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			for (const sourceId of new Set(activeExtensionSources)) {
 				modelRegistry.clearSourceRegistrations(sourceId);
 			}
-		}
-		if (extensionsResult.runtime.pendingProviderRegistrations.length > 0) {
-			for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
-				modelRegistry.registerProvider(name, config, sourceId);
+			if (extensionsResult.runtime.pendingProviderRegistrations.length > 0) {
+				for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
+					modelRegistry.registerProvider(name, config, sourceId);
+				}
+				extensionsResult.runtime.pendingProviderRegistrations = [];
 			}
-			extensionsResult.runtime.pendingProviderRegistrations = [];
 		}
 		// Hydrate cached runtime (extension) provider catalogs before model
 		// resolution. Dynamic-only providers have no synchronous registration side
@@ -3731,8 +3815,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			sessionManager,
 			settings,
 			additionalExtensionPaths: options.additionalExtensionPaths,
+			trustedExtensionPaths,
 			extensionRoots: buildSessionExtensionRoots,
-			preparedExtensions: extensionsResult.preparedExtensions,
+			preparedExtensions: restrictToolNames ? [] : extensionsResult.preparedExtensions,
 			extensionPaths,
 			disableExtensionDiscovery: options.disableExtensionDiscovery,
 			autoApprove: options.autoApprove,

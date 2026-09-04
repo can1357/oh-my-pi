@@ -112,6 +112,8 @@ export interface EditToolDetails {
 	snapshotsPruned?: boolean;
 	/** Pre-move source path; set only when the edit moved/renamed the file. The header renders `sourcePath → path`. */
 	sourcePath?: string;
+	/** Absolute normalized targets the edit engine wrote; a move names both sides. */
+	changedPaths?: string[];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

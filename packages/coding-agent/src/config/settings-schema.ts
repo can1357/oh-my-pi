@@ -599,6 +599,13 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	extensions: { type: "array", default: EMPTY_STRING_ARRAY },
+	/**
+	 * Extension modules that also bind their event handlers inside restricted
+	 * subagents, and whose absence fails startup. They load through ordinary
+	 * discovery too, so `--no-extensions` does not drop them. `--trusted-extension`
+	 * overrides this list for that launch. See docs/extension-loading.md.
+	 */
+	trustedExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	enabledModels: { type: "array", default: EMPTY_STRING_ARRAY },
 

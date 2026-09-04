@@ -1,7 +1,7 @@
 /**
  * Extension loader - loads TypeScript extension modules using native Bun import.
  */
-import type * as fs1 from "node:fs";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -401,12 +401,46 @@ async function importExtensionModule(extensionPath: string, cwd: string): Promis
 	}
 }
 
+/**
+ * Bind a trusted extension to a restricted session without granting its
+ * registration or runtime API. Only event subscriptions remain live.
+ */
+const handlerOnlyNoop = (): undefined => undefined;
+
+function handlerOnlyExtensionApi(api: ExtensionAPI): ExtensionAPI {
+	const subscribe = api.on.bind(api);
+	return new Proxy(api, {
+		get(target, property) {
+			// The logger and the schema builders grant a handler nothing and a
+			// handler needs them: stubbing `api.logger` makes an ordinary
+			// `api.logger.warn(...)` inside a policy module's own catch block
+			// throw, and the runner reports a handler throw as `{ block: true }`
+			// — so a module that meant to fail open blocks every tool call.
+			switch (property) {
+				case "on":
+					return subscribe;
+				case "logger":
+					return target.logger;
+				case "typebox":
+					return target.typebox;
+				case "arktype":
+					return target.arktype;
+				case "zod":
+					return target.zod;
+				default:
+					return handlerOnlyNoop;
+			}
+		},
+	});
+}
+
 async function bindExtension(
 	extensionPath: string,
 	imported: PreparedExtension,
 	cwd: string,
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
+	handlersOnly = false,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const factory = imported.factory;
 	if (imported.error !== null || factory === null) {
@@ -415,7 +449,9 @@ async function bindExtension(
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
+		await withHostGuard(() =>
+			runExtensionFactory(factory, handlersOnly ? handlerOnlyExtensionApi(api) : api, runtime),
+		);
 
 		return { extension, error: null };
 	} catch (err) {
@@ -453,11 +489,67 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	return bindPreparedExtensions(preparedExtensions, cwd, eventBus);
 }
 
+/**
+ * Load trusted extension modules for a restricted session. Factories are run
+ * for each session, but only their event subscriptions can affect that session.
+ */
+export async function loadTrustedExtensionHandlers(
+	paths: readonly string[],
+	cwd: string,
+	eventBus?: EventBus,
+): Promise<LoadExtensionsResult> {
+	const preparedExtensions = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
+	return bindPreparedExtensions(preparedExtensions, cwd, eventBus, true);
+}
+
+/** Where a trusted extension path came from. Picks the operator recovery line. */
+export type TrustedExtensionSource = "cli" | "settings";
+
+/** Operator instruction appended to every trusted-extension startup failure. */
+export const TRUSTED_EXTENSION_RECOVERY = {
+	cli: "Fix or remove the --trusted-extension path and restart.",
+	settings: "Fix or remove the trustedExtensions setting entry and restart.",
+} satisfies Record<TrustedExtensionSource, string>;
+
+/**
+ * Resolve one trusted extension path and prove it is a module file that exists
+ * now. A trusted path carries policy a restricted subagent cannot switch off,
+ * so a missing or non-file entry stops startup instead of loading nothing.
+ *
+ * `cli` paths are canonicalized through `realpath`: `--trusted-extension`
+ * disables discovery, so the resolved list is the whole allowlist and
+ * retargeting a symlink after the check must not widen it. `settings` paths
+ * keep their configured spelling because they also load through ordinary
+ * discovery, which dedupes by resolved path.
+ */
+export function resolveTrustedExtensionPath(rawPath: string, cwd: string, source: TrustedExtensionSource): string {
+	const recovery = TRUSTED_EXTENSION_RECOVERY[source];
+	let expanded: string;
+	try {
+		expanded = resolvePath(rawPath, cwd);
+	} catch (error) {
+		throw new Error(`${error instanceof Error ? error.message : String(error)} ${recovery}`);
+	}
+	let candidate = expanded;
+	let stat: fsSync.Stats;
+	try {
+		if (source === "cli") candidate = fsSync.realpathSync.native(expanded);
+		stat = fsSync.statSync(candidate);
+	} catch {
+		throw new Error(`Trusted extension must be an existing module file: ${rawPath}. ${recovery}`);
+	}
+	if (!stat.isFile()) {
+		throw new Error(`Trusted extension must be a module file, not a directory: ${rawPath}. ${recovery}`);
+	}
+	return candidate;
+}
+
 /** Bind previously imported extension factories to a fresh session runtime. */
 export async function bindPreparedExtensions(
 	preparedExtensions: readonly PreparedExtension[],
 	cwd: string,
 	eventBus?: EventBus,
+	handlersOnly = false,
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
@@ -465,7 +557,14 @@ export async function bindPreparedExtensions(
 	const runtime = new ExtensionRuntime();
 
 	for (const prepared of preparedExtensions) {
-		const { extension, error } = await bindExtension(prepared.path, prepared, cwd, resolvedEventBus, runtime);
+		const { extension, error } = await bindExtension(
+			prepared.path,
+			prepared,
+			cwd,
+			resolvedEventBus,
+			runtime,
+			handlersOnly,
+		);
 
 		if (error) {
 			errors.push({ path: prepared.path, error });
@@ -581,7 +680,7 @@ async function discoverExtensionsInDir(dir: string): Promise<string[]> {
 	}
 
 	// Otherwise, discover extensions from directory contents
-	let entries: fs1.Dirent[];
+	let entries: fsSync.Dirent[];
 	try {
 		entries = await fs.readdir(dir, { withFileTypes: true });
 	} catch (err) {
@@ -612,7 +711,7 @@ async function discoverHooksInPackageRoot(root: string): Promise<string[]> {
 	const hooks: string[] = [];
 	for (const hookType of ["pre", "post"]) {
 		const hookDir = path.join(root, "hooks", hookType);
-		let entries: fs1.Dirent[];
+		let entries: fsSync.Dirent[];
 		try {
 			entries = await fs.readdir(hookDir, { withFileTypes: true });
 		} catch (err) {
@@ -718,7 +817,7 @@ export async function discoverExtensionPaths(
 	for (const configuredPath of configuredPaths) {
 		const resolved = resolvePath(configuredPath, cwd);
 
-		let stat: fs1.Stats | null = null;
+		let stat: fsSync.Stats | null = null;
 		try {
 			stat = await fs.stat(resolved);
 		} catch (err) {

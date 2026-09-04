@@ -133,12 +133,18 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | --- | --- |
 | `--extension <path>`, `-e <path>` | Load an extension (repeatable). See [extensions](./extensions.md). |
 | `--hook <path>` | Load a hook/extension file (repeatable). See [hooks](./hooks.md). |
-| `--trusted-extension <abs-path>` | Load a trusted extension from an absolute path (repeatable; cannot be combined with `--extension`/`-e`/`--hook`). |
+| `--trusted-extension <abs-path>` | Load a trusted extension from an absolute path (repeatable; cannot be combined with `--extension`/`-e`/`--hook`). Exact allowlist: discovery is off, the path is canonicalized, a missing path aborts startup, and restricted subagents rebind these modules' event handlers. Overrides the `trustedExtensions` setting for this launch. |
 | `--plugin-dir <dir>` | Add a local plugin directory to discovery (repeatable). |
 | `--no-extensions` | Disable extension discovery (explicit `-e` paths still work). |
 | `--skills <globs>` | Comma-separated glob patterns to filter [skills](./skills.md) (e.g. `git-*,docker`). |
 | `--no-skills` | Disable skills discovery and loading. |
 | `--no-rules` | Disable rules discovery and loading. See [context files](./context-files.md). |
+
+Trusted extensions also have a persistent form: the `trustedExtensions` setting
+in `config.yml`. Those paths load through normal merged discovery, survive
+`--no-extensions`, abort startup when missing or broken, and keep running inside
+restricted subagents. `--trusted-extension` wins when both are set. See
+[extension loading](./extension-loading.md#trusted-extensions).
 
 #### System prompt
 

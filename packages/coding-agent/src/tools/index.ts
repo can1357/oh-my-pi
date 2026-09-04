@@ -203,6 +203,8 @@ export interface ToolSession {
 	 * (`<inline-N>`) are NOT included — those are session-local.
 	 */
 	extensionPaths?: string[];
+	/** Paths supplied through --trusted-extension, forwarded only to restricted children. */
+	trustedExtensionPaths?: readonly string[];
 	/** Imported extension factories safe to rebind in child sessions. */
 	preparedExtensions?: PreparedExtension[];
 	/**

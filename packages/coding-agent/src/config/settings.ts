@@ -238,6 +238,29 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, 
 	return result;
 }
 
+/**
+ * Drop `trustedExtensions` from a project settings file, naming the file and
+ * the dropped entries.
+ *
+ * A trusted extension rebinds inside every restricted subagent and its
+ * handlers cannot be blocked by the policy they enforce, so nominating one
+ * stays with the launch operator: only the user-level layers (the agent
+ * directory's `config.yml`, a `--config` overlay, a runtime override) may set
+ * it. Checking out a repository must not hand its `.omp/config.yml` — or a
+ * `.claude/settings.json` written for another tool — that authority. The
+ * ordinary `extensions` setting stays project-settable; it reaches only the
+ * top-level session, where a trusted policy handler still sees its tool calls.
+ */
+export function dropProjectTrustedExtensions(data: RawSettings, sourcePath: string): RawSettings {
+	if (!Object.hasOwn(data, "trustedExtensions")) return data;
+	const { trustedExtensions: ignored, ...kept } = data;
+	logger.warn("Settings: ignoring project-level trustedExtensions; only user-level config may nominate one", {
+		source: sourcePath,
+		entries: ignored,
+	});
+	return kept;
+}
+
 export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
 	const normalized: Record<string, number> = {};
@@ -1816,6 +1839,7 @@ export class Settings {
 			for (const item of result.items as SettingsCapabilityItem[]) {
 				if (item.level === "project") {
 					merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
+					merged = dropProjectTrustedExtensions(merged, item.path);
 					if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
 				}
 			}

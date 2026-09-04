@@ -28,6 +28,8 @@ export interface LspToolDetails {
 	action: string;
 	success: boolean;
 	request?: LspParams;
+	plannedMutationPaths?: string[];
+	changedPaths?: string[];
 }
 
 // =============================================================================

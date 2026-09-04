@@ -27,7 +27,7 @@ import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
 import type { OutputMeta } from "./output-meta";
-import { isInternalUrlPath, resolveToolSearchScope } from "./path-utils";
+import { isInternalUrlPath, normalizeMutationPaths, resolveToolSearchScope } from "./path-utils";
 import {
 	appendParseErrorsBulletList,
 	capParseErrors,
@@ -172,7 +172,11 @@ export interface AstEditToolDetails {
 	/** Session cwd at edit time. Display header paths are cwd-relative, so the
 	 * renderer resolves them against this; `searchPath` is the scope target. */
 	cwd?: string;
+	plannedMutationPaths?: string[];
+	changedPaths?: string[];
 }
+
+const astEditMutationSchema = type({ "paths?": "string[]" });
 
 type AstEditSchemaInfer = typeof astEditSchema.infer;
 
@@ -184,6 +188,10 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			: [];
 		return paths.length > 0 && paths.every(path => isInternalUrlPath(path)) ? "read" : "write";
 	};
+	mutationPaths(args: Partial<AstEditSchemaInfer>): readonly string[] | undefined {
+		const params = astEditMutationSchema(args);
+		return params instanceof type.errors || params.paths === undefined ? undefined : params.paths;
+	}
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<AstEditSchemaInfer>;
 		const lines: string[] = [];
@@ -332,6 +340,10 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				changesByFile.get(relativePath)!.push(change);
 			}
 
+			const previewPaths = normalizeMutationPaths(
+				fileList.map(filePath => path.resolve(this.session.cwd, filePath)),
+				this.session.cwd,
+			);
 			const baseDetails: AstEditToolDetails = {
 				totalReplacements: result.totalReplacements,
 				filesTouched: result.filesTouched,
@@ -343,6 +355,10 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				searchPath: resolvedSearchPath,
 				cwd: this.session.cwd,
 				files: fileList,
+				// This run is a dry run: the files are candidates, not changes. The
+				// write happens when a staged proposal is applied through
+				// `xd://resolve`, which reports `changedPaths` from the apply pass.
+				...(result.applied ? { changedPaths: previewPaths } : { plannedMutationPaths: previewPaths }),
 				fileReplacements: [],
 			};
 
@@ -500,6 +516,12 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 								: {}),
 							scopePath,
 							files: appliedFileList,
+							// The apply pass wrote these; the staged preview already published
+							// its candidate list.
+							changedPaths: normalizeMutationPaths(
+								appliedFileList.map(filePath => path.resolve(this.session.cwd, filePath)),
+								this.session.cwd,
+							),
 							fileReplacements: appliedFileReplacements,
 						};
 						const stalePreview =
