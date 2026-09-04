@@ -581,9 +581,24 @@ export interface CredentialDisabledEvent {
 	disabledCause: string;
 }
 
+/**
+ * How AuthStorage chooses among several stored credentials for one provider.
+ *
+ * - `balanced` (default): spread load across accounts — a session starts from
+ *   its hashed position, session-less lookups round-robin — and rank by live
+ *   usage headroom.
+ * - `fixed`: always start from the first stored credential and move to the
+ *   next one only when the current credential is blocked (rate-limited,
+ *   exhausted, or failed to refresh). Usage reports are not consulted for
+ *   selection; plan-gated openai-codex models still verify tier eligibility.
+ */
+export type AuthAccountSelection = "balanced" | "fixed";
+
 export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
 	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
+	/** Credential selection policy. Default: `balanced`. */
+	accountSelection?: AuthAccountSelection;
 	usageFetch?: typeof fetch;
 	usageRequestTimeoutMs?: number;
 	usageLogger?: UsageLogger;
@@ -1341,6 +1356,7 @@ export class AuthStorage {
 	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
 	#usageReportCacheKeysByProvider: Map<Provider, Set<string>> = new Map();
 	#rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
+	#accountSelection: AuthAccountSelection;
 	#usageCache: UsageCache;
 	#usageCacheEpoch = 0;
 	#usageRequestInFlight: Map<string, Promise<UsageReport | null>> = new Map();
@@ -1376,6 +1392,7 @@ export class AuthStorage {
 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
 		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
+		this.#accountSelection = options.accountSelection ?? "balanced";
 		this.#usageCache = new AuthStorageUsageCache(this.#store);
 		// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
 		// cache rows (24h last-good retention). A cheap indexed DELETE;
@@ -1429,6 +1446,11 @@ export class AuthStorage {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#store.close();
+	}
+
+	/** Credential selection policy this storage was constructed with. */
+	get accountSelection(): AuthAccountSelection {
+		return this.#accountSelection;
 	}
 
 	getGeneration(): number {
@@ -1771,10 +1793,12 @@ export class AuthStorage {
 	 * Returns credential indices in priority order for selection.
 	 * With sessionId: starts from hashed index (consistent per session).
 	 * Without sessionId: starts from round-robin index (load balancing).
+	 * Under `fixed` account selection: always starts from the first stored credential.
 	 * Order wraps around so all credentials are tried if earlier ones are blocked.
 	 */
 	#getCredentialOrder(providerKey: string, sessionId: string | undefined, total: number): number[] {
 		if (total <= 1) return [0];
+		if (this.#accountSelection === "fixed") return Array.from({ length: total }, (_, index) => index);
 		const start = sessionId
 			? this.#getHashedIndex(sessionId, total)
 			: this.#getNextRoundRobinIndex(providerKey, total);
@@ -2256,7 +2280,7 @@ export class AuthStorage {
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
 		const fallback = credentials[order[0]];
 		const strategy = this.#rankingStrategyResolver?.(provider);
-		if (!strategy) {
+		if (!strategy || this.#accountSelection === "fixed") {
 			for (const idx of order) {
 				const candidate = credentials[idx];
 				if (!this.#isCredentialBlocked(provider, providerKey, candidate.index)) {
@@ -4752,6 +4776,9 @@ export class AuthStorage {
 		if (planRequirement !== "none" && left.planPriority !== right.planPriority) {
 			return left.planPriority - right.planPriority;
 		}
+		// Fixed selection ranks on availability and plan eligibility only; the
+		// stored-position tie-break in the caller decides the rest.
+		if (this.#accountSelection === "fixed") return 0;
 		if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
 		// Short-window guard: candidates whose primary (e.g. 5h) window is
 		// nearly exhausted rank behind cool ones regardless of drain urgency —
@@ -4976,7 +5003,9 @@ export class AuthStorage {
 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const planRequirement = resolveOpenAICodexPlanRequirement(provider, options?.modelId);
 		const hasPlanRequirement = planRequirement !== "none";
-		const checkUsage = strategy !== undefined && (credentials.length > 1 || hasPlanRequirement);
+		const checkUsage =
+			strategy !== undefined &&
+			(hasPlanRequirement || (credentials.length > 1 && this.#accountSelection !== "fixed"));
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =

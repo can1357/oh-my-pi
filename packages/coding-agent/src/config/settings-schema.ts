@@ -1837,6 +1837,31 @@ export const SETTINGS_SCHEMA = {
 				"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows). 0 disables the ceiling — to let the session auto-resume through provider-stated quota resets.",
 		},
 	},
+	"auth.accountSelection": {
+		type: "enum",
+		values: ["balanced", "fixed"] as const,
+		default: "balanced",
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Account Selection",
+			description:
+				"How requests pick among multiple logged-in accounts of the same provider. Applies to OAuth accounts and stored API keys alike.",
+			options: [
+				{
+					value: "balanced",
+					label: "Balanced",
+					description: "Spread sessions across accounts and prefer the one with the most usage headroom",
+				},
+				{
+					value: "fixed",
+					label: "Fixed",
+					description:
+						"Always use the first stored account; move to the next only when it is rate-limited or exhausted",
+				},
+			],
+		},
+	},
 	"retry.modelFallback": {
 		type: "boolean",
 		default: true,
