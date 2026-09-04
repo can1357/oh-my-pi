@@ -64,8 +64,8 @@ export async function runChangelogFlow({
 	maxDiffChars,
 	onProgress,
 }: ChangelogFlowInput): Promise<string[]> {
-	const repo = vcs.requireGit(cwd);
 	if (stagedFiles.length === 0) return [];
+	const repo = vcs.requireGit(cwd);
 	onProgress?.("Detecting changelog boundaries...");
 	const boundaries = await detectChangelogBoundaries(cwd, stagedFiles);
 	if (boundaries.length === 0) return [];

@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- Added `commitSplit`: builds a chain of commits from staged hunk selections and advances HEAD once; the index and worktree are never rewritten, and a `pre-commit` hook that modifies the index aborts the split.
+- Added `commitSplit`: builds a chain of commits from staged hunk selections and advances HEAD once; the index and worktree are never rewritten. `pre-commit`/`post-commit` run once for the chain, `commit-msg` runs per commit, and a `pre-commit` hook that modifies the index aborts the split.
 - Added `stageContent`: stage exact bytes for a path without touching the worktree.
 
 ### Changed

@@ -183,12 +183,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	}
 }
 
-async function applyChangelog(
-	cwd: string,
-	proposal: ChangelogProposal,
-	dryRun: boolean,
-	split?: { plan: SplitCommitPlan; order: number[] },
-): Promise<void> {
+async function applyChangelog(cwd: string, proposal: ChangelogProposal, dryRun: boolean): Promise<string[]> {
 	process.stdout.write("● Applying changelog entries...\n");
 	const updated = await applyChangelogProposals({
 		cwd,
@@ -202,13 +197,10 @@ async function applyChangelog(
 		for (const filePath of updated) {
 			process.stdout.write(`  └─ ${filePath}\n`);
 		}
-		if (split) {
-			const updatedChangelogFiles = updated.map(filePath => path.relative(cwd, filePath));
-			appendFilesToLastCommit(split.plan, updatedChangelogFiles, split.order);
-		}
-	} else {
-		process.stdout.write("  └─ (no changes)\n");
+		return updated.map(filePath => path.relative(cwd, filePath));
 	}
+	process.stdout.write("  └─ (no changes)\n");
+	return [];
 }
 
 async function completeAgentCommitState(
@@ -298,13 +290,21 @@ async function runSplitCommit(
 		throw new Error(order.error);
 	}
 
+	for (const entry of ctx.changelogProposal?.entries ?? []) {
+		const file = path.relative(ctx.cwd, entry.path);
+		const owners = plan.commits.filter(commit => commit.changes.some(change => change.path === file)).length;
+		if (owners > 1) {
+			throw new Error(`Changelog ${file} is split across ${owners} commits; generated entries need a single owner`);
+		}
+	}
+
 	if (!ctx.dryRun && !(await confirmSplitCommitPlan(plan, ctx.changelogProposal !== undefined))) {
 		process.stdout.write("Split commit aborted by user.\n");
 		return;
 	}
 
 	if (ctx.changelogProposal) {
-		await applyChangelog(ctx.cwd, ctx.changelogProposal, ctx.dryRun, { plan, order });
+		routeChangelogFiles(plan, await applyChangelog(ctx.cwd, ctx.changelogProposal, ctx.dryRun), order);
 	}
 
 	if (ctx.dryRun) {
@@ -351,14 +351,12 @@ async function runSplitCommit(
 	if (ctx.push) await pushOrAbort(ctx.cwd);
 }
 
-function appendFilesToLastCommit(plan: SplitCommitPlan, files: string[], order: number[]): void {
-	if (plan.commits.length === 0 || order.length === 0) return;
-	const targetCommit = plan.commits[order[order.length - 1]];
-	const planned = new Set(plan.commits.flatMap(commit => commit.changes.map(change => change.path)));
+/** Generated changelog files ride whole in the commit that already owns them, else in the last commit. */
+function routeChangelogFiles(plan: SplitCommitPlan, files: string[], order: number[]): void {
+	const lastCommit = plan.commits[order[order.length - 1]];
 	for (const file of files) {
-		if (planned.has(file)) continue;
-		targetCommit.changes.push({ path: file, kind: "all" });
-		planned.add(file);
+		const owner = plan.commits.find(commit => commit.changes.some(change => change.path === file)) ?? lastCommit;
+		owner.changes = [...owner.changes.filter(change => change.path !== file), { path: file, kind: "all" }];
 	}
 }
 

@@ -169,21 +169,18 @@ impl GitRepo {
 		write_index_map_locked(&repo, &state, lock)
 	}
 
-	/// Create an atomic sequence of commits from a staged diff and hunk
-	/// selections without writing the index file or touching the worktree.
+	/// Creates an atomic sequence of commits without writing the index or
+	/// worktree. HEAD advances once or not at all. Hooks `pre-commit` and
+	/// `post-commit` run once for the chain, while `commit-msg` runs per
+	/// commit. If `pre-commit` modifies the index, the split fails.
 	pub fn commit_split(&self, options: &SplitCommitOptions) -> Result<Vec<String>> {
 		let repo = self.gix()?;
 
-		// 1. Acquire .git/index lock purely as a mutex while verifying and planning;
-		//    never written/committed, and MUST be dropped before running hooks.
+		// Index lock is held only as a mutex during planning and dropped before hooks.
 		let lock = lock_index(&repo.index_path(), "git commit split lock")?;
-
-		// 2. Load index and write_index_tree.
 		let index = load_index_or_head(&repo, "git commit split")?;
 		let index_tree = write_index_tree(&repo, &index)?;
 
-		// 3. old_commit = HEAD id (may be None on unborn). map = tree_map(repo,
-		//    head_tree) or empty BTreeMap.
 		let mut head = repo
 			.head()
 			.map_err(|err| Error::backend("git commit split", err))?;
@@ -209,7 +206,6 @@ impl GitRepo {
 			None => (repo.empty_tree().id().detach(), BTreeMap::new()),
 		};
 
-		// 4. Parse staged diff once and build planned commit trees.
 		let parsed_patches = parse_patch(&options.staged_diff).map_err(ApplyFailure::into_error)?;
 		let mut trees = Vec::with_capacity(options.commits.len());
 		let mut prev_tree = head_tree_id;
@@ -229,7 +225,6 @@ impl GitRepo {
 			trees.push(tree_i);
 		}
 
-		// 5. After all: require last_tree == index_tree.
 		let last_tree = trees
 			.last()
 			.copied()
@@ -244,13 +239,11 @@ impl GitRepo {
 			));
 		}
 
-		// 6. Drop index lock before running any hooks so hooks can touch the index.
 		drop(lock);
 
-		// 7. Run pre-commit hook once.
 		run_commit_hook(self, &repo, "pre-commit", &[])?;
 
-		// 8. Verify pre-commit hook did not modify the index.
+		// Commits were built from the pre-hook tree.
 		let post_hook_index = load_index_or_head(&repo, "git commit split")?;
 		let post_hook_tree = write_index_tree(&repo, &post_hook_index)?;
 		if post_hook_tree != index_tree {
@@ -261,7 +254,6 @@ impl GitRepo {
 			));
 		}
 
-		// 9. Create commit objects chained.
 		let (committer, author) = repo_identity(&repo, "git commit split")?;
 		let mut prev_commit = old_commit;
 		let mut commit_ids = Vec::with_capacity(trees.len());
@@ -281,7 +273,6 @@ impl GitRepo {
 			commit_ids.push(id.to_hex().to_string());
 		}
 
-		// 10. Single HEAD ref edit to the last commit id.
 		let last_commit_id = prev_commit.expect("at least one commit in split");
 		advance_head(&repo, "git commit split", old_commit, last_commit_id, "commit (split)")?;
 		let _ = run_commit_hook(self, &repo, "post-commit", &[]);
@@ -825,9 +816,16 @@ fn select_file_patches(
 				message: format!("No hunks selected for {}", selection.path),
 			});
 		}
-		let mut cloned = (*file).clone();
-		cloned.hunks = selected.into_iter().cloned().collect();
-		patches.push(cloned);
+		patches.push(FilePatch {
+			old_path: file.old_path.clone(),
+			new_path: file.new_path.clone(),
+			old_mode: file.old_mode,
+			new_mode: file.new_mode,
+			old_oid:  file.old_oid.clone(),
+			new_oid:  file.new_oid.clone(),
+			hunks:    selected.into_iter().cloned().collect(),
+			binary:   file.binary.clone(),
+		});
 	}
 	Ok(patches)
 }
@@ -925,46 +923,36 @@ fn apply_file_bytes(
 		return Ok(source.to_vec());
 	}
 	let mut lines = split_lines(source);
-	// Postimage numbering already carries every earlier hunk's size delta, so
-	// only the drift the previous hunk had to absorb is forwarded (git starts
-	// each search at `newpos - 1` and never forwards drift; this is a superset).
-	let mut drift: isize = 0;
-	// First line not written by an earlier hunk. Like `git apply` without
-	// `--allow-overlap`, a hunk may not match into a region a previous hunk in
-	// this pass produced.
+	// No hunk may match into lines a previous hunk wrote (git without
+	// --allow-overlap).
 	let mut floor: usize = 0;
 	for hunk in &patch.hunks {
 		let (start, anchor, replacement, expected) = hunk_sides(hunk, reverse);
-		let preferred = anchor as isize + drift;
 		let position = locate_hunk(
 			&lines,
 			&expected,
 			floor,
-			preferred,
+			anchor,
 			start <= 1,
 			!matches!(hunk.lines.last(), Some(line) if line.kind == b' '),
 		);
 		let Some(position) = position else {
 			return Err(ApplyFailure::Context(format!("hunk at line {start} does not apply")));
 		};
-		drift = position as isize - anchor as isize;
 		floor = position + replacement.len();
 		lines.splice(position..position + expected.len(), replacement);
 	}
 	Ok(lines.concat())
 }
 
-/// Find where `expected` occurs in `lines` at or after `floor`, mirroring
-/// `git apply`'s `find_pos`: try `preferred` first, then fan out one line at a
-/// time — forward before backward — so a hunk still applies after earlier
-/// edits shifted the file. A hunk that starts at the top of the old file or
-/// has no trailing context is pinned to the beginning / end of the file
-/// respectively, exactly as git does.
+/// Find where `expected` occurs in `lines` at or after `floor`, trying
+/// `preferred` first then fanning out forward before backward, mirroring `git
+/// apply`'s `find_pos`.
 fn locate_hunk(
 	lines: &[Vec<u8>],
 	expected: &[Vec<u8>],
 	floor: usize,
-	preferred: isize,
+	preferred: usize,
 	match_beginning: bool,
 	match_end: bool,
 ) -> Option<usize> {
@@ -983,7 +971,7 @@ fn locate_hunk(
 		};
 		return matches_at(pinned).then_some(pinned);
 	}
-	let preferred = preferred.clamp(floor as isize, last as isize) as usize;
+	let preferred = preferred.clamp(floor, last);
 	if matches_at(preferred) {
 		return Some(preferred);
 	}
@@ -1020,8 +1008,8 @@ fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Vec<u8>>, Vec<Ve
 			new.push(content);
 		}
 	}
-	// A zero-count range names the line *before* the hunk, so it is already
-	// the 0-based insertion index.
+	// A zero-count range names the line before the hunk, so it is already the
+	// 0-based index.
 	let anchor = |start: usize, count: usize| {
 		if count == 0 {
 			start
@@ -1967,7 +1955,7 @@ mod tests {
 	}
 
 	#[test]
-	fn patch_stage_hunks_selects_indices_and_applies_stale_diff_after_drift() {
+	fn patch_stage_hunks_selects_indices_and_applies_stale_diff() {
 		let original = (1..=20).fold(String::new(), |mut out, line| {
 			use std::fmt::Write as _;
 			let _ = writeln!(out, "line {line}");

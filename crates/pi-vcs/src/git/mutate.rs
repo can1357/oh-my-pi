@@ -264,7 +264,7 @@ impl GitRepo {
 		};
 		if !options.allow_empty {
 			if let Some(parent) = parents.first() {
-				if commit_tree(&repo, parent)? == tree {
+				if commit_tree(&repo, "git commit", parent)? == tree {
 					return Err(Error::backend("git commit", "nothing to commit, working tree clean"));
 				}
 			} else if tree == repo.empty_tree().id {
@@ -402,8 +402,17 @@ impl GitRepo {
 		};
 		let mut index = load_index_or_head(&repo, "git restore")?;
 		if let Some(mut lock) = lock {
-			let source = resolve_tree(&repo, options.source.as_deref().unwrap_or("HEAD"))?;
-			let source_index = index_for_tree(&repo, Some(&source))?;
+			let source_tree = match options.source.as_deref() {
+				Some(source) => Some(resolve_tree(&repo, source)?),
+				None => repo
+					.head()
+					.map_err(|err| Error::backend("git restore", err))?
+					.try_peel_to_id()
+					.map_err(|err| Error::backend("git restore", err))?
+					.map(|id| commit_tree(&repo, "git restore", &id.detach()))
+					.transpose()?,
+			};
+			let source_index = index_for_tree(&repo, source_tree.as_ref())?;
 			copy_index_paths(&mut index, &source_index, &options.files);
 			index
 				.write_to(&mut lock, INDEX_WRITE)
@@ -749,7 +758,7 @@ impl GitRepo {
 				.write(INDEX_WRITE)
 				.map_err(|err| Error::backend("git worktree add", err));
 		}
-		let tree = commit_tree(&linked_repo, &id)?;
+		let tree = commit_tree(&linked_repo, "git worktree add", &id)?;
 		let mut target = linked_repo
 			.index_from_tree(&tree)
 			.map_err(|err| Error::backend("git worktree add", err))?;
@@ -1149,14 +1158,17 @@ fn resolve_tree(repo: &gix::Repository, spec: &str) -> Result<gix::hash::ObjectI
 		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })
 }
 
-fn commit_tree(repo: &gix::Repository, id: &gix::hash::ObjectId) -> Result<gix::hash::ObjectId> {
-	let commit = repo
+fn commit_tree(
+	repo: &gix::Repository,
+	op: &'static str,
+	id: &gix::hash::ObjectId,
+) -> Result<gix::hash::ObjectId> {
+	repo
 		.find_commit(*id)
-		.map_err(|e| Error::backend("git commit", e))?;
-	commit
+		.map_err(|e| Error::backend(op, e))?
 		.tree_id()
 		.map(|id| id.detach())
-		.map_err(|e| Error::backend("git commit", e))
+		.map_err(|e| Error::backend(op, e))
 }
 
 fn index_for_tree(
@@ -1410,7 +1422,7 @@ fn compute_commit_tree(
 		let base = index_for_tree(
 			repo,
 			old_commit
-				.map(|id| commit_tree(repo, id))
+				.map(|id| commit_tree(repo, "git commit", id))
 				.transpose()?
 				.as_ref(),
 		)?;
@@ -1493,7 +1505,7 @@ fn checkout_tree(
 	commit: gix::hash::ObjectId,
 	overwrite: bool,
 ) -> Result<()> {
-	let tree = commit_tree(repo, &commit)?;
+	let tree = commit_tree(repo, "git checkout", &commit)?;
 	let mut target = repo
 		.index_from_tree(&tree)
 		.map_err(|e| Error::backend("git checkout", e))?;
@@ -1990,6 +2002,27 @@ mod tests {
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "A  new");
 		repo.unstage(&[]).unwrap();
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "?? new");
+	}
+
+	#[test]
+	fn unstage_on_unborn_head_empties_index() {
+		let temp = tempfile::tempdir().unwrap();
+		init_repo(temp.path());
+		fs::write(temp.path().join("a"), "hello\n").unwrap();
+		git(temp.path(), &["add", "a"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		repo.unstage(&[]).unwrap();
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "?? a");
+		git(temp.path(), &["add", "a"]);
+		repo
+			.restore(&RestoreOptions {
+				source:   None,
+				staged:   true,
+				worktree: false,
+				files:    vec!["a".into()],
+			})
+			.unwrap();
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "?? a");
 	}
 
 	#[test]

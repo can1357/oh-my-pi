@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { runCommitCommand } from "@oh-my-pi/pi-coding-agent/commit";
 import * as agentModule from "@oh-my-pi/pi-coding-agent/commit/agentic/agent";
-import type { SplitCommitPlan } from "@oh-my-pi/pi-coding-agent/commit/agentic/state";
+import type { ChangelogProposal, SplitCommitPlan } from "@oh-my-pi/pi-coding-agent/commit/agentic/state";
 import { applyChangelogProposals } from "@oh-my-pi/pi-coding-agent/commit/changelog";
 import * as changelogModule from "@oh-my-pi/pi-coding-agent/commit/changelog/generate";
 import * as generateModule from "@oh-my-pi/pi-coding-agent/commit/conventional/generate";
@@ -107,8 +107,7 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		const status = await $`git status --porcelain`.cwd(tmp.path()).text();
 		expect(status.trim()).toBe("");
 
-		const log = await $`git log -n 1 --oneline`.cwd(tmp.path()).text();
-		expect(log).toMatch(/docs:|chore:/);
+		expect((await $`git rev-list --count HEAD`.cwd(tmp.path()).text()).trim()).toBe("2");
 	});
 
 	it("dry-run is strictly non-mutating and does not stage changes", async () => {
@@ -291,6 +290,111 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		expect(afterHunk1).toContain("line 2 modified");
 		expect(afterHunk1).toContain("line 28\n");
 		expect(await $`git show HEAD:multi.txt`.cwd(tmp.path()).text()).toContain("line 28 modified");
+		expect((await $`git status --porcelain`.cwd(tmp.path()).text()).trim()).toBe("");
+	});
+
+	// One owner with partial hunks: without the upgrade to `all`, commitSplit rejects the plan as not
+	// covering the staged tree after the changelog was already written. Two owners: rejected up front,
+	// before anything is written.
+	it.each([
+		["upgrades the owning commit to all", [1]],
+		["is rejected before writing when split across commits", [1, 2]],
+	])("changelog in the split plan %s", async (_label, parts) => {
+		const changelogBaseline = [
+			"# Changelog",
+			"",
+			"## [Unreleased]",
+			"",
+			"### Added",
+			"",
+			...Array.from({ length: 12 }, (_, i) => `- Existing ${i + 1}`),
+			"",
+			"### Changed",
+			"",
+			"- Existing change",
+			"",
+		].join("\n");
+		await Bun.write(tmp.join("CHANGELOG.md"), changelogBaseline);
+		await $`git add CHANGELOG.md`.cwd(tmp.path()).quiet();
+		await $`git commit -m "commit baseline changelog"`.cwd(tmp.path()).quiet();
+
+		const stagedChangelog = [
+			"# Changelog",
+			"",
+			"## [Unreleased]",
+			"",
+			"### Added",
+			"",
+			"- Staged note",
+			...Array.from({ length: 12 }, (_, i) => `- Existing ${i + 1}`),
+			"",
+			"### Changed",
+			"",
+			"- Existing change",
+			"",
+		].join("\n");
+		await Bun.write(tmp.join("feature.txt"), "feature code\n");
+		await Bun.write(tmp.join("CHANGELOG.md"), stagedChangelog);
+		await $`git add feature.txt CHANGELOG.md`.cwd(tmp.path()).quiet();
+		const countBefore = Number.parseInt((await $`git rev-list --count HEAD`.cwd(tmp.path()).text()).trim(), 10);
+
+		const changelogCommits = parts.map((hunk, position) =>
+			commitSpec(
+				`update changelog part ${hunk}`,
+				[{ path: "CHANGELOG.md", kind: "indices", indices: [hunk] }],
+				"feat",
+				position === 0 ? [] : [position],
+			),
+		);
+		const splitProposal: SplitCommitPlan = {
+			commits: [commitSpec("add feature", [{ path: "feature.txt", kind: "all" }]), ...changelogCommits],
+			warnings: [],
+		};
+		const changelogProposal: ChangelogProposal = {
+			entries: [
+				{
+					path: tmp.join("CHANGELOG.md"),
+					entries: {
+						Fixed: ["Generated entry"],
+					},
+				},
+			],
+		};
+		vi.spyOn(agentModule, "runCommitAgentSession").mockImplementation((async (input: never) => {
+			const { onComplete } = input as { onComplete: (state: never) => Promise<void> };
+			await onComplete({ splitProposal, changelogProposal } as never);
+		}) as never);
+
+		const run = runCommitCommand({ push: false, dryRun: false, noChangelog: false });
+
+		if (parts.length > 1) {
+			const error = await run.then(
+				() => null,
+				(cause: unknown) => cause,
+			);
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toMatch(/split across 2 commits/);
+			expect(await Bun.file(tmp.join("CHANGELOG.md")).text()).toBe(stagedChangelog);
+			expect((await $`git rev-list --count HEAD`.cwd(tmp.path()).text()).trim()).toBe(String(countBefore));
+			expect((await $`git status --porcelain`.cwd(tmp.path()).text()).trim()).toBe(
+				"M  CHANGELOG.md\nA  feature.txt",
+			);
+			return;
+		}
+
+		await run;
+		const countAfter = Number.parseInt((await $`git rev-list --count HEAD`.cwd(tmp.path()).text()).trim(), 10);
+		expect(countAfter - countBefore).toBe(2);
+		expect((await $`git log --format=%s -n 2`.cwd(tmp.path()).text()).trim().split("\n")).toEqual([
+			"feat: update changelog part 1",
+			"feat: add feature",
+		]);
+
+		const committedChangelog = await $`git show HEAD:CHANGELOG.md`.cwd(tmp.path()).text();
+		expect(committedChangelog).toContain("Staged note");
+		expect(committedChangelog).toContain("Generated entry");
+
+		expect((await $`git show --stat --format= HEAD~1`.cwd(tmp.path()).text()).trim()).not.toContain("CHANGELOG.md");
 		expect((await $`git status --porcelain`.cwd(tmp.path()).text()).trim()).toBe("");
 	});
 });

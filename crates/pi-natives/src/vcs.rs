@@ -1213,7 +1213,7 @@ impl VcsGitRepo {
 		let options: Result<core::SplitCommitOptions> = options.try_into();
 		blocking("vcs.commitSplit", self.inner.clone(), signal, move |r| {
 			r.commit_split(&options.map_err(|error| pi_vcs::Error::Backend {
-				context: "git hunk selection",
+				context: "git commit split",
 				message: error.to_string(),
 			})?)
 		})

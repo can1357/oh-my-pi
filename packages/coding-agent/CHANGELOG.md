@@ -7,9 +7,9 @@
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
 - `omp commit --dry-run` is strictly read-only: it never stages, never pushes, and never touches changelogs.
-- Split commits are created atomically from the staged tree without rewriting the index or worktree; rejecting the plan leaves everything untouched.
+- Split commits are created atomically from the staged tree without rewriting the index or worktree; rejecting the plan at the confirmation prompt leaves everything untouched.
 - `omp commit` no longer sweeps pre-existing unstaged changelog edits into the commit when it appends generated changelog entries.
-
+- Routed generated changelog entries to their owning commit during split commits
 ## [18.1.10] - 2026-09-04
 
 ### Changed
