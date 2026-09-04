@@ -5,6 +5,7 @@
 ### Added
 
 - Added per-server MCP tool filtering: `enabledTools` / `disabledTools` in the server config accept exact tool names or glob patterns and restrict which advertised tools reach the session; `disabledTools` wins when both are set, and a filter excluding every tool is reported as a per-server failure
+- Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 
 ### Fixed
 
@@ -16,6 +17,7 @@
 - Standalone `CLAUDE.md` files in the project root (and ancestor directories) are now loaded as context, mirroring `AGENTS.md` discovery; config-directory context files still take precedence per scope.
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
+- Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
 
 ## [18.1.10] - 2026-09-04
 
