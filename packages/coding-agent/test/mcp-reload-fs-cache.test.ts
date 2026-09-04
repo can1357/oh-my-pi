@@ -7,6 +7,7 @@ import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { getMCPConfigPath, getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+import { createInteractiveModeContext, createMcpManagerStub } from "./helpers/interactive-mode-context";
 
 const originalProjectDir = getProjectDir();
 
@@ -26,11 +27,7 @@ async function writeExternalProjectConfig(projectDir: string, servers: Record<st
 function createController(discoveredCommands: string[]) {
 	const refreshMCPTools = vi.fn(async () => {});
 	const setMCPPromptCommands = vi.fn();
-	const settings = {
-		get: vi.fn((key: string) => (key === "mcp.enableProjectConfig" ? true : undefined)),
-	};
-	const mcpManager = {
-		disconnectAll: vi.fn(async () => {}),
+	const mcpManager = createMcpManagerStub({
 		discoverAndConnect: vi.fn(async () => {
 			const configPath = getMCPConfigPath("project", getProjectDir());
 			const content = await readFile(configPath);
@@ -47,41 +44,15 @@ function createController(discoveredCommands: string[]) {
 					}
 				}
 			}
-			return { errors: new Map<string, string>() };
+			return { errors: new Map<string, string>(), connectedServers: [], tools: [], exaApiKeys: [] };
 		}),
-		disconnectServer: vi.fn(async () => {}),
-		connectServers: vi.fn(async (_configs: Record<string, MCPServerConfig>, _sources: Record<string, unknown>) => ({
-			errors: new Map<string, string>(),
-			connectedServers: [],
-			tools: [],
-			exaApiKeys: [],
-		})),
-		getTools: vi.fn(() => []),
-		waitForConnection: vi.fn(async () => ({})),
-		getConnectionStatus: vi.fn(() => "connected"),
-		getSource: vi.fn(() => undefined),
-	};
-	const controller = new MCPCommandController({
-		chatContainer: { addChild: vi.fn() },
-		present: vi.fn(),
-		presentCommandOutput: vi.fn(),
-		ui: { requestRender: vi.fn() },
-		editor: {},
-		showError: vi.fn(),
-		showStatus: vi.fn(),
-		oauthManualInput: {
-			hasPending: vi.fn(() => false),
-			pendingProviderId: undefined,
-			tryClaimInput: vi.fn(),
-		},
-		session: {
-			refreshMCPTools,
-			setMCPPromptCommands,
-			modelRegistry: { authStorage: undefined },
-		},
-		settings,
-		mcpManager,
-	} as never);
+	});
+	const controller = new MCPCommandController(
+		createInteractiveModeContext({
+			session: { refreshMCPTools, setMCPPromptCommands },
+			mcpManager,
+		}),
+	);
 
 	return { controller, mcpManager, refreshMCPTools, setMCPPromptCommands };
 }

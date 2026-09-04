@@ -13,11 +13,9 @@ import type {
 	DesktopWindow,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
-import { createDesktopSession } from "@oh-my-pi/pi-natives/desktop";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
-import { copyToClipboard, readTextFromClipboard } from "../../utils/clipboard";
 import { cloneSafe, RunOutput } from "../browser/run-output";
 import {
 	bindRunFacade,
@@ -417,7 +415,7 @@ class Win {
 /** Hosts the persistent JavaScript runtime and native desktop session. */
 export class ComputerWorkerCore {
 	readonly #transport: ComputerWorkerTransport;
-	readonly #createSession: NativeDesktopSessionFactory;
+	readonly #createSession?: NativeDesktopSessionFactory;
 	readonly #unsubscribe: () => void;
 	#session?: NativeDesktopSession;
 	#runtime?: JsRuntime;
@@ -430,7 +428,7 @@ export class ComputerWorkerCore {
 	readonly #runContexts = new AsyncLocalStorage<ComputerRunContext>();
 	#closed = false;
 
-	constructor(transport: ComputerWorkerTransport, createSession: NativeDesktopSessionFactory = createDesktopSession) {
+	constructor(transport: ComputerWorkerTransport, createSession?: NativeDesktopSessionFactory) {
 		this.#transport = transport;
 		this.#createSession = createSession;
 		this.#unsubscribe = transport.onMessage(message => this.handle(message));
@@ -457,10 +455,14 @@ export class ComputerWorkerCore {
 		}
 	}
 
-	#ensureSession(snapshot: ComputerSessionSnapshot): NativeDesktopSession {
+	async #ensureSession(snapshot: ComputerSessionSnapshot): Promise<NativeDesktopSession> {
 		if (this.#session) return this.#session;
 		try {
-			this.#session = this.#createSession({ display: snapshot.display });
+			// The worker must answer its readiness handshake without loading the native
+			// addon; normal CLI startup and selector pings never execute desktop code.
+			const createSession =
+				this.#createSession ?? (await import("@oh-my-pi/pi-natives/desktop")).createDesktopSession;
+			this.#session = createSession({ display: snapshot.display });
 			return this.#session;
 		} catch (error) {
 			throw nativeError(error);
@@ -512,7 +514,7 @@ export class ComputerWorkerCore {
 		let completed = false;
 		try {
 			throwIfAborted(signal);
-			const session = this.#ensureSession(message.session);
+			const session = await this.#ensureSession(message.session);
 			const runtime = this.#ensureRuntime(message.session);
 			runtime.setCwd(message.session.cwd);
 			const desktop = this.#createDesktopScope(session);
@@ -578,7 +580,7 @@ export class ComputerWorkerCore {
 		if (completed) {
 			let capabilities: DesktopCapabilities;
 			try {
-				capabilities = this.#ensureSession(message.session).capabilities;
+				capabilities = (await this.#ensureSession(message.session)).capabilities;
 			} catch (error) {
 				this.#transport.send({
 					type: "result",
@@ -709,10 +711,17 @@ export class ComputerWorkerCore {
 				const node = await nativeCall(signal, () => session.axFocused());
 				return node ? el(node) : null;
 			},
+			ref: async (ref: string): Promise<El> => {
+				const { signal } = getContext();
+				return el(await nativeCall(signal, () => session.axNode(ref)));
+			},
 			clipboard: {
 				read: async (): Promise<string> => {
 					const { signal } = getContext();
 					throwIfAborted(signal);
+					// Clipboard access is part of the native desktop surface and remains
+					// outside the worker's readiness-only import graph.
+					const { readTextFromClipboard } = await import("../../utils/clipboard");
 					const text = await readTextFromClipboard();
 					throwIfAborted(signal);
 					return text;
@@ -720,6 +729,9 @@ export class ComputerWorkerCore {
 				write: async (text: string): Promise<void> => {
 					const context = getContext();
 					guardRun(context, "clipboard.write");
+					// Clipboard access is part of the native desktop surface and remains
+					// outside the worker's readiness-only import graph.
+					const { copyToClipboard } = await import("../../utils/clipboard");
 					await copyToClipboard(text);
 					throwIfAborted(context.signal);
 				},

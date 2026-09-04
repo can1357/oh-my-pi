@@ -1,6 +1,18 @@
 // Provider-wire compat for "fireworks"; regenerated from the frozen census using deployment contract selectors.
 
-provider "fireworks" {
+provider "fireworks" priority=-1 {
+	// Replaces the provider-keyed Fireworks minimal-effort remap.
+	thinking-effort-map {
+		minimal "none"
+	}
+	// Replaces the Fireworks wire-model-id dispatch baseline.
+	wire-model-id-mode "fireworks"
+	models "*-fast" {
+		// Replaces the Fast serving-path suffix mechanism dispatch.
+		wire-model-id-mode "firepass"
+	}
+	// Replaces the Fireworks reasoning-effort thinking-drop baseline.
+	drop-thinking-when-reasoning-effort #true
 	thinking-mode "effort"
 	class "qwen" {
 		thinking-format "openai"

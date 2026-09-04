@@ -298,7 +298,7 @@ function renderThinking(text: string): string {
 
 function renderTranscript(messages: readonly Message[], options: DialectRenderOptions = {}): string {
 	let out = "";
-	for (let i = 0; i < messages.length; ) {
+	for (let i = 0; i < messages.length;) {
 		const message = messages[i]!;
 		if (message.role === "assistant") {
 			const parts = assistantTranscriptParts(message);

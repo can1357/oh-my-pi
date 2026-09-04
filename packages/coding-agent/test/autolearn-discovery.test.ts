@@ -3,10 +3,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
+import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
 import "@oh-my-pi/pi-coding-agent/discovery";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 async function writeSkill(dir: string, name: string, description: string): Promise<void> {
 	const file = path.join(dir, name, "SKILL.md");
@@ -19,9 +21,13 @@ describe("managed-skills discovery", () => {
 	let tempCwd: string;
 	let managedDir: string;
 	let authoredDir: string;
+	let originalClaudeConfigDir: string | undefined;
 
 	let originalAgentDir: string;
 	beforeEach(async () => {
+		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+		delete process.env.CLAUDE_CONFIG_DIR;
+		delete Bun.env.CLAUDE_CONFIG_DIR;
 		originalAgentDir = getAgentDir();
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-managed-disco-home-"));
 		// cwd MUST live under the fake home so loadSkills' ancestor walk is bounded
@@ -36,6 +42,8 @@ describe("managed-skills discovery", () => {
 	});
 
 	afterEach(async () => {
+		restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
+		disableUserSource("claude");
 		spyOn(os, "homedir").mockRestore();
 		setAgentDir(originalAgentDir);
 		await removeWithRetries(tempHome);
@@ -131,6 +139,7 @@ describe("managed-skills discovery", () => {
 	it("preserves provider priority when duplicate authored providers are both enabled (#4648)", async () => {
 		await writeSkill(path.join(tempHome, ".claude", "skills"), "priority-authored", "Enabled claude.");
 		await writeSkill(path.join(tempHome, ".agents", "skills"), "priority-authored", "Enabled agents.");
+		enableUserSource("claude");
 		const { skills } = await loadSkills({ cwd: tempCwd });
 		const matches = skills.filter(s => s.name === "priority-authored");
 		expect(matches).toHaveLength(1);

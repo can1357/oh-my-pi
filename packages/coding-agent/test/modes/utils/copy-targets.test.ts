@@ -1,29 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
-	buildCopyTargets,
-	type CopySource,
-	type CopyTarget,
 	extractCodeBlocks,
 	extractLastCommand,
+	extractLastLink,
+	extractLinks,
 	extractQuoteBlocks,
 } from "@oh-my-pi/pi-coding-agent/modes/utils/copy-targets";
-
-function source(overrides: Partial<CopySource>): CopySource {
-	return {
-		messages: [],
-		getLastVisibleHandoffText: () => undefined,
-		...overrides,
-	};
-}
-
-function byId(targets: CopyTarget[], id: string): CopyTarget | undefined {
-	return targets.find(t => t.id === id);
-}
-
-function assistantText(text: string): AgentMessage {
-	return { role: "assistant", content: [{ type: "text", text }] } as unknown as AgentMessage;
-}
 
 function assistantCalls(toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>): AgentMessage {
 	return {
@@ -98,117 +81,65 @@ describe("extractLastCommand", () => {
 	});
 });
 
-describe("buildCopyTargets", () => {
-	it("lists assistant messages most-recent-first, drilling code-bearing ones", () => {
-		const newer = "Newer message\n```ts\nconst a = 1;\n```\nand\n```py\nprint(2)\n```";
-		const targets = buildCopyTargets(
-			source({
-				messages: [assistantText("Older message"), assistantText(newer)] as unknown as AgentMessage[],
-			}),
-		);
-
-		// Newest first.
-		expect(targets[0]?.id).toBe("msg:1");
-		expect(targets[0]?.label).toBe("Newer message");
-		expect(targets[1]?.id).toBe("msg:2");
-
-		// The newer message is itself a copy target (full text) AND a tree node
-		// exposing each code block as a child copy target.
-		const group = targets[0]!;
-		expect(group.content).toBe(newer);
-		expect(group.children?.map(c => c.label)).toEqual(["Block 1", "Block 2", "All 2 blocks"]);
-		expect(group.children?.[0]?.content).toBe("const a = 1;");
-		expect(group.children?.[0]?.language).toBe("ts"); // drives preview syntax highlighting
-		expect(group.children?.at(-1)?.content).toBe("const a = 1;\n\nprint(2)");
-
-		// The older, code-free message is a leaf that copies its full text.
-		expect(targets[1]?.children).toBeUndefined();
-		expect(targets[1]?.content).toBe("Older message");
-	});
-
-	it("exposes a single-block message as content plus one block child (no 'all')", () => {
-		const targets = buildCopyTargets(
-			source({ messages: [assistantText("Just one\n```js\nfoo();\n```")] as unknown as AgentMessage[] }),
-		);
-		const msg = byId(targets, "msg:1");
-		expect(msg?.content).toBe("Just one\n```js\nfoo();\n```");
-		expect(msg?.children?.map(c => c.label)).toEqual(["Block 1"]);
-	});
-
-	it("drills a quoted message into a de-prefixed quote child", () => {
-		const text = "Copy-paste to the other agent:\n\n> relay this\n> across agents";
-		const targets = buildCopyTargets(source({ messages: [assistantText(text)] as unknown as AgentMessage[] }));
-		const msg = byId(targets, "msg:1");
-		// The message node still copies the full markdown (with markers).
-		expect(msg?.content).toBe(text);
-		expect(msg?.hint).toBe("4 lines · 1 quote");
-		const quote = msg?.children?.find(c => c.id === "msg:1:quote:0");
-		expect(quote?.label).toBe("Quote 1");
-		// The drilled child copies the un-prefixed quote, ready to paste onward.
-		expect(quote?.content).toBe("relay this\nacross agents");
-		expect(quote?.language).toBeUndefined();
-		expect(quote?.copyMessage).toBe("Copied quote block 1 to clipboard");
-	});
-
-	it("interleaves code and quote children in document order with combined nodes", () => {
-		const text = "intro\n```ts\na;\n```\n> q one\n```py\nb\n```\n> q two";
-		const targets = buildCopyTargets(source({ messages: [assistantText(text)] as unknown as AgentMessage[] }));
-		const msg = byId(targets, "msg:1");
-		expect(msg?.children?.map(c => c.id)).toEqual([
-			"msg:1:code:0",
-			"msg:1:quote:0",
-			"msg:1:code:1",
-			"msg:1:quote:1",
-			"msg:1:all",
-			"msg:1:all-quotes",
+describe("extractLinks", () => {
+	it("finds inline links, autolinks, and bare URLs in document order, deduplicated by href", () => {
+		const text = [
+			'See [the docs](https://example.com/docs "Docs") and <https://example.com/auto>.',
+			"Bare: https://example.com/bare/path?x=1&y=2 then again https://example.com/docs.",
+		].join("\n");
+		expect(extractLinks(text)).toEqual([
+			{ text: "the docs", href: "https://example.com/docs" },
+			{ text: "https://example.com/auto", href: "https://example.com/auto" },
+			{ text: "https://example.com/bare/path?x=1&y=2", href: "https://example.com/bare/path?x=1&y=2" },
 		]);
-		expect(msg?.hint).toBe("9 lines · 2 code · 2 quote");
-		expect(msg?.children?.find(c => c.id === "msg:1:all-quotes")?.content).toBe("q one\n\nq two");
 	});
 
-	it("skips tool-only assistant turns and non-assistant messages", () => {
+	it("trims sentence punctuation but keeps a paren that belongs to the URL", () => {
+		expect(extractLinks("(https://en.wikipedia.org/wiki/Foo_(bar)).")).toEqual([
+			{ text: "https://en.wikipedia.org/wiki/Foo_(bar)", href: "https://en.wikipedia.org/wiki/Foo_(bar)" },
+		]);
+		expect(extractLinks("Try https://example.com/a, https://example.com/b; or https://example.com/c?")).toEqual([
+			{ text: "https://example.com/a", href: "https://example.com/a" },
+			{ text: "https://example.com/b", href: "https://example.com/b" },
+			{ text: "https://example.com/c", href: "https://example.com/c" },
+		]);
+	});
+
+	it("ignores URLs inside fenced code and inline code, because it uses the renderer's lexer", () => {
+		const text =
+			"Run `curl https://example.com/in-code` then:\n```bash\ncurl https://example.com/fenced\n```\nDocs: https://example.com/prose";
+		expect(extractLinks(text)).toEqual([{ text: "https://example.com/prose", href: "https://example.com/prose" }]);
+	});
+
+	it("keeps a URL that the terminal would wrap as one target", () => {
+		const long = `https://github.com/dalilshorja/dalilshorja/actions/runs/33654874668/job/100330811133?check_suite_focus=true&pr=4`;
+		expect(extractLinks(`Run: ${long}`)).toEqual([{ text: long, href: long }]);
+	});
+
+	it("only http(s) targets qualify", () => {
+		expect(extractLinks("[file](file:///tmp/x) [mail](mailto:a@b.c) ftp://x.y/z a@b.c")).toEqual([]);
+	});
+
+	it("resolves reference links and GFM www autolinks through the renderer's lexer", () => {
+		expect(extractLinks("[ref link][r] and www.example.com/www\n\n[r]: https://example.com/ref")).toEqual([
+			{ text: "ref link", href: "https://example.com/ref" },
+			{ text: "www.example.com/www", href: "http://www.example.com/www" },
+		]);
+	});
+});
+
+describe("extractLastLink", () => {
+	it("returns the last link of the most recent assistant message that has one", () => {
 		const messages = [
-			{ role: "user", content: [{ type: "text", text: "hi" }] },
-			assistantCalls([{ name: "read", arguments: { path: "x" } }]),
-			assistantText("real answer"),
+			{ role: "assistant", content: [{ type: "text", text: "old https://example.com/old" }] },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "a https://example.com/a and b https://example.com/b" }],
+			},
+			{ role: "user", content: "thanks https://example.com/user-link" },
+			{ role: "assistant", content: [{ type: "text", text: "no links here" }] },
 		] as unknown as AgentMessage[];
-		const targets = buildCopyTargets(source({ messages }));
-		expect(targets.filter(t => t.id.startsWith("msg:")).map(t => t.label)).toEqual(["real answer"]);
-	});
-
-	it("falls back to handoff context only when there are no assistant messages", () => {
-		const withMessages = buildCopyTargets(
-			source({
-				messages: [assistantText("answer")] as unknown as AgentMessage[],
-				getLastVisibleHandoffText: () => "<handoff>",
-			}),
-		);
-		expect(byId(withMessages, "handoff")).toBeUndefined();
-
-		const fresh = buildCopyTargets(source({ getLastVisibleHandoffText: () => "<handoff>\nGoal" }));
-		expect(byId(fresh, "handoff")?.content).toBe("<handoff>\nGoal");
-		expect(byId(fresh, "handoff")?.copyMessage).toBe("Copied handoff context to clipboard");
-	});
-
-	it("interleaves runnable commands after the assistant message that issued them", () => {
-		const targets = buildCopyTargets(
-			source({
-				messages: [
-					assistantText("older answer"),
-					assistantCalls([{ name: "bash", arguments: { command: "echo old" } }]),
-					assistantText("newer answer"),
-					assistantCalls([{ name: "bash", arguments: { command: "bun check" } }]),
-				] as unknown as AgentMessage[],
-			}),
-		);
-
-		expect(targets.map(t => t.id)).toEqual(["msg:1", "cmd:1", "msg:2", "cmd:2"]);
-
-		const cmd = byId(targets, "cmd:1");
-		expect(cmd?.label).toBe("bun check");
-		expect(cmd?.hint).toBe("bash · 1 line");
-		expect(cmd?.content).toBe("bun check");
-		expect(cmd?.language).toBe("bash");
-		expect(byId(targets, "cmd:2")?.content).toBe("echo old");
+		expect(extractLastLink(messages)).toEqual({ text: "https://example.com/b", href: "https://example.com/b" });
+		expect(extractLastLink(messages.slice(3))).toBeUndefined();
 	});
 });

@@ -17,6 +17,21 @@ function restoreEnv(name: string, value: string | undefined): void {
 	else process.env[name] = value;
 }
 
+/** Start an in-process broker for `projectDir`, scoping its environment to the call. */
+function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
+	const previousProjectDir = process.env[DAEMON_PROJECT_DIR_ENV];
+	const previousRuntimeDir = process.env[DAEMON_RUNTIME_DIR_ENV];
+	const previousGrace = process.env[DAEMON_IDLE_GRACE_ENV];
+	process.env[DAEMON_PROJECT_DIR_ENV] = projectDir;
+	process.env[DAEMON_RUNTIME_DIR_ENV] = runtimeDir;
+	process.env[DAEMON_IDLE_GRACE_ENV] = "5000";
+	const broker = startDaemonBrokerFromEnvironment();
+	restoreEnv(DAEMON_PROJECT_DIR_ENV, previousProjectDir);
+	restoreEnv(DAEMON_RUNTIME_DIR_ENV, previousRuntimeDir);
+	restoreEnv(DAEMON_IDLE_GRACE_ENV, previousGrace);
+	return broker;
+}
+
 describe("daemon broker log snapshots", () => {
 	it("returns the cursor captured with the PTY bytes rendered in the response", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-cursor-");
@@ -43,17 +58,8 @@ process.stdin.on("data", () => process.stdout.write("AFTER-SNAPSHOT\\n"));
 			return renderTerminalOutput(output, options);
 		});
 
-		const previousProjectDir = process.env[DAEMON_PROJECT_DIR_ENV];
-		const previousRuntimeDir = process.env[DAEMON_RUNTIME_DIR_ENV];
-		const previousGrace = process.env[DAEMON_IDLE_GRACE_ENV];
 		const previousTitle = process.title;
-		process.env[DAEMON_PROJECT_DIR_ENV] = projectDir;
-		process.env[DAEMON_RUNTIME_DIR_ENV] = runtimeDir;
-		process.env[DAEMON_IDLE_GRACE_ENV] = "5000";
-		const broker = startDaemonBrokerFromEnvironment();
-		restoreEnv(DAEMON_PROJECT_DIR_ENV, previousProjectDir);
-		restoreEnv(DAEMON_RUNTIME_DIR_ENV, previousRuntimeDir);
-		restoreEnv(DAEMON_IDLE_GRACE_ENV, previousGrace);
+		const broker = startBroker(projectDir, runtimeDir);
 
 		try {
 			const started = await client.request({
@@ -121,6 +127,82 @@ process.stdin.on("data", () => process.stdout.write("AFTER-SNAPSHOT\\n"));
 			await broker;
 			setProcessName(previousTitle);
 			vi.restoreAllMocks();
+		}
+	}, 20_000);
+
+	// A supervised program that probes the terminal (cursor position here) blocks
+	// on the reply; nothing behind the broker's PTY answered, so it hung until its
+	// own timeout. The broker now replies, and the reply bytes reach the program's
+	// stdin without being echoed back into the captured log.
+	it("answers terminal queries emitted by a supervised PTY", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-terminal-query-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "terminal-query.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setRawMode(true);
+process.stdin.setEncoding("utf8");
+let input = "";
+process.stdin.on("data", chunk => {
+	input += chunk;
+	const match = /\\x1b\\[(\\d+);(\\d+)R/.exec(input);
+	if (!match) return;
+	process.stdout.write("CPR:" + match[1] + ":" + match[2] + "\\n");
+	process.exit(0);
+});
+process.stdout.write("READY\\x1b[6n");
+`,
+		);
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		try {
+			const started = await client.request({
+				op: "start",
+				spec: {
+					name: "terminal-query",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: true,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+
+			const completed = await client.request({
+				op: "wait",
+				name: "terminal-query",
+				for: "exit",
+				timeoutMs: 2_000,
+			});
+			if (completed.op !== "wait") throw new Error("unexpected wait result");
+			expect(completed.timedOut).toBeFalse();
+			expect(completed.daemon.exitCode).toBe(0);
+
+			const logs = await client.request({
+				op: "logs",
+				name: "terminal-query",
+				lines: 20,
+				head: false,
+				follow: false,
+				timeoutMs: 1_000,
+			});
+			if (logs.op !== "logs") throw new Error("unexpected logs result");
+			expect(logs.text).toContain("CPR:1:1");
+			expect(logs.text).not.toContain("\x1b[1;1R");
+		} finally {
+			await client.request({ op: "stop", name: "terminal-query", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
 		}
 	}, 20_000);
 });

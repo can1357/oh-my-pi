@@ -122,6 +122,24 @@ describe("startServer access", () => {
 });
 
 describe("startServer port conflicts", () => {
+	it("returns the live in-process handle when started twice on the same port", async () => {
+		// Reserve an ephemeral port, then start on it explicitly so the memo applies.
+		const reservation = Bun.serve({ port: 0, hostname: STATS_DASHBOARD_HOSTNAME, fetch: () => new Response("") });
+		const port = reservation.port;
+		reservation.stop(true);
+
+		const first = await startServer(port);
+		try {
+			// Regression: the second start used to probe our own port and could
+			// dead-end in "Port X is held by the current process".
+			const second = await startServer(port);
+			expect(second.port).toBe(first.port);
+			expect(second).toBe(first);
+		} finally {
+			first.stop();
+		}
+	});
+
 	it("reuses a live stats dashboard identified by its header", async () => {
 		const existing = Bun.serve({
 			port: 0,

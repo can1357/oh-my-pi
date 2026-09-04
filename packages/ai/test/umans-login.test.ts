@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "bun:test";
-import { loginUmans } from "@oh-my-pi/pi-ai/registry/umans";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+
+const loginUmans = getProviderDefinition("umans")!.login!;
 
 describe("umans login", () => {
 	it("validates pasted keys against the Anthropic messages endpoint", async () => {

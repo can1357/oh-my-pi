@@ -1,6 +1,10 @@
 // Provider-wire compat for "alibaba-coding-plan"; regenerated from the frozen census using deployment contract selectors.
 
 provider "alibaba-coding-plan" {
+	// Replaces the Alibaba-compatible thinking-format branch.
+	thinking-format "qwen"
+	// Replaces the provider-wide completions stream-idle baseline.
+	stream-idle-timeout-ms 600000
 	thinking-mode "effort"
 	class "glm" {
 		thinking-efforts "minimal" "low" "medium" "high"

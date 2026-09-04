@@ -1,0 +1,10 @@
+auth "opencode-go" {
+	name "OpenCode Go"
+	login "api-key" {
+		// Go keys are minted from the same Zen console after subscribing to Go,
+		// so the URL is identical for both OpenCode subscription providers.
+		auth-url "https://opencode.ai/auth"
+		instructions "Log in to the OpenCode Zen console and copy your OpenCode Go API key"
+		prompt "Paste your OpenCode Go API key" placeholder="sk-..."
+	}
+}

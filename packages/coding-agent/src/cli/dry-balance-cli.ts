@@ -615,6 +615,7 @@ async function mapConcurrent<T, R>(
 	concurrency: number,
 	fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const results = new Array<R>(items.length);
 	let nextIndex = 0;
 	const workerCount = Math.min(concurrency, items.length);
