@@ -39,6 +39,9 @@
 - Local tiny models for titles, memory, and automatic thinking classification now share on-demand workers across omp processes, reducing redundant resource usage; workers stop automatically after inactivity.
 - PI_TINY_DEVICE=metal now selects the MLX backend on macOS.
 - Updated agent reactions to trigger on the opening emoji instead of requiring a newline, consuming any following whitespace.
+### Added
+
+- Added the `worktree.cleanSource` setting to reset and clean the original checkout when creating a worktree with `/wt`.
 
 ### Fixed
 
