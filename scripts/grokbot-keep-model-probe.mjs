@@ -294,13 +294,35 @@ async function testKeepModelRoundTrip(token, cfg, modelId) {
 	}
 	console.log(`  turn1: Shell toolCall id=${shellCall.id}`);
 
-	// Turn 2: feed tool result back, get final text
+	// Turn 2: feed tool result back using encodeCoreMessage fields (toolCalls / toolContent).
+	const shellArgs = { command: `echo keep-model-${modelId}-ok` };
 	const body2 = {
 		messages: [
 			{ role: 4, text: "You are a coding agent with shell, read, write, grep, and glob tools." },
 			{ role: 1, text: `Use the Shell tool to run: echo keep-model-${modelId}-ok. Do not explain, just call the tool.` },
-			{ role: 2, toolCallPart: { toolName: "Shell", toolCallId: shellCall.id, input: JSON.stringify({ command: `echo keep-model-${modelId}-ok` }) } },
-			{ role: 3, toolResponse: { toolCallId: shellCall.id, content: `keep-model-${modelId}-ok` } },
+			{
+				role: 2,
+				toolCalls: [
+					{
+						toolCallId: shellCall.id,
+						toolName: "Shell",
+						args: shellArgs,
+						rawToolCallArgs: JSON.stringify(shellArgs),
+					},
+				],
+			},
+			{
+				role: 3,
+				toolContent: {
+					parts: [
+						{
+							toolCallId: shellCall.id,
+							toolName: "Shell",
+							result: `keep-model-${modelId}-ok`,
+						},
+					],
+				},
+			},
 		],
 		tools: wired.tools,
 		requestedModel: wired.requestedModel,
@@ -313,16 +335,27 @@ async function testKeepModelRoundTrip(token, cfg, modelId) {
 	const { res: res2, parsed: parsed2 } = await sendStream(token, cfg, body2);
 	console.log(
 		`  turn2: http=${res2.status} ok=${parsed2.ok} model=${parsed2.responseModel || "?"}` +
+		` tools=${parsed2.toolCalls.map((t) => t.name).join(",") || "none"}` +
 		` text="${parsed2.text.slice(0, 120)}" err=${parsed2.message || "-"}`,
 	);
 
 	const routedModel = parsed2.responseModel || parsed1.responseModel;
 	const routedIsAnthropic = isAnthropicSandModelId(routedModel) || /claude|fable|opus|sonnet|haiku/i.test(routedModel);
 	console.log(`  routed model: ${routedModel} → ${routedIsAnthropic ? "Anthropic family ✓" : "NOT Anthropic ✗"}`);
+	// History replay is only proven if turn 2 emits a final answer instead of another tool call.
+	const finalResponse = parsed2.toolCalls.length === 0;
 
-	const pass = wireOk && res1.ok && parsed1.ok && shellCall && res2.ok && parsed2.ok && routedIsAnthropic;
+	const pass =
+		wireOk &&
+		res1.ok &&
+		parsed1.ok &&
+		shellCall &&
+		res2.ok &&
+		parsed2.ok &&
+		routedIsAnthropic &&
+		finalResponse;
 	console.log(`  ${pass ? "PASS" : "FAIL"} keep-model ${modelId}`);
-	return { modelId, pass, routedModel, wireOk, shellCallId: shellCall.id };
+	return { modelId, pass, routedModel, wireOk, shellCallId: shellCall.id, finalResponse };
 }
 
 async function testAutoResolvesKeepModel() {

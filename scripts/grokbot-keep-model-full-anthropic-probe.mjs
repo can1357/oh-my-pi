@@ -304,13 +304,29 @@ async function testModel(token, cfg, modelId, tools, label) {
 		return { modelId, pass: false, reason: `no-shell-call(${parsed1.toolCalls.map((t) => t.name).join(",")})`, wire: describeWire(wired), routed: parsed1.responseModel };
 	}
 
-	// Turn 2: feed tool result back
+	// Turn 2: feed tool result back using encodeCoreMessage fields (toolCalls / toolContent).
+	const shellArgs = { command: "echo probe-ok" };
 	const body2 = {
 		messages: [
 			{ role: 4, text: "You are a coding agent with shell, read, write, grep, and glob tools." },
 			{ role: 1, text: `Use the Shell tool to run: echo probe-ok. Do not explain, just call the tool.` },
-			{ role: 2, toolCallPart: { toolName: "Shell", toolCallId: shellCall.id, input: JSON.stringify({ command: "echo probe-ok" }) } },
-			{ role: 3, toolResponse: { toolCallId: shellCall.id, content: "probe-ok" } },
+			{
+				role: 2,
+				toolCalls: [
+					{
+						toolCallId: shellCall.id,
+						toolName: "Shell",
+						args: shellArgs,
+						rawToolCallArgs: JSON.stringify(shellArgs),
+					},
+				],
+			},
+			{
+				role: 3,
+				toolContent: {
+					parts: [{ toolCallId: shellCall.id, toolName: "Shell", result: "probe-ok" }],
+				},
+			},
 		],
 		tools: wired.tools,
 		requestedModel: wired.requestedModel,
@@ -324,12 +340,18 @@ async function testModel(token, cfg, modelId, tools, label) {
 
 	const routedModel = parsed2.responseModel || parsed1.responseModel;
 	const routedAnthropic = isAnthropicRouted(routedModel);
+	// History replay is only proven if turn 2 emits a final answer instead of another tool call.
+	const finalResponse = parsed2.toolCalls.length === 0;
 
-	const pass = res2.ok && parsed2.ok && routedAnthropic;
+	const pass = res2.ok && parsed2.ok && routedAnthropic && finalResponse;
 	return {
 		modelId,
 		pass,
-		reason: pass ? "ok" : `turn2-http-${res2.status}-${routedModel}`,
+		reason: pass
+			? "ok"
+			: !finalResponse
+				? `turn2-retried-tools(${parsed2.toolCalls.map((t) => t.name).join(",")})`
+				: `turn2-http-${res2.status}-${routedModel}`,
 		wire: describeWire(wired),
 		routed: routedModel,
 		toolCallId: shellCall.id,
