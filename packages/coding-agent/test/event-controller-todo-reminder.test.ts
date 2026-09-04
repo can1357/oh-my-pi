@@ -1,34 +1,16 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 beforeAll(async () => {
 	await initTheme(false);
 });
 
 function createContext() {
-	const present = vi.fn();
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn() },
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
-		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		clearPinnedError: vi.fn(),
-		ensureLoadingAnimation: vi.fn(),
-		// `viewSession.isStreaming` is read by `#ensureWorkingLoaderWhileStreaming`,
-		// which runs at the top of `tool_execution_end` (and other streaming-event
-		// handlers). Leaving it false matches the implicit assumption in this
-		// fixture: the todo HUD lifecycle is independent of the working loader.
-		viewSession: { isStreaming: false },
-		setTodos: vi.fn(),
-		present,
-	} as unknown as InteractiveModeContext;
-	return { ctx, present };
+	const ctx = createInteractiveModeContext();
+	return { ctx, present: vi.spyOn(ctx, "present") };
 }
 
 function reminder(attempt: number, content = "pending task"): Extract<AgentSessionEvent, { type: "todo_reminder" }> {

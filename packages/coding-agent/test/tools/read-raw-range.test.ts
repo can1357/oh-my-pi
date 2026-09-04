@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { formatTruncationMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -74,5 +75,82 @@ describe("read tool raw range exactness", () => {
 		expect(output).toContain("L31");
 		expect(output).toContain("L30");
 		expect(output).toContain("L32");
+	});
+
+	it("keeps the continuation when the byte budget stops inside requested buffered content", async () => {
+		const bufferedFile = path.join(testDir, "buffered-range.txt");
+		await Bun.write(
+			bufferedFile,
+			Array.from({ length: 100 }, (_, index) => `line-${index + 1} ${"x".repeat(1_016)}`).join("\n"),
+		);
+
+		const result = await tool.execute("call-buffered-byte-limited-range", { path: `${bufferedFile}:1-100` });
+		const output = getTextOutput(result);
+		const truncation = result.details?.meta?.truncation;
+
+		expect(output).not.toContain("could not fit after preceding context");
+		expect(output).not.toContain(":raw:");
+		expect(truncation).toBeDefined();
+		if (!truncation) throw new Error("expected truncation metadata");
+		const shownRange = truncation.shownRange;
+		expect(shownRange).toBeDefined();
+		if (!shownRange) throw new Error("expected shown range");
+		expect(truncation.nextOffset).toBe(shownRange.end + 1);
+		expect(formatTruncationMetaNotice(truncation)).toContain(`Use :${truncation.nextOffset} to continue`);
+	});
+
+	it("reports an oversized selected line from a buffered local file with a safe raw recovery selector", async () => {
+		const bufferedFile = path.join(testDir, "buffered-oversized.txt");
+		await Bun.write(
+			bufferedFile,
+			["leading-context", `oversized-${"x".repeat(70_000)}-end`, "trailing-one", "trailing-two"].join("\n"),
+		);
+
+		const result = await tool.execute("call-buffered-oversized-selected", { path: `${bufferedFile}:2-2` });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("leading-context");
+		expect(output).toContain("Line 2 is 68.4KB");
+		expect(output).toContain("50.0KB read budget");
+		expect(output).toContain(":raw:2-2");
+		const truncation = result.details?.meta?.truncation;
+		expect(truncation?.totalBytes).toBeGreaterThan(70_000);
+		expect(truncation?.nextOffset).toBeUndefined();
+		if (!truncation) throw new Error("expected truncation metadata");
+		expect(formatTruncationMetaNotice(truncation)).not.toContain("Use :2 to continue");
+
+		const recovered = await tool.execute("call-buffered-oversized-raw", { path: `${bufferedFile}:raw:2-2` });
+		const recoveredOutput = getTextOutput(recovered);
+		expect(recoveredOutput).toStartWith("oversized-");
+		expect(recoveredOutput).not.toContain("leading-context");
+		expect(recoveredOutput).not.toContain("trailing-one");
+		expect(recovered.details?.meta?.truncation?.partialLine).toBe(true);
+	});
+
+	it("accounts for the displayed preview when a single raw line exceeds the byte budget", async () => {
+		// Regression #10768: an oversized first line collects no complete line but
+		// still renders a ~50 KB byte-capped preview. The truncation meta used to
+		// report outputLines=0/outputBytes=0/totalBytes=0, so the notice claimed
+		// "Showing 0 of N lines (0B limit)" over visible content.
+		const bigFile = path.join(testDir, "big.txt");
+		const bigLine = "x".repeat(70000);
+		await Bun.write(bigFile, `first\n${bigLine}\nlast\n`);
+
+		const result = await tool.execute("call-oversized-line", { path: `${bigFile}:raw:2-2` });
+		const body = getTextOutput(result);
+		expect(Buffer.byteLength(body, "utf-8")).toBeGreaterThan(50000);
+
+		const truncation = result.details?.meta?.truncation;
+		expect(truncation).toBeDefined();
+		if (!truncation) throw new Error("expected truncation meta");
+		expect(truncation.partialLine).toBe(true);
+		expect(truncation.outputLines).toBe(1);
+		expect(truncation.outputBytes).toBe(Buffer.byteLength(body, "utf-8"));
+		expect(truncation.totalBytes).toBe(70000);
+
+		const notice = formatTruncationMetaNotice(truncation);
+		expect(notice).toContain("(partial,");
+		expect(notice).not.toMatch(/Showing 0 of/);
+		expect(notice).not.toContain("0B limit");
 	});
 });

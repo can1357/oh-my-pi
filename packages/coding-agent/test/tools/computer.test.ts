@@ -1,15 +1,22 @@
-import { describe, expect, it } from "bun:test";
-import { type as arkType } from "@oh-my-pi/omptype";
+import { afterAll, describe, expect, it } from "bun:test";
+import { createContext, runInContext } from "node:vm";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
+import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ComputerTool, computerApproval } from "@oh-my-pi/pi-coding-agent/tools/computer";
+import { computerApproval, createComputerPrelude } from "@oh-my-pi/pi-coding-agent/tools/computer";
+import { isReadOnlyComputerCall, renderComputerCall } from "@oh-my-pi/pi-coding-agent/tools/computer/call";
 import type {
 	ComputerSessionSnapshot,
 	ComputerWorkerInbound,
 	ComputerWorkerOutbound,
 	ComputerWorkerTransport,
 } from "@oh-my-pi/pi-coding-agent/tools/computer/protocol";
-import { ComputerSupervisor, type ComputerWorkerHandle } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
+import {
+	type ComputerController,
+	ComputerSupervisor,
+	type ComputerWorkerHandle,
+} from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { ComputerWorkerCore, type NativeDesktopSession } from "@oh-my-pi/pi-coding-agent/tools/computer/worker";
 import type {
 	AxNode,
@@ -21,6 +28,14 @@ import type {
 	DesktopWindow,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
+
+/** Method name of the last step in a facade call chain, or "" when the chain is malformed. */
+function terminalMethod(chain: unknown): string {
+	if (!Array.isArray(chain) || chain.length === 0) return "";
+	const terminal: unknown = chain[chain.length - 1];
+	if (terminal === null || typeof terminal !== "object" || !("method" in terminal)) return "";
+	return typeof terminal.method === "string" ? terminal.method : "";
+}
 
 const capabilities: DesktopCapabilities = {
 	backend: "fake",
@@ -208,10 +223,9 @@ async function runWorker(
 	timeoutMs = 2_000,
 ): Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
 	transport.inbound({ type: "run", id, code, timeoutMs, session: snapshot(readOnly) });
-	return (await transport.waitFor(
-		(message): message is Extract<ComputerWorkerOutbound, { type: "result" }> =>
-			message.type === "result" && message.id === id,
-	)) as Extract<ComputerWorkerOutbound, { type: "result" }>;
+	const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+	if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
+	return message;
 }
 
 function toolSession(): ToolSession {
@@ -221,39 +235,484 @@ function toolSession(): ToolSession {
 		settings: Settings.isolated({ "computer.enabled": true }),
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,
-	} as ToolSession;
+	};
 }
 
-const noOpController = {
-	async run() {
-		return { displays: [], returnValue: undefined, screenshots: [] };
-	},
-	async capabilities() {
-		return undefined;
-	},
-	async close() {},
-};
+afterAll(async () => {
+	await disposeAllKernelSessions();
+});
 
-describe("computer schema and approval", () => {
-	it("requires code, rejects unknown keys, and shares its lazily-created schema", async () => {
-		const first = new ComputerTool(toolSession(), () => noOpController);
-		const second = new ComputerTool(toolSession(), () => noOpController);
-		const schema = first.parameters;
+describe("computer prelude", () => {
+	it("validates action shapes and maps explicitly read-only runs to read approval", async () => {
+		const prelude = createComputerPrelude(toolSession(), () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async close() {},
+		}));
+		const context = { session: toolSession(), toolCallId: "computer-validation" };
 
-		expect(schema({ code: "await desktop.windows()" }) instanceof arkType.errors).toBe(false);
-		expect(schema({}) instanceof arkType.errors).toBe(true);
-		expect(schema({ code: "1", unexpected: true }) instanceof arkType.errors).toBe(true);
-		expect(first.parameters).toBe(schema);
-		expect(second.parameters).toBe(schema);
-		await Promise.all([first.close(), second.close()]);
+		await expect(prelude.invoke({}, context)).rejects.toThrow("computer received invalid arguments");
+		await expect(prelude.invoke({ action: "run", code: "1", unexpected: true }, context)).rejects.toThrow(
+			"computer received invalid arguments",
+		);
+		await expect(prelude.invoke({ action: "capabilities", code: "1" }, context)).rejects.toThrow(
+			"computer received invalid arguments",
+		);
+		await expect(prelude.invoke({ action: "run" }, context)).rejects.toThrow(
+			"Action 'run' requires exactly one of 'code' or 'fn'.",
+		);
+		await expect(prelude.invoke({ action: "run", code: "1", fn: "() => 1" }, context)).rejects.toThrow(
+			"Action 'run' requires exactly one of 'code' or 'fn'.",
+		);
+		await expect(prelude.invoke({ action: "call" }, context)).rejects.toThrow("computer received invalid arguments");
+		await expect(prelude.invoke({ action: "call", chain: [], read_only: true }, context)).rejects.toThrow(
+			"computer received invalid arguments",
+		);
+		await expect(
+			prelude.invoke({ action: "call", chain: [{ method: "launch", args: [] }] }, context),
+		).rejects.toThrow('Unknown desktop method "launch"');
+
+		expect(computerApproval({ action: "run", code: "1", read_only: true })).toBe("read");
+		expect(computerApproval({ action: "run", code: "1", read_only: false })).toBe("exec");
+		expect(computerApproval({ action: "call", chain: [{ method: "windows", args: [] }] })).toBe("read");
+		expect(
+			computerApproval({
+				action: "call",
+				chain: [
+					{ method: "window", args: ["42"] },
+					{ method: "ax", args: [] },
+				],
+			}),
+		).toBe("read");
+		expect(
+			computerApproval({
+				action: "call",
+				chain: [
+					{ method: "ref", args: ["e1"] },
+					{ method: "press", args: [] },
+				],
+			}),
+		).toBe("exec");
+		expect(computerApproval({ action: "call", chain: [{ method: "launch", args: [] }] })).toBe("exec");
+		expect(computerApproval({ action: "call", chain: [null] })).toBe("exec");
+		expect(computerApproval({ action: "call" })).toBe("exec");
+		expect(computerApproval({ action: "capabilities" })).toBe("read");
+		expect(computerApproval({ action: "close" })).toBe("exec");
+		expect(computerApproval("garbage")).toBe("exec");
+		await prelude.invoke({ action: "close" }, context);
 	});
 
-	it("maps only literal read_only true to read approval", () => {
-		expect(computerApproval({ read_only: true })).toBe("read");
-		expect(computerApproval({})).toBe("exec");
-		expect(computerApproval({ read_only: false })).toBe("exec");
-		expect(computerApproval({ read_only: "yes" })).toBe("exec");
-		expect(computerApproval("garbage")).toBe("exec");
+	it("routes run, capabilities, images, cancellation inputs, and close through one host controller", async () => {
+		const calls: Array<{
+			code: string;
+			timeoutMs: number;
+			snapshot: ComputerSessionSnapshot;
+			signal?: AbortSignal;
+		}> = [];
+		let closeCount = 0;
+		const controller: ComputerController = {
+			async run(code: string, timeoutMs: number, runSnapshot: ComputerSessionSnapshot, signal?: AbortSignal) {
+				calls.push({ code, timeoutMs, snapshot: runSnapshot, signal });
+				return {
+					displays: [
+						{ type: "text", text: "captured" },
+						{ type: "image", data: "iVBORw==", mimeType: "image/png" },
+					],
+					returnValue: { windows: 1 },
+					screenshots: [],
+					capabilities,
+				};
+			},
+			async capabilities() {
+				return capabilities;
+			},
+			async close() {
+				closeCount += 1;
+			},
+		};
+		const session = toolSession();
+		const prelude = createComputerPrelude(session, () => controller);
+		const abort = new AbortController();
+		const context = { session, toolCallId: "computer-run", signal: abort.signal };
+
+		const result = await prelude.invoke(
+			{ action: "run", code: "await desktop.windows()", read_only: true, timeout: 7 },
+			context,
+		);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]).toMatchObject({
+			code: "await desktop.windows()",
+			timeoutMs: 7_000,
+			snapshot: { readOnly: true, display: "all" },
+			signal: abort.signal,
+		});
+		expect(result.content).toEqual([
+			{ type: "text", text: "captured" },
+			{ type: "image", data: "iVBORw==", mimeType: "image/png", detail: "original" },
+		]);
+		expect(result.details).toMatchObject({
+			code: "await desktop.windows()",
+			readOnly: true,
+			backend: "fake",
+			value: { windows: 1 },
+		});
+
+		const functionResult = await prelude.invoke(
+			{ action: "run", fn: "(_scope, count) => count", args: [7] },
+			context,
+		);
+		expect(calls[1]?.code).toBe("return await ((_scope, count) => count)({ desktop, wait, assert }, 7);");
+		expect(functionResult.details).toMatchObject({ value: { windows: 1 } });
+
+		await prelude.invoke(
+			{
+				action: "call",
+				chain: [
+					{ method: "window", args: ["42"] },
+					{ method: "ax", args: [{ maxDepth: 3 }] },
+				],
+			},
+			context,
+		);
+		await prelude.invoke({ action: "call", chain: [{ method: "press", args: ["cmd+s"] }], timeout: 9 }, context);
+		expect(calls[2]).toMatchObject({
+			code: 'return await (await desktop.window("42")).ax({"maxDepth":3});',
+			snapshot: { readOnly: true },
+		});
+		expect(calls[3]).toMatchObject({
+			code: 'return await desktop.press("cmd+s");',
+			timeoutMs: 9_000,
+			snapshot: { readOnly: false },
+		});
+
+		const cancelled = new AbortController();
+		cancelled.abort();
+		await expect(
+			prelude.invoke(
+				{ action: "run", code: "await desktop.windows()" },
+				{ session, toolCallId: "computer-cancelled", signal: cancelled.signal },
+			),
+		).rejects.toMatchObject({ name: "ToolAbortError" });
+		expect(calls).toHaveLength(4);
+
+		const capabilityResult = await prelude.invoke({ action: "capabilities" }, context);
+		expect(capabilityResult.details).toEqual(capabilities);
+		await prelude.invoke({ action: "close" }, context);
+		await prelude.invoke({ action: "close" }, context);
+		expect(closeCount).toBe(1);
+		await expect(prelude.invoke({ action: "run", code: "await desktop.windows()" }, context)).rejects.toThrow(
+			"Computer session is closed",
+		);
+	});
+
+	it("installs a frozen JavaScript facade with handle proxies, runs, direct values, and display text", async () => {
+		const session = toolSession();
+		const prelude = createComputerPrelude(session, () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async close() {},
+		}));
+		const calls: unknown[] = [];
+		const displays: unknown[] = [];
+		const windowSnapshot = {
+			id: "42",
+			app: "Code",
+			title: "main.ts",
+			pid: 7,
+			bounds: { x: 1, y: 2, width: 3, height: 4 },
+			focused: true,
+		};
+		const elementSnapshot = {
+			ref: "e1",
+			role: "button",
+			nativeRole: "AXButton",
+			title: "Save",
+			enabled: true,
+			focused: false,
+			childCount: 0,
+		};
+		const callValues: Record<string, unknown> = {
+			window: windowSnapshot,
+			focusedWindow: null,
+			windows: [windowSnapshot],
+			ax: "- button [ref=e1]",
+			find: [elementSnapshot],
+			ref: elementSnapshot,
+			elementAt: elementSnapshot,
+			press: undefined,
+			parent: null,
+			children: [elementSnapshot, elementSnapshot],
+			bounds: { x: 7, y: 8, width: 9, height: 10 },
+			"clipboard.read": "copied",
+		};
+		const realm = createContext({
+			__omp_display__: (value: unknown) => displays.push(value),
+			__omp_prelude__: async (name: unknown, parameters: unknown) => {
+				expect(name).toBe("computer");
+				calls.push(parameters);
+				if (parameters === null || typeof parameters !== "object" || !("action" in parameters)) return undefined;
+				if (parameters.action === "run") return { text: "inner display", details: { value: 42 } };
+				if (parameters.action === "capabilities") return { text: "", details: capabilities };
+				if (parameters.action === "call" && "chain" in parameters) {
+					return { text: "", details: { value: callValues[terminalMethod(parameters.chain)] } };
+				}
+				return undefined;
+			},
+		});
+		runInContext(prelude.javascript, realm);
+
+		const fn = (_scope: unknown, count: number): number => count;
+		const argFn = (value: number): number => value;
+		Reflect.set(realm, "fn", fn);
+		Reflect.set(realm, "argFn", argFn);
+		expect(
+			await runInContext("computer.run(fn, { args: [7, /save/gi, argFn], read_only: true, timeout: 5 })", realm),
+		).toBe(42);
+		expect(
+			await runInContext(
+				'computer.run("41 + 1", { timeout: 2, action: "close", code: "old", fn: "old", unexpected: true })',
+				realm,
+			),
+		).toBe(42);
+		expect(await runInContext("computer.capabilities()", realm)).toEqual(capabilities);
+
+		expect(
+			await runInContext(
+				'(async () => { globalThis.win = await computer.window({ app: "Code" }); return { ...win }; })()',
+				realm,
+			),
+		).toEqual(windowSnapshot);
+		expect(await runInContext("computer.focusedWindow()", realm)).toBeNull();
+		expect(await runInContext("win.ax({ maxDepth: 3 })", realm)).toBe("- button [ref=e1]");
+		expect(await runInContext("win.press('cmd+s', undefined)", realm)).toBeUndefined();
+		expect(
+			await runInContext(
+				'(async () => { globalThis.el = await win.ref("e1"); return [el.ref, el.role, el.title]; })()',
+				realm,
+			),
+		).toEqual(["e1", "button", "Save"]);
+		expect(await runInContext("el.bounds()", realm)).toEqual({ x: 7, y: 8, width: 9, height: 10 });
+		expect(await runInContext("el.parent()", realm)).toBeNull();
+		expect(await runInContext("el.children().then(kids => kids.map(kid => kid.ref))", realm)).toEqual(["e1", "e1"]);
+		expect(await runInContext('win.find({ role: "button" }).then(found => found[0].role)', realm)).toBe("button");
+		expect(await runInContext("computer.elementAt(3, 4).then(found => found.ref)", realm)).toBe("e1");
+		expect(await runInContext("computer.clipboard.read()", realm)).toBe("copied");
+		await runInContext("computer.close()", realm);
+
+		expect(calls).toEqual([
+			{
+				action: "run",
+				fn: String(fn),
+				args: [7, { __omp_re: { source: "save", flags: "gi" } }, { __omp_fn: String(argFn) }],
+				read_only: true,
+				timeout: 5,
+			},
+			{ action: "run", code: "41 + 1", timeout: 2 },
+			{ action: "capabilities" },
+			{ action: "call", chain: [{ method: "window", args: [{ app: "Code" }] }] },
+			{ action: "call", chain: [{ method: "focusedWindow", args: [] }] },
+			{
+				action: "call",
+				chain: [
+					{ method: "window", args: ["42"] },
+					{ method: "ax", args: [{ maxDepth: 3 }] },
+				],
+			},
+			{
+				action: "call",
+				chain: [
+					{ method: "window", args: ["42"] },
+					{ method: "press", args: ["cmd+s"] },
+				],
+			},
+			{ action: "call", chain: [{ method: "ref", args: ["e1"] }] },
+			{
+				action: "call",
+				chain: [
+					{ method: "ref", args: ["e1"] },
+					{ method: "bounds", args: [] },
+				],
+			},
+			{
+				action: "call",
+				chain: [
+					{ method: "ref", args: ["e1"] },
+					{ method: "parent", args: [] },
+				],
+			},
+			{
+				action: "call",
+				chain: [
+					{ method: "ref", args: ["e1"] },
+					{ method: "children", args: [] },
+				],
+			},
+			{
+				action: "call",
+				chain: [
+					{ method: "window", args: ["42"] },
+					{ method: "find", args: [{ role: "button" }] },
+				],
+			},
+			{ action: "call", chain: [{ method: "elementAt", args: [3, 4] }] },
+			{ action: "call", chain: [{ method: "clipboard.read", args: [] }] },
+			{ action: "close" },
+		]);
+		expect(displays).toEqual(["inner display", "inner display"]);
+		expect(
+			runInContext(
+				"Object.isFrozen(computer) && Object.isFrozen(computer.clipboard) && Object.isFrozen(win) && Object.isFrozen(el)",
+				realm,
+			),
+		).toBe(true);
+		await expect(runInContext("computer.run({ code: '1 + 1' })", realm)).rejects.toThrow(
+			"computer.run() expects a function or code string",
+		);
+		await expect(runInContext('computer.run("1", null)', realm)).rejects.toThrow(
+			"computer.run() expects an options object",
+		);
+		await expect(runInContext("computer.run(Math.max)", realm)).rejects.toThrow(
+			"computer.run() cannot serialize a native or bound function",
+		);
+	});
+
+	it("returns direct values and prints inner display text from the Python facade in a real kernel", async () => {
+		const calls: unknown[] = [];
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = {
+			...toolSession(),
+			getEvalPreludes: () => definitions,
+		};
+		const shipped = createComputerPrelude(session, () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async close() {},
+		}));
+		const callValues: Record<string, unknown> = {
+			window: {
+				id: "42",
+				app: "Code",
+				title: "main.ts",
+				bounds: { x: 1, y: 2, width: 3, height: 4 },
+				focused: true,
+			},
+			ax: "- button [ref=e1]",
+			ref: { ref: "e1", role: "button", nativeRole: "AXButton", enabled: true, focused: false, childCount: 0 },
+			press: undefined,
+			raise: undefined,
+			click: undefined,
+		};
+		const definition: EvalPreludeDefinition = {
+			...shipped,
+			async invoke(parameters) {
+				calls.push(parameters);
+				if (parameters !== null && typeof parameters === "object" && "chain" in parameters) {
+					return { content: [], details: { value: callValues[terminalMethod(parameters.chain)] } };
+				}
+				return {
+					content: [{ type: "text", text: "computer inner display" }],
+					details: { value: { answer: 42 } },
+				};
+			},
+		};
+		definitions = [definition];
+
+		const result = await executePython(
+			[
+				'value = await computer.run("return 6 * 7;", read_only=True, timeout=3)',
+				'print(value["answer"])',
+				"try:",
+				"    await computer.run(lambda: 42)",
+				"except TypeError as error:",
+				"    print(str(error))",
+				'win = await computer.window(app="Code")',
+				"print(repr(win), win.bounds)",
+				"print(await win.ax(maxDepth=3))",
+				'el = await win.ref("e1")',
+				"print(repr(el))",
+				"await el.press()",
+				"await win.raise_()",
+				"await win.click(10, 20, button='right', delivery=None)",
+			].join("\n"),
+			{
+				cwd: process.cwd(),
+				sessionId: `computer-facade-py-${crypto.randomUUID()}`,
+				toolSession: session,
+				kernelMode: "per-call",
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim().split("\n")).toEqual([
+			"computer inner display",
+			"42",
+			"computer.run() expects a JavaScript code string",
+			"<computer.Window id='42' app='Code'> {'x': 1, 'y': 2, 'width': 3, 'height': 4}",
+			"- button [ref=e1]",
+			"<computer.Element ref='e1' role='button'>",
+		]);
+		expect(calls).toEqual([
+			{ action: "run", code: "return 6 * 7;", read_only: true, timeout: 3 },
+			{ action: "call", chain: [{ method: "window", args: [{ app: "Code" }] }] },
+			{
+				action: "call",
+				chain: [
+					{ method: "window", args: ["42"] },
+					{ method: "ax", args: [{ maxDepth: 3 }] },
+				],
+			},
+			{ action: "call", chain: [{ method: "ref", args: ["e1"] }] },
+			{
+				action: "call",
+				chain: [
+					{ method: "ref", args: ["e1"] },
+					{ method: "press", args: [] },
+				],
+			},
+			{
+				action: "call",
+				chain: [
+					{ method: "window", args: ["42"] },
+					{ method: "raise", args: [] },
+				],
+			},
+			{
+				action: "call",
+				chain: [
+					{ method: "window", args: ["42"] },
+					{ method: "click", args: [10, 20, { button: "right" }] },
+				],
+			},
+		]);
+	});
+
+	it("reflects the live enabled setting", () => {
+		const session = toolSession();
+		const prelude = createComputerPrelude(session, () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async close() {},
+		}));
+
+		expect(prelude.enabled?.()).toBe(true);
+		session.settings.override("computer.enabled", false);
+		expect(prelude.enabled?.()).toBe(false);
 	});
 });
 
@@ -402,6 +861,60 @@ describe("computer worker round trips", () => {
 		);
 		expect(result.ok).toBe(true);
 		if (result.ok) expect(result.payload.returnValue).toEqual({ role: "button", count: 1 });
+	});
+
+	it("returns plain identity snapshots for rendered handle calls and enforces the derived read-only tier", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		const win = await runWorker(
+			transport,
+			"call-window",
+			renderComputerCall([{ method: "window", args: ["42"] }]),
+			true,
+		);
+		expect(win.ok).toBe(true);
+		if (win.ok) {
+			expect(win.payload.returnValue).toEqual({
+				id: "42",
+				app: "Code",
+				title: "Editor",
+				pid: 123,
+				bounds: { x: 4, y: 5, width: 40, height: 20 },
+				focused: true,
+			});
+		}
+
+		const el = await runWorker(transport, "call-ref", renderComputerCall([{ method: "ref", args: ["e1"] }]), true);
+		expect(el.ok).toBe(true);
+		if (el.ok) {
+			expect(el.payload.returnValue).toEqual({
+				ref: "e1",
+				role: "button",
+				nativeRole: "button",
+				title: "Save",
+				enabled: true,
+				focused: false,
+				childCount: 0,
+			});
+		}
+
+		const clickChain = [
+			{ method: "window", args: ["42"] },
+			{ method: "click", args: [1, 2] },
+		];
+		const blocked = await runWorker(transport, "call-click-ro", renderComputerCall(clickChain), true);
+		expect(blocked.ok).toBe(false);
+		expect(native.clickCount).toBe(0);
+		const clicked = await runWorker(
+			transport,
+			"call-click",
+			renderComputerCall(clickChain),
+			isReadOnlyComputerCall(clickChain),
+		);
+		expect(clicked.ok).toBe(true);
+		expect(native.clickCount).toBe(1);
 	});
 
 	it("applies the current read-only policy to a retained writable window", async () => {

@@ -67,14 +67,14 @@ approval: { tier: "exec", override: true, reason: "Critical pattern detected" }
 
 ### Computer safety
 
-The disabled-by-default [`computer` tool](./computer-use.md) chooses its tier from the call's `read_only` declaration:
+The disabled-by-default Eval [`computer` API](./computer-use.md) chooses its tier per call:
 
-- `read_only: true` uses `read`;
-- `read_only: false`, a missing field, malformed arguments, or any other value uses `exec`.
+- direct helpers (`computer.windows()`, `win.screenshot()`, `win.ax()`, `el.bounds()`, `computer.clipboard.read()`, …) use `read` when the invoked method is inspection-only and `exec` for input, focus, mutation, and `clipboard.write`; read calls also run under the worker's read-only guard;
+- `computer.run(fnOrCode, options)` uses `read` only for `read_only: true` (JavaScript trailing option or Python keyword); `read_only: false`, a missing field, malformed arguments, or any other value uses `exec`.
 
-The approval prompt shows `read-only` when applicable, followed by the submitted JavaScript (truncated to 2,000 characters by the standard formatter). `read_only` is a trust declaration enforced by the approval tier, not static analysis of the script.
+The approval prompt shows `read-only` when applicable, followed by the resolved JavaScript (truncated to 2,000 characters by the standard formatter). For `computer.run`, `read_only` is a trust declaration enforced by the approval tier, not static analysis of the script.
 
-Separately, provider-originated computer-use calls may carry `pendingSafetyChecks` metadata. Any pending check forces an interactive prompt regardless of yolo, per-tool `allow`, or an already approved `xd://` dispatch. The prompt lists each safety-check code, message, and sanitized/truncated data. Without an interactive UI, the call fails closed with `pending provider safety checks but no interactive UI is available`.
+Separately, provider-originated computer-use calls may carry `pendingSafetyChecks` metadata. Any pending check forces an interactive prompt regardless of yolo or per-tool `allow`. The prompt lists each safety-check code, message, and sanitized/truncated data. Without an interactive UI, the call fails closed with `pending provider safety checks but no interactive UI is available`.
 
 Tool approval does not authorize the underlying real-world action. On-screen text is untrusted and cannot override direct user instructions. Consequential actions still require point-of-risk confirmation of the exact target, scope, and values unless the user's direct message already authorized them.
 

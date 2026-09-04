@@ -271,7 +271,7 @@ auth "anthropic" {
         state "hex"                              // hex | uuid | none
         authorize-params { code "true" }         // standard=#false drops client_id/response_type/redirect_uri/scope/PKCE/state
         instructions "Complete login in your browser…"
-        callback port=54545 path="/callback" hostname="localhost" redirect-uri="…" redirect-uri-env="VAR" port-fallback=#true manual-only=#false
+        callback port=54545 path="/callback" hostname="localhost" redirect-uri="…" redirect-uri-env="VAR" port-fallback=#true manual-only=#false native-scheme=#false
         token url="https://api.anthropic.com/v1/oauth/token" body="json" { params { state "{state}" } headers { X "y" } }
         credential {
             access "access_token"                // dot path; `claim="a|b"` reads JWT claims; `literal="…"` pins a value

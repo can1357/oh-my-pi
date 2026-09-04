@@ -150,15 +150,9 @@ describe("builtin tool schemas provider compatibility", () => {
 		const typeSchema = asSchemaObject(properties?.type);
 
 		expect(normalized?.type).toBe("object");
-		expect(properties?.result).toBeDefined();
+		expect(properties?.data).toBeDefined();
+		expect(asSchemaObject(properties?.error)?.type).toBe("string");
 		expect(typeSchema?.type).toBe("string");
 		expect(typeSchema?.anyOf).toBeUndefined();
-	});
-
-	it('asserts that browser tool schema root stays `type: "object"` when discoverable tools are mounted', async () => {
-		const toolSchemas = await toolSchemasPromise;
-		const browserEntry = toolSchemas.find(tool => tool.name === "browser");
-		expect(browserEntry).toBeDefined();
-		expect(asSchemaObject(browserEntry?.schema)?.type).toBe("object");
 	});
 });
