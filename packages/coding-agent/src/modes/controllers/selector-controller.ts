@@ -119,7 +119,7 @@ import type { SessionObserverRegistry } from "../session-observer-registry";
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
 
 export class SelectorController {
-	constructor(private ctx: InteractiveModeContext) { }
+	constructor(private ctx: InteractiveModeContext) {}
 	/**
 	 * Mount a primary fullscreen menu through the one polished modal path shared
 	 * by Settings, Model Hub, and Agent Hub.
@@ -285,9 +285,9 @@ export class SelectorController {
 		const currentProvider = this.ctx.session.model?.provider;
 		const activeAccount = currentProvider
 			? this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(
-				currentProvider,
-				this.ctx.session.sessionId,
-			)
+					currentProvider,
+					this.ctx.session.sessionId,
+				)
 			: undefined;
 		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(reports);
 		const done = () => {
@@ -817,8 +817,6 @@ export class SelectorController {
 			agent =>
 				agent.availability !== "subagent" && agent.availability !== "unavailable" && !disabled.has(agent.name),
 		);
-
-		let overlayHandle: OverlayHandle | undefined;
 		let closed = false;
 		const done = () => {
 			if (closed) return;
@@ -864,13 +862,14 @@ export class SelectorController {
 				done();
 			},
 		});
-		overlayHandle = this.ctx.ui.showOverlay(picker, {
+		const overlayHandle = this.ctx.ui.showOverlay(picker, {
 			anchor: "bottom-center",
 			width: "100%",
 			maxHeight: "100%",
 			margin: 0,
 		});
 		this.ctx.ui.setFocus(picker);
+		this.ctx.ui.requestRender();
 	}
 
 	/**

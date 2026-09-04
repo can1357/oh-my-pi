@@ -995,9 +995,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const toolMap = options.tools ? new Map(options.tools.map(tool => [tool.name, tool])) : undefined;
 	const promptTools = toolMap
 		? projectSystemPromptToolMetadata(
-			toolMap,
-			options.inlineToolDescriptors ? { mode: "full" } : { mode: "compact", toolNames: toolNames ?? [] },
-		)
+				toolMap,
+				options.inlineToolDescriptors ? { mode: "full" } : { mode: "compact", toolNames: toolNames ?? [] },
+			)
 		: undefined;
 	return await buildSystemPromptInternal({
 		cwd: options.cwd,
@@ -1091,14 +1091,14 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		renderCall: tool.renderCall,
 		renderResult: tool.renderResult
 			? (result, options, theme): Component => {
-				const component = tool.renderResult?.(
-					result,
-					{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
-					theme,
-				);
-				// Return empty component if undefined to match Component type requirement
-				return component ?? ({ render: () => [] } as unknown as Component);
-			}
+					const component = tool.renderResult?.(
+						result,
+						{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
+						theme,
+					);
+					// Return empty component if undefined to match Component type requirement
+					return component ?? ({ render: () => [] } as unknown as Component);
+				}
 			: undefined,
 		[TOOL_DEFINITION_MARKER]: true,
 	};
@@ -1439,7 +1439,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		: includeWorkspaceTree
 			? logger.time("buildWorkspaceTree", () => buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }))
 			: Promise.resolve({ rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] });
-	workspaceTreePromise.catch(() => { });
+	workspaceTreePromise.catch(() => {});
 
 	// Independent discoveries that depend only on cwd/agentDir — kicked off in parallel and awaited
 	// at their respective consumer sites. Their work can overlap with model resolution, secret loading,
@@ -1447,7 +1447,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const contextFilesPromise = options.contextFiles
 		? Promise.resolve(options.contextFiles)
 		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
-	contextFilesPromise.catch(() => { });
+	contextFilesPromise.catch(() => {});
 	const resolveRepoContext = async (repoCwd: string) => {
 		try {
 			return await resolveActiveRepoContext(repoCwd);
@@ -1457,35 +1457,35 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 	};
 	const activeRepoContextPromise = logger.time("resolveActiveRepoContext", resolveRepoContext, cwd);
-	activeRepoContextPromise.catch(() => { });
+	activeRepoContextPromise.catch(() => {});
 	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () => discoverWatchdogFiles(cwd, agentDir));
-	watchdogFilesPromise.catch(() => { });
+	watchdogFilesPromise.catch(() => {});
 	const advisorConfigsPromise = logger.time("discoverAdvisorConfigs", () => discoverAdvisorConfigs(cwd, agentDir));
-	advisorConfigsPromise.catch(() => { });
+	advisorConfigsPromise.catch(() => {});
 	const promptTemplatesPromise = options.promptTemplates
 		? Promise.resolve(options.promptTemplates)
 		: logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir);
-	promptTemplatesPromise.catch(() => { });
+	promptTemplatesPromise.catch(() => {});
 	const slashCommandsPromise = options.slashCommands
 		? Promise.resolve(options.slashCommands)
 		: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
-	slashCommandsPromise.catch(() => { });
+	slashCommandsPromise.catch(() => {});
 	const canLiveSwitchPersona = options.personaSwitchable === true || options.personaName !== undefined;
 	const customCommandsPromise =
 		options.disableExtensionDiscovery || (options.restrictToolNames === true && !canLiveSwitchPersona)
 			? Promise.resolve<CustomCommandsLoadResult>({ commands: [], errors: [] })
 			: logger.time("discoverCustomCommands", loadCustomCommandsInternal, { cwd, agentDir });
-	customCommandsPromise.catch(() => { });
+	customCommandsPromise.catch(() => {});
 	const skillsSettings = settings.getGroup("skills");
 	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
 	const discoveredSkillsPromise =
 		options.skills === undefined
 			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
-				...skillsSettings,
-				disabledExtensions: disabledExtensionIds,
-			})
+					...skillsSettings,
+					disabledExtensions: disabledExtensionIds,
+				})
 			: undefined;
-	discoveredSkillsPromise?.catch(() => { });
+	discoveredSkillsPromise?.catch(() => {});
 
 	// Initialize provider preferences from settings
 	applyProviderGlobalsFromSettings(settings);
@@ -3542,9 +3542,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const autoLearnInstructions = promptRestricted
 				? undefined
 				: buildAutoLearnInstructions({
-					manageSkill: builtInToolNames.includes("manage_skill"),
-					learn: builtInToolNames.includes("learn"),
-				});
+						manageSkill: builtInToolNames.includes("manage_skill"),
+						learn: builtInToolNames.includes("learn"),
+					});
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
@@ -3747,8 +3747,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			restrictToolNames || cliGrantRestrictsActive
 				? []
 				: [...sdkCustomTools.map(t => t.name), ...registeredTools.map(t => t.definition.name)].filter(
-					name => !defaultInactiveToolNames.has(name),
-				);
+						name => !defaultInactiveToolNames.has(name),
+					);
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);
@@ -3768,12 +3768,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const personaBaselineToolNames = options.personaCliToolOverride
 			? (explicitlyRequestedToolNames ?? [])
 			: [
-				...[...new Set([...toolNamesFromRegistry, ...alwaysInclude])].filter(
-					name => toolRegistry.has(name) && !defaultInactiveToolNames.has(name) && name !== "goal",
-				),
-				...(baselineLspEnabled ? ["lsp"] : []),
-				...(baselineHubEnabled ? ["hub"] : []),
-			];
+					...[...new Set([...toolNamesFromRegistry, ...alwaysInclude])].filter(
+						name => toolRegistry.has(name) && !defaultInactiveToolNames.has(name) && name !== "goal",
+					),
+					...(baselineLspEnabled ? ["lsp"] : []),
+					...(baselineHubEnabled ? ["hub"] : []),
+				];
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,
 		// so that subagents launched in the same parallel batch can see each other in
@@ -3925,18 +3925,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const snapcompactInline =
 			snapcompactSystemPromptMode !== "none" || settings.get("snapcompact.toolResults")
 				? new SnapcompactInlineTransformer(
-					{
-						renderSystemPrompt: snapcompactSystemPromptMode,
-						renderToolResults: settings.get("snapcompact.toolResults"),
-						shape: settings.get("snapcompact.shape"),
-					},
-					// Journal the tokens each imaged tool result keeps off the wire
-					// (frames never reach session.jsonl, so this is their only trace).
-					createSnapcompactSavingsRecorder(() => sessionManager.getSessionFile() ?? null),
-					// With a serving blob broker, frames become lazy URLs: rasterized
-					// only when a provider fetches them, never held as pixels here.
-					blobBroker?.frameSink,
-				)
+						{
+							renderSystemPrompt: snapcompactSystemPromptMode,
+							renderToolResults: settings.get("snapcompact.toolResults"),
+							shape: settings.get("snapcompact.shape"),
+						},
+						// Journal the tokens each imaged tool result keeps off the wire
+						// (frames never reach session.jsonl, so this is their only trace).
+						createSnapcompactSavingsRecorder(() => sessionManager.getSessionFile() ?? null),
+						// With a serving blob broker, frames become lazy URLs: rasterized
+						// only when a provider fetches them, never held as pixels here.
+						blobBroker?.frameSink,
+					)
 				: undefined;
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
@@ -3979,10 +3979,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const configuredServiceTierByFamily = hasServiceTierEntry
 			? (existingSession.serviceTier ?? {})
 			: buildServiceTierByFamily(
-				settings.get("tier.openai"),
-				settings.get("tier.anthropic"),
-				settings.get("tier.google"),
-			);
+					settings.get("tier.openai"),
+					settings.get("tier.anthropic"),
+					settings.get("tier.google"),
+				);
 		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
 		if (options.openAIServiceTier === null) {
 			delete initialServiceTierByFamily.openai;
@@ -4290,20 +4290,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			toolRegistry,
 			reconcileBrowserMcpFilter: mcpManager
 				? async enabled => {
-					await mcpManager.reconcileBrowserFilter(enabled);
-					return mcpManager.getTools();
-				}
+						await mcpManager.reconcileBrowserFilter(enabled);
+						return mcpManager.getTools();
+					}
 				: undefined,
 			memoryAgentDir: agentDir,
 			memoryTaskDepth: taskDepth,
 			createMemoryTools: restrictToolNames
 				? undefined
 				: async () => {
-					const tools = await Promise.all(
-						MEMORY_BACKEND_TOOL_NAMES.map(name => BUILTIN_TOOLS[name](toolSession)),
-					);
-					return tools.filter((tool): tool is AgentTool => tool !== null);
-				},
+						const tools = await Promise.all(
+							MEMORY_BACKEND_TOOL_NAMES.map(name => BUILTIN_TOOLS[name](toolSession)),
+						);
+						return tools.filter((tool): tool is AgentTool => tool !== null);
+					},
 			createThinkTool: async () => (await HIDDEN_TOOLS.think(toolSession)) ?? null,
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
@@ -4336,17 +4336,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			registerBuiltInTools,
 			getMcpServerInstructions: mcpManager
 				? () => {
-					const raw = mcpManager.getServerInstructions();
-					if (!raw || raw.size === 0) return raw;
-					const out = new Map<string, string>();
-					for (const [name, text] of raw) {
-						out.set(
-							name,
-							text.length > MAX_MCP_INSTRUCTIONS_LENGTH ? text.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH) : text,
-						);
+						const raw = mcpManager.getServerInstructions();
+						if (!raw || raw.size === 0) return raw;
+						const out = new Map<string, string>();
+						for (const [name, text] of raw) {
+							out.set(
+								name,
+								text.length > MAX_MCP_INSTRUCTIONS_LENGTH ? text.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH) : text,
+							);
+						}
+						return out;
 					}
-					return out;
-				}
 				: undefined,
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
@@ -4583,8 +4583,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					try {
 						const codexPrewarmApiKey = options.getApiKey
 							? // `getApiKey` returns a value-or-promise union; unwrap the promise,
-							// then resolve the result if it is itself an ApiKeyResolver.
-							await resolveApiKeyOnce(await options.getApiKey(codexModel))
+								// then resolve the result if it is itself an ApiKeyResolver.
+								await resolveApiKeyOnce(await options.getApiKey(codexModel))
 							: await modelRegistry.getApiKey(codexModel, providerSessionId);
 						if (!codexPrewarmApiKey) return;
 						await logger.time("prewarmOpenAICodexResponses", prewarmOpenAICodexResponses, codexModel, {

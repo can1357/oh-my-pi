@@ -112,10 +112,10 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 		outputSchema: options.outputSchema,
 		getPlanModeState: options.planMode
 			? () =>
-				({
-					enabled: true,
-					planFilePath: path.join(options.cwd ?? process.cwd(), "plan.md"),
-				}) satisfies PlanModeState
+					({
+						enabled: true,
+						planFilePath: path.join(options.cwd ?? process.cwd(), "plan.md"),
+					}) satisfies PlanModeState
 			: undefined,
 	};
 }
@@ -637,13 +637,13 @@ describe("agent() through eval runtimes", () => {
 				output: options.outputSchema ? '{"ok":true,"n":3}' : "hello from agent",
 				...(options.outputSchema
 					? {
-						structuredOutput: {
-							source: "caller",
-							mode: options.outputSchemaMode ?? "permissive",
-							status: "valid",
-							data: { ok: true, n: 3 },
-						} satisfies StructuredSubagentOutput,
-					}
+							structuredOutput: {
+								source: "caller",
+								mode: options.outputSchemaMode ?? "permissive",
+								status: "valid",
+								data: { ok: true, n: 3 },
+							} satisfies StructuredSubagentOutput,
+						}
 					: {}),
 			}),
 		);
@@ -721,13 +721,13 @@ describe("agent() through eval runtimes", () => {
 				output: options.outputSchema ? "not JSON" : "hello from python",
 				...(options.outputSchema
 					? {
-						structuredOutput: {
-							source: "caller",
-							mode: options.outputSchemaMode ?? "permissive",
-							status: "valid",
-							data: { ok: true },
-						} satisfies StructuredSubagentOutput,
-					}
+							structuredOutput: {
+								source: "caller",
+								mode: options.outputSchemaMode ?? "permissive",
+								status: "valid",
+								data: { ok: true },
+							} satisfies StructuredSubagentOutput,
+						}
 					: {}),
 			}),
 		);
@@ -828,7 +828,7 @@ describe("agent() through eval runtimes", () => {
 			return singleResult(options, { output: "done" });
 		});
 
-		const events: Array<{ op: string;[key: string]: unknown }> = [];
+		const events: Array<{ op: string; [key: string]: unknown }> = [];
 		const result = await executeJs(
 			'const handle = await agent("investigate", { label: "Scout" }); await handle.wait();',
 			{
