@@ -3,17 +3,16 @@
 ## [Unreleased]
 
 ### Added
-- Added `commitSplit` (atomic multi-commit from staged hunks, never rewrites index/worktree, aborts if a `pre-commit` hook modifies the index).
-- Added `stageContent` (stage exact content without touching the worktree).
+- Added `commitSplit`: builds a chain of commits from staged hunk selections and advances HEAD once; the index and worktree are never rewritten, and a `pre-commit` hook that modifies the index aborts the split.
+- Added `stageContent`: stage exact bytes for a path without touching the worktree.
 
 ### Changed
-- `applyPatch`/`canApplyPatch` now follow `git apply`'s default context rules: a hunk with no trailing context must match at end of file, a hunk starting at line 1 must match at the start, and a hunk may not overlap lines a previous hunk wrote. Zero-context (`-U0`) patches that previously applied by exact position are rejected, as with `git apply` without `--unidiff-zero`.
-- Removed indexTreeId and optimistic tree-hash verification options from commit and staging APIs
+- `applyPatch`/`canApplyPatch`/`stageHunks` locate hunks like `git apply`: a hunk still applies after earlier hunks shifted line numbers, a hunk with no trailing context must match at end of file, a hunk starting at line 1 must match at the start, and a hunk may not overlap lines a previous hunk wrote. Zero-context (`-U0`) patches behave as with `git apply` without `--unidiff-zero`.
 
 ### Fixed
-- Fixed filter/attribute (CRLF) normalization in native staging.
-- Fixed index writes serialized under `.git/index.lock`.
-- Fixed hunk application (`stageHunks`, `commitSplit`, `applyPatch`) failing with "hunk does not apply" when an earlier hunk in the same file shifted line numbers; hunks are now located like `git apply` does — searching from the postimage line, so a hunk lands on the right block even when an identical block sits nearby.
+- `stageFiles` now runs the filter pipeline, so `.gitattributes`/`autocrlf` normalization matches `git add`.
+- Concurrent `git` invocations no longer clobber staged changes while native staging or patch application writes the index.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

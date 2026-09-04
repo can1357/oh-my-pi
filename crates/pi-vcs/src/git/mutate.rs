@@ -2221,7 +2221,7 @@ mod tests {
 
 		let initial_tree = repo.write_tree(None).unwrap();
 
-		// Mutate changelog and concurrently stage another file
+		// Stage two more files, then restore only one of them
 		fs::write(temp.path().join("changelog"), "new changelog\n").unwrap();
 		fs::write(temp.path().join("unrelated"), "unrelated staged\n").unwrap();
 		repo

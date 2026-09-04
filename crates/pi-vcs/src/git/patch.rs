@@ -113,18 +113,22 @@ impl GitRepo {
 		}
 		let patches = parse_patch(patch_text).map_err(ApplyFailure::into_error)?;
 		let repo = self.gix()?;
+		let lock = options
+			.cached
+			.then(|| {
+				let path = options
+					.index_path
+					.as_deref()
+					.map_or_else(|| repo.index_path(), Path::to_owned);
+				lock_index(&path, "git write index lock")
+			})
+			.transpose()?;
 		let mut state = patch_target_map(self, &repo, &patches, options)?;
 		apply_patches_to_map(&repo, &mut state, &patches, options.reverse, options.three_way)?;
-		if options.cached {
-			let path = options
-				.index_path
-				.as_deref()
-				.map_or_else(|| repo.index_path(), Path::to_owned);
-			write_index_map_locked(&repo, &state, lock_index(&path, "git write index lock")?)?;
-		} else {
-			write_patch_worktree(self, &patches, options.reverse, &state)?;
+		match lock {
+			Some(lock) => write_index_map_locked(&repo, &state, lock),
+			None => write_patch_worktree(self, &patches, options.reverse, &state),
 		}
-		Ok(())
 	}
 
 	/// Check whether a patch applies without changing the index or worktree.
@@ -932,22 +936,14 @@ fn apply_file_bytes(
 	for hunk in &patch.hunks {
 		let (start, anchor, replacement, expected) = hunk_sides(hunk, reverse);
 		let preferred = anchor as isize + drift;
-		let position = if expected.is_empty() {
-			// Pure insertion with no context (`-U0` or empty file): nothing to
-			// search for, the anchor must simply be inside the file.
-			usize::try_from(preferred)
-				.ok()
-				.filter(|position| (floor..=lines.len()).contains(position))
-		} else {
-			locate_hunk(
-				&lines,
-				&expected,
-				floor,
-				preferred,
-				start <= 1,
-				!matches!(hunk.lines.last(), Some(line) if line.kind == b' '),
-			)
-		};
+		let position = locate_hunk(
+			&lines,
+			&expected,
+			floor,
+			preferred,
+			start <= 1,
+			!matches!(hunk.lines.last(), Some(line) if line.kind == b' '),
+		);
 		let Some(position) = position else {
 			return Err(ApplyFailure::Context(format!("hunk at line {start} does not apply")));
 		};
@@ -2075,6 +2071,30 @@ mod tests {
 			.can_apply_patch(&tail_diff, &ApplyOptions { cached: true, ..ApplyOptions::default() })
 			.expect("check");
 		assert!(!ours, "EOF-pinned hunk must not apply once the file grew");
+
+		// Zero-context insertions follow git without `--unidiff-zero`: into an
+		// empty file they apply; at the top of a nonempty file both pins
+		// (beginning and end) conflict and git rejects them.
+		let temp = init(&[("empty.txt", b""), ("full.txt", b"a\nb\n")]);
+		fs::write(temp.path().join("empty.txt"), b"x\n").expect("fill");
+		fs::write(temp.path().join("full.txt"), b"x\na\nb\n").expect("prepend");
+		let empty_diff = git(temp.path(), &["diff", "-U0", "--", "empty.txt"]);
+		let full_diff = git(temp.path(), &["diff", "-U0", "--", "full.txt"]);
+		git(temp.path(), &["checkout", "--", "."]);
+		let repository = repo(temp.path());
+		repository
+			.apply_patch(&empty_diff, &ApplyOptions::default())
+			.expect("insert into empty file");
+		assert_eq!(fs::read(temp.path().join("empty.txt")).expect("read"), b"x\n");
+		let patch_file = temp.path().join("full.patch");
+		fs::write(&patch_file, &full_diff).expect("write patch");
+		git_expecting(temp.path(), &["apply", "--check", patch_file.to_str().unwrap()], 1);
+		assert!(
+			!repository
+				.can_apply_patch(&full_diff, &ApplyOptions::default())
+				.expect("check"),
+			"zero-context insertion at the top of a nonempty file must be rejected like git"
+		);
 	}
 
 	#[test]
