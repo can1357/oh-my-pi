@@ -16,12 +16,11 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-	// Profile is process-wide; restore it after every test so a mutation (or an
-	// assertion failure before cleanup) can't leak into sibling tests or
-	// concurrently executing files. AGENTS.md: tests must isolate global state.
-	setProfile(originalProfile);
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
+	// Profile is process-wide; restore it after settings-state cleanup because
+	// restoring the captured agent dir resets the active profile.
+	setProfile(originalProfile);
 });
 
 test("renders profile plus compact metric status line", () => {
