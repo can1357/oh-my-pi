@@ -2,14 +2,13 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
-
-## [18.1.10] - 2026-09-04
 ### Added
 
 - Added `--provider-api-keys` for loading a named provider-key bundle and `--provider-api-keys-fd` for consuming an exact launcher descriptor, both process-local and never persisted ([#8286](https://github.com/can1357/oh-my-pi/pull/8286) by [@ghosty-11](https://github.com/ghosty-11))
+
+### Fixed
+
+- Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 
 ## [18.1.10] - 2026-09-04
 
