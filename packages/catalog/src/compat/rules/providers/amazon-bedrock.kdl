@@ -2,6 +2,11 @@
 
 provider "amazon-bedrock" {
 	class "anthropic" {
+		family "fable" {
+			revision ">=5.1 <5.2" {
+				thinking-efforts "low" "medium" "high" "xhigh" "max"
+			}
+		}
 		family "opus" {
 			revision ">=4.6 <4.7" {
 				thinking-mode "anthropic-adaptive"

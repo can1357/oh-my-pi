@@ -32679,10 +32679,11 @@
 			"thinking": {
 				"mode": "anthropic-adaptive",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
-					"high"
+					"high",
+					"xhigh",
+					"max"
 				],
 				"supportsDisplay": true,
 				"prefixBinding": true
@@ -33344,10 +33345,11 @@
 			"thinking": {
 				"mode": "anthropic-adaptive",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
-					"high"
+					"high",
+					"xhigh",
+					"max"
 				],
 				"supportsDisplay": true,
 				"prefixBinding": true
@@ -35571,10 +35573,11 @@
 			"thinking": {
 				"mode": "anthropic-adaptive",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
-					"high"
+					"high",
+					"xhigh",
+					"max"
 				],
 				"supportsDisplay": true,
 				"prefixBinding": true
@@ -36277,10 +36280,11 @@
 			"thinking": {
 				"mode": "anthropic-adaptive",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
-					"high"
+					"high",
+					"xhigh",
+					"max"
 				],
 				"supportsDisplay": true,
 				"prefixBinding": true

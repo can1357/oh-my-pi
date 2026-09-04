@@ -7065,6 +7065,33 @@
 				"providers": [
 					"amazon-bedrock"
 				],
+				"family": "fable",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.1.0"
+					},
+					{
+						"op": "<",
+						"revision": "5.2.0"
+					}
+				],
+				"thinking": {
+					"efforts": [
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max"
+					]
+				}
+			},
+			{
+				"source": "providers/amazon-bedrock.kdl:11",
+				"class": "anthropic",
+				"providers": [
+					"amazon-bedrock"
+				],
 				"family": "opus",
 				"revision": [
 					{
@@ -7081,7 +7108,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:10",
+				"source": "providers/amazon-bedrock.kdl:15",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -7109,7 +7136,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:16",
+				"source": "providers/amazon-bedrock.kdl:21",
 				"class": "openai",
 				"providers": [
 					"amazon-bedrock"
@@ -7119,7 +7146,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:19",
+				"source": "providers/amazon-bedrock.kdl:24",
 				"class": "deepseek",
 				"providers": [
 					"amazon-bedrock"
@@ -7137,7 +7164,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:24",
+				"source": "providers/amazon-bedrock.kdl:29",
 				"class": "minimax",
 				"providers": [
 					"amazon-bedrock"
@@ -7148,7 +7175,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:28",
+				"source": "providers/amazon-bedrock.kdl:33",
 				"class": "unknown",
 				"providers": [
 					"amazon-bedrock"
@@ -7164,7 +7191,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:33",
+				"source": "providers/amazon-bedrock.kdl:38",
 				"providers": [
 					"amazon-bedrock"
 				],
