@@ -196,17 +196,18 @@ The `source` field supports these formats. String sources must start with `./` a
 }
 ```
 
-**npm package** (parsed but not installable yet):
+**npm package** — install from an npm registry:
 
 ```json
 "source": {
   "source": "npm",
   "package": "@scope/my-plugin",
-  "version": "1.0.0"
+  "version": "^1.0.0",
+  "registry": "https://registry.npmjs.org"
 }
 ```
 
-Current installer behavior rejects npm marketplace sources with `npm plugin sources are not yet supported`; use relative, GitHub, URL, or git-subdir sources.
+`package` is the npm package name (validated as a runtime package name). `version` is optional: when omitted, `dist-tags.latest` is used; an exact version key is matched first; otherwise the expression is treated as a semver range and the highest satisfying version is selected. `registry` is optional (defaults to `https://registry.npmjs.org`) and must be a public HTTPS URL without credentials, query, or fragment. The tarball is integrity-verified via its SHA-512 SRI digest before extraction.
 
 Invalid catalog JSON or invalid required top-level fields reject the catalog. An invalid plugin entry is logged and skipped so other valid entries remain available.
 

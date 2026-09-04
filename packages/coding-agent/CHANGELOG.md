@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Marketplace plugins can now install from npm sources (`{ "source": "npm", "package": "...", "version": "...", "registry": "..." }`), with registry packument fetch, semver version selection, SHA-512 integrity verification, and extraction into the plugin cache. Update checks resolve the source's selector against the registry, so an ordinary release is detected even when the marketplace catalog is unchanged, and a package whose runtime dependencies its tarball does not ship is rejected at install time rather than failing later at load.
+
 ### Fixed
 
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).

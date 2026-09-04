@@ -7,7 +7,6 @@
  */
 
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 
 import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
@@ -30,7 +29,7 @@ import {
 	writeInstalledPluginsRegistry,
 	writeMarketplacesRegistry,
 } from "./registry";
-import { resolvePluginSource } from "./source-resolver";
+import { resolveNpmVersion, resolvePluginSource } from "./source-resolver";
 import type {
 	InstalledPluginEntry,
 	InstalledPluginSummary,
@@ -38,18 +37,9 @@ import type {
 	MarketplaceCatalog,
 	MarketplacePluginEntry,
 	MarketplaceRegistryEntry,
+	PluginSourceNpm,
 } from "./types";
-import { buildPluginId, parsePluginId } from "./types";
-
-const RUNTIME_PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
-const MAX_RUNTIME_PACKAGE_NAME_LENGTH = 214;
-
-function assertRuntimePackageName(name: string): string {
-	if (name.length > MAX_RUNTIME_PACKAGE_NAME_LENGTH || !RUNTIME_PACKAGE_NAME_RE.test(name)) {
-		throw new Error(`Invalid marketplace plugin package name: ${JSON.stringify(name)}`);
-	}
-	return name;
-}
+import { assertRuntimePackageName, buildPluginId, parsePluginId } from "./types";
 
 // ── Options ──────────────────────────────────────────────────────────────────
 
@@ -292,17 +282,25 @@ export class MarketplaceManager {
 			);
 		}
 
-		const { dir: sourcePath, tempCloneRoot } = await resolvePluginSource(pluginEntry, {
+		const {
+			dir: sourcePath,
+			tempCloneRoot,
+			resolvedVersion,
+		} = await resolvePluginSource(pluginEntry, {
 			marketplaceClonePath,
 			catalogMetadata: catalog.metadata,
-			tmpDir: os.tmpdir(),
+			// Extract directly under the plugin cache staging area so the extracted
+			// tree lands on the same filesystem as the cache and cachePlugin's staged
+			// rename stays cheap. A sibling `.staging-tmp` dir keeps it out of the
+			// cache's own namespace; the resolver cleans up its temp root in finally.
+			tmpDir: path.join(this.#opts.pluginsCacheDir, ".staging-tmp"),
 		});
 
-		// 5. Determine version: catalog entry > plugin manifest > git SHA > fallback
+		// 5. Determine version: npm resolved version > catalog entry > plugin manifest > git SHA > fallback
 		let version!: string;
 		let cachePath!: string;
 		try {
-			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
+			version = resolvedVersion ?? (await this.#resolvePluginVersion(pluginEntry, sourcePath));
 			cachePath = await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version);
 			await this.#writeEmbeddedLspConfig(pluginEntry, cachePath);
 			await this.#writeEmbeddedDapConfig(pluginEntry, cachePath);
@@ -624,9 +622,10 @@ export class MarketplaceManager {
 		}
 	}
 
-	// Compare installed plugin versions against their catalog entries.
-	// Returns one entry per (pluginId, scope) pair where the catalog declares a newer version.
-	// Catalog entries without a version field are skipped.
+	// Compare installed plugin versions against the version their catalog entry
+	// currently resolves to. Returns one entry per (pluginId, scope) pair that is
+	// behind. Entries with neither a catalog version nor a resolvable npm selector
+	// are skipped.
 	async checkForUpdates(): Promise<Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>> {
 		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const updates: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
@@ -650,25 +649,51 @@ export class MarketplaceManager {
 				if (!mktEntry) continue;
 
 				let catalogVersion: string | undefined;
+				let npmSource: PluginSourceNpm | undefined;
 				try {
 					const catalog = await this.#readCatalog(mktEntry);
-					catalogVersion = catalog.plugins.find(p => p.name === parsed.name)?.version;
+					const pluginEntry = catalog.plugins.find(p => p.name === parsed.name);
+					catalogVersion = pluginEntry?.version;
+					if (
+						!catalogVersion &&
+						pluginEntry &&
+						typeof pluginEntry.source === "object" &&
+						pluginEntry.source.source === "npm"
+					) {
+						npmSource = pluginEntry.source;
+					}
 				} catch {
 					continue;
 				}
 
-				if (!catalogVersion || catalogVersion === installed.version) continue;
+				// An npm selector is a moving target: the catalog may pin a range like
+				// "^1.2.0" or omit the version entirely (dist-tag `latest`), while
+				// installation persisted the exact version it resolved to. Comparing the
+				// selector string against that exact version can never observe an
+				// ordinary registry release, so resolve the selector and compare
+				// versions. A catalog `version` still wins when present.
+				let comparisonVersion = catalogVersion;
+				if (npmSource) {
+					try {
+						comparisonVersion = await resolveNpmVersion(npmSource);
+					} catch {
+						// Registry unreachable or selector unresolvable — report nothing
+						// for this plugin rather than guessing from the selector string.
+						continue;
+					}
+				}
+				if (!comparisonVersion || comparisonVersion === installed.version) continue;
 
 				// Treat newer semver as an update; fall back to inequality for non-semver tags.
 				let isNewer: boolean;
 				try {
-					isNewer = Bun.semver.order(catalogVersion, installed.version) > 0;
+					isNewer = Bun.semver.order(comparisonVersion, installed.version) > 0;
 				} catch {
-					isNewer = catalogVersion !== installed.version;
+					isNewer = comparisonVersion !== installed.version;
 				}
 
 				if (isNewer) {
-					updates.push({ pluginId, scope, from: installed.version, to: catalogVersion });
+					updates.push({ pluginId, scope, from: installed.version, to: comparisonVersion });
 				}
 			}
 		}
