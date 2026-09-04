@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native VCS clean to resolve nested `.gitignore` files, global `core.excludesFile`, and `.git/info/exclude`, safely unlink directory symlinks without modifying target trees, respect pathspec boundaries when pruning empty directories, and skip nested repositories and submodules ([#10714](https://github.com/can1357/oh-my-pi/pull/10714) by [@korri123](https://github.com/korri123)).
+
 ## [18.1.7] - 2026-09-03
 
 ### Added

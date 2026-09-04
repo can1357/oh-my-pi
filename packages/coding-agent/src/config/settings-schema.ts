@@ -4909,6 +4909,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"worktree.cleanSource": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Clean Source Checkout on /wt",
+			description:
+				"When creating a worktree with `/wt`, reset tracked changes and remove untracked files from the original checkout after carrying them over",
+		},
+	},
+
 	"task.isolation.apply": {
 		type: "boolean",
 		default: true,

@@ -900,6 +900,108 @@ describe("wave 3 commands", () => {
 		}
 	});
 
+	it("/wt: with worktree.cleanSource=true, cleans the source checkout while preserving the worktree", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		runtime.settings.override("worktree.cleanSource", true);
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clean-"));
+		const repoDir = path.join(root, "repo");
+		const worktreeBase = path.join(root, "wt");
+		const originalProjectDir = process.cwd();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		process.env.OMP_WORKTREE_DIR = worktreeBase;
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		try {
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "edited\n");
+			await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
+			await Bun.write(path.join(repoDir, "build/out.txt"), "ignored\n");
+			fakeSessionManager._cwd = repoDir;
+
+			const result = await executeAcpBuiltinSlashCommand("/wt feature/clean", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			const movedTo = fakeSessionManager._movedTo;
+			expect(movedTo).toBeDefined();
+			expect(movedTo!.startsWith(await fs.realpath(worktreeBase))).toBe(true);
+			expect(output[0]).toContain(`Moved to worktree ${movedTo} on branch feature/clean`);
+			expect(output[0]).toContain("uncommitted changes moved, source checkout cleaned");
+			// The worktree carries all uncommitted changes.
+			expect(await Bun.file(path.join(movedTo!, "tracked.txt")).text()).toBe("edited\n");
+			expect(await Bun.file(path.join(movedTo!, "untracked.txt")).text()).toBe("new\n");
+			// The source checkout was reset and cleaned.
+			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("committed\n");
+			expect(await Bun.file(path.join(repoDir, "untracked.txt")).exists()).toBe(false);
+			// Ignored files survive in the source checkout.
+			expect(await Bun.file(path.join(repoDir, "build/out.txt")).text()).toBe("ignored\n");
+			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
+			expect(await git("status", "--porcelain")).toBe("");
+		} finally {
+			setProjectDir(originalProjectDir);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("/wt: aborts and leaves source checkout untouched when settings flush fails", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		spyOn(runtime.settings, "flush").mockRejectedValue(new Error("disk full"));
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-flush-fail-"));
+		const repoDir = path.join(root, "repo");
+		const worktreeBase = path.join(root, "wt");
+		const originalProjectDir = process.cwd();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		process.env.OMP_WORKTREE_DIR = worktreeBase;
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		try {
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "dirty\n");
+			fakeSessionManager._cwd = repoDir;
+
+			const result = await executeAcpBuiltinSlashCommand("/wt feature/flush-fail", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("Failed to save pending settings: disk full");
+			expect(fakeSessionManager._movedTo).toBeUndefined();
+			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("dirty\n");
+			// Assert aborted BEFORE branch or worktree snapshot creation
+			const branchExists = await git("branch", "--list", "feature/flush-fail");
+			expect(branchExists).toBe("");
+			const worktrees = await git("worktree", "list", "--porcelain");
+			expect(worktrees).not.toContain("feature/flush-fail");
+			const wtDirs = await fs.readdir(worktreeBase).catch(() => []);
+			expect(wtDirs).toEqual([]);
+		} finally {
+			setProjectDir(originalProjectDir);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	// /memory
 	it("/memory unknown: returns usage message", async () => {
 		const { output, runtime } = createRuntime();
