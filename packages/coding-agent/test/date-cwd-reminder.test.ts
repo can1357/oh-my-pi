@@ -345,6 +345,63 @@ describe("date-cwd-reminder", () => {
 	});
 });
 
+describe("now stamp across processes", () => {
+	// True regression guard for the resume guarantee (r3909587061): two
+	// separate bun processes, each with a cold module cache, exactly like a
+	// resumed session. The in-process resume test above cannot cover this:
+	// a process-global stamp cache would stay warm inside one test process.
+	// The design holds no module-level value state (only a WeakMap), so the
+	// second process must re-derive the first process's stamped bytes.
+	const CHILD_SCRIPT = `
+(async () => {
+// Runtime-selected module path (this test pins byte-identity across processes
+// for whatever date-cwd-reminder.ts the env points at): static import impossible.
+const { applyNowStamp } = await import(process.env.NOWSTAMP_SRC);
+const T1 = Date.parse("2026-08-30T02:51:16Z");
+const T2 = Date.parse("2026-08-30T03:12:45Z");
+const a = { role: "assistant", content: [{ type: "text", text: "hi" }], timestamp: T1 + 1 };
+const m1 = { role: "user", content: "first turn", timestamp: T1 };
+const m3 = { role: "user", content: [{ type: "text", text: "new turn after resume" }, { type: "image", data: "imgB", mimeType: "image/png" }], timestamp: T2 };
+const messages = process.env.NOWSTAMP_MODE === "orig" ? [m1, a] : [m1, a, m3];
+const ctx = applyNowStamp({ systemPrompt: ["SYSTEM"], messages });
+console.log(JSON.stringify([JSON.stringify(ctx.systemPrompt), ...ctx.messages.map(m => JSON.stringify(m.content))]));
+})();
+`;
+	async function stampInColdProcess(mode: "orig" | "resumed"): Promise<string[]> {
+		const proc = Bun.spawn([process.execPath, "--no-env-file", "--no-install", "--eval", CHILD_SCRIPT], {
+			cwd: import.meta.dir,
+			env: {
+				...process.env,
+				NOWSTAMP_SRC: new URL("../src/session/date-cwd-reminder.ts", import.meta.url).href,
+				NOWSTAMP_MODE: mode,
+				TZ: "America/Chicago",
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: 30_000,
+		});
+		const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		expect(code, `child "${mode}" exited ${code}: ${stdout}`).toBe(0);
+		return JSON.parse(stdout.trim().split("\n").at(-1)!);
+	}
+
+	it("re-derives byte-identical stamps in a second cold bun process", async () => {
+		const orig = await stampInColdProcess("orig");
+		const resumed = await stampInColdProcess("resumed");
+		// Resume is a byte no-op: the stamped turn re-derives byte-identically
+		// from its own persisted timestamp in the cold process.
+		expect(resumed[1]).toBe(orig[1]);
+		expect(resumed[1]).toContain("Now: 2026-08-30T02:51:16Z");
+		expect(resumed[2]).toBe(orig[2]);
+		// The system prompt is never touched.
+		expect(resumed[0]).toBe(JSON.stringify(["SYSTEM"]));
+		// Only the genuinely-new last turn adds bytes, at the tail, stamped
+		// from its own instant.
+		expect(resumed).toHaveLength(orig.length + 1);
+		expect(resumed[3]).toContain("Now: 2026-08-30T03:12:45Z");
+	});
+});
+
 describe("date-cwd reminder on the provider wire", () => {
 	const sessions: Array<{ dispose(): Promise<void> }> = [];
 

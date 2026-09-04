@@ -143,8 +143,10 @@ export function renderNowStamp(now: Date = new Date()): string {
  * own `timestamp` — so re-stamps are byte-identical across requests and
  * across session resumes: a resumed process rehydrates history as fresh
  * objects with the persisted content and timestamp, and re-derives the
- * exact wire bytes the original process sent. Only the genuinely-new last
- * turn adds bytes, at the tail, so the prompt-cache prefix stays stable.
+ * exact wire bytes the original process sent, given the same host timezone
+ * and locale (the parenthesized local part of the stamp renders host-locally).
+ * Only the genuinely-new last turn adds bytes, at the tail, so the
+ * prompt-cache prefix stays stable.
  * Idempotent per user message: a message already carrying a stamp keeps
  * it — a fresh stamp would duplicate and invalidate the prompt cache from message 0.
  *
