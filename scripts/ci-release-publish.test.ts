@@ -139,26 +139,33 @@ describe("published manifest topology", () => {
 	});
 });
 
-describe("published file: vendor bundling", () => {
-	it("drops thinking-orbs file: spec and nests it for pack", async () => {
+describe("published thinking-orbs git dependency", () => {
+	it("keeps the fork git spec through rewriteManifest", async () => {
 		const pkg = packages.find(entry => entry.dir === "packages/coding-agent");
 		if (!pkg) throw new Error("coding-agent missing from publish set");
 
 		const manifest = await rewriteManifest(pkg, false);
 		const dependencies = manifest.dependencies as Record<string, string>;
-		expect(dependencies["thinking-orbs"]).toBeUndefined();
-		expect(manifest.bundledDependencies).toEqual(["thinking-orbs"]);
-		expect(manifest.files).toContain("node_modules/thinking-orbs");
+		expect(dependencies["thinking-orbs"]).toBe(
+			"https://github.com/kvnloo/thinking-orbs/releases/download/omp-tui-73f4ef1/thinking-orbs-0.3.1.tgz",
+		);
+		expect(manifest.bundledDependencies).toBeUndefined();
+		expect(manifest.files ?? []).not.toContain("node_modules/thinking-orbs");
 	});
 
-	it("applyPublishBin also nests thinking-orbs for tarball smoke", async () => {
+	it("applyPublishBin keeps the fork git spec for tarball smoke", async () => {
 		const manifest = await applyPublishBin("packages/coding-agent", false);
 		const dependencies = manifest.dependencies as Record<string, string>;
 		expect(manifest.bin).toEqual({ omp: "dist/cli.js" });
-		expect(dependencies["thinking-orbs"]).toBeUndefined();
-		expect(manifest.bundledDependencies).toEqual(["thinking-orbs"]);
-		expect(manifest.files).toContain("node_modules/thinking-orbs");
+		expect(dependencies["thinking-orbs"]).toBe(
+			"https://github.com/kvnloo/thinking-orbs/releases/download/omp-tui-73f4ef1/thinking-orbs-0.3.1.tgz",
+		);
+		expect(manifest.bundledDependencies).toBeUndefined();
+		expect(manifest.files ?? []).not.toContain("node_modules/thinking-orbs");
 	});
+});
+
+describe("published file: vendor bundling", () => {
 
 	it("copies file: deps into nested node_modules and omits the spec", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bundle-file-deps-"));

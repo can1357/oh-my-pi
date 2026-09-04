@@ -662,7 +662,10 @@
   "@oh-my-pi/pi-ai" = copyPathToStore ../packages/ai;
   "@oh-my-pi/pi-catalog" = copyPathToStore ../packages/catalog;
   "@oh-my-pi/pi-coding-agent" = copyPathToStore ../packages/coding-agent;
-  "@oh-my-pi/pi-coding-agent/thinking-orbs" = copyPathToStore ../vendor/thinking-orbs;
+  "thinking-orbs@https://github.com/kvnloo/thinking-orbs/releases/download/omp-tui-73f4ef1/thinking-orbs-0.3.1.tgz" = fetchurl {
+    url = "https://github.com/kvnloo/thinking-orbs/releases/download/omp-tui-73f4ef1/thinking-orbs-0.3.1.tgz";
+    hash = "sha512-yjWAOmKNz8EQl7JjDVkAV2Ac9caNtkT1TmWcMBkte33f4asyXAHujEZEemZiHfuicGt4Ch8Non8tB//efmd2WA==";
+  };
   "@oh-my-pi/pi-metaharness" = copyPathToStore ../packages/metaharness;
   "@oh-my-pi/pi-mnemopi" = copyPathToStore ../packages/mnemopi;
   "@oh-my-pi/pi-natives" = copyPathToStore ../packages/natives;

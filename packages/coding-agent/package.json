@@ -72,7 +72,7 @@
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@opentelemetry/sdk-trace-node": "catalog:",
     "puppeteer-core": "catalog:",
-    "thinking-orbs": "file:../../vendor/thinking-orbs"
+    "thinking-orbs": "https://github.com/kvnloo/thinking-orbs/releases/download/omp-tui-73f4ef1/thinking-orbs-0.3.1.tgz"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "catalog:",
