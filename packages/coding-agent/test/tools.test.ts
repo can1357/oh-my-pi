@@ -967,8 +967,11 @@ describe("Coding Agent Tools", () => {
 			const result = await artifactReadTool.execute("test-call-artifact-byte-limit", {
 				path: "artifact://7:3-4",
 			});
-
-			expect(getTextOutput(result)).toContain("[Showing lines 2-2 of 4 (50.0KB limit). Use :3 to continue]");
+			const output = getTextOutput(result);
+			expect(output).toContain("[Showing lines 2-2 of 4 (50.0KB limit)]");
+			expect(output).toContain("Line 3 is 60.0KB");
+			expect(output).toContain("artifact://7:raw:3-3");
+			expect(output).not.toContain("Use :3 to continue");
 		});
 
 		it("should spill oversized read output to an artifact", async () => {
