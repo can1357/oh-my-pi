@@ -190,3 +190,14 @@ export function createLiveConfigHeaders(
 export function resolveConfigHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
 	return materializeConfigHeaderSources([headers]);
 }
+
+/** Resolve every value in a record, dropping entries whose source resolves empty. */
+export function resolveConfigRecord(values: Record<string, string> | undefined): Record<string, string> | undefined {
+	if (!values) return undefined;
+	const resolved: Record<string, string> = {};
+	for (const [key, value] of Object.entries(values)) {
+		const next = resolveConfigValue(value);
+		if (next) resolved[key] = next;
+	}
+	return Object.keys(resolved).length > 0 ? resolved : undefined;
+}

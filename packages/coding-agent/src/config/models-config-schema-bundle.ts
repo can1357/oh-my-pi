@@ -295,6 +295,78 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const ProviderAuthSchema = type('"apiKey" | "none" | "oauth"');
 
+	const ProviderOAuthSchema = type({
+		name: "string",
+		clientId: "string",
+		"clientSecret?": "string",
+		authorizationUrl: "string",
+		tokenUrl: "string",
+		scopes: "string[]",
+		"issuer?": "string",
+		"redirectUri?": "string",
+		"callbackPort?": "number",
+		"callbackPath?": "string",
+		"useIdToken?": "boolean",
+		"pkce?": "boolean",
+		"authorizationParams?": { "[string]": "string" },
+		"tokenParams?": { "[string]": "string" },
+	}).narrow((value, ctx) => {
+		if (value.name.length === 0) return ctx.mustBe("name a non-empty string");
+		if (value.clientId.length === 0) return ctx.mustBe("clientId a non-empty string");
+		try {
+			const authorizationUrl = new URL(value.authorizationUrl);
+			if (authorizationUrl.protocol !== "https:") return ctx.mustBe("authorizationUrl an HTTPS URL");
+		} catch {
+			return ctx.mustBe("authorizationUrl a valid URL");
+		}
+		try {
+			const tokenUrl = new URL(value.tokenUrl);
+			if (tokenUrl.protocol !== "https:") return ctx.mustBe("tokenUrl an HTTPS URL");
+		} catch {
+			return ctx.mustBe("tokenUrl a valid URL");
+		}
+		if (value.scopes.length === 0) return ctx.mustBe("scopes a non-empty array");
+		if (value.issuer !== undefined) {
+			try {
+				const issuer = new URL(value.issuer);
+				if (issuer.protocol !== "https:") return ctx.mustBe("issuer an HTTPS URL");
+			} catch {
+				return ctx.mustBe("issuer a valid URL");
+			}
+		}
+		if (
+			value.callbackPort !== undefined &&
+			(!Number.isInteger(value.callbackPort) || value.callbackPort < 0 || value.callbackPort > 65_535)
+		) {
+			return ctx.mustBe("callbackPort an integer from 0 through 65535");
+		}
+		if (value.redirectUri !== undefined) {
+			try {
+				const redirectUri = new URL(value.redirectUri);
+				if (
+					redirectUri.protocol !== "http:" ||
+					!redirectUri.port ||
+					(redirectUri.hostname !== "localhost" && redirectUri.hostname !== "127.0.0.1")
+				) {
+					return ctx.mustBe("redirectUri a localhost HTTP URL with an explicit port");
+				}
+			} catch {
+				return ctx.mustBe("redirectUri a valid URL");
+			}
+			if (value.callbackPort !== undefined) return ctx.mustBe("redirectUri or callbackPort, not both");
+		}
+		if (value.callbackPath !== undefined) {
+			if (
+				!value.callbackPath.startsWith("/") ||
+				value.callbackPath.includes("?") ||
+				value.callbackPath.includes("#")
+			) {
+				return ctx.mustBe("callbackPath an absolute pathname without a query or fragment");
+			}
+		}
+		return true;
+	});
+
 	const ProviderConfigSchema = type({
 		"baseUrl?": "string",
 		"apiKey?": "string",
@@ -304,6 +376,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"remoteCompaction?": RemoteCompactionSchema,
 		"authHeader?": "boolean",
 		"auth?": ProviderAuthSchema,
+		"oauth?": ProviderOAuthSchema,
 		"discovery?": ProviderDiscoverySchema,
 		"models?": ModelDefinitionSchema.array(),
 		"modelOverrides?": { "[string]": ModelOverrideSchema },
