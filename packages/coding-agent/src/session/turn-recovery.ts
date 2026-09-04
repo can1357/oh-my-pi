@@ -250,6 +250,10 @@ type UsageLimitOutcome = {
 	switchedCredential: boolean;
 	retryAfterMs: number;
 	retryAtMs: number | undefined;
+	blockedUntilMs: number | undefined;
+	priorBlockedUntilMs: number | undefined;
+	priorBlockedUntilTimed: boolean | undefined;
+	reportResetAtMs: number | undefined;
 };
 
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
@@ -598,19 +602,29 @@ export class TurnRecovery {
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
 			const errorMessage = message.errorMessage || "Unknown error";
-			const retryAfterMs =
-				this.#parseRetryAfterMsFromError(errorMessage) ??
-				calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
+			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
 				const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
 					activeModel.provider,
 					this.#host.sessionId(),
-					{ retryAfterMs, baseUrl: activeModel.baseUrl, modelId: activeModel.id },
+					{
+						retryAfterMs,
+						// Provider-stated timing only when the error text parsed;
+						// the 30-minute fallback is a guess.
+						providerTimed: parsedRetryAfterMs !== undefined,
+						baseUrl: activeModel.baseUrl,
+						modelId: activeModel.id,
+					},
 				);
 				return {
 					switchedCredential: outcome.switched,
 					retryAfterMs,
 					retryAtMs: outcome.retryAtMs,
+					blockedUntilMs: outcome.blockedUntilMs,
+					priorBlockedUntilMs: outcome.priorBlockedUntilMs,
+					priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
+					reportResetAtMs: outcome.reportResetAtMs,
 				};
 			})();
 			this.#usageLimitOutcomes.set(message, recorded);
@@ -2062,54 +2076,11 @@ export class TurnRecovery {
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
-		const now = Date.now();
-		const retryAfterMsMatch = /retry-after-ms\s*[:=]\s*(\d+)/i.exec(errorMessage);
-		if (retryAfterMsMatch) {
-			return Math.max(0, Number(retryAfterMsMatch[1]));
-		}
-
-		const retryAfterMatch = /retry-after\s*[:=]\s*([^\s,;]+)/i.exec(errorMessage);
-		if (retryAfterMatch) {
-			const value = retryAfterMatch[1];
-			const seconds = Number(value);
-			if (!Number.isNaN(seconds)) {
-				return Math.max(0, seconds * 1000);
-			}
-			const dateMs = Date.parse(value);
-			if (!Number.isNaN(dateMs)) {
-				return Math.max(0, dateMs - now);
-			}
-		}
-
-		const retryHintMs = extractRetryHint(undefined, errorMessage);
-		if (retryHintMs !== undefined) {
-			return retryHintMs;
-		}
-
-		const resetMsMatch = /x-ratelimit-reset-ms\s*[:=]\s*(\d+)/i.exec(errorMessage);
-		if (resetMsMatch) {
-			const resetMs = Number(resetMsMatch[1]);
-			if (!Number.isNaN(resetMs)) {
-				if (resetMs > 1_000_000_000_000) {
-					return Math.max(0, resetMs - now);
-				}
-				return Math.max(0, resetMs);
-			}
-		}
-
-		const resetMatch = /x-ratelimit-reset\s*[:=]\s*(\d+)/i.exec(errorMessage);
-		if (resetMatch) {
-			const resetSeconds = Number(resetMatch[1]);
-			if (!Number.isNaN(resetSeconds)) {
-				if (resetSeconds > 1_000_000_000) {
-					return Math.max(0, resetSeconds * 1000 - now);
-				}
-				return Math.max(0, resetSeconds * 1000);
-			}
-		}
-
-		// Smart Fallback if no exact headers found
-		return undefined;
+		// Single call into the centralized parser: it merges every supported
+		// form (account resets, retry-after-ms, legacy retry-after /
+		// x-ratelimit-reset text) by longest-wins, so a shorter reset phrase
+		// can never shadow a longer retry signal carried in the same message.
+		return extractRetryHint(undefined, errorMessage);
 	}
 
 	/**
@@ -2214,14 +2185,60 @@ export class TurnRecovery {
 				delayMs = 0;
 			} else {
 				// No sibling credential is usable right now. Wait for whichever
-				// comes first: the provider's retry-after window for the current
-				// account, or the earliest moment a temporarily blocked sibling
-				// frees up (e.g. a 60s post-401 block or a 5-min usage-probe
-				// block) — the next attempt's getApiKey re-ranks and picks it up.
-				// Without this, one short-lived sibling block escalates a
+				// comes first: the current account's actual unblock deadline, or
+				// the earliest moment a temporarily blocked sibling frees up
+				// (e.g. a 60s post-401 block or a 5-min usage-probe block) — the
+				// next attempt's getApiKey re-ranks and picks it up. Without the
+				// sibling minimum, one short-lived sibling block escalates a
 				// recoverable situation into the provider's multi-hour wait and
 				// trips the fail-fast cap below.
+				// The deadline merges every independent provider signal by
+				// longest-wins (mirroring extractRetryHint): the error-text hint
+				// (or heuristic fallback when hintless), the credential block
+				// the mark call persisted, and — when the usage report is a
+				// complete authority — its own reset, which replaces the
+				// heuristic instead of sleeping a guess.
 				usageLimitWaitMs = recordedUsageLimitOutcome.retryAfterMs;
+				if (recordedUsageLimitOutcome.reportResetAtMs !== undefined && parsedRetryAfterMs === undefined) {
+					// A hintless error can still carry an authoritative
+					// usage-report window: it replaces THIS call's 30-minute
+					// heuristic guess in both directions — sleeping the guess
+					// past a shorter reported reset overshoots, and vice
+					// versa.
+					usageLimitWaitMs = Math.max(0, recordedUsageLimitOutcome.reportResetAtMs - Date.now());
+				}
+				if (
+					recordedUsageLimitOutcome.priorBlockedUntilMs !== undefined &&
+					recordedUsageLimitOutcome.priorBlockedUntilTimed === true
+				) {
+					// The merged deadline below masks a pre-existing block
+					// shorter than this call's heuristic fallback (longest-wins
+					// in the mark). The prior deadline is that block's own
+					// provenance — an earlier response's provider-stated
+					// window — and must survive this call's heuristic guess:
+					// waking before it retries a still-blocked credential. A
+					// prior deadline that was itself only a heuristic guess
+					// carries no such authority and must not extend the wait
+					// past an authoritative report window.
+					const priorRemainingMs = Math.max(0, recordedUsageLimitOutcome.priorBlockedUntilMs - Date.now());
+					if (priorRemainingMs > usageLimitWaitMs) usageLimitWaitMs = priorRemainingMs;
+				}
+				if (recordedUsageLimitOutcome.blockedUntilMs !== undefined) {
+					// The stored deadline merges every mark call for this
+					// credential (longest-wins). Only a deadline past what
+					// THIS call requested — a longer report window, or a
+					// longer block an earlier sibling-session response stored
+					// for the shared credential — may override the wait:
+					// retrying before the credential's actual unblock time
+					// re-hits the cap, but this call's own heuristic
+					// contribution must not re-inflate over the authoritative
+					// report window above.
+					const requestedBlockedUntilMs = Date.now() + (recordedUsageLimitOutcome.retryAfterMs ?? 0);
+					if (recordedUsageLimitOutcome.blockedUntilMs > requestedBlockedUntilMs) {
+						const blockedRemainingMs = Math.max(0, recordedUsageLimitOutcome.blockedUntilMs - Date.now());
+						if (blockedRemainingMs > usageLimitWaitMs) usageLimitWaitMs = blockedRemainingMs;
+					}
+				}
 				if (siblingAvailabilityWaitMs !== undefined && siblingAvailabilityWaitMs < usageLimitWaitMs) {
 					usageLimitWaitMs = siblingAvailabilityWaitMs;
 				}
@@ -2385,8 +2402,25 @@ export class TurnRecovery {
 		// subagent (or interactive session) silently hung. The original
 		// assistant error message is preserved in agent state so the caller
 		// can act on it.
+		// Opt-out: retry.waitForUsageReset lets a provider-stated usage-limit
+		// reset (Flag.UsageLimit — 5h/weekly quota windows, CN 使用上限, spend
+		// caps, … on any provider) sleep past the cap. Gated on authoritative
+		// provider timing: either a parsed reset hint from the error text, or
+		// a complete usage-report window (every exhausted limit carries a
+		// future reset). Usage-limit errors with neither fall back to the
+		// 30-minute QUOTA_EXHAUSTED heuristic, and sleeping on that for a
+		// permanent error (402 balance, dead spend cap) would hold the session
+		// through repeated heuristic sleeps instead of surfacing it. Bounded
+		// by the stated wait so an unrelated large backoff cannot sneak
+		// through.
 		const maxDelayMs = retrySettings.maxDelayMs;
-		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
+		const waitForUsageReset =
+			retrySettings.waitForUsageReset === true &&
+			recordedUsageLimitOutcome !== undefined &&
+			(parsedRetryAfterMs !== undefined || recordedUsageLimitOutcome.reportResetAtMs !== undefined) &&
+			effectiveUsageLimitWaitMs !== undefined &&
+			delayMs <= effectiveUsageLimitWaitMs;
+		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel && !waitForUsageReset) {
 			await this.persistTerminalEmptyErrorTurn(message);
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
