@@ -8780,7 +8780,22 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:15",
+				"source": "providers/grokbot.kdl:16",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "sand-default"
+					}
+				],
+				"catalog": {
+					"reasoning": true
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:19",
 				"providers": [
 					"grokbot"
 				],
@@ -8811,7 +8826,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:20",
+				"source": "providers/grokbot.kdl:24",
 				"providers": [
 					"grokbot"
 				],
@@ -8839,7 +8854,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:27",
+				"source": "providers/grokbot.kdl:31",
 				"providers": [
 					"grokbot"
 				],

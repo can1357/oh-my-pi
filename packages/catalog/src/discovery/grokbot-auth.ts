@@ -171,12 +171,21 @@ export async function resolveGrokbotDiscoveryIdentityAsync(overrides?: {
 }
 
 /** Sync resolver for registry `envKeys` / AuthStorage availability. */
+/**
+ * Sync resolver for registry `envKeys` / AuthStorage availability.
+ *
+ * Process-env renewal credentials are returned literally so broker migrate
+ * `--include-env` can upload them. Host-secret *file* credentials only advertise
+ * that auth is available via the shared `<authenticated>` sentinel — migrate
+ * skips that sentinel, so a file-backed renewer is never uploaded without the
+ * paired machine id.
+ */
 export function resolveGrokbotEnvApiKey(): string | undefined {
 	const fromEnv = $env.GROKBOT_RENEWAL_CREDENTIAL || $env.SAND_INFERENCE_RENEWAL_CREDENTIAL || undefined;
 	if (fromEnv) return fromEnv;
 	const file = loadGrokbotSecretFileSync();
 	const fromFile = file.GROKBOT_RENEWAL_CREDENTIAL || file.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
-	return fromFile || undefined;
+	return fromFile ? "<authenticated>" : undefined;
 }
 
 export async function loadGrokbotConfig(renewalOverride?: string): Promise<GrokbotConfig> {

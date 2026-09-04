@@ -292,6 +292,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * Reviewed native tool-calling support. Applied as a correction so live
 	 * discovery can leave the field unset and KDL can force false (e.g. grok-4.5).
 	 */
+	/**
+	 * Reviewed reasoning capability. Applied as a correction so synthetic
+	 * discovery/seed rows can stay neutral (`reasoning: false`) while KDL
+	 * upgrades specific routers (e.g. sand-default) without id compares in TS.
+	 */
+	"reasoning": { key: "reasoning", set: "catalog", shape: "scalar" },
 	"supports-tools": { key: "supportsTools", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 };

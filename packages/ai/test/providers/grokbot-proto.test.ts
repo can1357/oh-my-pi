@@ -466,6 +466,19 @@ describe("grokbot requested model mapping", () => {
 			{ id: "effort", value: "low" },
 			{ id: "fast", value: "false" },
 		]);
+		// Discovered thinking=false must win over effort-derived true (Codex P1).
+		expect(
+			resolveGrokbotRequestedModel("claude-opus-5", {
+				effort: "high",
+				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { thinking: "false", context: "300k", effort: "medium", fast: "false" },
+			}).parameters,
+		).toEqual([
+			{ id: "thinking", value: "false" },
+			{ id: "context", value: "300k" },
+			{ id: "effort", value: "high" },
+			{ id: "fast", value: "false" },
+		]);
 	});
 });
 

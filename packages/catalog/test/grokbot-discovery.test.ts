@@ -222,7 +222,10 @@ describe("grokbot AvailableModels normalize", () => {
 
 		const sandDefault = models.find(m => m.id === "sand-default");
 		expect(sandDefault?.sandParameterIds).toEqual([]);
-		expect(sandDefault?.reasoning).toBe(true);
+		// Discovery stays neutral; KDL `reasoning` upgrades via buildModel.
+		expect(sandDefault?.reasoning).toBe(false);
+		expect(buildModel(sandDefault!).reasoning).toBe(true);
+		expect(buildModel(models.find(m => m.id === "sand-cua")!).reasoning).toBe(false);
 		expect(sandDefault?.input).toEqual(["text"]);
 		expect(models.find(m => m.id === "sand-cua")?.input).toEqual(["text"]);
 
@@ -348,6 +351,7 @@ describe("grokbot AvailableModels normalize", () => {
 	test("live non-reasoning grok-4.6 is not OR-upgraded by static seed reasoning", async () => {
 		const staticModels = buildGrokbotStaticSeed().map(seed => buildModel(seed));
 		expect(staticModels.find(m => m.id === "grok-4.6")?.reasoning).toBe(true);
+		expect(staticModels.find(m => m.id === "sand-default")?.reasoning).toBe(true);
 		const live: ModelSpec<"grokbot-sand"> = {
 			id: "grok-4.6",
 			name: "Grok 4.6",

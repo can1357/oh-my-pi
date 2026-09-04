@@ -73,13 +73,13 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
  * `limits-patch`, `long-context-cost`, `context-window-floor`,
- * `input-modalities`) onto an upstream-sourced spec. Applied by
+ * `input-modalities`, `supports-tools`, `reasoning`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits and pricing still win.
  */
 export function applyCatalogCorrections(
-	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input" | "supportsTools">,
+	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input" | "supportsTools" | "reasoning">,
 	catalog: Record<string, unknown>,
 ): void {
 	const longContext = objectPayload(catalog.longContext);
@@ -145,6 +145,9 @@ export function applyCatalogCorrections(
 	}
 	if (typeof catalog.supportsTools === "boolean") {
 		model.supportsTools = catalog.supportsTools;
+	}
+	if (typeof catalog.reasoning === "boolean") {
+		model.reasoning = catalog.reasoning;
 	}
 }
 

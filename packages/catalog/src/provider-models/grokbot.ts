@@ -28,7 +28,8 @@ type GrokbotModelSeed = {
  * the unset default consumed as `[]` on the wire).
  */
 export const GROKBOT_MODEL_SEEDS: readonly GrokbotModelSeed[] = [
-	{ id: "sand-default", name: "sand-default (routed)", reasoning: true },
+	// Reasoning for routers is reviewed via KDL (`reasoning`); seeds stay neutral.
+	{ id: "sand-default", name: "sand-default (routed)", reasoning: false },
 	{ id: "sand-cua", name: "sand-cua (routed)", reasoning: false },
 	{ id: "sand-automation", name: "sand-automation (routed)", reasoning: false },
 	{ id: "default", name: "Auto", reasoning: false },

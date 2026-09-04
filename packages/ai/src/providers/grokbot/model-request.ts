@@ -28,7 +28,8 @@ export type GrokbotRequestedModelOptions = {
 	fast?: boolean;
 	/**
 	 * sand `thinking` boolean; only sent when the model lists `thinking`.
-	 * Default: `true` when an effort/reasoning value is being sent, else `false`.
+	 * Default: explicit `thinking`, then `sandParameterDefaults.thinking`, then
+	 * `true` when an effort/reasoning value is being sent, else `false`.
 	 */
 	thinking?: boolean;
 	/**
@@ -98,6 +99,7 @@ export function resolveGrokbotRequestedModel(
 	// routers/Auto omit parameters (and `sandMaxMode` alone controls maxMode).
 	const allowed = new Set(options?.sandParameterIds ?? []);
 	const parameters: GrokbotRequestedParameter[] = [];
+	const defaults = options?.sandParameterDefaults;
 
 	if (allowed.size > 0) {
 		const effortValue = resolveSandEffortWireValue(options, allowed);
@@ -105,7 +107,15 @@ export function resolveGrokbotRequestedModel(
 		// (thinking/context/effort/fast). Partial sets work for some vendors but
 		// Anthropic variants are defined as complete combinations.
 		if (allowed.has("thinking")) {
-			const thinking = options?.thinking !== undefined ? options.thinking : Boolean(effortValue);
+			const discoveredThinking = defaults?.thinking?.trim();
+			const thinking =
+				options?.thinking !== undefined
+					? options.thinking
+					: discoveredThinking === "true"
+						? true
+						: discoveredThinking === "false"
+							? false
+							: Boolean(effortValue);
 			parameters.push({ id: "thinking", value: thinking ? "true" : "false" });
 		}
 		if (allowed.has("context")) {

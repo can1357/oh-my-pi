@@ -9,6 +9,7 @@ import {
 	GROKBOT_RENEWAL_PATH,
 	joinGrokbotBackendUrl,
 	loadGrokbotConfig,
+	resolveGrokbotEnvApiKey,
 	loadGrokbotSecretFile,
 	loadGrokbotSecretFileSync,
 	mintGrokbotAccessToken,
@@ -196,6 +197,33 @@ describe("grokbot secrets dotenv parsing", () => {
 			else process.env.GROKBOT_CLIENT_VERSION = previousClientVersion;
 		}
 	});
+	test("file-only renewal advertises auth via authenticated sentinel, not the secret", async () => {
+		const previousAgentDir = getAgentDir();
+		const previousGrokbot = process.env.GROKBOT_RENEWAL_CREDENTIAL;
+		const previousSand = process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-env-sentinel-"));
+		dirs.push(agentDir);
+		await fs.mkdir(path.join(agentDir, "secrets"), { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "secrets", "grokbot.env"),
+			["GROKBOT_RENEWAL_CREDENTIAL=file-only-renewal", "GROKBOT_MACHINE_ID=file-machine"].join("\n"),
+		);
+		try {
+			delete process.env.GROKBOT_RENEWAL_CREDENTIAL;
+			delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+			setAgentDir(agentDir);
+			expect(resolveGrokbotEnvApiKey()).toBe("<authenticated>");
+			const cfg = await loadGrokbotConfig();
+			expect(cfg.renewal).toBe("file-only-renewal");
+		} finally {
+			setAgentDir(previousAgentDir);
+			if (previousGrokbot === undefined) delete process.env.GROKBOT_RENEWAL_CREDENTIAL;
+			else process.env.GROKBOT_RENEWAL_CREDENTIAL = previousGrokbot;
+			if (previousSand === undefined) delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+			else process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL = previousSand;
+		}
+	});
+
 });
 
 describe("grokbot backend URL join", () => {
@@ -406,4 +434,5 @@ describe("grokbot AvailableModels headers", () => {
 		// Without clearing on 401, the second call would reuse tok-1 and never remint.
 		expect(mintCount).toBe(2);
 	});
+
 });

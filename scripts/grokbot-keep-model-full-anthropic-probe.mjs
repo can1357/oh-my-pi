@@ -15,8 +15,6 @@
  *
  * Success marker: FULL_ANTHROPIC_PROBE_PASS
  */
-import * as fs from "node:fs";
-import * as path from "node:path";
 import {
 	applyAnthropicSandToolWire,
 	resolveAnthropicSandToolsWire,
@@ -30,65 +28,14 @@ import {
 	frameConnectProto,
 } from "../packages/ai/src/providers/grokbot/proto.ts";
 
-// ─── Inlined auth (avoids @oh-my-pi/pi-utils barrel → pi_natives) ───
+import {
+	GROKBOT_BACKEND,
+	GROKBOT_RENEWAL_PATH,
+	GROKBOT_CLIENT_TYPE,
+	grokbotSecretsPath,
+	loadGrokbotConfig,
+} from "./grokbot-probe-config.mjs";
 
-const GROKBOT_BACKEND = "https://api2.cursor.sh";
-const GROKBOT_RENEWAL_PATH = "/sand-box/inference-credential";
-const GROKBOT_AVAILABLE_MODELS_PATH = "/aiserver.v1.AiService/AvailableModels";
-const GROKBOT_CLIENT_TYPE = "sand";
-const GROKBOT_STAMPED_CLIENT_VERSION = "0.30.0-pre.16";
-const GROKBOT_DEFAULT_NAMESPACE = "prod";
-const STAMPED_VERSION_BASE = /^(\d+\.\d+\.\d+)(?:-.+)?$/;
-
-function stampedVersionBaseOf(stamped) {
-	const match = STAMPED_VERSION_BASE.exec(stamped?.trim() ?? "");
-	return match?.[1];
-}
-
-function resolveGrokbotClientVersion(namespace, stamped, explicitOverride) {
-	if (explicitOverride?.trim()) return explicitOverride.trim();
-	const base = stampedVersionBaseOf(stamped) ?? stamped;
-	switch (namespace) {
-		case "dev": return `${base}-dev`;
-		case "lab": return `${base}-lab`;
-		default: return base;
-	}
-}
-
-function parseEnvFile(filePath) {
-	const text = fs.readFileSync(filePath, "utf8");
-	const out = {};
-	for (const line of text.split("\n")) {
-		const trimmed = line.trim();
-		if (!trimmed || trimmed.startsWith("#")) continue;
-		const eq = trimmed.indexOf("=");
-		if (eq < 0) continue;
-		out[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
-	}
-	return out;
-}
-
-function grokbotSecretsPath() {
-	const agentDir = process.env.OMP_AGENT_DIR || path.join(process.env.HOME, ".omp", "agent");
-	return path.join(agentDir, "secrets", "grokbot.env");
-}
-
-function loadGrokbotConfig() {
-	const file = parseEnvFile(grokbotSecretsPath());
-	const namespace = process.env.GROKBOT_NAMESPACE || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
-	const explicitVersion = process.env.GROKBOT_CLIENT_VERSION || file.GROKBOT_CLIENT_VERSION || undefined;
-	return {
-		renewal:
-			process.env.GROKBOT_RENEWAL_CREDENTIAL ||
-			process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL ||
-			file.GROKBOT_RENEWAL_CREDENTIAL ||
-			file.SAND_INFERENCE_RENEWAL_CREDENTIAL ||
-			"",
-		machineId: process.env.GROKBOT_MACHINE_ID || file.GROKBOT_MACHINE_ID || "",
-		namespace,
-		clientVersion: resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION, explicitVersion),
-	};
-}
 
 function grokbotClientHeaders(cfg) {
 	return {
@@ -125,7 +72,7 @@ function joinGrokbotBackendUrl(baseUrl, p) {
 }
 
 async function mintGrokbotAccessToken(cfg) {
-	if (!cfg.renewal) throw new Error(`Grok Bot renewer missing. Read ${grokbotSecretsPath()}`);
+	if (!cfg.renewal) throw new Error(`Grok Bot renewer missing (GROKBOT_RENEWAL_CREDENTIAL env or ${grokbotSecretsPath()})`);
 	const response = await fetch(joinGrokbotBackendUrl(GROKBOT_BACKEND, GROKBOT_RENEWAL_PATH), {
 		method: "POST",
 		headers: { "content-type": "application/json", ...grokbotClientHeaders(cfg) },

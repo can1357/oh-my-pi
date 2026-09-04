@@ -12,6 +12,10 @@ provider "grokbot" {
 	credential-scoped-catalog #true
 	// Synthetic routers + offline seeds: reviewed budgeting floor when live
 	// AvailableModels omits contextTokenLimit (proto3 zero/absent).
+	// Synthetic sand-default router: reviewed reasoning capability (discovery/seeds stay neutral).
+	models "sand-default" {
+		reasoning #true
+	}
 	models "sand-default" "sand-cua" "sand-automation" "default" "auto" {
 		context-window-floor 200000
 	}

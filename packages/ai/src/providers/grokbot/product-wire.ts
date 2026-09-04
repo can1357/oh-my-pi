@@ -27,11 +27,16 @@ export const OMP_TO_SAND_FIELD2: Record<string, string> = {
 };
 
 /**
- * When multiple omp tools share one sand field-2 name, prefer this omp owner so
- * advertised schema and dispatch index stay one-to-one (edit+write both → Write).
+ * When multiple omp tools share one sand field-2 name (including an extension
+ * `customWireName` that collides with a built-in alias), prefer this omp owner
+ * so advertised schema and dispatch index stay one-to-one.
  */
 const SAND_FIELD2_PREFERRED_OMP: Readonly<Record<string, string>> = {
+	Shell: "bash",
+	Read: "read",
 	Write: "write",
+	Grep: "grep",
+	Glob: "glob",
 };
 
 /** Field 9 allowlist from capture-1 / automation worker. */
@@ -236,7 +241,11 @@ export function augmentToolIndexForProductWire(
 		if (!tool || typeof tool !== "object") continue;
 		const name = typeof tool.name === "string" ? tool.name : "";
 		if (!name) continue;
-		const sandName = toSandField2Name(name);
+		const customWire =
+			typeof tool.customWireName === "string" && tool.customWireName.trim()
+				? tool.customWireName.trim()
+				: undefined;
+		const sandName = customWire ?? toSandField2Name(name);
 		const meta = index.get(name);
 		if (!meta || sandName === name) continue;
 		// Keep product aliases off `customWireName` — that marker means grammar /

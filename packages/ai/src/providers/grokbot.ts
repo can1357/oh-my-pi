@@ -29,6 +29,7 @@ import {
 	mergeGrokbotHeaders,
 	mintGrokbotAccessToken,
 } from "./grokbot/auth";
+import { AUTHENTICATED_SENTINEL } from "../registry/types";
 import { resolveGrokbotRequestedModel, type GrokbotRequestedModel } from "./grokbot/model-request";
 import {
 	applyAnthropicSandToolWire,
@@ -646,8 +647,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			if (!cfg.machineId) {
 				throw new Error("Grok Bot machine id missing (GROKBOT_MACHINE_ID or secrets/grokbot.env)");
 			}
-			const requestKey = typeof options?.apiKey === "string" ? options.apiKey.trim() : "";
-			const renewal = requestKey || cfg.renewal;
+						const requestKey = typeof options?.apiKey === "string" ? options.apiKey.trim() : "";
+			const renewal =
+				requestKey && requestKey !== AUTHENTICATED_SENTINEL ? requestKey : cfg.renewal;
 			if (!renewal) {
 				throw new Error("Grok Bot renewer missing (GROKBOT_RENEWAL_CREDENTIAL or secrets/grokbot.env)");
 			}

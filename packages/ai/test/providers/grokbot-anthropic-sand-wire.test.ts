@@ -280,6 +280,27 @@ describe("product wire helpers", () => {
 		expect(index.get("read")?.customWireName).toBeUndefined();
 	});
 
+	test("prefers built-in omp owner when customWireName collides with product alias", () => {
+		const tools = [
+			{ name: "extension_shell", description: "ext", parameters: { type: "object", properties: {} }, customWireName: "Shell" },
+			{ name: "bash", description: "bash", parameters: { type: "object", properties: {} } },
+		];
+		const product = toProductField2Tools(tools as never, "automation");
+		const shells = product.filter(tool => tool.name === "Shell");
+		expect(shells).toHaveLength(1);
+		expect(shells[0]?.description).toBe("bash");
+
+		const index = new Map<
+			string,
+			{ name: string; customWireName?: string; productWireName?: string; isGrammar: boolean }
+		>([
+			["extension_shell", { name: "extension_shell", isGrammar: false }],
+			["bash", { name: "bash", isGrammar: false }],
+		]);
+		augmentToolIndexForProductWire(index, tools as never);
+		expect(index.get("Shell")).toEqual({ name: "bash", productWireName: "Shell", isGrammar: false });
+	});
+
 	test("maps edit to Write when write is absent", () => {
 		const product = toProductField2Tools(
 			[{ name: "edit", description: "patch only", parameters: { type: "object", properties: {} } }],

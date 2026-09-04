@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed Grok Bot `sand-default` reasoning capability to be owned by catalog KDL instead of discovery id compares, and excluded host-secret file credentials from env-only auth-broker migration.
+
+### Fixed
 
 - Fixed `/login zai` (Z.AI GLM Coding Plan sign-in) failing after Z.AI stopped registering loopback redirects: local desktops now capture the required `zcode://zai-auth/callback` scheme automatically, remote sessions retain paste-code completion, and `ZAI_OAUTH_REDIRECT_URI` remains configurable ([#10745](https://github.com/can1357/oh-my-pi/issues/10745)).
 

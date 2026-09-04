@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Fixed Grok Bot discovered `thinking: false` defaults being overridden by effort, and product-wire tool collisions preferring built-in omp owners.
+
 ### Added
 
 - Added recoverable native custom-scheme OAuth callbacks on macOS, Linux desktops, and Windows, with manual fallback for unavailable or remote sessions.
