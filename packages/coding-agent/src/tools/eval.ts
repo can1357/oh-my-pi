@@ -795,11 +795,18 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				const displayText = formatDisplayOutputsForText(cellDisplayOutputs);
 				const visibleDisplayText =
 					displayText && imageText ? `${displayText}\n\n${imageText}` : displayText || imageText;
+				// Model-facing text carries the full `display[N]:` JSON serialization.
 				const cellOutput =
 					stdoutTrimmed && visibleDisplayText
 						? `${stdoutTrimmed}\n\n${visibleDisplayText}`
 						: stdoutTrimmed || visibleDisplayText;
-				cellResult.output = cellOutput;
+				// The rendered cell box omits the structured display() serialization:
+				// `details.jsonOutputs` feeds the expandable JSON tree drawn below the
+				// box, so echoing it inside the box too would double-render the value
+				// (#10778). Image dimension notes stay — the tree only renders json.
+				const renderOutput =
+					stdoutTrimmed && imageText ? `${stdoutTrimmed}\n\n${imageText}` : stdoutTrimmed || imageText;
+				cellResult.output = renderOutput;
 				cellResult.exitCode = result.exitCode;
 				cellResult.durationMs = durationMs;
 				cellResult.statusEvents = cellStatusEvents.length > 0 ? cellStatusEvents : undefined;
