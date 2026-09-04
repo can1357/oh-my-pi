@@ -68,7 +68,6 @@ describe.serial("commit extension provider resolution", () => {
 	test("agentic pipeline resolves an explicit extension-provided model", async () => {
 		await expect(
 			runCommitCommand({
-				all: false,
 				push: false,
 				dryRun: true,
 				noChangelog: true,
@@ -80,7 +79,6 @@ describe.serial("commit extension provider resolution", () => {
 	test("legacy pipeline resolves the project commit role from an extension provider", async () => {
 		await expect(
 			runCommitCommand({
-				all: false,
 				push: false,
 				dryRun: true,
 				noChangelog: true,

@@ -14,7 +14,6 @@ export default class Commit extends Command {
 	static flags = {
 		push: Flags.boolean({ description: "Push after committing" }),
 		"dry-run": Flags.boolean({ description: "Preview without committing" }),
-		all: Flags.boolean({ char: "a", description: "Stage all changes before committing (git add -A)" }),
 		"no-changelog": Flags.boolean({ description: "Skip changelog updates" }),
 		legacy: Flags.boolean({ description: "Use legacy deterministic pipeline" }),
 		context: Flags.string({ char: "c", description: "Additional context for the model" }),
@@ -27,7 +26,6 @@ export default class Commit extends Command {
 		const cmd: CommitCommandArgs = {
 			push: flags.push ?? false,
 			dryRun: flags["dry-run"] ?? false,
-			all: flags.all ?? false,
 			noChangelog: flags["no-changelog"] ?? false,
 			legacy: flags.legacy,
 			context: flags.context,

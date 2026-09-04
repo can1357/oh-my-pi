@@ -24,6 +24,7 @@ import { detectRepositoryContext, formatRepositoryContext } from "./repo-context
 export interface GenerateGitCommitOptions {
 	cwd: string;
 	modelOverride?: string;
+	stageIfEmpty?: boolean;
 	onProgress?: CommitProgress;
 	signal?: AbortSignal;
 }
@@ -32,6 +33,7 @@ export interface GenerateGitCommitOptions {
 export interface GeneratedGitCommit {
 	commit: ConventionalCommit;
 	validationError: string | null;
+	stagedAll: boolean;
 }
 function renderNumstat(entries: VcsNumstatEntry[]): string {
 	return entries
@@ -57,12 +59,19 @@ function renderStat(entries: VcsNumstatEntry[]): string {
 	return `${lines.join("\n")}\n`;
 }
 
-/** Generate a commit message from the staged tree; never mutates the index. */
+/** Generate a commit message from the staged tree, staging all only when the index is empty. */
 export async function generateGitCommit(options: GenerateGitCommitOptions): Promise<GeneratedGitCommit> {
 	const repo = vcs.requireGit(options.cwd);
 	const settings = await Settings.init({ cwd: options.cwd });
 	const config = conventionalGenerationConfig(settings.getGroup("commit"));
-	const stagedFiles = await repo.changedFiles({ cached: true }, options.signal);
+	let stagedFiles = await repo.changedFiles({ cached: true }, options.signal);
+	let stagedAll = false;
+	if (stagedFiles.length === 0 && options.stageIfEmpty !== false) {
+		options.onProgress?.("Staging all changes…");
+		await repo.stageFiles([], options.signal);
+		stagedAll = true;
+		stagedFiles = await repo.changedFiles({ cached: true }, options.signal);
+	}
 	if (stagedFiles.length === 0) throw new Error("No staged changes to analyze");
 
 	options.onProgress?.("Reading staged changes…");
@@ -80,7 +89,8 @@ export async function generateGitCommit(options: GenerateGitCommitOptions): Prom
 
 	const inference = new LazyCommitInference(() => createOmpInference(options, settings, config));
 	try {
-		return await generateConventionalCommit({ diff, stat, numstat, config, inference, context });
+		const result = await generateConventionalCommit({ diff, stat, numstat, config, inference, context });
+		return { ...result, stagedAll };
 	} finally {
 		await inference.dispose();
 	}

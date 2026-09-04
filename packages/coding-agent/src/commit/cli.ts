@@ -2,7 +2,6 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { CommitCommandArgs } from "./types";
 
 const FLAG_ALIASES = new Map<string, string>([
-	["-a", "--all"],
 	["-c", "--context"],
 	["-m", "--model"],
 ]);
@@ -15,7 +14,6 @@ export function parseCommitArgs(args: string[]): CommitCommandArgs | undefined {
 	const result: CommitCommandArgs = {
 		push: false,
 		dryRun: false,
-		all: false,
 		noChangelog: false,
 	};
 
@@ -25,9 +23,6 @@ export function parseCommitArgs(args: string[]): CommitCommandArgs | undefined {
 		switch (flag) {
 			case "--push":
 				result.push = true;
-				break;
-			case "--all":
-				result.all = true;
 				break;
 			case "--dry-run":
 				result.dryRun = true;
@@ -80,7 +75,6 @@ export function printCommitHelp(): void {
 		"Options:",
 		"  --push           Push after committing",
 		"  --dry-run        Preview without committing",
-		"  --all, -a        Stage all changes before committing (git add -A)",
 		"  --no-changelog   Skip changelog updates",
 		"  --legacy         Use legacy deterministic pipeline",
 		"  --context, -c    Additional context for the model",

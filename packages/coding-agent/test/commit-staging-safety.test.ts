@@ -81,31 +81,32 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		await tmp.remove();
 	});
 
-	it("refuses to auto-stage on clean index without --all flag", async () => {
+	it("auto-stages all changes when index is empty before committing", async () => {
 		// Modify tracked file and add an untracked scratch file
 		await Bun.write(tmp.join("tracked.txt"), "modified content\n");
 		await Bun.write(tmp.join("scratch.txt"), "untracked file\n");
 
-		const repo = vcs.requireGit(tmp.path());
-		const stagedBefore = await repo.changedFiles({ cached: true });
-		expect(stagedBefore).toEqual([]);
+		// Run commit without pre-staging, forcing fallback to complete without LLM
+		process.env.PI_COMMIT_TEST_FALLBACK = "true";
 
-		// Run commit without --all
 		const result = await runCommitCommand({
 			push: false,
 			dryRun: false,
 			noChangelog: true,
-			all: false,
 		});
 
-		expect(result).toEqual({ usedFallback: false });
+		expect(result).toEqual({ usedFallback: true });
 
-		// Index MUST remain clean: no files auto-staged
+		// Both files should have been auto-staged and committed
+		const repo = vcs.requireGit(tmp.path());
 		const stagedAfter = await repo.changedFiles({ cached: true });
 		expect(stagedAfter).toEqual([]);
 
 		const status = await $`git status --porcelain`.cwd(tmp.path()).text();
-		expect(status.trim()).toBe("M tracked.txt\n?? scratch.txt");
+		expect(status.trim()).toBe("");
+
+		const log = await $`git log -n 1 --oneline`.cwd(tmp.path()).text();
+		expect(log).toMatch(/docs:|chore:/);
 	});
 
 	it("dry-run is strictly non-mutating and does not stage changes", async () => {
@@ -115,12 +116,11 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 
 			const repo = vcs.requireGit(tmp.path());
 
-			// Dry-run should never alter the index even with --all
+			// Dry-run should never alter the index
 			await runCommitCommand({
 				push: false,
 				dryRun: true,
 				noChangelog: true,
-				all: true,
 				legacy,
 			});
 
@@ -148,38 +148,10 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		await $`git commit -qam "ahead of remote"`.cwd(tmp.path()).quiet();
 
 		for (const legacy of [false, true]) {
-			await runCommitCommand({ all: false, push: true, dryRun: true, noChangelog: true, legacy });
+			await runCommitCommand({ push: true, dryRun: true, noChangelog: true, legacy });
 			const remoteHead = (await $`git rev-parse main`.cwd(remote).text()).trim();
 			expect(remoteHead).toBe(pushedHead);
 		}
-	});
-
-	it("explicit --all stages all changes before committing", async () => {
-		await Bun.write(tmp.join("tracked.txt"), "modified content\n");
-		await Bun.write(tmp.join("scratch.txt"), "untracked file\n");
-
-		// Run commit with --all and dryRun: false, forcing fallback to complete without LLM
-		process.env.PI_COMMIT_TEST_FALLBACK = "true";
-
-		const result = await runCommitCommand({
-			push: false,
-			dryRun: false,
-			noChangelog: true,
-			all: true,
-		});
-
-		expect(result).toEqual({ usedFallback: true });
-
-		// Both files should have been staged and committed
-		const repo = vcs.requireGit(tmp.path());
-		const stagedAfter = await repo.changedFiles({ cached: true });
-		expect(stagedAfter).toEqual([]);
-
-		const status = await $`git status --porcelain`.cwd(tmp.path()).text();
-		expect(status.trim()).toBe("");
-
-		const log = await $`git log -n 1 --oneline`.cwd(tmp.path()).text();
-		expect(log).toMatch(/docs:|chore:/);
 	});
 
 	it("legacy changelog flow does not sweep unstaged changelog edit adjacent in same hunk into commit", async () => {
@@ -206,7 +178,6 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 			legacy: true,
 			dryRun: false,
 			noChangelog: false,
-			all: false,
 			push: false,
 		});
 

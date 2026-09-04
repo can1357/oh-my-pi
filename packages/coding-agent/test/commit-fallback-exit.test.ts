@@ -65,7 +65,7 @@ describe("runAgenticCommit fallback signalling (issue #7835)", () => {
 		const commitCreateSpy = await setupRepoMocks();
 		process.env.PI_COMMIT_TEST_FALLBACK = "true";
 
-		const result = await runAgenticCommit({ all: false, noChangelog: true, push: false, dryRun: false });
+		const result = await runAgenticCommit({ noChangelog: true, push: false, dryRun: false });
 
 		expect(commitCreateSpy).toHaveBeenCalledTimes(1);
 		expect(result).toEqual({ usedFallback: true });
@@ -76,7 +76,7 @@ describe("runAgenticCommit fallback signalling (issue #7835)", () => {
 		const commitCreateSpy = await setupRepoMocks();
 		vi.spyOn(agentModule, "runCommitAgentSession").mockRejectedValue(new Error("model unreachable"));
 
-		const result = await runAgenticCommit({ all: false, noChangelog: true, push: false, dryRun: false });
+		const result = await runAgenticCommit({ noChangelog: true, push: false, dryRun: false });
 
 		expect(commitCreateSpy).toHaveBeenCalledTimes(1);
 		expect(result).toEqual({ usedFallback: true });
@@ -90,7 +90,7 @@ describe("runAgenticCommit fallback signalling (issue #7835)", () => {
 			await onComplete({} as never);
 		}) as never);
 
-		const result = await runAgenticCommit({ all: false, noChangelog: true, push: false, dryRun: false });
+		const result = await runAgenticCommit({ noChangelog: true, push: false, dryRun: false });
 
 		expect(commitCreateSpy).toHaveBeenCalledTimes(1);
 		expect(result).toEqual({ usedFallback: true });
@@ -110,7 +110,7 @@ describe("runAgenticCommit fallback signalling (issue #7835)", () => {
 			} as never);
 		}) as never);
 
-		const result = await runAgenticCommit({ all: false, noChangelog: true, push: false, dryRun: false });
+		const result = await runAgenticCommit({ noChangelog: true, push: false, dryRun: false });
 
 		expect(commitCreateSpy).toHaveBeenCalledTimes(1);
 		expect(result).toEqual({ usedFallback: false });

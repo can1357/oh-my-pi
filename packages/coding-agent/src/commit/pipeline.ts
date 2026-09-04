@@ -23,13 +23,11 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 	const cwd = getProjectDir();
 	const repo = vcs.requireGit(cwd);
 	let generated: GeneratedGitCommit;
-	if (args.all && !args.dryRun) {
-		await repo.stageFiles([]);
-	}
 	try {
 		generated = await generateGitCommit({
 			cwd,
 			modelOverride: args.model,
+			stageIfEmpty: !args.dryRun,
 			onProgress: message => process.stdout.write(`${message}\n`),
 		});
 	} catch (error) {
@@ -40,9 +38,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 				await pushOrAbort(cwd);
 				return;
 			}
-			process.stderr.write(
-				"No staged changes detected. Stage files with 'git add <files>' or pass '--all' / '-a' to stage all changes.\n",
-			);
+			process.stderr.write("No changes to commit.\n");
 			return;
 		}
 		throw error;

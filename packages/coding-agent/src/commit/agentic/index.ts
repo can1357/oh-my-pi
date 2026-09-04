@@ -36,11 +36,13 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	await modelRegistry.refresh();
 	await loadCliExtensionProviders(modelRegistry, settings, cwd);
 	const stagedFilesPromise = (async () => {
-		if (args.all && !args.dryRun) {
-			process.stdout.write("Staging all changes...\n");
+		let stagedFiles = await repo.changedFiles({ cached: true });
+		if (stagedFiles.length === 0 && !args.dryRun) {
+			process.stdout.write("No staged changes detected, staging all changes...\n");
 			await repo.stageFiles([]);
+			stagedFiles = await repo.changedFiles({ cached: true });
 		}
-		return await repo.changedFiles({ cached: true });
+		return stagedFiles;
 	})();
 
 	const primaryModelPromise = resolvePrimaryModel(args.model, settings, modelRegistry);
@@ -61,9 +63,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 			await pushOrAbort(cwd);
 			return { usedFallback: false };
 		}
-		process.stderr.write(
-			"No staged changes detected. Stage files with 'git add <files>' or pass '--all' / '-a' to stage all changes.\n",
-		);
+		process.stderr.write("No changes to commit.\n");
 		return { usedFallback: false };
 	}
 

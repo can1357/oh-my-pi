@@ -9,7 +9,6 @@
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
-- `omp commit` and the git TUI no longer auto-stage all changes when the index is empty; commits require pre-staged files or an explicit `--all` / `-a` flag.
 - `omp commit --dry-run` is strictly read-only: it never stages, never pushes, and never touches changelogs.
 - Split commits are created atomically from the staged tree without rewriting the index or worktree; rejecting the plan leaves everything untouched.
 - Changelog entries are staged as exact index content, so pre-existing unstaged changelog edits are no longer swept into the commit.
