@@ -264,8 +264,8 @@ describe("restartArgv (/restart relaunch argv)", () => {
 	});
 
 	it("leaves an absolute bundle path and other path-valued flags untouched", () => {
-		// Only --provider-api-keys is launch-relative; --cwd is rewritten by
-		// applyStartupCwd itself, so restartArgv must not second-guess it.
+		// Only --provider-api-keys is launch-relative. --cwd is out of scope: the
+		// relaunch already runs from the directory that token selected.
 		expect(
 			restartArgv(["--provider-api-keys", "/run/keys.json", "--cwd", "relative/dir"], "sid", "/launch/dir"),
 		).toEqual(["--provider-api-keys", "/run/keys.json", "--cwd", "relative/dir", "--resume", "sid"]);

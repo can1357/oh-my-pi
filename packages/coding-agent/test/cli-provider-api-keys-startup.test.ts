@@ -9,6 +9,8 @@ const argsModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/cli/args.
 const mainModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/main.ts")).href;
 const settingsModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/config/settings.ts")).href;
 const helpersModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/discovery/helpers.ts")).href;
+const startupCwdModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/cli/startup-cwd.ts")).href;
+const flagTablesModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/cli/flag-tables.ts")).href;
 
 afterEach(() => {
 	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -415,6 +417,69 @@ console.log(JSON.stringify(result));`;
 			requestedExitCode: 2,
 			injectCalled: false,
 			rootPresent: false,
+		});
+	});
+
+	it("records the launch directory so /restart replays an absolute bundle path", async () => {
+		// Regression guard for a silent no-op: restartArgv only re-anchors when it
+		// is handed a launch directory, so if startup ever stops calling
+		// recordLaunchDirectory the relative path gets replayed unchanged and the
+		// bug returns without an error anywhere. Drives real startup and reads the
+		// value the /restart site actually passes.
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-provider-api-keys-launchdir-"));
+		roots.push(root);
+		const relocateDir = path.join(root, "relocated");
+		fs.mkdirSync(relocateDir);
+		fs.writeFileSync(path.join(root, "bundle.json"), JSON.stringify({ anthropic: "launch-dir-token" }), {
+			mode: 0o600,
+		});
+		const argvJson = JSON.stringify(["--provider-api-keys", "bundle.json", "--cwd", relocateDir]);
+		const script = `import { parseArgs } from ${JSON.stringify(argsModuleUrl)};
+import { runRootCommand } from ${JSON.stringify(mainModuleUrl)};
+import { Settings } from ${JSON.stringify(settingsModuleUrl)};
+import { getLaunchDirectory } from ${JSON.stringify(startupCwdModuleUrl)};
+import { restartArgv } from ${JSON.stringify(flagTablesModuleUrl)};
+const argv = ${argvJson};
+const parsed = parseArgs(argv);
+parsed.mode = "acp";
+parsed.noExtensions = true;
+const continued = new Error("continued past bundle install");
+Settings.init = () => Promise.reject(continued);
+try {
+  await runRootCommand(parsed, argv, {
+    discoverAuthStorage: async () => ({ close() {}, setRuntimeApiKey() {} }),
+  });
+  throw new Error("startup returned instead of continuing");
+} catch (error) {
+  if (error !== continued) throw error;
+}
+console.log(
+  JSON.stringify({
+    cwd: process.cwd(),
+    launchDirectory: getLaunchDirectory(),
+    replayed: restartArgv(argv, "sid", getLaunchDirectory()),
+  }),
+);`;
+		const proc = Bun.spawn({
+			cmd: [process.execPath, "--eval", script],
+			cwd: root,
+			env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: path.join(root, "agent") },
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: 10_000,
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		// Startup relocated into --cwd, so replaying the bare relative token would
+		// resolve against relocateDir instead of the launch directory.
+		expect(JSON.parse(stdout.trim())).toEqual({
+			cwd: relocateDir,
+			launchDirectory: root,
+			replayed: ["--provider-api-keys", path.join(root, "bundle.json"), "--cwd", relocateDir, "--resume", "sid"],
 		});
 	});
 });

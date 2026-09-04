@@ -403,8 +403,12 @@ const CONSUMED_ONCE_FLAGS: ReadonlySet<string> = new Set(["--provider-api-keys-f
  * `applyStartupCwd` may relocate the process (automatic home relocation or an
  * explicit `--cwd`), and `/restart` re-executes the original argv from that new
  * directory. A relative value would then resolve somewhere else, so the
- * replacement process gets the launch-resolved absolute path instead. `--cwd`
- * itself is exempt: `applyStartupCwd` already rewrites it in place.
+ * replacement process gets the launch-resolved absolute path instead.
+ *
+ * `--cwd` is deliberately not in scope here. `applyStartupCwd` resolves it onto
+ * `parsed.cwd`, not onto argv, so the replayed token stays relative — but the
+ * relaunch runs from the directory that token already selected, and the resumed
+ * session carries its own cwd, so replaying it verbatim lands in the same place.
  */
 const LAUNCH_RELATIVE_PATH_FLAG = "--provider-api-keys";
 
