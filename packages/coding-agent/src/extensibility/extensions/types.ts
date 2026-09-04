@@ -452,6 +452,57 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+/**
+ * Identity of the agent an extension context serves.
+ *
+ * Purely descriptive and observational: everything here is derived from state
+ * that already exists (registry identity, spawn options); nothing changes how
+ * sessions behave — registry registration, display-name defaults, and every
+ * capability gate keep their pre-existing semantics. `kind` and `depth` mirror
+ * two different pre-existing gate inputs, so they can legitimately disagree:
+ * a `/tan` fork supplies `parentTaskPrefix` but no `taskDepth`, observing
+ * `kind: "sub"` with `depth: 0`. Ask "am I a spawned worker?" via
+ * `kind === "sub"`; ask "was I spawned by the task tool?" via `depth > 0`.
+ */
+export interface AgentIdentity {
+	/**
+	 * Whether this session runs as the top-level session or as a spawned
+	 * worker. Mirrors the session's pre-existing `agentKind` classification
+	 * (`taskDepth > 0 || parentTaskPrefix !== undefined`) verbatim — identity
+	 * never widens or narrows it. A caller linking via `parentAgentId` while
+	 * omitting `taskDepth`/`parentTaskPrefix` observes `"main"`.
+	 */
+	readonly kind: "main" | "sub";
+	/**
+	 * Recursion depth of this agent: `0` = top-level. Mirrors the session's own
+	 * `taskDepth` (the pre-existing gate input for IRC/memory/spawn capability
+	 * gates) exactly — it is NOT re-derived here from the parent chain.
+	 */
+	readonly depth: number;
+	/**
+	 * Registry id of this agent: `"Main"` for the default top-level session.
+	 * Mirrors the session's resolved registry id (`options.agentId ??
+	 * options.parentTaskPrefix ?? "Main"` — no linkage-derived default).
+	 */
+	readonly agentId: string;
+	/** Human-readable name of this agent. */
+	readonly displayName: string;
+	/**
+	 * Registry id of the direct parent agent as supplied to
+	 * `createAgentSession`; undefined for the top-level session. Reported
+	 * verbatim — linkage, not a spawn guarantee (a `parentAgentId`-only caller
+	 * is `kind: "main"`). A `/tan` fork reports the job-owning main session.
+	 */
+	readonly parentId?: string;
+	/**
+	 * Ancestor registry ids, nearest-first. Excludes `"Main"` and this agent's
+	 * own id. `[]` for the top-level session and every child of `"Main"`
+	 * (`parentId` is still `"Main"` there). Frozen like the surrounding
+	 * identity: copy rather than mutate.
+	 */
+	readonly parentChain: readonly string[];
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -477,6 +528,13 @@ export interface ExtensionContext {
 	model: Model | undefined;
 	/** Read-only model query facade: list / current / resolve / family. */
 	models: ExtensionModelQuery;
+	/**
+	 * Identity of the agent this context serves: top-level or subagent,
+	 * depth, registry id, display name, and parent chain. Read lazily;
+	 * `undefined` when the host does not report identity (e.g. provider-only
+	 * runner hosts) — handlers must fail open rather than assume `"main"`.
+	 */
+	readonly agentIdentity?: AgentIdentity;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */
