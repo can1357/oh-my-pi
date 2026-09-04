@@ -30,11 +30,12 @@ const { rulebookRules, alwaysApplyRules } = bucketRules(
   {
     builtinRules: ttsrSettings.builtinRules,
     disabledRules: ttsrSettings.disabledRules,
+    agentName: resolvedAgentName,
   },
 );
 ```
 
-`bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded `builtin-defaults` rules when `ttsr.builtinRules === false`, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
+`bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded builtin-defaults rules when `ttsr.builtinRules === false`, drops rules whose `agents` globs do not match this session's agent, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
 
 ### Pre-registration dedupe behavior
 

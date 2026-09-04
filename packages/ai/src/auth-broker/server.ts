@@ -89,7 +89,7 @@ export interface AuthBrokerServerHandle {
 function json(status: number, body: unknown, headers?: Record<string, string>): Response {
 	return new Response(JSON.stringify(body), {
 		status,
-		headers: { "Content-Type": "application/json", ...(headers ?? {}) },
+		headers: { "Content-Type": "application/json", ...headers },
 	});
 }
 
@@ -260,9 +260,9 @@ class GenerationGate {
 	}
 
 	#wake(generation: number): void {
-		for (const [waitingFor, waiters] of [...this.#waiters]) {
+		for (const [waitingFor, waiters] of Array.from(this.#waiters)) {
 			if (generation <= waitingFor) continue;
-			for (const resolve of [...waiters]) resolve();
+			for (const resolve of Array.from(waiters)) resolve();
 		}
 	}
 }
@@ -588,7 +588,7 @@ function serveSnapshotStream(
 						generation: snapshot.generation,
 					});
 				}
-				for (const id of [...lastByCredId.keys()]) {
+				for (const id of Array.from(lastByCredId.keys())) {
 					if (seenIds.has(id)) continue;
 					lastByCredId.delete(id);
 					const payload: SnapshotStreamRemovedEvent = {

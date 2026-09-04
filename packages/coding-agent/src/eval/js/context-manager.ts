@@ -9,14 +9,23 @@ import type { ToolSession } from "../../tools";
 import { ToolAbortError, ToolError } from "../../tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
-import { attachSessionOwner, resolveOwnerScopedSessionKey, type SessionOwners } from "../executor-base";
+import { getEnabledEvalPreludes } from "../preludes";
+import {
+	attachSessionOwner,
+	EvalKernelNotRunningError,
+	resolveOwnerScopedSessionKey,
+	type SessionOwners,
+} from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
+import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 import { WorkerCore } from "./worker-core";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
 import type {
+	EvalPreludeSource,
 	JsDisplayOutput,
+	JsToolRequest,
 	RunErrorPayload,
 	SessionSnapshot,
 	Transport,
@@ -178,6 +187,94 @@ export async function executeInVmContext(options: {
 	return await runOnce(session, options);
 }
 
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Describe or invoke tools defined in a retained JavaScript kernel. */
+export async function invokeJsTool(
+	request: JsToolRequest,
+	options: {
+		sessionKey: string;
+		ownerId?: string;
+		session: ToolSession;
+		signal?: AbortSignal;
+	},
+): Promise<EvalToolInvokeResult | { ok: true; tools: EvalToolDescriptor[]; missing: string[] }> {
+	const sessionKey = resolveOwnerScopedSessionKey({
+		baseKey: options.sessionKey,
+		ownerId: options.ownerId,
+		reset: false,
+		hasSession: key => sessions.has(key) || startingSessions.has(key),
+		getOwners: key => sessions.get(key) ?? startingSessions.get(key),
+	});
+	const session = sessions.get(sessionKey);
+	if (!session || session.state !== "alive") throw new EvalKernelNotRunningError("JavaScript");
+
+	const runId = `tool-${crypto.randomUUID()}`;
+	const { promise, resolve, reject } = Promise.withResolvers<{ value: unknown }>();
+	let envelope: unknown;
+	const pending: PendingRun = {
+		runId,
+		runState: {
+			signal: options.signal,
+			onDisplay: output => {
+				if (output.type === "json") envelope = output.data;
+			},
+		},
+		toolSession: options.session,
+		resolve,
+		reject,
+		toolCalls: new Map(),
+		deferDepth: 0,
+		aborted: false,
+		settled: false,
+	};
+	session.pending.set(runId, pending);
+
+	const onAbort = (): void => {
+		if (pending.settled) return;
+		pending.aborted = true;
+		pending.settled = true;
+		const error = reasonToError(options.signal?.reason, "Tool invocation aborted");
+		for (const controller of pending.toolCalls.values()) controller.abort(error);
+		reject(error);
+	};
+	if (options.signal?.aborted) onAbort();
+	else options.signal?.addEventListener("abort", onAbort, { once: true });
+
+	try {
+		if (!pending.settled) safeSend(session, { type: "tool", runId, ...request });
+		await promise;
+	} catch (error) {
+		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+	} finally {
+		options.signal?.removeEventListener("abort", onAbort);
+		session.pending.delete(runId);
+	}
+
+	if (!isUnknownRecord(envelope) || envelope.ok !== true) {
+		return { ok: false, error: "JavaScript tool request returned an invalid response" };
+	}
+	if (request.op === "call") {
+		if (!("value" in envelope)) return { ok: false, error: "JavaScript tool call returned an invalid response" };
+		return { ok: true, value: envelope.value };
+	}
+
+	const rawTools = Array.isArray(envelope.tools) ? envelope.tools : [];
+	const tools: EvalToolDescriptor[] = [];
+	for (const rawTool of rawTools) {
+		if (!isUnknownRecord(rawTool)) continue;
+		const { name, description, parameters } = rawTool;
+		if (typeof name !== "string" || typeof description !== "string" || !isUnknownRecord(parameters)) continue;
+		tools.push({ name, description, parameters, language: "js" });
+	}
+	const missing = Array.isArray(envelope.missing)
+		? envelope.missing.filter((name): name is string => typeof name === "string")
+		: [];
+	return { ok: true, tools, missing };
+}
+
 export async function resetVmContext(sessionKey: string): Promise<void> {
 	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 	if (!session) return;
@@ -189,7 +286,7 @@ export async function disposeAllVmContexts(): Promise<void> {
 	const pending = [...startingSessions.values()].map(starting => starting.promise);
 	startingSessions.clear();
 	const started = await Promise.allSettled(pending);
-	const all = [...sessions.values()];
+	const all = Array.from(sessions.values());
 	for (const result of started) {
 		if (result.status !== "fulfilled") continue;
 		if (!all.includes(result.value)) all.push(result.value);
@@ -204,7 +301,7 @@ export async function disposeAllVmContexts(): Promise<void> {
  */
 export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 	const toKill: JsSession[] = [];
-	for (const session of [...sessions.values()]) {
+	for (const session of Array.from(sessions.values())) {
 		if (!session.ownerIds.has(ownerId)) continue;
 		if (session.ownerIds.size === 1) {
 			toKill.push(session);
@@ -213,7 +310,7 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 		session.ownerIds.delete(ownerId);
 	}
 	const startingToKill: StartingJsSession[] = [];
-	for (const [sessionKey, starting] of [...startingSessions.entries()]) {
+	for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
 		if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
 		if (starting.ownerIds.size === 1) {
 			startingSessions.delete(sessionKey);
@@ -265,6 +362,15 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 	} finally {
 		await worker.terminate().catch(() => undefined);
 	}
+}
+
+function javascriptPreludeSources(session: ToolSession): EvalPreludeSource[] {
+	const definitions = getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []);
+	return definitions.flatMap(definition =>
+		definition.javascript.trim().length === 0
+			? []
+			: [{ name: definition.name, exports: [...definition.exports], source: definition.javascript }],
+	);
 }
 
 async function runOnce(
@@ -327,7 +433,12 @@ async function runOnce(
 			runId,
 			code: options.code,
 			filename: options.filename,
-			snapshot: { cwd: options.cwd, sessionId: options.sessionId, localRoots: options.localRoots },
+			snapshot: {
+				cwd: options.cwd,
+				sessionId: options.sessionId,
+				localRoots: options.localRoots,
+				preludes: javascriptPreludeSources(options.session),
+			},
 		});
 		return await promise;
 	} finally {
@@ -354,6 +465,7 @@ async function acquireSession(
 		attachSessionOwner(starting, snapshot.sessionId, ownerId);
 		return await starting.promise;
 	}
+	// oxlint-disable-next-line prefer-const -- captured by the startup closure before assignment
 	let startingSession!: StartingJsSession;
 
 	const startup = (async (): Promise<JsSession> => {
@@ -718,7 +830,6 @@ function spawnJsProcess(): WorkerHandle {
 		async close() {
 			const { promise, resolve } = Promise.withResolvers<boolean>();
 			let settled = false;
-			let timeout: NodeJS.Timeout | undefined;
 			let unsubscribe = (): void => {};
 			const finish = (value: boolean): void => {
 				if (settled) return;
@@ -731,7 +842,7 @@ function spawnJsProcess(): WorkerHandle {
 				if (message.type !== "closed") return;
 				void base.terminate().finally(() => finish(true));
 			});
-			timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
+			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
 			base.send({ type: "close" });
 			return await promise;
 		},
@@ -769,7 +880,6 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 			let settled = false;
 			let sawClosedAck = false;
 			let sawWorkerExit = false;
-			let timeout: NodeJS.Timeout | undefined;
 			let unsubscribe = (): void => {};
 			const finish = (value: boolean): void => {
 				if (settled) return;
@@ -792,7 +902,7 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 				finishIfClosed();
 			});
 			worker.addEventListener("close", onClose);
-			timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
+			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
 			worker.postMessage({ type: "close" } satisfies WorkerInbound);
 			return await closed;
 		},
@@ -845,7 +955,6 @@ function spawnInlineWorker(): WorkerHandle {
 		async close() {
 			const { promise: closed, resolve } = Promise.withResolvers<boolean>();
 			let settled = false;
-			let timeout: NodeJS.Timeout | undefined;
 			let unsubscribe = (): void => {};
 			const finish = (value: boolean): void => {
 				if (settled) return;
@@ -860,7 +969,7 @@ function spawnInlineWorker(): WorkerHandle {
 				if (msg.type === "closed") finish(true);
 			});
 			this.send({ type: "close" });
-			timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
+			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
 			return await closed;
 		},
 		async terminate() {

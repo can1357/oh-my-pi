@@ -1,7 +1,6 @@
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { formatHashlineHeader } from "@oh-my-pi/hashline";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -20,8 +19,9 @@ import {
 	openArchive,
 	parseArchivePathCandidates,
 } from "@oh-my-pi/pi-utils/ar";
-import { recordFileSnapshot, recordSeenLinesFromBody } from "../edit/file-snapshot-store";
+import { getEditStore } from "../edit/store";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import { formatHashlineHeader } from "./hashline-format";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import { InternalUrlRouter } from "../internal-urls/router";
 import type { InternalResource, ResolveContext } from "../internal-urls/types";
@@ -29,6 +29,7 @@ import type { Theme } from "../modes/theme/theme";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead, truncateLine } from "../session/streaming-output";
 import { getDiscoveredScoutAgent } from "../task/discovery-snapshot";
+import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import {
 	Ellipsis,
@@ -64,6 +65,7 @@ import {
 	splitPathAndSelPreferringLiteral,
 	toPathList,
 } from "./path-utils";
+import { isRawSelector } from "./read-selector";
 import {
 	createCachedComponent,
 	formatCodeFrameLine,
@@ -135,8 +137,10 @@ interface GrepPathSpec {
  * Mirror of read's `parseSel` selector grammar (`read.ts`) so `grep` accepts
  * exactly the internal-URL selectors `read` accepts: a single chunk that is a
  * line range, `raw`, or `conflicts`; or a two-chunk compound of exactly one `raw`
- * plus one line range. Everything else (`:-10`, `:1-1:1-2`, `:conflicts:1-1`,
- * `:raw:conflicts`) is rejected.
+ * plus one line range. Everything else (`:1-1:1-2`, `:conflicts:1-1`,
+ * `:raw:conflicts`) is rejected. Read's `:-N` tail is rejected too: a tail is
+ * only meaningful once the resource's line count is known, and search filters
+ * matches by absolute line number.
  *
  * This mirrors the *accepted set* of `parseSel`; `read` rejects the same shapes
  * caller-side when a peeled internal-URL selector parses as `none`, so neither
@@ -167,8 +171,9 @@ async function parsePathSpecs(rawEntries: readonly string[], cwd: string): Promi
 		// still honor any embedded line range as a match filter.
 		const internalSplit = splitInternalUrlSel(entry);
 		if (internalSplit.sel !== undefined) {
-			// Reject selectors read's parseSel would reject (`:-10`, `:1-1:1-2`,
-			// `:conflicts:1-1`) instead of silently widening the search or dropping a chunk.
+			// Reject selectors read's parseSel would reject (`:1-1:1-2`, `:conflicts:1-1`)
+			// plus read-only tails (`:-10`) instead of silently widening the search or
+			// dropping a chunk.
 			if (!isReadSelectorGrammar(internalSplit.sel)) {
 				throw new ToolError(
 					`path entry "${entry}" has an invalid selector ":${internalSplit.sel}" — use ":N-M" line ranges, ":raw"/":conflicts", a range plus ":raw", or percent-encode a literal ":" as %3A`,
@@ -775,6 +780,7 @@ async function resolveInternalSearchInputs(opts: {
 	archiveDisplayMap: ReadonlyMap<string, string>;
 	localProtocolOptions?: LocalProtocolOptions;
 	skills?: ResolveContext["skills"];
+	rules?: ResolveContext["rules"];
 	sessionFile?: string;
 }): Promise<InternalSearchInputResolution> {
 	const internalRouter = InternalUrlRouter.instance();
@@ -791,6 +797,7 @@ async function resolveInternalSearchInputs(opts: {
 		sessionFile: opts.sessionFile,
 		localProtocolOptions: opts.localProtocolOptions,
 		skills: opts.skills,
+		rules: opts.rules,
 		skipDirectoryListing: true,
 		// Try path-only first so large artifacts (and any other handler that
 		// separates path from content) resolve without materializing bytes.
@@ -923,6 +930,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		return prompt.render(grepDescription, {
 			IS_HL_MODE: displayMode.hashLines,
 			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
+			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,
 				this.session.getSessionSpawns?.() ?? "*",
@@ -978,7 +986,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				if (!target) return undefined;
 				const materialized = await materializeReadUrlToFile(
 					this.session,
-					{ path: target.path, raw: target.raw },
+					{ path: target.path, raw: isRawSelector(target.sel) },
 					signal,
 				);
 				materializedExternalPaths.set(rawPath, materialized.path);
@@ -996,11 +1004,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					pathSpecs,
 					resolvedPaths,
 					cwd: this.session.cwd,
+					archiveDisplayMap,
 					settings: this.session.settings,
 					signal,
-					archiveDisplayMap,
 					localProtocolOptions: this.session.localProtocolOptions,
 					skills: this.session.skills,
+					rules: this.session.activeRules,
 					sessionFile: this.session.getSessionFile() ?? undefined,
 				});
 				const searchablePaths = internalResolution.paths;
@@ -1041,9 +1050,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						cwd: this.session.cwd,
 						internalUrlAction: "search",
 						settings: this.session.settings,
-						signal,
 						localProtocolOptions: this.session.localProtocolOptions,
 						skills: this.session.skills,
+						rules: this.session.activeRules,
 						sessionFile: this.session.getSessionFile() ?? undefined,
 						resolveExternalUrl: materializeExternalUrlForSearch,
 						trackImmutableSources: true,
@@ -1358,6 +1367,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				let totalMatchLimitReached = false;
 				if (windowFiles.length > 0) {
 					const lists = windowFiles.map(file => matchesByPath.get(file) ?? []);
+					// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 					const cursors = new Array<number>(lists.length).fill(0);
 					let anyAdded = true;
 					while (anyAdded) {
@@ -1474,7 +1484,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						// Mint a whole-file content tag so any anchor validates while the
 						// file is unchanged; over-cap / unreadable files get no tag (and
 						// therefore plain, non-editable line output).
-						const tag = await recordFileSnapshot(this.session, absoluteFilePath);
+						const tag = getEditStore(this.session).recordSnapshotFile(absoluteFilePath);
 						if (tag) hashContexts.set(relativePath, { tag });
 					}
 				}
@@ -1522,7 +1532,11 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					}
 					if (hashContext?.tag) {
 						const absoluteFilePath = path.resolve(this.session.cwd, relativePath);
-						recordSeenLinesFromBody(this.session, absoluteFilePath, hashContext.tag, modelOut.join("\n"));
+						getEditStore(this.session).recordSeenLinesFromBody(
+							absoluteFilePath,
+							hashContext.tag,
+							modelOut.join("\n"),
+						);
 					}
 					return { model: modelOut, display: displayOut };
 				};
@@ -1568,11 +1582,11 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const displayText = displayLines.join("\n");
 				const truncated = Boolean(
 					fileLimitReached ||
-						perFileLimitReached ||
-						totalMatchLimitReached ||
-						result.limitReached ||
-						truncation.truncated ||
-						linesTruncated,
+					perFileLimitReached ||
+					totalMatchLimitReached ||
+					result.limitReached ||
+					truncation.truncated ||
+					linesTruncated,
 				);
 				const details: GrepToolDetails = {
 					scopePath,

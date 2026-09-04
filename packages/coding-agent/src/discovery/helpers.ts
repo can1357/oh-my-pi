@@ -11,10 +11,18 @@ import {
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
+import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
-import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
+import {
+	MAIN_AGENT_RULE_NAME,
+	parseRuleAgents,
+	parseRuleConditionAndScope,
+	type Rule,
+	type RuleFrontmatter,
+	SUB_AGENT_RULE_NAME,
+} from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
@@ -89,9 +97,12 @@ export const SOURCE_PATHS = {
 export type SourceId = keyof typeof SOURCE_PATHS;
 
 /**
- * Get user-level path for a source.
+ * Resolve a user-level path for a source without the `~/` opt-in gate.
+ * Only for callers that hold their own explicit opt-in (a per-capability
+ * `skills.enable*User` / `commands.enable*User` toggle); everything else
+ * goes through {@link getUserPath}.
  */
-export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
+export function resolveUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
 	// Native user config is profile-scoped via getAgentDir() (the active profile's
 	// agent dir), matching builtin.ts and getMCPConfigPath("user").
 	if (source === "native") return path.join(getAgentDir(), subpath);
@@ -99,6 +110,15 @@ export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string)
 	const paths = SOURCE_PATHS[source];
 	if (!paths.userAgent) return null;
 	return path.join(ctx.home, paths.userAgent, subpath);
+}
+
+/**
+ * Get user-level path for a source, or null when its `~/` config is not
+ * opted in (see {@link isUserSourceEnabled}).
+ */
+export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
+	if (!isUserSourceEnabled(source, ctx)) return null;
+	return resolveUserPath(ctx, source, subpath);
 }
 
 /**
@@ -125,12 +145,18 @@ export function resolveCopilotHome(home: string): string {
 /**
  * Create source metadata for an item.
  */
-export function createSourceMeta(provider: string, filePath: string, level: "user" | "project"): SourceMeta {
+export function createSourceMeta(
+	provider: string,
+	filePath: string,
+	level: "user" | "project",
+	origin?: string,
+): SourceMeta {
 	return {
 		provider,
 		providerName: "", // Filled in by registry
 		path: path.resolve(filePath),
 		level,
+		...(origin !== undefined && { origin }),
 	};
 }
 
@@ -179,21 +205,20 @@ export function parseArrayOrCSV(value: unknown): string[] | undefined {
 	return undefined;
 }
 
-/**
- * Build a canonical rule item from a markdown/markdown-frontmatter document.
- */
-export function buildRuleFromMarkdown(
+interface RuleMarkdownOptions {
+	ruleName?: string;
+	stripNamePattern?: RegExp;
+}
+
+function buildRule(
 	name: string,
-	content: string,
+	body: string,
+	frontmatter: RuleFrontmatter,
 	filePath: string,
 	source: SourceMeta,
-	options?: {
-		ruleName?: string;
-		stripNamePattern?: RegExp;
-	},
+	options?: RuleMarkdownOptions,
 ): Rule {
-	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
-	const { condition, astCondition, scope } = parseRuleConditionAndScope(frontmatter as RuleFrontmatter);
+	const { condition, astCondition, scope } = parseRuleConditionAndScope(frontmatter);
 
 	let globs: string[] | undefined;
 	if (Array.isArray(frontmatter.globs)) {
@@ -218,9 +243,35 @@ export function buildRuleFromMarkdown(
 		condition,
 		astCondition,
 		scope,
+		agents: parseRuleAgents(frontmatter.agents),
 		interruptMode,
 		_source: source,
 	};
+}
+
+/** Build a canonical rule from Markdown, including explicitly loaded disabled files. */
+export function buildRuleFromMarkdown(
+	name: string,
+	content: string,
+	filePath: string,
+	source: SourceMeta,
+	options?: RuleMarkdownOptions,
+): Rule {
+	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
+	return buildRule(name, body, frontmatter as RuleFrontmatter, filePath, source, options);
+}
+
+/** Build a discovered rule from Markdown, returning null when its frontmatter disables it. */
+export function discoverRuleFromMarkdown(
+	name: string,
+	content: string,
+	filePath: string,
+	source: SourceMeta,
+	options?: RuleMarkdownOptions,
+): Rule | null {
+	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
+	if (frontmatter.enabled === false) return null;
+	return buildRule(name, body, frontmatter as RuleFrontmatter, filePath, source, options);
 }
 
 /**
@@ -294,6 +345,16 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const description = typeof frontmatter.description === "string" ? frontmatter.description : undefined;
 
 	if (!name || !description) {
+		return null;
+	}
+	// "main" is the sentinel `agentName` for the top-level session (see
+	// MAIN_AGENT_RULE_NAME); "sub" is the fallback `agentName` for a subagent
+	// session with no explicit name (see SUB_AGENT_RULE_NAME / sdk.ts). A
+	// custom agent definition sharing either name would resolve to the same
+	// sentinel value, letting it load rules scoped `agents: [main]` or
+	// `agents: [sub]` that are documented to target only that session kind.
+	const normalizedName = name.trim().toLowerCase();
+	if (normalizedName === MAIN_AGENT_RULE_NAME || normalizedName === SUB_AGENT_RULE_NAME) {
 		return null;
 	}
 
@@ -406,6 +467,12 @@ export interface ScanSkillsFromDirOptions {
 	 * semantic every non-Claude provider relies on.
 	 */
 	includeSelf?: boolean;
+	/**
+	 * Registry/CLI origin of the plugin root supplying these skills, forwarded
+	 * to {@link SourceMeta.origin} so user-scope gating can tell omp's own
+	 * installs (`omp`, `plugin-dir`) from the foreign Claude tree (`claude`).
+	 */
+	origin?: string;
 }
 
 // Stable ordering used for skill lists in prompts: name (case-insensitive), then name, then path.
@@ -455,7 +522,7 @@ export async function scanSkillsFromDir(
 				content: body,
 				frontmatter: frontmatter as SkillFrontmatter,
 				level,
-				_source: createSourceMeta(providerId, skillPath, level),
+				_source: createSourceMeta(providerId, skillPath, level, options.origin),
 			});
 		} catch {
 			warnings.push(`Failed to read skill file: ${skillPath}`);
@@ -486,13 +553,32 @@ export async function scanSkillsFromDir(
 }
 
 /**
+ * Resolve a placeholder name against `extraEnv`, then the ambient environment.
+ *
+ * Inherited members of either map (`__proto__`, `constructor`, `toString`, …)
+ * are never substitutable: `extraEnv` is consulted by own property only, and
+ * `Bun.env`'s getter falls through to `Object.prototype`, so `${constructor}`
+ * would otherwise stringify into the value as `function Object() { [native
+ * code] }`. Every real variable is a string, so a non-string ambient hit means
+ * the name resolved to a prototype member and counts as unset.
+ */
+function lookupEnvValue(varName: string, extraEnv?: Record<string, string>): string | undefined {
+	if (extraEnv !== undefined && Object.hasOwn(extraEnv, varName)) return extraEnv[varName];
+	const ambient = Bun.env[varName];
+	return typeof ambient === "string" ? ambient : undefined;
+}
+
+/**
  * Expand environment variables in a string.
  * Supports ${VAR} and ${VAR:-default} syntax.
  */
 function expandEnvVars(value: string, extraEnv?: Record<string, string>): string {
 	return value.replace(/\$\{([^}:]+)(?::-([^}]*))?\}/g, (_, varName: string, defaultValue?: string) => {
-		const envValue = extraEnv?.[varName] ?? Bun.env[varName];
-		if (envValue !== undefined) return envValue;
+		const envValue = lookupEnvValue(varName, extraEnv);
+		// `${VAR:-default}` follows POSIX `:-`: the default applies when the
+		// variable is unset OR empty. Plain `${VAR}` keeps the value verbatim
+		// (even an empty one) and stays literal when unset.
+		if (envValue !== undefined && (defaultValue === undefined || envValue !== "")) return envValue;
 		if (defaultValue !== undefined) return defaultValue;
 		return `\${${varName}}`;
 	});
@@ -944,6 +1030,8 @@ export interface ClaudePluginRoot {
 	path: string;
 	/** Whether this is a user or project scope plugin */
 	scope: "user" | "project";
+	/** Registry or explicit CLI source that supplied this root. */
+	origin: "claude" | "omp" | "plugin-dir";
 }
 
 /**
@@ -1163,6 +1251,7 @@ export async function listClaudePluginRoots(
 						version: entry.version || "unknown",
 						path: entry.installPath,
 						scope: entry.scope === "local" ? "project" : entry.scope || "user",
+						origin: "claude",
 					});
 				}
 			}
@@ -1211,6 +1300,7 @@ export async function listClaudePluginRoots(
 						version: entry.version || "unknown",
 						path: entry.installPath,
 						scope: entry.scope === "local" ? "project" : entry.scope || "user",
+						origin: "omp",
 					});
 				}
 			}
@@ -1249,6 +1339,7 @@ export async function listClaudePluginRoots(
 							version: entry.version || "unknown",
 							path: entry.installPath,
 							scope: "project",
+							origin: "omp",
 						});
 					}
 				}

@@ -4,7 +4,7 @@ import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
 /** Hidden CLI selector that re-enters the computer worker host. */
 export const COMPUTER_WORKER_ARG = "__omp_worker_computer";
 
-/** Frozen run settings transferred from the tool session to the worker. */
+/** Frozen run settings transferred from the host session to the worker. */
 export interface ComputerSessionSnapshot {
 	cwd: string;
 	sessionId: string;
@@ -25,7 +25,7 @@ export type ComputerWorkerInbound =
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
 
-/** Successful computer run output returned to the tool supervisor. */
+/** Successful computer run output returned to the host supervisor. */
 export interface ComputerRunOk {
 	displays: Array<TextContent | ImageContent>;
 	returnValue: unknown;

@@ -1,6 +1,8 @@
 // Provider-wire compat for "minimax-code"; regenerated from the frozen census using deployment contract selectors.
 
-provider "minimax-code" {
+provider "minimax-code" priority=1 {
+	// Replaces the provider-id regex in both OpenAI baselines.
+	reasoning-deltas-may-be-cumulative #true
 	class "minimax" {
 		thinking-mode "effort"
 	}

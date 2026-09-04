@@ -1,16 +1,15 @@
-import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
-import { checkJuliaKernelAvailability } from "../eval/jl/kernel";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
-import { checkRubyKernelAvailability } from "../eval/rb/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { PreparedExtension } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
@@ -34,18 +33,16 @@ import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
 import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
+import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { EventBus } from "../utils/event-bus";
-import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import { WebSearchTool } from "../web/search";
 import type { WorkspaceTree } from "../workspace-tree";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
-import { BrowserTool } from "./browser";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
-import { ComputerTool } from "./computer";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -53,7 +50,6 @@ import { GithubTool } from "./gh";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
 import { HubTool, isIrcEnabled } from "./hub";
-import { InspectImageTool } from "./inspect-image";
 import { LearnTool } from "./learn";
 import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
@@ -94,7 +90,6 @@ export * from "./glob";
 export * from "./grep";
 export * from "./hub";
 export * from "./image-gen";
-export * from "./inspect-image";
 export * from "./learn";
 export * from "./manage-skill";
 export * from "./memory-edit";
@@ -193,6 +188,15 @@ export interface ToolSession {
 	/** Pre-loaded rules (forwarded to subagents to skip re-discovery). */
 	rules?: Rule[];
 	/**
+	 * This session's agent-scoped applicable rule set — rulebook + always-apply
+	 * + triggered TTSR rules, already bucketed against this session's `agents`
+	 * frontmatter. Distinct from {@link rules} (the full unfiltered discovery
+	 * result forwarded to children): this is what `rule://` resolution needs so
+	 * a subagent-only rule stays readable from inside that subagent, instead of
+	 * only from the top-level session's process-global snapshot.
+	 */
+	activeRules?: readonly Rule[];
+	/**
 	 * Pre-discovered extension source paths. Forwarded to subagents so they
 	 * skip the FS scan but still re-bind extensions to their own session-scoped
 	 * `ExtensionAPI` (cwd, eventBus, runtime). Inline extension factories
@@ -273,7 +277,7 @@ export interface ToolSession {
 	baselineHubEnabled?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
-	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python/Ruby/Julia state. */
+	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
@@ -281,6 +285,8 @@ export interface ToolSession {
 	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries">;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
+	/** Current enabled eval prelude definitions. */
+	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/** Reject new eval work once session disposal has started. */
 	assertEvalExecutionAllowed?: () => void;
 	/** Track tool-owned eval work so session disposal can await/abort it like direct session eval runs. */
@@ -354,8 +360,6 @@ export interface ToolSession {
 	getActiveModelString?: () => string | undefined;
 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
 	getActiveModel?: () => Model | undefined;
-	/** Session-scoped inspect_image mode override set by `/vision`; wins over the persisted setting. */
-	getInspectImageModeOverride?: () => InspectImageMode | undefined;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
@@ -405,6 +409,10 @@ export interface ToolSession {
 	getTodoPhases?: () => TodoPhase[];
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
+	/** Active workpool items whose incremental yields complete the current turn. */
+	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
+	/** Replace the active workpool item contract before a pooled turn starts. */
+	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => void;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */
 	getToolChoiceQueue?(): ToolChoiceQueue;
 	/** Build a model-provider-specific ToolChoice that targets the named tool, or undefined if unsupported. */
@@ -433,15 +441,8 @@ export interface ToolSession {
 	/** Get the most recent completed rewind, if this session just rewound a checkpoint. */
 	getLastCompletedRewind?: () => CompletedRewindState | undefined;
 
-	/** Per-session snapshot store of file contents as last shown to the model
-	 *  by `read`/`search`. Used by hashline anchor-stale recovery to
-	 *  reconstruct the version the model authored anchors against when the
-	 *  file changed out-of-band. Lazily initialized by `getFileSnapshotStore`. */
-	fileSnapshotStore?: InMemorySnapshotStore;
-
-	/** Per-session `CUT`/`PASTE` clipboard register shared across edit
-	 *  calls. Lazily initialized by `getEditClipboard`. */
-	editClipboard?: Clipboard;
+	/** Native snapshots, clipboard registers, and no-op guard shared by edit calls. */
+	editStore?: EditStore;
 
 	/** Per-session log of unresolved git merge conflict regions surfaced by
 	 *  `read`. Each entry gets a stable id N referenced by `write conflict://N`
@@ -452,13 +453,6 @@ export interface ToolSession {
 	/** Per-session ledger of post-edit LSP diagnostics already surfaced to the
 	 *  model for each file. Lazily initialized by `getDiagnosticsLedger`. */
 	diagnosticsLedger?: import("../lsp/diagnostics-ledger").DiagnosticsLedger;
-
-	/** Per-session ledger of consecutive byte-identical no-op edits, keyed by
-	 *  canonical file path. The hashline executor escalates a soft no-op hint
-	 *  to a thrown error once the same payload no-ops `NOOP_HARD_LIMIT` times,
-	 *  breaking subagent loops that ignore the textual hint (issue #2081).
-	 *  Lazily initialized by `getNoopLoopGuard`. */
-	noopLoopGuard?: import("../edit/hashline/noop-loop-guard").NoopLoopGuard;
 
 	/** Queue a hidden message to be injected at the next agent turn. */
 	queueDeferredMessage?(message: CustomMessage): void;
@@ -504,9 +498,6 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
 	lsp: LspTool.createIf,
-	inspect_image: s => new InspectImageTool(s),
-	browser: s => new BrowserTool(s),
-	computer: s => new ComputerTool(s),
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
 	task: s => TaskTool.create(s),
@@ -546,15 +537,12 @@ export async function resolveEvalAllowance(session: ToolSession, evalRequested: 
 	const backends = resolveEvalBackends(session);
 	const allowPython = backends.python;
 	const allowJs = backends.js;
-	const allowRuby = backends.ruby;
-	const allowJulia = backends.julia;
 	const skipEvalPreflight = session.skipPythonPreflight === true;
 	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
-	// we only probe Python/Ruby/Julia when JS is disabled — otherwise allowEval is
+	// we only probe Python when JS is disabled — otherwise allowEval is
 	// already true and per-backend availability is checked at first invocation.
 	let pythonAvailable = true;
-	let rubyAvailable = true;
-	let juliaAvailable = true;
+
 	if (!skipEvalPreflight && !allowJs && evalRequested) {
 		if (allowPython) {
 			const availability = await logger.time(
@@ -568,34 +556,12 @@ export async function resolveEvalAllowance(session: ToolSession, evalRequested: 
 				logger.warn("Python kernel unavailable and JS backend disabled", { reason: availability.reason });
 			}
 		}
-		if (allowRuby) {
-			const availability = await checkRubyKernelAvailability(
-				session.cwd,
-				session.settings.get("ruby.interpreter")?.trim() || undefined,
-			);
-			rubyAvailable = availability.ok;
-			if (!availability.ok) {
-				logger.warn("Ruby kernel unavailable and JS backend disabled", { reason: availability.reason });
-			}
-		}
-		if (allowJulia) {
-			const availability = await checkJuliaKernelAvailability(
-				session.cwd,
-				session.settings.get("julia.interpreter")?.trim() || undefined,
-			);
-			juliaAvailable = availability.ok;
-			if (!availability.ok) {
-				logger.warn("Julia kernel unavailable and JS backend disabled", { reason: availability.reason });
-			}
-		}
 	}
 	const effectivePythonAllowed = allowPython && pythonAvailable;
-	const effectiveRubyAllowed = allowRuby && rubyAvailable;
-	const effectiveJuliaAllowed = allowJulia && juliaAvailable;
 	// Eval is exposed whenever any backend is reachable. A backend may be
 	// unreachable, in which case eval dispatches exclusively to the others.
 	return {
-		allowEval: effectivePythonAllowed || allowJs || effectiveRubyAllowed || effectiveJuliaAllowed,
+		allowEval: effectivePythonAllowed || allowJs,
 	};
 }
 
@@ -614,7 +580,6 @@ export interface BuiltinToolAllowanceContext {
 	prewalkArmed?: boolean;
 	getGoalModeState?: () => GoalModeState | undefined;
 	getActiveModel?: () => Model | undefined;
-	getInspectImageModeOverride?: () => InspectImageMode | undefined;
 	/** Whether the current model can suppress native reasoning while scratchpad thoughts are active. */
 	externalThinkingActive: boolean;
 }
@@ -648,7 +613,6 @@ export function isBuiltinToolAllowed(session: BuiltinToolAllowanceContext, name:
 	if (name === "github") return session.settings.get("github.enabled");
 	if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 	if (name === "ast_edit") return session.settings.get("astEdit.enabled");
-	if (name === "inspect_image") return isInspectImageToolActive(session);
 	if (name === "web_search") return session.settings.get("web_search.enabled");
 	if (name === "security_scan") return session.settings.get("security.enabled");
 	if (name === "think") return session.externalThinkingActive;
@@ -714,7 +678,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		session.pendingFullWriteDescription = undefined;
 	}
 	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
-	// we only probe Python/Ruby/Julia when JS is disabled — otherwise allowEval is
+	// we only probe Python when JS is disabled — otherwise allowEval is
 	// already true and per-backend availability is checked at first invocation.
 	const evalRequested = requestedTools === undefined || requestedTools.includes("eval");
 	const { allowEval } = await resolveEvalAllowance(session, evalRequested);
@@ -792,7 +756,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		prewalkArmed: session.prewalkArmed,
 		getGoalModeState: session.getGoalModeState,
 		getActiveModel: session.getActiveModel,
-		getInspectImageModeOverride: session.getInspectImageModeOverride,
 		externalThinkingActive,
 	};
 	const isToolAllowed = (name: string) => isBuiltinToolAllowed(allowanceContext, name);

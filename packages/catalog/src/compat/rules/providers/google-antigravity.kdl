@@ -7,6 +7,12 @@ provider "google-antigravity" {
 		}
 	}
 	class "gemini" {
+		// Cloud Code Assist rejects an unsigned first function call; the bypass
+		// sentinel is required only on that first call (secondary parallel calls
+		// may stay unsigned). Host contract, so it lives with the provider.
+		revision ">=3" {
+			requires-skip-thought-signature-on-first-function-call #true
+		}
 		family "flash" {
 			revision ">=3 <3.6" {
 				thinking-effort-budgets {
@@ -18,7 +24,7 @@ provider "google-antigravity" {
 				thinking-mode "budget"
 				thinking-suppress-when-off #true
 			}
-			revision ">=3.6 <3.8" {
+			revision ">=3.6" {
 				thinking-mode "google-level"
 				thinking-requires-effort #true
 			}

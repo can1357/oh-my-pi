@@ -8,6 +8,8 @@ import type {
 	OverviewStats,
 	ProviderDashboardStats,
 	RequestDetails,
+	SessionSummary,
+	SessionTrace,
 	TimeRange,
 	ToolDashboardStats,
 } from "./types";
@@ -115,4 +117,25 @@ export async function getProviderDashboardStats(
 	return fetchJson<ProviderDashboardStats>(`${API_BASE}/stats/providers?range=${encodeURIComponent(range)}`, {
 		signal,
 	});
+}
+export async function getSessions(limit = 100, q?: string, signal?: AbortSignal): Promise<SessionSummary[]> {
+	const params = new URLSearchParams({ limit: String(limit) });
+	if (q) params.set("q", q);
+	return fetchJson<SessionSummary[]>(`${API_BASE}/sessions?${params}`, { signal });
+}
+
+export async function getSessionTrace(file: string, signal?: AbortSignal): Promise<SessionTrace> {
+	return fetchJson<SessionTrace>(`${API_BASE}/session/trace?file=${encodeURIComponent(file)}`, { signal });
+}
+
+/** Fetch one full journal entry for the span drawer. Entries are opaque JSON. */
+export async function getSessionEntryDetail(
+	file: string,
+	id: string,
+	signal?: AbortSignal,
+): Promise<{ entry: unknown }> {
+	return fetchJson<{ entry: unknown }>(
+		`${API_BASE}/session/entry?file=${encodeURIComponent(file)}&id=${encodeURIComponent(id)}`,
+		{ signal },
+	);
 }
