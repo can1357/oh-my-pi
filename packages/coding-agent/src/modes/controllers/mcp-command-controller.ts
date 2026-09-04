@@ -1535,13 +1535,17 @@ export class MCPCommandController {
 				for (const { providerName, shortPath, items: entries } of groupBySource(discoveredServers, e => e.source)) {
 					lines.push(theme.fg("accent", providerName) + theme.fg("muted", ` (${shortPath}):`));
 					for (const { name } of entries) {
-						const state = this.ctx.mcpManager!.getConnectionStatus(name);
+						const manager = this.ctx.mcpManager!;
+						const filterEmpty = manager.getFilterEmptyToolCount(name) !== undefined;
+						const state = filterEmpty ? "filter-empty" : manager.getConnectionStatus(name);
 						const status =
-							state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+							state === "filter-empty"
+								? theme.fg("error", " ✕ filter excludes all tools")
+								: state === "connected"
+									? theme.fg("success", " ● connected")
+									: state === "connecting"
+										? theme.fg("muted", " ◌ connecting")
+										: theme.fg("muted", " ○ not connected");
 						lines.push(`  ${theme.fg("accent", name)}${status}`);
 					}
 					lines.push("");
@@ -2144,6 +2148,17 @@ export class MCPCommandController {
 				// MCP tool selection. No need to call activateDiscoveredMCPTools —
 				// that would broaden the selection to all server tools.
 				await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
+				const filterEmpty = this.ctx.mcpManager.getFilterEmptyToolCount(name);
+				if (filterEmpty !== undefined) {
+					// The transport is healthy but the configured filter excludes every
+					// advertised tool — the connection is in the failed state (the
+					// `failed` event was emitted by the reconnect path), so a green
+					// "Reconnected" would contradict it.
+					this.ctx.showError(
+						`Reconnected to "${name}", but the tool filter excludes all ${filterEmpty} advertised tools. Widen or remove enabledTools/disabledTools.`,
+					);
+					return;
+				}
 				const serverTools = this.ctx.mcpManager.getTools().filter(t => t.mcpServerName === name);
 				this.#showMessage(
 					[

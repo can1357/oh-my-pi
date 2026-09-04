@@ -217,6 +217,44 @@ describe("snapshotMcpRuntime", () => {
 		expect(formatMcpHealthLabel("filter-empty")).toBe("Filter excludes all tools");
 		expect(formatMcpListHint(snap)).toBe("tool filter excludes every tool");
 	});
+	test("a configured filter renders raw definitions selected to the manager set", () => {
+		// Regression: filtered mode previously rendered manager tools, which
+		// drop the MCP title; and unfiltered mode showed the raw pre-filter
+		// list including excluded tools. The correct render is the raw
+		// definitions selected down to the manager's filtered names.
+		const conn = connection({
+			config: { command: "/usr/bin/github-mcp-server", enabledTools: ["search_code"] },
+			tools: [
+				{
+					name: "search_code",
+					title: "Search code tool",
+					description: "Search code across GitHub repositories.",
+					inputSchema: { type: "object" },
+				},
+				{
+					name: "delete_everything",
+					description: "Destructive tool excluded by the filter.",
+					inputSchema: { type: "object" },
+				},
+			],
+		});
+		const filteredSource: MCPRuntimeSource = {
+			...sourceFor("connected", conn),
+			getFilterEmptyToolCount: () => undefined,
+			getTools: () => [
+				{
+					mcpServerName: "github",
+					mcpToolName: "search_code",
+					description: "Search code across GitHub repositories.",
+					label: "mcp__github_search_code",
+				},
+			],
+		};
+		const snap = snapshotMcpRuntime(server(), filteredSource);
+		expect(snap.tools.map(t => t.name)).toEqual(["search_code"]);
+		expect(snap.tools[0]?.title).toBe("Search code tool");
+		expect(snap.tools[0]?.description).toBe("Search code across GitHub repositories.");
+	});
 });
 
 describe("applyMcpToggleRuntime", () => {

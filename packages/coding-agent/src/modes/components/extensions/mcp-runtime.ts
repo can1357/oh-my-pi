@@ -248,14 +248,19 @@ export function snapshotMcpRuntime(
 	);
 	const managerTools = toolsFromManager(manager, server.name);
 	// With a configured tool filter, the session's tool set is authoritative:
-	// raw `connection.tools` is pre-filter, so preferring it would advertise
-	// tools the filter excludes. Without a filter the raw list is richer
-	// (annotated titles/schemas) and identical in membership.
+	// raw `connection.tools` is pre-filter, so rendering from it directly would
+	// advertise tools the filter excludes. Filtered mode renders the raw
+	// definitions selected down to the manager's filtered names — keeping each
+	// surviving tool's MCP title/annotations/schema that manager tools lack.
+	const rawTools = (connection?.tools ?? []).map(tool =>
+		catalogItem(tool.name, tool.title ?? tool.annotations?.title, tool.description, tool.inputSchema),
+	);
 	const connectedTools = filteredConfigured
-		? managerTools
-		: (connection?.tools ?? []).map(tool =>
-				catalogItem(tool.name, tool.title ?? tool.annotations?.title, tool.description, tool.inputSchema),
-			);
+		? (() => {
+				const allowed = new Set(managerTools.map(tool => tool.name));
+				return rawTools.filter(tool => allowed.has(tool.name));
+			})()
+		: rawTools;
 	const tools = connectedTools.length > 0 ? connectedTools : managerTools;
 
 	return {
