@@ -22,9 +22,14 @@ export function parseCommandArgs(argsString: string, options?: ParseCommandArgsO
 			}
 		} else if (char === '"' || char === "'") {
 			inQuote = char;
-		} else if (escapeQuotes && char === "\\" && i + 1 < argsString.length && (argsString[i + 1] === '"' || argsString[i + 1] === "'")) {
+		} else if (
+			escapeQuotes &&
+			char === "\\" &&
+			i + 1 < argsString.length &&
+			(argsString[i + 1] === '"' || argsString[i + 1] === "'")
+		) {
 			current += argsString[++i];
-		} else if (char === " " || char === "\t") {
+		} else if (/\s/.test(char)) {
 			if (current) {
 				args.push(current);
 				current = "";

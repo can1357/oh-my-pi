@@ -195,6 +195,7 @@ describe("parseCommandArgs", () => {
 
 	test("should handle newlines in arguments", () => {
 		expect(parseCommandArgs('"line1\nline2" second')).toEqual(["line1\nline2", "second"]);
+		expect(parseCommandArgs("first\nsecond\r\nthird")).toEqual(["first", "second", "third"]);
 	});
 
 	test("should handle escaped quotes inside quoted strings", () => {
