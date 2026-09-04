@@ -124,92 +124,79 @@ impl JjWorkspace {
 
 	/// Count the recorded changes in `@` relative to its merged parent tree.
 	pub fn status_summary(&self) -> Result<StatusSummary> {
-		self.with_current_repo("jj status", |workspace, repo| {
-			Box::pin(async move {
-				let Some((before, after)) =
-					working_copy_trees(workspace, repo.as_ref(), "jj status").await?
-				else {
-					return Ok(StatusSummary::default());
-				};
-				let changes = collect_changes(&before, &after, &[], "jj status")?;
-				let mut summary = StatusSummary::default();
-				for change in changes {
-					if change.before.is_absent() {
-						summary.untracked = summary.untracked.saturating_add(1);
-					} else {
-						summary.unstaged = summary.unstaged.saturating_add(1);
+		self.with_working_copy_changes(
+			false,
+			"jj status",
+			Vec::new(),
+			StatusSummary::default(),
+			|_repo, _before, _after, changes| {
+				Box::pin(async move {
+					let mut summary = StatusSummary::default();
+					for change in changes {
+						if change.before.is_absent() {
+							summary.untracked = summary.untracked.saturating_add(1);
+						} else {
+							summary.unstaged = summary.unstaged.saturating_add(1);
+						}
 					}
-				}
-				Ok(summary)
-			})
-		})
+					Ok(summary)
+				})
+			},
+		)
 	}
 
 	/// Render `@` versus its merged parents in git porcelain-v1 form.
 	pub fn status_porcelain(&self, options: &StatusOptions) -> Result<String> {
-		let pathspecs = options.pathspecs.clone();
 		let nul_terminated = options.nul_terminated;
-		self.with_current_repo("jj status", move |workspace, repo| {
-			Box::pin(async move {
-				let Some((before, after)) =
-					working_copy_trees(workspace, repo.as_ref(), "jj status").await?
-				else {
-					return Ok(String::new());
-				};
-				let changes = collect_changes(&before, &after, &pathspecs, "jj status")?;
-				Ok(render_status_porcelain(&changes, nul_terminated))
-			})
-		})
+		self.with_working_copy_changes(
+			false,
+			"jj status",
+			options.pathspecs.clone(),
+			String::new(),
+			move |_repo, _before, _after, changes| {
+				Box::pin(async move { Ok(render_status_porcelain(&changes, nul_terminated)) })
+			},
+		)
 	}
 
 	/// Render `@` versus its merged parents as a git-format patch.
 	pub fn diff_text(&self, files: &[String], snapshot: bool) -> Result<String> {
-		let files = files.to_vec();
-		self.with_repo(snapshot, "jj diff", move |workspace, repo| {
-			Box::pin(async move {
-				let Some((before, after)) =
-					working_copy_trees(workspace, repo.as_ref(), "jj diff").await?
-				else {
-					return Ok(String::new());
-				};
-				let changes = collect_changes(&before, &after, &files, "jj diff")?;
-				render_git_diff(repo.as_ref(), &before, &after, changes).await
-			})
-		})
+		self.with_working_copy_changes(
+			snapshot,
+			"jj diff",
+			files.to_vec(),
+			String::new(),
+			|repo, before, after, changes| Box::pin(render_git_diff(repo, before, after, changes)),
+		)
 	}
 
 	/// List target paths changed in `@` relative to its merged parents.
 	pub fn changed_files(&self, files: &[String], snapshot: bool) -> Result<Vec<String>> {
-		let files = files.to_vec();
-		self.with_repo(snapshot, "jj diff", move |workspace, repo| {
-			Box::pin(async move {
-				let Some((before, after)) =
-					working_copy_trees(workspace, repo.as_ref(), "jj diff").await?
-				else {
-					return Ok(Vec::new());
-				};
-				Ok(collect_changes(&before, &after, &files, "jj diff")?
-					.into_iter()
-					.map(|change| change.after_path.as_internal_file_string().to_owned())
-					.collect())
-			})
-		})
+		self.with_working_copy_changes(
+			snapshot,
+			"jj diff",
+			files.to_vec(),
+			Vec::new(),
+			|_repo, _before, _after, changes| {
+				Box::pin(async move {
+					Ok(changes
+						.into_iter()
+						.map(|change| change.after_path.as_internal_file_string().to_owned())
+						.collect())
+				})
+			},
+		)
 	}
 
 	/// Return per-file line counts for `@` relative to its merged parents.
 	pub fn numstat(&self, files: &[String]) -> Result<Vec<NumstatEntry>> {
-		let files = files.to_vec();
-		self.with_repo(true, "jj diff", move |workspace, repo| {
-			Box::pin(async move {
-				let Some((before, after)) =
-					working_copy_trees(workspace, repo.as_ref(), "jj diff").await?
-				else {
-					return Ok(Vec::new());
-				};
-				let changes = collect_changes(&before, &after, &files, "jj diff")?;
-				render_numstat(repo.as_ref(), &before, &after, changes).await
-			})
-		})
+		self.with_working_copy_changes(
+			true,
+			"jj diff",
+			files.to_vec(),
+			Vec::new(),
+			|repo, before, after, changes| Box::pin(render_numstat(repo, before, after, changes)),
+		)
 	}
 
 	/// Return recent commit subjects, newest first.
@@ -322,6 +309,37 @@ impl JjWorkspace {
 		) -> Pin<Box<dyn Future<Output = Result<T>> + 'a>>,
 	{
 		self.with_repo(false, context, operation)
+	}
+
+	fn with_working_copy_changes<T, R>(
+		&self,
+		snapshot: bool,
+		context: &'static str,
+		files: Vec<String>,
+		empty: T,
+		render: R,
+	) -> Result<T>
+	where
+		T: 'static,
+		R: for<'a> FnOnce(
+				&'a dyn Repo,
+				&'a MergedTree,
+				&'a MergedTree,
+				Vec<TreeChange>,
+			) -> Pin<Box<dyn Future<Output = Result<T>> + 'a>>
+			+ 'static,
+	{
+		self.with_repo(snapshot, context, move |workspace, repo| {
+			Box::pin(async move {
+				let Some((before, after)) =
+					working_copy_trees(workspace, repo.as_ref(), context).await?
+				else {
+					return Ok(empty);
+				};
+				let changes = collect_changes(&before, &after, &files, context)?;
+				render(repo.as_ref(), &before, &after, changes).await
+			})
+		})
 	}
 
 	fn with_repo<T, F>(&self, snapshot: bool, context: &'static str, operation: F) -> Result<T>

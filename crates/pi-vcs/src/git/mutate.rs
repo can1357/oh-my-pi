@@ -1200,26 +1200,14 @@ pub fn detach_git_dir(
 }
 
 fn resolve_commit(repo: &gix::Repository, spec: &str) -> Result<gix::hash::ObjectId> {
-	let id = repo
-		.rev_parse_single(spec)
-		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-	let object = id
-		.object()
-		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-	object
+	super::read::resolve_object(repo, spec)?
 		.peel_to_commit()
 		.map(|commit| commit.id)
 		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })
 }
 
 fn resolve_tree(repo: &gix::Repository, spec: &str) -> Result<gix::hash::ObjectId> {
-	let id = repo
-		.rev_parse_single(spec)
-		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-	let object = id
-		.object()
-		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-	object
+	super::read::resolve_object(repo, spec)?
 		.peel_to_tree()
 		.map(|tree| tree.id)
 		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })
@@ -2012,32 +2000,21 @@ fn write_loose_ref(git_dir: &Path, name: &str, id: gix::hash::ObjectId) -> Resul
 }
 #[cfg(test)]
 mod tests {
-	use std::process::Command;
-
 	use tempfile::TempDir;
 
 	use super::*;
-	use crate::types::CommitAuthor;
+	use crate::{
+		test_support::{git as git_raw, init_repo},
+		types::CommitAuthor,
+	};
 
 	fn git(dir: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.arg("-C")
-			.arg(dir)
-			.args(args)
-			.output()
-			.unwrap();
-		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-		String::from_utf8(output.stdout)
-			.unwrap()
-			.trim_end()
-			.to_owned()
+		git_raw(dir, args).trim_end().to_owned()
 	}
 
 	fn fixture() -> (TempDir, GitRepo) {
 		let temp = tempfile::tempdir().unwrap();
-		git(temp.path(), &["init", "-q", "-b", "main"]);
-		git(temp.path(), &["config", "user.name", "Test"]);
-		git(temp.path(), &["config", "user.email", "test@example.com"]);
+		init_repo(temp.path());
 		fs::write(temp.path().join("a"), "one\n").unwrap();
 		fs::write(temp.path().join("b"), "two\n").unwrap();
 		git(temp.path(), &["add", "."]);
@@ -2046,6 +2023,27 @@ mod tests {
 		(temp, repo)
 	}
 
+	fn fixture_ignoring_build() -> (TempDir, GitRepo) {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join(".gitignore"), "build/\n").unwrap();
+		git(temp.path(), &["add", ".gitignore"]);
+		git(temp.path(), &["commit", "-qm", "ignore build"]);
+		(temp, repo)
+	}
+
+	fn add_detached_worktree(repo: &GitRepo, temp: &Path, name: &str) -> (PathBuf, PathBuf) {
+		let linked = temp.join(format!("../{name}"));
+		let _ = fs::remove_dir_all(&linked);
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();
+		(linked, common)
+	}
 	#[test]
 	fn mutate_stage_commit_amend_and_empty() {
 		let (temp, repo) = fixture();
@@ -2227,9 +2225,7 @@ mod tests {
 	#[test]
 	fn stage_keeps_distinct_nfc_and_nfd_when_precompose_is_off() {
 		let temp = tempfile::tempdir().unwrap();
-		git(temp.path(), &["init", "-q", "-b", "main"]);
-		git(temp.path(), &["config", "user.name", "Test"]);
-		git(temp.path(), &["config", "user.email", "test@example.com"]);
+		init_repo(temp.path());
 		git(temp.path(), &["config", "core.precomposeunicode", "false"]);
 		fs::write(temp.path().join("tracked"), "base\n").unwrap();
 		git(temp.path(), &["add", "."]);
@@ -2817,16 +2813,7 @@ mod tests {
 		use std::os::unix::fs::PermissionsExt;
 
 		let (temp, repo) = fixture();
-		let linked = temp.path().join("../linked-unreadable-index");
-		let _ = fs::remove_dir_all(&linked);
-		repo
-			.worktree_add(&linked, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
-			})
-			.unwrap();
-		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();
+		let (linked, common) = add_detached_worktree(&repo, temp.path(), "linked-unreadable-index");
 		let linked_repo = GitRepo::require(&linked).unwrap();
 		let index_path = linked_repo.info().git_dir.join("index");
 		let original_mode = fs::metadata(&index_path).unwrap().permissions().mode();
@@ -2846,10 +2833,7 @@ mod tests {
 
 	#[test]
 	fn clone_first_worktree_reconciles_source_state_to_target_tree() {
-		let (temp, repo) = fixture();
-		fs::write(temp.path().join(".gitignore"), "build/\n").unwrap();
-		git(temp.path(), &["add", ".gitignore"]);
-		git(temp.path(), &["commit", "-qm", "ignore build"]);
+		let (temp, repo) = fixture_ignoring_build();
 		git(temp.path(), &["checkout", "-qb", "target"]);
 		fs::write(temp.path().join("a"), "target\n").unwrap();
 		fs::remove_file(temp.path().join("b")).unwrap();
@@ -2960,10 +2944,7 @@ mod tests {
 	#[test]
 	fn worktree_add_keep_changes_carries_dirty_state_on_both_paths() {
 		for clone in [WorktreeClone::Auto, WorktreeClone::Off] {
-			let (temp, repo) = fixture();
-			fs::write(temp.path().join(".gitignore"), "build/\n").unwrap();
-			git(temp.path(), &["add", ".gitignore"]);
-			git(temp.path(), &["commit", "-qm", "ignore build"]);
+			let (temp, repo) = fixture_ignoring_build();
 			fs::write(temp.path().join("a"), "staged\n").unwrap();
 			git(temp.path(), &["add", "a"]);
 			fs::write(temp.path().join("a"), "staged then edited\n").unwrap();
@@ -3018,31 +2999,14 @@ mod tests {
 	#[test]
 	fn mutate_worktree_and_detach() {
 		let (temp, repo) = fixture();
-		let linked = temp.path().join("../linked-mut");
-		let _ = fs::remove_dir_all(&linked);
-		repo
-			.worktree_add(&linked, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
-			})
-			.unwrap();
+		let (linked, _) = add_detached_worktree(&repo, temp.path(), "linked-mut");
 		assert!(
 			git(temp.path(), &["worktree", "list", "--porcelain"])
 				.contains(linked.to_string_lossy().as_ref())
 		);
 		assert!(repo.worktree_remove(&linked, true).unwrap());
 
-		let linked = temp.path().join("../linked-detach");
-		let _ = fs::remove_dir_all(&linked);
-		repo
-			.worktree_add(&linked, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
-			})
-			.unwrap();
-		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();
+		let (linked, common) = add_detached_worktree(&repo, temp.path(), "linked-detach");
 		let source_head = git(temp.path(), &["rev-parse", "HEAD"]);
 		assert_eq!(detach_git_dir(&linked, &common).unwrap(), DetachGitDirResult::Detached);
 		let alternates = fs::read_to_string(linked.join(".git/objects/info/alternates")).unwrap();

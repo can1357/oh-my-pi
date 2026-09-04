@@ -853,12 +853,7 @@ impl GitRepo {
 			return Ok(cap_bytes(text.into_bytes(), max_bytes));
 		}
 		let repo = self.gix()?;
-		let id = repo
-			.rev_parse_single(spec)
-			.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-		let object = id
-			.object()
-			.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
+		let object = resolve_object(&repo, spec)?;
 		Ok(cap_bytes(
 			{
 				let mut blob = object
@@ -966,6 +961,17 @@ impl GitRepo {
 			})
 			.collect()
 	}
+}
+
+pub(crate) fn resolve_object<'repo>(
+	repo: &'repo gix::Repository,
+	spec: &str,
+) -> Result<gix::Object<'repo>> {
+	let id = repo
+		.rev_parse_single(spec)
+		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
+	id.object()
+		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })
 }
 
 fn nonempty(value: &str) -> Option<String> {

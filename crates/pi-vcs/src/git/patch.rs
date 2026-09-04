@@ -113,14 +113,7 @@ impl GitRepo {
 		}
 		let patches = parse_patch(patch_text).map_err(ApplyFailure::into_error)?;
 		let repo = self.gix()?;
-		let mut state = if options.cached {
-			index_map_at(&repo, options.index_path.as_deref())?
-		} else {
-			worktree_map(self, &repo)?
-		};
-		if !options.cached {
-			augment_patch_sources(self, &repo, &mut state, &patches, options.reverse)?;
-		}
+		let mut state = patch_target_map(self, &repo, &patches, options)?;
 		apply_patches_to_map(&repo, &mut state, &patches, options)?;
 		if options.cached {
 			write_index_map_at(&repo, &state, options.index_path.as_deref())?;
@@ -139,14 +132,7 @@ impl GitRepo {
 			return Ok(false);
 		};
 		let repo = self.gix()?.with_object_memory();
-		let mut state = if options.cached {
-			index_map_at(&repo, options.index_path.as_deref())?
-		} else {
-			worktree_map(self, &repo)?
-		};
-		if !options.cached {
-			augment_patch_sources(self, &repo, &mut state, &patches, options.reverse)?;
-		}
+		let mut state = patch_target_map(self, &repo, &patches, options)?;
 		match apply_patches_to_map(&repo, &mut state, &patches, options) {
 			Ok(()) => Ok(true),
 			Err(Error::PatchFailed { .. } | Error::Conflict { .. }) => Ok(false),
@@ -1415,6 +1401,23 @@ fn augment_patch_sources(
 	Ok(())
 }
 
+fn patch_target_map(
+	repo_handle: &GitRepo,
+	repo: &gix::Repository,
+	patches: &[FilePatch],
+	options: &ApplyOptions,
+) -> Result<BTreeMap<String, FileEntry>> {
+	let mut state = if options.cached {
+		index_map_at(repo, options.index_path.as_deref())?
+	} else {
+		worktree_map(repo_handle, repo)?
+	};
+	if !options.cached {
+		augment_patch_sources(repo_handle, repo, &mut state, patches, options.reverse)?;
+	}
+	Ok(state)
+}
+
 fn tracked_worktree_map(
 	repo: &GitRepo,
 	gix_repo: &gix::Repository,
@@ -1481,20 +1484,12 @@ fn untracked_worktree_map(
 }
 
 fn read_worktree_entry(path: &Path, index_mode: Mode) -> Result<Option<(Vec<u8>, Mode)>> {
-	let metadata = match fs::symlink_metadata(path) {
-		Ok(metadata) => metadata,
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-		Err(err) => return Err(err.into()),
+	let Some(metadata) = super::diff::symlink_metadata_opt(path)? else {
+		return Ok(None);
 	};
 	if metadata.file_type().is_symlink() {
 		let target = fs::read_link(path)?;
-		#[cfg(unix)]
-		let bytes = {
-			use std::os::unix::ffi::OsStrExt;
-			target.as_os_str().as_bytes().to_vec()
-		};
-		#[cfg(not(unix))]
-		let bytes = target.to_string_lossy().as_bytes().to_vec();
+		let bytes = super::diff::os_path_bytes(&target);
 		return Ok(Some((bytes, Mode::SYMLINK)));
 	}
 	if !metadata.is_file() {
@@ -1711,48 +1706,17 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 }
 #[cfg(test)]
 mod tests {
-	use std::process::Command;
-
 	use tempfile::TempDir;
 
 	use super::*;
-	use crate::types::SplitCommitSpec;
-
-	fn git(cwd: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.current_dir(cwd)
-			.args(args)
-			.output()
-			.expect("run git");
-		assert!(
-			output.status.success(),
-			"git {} failed: {}",
-			args.join(" "),
-			String::from_utf8_lossy(&output.stderr)
-		);
-		String::from_utf8(output.stdout).expect("git output is UTF-8")
-	}
-	fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.current_dir(cwd)
-			.env("GIT_INDEX_FILE", index)
-			.args(args)
-			.output()
-			.expect("run git with alternate index");
-		assert!(
-			output.status.success(),
-			"git {} failed: {}",
-			args.join(" "),
-			String::from_utf8_lossy(&output.stderr)
-		);
-		String::from_utf8(output.stdout).expect("git output is UTF-8")
-	}
+	use crate::{
+		test_support::{git, git_with_index, init_repo},
+		types::SplitCommitSpec,
+	};
 
 	fn init(files: &[(&str, &[u8])]) -> TempDir {
 		let temp = tempfile::tempdir().expect("tempdir");
-		git(temp.path(), &["init", "-q"]);
-		git(temp.path(), &["config", "user.name", "Patch Test"]);
-		git(temp.path(), &["config", "user.email", "patch@example.com"]);
+		init_repo(temp.path());
 		for (path, bytes) in files {
 			let absolute = temp.path().join(path);
 			if let Some(parent) = absolute.parent() {
@@ -2091,6 +2055,46 @@ mod tests {
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
 	}
 
+	struct StagedFixture {
+		temp:          TempDir,
+		repo:          GitRepo,
+		staged_diff:   String,
+		expected_tree: String,
+		count_before:  String,
+	}
+
+	fn staged_tracked_fixture() -> StagedFixture {
+		let temp = init(&[("tracked.txt", b"v1\n")]);
+		let repo = repo(temp.path());
+		fs::write(temp.path().join("tracked.txt"), b"v2\n").unwrap();
+		git(temp.path(), &["add", "tracked.txt"]);
+		let staged_diff = git(temp.path(), &["diff", "--cached", "--binary"]);
+		let expected_tree = repo.index_tree_id().unwrap();
+		let count_before = git(temp.path(), &["rev-list", "--count", "HEAD"]);
+		StagedFixture { temp, repo, staged_diff, expected_tree, count_before }
+	}
+
+	#[cfg(unix)]
+	fn install_pre_commit_hook(temp: &Path, script: &str) {
+		use std::os::unix::fs::PermissionsExt;
+
+		let hooks_dir = temp.join(".git/hooks");
+		fs::create_dir_all(&hooks_dir).unwrap();
+		let hook_path = hooks_dir.join("pre-commit");
+		fs::write(&hook_path, script).unwrap();
+		fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
+	}
+
+	fn single_spec(message: &str, paths: &[&str]) -> SplitCommitSpec {
+		SplitCommitSpec {
+			message:    message.into(),
+			selections: paths
+				.iter()
+				.map(|path| HunkSelection { path: (*path).into(), hunks: HunkSpec::All })
+				.collect(),
+		}
+	}
+
 	#[test]
 	fn commit_split_rejects_shifted_index_before_any_write() {
 		let temp = init(&[("tracked.txt", b"v1\n")]);
@@ -2108,13 +2112,7 @@ mod tests {
 
 		let err = repo
 			.commit_split(&SplitCommitOptions {
-				commits: vec![SplitCommitSpec {
-					message:    "feat: all".into(),
-					selections: vec![
-						HunkSelection { path: "tracked.txt".into(), hunks: HunkSpec::All },
-						HunkSelection { path: "b.txt".into(), hunks: HunkSpec::All },
-					],
-				}],
+				commits: vec![single_spec("feat: all", &["tracked.txt", "b.txt"])],
 				staged_diff,
 				expected_tree: stale_tree,
 			})
@@ -2146,13 +2144,7 @@ mod tests {
 
 		let err = repo
 			.commit_split(&SplitCommitOptions {
-				commits: vec![SplitCommitSpec {
-					message:    "feat: only tracked".into(),
-					selections: vec![HunkSelection {
-						path:  "tracked.txt".into(),
-						hunks: HunkSpec::All,
-					}],
-				}],
+				commits: vec![single_spec("feat: only tracked", &["tracked.txt"])],
 				staged_diff,
 				expected_tree,
 			})
@@ -2168,70 +2160,40 @@ mod tests {
 
 	#[test]
 	fn commit_split_rejects_empty_commit() {
-		let temp = init(&[("tracked.txt", b"v1\n")]);
-		let repo = repo(temp.path());
+		let fixture = staged_tracked_fixture();
 
-		fs::write(temp.path().join("tracked.txt"), b"v2\n").unwrap();
-		git(temp.path(), &["add", "tracked.txt"]);
-
-		let staged_diff = git(temp.path(), &["diff", "--cached", "--binary"]);
-		let expected_tree = repo.index_tree_id().unwrap();
-		let count_before = git(temp.path(), &["rev-list", "--count", "HEAD"]);
-
-		let err = repo
+		let err = fixture
+			.repo
 			.commit_split(&SplitCommitOptions {
-				commits: vec![
+				commits:       vec![
 					SplitCommitSpec { message: "empty commit".into(), selections: vec![] },
-					SplitCommitSpec {
-						message:    "real commit".into(),
-						selections: vec![HunkSelection {
-							path:  "tracked.txt".into(),
-							hunks: HunkSpec::All,
-						}],
-					},
+					single_spec("real commit", &["tracked.txt"]),
 				],
-				staged_diff,
-				expected_tree,
+				staged_diff:   fixture.staged_diff,
+				expected_tree: fixture.expected_tree,
 			})
 			.unwrap_err();
 
 		assert!(err.to_string().contains("would be empty"), "expected 'would be empty', got: {err}");
-		assert_eq!(git(temp.path(), &["rev-list", "--count", "HEAD"]), count_before);
+		assert_eq!(git(fixture.temp.path(), &["rev-list", "--count", "HEAD"]), fixture.count_before);
 	}
 
 	#[test]
 	#[cfg(unix)]
 	fn commit_split_fails_when_pre_commit_hook_modifies_index() {
-		use std::os::unix::fs::PermissionsExt;
+		let fixture = staged_tracked_fixture();
 
-		let temp = init(&[("tracked.txt", b"v1\n")]);
-		let repo = repo(temp.path());
+		install_pre_commit_hook(
+			fixture.temp.path(),
+			"#!/bin/sh\necho 'hook-rewrite' > tracked.txt\ngit add tracked.txt\n",
+		);
 
-		fs::write(temp.path().join("tracked.txt"), b"v2\n").unwrap();
-		git(temp.path(), &["add", "tracked.txt"]);
-
-		let staged_diff = git(temp.path(), &["diff", "--cached", "--binary"]);
-		let expected_tree = repo.index_tree_id().unwrap();
-		let count_before = git(temp.path(), &["rev-list", "--count", "HEAD"]);
-
-		let hooks_dir = temp.path().join(".git/hooks");
-		fs::create_dir_all(&hooks_dir).unwrap();
-		let hook_path = hooks_dir.join("pre-commit");
-		let hook_script = "#!/bin/sh\necho 'hook-rewrite' > tracked.txt\ngit add tracked.txt\n";
-		fs::write(&hook_path, hook_script).unwrap();
-		fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
-
-		let err = repo
+		let err = fixture
+			.repo
 			.commit_split(&SplitCommitOptions {
-				commits: vec![SplitCommitSpec {
-					message:    "feat: tracked".into(),
-					selections: vec![HunkSelection {
-						path:  "tracked.txt".into(),
-						hunks: HunkSpec::All,
-					}],
-				}],
-				staged_diff,
-				expected_tree,
+				commits:       vec![single_spec("feat: tracked", &["tracked.txt"])],
+				staged_diff:   fixture.staged_diff,
+				expected_tree: fixture.expected_tree,
 			})
 			.unwrap_err();
 
@@ -2240,50 +2202,28 @@ mod tests {
 				.contains("pre-commit hook modified the index"),
 			"expected 'pre-commit hook modified the index', got: {err}"
 		);
-		assert_eq!(git(temp.path(), &["rev-list", "--count", "HEAD"]), count_before);
+		assert_eq!(git(fixture.temp.path(), &["rev-list", "--count", "HEAD"]), fixture.count_before);
 	}
 
 	#[test]
 	#[cfg(unix)]
 	fn commit_split_succeeds_when_pre_commit_hook_runs_git_status() {
-		use std::os::unix::fs::PermissionsExt;
+		let fixture = staged_tracked_fixture();
+		let count_before: usize = fixture.count_before.trim().parse().unwrap();
 
-		let temp = init(&[("tracked.txt", b"v1\n")]);
-		let repo = repo(temp.path());
+		install_pre_commit_hook(fixture.temp.path(), "#!/bin/sh\ngit status --porcelain\n");
 
-		fs::write(temp.path().join("tracked.txt"), b"v2\n").unwrap();
-		git(temp.path(), &["add", "tracked.txt"]);
-
-		let staged_diff = git(temp.path(), &["diff", "--cached", "--binary"]);
-		let expected_tree = repo.index_tree_id().unwrap();
-		let count_before: usize = git(temp.path(), &["rev-list", "--count", "HEAD"])
-			.trim()
-			.parse()
-			.unwrap();
-
-		let hooks_dir = temp.path().join(".git/hooks");
-		fs::create_dir_all(&hooks_dir).unwrap();
-		let hook_path = hooks_dir.join("pre-commit");
-		let hook_script = "#!/bin/sh\ngit status --porcelain\n";
-		fs::write(&hook_path, hook_script).unwrap();
-		fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
-
-		let commits = repo
+		let commits = fixture
+			.repo
 			.commit_split(&SplitCommitOptions {
-				commits: vec![SplitCommitSpec {
-					message:    "feat: tracked".into(),
-					selections: vec![HunkSelection {
-						path:  "tracked.txt".into(),
-						hunks: HunkSpec::All,
-					}],
-				}],
-				staged_diff,
-				expected_tree,
+				commits:       vec![single_spec("feat: tracked", &["tracked.txt"])],
+				staged_diff:   fixture.staged_diff,
+				expected_tree: fixture.expected_tree,
 			})
 			.unwrap();
 
 		assert_eq!(commits.len(), 1);
-		let count_after: usize = git(temp.path(), &["rev-list", "--count", "HEAD"])
+		let count_after: usize = git(fixture.temp.path(), &["rev-list", "--count", "HEAD"])
 			.trim()
 			.parse()
 			.unwrap();
