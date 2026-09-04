@@ -202,7 +202,7 @@ import {
 	createLoopLimitRuntime,
 	describeLoopLimit,
 	describeLoopLimitRuntime,
-	isLoopDurationExpired,
+	getLoopIntervalMs,
 	type LoopLimitRuntime,
 	parseLoopLimitArgs,
 } from "./loop-limit";
@@ -555,6 +555,12 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 
+/** customType tag for interval-loop reminders queued via promptCustomMessage,
+ *  so a tick can dedupe against an already-queued reminder and disableLoopMode
+ *  can drop any still-queued reminder instead of leaving it to fire after the
+ *  loop was turned off. */
+const LOOP_REMINDER_CUSTOM_TYPE = "loop-reminder";
+
 export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
 	session: AgentSession;
@@ -605,6 +611,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	loopPrompt: string | undefined = undefined;
 	loopLimit: LoopLimitRuntime | undefined = undefined;
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
+	#loopIntervalTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
 	#nextAppearanceRequestToken = 1;
@@ -1674,6 +1681,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	#scheduleLoopAutoSubmit(): void {
 		this.#cancelLoopAutoSubmit();
 		if (!this.loopModeEnabled || !this.loopPrompt) return;
+		// Interval ("cron") loops own their cadence via #loopIntervalTimer, armed
+		// independently of this idle-only getUserInput() cycle so a tick still
+		// fires while a turn is streaming. This turn-boundary grace is only for
+		// fire-on-stop loops (no interval configured).
+		if (getLoopIntervalMs(this.loopLimit) !== undefined) return;
 		const prompt = this.loopPrompt;
 		const loopAction = settings.get("loop.mode");
 		this.#deferLoopAutoSubmit(() => {
@@ -1695,6 +1707,134 @@ export class InteractiveMode implements InteractiveModeContext {
 			clearTimeout(this.#loopAutoSubmitTimer);
 			this.#loopAutoSubmitTimer = undefined;
 		}
+	}
+
+	/**
+	 * Arm the interval ("cron") timer for a duration-limited loop: it fires on
+	 * a fixed cadence for the lifetime of loop mode, independent of the idle
+	 * getUserInput() cycle, so it can nudge the agent whether a turn is
+	 * streaming or idle. Iteration-limited and unbounded loops fire on the
+	 * turn-boundary grace in #scheduleLoopAutoSubmit instead; this is a no-op
+	 * for them.
+	 *
+	 * Armed when the loop first has a prompt, not when `/loop` is typed: a bare
+	 * `/loop 10m` waits for the user to supply the instruction, and starting the
+	 * clock at command entry would spend part of the first interval on their
+	 * typing (and drop every tick before a prompt existed).
+	 */
+	#armLoopIntervalTimer(): void {
+		this.#cancelLoopIntervalTimer();
+		if (!this.loopPrompt) return;
+		const intervalMs = getLoopIntervalMs(this.loopLimit);
+		if (intervalMs === undefined) return;
+		this.#loopIntervalTimer = setInterval(() => this.#fireLoopIntervalTick(), intervalMs);
+		this.#loopIntervalTimer.unref?.();
+	}
+
+	#cancelLoopIntervalTimer(): void {
+		if (this.#loopIntervalTimer) {
+			clearInterval(this.#loopIntervalTimer);
+			this.#loopIntervalTimer = undefined;
+		}
+	}
+
+	/**
+	 * One tick of an interval loop. A turn already streaming is *steered*: the
+	 * prompt is injected at the run's next provider-call boundary, so a long turn
+	 * actually receives the instruction while it works (a two-hour turn on a
+	 * 30-minute interval gets steered roughly four times) without being aborted
+	 * and re-prompted. Follow-up delivery would be wrong here — it only drains
+	 * once the run ends, so every tick during that turn would collapse into a
+	 * single late delivery.
+	 *
+	 * The message is tagged with {@link LOOP_REMINDER_CUSTOM_TYPE} so a tick can
+	 * detect one is already queued (a tick landing before the previous steer has
+	 * been consumed must not pile up duplicates) and so `disableLoopMode` can
+	 * retract it.
+	 *
+	 * An idle agent gets the same prompt through the normal submit path — when
+	 * the agent has stopped, steering *is* just a prompt, which is what keeps the
+	 * loop going after a turn ends. Compacting/post-prompt work (busy but not
+	 * `isStreaming`) is skipped rather than risking
+	 * `session.promptCustomMessage()` falling through to a fresh-turn start and
+	 * throwing `AgentBusyError`; the next tick retries. A tick landing in the
+	 * narrow gap between turns (busy flags clear but the next getUserInput()
+	 * hasn't re-armed onInputCallback yet) is likewise skipped.
+	 */
+	#fireLoopIntervalTick(): void {
+		if (!this.loopModeEnabled || this.loopModePaused || !this.loopPrompt) return;
+		const prompt = this.loopPrompt;
+		if (this.session.isStreaming) {
+			if (this.#hasQueuedLoopReminder()) return;
+			this.session
+				.promptCustomMessage(
+					{ customType: LOOP_REMINDER_CUSTOM_TYPE, content: prompt, display: false, attribution: "user" },
+					{ streamingBehavior: "steer" },
+				)
+				.catch(err => logger.warn("loop interval steer failed", { error: String(err) }));
+			return;
+		}
+		if (this.#isAutoSubmitBlocked()) return;
+		// onInputCallback self-clears when invoked, so this also covers a
+		// submission already in flight: no tick can submit twice for one turn.
+		if (!this.onInputCallback) return;
+		// Mirror #scheduleGoalContinuation: an idle tick must not clobber a prompt
+		// the user is composing. startPendingSubmission clears the editor draft,
+		// so skip while there is draft text or a pending image and let a later
+		// tick deliver once the composer is clear.
+		if (this.editor.getText().trim().length > 0) return;
+		// An attachment in the composer means the user is composing; the tick waits
+		// rather than clobbering it. Nothing here has attachments of its own: the
+		// inline `/loop <duration> <prompt>` goes through the normal submit path,
+		// which delivers its images with it, so a reminder is always just text.
+		if ((this.editor.pendingImages?.length ?? 0) > 0) return;
+		// A reminder queued onto a turn the user then interrupted (Esc) stays on
+		// the queue with auto-resume suppressed. Submitting this tick re-enables
+		// auto-resume, which would drain that retained reminder after the new
+		// turn — two model turns for one cadence, both running the same loop
+		// instruction. This visible submission *is* the tick, so consume the
+		// retained reminder rather than letting it fire again.
+		this.#clearQueuedLoopReminders();
+		this.onInputCallback(this.startPendingSubmission({ text: prompt }));
+	}
+
+	/** A steered reminder sits on the steering queue, so both queues must be
+	 *  scanned: checking only follow-ups would let every tick during a long turn
+	 *  queue another copy. */
+	#hasQueuedLoopReminder(): boolean {
+		const isLoopReminder = (message: AgentMessage): boolean =>
+			message.role === "custom" && message.customType === LOOP_REMINDER_CUSTOM_TYPE;
+		return (
+			this.session.agent.peekSteeringQueue().some(isLoopReminder) ||
+			this.session.agent.peekFollowUpQueue().some(isLoopReminder)
+		);
+	}
+
+	/** Drop any interval-loop reminder still sitting on the agent's queues so
+	 *  disabling the loop doesn't leave a stray reminder to fire after the fact. */
+	#clearQueuedLoopReminders(): void {
+		const isLoopReminder = (message: AgentMessage): boolean =>
+			message.role === "custom" && message.customType === LOOP_REMINDER_CUSTOM_TYPE;
+		const steering = this.session.agent.peekSteeringQueue();
+		const followUp = this.session.agent.peekFollowUpQueue();
+		if (!steering.some(isLoopReminder) && !followUp.some(isLoopReminder)) return;
+		this.session.agent.replaceQueues(
+			steering.filter(message => !isLoopReminder(message)),
+			followUp.filter(message => !isLoopReminder(message)),
+		);
+	}
+
+	/**
+	 * Drop a queued interval reminder so a user interrupt is honoured.
+	 *
+	 * `#canAutoContinueForFollowUp` resumes on any queued steer *before* it
+	 * consults the user-interrupt suppression, so a reminder left in the steering
+	 * queue would have the abort's drain start a fresh continuation — Esc would
+	 * appear not to stop the agent. The loop itself stays armed and steers again
+	 * on its next interval.
+	 */
+	dropQueuedLoopReminders(): void {
+		this.#clearQueuedLoopReminders();
 	}
 
 	#scheduleGoalContinuation(): void {
@@ -1766,10 +1906,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#submitLoopPromptWhenReady(prompt: string): void {
 		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return;
-		if (isLoopDurationExpired(this.loopLimit)) {
-			this.disableLoopMode("Loop time limit reached. Loop mode disabled.");
-			return;
-		}
 		if (this.#isAutoSubmitBlocked()) {
 			this.#deferLoopAutoSubmit(() => this.#submitLoopPromptWhenReady(prompt));
 			return;
@@ -1822,6 +1958,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopPrompt = undefined;
 		this.loopLimit = undefined;
 		this.#cancelLoopAutoSubmit();
+		this.#cancelLoopIntervalTimer();
+		this.#clearQueuedLoopReminders();
 		this.#syncLoopModeStatus();
 		if (wasEnabled) {
 			this.showStatus(message);
@@ -1832,18 +1970,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.loopModeEnabled) return;
 		this.loopPrompt = prompt;
 		this.loopModePaused = false;
+		// A reminder already queued for the previous prompt is now stale — drop
+		// it so the agent doesn't act on superseded content; the interval timer
+		// picks up the new prompt fresh on its next tick.
+		this.#clearQueuedLoopReminders();
+		// Start (or restart) the cadence from this instruction. A bare `/loop 10m`
+		// has no prompt to deliver until now, so this is when its clock should run.
+		this.#armLoopIntervalTimer();
 		this.#syncLoopModeStatus();
 	}
 
 	/**
-	 * Pause the loop without exiting it: drops the captured prompt and any
-	 * pending auto-resubmit. Loop mode stays enabled — the next prompt the
-	 * user submits becomes the new loop prompt and resumes iteration.
+	 * Pause the loop without exiting it: drops the captured prompt, any
+	 * pending auto-resubmit, and any interval reminder already queued for
+	 * delivery (same reason as {@link disableLoopMode} — a paused loop must
+	 * not still nudge). Loop mode stays enabled — the next prompt the user
+	 * submits becomes the new loop prompt and resumes iteration.
 	 */
 	pauseLoop(): void {
 		this.loopPrompt = undefined;
 		this.loopModePaused = true;
 		this.#cancelLoopAutoSubmit();
+		this.#clearQueuedLoopReminders();
 		this.#syncLoopModeStatus();
 	}
 
@@ -1861,17 +2009,34 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopModePaused = false;
 		this.loopPrompt = undefined;
 		this.loopLimit = createLoopLimitRuntime(parsed.limit);
+		this.#armLoopIntervalTimer();
 		this.#syncLoopModeStatus();
-		const limitSuffix = parsed.limit ? ` Limited to ${describeLoopLimit(parsed.limit)}.` : "";
-		const remainingSuffix = this.loopLimit ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
-		const tail = parsed.prompt ? "Repeating it after each turn." : "Your next prompt will repeat after each turn.";
+		const limitSuffix =
+			parsed.limit?.kind === "iterations"
+				? ` Limited to ${describeLoopLimit(parsed.limit)}.`
+				: parsed.limit?.kind === "duration"
+					? ` Reminding ${describeLoopLimit(parsed.limit)}, steered into the current turn without interrupting it.`
+					: "";
+		const remainingSuffix =
+			this.loopLimit?.kind === "iterations" ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
+		const tail =
+			parsed.limit?.kind === "duration"
+				? parsed.prompt
+					? "It repeats on that interval."
+					: "Your next prompt repeats on that interval."
+				: parsed.prompt
+					? "Repeating it after each turn."
+					: "Your next prompt will repeat after each turn.";
 		this.showStatus(
 			`Loop mode enabled.${limitSuffix}${remainingSuffix} ${tail} Esc cancels the current iteration; /loop again to disable.`,
 		);
-		// Hand any inline prompt back to the dispatcher so the normal submit flow
-		// runs the first iteration — it records the text as the loop prompt and
-		// auto-resubmits it after each yield, identical to typing the prompt right
-		// after enabling loop mode.
+		// Hand the inline prompt back for a normal first submission. It goes out
+		// like any typed prompt — steered into a live turn, with its attachments —
+		// and the interval timer nudges from there. Deferring it to the first tick
+		// instead would consume the command while leaving its images behind in the
+		// composer with no `[Image #N]` marker, where the next submission drops
+		// them; and a steer does not interrupt the turn, which was the only reason
+		// to defer.
 		return parsed.prompt;
 	}
 
@@ -4770,6 +4935,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
+		// Loop timers outlive teardown otherwise: the interval callback keeps the
+		// stopped mode alive and can still submit/queue in long-lived embedding
+		// or test processes and on stop()-without-exit error paths.
+		this.#cancelLoopAutoSubmit();
+		this.#cancelLoopIntervalTimer();
+		// Also drop any reminder already sitting on the agent's queues: cancelling
+		// the timer only stops future ticks, but a steer queued by an earlier tick
+		// would still drain and run after teardown. Only when a loop actually ran —
+		// teardown must not reach into the agent's queues (or throw on a session
+		// that has none) just to clean up a loop that was never enabled.
+		if (this.loopModeEnabled || this.loopPrompt !== undefined) {
+			this.#clearQueuedLoopReminders();
+		}
 		if (this.#sttController) {
 			this.#sttController.dispose();
 			this.#sttController = undefined;

@@ -2009,7 +2009,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			group: "Input",
 			label: "Loop Mode",
-			description: "What happens between /loop iterations before re-submitting the prompt",
+			description:
+				"What happens between /loop iterations before re-submitting the prompt. Applies only to count-based/unbounded loops; a duration-limited /loop fires on that fixed interval instead and always just delivers the prompt (compact/reset are skipped).",
 			options: [
 				{
 					value: "prompt",

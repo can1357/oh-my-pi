@@ -332,13 +332,13 @@ function formatLoopLimit(
 	if (!limit) return undefined;
 	if (limit.kind === "iterations") return `${limit.remaining}/${limit.initial}`;
 
-	const totalSeconds = Math.max(0, Math.ceil((limit.deadlineMs - nowMs) / 1_000));
+	const totalSeconds = Math.round(limit.durationMs / 1_000);
 	const hours = Math.floor(totalSeconds / 3_600);
 	const minutes = Math.floor((totalSeconds % 3_600) / 60);
 	const seconds = totalSeconds % 60;
-	if (hours > 0) return `${hours}h${minutes > 0 ? `${minutes}m` : ""} left`;
-	if (minutes > 0) return `${minutes}m${seconds > 0 ? `${seconds}s` : ""} left`;
-	return `${seconds}s left`;
+	if (hours > 0) return `every ${hours}h${minutes > 0 ? `${minutes}m` : ""}`;
+	if (minutes > 0) return `every ${minutes}m${seconds > 0 ? `${seconds}s` : ""}`;
+	return `every ${seconds}s`;
 }
 
 const modeSegment: StatusLineSegment = {
