@@ -8,6 +8,7 @@ import { CHANGELOG_CATEGORIES, type UnreleasedSection } from "../../commit/types
 import { detectChangelogBoundaries } from "./detect";
 import { generateChangelogEntries } from "./generate";
 import { parseUnreleasedSection } from "./parse";
+import type { ChangelogProposal } from "../agentic/state";
 
 const CHANGELOG_SECTIONS = CHANGELOG_CATEGORIES;
 
@@ -35,18 +36,13 @@ export interface ChangelogFlowInput {
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
 	stagedFiles: string[];
-	dryRun: boolean;
 	maxDiffChars?: number;
 	onProgress?: (message: string) => void;
 }
 
-export interface ChangelogProposalInput {
+interface ChangelogProposalInput {
 	cwd: string;
-	proposals: Array<{
-		path: string;
-		entries: Record<string, string[]>;
-		deletions?: Record<string, string[]>;
-	}>;
+	proposals: ChangelogProposal["entries"];
 	dryRun: boolean;
 	onProgress?: (message: string) => void;
 }
@@ -60,7 +56,6 @@ export async function runChangelogFlow({
 	apiKey,
 	thinkingLevel,
 	stagedFiles,
-	dryRun,
 	maxDiffChars,
 	onProgress,
 }: ChangelogFlowInput): Promise<string[]> {
@@ -79,7 +74,7 @@ export async function runChangelogFlow({
 		const stat = renderStat(await repo.numstat({ cached: true, files: boundary.files }));
 		const diffForPrompt = truncateDiff(diff, maxDiffChars ?? DEFAULT_MAX_DIFF_CHARS);
 		const changelogContent = await Bun.file(boundary.changelogPath).text();
-		let unreleased: { startLine: number; endLine: number; entries: Record<string, string[]> };
+		let unreleased: UnreleasedSection;
 		try {
 			unreleased = parseUnreleasedSection(changelogContent);
 		} catch (error) {
@@ -110,7 +105,7 @@ export async function runChangelogFlow({
 	return applyChangelogProposals({
 		cwd,
 		proposals,
-		dryRun,
+		dryRun: false,
 		onProgress,
 	});
 }
@@ -220,7 +215,7 @@ function formatExistingEntries(entries: Record<string, string[]>): string {
 
 function applyChangelogEntries(
 	content: string,
-	unreleased: { startLine: number; endLine: number; entries: Record<string, string[]> },
+	unreleased: UnreleasedSection,
 	entries: Record<string, string[]>,
 	deletions?: Record<string, string[]>,
 ): string {

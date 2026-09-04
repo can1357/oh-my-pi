@@ -61,7 +61,22 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 
 	if (!args.noChangelog) {
 		try {
-			await updateChangelog(cwd, repo, args);
+			const settings = await Settings.init({ cwd });
+			const authStorage = await discoverAuthStorage();
+			const registry = new ModelRegistry(authStorage);
+			await registry.refresh();
+			await loadCliExtensionProviders(registry, settings, cwd);
+			const primary = await resolvePrimaryModel(args.model, settings, registry);
+			const commitSettings = settings.getGroup("commit");
+			await runChangelogFlow({
+				cwd,
+				model: primary.model,
+				apiKey: primary.apiKey,
+				thinkingLevel: primary.thinkingLevel,
+				stagedFiles: await repo.changedFiles({ cached: true }),
+				maxDiffChars: commitSettings.changelogMaxDiffChars,
+				onProgress: message => process.stdout.write(`${message}\n`),
+			});
 		} catch (error) {
 			if (vcs.isVcsError(error)) abortOnGitFailure("Changelog update failed", error);
 			throw error;
@@ -75,24 +90,4 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 	}
 	process.stdout.write("Commit created.\n");
 	if (args.push) await pushOrAbort(cwd);
-}
-
-async function updateChangelog(cwd: string, repo: VcsGitRepo, args: CommitCommandArgs): Promise<void> {
-	const settings = await Settings.init({ cwd });
-	const authStorage = await discoverAuthStorage();
-	const registry = new ModelRegistry(authStorage);
-	await registry.refresh();
-	await loadCliExtensionProviders(registry, settings, cwd);
-	const primary = await resolvePrimaryModel(args.model, settings, registry);
-	const commitSettings = settings.getGroup("commit");
-	await runChangelogFlow({
-		cwd,
-		model: primary.model,
-		apiKey: primary.apiKey,
-		thinkingLevel: primary.thinkingLevel,
-		stagedFiles: await repo.changedFiles({ cached: true }),
-		dryRun: false,
-		maxDiffChars: commitSettings.changelogMaxDiffChars,
-		onProgress: message => process.stdout.write(`${message}\n`),
-	});
 }

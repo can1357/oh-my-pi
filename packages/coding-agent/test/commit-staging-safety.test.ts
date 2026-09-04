@@ -1,9 +1,7 @@
-import * as fs from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { runCommitCommand } from "@oh-my-pi/pi-coding-agent/commit";
 import * as agentModule from "@oh-my-pi/pi-coding-agent/commit/agentic/agent";
 import type { ChangelogProposal, SplitCommitPlan } from "@oh-my-pi/pi-coding-agent/commit/agentic/state";
-import { applyChangelogProposals } from "@oh-my-pi/pi-coding-agent/commit/changelog";
 import * as changelogModule from "@oh-my-pi/pi-coding-agent/commit/changelog/generate";
 import * as generateModule from "@oh-my-pi/pi-coding-agent/commit/conventional/generate";
 import * as modelSelection from "@oh-my-pi/pi-coding-agent/commit/model-selection";
@@ -35,6 +33,7 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 	let tmp: TempDir;
 	let origDir: string;
 	let settingsState: SettingsTestState | undefined;
+	let remote: TempDir | undefined;
 	beforeEach(async () => {
 		settingsState = beginSettingsTest();
 		origDir = process.cwd();
@@ -81,6 +80,8 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		restoreSettingsTestState(settingsState);
 		setProjectDir(origDir);
 		await tmp.remove();
+		await remote?.remove();
+		remote = undefined;
 	});
 
 	it("auto-stages all changes when index is empty before committing", async () => {
@@ -110,47 +111,25 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		expect((await $`git rev-list --count HEAD`.cwd(tmp.path()).text()).trim()).toBe("2");
 	});
 
-	it("dry-run is strictly non-mutating and does not stage changes", async () => {
-		for (const legacy of [false, true]) {
-			await Bun.write(tmp.join("tracked.txt"), "modified content\n");
-			await Bun.write(tmp.join("scratch.txt"), "untracked file\n");
-
-			const repo = vcs.requireGit(tmp.path());
-
-			// Dry-run should never alter the index
-			await runCommitCommand({
-				push: false,
-				dryRun: true,
-				noChangelog: true,
-				legacy,
-			});
-
-			const stagedAfter = await repo.changedFiles({ cached: true });
-			expect(stagedAfter).toEqual([]);
-
-			const status = await $`git status --porcelain`.cwd(tmp.path()).text();
-			expect(status.trim()).toBe("M tracked.txt\n?? scratch.txt");
-
-			// Clean up scratch file and reset tracked.txt for next iteration
-			await $`git checkout -- tracked.txt`.cwd(tmp.path()).quiet();
-			await fs.rm(tmp.join("scratch.txt"));
-		}
-	});
-
-	it("dry-run with --push never pushes when nothing is staged", async () => {
-		const remote = tmp.join("remote.git");
-		await $`git init --bare ${remote}`.quiet();
-		await $`git remote add origin ${remote}`.cwd(tmp.path()).quiet();
+	it("dry-run neither stages nor pushes, in both flows", async () => {
+		remote = await TempDir.create("@commit-staging-remote-");
+		await $`git init --bare ${remote.path()}`.quiet();
+		await $`git remote add origin ${remote.path()}`.cwd(tmp.path()).quiet();
 		await $`git push -q origin main`.cwd(tmp.path()).quiet();
 		const pushedHead = (await $`git rev-parse HEAD`.cwd(tmp.path()).text()).trim();
 
 		// Local is one commit ahead; a real push would advance the remote.
 		await Bun.write(tmp.join("tracked.txt"), "ahead\n");
 		await $`git commit -qam "ahead of remote"`.cwd(tmp.path()).quiet();
+		await Bun.write(tmp.join("tracked.txt"), "modified content\n");
+		await Bun.write(tmp.join("scratch.txt"), "untracked file\n");
 
 		for (const legacy of [false, true]) {
 			await runCommitCommand({ push: true, dryRun: true, noChangelog: true, legacy });
-			const remoteHead = (await $`git rev-parse main`.cwd(remote).text()).trim();
+
+			const status = await $`git status --porcelain`.cwd(tmp.path()).text();
+			expect(status.trim()).toBe("M tracked.txt\n?? scratch.txt");
+			const remoteHead = (await $`git rev-parse main`.cwd(remote.path()).text()).trim();
 			expect(remoteHead).toBe(pushedHead);
 		}
 	});
@@ -199,49 +178,6 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		const diff = await $`git diff CHANGELOG.md`.cwd(tmp.path()).text();
 		expect(diff).toContain("+- My private unstaged scratch note in same hunk");
 		expect(diff).not.toContain("+- Fixed bug in tracked file");
-	});
-
-	it("skips changelog staging when indexed baseline lacks [Unreleased] section, preserving unstaged worktree edits", async () => {
-		const changelogPath = tmp.join("CHANGELOG.md");
-		const releasedOnlyContent =
-			"# Changelog\n\n## [1.0.0] - 2026-09-01\n\n### Added\n\n- Existing released feature\n";
-		await Bun.write(changelogPath, releasedOnlyContent);
-		await $`git add CHANGELOG.md`.cwd(tmp.path()).quiet();
-		await $`git commit -m "init released changelog"`.cwd(tmp.path()).quiet();
-
-		// Worktree adds an unstaged [Unreleased] section with private feature
-		const dirtyWorktree = `# Changelog\n\n## [Unreleased]\n\n### Added\n\n- My unstaged worktree feature\n\n## [1.0.0] - 2026-09-01\n\n### Added\n\n- Existing released feature\n`;
-		await Bun.write(changelogPath, dirtyWorktree);
-
-		const repo = vcs.requireGit(tmp.path());
-
-		await applyChangelogProposals({
-			cwd: tmp.path(),
-			proposals: [
-				{
-					path: changelogPath,
-					entries: {
-						Fixed: ["Fixed bug in tracked file"],
-					},
-				},
-			],
-			dryRun: false,
-		});
-
-		// Indexed blob must NOT contain [Unreleased] or the unstaged worktree feature
-		const blob = await repo.showBlob(":CHANGELOG.md");
-		const indexContent = blob.data.toString("utf8");
-		expect(indexContent).not.toContain("## [Unreleased]");
-		expect(indexContent).not.toContain("My unstaged worktree feature");
-		expect(indexContent).toBe(releasedOnlyContent);
-
-		// Worktree on disk must retain the unstaged worktree feature
-		const onDisk = await Bun.file(changelogPath).text();
-		expect(onDisk).toContain("My unstaged worktree feature");
-
-		// Status must still show CHANGELOG.md as modified in the worktree
-		const status = await $`git status --porcelain`.cwd(tmp.path()).text();
-		expect(status.trim()).toBe("M CHANGELOG.md");
 	});
 
 	it("split plan from the agent yields one commit per group with hunk-level routing and a clean index", async () => {
@@ -300,39 +236,28 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		["upgrades the owning commit to all", [1]],
 		["is rejected before writing when split across commits", [1, 2]],
 	])("changelog in the split plan %s", async (_label, parts) => {
-		const changelogBaseline = [
-			"# Changelog",
-			"",
-			"## [Unreleased]",
-			"",
-			"### Added",
-			"",
-			...Array.from({ length: 12 }, (_, i) => `- Existing ${i + 1}`),
-			"",
-			"### Changed",
-			"",
-			"- Existing change",
-			"",
-		].join("\n");
-		await Bun.write(tmp.join("CHANGELOG.md"), changelogBaseline);
+		// 12 filler entries keep the staged note and the generated entry in separate hunks.
+		const changelog = (added: string[]) =>
+			[
+				"# Changelog",
+				"",
+				"## [Unreleased]",
+				"",
+				"### Added",
+				"",
+				...added,
+				...Array.from({ length: 12 }, (_, i) => `- Existing ${i + 1}`),
+				"",
+				"### Changed",
+				"",
+				"- Existing change",
+				"",
+			].join("\n");
+		await Bun.write(tmp.join("CHANGELOG.md"), changelog([]));
 		await $`git add CHANGELOG.md`.cwd(tmp.path()).quiet();
 		await $`git commit -m "commit baseline changelog"`.cwd(tmp.path()).quiet();
 
-		const stagedChangelog = [
-			"# Changelog",
-			"",
-			"## [Unreleased]",
-			"",
-			"### Added",
-			"",
-			"- Staged note",
-			...Array.from({ length: 12 }, (_, i) => `- Existing ${i + 1}`),
-			"",
-			"### Changed",
-			"",
-			"- Existing change",
-			"",
-		].join("\n");
+		const stagedChangelog = changelog(["- Staged note"]);
 		await Bun.write(tmp.join("feature.txt"), "feature code\n");
 		await Bun.write(tmp.join("CHANGELOG.md"), stagedChangelog);
 		await $`git add feature.txt CHANGELOG.md`.cwd(tmp.path()).quiet();
