@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added three opt-in status-line formatting features for custom presets: a `profile` segment that shows the active named profile as `p:<name>` and hides for the default profile, `segmentOptions.token_total.breakdown` to render labeled traffic totals like `in:25K out:5`, and `segmentOptions.context_pct.compact` to render percentage-only context labels such as `ctx:9.1%` ([#9096](https://github.com/can1357/oh-my-pi/issues/9096))
 - Made Markdown links to existing local files and resources clickable while preserving their displayed URLs.
 - Added the `/switch <model>` command for session-only model changes from the prompt, with support for the same model selectors and completions used by `--model`; ACP `/model <model>` accepts these selectors as well.
 - Added the `worktree.cleanSource` setting to reset and clean the original checkout when creating a worktree with `/wt`.
@@ -74,11 +75,6 @@
 
 ### Added
 
-- Added three opt-in status-line formatting features for custom presets: a `profile` segment that shows the active named profile as `p:<name>` and hides for the default profile, `segmentOptions.token_total.breakdown` to render labeled traffic totals like `in:25K out:5`, and `segmentOptions.context_pct.compact` to render percentage-only context labels such as `ctx:9.1%` ([#9096](https://github.com/can1357/oh-my-pi/issues/9096))
-- Video files can be attached or read through system ffmpeg as preview grids with metadata; use `:412` or `:1h5m42s` to inspect individual frames.
-- The model picker now shows a brain-icon intelligence column and uses catalog TPS as an estimate until local performance data exists.
-- Added `report` field to scout agent definitions for detailed, non-summarized findings
-- Subagents now automatically relay turn results to the originating agent, enabling read-only agents to return data
 - Added agent reactions: a reply that opens with a lone emoji line shows the emoji as a badge on your message bubble instead of in the text; toggle the prompt invitation with the tui.reactions setting.
 - Added video attachment and reading support through ffmpeg, including preview grids with metadata and timestamp/frame selectors such as :412 and :1h5m42s.
 - Enhanced the model picker with intelligence indicators, catalog TPS estimates, provider-aware ranking, and provider-supplied badges and descriptions.
