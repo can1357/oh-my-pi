@@ -2,9 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- Made Markdown links to existing local files and resources clickable while preserving their displayed URLs.
+- Added the `/switch <model>` command for session-only model changes from the prompt, with support for the same model selectors and completions used by `--model`; ACP `/model <model>` accepts these selectors as well.
+- Added the `worktree.cleanSource` setting to reset and clean the original checkout when creating a worktree with `/wt`.
+
 ### Fixed
 
+- Fixed fallback authorization-code prompts remaining active after native OAuth callback completion.
+- Fixed a rare issue where reciprocal idle subagents could continue waking one another indefinitely.
+- Fixed `/wt` and `git worktree add` failing when the new worktree targeted the same commit as the clean source checkout.
+- Fixed omp-installed marketplace plugins and `--plugin-dir` plugins still losing their skills when the Claude plugin source was not separately enabled, completing the #10666 fix ([#10743](https://github.com/can1357/oh-my-pi/issues/10743)).
+- Fixed session accent colors rendering as bright white in terminals without truecolor support, including Terminal.app ([#10759](https://github.com/can1357/oh-my-pi/issues/10759)).
+- Rules with `enabled: false` frontmatter are now omitted during discovery, matching disabled skills ([#10769](https://github.com/can1357/oh-my-pi/issues/10769)).
 - Fixed two idle subagents exchanging a single IRC message ping-ponging forever: wake-turn relays are now tagged and never relayed back, so each automated relay is delivered exactly once instead of waking a reciprocal relay until manual cancellation.
+- Fixed large MCP tool-result previews collapsing their tail window to closing braces when an oversized output line preceded them ([#10761](https://github.com/can1357/oh-my-pi/issues/10761)).
+- Fixed `Ctrl+V` preserving CJK text from XWayland clipboard owners on Wayland instead of replacing characters with `?` ([#10762](https://github.com/can1357/oh-my-pi/issues/10762)).
+- Fixed byte-limited artifact reads reporting the displayed byte count as the read limit instead of the actual budget ([#10764](https://github.com/can1357/oh-my-pi/issues/10764)).
+- Fixed the read tool's truncation notice reporting `Showing 0 of N lines` (with `outputLines`/`outputBytes` of 0) when a single line larger than the byte budget is shown as a partial preview; it now reports the delivered partial line, e.g. `Showing line N (partial, 50.0KB of 68.4KB) of N` ([#10768](https://github.com/can1357/oh-my-pi/issues/10768)).
 
 ## [18.1.8] - 2026-09-03
 
@@ -39,9 +55,6 @@
 - Local tiny models for titles, memory, and automatic thinking classification now share on-demand workers across omp processes, reducing redundant resource usage; workers stop automatically after inactivity.
 - PI_TINY_DEVICE=metal now selects the MLX backend on macOS.
 - Updated agent reactions to trigger on the opening emoji instead of requiring a newline, consuming any following whitespace.
-### Added
-
-- Added the `worktree.cleanSource` setting to reset and clean the original checkout when creating a worktree with `/wt`.
 
 ### Fixed
 

@@ -70,6 +70,8 @@ export interface ChatTranscriptBuilderDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	/** Session-scoped resolved destinations for model-authored Markdown links. */
+	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
 }
 
@@ -378,6 +380,7 @@ export class ChatTranscriptBuilder {
 			this.deps.getMessageRenderer ? undefined : [], // placeholder for thinkingRenderers
 			this.deps.ui.imageBudget,
 			proseOnlyThinking,
+			this.deps.linkTargets,
 		);
 		assistantComponent.setImagesVisible(settings.get("terminal.showImages"));
 		assistantComponent.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
@@ -412,6 +415,7 @@ export class ChatTranscriptBuilder {
 				this.deps.getMessageRenderer ? undefined : [],
 				undefined,
 				proseOnlyThinking,
+				this.deps.linkTargets,
 			);
 			component.setImagesVisible(settings.get("terminal.showImages"));
 			component.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
