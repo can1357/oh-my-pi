@@ -153,4 +153,35 @@ describe("read tool raw range exactness", () => {
 		expect(notice).not.toMatch(/Showing 0 of/);
 		expect(notice).not.toContain("0B limit");
 	});
+
+	it("reports lastLinePartial=true for the oversized first line preview window", async () => {
+		// Regression #10774: the exceeds-limit branch delivers a byte-capped
+		// window of one line, but details.truncation.lastLinePartial stayed
+		// hardcoded false, telling SDK consumers the delivered prefix was the
+		// complete line.
+		const bigFile = path.join(testDir, "big-partial.txt");
+		const bigLine = "x".repeat(70000);
+		await Bun.write(bigFile, `first\n${bigLine}\nlast\n`);
+
+		const result = await tool.execute("call-oversized-partial", { path: `${bigFile}:raw:2-2` });
+
+		const truncation = result.details?.truncation;
+		expect(truncation).toBeDefined();
+		if (!truncation) throw new Error("expected truncation details");
+		expect(truncation.lastLinePartial).toBe(true);
+		expect(truncation.firstLineExceedsLimit).toBe(true);
+		expect(truncation.outputBytes ?? 0).toBeGreaterThan(0);
+		expect(truncation.outputBytes ?? 0).toBeLessThan(70000);
+	});
+
+	it("reports lastLinePartial=false for a fully delivered final line", async () => {
+		const result = await tool.execute("call-complete-line", { path: `${filePath}:raw:31-31` });
+
+		const truncation = result.details?.truncation;
+		// A complete in-range line read is not truncated at all; when meta is
+		// absent or untruncated the flag must never claim a partial delivery.
+		if (truncation) {
+			expect(truncation.lastLinePartial).toBeFalsy();
+		}
+	});
 });
