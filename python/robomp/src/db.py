@@ -777,6 +777,20 @@ class Database:
             )
             return cur.rowcount > 0
 
+    def list_newer_queued_events(self, *, issue_key: str, exclude_delivery: str, after_received_at: str) -> list[EventRow]:
+        """Queued events for `issue_key` received strictly after `after_received_at` (excluding one delivery)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT delivery_id, event_type, repo, issue_key, payload_json, received_at, state, attempts, last_error
+                FROM events
+                WHERE issue_key = ? AND delivery_id != ? AND state = 'queued' AND received_at > ?
+                ORDER BY received_at
+                """,
+                (issue_key, exclude_delivery, after_received_at),
+            ).fetchall()
+        return [_event_row_from_db_row(row) for row in rows]
+
     # ---- releases ----
     def upsert_release(
         self,
