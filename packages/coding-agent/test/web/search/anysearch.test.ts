@@ -110,6 +110,34 @@ describe("AnySearch provider", () => {
 		});
 	});
 
+	it("strips terminal control sequences from indexed result text before returning it", async () => {
+		const { authStorage } = createAuthStorage("existing-key");
+		const fetchMock: FetchImpl = async () =>
+			Response.json({
+				code: 0,
+				request_id: "req-sanitized",
+				data: {
+					results: [
+						{
+							title: "Safe \x1b[31mred\x1b[0m title\x1b]52;c;c2VjcmV0\x07",
+							url: "https://example.com/sanitized",
+							content: "Before\x1b]52;c;c2VjcmV0\x07After \x1b[2Jcontent",
+						},
+					],
+				},
+			});
+
+		const response = await searchAnySearch({ query: "query", authStorage, fetch: fetchMock });
+
+		expect(response.sources).toEqual([
+			{
+				title: "Safe red title",
+				url: "https://example.com/sanitized",
+				snippet: "BeforeAfter content",
+			},
+		]);
+	});
+
 	it("sends a configured key as Bearer authentication", async () => {
 		const { authStorage } = createAuthStorage("existing-key");
 		const authorizations: Array<string | null> = [];

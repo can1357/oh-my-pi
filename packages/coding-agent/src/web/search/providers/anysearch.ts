@@ -6,7 +6,7 @@
  * so raw error bodies are parsed only for the protocol and never surfaced.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import { clampNumResults } from "../utils";
@@ -115,7 +115,7 @@ async function readLimitedResponseText(
 
 function normalizeText(value: unknown, maxLength: number): string | undefined {
 	if (typeof value !== "string") return undefined;
-	const text = value.replace(/\s+/g, " ").trim();
+	const text = sanitizeText(value).replace(/\s+/g, " ").trim();
 	if (!text) return undefined;
 	return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
 }
