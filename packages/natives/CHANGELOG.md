@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Linux desktop backend choosing Wayland whenever `WAYLAND_DISPLAY` is set, even when the named socket does not exist. A stale or empty `WAYLAND_DISPLAY` no longer hides a working X11 display from `computer`.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added
