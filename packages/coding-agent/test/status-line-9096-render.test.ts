@@ -1,14 +1,16 @@
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { getActiveProfile, setProfile } from "@oh-my-pi/pi-utils";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 const originalProfile = getActiveProfile();
+let settingsState: SettingsTestState | undefined;
 
-beforeAll(async () => {
-	resetSettingsForTest();
+beforeEach(async () => {
+	settingsState = beginSettingsTest();
 	await Settings.init({ inMemory: true });
 	await initTheme();
 });
@@ -18,11 +20,8 @@ afterEach(() => {
 	// assertion failure before cleanup) can't leak into sibling tests or
 	// concurrently executing files. AGENTS.md: tests must isolate global state.
 	setProfile(originalProfile);
-});
-
-afterAll(() => {
-	setProfile(originalProfile);
-	resetSettingsForTest();
+	restoreSettingsTestState(settingsState);
+	settingsState = undefined;
 });
 
 test("renders profile plus compact metric status line", () => {
