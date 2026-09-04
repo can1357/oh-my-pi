@@ -23,6 +23,7 @@ import {
 	isAttachmentStateCurrent,
 	noteAttachmentStateChange,
 	requireRecoveryStateLoaded,
+	retryFailedStateUpdate,
 	restoreRecoverableState,
 	serializeRecoverableStateUpdate,
 	shouldRetrackAfterDetachFailure,
@@ -82,7 +83,7 @@ const RECOVERY_LOADER_IDS_KEY = "ompRecoveryLoaderIds";
 const recoverableTabIds = new Set<number>();
 const liveOwnedTabIds = new Set<number>();
 const recoveryLoaderIds = new Map<number, string>();
-let recoveryLoaderGeneration = 0;
+const recoveryLoaderGenerations = new Map<number, number>();
 let recoverableUpdateGeneration = 0;
 const recoverableStartupMutations = new Set<number>();
 let orphanSweepDeadlineMs: number | null = null;
@@ -93,7 +94,7 @@ let orphanSweepDeadlineMs: number | null = null;
 let connectionGeneration = 0;
 let orphanSweepDeadlineGeneration = 0;
 const loadRecoverableState = createRetryableLoader(() => {
-	const loaderGeneration = recoveryLoaderGeneration;
+	const loaderGenerations = new Map(recoveryLoaderGenerations);
 	return chrome.storage.session
 		.get({
 			[RECOVERABLE_TAB_IDS_KEY]: [],
@@ -117,14 +118,15 @@ const loadRecoverableState = createRetryableLoader(() => {
 			);
 			recoverableStartupMutations.clear();
 			const storedLoaderIds = stored[RECOVERY_LOADER_IDS_KEY];
-			if (
-				loaderGeneration === recoveryLoaderGeneration &&
-				storedLoaderIds &&
-				typeof storedLoaderIds === "object"
-			) {
+			if (storedLoaderIds && typeof storedLoaderIds === "object") {
 				for (const [tabId, loaderId] of Object.entries(storedLoaderIds)) {
 					const parsed = Number(tabId);
-					if (Number.isInteger(parsed) && typeof loaderId === "string")
+					if (
+						Number.isInteger(parsed) &&
+						typeof loaderId === "string" &&
+						(recoveryLoaderGenerations.get(parsed) ?? 0) ===
+							(loaderGenerations.get(parsed) ?? 0)
+					)
 						recoveryLoaderIds.set(parsed, loaderId);
 				}
 			}
@@ -145,21 +147,27 @@ let orphanSweepDeadlineUpdates: Promise<void> = initialRecoverableReady.catch(
 );
 
 async function flushRecoverableUpdates(): Promise<void> {
+	const failedUpdate = recoverableUpdates;
 	try {
-		await recoverableUpdates;
+		await failedUpdate;
 	} catch {
-		const generation = ++recoverableUpdateGeneration;
-		const retry = serializeRecoverableStateUpdate(
-			Promise.resolve(),
-			Promise.resolve(),
-			() => generation === recoverableUpdateGeneration,
-			() =>
-				chrome.storage.session.set({
-					[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
-					[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
-					[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
-				}),
+		const retry = retryFailedStateUpdate(
+			failedUpdate,
+			recoverableUpdates,
+			() => {
+				const generation = ++recoverableUpdateGeneration;
+				return serializeRecoverableStateUpdate(
+					Promise.resolve(),
+					Promise.resolve(),
+					() => generation === recoverableUpdateGeneration,
+					() => persistRecoveryState(),
+				);
+			},
 		);
+		if (retry === null) {
+			await recoverableUpdates;
+			return;
+		}
 		recoverableUpdates = retry;
 		await retry;
 	}
@@ -412,8 +420,9 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 		// trackAttachments persisted every id before handing it to the guard, so
 		// onSuspend can start these detaches without depending on a last-moment
 		// storage write that MV3 may terminate with the worker.
-		const loaderGeneration = ++recoveryLoaderGeneration;
 		for (const tabId of tabIds) {
+			noteAttachmentStateChange(recoveryLoaderGenerations, tabId);
+			const loaderGeneration = recoveryLoaderGenerations.get(tabId) ?? 0;
 			const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
 			guardDetachments.add(tabId);
 			recoveryLoaderIds.delete(tabId);
@@ -426,7 +435,7 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 						| undefined;
 					const loaderId = frameTree?.frameTree?.frame?.loaderId;
 					if (
-						loaderGeneration === recoveryLoaderGeneration &&
+						loaderGeneration === recoveryLoaderGenerations.get(tabId) &&
 						typeof loaderId === "string"
 					)
 						recoveryLoaderIds.set(tabId, loaderId);
@@ -469,7 +478,6 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 			);
 		}
 		void Promise.all([...pendingDetaches]).then(async () => {
-			if (loaderGeneration !== recoveryLoaderGeneration) return;
 			await persistRecoveryLoaderIds();
 		});
 	},
@@ -1103,22 +1111,22 @@ async function connect(): Promise<void> {
 		if (helloDeliveredSocket === socket) helloDeliveredSocket = null;
 		const captureLoaderIds = async (): Promise<void> => {
 			await loadRecoverableState();
-			const loaderGeneration = ++recoveryLoaderGeneration;
 			await Promise.all(
 				attachmentGuard.attachedTabIds().map(async (tabId) => {
+					noteAttachmentStateChange(recoveryLoaderGenerations, tabId);
+					const loaderGeneration = recoveryLoaderGenerations.get(tabId) ?? 0;
 					const frameTree = (await chrome.debugger
 						.sendCommand({ tabId }, "Page.getFrameTree")
 						.catch(() => undefined)) as
 						| { frameTree?: { frame?: { loaderId?: unknown } } }
 						| undefined;
-					if (loaderGeneration !== recoveryLoaderGeneration) return;
+					if (loaderGeneration !== recoveryLoaderGenerations.get(tabId)) return;
 					recoveryLoaderIds.delete(tabId);
 					const loaderId = frameTree?.frameTree?.frame?.loaderId;
 					if (typeof loaderId === "string")
 						recoveryLoaderIds.set(tabId, loaderId);
 				}),
 			);
-			if (loaderGeneration !== recoveryLoaderGeneration) return;
 			await persistRecoveryState();
 		};
 		const loaderUpdate = recoverableUpdates

@@ -46,6 +46,14 @@ export function serializeRecoverableStateUpdate(
 	});
 }
 
+export function retryFailedStateUpdate<T>(
+	failedUpdate: Promise<T>,
+	currentUpdate: Promise<T>,
+	createRetry: () => Promise<T>,
+): Promise<T> | null {
+	return failedUpdate === currentUpdate ? createRetry() : null;
+}
+
 export function restoreRecoverableState(
 	target: Set<number>,
 	storedIds: unknown,

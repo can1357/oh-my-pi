@@ -7,6 +7,7 @@ import {
 	isAttachmentStateCurrent,
 	noteAttachmentStateChange,
 	requireRecoveryStateLoaded,
+	retryFailedStateUpdate,
 	restoreRecoverableState,
 	serializeRecoverableStateUpdate,
 	shouldRetrackAfterDetachFailure,
@@ -24,6 +25,15 @@ describe("attachment-state", () => {
 		expect(filterFreshAttachmentState(epochs, snapshot, tabIds)).toEqual([
 			11, 33,
 		]);
+	});
+
+	it("keeps loader captures fresh across disjoint detach batches", () => {
+		const generations = new Map<number, number>();
+		const targetedCapture = snapshotAttachmentState(generations, [1]);
+
+		noteAttachmentStateChange(generations, 2);
+
+		expect(filterFreshAttachmentState(generations, targetedCapture, [1])).toEqual([1]);
 	});
 
 	it("drops every tab when the caller freshness gate is already invalid", () => {
@@ -132,6 +142,32 @@ describe("attachment-state", () => {
 			},
 		);
 		await expect(pending).rejects.toThrow("final write failed");
+	});
+
+	it("does not replace a newer ownership update when an older flush fails", async () => {
+		const failed = Promise.reject(new Error("older write failed"));
+		void failed.catch(() => {});
+		const newer = Promise.resolve();
+		let retries = 0;
+
+		expect(
+			retryFailedStateUpdate(failed, newer, async () => {
+				retries++;
+			}),
+		).toBeNull();
+		expect(retries).toBe(0);
+	});
+
+	it("retries an ownership update only while the failed write is current", async () => {
+		const failed = Promise.reject(new Error("current write failed"));
+		void failed.catch(() => {});
+		let retries = 0;
+
+		const retry = retryFailedStateUpdate(failed, failed, async () => {
+			retries++;
+		});
+		await expect(retry).resolves.toBeUndefined();
+		expect(retries).toBe(1);
 	});
 
 	it("restores only startup ids unaffected by concurrent ownership changes", () => {
