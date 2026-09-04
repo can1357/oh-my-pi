@@ -53,13 +53,14 @@ describe("SDK workpool yield schema", () => {
 		sessions.push(session);
 		const tool = session.getToolByName("yield");
 		if (!tool) throw new Error("Missing yield tool");
-		expect(Reflect.get(tool.parameters, "required")).toEqual(["result"]);
+		expect(Reflect.get(tool.parameters, "properties")).toHaveProperty("type");
+		expect(Reflect.get(tool.parameters, "properties")).not.toHaveProperty("key");
 
 		session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
 		expect(Reflect.get(tool.parameters, "required")).toEqual(["key"]);
 		const properties = Reflect.get(tool.parameters, "properties");
 		expect(properties).toHaveProperty("key");
-		expect(properties).not.toHaveProperty("result");
+		expect(properties).not.toHaveProperty("type");
 		const activeTool = session.agent.state.tools.find(candidate => candidate.name === "yield");
 		if (!activeTool) throw new Error("Missing active yield tool");
 		expect(Reflect.get(activeTool.parameters, "required")).toEqual(["key"]);
