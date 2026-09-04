@@ -52,11 +52,13 @@ describe("HTML export themes", () => {
 			outputPath: "my report.html",
 			useUserThemes: true,
 		});
-		expect(parseExportArgs('"C:\\\\Users\\\\me\\\\My Reports\\\\session.html"')).toEqual({
+		expect(parseExportArgs('"C:\\Users\\me\\My Reports\\session.html"')).toEqual({
 			outputPath: "C:\\Users\\me\\My Reports\\session.html",
 			useUserThemes: false,
 		});
 		expect(parseExportArgs('"flat.html"')).toEqual({ outputPath: "flat.html", useUserThemes: false });
 		expect(() => parseExportArgs('"one file.html" "second file.html"')).toThrow("Usage: /export [--themes] [path]");
+		expect(() => parseExportArgs('"unterminated path.html')).toThrow("Unterminated quote");
+		expect(() => parseExportArgs("'unterminated path.html")).toThrow("Unterminated quote");
 	});
 });
