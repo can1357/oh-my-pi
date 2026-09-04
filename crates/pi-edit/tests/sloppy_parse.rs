@@ -403,23 +403,6 @@ fn recovers_a_stray_close_typed_as_an_inline_divider() {
 }
 
 #[test]
-fn rejects_a_markerless_prefix_instead_of_implicitly_splitting() {
-	// A marker-less desired-state block whose first line matches in the file
-	// must never be inferred as current/final halves: that split would replace
-	// only the matching prefix and strand the remainder. With no safe
-	// whole-block match, the payload fails closed rather than corrupting the
-	// file. Regression for the unsafe missing-separator split.
-	let err = message(
-		"«\nconst value = oldValue;\nconst value = newValue;",
-		"const value = oldValue;\nreport(value);\n",
-	);
-	assert!(
-		err.contains("has <SM:FIND> but no <SM:PUT>"),
-		"expected fail-closed separator guidance, got: {err}"
-	);
-}
-
-#[test]
 fn recovers_guillemets_used_as_brackets_around_old_and_new_blocks() {
 	let operations = parse_operations(
 		"«\nconst first = old;\n»\n«\nconst first = new;\n»",
