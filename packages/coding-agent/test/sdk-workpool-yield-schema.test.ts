@@ -74,7 +74,7 @@ describe("SDK workpool yield schema", () => {
 			agentDir: registryDir,
 			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({}),
+			settings: Settings.isolated({ inlineToolDescriptors: "on" }),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
 			skills: [],

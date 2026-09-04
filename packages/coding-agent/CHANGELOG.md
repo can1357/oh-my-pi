@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed subagent startup crash when evaluating `yield` tool descriptors before session initialization with inlined tool descriptors enabled.
+
 ## [18.1.10] - 2026-09-04
 
 ### Changed
