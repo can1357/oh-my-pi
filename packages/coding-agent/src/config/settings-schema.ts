@@ -1241,6 +1241,18 @@ export const SETTINGS_SCHEMA = {
 				"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
 		},
 	},
+
+	"tui.voiceOrbs": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Thinking Orb Voice UI",
+			description:
+				"Replace the default push-to-talk mic cursor and /live spectrum with animated thinking-orbs indicators. Off by default.",
+		},
+	},
 	"tui.tight": {
 		type: "boolean",
 		default: false,

@@ -4,6 +4,8 @@ node_modules
 
 # Build output
 dist/
+!vendor/thinking-orbs/dist/
+!vendor/thinking-orbs/dist/**
 packages/*/dist/
 packages/*/dist-chrome/
 packages/*/dist-firefox/

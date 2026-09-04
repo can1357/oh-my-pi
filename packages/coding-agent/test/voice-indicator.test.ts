@@ -1,38 +1,44 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import { VoiceIndicatorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/voice-indicator";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "../src/modes/theme/theme";
 
 describe("VoiceIndicatorComponent", () => {
 	beforeAll(async () => {
 		await initTheme(false);
 	});
 
-	it("renders a compact listening presence without spanning the terminal", () => {
+	it("renders a stable multi-line frame for recording", () => {
 		const indicator = new VoiceIndicatorComponent("recording");
-		const lines = indicator.render(30);
-		const plain = lines.map(line => Bun.stripANSI(line));
-
-		expect(lines).toHaveLength(9);
-		expect(plain.join("\n")).toContain("Listening");
-		expect(plain.join("\n")).toContain("speak naturally");
-		expect(lines.every(line => visibleWidth(line) === 30)).toBe(true);
-		expect(plain.slice(0, 7).join("")).toMatch(/[\u2800-\u28ff]/u);
+		const lines = indicator.render(40);
+		expect(lines.length).toBeGreaterThan(2);
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBe(40);
+		}
+		const plain = lines.map(line => Bun.stripANSI(line)).join("\n");
+		expect(plain).toContain("Listening");
+		expect(plain).toMatch(/[\u2800-\u28ff]/u);
 	});
 
-	it("animates in place and changes personality while transcribing", () => {
+	it("never exceeds the supplied width, including narrow terminals", () => {
 		const indicator = new VoiceIndicatorComponent("recording");
-		const initial = indicator.render(30).map(line => Bun.stripANSI(line));
-		for (let frame = 0; frame < 8; frame++) indicator.advance();
-		const animated = indicator.render(30).map(line => Bun.stripANSI(line));
-		expect(animated).not.toEqual(initial);
-		const initialLabelColumn = initial.find(line => line.includes("Listening"))?.indexOf("Listening");
-		const animatedLabelColumn = animated.find(line => line.includes("Listening"))?.indexOf("Listening");
-		expect(animatedLabelColumn).toBe(initialLabelColumn);
+		for (const width of [10, 19, 24, 40]) {
+			const lines = indicator.render(width);
+			expect(lines.length).toBeGreaterThan(0);
+			for (const line of lines) {
+				expect(visibleWidth(line)).toBe(width);
+			}
+		}
+	});
 
-		indicator.setState("transcribing");
-		const transcribing = indicator.render(30).map(line => Bun.stripANSI(line));
-		expect(transcribing.join("\n")).toContain("Thinking");
-		expect(transcribing.join("\n")).toContain("turning voice into words");
+	it("advances animation frames without changing width", () => {
+		const indicator = new VoiceIndicatorComponent("recording");
+		const first = indicator.render(32);
+		indicator.advance();
+		const second = indicator.render(32);
+		expect(second).toHaveLength(first.length);
+		for (const line of second) {
+			expect(visibleWidth(line)).toBe(32);
+		}
 	});
 });

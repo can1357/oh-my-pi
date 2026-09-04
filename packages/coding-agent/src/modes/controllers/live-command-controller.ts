@@ -100,6 +100,7 @@ export class LiveCommandController {
 			},
 			onToggleMute: () => this.#session?.toggleMute(),
 			stopKeys: this.#ctx.keybindings.getKeys("app.live.toggle"),
+			style: this.#ctx.settings.get("tui.voiceOrbs") ? "orbs" : "spectrum",
 		});
 		this.#mountVisualizer(visualizer);
 

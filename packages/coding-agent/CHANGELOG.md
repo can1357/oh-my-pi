@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added opt-in `tui.voiceOrbs` setting for animated thinking-orbs push-to-talk and `/live` indicators; classic mic cursor and spectrum remain the default.
 - Added the `/trace` slash command to display session trace URLs in the stats dashboard.
 - Added support for OpenAI-compatible gateways whose model-list endpoint is rooted at a versioned URL, with an `injectV1: false` discovery option to request `{baseUrl}/models` directly.
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics.

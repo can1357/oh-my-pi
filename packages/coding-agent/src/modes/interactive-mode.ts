@@ -44,6 +44,7 @@ import {
 	adjustHsv,
 	formatNumber,
 	getProjectDir,
+	hsvToRgb,
 	isEnoent,
 	logger,
 	postmortem,
@@ -822,8 +823,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#sttController: STTController | undefined;
 	#voiceAnimationInterval: NodeJS.Timeout | undefined;
 	#voiceIndicator: VoiceIndicatorComponent | undefined;
-	#voicePreviousShowHardwareCursor: boolean | undefined;
-	#voicePreviousUseTerminalCursor: boolean | undefined;
+	#voiceHue = 0;
+	#voicePreviousShowHardwareCursor: boolean | null = null;
+	#voicePreviousUseTerminalCursor: boolean | null = null;
 	#resizeHandler?: () => void;
 	#observerRegistry: SessionObserverRegistry;
 	#eventBus?: EventBus;
@@ -4689,7 +4691,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
 		}
-		this.#cleanupVoiceIndicator();
+		this.#cleanupVoiceUi();
 		// Stop the shared tool-spinner ticker: a live block missed by per-component
 		// stopAnimation would otherwise keep an 80ms interval pinning the process.
 		stopSharedSpinnerTicker();
@@ -5485,10 +5487,23 @@ export class InteractiveMode implements InteractiveModeContext {
 				// Duck assistant speech while the user is talking (push-to-talk); restore after.
 				if (state === "recording") vocalizer.duck();
 				else vocalizer.unduck();
-				if (state === "recording" || state === "transcribing") {
-					this.#showVoiceIndicator(state);
+				if (this.settings.get("tui.voiceOrbs")) {
+					if (state === "recording" || state === "transcribing") {
+						this.#showVoiceIndicator(state);
+					} else {
+						this.#cleanupVoiceUi();
+					}
+				} else if (state === "recording") {
+					this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
+					this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
+					this.ui.setShowHardwareCursor(false);
+					this.editor.setUseTerminalCursor(false);
+					this.#startMicAnimation();
+				} else if (state === "transcribing") {
+					this.#stopMicAnimation();
+					this.#setMicCursor({ r: 200, g: 200, b: 200 });
 				} else {
-					this.#cleanupVoiceIndicator();
+					this.#cleanupVoiceUi();
 				}
 				this.ui.requestRender();
 			},
@@ -5528,7 +5543,38 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestComponentRender(this.#voiceIndicator);
 	}
 
-	#cleanupVoiceIndicator(): void {
+	#setMicCursor(color: { r: number; g: number; b: number }): void {
+		this.editor.cursorOverride = `\x1b[38;2;${color.r};${color.g};${color.b}m${theme.icon.mic}\x1b[0m`;
+		// Theme symbols can be wide (for example, 🎤), so measure the rendered override.
+		this.editor.cursorOverrideWidth = visibleWidth(this.editor.cursorOverride);
+	}
+
+	#updateMicIcon(): void {
+		const { r, g, b } = hsvToRgb({ h: this.#voiceHue, s: 0.9, v: 1.0 });
+		this.#setMicCursor({ r, g, b });
+	}
+
+	#startMicAnimation(): void {
+		if (this.#voiceAnimationInterval) return;
+		this.#voiceHue = 0;
+		this.#updateMicIcon();
+		this.#voiceAnimationInterval = setInterval(() => {
+			this.#voiceHue = (this.#voiceHue + 8) % 360;
+			this.#updateMicIcon();
+			// Component-scoped: the hue sweep only recolors the editor's cursor
+			// glyph, so the transcript subtree is reused per animation frame.
+			this.ui.requestComponentRender(this.editor);
+		}, 60);
+	}
+
+	#stopMicAnimation(): void {
+		if (this.#voiceAnimationInterval) {
+			clearInterval(this.#voiceAnimationInterval);
+			this.#voiceAnimationInterval = undefined;
+		}
+	}
+
+	#cleanupVoiceUi(): void {
 		if (this.#voiceAnimationInterval) {
 			clearInterval(this.#voiceAnimationInterval);
 			this.#voiceAnimationInterval = undefined;
@@ -5538,13 +5584,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editorContainer.addChild(this.editor);
 		}
 		this.#voiceIndicator = undefined;
-		if (this.#voicePreviousShowHardwareCursor !== undefined) {
+		this.editor.cursorOverride = undefined;
+		this.editor.cursorOverrideWidth = undefined;
+		if (this.#voicePreviousShowHardwareCursor !== null) {
 			this.ui.setShowHardwareCursor(this.#voicePreviousShowHardwareCursor);
-			this.#voicePreviousShowHardwareCursor = undefined;
+			this.#voicePreviousShowHardwareCursor = null;
 		}
-		if (this.#voicePreviousUseTerminalCursor !== undefined) {
+		if (this.#voicePreviousUseTerminalCursor !== null) {
 			this.editor.setUseTerminalCursor(this.#voicePreviousUseTerminalCursor);
-			this.#voicePreviousUseTerminalCursor = undefined;
+			this.#voicePreviousUseTerminalCursor = null;
 		}
 	}
 
