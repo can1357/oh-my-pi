@@ -11,6 +11,7 @@
 ### Fixed
 - Fixed filter/attribute (CRLF) normalization in native staging.
 - Fixed index writes serialized under `.git/index.lock`.
+- Fixed hunk application (`stageHunks`, `commitSplit`, `applyPatch`) failing with "hunk does not apply" when an earlier hunk in the same file shifted line numbers; hunks are now located with `git apply`'s drift search and EOF/BOF pinning.
 ## [18.1.9] - 2026-09-04
 
 ### Added

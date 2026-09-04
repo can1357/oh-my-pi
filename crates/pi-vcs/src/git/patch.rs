@@ -940,24 +940,80 @@ fn apply_file_bytes(
 	let mut offset: isize = 0;
 	for hunk in &patch.hunks {
 		let (start, count, replacement, expected) = hunk_sides(hunk, reverse);
-		let position = if count == 0 {
-			start as isize
+		let anchor = if count == 0 {
+			start
 		} else {
-			start.saturating_sub(1) as isize
-		} + offset;
-		if position < 0 {
-			return Err(ApplyFailure::Context("hunk position precedes file".into()));
-		}
-		let position = position as usize;
-		if position.saturating_add(expected.len()) > lines.len()
-			|| lines[position..position + expected.len()] != expected
-		{
+			start.saturating_sub(1)
+		} as isize;
+		let preferred = anchor + offset;
+		let position = if expected.is_empty() {
+			// Pure insertion with no context (`-U0` or empty file): nothing to
+			// search for, the anchor must simply be inside the file.
+			usize::try_from(preferred)
+				.ok()
+				.filter(|position| *position <= lines.len())
+		} else {
+			locate_hunk(&lines, &expected, preferred, start <= 1, trailing_context(hunk) == 0)
+		};
+		let Some(position) = position else {
 			return Err(ApplyFailure::Context(format!("hunk at line {start} does not apply")));
-		}
+		};
 		lines.splice(position..position + expected.len(), replacement.clone());
-		offset += replacement.len() as isize - expected.len() as isize;
+		// Carry both the drift we just absorbed and the size change forward so
+		// later hunks start their search from where git would.
+		offset = position as isize - anchor + replacement.len() as isize - expected.len() as isize;
 	}
 	Ok(lines.concat())
+}
+
+/// Number of trailing context lines in `hunk`.
+fn trailing_context(hunk: &Hunk) -> usize {
+	hunk
+		.lines
+		.iter()
+		.rev()
+		.take_while(|line| line.kind == b' ')
+		.count()
+}
+
+/// Find where `expected` occurs in `lines`, mirroring `git apply`'s
+/// `find_pos`: try `preferred` first, then fan out one line at a time in both
+/// directions so a hunk still applies after earlier edits shifted the file.
+/// A hunk that starts at the top of the old file or has no trailing context is
+/// pinned to the beginning / end of the file respectively, exactly as git does.
+fn locate_hunk(
+	lines: &[Vec<u8>],
+	expected: &[Vec<u8>],
+	preferred: isize,
+	match_beginning: bool,
+	match_end: bool,
+) -> Option<usize> {
+	let last = lines.len().checked_sub(expected.len())?;
+	let matches_at = |position: usize| lines[position..position + expected.len()] == *expected;
+	if match_beginning || match_end {
+		let pinned = match (match_beginning, match_end) {
+			(true, true) if last != 0 => return None,
+			(true, _) => 0,
+			(false, _) => last,
+		};
+		return matches_at(pinned).then_some(pinned);
+	}
+	let preferred = preferred.clamp(0, last as isize) as usize;
+	if matches_at(preferred) {
+		return Some(preferred);
+	}
+	for distance in 1..=last.max(preferred) {
+		if let Some(before) = preferred.checked_sub(distance)
+			&& matches_at(before)
+		{
+			return Some(before);
+		}
+		let after = preferred + distance;
+		if after <= last && matches_at(after) {
+			return Some(after);
+		}
+	}
+	None
 }
 
 fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Vec<u8>>, Vec<Vec<u8>>) {
@@ -1710,7 +1766,7 @@ mod tests {
 
 	use super::*;
 	use crate::{
-		test_support::{git, git_with_index, init_repo},
+		test_support::{git, git_expecting, git_with_index, init_repo},
 		types::SplitCommitSpec,
 	};
 
@@ -1922,17 +1978,18 @@ mod tests {
 	}
 
 	#[test]
-	fn patch_stage_hunks_selects_indices_and_lines() {
+	fn patch_stage_hunks_selects_indices_and_applies_stale_diff_after_drift() {
 		let original = (1..=20).fold(String::new(), |mut out, line| {
 			use std::fmt::Write as _;
 			let _ = writeln!(out, "line {line}");
 			out
 		});
 		let temp = init(&[("file.txt", original.as_bytes())]);
+		// Hunk 1 grows the file by two lines; hunk 2 keeps its HEAD numbering.
 		let changed = original
-			.replace("line 2\n", "LINE TWO\n")
+			.replace("line 2\n", "LINE TWO\nLINE TWO B\nLINE TWO C\n")
 			.replace("line 18\n", "LINE EIGHTEEN\n");
-		fs::write(temp.path().join("file.txt"), changed).expect("edit");
+		fs::write(temp.path().join("file.txt"), &changed).expect("edit");
 		let diff = git(temp.path(), &["diff", "--unified=1"]);
 		let repository = repo(temp.path());
 		repository
@@ -1942,13 +1999,46 @@ mod tests {
 			)
 			.expect("stage first hunk");
 		let staged = git(temp.path(), &["show", ":file.txt"]);
-		assert!(staged.contains("LINE TWO"));
+		assert!(staged.contains("LINE TWO C"));
 		assert!(staged.contains("line 18"));
 		assert!(!staged.contains("LINE EIGHTEEN"));
+
+		// Same diff, second hunk: the index already carries hunk 1, so hunk 2's
+		// context sits two lines below where the diff says. git apply tolerates
+		// this drift; so must we.
+		repository
+			.stage_hunks(
+				&[HunkSelection { path: "file.txt".into(), hunks: HunkSpec::Indices(vec![2]) }],
+				Some(&diff),
+			)
+			.expect("stage second hunk from stale diff");
+		assert_eq!(git(temp.path(), &["show", ":file.txt"]), changed);
+
+		// Drift search must not rescue a hunk git rejects: one with no trailing
+		// context is pinned to EOF, even when its context still matches mid-file.
+		let temp = init(&[("tail.txt", b"a\nb\nc\nd\ne\n")]);
+		fs::write(temp.path().join("tail.txt"), b"a\nb\nc\nd\ne\nf\n").expect("append");
+		let tail_diff = git(temp.path(), &["diff"]);
+		fs::write(temp.path().join("tail.txt"), b"a\nb\nc\nd\ne\nx\ny\nz\n").expect("grow");
+		git(temp.path(), &["add", "tail.txt"]);
+		let patch_file = temp.path().join("tail.patch");
+		fs::write(&patch_file, &tail_diff).expect("write patch");
+		git_expecting(
+			temp.path(),
+			&["apply", "--check", "--cached", patch_file.to_str().unwrap()],
+			1,
+		);
+		let repository = repo(temp.path());
+		let ours = repository
+			.can_apply_patch(&tail_diff, &ApplyOptions { cached: true, ..ApplyOptions::default() })
+			.expect("check");
+		assert!(!ours, "EOF-pinned hunk must not apply once the file grew");
 	}
 
 	#[test]
 	fn commit_split_creates_chained_commits_without_touching_index() {
+		// Hunk 1 grows the file by two lines so hunk 2 (numbered against HEAD)
+		// only applies to the intermediate tree if the applier tolerates drift.
 		let split_base = concat!(
 			"line1\n",
 			"line2\n",
@@ -1972,7 +2062,9 @@ mod tests {
 			"line1\n",
 			"line2\n",
 			"line3\n",
-			"part1_new\n",
+			"part1_new_a\n",
+			"part1_new_b\n",
+			"part1_new_c\n",
 			"line4\n",
 			"line5\n",
 			"line6\n",
@@ -2036,6 +2128,10 @@ mod tests {
 		assert!(show0.contains("new.txt"), "{show0}");
 		assert!(show0.contains("split.txt"), "{show0}");
 		assert!(!show0.contains("tracked.txt"), "{show0}");
+		// Intermediate tree carries exactly hunk 1; hunk 2 lands on the drifted file.
+		let split_mid = split_new.replace("part2_new", "part2_old");
+		assert_eq!(git(temp.path(), &["show", &format!("{}:split.txt", commits[0])]), split_mid);
+		assert_eq!(git(temp.path(), &["show", &format!("{}:split.txt", commits[1])]), split_new);
 
 		// Commit 2 has only tracked.txt and split.txt
 		let show1 = git(temp.path(), &["show", "--stat", "--format=%s", &commits[1]]);
