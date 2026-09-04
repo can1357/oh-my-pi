@@ -1707,6 +1707,20 @@ describe("ModelRegistry", () => {
 			expect(authStorage.accountSelection).toBe("balanced");
 		});
 
+		test("falls back to the initialised Settings singleton when constructed without settings", async () => {
+			// Regression: `omp models --config fixed.yml` (and bench/commit/cleanse
+			// runtimes) build the registry without passing settings and keep routing
+			// by whatever discovery read from config.yml.
+			await Settings.init({
+				inMemory: true,
+				overrides: { "auth.accountSelection": "fixed" },
+			});
+
+			new ModelRegistry(authStorage, modelsJsonPath);
+
+			expect(authStorage.accountSelection).toBe("fixed");
+		});
+
 		test("refresh skips discovery probes for disabled local providers", async () => {
 			await Settings.init({
 				inMemory: true,

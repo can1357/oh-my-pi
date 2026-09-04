@@ -108,6 +108,7 @@ import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
 import {
 	onAppendOnlyModeChanged,
+	onAccountSelectionChanged,
 	onCodeModeChanged,
 	onExtendedContextChanged,
 	onModelRolesChanged,
@@ -577,6 +578,7 @@ export class AgentSession {
 	#unsubscribeAppendOnly?: () => void;
 	#unsubscribeModelRoles?: () => void;
 	#unsubscribeExtendedContext?: () => void;
+	#unsubscribeAccountSelection?: () => void;
 	#unsubscribeCodeMode?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
@@ -1820,6 +1822,11 @@ export class AgentSession {
 		// restores) premium long-context windows, and the live model object must
 		// follow so compaction thresholds and context display react immediately.
 		this.#unsubscribeExtendedContext = onExtendedContextChanged(() => void this.#reapplyExtendedContextPolicy());
+		// Re-apply the account-selection policy when it is changed at runtime
+		// (`/settings`, `omp config set`): the registry only applied it at construction.
+		this.#unsubscribeAccountSelection = onAccountSelectionChanged(() =>
+			this.#modelRegistry.authStorage.setAccountSelection(this.settings.get("auth.accountSelection")),
+		);
 		this.#unsubscribeCodeMode = onCodeModeChanged(() => {
 			void this.#tools.reconcileCodeMode().catch(error => {
 				logger.warn("Code Mode reconcile after setting change failed", { error: String(error) });
@@ -4552,6 +4559,10 @@ export class AgentSession {
 		if (this.#unsubscribeExtendedContext) {
 			this.#unsubscribeExtendedContext();
 			this.#unsubscribeExtendedContext = undefined;
+		}
+		if (this.#unsubscribeAccountSelection) {
+			this.#unsubscribeAccountSelection();
+			this.#unsubscribeAccountSelection = undefined;
 		}
 		if (this.#unsubscribeCodeMode) {
 			this.#unsubscribeCodeMode();

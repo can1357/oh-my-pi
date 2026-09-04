@@ -141,6 +141,64 @@ describe("credential pins", () => {
 		expect(active?.orgId).toBe("org-2");
 	});
 
+	test("an explicit pin is persisted as pinned and replayed as a user pin under fixed selection", async () => {
+		// Regression: `/session pin` is recorded like automatic routing, so a broker
+		// resume replays it as a restore and fixed selection snaps back to account a.
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		manager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
+		manager.appendMessage(assistantMessage("anthropic", Date.now()));
+		const accountB = storage
+			.listOAuthAccounts("anthropic", sessionId)
+			.find(account => account.accountId === "account-b");
+		expect(storage.pinSessionOAuthAccount("anthropic", sessionId, accountB!.credentialId)).toBe(true);
+		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		expect(manager.getCredentialPins().get("anthropic")?.pinned).toBe(true);
+		await manager.flush();
+
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("expected a session file");
+		const reopened = await SessionManager.open(file);
+		expect(reopened.getCredentialPins().get("anthropic")?.pinned).toBe(true);
+
+		// Fresh process with fixed selection and no sticky (broker-mode resume).
+		const freshStore = new SqliteAuthCredentialStore(new Database(":memory:"));
+		freshStore.saveOAuth("anthropic", mintOAuthCredential("a"));
+		freshStore.saveOAuth("anthropic", mintOAuthCredential("b"));
+		const fixedStorage = new AuthStorage(freshStore, { accountSelection: "fixed" });
+		await fixedStorage.reload();
+		seedCredentialPins(fixedStorage, reopened, sessionId);
+
+		// Replayed as a user pin: fixed selection keeps honouring it (pi-ai's
+		// account-selection tests cover the resolve semantics of a user pin).
+		expect(fixedStorage.listOAuthAccounts("anthropic", sessionId).find(account => account.active)?.accountId).toBe(
+			"account-b",
+		);
+		expect(fixedStorage.isSessionOAuthAccountPinned("anthropic", sessionId)).toBe(true);
+	});
+
+	test("an automatic pin is replayed as a restore and yields to fixed selection", async () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const hash = credentialPinHash("anthropic", { accountId: "account-b", email: "b@example.com" });
+		manager.appendCredentialPin("anthropic", hash!);
+		expect(manager.getCredentialPins().get("anthropic")?.pinned).toBe(false);
+
+		const freshStore = new SqliteAuthCredentialStore(new Database(":memory:"));
+		freshStore.saveOAuth("anthropic", mintOAuthCredential("a"));
+		freshStore.saveOAuth("anthropic", mintOAuthCredential("b"));
+		const fixedStorage = new AuthStorage(freshStore, { accountSelection: "fixed" });
+		await fixedStorage.reload();
+		seedCredentialPins(fixedStorage, manager, sessionId);
+
+		// Replayed as a restore: the sticky exists for warm-cache reuse under
+		// balanced, but fixed selection may route back to the first account.
+		expect(fixedStorage.listOAuthAccounts("anthropic", sessionId).find(account => account.active)?.accountId).toBe(
+			"account-b",
+		);
+		expect(fixedStorage.isSessionOAuthAccountPinned("anthropic", sessionId)).toBe(false);
+	});
+
 	test("seeding never clobbers a live sticky from the same process", () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		const sessionId = manager.getSessionId();

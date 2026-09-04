@@ -9,6 +9,7 @@ import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stre
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	__physicalTargetSegmentsForTesting,
+	onAccountSelectionChanged,
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
 	onModelRolesChanged,
@@ -1155,6 +1156,28 @@ describe("Settings", () => {
 			expect(Settings.isolated({ inlineToolDescriptors: true }).get("inlineToolDescriptors")).toBe("on");
 			expect(Settings.isolated({ inlineToolDescriptors: false }).get("inlineToolDescriptors")).toBe("off");
 			expect(Settings.isolated().get("inlineToolDescriptors")).toBe("auto");
+		});
+	});
+
+	describe("auth.accountSelection hooks", () => {
+		it("notifies subscribers when the policy is set at runtime", () => {
+			// Regression: switching Balanced -> Fixed in /settings leaves the live
+			// AuthStorage balanced until the next process start.
+			const isolated = Settings.isolated();
+			const values: string[] = [];
+			const unsubscribe = onAccountSelectionChanged(() => {
+				values.push(isolated.get("auth.accountSelection"));
+			});
+
+			try {
+				isolated.set("auth.accountSelection", "fixed");
+				expect(values).toEqual(["fixed"]);
+
+				isolated.set("auth.accountSelection", "balanced");
+				expect(values).toEqual(["fixed", "balanced"]);
+			} finally {
+				unsubscribe();
+			}
 		});
 	});
 

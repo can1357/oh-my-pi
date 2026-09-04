@@ -5,6 +5,7 @@
 
 export type {
 	ApiKeyCredential,
+	AuthAccountSelection,
 	AuthCredential,
 	AuthCredentialEntry,
 	AuthCredentialStore,

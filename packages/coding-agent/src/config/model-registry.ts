@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { ApiKeyResolver, FetchImpl, UsageProvider } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolver, AuthAccountSelection, FetchImpl, UsageProvider } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
@@ -182,6 +182,18 @@ function getDisabledProviderIdsFromSettings(settingsInstance?: Settings): Set<st
 		return new Set((settingsInstance ?? settings).get("disabledProviders"));
 	} catch {
 		return new Set();
+	}
+}
+
+/**
+ * Effective `auth.accountSelection`, or undefined when no settings source is
+ * available (SDK embedding, early boot) so discovery's `config.yml` value stands.
+ */
+function getAccountSelectionFromSettings(settingsInstance?: Settings): AuthAccountSelection | undefined {
+	try {
+		return (settingsInstance ?? settings).get("auth.accountSelection");
+	} catch {
+		return undefined;
 	}
 }
 
@@ -370,9 +382,11 @@ export class ModelRegistry {
 		this.#settings = options?.settings;
 		// The settings layer (config overlays, project settings) decides the
 		// account-selection policy; discovery only saw `<agentDir>/config.yml`.
-		// Applied here so every boot path that hands the registry its settings
-		// (runRootCommand, createAgentSession) routes credentials the same way.
-		if (options?.settings) this.authStorage.setAccountSelection(options.settings.get("auth.accountSelection"));
+		// Applied here so every boot path — explicit settings (runRootCommand,
+		// createAgentSession) or the initialised singleton (models/bench/commit
+		// runtimes) — routes credentials the same way.
+		const accountSelection = getAccountSelectionFromSettings(options?.settings);
+		if (accountSelection) this.authStorage.setAccountSelection(accountSelection);
 		this.#fetch =
 			options?.fetch ??
 			(isBunTestRuntime()

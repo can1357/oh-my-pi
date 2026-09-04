@@ -3088,6 +3088,7 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
 	"hindsight.scoping": () => hindsightScopeSignal.fire(),
 	extendedContext: () => extendedContextSignal.fire(),
+	"auth.accountSelection": () => accountSelectionSignal.fire(),
 	"worktree.base": value => {
 		const dir = typeof value === "string" && value.trim() ? value : undefined;
 		// Always call so an unset/empty value clears a previously-applied override.
@@ -3144,6 +3145,13 @@ const extendedContextSignal = new SettingSignal("extendedContext");
  * Returns an unsubscribe function.
  */
 export const onExtendedContextChanged = (cb: () => void) => extendedContextSignal.on(cb);
+
+/**
+ * Fires when the effective `auth.accountSelection` changes so live sessions can
+ * re-apply the policy to their `AuthStorage` without a restart.
+ */
+const accountSelectionSignal = new SettingSignal("auth.accountSelection");
+export const onAccountSelectionChanged = (cb: () => void) => accountSelectionSignal.on(cb);
 
 /** Fires when `statusLine.sessionAccent` changes at runtime. */
 const statusLineSessionAccentSignal = new SettingSignal("statusLine.sessionAccent");

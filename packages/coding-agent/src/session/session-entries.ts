@@ -226,6 +226,8 @@ export interface CredentialPinEntry extends SessionEntryBase {
 	provider: string;
 	/** `credentialPinHash()` of the serving account's identity + scope tuple. */
 	hash: string;
+	/** True when the account was chosen by an explicit `/session pin` rather than automatic routing. */
+	pinned?: boolean;
 }
 
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */

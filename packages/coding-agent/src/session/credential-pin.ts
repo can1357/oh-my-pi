@@ -55,10 +55,10 @@ export function credentialPinHash(provider: string, identity: CredentialPinIdent
 
 /**
  * Record the account that served the latest assistant turn for `provider`.
- * Appends a `credential_pin` entry only when the account differs from the
- * branch's latest pin, so steady-state sessions add a single entry; the
- * effective last-use time is derived from later assistant turns on read
- * (see `SessionManager.getCredentialPins`).
+ * Appends a `credential_pin` entry only when the account (or its explicit-pin
+ * origin) differs from the branch's latest pin, so steady-state sessions add a
+ * single entry; the effective last-use time is derived from later assistant
+ * turns on read (see `SessionManager.getCredentialPins`).
  */
 export function recordCredentialPin(
 	authStorage: AuthStorage,
@@ -69,8 +69,11 @@ export function recordCredentialPin(
 	const identity = authStorage.getOAuthAccountIdentity(provider, sessionId);
 	if (!identity) return;
 	const hash = credentialPinHash(provider, identity);
-	if (!hash || sessionManager.getCredentialPins().get(provider)?.hash === hash) return;
-	sessionManager.appendCredentialPin(provider, hash);
+	if (!hash) return;
+	const pinned = authStorage.isSessionOAuthAccountPinned(provider, sessionId);
+	const latest = sessionManager.getCredentialPins().get(provider);
+	if (latest?.hash === hash && latest.pinned === pinned) return;
+	sessionManager.appendCredentialPin(provider, hash, { pinned });
 }
 
 /**
@@ -78,7 +81,9 @@ export function recordCredentialPin(
  * session stickiness. No-op per provider when the account is gone (logged out)
  * or when a live sticky already exists (same-process branch/session switches
  * must not clobber fresher routing). Seeds with the session's effective
- * last-use time so stale resumes still fall through to usage ranking.
+ * last-use time so stale resumes still fall through to usage ranking. An
+ * explicit `/session pin` is replayed as a user pin so it keeps overriding
+ * `fixed` account selection; automatic pins are replayed as restores.
  */
 export function seedCredentialPins(authStorage: AuthStorage, sessionManager: SessionManager, sessionId: string): void {
 	for (const [provider, pin] of sessionManager.getCredentialPins()) {
@@ -88,7 +93,7 @@ export function seedCredentialPins(authStorage: AuthStorage, sessionManager: Ses
 		if (!match) continue;
 		authStorage.pinSessionOAuthAccount(provider, sessionId, match.credentialId, {
 			lastUsedAtMs: pin.lastUsedAt,
-			origin: "restore",
+			origin: pin.pinned ? "user" : "restore",
 		});
 	}
 }

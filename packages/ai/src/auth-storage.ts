@@ -3022,6 +3022,16 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Whether `sessionId`'s current OAuth account was chosen by an explicit pin
+	 * (`pinSessionOAuthAccount` with `origin: "user"`) rather than automatic
+	 * routing. Lets session persistence replay the pin with the same origin.
+	 */
+	isSessionOAuthAccountPinned(provider: string, sessionId: string | undefined): boolean {
+		const sessionPref = this.#getSessionCredential(provider, sessionId);
+		return sessionPref?.type === "oauth" && sessionPref.pinned === true;
+	}
+
+	/**
 	 * Get the OAuth account identity for a provider, preferring the credential that
 	 * is session-sticky for `sessionId`. This is a read-only lookup for display and
 	 * metadata paths; it does not refresh tokens, rank usage, or advance selection.
