@@ -29,7 +29,6 @@ export interface GenerateGitCommitOptions {
 	signal?: AbortSignal;
 }
 
-/** Conventional commit form values plus validation metadata. */
 export interface GeneratedGitCommit {
 	commit: ConventionalCommit;
 	validationError: string | null;

@@ -63,7 +63,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 			await pushOrAbort(cwd);
 			return { usedFallback: false };
 		}
-		process.stderr.write("No changes to commit.\n");
+		process.stderr.write(args.dryRun ? "No staged changes; --dry-run does not stage.\n" : "No changes to commit.\n");
 		return { usedFallback: false };
 	}
 
@@ -277,13 +277,9 @@ async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionCon
 	if (ctx.push) await pushOrAbort(ctx.cwd);
 }
 
-/** Exported and `confirm` injectable for tests; production goes through `runAgenticCommit`. */
-export async function runSplitCommit(
+async function runSplitCommit(
 	plan: SplitCommitPlan,
-	ctx: CommitExecutionContext & {
-		changelogProposal?: ChangelogProposal;
-		confirm?: (plan: SplitCommitPlan) => Promise<boolean>;
-	},
+	ctx: CommitExecutionContext & { changelogProposal?: ChangelogProposal },
 ): Promise<void> {
 	const repo = vcs.requireGit(ctx.cwd);
 	if (plan.warnings.length > 0) {
@@ -302,10 +298,7 @@ export async function runSplitCommit(
 		throw new Error(order.error);
 	}
 
-	const confirmed =
-		ctx.dryRun ||
-		(await (ctx.confirm ? ctx.confirm(plan) : confirmSplitCommitPlan(plan, ctx.changelogProposal !== undefined)));
-	if (!confirmed) {
+	if (!ctx.dryRun && !(await confirmSplitCommitPlan(plan, ctx.changelogProposal !== undefined))) {
 		process.stdout.write("Split commit aborted by user.\n");
 		return;
 	}

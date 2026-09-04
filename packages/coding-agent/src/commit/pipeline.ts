@@ -38,7 +38,9 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 				await pushOrAbort(cwd);
 				return;
 			}
-			process.stderr.write("No changes to commit.\n");
+			process.stderr.write(
+				args.dryRun ? "No staged changes; --dry-run does not stage.\n" : "No changes to commit.\n",
+			);
 			return;
 		}
 		throw error;

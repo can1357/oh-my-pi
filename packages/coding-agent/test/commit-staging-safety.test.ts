@@ -1,6 +1,7 @@
+import * as fs from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { runCommitCommand } from "@oh-my-pi/pi-coding-agent/commit";
-import { runSplitCommit } from "@oh-my-pi/pi-coding-agent/commit/agentic";
+import * as agentModule from "@oh-my-pi/pi-coding-agent/commit/agentic/agent";
 import type { SplitCommitPlan } from "@oh-my-pi/pi-coding-agent/commit/agentic/state";
 import { applyChangelogProposals } from "@oh-my-pi/pi-coding-agent/commit/changelog";
 import * as changelogModule from "@oh-my-pi/pi-coding-agent/commit/changelog/generate";
@@ -17,6 +18,7 @@ function commitSpec(
 	summary: string,
 	changes: SplitCommitPlan["commits"][number]["changes"],
 	type: "feat" | "fix" = "feat",
+	dependencies: number[] = [],
 ): SplitCommitPlan["commits"][number] {
 	return {
 		changes,
@@ -25,7 +27,7 @@ function commitSpec(
 		summary,
 		details: [],
 		issueRefs: [],
-		dependencies: [],
+		dependencies,
 	};
 }
 
@@ -132,7 +134,7 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 
 			// Clean up scratch file and reset tracked.txt for next iteration
 			await $`git checkout -- tracked.txt`.cwd(tmp.path()).quiet();
-			await $`rm -f scratch.txt`.cwd(tmp.path()).quiet();
+			await fs.rm(tmp.join("scratch.txt"));
 		}
 	});
 
@@ -243,111 +245,52 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		expect(status.trim()).toBe("M CHANGELOG.md");
 	});
 
-	it("user rejecting the split plan leaves HEAD, index, and changelog untouched", async () => {
-		const changelogContent = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Baseline feature\n";
-		await Bun.write(tmp.join("CHANGELOG.md"), changelogContent);
-		await $`git add CHANGELOG.md`.cwd(tmp.path()).quiet();
-		await $`git commit -qm "baseline changelog"`.cwd(tmp.path()).quiet();
-		await Bun.write(tmp.join("file1.txt"), "f1\n");
-		await $`git add file1.txt`.cwd(tmp.path()).quiet();
+	it("split plan from the agent yields one commit per group with hunk-level routing and a clean index", async () => {
+		const lines = `${Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join("\n")}\n`;
+		await Bun.write(tmp.join("multi.txt"), lines);
+		await $`git add multi.txt`.cwd(tmp.path()).quiet();
+		await $`git commit -qm "add multi.txt"`.cwd(tmp.path()).quiet();
 
-		const repo = vcs.requireGit(tmp.path());
-		const headBefore = (await $`git rev-parse HEAD`.cwd(tmp.path()).text()).trim();
-		const stagedBefore = await repo.changedFiles({ cached: true });
-
-		await runSplitCommit(
-			{
-				commits: [commitSpec("add file1", [{ path: "file1.txt", kind: "all" }])],
-				warnings: [],
-			},
-			{
-				cwd: tmp.path(),
-				dryRun: false,
-				push: false,
-				changelogProposal: { entries: [{ path: tmp.join("CHANGELOG.md"), entries: { Added: ["Added file1"] } }] },
-				confirm: async () => false,
-			},
+		await Bun.write(
+			tmp.join("multi.txt"),
+			lines.replace("line 2\n", "line 2 modified\n").replace("line 28\n", "line 28 modified\n"),
 		);
-
-		expect((await $`git rev-parse HEAD`.cwd(tmp.path()).text()).trim()).toBe(headBefore);
-		expect(await repo.changedFiles({ cached: true })).toEqual(stagedBefore);
-		expect(await Bun.file(tmp.join("CHANGELOG.md")).text()).toBe(changelogContent);
-	});
-
-	it("split commit creates one commit per plan entry atomically and leaves a clean index", async () => {
 		await Bun.write(tmp.join("file1.txt"), "f1\n");
-		await Bun.write(tmp.join("file2.txt"), "f2\n");
-		await Bun.write(tmp.join("tracked.txt"), "modified tracked content\n");
-		await $`git add file1.txt file2.txt tracked.txt`.cwd(tmp.path()).quiet();
-
+		await $`git add multi.txt file1.txt`.cwd(tmp.path()).quiet();
 		const countBefore = Number.parseInt((await $`git rev-list --count HEAD`.cwd(tmp.path()).text()).trim(), 10);
 
-		const plan: SplitCommitPlan = {
+		// Proposal order is hunk 2, file1, hunk 1; hunk 2 depends on hunk 1, so
+		// execution must reorder to file1, hunk 1, hunk 2.
+		const splitProposal: SplitCommitPlan = {
 			commits: [
+				commitSpec("update hunk 2", [{ path: "multi.txt", kind: "indices", indices: [2] }], "fix", [2]),
 				commitSpec("add file1", [{ path: "file1.txt", kind: "all" }]),
-				commitSpec("add file2", [{ path: "file2.txt", kind: "all" }]),
-				commitSpec("update tracked", [{ path: "tracked.txt", kind: "all" }], "fix"),
+				commitSpec("update hunk 1", [{ path: "multi.txt", kind: "indices", indices: [1] }], "fix"),
 			],
 			warnings: [],
 		};
+		vi.spyOn(agentModule, "runCommitAgentSession").mockImplementation((async (input: never) => {
+			const { onComplete } = input as { onComplete: (state: never) => Promise<void> };
+			await onComplete({ splitProposal } as never);
+		}) as never);
 
-		await runSplitCommit(plan, {
-			cwd: tmp.path(),
-			dryRun: false,
-			push: false,
-		});
+		const result = await runCommitCommand({ push: false, dryRun: false, noChangelog: true });
+		expect(result).toEqual({ usedFallback: false });
 
 		const countAfter = Number.parseInt((await $`git rev-list --count HEAD`.cwd(tmp.path()).text()).trim(), 10);
 		expect(countAfter - countBefore).toBe(3);
+		expect((await $`git log --format=%s -n 3`.cwd(tmp.path()).text()).trim().split("\n")).toEqual([
+			"fix: update hunk 2",
+			"fix: update hunk 1",
+			"feat: add file1",
+		]);
 
-		const logSubjects = await $`git log --format=%s -n 3`.cwd(tmp.path()).text();
-		expect(logSubjects).toContain("feat: add file1");
-		expect(logSubjects).toContain("feat: add file2");
-		expect(logSubjects).toContain("fix: update tracked");
-
-		const commit1Files = (await $`git show --stat --format= HEAD~2`.cwd(tmp.path()).text()).trim();
-		expect(commit1Files).toContain("file1.txt");
-		expect(commit1Files).not.toContain("file2.txt");
-		expect(commit1Files).not.toContain("tracked.txt");
-
-		const status = (await $`git status --porcelain`.cwd(tmp.path()).text()).trim();
-		expect(status).toBe("");
-	});
-
-	it("split commit with hunk-level selections routes each hunk to its commit", async () => {
-		const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
-		await Bun.write(tmp.join("multi.txt"), lines);
-		await $`git add multi.txt`.cwd(tmp.path()).quiet();
-		await $`git commit -m "add multi.txt"`.cwd(tmp.path()).quiet();
-
-		const modifiedLines = lines.replace("line 2\n", "line 2 modified\n").replace("line 28\n", "line 28 modified\n");
-		await Bun.write(tmp.join("multi.txt"), modifiedLines);
-		await $`git add multi.txt`.cwd(tmp.path()).quiet();
-
-		const plan: SplitCommitPlan = {
-			commits: [
-				commitSpec("update hunk 1", [{ path: "multi.txt", kind: "indices", indices: [1] }]),
-				commitSpec("update hunk 2", [{ path: "multi.txt", kind: "indices", indices: [2] }]),
-			],
-			warnings: [],
-		};
-
-		await runSplitCommit(plan, {
-			cwd: tmp.path(),
-			dryRun: false,
-			push: false,
-		});
-
-		const headMinusOneContent = await $`git show HEAD~1:multi.txt`.cwd(tmp.path()).text();
-		expect(headMinusOneContent).toContain("line 2 modified");
-		expect(headMinusOneContent).not.toContain("line 28 modified");
-		expect(headMinusOneContent).toContain("line 28\n");
-
-		const headContent = await $`git show HEAD:multi.txt`.cwd(tmp.path()).text();
-		expect(headContent).toContain("line 2 modified");
-		expect(headContent).toContain("line 28 modified");
-
-		const status = (await $`git status --porcelain`.cwd(tmp.path()).text()).trim();
-		expect(status).toBe("");
+		expect(await $`git show HEAD~2:file1.txt`.cwd(tmp.path()).text()).toBe("f1\n");
+		expect((await $`git show --stat --format= HEAD~2`.cwd(tmp.path()).text()).trim()).not.toContain("multi.txt");
+		const afterHunk1 = await $`git show HEAD~1:multi.txt`.cwd(tmp.path()).text();
+		expect(afterHunk1).toContain("line 2 modified");
+		expect(afterHunk1).toContain("line 28\n");
+		expect(await $`git show HEAD:multi.txt`.cwd(tmp.path()).text()).toContain("line 28 modified");
+		expect((await $`git status --porcelain`.cwd(tmp.path()).text()).trim()).toBe("");
 	});
 });

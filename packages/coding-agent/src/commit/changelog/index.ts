@@ -4,7 +4,7 @@ import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
 import type { VcsGitRepo, VcsNumstatEntry } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger } from "@oh-my-pi/pi-utils";
-import { CHANGELOG_CATEGORIES } from "../../commit/types";
+import { CHANGELOG_CATEGORIES, type UnreleasedSection } from "../../commit/types";
 import { detectChangelogBoundaries } from "./detect";
 import { generateChangelogEntries } from "./generate";
 import { parseUnreleasedSection } from "./parse";
@@ -139,7 +139,7 @@ export async function applyChangelogProposals({
 			continue;
 		}
 		const changelogContent = await Bun.file(proposal.path).text();
-		let unreleased: { startLine: number; endLine: number; entries: Record<string, string[]> };
+		let unreleased: UnreleasedSection;
 		try {
 			unreleased = parseUnreleasedSection(changelogContent);
 		} catch (error) {
@@ -158,7 +158,7 @@ export async function applyChangelogProposals({
 
 			let updatedStagedContent: string;
 			if (stagedContent !== null) {
-				let stagedUnreleased: { startLine: number; endLine: number; entries: Record<string, string[]> };
+				let stagedUnreleased: UnreleasedSection;
 				try {
 					stagedUnreleased = parseUnreleasedSection(stagedContent);
 				} catch (error) {
