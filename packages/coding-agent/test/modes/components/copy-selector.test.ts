@@ -15,11 +15,11 @@ import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/sess
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
 const UP = "\x1b[A";
+const DOWN = "\x1b[B";
 const LEFT = "\x1b[D";
 const RIGHT = "\x1b[C";
 const ENTER = "\r";
 const ESC = "\x1b";
-
 const CODE = "const answer = 42;\nconsole.log(answer);";
 const LINK = "https://github.com/can1357/oh-my-pi/pull/10503";
 const ASSISTANT_TEXT = `Here is the fix:\n\`\`\`ts\n${CODE}\n\`\`\`\nDone. See [the PR](${LINK}).`;
@@ -72,7 +72,10 @@ function makeSelector(
 		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
 		cwd: "/tmp",
 		requestRender: () => {},
-		onPick: (content, label) => picks.push({ content, label }),
+		onPick: (content, label) => {
+			picks.push({ content, label });
+			return true;
+		},
 		onOpen: opens ? (href, label) => opens.push({ href, label }) : undefined,
 		onCancel,
 	});
@@ -304,5 +307,48 @@ describe("CopySelectorComponent", () => {
 		const boxed = lines.filter(line => line.startsWith("┆")).join("\n");
 		expect(boxed).toContain("const answer = 42;");
 		expect(boxed).not.toContain("bun test");
+	});
+
+	it("preserves all copied block markers when copying multiple blocks sequentially", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks);
+		selector.render(100);
+
+		selector.handleInput(RIGHT);
+		selector.handleInput(ENTER); // copy block 1
+
+		selector.handleInput(DOWN);
+		selector.handleInput(DOWN);
+		selector.handleInput(ENTER); // copy block 3
+
+		const frame = selector.render(100).join("\n");
+		const copiedCount = (frame.match(/✓ copied!/g) ?? []).length;
+		expect(copiedCount).toBe(2);
+		selector.dispose();
+	});
+
+	it("does not mark block or turn as copied when onPick rejects payload", () => {
+		const onCancel = vi.fn();
+		const selector = new CopySelectorComponent(makeEntries(), {
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: "/tmp",
+			requestRender: () => {},
+			onPick: () => false,
+			onCancel,
+		});
+		selector.render(100);
+
+		// Attempt turn-level copy without descending
+		selector.handleInput(ENTER);
+		let frame = selector.render(100).join("\n");
+		expect(frame).not.toContain("✓ Copied turn!");
+
+		// Attempt block-level copy after descending
+		selector.handleInput(RIGHT);
+		selector.handleInput(ENTER);
+		frame = selector.render(100).join("\n");
+		expect(frame).not.toContain("✓ copied!");
+		expect(frame).not.toContain("✓ Copied!");
+		selector.dispose();
 	});
 });

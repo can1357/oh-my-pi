@@ -136,6 +136,7 @@ export class SelectorController {
 	}
 
 	#defaultRoleMutationTail = Promise.resolve();
+	#copyQueue = Promise.resolve();
 
 	async #acquireDefaultRoleMutation(): Promise<() => void> {
 		const previous = this.#defaultRoleMutationTail;
@@ -1411,10 +1412,12 @@ export class SelectorController {
 			return;
 		}
 
+		let lastCopied: string | undefined;
 		const done = () => {
 			overlayHandle?.hide();
 			selector?.dispose();
 			this.focusActiveEditorArea();
+			if (lastCopied) this.ctx.showStatus(`Copied ${lastCopied} to clipboard`);
 			this.ctx.ui.requestRender();
 		};
 		const selector = new CopySelectorComponent(entries, {
@@ -1428,16 +1431,20 @@ export class SelectorController {
 			linkTargets: getAssistantMessageLinkTargets(this.ctx),
 			requestRender: () => this.ctx.ui.requestRender(),
 			onPick: (content, label) => {
-				done();
 				if (!content.trim()) {
 					this.ctx.showStatus("Nothing to copy in that item");
-					return;
+					return false;
 				}
-				void copyToClipboard(content);
-				this.ctx.showStatus(`Copied ${label} to clipboard`);
+				lastCopied = label;
+				this.#copyQueue = this.#copyQueue
+					.then(async () => {
+						await copyToClipboard(content);
+					})
+					.catch(() => {});
+				this.ctx.ui.requestRender();
+				return true;
 			},
 			onOpen: (href, label) => {
-				done();
 				openPath(href);
 				this.ctx.showStatus(`Opening ${label}: ${href}`);
 			},
