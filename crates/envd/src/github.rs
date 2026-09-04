@@ -22,7 +22,7 @@ use omp_journal::blob::BlobRef;
 use omp_tools::github::{
 	Artifact, DateField, Fault, GithubHost, Operation, Params, Payload, Update,
 };
-use omp_vcs::{PushOptions, git::GitRepo};
+use omp_vcs::{PushOptions, ResetMode, git::GitRepo};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use strum::EnumMessage as _;
@@ -747,7 +747,7 @@ impl GithubService {
 			.ok_or_else(|| {
 				fault("github_invalid_response", "pull request head branch is unavailable")
 			})?;
-		let expected_head = api
+		let remote_head = api
 			.value
 			.pointer("/head/sha")
 			.and_then(Value::as_str)
@@ -755,8 +755,10 @@ impl GithubService {
 				fault("github_invalid_response", "pull request head commit is unavailable")
 			})?;
 		let path = self.worktrees.join(format!("pr-{number}"));
+		let metadata_path = self.worktrees.join(format!("pr-{number}.json"));
+		let previous = load_checkout_metadata(&metadata_path);
 		let reused = path.exists();
-		tokio::select! {
+		let sync = tokio::select! {
 			result = checkout_git(
 				&self.root,
 				&path,
@@ -767,19 +769,22 @@ impl GithubService {
 				cancellation.clone(),
 			) => result?,
 			() = cancellation.cancelled() => return Err(cancelled_fault()),
-		}
+		};
 		fs::create_dir_all(&path).map_err(io_fault)?;
 		let metadata = CheckoutMetadata {
 			repo:          repo.identity().to_owned(),
 			clone_url:     clone_url.to_owned(),
 			head:          head.to_owned(),
-			expected_head: expected_head.to_owned(),
+			expected_head: lease_expected_head(
+				sync.synced_to_remote,
+				&sync.worktree_head,
+				previous
+					.as_ref()
+					.map(|metadata| metadata.expected_head.as_str()),
+			),
 		};
-		fs::write(
-			self.worktrees.join(format!("pr-{number}.json")),
-			serde_json::to_vec(&metadata).expect("metadata serializes"),
-		)
-		.map_err(io_fault)?;
+		fs::write(metadata_path, serde_json::to_vec(&metadata).expect("metadata serializes"))
+			.map_err(io_fault)?;
 		Ok(json!({
 			"pr": number,
 			"url": api.value.get("html_url").and_then(Value::as_str),
@@ -787,7 +792,7 @@ impl GithubService {
 			"path": path,
 			"remote": clone_url,
 			"remote_branch": head,
-			"head_sha": expected_head,
+			"head_sha": remote_head,
 			"reused": reused,
 		}))
 	}
@@ -1258,6 +1263,38 @@ struct CheckoutMetadata {
 	expected_head: String,
 }
 
+/// Result of materializing a pull-request worktree.
+struct CheckoutSync {
+	/// HEAD currently checked out in the worktree.
+	worktree_head:    String,
+	/// Whether that HEAD is the fetched remote pull-request tip.
+	synced_to_remote: bool,
+}
+
+fn load_checkout_metadata(path: &Path) -> Option<CheckoutMetadata> {
+	serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
+/// Choose the SHA a later force-with-lease push may overwrite.
+///
+/// Advance the lease target to the worktree HEAD only after that worktree
+/// actually contains the fetched remote tip. Reusing a stale worktree must
+/// keep the previous lease SHA so `pr_push` cannot clobber remote-only
+/// commits the local tree never incorporated.
+fn lease_expected_head(
+	synced_to_remote: bool,
+	worktree_head: &str,
+	previous_expected_head: Option<&str>,
+) -> String {
+	if synced_to_remote {
+		worktree_head.to_owned()
+	} else if let Some(previous) = previous_expected_head.filter(|head| !head.is_empty()) {
+		previous.to_owned()
+	} else {
+		worktree_head.to_owned()
+	}
+}
+
 async fn checkout_git(
 	root: &Path,
 	path: &Path,
@@ -1266,7 +1303,7 @@ async fn checkout_git(
 	head: &str,
 	force: bool,
 	cancel: CancellationToken,
-) -> Result<(), Fault> {
+) -> Result<CheckoutSync, Fault> {
 	let parent = path
 		.parent()
 		.ok_or_else(|| fault("github_git_failed", "invalid worktree path"))?;
@@ -1300,7 +1337,7 @@ fn finish_checkout_git(
 	number: u64,
 	fetch_branch: &str,
 	force: bool,
-) -> Result<(), Fault> {
+) -> Result<CheckoutSync, Fault> {
 	let branch = format!("pr-{number}");
 	let fetch_ref = format!("refs/heads/{fetch_branch}");
 	let fetched = repo
@@ -1310,17 +1347,28 @@ fn finish_checkout_git(
 	repo.delete_branch(fetch_branch, true).map_err(git_fault)?;
 
 	if path.exists() {
-		let active = GitRepo::require(path)
-			.map_err(git_fault)?
-			.current_branch()
-			.map_err(git_fault)?;
+		let worktree = GitRepo::require(path).map_err(git_fault)?;
+		let active = worktree.current_branch().map_err(git_fault)?;
 		if active.as_deref() != Some(branch.as_str()) {
 			return Err(fault(
 				"github_git_failed",
 				"existing pull-request worktree has an unexpected branch",
 			));
 		}
-		return Ok(());
+		let worktree_head = worktree
+			.head_sha()
+			.map_err(git_fault)?
+			.ok_or_else(|| fault("github_git_failed", "pull request worktree has no HEAD commit"))?;
+		if worktree_head == fetched {
+			return Ok(CheckoutSync { worktree_head, synced_to_remote: true });
+		}
+		if !force {
+			return Ok(CheckoutSync { worktree_head, synced_to_remote: false });
+		}
+		worktree
+			.reset(ResetMode::Hard, Some(&fetched))
+			.map_err(git_fault)?;
+		return Ok(CheckoutSync { worktree_head: fetched, synced_to_remote: true });
 	}
 
 	match repo
@@ -1344,7 +1392,8 @@ fn finish_checkout_git(
 			.map_err(git_fault)?,
 		_ => {},
 	}
-	repo.worktree_add(path, &branch, false).map_err(git_fault)
+	repo.worktree_add(path, &branch, false).map_err(git_fault)?;
+	Ok(CheckoutSync { worktree_head: fetched, synced_to_remote: true })
 }
 
 async fn push_git(
@@ -2593,9 +2642,9 @@ mod tests {
 	use super::{
 		ActionsState, DateField, Operation, Params, PrMetadata, UNIX_EPOCH, actions_runs_endpoint,
 		actions_state, branch_endpoint, compare_endpoint, date_qualifier, days_from_civil,
-		decode_file_response, failed_jobs, file_endpoint, fill_from_commits, has_scope,
-		normalize_date_bound, parse_pr_number, parse_run_reference, poll_sleep, pr_branch_endpoint,
-		render_output, run_jobs_endpoint, tail_limit, tail_lines,
+		decode_file_response, failed_jobs, file_endpoint, fill_from_commits, finish_checkout_git,
+		has_scope, lease_expected_head, normalize_date_bound, parse_pr_number, parse_run_reference,
+		poll_sleep, pr_branch_endpoint, render_output, run_jobs_endpoint, tail_limit, tail_lines,
 	};
 	use crate::github_url::GithubRepo;
 
@@ -2885,6 +2934,88 @@ mod tests {
 		let pending = json!({ "workflow_runs": [] });
 		assert!(matches!(actions_state(&pending), ActionsState::Pending));
 	}
+	#[test]
+	fn lease_expected_head_does_not_advance_until_the_worktree_contains_remote() {
+		assert_eq!(
+			lease_expected_head(true, "ccc", Some("aaa")),
+			"ccc",
+			"a worktree reset to the fetched tip may lease that tip",
+		);
+		assert_eq!(
+			lease_expected_head(false, "aaa", Some("aaa")),
+			"aaa",
+			"reusing a stale worktree must keep the previous lease SHA",
+		);
+		assert_eq!(
+			lease_expected_head(false, "aaa", Some("")),
+			"aaa",
+			"missing prior metadata falls back to the worktree HEAD",
+		);
+		assert_eq!(
+			lease_expected_head(false, "local", Some("remote-only")),
+			"remote-only",
+			"stale reuse must not replace the lease with a never-synced remote SHA",
+		);
+	}
+
+	fn git(dir: &std::path::Path, args: &[&str]) -> String {
+		let output = std::process::Command::new("git")
+			.arg("-C")
+			.arg(dir)
+			.args(args)
+			.output()
+			.expect("git");
+		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+		String::from_utf8(output.stdout)
+			.expect("git stdout")
+			.trim_end()
+			.to_owned()
+	}
+
+	#[test]
+	fn reused_pr_worktree_stays_put_unless_forced() {
+		let temp = tempfile::tempdir().expect("tempdir");
+		let root = temp.path().join("repo");
+		std::fs::create_dir_all(&root).expect("repo dir");
+		git(&root, &["init", "-q", "-b", "main"]);
+		git(&root, &["config", "user.name", "Test"]);
+		git(&root, &["config", "user.email", "test@example.com"]);
+		std::fs::write(root.join("a"), "base\n").expect("base file");
+		git(&root, &["add", "."]);
+		git(&root, &["commit", "-qm", "base"]);
+		let base = git(&root, &["rev-parse", "HEAD"]);
+		git(&root, &["branch", "pr-7"]);
+		let worktree = temp.path().join("pr-7");
+		git(&root, &["worktree", "add", "-q", worktree.to_str().expect("utf8"), "pr-7"]);
+
+		git(&root, &["checkout", "-q", "-b", "omp/github-fetch/pr-7"]);
+		std::fs::write(root.join("a"), "remote\n").expect("remote file");
+		git(&root, &["add", "."]);
+		git(&root, &["commit", "-qm", "remote"]);
+		let fetched = git(&root, &["rev-parse", "HEAD"]);
+		git(&root, &["checkout", "-q", "main"]);
+
+		let repo = std::sync::Arc::new(omp_vcs::git::GitRepo::require(&root).expect("open repo"));
+		let sync = finish_checkout_git(
+			std::sync::Arc::clone(&repo),
+			&worktree,
+			7,
+			"omp/github-fetch/pr-7",
+			false,
+		)
+		.expect("reuse without force");
+		assert!(!sync.synced_to_remote);
+		assert_eq!(sync.worktree_head, base);
+		assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), base);
+
+		git(&root, &["branch", "omp/github-fetch/pr-7", &fetched]);
+		let sync = finish_checkout_git(repo, &worktree, 7, "omp/github-fetch/pr-7", true)
+			.expect("force reset");
+		assert!(sync.synced_to_remote);
+		assert_eq!(sync.worktree_head, fetched);
+		assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), fetched);
+	}
+
 	#[tokio::test]
 	async fn poll_sleep_stops_immediately_when_cancelled() {
 		let cancellation = CancellationToken::new();
