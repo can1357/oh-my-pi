@@ -28,7 +28,7 @@ describe("LiveVisualizer", () => {
 		}
 	});
 
-	it("renders thinking orbs when style is orbs and still honors narrow widths", () => {
+	it("renders thinking orbs when style is orbs at a fixed body height", () => {
 		const visualizer = new LiveVisualizer({
 			onStop: () => {},
 			onToggleMute: () => {},
@@ -37,7 +37,8 @@ describe("LiveVisualizer", () => {
 
 		for (const targetWidth of [10, 80, 140]) {
 			const lines = visualizer.render(targetWidth);
-			expect(lines.length).toBeGreaterThan(0);
+			// top + 7 orb rows + transcript + footer
+			expect(lines).toHaveLength(10);
 			for (const line of lines) {
 				expect(visibleWidth(line)).toBe(targetWidth);
 			}

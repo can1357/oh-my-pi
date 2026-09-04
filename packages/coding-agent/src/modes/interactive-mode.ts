@@ -823,6 +823,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#sttController: STTController | undefined;
 	#voiceAnimationInterval: NodeJS.Timeout | undefined;
 	#voiceIndicator: VoiceIndicatorComponent | undefined;
+	/** Latched for one STT gesture so mid-session setting flips cannot mix mic/orb teardown. */
+	#voiceUiStyle: "orbs" | "mic" | undefined;
 	#voiceHue = 0;
 	#voicePreviousShowHardwareCursor: boolean | null = null;
 	#voicePreviousUseTerminalCursor: boolean | null = null;
@@ -5487,23 +5489,26 @@ export class InteractiveMode implements InteractiveModeContext {
 				// Duck assistant speech while the user is talking (push-to-talk); restore after.
 				if (state === "recording") vocalizer.duck();
 				else vocalizer.unduck();
-				if (this.settings.get("tui.voiceOrbs")) {
-					if (state === "recording" || state === "transcribing") {
-						this.#showVoiceIndicator(state);
-					} else {
-						this.#cleanupVoiceUi();
-					}
-				} else if (state === "recording") {
-					this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
-					this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
-					this.ui.setShowHardwareCursor(false);
-					this.editor.setUseTerminalCursor(false);
-					this.#startMicAnimation();
-				} else if (state === "transcribing") {
-					this.#stopMicAnimation();
-					this.#setMicCursor({ r: 200, g: 200, b: 200 });
-				} else {
+				if (state === "idle") {
 					this.#cleanupVoiceUi();
+				} else {
+					// Latch style for the whole recording→transcribing gesture.
+					this.#voiceUiStyle ??= this.settings.get("tui.voiceOrbs") ? "orbs" : "mic";
+					if (this.#voiceUiStyle === "orbs") {
+						this.#showVoiceIndicator(state);
+					} else if (state === "recording") {
+						if (this.#voicePreviousShowHardwareCursor === null) {
+							this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
+							this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
+							this.ui.setShowHardwareCursor(false);
+							this.editor.setUseTerminalCursor(false);
+						}
+						this.#startMicAnimation();
+					} else {
+						// transcribing
+						this.#stopMicAnimation();
+						this.#setMicCursor({ r: 200, g: 200, b: 200 });
+					}
 				}
 				this.ui.requestRender();
 			},
@@ -5584,6 +5589,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editorContainer.addChild(this.editor);
 		}
 		this.#voiceIndicator = undefined;
+		this.#voiceUiStyle = undefined;
 		this.editor.cursorOverride = undefined;
 		this.editor.cursorOverrideWidth = undefined;
 		if (this.#voicePreviousShowHardwareCursor !== null) {

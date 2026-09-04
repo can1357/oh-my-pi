@@ -6,8 +6,8 @@ import { theme } from "../theme/theme";
 
 export type VoiceIndicatorState = "recording" | "transcribing";
 
-const ORB_WIDTH = 19;
-const ORB_HEIGHT = 7;
+export const ORB_WIDTH = 19;
+export const ORB_HEIGHT = 7;
 
 function voiceGlyph(glyph: string, intensity: number): string {
 	if (glyph === " ") return glyph;
@@ -16,7 +16,7 @@ function voiceGlyph(glyph: string, intensity: number): string {
 }
 
 /** Center a styled line by its visible terminal width, never exceeding `width`. */
-export function centerVoiceLine(line: string, width: number): string {
+function centerVoiceLine(line: string, width: number): string {
 	if (width <= 0) return "";
 	const clipped = truncateToWidth(line, width);
 	const lineWidth = visibleWidth(clipped);
@@ -70,7 +70,7 @@ export class VoiceIndicatorComponent implements Component {
 		const listening = this.#state === "recording";
 		const energy = listening ? 0.52 + Math.sin(this.#frame * 0.11) * 0.18 : 0.3;
 		const columns = Math.max(1, Math.min(ORB_WIDTH, frameWidth));
-		const rows = Math.max(1, Math.min(ORB_HEIGHT, Math.max(1, Math.floor(frameWidth / 3))));
+		const rows = frameWidth > 0 ? ORB_HEIGHT : 1;
 		const orb = renderVoiceOrb(listening ? "listening" : "solving", this.#frame, energy, rows, columns).map(line =>
 			centerVoiceLine(line, frameWidth),
 		);

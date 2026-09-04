@@ -8,7 +8,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { renderVoiceOrb } from "../modes/components/voice-indicator";
+import { ORB_HEIGHT, ORB_WIDTH, renderVoiceOrb } from "../modes/components/voice-indicator";
 import { type ThemeColor, theme } from "../modes/theme/theme";
 
 /** Distinct states of a realtime call connection. */
@@ -196,9 +196,9 @@ export class LiveVisualizer implements Component {
 				: this.#phase === "speaking"
 					? Math.max(0.68, this.#displayLevel)
 					: this.#displayLevel;
-		const columns = Math.max(1, Math.min(19, innerWidth));
-		const rows = Math.max(1, Math.min(7, Math.max(1, Math.floor(innerWidth / 3))));
-		return renderVoiceOrb(orbState, this.#frame, energy, rows, columns).map(line => {
+		const columns = Math.max(1, Math.min(ORB_WIDTH, innerWidth));
+		// Fixed body height (matches the classic panel contract; spectrum uses 2 rows).
+		return renderVoiceOrb(orbState, this.#frame, energy, ORB_HEIGHT, columns).map(line => {
 			const content = truncateToWidth(line, innerWidth);
 			return border(content + " ".repeat(Math.max(0, innerWidth - visibleWidth(content))));
 		});
