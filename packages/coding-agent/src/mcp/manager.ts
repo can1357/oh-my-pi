@@ -801,6 +801,13 @@ export class MCPManager {
 
 			for (const task of connectionTasks) {
 				const { name } = task;
+				// Branch on the CURRENT status, not the snapshot taken before the
+				// async cache reads: a task pending at the startup race can fulfill
+				// while those reads are in flight. Routing the late fulfillment
+				// through the cached branch would let an older cached list
+				// overwrite the live registry the background continuation just
+				// set (e.g. a filter-empty `[]`). `reportedErrors` only dedupes
+				// diagnostics, it must not decide the branch.
 				if (task.tracked.status === "fulfilled" && !reportedErrors.has(name)) {
 					const value = task.tracked.value;
 					if (!value) continue;
