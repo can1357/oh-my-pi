@@ -1342,6 +1342,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			"options.authStorage and options.modelRegistry.authStorage must be the same instance when both are provided",
 		);
 	}
+	// The settings layer is authoritative for account selection whichever caller
+	// built the registry (runRootCommand, benchmark harnesses, SDK hosts): a
+	// registry constructed before `Settings.init` never saw the effective policy.
+	authStorage.setAccountSelection(settings.get("auth.accountSelection"));
 	// Subscribe before any getApiKey() call so startup model probes can't fire a
 	// credential_disabled event past us. An embedder's constructor handler makes the
 	// listener set non-empty from construction, which defeats AuthStorage's no-listener

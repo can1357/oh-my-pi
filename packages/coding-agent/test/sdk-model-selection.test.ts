@@ -130,6 +130,25 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		};
 	}
 
+	test("applies auth.accountSelection from the settings layer to a caller-provided ModelRegistry", async () => {
+		// Regression: harnesses that build the registry before Settings.init (the
+		// TypeScript edit benchmark) keep discovery's balanced policy for every request.
+		const settings = Settings.isolated({ "auth.accountSelection": "fixed" });
+		expect(fixtureAuthStorage.accountSelection).toBe("balanced");
+
+		const { session } = await createAgentSession({
+			...buildSessionOptions("runtime-provider/runtime-model"),
+			settings,
+		});
+
+		try {
+			expect(fixtureAuthStorage.accountSelection).toBe("fixed");
+		} finally {
+			await session.dispose();
+			fixtureAuthStorage.setAccountSelection("balanced");
+		}
+	});
+
 	test("resolves explicit modelPattern after extension providers register", async () => {
 		const { session, modelFallbackMessage } = await createAgentSession(
 			buildSessionOptions("runtime-provider/runtime-model"),
