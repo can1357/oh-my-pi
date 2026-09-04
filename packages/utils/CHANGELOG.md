@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the optional `isRetryableStatus` predicate to `FetchWithRetryOptions`, allowing callers to customize or extend the retryable HTTP status set.
+
 ## [18.1.7] - 2026-09-03
 
 ### Added

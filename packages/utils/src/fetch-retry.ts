@@ -189,6 +189,11 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 */
 	fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 	/**
+	 * Optional custom predicate to determine whether an HTTP status is retryable.
+	 * When omitted, defaults to `isRetryableStatus` (5xx, 408, 429).
+	 */
+	isRetryableStatus?: (status: number, response?: Response) => boolean;
+	/**
 	 * Optional retry gate for HTTP responses whose status is retryable. Receives a
 	 * cloned body string so callers can fail fast on deterministic provider
 	 * failures that happen to use a 5xx status.
@@ -225,6 +230,7 @@ export async function fetchWithRetry(
 		maxDelayMs = DEFAULT_MAX_DELAY_MS,
 		defaultDelayMs,
 		prepareInit,
+		isRetryableStatus: isRetryableStatusOption,
 		shouldRetryResponse,
 		fetch: fetchImpl = fetch,
 		timeout = false,
@@ -259,7 +265,10 @@ export async function fetchWithRetry(
 			continue;
 		}
 
-		if (!isRetryableStatus(response.status)) return response;
+		const isRetryable = isRetryableStatusOption
+			? isRetryableStatusOption(response.status, response)
+			: isRetryableStatus(response.status);
+		if (!isRetryable) return response;
 		if (attempt + 1 >= maxAttempts) return response;
 
 		const retryBody = await response.clone().text();

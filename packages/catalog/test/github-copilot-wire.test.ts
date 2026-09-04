@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import {
+	COPILOT_CAPI_IDENTITY_HEADERS,
+	COPILOT_VSCODE_IDENTITY_HEADERS,
+	getCopilotCapiIdentityHeaders,
 	getGitHubCopilotBaseUrl,
+	isCopilotVscodeMode,
+	mergeCopilotApiHeaders,
 	normalizeGitHubCopilotApiEndpoint,
 	normalizeGitHubCopilotEnterpriseDomain,
 	parseGitHubCopilotApiKey,
@@ -40,5 +45,38 @@ describe("GitHub Copilot OAuth helpers", () => {
 			enterpriseUrl: "ghe.example.com",
 			apiEndpoint: "https://api.business.githubcopilot.com",
 		});
+	});
+});
+
+describe("GitHub Copilot VS Code mode identity", () => {
+	it("detects VS Code mode from explicit headers", () => {
+		expect(isCopilotVscodeMode()).toBe(false);
+		expect(isCopilotVscodeMode({ "Copilot-Mode": "vscode" })).toBe(true);
+		expect(isCopilotVscodeMode({ "Copilot-Mode": "cli" })).toBe(false);
+		expect(isCopilotVscodeMode({ "Copilot-Integration-Id": "vscode-chat" })).toBe(true);
+		expect(isCopilotVscodeMode({ "Editor-Version": "vscode/1.136.0" })).toBe(true);
+		expect(isCopilotVscodeMode({ "Copilot-Integration-Id": "copilot-developer-cli" })).toBe(false);
+	});
+
+	it("returns VS Code identity headers when in VS Code mode", () => {
+		expect(getCopilotCapiIdentityHeaders({ "Copilot-Integration-Id": "vscode-chat" })).toEqual({
+			...COPILOT_VSCODE_IDENTITY_HEADERS,
+		});
+		expect(getCopilotCapiIdentityHeaders({ "Copilot-Mode": "vscode" })).toEqual({
+			...COPILOT_VSCODE_IDENTITY_HEADERS,
+		});
+		expect(getCopilotCapiIdentityHeaders()).toEqual({
+			...COPILOT_CAPI_IDENTITY_HEADERS,
+		});
+		expect(getCopilotCapiIdentityHeaders({ "Copilot-Mode": "cli" })).toEqual({
+			...COPILOT_CAPI_IDENTITY_HEADERS,
+		});
+	});
+
+	it("merges headers preserving VS Code identity when enabled", () => {
+		const merged = mergeCopilotApiHeaders({ "Copilot-Integration-Id": "vscode-chat", "Custom-Header": "foo" });
+		expect(merged["Copilot-Integration-Id"]).toBe("vscode-chat");
+		expect(merged["Editor-Version"]).toBe("vscode/1.136.0");
+		expect(merged["Custom-Header"]).toBe("foo");
 	});
 });

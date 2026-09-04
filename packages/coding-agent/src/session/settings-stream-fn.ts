@@ -33,6 +33,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		const openrouterVariant =
 			openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
 		const antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
+		const copilotMode = settings.get("providers.copilot.mode");
 		const textVerbosity =
 			model.api === "openai-codex-responses"
 				? settings.isConfigured("textVerbosity")
@@ -66,8 +67,23 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			(serverSideFallbackIdentity.family === "fable" || serverSideFallbackIdentity.family === "mythos");
 		const fallbacks =
 			streamOptions?.fallbacks ?? (serverSideFallbackEnabled ? [{ model: "claude-opus-4-8" }] : undefined);
+
+		let headers = streamOptions?.headers;
+		if (model.provider === "github-copilot") {
+			const hasCallerIdentity = headers
+				? Object.keys(headers).some(k => {
+						const lower = k.toLowerCase();
+						return lower === "copilot-mode" || lower === "copilot-integration-id" || lower === "editor-version";
+					})
+				: false;
+			if (!hasCallerIdentity && (copilotMode === "vscode" || copilotMode === "cli")) {
+				headers = { ...headers, "Copilot-Mode": copilotMode };
+			}
+		}
+
 		const merged: SimpleStreamOptions = {
 			...streamOptions,
+			...(headers !== undefined ? { headers } : {}),
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,

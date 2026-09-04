@@ -20,7 +20,7 @@ import {
 	hasCoreWeaveProjectHeader,
 	removeBlankCoreWeaveProjectHeaders,
 } from "@oh-my-pi/pi-catalog/wire/coreweave";
-import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { parseGitHubCopilotApiKey, sanitizeCopilotHeaders } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
 	classifyJsonPrefix,
@@ -260,7 +260,7 @@ export function resolveOpenAIRequestSetup(
 			headers,
 			initiatorOverride: options.initiatorOverride,
 		});
-		Object.assign(headers, copilot.headers);
+		headers = Object.assign(sanitizeCopilotHeaders(headers), copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;
 		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
 	}

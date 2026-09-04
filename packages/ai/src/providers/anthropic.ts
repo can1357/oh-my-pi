@@ -7,7 +7,11 @@ import { hostMatchesUrl, isVertexRawPredictUrl } from "@oh-my-pi/pi-catalog/host
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
-import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import {
+	mergeCopilotApiHeaders,
+	parseGitHubCopilotApiKey,
+	sanitizeCopilotHeaders,
+} from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
 	getInstallId,
@@ -3254,6 +3258,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		// The GitHub Copilot Anthropic proxy doesn't accept Anthropic beta
 		// features. Forward only caller-supplied betas.
 		const betaFeatures = [...extraBetas];
+		const copilotIdentity = mergeCopilotApiHeaders({ ...model.headers, ...headers, ...dynamicHeaders });
 		const defaultHeaders = mergeHeaders(
 			{
 				Accept: stream ? "text/event-stream" : "application/json",
@@ -3263,9 +3268,10 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 				Authorization: `Bearer ${copilotApiKey}`,
 				...(betaFeatures.length > 0 ? { "anthropic-beta": buildBetaHeader([], betaFeatures) } : {}),
 			},
-			model.headers,
+			sanitizeCopilotHeaders(model.headers),
+			sanitizeCopilotHeaders(headers),
+			copilotIdentity,
 			dynamicHeaders,
-			headers,
 		);
 		applyInferenceHeaders(defaultHeaders, {
 			provider: model.provider,

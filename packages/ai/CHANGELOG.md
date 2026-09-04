@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed GitHub Copilot requests on enterprise seats with `cli_enabled: false` by supporting VS Code wire identity and adding bounded CLI-to-VS Code fallback in auto mode.
+- Fixed premature credential rotation on transient Copilot 403 errors (`unauthorized: not authorized to use this Copilot feature`) by retrying with backoff at the transport layer and classifying them as `Flag.Transient`.
+
 ## [18.1.8] - 2026-09-03
 
 ### Added

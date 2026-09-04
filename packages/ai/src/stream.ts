@@ -20,7 +20,7 @@ import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
-import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
+import { isConcurrencyCapExclusion, isTransientCopilotForbidden, isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
@@ -1137,7 +1137,11 @@ function isRetryableUpstreamError(
 	// classify as RATE_LIMIT_EXCEEDED in `parseRateLimitReason` and stay in the
 	// provider's own backoff layer instead of burning siblings.
 	if (AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)) return true;
-	if (status === 401 || (status === 403 && !isConcurrencyCapExclusion(status, message))) return true;
+	if (
+		status === 401 ||
+		(status === 403 && !isConcurrencyCapExclusion(status, message) && !isTransientCopilotForbidden(status, message))
+	)
+		return true;
 	return isUsageLimitOutcome(status, message);
 }
 
