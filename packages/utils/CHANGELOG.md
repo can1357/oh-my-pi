@@ -7,6 +7,9 @@
 ### Added
 
 - Added the public `getTinyWorkerRuntimeDir()` utility, which returns the standard `~/.omp/run/tiny` directory for tiny-worker runtime data.
+### Fixed
+
+- Fixed retry classification for Bun's bare `Socket is closed` transport error.
 
 ## [18.1.6] - 2026-09-03
 

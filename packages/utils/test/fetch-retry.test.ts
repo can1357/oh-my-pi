@@ -1,5 +1,18 @@
 import { describe, expect, it } from "bun:test";
-import { extractRetryHint, fetchWithRetry } from "@oh-my-pi/pi-utils/fetch-retry";
+import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
+
+describe("isUnexpectedSocketCloseMessage", () => {
+	it.each(["Socket is closed", "Error: Socket is closed.", "The socket connection was closed unexpectedly"])(
+		"recognizes %s",
+		message => expect(isUnexpectedSocketCloseMessage(message)).toBe(true),
+	);
+
+	it("does not match socket wording embedded in an application error", () => {
+		expect(isUnexpectedSocketCloseMessage("validation failed because socket is closed to remote control")).toBe(
+			false,
+		);
+	});
+});
 
 describe("fetchWithRetry", () => {
 	it("routes requests through the `fetch` override when provided", async () => {
