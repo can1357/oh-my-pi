@@ -1155,23 +1155,11 @@ export class ModelHubComponent implements Component {
 		}
 		return { value: this.#settings.getModelRole(role), scope: undefined };
 	}
-
 	#hasLiteralModel(provider: string, id: string): boolean {
 		const selector = `${provider}/${id}`;
 		if (this.#availableItems.some(item => item.selector === selector)) return true;
-		const registry = this.#registry as unknown as { find?: (provider: string, id: string) => Model | undefined };
-		if (typeof registry.find === "function") {
-			try {
-				if (registry.find(provider, id) !== undefined) return true;
-			} catch {
-				// Fall through to the snapshot scan below.
-			}
-		}
-		try {
-			return this.#registry.getAll().some(model => model.provider === provider && model.id === id);
-		} catch {
-			return false;
-		}
+		if (this.#registry.find(provider, id) !== undefined) return true;
+		return this.#registry.getAll().some(model => model.provider === provider && model.id === id);
 	}
 
 	#parseSimpleSelector(value: string): { base: string; level: ConfiguredThinkingLevel | undefined } | undefined {
@@ -1195,23 +1183,11 @@ export class ModelHubComponent implements Component {
 		const provider = base.slice(0, slash);
 		const id = base.slice(slash + 1);
 		if (!provider || !id) return undefined;
-		const registry = this.#registry as unknown as { find?: (provider: string, id: string) => Model | undefined };
-		if (typeof registry.find === "function") {
-			try {
-				const found = registry.find(provider, id);
-				if (found) return found;
-			} catch {
-				// Fall through to the snapshot scans below.
-			}
-		}
-		try {
-			for (const model of this.#registry.getAll()) {
-				if (model.provider === provider && model.id === id) return model;
-			}
-		} catch {
-			// Fall through to the browser snapshot below.
-		}
-		return this.#availableItems.find(item => item.selector === base)?.model;
+		return (
+			this.#registry.find(provider, id) ??
+			this.#registry.getAll().find(model => model.provider === provider && model.id === id) ??
+			this.#availableItems.find(item => item.selector === base)?.model
+		);
 	}
 
 	/**
