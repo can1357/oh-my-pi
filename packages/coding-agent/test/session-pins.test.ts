@@ -154,7 +154,7 @@ describe("session-pins", () => {
 			while (settledCount < toggles.length) {
 				try {
 					const raw = await fs.readFile(pinsFile, "utf-8");
-					if (raw.length > 0) JSON.parse(raw);
+					JSON.parse(raw);
 					samples++;
 				} catch (err) {
 					const code = (err as NodeJS.ErrnoException).code;
