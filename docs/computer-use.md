@@ -27,7 +27,7 @@ tools:
 | `computer.maxWidth`  |  `3840` | Maximum screenshot width. Some model transports impose an effective coordinate-safe cap of 1280.                  |
 | `computer.maxHeight` |  `2400` | Maximum screenshot height. Some model transports impose an effective coordinate-safe cap of 896.                  |
 
-There is no `computer.backend` setting: the native addon selects the platform backend. On Linux it picks Wayland when `WAYLAND_SOCKET` is set or `WAYLAND_DISPLAY` names a socket that exists. Otherwise it picks X11 when `DISPLAY` is set. The `/computer`, `/computer on`, `/computer off`, and `/computer status` commands toggle or inspect the current session without writing config. Start a new session after changing settings files.
+There is no `computer.backend` setting: the native addon selects the platform backend. On Linux it picks Wayland when `WAYLAND_SOCKET` is an open socket descriptor or `WAYLAND_DISPLAY` names a socket that accepts connections. Otherwise it picks X11 when `DISPLAY` is set. The `/computer`, `/computer on`, `/computer off`, and `/computer status` commands toggle or inspect the current session without writing config. Start a new session after changing settings files.
 
 `tools.approvalMode: write` allows inspection helpers (window listing, screenshots, AX reads, clipboard reads) and `computer.run` calls declared with `read_only: true`; it prompts for input and mutation helpers. An explicit `tools.approval.computer: allow | prompt | deny` overrides the mode.
 
