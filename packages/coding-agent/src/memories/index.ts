@@ -640,7 +640,7 @@ function markPhase2FailureWithFallback(
 	}
 }
 
-async function collectThreads(session: AgentSession, currentThreadId?: string): Promise<MemoryThread[]> {
+export async function collectThreads(session: AgentSession, currentThreadId?: string): Promise<MemoryThread[]> {
 	const sessionDir = session.sessionManager.getSessionDir();
 	const files = await fs.readdir(sessionDir);
 	const threads: MemoryThread[] = [];
@@ -656,10 +656,24 @@ async function collectThreads(session: AgentSession, currentThreadId?: string): 
 		let cwd = "";
 		let id = name.slice(0, -6);
 		try {
-			const fileText = await Bun.file(fullPath).text();
+			// Bounded head read: session files can grow to hundreds of MBs, but the
+			// session header line always lives at line 1 (or line 2 after a title
+			// slot). Reading a small head slice avoids full-file read and line-split
+			// allocations on startup for every past session. If the candidate line
+			// falls on the slice boundary, fall back to a full read.
+			const HEAD_CAP = 64 * 1024;
+			let isLarge = stat.size > HEAD_CAP;
+			let fileText = isLarge ? await Bun.file(fullPath).slice(0, HEAD_CAP).text() : await Bun.file(fullPath).text();
+			let lines = fileText.split(/\r?\n/);
 			let sawTitleSlot = false;
-			for (const rawLine of fileText.split(/\r?\n/)) {
-				const line = rawLine.trim();
+			for (let i = 0; i < lines.length; i++) {
+				// If the slice was cut before this line terminated, fall back to full read
+				if (isLarge && i === lines.length - 1) {
+					fileText = await Bun.file(fullPath).text();
+					lines = fileText.split(/\r?\n/);
+					isLarge = false;
+				}
+				const line = lines[i].trim();
 				if (!line) continue;
 				const parsed = parseJsonlLenient<Record<string, unknown>>(line);
 				const header = Array.isArray(parsed) && parsed.length > 0 ? parsed[0] : undefined;
