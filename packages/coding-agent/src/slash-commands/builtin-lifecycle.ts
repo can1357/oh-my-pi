@@ -533,7 +533,10 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			if (runtime.session.isStreaming) {
 				return usage("Wait for the current response to finish or abort it before continuing.", runtime);
 			}
-			if (!runtime.session.continueTurn()) {
+			const didContinue = runtime.session.continueTurn({
+				onError: error => runtime.output(`Continuation failed: ${errorMessage(error)}`),
+			});
+			if (!didContinue) {
 				return usage("Nothing to continue.", runtime);
 			}
 			await runtime.output("Continuing the agent's work.");
@@ -547,8 +550,13 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handleTui: async (_command, runtime) => {
 			if (runtime.ctx.session.isStreaming) {
 				runtime.ctx.showStatus("Wait for the current response to finish or abort it before continuing");
-			} else if (!runtime.ctx.session.continueTurn()) {
-				runtime.ctx.showStatus("Nothing to continue");
+			} else {
+				const didContinue = runtime.ctx.session.continueTurn({
+					onError: error => runtime.ctx.showError(`Continuation failed: ${errorMessage(error)}`),
+				});
+				if (!didContinue) {
+					runtime.ctx.showStatus("Nothing to continue");
+				}
 			}
 			runtime.ctx.editor.setText("");
 		},

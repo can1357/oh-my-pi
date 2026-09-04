@@ -439,7 +439,7 @@ type ScheduledAgentContinueOptions = {
 	generation?: number;
 	shouldContinue?: () => boolean;
 	onSkip?: (reason: AgentContinueSkipReason) => void;
-	onError?: (error: unknown) => void;
+	onError?: (error: unknown) => void | Promise<void>;
 };
 
 type ScheduledAgentContinueRequest = {
@@ -3559,11 +3559,14 @@ export class AgentSession {
 		request.options.onSkip?.(reason);
 	}
 
-	#handleAgentContinueOutcome(outcome: AgentContinueOutcome, request: ScheduledAgentContinueRequest): void {
+	async #handleAgentContinueOutcome(
+		outcome: AgentContinueOutcome,
+		request: ScheduledAgentContinueRequest,
+	): Promise<void> {
 		if (outcome.status === "skipped") {
 			this.#skipAgentContinue(outcome.reason, request);
 		} else if (outcome.status === "failed") {
-			request.options.onError?.(outcome.error);
+			await request.options.onError?.(outcome.error);
 		}
 	}
 
@@ -3666,7 +3669,7 @@ export class AgentSession {
 						activeSource: active.source,
 						activeSchedulerToken: active.schedulerToken,
 					});
-					this.#handleAgentContinueOutcome(await active.promise, request);
+					await this.#handleAgentContinueOutcome(await active.promise, request);
 					return;
 				}
 
@@ -3681,7 +3684,7 @@ export class AgentSession {
 				};
 				this.#activeAgentContinue = attempt;
 				try {
-					this.#handleAgentContinueOutcome(await promise, request);
+					await this.#handleAgentContinueOutcome(await promise, request);
 				} finally {
 					// Clear the active attempt BEFORE #endInFlight(): the settle drain it
 					// triggers (#drainStrandedQueuedMessages -> queued-message-drain) runs
@@ -3733,6 +3736,7 @@ export class AgentSession {
 			userInitiated?: boolean;
 			includePostCompactionEagerNudges?: boolean;
 			onSettled?: () => void;
+			onError?: (error: unknown) => void | Promise<void>;
 		},
 	): boolean {
 		this.#schedulePostPromptTask(
@@ -3746,6 +3750,7 @@ export class AgentSession {
 							source: options?.userInitiated ? "manual-continue-queued-message" : "auto-continue-queued-message",
 							generation,
 							shouldContinue: () => this.agent.hasQueuedMessages(),
+							onError: options?.onError,
 						});
 						return;
 					}
@@ -3754,7 +3759,7 @@ export class AgentSession {
 					const eagerNudges = options?.includePostCompactionEagerNudges
 						? this.#todo.buildPostCompactionEagerNudges()
 						: [];
-					await this.#promptWithMessage(
+					const dispatched = await this.#promptWithMessage(
 						{
 							role: "developer",
 							content: [{ type: "text", text }],
@@ -3764,6 +3769,7 @@ export class AgentSession {
 							// continuation reminders (todo/plan) that are also persisted as
 							// developer messages; replay uses it for the prompt→yield anchor.
 							synthetic: true,
+							userInitiated: options?.userInitiated === true ? true : undefined,
 						},
 						text,
 						{
@@ -3771,6 +3777,12 @@ export class AgentSession {
 							prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
 						},
 					);
+					if (!dispatched && this.#promptGeneration === generation) {
+						await options?.onError?.(new Error("Continuation did not start."));
+					}
+				} catch (error) {
+					if (!options?.onError) throw error;
+					await options.onError(error);
 				} finally {
 					options?.onSettled?.();
 				}
@@ -8443,12 +8455,13 @@ export class AgentSession {
 	 * developer directive as the `.`/`c` shortcuts. Returns false when the
 	 * session is busy or has no transcript to continue.
 	 */
-	continueTurn(): boolean {
+	continueTurn(options?: { onError?: (error: unknown) => void | Promise<void> }): boolean {
 		if (this.isStreaming || this.isCompacting || this.isRetrying || this.#manualContinuationPending) return false;
 		if (this.agent.state.messages.length === 0) return false;
 		this.#manualContinuationPending = true;
 		return this.#scheduleContinuationPrompt(this.#promptGeneration, manualContinuePrompt, {
 			userInitiated: true,
+			onError: options?.onError,
 			onSettled: () => {
 				this.#manualContinuationPending = false;
 			},

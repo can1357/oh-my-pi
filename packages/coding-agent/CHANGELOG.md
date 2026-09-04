@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `/continue` as a discoverable equivalent to the existing `.`/`c` shortcut (when the session is idle), resuming the current intent without a user message after rewinds or interrupts.
+- Added `/continue` as a discoverable equivalent to the existing `.`/`c` shortcut (when the session is idle), resuming the current intent without a user message after rewinds or interrupts ([#10709](https://github.com/can1357/oh-my-pi/pull/10709) by [@brunowowk](https://github.com/brunowowk)).
 
 ## [18.1.7] - 2026-09-03
 
