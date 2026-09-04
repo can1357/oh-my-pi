@@ -23,6 +23,14 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `confirm-destructive.ts` | Confirms before destructive session actions (clear, switch, branch)          |
 | `dirty-repo-guard.ts`    | Prevents session changes with uncommitted git changes                        |
 
+### Privacy
+
+| Extension         | Description                                                                 |
+| ----------------- | --------------------------------------------------------------------------- |
+| `pii-redact.ts`   | Scrub emails/phones/SSNs on `tool_result` + `context` (+ optional PAW CLI)  |
+
+Full local NER plugin (ProgramAsWeights): https://github.com/kvnloo/pii/tree/main/integrations/omp
+
 ### Custom Tools
 
 | Extension     | Description                                                                   |
