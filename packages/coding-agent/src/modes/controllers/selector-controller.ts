@@ -136,6 +136,7 @@ export class SelectorController {
 	}
 
 	#defaultRoleMutationTail = Promise.resolve();
+	#copyQueue = Promise.resolve();
 
 	async #acquireDefaultRoleMutation(): Promise<() => void> {
 		const previous = this.#defaultRoleMutationTail;
@@ -1412,7 +1413,6 @@ export class SelectorController {
 		}
 
 		let lastCopied: string | undefined;
-		let copyQueue: Promise<void> = Promise.resolve();
 		const done = () => {
 			overlayHandle?.hide();
 			selector?.dispose();
@@ -1436,7 +1436,7 @@ export class SelectorController {
 					return false;
 				}
 				lastCopied = label;
-				copyQueue = copyQueue
+				this.#copyQueue = this.#copyQueue
 					.then(async () => {
 						await copyToClipboard(content);
 					})
