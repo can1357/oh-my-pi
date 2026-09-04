@@ -558,7 +558,8 @@ def test_search_issues_github_uses_search_issues_with_items() -> None:
 
 def test_get_review_comment_fetches_canonical_endpoint() -> None:
     """`get_review_comment` (the Forgejo #7935 workaround) reads the actual text
-    from the canonical `/repos/{repo}/pulls/comments/{id}` endpoint."""
+    from the canonical `/repos/{repo}/pulls/comments/{id}` endpoint (GitHub;
+    Forgejo resolves via the reviews walk instead — see the tests below)."""
     captured: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -575,7 +576,7 @@ def test_get_review_comment_fetches_canonical_endpoint() -> None:
             },
         )
 
-    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="github")
     rc = _run_async(client.get_review_comment("octo/widget", 42))
 
     assert captured["path"] == "/repos/octo/widget/pulls/comments/42"
@@ -846,3 +847,292 @@ def test_list_repo_labels_truncates_at_page_bound(caplog: pytest.LogCaptureFixtu
     assert requests_seen == list(range(1, _MAX_LABEL_PAGES + 1))
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("truncated" in r.getMessage() for r in warnings)
+
+
+def test_forgejo_list_review_comments_walks_reviews() -> None:
+    """Forgejo's flat `/pulls/{n}/comments` route 404s, so the client walks the
+    PR's reviews and fetches each review's comments; `position` (new-file line)
+    maps to `line` — Forgejo items carry no `line`/`original_line` keys."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path == "/repos/o/r/pulls/1664/reviews":
+            return httpx.Response(
+                200,
+                json=[{"id": 535, "user": {"login": "mira"}, "body": "lgtm", "state": "approved"}],
+            )
+        if request.url.path == "/repos/o/r/pulls/1664/reviews/535/comments":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 10925,
+                        "user": {"login": "miracodeai-bot"},
+                        "body": "**Bug**",
+                        "path": ".forgejo/workflows/ci.yml",
+                        "position": 655,
+                        "original_position": 654,
+                        "diff_hunk": "@@ -652,3 +652,4 @@",
+                        "created_at": "2026-09-01T12:00:00Z",
+                    }
+                ],
+            )
+        return httpx.Response(404, json={"message": "unexpected " + request.url.path})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    comments = _run_async(client.list_review_comments("o/r", 1664))
+
+    assert len(comments) == 1
+    rc = comments[0]
+    assert rc.id == 10925
+    assert rc.line == 655
+    assert rc.path == ".forgejo/workflows/ci.yml"
+    assert rc.author == "miracodeai-bot"
+    assert rc.body == "**Bug**"
+    # The dead flat route must never be requested on Forgejo.
+    assert "/repos/o/r/pulls/1664/comments" not in requested
+    assert requested == [
+        "/repos/o/r/pulls/1664/reviews",
+        "/repos/o/r/pulls/1664/reviews/535/comments",
+    ]
+
+
+def test_forgejo_list_review_comments_flattens_reviews() -> None:
+    """Comments from several reviews flatten into one list, in review order."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/o/r/pulls/1664/reviews":
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": 535, "user": {"login": "mira"}, "body": "first"},
+                    {"id": 536, "user": {"login": "bob"}, "body": "second"},
+                ],
+            )
+        if request.url.path == "/repos/o/r/pulls/1664/reviews/535/comments":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 1,
+                        "user": {"login": "mira"},
+                        "body": "a",
+                        "path": "x.py",
+                        "position": 10,
+                        "created_at": "2026-09-01T00:00:00Z",
+                    }
+                ],
+            )
+        if request.url.path == "/repos/o/r/pulls/1664/reviews/536/comments":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 2,
+                        "user": {"login": "bob"},
+                        "body": "b",
+                        "path": "y.py",
+                        "position": 20,
+                        "created_at": "2026-09-01T00:00:00Z",
+                    }
+                ],
+            )
+        return httpx.Response(404, json={"message": "unexpected " + request.url.path})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    comments = _run_async(client.list_review_comments("o/r", 1664))
+
+    assert [(c.id, c.body, c.author) for c in comments] == [(1, "a", "mira"), (2, "b", "bob")]
+
+
+def test_forgejo_list_review_comments_paginates() -> None:
+    """A review with more than 50 inline comments must paginate with
+    `limit=50` (Forgejo's MaxResponseItems clamp) until a short page."""
+    seen_params: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/o/r/pulls/1664/reviews":
+            return httpx.Response(200, json=[{"id": 535, "user": {"login": "mira"}, "body": "many"}])
+        if request.url.path == "/repos/o/r/pulls/1664/reviews/535/comments":
+            seen_params.append(dict(request.url.params))
+            if request.url.params.get("page") == "1":
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "id": i,
+                            "user": {"login": "mira"},
+                            "body": f"c{i}",
+                            "path": "x.py",
+                            "position": i,
+                            "created_at": "2026-09-01T00:00:00Z",
+                        }
+                        for i in range(50)
+                    ],
+                )
+            assert request.url.params["page"] == "2"
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 999,
+                        "user": {"login": "mira"},
+                        "body": "last",
+                        "path": "x.py",
+                        "position": 51,
+                        "created_at": "2026-09-01T00:00:00Z",
+                    }
+                ],
+            )
+        return httpx.Response(404, json={"message": "unexpected " + request.url.path})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    comments = _run_async(client.list_review_comments("o/r", 1664))
+
+    assert len(comments) == 51
+    assert comments[-1].id == 999
+    assert comments[-1].line == 51
+    assert seen_params[0] == {"limit": "50", "page": "1"}
+    assert seen_params[1] == {"limit": "50", "page": "2"}
+
+
+def test_forgejo_get_review_comment_found() -> None:
+    """With `pr_number`, a Forgejo comment resolves via the reviews walk and
+    returns the mapped item (no flat `/pulls/comments/{id}` fetch)."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path == "/repos/o/r/pulls/1664/reviews":
+            return httpx.Response(200, json=[{"id": 535, "user": {"login": "mira"}, "body": "review"}])
+        if request.url.path == "/repos/o/r/pulls/1664/reviews/535/comments":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 10925,
+                        "user": {"login": "miracodeai-bot"},
+                        "body": "**Bug**",
+                        "path": ".forgejo/workflows/ci.yml",
+                        "position": 655,
+                        "created_at": "2026-09-01T00:00:00Z",
+                    }
+                ],
+            )
+        return httpx.Response(404, json={"message": "unexpected " + request.url.path})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    rc = _run_async(client.get_review_comment("o/r", 10925, pr_number=1664))
+
+    assert rc.id == 10925
+    assert rc.line == 655
+    assert rc.path == ".forgejo/workflows/ci.yml"
+    assert rc.author == "miracodeai-bot"
+    assert "/repos/o/r/pulls/comments/10925" not in requested
+
+
+def test_forgejo_get_review_comment_not_found() -> None:
+    """A Forgejo id the reviews walk never yields raises `GitHubError(404)` —
+    the caller's except path already falls back to the webhook body."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/o/r/pulls/1664/reviews":
+            return httpx.Response(200, json=[{"id": 535, "user": {"login": "mira"}, "body": "review"}])
+        if request.url.path == "/repos/o/r/pulls/1664/reviews/535/comments":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 10925,
+                        "user": {"login": "miracodeai-bot"},
+                        "body": "**Bug**",
+                        "path": ".forgejo/workflows/ci.yml",
+                        "position": 655,
+                        "created_at": "2026-09-01T00:00:00Z",
+                    }
+                ],
+            )
+        return httpx.Response(404, json={"message": "unexpected " + request.url.path})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    with pytest.raises(GitHubError) as exc:
+        _run_async(client.get_review_comment("o/r", 999999, pr_number=1664))
+
+    assert exc.value.status == 404
+
+
+def test_forgejo_review_comments_204_treated_empty() -> None:
+    """A `204` from the review-comments fetch is treated as an empty comment
+    list, not an error (the shared `_check` 204 -> `None` path)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/o/r/pulls/1664/reviews":
+            return httpx.Response(200, json=[{"id": 535, "user": {"login": "mira"}, "body": "review"}])
+        if request.url.path == "/repos/o/r/pulls/1664/reviews/535/comments":
+            return httpx.Response(204)
+        return httpx.Response(404, json={"message": "unexpected " + request.url.path})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    assert _run_async(client.list_review_comments("o/r", 1664)) == []
+
+
+def test_github_review_comments_regression_pins() -> None:
+    """The GitHub path stays on the flat canonical routes: `list_review_comments`
+    hits `/pulls/{n}/comments` (mapping `line`, falling back to `original_line`)
+    and `get_review_comment` hits `/pulls/comments/{id}`."""
+    requested: list[str] = []
+
+    def list_handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 1,
+                    "user": {"login": "alice"},
+                    "body": "a",
+                    "path": "x.py",
+                    "line": 5,
+                    "created_at": "2026-09-01T00:00:00Z",
+                },
+                {
+                    "id": 2,
+                    "user": {"login": "bob"},
+                    "body": "b",
+                    "path": "y.py",
+                    "original_line": 7,
+                    "created_at": "2026-09-01T00:00:00Z",
+                },
+            ],
+        )
+
+    list_client = GitHubClient("tok", transport=httpx.MockTransport(list_handler), platform="github")
+    comments = _run_async(list_client.list_review_comments("o/r", 1664))
+
+    assert requested == ["/repos/o/r/pulls/1664/comments"]
+    assert [c.line for c in comments] == [5, 7]
+    assert [c.author for c in comments] == ["alice", "bob"]
+
+    requested.clear()
+
+    def get_handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "id": 10925,
+                "body": "**Bug**",
+                "path": ".forgejo/workflows/ci.yml",
+                "line": 655,
+                "user": {"login": "miracodeai-bot"},
+                "created_at": "2026-09-01T00:00:00Z",
+            },
+        )
+
+    get_client = GitHubClient("tok", transport=httpx.MockTransport(get_handler), platform="github")
+    rc = _run_async(get_client.get_review_comment("o/r", 10925))
+
+    assert requested == ["/repos/o/r/pulls/comments/10925"]
+    assert rc.id == 10925
+    assert rc.line == 655

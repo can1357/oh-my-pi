@@ -863,7 +863,7 @@ async def handle_review(
     comment_id = comment.get("id")
     if comment_id is not None and hasattr(github, "get_review_comment"):
         try:
-            fetched = await github.get_review_comment(repo_full, int(comment_id))
+            fetched = await github.get_review_comment(repo_full, int(comment_id), pr_number=pr_number)
             if fetched.body.strip():
                 body = fetched.body.strip()
             if fetched.path:

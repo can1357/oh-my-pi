@@ -717,11 +717,11 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         return JSONResponse({"items": [_serialize(c) for c in items]})
 
     @app.get("/gh/v1/get_review_comment")
-    async def get_review_comment(request: Request, repo: str, comment_id: int) -> JSONResponse:
+    async def get_review_comment(request: Request, repo: str, comment_id: int, pr_number: int | None = None) -> JSONResponse:
         await _authenticate(request)
         github = _github_client_for(request)
         try:
-            info = await github.get_review_comment(repo, comment_id)
+            info = await github.get_review_comment(repo, comment_id, pr_number=pr_number)
         except GitHubError as exc:
             return _gh_error_response(exc)
         return JSONResponse(_serialize(info))
