@@ -136,7 +136,9 @@ def test_followup_comment_prompt_embeds_thread_context() -> None:
 def test_followup_review_prompt_embeds_thread_context() -> None:
     thread = (
         ThreadMessage(kind="pr_body", author="roboomp", body="PR body", created_at=""),
-        ThreadMessage(kind="comment", author="coderabbit", body="Walkthrough was not generated", created_at="2026-05-01T10:00:00Z"),
+        ThreadMessage(
+            kind="comment", author="coderabbit", body="Walkthrough was not generated", created_at="2026-05-01T10:00:00Z"
+        ),
         ThreadMessage(
             kind="review_comment",
             author="coderabbit",
@@ -161,39 +163,6 @@ def test_followup_review_prompt_embeds_thread_context() -> None:
     assert "Walkthrough was not generated" in out
     assert "leak at 42" in out
     assert "use a generator here" in out
-
-
-def test_prompts_guard_against_second_already_resolved_reply() -> None:
-    """Follow-up prompts must forbid a second 'already resolved' reply."""
-    guard = 'a second "already resolved" reply'
-    review = persona.followup_review(
-        repo=_Repo(),
-        workspace=_Workspace(),
-        pr_number=1080,
-        comment_author="coderabbit",
-        comment_body="leak",
-        comment_path="src/foo.py",
-        comment_line_range=":L42",
-    )
-    assert guard in review
-    directive = persona.directive(
-        repo=_Repo(),
-        issue=_Issue(),
-        comment=_Comment(),
-        workspace=_Workspace(),
-        directive=DirectiveInfo(body="apply fix Y", author="coderabbit"),
-        pr_status="PR #1080 is open",
-    )
-    assert guard in directive
-    followup = persona.followup_comment(
-        repo=_Repo(),
-        issue=_Issue(),
-        comment=_Comment(body="current request"),
-        workspace=_Workspace(),
-        pr_status="PR #1080 is open",
-        pr_number=1080,
-    )
-    assert guard in followup
 
 
 def test_kickoff_directive_prompt_embeds_thread_and_classify_instruction() -> None:

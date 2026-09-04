@@ -264,6 +264,7 @@ async def test_handle_review_passes_full_thread_to_run_task(db, settings, monkey
         labels=(),
         is_pull_request=False,
     )
+
     async def _get_repo(_r):
         return repo
 
@@ -275,7 +276,9 @@ async def test_handle_review_passes_full_thread_to_run_task(db, settings, monkey
 
     async def _list_review_comments(_r, _n):
         return [
-            SimpleNamespace(author="coderabbit", body="leak at 42", path="src/foo.py", line=42, created_at="2026-05-02T10:00:00Z"),
+            SimpleNamespace(
+                author="coderabbit", body="leak at 42", path="src/foo.py", line=42, created_at="2026-05-02T10:00:00Z"
+            ),
         ]
 
     async def _list_pr_reviews(_r, _n):

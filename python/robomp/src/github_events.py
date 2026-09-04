@@ -77,7 +77,7 @@ def payload_has_reviewer_bot_directive(payload: Mapping[str, Any], reviewer_bots
     raw = payload.get("_robomp_directive")
     if not isinstance(raw, Mapping):
         return False
-    author = str(raw.get("author") or "").lower().removesuffix("[bot]")
+    author = _normalize_bot_login(str(raw.get("author") or ""))
     return author in reviewer_bots
 
 

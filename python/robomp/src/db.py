@@ -777,7 +777,9 @@ class Database:
             )
             return cur.rowcount > 0
 
-    def list_newer_queued_events(self, *, issue_key: str, exclude_delivery: str, after_received_at: str) -> list[EventRow]:
+    def list_newer_queued_events(
+        self, *, issue_key: str, exclude_delivery: str, after_received_at: str
+    ) -> list[EventRow]:
         """Queued events for `issue_key` received strictly after `after_received_at` (excluding one delivery)."""
         with self._lock:
             rows = self._conn.execute(
