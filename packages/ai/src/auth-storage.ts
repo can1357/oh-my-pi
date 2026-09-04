@@ -1509,10 +1509,15 @@ export class AuthStorage {
 
 	/**
 	 * Set a runtime API key override (not persisted to disk).
-	 * Used for CLI --api-key flag.
+	 * Used for invocation-scoped credentials such as CLI flags and credential bundles.
 	 */
 	setRuntimeApiKey(provider: string, apiKey: string): void {
 		this.#runtimeOverrides.set(provider, apiKey);
+	}
+
+	/** Return the runtime API key override without consulting lower-priority sources. */
+	getRuntimeApiKey(provider: string): string | undefined {
+		return this.#runtimeOverrides.get(provider);
 	}
 
 	/**
@@ -1552,8 +1557,8 @@ export class AuthStorage {
 	 * config, that key is what authenticates outbound requests, regardless
 	 * of whatever the broker happens to have loaded for that provider.
 	 *
-	 * Lower priority than {@link setRuntimeApiKey} so a CLI `--api-key`
-	 * still wins for the duration of a single invocation.
+	 * Lower priority than {@link setRuntimeApiKey} so invocation-scoped
+	 * credentials still win.
 	 */
 	setConfigApiKey(provider: string, apiKey: string): void {
 		this.#configOverrides.set(provider, apiKey);
@@ -7125,7 +7130,7 @@ export class AuthStorage {
 	 */
 	describeCredentialSource(provider: string, sessionId?: string): string | undefined {
 		if (this.#runtimeOverrides.has(provider)) {
-			return "runtime override (--api-key)";
+			return "runtime API key override";
 		}
 		if (this.#configOverrides.has(provider)) {
 			return "config override (models.yml)";

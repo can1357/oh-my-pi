@@ -30,6 +30,7 @@
  * real implementations at the dispatch site.
  */
 
+import * as nodePath from "node:path";
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { Args } from "./args";
@@ -162,6 +163,15 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	},
 	"--api-key": (result, value) => {
 		result.apiKey = value;
+	},
+	"--provider-api-keys": (result, value) => {
+		result.providerApiKeys = value;
+	},
+	"--provider-api-keys-fd": (result, value) => {
+		if (result.providerApiKeysFd !== undefined) {
+			throw new CliUsageError("--provider-api-keys-fd may only be specified once");
+		}
+		result.providerApiKeysFd = value;
 	},
 	"--system-prompt": (result, value) => {
 		result.systemPrompt = value;
@@ -376,6 +386,42 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Flags whose value is consumed exactly once at startup and cannot be replayed.
+ *
+ * `--provider-api-keys-fd N` transfers ownership of descriptor N: it is read
+ * and closed during startup, so handing the same number to the replacement
+ * process makes it exit with "must name a readable open descriptor" instead of
+ * resuming the session. The credentials do not survive `/restart`; a named
+ * `--provider-api-keys` path is re-readable and is replayed normally.
+ */
+export const PROVIDER_API_KEYS_FD_FLAG = "--provider-api-keys-fd";
+
+const CONSUMED_ONCE_FLAGS: ReadonlySet<string> = new Set([PROVIDER_API_KEYS_FD_FLAG]);
+
+/**
+ * The one flag whose value is a filesystem path resolved against the *launch*
+ * directory rather than the directory the process ends up in.
+ *
+ * `applyStartupCwd` may relocate the process (automatic home relocation or an
+ * explicit `--cwd`), and `/restart` re-executes the original argv from that new
+ * directory. A relative value would then resolve somewhere else, so the
+ * replacement process gets the launch-resolved absolute path instead.
+ *
+ * `--cwd` is deliberately not in scope here. `applyStartupCwd` resolves it onto
+ * `parsed.cwd`, not onto argv, so the replayed token stays relative — but the
+ * relaunch runs from the directory that token already selected, and the resumed
+ * session carries its own cwd, so replaying it verbatim lands in the same place.
+ */
+const LAUNCH_RELATIVE_PATH_FLAG = "--provider-api-keys";
+
+/** Re-anchor a launch-relative flag value so it survives a cwd change. */
+function resolveLaunchRelativeValue(flag: string, value: string, launchCwd: string | undefined): string {
+	if (launchCwd === undefined || flag !== LAUNCH_RELATIVE_PATH_FLAG) return value;
+	if (value.length === 0 || nodePath.isAbsolute(value)) return value;
+	return nodePath.resolve(launchCwd, value);
+}
+
+/**
  * Rewrite the launch argv for an in-place self-restart (`/restart`).
  *
  * Keeps every configuration flag as launched, but drops:
@@ -383,14 +429,21 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
  *   `--resume=<id>` forms) — the relaunch resumes `resumeSessionId` instead;
  * - positionals (prompt messages, `@file` args, subcommand tokens) — their
  *   effect is already in the resumed transcript, so replaying them would
- *   duplicate the initial prompt.
+ *   duplicate the initial prompt;
+ * - consumed-once flags ({@link CONSUMED_ONCE_FLAGS}), whose value no longer
+ *   exists by the time the replacement process starts.
  *
  * Value consumption mirrors {@link flagConsumesValue}, so a dropped flag takes
  * its value token with it and an unknown extension flag keeps its value.
  * `resumeSessionId` is omitted for a session that never materialized on disk;
  * the relaunch then starts fresh with the same configuration.
+ *
+ * `launchCwd` is the directory the process was launched from. When given, a
+ * relative {@link LAUNCH_RELATIVE_PATH_FLAG} value is rewritten to its
+ * launch-resolved absolute form, so a relaunch from a different working
+ * directory still finds the same file.
  */
-export function restartArgv(argv: string[], resumeSessionId: string | undefined): string[] {
+export function restartArgv(argv: string[], resumeSessionId: string | undefined, launchCwd?: string): string[] {
 	const kept: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -398,12 +451,17 @@ export function restartArgv(argv: string[], resumeSessionId: string | undefined)
 		if (!arg.startsWith("-")) continue; // positional: prompt message, @file, or subcommand
 		const consumesNext = flagConsumesValue(arg, argv[i + 1]);
 		const flag = arg.startsWith("--") ? arg.split("=", 1)[0] : arg;
-		if (SESSION_SOURCE_FLAGS.has(flag)) {
+		if (SESSION_SOURCE_FLAGS.has(flag) || CONSUMED_ONCE_FLAGS.has(flag)) {
 			if (consumesNext) i++;
 			continue;
 		}
+		if (flag === LAUNCH_RELATIVE_PATH_FLAG && arg.startsWith(`${flag}=`)) {
+			const inlineValue = arg.slice(flag.length + 1);
+			kept.push(`${flag}=${resolveLaunchRelativeValue(flag, inlineValue, launchCwd)}`);
+			continue;
+		}
 		kept.push(arg);
-		if (consumesNext) kept.push(argv[++i]);
+		if (consumesNext) kept.push(resolveLaunchRelativeValue(flag, argv[++i], launchCwd));
 	}
 	if (resumeSessionId !== undefined) kept.push("--resume", resumeSessionId);
 	return kept;

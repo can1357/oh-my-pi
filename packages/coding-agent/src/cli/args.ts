@@ -42,6 +42,8 @@ export interface Args {
 	planYoloInto?: string;
 	maxTime?: number;
 	apiKey?: string;
+	providerApiKeys?: string;
+	providerApiKeysFd?: string;
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
 	thinking?: ConfiguredThinkingLevel;
@@ -205,16 +207,25 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			}
 		} else if (STRING_VALUE_FLAGS.has(arg)) {
 			if (arg === "--trusted-extension") trustedFlagCount++;
-			// Built-in string flags consume the next token even when it is flag-looking
-			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile").
-			// The one token they must never absorb is the profile bootstrap's internal
-			// boundary sentinel: an extension-shadowable built-in like `--plan` (parsed
-			// here only when its boolean extension is NOT loaded) would otherwise swallow
-			// the marker as its value and drop the user's trailing message.
-			if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) {
+			const next = args[i + 1];
+			// The next token has not been through the `--flag=value` split yet, so
+			// compare its flag name with any `=value` suffix stripped: the equals
+			// spelling of a credential flag must be as unconsumable as the bare one.
+			const nextFlagName = next?.startsWith("--") && next.includes("=") ? next.slice(0, next.indexOf("=")) : next;
+			const nextIsProviderBundleFlag =
+				(arg === "--provider-api-keys" || arg === "--provider-api-keys-fd") &&
+				(nextFlagName === "--provider-api-keys" || nextFlagName === "--provider-api-keys-fd");
+			// Built-in string flags normally consume a flag-looking value. Credential
+			// bundle flags must not consume each other: a missing named path must leave
+			// the descriptor flag recognizable so its transferred fd can be closed.
+			// The profile bootstrap boundary is also never a value; an extension-
+			// shadowable built-in could otherwise swallow it and drop the user's message.
+			if (i + 1 < args.length && next !== PROFILE_BOOTSTRAP_BOUNDARY_ARG && !nextIsProviderBundleFlag) {
 				const consumed = consumeBuiltInStringValue(arg, args, i + 1);
 				i = consumed.index;
 				STRING_SETTERS[arg](result, consumed.value, parseDeps);
+			} else if (arg === "--provider-api-keys" || arg === "--provider-api-keys-fd") {
+				STRING_SETTERS[arg](result, "", parseDeps);
 			}
 		} else if (OPTIONAL_VALUE_FLAGS.has(arg)) {
 			const config = OPTIONAL_FLAGS[arg];

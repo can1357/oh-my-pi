@@ -3,6 +3,25 @@ import * as path from "node:path";
 import { directoryExists, getProjectDir, normalizePathForComparison, setProjectDir } from "@oh-my-pi/pi-utils";
 import type { Args } from "./args";
 
+/**
+ * Directory the process was launched from, captured before any relocation.
+ *
+ * `applyStartupCwd` can chdir the process, and `/restart` re-executes the
+ * original argv from wherever the process ended up. Launch-relative flag
+ * values must therefore be re-anchored against this directory, not `cwd()`.
+ */
+let launchDirectory: string | undefined;
+
+/** Record the pre-relocation launch directory. Called once during startup. */
+export function recordLaunchDirectory(dir: string): void {
+	launchDirectory = dir;
+}
+
+/** The recorded launch directory, or `undefined` before startup records it. */
+export function getLaunchDirectory(): string | undefined {
+	return launchDirectory;
+}
+
 async function maybeAutoChdir(parsed: Args): Promise<void> {
 	if (parsed.allowHome || parsed.cwd) {
 		return;

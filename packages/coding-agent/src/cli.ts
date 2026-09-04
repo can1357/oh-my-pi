@@ -30,6 +30,7 @@ import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from
 import { BLOB_BROKER_WORKER_ARG } from "./blob-broker/protocol";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
+import { closeProviderApiKeyBundleFd } from "./cli/provider-api-keys";
 import { startJsEvalProcess } from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
@@ -460,6 +461,12 @@ export async function runCli(argv: string[]): Promise<void> {
 			process.stderr.write(`error: ${resolved.error}\n`);
 			process.exitCode = 1;
 			return;
+		}
+		// A stripped credential descriptor belongs to nobody now: close it before
+		// the subcommand runs, so `update`'s package-manager children cannot
+		// inherit a live provider-key fd.
+		if (resolved.orphanedKeyDescriptors?.length) {
+			for (const fd of resolved.orphanedKeyDescriptors) await closeProviderApiKeyBundleFd(fd);
 		}
 		await run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
 	} finally {

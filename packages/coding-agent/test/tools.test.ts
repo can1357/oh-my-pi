@@ -968,7 +968,13 @@ describe("Coding Agent Tools", () => {
 				path: "artifact://7:3-4",
 			});
 
-			expect(getTextOutput(result)).toContain("[Showing lines 2-2 of 4 (50.0KB limit). Use :3 to continue]");
+			const output = getTextOutput(result);
+			// #10775: an oversized selected line is omitted and the continuation
+			// hint is dropped — `:3` would just re-request the line that already
+			// could not fit. The budget footer still reports the limit.
+			expect(output).toContain("[Showing lines 2-2 of 4 (50.0KB limit)]");
+			expect(output).not.toContain("Use :3 to continue");
+			expect(output).toContain("Line 3 is 60.0KB and could not fit after preceding context");
 		});
 
 		it("should spill oversized read output to an artifact", async () => {

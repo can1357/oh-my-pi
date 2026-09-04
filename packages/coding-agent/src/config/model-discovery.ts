@@ -170,6 +170,15 @@ export interface DiscoveryContext {
 	getBearerApiKeyResolver(provider: string): Promise<ApiKey | undefined>;
 }
 
+function replaceBearerAuthorization(headers: Record<string, string>, apiKey: string): Record<string, string> {
+	const authenticatedHeaders = { ...headers };
+	for (const name in authenticatedHeaders) {
+		if (name.toLowerCase() === "authorization") delete authenticatedHeaders[name];
+	}
+	authenticatedHeaders.Authorization = `Bearer ${apiKey}`;
+	return authenticatedHeaders;
+}
+
 type OllamaDiscoveredModelMetadata = {
 	reasoning: boolean;
 	input: ("text" | "image")[];
@@ -474,33 +483,41 @@ export async function discoverOllamaModels(
 ): Promise<Model<Api>[]> {
 	const endpoint = normalizeOllamaBaseUrl(providerConfig.baseUrl);
 	const tagsUrl = `${endpoint}/api/tags`;
-	const headers = { ...providerConfig.headers };
+	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	const customTimeoutMs = providerConfig.discovery.timeoutMs;
-	const payload = await withTimeoutSignal(discoveryProbeTimeoutMs(endpoint, 250, customTimeoutMs), async signal => {
-		const response = await ctx.fetch(tagsUrl, {
-			headers,
-			signal,
+	const attempt = async (h: Record<string, string>) => {
+		const payload = await withTimeoutSignal(discoveryProbeTimeoutMs(endpoint, 250, customTimeoutMs), async signal => {
+			const response = await ctx.fetch(tagsUrl, {
+				headers: h,
+				signal,
+			});
+			if (!response.ok) {
+				throw new Error(`HTTP ${response.status} from ${tagsUrl}`);
+			}
+			return (await response.json()) as { models?: Array<{ name?: string; model?: string }> };
 		});
-		if (!response.ok) {
-			throw new Error(`HTTP ${response.status} from ${tagsUrl}`);
-		}
-		return (await response.json()) as { models?: Array<{ name?: string; model?: string }> };
-	});
-	const entries = (payload.models ?? []).flatMap(item => {
-		const id = item.model || item.name;
-		return id ? [{ id, name: item.name || id }] : [];
-	});
-	const metadataById = new Map(
-		await Promise.all(
-			entries.map(
+		const listed = (payload.models ?? []).flatMap(item => {
+			const id = item.model || item.name;
+			return id ? [{ id, name: item.name || id }] : [];
+		});
+		// The metadata probe is the same authority as the listing, so it reuses
+		// the headers the listing succeeded with rather than the bare config.
+		const metadata = await Promise.all(
+			listed.map(
 				async entry =>
-					[
-						entry.id,
-						await discoverOllamaModelMetadata(ctx, endpoint, entry.id, headers, customTimeoutMs),
-					] as const,
+					[entry.id, await discoverOllamaModelMetadata(ctx, endpoint, entry.id, h, customTimeoutMs)] as const,
 			),
-		),
-	);
+		);
+		return [listed, metadata] as const;
+	};
+	// A remote ollama behind bearer auth takes its credential from the same
+	// resolver as every other authenticated discovery path, including a key
+	// installed process-locally by --provider-api-keys.
+	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
+	const [entries, metadataEntries] = apiKey
+		? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
+		: await attempt(baseHeaders);
+	const metadataById = new Map(metadataEntries);
 	return entries.map(entry => {
 		const metadata = metadataById.get(entry.id);
 		return buildModel({
@@ -622,7 +639,7 @@ export async function discoverLlamaCppModels(
 	};
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
 	const [payload, serverMetadata] = apiKey
-		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+		? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 		: await attempt(baseHeaders);
 	const models = parseLlamaCppModelList(payload);
 	const discovered: Model<Api>[] = [];
@@ -717,7 +734,7 @@ export async function discoverLlamaCppModelRuntimeMetadata(
 	try {
 		const apiKey = await ctx.getBearerApiKeyResolver(model.provider);
 		return apiKey
-			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+			? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 			: await attempt(baseHeaders);
 	} catch {
 		return undefined;
@@ -772,7 +789,7 @@ export async function discoverLmStudioModelRuntimeMetadata(
 	try {
 		const apiKey = await ctx.getBearerApiKeyResolver(model.provider);
 		return apiKey
-			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+			? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 			: await attempt(baseHeaders);
 	} catch {
 		return undefined;
@@ -857,7 +874,7 @@ export async function discoverOpenAIModelsList(
 	};
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
 	const [payload, nativeMetadata] = apiKey
-		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+		? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 		: await attempt(baseHeaders);
 	const models = payload.data ?? [];
 	const references = getBundledModelReferenceIndex();
@@ -969,7 +986,7 @@ export async function discoverLiteLLMModels(
 	let richModels: ModelSpec<Api>[] | null;
 	try {
 		richModels = apiKey
-			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+			? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 			: await attempt(baseHeaders);
 	} catch (error) {
 		const status = typeof error === "object" && error !== null && "status" in error ? error.status : undefined;
@@ -1025,7 +1042,7 @@ export async function discoverProxyModels(
 		});
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
 	const payload = apiKey
-		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
+		? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
 		: await attempt(baseHeaders);
 	const items = payload.data ?? [];
 	const discovered: Model<Api>[] = [];

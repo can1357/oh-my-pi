@@ -1377,6 +1377,10 @@ describe("ModelRegistry runtime discovery", () => {
 				},
 			);
 
+			// Credential resolution precedes the probe, so the timeout is armed one
+			// microtask turn after the call; advancing the clock before that turn
+			// would move time past a timer that does not exist yet.
+			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
 			vi.advanceTimersByTime(25);
 			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
 
@@ -2536,6 +2540,96 @@ providers:
 		expect(zeroCtx?.contextWindow).toBe(128000);
 	});
 
+	test("runtime keys replace configured authorization headers case-insensitively during proxy discovery", async () => {
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				headers: { authorization: "Bearer stale-token", "X-Proxy": "configured" },
+				discovery: { type: "proxy" },
+			},
+		});
+		authStorage.setRuntimeApiKey("proxy-test", "runtime-token");
+		const fetchMock: FetchImpl = async (input, init) => {
+			expect(String(input)).toBe("http://127.0.0.1:9998/v1/models");
+			expect(init?.headers).toEqual({
+				"X-Proxy": "configured",
+				Authorization: "Bearer runtime-token",
+			});
+			return Response.json({
+				data: [{ id: "anthropic-model", supported_endpoint_types: ["anthropic"], context_length: 200000 }],
+			});
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("proxy-test", "anthropic-model");
+		expect(model?.headers).toEqual({
+			"X-Proxy": "configured",
+			Authorization: "Bearer runtime-token",
+		});
+		authStorage.removeRuntimeApiKey("proxy-test");
+		expect(model?.headers).toEqual({
+			authorization: "Bearer stale-token",
+			"X-Proxy": "configured",
+		});
+	});
+
+	test("a runtime key removed mid-discovery does not survive on the merged model", async () => {
+		// The discovered model carries the bearer that started the probe. If the
+		// SDK host removes that key before the refresh merges, the merge must
+		// still rebuild live headers — otherwise the materialized bearer sticks
+		// and keeps being sent after removal.
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				headers: { authorization: "Bearer stale-token", "X-Proxy": "configured" },
+				discovery: { type: "proxy" },
+			},
+		});
+		authStorage.setRuntimeApiKey("proxy-test", "runtime-token");
+		const fetchMock: FetchImpl = async (_input, init) => {
+			expect(new Headers(init?.headers).get("authorization")).toBe("Bearer runtime-token");
+			// Removal lands while the probe is in flight, before the merge.
+			authStorage.removeRuntimeApiKey("proxy-test");
+			return Response.json({
+				data: [{ id: "anthropic-model", supported_endpoint_types: ["anthropic"], context_length: 200000 }],
+			});
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("proxy-test", "anthropic-model");
+		expect(model?.headers).toEqual({
+			authorization: "Bearer stale-token",
+			"X-Proxy": "configured",
+		});
+	});
+
+	test("a removed runtime key is dropped even with no configured header to fall back to", async () => {
+		// No `headers` block and no `authHeader` bearer: the provider's fallback
+		// credential lives in AuthStorage (OAuth, stored key, environment), which
+		// `getApiKey()` resolves. Keeping the materialized bearer meant the
+		// OpenAI-compatible transport preserved an explicitly removed credential
+		// and never consulted that fallback.
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				discovery: { type: "proxy" },
+			},
+		});
+		authStorage.setRuntimeApiKey("proxy-test", "runtime-token");
+		const fetchMock: FetchImpl = async (_input, init) => {
+			expect(new Headers(init?.headers).get("authorization")).toBe("Bearer runtime-token");
+			authStorage.removeRuntimeApiKey("proxy-test");
+			return Response.json({
+				data: [{ id: "anthropic-model", supported_endpoint_types: ["anthropic"], context_length: 200000 }],
+			});
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("proxy-test", "anthropic-model");
+		const authNames = Object.keys({ ...model?.headers }).filter(name => name.toLowerCase() === "authorization");
+		expect(authNames).toEqual([]);
+	});
+
 	test("proxy discovery uses proxy-reported name over bundled placeholder", async () => {
 		writeRawModelsJson({
 			"proxy-test": {
@@ -2852,5 +2946,72 @@ providers:
 
 		expect(registry.find("github-copilot", cachedAlias.id)).toBeUndefined();
 		expect(registry.find("github-copilot", bundledBase.id)?.headers).toEqual(bundledBase.headers);
+	});
+});
+
+describe("ollama discovery authentication", () => {
+	test("sends the resolved bearer credential to both ollama probes", async () => {
+		// A bearer-authenticated remote ollama whose key comes only from
+		// --provider-api-keys: the registry accepts the runtime key, so the
+		// probes must carry it or /api/tags and /api/show answer 401 and the
+		// provider ends up model-less.
+		const seen: Record<string, string | undefined> = {};
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			seen[new URL(url).pathname] = new Headers(init?.headers).get("authorization") ?? undefined;
+			if (url.endsWith("/api/tags")) {
+				return new Response(JSON.stringify({ models: [{ model: "qwen3:8b", name: "qwen3:8b" }] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url.endsWith("/api/show")) {
+				return new Response(JSON.stringify({ capabilities: ["thinking"] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+
+		const models = await discoverOllamaModels(
+			{
+				provider: "ollama-remote",
+				api: "openai-responses",
+				baseUrl: "https://ollama.example/",
+				headers: { "X-Tenant": "acme" },
+				discovery: { type: "ollama" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => "bundle-key" },
+		);
+
+		expect(seen["/api/tags"]).toBe("Bearer bundle-key");
+		expect(seen["/api/show"]).toBe("Bearer bundle-key");
+		expect(models.map(model => model.id)).toEqual(["qwen3:8b"]);
+		expect({ ...models[0]?.headers }["X-Tenant"]).toBe("acme");
+	});
+
+	test("leaves a configured authorization header alone when no credential resolves", async () => {
+		// Local ollama has no key; the provider's own configured header must not
+		// be replaced by an empty bearer.
+		const seen: (string | undefined)[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			seen.push(new Headers(init?.headers).get("authorization") ?? undefined);
+			if (String(input).endsWith("/api/tags")) {
+				return new Response(JSON.stringify({ models: [] }), { headers: { "Content-Type": "application/json" } });
+			}
+			throw new Error(`Unexpected URL: ${input}`);
+		};
+
+		await discoverOllamaModels(
+			{
+				provider: "ollama",
+				api: "openai-responses",
+				baseUrl: "http://127.0.0.1:11434",
+				headers: { Authorization: "Basic configured" },
+				discovery: { type: "ollama" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+
+		expect(seen).toEqual(["Basic configured"]);
 	});
 });

@@ -222,4 +222,61 @@ describe("restartArgv (/restart relaunch argv)", () => {
 	it("omits --resume for a session that never materialized on disk", () => {
 		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
 	});
+
+	it("drops a consumed credential descriptor but keeps a re-readable bundle path", () => {
+		// `--provider-api-keys-fd N` is single-use: startup consumed and closed N,
+		// so replaying it makes the replacement process exit with "must name a
+		// readable open descriptor" instead of resuming. The named path is still
+		// readable, so it is replayed as ordinary configuration.
+		expect(restartArgv(["--provider-api-keys-fd", "7", "--provider-api-keys", "/run/keys.json"], "sid")).toEqual([
+			"--provider-api-keys",
+			"/run/keys.json",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("drops the inline equals form of a consumed credential descriptor", () => {
+		expect(restartArgv(["--provider-api-keys-fd=7", "--model", "gpt-5"], "sid")).toEqual([
+			"--model",
+			"gpt-5",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("re-anchors a relative bundle path against the launch directory", () => {
+		// `omp --provider-api-keys keys.json --cwd /work/project` resolves the
+		// bundle from the launch directory and then chdirs. Replaying the bare
+		// relative token would make the replacement resolve /work/project/keys.json
+		// and exit with a credential-bundle error, so the absolute path is replayed.
+		expect(restartArgv(["--provider-api-keys", "keys.json", "--cwd", "/work/project"], "sid", "/launch/dir")).toEqual(
+			["--provider-api-keys", "/launch/dir/keys.json", "--cwd", "/work/project", "--resume", "sid"],
+		);
+	});
+
+	it("re-anchors the inline equals form of a relative bundle path", () => {
+		expect(restartArgv(["--provider-api-keys=sub/keys.json"], "sid", "/launch/dir")).toEqual([
+			"--provider-api-keys=/launch/dir/sub/keys.json",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("leaves an absolute bundle path and other path-valued flags untouched", () => {
+		// Only --provider-api-keys is launch-relative. --cwd is out of scope: the
+		// relaunch already runs from the directory that token selected.
+		expect(
+			restartArgv(["--provider-api-keys", "/run/keys.json", "--cwd", "relative/dir"], "sid", "/launch/dir"),
+		).toEqual(["--provider-api-keys", "/run/keys.json", "--cwd", "relative/dir", "--resume", "sid"]);
+	});
+
+	it("replays the relative bundle path unchanged when no launch directory is known", () => {
+		expect(restartArgv(["--provider-api-keys", "keys.json"], "sid")).toEqual([
+			"--provider-api-keys",
+			"keys.json",
+			"--resume",
+			"sid",
+		]);
+	});
 });

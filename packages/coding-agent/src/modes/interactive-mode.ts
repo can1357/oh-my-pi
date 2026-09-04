@@ -55,6 +55,7 @@ import {
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "../capability";
 import { restartArgv } from "../cli/flag-tables";
+import { getLaunchDirectory } from "../cli/startup-cwd";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { formatKeyHint, KeybindingsManager } from "../config/keybindings";
@@ -4827,8 +4828,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * Tear down like {@link shutdown}, then relaunch the CLI with the original
-	 * launch argv (session-source flags and positional prompts stripped, see
-	 * {@link restartArgv}), resuming this session when it exists on disk.
+	 * launch argv (session-source flags and positional prompts stripped and
+	 * launch-relative paths re-anchored, see {@link restartArgv}), resuming this
+	 * session when it exists on disk.
 	 *
 	 * On POSIX the relaunch is a true `execvp(3)` image replacement: same PID,
 	 * same terminal, no lingering parent. Postmortem cleanups and stdout are
@@ -4841,7 +4843,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#isShuttingDown = true;
 		await this.#teardown();
 
-		const cmd = [...resolveCliEntryCmd(), ...restartArgv(process.argv.slice(2), this.#resumableSessionId())];
+		const cmd = [
+			...resolveCliEntryCmd(),
+			...restartArgv(process.argv.slice(2), this.#resumableSessionId(), getLaunchDirectory()),
+		];
 		await postmortem.cleanup();
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {
