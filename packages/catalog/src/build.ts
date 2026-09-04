@@ -68,6 +68,17 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (Array.isArray(sandParameterIds) && model.sandParameterIds === undefined) {
 		model.sandParameterIds = sandParameterIds.filter((entry): entry is string => typeof entry === "string");
 	}
+	const sandToolsWire = catalog.sandToolsWire;
+	if (
+		(sandToolsWire === "parent-chat" ||
+			sandToolsWire === "automation" ||
+			sandToolsWire === "keep-model" ||
+			sandToolsWire === "error" ||
+			sandToolsWire === "sand-default-fallback") &&
+		model.sandToolsWire === undefined
+	) {
+		model.sandToolsWire = sandToolsWire;
+	}
 }
 
 /**

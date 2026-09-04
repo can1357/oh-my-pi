@@ -32,6 +32,9 @@ export const GROKBOT_STAMPED_CLIENT_VERSION = "0.30.0-pre.16";
 export const GROKBOT_DEFAULT_CLIENT_VERSION = GROKBOT_STAMPED_CLIENT_VERSION;
 export const GROKBOT_DEFAULT_NAMESPACE = "prod";
 export const GROKBOT_DEFAULT_TOKEN_TTL_MS = 10 * 60_000;
+
+/** Shared with Bedrock/Vertex env hooks — not a literal renewal credential. */
+export const GROKBOT_AUTHENTICATED_SENTINEL = "<authenticated>";
 const STAMPED_VERSION_BASE = /^(\d+\.\d+\.\d+)(?:-.+)?$/;
 
 export type GrokbotConfig = {
@@ -185,16 +188,20 @@ export function resolveGrokbotEnvApiKey(): string | undefined {
 	if (fromEnv) return fromEnv;
 	const file = loadGrokbotSecretFileSync();
 	const fromFile = file.GROKBOT_RENEWAL_CREDENTIAL || file.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
-	return fromFile ? "<authenticated>" : undefined;
+	return fromFile ? GROKBOT_AUTHENTICATED_SENTINEL : undefined;
 }
 
 export async function loadGrokbotConfig(renewalOverride?: string): Promise<GrokbotConfig> {
 	const file = await loadGrokbotSecretFile();
 	const namespace = $env.GROKBOT_NAMESPACE || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
 	const explicitVersion = $env.GROKBOT_CLIENT_VERSION || file.GROKBOT_CLIENT_VERSION || undefined;
+	// ModelRegistry may forward the env-hook sentinel as apiKey; never mint with it.
+	const override = renewalOverride?.trim();
+	const effectiveOverride =
+		override && override !== GROKBOT_AUTHENTICATED_SENTINEL ? override : undefined;
 	return {
 		renewal:
-			renewalOverride ||
+			effectiveOverride ||
 			$env.GROKBOT_RENEWAL_CREDENTIAL ||
 			$env.SAND_INFERENCE_RENEWAL_CREDENTIAL ||
 			file.GROKBOT_RENEWAL_CREDENTIAL ||

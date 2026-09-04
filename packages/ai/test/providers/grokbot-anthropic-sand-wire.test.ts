@@ -106,6 +106,27 @@ describe("anthropic sand tool wire", () => {
 				toolCount: 2,
 			}),
 		).toBe("error");
+		// Router wire mode comes from catalog `sand-tools-wire`, not id compares.
+		expect(
+			resolveAnthropicSandToolsWire(undefined, undefined, {
+				modelId: "sand-default",
+				toolCount: 2,
+				sandToolsWire: "parent-chat",
+			}),
+		).toBe("parent-chat");
+		expect(
+			resolveAnthropicSandToolsWire(undefined, undefined, {
+				modelId: "sand-automation",
+				toolCount: 2,
+				sandToolsWire: "automation",
+			}),
+		).toBe("automation");
+		expect(
+			resolveAnthropicSandToolsWire(undefined, undefined, {
+				modelId: "sand-default",
+				toolCount: 2,
+			}),
+		).toBe("error");
 	});
 
 	test("keep-model keeps anthropic requestedModel and maps product tools", () => {

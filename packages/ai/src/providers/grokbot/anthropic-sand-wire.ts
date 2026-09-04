@@ -35,6 +35,11 @@ export function isAnthropicSandModelId(modelId: string, provider = "grokbot"): b
 export type AnthropicSandWireResolveContext = {
 	modelId: string;
 	toolCount: number;
+	/**
+	 * Reviewed catalog fact (`sand-tools-wire`) for synthetic routers.
+	 * When set, auto mode uses this instead of comparing model ids.
+	 */
+	sandToolsWire?: "parent-chat" | "automation" | "keep-model" | "error" | "sand-default-fallback";
 };
 
 export function resolveAnthropicSandToolsWire(
@@ -56,8 +61,16 @@ export function resolveAnthropicSandToolsWire(
 	const modelId = context?.modelId?.trim() ?? "";
 	if (toolCount === 0) return "error";
 	if (isAnthropicSandModelId(modelId)) return "keep-model";
-	if (modelId === "sand-default") return "parent-chat";
-	if (modelId === "sand-automation") return "automation";
+	const catalogWire = context?.sandToolsWire;
+	if (
+		catalogWire === "parent-chat" ||
+		catalogWire === "automation" ||
+		catalogWire === "keep-model" ||
+		catalogWire === "error" ||
+		catalogWire === "sand-default-fallback"
+	) {
+		return catalogWire;
+	}
 	return "error";
 }
 

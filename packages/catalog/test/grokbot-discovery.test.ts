@@ -225,6 +225,8 @@ describe("grokbot AvailableModels normalize", () => {
 		// Discovery stays neutral; KDL `reasoning` upgrades via buildModel.
 		expect(sandDefault?.reasoning).toBe(false);
 		expect(buildModel(sandDefault!).reasoning).toBe(true);
+		expect(buildModel(sandDefault!).sandToolsWire).toBe("parent-chat");
+		expect(buildModel(models.find(m => m.id === "sand-automation")!).sandToolsWire).toBe("automation");
 		expect(buildModel(models.find(m => m.id === "sand-cua")!).reasoning).toBe(false);
 		expect(sandDefault?.input).toEqual(["text"]);
 		expect(models.find(m => m.id === "sand-cua")?.input).toEqual(["text"]);

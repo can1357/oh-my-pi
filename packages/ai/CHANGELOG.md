@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed Grok Bot Anthropic+tools auto wire to read catalog `sand-tools-wire` for routers instead of hard-coded model ids.
+
+### Fixed
 - Fixed Grok Bot discovered `thinking: false` defaults being overridden by effort, and product-wire tool collisions preferring built-in omp owners.
 ## [18.1.9] - 2026-09-04
 

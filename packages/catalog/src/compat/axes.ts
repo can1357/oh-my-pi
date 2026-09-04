@@ -41,6 +41,8 @@ export interface AxisDef {
 
 const OAI = ["openai", "openai-responses"] as const;
 const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+/** Reviewed Grok Bot Anthropic+tools auto wire profiles (routers). */
+const SAND_TOOLS_WIRES = ["parent-chat", "automation", "keep-model", "error", "sand-default-fallback"] as const;
 
 /** Effort tiers accepted by taxonomy collapse/override vocabulary (`Effort` ∪ `"off"`). */
 export const EFFORT_TIERS: readonly string[] = [...EFFORTS, "off"];
@@ -299,15 +301,23 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"sand-parameter-ids": { key: "sandParameterIds", set: "catalog", shape: "array" },
 	/**
-	 * Reviewed native tool-calling support. Applied as a correction so live
-	 * discovery can leave the field unset and KDL can force false (e.g. grok-4.5).
+	 * Reviewed Grok Bot Anthropic+tools wire profile for synthetic routers.
+	 * Discovery/seeds stay unset; stream auto-mode branches on this fact instead
+	 * of comparing model ids in TypeScript.
 	 */
+	"sand-tools-wire": {
+		key: "sandToolsWire",
+		set: "catalog",
+		shape: "scalar",
+		values: SAND_TOOLS_WIRES,
+	},
 	/**
 	 * Reviewed reasoning capability. Applied as a correction so synthetic
 	 * discovery/seed rows can stay neutral (`reasoning: false`) while KDL
 	 * upgrades specific routers (e.g. sand-default) without id compares in TS.
 	 */
 	"reasoning": { key: "reasoning", set: "catalog", shape: "scalar" },
+	/** Reviewed native tool-calling support. Live discovery may leave unset; KDL can force false. */
 	"supports-tools": { key: "supportsTools", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 };

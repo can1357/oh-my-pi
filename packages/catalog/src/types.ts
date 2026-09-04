@@ -1126,6 +1126,11 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	sandParameterIds?: readonly string[];
 	/**
+	 * Reviewed Grok Bot Anthropic+tools auto wire profile (KDL `sand-tools-wire`).
+	 * Synthetic routers declare `parent-chat` / `automation`; unset for ordinary models.
+	 */
+	sandToolsWire?: "parent-chat" | "automation" | "keep-model" | "error" | "sand-default-fallback";
+	/**
 	 * Default Grok Bot `requestedModel.parameters` values from live AvailableModels
 	 * variants (e.g. default `context` tier). Wire mapping prefers explicit request
 	 * options, then these defaults, then reviewed fallbacks.

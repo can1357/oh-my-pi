@@ -8817,11 +8817,27 @@
 					}
 				],
 				"catalog": {
-					"reasoning": true
+					"reasoning": true,
+					"sandToolsWire": "parent-chat"
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:19",
+				"source": "providers/grokbot.kdl:20",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "sand-automation"
+					}
+				],
+				"catalog": {
+					"sandToolsWire": "automation"
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:23",
 				"providers": [
 					"grokbot"
 				],
@@ -8852,7 +8868,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:24",
+				"source": "providers/grokbot.kdl:28",
 				"providers": [
 					"grokbot"
 				],
@@ -8880,7 +8896,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:31",
+				"source": "providers/grokbot.kdl:35",
 				"providers": [
 					"grokbot"
 				],

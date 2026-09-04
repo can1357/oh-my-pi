@@ -15,6 +15,10 @@ provider "grokbot" {
 	// Synthetic sand-default router: reviewed reasoning capability (discovery/seeds stay neutral).
 	models "sand-default" {
 		reasoning #true
+		sand-tools-wire "parent-chat"
+	}
+	models "sand-automation" {
+		sand-tools-wire "automation"
 	}
 	models "sand-default" "sand-cua" "sand-automation" "default" "auto" {
 		context-window-floor 200000

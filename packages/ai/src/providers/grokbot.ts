@@ -690,7 +690,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			const resolvedWire = resolveAnthropicSandToolsWire(
 				typeof process !== "undefined" ? process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE : undefined,
 				options?.anthropicToolsWire,
-				{ modelId: model.id, toolCount: tools.length },
+				{ modelId: model.id, toolCount: tools.length, sandToolsWire: model.sandToolsWire },
 			);
 			const anthropicWire = applyAnthropicSandToolWire(
 				{ requestedModel: reqModel, tools, modelId: model.id, ompTools: context.tools },
