@@ -157,7 +157,7 @@ const validSamples: Record<SchemaName, unknown> = {
 			},
 		],
 	},
-	clientUsageReportRequestSchema: { installId: "install", hostname: "host", entries: [OBSERVED_USAGE] },
+	clientUsageReportRequestSchema: { installId: "install", hostname: "host", app: "robomp", entries: [OBSERVED_USAGE] },
 	clientUsageReportResponseSchema: { ok: true },
 	clientUsageSummaryResponseSchema: {
 		generatedAt: 2_000,
@@ -167,7 +167,7 @@ const validSamples: Record<SchemaName, unknown> = {
 				hostname: "host",
 				firstSeen: 1_000,
 				lastSeen: 2_000,
-				providers: [{ ...OBSERVED_USAGE, firstSeen: undefined, at: undefined, model: undefined }],
+				providers: [{ ...OBSERVED_USAGE, app: "robomp", firstSeen: undefined, at: undefined, model: undefined }],
 			},
 		],
 	},
@@ -213,7 +213,6 @@ describe("auth-broker public wire schemas", () => {
 	test("exports all 31 real callable ArkType values with canonical behavior", () => {
 		expect(Object.keys(wireSchemas).sort()).toEqual([...schemaNames].sort());
 		for (const name of schemaNames) {
-			// biome-ignore lint/performance/noDynamicNamespaceImportAccess: this contract intentionally verifies the public namespace.
 			const schema = wireSchemas[name];
 			expect(typeof schema).toBe("function");
 			expect(schema).toBeInstanceOf(Type);

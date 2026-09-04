@@ -32,6 +32,7 @@ import {
 	type EditorBorderStyle,
 	type EditorTopBorder,
 	getComposerStyle,
+	isFilledComposerStyle,
 } from "./composer";
 
 export type { EditorBorderStyle, EditorTopBorder };
@@ -401,6 +402,8 @@ export interface EditorTheme {
 	accentColor?: (str: string) => string;
 	/** Background fill used by filled composer styles. */
 	surfaceColor?: (str: string) => string;
+	/** Foreground used when the composer shape leaves its text surface transparent. */
+	textColor?: (str: string) => string;
 	selectList: SelectListTheme;
 	symbols: SymbolTheme;
 	editorPaddingX?: number;
@@ -463,6 +466,12 @@ export interface EditorTextAssistProvider {
 
 type HistoryCursorAnchor = "start" | "end";
 type AutocompleteRequest = { kind: "regular"; explicitTab: boolean } | { kind: "force" };
+
+/** What the paste transport knew about the input burst before the editor inserts the payload. */
+export interface PasteOptions {
+	/** A submit keypress arrived in the same input burst and will be dispatched right after the paste. */
+	submitAfterPaste?: boolean;
+}
 
 export class Editor implements Component, Focusable {
 	#state: EditorState = {
@@ -578,8 +587,9 @@ export class Editor implements Component, Focusable {
 	 *  the editor inserts nothing and records no undo state, leaving insertion to the host (e.g. a
 	 *  "wrap in a code block / XML / attach as file" menu for very large pastes), which re-inserts
 	 *  via {@link insertPaste} or {@link insertText}. Return `false` (or leave unset) for the
-	 *  default collapse-to-marker behavior. `lineCount` is the sanitized paste's line count. */
-	onLargePaste?: (text: string, lineCount: number) => boolean;
+	 *  default collapse-to-marker behavior. `lineCount` is the sanitized paste's line count;
+	 *  `options` carries what the paste transport knew about the burst. */
+	onLargePaste?: (text: string, lineCount: number, options: PasteOptions) => boolean;
 	onAutocompleteCancel?: () => void;
 	disableSubmit: boolean = false;
 
@@ -594,6 +604,34 @@ export class Editor implements Component, Focusable {
 	constructor(theme: EditorTheme) {
 		this.#theme = theme;
 		this.borderColor = theme.borderColor;
+	}
+	/** Return bounded editor content, cursor, and transient child state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		const lines = this.#state.lines;
+		let textLength = Math.max(0, lines.length - 1);
+		let textPreview = "";
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i] ?? "";
+			textLength += line.length;
+			if (textPreview.length >= 120) continue;
+			if (i > 0) textPreview += "\n";
+			textPreview += line.slice(0, 120 - textPreview.length);
+		}
+		return {
+			textPreview,
+			textLength,
+			previewTruncated: textLength > 120,
+			cursorLine: this.#state.cursorLine,
+			cursorCol: this.#state.cursorCol,
+			lineCount: lines.length,
+			selection: null,
+			placeholderActive: false,
+		};
+	}
+
+	/** Expose the active autocomplete list to the debug tree walker. */
+	get debugChildren(): readonly Component[] {
+		return this.#autocompleteList ? [this.#autocompleteList] : [];
 	}
 
 	setTheme(theme: EditorTheme): void {
@@ -1243,13 +1281,16 @@ export class Editor implements Component, Focusable {
 					displayWidth = visibleWidth(displayText);
 				}
 			}
+			const renderedText = isFilledComposerStyle(style)
+				? displayText
+				: (this.#theme.textColor ?? PASSTHROUGH_COLOR)(displayText);
 
 			const linePad = padding(Math.max(0, lineContentWidth - displayWidth));
 
 			result.push(
 				...style.renderRow({
 					...chromeCtx,
-					text: displayText,
+					text: renderedText,
 					pad: linePad,
 					gutter: gutterText,
 					isLastRow: visibleIndex === visibleLayoutLines.length - 1,
@@ -1375,11 +1416,17 @@ export class Editor implements Component, Focusable {
 				this.#cancelAutocomplete(true);
 				return;
 			}
+			// Right arrow at end of line accepts the selection like Tab (fish-style).
+			// Mid-line, right arrow keeps its cursor-movement role and falls through.
+			const rightArrowAccepts =
+				kb.matchesCanonical(canonical, "tui.editor.cursorRight") &&
+				this.#state.cursorCol >= (this.#state.lines[this.#state.cursorLine] ?? "").length;
 			if (
 				this.#autocompleteState === "assist" &&
 				(kb.matchesCanonical(canonical, "tui.input.submit") ||
 					data === "\n" ||
-					kb.matchesCanonical(canonical, "tui.input.tab"))
+					kb.matchesCanonical(canonical, "tui.input.tab") ||
+					rightArrowAccepts)
 			) {
 				this.#applySpellingSuggestion();
 				return;
@@ -1392,7 +1439,8 @@ export class Editor implements Component, Focusable {
 				kb.matchesCanonical(canonical, "tui.select.pageDown") ||
 				kb.matchesCanonical(canonical, "tui.input.submit") ||
 				data === "\n" ||
-				kb.matchesCanonical(canonical, "tui.input.tab")
+				kb.matchesCanonical(canonical, "tui.input.tab") ||
+				rightArrowAccepts
 			) {
 				// Only pass navigation keys to the list, not Enter/Tab (we handle those directly)
 				if (
@@ -1407,7 +1455,7 @@ export class Editor implements Component, Focusable {
 				}
 
 				// If Tab was pressed, always apply the selection
-				if (kb.matchesCanonical(canonical, "tui.input.tab")) {
+				if (kb.matchesCanonical(canonical, "tui.input.tab") || rightArrowAccepts) {
 					const selected = this.#autocompleteList.getSelectedItem();
 					// Check for stale autocomplete state due to buffer edits since last refresh
 					// (destructive keys or paste can outrun the debounced update).
@@ -1703,6 +1751,13 @@ export class Editor implements Component, Focusable {
 			}
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorRight")) {
 			// Right
+			// At end of line, accept the inline ghost word completion (IME-style) like Tab.
+			if (
+				this.#state.cursorCol >= (this.#state.lines[this.#state.cursorLine] ?? "").length &&
+				this.#acceptWordCompletion()
+			) {
+				return;
+			}
 			this.#moveCursor(0, 1);
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorLeft")) {
 			// Left
@@ -2100,8 +2155,8 @@ export class Editor implements Component, Focusable {
 	}
 
 	/** Apply terminal paste semantics to text from non-bracketed paste transports. */
-	pasteText(text: string): void {
-		this.#handlePaste(text);
+	pasteText(text: string, options: PasteOptions = {}): void {
+		this.#handlePaste(text, options);
 	}
 
 	/** Insert `content` as a collapsed `[Paste #N]` marker (stored for expansion on submit via
@@ -2241,7 +2296,7 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	#handlePaste(pastedText: string): void {
+	#handlePaste(pastedText: string, options: PasteOptions = {}): void {
 		let filteredText = this.#sanitizePastedText(pastedText);
 
 		// If pasting a file path (starts with /, ~, or .) and the character before
@@ -2263,7 +2318,7 @@ export class Editor implements Component, Focusable {
 		// Let the host intercept marker-sized pastes (e.g. the large-paste menu). When it takes
 		// over, the editor inserts nothing and records no undo state — the host re-inserts via
 		// `insertPaste`/`insertText` once the user chooses.
-		if (isMarkerSized && this.onLargePaste?.(filteredText, pastedLines.length)) {
+		if (isMarkerSized && this.onLargePaste?.(filteredText, pastedLines.length, options)) {
 			return;
 		}
 
@@ -3407,13 +3462,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	async #handleTabCompletion(): Promise<void> {
-		const wordCompletion = this.#getWordCompletion();
-		if (wordCompletion) {
-			const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
-			const after = currentLine.slice(this.#state.cursorCol);
-			this.#insertTextAtCursor(wordCompletion + (/^[\s.,;:!?"\])}]/.test(after) ? "" : " "));
-			return;
-		}
+		if (this.#acceptWordCompletion()) return;
 		if (!this.#autocompleteProvider) return;
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
@@ -3430,6 +3479,16 @@ export class Editor implements Component, Focusable {
 			await this.#forceFileAutocomplete();
 		}
 	}
+	/** Insert the inline ghost word completion at the cursor, if any. Shared by Tab and right-arrow accept. */
+	#acceptWordCompletion(): boolean {
+		const wordCompletion = this.#getWordCompletion();
+		if (!wordCompletion) return false;
+		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
+		const after = currentLine.slice(this.#state.cursorCol);
+		this.#insertTextAtCursor(wordCompletion + (/^[\s.,;:!?"\])}]/.test(after) ? "" : " "));
+		return true;
+	}
+
 	async #showSpellingSuggestions(): Promise<void> {
 		const cursorLine = this.#state.cursorLine;
 		const cursorCol = this.#state.cursorCol;

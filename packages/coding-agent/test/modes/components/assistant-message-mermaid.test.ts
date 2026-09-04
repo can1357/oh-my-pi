@@ -82,6 +82,49 @@ describe("AssistantMessageComponent transcript lifecycle", () => {
 		expect(Bun.stripANSI(batch?.rows.join("\n") ?? "")).toContain("Revised opening paragraph");
 	});
 
+	it("retires the frozen thinking prefix into history while still streaming", () => {
+		const thinkingMessage = (thinking: string): AssistantMessage => ({
+			...createAssistantMessage(""),
+			content: [{ type: "thinking", thinking }],
+		});
+		const component = new AssistantMessageComponent();
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+
+		component.updateContent(
+			thinkingMessage("Alpha reasoning paragraph.\n\nBeta reasoning paragraph.\n\nPartial tail"),
+			{ transient: true },
+		);
+		transcript.renderViewport(80, 20, { now: 0, tick: 0 });
+		component.updateContent(
+			thinkingMessage(
+				"Alpha reasoning paragraph.\n\nBeta reasoning paragraph.\n\nPartial tail keeps growing.\n\nNewer tail",
+			),
+			{ transient: true },
+		);
+		transcript.renderViewport(80, 20, { now: 1, tick: 1 });
+
+		// Under pressure the frozen thinking prefix retires while streaming.
+		const first = transcript.peekFinalizedBatch(80, 0);
+		expect(first).toBeDefined();
+		const firstText = Bun.stripANSI(first!.rows.join("\n"));
+		expect(firstText).toContain("Alpha reasoning paragraph.");
+		expect(firstText).not.toContain("Newer tail");
+		transcript.acknowledgeFinalizedBatch(first!.id);
+
+		// Emitted rows leave the mutable viewport; the streaming tail stays live.
+		const live = Bun.stripANSI(transcript.renderViewport(80, 20, { now: 2, tick: 2 }).join("\n"));
+		expect(live).not.toContain("Alpha reasoning paragraph.");
+		expect(live).toContain("Newer tail");
+
+		// Finalization retires exactly the un-emitted remainder — no duplicates.
+		component.markTranscriptBlockFinalized();
+		const flush = transcript.peekFlushBatch(80);
+		const flushText = Bun.stripANSI(flush?.rows.join("\n") ?? "");
+		expect(flushText).not.toContain("Alpha reasoning paragraph.");
+		expect(flushText).toContain("Newer tail");
+	});
+
 	it("appends a late cache-miss marker after assistant output", () => {
 		const component = new AssistantMessageComponent();
 		component.updateContent(

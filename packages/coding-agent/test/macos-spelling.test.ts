@@ -38,6 +38,49 @@ describe("macOS spelling feature gates", () => {
 		secondCheck.resolve([]);
 		await Promise.resolve();
 	});
+	it("keeps the queued verification check when a projected undercurl paints while busy", async () => {
+		// Regression: fast-typing "each" projected the stale "eac" range from the
+		// cached "{ #eac" check onto "{ #each" and then deleted its own queued
+		// verification check, freezing the undercurl until an unrelated repaint.
+		const requests: Array<{
+			text: string;
+			result: PromiseWithResolvers<readonly { start: number; length: number }[]>;
+		}> = [];
+		const provider = new MacOSSpellingProvider(
+			backend({
+				checkSpelling: text => {
+					const result = Promise.withResolvers<readonly { start: number; length: number }[]>();
+					requests.push({ text, result });
+					return result.promise;
+				},
+			}),
+		);
+		provider.setFeatures({ typoDetection: true, autocomplete: false, autocorrect: false });
+		let updated = Promise.withResolvers<void>();
+		provider.onUpdate = () => updated.resolve();
+
+		provider.decorateTypos("{ #eac", decorationContext("{ #eac"));
+		requests[0]?.result.resolve([{ start: 3, length: 3 }]);
+		await updated.promise;
+		updated = Promise.withResolvers();
+
+		// A check for another lane is in flight when the extended text renders.
+		const editorText = "{ #each\nother";
+		provider.decorateTypos("other", decorationContext(editorText, 1));
+		const painted = provider.decorateTypos("{ #each", decorationContext(editorText, 0));
+		expect(painted).toContain("\x1b[4:3m"); // transitional projected undercurl on "eac"
+		await Bun.sleep(0); // let the queued "other" check start
+		expect(requests.map(request => request.text)).toEqual(["{ #eac", "other"]);
+
+		requests[1]?.result.resolve([]);
+		await Bun.sleep(0);
+		// The queued verification for "{ #each" must survive the projected paint.
+		expect(requests.map(request => request.text)).toEqual(["{ #eac", "other", "{ #each"]);
+
+		requests[2]?.result.resolve([]);
+		await updated.promise;
+		expect(provider.decorateTypos("{ #each", decorationContext(editorText, 0))).toBe("{ #each");
+	});
 	it("never re-emits text when the backend returns overlapping typo ranges", async () => {
 		// Regression: a whole-line range overlapping a word range made decorateTypos
 		// render the overlapped slice twice ("thgh" → "thghthgh") and desynced the

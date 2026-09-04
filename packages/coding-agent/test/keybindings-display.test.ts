@@ -19,10 +19,10 @@ describe("KeybindingsManager.getDisplayString", () => {
 		expect(keybindings.getDisplayString("app.message.dequeue")).toBe("Alt+Up");
 	});
 
-	it("defaults retry to Alt+R", () => {
+	it("defaults retry to F5 with the Alt+R fallback", () => {
 		const keybindings = KeybindingsManager.inMemory();
 
-		expect(keybindings.getDisplayString("app.retry")).toBe("Alt+R");
+		expect(keybindings.getDisplayString("app.retry")).toBe("F5/Alt+R");
 	});
 
 	it("formats multiple bindings with the existing separator", () => {

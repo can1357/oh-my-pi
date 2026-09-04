@@ -4,7 +4,6 @@ import {
 	autolinkSchemeScanIndex,
 	clearRenderCache,
 	Markdown,
-	mathStartIndex,
 	renderInlineMarkdown,
 	urlTokenPossible,
 } from "@oh-my-pi/pi-tui/components/markdown";
@@ -12,6 +11,7 @@ import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capab
 import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { Chalk } from "@oh-my-pi/pi-utils/chalk";
+import { mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
 import { defaultMarkdownTheme } from "./test-themes.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 
@@ -1361,7 +1361,7 @@ bar`,
 			let visible = "";
 			const targets: Array<string | null> = [];
 
-			for (let i = 0; i < line.length; ) {
+			for (let i = 0; i < line.length;) {
 				if (line.startsWith("\x1b]8;;", i)) {
 					const terminator = line.indexOf("\x07", i + 5);
 					activeTarget = line.slice(i + 5, terminator) || null;
@@ -1454,15 +1454,15 @@ bar`,
 			const labelStart = issueRow.visible.indexOf("#5860");
 			const separator = issueRow.visible.indexOf("|", labelStart);
 			expect(issueRow.targets.slice(labelStart, labelStart + "#5860".length)).toEqual(
-				new Array("#5860".length).fill(issueUrl),
+				Array.from({ length: "#5860".length }, () => issueUrl),
 			);
 			expect(issueRow.targets.slice(labelStart + "#5860".length, separator)).toEqual(
-				new Array(separator - labelStart - "#5860".length).fill(null),
+				Array.from({ length: separator - labelStart - "#5860".length }, () => null),
 			);
 
 			const titleStart = issueRow.visible.indexOf("feat(extensions)");
 			expect(issueRow.targets.slice(titleStart, titleStart + "feat(extensions)".length)).toEqual(
-				new Array("feat(extensions)".length).fill(null),
+				Array.from({ length: "feat(extensions)".length }, () => null),
 			);
 
 			const linkedText = lines
@@ -1506,10 +1506,12 @@ bar`,
 				[secondRow, "second"],
 			] as const) {
 				const start = row.visible.indexOf(label);
-				expect(row.targets.slice(start, start + label.length)).toEqual(new Array(label.length).fill(issueUrl));
+				expect(row.targets.slice(start, start + label.length)).toEqual(
+					Array.from({ length: label.length }, () => issueUrl),
+				);
 				const separator = row.visible.indexOf("|", start);
 				expect(row.targets.slice(start + label.length, separator)).toEqual(
-					new Array(separator - start - label.length).fill(null),
+					Array.from({ length: separator - start - label.length }, () => null),
 				);
 			}
 
@@ -1573,6 +1575,26 @@ bar`,
 
 			const output = markdown.render(80).join("\n");
 			expect(output.includes("\x1b]8;;http://www.example.com\x07")).toBe(true);
+		});
+
+		it("renders a reference link with a prototype-key label as plain text without crashing (issue #10283)", () => {
+			// A reference-style link whose label collides with an Object.prototype
+			// member used to resolve to an inherited non-definition, producing a
+			// link token with `href: undefined` that crashed the renderer at
+			// `token.href.startsWith` — fatal during transcript replay.
+			// `constructor`/`toString` render as literal label text; every case
+			// must avoid emitting an OSC 8 hyperlink and must not throw.
+			for (const label of ["constructor", "toString", "valueOf", "isPrototypeOf"]) {
+				const markdown = new Markdown(`See [${label}] for details`, 0, 0, defaultMarkdownTheme);
+				const output = markdown.render(80).join("\n");
+				expect(stripTerminalSequences(output).trim()).toBe(`See [${label}] for details`);
+				expect(output.includes("\x1b]8;;")).toBe(false);
+			}
+			// `__proto__`'s double underscores are legitimately parsed as emphasis;
+			// the contract here is only that it never becomes a link or crashes.
+			const protoOut = new Markdown("See [__proto__] for details", 0, 0, defaultMarkdownTheme).render(80).join("\n");
+			expect(protoOut.includes("\x1b]8;;")).toBe(false);
+			expect(stripTerminalSequences(protoOut)).toContain("proto");
 		});
 	});
 
@@ -1672,19 +1694,30 @@ describe("Inline color swatches", () => {
 	const FMT = TERMINAL.trueColor ? "ansi-16m" : "ansi-256";
 	// defaultMarkdownTheme supplies no `colorSwatch` symbol, so the renderer uses its ■ default.
 	const swatchFor = (hex: string, glyph = "■"): string => `${Bun.color(`#${hex}`, FMT)}${glyph}`;
+	// The `#hex` token itself is painted with the color as background and a
+	// YIQ-contrast foreground (VS Code's Color.isLighter rule).
+	const BLACK_FG = TERMINAL.trueColor ? "\x1b[38;2;0;0;0m" : "\x1b[38;5;16m";
+	const WHITE_FG = TERMINAL.trueColor ? "\x1b[38;2;255;255;255m" : "\x1b[38;5;231m";
+	const paintedFor = (hex: string, fg: string, text = `#${hex}`): string =>
+		`${Bun.color(`#${hex}`, FMT)!.replace("[38;", "[48;")}${fg}${text}\x1b[39m\x1b[49m`;
 
 	it("paints a colored swatch before a bare hex color in prose", () => {
 		const out = new Markdown("Accent is #C5FFD6 today.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
 		// Swatch (color SGR + chip glyph + fg reset + space) sits immediately before the code.
 		expect(out.includes(`${swatchFor("C5FFD6")}\x1b[39m `)).toBeTruthy();
-		expect(out.includes("#C5FFD6")).toBeTruthy();
+		// The token itself sits on the color: bg + contrast fg (light fill → black text).
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
+	});
+	it("picks a white foreground on dark fills", () => {
+		const out = new Markdown("Navy is #000080 here.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
+		expect(out.includes(paintedFor("000080", WHITE_FG))).toBeTruthy();
 	});
 
 	it("paints a swatch before a backticked hex color", () => {
 		const out = new Markdown("Use `#C5FFD6` for the bg.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
 		expect(out.includes(swatchFor("C5FFD6"))).toBeTruthy();
-		// The code text survives as inline code (theme styles it yellow).
-		expect(out.includes("#C5FFD6")).toBeTruthy();
+		// The code text is painted onto the color instead of the codespan style.
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
 	});
 
 	it("does not swatch short numeric references that resemble issue numbers", () => {
@@ -1695,6 +1728,15 @@ describe("Inline color swatches", () => {
 	it("swatches a 3-digit shorthand that contains a hex letter", () => {
 		const out = new Markdown("White is #fff.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
 		expect(out.includes(swatchFor("fff"))).toBeTruthy();
+	});
+
+	it("does not swatch hex-prefixed word fragments like #each", () => {
+		// "#each" starts with hex digits ("eac") but the trailing "h" makes it a
+		// word, not a color; hashtag-style prose must never sprout a swatch.
+		const out = new Markdown("Loop with {{#each items}} in templates.", 0, 0, defaultMarkdownTheme)
+			.render(80)
+			.join("");
+		expect(out.includes("■")).toBe(false);
 	});
 
 	it("does not swatch 4-digit hashline #TAG snapshot tags", () => {
@@ -1736,8 +1778,10 @@ describe("Inline color swatches", () => {
 			.render(80)
 			.join("\n");
 		expect(out.includes(swatchFor("C5FFD6"))).toBeTruthy();
-		// Gray (\x1b[90m) is re-opened for the code text — the swatch's fg reset must not bleed.
-		expect(out.includes("\x1b[90m#C5FFD6")).toBeTruthy();
+		// The token is painted with its own contrast fg; gray (\x1b[90m) re-opens
+		// for the surrounding prose after the chip's fg/bg resets.
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
+		expect(out.includes("\x1b[90m for accent")).toBeTruthy();
 	});
 });
 

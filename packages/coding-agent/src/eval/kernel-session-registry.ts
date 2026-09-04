@@ -87,10 +87,15 @@ interface KernelSessionRegistryDescriptor<
 	validateKernel?: (session: TSession, kernel: TKernel) => boolean;
 }
 
-interface KernelSessionRegistry<TOptions extends KernelSessionRegistryOptions, TResult> {
+interface KernelSessionRegistry<
+	TKernel extends RegistryKernel,
+	TOptions extends KernelSessionRegistryOptions,
+	TResult,
+> {
 	disposeAll(): Promise<void>;
 	disposeByOwner(ownerId: string): Promise<void>;
 	executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult>;
+	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
 }
 
 export function normalizeKernelSessionCwd(cwd: string): string {
@@ -131,7 +136,7 @@ export function createKernelSessionRegistry<
 	TSession extends KernelSession<TKernel>,
 >(
 	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, TResult, TSession>,
-): KernelSessionRegistry<TOptions, TResult> {
+): KernelSessionRegistry<TKernel, TOptions, TResult> {
 	const sessions = new Map<string, TSession>();
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
@@ -178,6 +183,7 @@ export function createKernelSessionRegistry<
 			attachSessionOwner(starting, sessionId, options.kernelOwnerId);
 			return await waitForStartup(starting.promise, options);
 		}
+		// oxlint-disable-next-line prefer-const -- captured by the startup closure before assignment
 		let startingSession!: StartingKernelSession<TSession>;
 		const startup = (async () => {
 			const kernel = await descriptor.startKernel(cwd, options);
@@ -352,7 +358,7 @@ export function createKernelSessionRegistry<
 	async function disposeByOwner(ownerId: string): Promise<void> {
 		const toShutdown: TSession[] = [];
 		const startingToShutdown: StartingKernelSession<TSession>[] = [];
-		for (const session of [...sessions.values()]) {
+		for (const session of Array.from(sessions.values())) {
 			if (!session.ownerIds.has(ownerId)) continue;
 			if (session.ownerIds.size === 1) {
 				toShutdown.push(session);
@@ -360,7 +366,7 @@ export function createKernelSessionRegistry<
 			}
 			session.ownerIds.delete(ownerId);
 		}
-		for (const [sessionKey, starting] of [...startingSessions.entries()]) {
+		for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
 			if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
 			if (starting.ownerIds.size === 1) {
 				startingSessions.delete(sessionKey);
@@ -418,6 +424,19 @@ export function createKernelSessionRegistry<
 			throw new descriptor.cancelledErrorClass(false);
 		}
 		return retryKernel;
+	}
+
+	function peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined {
+		const sessionId = options.sessionId ?? `session:${cwd}`;
+		const sessionKey = resolveOwnerScopedSessionKey({
+			baseKey: descriptor.buildSessionKey(sessionId, cwd, options.interpreter),
+			ownerId: options.kernelOwnerId,
+			reset: false,
+			hasSession: key => sessions.has(key) || startingSessions.has(key),
+			getOwners: key => sessions.get(key) ?? startingSessions.get(key),
+		});
+		const kernel = sessions.get(sessionKey)?.kernel;
+		return kernel?.isAlive() ? kernel : undefined;
 	}
 
 	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult> {
@@ -497,5 +516,5 @@ export function createKernelSessionRegistry<
 		return retryResult;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession };
+	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel };
 }

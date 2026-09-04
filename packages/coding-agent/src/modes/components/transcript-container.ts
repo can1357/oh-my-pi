@@ -1,5 +1,6 @@
 import type { Component, HistoryBatch } from "@oh-my-pi/pi-tui";
 import { Container } from "@oh-my-pi/pi-tui";
+import { logger } from "@oh-my-pi/pi-utils";
 import { isToolActivityComponent } from "./tool-activity";
 
 /** Shared animation time supplied by the constrained transcript root. */
@@ -25,6 +26,9 @@ export interface TranscriptStableRow {
  * Explicit semantic-row contract for a block whose stable head may enter native
  * history before finalization. Every later array must extend the prior keys
  * exactly; each row renderer is deterministic for its width.
+ * A publication that breaks these invariants (e.g. a mid-stream theme change
+ * re-coloring already-emitted bytes) freezes further stable-row emission for
+ * that block instead of failing the render — see {@link TranscriptContainer}.
  */
 export interface AppendOnlyTranscriptBlock {
 	readonly transcriptBlockMode: "appendOnly";
@@ -35,6 +39,15 @@ export interface AppendOnlyTranscriptBlock {
 	 * prefix the block's full render at the same width.
 	 */
 	renderTranscriptStableRows(count: number, width: number): readonly string[];
+	/**
+	 * Discard every published stable row so the block re-renders its head from
+	 * scratch. Called only alongside a destructive display reset (e.g. a
+	 * thinking-visibility toggle) that clears the native scrollback those rows
+	 * occupied — the sole context in which the append-only "published bytes never
+	 * change" contract may be retracted. Optional: blocks whose stable-row
+	 * presentation never changes may omit it.
+	 */
+	resetTranscriptStableRows?(): void;
 }
 
 interface FinalizableBlock {
@@ -58,6 +71,13 @@ interface TranscriptEntry {
 	stableRows: readonly TranscriptStableRow[];
 	renderedStableByWidth: Map<number, readonly string[]>;
 	emitted: number;
+	/**
+	 * Set when a published stable row drifted (retraction, byte change within a
+	 * width epoch, or no longer a render prefix). Rows already in native
+	 * scrollback cannot be retracted, so the entry keeps its last good stable
+	 * state for emitted-row slicing but never emits another mid-stream row.
+	 */
+	stableFrozen: boolean;
 }
 
 type RetirementPolicy = "pressure" | "flush";
@@ -67,6 +87,8 @@ type Offered =
 	| { batch: HistoryBatch; kind: "replay" };
 
 const MAX_LIVE_BLOCKS = 256;
+/** Grace before a pressure-blocked frontier is reported; a streaming block may legitimately hold it briefly. */
+const PINNED_FRONTIER_WARN_MS = 30_000;
 const EMPTY_ROWS: readonly string[] = [];
 const EMPTY_STABLE_ROWS: readonly TranscriptStableRow[] = [];
 
@@ -85,7 +107,8 @@ function isPlainBlank(line: string): boolean {
 	return !/\S/.test(line);
 }
 
-function isRowPrefix(prefix: readonly string[], rows: readonly string[]): boolean {
+/** Whether `prefix` matches `rows` byte-for-byte from the top. */
+export function isRowPrefix(prefix: readonly string[], rows: readonly string[]): boolean {
 	if (prefix.length > rows.length) return false;
 	for (let index = 0; index < prefix.length; index++) {
 		if (prefix[index] !== rows[index]) return false;
@@ -120,6 +143,12 @@ export class TranscriptContainer extends Container {
 	#replayRequested = false;
 	#toolActivityVisible = true;
 	#lastFrame: AnimationFrame = { tick: 0, now: 0 };
+	// Start rows from the last full render(), keyed by child component (transcript deep-links).
+	#childStartRows = new Map<Component, number>();
+	// Watchdog for the wedge where an unfinalized frontier block pins pressure
+	// retirement: everything behind it stays live and degrades to one-line
+	// allocations. Logs once per pinned episode after a grace period.
+	#pinnedFrontier: { index: number; since: number; logged: boolean } | undefined;
 
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
@@ -131,6 +160,7 @@ export class TranscriptContainer extends Container {
 			stableRows: EMPTY_STABLE_ROWS,
 			renderedStableByWidth: new Map(),
 			emitted: 0,
+			stableFrozen: false,
 		});
 	}
 
@@ -139,6 +169,7 @@ export class TranscriptContainer extends Container {
 		super.removeChild(component);
 		this.#entries = this.#entries.filter(candidate => candidate.component !== component);
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
+		this.#childStartRows.delete(component);
 	}
 
 	override clear(): void {
@@ -146,6 +177,8 @@ export class TranscriptContainer extends Container {
 		this.#entries = [];
 		this.#frontier = 0;
 		this.#offered = undefined;
+		this.#childStartRows.clear();
+		this.#pinnedFrontier = undefined;
 		this.#replayPending = false;
 		this.#replayRequested = false;
 	}
@@ -157,6 +190,32 @@ export class TranscriptContainer extends Container {
 			if (isToolActivityComponent(child)) child.setToolActivityVisible(visible);
 		}
 		this.invalidate();
+	}
+
+	/**
+	 * Forget the append-only emission ledger — emitted counts, published stable
+	 * rows, per-width render cache, and freeze state — for every block, and ask
+	 * each append-only block to drop its own published rows. The next replay then
+	 * re-renders each block from its current {@link Component.render}, applying a
+	 * changed presentation (e.g. a thinking-visibility toggle) to rows that were
+	 * already emitted as stable heads while streaming (#10177).
+	 *
+	 * Callers MUST pair this with a scrollback-clearing {@link resetDisplay}: the
+	 * emitted rows it forgets still sit in native history until that clear
+	 * rewrites them, so unpaired use would duplicate them on the next retirement.
+	 */
+	resetStableEmission(): void {
+		this.#syncEntries();
+		if (this.#offered?.kind === "append") this.#offered = undefined;
+		for (const entry of this.#entries) {
+			entry.emitted = 0;
+			entry.stableRows = EMPTY_STABLE_ROWS;
+			entry.renderedStableByWidth = new Map();
+			entry.stableFrozen = false;
+			if (entry.mode === "appendOnly") {
+				(entry.component as Component & AppendOnlyTranscriptBlock).resetTranscriptStableRows?.();
+			}
+		}
 	}
 
 	/** Whether a transient block may be discarded without leaving tape history. */
@@ -260,6 +319,7 @@ export class TranscriptContainer extends Container {
 			return output;
 		}
 
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const allocation: number[] = new Array(shown.length).fill(1);
 		let surplus = capacity - shown.length;
 		// Surplus rows favor ordinary transcript blocks over dynamic tool-activity
@@ -318,6 +378,26 @@ export class TranscriptContainer extends Container {
 		return this.#peekBatch(width, 0, "flush");
 	}
 
+	/** Recompose the unacknowledged batch so a discarded TUI frame can be rendered again. */
+	rerenderOfferedBatch(width: number): HistoryBatch | undefined {
+		const offered = this.#offered;
+		if (offered === undefined) return undefined;
+		let rows: readonly string[];
+		if (offered.kind === "append") {
+			const entry = this.#entries[offered.entry];
+			if (entry === undefined) return undefined;
+			const before = this.#renderStablePrefix(entry, entry.emitted, width);
+			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
+			rows = after.slice(before.length);
+		} else if (offered.kind === "commit") {
+			rows = this.#renderRange(this.#frontier, offered.end, width, true);
+		} else {
+			rows = this.#renderReplay(width);
+		}
+		offered.batch = { id: offered.batch.id, rows, kind: offered.batch.kind };
+		return offered.batch;
+	}
+
 	#peekBatch(width: number, capacity: number, policy: RetirementPolicy): HistoryBatch | undefined {
 		this.#syncEntries();
 		this.#settleFinalized();
@@ -329,7 +409,9 @@ export class TranscriptContainer extends Container {
 		const room = Math.max(0, Math.trunc(capacity));
 		const live = this.#liveEntries();
 		if (live.length === 0) return undefined;
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const rendered: (readonly string[])[] = new Array(live.length);
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const heights: number[] = new Array(live.length);
 		let total = 0;
 		let visible = 0;
@@ -345,13 +427,17 @@ export class TranscriptContainer extends Container {
 			if (rows.length > 0) total += rows.length + (visible++ > 0 ? 1 : 0);
 		}
 		const overflowing = total > room || this.#liveCount() >= MAX_LIVE_BLOCKS;
-		if (policy === "pressure" && !overflowing) return undefined;
+		if (policy === "pressure" && !overflowing) {
+			this.#pinnedFrontier = undefined;
+			return undefined;
+		}
 
 		const head = this.#entries[this.#frontier];
 		if (
 			policy === "pressure" &&
 			total > room &&
 			head?.mode === "appendOnly" &&
+			!head.stableFrozen &&
 			head.state !== "committed" &&
 			head.emitted < head.stableRows.length
 		) {
@@ -359,7 +445,8 @@ export class TranscriptContainer extends Container {
 			const before = this.#renderStablePrefix(head, head.emitted, width);
 			const after = this.#renderStablePrefix(head, emittedEnd, width);
 			if (!isRowPrefix(before, after) || after.length === before.length) {
-				throw new Error("Append-only transcript semantic row render must add a non-empty suffix");
+				this.#freezeStableRows(head, EMPTY_ROWS, "semantic row render added no suffix");
+				return undefined;
 			}
 			const batch: HistoryBatch = {
 				id: this.#nextBatchId++,
@@ -367,6 +454,7 @@ export class TranscriptContainer extends Container {
 				kind: "append",
 			};
 			this.#offered = { batch, kind: "append", entry: this.#frontier, emittedEnd };
+			this.#pinnedFrontier = undefined;
 			return batch;
 		}
 
@@ -384,7 +472,11 @@ export class TranscriptContainer extends Container {
 			end++;
 			index++;
 		}
-		if (end === this.#frontier) return undefined;
+		if (end === this.#frontier) {
+			if (policy === "pressure") this.#notePinnedFrontier();
+			return undefined;
+		}
+		this.#pinnedFrontier = undefined;
 		const batch: HistoryBatch = {
 			id: this.#nextBatchId++,
 			rows: this.#renderRange(this.#frontier, end, width, true),
@@ -439,27 +531,34 @@ export class TranscriptContainer extends Container {
 	/** Full semantic render used by exports and non-terminal commands. */
 	override render(width: number): readonly string[] {
 		this.#syncEntries();
+		this.#childStartRows.clear();
 		const rows: string[] = [];
 		for (const entry of this.#entries) {
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const block = this.#renderEntry(entry, width);
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.push("");
+			this.#childStartRows.set(entry.component, rows.length);
 			rows.push(...block);
 		}
 		return rows;
 	}
 
+	/** Rendered row where a child's block begins in the last full render() (transcript deep-links). */
+	getChildStartRow(child: Component): number | undefined {
+		return this.#childStartRows.get(child);
+	}
+
 	#renderEntry(entry: TranscriptEntry, width: number): readonly string[] {
 		const rendered = trimBlankEdges(entry.component.render(width));
-		if (entry.mode === "mutable") return rendered;
+		if (entry.mode === "mutable" || entry.stableFrozen) return rendered;
 		const appendOnly = entry.component as Component & AppendOnlyTranscriptBlock;
 		const stable = appendOnly.getTranscriptStableRows();
 		if (!isStablePrefix(entry.stableRows, stable)) {
-			throw new Error("Append-only transcript stable rows must extend the previously published prefix");
+			return this.#freezeStableRows(entry, rendered, "publication retracted the published prefix");
 		}
 		if (entry.emitted > stable.length) {
-			throw new Error("Append-only transcript stable rows cannot retract emitted history");
+			return this.#freezeStableRows(entry, rendered, "publication retracted emitted history");
 		}
 		const published =
 			stable.length > entry.stableRows.length
@@ -467,14 +566,27 @@ export class TranscriptContainer extends Container {
 				: entry.stableRows;
 		const stableRendered = appendOnly.renderTranscriptStableRows(published.length, width);
 		if (!isRowPrefix(stableRendered, rendered)) {
-			throw new Error("Append-only transcript stable rows must render as a prefix of the block");
+			return this.#freezeStableRows(entry, rendered, "stable rows no longer render as a prefix of the block");
 		}
 		const priorRender = entry.renderedStableByWidth.get(width);
 		if (priorRender && !isRowPrefix(priorRender, stableRendered)) {
-			throw new Error("Append-only transcript stable rows changed within a width epoch");
+			return this.#freezeStableRows(entry, rendered, "stable rows changed within a width epoch");
 		}
 		entry.stableRows = published;
 		entry.renderedStableByWidth.set(width, stableRendered.slice());
+		return rendered;
+	}
+
+	/**
+	 * Demote a drifting append-only publication: rows already written to native
+	 * scrollback cannot be retracted, so keep the last good stable state for
+	 * emitted-row slicing and stop mid-stream emission for this block. The block
+	 * still renders and retires whole on finalization; worst case is the old
+	 * finalize-time behavior plus a possible stale-byte seam in scrollback.
+	 */
+	#freezeStableRows(entry: TranscriptEntry, rendered: readonly string[], reason: string): readonly string[] {
+		entry.stableFrozen = true;
+		logger.warn("Append-only transcript block frozen", { reason, emitted: entry.emitted });
 		return rendered;
 	}
 
@@ -482,6 +594,30 @@ export class TranscriptContainer extends Container {
 		if (count === 0) return EMPTY_ROWS;
 		const appendOnly = entry.component as Component & AppendOnlyTranscriptBlock;
 		return appendOnly.renderTranscriptStableRows(Math.min(count, entry.stableRows.length), width);
+	}
+	/**
+	 * Record that pressure retirement is blocked behind a not-yet-settled
+	 * frontier block, and log its identity once the episode outlives the grace
+	 * period. A block that never finalizes (a dropped terminal event) pins the
+	 * whole live region here with no visible symptom other than degraded
+	 * one-line layout, so the log line is the only forensic trail.
+	 */
+	#notePinnedFrontier(): void {
+		const entry = this.#entries[this.#frontier];
+		if (entry === undefined) return;
+		const now = Date.now();
+		if (this.#pinnedFrontier?.index !== this.#frontier) {
+			this.#pinnedFrontier = { index: this.#frontier, since: now, logged: false };
+			return;
+		}
+		if (this.#pinnedFrontier.logged || now - this.#pinnedFrontier.since < PINNED_FRONTIER_WARN_MS) return;
+		this.#pinnedFrontier.logged = true;
+		logger.warn("Transcript retirement pinned by unfinalized frontier block", {
+			component: entry.component.constructor.name,
+			state: entry.state,
+			mode: entry.mode,
+			liveBlocks: this.#liveCount(),
+		});
 	}
 
 	#renderRange(start: number, end: number, width: number, trailingBlank: boolean): readonly string[] {
@@ -640,6 +776,7 @@ export class TranscriptContainer extends Container {
 					stableRows: EMPTY_STABLE_ROWS,
 					renderedStableByWidth: new Map(),
 					emitted: 0,
+					stableFrozen: false,
 				},
 		);
 		this.#frontier = this.#entries.findIndex(entry => entry.state !== "committed");

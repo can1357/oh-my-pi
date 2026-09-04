@@ -17,6 +17,35 @@ describe("Editor text assistance", () => {
 		expect(editor.getText()).toBe("The weather ");
 		expect(editor.getCursor()).toEqual({ line: 0, col: 12 });
 	});
+	it("accepts word completion with right arrow at end of line", () => {
+		const assist: EditorTextAssistProvider = {
+			getWordCompletion: (lines, line, col) => ((lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null),
+		};
+		const editor = new Editor(defaultEditorTheme);
+		editor.setTextAssistProvider(assist);
+		editor.setText("The weath");
+
+		editor.handleInput("\x1b[C");
+
+		expect(editor.getText()).toBe("The weather ");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 12 });
+	});
+
+	it("keeps right arrow as movement mid-line even when a word completion exists", () => {
+		const assist: EditorTextAssistProvider = {
+			getWordCompletion: (lines, line, col) => ((lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null),
+		};
+		const editor = new Editor(defaultEditorTheme);
+		editor.setTextAssistProvider(assist);
+		editor.setText("The weath end");
+		editor.handleInput("\x01"); // Ctrl+A
+		for (let i = 0; i < 9; i++) editor.handleInput("\x1b[C"); // after "weath"
+
+		editor.handleInput("\x1b[C");
+
+		expect(editor.getText()).toBe("The weath end");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 10 });
+	});
 
 	it("accepts word completion before whitespace or closing punctuation without adding a space", () => {
 		for (const suffix of [" rest", ", later"]) {
@@ -114,6 +143,26 @@ describe("Editor text assistance", () => {
 		editor.handleInput("\t");
 		expect(editor.getText()).toBe("received ");
 		expect(editor.getCursor()).toEqual({ line: 0, col: 9 });
+	});
+	it("applies the selected spelling replacement with right arrow at end of line", () => {
+		const assist: EditorTextAssistProvider = {
+			getWordReplacements: () => ({
+				line: 0,
+				startCol: 0,
+				endCol: 8,
+				items: ["received", "relieved"],
+			}),
+		};
+		const editor = new Editor(defaultEditorTheme);
+		editor.setTextAssistProvider(assist);
+		editor.setText("recieved");
+
+		editor.handleInput("\x1b[46;5u");
+
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		editor.handleInput("\x1b[C");
+		expect(editor.getText()).toBe("received");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 8 });
 	});
 
 	it("opens async spelling replacements", async () => {

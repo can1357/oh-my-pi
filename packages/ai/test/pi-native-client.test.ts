@@ -220,6 +220,55 @@ describe("streamPiNative request shape", () => {
 			guardrailTrace: "enabled_full",
 		});
 	});
+	it("forwards requestMetadata flattened from the model and per-call options, per-call winning on collision", async () => {
+		const captured: { init?: RequestInit } = {};
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			captured.init = init;
+			return fakeResponse([{ type: "done", reason: "stop", message: baseAssistant() }]);
+		}) as FetchImpl;
+
+		await streamSimple(fakeBedrockModel({ requestMetadata: { team: "growth", environment: "prod" } }), baseContext, {
+			apiKey: "gw-bearer",
+			fetch: fetchImpl,
+			requestMetadata: { environment: "staging", run: "42" },
+		}).result();
+
+		const body = JSON.parse(captured.init?.body as string);
+		expect(body.options.requestMetadata).toEqual({ team: "growth", environment: "staging", run: "42" });
+	});
+
+	it("forwards a model-configured User-Agent override across the pi-native wire", async () => {
+		const captured: { init?: RequestInit } = {};
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			captured.init = init;
+			return fakeResponse([{ type: "done", reason: "stop", message: baseAssistant() }]);
+		}) as FetchImpl;
+
+		await streamSimple(fakeBedrockModel({ headers: { "User-Agent": "custom-ua/1.0" } }), baseContext, {
+			apiKey: "gw-bearer",
+			fetch: fetchImpl,
+		}).result();
+
+		const body = JSON.parse(captured.init?.body as string);
+		expect(body.options.headers).toEqual({ "User-Agent": "custom-ua/1.0" });
+	});
+
+	it("keeps the caller's own User-Agent over a model-configured one", async () => {
+		const captured: { init?: RequestInit } = {};
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			captured.init = init;
+			return fakeResponse([{ type: "done", reason: "stop", message: baseAssistant() }]);
+		}) as FetchImpl;
+
+		await streamSimple(fakeBedrockModel({ headers: { "User-Agent": "from-model" } }), baseContext, {
+			apiKey: "gw-bearer",
+			fetch: fetchImpl,
+			headers: { "user-agent": "from-caller" },
+		}).result();
+
+		const body = JSON.parse(captured.init?.body as string);
+		expect(body.options.headers).toEqual({ "user-agent": "from-caller" });
+	});
 
 	it("strips non-wire fields (signal, apiKey, fetch, callbacks) from `options`", async () => {
 		// `apiKey` must ride in the Authorization header, never the body — sending

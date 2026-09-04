@@ -763,7 +763,7 @@ use std::{
 	collections::HashMap,
 	ffi::OsString,
 	fs::File,
-	io::{BufRead, BufReader, Read, Write},
+	io::{self, BufRead, BufReader, Read, Write},
 	path::{Path, PathBuf},
 	sync::LazyLock,
 };
@@ -1773,7 +1773,10 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 				}
 			},
 			Err((input, _err)) => {
-				let _ = stdout.flush();
+				// A departed reader ends the run; the host maps it to SIGPIPE.
+				if stdout.flush().is_err_and(|e| e.kind() == io::ErrorKind::BrokenPipe) {
+					return Ok(());
+				}
 				// context stderr, record the failure exit code, and keep
 				// processing the remaining lines.
 				let _ = writeln!(host.stderr, "date: invalid date '{input}'");

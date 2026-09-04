@@ -178,15 +178,64 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result?.items.map(item => item.value)).toEqual(["skill:"]);
 		});
 
-		it("does not surface skills for a leading prefix unrelated to the namespace", async () => {
+		it("surfaces skills for a leading bare-name prefix no command matches as strongly", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:batch", description: "Run batch workflows" },
+					{ name: "skill:reviewer", description: "Code review" },
+					{ name: "run-batch", description: "Run a saved batch job" },
+				],
+				"/tmp",
+			);
+
+			// `run-batch` only fuzzy-matches `batch`; the skill's bare-name prefix
+			// match is strictly stronger, so it breaks out of the group and
+			// outranks the fuzzy command hit.
+			const result = await provider.getSuggestions(["/batch"], 0, "/batch".length);
+
+			expect(result?.prefix).toBe("/batch");
+			expect(result?.items.map(item => item.value)).toEqual(["skill:batch", "run-batch"]);
+		});
+
+		it("keeps skills collapsed when a command name matches the prefix equally", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:setup-ci", description: "Bootstrap CI pipelines" },
+					{ name: "settings", description: "Open settings" },
+				],
+				"/tmp",
+			);
+
+			// Both the command and the skill's bare name prefix-match `set`;
+			// the tie keeps the popup command-only.
+			const result = await provider.getSuggestions(["/set"], 0, "/set".length);
+
+			expect(result?.items.map(item => item.value)).toEqual(["settings"]);
+		});
+
+		it("breaks a skill out when its bare name matches exactly and commands only prefix-match", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:set", description: "Set tracked values" },
+					{ name: "settings", description: "Open settings" },
+				],
+				"/tmp",
+			);
+
+			const result = await provider.getSuggestions(["/set"], 0, "/set".length);
+
+			expect(result?.items.map(item => item.value)).toEqual(["skill:set", "settings"]);
+		});
+
+		it("never breaks skills out on fuzzy-only bare-name hits", async () => {
 			const provider = new CombinedAutocompleteProvider(
 				[{ name: "skill:humanizer", description: "Remove signs of AI writing" }],
 				"/tmp",
 			);
 
-			// Bare-name and description fuzzy matches are reserved for the
-			// mid-prompt skill popup; at prompt start only `/skill:…` lists skills.
-			const result = await provider.getSuggestions(["/hum"], 0, "/hum".length);
+			// `hmz` fuzzy-matches `humanizer` but is not a prefix; the popup
+			// stays closed instead of surfacing a weak skill hit.
+			const result = await provider.getSuggestions(["/hmz"], 0, "/hmz".length);
 
 			expect(result).toBeNull();
 		});

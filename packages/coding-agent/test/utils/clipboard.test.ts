@@ -363,7 +363,9 @@ describe("readTextFromClipboard", () => {
 			clearInterval(timer);
 		}
 		// If the read blocked the loop, ticks would stay at 0. A yielding
-		// implementation fires several ticks in the ~80ms window.
-		expect(ticks).toBeGreaterThanOrEqual(2);
+		// implementation must turn the loop to resolve the 80ms sleep, which
+		// fires the expired interval at least once — even under heavy parallel
+		// test load, where wall-clock tick counts are unreliable.
+		expect(ticks).toBeGreaterThanOrEqual(1);
 	});
 });

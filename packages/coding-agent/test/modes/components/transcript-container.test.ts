@@ -66,6 +66,16 @@ class AppendBlock extends Block {
 		this.#stableRender = rendered;
 	}
 
+	/** Change the block's full render without finalizing (e.g. hiding thinking). */
+	revise(rows: string[]): void {
+		this.finalize(rows);
+	}
+
+	resetTranscriptStableRows(): void {
+		this.#stable = [];
+		this.#stableRender = [];
+	}
+
 	getTranscriptStableRows(): readonly TranscriptStableRow[] {
 		return this.#stable;
 	}
@@ -141,20 +151,39 @@ describe("TranscriptContainer", () => {
 		expect(transcript.blockModes()).toEqual(["mutable", "appendOnly"]);
 	});
 
-	it("rejects non-prefix and retracting append-only publications", () => {
+	it("freezes a retracting publication and keeps rendering the block", () => {
 		const transcript = new TranscriptContainer();
 		const block = new AppendBlock(["one", "two"], ["one"]);
 		transcript.addChild(block);
 		expect(transcript.renderViewport(80, 2, frame)).toEqual(["one", "two"]);
 
+		// Retraction cannot be honored (rows may already sit in scrollback):
+		// the block demotes to finalize-time retirement but never fails a render.
 		block.publish(["changed"]);
-		expect(() => transcript.renderViewport(80, 2, frame)).toThrow("must extend");
+		expect(transcript.renderViewport(80, 2, frame)).toEqual(["one", "two"]);
+		expect(transcript.blockModes()).toEqual(["appendOnly"]);
+	});
 
-		block.publish([]);
-		expect(() => transcript.renderViewport(80, 2, frame)).toThrow("must extend");
+	it("freezes drifted stable bytes, keeps the emitted slice, and retires the remainder once", () => {
+		const transcript = new TranscriptContainer();
+		const block = new AppendBlock(["one", "two"], ["one"]);
+		transcript.addChild(block);
+		expect(transcript.renderViewport(80, 2, frame)).toEqual(["one", "two"]);
 
+		const emitted = transcript.peekFinalizedBatch(80, 0)!;
+		expect(emitted.rows).toEqual(["one"]);
+		transcript.acknowledgeFinalizedBatch(emitted.id);
+
+		// Published bytes drift (e.g. a mid-stream theme change): the emitted
+		// slice stays retired, the live tail keeps rendering, and no further
+		// mid-stream row is offered.
 		block.publishStable([literalStableRow("one"), literalStableRow("two")], ["one", "changed physical row"]);
-		expect(() => transcript.renderViewport(80, 2, frame)).toThrow("must render as a prefix");
+		expect(transcript.renderViewport(80, 2, frame)).toEqual(["two"]);
+		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
+
+		// Finalization retires exactly the un-emitted suffix.
+		block.finalize(["one", "two"]);
+		expect(transcript.peekFinalizedBatch(80, 0)?.rows).toEqual(["two", ""]);
 	});
 
 	it("emits only the stable current head under row pressure", () => {
@@ -223,6 +252,34 @@ describe("TranscriptContainer", () => {
 		block.finalize();
 		const suffix = transcript.peekFinalizedBatch(8, 0)!;
 		expect(suffix.rows).toEqual(["final", ""]);
+	});
+
+	it("drops emitted stable rows on reset so a replay honors a hidden presentation (#10177)", () => {
+		const transcript = new TranscriptContainer();
+		// A thinking block whose reasoning prefix streams into scrollback ahead of
+		// its answer while the whole block is still the live frontier head.
+		const block = new AppendBlock(["reasoning one", "reasoning two", "answer"], ["reasoning one", "reasoning two"]);
+		transcript.addChild(block);
+
+		const first = transcript.peekFinalizedBatch(80, 1)!;
+		expect(first.rows).toEqual(["reasoning one"]);
+		transcript.acknowledgeFinalizedBatch(first.id);
+		const second = transcript.peekFinalizedBatch(80, 1)!;
+		expect(second.rows).toEqual(["reasoning two"]);
+		transcript.acknowledgeFinalizedBatch(second.id);
+		expect(transcript.emittedStableRows()).toEqual([2]);
+
+		// Ctrl+T hides thinking: the block now renders only its answer and drops
+		// its published reasoning snapshots. resetStableEmission forgets the
+		// emitted prefix so the paired destructive replay does not resurrect the
+		// captured reasoning that visibly streamed into scrollback.
+		block.revise(["answer"]);
+		transcript.resetStableEmission();
+		expect(transcript.emittedStableRows()).toEqual([0]);
+
+		transcript.beginReplay();
+		expect(transcript.peekReplayBatch(80)).toBeUndefined();
+		expect(transcript.renderViewport(80, 5, frame)).toEqual(["answer"]);
 	});
 
 	beforeAll(async () => {

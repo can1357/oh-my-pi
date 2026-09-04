@@ -115,6 +115,17 @@ interface SidebarEntry {
 	catalogCount?: number;
 }
 
+/**
+ * The focused sidebar entry plus its screen row, captured before a rebuild so
+ * the viewport can be restored around it. `index` is the entry's position in
+ * `#entries` (−1 when absent); `offset` is its row relative to the scroll top.
+ */
+interface SidebarAnchor {
+	id: string;
+	index: number;
+	offset: number;
+}
+
 interface StripChip {
 	label: string;
 	/** Pre-styled label body (without selection decoration). */
@@ -222,13 +233,6 @@ export class ModelHubComponent implements Component {
 	#scheduledProviderRefreshes = new Map<string, Timer>();
 	#refreshSpinnerFrame = 0;
 	#refreshSpinnerInterval?: Timer;
-	// Optional discoverable locals (ollama, llama.cpp, lm-studio) hidden from
-	// the sidebar because discovery found nothing at their endpoint (#2761).
-	// Rebuilt on every sidebar build; consumed by the once-per-open re-probe.
-	#hiddenOptionalProviders = new Set<string>();
-	/** Providers already re-probed by {@link ModelHubComponent.#reprobeHiddenOptionalProviders} this hub open. */
-	#reprobedHiddenProviders = new Set<string>();
-
 	// Frame geometry from the last render, for mouse hit-testing (the
 	// fullscreen overlay paints from screen row 0, so mouse rows map 1:1).
 	#contentRowStart = 1;
@@ -277,9 +281,8 @@ export class ModelHubComponent implements Component {
 		// the synchronous hydration above.
 		if (this.#scopedModels.length === 0) {
 			this.#registry
-				.refresh("offline")
+				.refresh("online")
 				.then(() => this.#syncFromRegistryState())
-				.then(() => this.#reprobeHiddenOptionalProviders())
 				.catch(error => {
 					this.#configError = error instanceof Error ? error.message : String(error);
 				})
@@ -316,6 +319,10 @@ export class ModelHubComponent implements Component {
 
 	/** Rebuild items, roles, and the sidebar from the registry's in-memory state. */
 	#syncFromRegistryState(): void {
+		// A background rebuild (provider refresh, mutation) must not yank the
+		// sidebar viewport: remember the focused entry's screen row so it — or
+		// its nearest survivor — stays put after #buildSidebar reshuffles entries.
+		const anchor = this.#captureSidebarAnchor();
 		let allModels: ReadonlyArray<Model>;
 		let availableModels: ReadonlyArray<Model>;
 		if (this.#scopedModels.length > 0) {
@@ -354,11 +361,11 @@ export class ModelHubComponent implements Component {
 		}
 
 		this.#buildSidebar(allModels, availableModels);
+		this.#restoreSidebarAnchor(anchor);
 		this.#applyScope();
 	}
 
 	#buildSidebar(allModels: ReadonlyArray<Model>, availableModels: ReadonlyArray<Model>): void {
-		this.#hiddenOptionalProviders.clear();
 		const scoped = this.#scopedModels.length > 0;
 		let disabledProviders: ReadonlySet<string>;
 		try {
@@ -401,7 +408,6 @@ export class ModelHubComponent implements Component {
 					if (!authStorage.hasAuth(provider)) {
 						const discovery = this.#registry.getProviderDiscoveryState(provider);
 						if (discovery?.optional && (discovery.status === "idle" || discovery.status === "unavailable")) {
-							this.#hiddenOptionalProviders.add(provider);
 							continue;
 						}
 					}
@@ -483,6 +489,45 @@ export class ModelHubComponent implements Component {
 			this.#activeEntryId = "all";
 			this.#sidebarFollowActive = true;
 		}
+	}
+
+	/** Snapshot the focused entry and its row within the sidebar viewport. */
+	#captureSidebarAnchor(): SidebarAnchor {
+		const index = this.#entries.findIndex(entry => entry.id === this.#activeEntryId);
+		return { id: this.#activeEntryId, index, offset: index - this.#sidebarScroll };
+	}
+
+	/**
+	 * Reposition the sidebar after {@link #buildSidebar} rebuilt `#entries`. A
+	 * surviving focused entry keeps its screen row; if it vanished (a keyless
+	 * provider flipping back to hidden mid-navigation), focus falls to the
+	 * nearest surviving entry instead of snapping to the top.
+	 */
+	#restoreSidebarAnchor(anchor: SidebarAnchor): void {
+		if (anchor.index < 0) return;
+		const survivor = this.#entries.findIndex(entry => entry.id === anchor.id);
+		if (survivor >= 0) {
+			this.#sidebarScroll = Math.max(0, survivor - anchor.offset);
+			return;
+		}
+		const replacement = this.#nearestNavigableEntry(anchor.index);
+		if (!replacement) return;
+		this.#activeEntryId = replacement.id;
+		this.#sidebarScroll = Math.max(0, this.#entries.indexOf(replacement) - anchor.offset);
+	}
+
+	/** The selectable entry nearest `preferredIndex` in the current `#entries`. */
+	#nearestNavigableEntry(preferredIndex: number): SidebarEntry | undefined {
+		const entries = this.#entries;
+		if (entries.length === 0) return undefined;
+		const start = Math.max(0, Math.min(preferredIndex, entries.length - 1));
+		for (let radius = 0; radius < entries.length; radius++) {
+			for (const index of radius === 0 ? [start] : [start + radius, start - radius]) {
+				const entry = entries[index];
+				if (entry && !this.#isHopSkipped(entry)) return entry;
+			}
+		}
+		return undefined;
 	}
 
 	#activeEntry(): SidebarEntry {
@@ -721,23 +766,6 @@ export class ModelHubComponent implements Component {
 		} finally {
 			this.#setProviderRefreshing(providerId, false);
 			this.#tui.requestRender();
-		}
-	}
-
-	/**
-	 * Background-probe optional discoverable providers hidden from the
-	 * sidebar (#2761). Runs once per provider per hub open, after the offline
-	 * hydration settles: when a previously dead local endpoint (ollama,
-	 * llama.cpp, lm-studio) is now serving models, the online refresh
-	 * repopulates the registry and the sync resurfaces its tab. Endpoints
-	 * still down keep their "unavailable" state and stay hidden.
-	 */
-	#reprobeHiddenOptionalProviders(): void {
-		if (this.#scopedModels.length > 0) return;
-		for (const provider of this.#hiddenOptionalProviders) {
-			if (this.#reprobedHiddenProviders.has(provider)) continue;
-			this.#reprobedHiddenProviders.add(provider);
-			void this.#refreshProviderInBackground(provider);
 		}
 	}
 

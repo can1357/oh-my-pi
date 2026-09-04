@@ -1,0 +1,22 @@
+// Provider-wire compat for "together"; regenerated from the frozen census using deployment contract selectors.
+
+provider "together" {
+	// Replaces the strict-mode provider whitelist entry.
+	supports-strict-mode #true
+	thinking-mode "effort"
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek-ai/DeepSeek-V3-1" {
+		requires-reasoning-content-for-all-assistant-turns #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "zai-org/GLM-4.7" "zai-org/GLM-5" "zai-org/GLM-5.1" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "zai-org/GLM-5.2" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+}

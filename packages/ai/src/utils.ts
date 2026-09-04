@@ -7,6 +7,24 @@ type OpenAIResponsesReplayItem = ResponseInput[number];
 const NON_WHITESPACE_RE = /\S/;
 
 export { isRecord } from "@oh-my-pi/pi-utils";
+/**
+ * Read a header value ignoring key casing. HTTP header names are
+ * case-insensitive, but `Record<string, string>` header bags are not, so a
+ * config-authored `User-Agent` and a caller-authored `user-agent` are the same
+ * header to every provider that lowercases before merging.
+ */
+export function getHeaderCaseInsensitive(
+	headers: Record<string, string> | undefined,
+	headerName: string,
+): string | undefined {
+	if (!headers) return undefined;
+	const normalizedName = headerName.toLowerCase();
+	for (const [key, value] of Object.entries(headers)) {
+		if (key.toLowerCase() === normalizedName) return value;
+	}
+	return undefined;
+}
+
 export function normalizeSystemPrompts(systemPrompt: readonly string[] | string | undefined | null): string[] {
 	if (systemPrompt === undefined || systemPrompt === null) return [];
 	const prompts = Array.isArray(systemPrompt) ? systemPrompt : typeof systemPrompt === "string" ? [systemPrompt] : [];
@@ -84,7 +102,11 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
 	for (let index = 0; index < items.length; index++) {
 		const item = items[index]!;
 		const rejectsOutputStatus =
-			item.type === "message" || item.type === "function_call" || item.type === "custom_tool_call";
+			item.type === "message" ||
+			item.type === "function_call" ||
+			item.type === "custom_tool_call" ||
+			item.type === "compaction" ||
+			item.type === "compaction_summary";
 		if (!rejectsOutputStatus || !Object.hasOwn(item, "status")) {
 			sanitized?.push(item);
 			continue;
@@ -389,6 +411,14 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	supportsImageDetailOriginal: boolean,
 	preserveReasoningItemIds: boolean,
 ): OpenAIResponsesReplayItem | undefined {
+	if (item.type === "function_call") {
+		if (typeof item.arguments !== "string" || item.arguments.trim().length === 0) return undefined;
+		try {
+			JSON.parse(item.arguments);
+		} catch {
+			return undefined;
+		}
+	}
 	if (item.type === "item_reference") return undefined;
 	if (item.type === "image_generation_call") return sanitizeOpenAIResponsesImageGenerationCallForReplay(item);
 	if (item.type === "reasoning") {

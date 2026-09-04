@@ -34,10 +34,16 @@ const BASE64_ONE_PIXEL_PNG =
 
 const ORIGINAL_TMUX = Bun.env.TMUX;
 const ORIGINAL_HERDR_ENV = Bun.env.HERDR_ENV;
+const ORIGINAL_HERDR_PANE_ID = Bun.env.HERDR_PANE_ID;
+const ORIGINAL_HERDR_TAB_ID = Bun.env.HERDR_TAB_ID;
+const ORIGINAL_HERDR_WORKSPACE_ID = Bun.env.HERDR_WORKSPACE_ID;
 
 beforeEach(() => {
 	delete Bun.env.TMUX;
 	delete Bun.env.HERDR_ENV;
+	delete Bun.env.HERDR_PANE_ID;
+	delete Bun.env.HERDR_TAB_ID;
+	delete Bun.env.HERDR_WORKSPACE_ID;
 });
 
 afterEach(() => {
@@ -45,16 +51,22 @@ afterEach(() => {
 	else Bun.env.TMUX = ORIGINAL_TMUX;
 	if (ORIGINAL_HERDR_ENV === undefined) delete Bun.env.HERDR_ENV;
 	else Bun.env.HERDR_ENV = ORIGINAL_HERDR_ENV;
+	if (ORIGINAL_HERDR_PANE_ID === undefined) delete Bun.env.HERDR_PANE_ID;
+	else Bun.env.HERDR_PANE_ID = ORIGINAL_HERDR_PANE_ID;
+	if (ORIGINAL_HERDR_TAB_ID === undefined) delete Bun.env.HERDR_TAB_ID;
+	else Bun.env.HERDR_TAB_ID = ORIGINAL_HERDR_TAB_ID;
+	if (ORIGINAL_HERDR_WORKSPACE_ID === undefined) delete Bun.env.HERDR_WORKSPACE_ID;
+	else Bun.env.HERDR_WORKSPACE_ID = ORIGINAL_HERDR_WORKSPACE_ID;
 });
 
 /** Drive one render pass against the budget with `count` images (ids 1..count, stable across passes). */
-function pass(budget: ImageBudget, count: number): { suppressed: boolean[]; reset: boolean; purge: readonly number[] } {
+function pass(budget: ImageBudget, count: number): { suppressed: boolean[]; retry: boolean; purge: readonly number[] } {
 	budget.beginPass();
 	const suppressed: boolean[] = [];
 	for (let i = 0; i < count; i++) suppressed.push(budget.observe(i + 1));
-	const reset = budget.endPass();
+	const retry = budget.endPass();
 	const purge = [...budget.takePurgeIds()];
-	return { suppressed, reset, purge };
+	return { suppressed, retry, purge };
 }
 
 describe("ImageBudget", () => {
@@ -62,15 +74,15 @@ describe("ImageBudget", () => {
 		const budget = new ImageBudget(3, () => {});
 		const first = pass(budget, 2);
 		expect(first.suppressed).toEqual([false, false]);
-		expect(first.reset).toBe(false);
+		expect(first.retry).toBe(false);
 
 		const second = pass(budget, 3);
 		expect(second.suppressed).toEqual([false, false, false]);
-		expect(second.reset).toBe(false);
+		expect(second.retry).toBe(false);
 		expect(second.purge).toEqual([]);
 	});
 
-	it("demotes the oldest image on the frame after the cap is exceeded, purging its graphics id", () => {
+	it("repeats an over-cap pass before emission and purges the oldest graphics id", () => {
 		let renders = 0;
 		const budget = new ImageBudget(2, () => {
 			renders += 1;
@@ -79,31 +91,31 @@ describe("ImageBudget", () => {
 		// At cap: nothing demoted.
 		expect(pass(budget, 2).suppressed).toEqual([false, false]);
 
-		// Over cap: the new image still shows this frame; a follow-up render is scheduled.
+		// Discovery identifies the stricter split and requires a retry before emit.
 		const overflow = pass(budget, 3);
 		expect(overflow.suppressed).toEqual([false, false, false]);
-		expect(overflow.reset).toBe(false);
+		expect(overflow.retry).toBe(true);
 		expect(renders).toBe(1);
 
-		// The scheduled frame demotes the oldest image and purges its id (1) with a full redraw.
+		// The retry demotes the oldest image and purges its id (1).
 		const demote = pass(budget, 3);
 		expect(demote.suppressed).toEqual([true, false, false]);
-		expect(demote.reset).toBe(true);
+		expect(demote.retry).toBe(false);
 		expect(demote.purge).toEqual([1]);
 
-		// Steady state: no further resets while the count is unchanged.
+		// Steady state: no further retries while the count is unchanged.
 		const steady = pass(budget, 3);
 		expect(steady.suppressed).toEqual([true, false, false]);
-		expect(steady.reset).toBe(false);
+		expect(steady.retry).toBe(false);
 		expect(steady.purge).toEqual([]);
 	});
 
 	it("keeps exactly `cap` images live as more arrive", () => {
 		const budget = new ImageBudget(2, () => {});
-		// Walk up to 5 images; each addition settles into a demotion frame.
+		// Walk up to 5 images; each addition settles in a pre-emission retry.
 		for (let count = 3; count <= 5; count++) {
-			pass(budget, count); // overflow frame (schedules reset)
-			pass(budget, count); // reset frame (applies demotion)
+			pass(budget, count); // discovery pass requests a retry
+			pass(budget, count); // retry applies the demotion
 		}
 		const settled = pass(budget, 5);
 		// Newest 2 live, oldest 3 demoted.
@@ -118,7 +130,7 @@ describe("ImageBudget", () => {
 		expect(budget.enabled).toBe(false);
 		const result = pass(budget, 6);
 		expect(result.suppressed).toEqual([false, false, false, false, false, false]);
-		expect(result.reset).toBe(false);
+		expect(result.retry).toBe(false);
 		expect(result.purge).toEqual([]);
 		expect(renders).toBe(0);
 	});
@@ -133,7 +145,7 @@ describe("ImageBudget", () => {
 		pass(budget, 2);
 		const restored = pass(budget, 2);
 		expect(restored.suppressed).toEqual([false, false]);
-		expect(restored.reset).toBe(false);
+		expect(restored.retry).toBe(false);
 		expect(restored.purge).toEqual([]);
 	});
 
@@ -175,16 +187,16 @@ describe("ImageBudget", () => {
 		budget.observe(id3);
 		budget.endPass(); // schedules demotion of id1
 
-		// The key map should STILL hold id1 because it's not purged until the demotion frame.
+		// The key map still holds id1 until the retry applies the demotion.
 		expect(budget.acquireId("keyA")).toBe(id1);
 
-		// Demotion frame: applies the purge of id1.
+		// Retry pass: applies the purge of id1 without requiring another pass.
 		budget.beginPass();
 		budget.observe(id1);
 		budget.observe(id2);
 		budget.observe(id3);
-		const reset = budget.endPass();
-		expect(reset).toBe(true);
+		const retry = budget.endPass();
+		expect(retry).toBe(false);
 
 		// id1 was purged. Acquiring "keyA" now yields a fresh ID.
 		const id1Fresh = budget.acquireId("keyA");
@@ -211,7 +223,7 @@ describe("ImageBudget", () => {
 		budget.observe(oldId);
 		budget.observe(id2);
 		budget.observe(id3);
-		expect(budget.endPass()).toBe(true);
+		expect(budget.endPass()).toBe(false);
 		expect([...budget.takePurgeIds()]).toEqual([oldId]);
 
 		const suppressedId = budget.acquireId("keyA");
@@ -279,7 +291,7 @@ describe("ImageBudget", () => {
 		// the same split and schedules no purge or redraw.
 		const after = pass(budget, 4);
 		expect(after.suppressed).toEqual([true, true, false, false]);
-		expect(after.reset).toBe(false);
+		expect(after.retry).toBe(false);
 		expect(after.purge).toEqual([]);
 	});
 });
@@ -683,6 +695,34 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
+	it("applies the image budget before emitting the first frame", async () => {
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(1);
+		tui.addChild(makeImage(tui.imageBudget, "first"));
+		tui.addChild(makeImage(tui.imageBudget, "second"));
+		tui.addChild(makeImage(tui.imageBudget, "third"));
+
+		try {
+			tui.start();
+			await settle(term);
+
+			const output = writes.join("");
+			expect(output.match(/\x1b_Ga=t/g)).toHaveLength(1);
+			const viewport = term.getViewport().map(line => line.trimEnd());
+			expect(viewport.filter(line => line.includes("[Image:"))).toHaveLength(2);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("purges demoted image graphics and repaints the fallback without a destructive replay", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
@@ -987,11 +1027,12 @@ describe("ImageBudget transmit tracking", () => {
 	it("re-transmits an image after a purge frees its data", () => {
 		const budget = new ImageBudget(2, () => {});
 		budget.enqueueTransmit(1, "TX1");
+		expect([...budget.takeTransmits()]).toEqual(["TX1"]);
 		expect(budget.shouldTransmit(1)).toBe(false);
 
 		// Push past the cap so the oldest image (id 1) is demoted and purged.
-		pass(budget, 3); // overflow frame schedules the demotion
-		const demote = pass(budget, 3); // demotion frame purges id 1
+		pass(budget, 3); // discovery pass requests a retry
+		const demote = pass(budget, 3); // retry purges id 1
 		expect(demote.purge).toEqual([1]);
 
 		// d=I freed the data, so the image must transmit again if it returns.

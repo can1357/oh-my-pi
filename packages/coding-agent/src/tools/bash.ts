@@ -29,6 +29,7 @@ import type {
 	ClientBridgeTerminalOutput,
 } from "../session/client-bridge";
 import { DEFAULT_MAX_BYTES, enforceInlineByteCap, streamTailUpdates, TailBuffer } from "../session/streaming-output";
+import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
 import { getSixelLineMask } from "../utils/sixel";
@@ -36,6 +37,7 @@ import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
+import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
 import { resolveEvalBackends } from "./eval-backends";
@@ -352,6 +354,7 @@ export interface BashToolDetails {
 	exitCode?: number;
 	/** True when the command was killed by its timeout deadline (not a failure). */
 	timedOut?: boolean;
+	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
 	async?: {
 		state: "running" | "completed" | "failed";
@@ -597,10 +600,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			hasGlob: isToolActive("glob", this.session.settings.get("glob.enabled")),
 			hasRead: isToolActive("read", true),
 			hasLaunch: isToolActive("hub", this.session.settings.get("launch.enabled")),
-			hasEval: isToolActive(
-				"eval",
-				evalBackends.python || evalBackends.js || evalBackends.ruby || evalBackends.julia,
-			),
+			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
 			hasShellBuiltins: !shellBuiltinsDisabled(this.session.settings),
 			isWindows: process.platform === "win32",
 		});
@@ -674,7 +674,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		options: {
 			requestedTimeoutSec?: number;
 			notices?: readonly string[];
-			terminalId?: string;
 			wallTimeMs?: number;
 		} = {},
 	): Promise<AgentToolResult<BashToolDetails>> {
@@ -710,9 +709,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		}
 		if (options.requestedTimeoutSec !== undefined && options.requestedTimeoutSec !== timeoutSec) {
 			details.requestedTimeoutSeconds = options.requestedTimeoutSec;
-		}
-		if (options.terminalId !== undefined) {
-			details.terminalId = options.terminalId;
 		}
 		if (options.wallTimeMs !== undefined) {
 			details.wallTimeMs = options.wallTimeMs;
@@ -943,11 +939,17 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			}
 		}
 
+		if (this.session.settings.get("worktree.clone")) {
+			command = rewriteGitWorktreeAdd(command, resolveCliEntryCmd());
+		}
+
 		const internalUrlOptions: InternalUrlExpansionOptions = {
 			skills: this.session.skills ?? [],
 			attachments: this.session.getImageAttachments?.() ?? [],
 			internalRouter: InternalUrlRouter.instance(),
 			cwd: this.session.cwd,
+			sessionFile: this.session.getSessionFile() ?? undefined,
+			rules: this.session.activeRules,
 			localOptions: {
 				getArtifactsDir: this.session.getArtifactsDir,
 				getSessionId: this.session.getSessionId,
@@ -1356,7 +1358,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				return this.#buildCompletedResult(bridgeResult, timeoutSec, {
 					requestedTimeoutSec,
 					notices: bridgeNotices,
-					terminalId: handle.terminalId,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
 				});
 			} finally {

@@ -6,9 +6,12 @@
 members = [
    "crates/pi-ast",
    "crates/pi-builtins",
+   "crates/pi-diff",
+   "crates/pi-edit",
    "crates/pi-iso",
    "crates/pi-natives",
    "crates/pi-shell",
+   "crates/pi-vcs",
    "crates/pi-voice",
    "crates/pi-walker",
    "crates/vendor/brush-core",
@@ -16,7 +19,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.0.5"
+version = "18.1.8"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -184,6 +187,10 @@ verbose_bit_mask = "allow"   # Explicit bit patterns can be clearer than hex
 # ──────────────────────────────────────────────────────────────────────────────
 default_trait_access = "allow"        # Default::default() sometimes clearer
 significant_drop_tightening = "allow" # We pay attention to this already
+# ──────────────────────────────────────────────────────────────────────────────
+# Tests & Assertions
+# ──────────────────────────────────────────────────────────────────────────────
+assert_is_empty = "allow" # `is_empty()` states intent without brittle type annotations
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Documentation
@@ -203,10 +210,13 @@ too_many_lines = "allow"     # Arbitrary limits don't account for necessary comp
 # Internal Libraries
 # ──────────────────────────────────────────────────────────────────────────────
 pi-ast = { path = "crates/pi-ast" }
+pi-diff = { path = "crates/pi-diff" }
+pi-edit = { path = "crates/pi-edit" }
 pi-iso = { path = "crates/pi-iso" }
 pi-shell = { path = "crates/pi-shell" }
 pi-voice = { path = "crates/pi-voice" }
 pi-walker = { path = "crates/pi-walker" }
+pi-vcs = { path = "crates/pi-vcs" }
 brush-core = { path = "crates/vendor/brush-core" }
 pi-builtins = { path = "crates/pi-builtins" }
 
@@ -234,6 +244,7 @@ toml = "1.1"
 # Error Handling
 # ──────────────────────────────────────────────────────────────────────────────
 anyhow = "1.0"
+thiserror = "2"
 bytes = "1"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -264,7 +275,7 @@ smallvec = { version = "1.15.1", features = [
 # ──────────────────────────────────────────────────────────────────────────────
 # Hashing
 # ──────────────────────────────────────────────────────────────────────────────
-xxhash-rust = { version = "0.8", features = ["xxh64"] }
+xxhash-rust = { version = "0.8", features = ["xxh64", "xxh32"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio & Realtime Media
@@ -332,6 +343,9 @@ resvg = "0.48"
 # JPEG decoder compiles — zune-jpeg 0.5.15's no-log stub macros are not
 # expression-safe and the crate fails to build without it.
 zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
+# Not used directly: pins tinyvec to 1.12.0 because 1.13.0 was published broken
+# (cannot find macro `vec` in alloc-only context).
+tinyvec = "=1.12.0"
 png = "0.18"
 inferno = { version = "0.12", default-features = false }
 syntect = { version = "5.3", default-features = false, features = [
@@ -358,6 +372,29 @@ tiktoken-rs = "0.11"
 # Shell Parsing
 # ──────────────────────────────────────────────────────────────────────────────
 brush-parser = "0.3"
+# ──────────────────────────────────────────────────────────────────────────────
+# Version Control (in-process git + jujutsu)
+# ──────────────────────────────────────────────────────────────────────────────
+# gix is pinned to the minor jj-lib depends on so both VCS backends share one
+# gitoxide stack in the binary. No transport/credential features: network ops
+# (clone/fetch/push) deliberately shell out to the git CLI for auth parity.
+gix = { version = "0.85", default-features = false, features = [
+   "attributes",
+   "blob-diff",
+   "dirwalk",
+   "excludes",
+   "index",
+   "max-performance-safe",
+   "merge",
+   "revision",
+   "sha1",
+   "sha256",
+   "status",
+   "tree-editor",
+   "worktree-mutation",
+   "zlib-rs",
+] }
+jj-lib = { version = "0.44", default-features = false, features = ["git"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # AST & Tree-Sitter

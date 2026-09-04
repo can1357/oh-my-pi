@@ -1,21 +1,15 @@
 import { Marked } from "@oh-my-pi/pi-utils/marked";
 import type { ReactNode } from "react";
 import { memo, useMemo } from "react";
+import { escapeHtml } from "../../lib/format";
+import { mathExtension } from "./math";
 
-function escapeHtml(s: string): string {
-	return s
-		.replaceAll("&", "&amp;")
-		.replaceAll("<", "&lt;")
-		.replaceAll(">", "&gt;")
-		.replaceAll('"', "&quot;")
-		.replaceAll("'", "&#39;");
-}
 function unescapeHtml(raw: string): string {
 	const parseCodePoint = (value: number): string => {
 		if (Number.isFinite(value) && value >= 0 && value <= 0x10ffff) {
 			try {
 				return String.fromCodePoint(value);
-			} catch (_) {}
+			} catch {}
 		}
 		return "";
 	};
@@ -73,6 +67,7 @@ const md = new Marked({
 	},
 	breaks: true,
 });
+md.use(mathExtension);
 
 export const Markdown = memo(function Markdown({ text }: { text: string }): ReactNode {
 	const html = useMemo(() => {

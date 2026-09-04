@@ -111,7 +111,7 @@ export function renderChatMlTranscript(
 ): string {
 	if (messages.length === 0) return "";
 	let out = config.bos ?? "";
-	for (let i = 0; i < messages.length; ) {
+	for (let i = 0; i < messages.length;) {
 		const message = messages[i]!;
 		if (message.role === "assistant") {
 			const parts = assistantTranscriptParts(message);
@@ -141,7 +141,7 @@ export function renderLegacyTextTranscript(
 	config: LegacyTextTranscriptConfig,
 ): string {
 	let out = "";
-	for (let i = 0; i < messages.length; ) {
+	for (let i = 0; i < messages.length;) {
 		const message = messages[i]!;
 		if (message.role === "assistant") {
 			const parts = assistantTranscriptParts(message);

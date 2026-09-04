@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { $envExact } from "@oh-my-pi/pi-utils";
+import { $envExact, directoryIsEnterableSync, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 
 const commandValueCache = new Map<string, string>();
 // Failed `!command` resolutions (non-zero exit, empty stdout) are negative-cached
@@ -18,6 +18,21 @@ export function isCommandConfigValue(valueConfig: string | undefined): valueConf
 	return valueConfig?.startsWith("!") === true;
 }
 
+/**
+ * Drop the cached result (and any negative-cache backoff) for a command-backed
+ * config value so the next {@link resolveConfigValue} re-runs the command.
+ *
+ * Used by the 401 auth-retry path to force every command-backed credential a
+ * provider carries — API key AND header values — to re-mint, not just the
+ * apiKey (which alone was covered before). Non-command values are ignored.
+ */
+export function invalidateCommandConfig(valueConfig: string | undefined): void {
+	if (!isCommandConfigValue(valueConfig)) return;
+	const command = valueConfig.slice(1).trim();
+	commandValueCache.delete(command);
+	commandFailureRetryAt.delete(command);
+}
+
 function resolveCommandConfig(command: string, options?: ResolveConfigValueOptions): string | undefined {
 	if (options?.forceCommandRefresh === true) {
 		commandValueCache.delete(command);
@@ -28,7 +43,17 @@ function resolveCommandConfig(command: string, options?: ResolveConfigValueOptio
 	const retryAt = commandFailureRetryAt.get(command);
 	if (retryAt !== undefined && Date.now() < retryAt) return undefined;
 	try {
-		const stdout = execSync(command, { encoding: "utf8", timeout: 10_000, windowsHide: true });
+		const cwd = getProjectDir();
+		if (!directoryIsEnterableSync(cwd)) {
+			commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+			return undefined;
+		}
+		const stdout = execSync(command, {
+			cwd,
+			encoding: "utf8",
+			timeout: 10_000,
+			windowsHide: true,
+		});
 		const trimmed = stdout.trim();
 		if (trimmed.length === 0) {
 			commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
@@ -37,7 +62,14 @@ function resolveCommandConfig(command: string, options?: ResolveConfigValueOptio
 		commandFailureRetryAt.delete(command);
 		commandValueCache.set(command, trimmed);
 		return trimmed;
-	} catch {
+	} catch (err) {
+		// The command may embed credentials inline, and execSync's message can
+		// echo the invocation and its output. Log only non-sensitive metadata.
+		const code =
+			typeof (err as NodeJS.ErrnoException | null)?.code === "string"
+				? (err as NodeJS.ErrnoException).code
+				: "unknown";
+		logger.warn("model-config: !command value resolution failed", { code });
 		commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
 		return undefined;
 	}
@@ -66,6 +98,20 @@ interface HeaderResolutionOptions {
 	apiKeyConfig?: string;
 }
 
+/**
+ * Hidden accessor a live-headers proxy exposes so a parent
+ * {@link createLiveConfigHeaders} can fold it in one resolve call. Enumerating a
+ * nested proxy key-by-key instead re-fires its traps (and its own nested
+ * sources' traps) per property, which is O(keys^depth) once these proxies are
+ * re-wrapped across turns/subagent batches — the multi-minute main-thread stall
+ * in #10605.
+ */
+const LIVE_HEADER_RESOLVER = Symbol("ompLiveConfigHeaderResolver");
+
+interface LiveHeaderCarrier {
+	[LIVE_HEADER_RESOLVER]?: () => Record<string, string> | undefined;
+}
+
 function materializeConfigHeaderSources(
 	sources: readonly HeaderSource[],
 	options?: HeaderResolutionOptions,
@@ -73,8 +119,17 @@ function materializeConfigHeaderSources(
 	const resolved: Record<string, string> = {};
 	for (const source of sources) {
 		if (!source) continue;
-		for (const [key, value] of Object.entries(source)) {
-			const next = resolveConfigValue(value);
+		const resolveLive = (source as LiveHeaderCarrier)[LIVE_HEADER_RESOLVER];
+		if (resolveLive) {
+			// A nested live-headers proxy already resolves its own chain; fold its
+			// snapshot once instead of enumerating it (its values are resolved, so
+			// they must not pass through resolveConfigValue again).
+			const snapshot = resolveLive();
+			if (snapshot) Object.assign(resolved, snapshot);
+			continue;
+		}
+		for (const key in source) {
+			const next = resolveConfigValue(source[key]);
 			if (next) resolved[key] = next;
 		}
 	}
@@ -97,6 +152,7 @@ export function createLiveConfigHeaders(
 	const current = () => materializeConfigHeaderSources(allSources, options) ?? {};
 	return new Proxy(localHeaders, {
 		get(target, property, receiver) {
+			if (property === LIVE_HEADER_RESOLVER) return () => materializeConfigHeaderSources(allSources, options);
 			if (typeof property !== "string") return Reflect.get(target, property, receiver);
 			return current()[property];
 		},

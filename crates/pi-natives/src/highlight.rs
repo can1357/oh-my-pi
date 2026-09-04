@@ -41,6 +41,8 @@ const EXTRA_SYNTAXES: &[&str] = &[
 	include_str!("syntaxes/Julia.sublime-syntax"),
 	include_str!("syntaxes/Nix.sublime-syntax"),
 	include_str!("syntaxes/Mermaid.sublime-syntax"),
+	include_str!("syntaxes/TypeScript.sublime-syntax"),
+	include_str!("syntaxes/TypeScriptReact.sublime-syntax"),
 ];
 
 fn get_syntax_set() -> &'static SyntaxSet {
@@ -201,7 +203,9 @@ pub struct HighlightColors {
 /// Language alias mappings: (aliases, target syntax name).
 /// Used for languages not in syntect's default set or with non-standard names.
 const LANG_ALIASES: &[(&[&str], &str)] = &[
-	(&["ts", "tsx", "typescript", "js", "jsx", "javascript", "mjs", "cjs"], "JavaScript"),
+	(&["ts", "mts", "cts", "typescript"], "TypeScript"),
+	(&["tsx"], "TypeScriptReact"),
+	(&["js", "jsx", "javascript", "mjs", "cjs"], "JavaScript"),
 	(&["py", "python"], "Python"),
 	(&["rb", "ruby"], "Ruby"),
 	(&["jl", "julia"], "Julia"),
@@ -674,5 +678,24 @@ mod tests {
 		assert!(out.contains("<s>Start"));
 		assert!(out.contains("<k>-->"));
 		assert!(out.contains("<c> note"));
+	}
+	/// Regression: with the JavaScript grammar, TS type annotations
+	/// (generic return types, arrow-type params) corrupted parser state, and a
+	/// later template literal left an unterminated string scope that painted
+	/// the rest of the file as a string (issue seen in the git TUI diff pane).
+	#[test]
+	fn typescript_template_literal_does_not_leak_string_state() {
+		assert!(get_supported_languages().contains(&"TypeScript".to_string()));
+		assert!(supports_language_impl("ts"));
+		assert!(supports_language_impl("tsx"));
+
+		let code = "function icons(): Record<\"close\" | \"hunk\", string> {\n\treturn \
+		            {};\n}\nfunction chip(label: string): string {\n\tconst text = ` ${label} \
+		            `;\n\treturn text;\n}\nconst zzz = 1;\n";
+		let out = highlight_code_impl(code, Some("ts"), &test_colors());
+		let last = out.lines().last().unwrap();
+		assert!(last.contains("<k>const"), "trailing code lost keyword highlighting: {last}");
+		assert!(last.contains("<n>1"), "trailing code lost number highlighting: {last}");
+		assert!(!last.contains("<s>const"), "string scope leaked past template literal: {last}");
 	}
 }

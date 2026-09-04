@@ -229,6 +229,43 @@ describe("Editor slash autocomplete acceptance", () => {
 			fs.rmSync(baseDir, { recursive: true, force: true });
 		}
 	});
+	it("accepts the selection with right arrow when the cursor is at end of line", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "skills:fix-bug", description: "Fix a bug" }], "/tmp"),
+		);
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+		editor.handleInput("s");
+		editor.handleInput("k");
+		editor.handleInput("i");
+		await untilAutocompleteShown(editor);
+
+		editor.handleInput("\x1b[C");
+
+		expect(editor.getText()).toBe("/skills:fix-bug ");
+	});
+
+	it("keeps right arrow as cursor movement mid-line while the popup is open", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "skills:fix-bug", description: "Fix a bug" }], "/tmp"),
+		);
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+		editor.handleInput("s");
+		editor.handleInput("k");
+		editor.handleInput("i");
+		await untilAutocompleteShown(editor);
+
+		editor.handleInput("\x1b[D"); // Left: cursor now mid-line before "i"
+		editor.handleInput("\x1b[C"); // Right: plain movement back to EOL, no accept
+
+		expect(editor.getText()).toBe("/ski");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 4 });
+	});
 });
 class SyncSlashProvider implements AutocompleteProvider {
 	async getSuggestions(

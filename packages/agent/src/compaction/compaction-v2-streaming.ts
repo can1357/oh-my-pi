@@ -27,6 +27,7 @@ import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
+	codexRoutingHint,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
@@ -324,9 +325,7 @@ async function attemptCompactionV2Streaming(
 		...(request.reasoning || model.useResponsesLite
 			? {
 					// Lite implies gpt-5.4+, where codex-rs sends `all_turns` replay.
-					reasoning: model.useResponsesLite
-						? { ...(request.reasoning ?? {}), context: "all_turns" }
-						: request.reasoning,
+					reasoning: model.useResponsesLite ? { ...request.reasoning, context: "all_turns" } : request.reasoning,
 					include: ["reasoning.encrypted_content"],
 				}
 			: {}),
@@ -403,13 +402,13 @@ function buildCompactionV2Headers(
 			? {
 					"content-type": "application/json",
 					"api-key": apiKey,
-					...(model.headers ?? {}),
+					...model.headers,
 				}
 			: {
 					"content-type": "application/json",
 					...resolveOpenAIRequestSetup(
 						{ provider: model.provider, id: model.id, baseUrl: model.baseUrl, headers: model.headers },
-						{ apiKey, messages: [], openAISessionId: routingSessionId, promptCacheSessionId },
+						{ apiKey, messages: [], sessionId: request.sessionId ?? routingSessionId, promptCacheSessionId },
 					).headers,
 				};
 	if (api === "openai-codex-responses" || model.provider === "openai-codex") {
@@ -426,6 +425,7 @@ function buildCompactionV2Headers(
 		headers[OPENAI_HEADERS.BETA] = OPENAI_HEADER_VALUES.BETA_RESPONSES;
 		headers[OPENAI_HEADERS.ORIGINATOR] = OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
 		headers[OPENAI_HEADERS.CODEX_BETA_FEATURES] = OPENAI_HEADER_VALUES.REMOTE_COMPACTION_V2;
+		headers[OPENAI_HEADERS.ROUTING_HINT] = codexRoutingHint(request.model, undefined);
 		if (model.useResponsesLite) {
 			headers[OPENAI_HEADERS.RESPONSES_LITE] = "true";
 		}

@@ -12,7 +12,16 @@ import type { SymbolTheme } from "../../symbols";
 export type ComposerBox = SymbolTheme["boxRound"];
 
 /** Built-in composer shape identifiers shipped by pi-tui. */
-export const BUILTIN_EDITOR_BORDER_STYLES = ["box", "claude", "pi", "borderless", "rule", "field", "rail"] as const;
+export const BUILTIN_EDITOR_BORDER_STYLES = [
+	"box",
+	"band",
+	"claude",
+	"pi",
+	"borderless",
+	"rule",
+	"field",
+	"rail",
+] as const;
 
 /** Identifier for a built-in composer shape. */
 export type BuiltinEditorBorderStyle = (typeof BUILTIN_EDITOR_BORDER_STYLES)[number];
@@ -68,14 +77,20 @@ export interface ComposerRowContext extends ComposerChromeContext {
 
 export interface ComposerStyle {
 	readonly id: EditorBorderStyle;
+	/**
+	 * True when rows paint their own foreground through `surfaceColor`.
+	 * Built-ins default to transparent; registered extensions that omit this
+	 * field retain the pre-field behavior and receive undecorated row text.
+	 */
+	readonly filledSurface?: boolean;
 	/** Content rows carry left/right border glyphs; drives the cursor-reserve
 	 *  column, IME-safe layout, and the right-border scrollbar. */
 	readonly sideBorders: boolean;
 	/** Rows consumed by top+bottom chrome (drives maxHeight budgeting). */
 	readonly verticalChrome: 0 | 1 | 2;
 	/** Where the host should attach the status bar: embedded in the top border,
-	 * docked onto a top rule, or detached into a standalone bottom bar. */
-	readonly statusAttachment: "top-border" | "top-rule-chip" | "none";
+	 * rendered as a flush soft-capped band above the input, docked onto a top rule, or detached into a standalone bottom bar. */
+	readonly statusAttachment: "top-border" | "top-band" | "top-rule-chip" | "none";
 	/** Which segment groups the standalone bottom status bar shows. */
 	readonly bottomBar: "none" | "left" | "full";
 	/** Insert a blank spacer row between the editor and the standalone bottom

@@ -107,9 +107,25 @@ export class SessionFocusController {
 			}
 			await this.ctx.eventController.handleEvent(event);
 		});
+		// Events emitted while another session was focused had no TUI listener,
+		// but their message_end handlers still persist authoritative transcript
+		// state asynchronously. Subscribe first, then settle the persistence
+		// already in flight at this boundary before replay: an already-emitted
+		// tool completion becomes a persisted toolResult, so the rebuild can't
+		// resurrect a result-less toolCall whose only completion was lost during
+		// the blackout (#9816). Later events reach the newly installed listener.
+		await target.settleInFlightMessagePersistence();
+		if (generation !== this.#attachGeneration) return false;
 		this.ctx.statusLine.setSession(target, this.#focusedAgentId);
 		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 		if (generation !== this.#attachGeneration) return false;
+		// Partial tool results are display events, not persisted messages. Replay
+		// each target's latest snapshot after rebuilding so focus navigation does
+		// not collapse a live task board back to its bare call arguments (#10446).
+		for (const event of target.activeToolExecutionUpdates()) {
+			await this.ctx.eventController.handleEvent(event);
+			if (generation !== this.#attachGeneration) return false;
+		}
 		// Retarget the sticky Todo HUD too. While a subagent is focused the main
 		// session's `todo` completions never reach this controller; returning to
 		// main must therefore reload its current state instead of retaining the

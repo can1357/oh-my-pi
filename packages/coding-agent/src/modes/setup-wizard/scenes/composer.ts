@@ -11,7 +11,7 @@ class ComposerSceneController implements SetupSceneController {
 	#selectList: SelectList;
 	#shapes: readonly ComposerShape[];
 	#items: readonly SelectItem[];
-	#currentShape: ComposerShape = "box";
+	#currentShape: ComposerShape = "band";
 	#committing = false;
 	#listRowStart = 0;
 
@@ -23,8 +23,8 @@ class ComposerSceneController implements SetupSceneController {
 			label: `${index + 1}  ${choice.label}`,
 			description: choice.description,
 		}));
-		const configuredShape = host.ctx.settings.get("composer.shape") ?? "box";
-		const initialShape = this.#shapes.includes(configuredShape) ? configuredShape : "box";
+		const configuredShape = host.ctx.settings.get("composer.shape") ?? "band";
+		const initialShape = this.#shapes.includes(configuredShape) ? configuredShape : "band";
 		this.#currentShape = initialShape;
 		const initialIndex = Math.max(0, this.#shapes.indexOf(initialShape));
 
@@ -52,7 +52,7 @@ class ComposerSceneController implements SetupSceneController {
 		const quickIndex = data.length === 1 ? Number(data) - 1 : -1;
 		if (Number.isInteger(quickIndex) && quickIndex >= 0 && quickIndex < this.#items.length) {
 			this.#selectList.setSelectedIndex(quickIndex);
-			this.#preview(this.#shapes[quickIndex] ?? "box");
+			this.#preview(this.#shapes[quickIndex] ?? "band");
 			return;
 		}
 		this.#selectList.handleInput(data);

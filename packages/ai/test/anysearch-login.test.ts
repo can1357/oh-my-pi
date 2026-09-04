@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { loginAnySearch } from "@oh-my-pi/pi-ai/registry/anysearch";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+
+const loginAnySearch = getProviderDefinition("anysearch")?.login;
+if (!loginAnySearch) throw new Error("AnySearch login is not registered");
 
 const originalAnySearchApiKey = Bun.env.ANYSEARCH_API_KEY;
 

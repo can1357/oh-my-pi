@@ -123,6 +123,54 @@ function makeFailingGuestContext(failure: Error): InteractiveModeContext {
 	} as unknown as InteractiveModeContext;
 	return ctx;
 }
+function makeCancelledSwitchGuestContext(
+	switchSession: () => Promise<boolean>,
+	events: string[],
+): InteractiveModeContext {
+	return {
+		settings: { get: () => "" },
+		sessionManager: {
+			getSessionFile: () => null,
+			getSessionName: () => undefined,
+			getCwd: () => process.cwd(),
+		},
+		session: {
+			switchSession,
+			newSession: () => Promise.resolve(),
+			messages: [],
+			agent: {
+				state: { model: undefined },
+				setModel: () => events.push("host-model"),
+				setThinkingLevel: () => events.push("host-thinking"),
+				setDisableReasoning: () => events.push("host-reasoning"),
+			},
+		},
+		statusContainer: { clear: () => events.push("clear-transient-ui") },
+		pendingMessagesContainer: { clear: () => {} },
+		compactionQueuedMessages: [],
+		streamingComponent: undefined,
+		streamingMessage: undefined,
+		transcriptMessageComponents: new WeakMap(),
+		pendingTools: new Map(),
+		loadingAnimation: undefined,
+		statusLine: {
+			setCollabStatus: () => {},
+			invalidate: () => {},
+			resetActiveTime: () => {},
+			markActivityEnd: () => events.push("host-activity"),
+		},
+		ui: { requestRender: () => {} },
+		chatContainer: { clear: () => {}, disposeChildren: () => {} },
+		resetObserverRegistry: () => {},
+		renderInitialMessages: () => {},
+		syncRunningSubagentBadge: () => {},
+		reloadTodos: () => Promise.resolve(),
+		showStatus: (status: string) => events.push(`status:${status}`),
+		updateEditorTopBorder: () => {},
+		updateEditorBorderColor: () => {},
+		collabGuest: undefined,
+	} as unknown as InteractiveModeContext;
+}
 
 // ── Shared host/relay ───────────────────────────────────────────────────────
 
@@ -217,6 +265,48 @@ describe("collab chunked welcome (#3144)", () => {
 			).rejects.toThrow("replica write failed during snapshot resume");
 		} finally {
 			writeSpy.mockRestore();
+			await guest.leave("test cleanup").catch(() => {});
+		}
+	});
+	it("does not clear the old guest session when replica activation is cancelled", async () => {
+		const events: string[] = [];
+		const guest = new CollabGuestLink(makeCancelledSwitchGuestContext(async () => false, events));
+		guest.agentRegistry.register({
+			id: "local-agent",
+			displayName: "local",
+			kind: "main",
+			parentId: undefined,
+			session: null,
+			status: "running",
+		});
+
+		const joinAttempt = guest.join(host.link);
+		try {
+			await expect(joinAttempt).rejects.toThrow("Collab replica activation was cancelled");
+			expect(guest.agentRegistry.get("local-agent")).toBeDefined();
+			expect(events).not.toContain("clear-transient-ui");
+			expect(events).not.toContain("status:Joined collab session");
+		} finally {
+			await guest.leave("test cleanup").catch(() => {});
+		}
+	});
+	it("applies host state only after the replica activates", async () => {
+		const events: string[] = [];
+		const guest = new CollabGuestLink(
+			makeCancelledSwitchGuestContext(async () => {
+				events.push("replica-activated");
+				return true;
+			}, events),
+		);
+
+		try {
+			await guest.join(host.link);
+			expect(events.indexOf("replica-activated")).toBeGreaterThanOrEqual(0);
+			expect(events.indexOf("host-thinking")).toBeGreaterThan(events.indexOf("replica-activated"));
+			expect(events.findIndex(event => event.startsWith("status:Joined collab session"))).toBeGreaterThan(
+				events.indexOf("host-thinking"),
+			);
+		} finally {
 			await guest.leave("test cleanup").catch(() => {});
 		}
 	});

@@ -7,7 +7,7 @@ import {
 	fetchMarketplace,
 	parseMarketplaceCatalog,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 // Fixture lives at test/marketplace/fixtures/valid-marketplace/
@@ -233,7 +233,7 @@ describe("fetchMarketplace", () => {
 	});
 
 	it("hides temp clone paths in cloned catalog validation errors", async () => {
-		const cloneSpy = spyOn(git, "clone").mockImplementation(async (_url, targetDir) => {
+		const cloneSpy = spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
 			fs.mkdirSync(path.join(targetDir, ".claude-plugin"), { recursive: true });
 			fs.writeFileSync(
 				path.join(targetDir, ".claude-plugin", "marketplace.json"),

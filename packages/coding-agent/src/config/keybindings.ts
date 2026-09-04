@@ -142,7 +142,10 @@ export const KEYBINDINGS = {
 		description: "Send follow-up message",
 	},
 	"app.retry": {
-		defaultKeys: "alt+r",
+		// F5 leads: it is delivered verbatim by every terminal, unlike modified
+		// Enter chords (Ctrl/Alt/Cmd+Enter), which various terminals swallow or
+		// fold into plain Enter. The idle "F5 to Retry" status row advertises it.
+		defaultKeys: ["f5", "alt+r"],
 		description: "Retry last failed assistant turn",
 	},
 	"app.message.dequeue": {

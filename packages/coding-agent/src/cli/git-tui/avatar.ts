@@ -11,8 +11,8 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getAvatarCacheDir, logger } from "@oh-my-pi/pi-utils";
-import * as git from "../../utils/git";
 
 const AVATAR_PX = 64;
 const FETCH_TIMEOUT_MS = 5_000;
@@ -43,7 +43,7 @@ async function fetchBytes(url: string, headers?: Record<string, string>): Promis
 
 /** Look up the author's avatar through the GitHub commits API of the `origin` remote. */
 async function githubApiAvatarUrl(cwd: string, email: string): Promise<string | null> {
-	const remoteUrl = await git.remote.url(cwd, "origin").catch(() => undefined);
+	const remoteUrl = await vcs.git(cwd)?.remoteUrl("origin");
 	const match = remoteUrl?.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/);
 	if (!match) return null;
 	const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;

@@ -187,6 +187,7 @@ describe("InspectImageTool", () => {
 		});
 
 		expect(result.content).toEqual([{ type: "text", text: "Detected text: Settings" }]);
+		expect(result.details?.usage).toMatchObject({ input: 1, output: 1, totalTokens: 2 });
 		expect((result.content as Array<{ type: string }>).some(c => c.type === "image")).toBe(false);
 		expect(stub.calls).toHaveLength(1);
 
@@ -456,6 +457,23 @@ describe("InspectImageTool", () => {
 		const result = await tool.execute("call-1c", { path: imagePath, question: "What text is visible?" });
 		expect(result.details?.model).toBe("openai/gpt-4o");
 		expect(stub.calls).toHaveLength(1);
+		const selectedModel = stub.calls[0]?.[0] as { id?: string } | undefined;
+		expect(selectedModel?.id).toBe("gpt-4o");
+	});
+
+	it("skips text-only role fallbacks for an available vision model on the active provider", async () => {
+		const stub = createCompleteSimpleSuccessStub("Vision-capable fallback used");
+		const tool = new InspectImageTool(
+			createSession(testDir, textOnlyModel, "test-key", Settings.isolated(), {
+				configureVisionRole: false,
+				availableModels: [textOnlyModel, visionModel],
+				activeModel: textOnlyModel,
+			}),
+			stub.fn,
+		);
+
+		const result = await tool.execute("call-1d", { path: imagePath, question: "What text is visible?" });
+		expect(result.details?.model).toBe("openai/gpt-4o");
 		const selectedModel = stub.calls[0]?.[0] as { id?: string } | undefined;
 		expect(selectedModel?.id).toBe("gpt-4o");
 	});

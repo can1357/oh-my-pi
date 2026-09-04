@@ -116,6 +116,19 @@ export class SelectList implements Component, MouseRoutable {
 		this.#maxVisible = Math.max(1, Math.trunc(maxVisible));
 		this.#filteredItems = items;
 	}
+	/** Return item, selection, and filter state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		const selected = this.#filteredItems[this.#selectedIndex];
+		return {
+			itemCount: this.items.length,
+			filteredItemCount: this.#filteredItems.length,
+			selectedIndex: this.#filteredItems.length > 0 ? this.#selectedIndex : -1,
+			selectedItemId: selected?.value ?? null,
+			selectedItemLabel: selected?.label ?? null,
+			filterText: this.#filterQuery,
+			maxVisible: this.#maxVisible,
+		};
+	}
 
 	/** Refit the visible row budget (hosts clamp the list to available height). */
 	setMaxVisible(rows: number): void {
@@ -194,6 +207,7 @@ export class SelectList implements Component, MouseRoutable {
 		// every count is 1, so visualTotal == #filteredItems and overflow falls
 		// back to the original `N > maxVisible` predicate exactly.
 		const conservativeRowWidth = Math.max(0, width - 1);
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const rowCounts = new Array<number>(this.#filteredItems.length);
 		let visualTotal = 0;
 		for (let i = 0; i < this.#filteredItems.length; i++) {

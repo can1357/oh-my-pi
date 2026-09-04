@@ -7,8 +7,9 @@ import {
 	type TokenizerAndRendererExtension,
 	type Tokens,
 } from "@oh-my-pi/pi-utils/marked";
+import { mathBlockAt, mathSpanAt, mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
 import { latexToBlock } from "../latex-block";
-import { inlineMathSpanEnd, isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
+import { isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
 import type { SymbolTheme } from "../symbols";
 import { TERMINAL } from "../terminal-capabilities";
 import type { Component } from "../tui";
@@ -136,7 +137,7 @@ function normalizeHtmlEntitiesForTerminal(raw: string): string {
 		if (Number.isFinite(value) && value >= 0 && value <= 0x10ffff) {
 			try {
 				return String.fromCodePoint(value);
-			} catch (_) {
+			} catch {
 				// Fallback to empty string or original if invalid codepoint
 			}
 		}
@@ -260,7 +261,7 @@ function normalizeHtmlForTerminal(
 		}
 		lastIndex = index + tag.length;
 
-		const isClosing = /^<\//.test(tag);
+		const isClosing = tag.startsWith("</");
 		const isSelfClosing = /\/\s*>$/.test(tag);
 
 		switch (name) {
@@ -528,7 +529,7 @@ markdownParser.setOptions({
 // `math` inline token before markdown's escape/emphasis/link rules run, so
 // backslash commands (`\frac`, `\alpha`) and intraword underscores (`x_i`)
 // survive intact instead of being mangled or split. The `$…$` form uses
-// pandoc's anti-currency heuristic (`inlineMathSpanEnd`) so "$5 and $10" is
+// pandoc's anti-currency heuristic (`mathSpanAt`) so "$5 and $10" is
 // never math. Inline extensions run before marked's escape tokenizer, so
 // `\(…\)` becomes math while a genuinely escaped `\$` is left to `escape` and
 // renders as a literal dollar.
@@ -582,78 +583,33 @@ const customHrExtension: TokenizerAndRendererExtension = {
 	},
 };
 
-// Leftmost-match scan replacing /\$|\\\(|\\\[/ in mathExtension.start —
-// marked calls start() on the remaining source at every inline position, so
-// the regex alternation showed up in CPU profiles (part of a ~4.3% start()
-// tail). Three indexOf scans yield the identical leftmost index.
-/** @internal exported for tests — must stay index-identical to the old regex scan. */
-export function mathStartIndex(src: string): number | undefined {
-	let best = src.indexOf("$");
-	const paren = src.indexOf("\\(");
-	if (paren !== -1 && (best === -1 || paren < best)) best = paren;
-	const bracket = src.indexOf("\\[");
-	if (bracket !== -1 && (best === -1 || bracket < best)) best = bracket;
-	return best === -1 ? undefined : best;
-}
-
+// Delimiters come from `@oh-my-pi/pi-utils/math-delimiters`; rendering policy stays here.
 const mathExtension: TokenizerAndRendererExtension = {
 	name: "math",
 	level: "inline",
-	start(src) {
-		return mathStartIndex(src);
-	},
+	start: mathStartIndex,
 	tokenizer(src) {
-		if (src.startsWith("$$")) {
-			const end = src.indexOf("$$", 2);
-			if (end !== -1 && src.slice(2, end).trim().length > 0) {
-				return { type: "math", raw: src.slice(0, end + 2), text: src.slice(2, end), display: true };
-			}
-			return undefined;
-		}
-		if (src.startsWith("\\[")) {
-			const end = src.indexOf("\\]", 2);
-			if (end !== -1) return { type: "math", raw: src.slice(0, end + 2), text: src.slice(2, end), display: true };
-			return undefined;
-		}
-		if (src.startsWith("\\(")) {
-			const end = src.indexOf("\\)", 2);
-			if (end !== -1) return { type: "math", raw: src.slice(0, end + 2), text: src.slice(2, end), display: false };
-			return undefined;
-		}
-		if (src.charCodeAt(0) === 0x24 /* $ */) {
-			const end = inlineMathSpanEnd(src, 0);
-			if (end !== -1) return { type: "math", raw: src.slice(0, end + 1), text: src.slice(1, end), display: false };
-		}
-		return undefined;
+		const span = mathSpanAt(src, 0);
+		if (!span) return undefined;
+		return { type: "math", raw: src.slice(0, span.end), text: span.body, display: span.display };
 	},
 	renderer(token) {
-		return (token as { text?: string }).text ?? "";
+		return typeof token.text === "string" ? token.text : "";
 	},
 };
 
-// Display math blocks: opening `$$` / `\[` and closing `$$` / `\]` each alone on
-// their own line (≤3 leading spaces). Matched at the block level — before
-// paragraph/list parsing — so a multi-line equation (e.g. a matrix with `\\`
-// row breaks) renders across several lines instead of being collapsed onto one,
-// and blank lines inside the block don't split it. The own-line requirement
-// keeps inline `$$…$$` inside prose for the inline tokenizer above.
-const MATH_BLOCK_DOLLAR = /^ {0,3}\$\$[ \t]*\n([\s\S]+?)\n {0,3}\$\$[ \t]*(?:\n|$)/;
-const MATH_BLOCK_BRACKET = /^ {0,3}\\\[[ \t]*\n([\s\S]+?)\n {0,3}\\\][ \t]*(?:\n|$)/;
-const MATH_BLOCK_START = /(?:^|\n) {0,3}(?:\$\$|\\\[)[ \t]*\n/;
 const mathBlockExtension: TokenizerAndRendererExtension = {
 	name: "mathBlock",
 	level: "block",
-	start(src) {
-		const m = MATH_BLOCK_START.exec(src);
-		return m ? m.index : undefined;
-	},
+	// No `start` hint: marked only probes block extensions at a block boundary
+	// here and never consults their hints.
 	tokenizer(src) {
-		const m = MATH_BLOCK_DOLLAR.exec(src) ?? MATH_BLOCK_BRACKET.exec(src);
-		if (!m || m[1].trim().length === 0) return undefined;
-		return { type: "math", raw: m[0], text: m[1], display: true };
+		const block = mathBlockAt(src);
+		if (!block) return undefined;
+		return { type: "math", raw: block.raw, text: block.body, display: true };
 	},
 	renderer(token) {
-		return (token as { text?: string }).text ?? "";
+		return typeof token.text === "string" ? token.text : "";
 	},
 };
 
@@ -718,7 +674,7 @@ const mathEnvBlockExtension: TokenizerAndRendererExtension = {
 // (return undefined) to marked's own autolink handling unchanged.
 const AUTOLINK_SCHEME_REGEX = /^(?:www\.|https?:\/\/|ftp:\/\/)/i;
 // Case-insensitive scheme scan replacing /www\.|https?:\/\/|ftp:\/\//i in
-// boundedAutolinkExtension.start — like mathStartIndex above, this runs on the
+// boundedAutolinkExtension.start — like `mathStartIndex`, this runs on the
 // remaining source at every inline position (part of a ~4.3% CPU start() scan
 // tail in profiles). charCode-only: no allocation, no toLowerCase copies.
 // `| 32` lower-cases ASCII letters; `.`/`:`/`/` are compared exactly, matching
@@ -838,7 +794,7 @@ export function urlTokenPossible(src: string): boolean {
 	}
 	if (i === 0) return false;
 	if (i >= URL_GATE_EMAIL_SCAN_LIMIT) return true; // over-long run: give up conservatively
-	return src.charCodeAt(i) === 64 /* @ */;
+	return src.charCodeAt(i) === 64; /* @ */
 }
 
 // Setext-underline pre-gate for marked's `lheading` rule. The rule's lazy body
@@ -1175,7 +1131,7 @@ function listMayContinueAt(text: string, tailStart: number, listRaw: string): bo
 	// bare newline, or end-of-input (which appends can still extend).
 	if (i >= n) return true;
 	const after = text.charCodeAt(i);
-	return after === 0x20 /* space */ || after === 0x09 /* tab */ || after === 0x0a /* \n */;
+	return after === 0x20 /* space */ || after === 0x09 /* tab */ || after === 0x0a; /* \n */
 }
 
 const NO_BLOCK_BOUNDARY = { end: 0, count: 0 } as const;
@@ -1296,6 +1252,52 @@ function lexDocument(text: string): Token[] {
 	// window offsets would address the wrong characters — lex those in one pass.
 	if (text.length < WINDOWED_LEX_MIN_BYTES || text.includes("\r")) return markdownParser.lexer(text);
 	return lexWindowed(text);
+}
+
+/** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */
+export interface MarkdownLink {
+	/** Visible link text (equals `href` for autolinks and bare URLs). */
+	text: string;
+	/** Destination exactly as marked resolved it (references resolved, no normalization). */
+	href: string;
+}
+
+/**
+ * Every link token in `text`, in document order, from the same configured
+ * lexer the renderer uses — so fenced code, code spans, escapes, reference
+ * definitions and the GFM autolink rules agree with what is drawn on screen.
+ * Duplicate hrefs are kept; callers decide how to fold them.
+ */
+export function extractMarkdownLinks(text: string): MarkdownLink[] {
+	const links: MarkdownLink[] = [];
+	const walk = (tokens: readonly Token[] | undefined): void => {
+		if (!tokens) return;
+		for (const token of tokens) {
+			if (token.type === "link") {
+				const link = token as Tokens.Link;
+				if (typeof link.href === "string" && link.href.length > 0) {
+					links.push({
+						text: typeof link.text === "string" && link.text.length > 0 ? link.text : link.href,
+						href: link.href,
+					});
+				}
+				continue;
+			}
+			// Containers: paragraphs, emphasis, lists, blockquotes, table cells.
+			const any = token as {
+				tokens?: Token[];
+				items?: Token[];
+				header?: Array<{ tokens?: Token[] }>;
+				rows?: Array<Array<{ tokens?: Token[] }>>;
+			};
+			walk(any.tokens);
+			walk(any.items);
+			if (any.header) for (const cell of any.header) walk(cell.tokens);
+			if (any.rows) for (const row of any.rows) for (const cell of row) walk(cell.tokens);
+		}
+	};
+	walk(lexDocument(text));
+	return links;
 }
 
 /** Drop all L2 cache entries. Call on theme change to prevent stale styled output. */
@@ -1559,11 +1561,11 @@ const DEFAULT_COLOR_SWATCH_GLYPH = "■";
 
 // `#` + 3-8 hex digits, not glued to a surrounding word/`#`/`&` (avoids HTML
 // entities like &#9731; and paths like foo#fff), not the start of a canonical
-// UUID, and not trailed by more hex (so over-long runs never produce a
-// misleading swatch). Length/letter rules are enforced in classifyHexColor
-// since the alternation can't express "exactly 3, 6, or 8".
-const HEX_COLOR_REGEX =
-	/(?<![\w#&])#(?![0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})([0-9a-fA-F]{3,8})(?![0-9a-fA-F])/g;
+// UUID, and not trailed by another word char (over-long runs and word
+// fragments like the "#eac" of "#each" never produce a misleading swatch).
+// Length/letter rules are enforced in classifyHexColor since the alternation
+// can't express "exactly 3, 6, or 8".
+const HEX_COLOR_REGEX = /(?<![\w#&])#(?![0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})([0-9a-fA-F]{3,8})(?!\w)/g;
 const HEX_COLOR_EXACT_REGEX = /^#([0-9a-fA-F]{3,8})$/;
 
 /**
@@ -1583,12 +1585,28 @@ function classifyHexColor(hex: string, strict: boolean): boolean {
 	return true;
 }
 
-/** ANSI-painted `glyph` for `#${hex}`, or "" when the color can't be encoded. */
-function colorSwatch(hex: string, glyph: string): string {
-	const ansi = Bun.color(`#${hex}`, TERMINAL.trueColor ? "ansi-16m" : "ansi-256");
-	// Reset only the foreground (\x1b[39m) so an enclosing background/decoration
-	// applied later by the line renderer survives across the swatch.
-	return ansi ? `${ansi}${glyph}\x1b[39m ` : "";
+/** Black-or-white foreground legible on `#${hex}` used as a fill. VS Code's
+ *  rule (Color.isLighter): YIQ brightness (r·299 + g·587 + b·114)/1000 ≥ 128
+ *  → dark text, else light. */
+function swatchContrastFg(hex: string): string {
+	const rgba = Bun.color(`#${hex}`, "{rgba}");
+	if (!rgba) return "";
+	const light = (rgba.r * 299 + rgba.g * 587 + rgba.b * 114) / 1000 >= 128;
+	if (TERMINAL.trueColor) return light ? "\x1b[38;2;0;0;0m" : "\x1b[38;2;255;255;255m";
+	return light ? "\x1b[38;5;16m" : "\x1b[38;5;231m";
+}
+
+/** Chip glyph + `text` (the `#hex` mention) painted onto the color itself:
+ *  a fg-painted chip, then the token with the color as background and a
+ *  YIQ-contrast foreground (VS Code's color-picker rule). Returns "" when the
+ *  color can't be encoded. Foreground closes with \x1b[39m and background with
+ *  a standalone \x1b[49m so line-level backgrounds re-open themselves via
+ *  applyBackgroundToLine / Theme.bgFill. */
+function colorSwatch(hex: string, glyph: string, text: string): string {
+	const fg = Bun.color(`#${hex}`, TERMINAL.trueColor ? "ansi-16m" : "ansi-256");
+	if (!fg) return "";
+	const bg = fg.replace("[38;", "[48;");
+	return `${fg}${glyph}\x1b[39m ${bg}${swatchContrastFg(hex)}${text}\x1b[39m\x1b[49m`;
 }
 
 /**
@@ -1604,10 +1622,10 @@ function renderTextWithSwatches(text: string, applySegment: (t: string) => strin
 		const match = HEX_COLOR_REGEX.exec(text);
 		if (match === null) break;
 		if (!classifyHexColor(match[1], true)) continue;
-		const swatch = colorSwatch(match[1], glyph);
+		const swatch = colorSwatch(match[1], glyph, match[0]);
 		if (!swatch) continue;
 		if (match.index > last) result += applySegment(text.slice(last, match.index));
-		result += swatch + applySegment(match[0]);
+		result += swatch;
 		last = match.index + match[0].length;
 	}
 	if (last === 0) return applySegment(text);
@@ -1619,7 +1637,7 @@ function renderTextWithSwatches(text: string, applySegment: (t: string) => strin
 function codespanSwatch(code: string, glyph: string): string {
 	const match = HEX_COLOR_EXACT_REGEX.exec(code.trim());
 	if (!match || !classifyHexColor(match[1], false)) return "";
-	return colorSwatch(match[1], glyph);
+	return colorSwatch(match[1], glyph, match[0]);
 }
 
 interface RenderSignature {
@@ -1801,6 +1819,18 @@ export class Markdown implements Component {
 		this.#defaultTextStyle = defaultTextStyle;
 		this.#codeBlockIndent = Math.max(0, Math.floor(codeBlockIndent));
 	}
+	/** Return bounded source text and layout state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return {
+			textPreview: this.#text.slice(0, 120),
+			textLength: this.#text.length,
+			previewTruncated: this.#text.length > 120,
+			paddingX: this.#paddingX,
+			paddingY: this.#paddingY,
+			codeBlockIndent: this.#codeBlockIndent,
+			ignoreTight: this.#ignoreTight,
+		};
+	}
 
 	setText(text: string): boolean {
 		// Identical re-emit (throttled tick): fully normalized already.
@@ -1864,6 +1894,15 @@ export class Markdown implements Component {
 		this.#cachedText = undefined;
 		this.#cachedWidth = undefined;
 		this.#cachedLines = undefined;
+	}
+
+	/**
+	 * Width-independent source prefix of the last render ending at a frozen
+	 * Markdown block boundary. Only meaningful while streaming (transient
+	 * render cache on); grows monotonically under append-only `setText`.
+	 */
+	getLastRenderStableText(): string {
+		return this.#transientRenderCache ? (this.#streamPrefixText ?? "") : "";
 	}
 
 	get transientRenderCache(): boolean {
@@ -2362,8 +2401,11 @@ export class Markdown implements Component {
 		}
 
 		const recorder: TailRenderRecorder = {
+			// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 			rows: new Array(tokens.length - spliceEnd).fill(undefined),
+			// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 			raws: new Array(tokens.length - spliceEnd).fill(undefined),
+			// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 			nextTypes: new Array(tokens.length - spliceEnd).fill(undefined),
 		};
 		const fresh = this.#renderContentLines(tokens, spliceEnd, tokens.length, contentWidth, signature, recorder);
@@ -2376,8 +2418,11 @@ export class Markdown implements Component {
 		// `start`), so a mostly-frozen document allocates only for the
 		// unfrozen tail instead of the whole token list every frame.
 		const tailCount = tokens.length - start;
+		// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 		const rows: (readonly string[] | undefined)[] = new Array(tailCount).fill(undefined);
+		// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 		const raws: (string | undefined)[] = new Array(tailCount).fill(undefined);
+		// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 		const nextTypes: (string | undefined)[] = new Array(tailCount).fill(undefined);
 		if (cache !== undefined && cache.tokenStart === start) {
 			for (let i = start; i < Math.min(cache.cachedThrough, spliceEnd); i++) {
@@ -3153,7 +3198,8 @@ export class Markdown implements Component {
 
 				case "codespan": {
 					markHtmlItemWhenContent(token.text);
-					result += codespanSwatch(token.text, swatchGlyph) + this.#theme.code(token.text) + stylePrefix;
+					const painted = codespanSwatch(token.text, swatchGlyph);
+					result += (painted || this.#theme.code(token.text)) + stylePrefix;
 					break;
 				}
 
@@ -3161,17 +3207,21 @@ export class Markdown implements Component {
 					markHtmlItemWhenContent(token.text);
 					const linkText = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
-					const clickableLinkText = formatHyperlink(styledLinkText, token.href);
-					// If link text matches href, only show the link once
+					const href = typeof token.href === "string" ? token.href : "";
+					const clickableLinkText = formatHyperlink(styledLinkText, href);
+					// If link text matches href, only show the link once. A missing
+					// href (malformed/partial link token) renders as plain link text
+					// instead of crashing the renderer or emitting an empty "()"
+					// (issue #10283).
 					// Compare raw text (token.text) not styled text (linkText) since linkText has ANSI codes
 					// For mailto: links, strip the prefix before comparing (autolinked emails have
 					// text="foo@bar.com" but href="mailto:foo@bar.com")
-					const hrefForComparison = token.href.startsWith("mailto:") ? token.href.slice(7) : token.href;
-					if (token.text === token.href || token.text === hrefForComparison)
+					const hrefForComparison = href.startsWith("mailto:") ? href.slice(7) : href;
+					if (!href || token.text === href || token.text === hrefForComparison)
 						result += clickableLinkText + stylePrefix;
 					else {
-						const styledLinkUrl = this.#theme.linkUrl(`(${token.href})`);
-						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, token.href)}${stylePrefix}`;
+						const styledLinkUrl = this.#theme.linkUrl(`(${href})`);
+						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, href)}${stylePrefix}`;
 					}
 					break;
 				}
@@ -3470,6 +3520,7 @@ export class Markdown implements Component {
 		let minCellsWidth = minColumnWidths.reduce((a, b) => a + b, 0);
 
 		if (minCellsWidth > availableForCells) {
+			// oxlint-disable-next-line unicorn/no-new-array -- column-width allocation
 			minColumnWidths = new Array(numCols).fill(1);
 			const remaining = availableForCells - numCols;
 

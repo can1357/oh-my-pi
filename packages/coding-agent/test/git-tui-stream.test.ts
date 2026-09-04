@@ -92,6 +92,28 @@ describe("git TUI streamed document", () => {
 		const synchronous = buildDiffDocument(oldText, newText, "fixture.ts");
 		expect(streamed).toEqual(synchronous);
 	});
+
+	// #9734: unstaged files on Windows diff the CRLF worktree side against the
+	// LF index side. Raw carriage returns in display lines snap the terminal
+	// cursor to column 0 mid-row, corrupting the render. Both the built
+	// document and every rendered row must be free of C0 control bytes.
+	test("strips carriage returns from a CRLF worktree side", async () => {
+		const oldText = "line one\nline two\nline three\n"; // index side (LF)
+		const newText = "line one\r\nline two changed\r\nline three\r\n"; // worktree side (CRLF)
+		const doc = buildDiffDocument(oldText, newText, "fixture.ts");
+		expect(doc.newDisplayLines.some(line => line.includes("\r"))).toBe(false);
+		expect(doc.newDisplayLines).toContain("line two changed");
+
+		const pane = new DiffPane();
+		pane.setDocument(doc, "ready");
+		const control = /[\x00-\x08\x0b-\x1f\x7f]/;
+		for (const mode of ["split", "inline", "file", "hunk"] as const) {
+			pane.setMode(mode);
+			for (const row of pane.render(80, 20)) {
+				expect(control.test(row.replace(/\x1b\[[0-9;]*m/g, ""))).toBe(false);
+			}
+		}
+	});
 });
 describe("git TUI asset previews", () => {
 	test("renders raster Git objects as media instead of binary placeholders", async () => {

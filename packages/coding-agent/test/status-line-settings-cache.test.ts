@@ -7,7 +7,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import { visibleWidth } from "@oh-my-pi/pi-tui";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -163,7 +164,7 @@ describe("StatusLineComponent effective settings cache", () => {
 	it("surfaces active subagents even when custom segments omit subagents", () => {
 		const component = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
 
-		component.setSubagentCount(2);
+		component.setRunningSubagents(["sub-1", "sub-2"]);
 
 		const content = stripVTControlCharacters(component.getTopBorder(120).content);
 		expect(content).toContain("2 agents");
@@ -184,6 +185,36 @@ describe("StatusLineComponent effective settings cache", () => {
 		component.setHookStatus("hook", "hook done");
 		expect(component.render(80)).toEqual(["hook done"]);
 		expect(component.getEffectiveSettingsForTest()).toBe(effective);
+	});
+
+	it("renders arbitrary extension statuses in deterministic segment order", () => {
+		const component = makeComponent({
+			preset: "custom",
+			leftSegments: ["pi", "status", "model"],
+			rightSegments: [],
+			separator: "powerline-thin",
+			showHookStatus: false,
+			sessionAccent: false,
+			segmentOptions: { model: { showThinkingLevel: false } },
+		});
+
+		component.setHookStatus("z-tests", "Tests passing");
+		component.setHookStatus("a-indexer", "\x1b]8;;https://example.com\x07Indexer ready\x1b]8;;\x07");
+
+		const border = component.getTopBorder(120).content;
+		const content = stripVTControlCharacters(border);
+		expect(border).not.toContain("https://example.com");
+		expect(content.indexOf("Indexer ready")).toBeGreaterThanOrEqual(0);
+		expect(content.indexOf("Indexer ready")).toBeLessThan(content.indexOf("Tests passing"));
+		expect(content.indexOf("Tests passing")).toBeLessThan(content.indexOf("Test Model"));
+		expect(component.render(120)).toEqual([]);
+		expect(visibleWidth(component.getTopBorder(24).content)).toBeLessThanOrEqual(24);
+
+		component.setHookStatus("a-indexer", undefined);
+		component.setHookStatus("z-tests", undefined);
+		const cleared = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(cleared).not.toContain("Indexer ready");
+		expect(cleared).not.toContain("Tests passing");
 	});
 
 	it("does not mutate shared preset segment options during narrow renders", () => {
@@ -212,9 +243,9 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(component.getEffectiveSettingsForTest()).toBe(nextEffective);
 	});
 	it("skips git probes when git integration is disabled", async () => {
-		const headSpy = spyOn(git.head, "resolveSync").mockReturnValue(null);
-		const statusSpy = spyOn(git.status, "summary").mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
-		const repoSpy = spyOn(git.repo, "resolveSync").mockReturnValue(null);
+		const headSpy = spyOn(vcs, "gitInfo");
+		const statusSpy = spyOn(vcs, "watch");
+		const repoSpy = spyOn(vcs, "repo");
 		try {
 			Settings.instance.override("git.enabled", false);
 			const component = makeComponent({
@@ -241,9 +272,9 @@ describe("StatusLineComponent effective settings cache", () => {
 	});
 
 	it("skips git probes when no git-backed segment is visible", async () => {
-		const headSpy = spyOn(git.head, "resolveSync").mockReturnValue(null);
-		const statusSpy = spyOn(git.status, "summary").mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
-		const repoSpy = spyOn(git.repo, "resolveSync").mockReturnValue(null);
+		const headSpy = spyOn(vcs, "gitInfo");
+		const statusSpy = spyOn(vcs, "watch");
+		const repoSpy = spyOn(vcs, "repo");
 		try {
 			const component = makeComponent({
 				preset: "custom",

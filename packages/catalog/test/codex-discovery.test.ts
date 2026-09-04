@@ -191,9 +191,11 @@ describe("Codex model discovery", () => {
 			Effort.XHigh,
 			Effort.Max,
 		]);
-		expect(blue.cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 });
+		// Standard API pricing is rule-owned (`providers/openai-codex.kdl`
+		// cost-patch) and corrected at build time.
+		expect(buildModel(blue).cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 });
 		expect(red.contextWindow).toBe(400_000);
-		expect(red.cost).toEqual({ input: 12.5, output: 75, cacheRead: 1.25, cacheWrite: 15.625 });
+		expect(buildModel(red).cost).toEqual({ input: 12.5, output: 75, cacheRead: 1.25, cacheWrite: 15.625 });
 	});
 
 	it("floors stale reported windows for GPT-5.6 luna/sol/terra and honors reports above the floor", async () => {
@@ -412,6 +414,96 @@ describe("Codex model discovery", () => {
 					{ accessToken: "token-1", accountId: "account-1" },
 					{ accessToken: "token-2", accountId: "account-2" },
 				],
+				fetch: fetchFn,
+			});
+			const result = await resolveProviderModels(
+				{ ...options, staticModels: [bundled], cacheDbPath: path.join(tempDir, "models.db") },
+				"online",
+			);
+
+			expect(result.models.map(model => model.id)).toEqual(["gpt-5.6-terra"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("skips an account whose credential the backend rejects and unions the rest", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-union-revoked-"));
+		const bundled: ModelSpec<"openai-codex-responses"> = {
+			id: "gpt-5.6-terra",
+			name: "GPT-5.6 Terra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 372_000,
+			maxTokens: 128_000,
+		};
+		const fetchFn: typeof fetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const accountId = new Headers(init?.headers).get("chatgpt-account-id");
+				if (accountId === "revoked") {
+					return Response.json(
+						{ error: { message: "Encountered invalidated oauth token for user", code: "token_revoked" } },
+						{ status: 401 },
+					);
+				}
+				return Response.json({
+					models: [
+						{
+							slug: "gpt-6-astra",
+							display_name: "GPT-6-Astra",
+							default_reasoning_level: "medium",
+							supported_reasoning_levels: [{ effort: "low" }, { effort: "max" }, { effort: "ultra" }],
+							input_modalities: ["text", "image"],
+							supported_in_api: true,
+						},
+					],
+				});
+			},
+			{ preconnect() {} },
+		);
+		try {
+			const options = openaiCodexModelManagerOptions({
+				resolveAccounts: async () => [
+					{ accessToken: "token-revoked", accountId: "revoked" },
+					{ accessToken: "token-live", accountId: "live" },
+				],
+				fetch: fetchFn,
+			});
+			const result = await resolveProviderModels(
+				{ ...options, staticModels: [bundled], cacheDbPath: path.join(tempDir, "models.db") },
+				"online",
+			);
+
+			expect(result.models.map(model => model.id)).toEqual(["gpt-6-astra"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps bundled Codex models when every account credential is rejected", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-union-all-revoked-"));
+		const bundled: ModelSpec<"openai-codex-responses"> = {
+			id: "gpt-5.6-terra",
+			name: "GPT-5.6 Terra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 372_000,
+			maxTokens: 128_000,
+		};
+		const fetchFn: typeof fetch = Object.assign(async () => new Response("forbidden", { status: 403 }), {
+			preconnect() {},
+		});
+		try {
+			const options = openaiCodexModelManagerOptions({
+				resolveAccounts: async () => [{ accessToken: "token-1", accountId: "account-1" }],
 				fetch: fetchFn,
 			});
 			const result = await resolveProviderModels(

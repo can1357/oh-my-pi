@@ -26,6 +26,7 @@ import type {
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
+	ProviderModelConfig,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -156,6 +157,51 @@ describe("ExtensionRunner", () => {
 
 		runner.initialize(actions, contextActions, undefined, undefined, "tui");
 		expect(runner.createContext().mode).toBe("tui");
+	});
+
+	it("uses required context actions when command actions are unavailable", async () => {
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const usage = { tokens: 1200, contextWindow: 8000, percent: 15 };
+		const compact = vi.fn(async () => {});
+
+		runner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => undefined,
+				setThinkingLevel: () => {},
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			},
+			{
+				getModel: () => undefined,
+				isIdle: () => true,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => usage,
+				compact,
+				getSystemPrompt: () => [],
+			},
+		);
+
+		expect(runner.createContext().getContextUsage()).toEqual(usage);
+		await runner.createContext().compact("preserve current task");
+		expect(compact).toHaveBeenCalledWith("preserve current task");
 	});
 
 	describe("shortcut conflicts", () => {
@@ -2054,6 +2100,12 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("provider model API", () => {
+		it("accepts a per-model WebSocket preference", () => {
+			expectTypeOf<ProviderModelConfig["preferWebsockets"]>().toEqualTypeOf<boolean | undefined>();
+		});
+	});
+
 	describe("service tier API", () => {
 		it("restricts tiers to values supported by each provider family", () => {
 			expectTypeOf<"scale">().toExtend<ExtensionServiceTier<"openai">>();
@@ -2573,7 +2625,7 @@ describe("ExtensionRunner", () => {
 			};
 		}
 
-		it("exposes a single hashline edit path to extension gate handlers", async () => {
+		it("allows bracketed Markdown paths, blocks non-Markdown paths, and accepts legacy headers", async () => {
 			const eventsPath = path.join(tempDir.path(), "tool-call-events.jsonl");
 			const extCode = `
 				import * as fs from "node:fs";
@@ -2585,7 +2637,7 @@ describe("ExtensionRunner", () => {
 							${JSON.stringify(eventsPath)},
 							JSON.stringify({ path: event.input.path, paths: event.input.paths }) + "\\n",
 						);
-						if (typeof event.input.path !== "string") {
+						if (typeof event.input.path !== "string" || !event.input.path.endsWith(".md")) {
 							return { block: true, reason: \`Blocked: \${event.input.path}\` };
 						}
 					});
@@ -2604,17 +2656,37 @@ describe("ExtensionRunner", () => {
 			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
 
 			const resultMessage = await wrapped.execute("tool-call-id", {
-				input: "¶plans/switch-case-array-syntax.md#ABC1\n27 27\n+new content",
+				input: [
+					"*** Begin Patch",
+					'["plans/switch case-array.md"#ABC1]',
+					"PUT 27.=27:",
+					"+new content",
+					"*** End Patch",
+				].join("\n"),
+			});
+			await expect(
+				wrapped.execute("non-markdown-tool-call-id", {
+					input: "[packages/coding-agent/src/main.ts#BCD2]\nPUT 1.=1:\n+changed",
+				}),
+			).rejects.toThrow("Blocked: packages/coding-agent/src/main.ts");
+			const legacyResult = await wrapped.execute("legacy-tool-call-id", {
+				input: "¶plans/legacy.md#CDE3\n27 27\n+new content",
 			});
 
 			expect(resultMessage.content).toEqual([{ type: "text", text: "ok" }]);
+			expect(legacyResult.content).toEqual([{ type: "text", text: "ok" }]);
 			const events = fs
 				.readFileSync(eventsPath, "utf8")
 				.trim()
 				.split("\n")
 				.map(line => JSON.parse(line));
 			expect(events).toEqual([
-				{ path: "plans/switch-case-array-syntax.md", paths: ["plans/switch-case-array-syntax.md"] },
+				{ path: "plans/switch case-array.md", paths: ["plans/switch case-array.md"] },
+				{
+					path: "packages/coding-agent/src/main.ts",
+					paths: ["packages/coding-agent/src/main.ts"],
+				},
+				{ path: "plans/legacy.md", paths: ["plans/legacy.md"] },
 			]);
 		});
 		it("keeps non-tag hash suffixes in hashline edit paths", async () => {
@@ -2645,7 +2717,7 @@ describe("ExtensionRunner", () => {
 			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
 
 			await wrapped.execute("tool-call-id", {
-				input: "¶plans/foo.md#notatag\n27 27\n+new content",
+				input: "[plans/foo.md#notatag]\nPUT 27.=27:\n+new content",
 			});
 
 			const events = fs
@@ -2685,7 +2757,7 @@ describe("ExtensionRunner", () => {
 
 			await wrapped.execute("tool-call-id", {
 				_path: "plans/allowed.md",
-				input: "¶src/secret.ts#ABC1\n27 27\n+evil content",
+				input: "[src/secret.ts#ABC1]\nPUT 27.=27:\n+evil content",
 			});
 
 			const events = fs
@@ -2728,7 +2800,7 @@ describe("ExtensionRunner", () => {
 
 			await expect(
 				wrapped.execute("tool-call-id", {
-					input: "¶plans/switch-case-array-syntax.md#ABC1\n27 27\n+new content\n¶packages/coding-agent/src/main.ts#DEF2\n1 1\n+changed",
+					input: "[plans/switch-case-array-syntax.md#ABC1]\nPUT 27.=27:\n+new content\n[packages/coding-agent/src/main.ts#DEF2]\nPUT 1.=1:\n+changed",
 				}),
 			).rejects.toThrow("Blocked: undefined");
 
@@ -2915,7 +2987,7 @@ describe("ExtensionRunner", () => {
 			// resolves against the revised args and blocks — the tool never runs.
 			await expect(
 				wrapped.execute("tool-call-id", { command: "echo original" }, undefined, undefined, yoloContext),
-			).rejects.toThrow(/blocked by user policy/);
+			).rejects.toThrow('Tool "bash" is blocked by tool policy.\nReason: dangerous');
 			expect(fs.existsSync(recordPath)).toBe(false); // tool never executed
 		});
 

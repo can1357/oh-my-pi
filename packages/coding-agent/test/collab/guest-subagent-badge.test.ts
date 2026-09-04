@@ -9,7 +9,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import {
-	countRunningSubagentBadgeAgents,
+	getRunningSubagentBadgeAgentIds,
 	getRunningSubagentBadgeRegistry,
 } from "@oh-my-pi/pi-coding-agent/modes/running-subagent-badge";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -72,8 +72,8 @@ function makeGuestContext(counts: number[]): InteractiveModeContext {
 		pendingTools: new Map(),
 		loadingAnimation: undefined,
 		statusLine: {
-			setSubagentCount: (count: number) => {
-				statusLineCount = count;
+			setRunningSubagents: (agentIds: readonly string[]) => {
+				statusLineCount = agentIds.length;
 			},
 			get subagentCount() {
 				return statusLineCount;
@@ -96,9 +96,9 @@ function makeGuestContext(counts: number[]): InteractiveModeContext {
 		eventController: { handleEvent: () => Promise.resolve() },
 		syncRunningSubagentBadge: () => {
 			const registry = getRunningSubagentBadgeRegistry(ctx.collabGuest);
-			const count = countRunningSubagentBadgeAgents(registry);
-			ctx.statusLine.setSubagentCount(count);
-			counts.push(count);
+			const agentIds = getRunningSubagentBadgeAgentIds(registry);
+			ctx.statusLine.setRunningSubagents(agentIds);
+			counts.push(agentIds.length);
 		},
 	} as unknown as InteractiveModeContext;
 	return ctx;

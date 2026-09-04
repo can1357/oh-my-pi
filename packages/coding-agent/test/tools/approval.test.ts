@@ -3,6 +3,7 @@ import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import { LSP_READONLY_ACTIONS } from "@oh-my-pi/pi-coding-agent/lsp";
 import {
 	type ApprovalMode,
+	denyError,
 	formatApprovalPrompt,
 	requiresApproval,
 	resolveApproval,
@@ -114,6 +115,30 @@ describe("resolveApproval override and user policy", () => {
 		);
 	});
 
+	it("tool-sourced deny surfaces the reason and does not mention tools.approval", () => {
+		const blocked = tool("bash", {
+			tier: "exec",
+			override: true,
+			policy: "deny",
+			reason: "Blocked by bash pattern: rm -rf *",
+		});
+		const resolved = resolveApproval(blocked, {}, "yolo", { bash: "allow" });
+		expect(() => {
+			throw denyError(resolved, "bash");
+		}).toThrow('Tool "bash" is blocked by tool policy.\nReason: Blocked by bash pattern: rm -rf *');
+		expect(() => {
+			throw denyError(resolved, "bash");
+		}).not.toThrow(/tools\.approval/);
+	});
+
+	it("user-sourced deny keeps the original tools.approval message", () => {
+		const writeTool = tool("write", "write");
+		const resolved = resolveApproval(writeTool, {}, "yolo", { write: "deny" });
+		expect(() => {
+			throw denyError(resolved, "write");
+		}).toThrow('Tool "write" is blocked by user policy.\nTo allow: remove "tools.approval.write: deny" from config.');
+	});
+
 	it("valid user policy overrides mode and tier when no tool override is active", () => {
 		const writeTool = tool("write", "write");
 		expect(resolveApproval(writeTool, {}, "always-ask", { write: "allow" }).policy).toBe("allow");
@@ -179,14 +204,27 @@ describe("MCP fallback and prompt formatting", () => {
 		return new EditTool(session, "sloppy");
 	}
 
+	function sloppySection(path: string, find = "old", put = "new"): string {
+		return [
+			`<SM:EDIT path="${path}">`,
+			"<SM:FIND>",
+			find,
+			"</SM:FIND>",
+			"<SM:PUT>",
+			put,
+			"</SM:PUT>",
+			"</SM:EDIT>",
+		].join("\n");
+	}
+
 	it("shows the file from a sloppy edit section header", () => {
-		const input = "§src/config.go\n§\nold\n»\nnew";
+		const input = sloppySection("src/config.go");
 		expect(formatApprovalPrompt(sloppyEditTool(), { input })).toBe("Allow tool: edit\nFile: src/config.go");
 	});
 
 	it("keeps a mixed internal+workspace sloppy payload at write tier", () => {
 		const editTool = sloppyEditTool();
-		const input = "§local://notes\n§\nold\n»\nnew\n§src/config.go\n§\nold\n»\nnew";
+		const input = `${sloppySection("local://notes")}\n${sloppySection("src/config.go")}`;
 		// Section 0 is internal; the workspace section must still force write tier
 		// and an always-ask prompt because executeSloppy writes both.
 		expect(editTool.approval?.({ input })).toBe("write");
@@ -198,18 +236,18 @@ describe("MCP fallback and prompt formatting", () => {
 	});
 
 	it("keeps an all-internal sloppy payload at read tier", () => {
-		const input = "§local://notes\n§\nold\n»\nnew\n§local://scratch\n§\nold\n»\nnew";
+		const input = `${sloppySection("local://notes")}\n${sloppySection("local://scratch")}`;
 		expect(sloppyEditTool().approval?.({ input })).toBe("read");
 	});
 
 	it("keeps a writable internal sloppy target at write tier", () => {
-		const input = "§vault://notes/test.md\n§\nold\n»\nnew";
+		const input = sloppySection("vault://notes/test.md");
 		expect(sloppyEditTool().approval?.({ input })).toBe("write");
 	});
 
 	it("uses only sloppy section headers for sloppy approval tiering", () => {
 		const editTool = sloppyEditTool();
-		const input = "§src/config.go\n§\n[local://notes]\n»\nupdated";
+		const input = sloppySection("src/config.go", "[local://notes]", "updated");
 		expect(editTool.approval?.({ input })).toBe("write");
 		expect(formatApprovalPrompt(editTool, { input })).toBe("Allow tool: edit\nFile: src/config.go");
 	});

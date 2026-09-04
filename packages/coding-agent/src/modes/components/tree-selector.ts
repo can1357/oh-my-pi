@@ -70,12 +70,10 @@ interface AdvisorTreeDisplay {
 }
 
 /**
- * Collapse a raw advisor field (a `WATCHDOG.yml`-supplied name or severity) to
- * a single safe line: strip ANSI/control characters via the shared sanitizer,
- * then fold the tab/newline it intentionally preserves into spaces so the value
- * cannot split or misalign a session-tree row.
+ * Collapse untrusted session metadata to one safe tree-row field: strip
+ * ANSI/control characters, then fold preserved tabs/newlines into spaces.
  */
-function sanitizeAdvisorField(value: string): string {
+function sanitizeTreeField(value: string): string {
 	return sanitizeText(value)
 		.replace(/[\n\t]/g, " ")
 		.trim();
@@ -96,16 +94,57 @@ function advisorTreeDisplay(details: unknown): AdvisorTreeDisplay {
 		if (!isRecord(note)) continue;
 		if (typeof note.note === "string") notes.push(note.note);
 		if (typeof note.advisor === "string") {
-			const name = sanitizeAdvisorField(note.advisor);
+			const name = sanitizeTreeField(note.advisor);
 			if (name && name !== "default" && !advisors.includes(name)) advisors.push(name);
 		}
 		if (typeof note.severity === "string") {
-			const severity = sanitizeAdvisorField(note.severity);
+			const severity = sanitizeTreeField(note.severity);
 			if (severity && !severities.includes(severity)) severities.push(severity);
 		}
 	}
 	return { qualifier: [...advisors, ...severities].join(", "), text: notes.join(" ") };
 }
+
+/**
+ * Strip one model-facing `<system-*>` envelope from custom-message content.
+ * Nested system tags belong to the recorded payload and remain visible.
+ */
+function stripSystemWrapperTags(content: string): string {
+	const trimmed = content.trim();
+	const opening = /^<(system-[\w-]+)/i.exec(trimmed);
+	if (!opening) return content;
+
+	const attributeStart = opening[0].length;
+	const firstAttributeCharacter = trimmed[attributeStart];
+	if (firstAttributeCharacter !== ">" && !/\s/.test(firstAttributeCharacter ?? "")) return content;
+
+	let quote: '"' | "'" | undefined;
+	let openingEnd = -1;
+	for (let index = attributeStart; index < trimmed.length; index++) {
+		const character = trimmed[index];
+		if (quote) {
+			if (character === quote) quote = undefined;
+		} else if (character === '"' || character === "'") {
+			quote = character;
+		} else if (character === "<") {
+			return content;
+		} else if (character === ">") {
+			openingEnd = index;
+			break;
+		}
+	}
+	if (openingEnd === -1 || quote) return content;
+
+	const closingTag = `</${opening[1]}>`;
+	const closingStart = trimmed.length - closingTag.length;
+	if (closingStart <= openingEnd || trimmed.slice(closingStart).toLowerCase() !== closingTag.toLowerCase()) {
+		return content;
+	}
+	return trimmed.slice(openingEnd + 1, closingStart).trim();
+}
+
+/** Per-message cap on text folded into the tree search index. */
+const SEARCH_TEXT_LIMIT = 200;
 
 class TreeList implements Component {
 	#flatNodes: FlatNode[] = [];
@@ -338,6 +377,7 @@ class TreeList implements Component {
 				entry.type === "label" ||
 				entry.type === "custom" ||
 				entry.type === "model_change" ||
+				entry.type === "model_usage" ||
 				entry.type === "thinking_level_change" ||
 				entry.type === "service_tier_change" ||
 				entry.type === "title_change" ||
@@ -424,7 +464,7 @@ class TreeList implements Component {
 					if (qualifier) parts.push(qualifier);
 					if (text) parts.push(text);
 				} else {
-					const content = typeof entry.content === "string" ? entry.content : this.#extractContent(entry.content);
+					const content = stripSystemWrapperTags(this.#joinTextContent(entry.content)).slice(0, SEARCH_TEXT_LIMIT);
 					if (content) parts.push(content);
 				}
 				break;
@@ -437,6 +477,15 @@ class TreeList implements Component {
 				break;
 			case "model_change":
 				parts.push("model", entry.model);
+				break;
+			case "model_usage":
+				parts.push(
+					"model usage",
+					sanitizeTreeField(entry.purpose),
+					sanitizeTreeField(entry.role ?? ""),
+					sanitizeTreeField(entry.provider),
+					sanitizeTreeField(entry.model),
+				);
 				break;
 			case "thinking_level_change":
 				parts.push("thinking", entry.thinkingLevel ?? ThinkingLevel.Off);
@@ -719,13 +768,7 @@ class TreeList implements Component {
 					result = theme.fg("customMessageLabel", label) + normalize(text);
 					break;
 				}
-				const content =
-					typeof entry.content === "string"
-						? entry.content
-						: entry.content
-								.filter((c): c is { type: "text"; text: string } => c.type === "text")
-								.map(c => c.text)
-								.join("");
+				const content = stripSystemWrapperTags(this.#joinTextContent(entry.content));
 				result = theme.fg("customMessageLabel", `[${entry.customType}]: `) + normalize(content);
 				break;
 			}
@@ -740,6 +783,14 @@ class TreeList implements Component {
 			case "model_change":
 				result = theme.fg("dim", `[model: ${entry.model}]`);
 				break;
+			case "model_usage": {
+				const purpose = sanitizeTreeField(entry.purpose);
+				const role = sanitizeTreeField(entry.role ?? "");
+				const provider = sanitizeTreeField(entry.provider);
+				const model = sanitizeTreeField(entry.model);
+				result = theme.fg("dim", `[model usage: ${purpose} ${role ? `${role} ` : ""}${provider}/${model}]`);
+				break;
+			}
 			case "thinking_level_change":
 				result = theme.fg("dim", `[thinking: ${entry.thinkingLevel ?? ThinkingLevel.Off}]`);
 				break;
@@ -780,14 +831,24 @@ class TreeList implements Component {
 	}
 
 	#extractContent(content: unknown): string {
-		const maxLen = 200;
-		if (typeof content === "string") return content.slice(0, maxLen);
+		return this.#joinTextContent(content).slice(0, SEARCH_TEXT_LIMIT);
+	}
+
+	/** Concatenate every text block (or return a string as-is) with no length cap. */
+	#joinTextContent(content: unknown): string {
+		if (typeof content === "string") return content;
 		if (Array.isArray(content)) {
 			let result = "";
 			for (const c of content) {
-				if (typeof c === "object" && c !== null && "type" in c && c.type === "text") {
-					result += (c as { text: string }).text;
-					if (result.length >= maxLen) return result.slice(0, maxLen);
+				if (
+					typeof c === "object" &&
+					c !== null &&
+					"type" in c &&
+					c.type === "text" &&
+					"text" in c &&
+					typeof c.text === "string"
+				) {
+					result += c.text;
 				}
 			}
 			return result;

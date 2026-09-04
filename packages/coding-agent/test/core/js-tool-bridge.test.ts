@@ -179,6 +179,19 @@ describe("callSessionTool", () => {
 		expect(rawExecute).not.toHaveBeenCalled();
 	});
 
+	it("rejects checkpoint and rewind before reaching the registry", async () => {
+		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ok" }] });
+		const session = createSession([createTool("checkpoint", execute), createTool("rewind", execute)]);
+
+		await expect(callSessionTool("checkpoint", { goal: "g" }, { session })).rejects.toThrow(
+			"cannot run through the eval bridge",
+		);
+		await expect(callSessionTool("rewind", { report: "r" }, { session })).rejects.toThrow(
+			"cannot run through the eval bridge",
+		);
+		expect(execute).not.toHaveBeenCalled();
+	});
+
 	it("rejects a registry tool excluded from the eval bridge", async () => {
 		const rawExecute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "raw" }] });
 		const session = {

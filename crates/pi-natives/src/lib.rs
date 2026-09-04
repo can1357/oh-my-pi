@@ -31,6 +31,7 @@ pub mod crash_handler;
 pub mod desktop;
 pub mod devicecheck;
 pub mod diff;
+pub mod edit;
 pub mod fd;
 pub mod file_lock;
 pub mod glob;
@@ -49,6 +50,7 @@ pub mod snapcompact;
 pub mod spelling;
 pub mod svg;
 pub mod utok;
+pub mod vcs;
 pub use pi_ast::language;
 
 pub mod power;
@@ -262,7 +264,7 @@ fn create_windows_napi_tokio_runtime() -> Option<tokio::runtime::Runtime> {
 /// MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
 /// `packages/natives/native/index.js` (which derives the name from
 /// `package.json#version`).
-#[napi(js_name = "__piNativesV18_0_5")]
+#[napi(js_name = "__piNativesV18_1_8")]
 pub const fn pi_natives_version_sentinel() {}
 
 /// Native module entry point: install crash diagnostics before any tool can

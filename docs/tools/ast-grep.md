@@ -19,7 +19,7 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `pat` | `string` | Yes | Single AST pattern. The wrapper trims it and rejects empty strings. |
-| `path` | `string` | No | File, directory, glob, internal URL, or fetched web URL to search. Separate multiple roots with `;`. Omitted or empty defaults to `.` (the workspace root). Internal-URL globs are rejected. |
+| `path` | `string` | No | One file, directory, glob, internal URL with a backing file, or fetched web URL — or several of those as a semicolon-delimited list (`"src; tests"`). Omitted or empty defaults to `.` (the workspace root). Empty entries are rejected. Internal-URL globs are rejected. |
 | `skip` | `number` | No | Match offset. Defaults to `0`, then `Math.floor(...)`; negatives and non-finite values fail. |
 
 Pattern grammar and language support exposed to the model:
@@ -41,15 +41,15 @@ Pattern grammar and language support exposed to the model:
   - match lines rendered under `[PATH#HASH]` as `*LINE:text` in hashline mode or `*LINE|text` otherwise,
   - continuation lines for multi-line matches rendered with a leading space,
   - an optional `meta: NAME=value, …` line per match when ast-grep captured metavariables.
-- If no matches are found, text is `No matches found` or `No matches found. Parse issues mean the query may be mis-scoped; narrow paths before concluding absence.` plus formatted parse issues.
-- If the wrapper truncates visible results, the text ends with `Result limit reached; narrow paths or increase limit.`
+- If no matches are found, text is `No matches found` or `No matches found. Parse issues mean the query may be mis-scoped; narrow \`path\` before concluding absence.` plus formatted parse issues.
+- If the wrapper truncates visible results, the text ends with `Result limit reached; narrow path or increase limit.`
 - `details` includes counts and metadata, not full match payloads:
   - `matchCount`, `fileCount`, `filesSearched`, `limitReached`
   - optional `parseErrors`, `parseErrorsTotal`, `scopePath`, `searchPath`, `cwd`, `files`, `fileMatches`, `displayContent`, `meta`
 - Native ranges (`byteStart`, `byteEnd`, `startLine`, `startColumn`, `endLine`, `endColumn`) exist only inside the native result; the wrapper does not emit them directly to the model.
 
 ## Flow
-1. `AstGrepTool.execute()` trims and validates `pat`, normalizes `skip`, converts semicolon-delimited `path` to roots (default `.`), then delegates scope resolution to `resolveToolSearchScope()`.
+1. `AstGrepTool.execute()` validates `pat`, normalizes `skip`, then delegates path resolution to `resolveToolSearchScope()` in `packages/coding-agent/src/tools/path-utils.ts`, which normalizes entries, expands semicolon-delimited lists (plus conditional comma/whitespace splits), and rejects empty `path` entries.
 2. Internal URLs are resolved through the shared router; entries without `sourcePath` and internal-URL globs fail. Readable external URLs are materialized to immutable local files for searching.
 3. For multiple path inputs, `partitionExistingPaths()` drops missing bases only when at least one surviving base remains; if all bases are missing the call fails.
 4. `parseSearchPathPreferringLiteral()` splits a single path into `basePath` plus optional `glob`. `resolveExplicitSearchPaths()` collapses multiple inputs into a common base plus a brace-union glob, or separate `targets` when the common ancestor is not itself one of the requested paths.

@@ -2,6 +2,94 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native VCS clean to resolve nested `.gitignore` files, global `core.excludesFile`, and `.git/info/exclude`, safely unlink directory symlinks without modifying target trees, respect pathspec boundaries when pruning empty directories, and skip nested repositories and submodules ([#10714](https://github.com/can1357/oh-my-pi/pull/10714) by [@korri123](https://github.com/korri123)).
+
+## [18.1.7] - 2026-09-03
+
+### Added
+
+- Added Windows ARM64 native addon support, including platform-specific npm packages.
+
+## [18.1.6] - 2026-09-03
+
+### Breaking Changes
+
+- Renamed `MacOSPowerAssertion` to `PowerAssertion` and `MacOSPowerAssertionOptions` to `PowerAssertionOptions`; the options and handle shapes are unchanged.
+
+### Added
+
+- Added edit-session and edit-store types and utilities for managing edit states, snapshots, hashline operations, edit modes, edit descriptions, editable notebook text, and inline sloppy regions.
+- Added cross-platform sleep inhibition to `PowerAssertion` on Linux and Windows.
+
+### Changed
+
+- `PowerAssertion.start` now reports acquisition failures on Linux and Windows instead of returning a handle that silently does nothing; platforms without an implementation continue to receive a no-op handle.
+
+### Fixed
+
+- Fixed native `git add` so staging an empty file list no longer stages macOS filename-normalization duplicates of tracked paths or files ignored only by a nested `.gitignore`.
+
+## [18.1.5] - 2026-09-03
+
+### Changed
+
+- Updated `worktreeAdd` to support additional worktree creation options, including preserving uncommitted changes.
+
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- Fixed `grep` and `sed` treating basic regular expressions as extended ones, which silently matched every line for patterns like `^+` or `s/^\+/` and swapped the meanings of `+` and `\+` ([#10298](https://github.com/can1357/oh-my-pi/pull/10298) by [@mruangutai](https://github.com/mruangutai)).
+
+## [18.1.0] - 2026-09-01
+
+### Fixed
+
+- Fixed TTY output backpressure reporting so pending write progress is accurately reflected during large writes.
+
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed staging and committing files through a reused Git repository handle, ensuring newly staged changes are correctly included in commits even on filesystems with coarse timestamp resolution.
+
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Added native process replacement support for the CLI’s `/restart` command.
+- Added `VcsGitRepo.mergeBase(a, b)` to find the best common ancestor of two Git revisions, returning `null` when the histories are unrelated.
+
+## [18.0.9] - 2026-08-28
+
+### Breaking Changes
+
+- Replaced the Git-specific `watchHead` and `headWatchTarget` API with the backend-neutral `watch` and `VcsRepo.watchTarget` APIs.
+
+### Added
+
+- Added portable repository discovery and read operations through `VcsRepo`, `repo()`, and `require()`, with support for Git and Jujutsu and explicit capability checks for staged and revision diffs.
+- Added the `Vcs*` API for repository operations across Git and Jujutsu, including repository discovery, refs and status, diffs, staging, commits, branches, worktrees, patch application, stash, cherry-pick, and CLI-backed push, fetch, and clone operations with cancellation support.
+
+### Fixed
+
+- Fixed Git intent-to-add files so they appear correctly as unstaged additions in `statusPorcelain` and are handled correctly when staging or applying patches.
+
+## [18.0.8] - 2026-08-27
+
+### Fixed
+
+- Large session histories no longer leave macOS Terminal unresponsive during repaint.
+- Bounded the interactive PTY reader→JS queue (64 × ≤64 KiB) and forward chunks through a separate `call_async` pump so a fast child plus a stalled JS consumer cannot accumulate unbounded output in-process, without freezing PTY input/resize/kill. After a finite child exit, wait until accepted output reaches `on_chunk`; only a permanently open slave skips that wait. Cancel, timeout, and that stuck-open path abort the pump before `start()` resolves. Same defect class as the non-PTY bash bridge (#4078).
+
+## [18.0.6] - 2026-08-26
+
+### Fixed
+
+- Improved TypeScript and TSX syntax highlighting, including correct handling of type annotations and template literals.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

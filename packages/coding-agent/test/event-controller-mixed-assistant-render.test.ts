@@ -5,6 +5,7 @@ import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 
@@ -51,7 +52,10 @@ function lineContaining(lines: string[], marker: string): number {
 	return index;
 }
 
-function createFixture(hideToolActivity = false) {
+function createFixture(
+	hideToolActivity = false,
+	toolByName: (name: string) => { name: string; label?: string } | undefined = () => undefined,
+) {
 	const chatContainer = new TranscriptContainer();
 	chatContainer.setToolActivityVisible(!hideToolActivity);
 	const pendingTools = new Map();
@@ -61,8 +65,9 @@ function createFixture(hideToolActivity = false) {
 		imageBudget: undefined,
 	} as unknown as TUI;
 	const viewSession = {
-		getToolByName: () => undefined,
+		getToolByName: toolByName,
 		hasBuiltInTool: () => true,
+		sessionManager: { getCwd: () => process.cwd() },
 		extensionRunner: undefined,
 		isTtsrAbortPending: false,
 		retryAttempt: 0,
@@ -99,7 +104,7 @@ function createFixture(hideToolActivity = false) {
 		lastAssistantUsage: zeroUsage(),
 	} as unknown as InteractiveModeContext;
 
-	return { controller: new EventController(ctx), chatContainer };
+	return { controller: new EventController(ctx), chatContainer, ctx };
 }
 
 describe("EventController mixed assistant text/tool rendering", () => {
@@ -247,6 +252,60 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		expect(lines.filter(line => line.includes(MIDDLE_MARKER))).toHaveLength(1);
 		expect(middleLine).toBeLessThan(toolResultBLine);
 		expect(toolResultBLine).toBeLessThan(finalLine);
+	});
+
+	it("uses the canonical mounted-tool renderer for prefixed calls live and after transcript rebuild", async () => {
+		const githubTool = { name: "github", label: "GitHub" };
+		const toolByName = (name: string) => (name === "github" || name === "xd://github" ? githubTool : undefined);
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "toolu_prefixed_github",
+			name: "xd://github",
+			arguments: { op: "repo_view", repo: "can1357/oh-my-pi" },
+		};
+		const streaming = assistantMessage([toolCall]);
+
+		const live = createFixture(false, toolByName);
+		await live.controller.handleEvent({ type: "message_start", message: assistantMessage([]) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		await live.controller.handleEvent({
+			type: "message_update",
+			message: streaming,
+			assistantMessageEvent: {
+				type: "toolcall_end",
+				contentIndex: 0,
+				toolCall,
+				partial: streaming,
+			},
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		expect(Bun.stripANSI(live.chatContainer.render(120).join("\n"))).toContain("GitHub Repo can1357/oh-my-pi");
+
+		const executionOnly = createFixture(false, toolByName);
+		await executionOnly.controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			args: toolCall.arguments,
+		} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
+		expect(Bun.stripANSI(executionOnly.chatContainer.render(120).join("\n"))).toContain(
+			"GitHub Repo can1357/oh-my-pi",
+		);
+
+		const rebuilt = createFixture(false, toolByName);
+		const rebuiltHelpers = new UiHelpers(rebuilt.ctx);
+		rebuilt.ctx.addMessageToChat = (message, options) => rebuiltHelpers.addMessageToChat(message, options);
+		rebuiltHelpers.renderSessionContext({
+			messages: [streaming],
+			models: {},
+			injectedTtsrRules: [],
+			mode: "none",
+		});
+		expect(Bun.stripANSI(rebuilt.chatContainer.render(120).join("\n"))).toContain("GitHub Repo can1357/oh-my-pi");
+
+		// Canonicalization is presentation-only; provider replay keeps the wire spelling.
+		expect(toolCall.name).toBe("xd://github");
 	});
 
 	it("keeps assistant text streaming while hiding bash failures and grouped read activity", async () => {

@@ -1,7 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { CommitAgentState } from "../../../commit/agentic/state";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
-import * as git from "../../../utils/git";
 
 const TARGET_TOKENS = 30000;
 const CHARS_PER_TOKEN = 4;
@@ -137,6 +137,7 @@ const gitFileDiffSchema = type({
 });
 
 export function createGitFileDiffTool(cwd: string, state: CommitAgentState): CustomTool<typeof gitFileDiffSchema> {
+	const repo = vcs.requireGit(cwd);
 	return {
 		name: "git_file_diff",
 		label: "Git File Diff",
@@ -164,7 +165,7 @@ export function createGitFileDiffTool(cwd: string, state: CommitAgentState): Cus
 
 			if (uncachedFiles.length > 0) {
 				for (const file of uncachedFiles) {
-					const diff = await git.diff(cwd, { cached: staged, files: [file] });
+					const diff = await repo.diffText({ cached: staged, files: [file] });
 					if (diff) {
 						diffs.set(file, diff);
 						state.diffCache.set(cacheKey(file), diff);

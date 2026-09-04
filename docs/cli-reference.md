@@ -211,7 +211,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `auth-broker` | Manage the omp auth-broker (credential vault). | [auth broker / gateway](./auth-broker-gateway.md) |
 | `auth-gateway` | Run an auth-gateway forward proxy backed by the configured broker. | [auth broker / gateway](./auth-broker-gateway.md) |
 | `agents` | Manage bundled task agents. | [task agent discovery](./task-agent-discovery.md) |
-| `bench` | Benchmark models with the same prompt: time-to-first-token and generation throughput (tokens/s). | |
+| `bench` | Benchmark models: TTFT/prefill vs decode throughput with p50/p95 across chat, prefill, generation, and prompt-cache workloads, rendered in a live dashboard (`--prefill-bytes` sizes the synthetic prefill input). | |
 | `browser-relay` | Run the local CDP relay that lets the browser tool drive your own Chrome tabs. | [computer use](./computer-use.md) |
 | `cleanse` | Detect and fix project diagnostics with weighted parallel subagents. | |
 | `commit` | Generate a commit message and update changelogs. | |
@@ -222,8 +222,10 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `gc` | Run storage garbage collection. | |
 | `grep` | Test the grep tool from the CLI. (The [`grep` tool](./tools/grep.md) is a separate agent tool.) | |
 | `gallery` | Preview tool renderers across streaming, in-progress, success, and failure states. | |
+| `git` | Interactive fullscreen git UI: split diff viewer, staging sidebar, and commit composer. | |
 | `grievances` | View, clean, or push reported tool issues (auto-QA grievances). | |
 | `if-bench` | Benchmark instruction following and working memory: one cached thread of glyph array actions with a cat-sound directive that moves through the prompt. | |
+| `images`, `img` | Inspect, diagnose, probe, and purge image publication backends. | |
 | `install` | Install or link an extension package (alias of `plugin install` / `plugin link`). | [extensions](./extensions.md) |
 | `join` | Join a shared collab session (same as `/join`). | [collab](./collab.md) |
 | `models` | List, search, and refresh available models. | [models](./models.md) |
@@ -234,10 +236,11 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `setup` | Run onboarding setup or install dependencies for optional features. | |
 | `shell` | Interactive shell console. | |
 | `read` | Show what the read tool will return for a path, URL, or internal URI. (The [`read` tool](./tools/read.md) is a separate agent tool.) | |
+| `render` | Draw a session's entire thread through the production transcript pipeline (with repaint timing). | |
 | `ssh` | Manage SSH host configurations. | |
 | `stats` | View usage statistics. | |
-| `update` | Check for and install updates. | |
-| `usage` | Show provider usage limits for every authenticated account. | |
+| `update` | Check for and install updates; `--canary`/`--stable` switch release channels. | |
+| `usage` | Show provider usage limits for every authenticated account; `usage clients` breaks token burn down per client (with `--days`), `usage invalidate` drops cached reports. | |
 | `tiny-models` | Download tiny local models (session titles + memory). | [local models](./local-models.md) |
 | `token` | Get the API key or OAuth token for a provider. | [secrets](./secrets.md) |
 | `ttsr` | Inspect and test Time-Traveling Stream Rules (TTSR). (Covers the CLI command; the [TTSR feature](./ttsr-injection-lifecycle.md) is documented separately.) | |

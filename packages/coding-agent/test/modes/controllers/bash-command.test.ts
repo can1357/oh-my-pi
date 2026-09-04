@@ -44,6 +44,10 @@ function createCwdContext(sourceDir: string, isStreaming = false) {
 			moveTo: vi.fn(async (cwd: string) => {
 				state.cwd = cwd;
 			}),
+			captureState: vi.fn(() => ({ cwd: state.cwd, sessionDir: "/tmp/bash-sessions" })),
+			restoreState: vi.fn((snapshot: { cwd: string }) => {
+				state.cwd = snapshot.cwd;
+			}),
 		},
 		chatContainer: createContainer(),
 		pendingMessagesContainer,
@@ -54,6 +58,7 @@ function createCwdContext(sourceDir: string, isStreaming = false) {
 		showWarning: vi.fn(),
 		applyCwdChange: vi.fn(async (cwd: string) => {
 			expect(state.cwd).toBe(cwd);
+			return true;
 		}),
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),

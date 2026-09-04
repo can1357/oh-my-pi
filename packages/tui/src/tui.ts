@@ -14,17 +14,19 @@
  */
 import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
-import { $flag, getDebugLogPath, logger } from "@oh-my-pi/pi-utils";
+import { $flag, getDebugLogPath, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
+import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
-import { setAltScreenActive, type Terminal } from "./terminal";
+import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteAllImages,
 	encodeKittyDeleteImage,
 	encodeKittyPlacementLine,
 	ImageProtocol,
 	isImageProtocolForced,
+	isInsideHerdr,
 	isInsideTerminalMultiplexer,
 	parseKittyDirectPlacementLine,
 	setCellDimensions,
@@ -181,6 +183,15 @@ const DEFAULT_RENDER_SCHEDULER: RenderScheduler = {
  * which leading rows survived.
  */
 export interface Component {
+	/** Stable identifier surfaced in the debug tree as kind#id. */
+	debugId?: string;
+	/** Override for the tree node kind (default: constructor.name). */
+	debugKind?: string;
+	/** Widget state for the debug `values`/`tree` ops. JSON-serializable. */
+	debugState?(): Record<string, unknown>;
+	/** Children for the debug tree when not already exposed as a public `children` array. */
+	debugChildren?: readonly Component[];
+
 	/**
 	 * Render the component to an array of physical rows at the given width.
 	 * The result is component-owned and `readonly` to the caller; an unchanged
@@ -464,6 +475,7 @@ export class Container implements Component {
 		let refs = this.#memoChildLines;
 		let unchanged = this.#memoLines !== undefined && this.#memoWidth === width && refs.length === count;
 		if (refs.length !== count) {
+			// oxlint-disable-next-line unicorn/no-new-array -- render-frame length preallocation
 			refs = new Array(count);
 			this.#memoChildLines = refs;
 		}
@@ -699,6 +711,16 @@ export class TUI extends Container {
 	#previousWidth = 0;
 	#previousHeight = 0;
 	#focusedComponent: Component | null = null;
+	#debugServer: TuiDebugServer | undefined;
+	#debugPaint:
+		| {
+				lines: readonly string[];
+				windowTop: number;
+				altScreen: boolean;
+				cursor?: { x: number; y: number; visible?: boolean };
+		  }
+		| undefined;
+	#debugNextWindowTop = 0;
 	#inputListeners = new Set<InputListener>();
 	#startListeners = new Set<StartListener>();
 
@@ -733,8 +755,12 @@ export class TUI extends Container {
 	 * render (keeping its forced/clear-scrollback intent) and retry shortly;
 	 * the eventual frame composes the latest component state, so a slow
 	 * terminal receives only fresh frames instead of every intermediate one.
+	 *
+	 * This is the terminal's healthy-backlog level ({@link STDOUT_BACKLOG_CLEAR_BYTES}):
+	 * gating here and ending a StdoutStallWatchdog episode there keeps the stall
+	 * watchdog armed across exactly the range where frames are deferred (#10434).
 	 */
-	static readonly #MAX_PENDING_OUTPUT_BYTES = 256 * 1024;
+	static readonly #MAX_PENDING_OUTPUT_BYTES = STDOUT_BACKLOG_CLEAR_BYTES;
 	/** Retry cadence while the output backlog gate is holding renders back. */
 	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
 	/** Quiet window before restoring the normal buffer after resize. */
@@ -775,6 +801,7 @@ export class TUI extends Container {
 	#forceViewportRepaintOnNextRender = false;
 	#hasEverRendered = false;
 	#stopped = false;
+	#cancelPostmortemRestore?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
@@ -901,6 +928,16 @@ export class TUI extends Container {
 		return this.#synchronizedOutputEnabled;
 	}
 
+	/**
+	 * Cost in milliseconds of the most recently completed frame.
+	 *
+	 * Animation components use this to apply proportional backpressure after
+	 * their render request is asynchronously composed and written.
+	 */
+	get lastFrameCostMs(): number {
+		return this.#lastFrameCostMs;
+	}
+
 	setFocus(component: Component | null): void {
 		const topVisibleOverlay = this.#getTopmostVisibleOverlay();
 		if (topVisibleOverlay && !isOverlayFocusTarget(topVisibleOverlay.component, component)) {
@@ -929,6 +966,27 @@ export class TUI extends Container {
 	/** Component currently receiving keyboard input, if any. */
 	getFocused(): Component | null {
 		return this.#focusedComponent;
+	}
+	/** Last viewport successfully written by the renderer, for debug inspection. */
+	getDebugPaint():
+		| {
+				lines: readonly string[];
+				windowTop: number;
+				altScreen: boolean;
+				cursor?: { x: number; y: number; visible?: boolean };
+		  }
+		| undefined {
+		return this.#debugPaint;
+	}
+
+	/** Render the current root document at the live terminal width for debug inspection. */
+	getDebugDocument(): readonly string[] {
+		return this.render(Math.max(1, this.terminal.columns));
+	}
+
+	/** Feed debug and test input through the same pipeline as terminal stdin. */
+	injectDebugInput(data: string): void {
+		this.#handleInput(data);
 	}
 
 	/**
@@ -1032,6 +1090,14 @@ export class TUI extends Container {
 
 	start(options?: TUIStartOptions): void {
 		this.#stopped = false;
+		this.#debugPaint = undefined;
+		this.#debugServer?.stop();
+		this.#debugServer = undefined;
+		const debugPath = process.env.OMP_TUI_DEBUG;
+		if (debugPath !== undefined && debugPath.length > 0) {
+			this.#debugServer = new TuiDebugServer(this, debugPath);
+			this.#debugServer.start();
+		}
 		this.#inputDeferred = options?.deferInput === true;
 		this.#watchdog.start();
 		this.#ghosttyInitialImageDelayDone = false;
@@ -1043,9 +1109,15 @@ export class TUI extends Container {
 		// implementing DECRQM, so retain the statically detected default instead of
 		// exposing destructive full paints. An explicit user opt-out/force still
 		// wins, so skip every probe result in that case.
-		this.terminal.onPrivateModeReport?.((mode, supported, confirmed = true) => {
+		this.terminal.onPrivateModeReport?.((mode, supported, confirmed = true, status) => {
 			if (mode !== 2026 || !confirmed) return;
 			if (synchronizedOutputUserOverride() !== null) return;
+			// Herdr's Ghostty VTE honors DEC 2026 even when DECRQM is unanswered or
+			// reports unrecognized (status 0). Other confirmed unsupported reports
+			// still disable: status 4 is permanently reset, and a three-argument
+			// callback (`status` omitted) is a definitive unsupported from a
+			// custom Terminal that does not distinguish DECRPM codes.
+			if (!supported && isInsideHerdr() && status === 0) return;
 			this.#setSynchronizedOutput(supported);
 		});
 		this.terminal.start(
@@ -1067,6 +1139,8 @@ export class TUI extends Container {
 			{ deferInput: this.#inputDeferred },
 		);
 		if (this.#stopped) return;
+		this.#cancelPostmortemRestore?.();
+		this.#cancelPostmortemRestore = postmortem.register("tui-restore", () => this.stop());
 		for (const listener of this.#startListeners) {
 			try {
 				listener();
@@ -1138,7 +1212,7 @@ export class TUI extends Container {
 						this.terminal.columns,
 					);
 					const top = Math.max(0, Math.min(this.#providerViewportTop, this.terminal.rows - staleRows));
-					erase = `\x1b[?25l\x1b[${top + 1};1H\x1b[J`;
+					erase = `\x1b[?25l${this.#eraseBelowRow(top, this.terminal.rows)}`;
 				} else {
 					const up = this.#reflowedRowCount(
 						this.#providerWindow,
@@ -1146,7 +1220,8 @@ export class TUI extends Container {
 						this.#parkedViewportOffset,
 						this.terminal.columns,
 					);
-					erase = `\x1b[?25l${up > 0 ? `\x1b[${up}A` : ""}\r\x1b[J`;
+					const eraseBelow = this.#eraseBelowCursorRow(this.terminal.columns, this.terminal.rows);
+					erase = `\x1b[?25l${up > 0 ? `\x1b[${up}A` : ""}${eraseBelow}`;
 				}
 				// Both erase paths leave the cursor on the viewport's top row, so the
 				// parked offset no longer applies; carrying a stale nonzero offset
@@ -1362,11 +1437,13 @@ export class TUI extends Container {
 	/** Paint the full semantic tail on the borrowed resize buffer. */
 	#renderResizeAltFrame(width: number, height: number): void {
 		const provider = this.#frameProvider;
-		this.#imageBudget.beginPass();
-		const rendered =
-			provider?.renderResizeFrame?.({ columns: width, rows: height }) ??
-			(provider ? provider.renderFrame({ columns: width, rows: height }).viewport : this.render(width));
-		this.#imageBudget.endPass();
+		let rendered: readonly string[];
+		do {
+			this.#imageBudget.beginPass();
+			rendered =
+				provider?.renderResizeFrame?.({ columns: width, rows: height }) ??
+				(provider ? provider.renderFrame({ columns: width, rows: height }).viewport : this.render(width));
+		} while (this.#imageBudget.endPass());
 		const viewport = rendered.length > height ? rendered.slice(rendered.length - height) : Array.from(rendered);
 		this.#extractCursorMarkers(viewport);
 		this.#emitAltFrame(this.#prepareLinesArray(viewport, width), width, height);
@@ -1540,9 +1617,11 @@ export class TUI extends Container {
 		if (width <= 0 || height <= 0) return;
 		provider.beginHistoryFlush();
 		while (true) {
-			this.#imageBudget.beginPass();
-			const plan = provider.renderFrame({ columns: width, rows: height });
-			this.#imageBudget.endPass();
+			let plan: TerminalFramePlan;
+			do {
+				this.#imageBudget.beginPass();
+				plan = provider.renderFrame({ columns: width, rows: height });
+			} while (this.#imageBudget.endPass());
 			if (plan.history === undefined) return;
 			let viewport = Array.from(plan.viewport);
 			if (viewport.length > height) viewport = viewport.slice(0, height);
@@ -1555,6 +1634,10 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		this.#cancelPostmortemRestore?.();
+		this.#cancelPostmortemRestore = undefined;
+		this.#debugServer?.stop();
+		this.#debugServer = undefined;
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
 		this.#cancelResizeProbe();
@@ -2199,9 +2282,12 @@ export class TUI extends Container {
 	#renderProviderFrame(width: number, height: number): void {
 		const provider = this.#frameProvider;
 		if (!provider || width <= 0 || height <= 0) return;
-		this.#imageBudget.beginPass();
-		const plan = provider.renderFrame({ columns: width, rows: height });
-		this.#imageBudget.endPass();
+		this.#debugNextWindowTop = 0;
+		let plan: TerminalFramePlan;
+		do {
+			this.#imageBudget.beginPass();
+			plan = provider.renderFrame({ columns: width, rows: height });
+		} while (this.#imageBudget.endPass());
 		let viewport = Array.from(plan.viewport);
 		if (viewport.length > height) {
 			const message = `Frame provider returned ${viewport.length} rows for a ${height}-row viewport`;
@@ -2218,6 +2304,14 @@ export class TUI extends Container {
 	 * Append mode leaves the terminal's prior copy in place and writes a
 	 * current-width copy below it. Rebuild mode routes through the destructive
 	 * reset latch so ED3 removes stale history before the same replay.
+	 *
+	 * The append replay only exists to refresh width-shredded scrollback: a
+	 * width change leaves the terminal's committed history wrapped at the old
+	 * width, so the copy below it is the intended fresh current-width render. A
+	 * height-only change reflows nothing (the terminal merely pulls rows back
+	 * out of scrollback), so replaying would write an identical duplicate — the
+	 * editor/status chrome included — below the retained copy. Skip it, matching
+	 * the `widthChanged`-gated commit-ledger logic in {@link #doRender}.
 	 */
 	#prepareResizeReplay(width: number, height: number): void {
 		const size = `${width}x${height}`;
@@ -2240,8 +2334,50 @@ export class TUI extends Container {
 			this.#prepareForcedRender(true);
 			return;
 		}
+		if (width === this.#previousWidth) return;
 		provider.beginHistoryReplay();
 		this.#forceViewportRepaintOnNextRender = true;
+	}
+
+	/**
+	 * Erase `row` and everything below it, absolute-addressed, without ever
+	 * issuing a full-screen clear. tmux and Windows conhost (#9597) archive a
+	 * screen-wide erase into pane history instead of discarding it, so an erase
+	 * anchored on the first row would preserve the unfinished frame it exists to
+	 * remove (#9780). Below existing history a plain ED0 cannot span the screen;
+	 * on the first row, EL2 that row and ED0 from the second down touch the same
+	 * cells with no full-screen clear. `row` is clamped because a caller's
+	 * viewport top can predate a height shrink.
+	 * Every form leaves the cursor on the clamped row at column zero.
+	 */
+	#eraseBelowRow(row: number, height: number): string {
+		const top = Math.max(0, Math.min(row, Math.max(0, height - 1)));
+		if (top > 0) return `\x1b[${top + 1};1H\x1b[J`;
+		if (height <= 1) return `\x1b[1;1H${ERASE_LINE}`;
+		return `\x1b[1;1H${ERASE_LINE}\x1b[2;1H\x1b[J\x1b[1;1H`;
+	}
+
+	/**
+	 * Erase the cursor's row and everything below it, cursor-relative, without
+	 * ever issuing a full-screen clear. Used where the resize path must stay
+	 * cursor-relative: the terminal reflowed the normal buffer, so absolute rows
+	 * are stale and only the parked cursor still tracks the viewport's logical
+	 * line. Every form leaves the cursor on column zero of that row, exactly
+	 * where a plain `\r\x1b[J` left it.
+	 *
+	 * The erase must never run from the first cell, which is what makes tmux and
+	 * Windows conhost (#9597) archive the screen instead of discarding it
+	 * (#9780), and a clamped CUU can put the cursor on the first row without
+	 * naming it. Stepping one column right is enough and needs no row movement,
+	 * but at one column CUF cannot leave the first cell, so step one row down
+	 * instead: from the first row that can only reach row 1, and DECSC/DECRC
+	 * restores the anchor even when CUD clamps at the last row. A one-row screen
+	 * has nothing below the cursor, so EL2 alone clears everything.
+	 */
+	#eraseBelowCursorRow(width: number, height: number): string {
+		if (height <= 1) return `\r${ERASE_LINE}`;
+		if (width > 1) return `\r${ERASE_LINE}\x1b[C\x1b[J\r`;
+		return `\r${ERASE_LINE}\x1b7\x1b[B\x1b[J\x1b8`;
 	}
 
 	/**
@@ -2300,7 +2436,8 @@ export class TUI extends Container {
 		const geometryStable = this.#hasEverRendered && this.#previousWidth === width && this.#previousHeight === height;
 		const startTop = destructiveReset ? 0 : Math.min(this.#providerViewportTop, Math.max(0, height - 1));
 		const newTop = Math.max(0, Math.min(startTop + historyRows.length, height - rows));
-		let buffer = this.#paintBeginSequence;
+		const pendingAltExit = this.#pendingAltExit;
+		let buffer = this.#paintBeginSequence + pendingAltExit;
 		if (destructiveReset && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			// ED2/ED3 erase text cells but leave Kitty graphics visible. A reset is
 			// explicitly destructive, so remove every placement—not only the ones
@@ -2352,7 +2489,7 @@ export class TUI extends Container {
 			// committed rows and blanks, never an unfinished frame.
 			const pushed = Math.max(0, startTop + preparedHistory.length + rows - height);
 			if (pushed > this.#providerViewportTop && this.#providerWindow.length > 0) {
-				buffer += `\x1b[${this.#providerViewportTop + 1};1H\x1b[J`;
+				buffer += this.#eraseBelowRow(this.#providerViewportTop, height);
 			}
 			buffer += `\x1b[${startTop + 1};1H`;
 			let screenRow = startTop;
@@ -2401,6 +2538,16 @@ export class TUI extends Container {
 		}
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
+		this.#debugPaint = {
+			lines: prepared,
+			windowTop: this.#debugNextWindowTop,
+			altScreen: false,
+			...(target === null ? {} : { cursor: { x: target.col, y: target.row, visible: target.visible } }),
+		};
+		if (pendingAltExit) {
+			this.#pendingAltExit = "";
+			setAltScreenActive(false);
+		}
 		if (target) this.#recordHardwareCursorState(target);
 		else this.#recordHardwareCursorHidden();
 		this.#providerWindow = mutablePrepared;
@@ -2465,16 +2612,29 @@ export class TUI extends Container {
 			const mouseExit = this.#altMouseTrackingActive ? MOUSE_TRACKING_OFF : "";
 			const enhancementExit = this.#keyboardEnhancementExit();
 			const exitSequence = `${mouseExit}${enhancementExit}\x1b[?1049l`;
-			this.terminal.write(exitSequence);
-			setAltScreenActive(false);
+			// Session replacement finishes while its fullscreen selector still
+			// covers the old normal buffer. Fuse the restore into the destructive
+			// repaint so no stale frame can become visible between writes.
+			if (this.#clearScrollbackOnNextRender) {
+				this.#pendingAltExit = exitSequence;
+			} else {
+				this.terminal.write(exitSequence);
+				setAltScreenActive(false);
+			}
 			this.#forgetHardwareCursorState();
 			this.#altActive = false;
 			this.#altMouseTrackingActive = false;
 			this.#altPreviousLines = [];
-			// The alt buffer restore put the pre-overlay normal screen back; a
-			// geometry change while covered invalidates the diff baseline and the
-			// writer's dimension check forces the full anchored rewrite.
+			// The alt-buffer restore put the pre-overlay normal screen back. If
+			// that buffer resized while covered, its cursor moved with width
+			// rewrap or a height-grow scrollback pull, while our viewport anchor
+			// stayed frozen. Recover the restored cursor position before any
+			// provider repaint can overwrite history at the stale row.
 			if (width !== this.#altEnterWidth || height !== this.#altEnterHeight) {
+				if (this.#frameProvider !== undefined) {
+					this.#beginResizeAnchorProbe();
+					return;
+				}
 				this.#forceViewportRepaintOnNextRender = true;
 			}
 		} else if (wantMouseTracking !== this.#altMouseTrackingActive) {
@@ -2499,16 +2659,20 @@ export class TUI extends Container {
 	 * mutable viewport. Nothing is ever appended to terminal history.
 	 */
 	#renderChildrenFrame(width: number, height: number): void {
-		this.#imageBudget.beginPass();
-		const composed = this.render(width);
-		this.#imageBudget.endPass();
+		let composed: readonly string[];
+		do {
+			this.#imageBudget.beginPass();
+			composed = this.render(width);
+		} while (this.#imageBudget.endPass());
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
+		this.#debugNextWindowTop = Math.max(0, composed.length - height);
 		const viewport = composed.length > height ? composed.slice(composed.length - height) : Array.from(composed);
 		this.#emitPlanFrame(width, height, viewport, undefined, undefined);
 	}
 
 	/** Stateless variant for overlay-composited windows and alt-screen frames. */
 	#prepareLinesArray(lines: readonly string[], width: number): string[] {
+		// oxlint-disable-next-line unicorn/no-new-array -- render-frame length preallocation
 		const prepared: string[] = new Array(lines.length);
 		for (let i = 0; i < lines.length; i++) {
 			prepared[i] = this.#prepareLine(lines[i]!, width).line;
@@ -2540,7 +2704,7 @@ export class TUI extends Container {
 
 		let output = "";
 		let cells = 0;
-		for (let i = 0; i < raw.length && cells < safeWidth; ) {
+		for (let i = 0; i < raw.length && cells < safeWidth;) {
 			if (raw.charCodeAt(i) === 0x1b) {
 				const end = this.#ansiSequenceEnd(raw, i);
 				if (end < 0) break;
@@ -2636,7 +2800,7 @@ export class TUI extends Container {
 
 	#ansiAsciiLineWidth(line: string, maxWidth: number): number | undefined {
 		let col = 0;
-		for (let i = 0; i < line.length; ) {
+		for (let i = 0; i < line.length;) {
 			const code = line.charCodeAt(i);
 			if (code === 0x1b) {
 				const next = line.charCodeAt(i + 1);
@@ -2797,6 +2961,7 @@ export class TUI extends Container {
 	 * blank base — the transcript is never touched while the alt buffer is up.
 	 */
 	#renderAltFrame(width: number, height: number): void {
+		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const base: string[] = new Array(Math.max(0, height)).fill("");
 		let lines = this.#compositeOverlaysIntoWindow(base, width, height);
 		this.#extractCursorMarkers(lines);
@@ -2810,6 +2975,7 @@ export class TUI extends Container {
 	 * native-scrollback byte. The hardware cursor stays hidden here.
 	 */
 	#emitAltFrame(lines: string[], width: number, height: number): void {
+		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const fitted: string[] = new Array(height);
 		for (let r = 0; r < height; r++) fitted[r] = lines[r] ?? "";
 		// Flush queued image-data transmits (`a=t`, no visible output) before the
@@ -2848,6 +3014,7 @@ export class TUI extends Container {
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#altPreviousLines = fitted;
+		this.#debugPaint = { lines: fitted, windowTop: 0, altScreen: true };
 		this.#fullRedrawCount += 1;
 	}
 }

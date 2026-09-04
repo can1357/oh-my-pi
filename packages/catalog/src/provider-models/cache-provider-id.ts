@@ -60,7 +60,10 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			return "cursor:default-effort-v4";
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
-			return `litellm:rich-v6:${Bun.hash(baseUrl).toString(36)}`;
+			// rich-v8 invalidates rows whose `compatConfig` retained a colliding
+			// bundled model's provider-specific transport (e.g. Fireworks
+			// `wireModelIdMode`) before that leak was fixed (issue #9938).
+			return `litellm:rich-v8:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "opencode-go":
 		case "opencode-zen": {

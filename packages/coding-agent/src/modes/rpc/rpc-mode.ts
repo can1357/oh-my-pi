@@ -23,7 +23,12 @@ import {
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
-import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
+import {
+	type BuiltSkillPromptMessage,
+	buildSkillPromptMessage,
+	parseSkillInvocation,
+	type Skill,
+} from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
@@ -115,18 +120,40 @@ export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchS
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
 export type RpcSkillCommandResult = { agentInvoked: true };
 
-export async function tryRunRpcSkillCommand(
-	session: RpcSkillCommandSession,
-	text: string,
-	streamingBehavior: "steer" | "followUp" = "steer",
-): Promise<RpcSkillCommandResult | false> {
-	if (!session.skillsSettings?.enableSkillCommands) return false;
+export interface RpcSkillInvocation {
+	skill: Skill;
+	args: string;
+}
+
+/**
+ * Fast in-memory pre-check for a skill invocation: settings gate, text shape,
+ * and skill lookup. Returns null when the message is not a runnable skill
+ * command. Performs no I/O — safe to run on the RPC serial queue.
+ */
+export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text: string): RpcSkillInvocation | null {
+	if (!session.skillsSettings?.enableSkillCommands) return null;
 	const parsed = parseSkillInvocation(text);
-	if (!parsed) return false;
+	if (!parsed) return null;
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
-	if (!skill) return false;
-	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
-	await session.promptCustomMessage(
+	if (!skill) return null;
+	return { skill, args: parsed.args };
+}
+
+/**
+ * Slow half of a skill invocation: builds the skill prompt message (file I/O)
+ * and dispatches it through the full prompt pipeline (usage preflight,
+ * compaction checks, provider calls). Resolves once the turn is scheduled.
+ * Must not run on the RPC serial queue's response path — register it with
+ * watchAndReportLocalOnlyPromptResult and answer the command first.
+ */
+export async function runRpcSkillCommand(
+	session: RpcSkillCommandSession,
+	invocation: RpcSkillInvocation,
+	streamingBehavior: "steer" | "followUp" = "steer",
+	prebuilt?: BuiltSkillPromptMessage,
+): Promise<boolean> {
+	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation.args, "user"));
+	return session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
 			content: built.message,
@@ -136,6 +163,51 @@ export async function tryRunRpcSkillCommand(
 		},
 		{ streamingBehavior },
 	);
+}
+
+/**
+ * Skill branch of the `prompt` command: resolves the invocation cheaply, then
+ * registers the slow dispatch with watchAndReportLocalOnlyPromptResult and
+ * returns immediately. The caller answers the command right away — building
+ * the skill prompt and running the prompt pipeline (usage preflight,
+ * compaction, provider calls) can outlast any client's prompt timeout under
+ * provider stress; the plain-prompt path responds first for the same reason.
+ */
+export async function dispatchRpcSkillPrompt(input: {
+	id: string | undefined;
+	session: RpcSkillCommandSession;
+	message: string;
+	streamingBehavior: "steer" | "followUp" | undefined;
+	output: (obj: object) => void;
+	onError: (error: Error) => void;
+	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
+}): Promise<RpcSkillCommandResult | null> {
+	const invocation = resolveRpcSkillInvocation(input.session, input.message);
+	if (!invocation) return null;
+	// buildSkillPromptMessage is cheap file I/O and covers the failure the old
+	// synchronous path reported immediately (a removed or unreadable SKILL.md);
+	// keep that error contract by awaiting it before answering. The expensive
+	// promptCustomMessage pipeline (usage preflight, compaction, provider
+	// calls) is what moves behind the acknowledgement.
+	const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
+	watchAndReportLocalOnlyPromptResult({
+		id: input.id,
+		startPrompt: () => runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built),
+		output: input.output,
+		onError: input.onError,
+		extensionUserMessageTracker: input.extensionUserMessageTracker,
+	});
+	return { agentInvoked: true };
+}
+
+export async function tryRunRpcSkillCommand(
+	session: RpcSkillCommandSession,
+	text: string,
+	streamingBehavior: "steer" | "followUp" = "steer",
+): Promise<RpcSkillCommandResult | false> {
+	const invocation = resolveRpcSkillInvocation(session, text);
+	if (!invocation) return false;
+	await runRpcSkillCommand(session, invocation, streamingBehavior);
 	return { agentInvoked: true };
 }
 
@@ -550,6 +622,7 @@ export function requestRpcSelect(
 	options: ExtensionUISelectItem[],
 	dialogOptions?: ExtensionUIDialogOptions,
 ): Promise<string | undefined> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const labels = new Array<string>(options.length);
 	let optionDetails: RpcExtensionUISelectOptionDetail[] | undefined;
 	for (let index = 0; index < options.length; index++) {
@@ -699,7 +772,7 @@ export function requestRpcDialog<T>(
 export async function runRpcMode(
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
-	eventBus?: EventBus,
+	subagentEventBus?: EventBus,
 	input: ReadableStream<Uint8Array> = claimRpcInput(),
 ): Promise<never> {
 	// Signal to RPC clients that the server is ready to accept commands
@@ -760,7 +833,7 @@ export async function runRpcMode(
 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
-	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
+	const subagentRegistry = subagentEventBus ? new RpcSubagentRegistry(subagentEventBus, output) : undefined;
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
@@ -986,7 +1059,12 @@ export async function runRpcMode(
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		resetCapabilities();
 		await session.refreshSkills();
-		session.setSlashCommands(await loadSlashCommands({ cwd }));
+		session.setSlashCommands(
+			await loadSlashCommands({
+				cwd,
+				extensionRoots: session.effectiveExtensionRoots,
+			}),
+		);
 		await emitAvailableCommandsUpdate();
 	};
 	const emitAvailableCommandsUpdate = async () => {
@@ -1013,7 +1091,15 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
-				const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
+				const skillResult = await dispatchRpcSkillPrompt({
+					id,
+					session,
+					message: command.message,
+					streamingBehavior: command.streamingBehavior,
+					output,
+					onError: promptError => output(error(id, "prompt", promptError.message)),
+					extensionUserMessageTracker,
+				});
 				if (skillResult) {
 					return success(id, "prompt", skillResult);
 				}

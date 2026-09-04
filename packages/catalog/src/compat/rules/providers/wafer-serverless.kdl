@@ -1,0 +1,35 @@
+// Provider-wire compat for "wafer-serverless"; regenerated from the frozen census using deployment contract selectors.
+
+provider "wafer-serverless" {
+	thinking-mode "effort"
+	class "glm" {
+		reasoning-content-field "reasoning_content"
+	}
+	class "kimi" {
+		reasoning-content-field "reasoning_content"
+		thinking-format "zai"
+	}
+	class "qwen" {
+		revision ">=3.6.35 <3.8" {
+			reasoning-content-field "reasoning_content"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "DeepSeek-V4-Flash-0731-Fast" "DeepSeek-V4-Pro" {
+		reasoning-content-field "reasoning_content"
+		supports-developer-role #false
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "GLM-*" {
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-format "zai"
+	}
+	// residue: the GLM-5.2 route serves only the wire-exact high/max tiers.
+	models "GLM-5.2" {
+		thinking-efforts "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm5*" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+}

@@ -1,6 +1,6 @@
+import { toClinePassWireModelId } from "@oh-my-pi/pi-catalog/cline-pass-model-id";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
-import { isGlm52ReasoningEffortModelId, isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type {
@@ -114,6 +114,7 @@ import type {
 	ResponseStatus,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
+import { applyInferenceHeaders, setHeaderIfAbsent } from "./inference-headers";
 import { transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
@@ -130,6 +131,7 @@ export const NO_AUTH_SENTINEL = "N/A";
 export interface OpenAIModelIdentity {
 	provider: string;
 	id: string;
+	identity?: Model["identity"];
 	baseUrl?: string;
 }
 
@@ -170,7 +172,7 @@ export interface OpenAIRequestSetupOptions {
 		apiVersion: string;
 		deploymentName: string;
 	};
-	openAISessionId?: string;
+	sessionId?: string;
 	promptCacheSessionId?: string;
 }
 
@@ -204,14 +206,6 @@ function applyCoreWeaveProjectHeader(headers: Record<string, string>): void {
 	}
 }
 
-function setHeaderIfAbsent(headers: Record<string, string>, name: string, value: string): void {
-	const normalizedName = name.toLowerCase();
-	for (const existingName in headers) {
-		if (existingName.toLowerCase() === normalizedName) return;
-	}
-	headers[name] = value;
-}
-
 export function resolveOpenAIRequestSetup(
 	model: OpenAIRequestSetupModel,
 	options: OpenAIRequestSetupOptions,
@@ -227,7 +221,7 @@ export function resolveOpenAIRequestSetup(
 		apiKey = $env.OPENAI_API_KEY;
 	}
 	const rawApiKey = apiKey;
-	let headers = { ...(model.headers ?? {}) };
+	let headers = { ...model.headers };
 	if (model.provider === "openrouter") {
 		Object.assign(headers, getOpenRouterHeaders());
 	}
@@ -306,10 +300,12 @@ export function resolveOpenAIRequestSetup(
 		query = { "api-version": options.azureChatCompletions.apiVersion };
 	}
 
-	if (options.openAISessionId && model.provider === "openai") {
-		setHeaderIfAbsent(headers, "session_id", options.openAISessionId);
-		setHeaderIfAbsent(headers, "x-client-request-id", options.openAISessionId);
-	}
+	const sessionId = options.sessionId ?? options.promptCacheSessionId;
+	applyInferenceHeaders(headers, {
+		provider: model.provider,
+		protocol: "openai",
+		sessionId,
+	});
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
 		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);
 	}
@@ -337,7 +333,7 @@ export function resolveOpenAIRequestSetup(
 export function applyOpenAIServiceTier(
 	params: { service_tier?: ServiceTier | null | undefined },
 	serviceTier: ServiceTier | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: Pick<Model, "provider" | "api" | "identity">,
 ): void {
 	if (!shouldSendServiceTier(serviceTier, model)) return;
 	params.service_tier = serviceTier;
@@ -349,7 +345,12 @@ export function applyOpenAIServiceTier(
  * half price; Priority is a 2x premium. Codex bills the same tiers with its own
  * table (Priority is 2.5x on gpt-5.5) and applies that separately.
  */
-function getOpenAIResponsesServiceTierCostMultiplier(tier: string | null | undefined): number {
+function getOpenAIResponsesServiceTierCostMultiplier(
+	model: Pick<Model, "serviceTierCost">,
+	tier: string | null | undefined,
+): number {
+	const resolvedMultiplier = tier === "flex" || tier === "priority" ? model.serviceTierCost?.[tier] : undefined;
+	if (resolvedMultiplier !== undefined) return resolvedMultiplier;
 	switch (tier) {
 		case "flex":
 			return 0.5;
@@ -369,7 +370,7 @@ function getOpenAIResponsesServiceTierCostMultiplier(tier: string | null | undef
  * proxy can never skew those costs.
  */
 export function applyOpenAIResponsesServiceTierCost(
-	model: Pick<Model, "provider">,
+	model: Pick<Model, "provider" | "serviceTierCost">,
 	usage: AssistantMessage["usage"],
 	responseServiceTier: unknown,
 	requestServiceTier: ServiceTier | null | undefined,
@@ -379,7 +380,7 @@ export function applyOpenAIResponsesServiceTierCost(
 	// requested priority/flex turn to default under load); only fall back to the
 	// requested tier when the response omits the echo entirely.
 	const served = typeof responseServiceTier === "string" ? responseServiceTier : (requestServiceTier ?? undefined);
-	const multiplier = getOpenAIResponsesServiceTierCostMultiplier(served);
+	const multiplier = getOpenAIResponsesServiceTierCostMultiplier(model, served);
 	if (multiplier === 1) return;
 	usage.cost.input *= multiplier;
 	usage.cost.output *= multiplier;
@@ -388,9 +389,14 @@ export function applyOpenAIResponsesServiceTierCost(
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 }
 
-/** Reconcile token-price estimates with OpenRouter's authoritative account charge. */
-export function applyOpenRouterReportedCost(model: Pick<Model, "provider">, usage: Usage, rawUsage: unknown): void {
-	if (model.provider !== "openrouter" || typeof rawUsage !== "object" || rawUsage === null) return;
+/** Reconcile token-price estimates with a gateway's authoritative account charge. */
+export function applyProviderReportedCost(model: Pick<Model, "provider">, usage: Usage, rawUsage: unknown): void {
+	if (
+		(model.provider !== "openrouter" && model.provider !== "cline-pass") ||
+		typeof rawUsage !== "object" ||
+		rawUsage === null
+	)
+		return;
 	const reportedCost = Reflect.get(rawUsage, "cost");
 	if (typeof reportedCost !== "number" || !Number.isFinite(reportedCost) || reportedCost < 0) return;
 
@@ -534,10 +540,6 @@ export function disableStrictToolsForScope(
 	state?.strictTools.disabledModelScopes.add(`${scope.provider}:${scope.baseUrl ?? ""}:${scope.modelId}`);
 }
 
-export function isOpenRouterAnthropicModel(model: OpenAIModelIdentity): boolean {
-	return model.provider === "openrouter" && model.id.toLowerCase().startsWith("anthropic/");
-}
-
 /**
  * Append an OpenRouter routing-variant suffix (e.g. `:nitro`, `:floor`, `:online`, `:exacto`)
  * to a model id when no explicit variant is already present. A variant is considered
@@ -559,6 +561,8 @@ export function applyWireModelIdTransform(
 	openrouterVariant?: string,
 ): string {
 	switch (mode) {
+		case "cline-pass":
+			return toClinePassWireModelId(baseId);
 		case "firepass":
 			return toFirepassWireModelId(baseId);
 		case "fireworks":
@@ -764,7 +768,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 		preserve_thinking?: boolean;
 		reasoning_effort?: string;
 	};
-	reasoning?: { effort?: string } | { enabled: false };
+	reasoning?: { effort?: string; enabled?: boolean; max_tokens?: number };
 	venice_parameters?: { disable_thinking?: boolean; [key: string]: unknown };
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;
@@ -777,6 +781,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 export interface ChatCompletionsReasoningOptions {
 	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	disableReasoning?: boolean;
+	thinkingBudgets?: Partial<Record<Effort, number>>;
 }
 
 export type OpenAICompatEndpoint = "chat-completions" | "responses";
@@ -1016,9 +1021,8 @@ function encodeChatCompletionsDisabledReasoning(
 			params.chat_template_kwargs = { ...params.chat_template_kwargs, thinking: false };
 			break;
 		case "openrouter-enabled-false":
-			(params as typeof params & { reasoning?: { effort?: string } | { enabled: false } }).reasoning = {
-				enabled: false,
-			};
+		case "cline-enabled-false":
+			params.reasoning = { enabled: false };
 			break;
 		case "venice-disable-thinking":
 			params.venice_parameters = { ...params.venice_parameters, disable_thinking: true };
@@ -1166,16 +1170,26 @@ export function applyChatCompletionsReasoningParams(
 	compat: ResolvedOpenAICompat,
 	options: (ChatCompletionsReasoningOptions & { toolChoice?: unknown }) | undefined,
 ): void {
-	applyChatCompletionsCompatPolicy(
-		params,
-		resolveOpenAICompatPolicy(model, {
-			endpoint: "chat-completions",
-			compat,
-			reasoning: options?.reasoning,
-			disableReasoning: options?.disableReasoning,
-			toolChoice: options?.toolChoice,
-		}),
-	);
+	const policy = resolveOpenAICompatPolicy(model, {
+		endpoint: "chat-completions",
+		compat,
+		reasoning: options?.reasoning,
+		disableReasoning: options?.disableReasoning,
+		toolChoice: options?.toolChoice,
+	});
+	applyChatCompletionsCompatPolicy(params, policy);
+	if (
+		model.provider !== "cline-pass" ||
+		!policy.reasoning.enabled ||
+		model.thinking?.mode !== "budget" ||
+		options?.reasoning === undefined
+	) {
+		return;
+	}
+	const budget = options.thinkingBudgets?.[options.reasoning] ?? model.thinking.effortBudgets?.[options.reasoning];
+	if (budget === undefined) return;
+	delete params.reasoning_effort;
+	params.reasoning = { ...params.reasoning, max_tokens: budget };
 }
 
 export function disableChatCompletionsReasoningForDialect(
@@ -1193,26 +1207,29 @@ export function disableChatCompletionsReasoningForDialect(
  * true but are NOT GLM-5.2, so the model-id check is load-bearing — never swap it
  * for `compat.supportsReasoningEffort`.
  */
-function isZaiReasoningEffortDialect(model: Model<"openai-completions">, compat: ResolvedOpenAICompat): boolean {
-	return compat.thinkingFormat === "zai" && isGlm52ReasoningEffortModelId(model.id);
+function isZaiReasoningEffortDialect(_model: Model<"openai-completions">, compat: ResolvedOpenAICompat): boolean {
+	return compat.thinkingFormat === "zai" && compat.zaiReasoningEffortDialect;
 }
 
 /**
  * Provider-specific Chat Completions output clamp.
  *
  * Most OpenAI-compatible endpoints retain the conservative 64k ceiling from
- * {@link resolveOpenAIOutputTokenParam}. Z.AI/GLM-5.2 reasoning and native
- * Moonshot K3 explicitly accept their full advertised model caps, so those
- * routes clamp to `model.maxTokens` instead.
+ * {@link resolveOpenAIOutputTokenParam}. ClinePass, Z.AI/GLM-5.2 reasoning,
+ * and native Moonshot K3 explicitly accept their full advertised model caps,
+ * so those routes clamp to `model.maxTokens` instead.
  */
 export function resolveOpenAICompletionsOutputClamp(
 	model: Model<"openai-completions">,
 	compat: ResolvedOpenAICompat,
 ): number | undefined {
+	if (model.provider === "cline-pass") {
+		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
 	if (isZaiReasoningEffortDialect(model, compat)) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
-	if (model.provider === "moonshot" && isKimiK3ModelId(model.id)) {
+	if (compat.clampOutputToModelMax) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
 	return undefined;
@@ -1831,8 +1848,25 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
  */
 export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput {
 	return items.map(item => {
-		if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
-			return typeof item.output === "string" ? { ...item, output: escapeHarmonyControlTokens(item.output) } : item;
+		if (item.type === "function_call_output") {
+			return typeof item.output === "string"
+				? { ...item, output: escapeHarmonyControlTokens(item.output) }
+				: {
+						...item,
+						output: item.output.map(part =>
+							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+						),
+					};
+		}
+		if (item.type === "custom_tool_call_output") {
+			return typeof item.output === "string"
+				? { ...item, output: escapeHarmonyControlTokens(item.output) }
+				: {
+						...item,
+						output: item.output.map(part =>
+							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+						),
+					};
 		}
 		if (item.type === "function_call") {
 			return typeof item.arguments === "string"
@@ -2077,6 +2111,19 @@ function parseResponseReasoningReplayItem(signature: string | undefined): Respon
 	}
 }
 
+/**
+ * Non-empty `reasoning_text` shipped for a synthesized reasoning item when no
+ * thinking text survived history reconstruction. DeepSeek-family Responses
+ * targets (e.g. opencode-go) reject BOTH a missing reasoning item and one whose
+ * `reasoning_text` is empty — "The reasoning_text in the thinking mode must be
+ * passed back to the API" (#8248 covered the missing case, #10690 the empty
+ * one). The item's presence plus a non-empty payload is what satisfies the
+ * contract; the exact text is immaterial once the source turn's reasoning is
+ * gone. Kept out of `reasoning_content="."`-territory since DeepSeek rejects the
+ * bare-dot synthetic placeholder on the chat-completions path.
+ */
+export const SYNTHETIC_REASONING_REPLAY_PLACEHOLDER = "reasoning unavailable";
+
 export function convertResponsesAssistantMessage<TApi extends Api>(
 	assistantMsg: AssistantMessage,
 	model: Model<TApi>,
@@ -2234,12 +2281,15 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	if (requiresReasoningItem && !reasoningItemEmitted && outputItems.length > 0) {
 		// Replay the demoted reasoning (already present in `content` as visible
 		// text) as a structured reasoning item so the thinking-mode continuation
-		// carries the `reasoning_text` the provider requires. The text may be empty
-		// when the source turn was minted by another model and its reasoning is
-		// already folded into the message text; the item's presence is what
-		// satisfies the provider contract, mirroring the empty `reasoning_content`
-		// placeholder used on the chat-completions path.
-		const reasoningText = carriedReasoningTexts.join("\n");
+		// carries the `reasoning_text` the provider requires. When no thinking
+		// text survived reconstruction (source turn minted by another model, or
+		// reasoning dropped by compaction/archive budget) the carried text is
+		// empty — and DeepSeek-family targets reject an empty `reasoning_text`
+		// exactly like a missing item (#10690), so substitute a non-empty
+		// placeholder. The `id` still prefers a surviving upstream item id.
+		const carriedReasoningText = carriedReasoningTexts.join("\n");
+		const reasoningText =
+			carriedReasoningText.length > 0 ? carriedReasoningText : SYNTHETIC_REASONING_REPLAY_PLACEHOLDER;
 		const reasoningId =
 			synthesizedReasoningItemId ?? `rs_${Bun.hash(`${model.id}:${msgIndex}:${reasoningText}`).toString(36)}`;
 		const reasoningItem: ResponseReasoningItem = {
@@ -2254,21 +2304,65 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	return outputItems;
 }
 
-const syntheticToolImageMessages = new WeakSet<object>();
-
-function insertResponsesToolOutput(messages: ResponseInput, output: ResponseInput[number]): void {
-	let index = messages.length;
-	while (index > 0) {
-		const previous = messages[index - 1];
-		if (typeof previous !== "object" || previous === null || !syntheticToolImageMessages.has(previous)) {
-			break;
-		}
-		index -= 1;
-	}
-	messages.splice(index, 0, output);
+/**
+ * Responses wire output for a tool result plus its text-only fallback.
+ *
+ * `output` preserves native image blocks for paired function/custom outputs.
+ * `outputText` feeds orphan and unsupported-computer fallback messages, which
+ * cannot carry the native output array.
+ */
+export interface ResponsesToolResultOutputEncoding {
+	output: string | ResponseInputContent[];
+	outputText: string;
 }
 
-/** Appends one tool result while keeping consecutive outputs ahead of its synthetic image messages. */
+/**
+ * Encodes one canonical tool result for OpenAI Responses replay.
+ *
+ * Image-capable models receive an ordered native content array; text-only
+ * models and callers without images receive the compatible string form.
+ */
+export function encodeResponsesToolResultOutput<TApi extends Api>(
+	toolResult: ToolResultMessage,
+	model: Model<TApi>,
+	supportsImageDetailOriginal: boolean,
+): ResponsesToolResultOutputEncoding {
+	const supportsImages = model.input.includes("image");
+	const textResult = toolResult.content
+		.filter((block): block is TextContent => block.type === "text")
+		.map(block => block.text)
+		.join("\n");
+	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
+	const omittedImages = hasImages && !supportsImages;
+	const rawOutput = (
+		omittedImages
+			? joinTextWithImagePlaceholder(textResult, true)
+			: textResult.length > 0
+				? textResult
+				: hasImages
+					? "(see attached image)"
+					: ""
+	).toWellFormed();
+	const escapeControlTokens = isHarmonyDialectModel(model);
+	// Harmony-server models reject reserved control-token spellings even as tool
+	// data; escape the transport copy so a grep/read result cannot poison the
+	// session (#6913). Covers every downstream branch that consumes `output`.
+	const outputText = escapeControlTokens ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
+	const output: string | ResponseInputContent[] =
+		hasImages && supportsImages
+			? toolResult.content.map((block): ResponseInputContent => {
+					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
+					const text = block.text.toWellFormed();
+					return {
+						type: "input_text",
+						text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
+					};
+				})
+			: outputText;
+	return { output, outputText };
+}
+
+/** Appends one Responses tool result. */
 export function appendResponsesToolResultMessages<TApi extends Api>(
 	messages: ResponseInput,
 	toolResult: ToolResultMessage,
@@ -2280,32 +2374,8 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	supportsCustomToolCalls = true,
 	computerCallIds?: ReadonlySet<string>,
 ): void {
-	const supportsImages = model.input.includes("image");
-	const textResult = toolResult.content
-		.filter((block): block is TextContent => block.type === "text")
-		.map(block => block.text)
-		.join("\n");
-	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
-	const omittedImages = hasImages && !supportsImages;
+	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
-	// "(see attached image)" is only truthful when the result actually carries
-	// images (they ride as a separate user message on the Responses API). A
-	// genuinely empty text result (empty file read, silent tool) must stay
-	// empty — the placeholder sent models chasing an attachment that never
-	// existed.
-	const rawOutput = (
-		omittedImages
-			? joinTextWithImagePlaceholder(textResult, true)
-			: textResult.length > 0
-				? textResult
-				: hasImages
-					? "(see attached image)"
-					: ""
-	).toWellFormed();
-	// Harmony-server models reject reserved control-token spellings even as tool
-	// data; escape the transport copy so a grep/read result cannot poison the
-	// session (#6913). Covers every downstream branch that consumes `output`.
-	const output = isHarmonyDialectModel(model) ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
 	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
 		messages.push({
 			type: "message",
@@ -2317,7 +2387,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	if (computerCallIds?.has(normalized.callId)) {
 		if (toolResult.providerMetadata?.type !== "computer") {
 			const limit = 16_000;
-			const noteText = output.length > limit ? `${output.slice(0, limit)}\n...[truncated]` : output;
+			const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
 			messages.push({
 				type: "message",
 				role: "assistant",
@@ -2333,7 +2403,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 			} as ResponseInput[number]);
 			return;
 		}
-		insertResponsesToolOutput(messages, {
+		messages.push({
 			type: "computer_call_output",
 			call_id: normalized.callId,
 			output: structuredCloneJSON(toolResult.providerMetadata.screenshot),
@@ -2346,7 +2416,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		// silently dropping the result loses information the model needs. Fold it
 		// into an assistant note instead (same shape as repairOrphanResponsesToolOutputs).
 		const limit = 16_000;
-		const noteText = output.length > limit ? `${output.slice(0, limit)}\n...[truncated]` : output;
+		const noteText = outputText.length > limit ? `${outputText.slice(0, limit)}\n...[truncated]` : outputText;
 		messages.push({
 			type: "message",
 			role: "assistant",
@@ -2355,34 +2425,18 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {
-		insertResponsesToolOutput(messages, {
+		messages.push({
 			type: "custom_tool_call_output",
 			call_id: normalized.callId,
 			output,
 		} as ResponseInput[number]);
 	} else {
-		insertResponsesToolOutput(messages, {
+		messages.push({
 			type: "function_call_output",
 			call_id: normalized.callId,
 			output,
 		});
 	}
-
-	if (!hasImages || !supportsImages) {
-		return;
-	}
-
-	const contentParts: ResponseInputContent[] = [
-		{ type: "input_text", text: "Attached image(s) from tool result:" } satisfies ResponseInputText,
-	];
-	for (const block of toolResult.content) {
-		if (block.type === "image") {
-			contentParts.push(convertResponsesInputImage(block, supportsImageDetailOriginal));
-		}
-	}
-	const imageMessage = { role: "user", content: contentParts } satisfies ResponseInput[number];
-	syntheticToolImageMessages.add(imageMessage);
-	messages.push(imageMessage);
 }
 
 /**
@@ -3296,7 +3350,7 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
 			calculateCost(model, output.usage);
-			applyOpenRouterReportedCost(model, output.usage, response?.usage);
+			applyProviderReportedCost(model, output.usage, response?.usage);
 			applyOpenAIResponsesServiceTierCost(
 				model,
 				output.usage,
@@ -3518,7 +3572,7 @@ type CommonSamplingOptions = Pick<
 export function applyCommonResponsesSamplingParams<P extends CommonResponsesParams>(
 	params: P,
 	options: CommonSamplingOptions | undefined,
-	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens"> & {
+	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens" | "identity"> & {
 		compat: Pick<ResolvedOpenAISharedCompat, "supportsSamplingParams" | "supportsPenaltyAndStopParams">;
 	},
 ): void {
@@ -3550,6 +3604,19 @@ type ReasoningOptions = {
 	disableReasoning?: boolean;
 	toolChoice?: unknown;
 };
+
+/**
+ * Resolve the caller's reasoning-summary request against catalog compat.
+ * Hosts that reject `reasoning.summary` get an explicit `null` (wire omission)
+ * whenever reasoning is engaged, so the policy never fills the `"auto"` default.
+ */
+export function resolveReasoningSummaryOption(
+	model: Model<"openai-responses" | "azure-openai-responses" | "openai-codex-responses">,
+	options: { reasoning?: string; reasoningSummary?: "auto" | "detailed" | "concise" | null } | undefined,
+): "auto" | "detailed" | "concise" | null | undefined {
+	if (model.compat.supportsReasoningSummary) return options?.reasoningSummary;
+	return options?.reasoning === undefined ? undefined : null;
+}
 
 export interface ApplyResponsesCompatPolicyOptions {
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
@@ -3644,7 +3711,7 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 			includeEncryptedReasoning,
 			omitReasoningEffort,
 		}),
-		{ reasoningSummary: options?.reasoningSummary, mapEffort },
+		{ reasoningSummary: resolveReasoningSummaryOption(model, options), mapEffort },
 	);
 }
 

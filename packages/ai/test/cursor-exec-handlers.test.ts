@@ -606,6 +606,29 @@ describe("Cursor history encoding", () => {
 		]);
 	});
 
+	it("folds an orphaned tool result into assistant text for Cursor replay", () => {
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Wait for the background task.", timestamp: 1 },
+			{
+				role: "toolResult",
+				toolCallId: "call-orphan",
+				toolName: "hub",
+				content: [{ type: "text", text: "The background task was cancelled." }],
+				isError: false,
+				timestamp: 2,
+			},
+			{ role: "user", content: "Continue.", timestamp: 3 },
+		];
+
+		const history = buildCursorHistoryForTest(messages);
+		const repairedText = "[Tool Result]\nThe background task was cancelled.";
+		expect(history.rootPromptMessagesJson).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Wait for the background task." }] },
+			{ role: "assistant", content: [{ type: "text", text: repairedText }] },
+		]);
+		expect(history.turnStepMessagesJson).toEqual([[{ assistantMessage: { text: repairedText } }]]);
+	});
+
 	it("omits undefined optional tool arguments from protobuf replay", () => {
 		const messages: Context["messages"] = [
 			{ role: "user", content: "Search for TODOs.", timestamp: 1 },
@@ -1002,6 +1025,65 @@ describe("Cursor history encoding", () => {
 				expect(step).not.toHaveProperty("thinkingMessage");
 			}
 		}
+	});
+
+	it("sanitizes foreign responses composite tool-call ids for Cursor replay", () => {
+		// openai-codex/responses history stores composite `"{callId}|{itemId}"`
+		// tool-call ids (encodeResponsesToolCallId). The `|` is invalid for
+		// Cursor's tool-call-id charset and gets the whole Run rejected as
+		// resource_exhausted, so it must be normalized identically on the call
+		// and result sides.
+		const compositeId = "call_abc123|fc_def456";
+		const sanitizedId = "call_abc123_fc_def456";
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Read package.json", timestamp: 1 },
+			{
+				...cursorAssistant(
+					"gpt-5.6-sol",
+					[{ type: "toolCall", id: compositeId, name: "read", arguments: { path: "package.json" } }],
+					2,
+					"toolUse",
+				),
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+			},
+			{
+				role: "toolResult",
+				toolCallId: compositeId,
+				toolName: "read",
+				content: [{ type: "text", text: "{}" }],
+				isError: false,
+				timestamp: 3,
+			},
+			{ role: "user", content: "Continue.", timestamp: 4 },
+		];
+
+		const history = buildCursorHistoryForTest(messages, undefined, "cursor-composer-2.5");
+		expect(history.rootPromptMessagesJson).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Read package.json" }] },
+			{
+				role: "assistant",
+				content: [{ type: "tool-call", toolCallId: sanitizedId, toolName: "read", args: { path: "package.json" } }],
+			},
+			{
+				role: "tool",
+				id: sanitizedId,
+				content: [{ type: "tool-result", toolName: "read", toolCallId: sanitizedId, result: "{}" }],
+			},
+		]);
+		expect(history.turnStepMessagesJson).toEqual([
+			[
+				expect.objectContaining({
+					toolCall: expect.objectContaining({
+						toolCallId: sanitizedId,
+						mcpToolCall: expect.objectContaining({
+							args: expect.objectContaining({ toolCallId: sanitizedId }),
+						}),
+					}),
+				}),
+			],
+		]);
+		expect(JSON.stringify(history)).not.toContain("|");
 	});
 
 	it("preserves image-only user turns in root prompt history and conversation turns", () => {

@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import { logger } from "@oh-my-pi/pi-utils";
+import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -34,6 +35,8 @@ export interface PersistedSubagentReviveContext {
 	 * the same lifecycle/progress frames a live run does.
 	 */
 	eventBus?: EventBus;
+	/** Root-scoped observability bus the revived run's frames also publish to. */
+	subagentEventBus?: EventBus;
 }
 
 /**
@@ -100,6 +103,13 @@ export function createPersistedSubagentReviverFactory(
 			init.modelRole && init.modelRole !== "default"
 				? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
 				: init.resolvedModel;
+		// Older session files persisted the synthetic xd:// write transport in the
+		// enabled set. A read-only agent definition could never grant full write,
+		// so remove that transport name before replaying tools as explicit grants.
+		const revivedToolNames =
+			init.readOnly === true && init.tools.includes("write")
+				? init.tools.filter(name => name !== "write")
+				: init.tools;
 		return async expectedRef => {
 			// Re-open fresh on every revive: park closes the writer, so this takes
 			// the single-writer lock cleanly and restores the full message history.
@@ -116,6 +126,9 @@ export function createPersistedSubagentReviverFactory(
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
 				authStorage: ctx.authStorage,
+				// Revived agents join the root session tree, so their observability
+				// frames ride the same bus the RPC/collab surfaces subscribed to.
+				subagentEventBus: ctx.subagentEventBus,
 				modelRegistry: ctx.modelRegistry,
 				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
 				modelPatternAuthFallback: init.resolvedModel,
@@ -123,11 +136,29 @@ export function createPersistedSubagentReviverFactory(
 				sessionManager: reopened,
 				agentId: ref.id,
 				agentDisplayName: ref.displayName,
+				// `agents` rule scoping keys on the durable definition name (`scout`,
+				// `reviewer`, …), not the registry display label — cold-revived refs
+				// register with `displayName: id` (registry/persisted-agents.ts), so a
+				// generated task id would silently drop every agent-scoped rule.
+				// `init.agent` carries the real name; only files predating that field
+				// fall back to the display label. A parked transcript may also predate
+				// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
+				// persisted `init.agent` of either sentinel value from such a legacy
+				// custom agent must not masquerade as that sentinel here, so it falls
+				// back to the display label too, keeping it scoped as an ordinary
+				// subagent under its generated id instead of `main` or the shared `sub`
+				// bucket.
+				agentName:
+					init.agent &&
+					init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
+					init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
+						? init.agent
+						: ref.displayName,
 				parentTaskPrefix: ref.id,
 				parentAgentId: ref.parentId,
 				expectedAgentRef: expectedRef,
 				taskDepth,
-				toolNames: init.tools,
+				toolNames: revivedToolNames,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
@@ -143,6 +174,7 @@ export function createPersistedSubagentReviverFactory(
 							enableIrc: false,
 							enableMCP: false,
 							preloadedExtensionPaths: [],
+							preloadedPreparedExtensions: [],
 							preloadedCustomToolPaths: [],
 						}
 					: {
@@ -154,7 +186,7 @@ export function createPersistedSubagentReviverFactory(
 			// Clamp the active set to the persisted list: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
 			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...init.tools, ...session.getMountedXdevToolNames()]);
+			await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
 			// Wire the extension runtime exactly as the live executor does. Without
 			// this the runner stays pre-init, every action method throws
 			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
@@ -183,6 +215,7 @@ export function createPersistedSubagentReviverFactory(
 				id: ref.id,
 				agent: wakeAgent,
 				eventBus: ctx.eventBus,
+				subagentEventBus: ctx.subagentEventBus,
 				sessionFile,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,

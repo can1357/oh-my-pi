@@ -76,7 +76,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **Qwen Portal** (supports `QWEN_OAUTH_TOKEN` or `QWEN_PORTAL_API_KEY`)
 - **QwenCloud Token Plan** (supports `/login alibaba-token-plan`, `ALIBABA_TOKEN_PLAN_API_KEY`, or `BAILIAN_TOKEN_PLAN_API_KEY`; interactive login first selects a region — International (Singapore, default), China (Beijing) for 百炼 Token Plan keys, or a custom base URL — since region keys are non-interchangeable, then optionally stores a `home.qwencloud.com` Cookie request header for best-effort 5-hour and 7-day quota reporting)
   To enable quota reporting, sign in to the Token Plan dashboard, copy the `Cookie` request-header value from a `home.qwencloud.com` request in browser developer tools, and paste it at the second login prompt. Press Enter to skip; the Cookie is sensitive and session-lived, so rerun login when it expires.
-- **Cloudflare AI Gateway** (requires `CLOUDFLARE_AI_GATEWAY_API_KEY` and provider-specific gateway base URL)
+- **Cloudflare AI Gateway** (supports `/login cloudflare-ai-gateway`, or `CLOUDFLARE_AI_GATEWAY_API_KEY` with `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_GATEWAY_ID`)
 - **Ollama** (local OpenAI-compatible runtime; optional `OLLAMA_API_KEY`)
 - **Ollama Cloud** (hosted native Ollama API; requires `OLLAMA_CLOUD_API_KEY`)
 - **llama.cpp** (local OpenAI and Anthropic compatible inference server)
@@ -960,11 +960,10 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | Xiaomi MiMo    | `XIAOMI_API_KEY`                                                             |
 | ZenMux         | `ZENMUX_API_KEY`                                                             |
 | vLLM           | `VLLM_API_KEY`                                                               |
-| Cloudflare AI Gateway | `CLOUDFLARE_AI_GATEWAY_API_KEY`                                      |
+| Cloudflare AI Gateway | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
 | GitHub Copilot | `COPILOT_GITHUB_TOKEN` or `GH_TOKEN` or `GITHUB_TOKEN`                      |
 
-For Cloudflare AI Gateway models, use provider base URL format
-`https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic`.
+`/login cloudflare-ai-gateway` collects and stores the gateway token, account ID, and gateway ID. For environment configuration, set all three Cloudflare values above. OMP derives provider endpoints from the account and gateway IDs.
 
 For Anthropic Foundry routing, set `CLAUDE_CODE_USE_FOUNDRY=true` plus:
 `FOUNDRY_BASE_URL`, `ANTHROPIC_FOUNDRY_API_KEY`, optional `ANTHROPIC_CUSTOM_HEADERS`,
@@ -996,7 +995,7 @@ Provider endpoint defaults for the current OpenAI-compatible integrations:
 - Ollama: local OpenAI-compatible runtime (`http://127.0.0.1:11434/v1`)
 - Ollama Cloud: native Ollama API host (`https://ollama.com/api`, configured here as base URL `https://ollama.com`)
 - LiteLLM: `http://localhost:4000/v1`
-- Cloudflare AI Gateway: `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic`
+- Cloudflare AI Gateway: native Anthropic, OpenAI, and Workers AI routes under `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>`
 - Qwen Portal: `https://portal.qwen.ai/v1`
 When set, the library automatically uses these keys:
 
@@ -1091,56 +1090,31 @@ For the current API-key onboarding flows, the library covers Together, Moonshot,
 
 ### Programmatic OAuth
 
-The library provides login and token refresh functions. Credential storage is the caller's responsibility.
+Provider login and refresh behavior is exposed through the registry. Credential storage is the caller's responsibility.
 
 ```typescript
 import {
-	// Login functions (return credentials, do not store)
-	loginAnthropic,
-	loginOpenAICodex,
-	loginGitHubCopilot,
-	loginGeminiCli,
-	loginAntigravity,
-	loginCloudflareAiGateway,
-	loginHuggingface,
-	loginLiteLLM,
-	loginMoonshot,
-	loginNvidia,
-	loginNanoGPT,
-	loginQianfan,
-	loginQwenPortal,
-	loginTogether,
-	loginVenice,
-	loginVllm,
-	loginXiaomi,
-
-	// Token management
+	getProviderDefinition,
 	refreshOAuthToken, // (provider, credentials) => new credentials
 	getOAuthApiKey, // (provider, credentialsMap) => { newCredentials, apiKey } | null
-
-	// Types
-	type OAuthProvider, // includes 'anthropic', 'openai-codex', 'github-copilot', 'google-gemini-cli', 'google-antigravity', 'together', 'moonshot', 'qianfan', 'nvidia', 'nanogpt', 'novita', 'huggingface', 'venice', 'xiaomi', 'vllm', 'litellm', 'cloudflare-ai-gateway', 'qwen-portal', ...
+	type OAuthProvider,
 	type OAuthCredentials,
 } from "@oh-my-pi/pi-ai";
-```
 
-`loginOpenAICodex` accepts an optional `originator` value used in the OAuth flow:
-
-```typescript
-await loginOpenAICodex({
+const provider = getProviderDefinition("openai-codex");
+const credentials = await provider?.login?.({
 	onAuth: ({ url }) => console.log(url),
-	originator: "my-cli",
 });
 ```
 
 ### Login Flow Example
 
 ```typescript
-import { loginGitHubCopilot } from "@oh-my-pi/pi-ai";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai";
 import * as fs from "node:fs";
 
-const credentials = await loginGitHubCopilot({
-	onAuth: (url, instructions) => {
+const credentials = await getProviderDefinition("github-copilot")?.login?.({
+	onAuth: ({ url, instructions }) => {
 		console.log(`Open: ${url}`);
 		if (instructions) console.log(instructions);
 	},

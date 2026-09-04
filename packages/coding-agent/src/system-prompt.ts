@@ -651,6 +651,8 @@ export interface BuildSystemPromptOptions {
 	includeWorkspaceTree?: boolean;
 	/** Whether Mermaid fenced blocks render as terminal ASCII diagrams. Default: true */
 	renderMermaid?: boolean;
+	/** Whether the TUI lifts an opening emoji into a reaction badge on the user's message. Default: false */
+	reactions?: boolean;
 	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
 	activeRepoContext?: ActiveRepoContext | null;
 	/** Tools mounted under `xd://`; renders the protocol section when non-empty. `dynamic` marks external devices whose summary is third-party metadata. */
@@ -659,6 +661,8 @@ export interface BuildSystemPromptOptions {
 	xdevDocs?: string;
 	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
 	autoQaEnabled?: boolean;
+	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
+	writeTransportOnly?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -714,9 +718,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		personality = "default",
 		includeWorkspaceTree = false,
 		renderMermaid = true,
+		reactions = false,
 		xdevTools = [],
 		xdevDocs = "",
 		autoQaEnabled = false,
+		writeTransportOnly = false,
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
@@ -1006,10 +1012,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasObsidian: hasObsidian(),
 		includeWorkspaceTree,
 		renderMermaid,
+		reactions,
 		xdevTools,
 		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
 		xdevDocs,
 		autoQaEnabled,
+		writeTransportOnly,
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
 	const systemPrompt = [rendered];

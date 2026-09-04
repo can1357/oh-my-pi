@@ -288,6 +288,52 @@ describe("ModelHub", () => {
 		});
 	});
 
+	describe("sidebar rebuild during navigation", () => {
+		test("keeps focus on a surviving provider when the focused entry vanishes on refresh", async () => {
+			vi.useFakeTimers();
+			try {
+				const models = [makeModel("alpha", "m"), makeModel("beta", "m"), makeModel("gamma", "m")];
+				// A keyless discoverable local endpoint: starts visible (discovery
+				// "empty"), then its on-focus refresh finds it unreachable and it
+				// flips to hidden (optional + "unavailable"), vanishing from the list.
+				let localStatus = "empty";
+				const { hub } = createHub({
+					models,
+					registry: {
+						getDiscoverableProviders: () => ["delta-local"],
+						getProviderDiscoveryState: providerId =>
+							providerId === "delta-local" ? { optional: true, status: localStatus } : undefined,
+						refreshProvider: async providerId => {
+							if (providerId === "delta-local") localStatus = "unavailable";
+						},
+					},
+				});
+				installTestTheme();
+
+				// Sidebar order: Roles, All models, [sep], alpha, beta, delta-local, gamma.
+				// Hop down onto the keyless provider, which schedules its refresh.
+				hub.handleInput(DOWN); // all → alpha
+				hub.handleInput(DOWN); // alpha → beta
+				hub.handleInput(DOWN); // beta → delta-local
+				expect(normalize(hub.render(220))).toContain("delta-local ·");
+
+				// Fire the debounced on-focus refresh, then flush the async rebuild
+				// (refreshProvider resolves on a microtask before #syncFromRegistryState).
+				vi.advanceTimersByTime(200);
+				await Promise.resolve();
+				await Promise.resolve();
+
+				// delta-local is gone; focus must land on the neighbouring provider,
+				// not snap back to "All models" at the top.
+				const rendered = normalize(hub.render(220));
+				expect(rendered).not.toContain("All available models");
+				expect(rendered).toContain("gamma ·");
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
 	describe("typing focus", () => {
 		test("typing on All models switches focus to model list and navigates results with arrows", () => {
 			const modelA = makeModel("test", "model-a");

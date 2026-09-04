@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
@@ -15,6 +18,7 @@ import {
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Browser, HTTPRequest, Page, Target } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
@@ -50,6 +54,40 @@ function fakeTarget(type: string, page: Page | null): Target {
 		type: () => type,
 		page: async () => page,
 	} as unknown as Target;
+}
+
+interface DisposableExecutable {
+	path: string;
+	pid: number;
+	close(): Promise<void>;
+}
+
+async function spawnDisposableExecutable(args: string[] = []): Promise<DisposableExecutable> {
+	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-app-path-"));
+	const executablePath = path.join(tempDir, path.basename(process.execPath));
+	await Bun.write(executablePath, Bun.file(process.execPath));
+	if (process.platform !== "win32") await fs.chmod(executablePath, 0o755);
+	const executable = await fs.realpath(executablePath);
+	const child = Bun.spawn(
+		[executable, "--eval", 'process.stdout.write("ready\\n"); await Bun.stdin.text()', ...args],
+		{
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "ignore",
+		},
+	);
+	const readiness = child.stdout.getReader();
+	await readiness.read();
+	readiness.releaseLock();
+	return {
+		path: executable,
+		pid: child.pid,
+		async close() {
+			child.kill();
+			await child.exited;
+			await fs.rm(tempDir, { recursive: true, force: true });
+		},
+	};
 }
 
 describe("pickElectronTarget", () => {
@@ -133,6 +171,84 @@ describe("pickElectronTarget", () => {
 		);
 		expect(normalizeConnectedCdpUrl("http://127.0.0.1:9222/")).toBe("http://127.0.0.1:9222");
 	});
+
+	test("refuses to replace a running same-executable process", async () => {
+		const existing = await spawnDisposableExecutable();
+		try {
+			await expect(
+				acquireBrowser(
+					{ kind: "spawned", path: existing.path },
+					{ cwd: process.cwd(), signal: AbortSignal.timeout(2_000) },
+				),
+			).rejects.toThrow("already running without a reusable CDP endpoint");
+			expect(Process.fromPid(existing.pid)?.status()).toBe(ProcessStatus.Running);
+		} finally {
+			await existing.close();
+		}
+	}, 10_000);
+
+	test("rejects a user-data-dir already used by the running executable", async () => {
+		const profile = path.join(os.tmpdir(), `omp-browser-profile-${process.pid}-${Date.now()}`);
+		const existing = await spawnDisposableExecutable([`--user-data-dir=${profile}`]);
+		try {
+			await expect(
+				acquireBrowser(
+					{ kind: "spawned", path: existing.path },
+					{
+						cwd: process.cwd(),
+						appArgs: [`--user-data-dir=${profile}`],
+						signal: AbortSignal.timeout(2_000),
+					},
+				),
+			).rejects.toThrow("already running without a reusable CDP endpoint");
+			expect(Process.fromPid(existing.pid)?.status()).toBe(ProcessStatus.Running);
+		} finally {
+			await existing.close();
+		}
+	}, 10_000);
+
+	test("launches an isolated user-data-dir beside a running executable", async () => {
+		const existing = await spawnDisposableExecutable();
+		const { promise: launched, resolve: markLaunched } = Promise.withResolvers<void>();
+		const marker = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch() {
+				markLaunched();
+				return new Response("ok");
+			},
+		});
+		const controller = new AbortController();
+		const childScript = `await fetch(${JSON.stringify(marker.url.href)}); Bun.serve({ port: 0, fetch: () => new Response("ok") });`;
+		const openError = acquireBrowser(
+			{ kind: "spawned", path: existing.path },
+			{
+				cwd: process.cwd(),
+				appArgs: ["--eval", childScript, `--user-data-dir=${path.join(path.dirname(existing.path), "profile")}`],
+				signal: controller.signal,
+			},
+		).then(
+			() => new Error("Expected isolated app acquisition to remain pending"),
+			error => (error instanceof Error ? error : new Error(String(error))),
+		);
+
+		try {
+			await Promise.race([
+				launched,
+				openError.then(error => {
+					throw error;
+				}),
+			]);
+			expect(Process.fromPid(existing.pid)?.status()).toBe(ProcessStatus.Running);
+			controller.abort();
+			expect((await openError).name).toBe("ToolAbortError");
+		} finally {
+			controller.abort();
+			await openError;
+			await marker.stop(true);
+			await existing.close();
+		}
+	}, 10_000);
 
 	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
 	test.skipIf(!CHROMIUM_AVAILABLE)(

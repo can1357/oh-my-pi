@@ -318,21 +318,12 @@ const ANTIGRAVITY_ENDPOINT_FALLBACKS = [ANTIGRAVITY_DAILY_ENDPOINT, ANTIGRAVITY_
 // Retry configuration
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
-const FLASH_FIRST_EVENT_TIMEOUT_MS = 60_000;
 const DEFAULT_FIRST_EVENT_TIMEOUT_MS = 300_000;
 const FIRST_EVENT_TIMEOUT_ERROR = "Cloud Code Assist stream timed out while waiting for the first event";
 const RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 const CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14";
 const GOOGLE_GEMINI_REFRESH_SKEW_MS = 60_000;
 const ANTIGRAVITY_REFRESH_SKEW_MS = 60_000;
-
-function isClaudeModel(modelId: string): boolean {
-	return modelId.toLowerCase().includes("claude");
-}
-
-function needsClaudeThinkingBetaHeader(model: Model<"google-gemini-cli">): boolean {
-	return model.provider === "google-antigravity" && model.id.startsWith("claude-") && model.reasoning;
-}
 
 const optionalCredentialString = type("unknown").pipe(raw => {
 	const out = type("string")(raw);
@@ -594,8 +585,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				"Content-Type": "application/json",
 				Accept: "text/event-stream",
 				...headers,
-				...(needsClaudeThinkingBetaHeader(model) ? { "anthropic-beta": CLAUDE_THINKING_BETA_HEADER } : {}),
-				...(options?.headers ?? {}),
+				...(model.compat.claudeThinkingBetaHeader && model.identity.class === "anthropic" && model.reasoning
+					? { "anthropic-beta": CLAUDE_THINKING_BETA_HEADER }
+					: {}),
+				...options?.headers,
 			};
 			const requestBodyJson = JSON.stringify(requestBody);
 			rawRequestDump = {
@@ -615,11 +608,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				options?.streamFirstEventTimeoutMs ??
 				getStreamFirstEventTimeoutMs(
 					undefined,
-					model.id.includes("flash") ? FLASH_FIRST_EVENT_TIMEOUT_MS : DEFAULT_FIRST_EVENT_TIMEOUT_MS,
+					model.compat.streamFirstEventTimeoutMs ?? DEFAULT_FIRST_EVENT_TIMEOUT_MS,
 				);
 			const callerSignal = options?.signal;
 			const toolNames = new Set(context.tools?.map(t => t.name) ?? []);
-			const isFlashLeakModel = model.id.includes("flash");
+			const isFlashLeakModel = model.compat.flashStreamLeakWorkaround;
 
 			let started = false;
 			// Once any stream event starts, the endpoint is committed downstream.
@@ -1247,15 +1240,16 @@ function buildAntigravityRequestEnvelope(
 	const sessionId = state?.sessionId ?? deriveAntigravitySessionId(context);
 	const step = state?.stepIndex ?? 2;
 	const requestId = `agent/${agentId}/${Date.now()}/${trajectoryId}/${step}`;
-	const isClaude = isClaudeModel(model.id);
+	const isClaude = model.identity.class === "anthropic";
 	const profile = getAntigravityModelWireProfile(wireModelId);
 	const labels: Record<string, string> = {};
 	if (state?.lastExecutionId) labels.last_execution_id = state.lastExecutionId;
 	labels.last_step_index = String(step - 1);
 	if (profile?.modelEnum !== undefined) labels.model_enum = profile.modelEnum;
 	labels.trajectory_id = trajectoryId;
-	labels.used_claude = String(isClaude);
-	labels.used_claude_conservative = String(isClaude);
+	const usageLabel = model.compat.antigravityUsageLabel ?? String(isClaude);
+	labels.used_claude = usageLabel;
+	labels.used_claude_conservative = usageLabel;
 	return { sessionId, requestId, labels };
 }
 
@@ -1353,7 +1347,11 @@ export function buildRequest(
 			// the backend answers in text under `mode: "ANY"` and still emits calls
 			// under `"NONE"`. Claude routes implement it, so only Gemini needs the
 			// forced choice restated in the transcript.
-			if (isAntigravity && !isClaudeModel(model.id) && request.toolConfig?.functionCallingConfig.mode === "ANY") {
+			if (
+				isAntigravity &&
+				model.identity.class !== "anthropic" &&
+				request.toolConfig?.functionCallingConfig.mode === "ANY"
+			) {
 				contents.push({ role: "user", parts: [{ text: forcedToolDirective }] });
 			}
 		}
@@ -1367,7 +1365,7 @@ export function buildRequest(
 	}
 
 	// Claude on Antigravity always forces VALIDATED, even with no tools declared.
-	if (isAntigravity && isClaudeModel(model.id)) {
+	if (isAntigravity && model.identity.class === "anthropic" && model.compat.antigravityClaudeToolMode) {
 		request.toolConfig = {
 			functionCallingConfig: {
 				mode: "VALIDATED" as FunctionCallingConfigMode,

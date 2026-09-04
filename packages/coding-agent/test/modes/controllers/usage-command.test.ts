@@ -1,47 +1,17 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
-import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
-interface RenderableBlock {
-	render(width: number): string[];
-}
-
-function isRenderableBlock(value: unknown): value is RenderableBlock {
-	return value !== null && typeof value === "object" && "render" in value && typeof value.render === "function";
-}
-
-function renderPresentedBlocks(value: unknown): string {
-	const blocks = Array.isArray(value) ? value : [value];
-	return blocks
-		.filter(isRenderableBlock)
-		.flatMap(block => block.render(120))
-		.join("\n");
-}
-
-function createUsageSessionDouble() {
-	return { getUsageReportingModelSelectors: () => [] };
-}
-
-describe("CommandController /usage", () => {
+describe("renderUsageReports content", () => {
 	beforeAll(async () => {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		setThemeInstance(theme);
+		const darkTheme = await getThemeByName("dark");
+		if (!darkTheme) throw new Error("Expected dark theme");
+		setThemeInstance(darkTheme);
 	});
 
-	it("renders bars and free percentage for limits that only report remainingFraction", async () => {
-		const present = vi.fn();
-		const ctx = {
-			session: createUsageSessionDouble(),
-			ui: { terminal: { columns: 100 } },
-			present,
-			presentCommandOutput: present,
-			showWarning: vi.fn(),
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext;
-		const controller = new CommandController(ctx);
+	it("renders bars and free percentage for limits that only report remainingFraction", () => {
 		const reports: UsageReport[] = [
 			{
 				provider: "openai-codex",
@@ -60,28 +30,13 @@ describe("CommandController /usage", () => {
 			},
 		];
 
-		await controller.handleUsageCommand(reports);
-
-		expect(present).toHaveBeenCalledTimes(1);
-		const firstCall = present.mock.calls[0];
-		expect(firstCall).toBeDefined();
-		const output = renderPresentedBlocks(firstCall?.[0]);
+		const output = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 98));
 		expect(output).toContain("25% free");
 		expect(output).toContain("█");
 		expect(output).not.toContain("··········");
 	});
 
-	it("renders Cursor request quotas in the /usage view", async () => {
-		const present = vi.fn();
-		const ctx = {
-			session: createUsageSessionDouble(),
-			ui: { terminal: { columns: 100 } },
-			present,
-			presentCommandOutput: present,
-			showWarning: vi.fn(),
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext;
-		const controller = new CommandController(ctx);
+	it("renders Cursor request quotas in the /usage view", () => {
 		const now = Date.now();
 		const reports: UsageReport[] = [
 			{
@@ -108,29 +63,14 @@ describe("CommandController /usage", () => {
 			},
 		];
 
-		await controller.handleUsageCommand(reports);
-
-		expect(present).toHaveBeenCalledTimes(1);
-		const firstCall = present.mock.calls[0];
-		expect(firstCall).toBeDefined();
-		const output = renderPresentedBlocks(firstCall?.[0]);
+		const output = stripVTControlCharacters(renderUsageReports(reports, theme, now, 98));
 		expect(output).toContain("Cursor");
 		expect(output).toContain("gpt-4 requests");
 		expect(output).toContain("70% free");
 		expect(output).toContain("resets in 1d");
 	});
 
-	it("renders saved reset expiry lines for future and expired credits", async () => {
-		const present = vi.fn();
-		const ctx = {
-			session: createUsageSessionDouble(),
-			ui: { terminal: { columns: 100 } },
-			present,
-			presentCommandOutput: present,
-			showWarning: vi.fn(),
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext;
-		const controller = new CommandController(ctx);
+	it("renders saved reset expiry lines for future and expired credits", () => {
 		const now = Date.now();
 		const dayMs = 24 * 60 * 60 * 1000;
 		const futureIso = new Date(now + 2 * dayMs).toISOString();
@@ -148,12 +88,7 @@ describe("CommandController /usage", () => {
 			},
 		];
 
-		await controller.handleUsageCommand(reports);
-
-		expect(present).toHaveBeenCalledTimes(1);
-		const firstCall = present.mock.calls[0];
-		expect(firstCall).toBeDefined();
-		const output = renderPresentedBlocks(firstCall?.[0]);
+		const output = stripVTControlCharacters(renderUsageReports(reports, theme, now, 98));
 		expect(output).toContain("Saved rate-limit resets");
 		expect(output).toContain("user@example.com: 2 saved resets");
 		expect(output).toContain(`expires in`);

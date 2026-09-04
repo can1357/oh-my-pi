@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -39,7 +39,7 @@ async function discoverCopilotModels(
 	expectedBaseUrl = "https://api.githubcopilot.com",
 	expectedAuthorizationToken = apiKey,
 ) {
-	const requestApiVersions: Array<string | undefined> = [];
+	const requestHeaders: Headers[] = [];
 	const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 		const url = typeof input === "string" ? input : input.toString();
 		if (url === "https://api.github.com/copilot_internal/user") {
@@ -52,7 +52,7 @@ async function discoverCopilotModels(
 		expect(url).toBe(`${expectedBaseUrl}/models`);
 		expect(init?.method).toBe("GET");
 		expect(getHeaderValue(init?.headers, "Authorization")).toBe(`Bearer ${expectedAuthorizationToken}`);
-		requestApiVersions.push(getHeaderValue(init?.headers, "X-GitHub-Api-Version"));
+		requestHeaders.push(new Headers(init?.headers));
 		return new Response(JSON.stringify(payload), {
 			status: 200,
 			headers: { "Content-Type": "application/json" },
@@ -60,7 +60,7 @@ async function discoverCopilotModels(
 	});
 	const options = githubCopilotModelManagerOptions({ apiKey, fetch: fetchMock });
 	const models = await options.fetchDynamicModels?.();
-	return { models: models ?? [], fetchMock, requestApiVersions };
+	return { models: models ?? [], fetchMock, requestHeaders };
 }
 
 function cachedCopilotCompletionModel(id: string, name: string): ModelSpec<"openai-completions"> {
@@ -490,7 +490,7 @@ describe("github copilot model limits mapping", () => {
 });
 
 /**
- * Entry shaped like the `/models` response under `X-GitHub-Api-Version: 2026-06-01`:
+ * Entry shaped like the `/models` response under `X-GitHub-Api-Version: 2026-08-01`:
  * `capabilities.limits` reports the long-context ceiling and
  * `billing.token_prices` carries per-tier prompt boundaries and prices
  * (hundredths of a dollar per 1M tokens).
@@ -544,9 +544,31 @@ function tieredCopilotEntry(overrides: {
 }
 
 describe("github copilot tiered context windows", () => {
-	it("sends the Copilot API version header on discovery", async () => {
-		const { requestApiVersions } = await discoverCopilotModels({ data: [] });
-		expect(requestApiVersions).toEqual(["2026-06-01"]);
+	it("sends the Copilot CLI identity on discovery", async () => {
+		const { requestHeaders } = await discoverCopilotModels({ data: [] });
+		expect(Object.fromEntries(requestHeaders[0] ?? [])).toMatchObject({
+			authorization: "Bearer copilot-test-key",
+			"copilot-harness-id": "copilot-sdk",
+			"copilot-integration-id": "copilot-developer-cli",
+			"editor-version": "copilot/1.0.82",
+			"openai-intent": "conversation-agent",
+			"user-agent": "copilot/1.0.82",
+			"x-github-api-version": "2026-08-01",
+			"x-initiator": "user",
+		});
+	});
+
+	it("keeps every bundled Copilot model on the Copilot CLI identity", () => {
+		for (const model of getBundledModels("github-copilot")) {
+			expect(model.headers).toMatchObject({
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01",
+			});
+		}
 	});
 
 	it("caps the base entry to the default tier and synthesizes a 1M sibling", async () => {
@@ -571,7 +593,7 @@ describe("github copilot tiered context windows", () => {
 		expect(base?.contextWindow).toBe(264_000);
 		expect(base?.maxTokens).toBe(64_000);
 		expect(base?.contextPromotionTarget).toBe("github-copilot/claude-opus-4.7-1m");
-		expect(base?.headers?.["X-GitHub-Api-Version"]).toBe("2026-06-01");
+		expect(base?.headers?.["X-GitHub-Api-Version"]).toBe("2026-08-01");
 
 		const variant = models.find(candidate => candidate.id === "claude-opus-4.7-1m");
 		expect(variant?.requestModelId).toBe("claude-opus-4.7");

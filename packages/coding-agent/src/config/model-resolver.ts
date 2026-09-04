@@ -18,13 +18,13 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
-import { stripThinkingVariantToken } from "@oh-my-pi/pi-catalog/identity/family";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
-import { resolveBareVariantAlias, resolveVariantAlias } from "@oh-my-pi/pi-catalog/variant-collapse";
 import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -54,18 +54,44 @@ function isKnownProvider(provider: string): provider is KnownProvider {
 /**
  * Pick the first provider-default model in availability order.
  *
+ * When `hasConcreteCredential` is supplied and at least one available model
+ * belongs to a provider with a concrete credential, the candidate pool is
+ * restricted to those providers first. This keeps a provider that is merely
+ * *ambiently* available — an `amazon-bedrock`/`google-vertex` transport that
+ * self-resolves credentials from a stray `~/.aws` profile or Application
+ * Default Credentials — from winning the startup default over the provider the
+ * user actually signed into (issue #9967). A provider that is the *only*
+ * credentialed option is still selected.
+ *
  * If multiple providers expose that same default id, rank only that shared-id
  * group by canonical provider priority so native/OAuth transports beat mirrors
  * without changing unrelated provider fallback precedence.
  */
-export function pickDefaultAvailableModel(availableModels: Model<Api>[]): Model<Api> | undefined {
-	const firstDefault = availableModels.find(
+export function pickDefaultAvailableModel(
+	availableModels: Model<Api>[],
+	hasConcreteCredential?: (provider: string) => boolean,
+): Model<Api> | undefined {
+	const models =
+		hasConcreteCredential === undefined
+			? availableModels
+			: (() => {
+					const concreteAuthByProvider = new Map<string, boolean>();
+					const concrete = availableModels.filter(model => {
+						const cached = concreteAuthByProvider.get(model.provider);
+						if (cached !== undefined) return cached;
+						const hasConcreteAuth = hasConcreteCredential(model.provider);
+						concreteAuthByProvider.set(model.provider, hasConcreteAuth);
+						return hasConcreteAuth;
+					});
+					return concrete.length > 0 ? concrete : availableModels;
+				})();
+	const firstDefault = models.find(
 		model => isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
 	);
-	if (!firstDefault) return availableModels[0];
+	if (!firstDefault) return models[0];
 
 	const providerPriority = buildModelProviderPriorityRank();
-	const sharedDefaultMatches = availableModels.filter(
+	const sharedDefaultMatches = models.filter(
 		model =>
 			model.id === firstDefault.id &&
 			isKnownProvider(model.provider) &&
@@ -75,7 +101,7 @@ export function pickDefaultAvailableModel(availableModels: Model<Api>[]): Model<
 		const aRank = providerPriority.get(a.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
 		const bRank = providerPriority.get(b.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
 		if (aRank !== bRank) return aRank - bRank;
-		return availableModels.indexOf(a) - availableModels.indexOf(b);
+		return models.indexOf(a) - models.indexOf(b);
 	})[0];
 }
 
@@ -329,6 +355,12 @@ function resolveBedrockInferenceProfileModelId(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: null,
 		maxTokens: null,
+		...(template.headers ? { headers: template.headers } : {}),
+		...(template.transport !== undefined ? { transport: template.transport } : {}),
+		...(template.guardrailIdentifier !== undefined ? { guardrailIdentifier: template.guardrailIdentifier } : {}),
+		...(template.guardrailVersion !== undefined ? { guardrailVersion: template.guardrailVersion } : {}),
+		...(template.guardrailTrace !== undefined ? { guardrailTrace: template.guardrailTrace } : {}),
+		...(template.requestMetadata !== undefined ? { requestMetadata: template.requestMetadata } : {}),
 	});
 }
 
@@ -381,24 +413,92 @@ function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 }
 
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");
+const kProviderSpellingIndex = Symbol("model-resolver.providerSpellingIndex");
 type ModelsWithProviderIndex = readonly Model<Api>[] & {
 	[kProviderModelIndex]?: Map<string, Model<Api> | null>;
+	[kProviderSpellingIndex]?: Map<string, Model<Api> | null>;
 };
 
-function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
-	const tagged = availableModels as ModelsWithProviderIndex;
-	const cached = tagged[kProviderModelIndex];
-	if (cached) return cached;
+/**
+ * Collapse the dotted revision spelling aggregators use (`claude-fable-5.1`,
+ * `gpt-4.1`) onto the dashed spelling first-party ids use (`claude-fable-5-1`,
+ * `gpt-4-1`). Only digit-bounded dots are separators; anything else stays
+ * verbatim so unrelated punctuation never coalesces.
+ */
+function revisionSpellingKey(id: string): string {
+	return id.toLowerCase().replace(/(?<=\d)\.(?=\d)/g, "-");
+}
+
+function buildProviderIndex(
+	availableModels: readonly Model<Api>[],
+	idKey: (id: string) => string,
+): Map<string, Model<Api> | null> {
 	const index = new Map<string, Model<Api> | null>();
 	for (const m of availableModels) {
-		const key = `${m.provider.toLowerCase()}\u0000${m.id.toLowerCase()}`;
+		const key = `${m.provider.toLowerCase()}\u0000${idKey(m.id)}`;
 		if (index.has(key)) {
 			index.set(key, null); // ambiguous sentinel; do not overwrite back
 		} else {
 			index.set(key, m);
 		}
 	}
+	return index;
+}
+
+function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
+	const tagged = availableModels as ModelsWithProviderIndex;
+	const cached = tagged[kProviderModelIndex];
+	if (cached) return cached;
+	const index = buildProviderIndex(availableModels, id => id.toLowerCase());
 	tagged[kProviderModelIndex] = index;
+	return index;
+}
+
+/** `provider\0revisionSpellingKey(id)` → model; the dot/dash-tolerant twin of {@link getProviderModelIndex}. */
+function getProviderSpellingIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
+	const tagged = availableModels as ModelsWithProviderIndex;
+	const cached = tagged[kProviderSpellingIndex];
+	if (cached) return cached;
+	const index = buildProviderIndex(availableModels, revisionSpellingKey);
+	tagged[kProviderSpellingIndex] = index;
+	return index;
+}
+
+const kProviderWireRouteIndex = Symbol("model-resolver.wireRouteIndex");
+type ModelsWithWireRouteIndex = readonly Model<Api>[] & {
+	[kProviderWireRouteIndex]?: Map<string, Model<Api> | null>;
+};
+
+/**
+ * Reverse index over collapsed models' `thinking.effortRouting`:
+ * `provider\0wireId` → the logical model that routes to it. Families collapsed
+ * at discovery time (Devin's dynamic catalog) carry no hand-table alias, so
+ * their raw upstream uids would otherwise be unselectable. Ambiguous wire ids
+ * (two logical models routing to one uid) map to the `null` sentinel and
+ * resolve to nothing, exactly like the exact-id index.
+ */
+function getProviderWireRouteIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
+	const tagged = availableModels as ModelsWithWireRouteIndex;
+	const cached = tagged[kProviderWireRouteIndex];
+	if (cached) return cached;
+	const index = new Map<string, Model<Api> | null>();
+	for (const m of availableModels) {
+		const routing = m.thinking?.effortRouting;
+		if (routing === undefined) continue;
+		const providerKey = m.provider.toLowerCase();
+		for (const effort in routing) {
+			const wireId = routing[effort as keyof typeof routing];
+			if (wireId === undefined) continue;
+			const key = `${providerKey}\u0000${wireId.toLowerCase()}`;
+			const existing = index.get(key);
+			if (existing === undefined) {
+				index.set(key, m);
+			} else if (existing !== null && existing !== m) {
+				index.set(key, null); // ambiguous sentinel; do not overwrite back
+			}
+		}
+	}
+	tagged[kProviderWireRouteIndex] = index;
 	return index;
 }
 
@@ -425,8 +525,10 @@ export function resolveProviderModelReference(
 	// Retired effort-tier variant ids resolve to their collapsed logical
 	// model: hand-table aliases first, then the `X-thinking` → `X` grammar
 	// for auto-derived pairs. Exact lookup above always wins while raw is live.
+	const collapsedVariant = collapseVariantId(normalizedProvider, normalizedModelId);
 	const variantAliasId =
-		resolveVariantAlias(normalizedProvider, normalizedModelId) ?? stripThinkingVariantToken(normalizedModelId);
+		resolveVariantSelector(normalizedProvider, normalizedModelId) ??
+		(collapsedVariant.thinkingVariant ? collapsedVariant.logicalId : undefined);
 	if (variantAliasId) {
 		const aliased = index.get(`${normalizedProvider}\u0000${variantAliasId.toLowerCase()}`);
 		if (aliased) {
@@ -434,9 +536,30 @@ export function resolveProviderModelReference(
 		}
 	}
 
+	// Dynamically collapsed families have no hand-table alias: fall back to the
+	// per-effort wire ids the live model routes to, so a raw upstream uid still
+	// selects its logical model. The exact lookup above keeps a live raw model
+	// winning over the collapsed carrier.
+	const routed = getProviderWireRouteIndex(availableModels).get(`${normalizedProvider}\u0000${normalizedModelId}`);
+	if (routed) {
+		return routed;
+	}
+
 	const bedrockInferenceProfile = resolveBedrockInferenceProfileReference(provider, modelId, availableModels);
 	if (bedrockInferenceProfile) {
 		return bedrockInferenceProfile;
+	}
+
+	// Dotted vs dashed revision spelling (`anthropic/claude-fable-5.1` for the
+	// first-party `claude-fable-5-1`). Resolving it here, inside the named
+	// provider, keeps the selector from falling through to the exact-bare-id
+	// phase, where the dotted form is verbatim an aggregator id (OpenRouter's
+	// `anthropic/claude-fable-5.1`) and would silently re-bind the request.
+	const spelled = getProviderSpellingIndex(availableModels).get(
+		`${normalizedProvider}\u0000${revisionSpellingKey(normalizedModelId)}`,
+	);
+	if (spelled) {
+		return spelled;
 	}
 
 	if (normalizedProvider !== "openrouter") {
@@ -467,8 +590,8 @@ export interface ModelMatchPreferences {
 
 export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable">;
 type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable">;
-type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find">;
-type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey">;
+type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "hasConcreteAuth">;
+type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey" | "hasConcreteAuth">;
 
 interface ModelPreferenceContext {
 	modelUsageRank: Map<string, number>;
@@ -620,14 +743,16 @@ function isProviderLockedCrossMatch(pattern: string, matchedModel: Model<Api>): 
 		return false;
 	}
 	const provider = pattern.slice(0, slashIdx).toLowerCase();
-	const modelId = pattern.slice(slashIdx + 1).toLowerCase();
+	const modelId = revisionSpellingKey(pattern.slice(slashIdx + 1));
 	if (matchedModel.provider.toLowerCase() === provider) {
 		return false;
 	}
-	// Case-insensitive on both halves: the surrounding matcher lowercases the
-	// selector before comparing ids, so the lock must not evaporate on case
-	// variance (catalog provider keys are lowercase; model ids may not be).
-	return getBundledModels(provider as GeneratedProvider).some(m => m.id.toLowerCase() === modelId);
+	// Case- and revision-spelling-insensitive on both halves: the surrounding
+	// matcher lowercases the selector before comparing ids, and
+	// resolveProviderModelReference accepts `5.1` for `5-1`, so the lock must
+	// not evaporate on either variance (catalog provider keys are lowercase;
+	// model ids may not be).
+	return getBundledModels(provider as GeneratedProvider).some(m => revisionSpellingKey(m.id) === modelId);
 }
 
 /**
@@ -701,8 +826,8 @@ function matchModel(
 	// their collapsed logical model; models from the providers whose table
 	// declared the alias win ties. Auto-derived `X-thinking` pairs resolve
 	// through the grammar fallback.
-	const bareAlias = resolveBareVariantAlias(modelPattern);
-	const bareAliasTargetId = bareAlias?.id ?? stripThinkingVariantToken(modelPattern);
+	const bareAlias = resolveBareVariantSelector(modelPattern);
+	const bareAliasTargetId = bareAlias?.id ?? stripThinkingVariantSuffix(modelPattern);
 	if (bareAliasTargetId) {
 		const lowerAliasTarget = bareAliasTargetId.toLowerCase();
 		const aliasMatches = availableModels.filter(m => m.id.toLowerCase() === lowerAliasTarget);
@@ -1008,7 +1133,7 @@ function isSessionInheritedAgentPattern(value: string): boolean {
 }
 
 function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
-	return role === "smol" || role === "slow" || role === "designer";
+	return role === "smol" || role === "slow";
 }
 
 /**
@@ -1522,7 +1647,7 @@ export function resolveRoleSelection(
 	roles: readonly string[],
 	settings: Settings,
 	availableModels: Model<Api>[],
-): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+): { role: string; model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
 	const matchPreferences = getModelMatchPreferences(settings);
 	for (const role of roles) {
 		const resolved = resolveModelRoleValue(settings.getModelRole(role), availableModels, {
@@ -1530,7 +1655,7 @@ export function resolveRoleSelection(
 			matchPreferences,
 		});
 		if (resolved.model) {
-			return { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			return { role, model: resolved.model, thinkingLevel: resolved.thinkingLevel };
 		}
 	}
 	return undefined;
@@ -2069,7 +2194,7 @@ export async function findInitialModel(options: {
 	// 4. Try first available model with valid API key
 	const availableModels = modelRegistry.getAvailable();
 
-	const fallback = pickDefaultAvailableModel(availableModels);
+	const fallback = pickDefaultAvailableModel(availableModels, provider => modelRegistry.hasConcreteAuth(provider));
 	if (fallback) {
 		return { model: fallback, thinkingLevel: undefined, fallbackMessage: undefined };
 	}
@@ -2121,7 +2246,9 @@ export async function restoreModelFromSession(
 	// Try to find any available model
 	const availableModels = modelRegistry.getAvailable();
 
-	const fallbackModel = pickDefaultAvailableModel(availableModels);
+	const fallbackModel = pickDefaultAvailableModel(availableModels, provider =>
+		modelRegistry.hasConcreteAuth(provider),
+	);
 	if (fallbackModel) {
 		if (shouldPrintMessages) {
 			console.log(chalk.dim(`Falling back to: ${fallbackModel.provider}/${fallbackModel.id}`));

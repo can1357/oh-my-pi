@@ -121,7 +121,7 @@ The automatic paths are intentionally different:
   - On soft-compaction success, `agent.continue()` is scheduled to retry the turn.
 
 - **Threshold maintenance**
-  - Trigger: successful, non-error assistant message whose adjusted context tokens exceed `resolveThresholdTokens(...)`.
+  - Trigger: successful, non-error assistant message whose adjusted context tokens exceed `resolveThresholdTokens(...)`. The measured count comes from `calculateContextTokens(...)`, which subtracts provider-side orchestration tokens (billable, but never replayed into the conversation prefix) so auto-compaction and context-promotion thresholds are not inflated by them.
   - Mid-turn maintenance also checks safe tool-loop boundaries before the next provider request when `compaction.midTurnEnabled !== false`.
   - Tool-output pruning can reduce the measured token count before threshold comparison.
   - Context promotion is tried before post-turn compaction.
@@ -143,7 +143,7 @@ Threshold, incomplete-output, and overflow recovery advance to the next configur
 
 Including `snapcompact` in `compaction.methodOrder` replaces the LLM summarization call with a local, deterministic archival pass (`compact` from `@oh-my-pi/snapcompact`):
 
-- The discarded history is serialized, whitespace-collapsed, and printed onto model-aware PNG frames (frame width fixed per shape; frame height hugs the rows actually printed) using bundled public-domain pixel fonts. The shape — and frame size — resolve from the **model id** when the model line was measured: Claude reads X.org `8x13` glyphs on an 11px advance (extra letter-spacing, black ink — `11on16-bw`; high-res lines — Opus 4.7+, Fable, Mythos — get 1932px frames under Anthropic's 4,784 visual-token cap, older lines stay at 1568px), Gemini reads `8x13` glyphs on a 22px pitch (extra leading, black ink — `8on22-bw` at 2048px, since Gemini 3.x bills a fixed 1,120-token budget per image at any pixel size), GPT/Codex read the same `8on22-bw` shape at 1568px (patch billing is area-proportional, so larger frames cannot improve chars per token), and Kimi/GLM read `8x13` glyphs on a 16px pitch (`8on16-bw` at 1568px — kimi's processor downscales past 1792px). A Claude routed through Vertex or OpenRouter keeps its Claude shape. Unmeasured models fall back to their wire API family (Anthropic-family/unknown → `11on16-bw`, Google → `8on22-bw`, OpenAI-compatible → `8on22-bw`); billing (per-family patch/budget formulas, OpenAI's `detail: "original"` hint) always follows the API carrying the request, computed for the resolved frame size. The `snapcompact.shape` setting (default `auto`) forces one of the research-eval variants instead: square grids (`8x8r`/`8x8u`/`6x6u`/`5x8` × sentence-hue/black ink) or the per-model eval winners (`6x12-dim`, `8x13-bw`, `8on16-bw`, `8on22-bw`, `11on16-bw`, and the two-column word-wrapped `doc-8on16-bw`/`-sent`/`-sent-dim`, where `dim` prints stopwords in gray). A forced variant keeps its geometry but is re-priced for the target provider's image billing. The same setting governs inline system-prompt/tool-result imaging (`snapcompact.systemPrompt`, `snapcompact.toolResults`).
+- The discarded history is serialized, whitespace-collapsed, and printed onto model-aware PNG frames (frame width fixed per shape; frame height hugs the rows actually printed) using bundled public-domain pixel fonts. The shape — and frame size — resolve from the **model id** when the model line was measured: Claude reads X.org `8x13` glyphs on an 11px advance (extra letter-spacing, black ink — `11on16-bw`; high-res lines — Opus 4.7+, Fable, Mythos — get 1932px frames under Anthropic's 4,784 visual-token cap, older lines stay at 1568px), Gemini reads `8x13` glyphs on a 22px pitch (extra leading, black ink — `8on22-bw` at 2048px, since Gemini 3.x bills a fixed 1,120-token budget per image at any pixel size), GPT/Codex read the same `8on22-bw` shape at 1568px (patch billing is area-proportional, so larger frames cannot improve chars per token), and Kimi/GLM read `8x13` glyphs on a 16px pitch (`8on16-bw` at 1568px — kimi's processor downscales past 1792px). A Claude routed through Vertex or OpenRouter keeps its Claude shape. Auto selection is also font-aware (`resolveShapeForText`): when the model-default font cannot safely render the transcript, or wide CJK glyphs dominate it and the `silver16-bw` grid can render it safely, auto switches to `silver16-bw`; forced variants are never overridden. Unmeasured models fall back to their wire API family (Anthropic-family/unknown → `11on16-bw`, Google → `8on22-bw`, OpenAI-compatible → `8on22-bw`); billing (per-family patch/budget formulas, OpenAI's `detail: "original"` hint) always follows the API carrying the request, computed for the resolved frame size. The `snapcompact.shape` setting (default `auto`) forces one of the research-eval variants instead: square grids (`8x8r`/`8x8u`/`6x6u`/`5x8` × sentence-hue/black ink) or the per-model eval winners (`6x12-dim`, `8x13-bw`, `8on16-bw`, `8on22-bw`, `11on16-bw`, `silver16-bw` — the embedded Silver TrueType font on a 16px grid for CJK and other non-Latin text — and the two-column word-wrapped `doc-8on16-bw`/`-sent`/`-sent-dim`, where `dim` prints stopwords in gray). A forced variant keeps its geometry but is re-priced for the target provider's image billing. The same setting governs inline system-prompt/tool-result imaging (`snapcompact.systemPrompt`, `snapcompact.toolResults`).
 - Serialization keeps the archive conversation-dense: tool results are truncated head+tail (default 2,000 chars at a 0.6 head ratio), tool-call argument values are capped per value (500) and per call (2,000), and tool output is printed in dim gray ink so conversation reads louder than tool noise. All budgets and the dimming are configurable via `SerializeOptions` (`toolResultMaxChars`, `toolArgMaxChars`, `toolCallMaxChars`, `truncateHeadRatio`, `dimToolResults`).
 - The snapcompact archive persists under `CompactionEntry.preserveData.snapcompact` as bounded source text plus rendered frames. On each context rebuild it is reconstructed into ordered compaction blocks: plain text at the oldest edge, an imaged middle, then plain text at the newest edge. The entry's `summary` is just the short resume lead-in plus the usual file-operation list.
 - Later compactions re-render from that bounded source text (`Archive.text`), not by carrying old PNGs forward blindly. `maxFrames` now defaults to `MAX_FRAMES_DEFAULT` (80) and acts only as an upper limit; when the imaged middle is large it foveates internally (HQ/LQ/HQ), while both chronological edges stay verbatim text.
@@ -186,9 +186,10 @@ The flag never reaches provider wire formats, and flagged pairs are never remove
 `prepareCompaction()` only considers entries since the last compaction entry (if any).
 
 1. Find previous compaction index.
-2. Compute `boundaryStart = prevCompactionIndex + 1`.
-3. Adapt `keepRecentTokens` using measured usage ratio when available.
-4. Run `findCutPoint()` over the boundary window.
+2. Honor the latest `/clear` `reset_boundary` marker: a boundary after the last reusable compaction supersedes it, so a compaction after an in-place `/clear` only summarizes messages created after the reset (issue #8718).
+3. Compute `boundaryStart = prevCompactionIndex + 1`.
+4. Adapt `keepRecentTokens` using measured usage ratio when available.
+5. Run `findCutPoint()` over the boundary window.
 
 Valid cut points include:
 
@@ -247,13 +248,15 @@ Prompt selection:
 - short UI summary: `compaction-short-summary.md`
 - handoff document: `handoff-document.md` (used by `generateHandoff(...)`, not serialized compaction)
 
-Remote summarization modes:
+Remote summarization modes, consulted in order (each stage falls back to the next while one is available):
 
-- If `compaction.remoteEndpoint` is set and remote compaction is enabled, local summary generation POSTs one of two wire formats:
+- **V2 streaming Responses compaction** (tried first, on by default via `compaction.remoteStreamingV2Enabled`): for eligible models — `shouldUseCompactionV2Streaming(...)`: `openai-responses`, `azure-openai-responses`, or `openai-codex-responses` APIs with `remoteCompaction.v2StreamingEnabled` and a resolvable Responses endpoint — compaction forwards the full conversation, including provider-native tool-call history replay, to the model's normal Responses streaming endpoint with a trailing `compaction_trigger` input item, and requires exactly one streamed `compaction` output item. The request carries session routing and prompt-cache identifiers (routing/session-id headers plus `prompt_cache_key`) and resolves the model's reasoning effort the same way a normal turn does. Replacement history is Codex-style: retained real user messages within the `compaction.v2RetainedMessageBudget` (default `64000` tokens, clamped to that ceiling) followed by the compaction item, stored in `preserveData.openaiRemoteCompaction` (version `"v2"`). Transient stream errors retry up to `V2_COMPACTION_MAX_RETRIES` (`2`) times with exponential backoff under a 3-minute timeout (`V2_COMPACTION_TIMEOUT_MS`, same as V1); user aborts are never retried.
+- **V1 native `/responses/compact`**: for OpenAI/OpenAI Codex models (`shouldUseOpenAiRemoteCompaction`), when remote compaction is enabled and V2 did not run (ineligible or failed), compaction tries the provider-native `/responses/compact` endpoint. It preserves provider replacement history in `preserveData.openaiRemoteCompaction`. A native failure surfaces its transport error instead of silently switching to generic summarization — unless `compaction.remoteEndpoint` is set, in which case summary generation falls through to that endpoint/local summarization.
+- **Custom remote endpoint**: if `compaction.remoteEndpoint` is set and remote compaction is enabled, local summary generation POSTs one of two wire formats:
   - custom omp summarizer endpoints receive `{ systemPrompt, prompt }` and must return JSON containing at least `{ summary }`.
   - OpenAI-compatible endpoints whose path ends in `/chat/completions` receive `{ model, messages, stream: false }`, where `messages` contains one system prompt and one user prompt. The summary is read from `choices[0].message.content`, which lets self-hosted servers such as llama.cpp and vLLM act as remote compactors without a separate summarizer shim.
-- Compatible OpenAI Responses, Azure OpenAI Responses, and Codex models whose catalog metadata enables V2 streaming compaction first append a `compaction_trigger` to a normal Responses stream. The returned compaction item plus retained real user messages become replacement history, bounded by `compaction.v2RetainedMessageBudget`; the replacement is persisted under `preserveData.openaiRemoteCompaction`.
-- If V2 is unavailable or fails, eligible OpenAI/OpenAI Codex models try the provider-native `/responses/compact` path. Native failure then falls back to local summarization.
+
+When a native remote compaction (V2 or V1) succeeds, local LLM summarization is skipped entirely — the durable history lives in the provider replay payload and the stored `summary` is a placeholder lead-in plus the file-operation list.
 
 ### Handoff generation
 
@@ -372,6 +375,8 @@ Can:
 
 - cancel compaction (`{ cancel: true }`)
 - provide full custom compaction payload (`{ compaction: CompactionResult }`)
+
+The hook's `customInstructions` carries only the public user focus. Internal summarizer guidance — currently the plan-mode "Approve and compact context" distillation prompt — travels a separate `internalGuidance` channel on `CompactOptions` that reaches only native summarization, never this hook or `session.compacting`; when both are set the summarizer uses `internalGuidance` while hooks still see the public `customInstructions` (issue #4359).
 
 ### `session.compacting`
 

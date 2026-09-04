@@ -891,9 +891,50 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should reject malformed internal-URL selectors instead of dumping the whole resource", async () => {
-			await expect(readTool.execute("test-call-bad-internal-sel", { path: "artifact://3:-100" })).rejects.toThrow(
-				/Invalid selector ':-100'/,
+			await expect(readTool.execute("test-call-bad-internal-sel", { path: "artifact://3:-100-5" })).rejects.toThrow(
+				/Invalid selector ':-100-5'/,
 			);
+		});
+
+		it("reads the last N lines with a :-N tail selector (1 leading context line, no trailing)", async () => {
+			const testFile = path.join(testDir, "tail-test.txt");
+			const lines = Array.from({ length: 100 }, (_, i) => `Line ${i + 1}`);
+			fs.writeFileSync(testFile, lines.join("\n"));
+
+			const output = getTextOutput(await readTool.execute("test-tail", { path: `${testFile}:-10` }));
+
+			expect(output).not.toContain("Line 89");
+			expect(output).toContain("Line 90");
+			expect(output).toContain("Line 91");
+			expect(output).toContain("Line 100");
+			expect(output).not.toContain("Use :");
+		});
+
+		it("tails a file past the snapshot cap without buffering it", async () => {
+			const testFile = path.join(testDir, "tail-large.txt");
+			const line = `${"x".repeat(1024)}`;
+			const total = 12_000;
+			fs.writeFileSync(testFile, Array.from({ length: total }, (_, i) => `${i + 1} ${line}`).join("\n"));
+			expect(fs.statSync(testFile).size).toBeGreaterThan(8 * 1024 * 1024);
+
+			const output = getTextOutput(await readTool.execute("test-tail-large", { path: `${testFile}:-3` }));
+
+			expect(output).not.toContain(`${total - 4} x`);
+			expect(output).toContain(`${total - 3} x`);
+			expect(output).toContain(`${total} x`);
+		});
+
+		it("tail selector is verbatim under :raw and clamps to the whole file when N exceeds it", async () => {
+			const testFile = path.join(testDir, "tail-raw.txt");
+			fs.writeFileSync(testFile, "alpha\nbeta\ngamma\n");
+
+			const raw = getTextOutput(await readTool.execute("test-tail-raw", { path: `${testFile}:raw:-2` }));
+			expect(raw).toBe("gamma\n");
+
+			const clamped = getTextOutput(await readTool.execute("test-tail-clamp", { path: `${testFile}:-50` }));
+			expect(clamped).toContain("alpha");
+			expect(clamped).toContain("gamma");
+			expect(clamped).not.toContain("beyond end of file");
 		});
 
 		it("should include truncation details when truncated", async () => {
@@ -1962,13 +2003,13 @@ describe("Coding Agent Tools", () => {
 			const originalContent = "Hello, world!";
 			fs.writeFileSync(testFile, originalContent);
 
-			await expect(
-				editTool.execute("test-call-6", {
-					path: testFile,
-					old_string: "nonexistent",
-					new_string: "testing",
-				}),
-			).rejects.toThrow(/Could not find/);
+			const result = await editTool.execute("test-call-6", {
+				path: testFile,
+				old_string: "nonexistent",
+				new_string: "testing",
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Could not find/);
 		});
 
 		it("should fail if text appears multiple times", async () => {
@@ -1976,13 +2017,13 @@ describe("Coding Agent Tools", () => {
 			const originalContent = "foo foo foo";
 			fs.writeFileSync(testFile, originalContent);
 
-			await expect(
-				editTool.execute("test-call-7", {
-					path: testFile,
-					old_string: "foo",
-					new_string: "bar",
-				}),
-			).rejects.toThrow(/Found 3 occurrences/);
+			const result = await editTool.execute("test-call-7", {
+				path: testFile,
+				old_string: "foo",
+				new_string: "bar",
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Found 3 occurrences/);
 		});
 
 		it("should replace all occurrences with replace_all: true", async () => {
@@ -2020,28 +2061,28 @@ function b() {
 			);
 
 			// With multiple fuzzy matches, the tool rejects for safety to avoid ambiguous replacements
-			await expect(
-				editTool.execute("test-all-fuzzy", {
-					path: testFile,
-					old_string: "if (x) {\n  doThing();\n}",
-					new_string: "if (y) {\n  doOther();\n}",
-					replace_all: true,
-				}),
-			).rejects.toThrow(/Found 2 high-confidence matches/);
+			const result = await editTool.execute("test-all-fuzzy", {
+				path: testFile,
+				old_string: "if (x) {\n  doThing();\n}",
+				new_string: "if (y) {\n  doOther();\n}",
+				replace_all: true,
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Found 2 high-confidence matches/);
 		});
 
 		it("should fail with replace_all: true if no matches found", async () => {
 			const testFile = path.join(testDir, "edit-all-nomatch.txt");
 			fs.writeFileSync(testFile, "hello world");
 
-			await expect(
-				editTool.execute("test-all-nomatch", {
-					path: testFile,
-					old_string: "nonexistent",
-					new_string: "bar",
-					replace_all: true,
-				}),
-			).rejects.toThrow(/Could not find/);
+			const result = await editTool.execute("test-all-nomatch", {
+				path: testFile,
+				old_string: "nonexistent",
+				new_string: "bar",
+				replace_all: true,
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Could not find/);
 		});
 
 		it("should replace multiline text with replace_all: true", async () => {
@@ -3236,13 +3277,13 @@ describe("edit tool CRLF handling", () => {
 
 		fs.writeFileSync(testFile, "hello\r\nworld\r\n---\r\nhello\nworld\n");
 
-		await expect(
-			editTool.execute("test-crlf-dup", {
-				path: testFile,
-				old_string: "hello\nworld\n",
-				new_string: "replaced\n",
-			}),
-		).rejects.toThrow(/Found 2 occurrences/);
+		const result = await editTool.execute("test-crlf-dup", {
+			path: testFile,
+			old_string: "hello\nworld\n",
+			new_string: "replaced\n",
+		});
+		expect(result.isError).toBe(true);
+		expect(getTextOutput(result)).toMatch(/Found 2 occurrences/);
 	});
 
 	// TODO: CRLF preservation broken by LSP formatting - fix later

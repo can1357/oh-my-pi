@@ -8,6 +8,7 @@ import {
 	STREAM_ENVELOPE_ERROR_PREFIX,
 } from "./classes";
 import {
+	is402BillingCapBody,
 	isAccountScopedCapText,
 	isDashScopeTokenLimitText,
 	isOpaqueStatusBody,
@@ -153,7 +154,7 @@ function matchesPayloadRejectionText(text: string): boolean {
 
 const TIMEOUT_PATTERN = /\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bstream stall\b/i;
 const TRANSIENT_ENVELOPE_PATTERN = /anthropic stream envelope error:/i;
-const TRANSIENT_ENVELOPE_BEFORE_START_PATTERN = /before message_start/i;
+const TRANSIENT_ENVELOPE_TRUNCATION_PATTERN = /before message_(?:start|stop)/i;
 export const STREAM_READ_ERROR_PATTERN = /stream[_ -]?read[_ -]?error/i;
 export const TRANSIENT_TRANSPORT_PATTERN =
 	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call/i;
@@ -211,15 +212,6 @@ const STALE_RESPONSE_ITEM_DETAIL_PATTERN = /not[ _]?found|invalid|expired|stale|
 export const LLAMA_CPP_TOOL_CALL_PARSE_PATTERN =
 	/failed to parse tool call arguments as json|\[json\.exception\.parse_error\.101\]/i;
 
-// Copilot fleet skew: HTTP 400 `model_not_supported` can reject a model that
-// `/models` advertised on the same host when the request lands on a stale
-// replica. `model_not_available_for_integrator` is deliberately excluded:
-// GitHub also uses it for stable per-integrator entitlement denials and includes
-// that integrator's actionable `Available models` list in the response.
-const COPILOT_TRANSIENT_MODEL_CODES: Record<string, true> = {
-	model_not_supported: true,
-};
-const COPILOT_TRANSIENT_MODEL_PATTERN = /model_not_supported/i;
 // Fireworks (and other OpenAI-compat backends) can abort mid-generation with an
 // HTTP 400 `invalid_request_error` whose body reports a model-side numerical
 // fault: "Floating point NaN (not-a-number) is detected in generation". Despite
@@ -404,7 +396,7 @@ function isTransientErrorText(text: string): boolean {
 	return (
 		isUnexpectedSocketCloseMessage(text) ||
 		isStreamReadErrorText(text) ||
-		(TRANSIENT_ENVELOPE_PATTERN.test(text) && TRANSIENT_ENVELOPE_BEFORE_START_PATTERN.test(text)) ||
+		(TRANSIENT_ENVELOPE_PATTERN.test(text) && TRANSIENT_ENVELOPE_TRUNCATION_PATTERN.test(text)) ||
 		TRANSIENT_TRANSPORT_PATTERN.test(text)
 	);
 }
@@ -471,26 +463,24 @@ function classifyText(
 
 		const isLimitStatus = isUsageLimitStatus(statusClean);
 		const reason = parseRateLimitReason(cleanMessage);
+		const is402BillingCap = statusClean === 402 && is402BillingCapBody(cleanMessage);
 		// Concurrency caps (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") are shed-and-backoff, not credential-rotatable —
 		// exclude them even when the quota-worded phrasing matches the generic
 		// usage-limit text matcher, whose `quota.?exceeded` arm would otherwise
 		// set Flag.UsageLimit and burn a healthy sibling credential. HTTP 402 is
-		// excluded from this gate: it is categorically an account-billing cap, so
-		// a 402 whose body merely mentions concurrency still classifies as a
-		// usage limit, mirroring isUsageLimitOutcome.
-		const isBillingCapStatus = statusClean === 402;
-		const concurrencyExcluded = reason === "CONCURRENT_LIMIT" && !isBillingCapStatus;
+		// excluded from this gate: a 402 whose body merely mentions concurrency
+		// still classifies as a usage limit, mirroring isUsageLimitOutcome.
+		const concurrencyExcluded = reason === "CONCURRENT_LIMIT" && statusClean !== 402;
 		if (
 			!concurrencyExcluded &&
-			(matchesUsageLimitText(cleanMessage) ||
+			(is402BillingCap ||
+				matchesUsageLimitText(cleanMessage) ||
 				((statusClean === 403 || statusClean === undefined) && isAccountScopedCapText(cleanMessage)) ||
-				(isLimitStatus &&
-					(isOpaque || reason === "QUOTA_EXHAUSTED" || (isBillingCapStatus && reason === "CONCURRENT_LIMIT"))))
+				(isLimitStatus && (isOpaque || reason === "QUOTA_EXHAUSTED")))
 		) {
 			kinds |= Flag.UsageLimit;
 		}
-
 		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
 		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
 		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests
@@ -502,8 +492,6 @@ function classifyText(
 			kinds |= Flag.StaleResponsesItem;
 		}
 
-		// Copilot's `model_not_supported` fleet-skew rejection is transient.
-		if (statusClean === 400 && COPILOT_TRANSIENT_MODEL_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
 		// Fireworks mid-generation NaN 400 is a model-side decode fault, not a bad
 		// request; a byte-identical replay succeeds, so treat it as transient.
 		if (statusClean === 400 && GENERATION_NAN_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
@@ -518,6 +506,9 @@ function classifyText(
 		!(errorMessage && hasTokenContextOverflowEvidence(errorMessage))
 	) {
 		kinds |= Flag.PayloadRejected;
+	}
+	if (statusEvidence === 402 && (errorMessage === undefined || isOpaqueStatusBody(errorMessage))) {
+		kinds |= Flag.UsageLimit;
 	}
 	if (kinds !== 0) return create(kinds);
 	const fallbackStatus = errorStatus ?? (errorMessage ? status({ message: errorMessage }) : undefined);
@@ -567,7 +558,9 @@ export function classify(error: unknown, api?: Api): number {
 			const { status: codeStatus, code } = link;
 			if (
 				code === "usage_limit_reached" ||
-				(code === "insufficient_quota" && !isDashScopeTokenLimitText(link.message))
+				(code === "insufficient_quota" && !isDashScopeTokenLimitText(link.message)) ||
+				(codeStatus === 402 &&
+					(code === "payment_required" || code === "deactivated_workspace" || is402BillingCapBody(link.message)))
 			) {
 				linkKinds |= Flag.UsageLimit;
 			}
@@ -689,38 +682,16 @@ export function isFastModeUnsupported(error: unknown): boolean {
 	return is(classify(error), Flag.FastModeUnsupported);
 }
 
-/**
- * Depth-bounded search for a provider error `code`. SDK error objects keep the
- * parsed response body on `.error`, and Copilot's body is itself
- * `{ error: { code } }`, so the code sits up to two envelopes below the thrown
- * error depending on which SDK produced it.
- */
-function providerErrorCode(error: object): string | undefined {
-	let node: object = error;
-	for (let depth = 0; depth < 3; depth++) {
-		if ("code" in node && typeof node.code === "string") return node.code;
-		if (!("error" in node)) return undefined;
-		const nested: unknown = node.error;
-		if (!nested || typeof nested !== "object") return undefined;
-		node = nested;
-	}
-	return undefined;
-}
+const CLINE_PASS_SURFACE_GATE_PATTERN = /only available via cline product surfaces/i;
 
 /**
- * GitHub Copilot 400 `model_not_supported` response for a model advertised by
- * `/models` — transient fleet skew, not a malformed request. Reads the
- * structural `code` through the SDK/body envelopes, then falls back to the
- * stringified body both SDK families put in `message`.
+ * Cline's gateway gates some roster entries (certain free-tier models) to its
+ * own product surfaces with a 403. The API key is valid — the restriction is
+ * per-model client policy — so it must neither rotate sibling credentials (they
+ * fail identically) nor surface as an auth failure.
  */
-export function isCopilotTransientModelError(error: unknown): boolean {
-	if (!error || typeof error !== "object" || status(error) !== 400) return false;
-	const code = providerErrorCode(error);
-	// `Object.hasOwn`, not a bare index: `code` is provider-controlled, and a
-	// prototype key (`__proto__`, `toString`, …) would otherwise read truthy.
-	if (code !== undefined && Object.hasOwn(COPILOT_TRANSIENT_MODEL_CODES, code)) return true;
-	const message: unknown = "message" in error ? error.message : undefined;
-	return typeof message === "string" && COPILOT_TRANSIENT_MODEL_PATTERN.test(message);
+export function isClinePassSurfaceGateMessage(errorMessage: string | undefined): boolean {
+	return errorMessage !== undefined && CLINE_PASS_SURFACE_GATE_PATTERN.test(errorMessage);
 }
 
 export function classifyMessage(message: {

@@ -18,6 +18,8 @@ export * from "./components/spacer";
 export * from "./components/tab-bar";
 export * from "./components/text";
 export * from "./components/truncated-text";
+// Headless debug socket server
+export * from "./debug-server";
 // DECCARA rectangular-SGR background-fill optimizer
 export * from "./deccara";
 // Desktop notifications via D-Bus (Linux freedesktop notifications)
