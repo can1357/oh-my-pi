@@ -289,7 +289,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "loop",
 		icon: "loop",
 		description:
-			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Esc cancels the current iteration; /loop again to disable.",
+			"Toggle loop mode. A count/unbounded loop re-submits the prompt after every yield; a duration (e.g. 30s, 10m) instead fires on that fixed interval — steering the prompt into a turn that is still working, or submitting it when the agent has stopped. Esc cancels the current iteration; /loop again to disable.",
 		inlineHint: "[count|duration] [prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
