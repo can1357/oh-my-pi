@@ -44,15 +44,12 @@ function makeProgress(recentOutput: string[]): AgentProgress {
 }
 
 function makeParentWithNestedProgress(childCount: number): AgentProgress {
-	const children = Array.from(
-		{ length: childCount },
-		(_, index): AgentProgress => ({
-			...makeProgress([]),
-			index,
-			id: `Nested${index + 1}`,
-			task: `nested child ${index + 1}`,
-		}),
-	);
+	const children = Array.from({ length: childCount }, (_, index): AgentProgress => ({
+		...makeProgress([]),
+		index,
+		id: `Nested${index + 1}`,
+		task: `nested child ${index + 1}`,
+	}));
 	return {
 		...makeProgress([]),
 		id: "Parent",

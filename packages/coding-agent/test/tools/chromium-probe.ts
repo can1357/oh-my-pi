@@ -48,3 +48,27 @@ export function chromiumAvailable(): Promise<boolean> {
 	probe ??= chromiumCanLaunch();
 	return probe;
 }
+
+let visibleProbe: Promise<boolean> | undefined;
+
+/**
+ * Gate for tests that launch a *headful* Chromium (`headless: false`).
+ *
+ * `chromiumAvailable()` only proves the binary execs: `chrome --version`
+ * exits 0 with no display at all, so it cannot gate a headful launch. On a
+ * GH-hosted ubuntu runner there is no X server and no xvfb in the workflow,
+ * so `puppeteer.launch({ headless: false })` throws "Missing X server or
+ * $DISPLAY" and the suite fails rather than skipping. Require a display on
+ * Linux; macOS and Windows launch headful without one.
+ *
+ * Same promise-not-awaited-const shape as `chromiumAvailable()`, for the same
+ * temporal-dead-zone reason.
+ */
+export function visibleBrowserAvailable(): Promise<boolean> {
+	visibleProbe ??= (async () => {
+		if (!(await chromiumAvailable())) return false;
+		if (process.platform !== "linux") return true;
+		return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+	})();
+	return visibleProbe;
+}

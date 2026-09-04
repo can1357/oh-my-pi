@@ -45,7 +45,7 @@ class RecordingTracer implements Tracer {
 	startSpan(name: string, options?: SpanOptions, _ctx?: OtelContext): Span {
 		const record: RecordedSpan = {
 			name,
-			attributes: { ...(options?.attributes ?? {}) },
+			attributes: { ...options?.attributes },
 			ended: false,
 			exceptions: [],
 		};
@@ -630,8 +630,9 @@ describe("regressions: agent loop telemetry/run summary", () => {
 		const tracer = new RecordingTracer();
 		// `concurrency: "exclusive"` serializes the batch so we can deterministically
 		// reach the `interruptState.triggered` early-return inside `runTool` for
-		// the second and third call. Pre-fix that path called `recordSkippedTool`
-		// AND the tail sweep called it again, double-counting.
+		// the second and third call (only interruptible waits are skipped there).
+		// Pre-fix that path called `recordSkippedTool` AND the tail sweep called
+		// it again, double-counting.
 		const fastTool: AgentTool = {
 			name: "fast",
 			label: "fast",
@@ -639,6 +640,7 @@ describe("regressions: agent loop telemetry/run summary", () => {
 			parameters: type({ value: type("string").optional() }),
 			intent: "omit",
 			concurrency: "exclusive",
+			interruptible: true,
 			execute: async () => {
 				state.firstDone = true;
 				return { content: [{ type: "text", text: "ok" }], details: {} };

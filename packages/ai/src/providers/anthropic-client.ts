@@ -283,7 +283,7 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 		callerSignal?.addEventListener("abort", onAbort, { once: true });
 		try {
 			return await fetchFn(url, {
-				...(this.#options.fetchOptions ?? {}),
+				...this.#options.fetchOptions,
 				method: "POST",
 				headers,
 				body,

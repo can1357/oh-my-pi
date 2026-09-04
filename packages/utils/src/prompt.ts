@@ -196,6 +196,7 @@ export function format(content: string, options: PromptFormatOptions = {}): stri
 	} = options;
 	const isPreRender = renderPhase === "pre-render";
 	const lines = content.split("\n");
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const result: string[] = new Array(lines.length);
 	let n = 0; // logical length of `result` (pops are n--)
 	let inCodeBlock = false;

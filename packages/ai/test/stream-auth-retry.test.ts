@@ -48,9 +48,28 @@ function usageLimitError(): Error & { status: number } {
 	});
 }
 
-function googleResourceExhaustedMessage(): string {
-	return "Google API error (429): Resource exhausted. Please try again later.";
-}
+const GOOGLE_CAPACITY_EXHAUSTED_MESSAGE = `Cloud Code Assist API error (429): ${JSON.stringify({
+	error: {
+		code: 429,
+		message: "You have exhausted your capacity on this model. Resets in 0s.",
+		status: "RESOURCE_EXHAUSTED",
+		details: [
+			{
+				"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+				reason: "RATE_LIMIT_EXCEEDED",
+				domain: "cloudcode-pa.googleapis.com",
+				metadata: {
+					model: "gemini-3.7-flash-medium",
+					quotaResetDelay: "835.150299ms",
+				},
+			},
+			{
+				"@type": "type.googleapis.com/google.rpc.RetryInfo",
+				retryDelay: "0.835150299s",
+			},
+		],
+	},
+})}`;
 
 function model(): Model<Api> {
 	return {
@@ -827,7 +846,7 @@ describe("streamSimple resolver auth retry", () => {
 		}
 	});
 
-	it("rotates on the exact Google Resource exhausted 429 error before content", async () => {
+	it("rotates on short Google account capacity exhaustion before content", async () => {
 		const keys: unknown[] = [];
 		const retryContexts: ApiKeyResolveContext[] = [];
 		registerCustomApi(
@@ -844,7 +863,7 @@ describe("streamSimple resolver auth retry", () => {
 					stream.push({
 						type: "error",
 						reason: "error",
-						error: assistantError(googleResourceExhaustedMessage(), 429),
+						error: assistantError(GOOGLE_CAPACITY_EXHAUSTED_MESSAGE, 429),
 					});
 				});
 				return stream;
@@ -867,8 +886,9 @@ describe("streamSimple resolver auth retry", () => {
 		expect(retryContexts.map(ctx => ({ lastChance: ctx.lastChance, hasError: ctx.error !== undefined }))).toEqual([
 			{ lastChance: true, hasError: true },
 		]);
-		expect(retryContexts[0]).toBeDefined();
-		expect((retryContexts[0]!.error as Error).message).toContain("Resource exhausted");
+		const retryError = retryContexts[0]?.error;
+		if (!(retryError instanceof Error)) throw new Error("Expected credential retry error");
+		expect(retryError.message).toContain("exhausted your capacity");
 	});
 
 	it("surfaces the original error when the resolver declines every retry", async () => {

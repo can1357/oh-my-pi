@@ -16,7 +16,7 @@ export function sliceCodePoints(text: string, start: number, end?: number): stri
 	let ordinal = 0;
 	let startOffset = text.length;
 	let endOffset = text.length;
-	for (let index = 0; index < text.length; ) {
+	for (let index = 0; index < text.length;) {
 		if (ordinal === normalizedStart) startOffset = index;
 		if (ordinal === normalizedEnd) {
 			endOffset = index;

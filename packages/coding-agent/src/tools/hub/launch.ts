@@ -77,7 +77,9 @@ function registerCompletionSink(
 			if (!delivery) throw new Error("Session cannot accept launch completion delivery");
 			return delivery;
 		});
+		// oxlint-disable-next-line prefer-const -- read by the cleanup closure before assignment
 		let unregisterDispose: (() => void) | void;
+		// oxlint-disable-next-line prefer-const -- read by the cleanup closure before assignment
 		let unregisterSessionChange: (() => void) | void;
 		const cleanup = (preservePending = false): void => {
 			if (!registration?.active) return;

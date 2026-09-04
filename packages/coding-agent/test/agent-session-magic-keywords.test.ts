@@ -138,10 +138,11 @@ describe("AgentSession magic keyword settings", () => {
 		}>;
 		const notice = promptMessages.find(message => message.customType === "workflow-notice");
 		expect(notice?.customType).toBe("workflow-notice");
-		expect(notice?.content).toContain("`eval`");
-		expect(notice?.content).toContain("`parallel(thunks)`");
-		expect(notice?.content).toContain("**Python (`eval`, Python backend):**");
-		expect(notice?.content).toContain("**JavaScript (`eval`, JavaScript backend):**");
+		expect(notice?.content).toContain("Default to `workpool()`");
+		expect(notice?.content).toContain('`hub` with `op:"wait", ids:["<pool-name>"]`');
+		expect(notice?.content).toContain("**Python:**");
+		expect(notice?.content).toContain("**JavaScript:**");
+		expect(notice?.content).not.toContain("parallel(thunks)");
 	});
 
 	it("updates the workflowz notice when scout is disabled during the session", async () => {
@@ -159,7 +160,7 @@ describe("AgentSession magic keyword settings", () => {
 	});
 
 	it("omits isolation controls from the workflowz notice when isolation is unavailable", async () => {
-		// Default settings: task.isolation.mode is "none", so the preflight
+		// Default settings: task.isolation.enabled is false, so the preflight
 		// rejects `isolated`/`apply`/`merge`. The notice must not advertise
 		// controls the spawn preflight refuses (regression: the notice
 		// unconditionally advertised them, steering the model into rejected
@@ -180,7 +181,7 @@ describe("AgentSession magic keyword settings", () => {
 	it("advertises isolation controls in the workflowz notice when isolation is available", async () => {
 		const created = await createMagicKeywordSession(modelRegistry);
 		session = created.session;
-		created.settings.set("task.isolation.mode", "auto");
+		created.settings.set("task.isolation.enabled", true);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 
 		await session.prompt("please workflowz this");
@@ -200,7 +201,7 @@ describe("AgentSession magic keyword settings", () => {
 		// settings axis.
 		const created = await createMagicKeywordSession(modelRegistry, [mockTaskTool, mockEvalTool], true);
 		session = created.session;
-		created.settings.set("task.isolation.mode", "auto");
+		created.settings.set("task.isolation.enabled", true);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 
 		await session.prompt("please workflowz this");
@@ -215,7 +216,7 @@ describe("AgentSession magic keyword settings", () => {
 	it("advertises isolation controls in the workflowz notice for an isolated session with allowNested", async () => {
 		const created = await createMagicKeywordSession(modelRegistry, [mockTaskTool, mockEvalTool], true);
 		session = created.session;
-		created.settings.set("task.isolation.mode", "auto");
+		created.settings.set("task.isolation.enabled", true);
 		created.settings.set("task.isolation.allowNested", true);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 

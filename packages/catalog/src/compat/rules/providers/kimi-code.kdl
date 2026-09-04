@@ -1,6 +1,18 @@
 // Provider-wire compat for "kimi-code"; regenerated from the frozen census using deployment contract selectors.
 
 provider "kimi-code" {
+	class "kimi" {
+		// Replaces the native Kimi provider thinking-format branch.
+		thinking-format "zai"
+		family "k3" {
+			thinking-format "openai"
+		}
+	}
+	// Replaces streamKimi's TS fallback for models whose discovery metadata omits the protocol.
+	kimi-api-format "anthropic"
+	// Kimi Code derives cache routing from top-level `prompt_cache_key` on
+	// chat completions; replaces the provider check in the request builder.
+	supports-prompt-cache-key #true
 	thinking-mode "effort"
 	// /models omits `supports_image_in` for K2.5, which is vision-capable on
 	// the coding endpoint; the correction is rule-owned.

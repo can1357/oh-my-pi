@@ -1,4 +1,4 @@
-// biome-ignore-all lint/suspicious/noTemplateCurlyInString: sample source-code strings (read fixtures) intentionally contain literal ${...}.
+// oxlint-disable no-template-curly-in-string -- sample source-code strings intentionally contain literal placeholders.
 // Gallery fixtures for the filesystem tools (read, write, glob).
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { ReadToolGroupComponent } from "../../modes/components/read-tool-group";
@@ -147,9 +147,11 @@ export const fsFixtures: Record<string, GalleryFixture> = {
 					].join("\n"),
 				},
 			],
+			// A plain range read records its absolute path only in `meta.source`
+			// (`resolvedPath` marks corrected, URL, and archive reads), so the
+			// renderer paints no `Resolved path` line for it.
 			details: {
 				kind: "file",
-				resolvedPath: "/Users/dev/Projects/pi/packages/coding-agent/src/tools/glob.ts",
 				contentType: "text/typescript",
 				displayContent: { text: readSnippet, startLine: 437 },
 			},

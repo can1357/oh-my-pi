@@ -44,6 +44,23 @@ const bookkeeping: SessionEntry[] = [
 		task: "task",
 		tools: ["bash"],
 	},
+	{
+		...base("usage", "init"),
+		type: "model_usage",
+		purpose: "auto\nthinking",
+		role: "smol\trole",
+		api: "anthropic-messages",
+		provider: "\x1b[31manthropic\x1b[0m",
+		model: "claude\nhaiku",
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+	},
 ] as SessionEntry[];
 
 function selectorFor(entries: SessionEntry[]): TreeSelectorComponent {
@@ -85,6 +102,8 @@ describe("tree selector entry labels", () => {
 		expect(rows).toContain("[service tier: claude:priority]");
 		// A cleared tier is a real transition, so it says so rather than "null".
 		expect(rows).toContain("[service tier: (default)]");
+		expect(rows).toContain("[model usage: auto thinking smol role anthropic/claude haiku]");
+		expect(rows).not.toContain("\x1b[31m");
 	});
 
 	it("falls back to the entry type for kinds with nothing to spell out", () => {

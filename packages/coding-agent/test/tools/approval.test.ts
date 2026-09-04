@@ -204,14 +204,27 @@ describe("MCP fallback and prompt formatting", () => {
 		return new EditTool(session, "sloppy");
 	}
 
+	function sloppySection(path: string, find = "old", put = "new"): string {
+		return [
+			`<SM:EDIT path="${path}">`,
+			"<SM:FIND>",
+			find,
+			"</SM:FIND>",
+			"<SM:PUT>",
+			put,
+			"</SM:PUT>",
+			"</SM:EDIT>",
+		].join("\n");
+	}
+
 	it("shows the file from a sloppy edit section header", () => {
-		const input = "§src/config.go\n§\nold\n»\nnew";
+		const input = sloppySection("src/config.go");
 		expect(formatApprovalPrompt(sloppyEditTool(), { input })).toBe("Allow tool: edit\nFile: src/config.go");
 	});
 
 	it("keeps a mixed internal+workspace sloppy payload at write tier", () => {
 		const editTool = sloppyEditTool();
-		const input = "§local://notes\n§\nold\n»\nnew\n§src/config.go\n§\nold\n»\nnew";
+		const input = `${sloppySection("local://notes")}\n${sloppySection("src/config.go")}`;
 		// Section 0 is internal; the workspace section must still force write tier
 		// and an always-ask prompt because executeSloppy writes both.
 		expect(editTool.approval?.({ input })).toBe("write");
@@ -223,18 +236,18 @@ describe("MCP fallback and prompt formatting", () => {
 	});
 
 	it("keeps an all-internal sloppy payload at read tier", () => {
-		const input = "§local://notes\n§\nold\n»\nnew\n§local://scratch\n§\nold\n»\nnew";
+		const input = `${sloppySection("local://notes")}\n${sloppySection("local://scratch")}`;
 		expect(sloppyEditTool().approval?.({ input })).toBe("read");
 	});
 
 	it("keeps a writable internal sloppy target at write tier", () => {
-		const input = "§vault://notes/test.md\n§\nold\n»\nnew";
+		const input = sloppySection("vault://notes/test.md");
 		expect(sloppyEditTool().approval?.({ input })).toBe("write");
 	});
 
 	it("uses only sloppy section headers for sloppy approval tiering", () => {
 		const editTool = sloppyEditTool();
-		const input = "§src/config.go\n§\n[local://notes]\n»\nupdated";
+		const input = sloppySection("src/config.go", "[local://notes]", "updated");
 		expect(editTool.approval?.({ input })).toBe("write");
 		expect(formatApprovalPrompt(editTool, { input })).toBe("Allow tool: edit\nFile: src/config.go");
 	});

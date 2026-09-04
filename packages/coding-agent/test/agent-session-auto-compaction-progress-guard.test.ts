@@ -1,16 +1,19 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { type CompactionPreparation, resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { INCOMPLETE_RECOVERY_MAX_RETRIES } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 
 it("clamps a reserve exceeding the window for small-window threshold recovery bands", () => {
 	const settings = {
@@ -52,6 +55,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let compactHookEnabled = true;
+	const tempDirs: TempDir[] = [];
 
 	const NOTICE_SOURCE = "compaction";
 	const NO_PROGRESS_FRAGMENT = "Compaction freed too little context to make progress";
@@ -62,10 +66,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
-	beforeEach(() => {
-		compactHookEnabled = true;
-		sessionManager = SessionManager.inMemory();
-
+	function createTestSession(manager: SessionManager): AgentSession {
 		// The progress-guard tests exercise AgentSession's post-compaction state
 		// transitions, not extension discovery. Keep the production hook boundary
 		// while returning the same short-circuit result without compiling a
@@ -105,16 +106,9 @@ describe("AgentSession auto-compaction progress guard", () => {
 			},
 		});
 
-		// Seed a minimal branch so prepareCompaction() returns a preparation.
-		sessionManager.appendMessage({
-			role: "user",
-			content: "hello",
-			timestamp: Date.now(),
-		});
-
-		session = new AgentSession({
+		return new AgentSession({
 			agent,
-			sessionManager,
+			sessionManager: manager,
 			settings: Settings.isolated({
 				// Auto-continue ON so the guarded auto-continue path is exercised.
 				"compaction.autoContinue": true,
@@ -122,10 +116,24 @@ describe("AgentSession auto-compaction progress guard", () => {
 			modelRegistry,
 			extensionRunner: extensionRunner as never,
 		});
+	}
+
+	beforeEach(() => {
+		compactHookEnabled = true;
+		sessionManager = SessionManager.inMemory();
+
+		// Seed a minimal branch so prepareCompaction() returns a preparation.
+		sessionManager.appendMessage({
+			role: "user",
+			content: "hello",
+			timestamp: Date.now(),
+		});
+		session = createTestSession(sessionManager);
 	});
 
 	afterEach(async () => {
 		await session?.dispose();
+		await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 		vi.restoreAllMocks();
 	});
 
@@ -935,6 +943,100 @@ describe("AgentSession auto-compaction progress guard", () => {
 				}),
 			}),
 		);
+	});
+
+	it("durably caps repeated empty length-stop recovery across restart", async () => {
+		// #10594: a model (zai/glm-4.5-flash) kept returning an empty zero-token
+		// `length` turn. Handoff generation produced no document, so recovery fell
+		// to shake-retry, which re-entered the same empty turn ~once/second for 20
+		// minutes and persisted hundreds of empty assistant turns until manual abort.
+		await session.dispose();
+		const tempDir = TempDir.createSync("@pi-incomplete-recovery-cap-");
+		tempDirs.push(tempDir);
+		const cwd = tempDir.path();
+		const sessionDir = path.join(cwd, "sessions");
+		sessionManager = SessionManager.create(cwd, sessionDir);
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file path");
+		sessionManager.appendMessage({
+			role: "user",
+			content: "hello",
+			timestamp: Date.now(),
+		});
+		session = createTestSession(sessionManager);
+		session.settings.set("compaction.methodOrder", ["shake"]);
+		session.settings.set("compaction.enabled", true);
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.set("contextPromotion.enabled", false);
+		compactHookEnabled = false;
+		// Shake schedules a `shake-retry` continuation each pass (nothing to reclaim,
+		// but the incomplete turn is not over threshold), re-entering Case 3 on the
+		// next empty length turn — the loop the report hit. Without a cap it never
+		// terminates.
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		const errorNotices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice" && event.level === "error") errorNotices.push(event.message);
+		});
+
+		const emptyLengthStop = (offset: number): AssistantMessage => ({
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "length",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now() + offset,
+		});
+
+		// Drive the shake-retry loop: each retry produces another empty length turn.
+		// Stop the moment recovery declines to schedule a continuation — that is the
+		// point where a real session would yield instead of re-prompting the model.
+		let attempts = 0;
+		for (let i = 0; i < 20; i++) {
+			const before = continueSpy.mock.calls.length;
+			const msg = emptyLengthStop(i);
+			sessionManager.appendMessage(msg);
+			session.agent.emitExternalEvent({ type: "message_end", message: msg });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [msg] });
+			await session.waitForIdle();
+			attempts++;
+			if (continueSpy.mock.calls.length === before) break;
+		}
+
+		// Bounded: one blocked attempt past the retry cap, not an unbounded loop.
+		expect(attempts).toBe(INCOMPLETE_RECOVERY_MAX_RETRIES + 1);
+		expect(continueSpy).toHaveBeenCalledTimes(INCOMPLETE_RECOVERY_MAX_RETRIES);
+		expect(errorNotices.some(message => /length/i.test(message))).toBe(true);
+		expect(sessionManager.getBranch()).not.toContainEqual(
+			expect.objectContaining({
+				type: "message",
+				message: expect.objectContaining({ role: "assistant", stopReason: "length" }),
+			}),
+		);
+
+		// The capped path appends no successor after dropping the failed turn. Reopen
+		// the journal to prove the durable branch marker, rather than the discarded
+		// physical leaf, selects the active branch after a process restart.
+		await session.dispose();
+		const reloaded = await SessionManager.open(sessionFile, sessionDir);
+		expect(reloaded.getBranch()).not.toContainEqual(
+			expect.objectContaining({
+				type: "message",
+				message: expect.objectContaining({ role: "assistant", stopReason: "length" }),
+			}),
+		);
+		await reloaded.close();
 	});
 
 	it("settles an overlapping successful stop but resumes a thinking-only length stop", async () => {

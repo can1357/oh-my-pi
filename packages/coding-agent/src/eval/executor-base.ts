@@ -15,6 +15,16 @@ import { registerPyToolBridge } from "./py/tool-bridge";
  */
 export type CancelledErrorClass = new (timedOut: boolean) => Error & { timedOut: boolean };
 
+/** Raised when callers reference kernel-owned state before its retained kernel exists. */
+export class EvalKernelNotRunningError extends Error {
+	constructor(language: string) {
+		super(
+			`${language} kernel is not running; tools defined with @tool / tool() live in the kernel and must be (re)defined in an eval cell first`,
+		);
+		this.name = "EvalKernelNotRunningError";
+	}
+}
+
 /** Managed-env values a kernel patch may carry (`null` clears, `undefined` skips). */
 export type KernelEnvPatch = Record<string, string | null | undefined>;
 
@@ -404,25 +414,14 @@ export interface ExecuteWithKernelBaseParams<
 	kernel: GenericKernel<TEnv>;
 	code: string;
 	options: TOptions | undefined;
-	/** Prefix for the per-execution run id (e.g. `"py"`, `"rb"`, `"jl"`). */
+	/** Prefix for the per-execution run id (e.g. `"py"`). */
 	runIdPrefix: string;
 	/** Human-readable language label used in the failure log line. */
 	errorLogLabel: string;
-	/**
-	 * Julia surfaces eval-timeout control events through its normal status path,
-	 * so they must NOT be filtered out the way the JS-status backends do.
-	 */
-	isJulia?: boolean;
 	cancelledErrorClass: CancelledErrorClass;
 	buildKernelEnvPatch: (options: TOptions) => TEnv;
 	formatKernelTimeoutAnnotation: (executionTimeoutMs: number | undefined, kernelKilled: boolean) => string;
 	formatTimeoutAnnotation: (executionTimeoutMs: number | undefined) => string | undefined;
-	/**
-	 * Override how the wall-clock deadline is derived from options. Defaults to
-	 * {@link getExecutionDeadlineMs}; Julia passes the pre-computed `deadlineMs`
-	 * straight through instead of re-deriving from `timeoutMs`.
-	 */
-	resolveDeadlineMs?: (options: TOptions | undefined) => number | undefined;
 }
 
 export async function executeWithKernelBase<
@@ -435,12 +434,10 @@ export async function executeWithKernelBase<
 		options,
 		runIdPrefix,
 		errorLogLabel,
-		isJulia,
 		cancelledErrorClass,
 		buildKernelEnvPatch,
 		formatKernelTimeoutAnnotation,
 		formatTimeoutAnnotation,
-		resolveDeadlineMs,
 	} = params;
 
 	const settings = await Settings.init();
@@ -453,14 +450,14 @@ export async function executeWithKernelBase<
 	});
 
 	const displayOutputs: KernelDisplayOutput[] = [];
-	const deadlineMs = (resolveDeadlineMs ?? getExecutionDeadlineMs)(options);
+	const deadlineMs = getExecutionDeadlineMs(options);
 	const remainingMs = getRemainingTimeoutMs(deadlineMs);
 	const executionTimeoutMs = remainingMs !== undefined && remainingMs > 0 ? remainingMs : undefined;
 	// The wall-clock timeout must abort through the same shield the bridge
 	// watches. A kernel-internal timer SIGINTs the runner but leaves in-flight
-	// bridge calls (parallel() fan-outs of agent()/completion()/tool.*) blocked
-	// in urllib worker threads; the runner then wedges in the pool's
-	// shutdown(wait=True), never emits `done`, and the SIGINT escalation kills
+	// bridge calls (wait() over agent()/completion() handles or tool.*) blocked
+	// in urllib worker threads; the runner then wedges waiting for them, never
+	// emits `done`, and the SIGINT escalation kills
 	// the kernel — losing every variable. Expiring via the shield rejects those
 	// bridge calls, so the workers unwind and the cell settles as a clean
 	// KeyboardInterrupt. It also inherits critical-phase deferral: a timeout
@@ -477,7 +474,7 @@ export async function executeWithKernelBase<
 		if (output.type === "status") {
 			abortShield.handleStatus?.(output.event);
 			options?.onStatus?.(output.event);
-			if (!isJulia && isEvalTimeoutControlEvent(output.event)) return;
+			if (isEvalTimeoutControlEvent(output.event)) return;
 		}
 		displayOutputs.push(output);
 	};
@@ -488,7 +485,7 @@ export async function executeWithKernelBase<
 	// Two aborts cross the bridge, and conflating them is what let a cancelled
 	// turn keep working. Delegated work (above all the subagents `agent()`
 	// spawns) gets the caller's real signal so it dies with the turn — shielding
-	// it here made Python/Ruby/Julia fan-outs outlive a cancel indefinitely,
+	// it here made Python fan-outs outlive a cancel indefinitely,
 	// while JS cells, which never route through this shield, stopped fine. The
 	// shielded signal only governs how long the host waits on a call, holding
 	// the cell open across a critical phase (isolation worktree setup,

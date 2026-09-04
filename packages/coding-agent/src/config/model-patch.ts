@@ -18,6 +18,7 @@ export interface ProviderOverride {
 	guardrailIdentifier?: Model<Api>["guardrailIdentifier"];
 	guardrailVersion?: Model<Api>["guardrailVersion"];
 	guardrailTrace?: Model<Api>["guardrailTrace"];
+	requestMetadata?: Model<Api>["requestMetadata"];
 }
 
 /**
@@ -43,20 +44,40 @@ export interface ProviderOverride {
  * default openai-completions transport after the background catalog
  * refresh — so the first `/model` switch after boot hits the raw OpenAI
  * chat-completions URL instead of the gateway's `/v1/pi/stream` (#2555).
- * See `xiaomi-tp-discovery-merge.test.ts` and the `refresh()` baseUrl-override
- * regression in `model-registry.test.ts`.
+ *
+ * Merged headers are wrapped in `createLiveConfigHeaders` so `!command`
+ * values keep resolving per request on the inference path, matching the
+ * `modelOverrides`/`applyModelPatch` behavior — otherwise a discovery
+ * provider would send the raw `!command` literal upstream (#10457).
+ * The `authHeader`/`apiKey` override fields are threaded into the live
+ * resolver too, so an `authHeader: true` + `apiKey` provider with no explicit
+ * `headers:` block re-derives `Authorization` from the current `apiKey`
+ * resolution each request — a 401 force-refresh (command-cache invalidation)
+ * reaches the retry instead of resending the discovery-time baked bearer
+ * (#10551). See `xiaomi-tp-discovery-merge.test.ts` and the `refresh()`
+ * baseUrl-override regression in `model-registry.test.ts`.
  */
 export function mergeDiscoveredModel<TApi extends Api>(
 	model: Model<TApi>,
 	existing: Model<Api> | undefined,
-	providerOverride?: Pick<ProviderOverride, "baseUrl" | "compat" | "headers" | "remoteCompaction" | "transport">,
+	providerOverride?: Pick<
+		ProviderOverride,
+		"baseUrl" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
+	>,
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
 		return buildModel({
 			...toModelSpec(model),
 			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
-			headers: existing.headers ? { ...existing.headers, ...model.headers } : model.headers,
+			// providerOverride.headers (raw `!command`) must be the last live
+			// source: `model.headers` is a discovery-time resolved snapshot, so
+			// without this a rotated credential (401 → cache invalidation) would
+			// stay shadowed by the stale snapshot on the inference path (#10458).
+			headers: createLiveConfigHeaders([existing.headers, model.headers, providerOverride?.headers], {
+				authHeader: providerOverride?.authHeader,
+				apiKeyConfig: providerOverride?.apiKey,
+			}),
 			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
 				mergeRemoteCompactionConfig(existing.remoteCompaction, model.remoteCompaction),
@@ -70,7 +91,10 @@ export function mergeDiscoveredModel<TApi extends Api>(
 		return buildModel({
 			...toModelSpec(model),
 			baseUrl: providerOverride.baseUrl ?? model.baseUrl,
-			headers: providerOverride.headers ? { ...model.headers, ...providerOverride.headers } : model.headers,
+			headers: createLiveConfigHeaders([model.headers, providerOverride.headers], {
+				authHeader: providerOverride.authHeader,
+				apiKeyConfig: providerOverride.apiKey,
+			}),
 			...(providerOverride.transport !== undefined ? { transport: providerOverride.transport } : {}),
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
 				model.remoteCompaction,

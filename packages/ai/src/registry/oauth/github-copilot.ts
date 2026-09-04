@@ -1,5 +1,5 @@
 /**
- * GitHub Copilot OAuth flow (opencode OAuth app)
+ * GitHub Copilot OAuth flow using the official Copilot CLI app.
  */
 import { scheduler } from "node:timers/promises";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
@@ -10,13 +10,18 @@ import {
 	isPublicGitHubHost,
 	normalizeDomain,
 	normalizeGitHubCopilotEnterpriseDomain,
-	OPENCODE_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
-import type { OAuthCredentials } from "./types";
+import type { OAuthController, OAuthCredentials } from "./types";
 
-const CLIENT_ID = "Ov23li8tweQw6odWQebz";
+const CLIENT_ID = "Ov23ctDVkRmgkPke0Mmm";
+const OAUTH_SCOPE = "read:user";
+const OAUTH_HEADERS = {
+	Accept: "application/json",
+	"Content-Type": "application/x-www-form-urlencoded",
+	"User-Agent": "copilot-developer-action/0.0.1",
+} as const;
 
 const INITIAL_POLL_INTERVAL_MULTIPLIER = 1.2;
 const SLOW_DOWN_POLL_INTERVAL_MULTIPLIER = 1.4;
@@ -75,14 +80,10 @@ async function startDeviceFlow(domain: string, fetchImpl: FetchImpl): Promise<De
 		urls.deviceCodeUrl,
 		{
 			method: "POST",
-			headers: {
-				Accept: "application/json",
-				"Content-Type": "application/json",
-				...OPENCODE_HEADERS,
-			},
-			body: JSON.stringify({
+			headers: OAUTH_HEADERS,
+			body: new URLSearchParams({
 				client_id: CLIENT_ID,
-				scope: "read:user",
+				scope: OAUTH_SCOPE,
 			}),
 		},
 		fetchImpl,
@@ -153,12 +154,8 @@ async function pollForGitHubAccessToken(
 			urls.accessTokenUrl,
 			{
 				method: "POST",
-				headers: {
-					Accept: "application/json",
-					"Content-Type": "application/json",
-					...OPENCODE_HEADERS,
-				},
-				body: JSON.stringify({
+				headers: OAUTH_HEADERS,
+				body: new URLSearchParams({
 					client_id: CLIENT_ID,
 					device_code: deviceCode,
 					grant_type: "urn:ietf:params:oauth:grant-type:device_code",
@@ -210,7 +207,8 @@ const FAR_FUTURE_MS = Date.now() + 10 * 365.25 * 24 * 60 * 60 * 1000;
 
 /**
  * Refresh GitHub Copilot token.
- * With the opencode OAuth flow, the GitHub token is used directly — no JWT exchange needed.
+ * GitHub OAuth tokens from both the former OpenCode app and the Copilot CLI app
+ * remain directly usable, so existing logins need no token exchange or migration.
  */
 export function refreshGitHubCopilotToken(
 	refreshToken: string,
@@ -224,6 +222,10 @@ export function refreshGitHubCopilotToken(
 		enterpriseUrl: enterpriseDomain,
 		apiEndpoint,
 	};
+}
+
+export async function refreshGitHubCopilotHook(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+	return refreshGitHubCopilotToken(credentials.refresh, credentials.enterpriseUrl, credentials.apiEndpoint);
 }
 
 /**
@@ -247,8 +249,9 @@ async function enableGitHubCopilotModel(
 				"Content-Type": "application/json",
 				Authorization: `Bearer ${token}`,
 				...COPILOT_API_HEADERS,
-				"openai-intent": "chat-policy",
-				"x-interaction-type": "chat-policy",
+				"Openai-Intent": "chat-policy",
+				"X-Initiator": "user",
+				"X-Interaction-Type": "chat-policy",
 			},
 			body: JSON.stringify({ state: "enabled" }),
 		});
@@ -332,7 +335,8 @@ export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Pr
 
 	const apiEndpoint = await discoverGitHubCopilotApiEndpoint(githubAccessToken, fetchImpl);
 
-	// With opencode OAuth, the GitHub token is used directly for all API requests
+	// Keep storing the GitHub token directly so credentials minted by the former
+	// OpenCode OAuth app remain valid alongside new Copilot CLI app logins.
 	const credentials: OAuthCredentials = {
 		refresh: githubAccessToken,
 		access: githubAccessToken,
@@ -345,4 +349,16 @@ export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Pr
 	options.onProgress?.("Enabling models...");
 	await enableAllGitHubCopilotModels(githubAccessToken, enterpriseDomain ?? undefined, apiEndpoint, fetchImpl);
 	return credentials;
+}
+
+export async function loginGitHubCopilotHook(callbacks: OAuthController): Promise<OAuthCredentials> {
+	const onPrompt = callbacks.onPrompt;
+	if (!onPrompt) throw new AIError.OnPromptRequiredError("GitHub Copilot");
+	return loginGitHubCopilot({
+		onAuth: (url, instructions) => callbacks.onAuth?.({ url, instructions }),
+		onPrompt,
+		onProgress: callbacks.onProgress,
+		signal: callbacks.signal,
+		fetch: callbacks.fetch,
+	});
 }

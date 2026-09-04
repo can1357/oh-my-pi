@@ -95,6 +95,36 @@ describe("azure openai responses streaming", () => {
 		]);
 	});
 
+	it("repairs the orphaned output after dropping a malformed native function call", async () => {
+		const previous = {
+			...createAssistantMessage(""),
+			stopReason: "toolUse" as const,
+			providerPayload: {
+				type: "openaiResponsesHistory" as const,
+				provider: "azure" as const,
+				items: [
+					{
+						type: "function_call",
+						id: "fc_bad",
+						call_id: "call_bad",
+						name: "bash",
+						arguments: '{"command":"unterminated',
+					},
+					{ type: "function_call_output", call_id: "call_bad", output: "durable result" },
+				],
+			},
+		};
+
+		const payload = await captureAzurePayload({
+			messages: [previous, { role: "user", content: "continue", timestamp: Date.now() }],
+		});
+		const input = payload.input as Array<Record<string, unknown>>;
+
+		expect(input).not.toContainEqual(expect.objectContaining({ type: "function_call", call_id: "call_bad" }));
+		expect(input).not.toContainEqual(expect.objectContaining({ type: "function_call_output", call_id: "call_bad" }));
+		expect(JSON.stringify(input)).toContain("durable result");
+	});
+
 	it("sends an async onPayload replacement body", async () => {
 		let capturedBody: Record<string, unknown> | undefined;
 		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {

@@ -2,6 +2,54 @@ import { describe, expect, it } from "bun:test";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 describe("SessionManager usage statistics", () => {
+	const modelUsage = {
+		purpose: "auto-thinking",
+		role: "smol",
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-haiku-4-5",
+		stopReason: "stop",
+		usage: {
+			input: 11,
+			output: 2,
+			cacheRead: 3,
+			cacheWrite: 0,
+			totalTokens: 16,
+			cost: { input: 0.0011, output: 0.0004, cacheRead: 0.00003, cacheWrite: 0, total: 0.00153 },
+		},
+	} as const;
+
+	it("counts non-transcript model calls without adding conversation messages", () => {
+		const session = SessionManager.inMemory();
+
+		session.appendModelUsage(modelUsage, { sessionId: session.getSessionId(), parentId: session.getLeafId() });
+
+		expect(session.getUsageStatistics()).toMatchObject({
+			input: 11,
+			output: 2,
+			cacheRead: 3,
+			totalTokens: 16,
+			cost: 0.00153,
+		});
+		expect(session.buildSessionContext().messages).toEqual([]);
+	});
+
+	it("records late usage on its initiating branch without moving the active leaf", () => {
+		const session = SessionManager.inMemory();
+		const ownerParent = session.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const activeLeaf = session.appendMessage({ role: "user", content: "successor", timestamp: 2 });
+
+		const usageId = session.appendModelUsage(modelUsage, {
+			sessionId: session.getSessionId(),
+			parentId: ownerParent,
+		});
+
+		expect(usageId).toBeDefined();
+		expect(session.getLeafId()).toBe(activeLeaf);
+		expect(session.getBranch().some(entry => entry.id === usageId)).toBe(false);
+		expect(session.getBranch(usageId).at(-1)).toMatchObject({ type: "model_usage", parentId: ownerParent });
+	});
+
 	it("accumulates premium requests from assistant messages and task tool results", () => {
 		const session = SessionManager.inMemory();
 

@@ -9,10 +9,8 @@ import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
 let originalPiPy: string | undefined;
 let originalPiJs: string | undefined;
-let originalPiRb: string | undefined;
-let originalPiJl: string | undefined;
 
-function restoreEnv(name: "PI_PY" | "PI_JS" | "PI_RB" | "PI_JL", value: string | undefined): void {
+function restoreEnv(name: "PI_PY" | "PI_JS", value: string | undefined): void {
 	if (value === undefined) {
 		delete Bun.env[name];
 		return;
@@ -46,20 +44,14 @@ describe("EvalTool language dispatch", () => {
 	beforeEach(() => {
 		originalPiPy = Bun.env.PI_PY;
 		originalPiJs = Bun.env.PI_JS;
-		originalPiRb = Bun.env.PI_RB;
-		originalPiJl = Bun.env.PI_JL;
 		delete Bun.env.PI_PY;
 		delete Bun.env.PI_JS;
-		delete Bun.env.PI_RB;
-		delete Bun.env.PI_JL;
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
 		restoreEnv("PI_PY", originalPiPy);
 		restoreEnv("PI_JS", originalPiJs);
-		restoreEnv("PI_RB", originalPiRb);
-		restoreEnv("PI_JL", originalPiJl);
 	});
 
 	it('dispatches to the JS backend when cell.language === "js"', async () => {
@@ -105,31 +97,19 @@ describe("EvalTool language dispatch", () => {
 		expect(probeSpy.mock.calls[0]?.[1]).toMatchObject({ timeoutMs: 1_000 });
 	});
 
-	for (const testCase of [
-		{ language: "py", backend: evalIndex.pythonBackend },
-		{ language: "rb", backend: evalIndex.rubyBackend },
-		{ language: "jl", backend: evalIndex.juliaBackend },
-	] as const) {
-		it(`preserves caller cancellation during ${testCase.language} availability probing`, async () => {
-			const settings = Settings.isolated();
-			if (testCase.language === "rb") settings.set("eval.rb", true);
-			if (testCase.language === "jl") settings.set("eval.jl", true);
-			const controller = new AbortController();
-			vi.spyOn(testCase.backend, "isAvailable").mockImplementation(async () => {
-				controller.abort();
-				return false;
-			});
-
-			const tool = new EvalTool(makeSession(settings));
-			await expect(
-				tool.execute(
-					`call-${testCase.language}-abort`,
-					{ language: testCase.language, code: "never runs" },
-					controller.signal,
-				),
-			).rejects.toBeInstanceOf(ToolAbortError);
+	it("preserves caller cancellation during py availability probing", async () => {
+		const settings = Settings.isolated();
+		const controller = new AbortController();
+		vi.spyOn(evalIndex.pythonBackend, "isAvailable").mockImplementation(async () => {
+			controller.abort();
+			return false;
 		});
-	}
+
+		const tool = new EvalTool(makeSession(settings));
+		await expect(
+			tool.execute("call-py-abort", { language: "py", code: "never runs" }, controller.signal),
+		).rejects.toBeInstanceOf(ToolAbortError);
+	});
 
 	it("dispatches each call to the backend named by its language", async () => {
 		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
@@ -178,8 +158,6 @@ describe("EvalTool language dispatch", () => {
 		expect(resolveEvalBackends(makeSession(settings))).toEqual({
 			python: true,
 			js: false,
-			ruby: false,
-			julia: false,
 		});
 	});
 

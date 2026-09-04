@@ -27,17 +27,21 @@ export function renderWorkflowNotice({
 	taskBatch,
 	scoutAvailable,
 	isolationEnabled,
+	evalTools,
 }: {
 	taskBatch: boolean;
 	scoutAvailable?: boolean;
 	/** Whether `isolated`/`apply`/`merge` controls may be advertised (same gate as the eval description). */
 	isolationEnabled?: boolean;
+	/** Advertise `@tool`-defined tools for subagents (`eval.tools.enabled`). */
+	evalTools?: boolean;
 }): string {
 	return prompt
 		.render(workflowNoticeTemplate, {
 			taskBatch,
 			scoutAvailable: scoutAvailable ?? true,
 			isolationEnabled: isolationEnabled ?? true,
+			evalTools: evalTools ?? true,
 		})
 		.trim();
 }

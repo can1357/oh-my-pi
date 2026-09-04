@@ -239,7 +239,9 @@ export interface DeccaraPlan {
  */
 export function planDeccaraFills(lines: string[], width: number, firstScreenRow = 0): DeccaraPlan {
 	const n = lines.length;
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const texts: string[] = new Array(n);
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const candidates: (FillCandidate | null)[] = new Array(n);
 
 	for (let k = 0; k < n; k++) {
