@@ -26,7 +26,12 @@ use crate::{
 	transport::Frame,
 };
 
-const CODEX_CLIENT_VERSION: &str = "0.144.1";
+/// Codex CLI version presented to `chatgpt.com`. The `/codex/models` listing is
+/// tailored to this value: the backend withholds models it considers too new
+/// for the declared client (GPT-6 Astra appeared only from 0.153.x), so keep it
+/// close to the current Codex CLI release when new subscription models fail to
+/// show up.
+const CODEX_CLIENT_VERSION: &str = "0.153.1";
 const CODEX_ORIGINATOR: &str = "omp";
 const CODEX_DISCOVERY_SOURCE: &str = "openai_codex_models";
 const CODEX_RESIDENCY_HEADER: &str = "x-openai-internal-codex-residency";
