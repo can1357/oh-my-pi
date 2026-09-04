@@ -24,16 +24,14 @@ import { detectRepositoryContext, formatRepositoryContext } from "./repo-context
 export interface GenerateGitCommitOptions {
 	cwd: string;
 	modelOverride?: string;
-	stageIfEmpty?: boolean;
 	onProgress?: CommitProgress;
 	signal?: AbortSignal;
 }
 
-/** Conventional commit form values plus staging and validation metadata. */
+/** Conventional commit form values plus validation metadata. */
 export interface GeneratedGitCommit {
 	commit: ConventionalCommit;
 	validationError: string | null;
-	stagedAll: boolean;
 }
 function renderNumstat(entries: VcsNumstatEntry[]): string {
 	return entries
@@ -59,19 +57,12 @@ function renderStat(entries: VcsNumstatEntry[]): string {
 	return `${lines.join("\n")}\n`;
 }
 
-/** Generate a commit message from the staged tree, staging all only when the index is empty. */
+/** Generate a commit message from the staged tree; never mutates the index. */
 export async function generateGitCommit(options: GenerateGitCommitOptions): Promise<GeneratedGitCommit> {
 	const repo = vcs.requireGit(options.cwd);
 	const settings = await Settings.init({ cwd: options.cwd });
 	const config = conventionalGenerationConfig(settings.getGroup("commit"));
-	let stagedFiles = await repo.changedFiles({ cached: true }, options.signal);
-	let stagedAll = false;
-	if (stagedFiles.length === 0 && options.stageIfEmpty !== false) {
-		options.onProgress?.("Staging all changes…");
-		await repo.stageFiles([], options.signal);
-		stagedAll = true;
-		stagedFiles = await repo.changedFiles({ cached: true }, options.signal);
-	}
+	const stagedFiles = await repo.changedFiles({ cached: true }, options.signal);
 	if (stagedFiles.length === 0) throw new Error("No staged changes to analyze");
 
 	options.onProgress?.("Reading staged changes…");
@@ -89,8 +80,7 @@ export async function generateGitCommit(options: GenerateGitCommitOptions): Prom
 
 	const inference = new LazyCommitInference(() => createOmpInference(options, settings, config));
 	try {
-		const result = await generateConventionalCommit({ diff, stat, numstat, config, inference, context });
-		return { ...result, stagedAll };
+		return await generateConventionalCommit({ diff, stat, numstat, config, inference, context });
 	} finally {
 		await inference.dispose();
 	}

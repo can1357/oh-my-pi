@@ -342,6 +342,10 @@ class GitTuiComponent implements Component {
 					break;
 				}
 				case "generate": {
+					if (this.#model.staged.length === 0) {
+						this.#setStatus(theme.fg("warning", "No staged changes — stage files first to generate a message"));
+						break;
+					}
 					const abort = new AbortController();
 					this.#generationAbort = abort;
 					this.#sidebar.setGenerating(true);
@@ -349,7 +353,6 @@ class GitTuiComponent implements Component {
 					try {
 						const generated = await generateGitCommit({
 							cwd: this.#model.cwd,
-							stageIfEmpty: true,
 							signal: abort.signal,
 							onProgress: message => {
 								if (!this.#disposed) this.#setStatus(theme.fg("dim", message));
@@ -359,12 +362,7 @@ class GitTuiComponent implements Component {
 						this.#setStatus(
 							generated.validationError
 								? theme.fg("warning", `Generated message needs review: ${generated.validationError}`)
-								: theme.fg(
-										"success",
-										generated.stagedAll
-											? "Staged all changes and generated commit message"
-											: "Generated commit message",
-									),
+								: theme.fg("success", "Generated commit message"),
 						);
 					} finally {
 						if (this.#generationAbort === abort) this.#generationAbort = null;

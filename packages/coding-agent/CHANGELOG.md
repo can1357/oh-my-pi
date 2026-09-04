@@ -2,12 +2,18 @@
 
 ## [Unreleased]
 
-### Fixed
+### Changed
+- `omp commit` file analysis subagents now run as `scout` instead of `sonic`.
 
+### Fixed
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
-
+- Fixed `omp commit` auto-staging unrelated changes on clean index: commits now require pre-staged files or an explicit `--all` / `-a` flag, and `--dry-run` is strictly read-only.
+- Fixed split commit confirmation ordering: user rejection now aborts with zero changelog or index mutations.
+- Fixed split commits to be created atomically from the staged tree: the index and worktree are never rewritten mid-split, and any concurrent staging aborts the whole split before a commit is made.
+- Fixed changelog staging to use targeted hunk staging across all commit paths, preserving pre-existing unstaged changelog edits and isolating rollback to touched files on failure.
+- Fixed the git TUI "generate commit message" action auto-staging all changes on an empty index; it now asks you to stage files first and never touches the index.
 ## [18.1.10] - 2026-09-04
 
 ### Changed

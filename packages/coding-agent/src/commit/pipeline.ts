@@ -1,3 +1,4 @@
+import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
@@ -20,12 +21,16 @@ export async function runCommitCommand(args: CommitCommandArgs): Promise<{ usedF
 
 async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 	const cwd = getProjectDir();
+	const repo = vcs.requireGit(cwd);
 	let generated: GeneratedGitCommit;
+	if (args.all && !args.dryRun) {
+		await repo.stageFiles([]);
+	}
+	let expectedTree = await repo.indexTreeId();
 	try {
 		generated = await generateGitCommit({
 			cwd,
 			modelOverride: args.model,
-			stageIfEmpty: true,
 			onProgress: message => process.stdout.write(`${message}\n`),
 		});
 	} catch (error) {
@@ -36,7 +41,9 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 				await pushOrAbort(cwd);
 				return;
 			}
-			process.stderr.write("No changes to commit.\n");
+			process.stderr.write(
+				"No staged changes detected. Stage files with 'git add <files>' or pass '--all' / '-a' to stage all changes.\n",
+			);
 			return;
 		}
 		throw error;
@@ -55,9 +62,16 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 		throw new Error(`Generated commit message failed validation: ${generated.validationError}`);
 	}
 
-	if (!args.noChangelog) await updateChangelog(cwd, args);
+	if (!args.noChangelog) {
+		try {
+			({ expectedTree } = await updateChangelog(cwd, repo, args, expectedTree));
+		} catch (error) {
+			if (vcs.isVcsError(error)) abortOnGitFailure("Changelog update failed", error);
+			throw error;
+		}
+	}
 	try {
-		await vcs.requireGit(cwd).commitCreate(commitMessage, {});
+		await repo.commitCreate(commitMessage, { expectedTree });
 	} catch (error) {
 		if (vcs.isVcsError(error)) abortOnGitFailure("Commit failed", error);
 		throw error;
@@ -66,7 +80,12 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 	if (args.push) await pushOrAbort(cwd);
 }
 
-async function updateChangelog(cwd: string, args: CommitCommandArgs): Promise<void> {
+async function updateChangelog(
+	cwd: string,
+	repo: VcsGitRepo,
+	args: CommitCommandArgs,
+	expectedTree: string,
+): Promise<{ updated: string[]; expectedTree: string }> {
 	const settings = await Settings.init({ cwd });
 	const authStorage = await discoverAuthStorage();
 	const registry = new ModelRegistry(authStorage);
@@ -74,13 +93,14 @@ async function updateChangelog(cwd: string, args: CommitCommandArgs): Promise<vo
 	await loadCliExtensionProviders(registry, settings, cwd);
 	const primary = await resolvePrimaryModel(args.model, settings, registry);
 	const commitSettings = settings.getGroup("commit");
-	await runChangelogFlow({
+	return runChangelogFlow({
 		cwd,
 		model: primary.model,
 		apiKey: primary.apiKey,
 		thinkingLevel: primary.thinkingLevel,
-		stagedFiles: await vcs.requireGit(cwd).changedFiles({ cached: true }),
+		stagedFiles: await repo.changedFiles({ cached: true }),
 		dryRun: false,
+		expectedTree,
 		maxDiffChars: commitSettings.changelogMaxDiffChars,
 		onProgress: message => process.stdout.write(`${message}\n`),
 	});

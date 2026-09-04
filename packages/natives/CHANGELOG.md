@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- Added `commitSplit` atomic multi-commit creation from staged hunks that verifies the index tree and never rewrites the index or worktree; it aborts before writing if a `pre-commit` hook modifies the index.
+- Added `stageContent` for staging exact content without touching the worktree.
+- Added `expectedTree` verification on `commitCreate` and `stageContent`; `commitCreate` checks the tree before `pre-commit` runs and still commits hook re-staged content.
+- Added `indexTreeId` to compute the tree SHA corresponding to the current index state.
+
+### Fixed
+- Fixed filter/attribute (CRLF) normalization in native staging.
+- Fixed index writes serialized under `.git/index.lock`.
 ## [18.1.9] - 2026-09-04
 
 ### Added

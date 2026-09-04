@@ -189,10 +189,11 @@ pub struct VcsStatusOptions {
 #[napi(object)]
 #[derive(Default)]
 pub struct VcsCommitOptions {
-	pub author:      Option<VcsCommitAuthor>,
-	pub allow_empty: Option<bool>,
-	pub amend:       Option<bool>,
-	pub files:       Option<Vec<String>>,
+	pub author:        Option<VcsCommitAuthor>,
+	pub allow_empty:   Option<bool>,
+	pub amend:         Option<bool>,
+	pub files:         Option<Vec<String>>,
+	pub expected_tree: Option<String>,
 }
 /// Patch application options.
 #[napi(object)]
@@ -250,6 +251,20 @@ pub struct VcsHunkSelection {
 pub struct VcsHunkSelectionError {
 	pub path:    String,
 	pub message: String,
+}
+/// One commit in an atomic split: its final message and the staged hunks it
+/// takes.
+#[napi(object)]
+pub struct VcsSplitCommitSpec {
+	pub message:    String,
+	pub selections: Vec<VcsHunkSelection>,
+}
+/// Options for an atomic split commit.
+#[napi(object)]
+pub struct VcsSplitCommitOptions {
+	pub commits:       Vec<VcsSplitCommitSpec>,
+	pub staged_diff:   String,
+	pub expected_tree: String,
 }
 
 impl From<core::GitRepoInfo> for VcsGitRepoInfo {
@@ -353,10 +368,11 @@ impl TryFrom<VcsStatusOptions> for core::StatusOptions {
 impl From<VcsCommitOptions> for core::CommitOptions {
 	fn from(v: VcsCommitOptions) -> Self {
 		Self {
-			author:      v.author.map(Into::into),
-			allow_empty: v.allow_empty.unwrap_or(false),
-			amend:       v.amend.unwrap_or(false),
-			files:       v.files.unwrap_or_default(),
+			author:        v.author.map(Into::into),
+			allow_empty:   v.allow_empty.unwrap_or(false),
+			amend:         v.amend.unwrap_or(false),
+			files:         v.files.unwrap_or_default(),
+			expected_tree: v.expected_tree,
 		}
 	}
 }
@@ -425,6 +441,30 @@ impl TryFrom<VcsHunkSelection> for core::HunkSelection {
 			x => return Err(napi::Error::from_reason(format!("invalid hunk selection kind: {x}"))),
 		};
 		Ok(Self { path: v.path, hunks })
+	}
+}
+impl TryFrom<VcsSplitCommitSpec> for core::SplitCommitSpec {
+	type Error = napi::Error;
+
+	fn try_from(v: VcsSplitCommitSpec) -> Result<Self> {
+		let selections: Vec<_> = v
+			.selections
+			.into_iter()
+			.map(TryInto::try_into)
+			.collect::<Result<_>>()?;
+		Ok(Self { message: v.message, selections })
+	}
+}
+impl TryFrom<VcsSplitCommitOptions> for core::SplitCommitOptions {
+	type Error = napi::Error;
+
+	fn try_from(v: VcsSplitCommitOptions) -> Result<Self> {
+		let commits: Vec<_> = v
+			.commits
+			.into_iter()
+			.map(TryInto::try_into)
+			.collect::<Result<_>>()?;
+		Ok(Self { commits, staged_diff: v.staged_diff, expected_tree: v.expected_tree })
 	}
 }
 
@@ -1133,6 +1173,26 @@ impl VcsGitRepo {
 		})
 	}
 
+	/// Stage exact content directly into the index for a path without touching
+	/// the worktree, verifying expected tree (CAS), and returning the new tree
+	/// SHA.
+	#[napi]
+	pub fn stage_content(
+		&self,
+		path: String,
+		content: Either<String, Buffer>,
+		expected_tree: Option<String>,
+		signal: Option<Unknown>,
+	) -> Promise<String> {
+		let bytes = match content {
+			Either::A(s) => s.into_bytes(),
+			Either::B(b) => b.to_vec(),
+		};
+		blocking("vcs.stageContent", self.inner.clone(), signal, move |r| {
+			r.stage_content(&path, &bytes, expected_tree.as_deref())
+		})
+	}
+
 	/// Create commit.
 	#[napi]
 	pub fn commit_create(
@@ -1145,6 +1205,28 @@ impl VcsGitRepo {
 		blocking("vcs.commitCreate", self.inner.clone(), signal, move |r| {
 			r.commit_create(&message, &options)
 		})
+	}
+
+	/// Atomic split commit; verifies expected tree; never writes index/worktree.
+	#[napi]
+	pub fn commit_split(
+		&self,
+		options: VcsSplitCommitOptions,
+		signal: Option<Unknown>,
+	) -> Promise<Vec<String>> {
+		let options: Result<core::SplitCommitOptions> = options.try_into();
+		blocking("vcs.commitSplit", self.inner.clone(), signal, move |r| {
+			r.commit_split(&options.map_err(|error| pi_vcs::Error::Backend {
+				context: "git hunk selection",
+				message: error.to_string(),
+			})?)
+		})
+	}
+
+	/// Compute the tree SHA corresponding to the current index state.
+	#[napi]
+	pub fn index_tree_id(&self, signal: Option<Unknown>) -> Promise<String> {
+		blocking("vcs.indexTreeId", self.inner.clone(), signal, move |r| r.index_tree_id())
 	}
 
 	/// Checkout revision.

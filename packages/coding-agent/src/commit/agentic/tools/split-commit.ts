@@ -14,6 +14,7 @@ import { validateScope } from "../../../commit/analysis/validation";
 import { normalizeDetails } from "../../../commit/utils";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
 import { commitTypeSchema, detailSchema } from "./schemas.js";
+import { EXCLUDED_LOCK_FILES } from "../lock-files";
 
 const fileChangeSchema = type({ path: "string", kind: "'all'" })
 	.or({ path: "string", kind: "'indices'", indices: "number[]" })
@@ -53,8 +54,12 @@ export function createSplitCommitTool(
 		description: "Propose multiple atomic commits for unrelated changes.",
 		parameters: splitCommitSchema,
 		async execute(_toolCallId, params) {
-			const stagedFiles = state.overview?.files ?? (await repo.changedFiles({ cached: true }));
-			const stagedSet = new Set(stagedFiles);
+			const allStagedFiles = await repo.changedFiles({ cached: true });
+			const stagedFiles = allStagedFiles.filter(file => {
+				const basename = file.split("/").pop() ?? file;
+				return !EXCLUDED_LOCK_FILES.has(basename);
+			});
+			const stagedSet = new Set(allStagedFiles);
 			const changelogSet = new Set(changelogTargets);
 			const usedFiles = new Set<string>();
 			const errors: string[] = [];

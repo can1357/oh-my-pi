@@ -16,7 +16,7 @@ import { type ExistingChangelogEntries, runCommitAgentSession } from "./agent";
 import { generateFallbackProposal } from "./fallback";
 import { assignLockFilesToPlan } from "./lock-files";
 import splitConfirmPrompt from "./prompts/split-confirm.md" with { type: "text" };
-import type { CommitAgentState, CommitProposal, FileChange, SplitCommitPlan } from "./state";
+import type { ChangelogProposal, CommitAgentState, CommitProposal, FileChange, SplitCommitPlan } from "./state";
 import { computeDependencyOrder } from "./topo-sort";
 import { detectTrivialChange } from "./trivial";
 
@@ -36,13 +36,11 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	await modelRegistry.refresh();
 	await loadCliExtensionProviders(modelRegistry, settings, cwd);
 	const stagedFilesPromise = (async () => {
-		let stagedFiles = await repo.changedFiles({ cached: true });
-		if (stagedFiles.length === 0) {
-			process.stdout.write("No staged changes detected, staging all changes...\n");
+		if (args.all && !args.dryRun) {
+			process.stdout.write("Staging all changes...\n");
 			await repo.stageFiles([]);
-			stagedFiles = await repo.changedFiles({ cached: true });
 		}
-		return stagedFiles;
+		return await repo.changedFiles({ cached: true });
 	})();
 
 	const primaryModelPromise = resolvePrimaryModel(args.model, settings, modelRegistry);
@@ -63,9 +61,12 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 			await pushOrAbort(cwd);
 			return { usedFallback: false };
 		}
-		process.stderr.write("No changes to commit.\n");
+		process.stderr.write(
+			"No staged changes detected. Stage files with 'git add <files>' or pass '--all' / '-a' to stage all changes.\n",
+		);
 		return { usedFallback: false };
 	}
+	const initialIndexTree = await repo.indexTreeId();
 
 	if (!args.noChangelog) {
 		process.stdout.write("● Detecting changelog targets...\n");
@@ -107,7 +108,12 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	if (forceFallback) {
 		process.stdout.write("● Forcing fallback commit generation...\n");
 		const fallbackProposal = generateFallbackProposal(numstat);
-		await runSingleCommit(fallbackProposal, { cwd, dryRun: args.dryRun, push: args.push });
+		await runSingleCommit(fallbackProposal, {
+			cwd,
+			dryRun: args.dryRun,
+			push: args.push,
+			expectedTree: initialIndexTree,
+		});
 		return { usedFallback: true };
 	}
 
@@ -124,7 +130,12 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 			summary: trivialChange.summary,
 			warnings: [],
 		};
-		await runSingleCommit(trivialProposal, { cwd, dryRun: args.dryRun, push: args.push });
+		await runSingleCommit(trivialProposal, {
+			cwd,
+			dryRun: args.dryRun,
+			push: args.push,
+			expectedTree: initialIndexTree,
+		});
 		return { usedFallback: false };
 	}
 
@@ -163,6 +174,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 					noChangelog: args.noChangelog,
 					changelogTargets,
 					numstat,
+					expectedTree: initialIndexTree,
 				});
 			},
 		});
@@ -178,9 +190,44 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 		}
 		process.stdout.write("● Using fallback commit generation...\n");
 		const fallbackProposal = generateFallbackProposal(numstat);
-		await runSingleCommit(fallbackProposal, { cwd, dryRun: args.dryRun, push: args.push });
+		await runSingleCommit(fallbackProposal, {
+			cwd,
+			dryRun: args.dryRun,
+			push: args.push,
+			expectedTree: initialIndexTree,
+		});
 		return { usedFallback: true };
 	}
+}
+
+async function applyChangelog(
+	ctx: { cwd: string; expectedTree: string },
+	proposal: ChangelogProposal,
+	dryRun: boolean,
+	split?: { plan: SplitCommitPlan; order: number[] },
+): Promise<string> {
+	process.stdout.write("● Applying changelog entries...\n");
+	const { updated, expectedTree } = await applyChangelogProposals({
+		cwd: ctx.cwd,
+		proposals: proposal.entries,
+		dryRun,
+		expectedTree: ctx.expectedTree,
+		onProgress: message => {
+			process.stdout.write(`  ├─ ${message}\n`);
+		},
+	});
+	if (updated.length > 0) {
+		for (const filePath of updated) {
+			process.stdout.write(`  └─ ${filePath}\n`);
+		}
+		if (split) {
+			const updatedChangelogFiles = updated.map(filePath => path.relative(ctx.cwd, filePath));
+			appendFilesToLastCommit(split.plan, updatedChangelogFiles, split.order);
+		}
+	} else {
+		process.stdout.write("  └─ (no changes)\n");
+	}
+	return expectedTree;
 }
 
 async function completeAgentCommitState(
@@ -189,6 +236,7 @@ async function completeAgentCommitState(
 		noChangelog: boolean;
 		changelogTargets: string[];
 		numstat: NumstatEntry[];
+		expectedTree: string;
 	},
 ): Promise<boolean> {
 	let usedFallback = false;
@@ -200,41 +248,36 @@ async function completeAgentCommitState(
 		}
 	}
 
-	let updatedChangelogFiles: string[] = [];
-	if (!ctx.noChangelog && ctx.changelogTargets.length > 0 && !usedFallback) {
-		if (!commitState.changelogProposal) {
-			throw new Error("Commit agent did not provide changelog entries.");
-		}
-		process.stdout.write("● Applying changelog entries...\n");
-		const updated = await applyChangelogProposals({
-			cwd: ctx.cwd,
-			proposals: commitState.changelogProposal.entries,
-			dryRun: ctx.dryRun,
-			onProgress: message => {
-				process.stdout.write(`  ├─ ${message}\n`);
-			},
-		});
-		updatedChangelogFiles = updated.map(filePath => path.relative(ctx.cwd, filePath));
-		if (updated.length > 0) {
-			for (const filePath of updated) {
-				process.stdout.write(`  └─ ${filePath}\n`);
-			}
-		} else {
-			process.stdout.write("  └─ (no changes)\n");
-		}
+	const wantChangelog = !ctx.noChangelog && ctx.changelogTargets.length > 0 && !usedFallback;
+	if (wantChangelog && !commitState.changelogProposal) {
+		throw new Error("Commit agent did not provide changelog entries.");
 	}
+	const changelogProposal = wantChangelog ? commitState.changelogProposal : undefined;
 
 	if (commitState.proposal) {
+		if (changelogProposal) {
+			ctx.expectedTree = await applyChangelog(ctx, changelogProposal, ctx.dryRun);
+		}
 		await runSingleCommit(commitState.proposal, ctx);
 		return usedFallback;
 	}
 
 	if (commitState.splitProposal) {
+		// Dry run lists the changelog entries up front; a real run applies them
+		// inside runSplitCommit only after the user confirms the plan.
+		if (changelogProposal && ctx.dryRun) {
+			const order = computeDependencyOrder(commitState.splitProposal.commits);
+			if ("error" in order) {
+				throw new Error(order.error);
+			}
+			await applyChangelog(ctx, changelogProposal, true, { plan: commitState.splitProposal, order });
+		}
 		await runSplitCommit(commitState.splitProposal, {
 			cwd: ctx.cwd,
 			dryRun: ctx.dryRun,
 			push: ctx.push,
-			additionalFiles: updatedChangelogFiles,
+			changelogProposal,
+			expectedTree: ctx.expectedTree,
 		});
 		return usedFallback;
 	}
@@ -242,7 +285,10 @@ async function completeAgentCommitState(
 	throw new Error("Commit agent did not provide a proposal.");
 }
 
-async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionContext): Promise<void> {
+async function runSingleCommit(
+	proposal: CommitProposal,
+	ctx: CommitExecutionContext & { expectedTree: string },
+): Promise<void> {
 	const repo = vcs.requireGit(ctx.cwd);
 	if (proposal.warnings.length > 0) {
 		process.stdout.write(formatWarnings(proposal.warnings));
@@ -255,7 +301,9 @@ async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionCon
 	}
 	process.stdout.write("● Creating commit...\n");
 	try {
-		await repo.commitCreate(commitMessage, {});
+		await repo.commitCreate(commitMessage, {
+			expectedTree: ctx.expectedTree,
+		});
 	} catch (error) {
 		if (vcs.isVcsError(error)) abortOnGitFailure("Commit failed", error);
 		throw error;
@@ -264,16 +312,22 @@ async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionCon
 	if (ctx.push) await pushOrAbort(ctx.cwd);
 }
 
-async function runSplitCommit(
+/**
+ * Execute a confirmed split plan. Exported, and `ctx.confirm` injectable, only so
+ * tests can interpose on the confirmation step (e.g. to stage concurrently while the
+ * user is deciding); production callers go through `runAgenticCommit`.
+ */
+export async function runSplitCommit(
 	plan: SplitCommitPlan,
-	ctx: CommitExecutionContext & { additionalFiles?: string[] },
+	ctx: CommitExecutionContext & {
+		expectedTree: string;
+		changelogProposal?: ChangelogProposal;
+		confirm?: (plan: SplitCommitPlan) => Promise<boolean>;
+	},
 ): Promise<void> {
 	const repo = vcs.requireGit(ctx.cwd);
 	if (plan.warnings.length > 0) {
 		process.stdout.write(formatWarnings(plan.warnings));
-	}
-	if (ctx.additionalFiles && ctx.additionalFiles.length > 0) {
-		appendFilesToLastCommit(plan, ctx.additionalFiles);
 	}
 	const stagedFiles = await repo.changedFiles({ cached: true });
 	assignLockFilesToPlan(plan, stagedFiles);
@@ -300,52 +354,52 @@ async function runSplitCommit(
 		return;
 	}
 
-	if (!(await confirmSplitCommitPlan(plan))) {
-		process.stdout.write("Split commit aborted by user.\n");
-		return;
-	}
-
 	const order = computeDependencyOrder(plan.commits);
 	if ("error" in order) {
 		throw new Error(order.error);
 	}
 
+	if (!(await (ctx.confirm ? ctx.confirm(plan) : confirmSplitCommitPlan(plan, ctx.changelogProposal !== undefined)))) {
+		process.stdout.write("Split commit aborted by user.\n");
+		return;
+	}
+
+	let expectedTree = ctx.expectedTree;
+	if (ctx.changelogProposal) {
+		expectedTree = await applyChangelog(ctx, ctx.changelogProposal, false, { plan, order });
+	}
+
 	process.stdout.write("● Creating split commits...\n");
 	const stagedDiff = await repo.diffText({ cached: true, binary: true });
-	await repo.unstage([]);
-	for (const [position, commitIndex] of order.entries()) {
+	const commits = order.map(commitIndex => {
 		const commit = plan.commits[commitIndex];
-		await repo.stageHunks(commit.changes, stagedDiff);
 		const analysis: ConventionalAnalysis = {
 			type: commit.type,
 			scope: commit.scope,
 			details: commit.details,
 			issueRefs: commit.issueRefs,
 		};
-		const message = formatCommitMessage(analysis, commit.summary);
-		try {
-			await repo.commitCreate(message, {});
-		} catch (error) {
-			if (vcs.isVcsError(error)) {
-				const stagedNow = await repo.changedFiles({ cached: true });
-				abortOnGitFailure(
-					`Commit ${position + 1} of ${order.length} failed`,
-					error,
-					`${position} of ${order.length} commits created; ${stagedNow.length} file(s) remain staged. No changes were lost.`,
-				);
-			}
-			throw error;
+		return {
+			message: formatCommitMessage(analysis, commit.summary),
+			selections: commit.changes,
+		};
+	});
+	try {
+		await repo.commitSplit({ commits, stagedDiff, expectedTree });
+	} catch (error) {
+		if (vcs.isVcsError(error)) {
+			abortOnGitFailure("Split commit failed", error);
 		}
-		await repo.unstage([]);
+		throw error;
 	}
 	process.stdout.write("Split commits created.\n");
 	if (ctx.push) await pushOrAbort(ctx.cwd);
 }
 
-function appendFilesToLastCommit(plan: SplitCommitPlan, files: string[]): void {
-	if (plan.commits.length === 0) return;
+function appendFilesToLastCommit(plan: SplitCommitPlan, files: string[], order: number[]): void {
+	if (plan.commits.length === 0 || order.length === 0) return;
+	const targetCommit = plan.commits[order[order.length - 1]];
 	const planned = new Set(plan.commits.flatMap(commit => commit.changes.map(change => change.path)));
-	const targetCommit = plan.commits[plan.commits.length - 1];
 	for (const file of files) {
 		if (planned.has(file)) continue;
 		targetCommit.changes.push({ path: file, kind: "all" });
@@ -353,13 +407,16 @@ function appendFilesToLastCommit(plan: SplitCommitPlan, files: string[]): void {
 	}
 }
 
-async function confirmSplitCommitPlan(plan: SplitCommitPlan): Promise<boolean> {
+async function confirmSplitCommitPlan(plan: SplitCommitPlan, changelogPending: boolean): Promise<boolean> {
 	if (!process.stdin.isTTY || !process.stdout.isTTY) {
 		return true;
 	}
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	try {
-		const splitConfirmQuestion = prompt.render(splitConfirmPrompt, { count: plan.commits.length });
+		const splitConfirmQuestion = prompt.render(splitConfirmPrompt, {
+			count: plan.commits.length,
+			changelog_pending: changelogPending,
+		});
 		const answer = await rl.question(splitConfirmQuestion);
 		return ["y", "yes"].includes(answer.trim().toLowerCase());
 	} finally {

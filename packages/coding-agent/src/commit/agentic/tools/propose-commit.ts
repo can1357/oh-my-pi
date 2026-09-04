@@ -57,7 +57,7 @@ export function createProposeCommitTool(cwd: string, state: CommitAgentState): C
 
 			const summaryValidation = validateSummaryRules(summary);
 			const analysisValidation = validateAnalysis(analysis);
-			const stagedFiles = state.overview?.files ?? (await repo.changedFiles({ cached: true }));
+			const stagedFiles = await repo.changedFiles({ cached: true });
 			const diffText = state.diffText ?? (await repo.diffText({ cached: true }));
 			const typeValidation = validateTypeConsistency(params.type, stagedFiles, {
 				diffText,

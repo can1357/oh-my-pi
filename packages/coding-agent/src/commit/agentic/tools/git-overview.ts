@@ -73,7 +73,9 @@ export function createGitOverviewTool(cwd: string, state: CommitAgentState): Cus
 				untrackedFiles,
 				excludedFiles: excluded.length > 0 ? excluded : undefined,
 			};
-			state.overview = snapshot;
+			if (staged) {
+				state.overview = snapshot;
+			}
 			return {
 				content: [{ type: "text", text: JSON.stringify(snapshot, null, 2) }],
 				details: snapshot,

@@ -1,1 +1,1 @@
-Split commit plan has {{count}} commits. Proceed? (y/N):
+Split commit plan has {{count}} commits.{{#if changelog_pending}} Generated changelog entries will be staged and appended to the final commit after confirmation.{{/if}} Proceed? (y/N): 

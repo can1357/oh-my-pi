@@ -53,6 +53,8 @@ export interface CommitCommandArgs {
 	push: boolean;
 	/** Preview without committing */
 	dryRun: boolean;
+	/** Stage all changes (git add -A) before committing */
+	all: boolean;
 	/** Skip changelog updates */
 	noChangelog: boolean;
 	/** Use legacy deterministic pipeline */

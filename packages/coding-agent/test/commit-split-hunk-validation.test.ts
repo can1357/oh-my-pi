@@ -32,6 +32,7 @@ describe("split_commit hunk selector validation", () => {
 	it("rejects hunk index selectors that match no parsed hunk", async () => {
 		vi.spyOn(vcs, "requireGit").mockReturnValue({
 			diffText: async () => STAGED_DIFF,
+			changedFiles: async () => ["src/a.ts", "src/b.ts"],
 		} as unknown as VcsGitRepo);
 		const state: CommitAgentState = {
 			overview: { files: ["src/a.ts", "src/b.ts"], stat: "", numstat: [], scopeCandidates: "", isWideScope: false },
@@ -68,6 +69,7 @@ describe("split_commit hunk selector validation", () => {
 	it("rejects line selectors that overlap no parsed hunk", async () => {
 		vi.spyOn(vcs, "requireGit").mockReturnValue({
 			diffText: async () => STAGED_DIFF,
+			changedFiles: async () => ["src/a.ts", "src/b.ts"],
 		} as unknown as VcsGitRepo);
 		const state: CommitAgentState = {
 			overview: { files: ["src/a.ts", "src/b.ts"], stat: "", numstat: [], scopeCandidates: "", isWideScope: false },
@@ -104,6 +106,7 @@ describe("split_commit hunk selector validation", () => {
 	it("allows deferred changelog targets that are not in the staged diff yet", async () => {
 		vi.spyOn(vcs, "requireGit").mockReturnValue({
 			diffText: async () => STAGED_DIFF,
+			changedFiles: async () => ["src/a.ts", "src/b.ts"],
 		} as unknown as VcsGitRepo);
 		const state: CommitAgentState = {
 			overview: { files: ["src/a.ts", "src/b.ts"], stat: "", numstat: [], scopeCandidates: "", isWideScope: false },

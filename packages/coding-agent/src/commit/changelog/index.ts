@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
-import type { VcsNumstatEntry } from "@oh-my-pi/pi-natives";
+import type { VcsGitRepo, VcsNumstatEntry } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger } from "@oh-my-pi/pi-utils";
 import { CHANGELOG_CATEGORIES } from "../../commit/types";
@@ -36,6 +36,7 @@ export interface ChangelogFlowInput {
 	thinkingLevel?: ThinkingLevel;
 	stagedFiles: string[];
 	dryRun: boolean;
+	expectedTree: string;
 	maxDiffChars?: number;
 	onProgress?: (message: string) => void;
 }
@@ -48,6 +49,7 @@ export interface ChangelogProposalInput {
 		deletions?: Record<string, string[]>;
 	}>;
 	dryRun: boolean;
+	expectedTree: string;
 	onProgress?: (message: string) => void;
 }
 
@@ -61,17 +63,18 @@ export async function runChangelogFlow({
 	thinkingLevel,
 	stagedFiles,
 	dryRun,
+	expectedTree,
 	maxDiffChars,
 	onProgress,
-}: ChangelogFlowInput): Promise<string[]> {
-	if (stagedFiles.length === 0) return [];
+}: ChangelogFlowInput): Promise<{ updated: string[]; expectedTree: string }> {
 	const repo = vcs.requireGit(cwd);
+	if (stagedFiles.length === 0) return { updated: [], expectedTree };
 	onProgress?.("Detecting changelog boundaries...");
 	const boundaries = await detectChangelogBoundaries(cwd, stagedFiles);
-	if (boundaries.length === 0) return [];
+	if (boundaries.length === 0) return { updated: [], expectedTree };
 
 	const sessionId = Bun.randomUUIDv7();
-	const updated: string[] = [];
+	const proposals: ChangelogProposalInput["proposals"] = [];
 	for (const boundary of boundaries) {
 		onProgress?.(`Generating entries for ${boundary.changelogPath}…`);
 		const diff = await repo.diffText({ cached: true, files: boundary.files });
@@ -100,16 +103,20 @@ export async function runChangelogFlow({
 			diff: diffForPrompt,
 		});
 		if (Object.keys(generated.entries).length === 0) continue;
-
-		const updatedContent = applyChangelogEntries(changelogContent, unreleased, generated.entries);
-		if (!dryRun) {
-			await Bun.write(boundary.changelogPath, updatedContent);
-			await repo.stageFiles([path.relative(cwd, boundary.changelogPath)]);
-		}
-		updated.push(boundary.changelogPath);
+		proposals.push({
+			path: boundary.changelogPath,
+			entries: generated.entries,
+		});
 	}
 
-	return updated;
+	if (proposals.length === 0) return { updated: [], expectedTree };
+	return applyChangelogProposals({
+		cwd,
+		proposals,
+		dryRun,
+		expectedTree,
+		onProgress,
+	});
 }
 
 /**
@@ -119,42 +126,116 @@ export async function applyChangelogProposals({
 	cwd,
 	proposals,
 	dryRun,
+	expectedTree,
 	onProgress,
-}: ChangelogProposalInput): Promise<string[]> {
+}: ChangelogProposalInput): Promise<{ updated: string[]; expectedTree: string }> {
 	const repo = vcs.requireGit(cwd);
+	let currentTree = expectedTree;
 	const updated: string[] = [];
-	for (const proposal of proposals) {
-		if (
-			Object.keys(proposal.entries).length === 0 &&
-			(!proposal.deletions || Object.keys(proposal.deletions).length === 0)
-		)
-			continue;
-		onProgress?.(`Applying entries for ${proposal.path}…`);
-		const exists = await Bun.file(proposal.path).exists();
-		if (!exists) {
-			logger.warn("commit changelog path missing", { path: proposal.path });
-			continue;
-		}
-		const changelogContent = await Bun.file(proposal.path).text();
-		let unreleased: { startLine: number; endLine: number; entries: Record<string, string[]> };
-		try {
-			unreleased = parseUnreleasedSection(changelogContent);
-		} catch (error) {
-			logger.warn("commit changelog parse skipped", { path: proposal.path, error: String(error) });
-			continue;
-		}
-		const normalized = normalizeEntries(proposal.entries);
-		const normalizedDeletions = proposal.deletions ? normalizeEntries(proposal.deletions) : undefined;
-		if (Object.keys(normalized).length === 0 && !normalizedDeletions) continue;
-		const updatedContent = applyChangelogEntries(changelogContent, unreleased, normalized, normalizedDeletions);
-		if (!dryRun) {
-			await Bun.write(proposal.path, updatedContent);
-			await repo.stageFiles([path.relative(cwd, proposal.path)]);
-		}
-		updated.push(proposal.path);
-	}
+	const backups = new Map<string, string>();
+	const stagedPaths: string[] = [];
+	try {
+		for (const proposal of proposals) {
+			if (
+				Object.keys(proposal.entries).length === 0 &&
+				(!proposal.deletions || Object.keys(proposal.deletions).length === 0)
+			)
+				continue;
+			onProgress?.(`Applying entries for ${proposal.path}…`);
+			const exists = await Bun.file(proposal.path).exists();
+			if (!exists) {
+				logger.warn("commit changelog path missing", { path: proposal.path });
+				continue;
+			}
+			const changelogContent = await Bun.file(proposal.path).text();
+			let unreleased: { startLine: number; endLine: number; entries: Record<string, string[]> };
+			try {
+				unreleased = parseUnreleasedSection(changelogContent);
+			} catch (error) {
+				logger.warn("commit changelog parse skipped", { path: proposal.path, error: String(error) });
+				continue;
+			}
+			const normalized = normalizeEntries(proposal.entries);
+			const normalizedDeletions = proposal.deletions ? normalizeEntries(proposal.deletions) : undefined;
+			if (Object.keys(normalized).length === 0 && !normalizedDeletions) continue;
+			const updatedContent = applyChangelogEntries(changelogContent, unreleased, normalized, normalizedDeletions);
+			if (!dryRun) {
+				backups.set(proposal.path, changelogContent);
+				const relPath = path.relative(cwd, proposal.path);
 
-	return updated;
+				// 1. Staged baseline: index blob, else HEAD blob, else untracked
+				const stagedContent = await readIndexOrHeadBlob(repo, relPath);
+
+				let updatedStagedContent: string;
+				if (stagedContent !== null) {
+					let stagedUnreleased: { startLine: number; endLine: number; entries: Record<string, string[]> };
+					try {
+						stagedUnreleased = parseUnreleasedSection(stagedContent);
+					} catch (error) {
+						onProgress?.(`Skipped ${proposal.path}: staged baseline has no [Unreleased] section`);
+						logger.warn(
+							"commit changelog staged baseline lacks parseable [Unreleased] section; skipping to prevent collateral staging of unstaged worktree edits",
+							{ path: proposal.path, error: String(error) },
+						);
+						continue;
+					}
+					updatedStagedContent = applyChangelogEntries(
+						stagedContent,
+						stagedUnreleased,
+						normalized,
+						normalizedDeletions,
+					);
+				} else {
+					updatedStagedContent = updatedContent;
+				}
+
+				// 2. Stage the exact index content verifying expectedTree CAS under index lock
+				currentTree = await repo.stageContent(relPath, updatedStagedContent, currentTree);
+				stagedPaths.push(relPath);
+
+				// 3. Update the worktree on disk with changes applied to current disk content
+				await Bun.write(proposal.path, updatedContent);
+			}
+			updated.push(proposal.path);
+		}
+		return { updated, expectedTree: currentTree };
+	} catch (error) {
+		for (const [filePath, originalContent] of backups) {
+			try {
+				await Bun.write(filePath, originalContent);
+			} catch (rollbackErr) {
+				logger.warn("Failed to rollback changelog file on error", { path: filePath, error: String(rollbackErr) });
+			}
+		}
+		if (stagedPaths.length > 0) {
+			try {
+				await repo.restore({
+					source: expectedTree,
+					staged: true,
+					worktree: false,
+					files: stagedPaths,
+				});
+			} catch (restoreErr) {
+				logger.warn("Failed to restore changelog index state on error", {
+					paths: stagedPaths,
+					error: String(restoreErr),
+				});
+			}
+		}
+		throw error;
+	}
+}
+
+/** Content of `relPath` in the index, else in HEAD, else null when tracked nowhere. */
+async function readIndexOrHeadBlob(repo: VcsGitRepo, relPath: string): Promise<string | null> {
+	for (const spec of [`:${relPath}`, `HEAD:${relPath}`]) {
+		try {
+			return (await repo.showBlob(spec)).data.toString("utf8");
+		} catch (error) {
+			if (!vcs.isVcsError(error) || error.code !== "ObjectNotFound") throw error;
+		}
+	}
+	return null;
 }
 
 function truncateDiff(diff: string, maxChars: number): string {
