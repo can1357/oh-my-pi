@@ -1,4 +1,8 @@
-import { GROKBOT_BACKEND, resolveGrokbotDiscoveryIdentity } from "../discovery/grokbot-auth";
+import {
+	GROKBOT_BACKEND,
+	resolveGrokbotCacheCredential,
+	resolveGrokbotDiscoveryIdentity,
+} from "../discovery/grokbot-auth";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 
 export interface ModelCacheProviderIdOptions {
@@ -120,8 +124,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 							clientVersion: options.clientVersion,
 						});
 			const headerScope = fingerprintModelCacheHeaders(options.headers);
-			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}\u0000${identity.namespace}\u0000${identity.clientVersion}\u0000${headerScope}`;
-			return `grokbot:models-v3:${Bun.hash(scope).toString(36)}`;
+			// Expand `<authenticated>` to the real renewer so secrets-file accounts
+			// do not share one authoritative cache namespace.
+			const credential = resolveGrokbotCacheCredential(options.apiKey);
+			const scope = `${credential}\u0000${baseUrl}\u0000${identity.namespace}\u0000${identity.clientVersion}\u0000${headerScope}`;
+			return `grokbot:models-v4:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

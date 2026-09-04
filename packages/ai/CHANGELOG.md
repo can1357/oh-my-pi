@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed Grok Bot router responses to publish the concrete `responseInfo.model` on `upstreamModel` for session stats.
 - Fixed Grok Bot Anthropic+tools auto wire to read catalog `sand-tools-wire` for routers instead of hard-coded model ids.
 
 ### Fixed

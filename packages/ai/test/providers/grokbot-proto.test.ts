@@ -1340,6 +1340,39 @@ describe("grokbot request headers", () => {
 		expect(captured?.["connect-protocol-version"]).toBe("1");
 	});
 
+	test("publishes responseInfo.model on assistant upstreamModel", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const body = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } }),
+			),
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					responseInfo: { id: "resp-1", model: "claude-4.6-sonnet" },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const fetchImpl = (async () =>
+			new Response(body, {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			}),
+		) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.upstreamModel).toBe("claude-4.6-sonnet");
+		expect(result.responseId).toBe("resp-1");
+	});
+
 	test("replaces reserved headers case-insensitively so Authorization is not comma-joined", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",

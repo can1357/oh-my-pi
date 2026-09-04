@@ -9,6 +9,8 @@ import {
 	GROKBOT_RENEWAL_PATH,
 	joinGrokbotBackendUrl,
 	loadGrokbotConfig,
+	GROKBOT_AUTHENTICATED_SENTINEL,
+	resolveGrokbotCacheCredential,
 	resolveGrokbotEnvApiKey,
 	loadGrokbotSecretFile,
 	loadGrokbotSecretFileSync,
@@ -241,6 +243,64 @@ describe("grokbot secrets dotenv parsing", () => {
 			setAgentDir(agentDir);
 			const cfg = await loadGrokbotConfig("<authenticated>");
 			expect(cfg.renewal).toBe("file-renewal");
+		} finally {
+			setAgentDir(previousAgentDir);
+			if (previousGrokbot === undefined) delete process.env.GROKBOT_RENEWAL_CREDENTIAL;
+			else process.env.GROKBOT_RENEWAL_CREDENTIAL = previousGrokbot;
+			if (previousSand === undefined) delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+			else process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL = previousSand;
+		}
+	});
+
+
+	test("file-backed cache ids expand the authenticated sentinel to the renewer", async () => {
+		const previousAgentDir = getAgentDir();
+		const previousGrokbot = process.env.GROKBOT_RENEWAL_CREDENTIAL;
+		const previousSand = process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+		const agentDirA = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-cache-a-"));
+		const agentDirB = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-cache-b-"));
+		dirs.push(agentDirA, agentDirB);
+		await fs.mkdir(path.join(agentDirA, "secrets"), { recursive: true });
+		await fs.mkdir(path.join(agentDirB, "secrets"), { recursive: true });
+		await Bun.write(
+			path.join(agentDirA, "secrets", "grokbot.env"),
+			["GROKBOT_RENEWAL_CREDENTIAL=file-renewal-a", "GROKBOT_MACHINE_ID=machine-a"].join("\n"),
+		);
+		await Bun.write(
+			path.join(agentDirB, "secrets", "grokbot.env"),
+			["GROKBOT_RENEWAL_CREDENTIAL=file-renewal-b", "GROKBOT_MACHINE_ID=machine-b"].join("\n"),
+		);
+		try {
+			delete process.env.GROKBOT_RENEWAL_CREDENTIAL;
+			delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+			setAgentDir(agentDirA);
+			expect(resolveGrokbotEnvApiKey()).toBe(GROKBOT_AUTHENTICATED_SENTINEL);
+			expect(resolveGrokbotCacheCredential(GROKBOT_AUTHENTICATED_SENTINEL)).toBe("file-renewal-a");
+			const cacheA = resolveModelCacheProviderId("grokbot", {
+				apiKey: GROKBOT_AUTHENTICATED_SENTINEL,
+				baseUrl: "https://api2.cursor.sh",
+				namespace: "prod",
+				clientVersion: "0.30.0",
+			});
+			setAgentDir(agentDirB);
+			expect(resolveGrokbotCacheCredential(GROKBOT_AUTHENTICATED_SENTINEL)).toBe("file-renewal-b");
+			const cacheB = resolveModelCacheProviderId("grokbot", {
+				apiKey: GROKBOT_AUTHENTICATED_SENTINEL,
+				baseUrl: "https://api2.cursor.sh",
+				namespace: "prod",
+				clientVersion: "0.30.0",
+			});
+			expect(cacheA).not.toBe(cacheB);
+			// Explicit renewer still matches the expanded sentinel for the same account.
+			setAgentDir(agentDirA);
+			expect(
+				resolveModelCacheProviderId("grokbot", {
+					apiKey: "file-renewal-a",
+					baseUrl: "https://api2.cursor.sh",
+					namespace: "prod",
+					clientVersion: "0.30.0",
+				}),
+			).toBe(cacheA);
 		} finally {
 			setAgentDir(previousAgentDir);
 			if (previousGrokbot === undefined) delete process.env.GROKBOT_RENEWAL_CREDENTIAL;

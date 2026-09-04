@@ -1111,7 +1111,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							(typeof (info as { modelId?: string }).modelId === "string" &&
 								(info as { modelId?: string }).modelId) ||
 							"";
-						if (routedModel) routedResponseModel = routedModel;
+						if (routedModel) {
+							routedResponseModel = routedModel;
+							output.upstreamModel = routedModel;
+						}
 					}
 				}
 			}
