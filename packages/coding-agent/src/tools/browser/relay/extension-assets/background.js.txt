@@ -85,6 +85,9 @@ class AttachmentGuard {
 function noteAttachmentStateChange(epochs, tabId) {
   epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
 }
+function isAttachmentStateCurrent(epochs, tabId, epoch) {
+  return (epochs.get(tabId) ?? 0) === epoch;
+}
 function consumeRelayInitiatedDetach(markedTabs, tabId, reason) {
   const relayMarked = markedTabs.delete(tabId);
   const userDetach = reason === "canceled_by_user" || reason === "replaced_with_devtools";
@@ -136,7 +139,7 @@ function snapshotAttachmentState(epochs, tabIds) {
   return snapshot;
 }
 function filterFreshAttachmentState(epochs, snapshot, tabIds) {
-  return tabIds.filter((tabId) => (epochs.get(tabId) ?? 0) === (snapshot.get(tabId) ?? 0));
+  return tabIds.filter((tabId) => isAttachmentStateCurrent(epochs, tabId, snapshot.get(tabId) ?? 0));
 }
 
 // extension/orphan-sweep.ts
@@ -202,7 +205,7 @@ async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOpe
 class PendingAttaches {
   #byTab = new Map;
   begin(tabId) {
-    const token = { canceled: false };
+    const token = { canceled: false, canceledAtEpoch: null };
     const pending = this.#byTab.get(tabId) ?? new Set;
     pending.add(token);
     this.#byTab.set(tabId, pending);
@@ -216,9 +219,11 @@ class PendingAttaches {
     if (pending.size === 0)
       this.#byTab.delete(tabId);
   }
-  cancel(tabId) {
-    for (const token of this.#byTab.get(tabId) ?? [])
+  cancel(tabId, attachmentEpoch) {
+    for (const token of this.#byTab.get(tabId) ?? []) {
       token.canceled = true;
+      token.canceledAtEpoch = attachmentEpoch;
+    }
   }
   has(tabId) {
     return (this.#byTab.get(tabId)?.size ?? 0) > 0;
@@ -680,8 +685,8 @@ async function attachTab(tabId, socket) {
 async function attachTabOperation(tabId, socket, operation) {
   await chrome.debugger.attach({ tabId }, "1.3");
   noteAttachmentStateChange(attachmentStateEpochs, tabId);
+  const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
   if (ws !== socket) {
-    const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
     guardDetachments.add(tabId);
     await trackPendingDetach(chrome.debugger.detach({ tabId }).catch(async () => {
       guardDetachments.delete(tabId);
@@ -701,7 +706,6 @@ async function attachTabOperation(tabId, socket, operation) {
   try {
     await trackAttachments([tabId]);
   } catch (error) {
-    const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
     guardDetachments.add(tabId);
     await trackPendingDetach(chrome.debugger.detach({ tabId })).catch(async () => {
       guardDetachments.delete(tabId);
@@ -713,8 +717,10 @@ async function attachTabOperation(tabId, socket, operation) {
     throw error;
   }
   if (operation.canceled) {
-    attachmentGuard.untrack(tabId);
-    await forgetRecoverable(tabId);
+    if (operation.canceledAtEpoch !== null && isAttachmentStateCurrent(attachmentStateEpochs, tabId, operation.canceledAtEpoch)) {
+      attachmentGuard.untrack(tabId);
+      await forgetRecoverable(tabId);
+    }
     throw new Error("debugger attachment detached before attach completed");
   }
 }
@@ -903,8 +909,9 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     return;
   }
   const relayInitiated = consumeRelayInitiatedDetach(relayInitiatedDetachTabs, source.tabId, reason);
-  if (!relayInitiated && pendingAttachOperations.has(source.tabId))
-    pendingAttachOperations.cancel(source.tabId);
+  if (!relayInitiated && pendingAttachOperations.has(source.tabId)) {
+    pendingAttachOperations.cancel(source.tabId, attachmentStateEpochs.get(source.tabId) ?? 0);
+  }
   forgetRecoverable(source.tabId);
   post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
   refreshHello();

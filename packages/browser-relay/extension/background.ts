@@ -20,6 +20,7 @@ import {
 	createRetryableLoader,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
+	isAttachmentStateCurrent,
 	noteAttachmentStateChange,
 	requireRecoveryStateLoaded,
 	restoreRecoverableState,
@@ -813,6 +814,7 @@ async function attachTabOperation(
 ): Promise<void> {
 	await chrome.debugger.attach({ tabId }, "1.3");
 	noteAttachmentStateChange(attachmentStateEpochs, tabId);
+	const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
 	// The relay that requested this attachment disappeared while Chrome was
 	// still resolving attach(). Its pending RPC was rejected by RelayBridge,
 	// so no downstream session can own the resulting debugger attachment.
@@ -821,7 +823,6 @@ async function attachTabOperation(
 	// `detached` that bans the tab and drops its recovery bit instead of
 	// letting the surviving relay reconcile it from the next hello.
 	if (ws !== socket) {
-		const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
 		guardDetachments.add(tabId);
 		await trackPendingDetach(
 			chrome.debugger.detach({ tabId }).catch(async () => {
@@ -859,7 +860,6 @@ async function attachTabOperation(
 	try {
 		await trackAttachments([tabId]);
 	} catch (error) {
-		const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
 		guardDetachments.add(tabId);
 		await trackPendingDetach(chrome.debugger.detach({ tabId })).catch(
 			async () => {
@@ -882,9 +882,20 @@ async function attachTabOperation(
 	if (operation.canceled) {
 		// onDetach ran while the recovery marker was being persisted. Undo the
 		// delayed track and fail the RPC: returning success would make the bridge
-		// mint a session for a Chrome root the user already canceled.
-		attachmentGuard.untrack(tabId);
-		await forgetRecoverable(tabId);
+		// mint a session for a Chrome root the user already canceled. A replacement
+		// attach may already own this tab, though, so only clear state still owned by
+		// this operation's attachment epoch.
+		if (
+			operation.canceledAtEpoch !== null &&
+			isAttachmentStateCurrent(
+				attachmentStateEpochs,
+				tabId,
+				operation.canceledAtEpoch,
+			)
+		) {
+			attachmentGuard.untrack(tabId);
+			await forgetRecoverable(tabId);
+		}
 		throw new Error("debugger attachment detached before attach completed");
 	}
 }
@@ -1175,8 +1186,12 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 		source.tabId,
 		reason,
 	);
-	if (!relayInitiated && pendingAttachOperations.has(source.tabId))
-		pendingAttachOperations.cancel(source.tabId);
+	if (!relayInitiated && pendingAttachOperations.has(source.tabId)) {
+		pendingAttachOperations.cancel(
+			source.tabId,
+			attachmentStateEpochs.get(source.tabId) ?? 0,
+		);
+	}
 	void forgetRecoverable(source.tabId);
 	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 	// A detach can land after buildHello() snapshots getTargets() while that

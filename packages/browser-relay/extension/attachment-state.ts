@@ -5,6 +5,14 @@ export function noteAttachmentStateChange(
 	epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
 }
 
+export function isAttachmentStateCurrent(
+	epochs: ReadonlyMap<number, number>,
+	tabId: number,
+	epoch: number,
+): boolean {
+	return (epochs.get(tabId) ?? 0) === epoch;
+}
+
 export function consumeRelayInitiatedDetach(
 	markedTabs: Set<number>,
 	tabId: number,
@@ -98,6 +106,7 @@ export function filterFreshAttachmentState(
 	tabIds: number[],
 ): number[] {
 	return tabIds.filter(
-		(tabId) => (epochs.get(tabId) ?? 0) === (snapshot.get(tabId) ?? 0),
+		(tabId) =>
+			isAttachmentStateCurrent(epochs, tabId, snapshot.get(tabId) ?? 0),
 	);
 }

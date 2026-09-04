@@ -4,6 +4,7 @@ import {
 	createRetryableLoader,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
+	isAttachmentStateCurrent,
 	noteAttachmentStateChange,
 	requireRecoveryStateLoaded,
 	restoreRecoverableState,
@@ -43,6 +44,20 @@ describe("attachment-state", () => {
 		noteAttachmentStateChange(epochs, 1);
 
 		expect(filterFreshAttachmentState(epochs, snapshot, [1])).toEqual([]);
+	});
+
+	it("keeps canceled attach cleanup from deleting replacement ownership", () => {
+		const epochs = new Map<number, number>();
+		noteAttachmentStateChange(epochs, 1);
+		// Chrome reports the cancellation. Cleanup is valid at this epoch.
+		noteAttachmentStateChange(epochs, 1);
+		const canceledAtEpoch = epochs.get(1) ?? 0;
+		expect(isAttachmentStateCurrent(epochs, 1, canceledAtEpoch)).toBe(true);
+
+		// A replacement attach takes ownership before canceled cleanup resumes.
+		noteAttachmentStateChange(epochs, 1);
+
+		expect(isAttachmentStateCurrent(epochs, 1, canceledAtEpoch)).toBe(false);
 	});
 
 	it("lets user detach reasons override an in-flight relay marker", () => {
