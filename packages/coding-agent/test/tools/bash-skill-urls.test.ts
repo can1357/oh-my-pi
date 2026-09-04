@@ -141,11 +141,11 @@ describe("expandSkillUrls", () => {
 		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
 	});
 
-	it("resolves skill://name with no relative path to the skill directory", () => {
+	it("resolves skill://name with no relative path to the skill instruction file", () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
 		const command = "printf '%s\n' skill://valid-skill";
 
-		expect(expandSkillUrls(command, skills)).toBe(`printf '%s\n' ${shellEscape(skills[0].baseDir)}`);
+		expect(expandSkillUrls(command, skills)).toBe(`printf '%s\n' ${shellEscape(skills[0].filePath)}`);
 	});
 
 	it("returns command unchanged when no skills are loaded", () => {

@@ -56,6 +56,18 @@ describe("bash skill:// expansion containment", () => {
 		expect(resolveSkillUrlToPath("skill://docs", [skill])).toBe(skill.filePath);
 	});
 
+	it("rejects a bare URI whose instruction file escapes the plugin root", () => {
+		const skill: Skill = { ...pluginSkill(), filePath: outsideFile };
+
+		expect(() => resolveSkillUrlToPath("skill://docs", [skill])).toThrow("resolves outside the plugin root");
+	});
+
+	it("fails closed on a bare URI whose instruction file is missing", () => {
+		const skill: Skill = { ...pluginSkill(), filePath: path.join(skillDir, "gone.md") };
+
+		expect(() => resolveSkillUrlToPath("skill://docs", [skill])).toThrow("does not exist");
+	});
+
 	it("resolves in-root symlinks to their canonical target", () => {
 		const resolved = resolveSkillUrlToPath("skill://docs/references/ok.md", [pluginSkill()]);
 		// The canonical realpath is returned, never the symlink path.

@@ -85,7 +85,20 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 	const hasRelativePath = rawPath !== "" && rawPath !== "/";
 
 	if (!hasRelativePath) {
-		return path.resolve(skill.filePath);
+		// A bare URI addresses the skill's configured instruction file directly.
+		// Contained skills still fail closed when it escapes or is missing.
+		const instructionPath = path.resolve(skill.filePath);
+		if (skill.containRoot) {
+			const contained = resolveContainedPathSync(skill.containRoot, instructionPath);
+			if (contained.status === "outside") {
+				throw new ToolError(`skill:// path resolves outside the plugin root: ${url}`);
+			}
+			if (contained.status === "missing") {
+				throw new ToolError(`skill:// path does not exist: ${url}`);
+			}
+			return contained.realPath;
+		}
+		return instructionPath;
 	}
 
 	let relativePath: string;
