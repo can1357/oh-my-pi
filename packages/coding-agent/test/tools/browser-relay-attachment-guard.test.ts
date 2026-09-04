@@ -30,12 +30,12 @@ class FakeTimers {
 
 function makeGuard(graceMs = 5_000) {
 	const timers = new FakeTimers();
-	const detached: number[][] = [];
+	const detached: Array<{ tabIds: number[]; source: "sweep" | "retry" }> = [];
 	const guard = new AttachmentGuard<number>({
 		graceMs,
 		setTimer: (fn, ms) => timers.set(fn, ms),
 		clearTimer: handle => timers.clear(handle),
-		detachAll: tabIds => detached.push(tabIds),
+		detachAll: (tabIds, source) => detached.push({ tabIds, source }),
 	});
 	return { guard, timers, detached };
 }
@@ -51,7 +51,7 @@ describe("AttachmentGuard", () => {
 		expect(detached).toEqual([]);
 
 		timers.flush();
-		expect(detached).toEqual([[11, 22]]);
+		expect(detached).toEqual([{ tabIds: [11, 22], source: "sweep" }]);
 		expect(guard.attachedTabIds()).toEqual([]);
 	});
 
@@ -85,7 +85,7 @@ describe("AttachmentGuard", () => {
 		expect(timers.pendingCount).toBe(1);
 
 		timers.flush();
-		expect(detached).toEqual([[1]]);
+		expect(detached).toEqual([{ tabIds: [1], source: "sweep" }]);
 	});
 
 	it("retries only the failed attachment while the relay remains connected", () => {
@@ -97,7 +97,7 @@ describe("AttachmentGuard", () => {
 		expect(timers.pendingCount).toBe(1);
 		timers.flush();
 
-		expect(detached).toEqual([[1]]);
+		expect(detached).toEqual([{ tabIds: [1], source: "retry" }]);
 		expect(guard.attachedTabIds()).toEqual([2]);
 	});
 
@@ -134,7 +134,7 @@ describe("AttachmentGuard", () => {
 		expect(timers.pendingCount).toBe(1);
 
 		timers.flush();
-		expect(detached).toEqual([[5]]);
+		expect(detached).toEqual([{ tabIds: [5], source: "sweep" }]);
 		expect(guard.attachedTabIds()).toEqual([]);
 	});
 
@@ -146,7 +146,7 @@ describe("AttachmentGuard", () => {
 
 		guard.onDisconnected();
 		timers.flush();
-		expect(detached).toEqual([[4]]);
+		expect(detached).toEqual([{ tabIds: [4], source: "sweep" }]);
 	});
 
 	it("detaches immediately on suspend and cancels any pending sweep", () => {
@@ -157,11 +157,11 @@ describe("AttachmentGuard", () => {
 
 		guard.onSuspend();
 		expect(timers.pendingCount).toBe(0);
-		expect(detached).toEqual([[9]]);
+		expect(detached).toEqual([{ tabIds: [9], source: "sweep" }]);
 
 		// A late-firing stale timer must not double-detach.
 		timers.flush();
-		expect(detached).toEqual([[9]]);
+		expect(detached).toEqual([{ tabIds: [9], source: "sweep" }]);
 	});
 
 	it("cancels a pending sweep when the last tracked attachment disappears", () => {

@@ -27,7 +27,7 @@ export interface AttachmentGuardOptions<H> {
 	setTimer: (fn: () => void, ms: number) => H;
 	clearTimer: (handle: H) => void;
 	/** Detach every listed tab. Never called with an empty list. */
-	detachAll: (tabIds: number[]) => void;
+	detachAll: (tabIds: number[], source: "sweep" | "retry") => void;
 }
 
 export class AttachmentGuard<H> {
@@ -68,7 +68,7 @@ export class AttachmentGuard<H> {
 			this.#targetedRetries.delete(tabId);
 			if (!isFresh()) return;
 			if (!this.#attached.delete(tabId)) return;
-			this.options.detachAll([tabId]);
+			this.options.detachAll([tabId], "retry");
 		}, this.options.graceMs);
 		this.#targetedRetries.set(tabId, pending);
 	}
@@ -116,6 +116,6 @@ export class AttachmentGuard<H> {
 		this.#attached.clear();
 		for (const retry of this.#targetedRetries.values()) this.options.clearTimer(retry);
 		this.#targetedRetries.clear();
-		this.options.detachAll(tabIds);
+		this.options.detachAll(tabIds, "sweep");
 	}
 }

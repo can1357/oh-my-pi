@@ -408,7 +408,7 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 	graceMs: ORPHAN_GRACE_MS,
 	setTimer: (fn, ms) => setTimeout(fn, ms),
 	clearTimer: (handle) => clearTimeout(handle),
-	detachAll: (tabIds) => {
+	detachAll: (tabIds, source) => {
 		// trackAttachments persisted every id before handing it to the guard, so
 		// onSuspend can start these detaches without depending on a last-moment
 		// storage write that MV3 may terminate with the worker.
@@ -451,9 +451,18 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 						} catch {
 							if ((attachmentStateEpochs.get(tabId) ?? 0) !== attachmentEpoch)
 								return;
-							attachmentGuard.onDisconnected();
-							attachmentGuard.track(tabId);
-							void maybeScheduleOrphanSweep(true);
+							if (source === "retry") {
+								attachmentGuard.retry(
+									tabId,
+									() =>
+										(attachmentStateEpochs.get(tabId) ?? 0) ===
+										attachmentEpoch,
+								);
+							} else {
+								attachmentGuard.onDisconnected();
+								attachmentGuard.track(tabId);
+								void maybeScheduleOrphanSweep(true);
+							}
 						}
 					}
 				}),

@@ -36,7 +36,7 @@ class AttachmentGuard {
         return;
       if (!this.#attached.delete(tabId))
         return;
-      this.options.detachAll([tabId]);
+      this.options.detachAll([tabId], "retry");
     }, this.options.graceMs);
     this.#targetedRetries.set(tabId, pending);
   }
@@ -77,7 +77,7 @@ class AttachmentGuard {
     for (const retry of this.#targetedRetries.values())
       this.options.clearTimer(retry);
     this.#targetedRetries.clear();
-    this.options.detachAll(tabIds);
+    this.options.detachAll(tabIds, "sweep");
   }
 }
 
@@ -451,7 +451,7 @@ var attachmentGuard = new AttachmentGuard({
   graceMs: ORPHAN_GRACE_MS,
   setTimer: (fn, ms) => setTimeout(fn, ms),
   clearTimer: (handle) => clearTimeout(handle),
-  detachAll: (tabIds) => {
+  detachAll: (tabIds, source) => {
     const loaderGeneration = ++recoveryLoaderGeneration;
     for (const tabId of tabIds) {
       const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
@@ -474,9 +474,13 @@ var attachmentGuard = new AttachmentGuard({
           } catch {
             if ((attachmentStateEpochs.get(tabId) ?? 0) !== attachmentEpoch)
               return;
-            attachmentGuard.onDisconnected();
-            attachmentGuard.track(tabId);
-            maybeScheduleOrphanSweep(true);
+            if (source === "retry") {
+              attachmentGuard.retry(tabId, () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch);
+            } else {
+              attachmentGuard.onDisconnected();
+              attachmentGuard.track(tabId);
+              maybeScheduleOrphanSweep(true);
+            }
           }
         }
       }));
