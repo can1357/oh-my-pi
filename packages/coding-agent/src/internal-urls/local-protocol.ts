@@ -488,6 +488,17 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		}
 
 		const resolved = await resolveLocalTarget(url, opts);
+		if (context?.pathOnly) {
+			const sourcePath = resolved.kind === "listing" ? resolved.root : resolved.path;
+			return {
+				url: url.href,
+				content: "",
+				contentType: getContentType(sourcePath),
+				sourcePath,
+				size: resolved.kind === "file" ? resolved.size : undefined,
+				isDirectory: resolved.kind !== "file",
+			};
+		}
 		if (resolved.kind === "listing") {
 			return buildListing(url, resolved.root);
 		}

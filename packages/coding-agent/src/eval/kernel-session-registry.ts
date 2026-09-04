@@ -56,7 +56,7 @@ export interface KernelSessionRegistryContext<
 interface KernelSessionRegistryDescriptor<
 	TKernel extends RegistryKernel,
 	TOptions extends KernelSessionRegistryOptions,
-	TResult,
+	R,
 	TSession extends KernelSession<TKernel>,
 > {
 	languageLabel: string;
@@ -64,7 +64,7 @@ interface KernelSessionRegistryDescriptor<
 	buildSessionKey: (sessionId: string, cwd: string, interpreter: string | undefined) => string;
 	createSession: (session: KernelSession<TKernel>) => TSession;
 	startKernel: (cwd: string, options: TOptions) => Promise<TKernel>;
-	executeWithKernel: (kernel: TKernel, code: string, options: TOptions) => Promise<TResult>;
+	executeWithKernel: (kernel: TKernel, code: string, options: TOptions) => Promise<R>;
 	waitForStartup?: (promise: Promise<TSession>, options: TOptions) => Promise<TSession>;
 	replaceSessionKernel?: (
 		session: TSession,
@@ -87,14 +87,10 @@ interface KernelSessionRegistryDescriptor<
 	validateKernel?: (session: TSession, kernel: TKernel) => boolean;
 }
 
-interface KernelSessionRegistry<
-	TKernel extends RegistryKernel,
-	TOptions extends KernelSessionRegistryOptions,
-	TResult,
-> {
+interface KernelSessionRegistry<TKernel extends RegistryKernel, TOptions extends KernelSessionRegistryOptions, R> {
 	disposeAll(): Promise<void>;
 	disposeByOwner(ownerId: string): Promise<void>;
-	executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult>;
+	executeOnSession(code: string, cwd: string, options: TOptions): Promise<R>;
 	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
 }
 
@@ -132,11 +128,11 @@ export function formatSessionKernelTimeoutAnnotation(timeoutMs: number | undefin
 export function createKernelSessionRegistry<
 	TKernel extends RegistryKernel,
 	TOptions extends KernelSessionRegistryOptions,
-	TResult extends { cancelled: boolean },
+	R extends { cancelled: boolean },
 	TSession extends KernelSession<TKernel>,
 >(
-	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, TResult, TSession>,
-): KernelSessionRegistry<TKernel, TOptions, TResult> {
+	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, R, TSession>,
+): KernelSessionRegistry<TKernel, TOptions, R> {
 	const sessions = new Map<string, TSession>();
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
@@ -439,7 +435,7 @@ export function createKernelSessionRegistry<
 		return kernel?.isAlive() ? kernel : undefined;
 	}
 
-	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult> {
+	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<R> {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
 		const sessionKey = resolveOwnerScopedSessionKey({
 			baseKey: descriptor.buildSessionKey(sessionId, cwd, options.interpreter),
@@ -476,7 +472,7 @@ export function createKernelSessionRegistry<
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
 		throwIfCallerCancelled(options);
 		const runOptions = { ...options, cwd };
-		let result: TResult;
+		let result: R;
 		try {
 			result = await descriptor.executeWithKernel(kernel, code, runOptions);
 		} catch (err) {

@@ -8,6 +8,7 @@ import * as util from "node:util";
 
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
+import type { EvalPreludeSource } from "../worker-protocol";
 import { createHelpers, type HelperBundle } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
@@ -173,6 +174,8 @@ function describeDataType(data: unknown): string {
 export class JsRuntime {
 	#globalOwner = Symbol("JsRuntime globals");
 	#ownedGlobalKeys = new Set<string>();
+	#reservedGlobalKeys = new Set<string>();
+	#installedPreludes = new Map<string, EvalPreludeSource>();
 	#disposed = false;
 	#runHookResolver = () => this.#als.getStore()?.hooks;
 
@@ -180,6 +183,11 @@ export class JsRuntime {
 		if (this.#ownedGlobalKeys.has(key)) return;
 		claimGlobalKey(key, this.#globalOwner);
 		this.#ownedGlobalKeys.add(key);
+	}
+
+	#releaseGlobal(key: string): void {
+		if (!this.#ownedGlobalKeys.delete(key)) return;
+		releaseGlobalKey(key, this.#globalOwner);
 	}
 
 	#activateGlobals(action: string): void {
@@ -243,6 +251,61 @@ export class JsRuntime {
 			this.#ownGlobal(key);
 			(globalThis as Record<string, unknown>)[key] = scope[key];
 			recordGlobalValue(key, this.#globalOwner);
+		}
+	}
+
+	/**
+	 * Synchronize enabled capability snippets before an ordinary eval cell.
+	 * Unchanged sources retain their objects; removed or replaced definitions
+	 * release every declared global before replacement source runs.
+	 */
+	syncPreludes(preludes: readonly EvalPreludeSource[]): void {
+		if (preludes.length === 0 && this.#installedPreludes.size === 0) return;
+		this.#activateGlobals("sync eval preludes");
+		const desired = new Map<string, EvalPreludeSource>();
+		const exportOwners = new Map<string, string>();
+		for (const prelude of preludes) {
+			if (desired.has(prelude.name)) throw new Error(`Duplicate eval prelude name: ${prelude.name}`);
+			for (const name of prelude.exports) {
+				if (this.#reservedGlobalKeys.has(name)) {
+					throw new Error(`Eval prelude ${prelude.name} cannot replace reserved global ${name}`);
+				}
+				const owner = exportOwners.get(name);
+				if (owner) throw new Error(`Eval preludes ${owner} and ${prelude.name} both export ${name}`);
+				exportOwners.set(name, prelude.name);
+			}
+			desired.set(prelude.name, prelude);
+		}
+
+		for (const [name, installed] of this.#installedPreludes) {
+			const next = desired.get(name);
+			if (
+				next &&
+				next.source === installed.source &&
+				next.exports.length === installed.exports.length &&
+				next.exports.every((value, index) => value === installed.exports[index])
+			) {
+				continue;
+			}
+			for (const exported of installed.exports) this.#releaseGlobal(exported);
+			this.#installedPreludes.delete(name);
+		}
+
+		for (const [name, prelude] of desired) {
+			if (this.#installedPreludes.has(name)) continue;
+			for (const exported of prelude.exports) this.#ownGlobal(exported);
+			try {
+				indirectEval(prelude.source, `[eval-prelude:${name}]`);
+				for (const exported of prelude.exports) recordGlobalValue(exported, this.#globalOwner);
+				this.#installedPreludes.set(name, {
+					name,
+					exports: [...prelude.exports],
+					source: prelude.source,
+				});
+			} catch (error) {
+				for (const exported of prelude.exports) this.#releaseGlobal(exported);
+				throw error;
+			}
 		}
 	}
 
@@ -396,6 +459,12 @@ export class JsRuntime {
 				if (!hooks) return undefined;
 				return surfaceBridgedToolImages(await hooks.callTool(name, args), hooks);
 			},
+			__omp_prelude__: async (name: string, parameters: unknown) => {
+				const hooks = this.#activeHooks("prelude");
+				if (!hooks) return undefined;
+				const payload = { name, parameters };
+				return surfaceBridgedToolImages(await hooks.callTool("__prelude__", payload), hooks);
+			},
 			__omp_import__: async (source: string, options?: ImportCallOptions) => {
 				const resolved = await this.#moduleLoader.resolveForRun(this.#activeCwd(), source);
 				if (resolved.mode === "local") return resolved.value;
@@ -459,6 +528,7 @@ export class JsRuntime {
 			...PRELUDE_GLOBAL_KEYS,
 		]);
 
+		this.#reservedGlobalKeys = allGlobalKeys;
 		for (const key of allGlobalKeys) {
 			this.#ownGlobal(key);
 		}
@@ -478,6 +548,8 @@ export class JsRuntime {
 		RUN_HOOK_RESOLVERS.delete(this.#runHookResolver);
 		for (const key of this.#ownedGlobalKeys) releaseGlobalKey(key, this.#globalOwner);
 		this.#ownedGlobalKeys.clear();
+		this.#reservedGlobalKeys.clear();
+		this.#installedPreludes.clear();
 	}
 }
 

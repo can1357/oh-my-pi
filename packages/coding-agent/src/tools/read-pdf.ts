@@ -73,7 +73,7 @@ export function splitPdfImageReadPath(readPath: string): PdfImageReadTarget | nu
 	return { pdfPath, member, page };
 }
 
-/** Render one PDF page through the browser tool's shared headless Chromium. */
+/** Render one PDF page through the browser capability's shared headless Chromium. */
 export async function renderPdfPageScreenshot(
 	session: ToolSession,
 	absolutePdfPath: string,

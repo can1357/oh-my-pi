@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AsyncJobError, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 
 async function waitForJobEviction(manager: AsyncJobManager, jobId: string): Promise<void> {
@@ -132,22 +133,30 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.structured?.data).toEqual({ count: 7 });
 	});
 
-	test("keeps structured output for a delivery that only succeeds after the job row is evicted", async () => {
+	test("keeps structured output and images when delivery succeeds after job eviction", async () => {
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+		};
 		let sinkCalls = 0;
-		const delivered: Array<{ jobId: string; structured: unknown }> = [];
+		const delivered: Array<{ jobId: string; structured: unknown; images: ImageContent[] | undefined }> = [];
 		const manager = new AsyncJobManager({
 			retentionMs: 25,
 			onJobComplete: async (jobId, _text, job) => {
 				sinkCalls += 1;
 				if (sinkCalls === 1) throw new Error("simulated delivery failure");
-				delivered.push({ jobId, structured: job?.structured });
+				delivered.push({ jobId, structured: job?.structured, images: job?.latestDetails?.images });
 			},
 		});
 
-		const jobId = manager.register("task", "agent task", async () => ({
-			text: "task done",
-			structured: { source: "caller", mode: "permissive", status: "valid", data: { count: 7 } },
-		}));
+		const jobId = manager.register("task", "agent task", async ({ reportProgress }) => {
+			await reportProgress("rendered", { images: [image] });
+			return {
+				text: "task done",
+				structured: { source: "caller", mode: "permissive", status: "valid", data: { count: 7 } },
+			};
+		});
 
 		await manager.waitForAll();
 		await waitForJobEviction(manager, jobId);
@@ -158,7 +167,11 @@ describe("AsyncJobManager", () => {
 		// enqueue time — not silently drop it because the row was evicted.
 		expect(sinkCalls).toBe(2);
 		expect(delivered).toEqual([
-			{ jobId, structured: { source: "caller", mode: "permissive", status: "valid", data: { count: 7 } } },
+			{
+				jobId,
+				structured: { source: "caller", mode: "permissive", status: "valid", data: { count: 7 } },
+				images: [image],
+			},
 		]);
 	});
 

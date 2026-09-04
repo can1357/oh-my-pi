@@ -5,6 +5,7 @@ import {
 	getAntigravityCounterKeyForModel,
 	scopeAntigravityLimitsForModel,
 } from "@oh-my-pi/pi-ai/usage/google-antigravity";
+import type { VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
@@ -238,6 +239,8 @@ interface ActiveRepoCache {
 	projectDir: string;
 	activeRepo: ActiveRepoContext | null;
 	effectiveGitCwd: string;
+	repository: VcsRepo | null;
+	repositoryCheckedAt: number;
 	/** Project + worktree dir name when `projectDir` is a linked worktree, else null. */
 	worktree: WorktreeContext | null;
 }
@@ -527,13 +530,31 @@ export class StatusLineComponent implements Component {
 			return this.#activeRepoCache;
 		}
 
-		const activeRepo = resolveActiveRepoContextSync(projectDir);
+		const projectRepository = vcs.repo(projectDir);
+		const activeRepo = projectRepository ? null : resolveActiveRepoContextSync(projectDir);
 		const effectiveGitCwd = activeRepo?.repoRoot ?? projectDir;
+		const repository = projectRepository ?? (activeRepo ? vcs.repo(effectiveGitCwd) : null);
 		// Only collapse the bare-cwd case: a single-direct-child-repo context
 		// (activeRepo set) renders `<parent> ↳ <child>`, which we leave intact.
 		const worktree = activeRepo ? null : resolveWorktreeContext(effectiveGitCwd);
-		this.#activeRepoCache = { projectDir, activeRepo, effectiveGitCwd, worktree };
+		this.#activeRepoCache = {
+			projectDir,
+			activeRepo,
+			effectiveGitCwd,
+			repository,
+			repositoryCheckedAt: Date.now(),
+			worktree,
+		};
 		return this.#activeRepoCache;
+	}
+
+	#resolveRepository(cache: ActiveRepoCache): VcsRepo | null {
+		if (cache.repository) return cache.repository;
+		const now = Date.now();
+		if (now - cache.repositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) return null;
+		cache.repository = vcs.repo(cache.effectiveGitCwd);
+		cache.repositoryCheckedAt = now;
+		return cache.repository;
 	}
 
 	/**
@@ -749,8 +770,8 @@ export class StatusLineComponent implements Component {
 			return;
 		}
 
-		const { effectiveGitCwd } = this.#resolveActiveRepoCache();
-		const repository = vcs.repo(effectiveGitCwd);
+		const activeRepoCache = this.#resolveActiveRepoCache();
+		const repository = this.#resolveRepository(activeRepoCache);
 		if (!repository) {
 			// There is no path to watch yet. Cache the negative result only for the
 			// fallback poll interval so a later `git init` becomes visible without
@@ -971,11 +992,11 @@ export class StatusLineComponent implements Component {
 		this.#jjStatusActive?.controller.abort();
 		this.#jjStatusActive = undefined;
 	}
-	#getBranchLabel(effectiveGitCwd?: string): string | null {
+	#getBranchLabel(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): string | null {
 		if (!this.#gitEnabled()) return null;
 
-		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		const repository = vcs.repo(gitCwd);
+		const gitCwd = activeRepoCache.effectiveGitCwd;
+		const repository = this.#resolveRepository(activeRepoCache);
 		if (!repository) return null;
 		const gitRepository = repository.asGit();
 		if (!gitRepository) {
@@ -1111,11 +1132,15 @@ export class StatusLineComponent implements Component {
 		return branch === this.#defaultBranch;
 	}
 
-	#getStatus(effectiveGitCwd?: string): { staged: number; unstaged: number; untracked: number } | null {
+	#getStatus(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): {
+		staged: number;
+		unstaged: number;
+		untracked: number;
+	} | null {
 		if (!this.#gitEnabled()) return null;
 
-		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		const repository = vcs.repo(gitCwd);
+		const gitCwd = activeRepoCache.effectiveGitCwd;
+		const repository = this.#resolveRepository(activeRepoCache);
 		if (!repository) return null;
 		if (repository.kind() === "jj") {
 			if (this.#jjStatusActive || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
@@ -1179,12 +1204,15 @@ export class StatusLineComponent implements Component {
 		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 	}
 
-	#lookupPr(effectiveGitCwd?: string): { number: number; url: string } | null {
+	#lookupPr(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): {
+		number: number;
+		url: string;
+	} | null {
 		if (!this.#gitEnabled()) return null;
 
-		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		if (vcs.repo(gitCwd)?.kind() !== "git") return null;
-		const branch = this.#getBranchLabel(gitCwd);
+		const gitCwd = activeRepoCache.effectiveGitCwd;
+		if (this.#resolveRepository(activeRepoCache)?.kind() !== "git") return null;
+		const branch = this.#getBranchLabel(activeRepoCache);
 		const currentContext = branch ? createPrCacheContext(branch, this.#cachedBranchRepoId ?? null) : null;
 
 		if (canReuseCachedPr(this.#cachedPr, this.#cachedPrContext, currentContext)) {
@@ -1212,7 +1240,9 @@ export class StatusLineComponent implements Component {
 		(async () => {
 			// Helper: only write cache if branch/repo context hasn't changed since launch
 			const setCachedPr = (value: { number: number; url: string } | null) => {
-				const latestBranch = this.#getBranchLabel(lookupCwd);
+				const latestActiveRepoCache = this.#resolveActiveRepoCache();
+				if (latestActiveRepoCache.effectiveGitCwd !== lookupCwd) return;
+				const latestBranch = this.#getBranchLabel(latestActiveRepoCache);
 				const latestContext = latestBranch
 					? createPrCacheContext(latestBranch, this.#cachedBranchRepoId ?? null)
 					: undefined;
@@ -1802,10 +1832,17 @@ export class StatusLineComponent implements Component {
 		const projectDir = getProjectDir();
 		const activeRepoCache = shouldResolveActiveRepo
 			? this.#resolveActiveRepoCache()
-			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir, worktree: null };
-		const gitBranch = includeGit || includePr ? this.#getBranchLabel(activeRepoCache.effectiveGitCwd) : null;
-		const gitStatus = includeGit ? this.#getStatus(activeRepoCache.effectiveGitCwd) : null;
-		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
+			: {
+					projectDir,
+					activeRepo: null,
+					effectiveGitCwd: projectDir,
+					repository: null,
+					repositoryCheckedAt: Date.now(),
+					worktree: null,
+				};
+		const gitBranch = includeGit || includePr ? this.#getBranchLabel(activeRepoCache) : null;
+		const gitStatus = includeGit ? this.#getStatus(activeRepoCache) : null;
+		const gitPr = includePr ? this.#lookupPr(activeRepoCache) : null;
 		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
 		this.#syncSpeculationBlink(compactionSpeculation);
 		const sessionAccentEnabled = this.#resolveSettings().sessionAccent !== false;

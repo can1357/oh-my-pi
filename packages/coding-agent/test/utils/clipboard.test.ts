@@ -15,7 +15,7 @@ type SpawnOptions = Bun.SpawnOptions.SpawnOptions<
 
 type SpawnCall = { cmd: string[]; options: SpawnOptions };
 type SpawnOutput = string | Uint8Array;
-
+type SpawnOutputSource = SpawnOutput | SpawnOutput[] | ((cmd: string[]) => SpawnOutput);
 function streamOf(body: SpawnOutput): ReadableStream<Uint8Array> {
 	const stream = new Response(body).body;
 	if (!stream) throw new Error("Failed to create response stream.");
@@ -33,14 +33,15 @@ function fakeProcess(stdout: SpawnOutput, exitCode = 0): Subprocess {
 	} as unknown as Subprocess;
 }
 
-function spySpawn(calls: SpawnCall[], stdout: SpawnOutput | SpawnOutput[], exitCode: number | number[] = 0) {
+function spySpawn(calls: SpawnCall[], stdout: SpawnOutputSource, exitCode: number | number[] = 0) {
 	function mockSpawn(opts: SpawnOptions & { cmd: string[] }): Subprocess;
 	function mockSpawn(cmd: string[], opts?: SpawnOptions): Subprocess;
 	function mockSpawn(first: string[] | (SpawnOptions & { cmd: string[] }), second?: SpawnOptions): Subprocess {
 		const cmd = Array.isArray(first) ? first : first.cmd;
 		const options = Array.isArray(first) ? (second ?? ({} as SpawnOptions)) : (first as SpawnOptions);
 		calls.push({ cmd, options });
-		const output = Array.isArray(stdout) ? (stdout[calls.length - 1] ?? "") : stdout;
+		const output =
+			typeof stdout === "function" ? stdout(cmd) : Array.isArray(stdout) ? (stdout[calls.length - 1] ?? "") : stdout;
 		const code = Array.isArray(exitCode) ? (exitCode[calls.length - 1] ?? 0) : exitCode;
 		return fakeProcess(output, code);
 	}
@@ -302,10 +303,20 @@ describe("readTextFromClipboard", () => {
 
 		expect(await readTextFromClipboard()).toBe("from xsel");
 		expect(calls.map(call => call.cmd)).toEqual([
-			["wl-paste", "--type", "text/plain", "--no-newline"],
+			["wl-paste", "--type", "text", "--no-newline"],
 			["xclip", "-selection", "clipboard", "-o"],
 			["xsel", "--clipboard", "--output"],
 		]);
+	});
+
+	it("requests UTF-8-capable text instead of the first Wayland MIME offer", async () => {
+		setPlatform("linux");
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, cmd => (cmd.includes("text") ? "已提交75个样本" : "<strong>formatted text</strong>"));
+
+		expect(await readTextFromClipboard()).toBe("已提交75个样本");
+		expect(calls.map(call => call.cmd)).toEqual([["wl-paste", "--type", "text", "--no-newline"]]);
 	});
 
 	it("returns pbpaste stdout on darwin without touching execSync", async () => {

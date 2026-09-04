@@ -360,7 +360,7 @@ describe("renderYieldSchema", () => {
 		return prompt.render(templateSource, { agent: "test-agent", outputSchema });
 	}
 
-	test("wraps a JTD properties schema inside result.data so the model matches the yield envelope", async () => {
+	test("wraps a JTD properties schema inside data so the model matches the yield call shape", async () => {
 		const rendered = await renderSubagentPrompt({
 			properties: {
 				status: { enum: ["goal_complete", "plan_created"] },
@@ -368,28 +368,28 @@ describe("renderYieldSchema", () => {
 				summary: { type: "string" },
 			},
 		});
-		expect(rendered).toContain('```ts\nresult: {\n  data: {\n    status: "goal_complete" | "plan_created";');
+		expect(rendered).toContain('```ts\n{\n  data: {\n    status: "goal_complete" | "plan_created";');
 		expect(rendered).toContain("    summary: string;\n  };\n}\n```");
-		// The old rendering advertised a bare interface with no `result.data` context.
+		// The old rendering advertised a bare interface with no `data` context.
 		// Guard against regressing to it — that phrasing is what caused the reported bug.
 		expect(rendered).not.toContain("Your result MUST match this TypeScript interface");
 	});
 
-	test("wraps a scalar schema on the same line as data so the model matches the yield envelope", async () => {
+	test("wraps a scalar schema on the same line as data so the model matches the yield call shape", async () => {
 		const rendered = await renderSubagentPrompt({ type: "string" });
-		expect(rendered).toContain("```ts\nresult: {\n  data: string;\n}\n```");
+		expect(rendered).toContain("```ts\n{\n  data: string;\n}\n```");
 	});
 
-	test("wraps an array-of-object schema without breaking the result.data envelope", async () => {
+	test("wraps an array-of-object schema without breaking the data call shape", async () => {
 		const rendered = await renderSubagentPrompt({
 			elements: { properties: { title: { type: "string" }, count: { type: "int32" } } },
 		});
-		expect(rendered).toContain("```ts\nresult: {\n  data: { title: string; count: number; }[];\n}\n```");
+		expect(rendered).toContain("```ts\n{\n  data: { title: string; count: number; }[];\n}\n```");
 	});
 
 	test("omits the schema section entirely when outputSchema is absent", async () => {
 		const rendered = await renderSubagentPrompt(undefined);
-		expect(rendered).not.toContain("result: {");
+		expect(rendered).not.toContain("```ts");
 		expect(rendered).not.toContain("Your terminal `yield` MUST use exactly this shape");
 	});
 });

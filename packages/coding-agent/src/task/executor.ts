@@ -2461,6 +2461,9 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 		const details = record.details && typeof record.details === "object" ? record.details : undefined;
 		const from = details ? Reflect.get(details, "from") : undefined;
 		if (typeof from !== "string" || from === selfId || sources.some(source => source.from === from)) continue;
+		// Automated wake-turn relays are answers, not wake sources: relaying one
+		// back would ping-pong two idle peers forever.
+		if (details && Reflect.get(details, "wakeRelay") === true) continue;
 		const messageId = details ? Reflect.get(details, "id") : undefined;
 		sources.push({ from, messageId: typeof messageId === "string" ? messageId : undefined });
 	}
@@ -2495,7 +2498,13 @@ async function relayWakeTurnOutput(args: {
 			: args.turnText.trim();
 	if (!body) return;
 	for (const source of pending) {
-		const receipt = await bus.send({ from: args.id, to: source.from, body, replyTo: source.messageId });
+		const receipt = await bus.send({
+			from: args.id,
+			to: source.from,
+			body,
+			replyTo: source.messageId,
+			wakeRelay: true,
+		});
 		if (receipt.outcome === "failed") {
 			logger.warn("IRC wake-turn relay failed", { from: args.id, to: source.from, error: receipt.error });
 		}

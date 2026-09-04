@@ -17,7 +17,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
 import type { LoadContext, LoadResult } from "../capability/types";
 import {
-	buildRuleFromMarkdown,
+	discoverRuleFromMarkdown,
 	calculateDepth,
 	createSourceMeta,
 	loadFilesFromDir,
@@ -185,7 +185,7 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 		loadFilesFromDir<Rule>(ctx, dir, PROVIDER_ID, level, {
 			extensions: ["md", "mdc"],
 			transform: (name, content, filePath, source) =>
-				buildRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
+				discoverRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
 		});
 
 	const results = await Promise.all([

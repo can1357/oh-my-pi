@@ -5,11 +5,12 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import type { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 beforeAll(async () => {
 	await initTheme();
@@ -49,36 +50,11 @@ function deviceWrite(id: string, name: string, inner: Record<string, unknown>) {
 
 function createFixture(streamingMessage: AssistantMessage) {
 	const pendingTools = new Map<string, ToolExecutionComponent>();
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn(), resetDisplay: vi.fn() },
-		settings,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		streamingComponent: { updateContent: vi.fn(), markTranscriptBlockFinalized: vi.fn() },
+	const ctx = createInteractiveModeContext({
+		streamingComponent: new AssistantMessageComponent(),
 		streamingMessage,
-		transcriptMessageComponents: new WeakMap(),
 		pendingTools,
-		noteDisplayableThinkingContent: vi.fn(() => false),
-		chatContainer: { addChild: vi.fn(), canRemoveBlock: () => true },
-		toolOutputExpanded: false,
-		lastAssistantUsage: undefined,
-		showPinnedError: vi.fn(),
-		session: {
-			getToolByName: () => undefined,
-			hasBuiltInTool: () => true,
-			isTtsrAbortPending: false,
-			retryAttempt: 0,
-		},
-		viewSession: {
-			getToolByName: () => undefined,
-			hasBuiltInTool: () => true,
-			isTtsrAbortPending: false,
-			retryAttempt: 0,
-		},
-		sessionManager: { getCwd: () => process.cwd() },
-	} as unknown as InteractiveModeContext;
+	});
 
 	const controller = new EventController(ctx);
 	ctx.eventController = controller;

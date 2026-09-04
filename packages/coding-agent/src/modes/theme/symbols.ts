@@ -275,7 +275,6 @@ export type SymbolKey =
 	| "tool.ask"
 	| "tool.resolve"
 	| "tool.review"
-	| "tool.inspectImage"
 	| "tool.goal"
 	| "tool.irc"
 	| "tool.delete"
@@ -628,7 +627,6 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tool.ask": "?",
 	"tool.resolve": "✓",
 	"tool.review": "◉",
-	"tool.inspectImage": "🖼",
 	"tool.goal": "◎",
 	"tool.irc": "✉",
 	"tool.delete": "🗑",
@@ -1064,7 +1062,6 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tool.ask": "\uEAC7",
 	"tool.resolve": "\uEBB1",
 	"tool.review": "\uEA70",
-	"tool.inspectImage": "\uEAEA",
 	"tool.goal": "\uEBF8",
 	"tool.irc": "\uF086",
 	"tool.delete": "\uf12d",
@@ -1335,7 +1332,6 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tool.ask": "[?]",
 	"tool.resolve": "[v]",
 	"tool.review": "rev",
-	"tool.inspectImage": "[i]",
 	"tool.goal": "(o)",
 	"tool.irc": "#",
 	"tool.delete": "rm",
