@@ -239,6 +239,9 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 		use std::os::unix::fs::OpenOptionsExt;
 		options.mode(mode);
 	}
+	// Windows has no per-file mode bits; the file inherits its parent's ACL.
+	#[cfg(not(unix))]
+	let _ = mode;
 	let write_result = (|| -> Result<()> {
 		let mut file = options
 			.open(&temp)
