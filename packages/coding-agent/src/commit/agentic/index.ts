@@ -56,7 +56,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	);
 
 	if (stagedFiles.length === 0) {
-		if (args.push) {
+		if (args.push && !args.dryRun) {
 			process.stdout.write("No changes to commit; pushing existing commits...\n");
 			await pushOrAbort(cwd);
 			return { usedFallback: false };

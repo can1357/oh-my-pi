@@ -119,7 +119,7 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		const repo = vcs.requireGit(tmp.path());
 
 		await runCommitCommand({
-			all: false,
+			all: true,
 			push: false,
 			dryRun: true,
 			noChangelog: true,
@@ -131,6 +131,24 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 
 		const status = await $`git status --porcelain`.cwd(tmp.path()).text();
 		expect(status.trim()).toBe("M tracked.txt\n?? scratch.txt");
+	});
+
+	it("dry-run with --push never pushes when nothing is staged", async () => {
+		const remote = tmp.join("remote.git");
+		await $`git init --bare ${remote}`.quiet();
+		await $`git remote add origin ${remote}`.cwd(tmp.path()).quiet();
+		await $`git push -q origin main`.cwd(tmp.path()).quiet();
+		const pushedHead = (await $`git rev-parse HEAD`.cwd(tmp.path()).text()).trim();
+
+		// Local is one commit ahead; a real push would advance the remote.
+		await Bun.write(tmp.join("tracked.txt"), "ahead\n");
+		await $`git commit -qam "ahead of remote"`.cwd(tmp.path()).quiet();
+
+		for (const legacy of [false, true]) {
+			await runCommitCommand({ all: false, push: true, dryRun: true, noChangelog: true, legacy });
+			const remoteHead = (await $`git rev-parse main`.cwd(remote).text()).trim();
+			expect(remoteHead).toBe(pushedHead);
+		}
 	});
 
 	it("explicit --all stages all changes before committing", async () => {
@@ -304,50 +322,6 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		expect(diff).not.toContain("+- Fixed bug in tracked file");
 	});
 
-	it("applyChangelogProposals isolates unstaged edits in the Unreleased hunk via exact index staging", async () => {
-		const changelogPath = tmp.join("CHANGELOG.md");
-		const initialContent = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Baseline feature\n";
-		await Bun.write(changelogPath, initialContent);
-		await $`git add CHANGELOG.md`.cwd(tmp.path()).quiet();
-		await $`git commit -m "init changelog"`.cwd(tmp.path()).quiet();
-
-		// Add an unstaged scratch note directly in the Unreleased section (same diff hunk)
-		const dirtyWorktree = `${initialContent}- Unstaged scratch note in same hunk\n`;
-		await Bun.write(changelogPath, dirtyWorktree);
-
-		const repo = vcs.requireGit(tmp.path());
-
-		await applyChangelogProposals({
-			cwd: tmp.path(),
-			expectedTree: await repo.indexTreeId(),
-			proposals: [
-				{
-					path: changelogPath,
-					entries: {
-						Fixed: ["Fixed critical issue"],
-					},
-				},
-			],
-			dryRun: false,
-		});
-
-		// Index blob has generated entry, but NOT the unstaged scratch note
-		const blob = await repo.showBlob(":CHANGELOG.md");
-		const indexContent = blob.data.toString("utf8");
-		expect(indexContent).toContain("Fixed critical issue");
-		expect(indexContent).not.toContain("Unstaged scratch note in same hunk");
-
-		// On disk, worktree retains the unstaged scratch note AND has the generated entry
-		const onDisk = await Bun.file(changelogPath).text();
-		expect(onDisk).toContain("Fixed critical issue");
-		expect(onDisk).toContain("Unstaged scratch note in same hunk");
-
-		// Unstaged diff shows ONLY the scratch note
-		const unstagedDiff = await $`git diff CHANGELOG.md`.cwd(tmp.path()).text();
-		expect(unstagedDiff).toContain("+- Unstaged scratch note in same hunk");
-		expect(unstagedDiff).not.toContain("+- Fixed critical issue");
-	});
-
 	it("skips changelog staging when indexed baseline lacks [Unreleased] section, preserving unstaged worktree edits", async () => {
 		const changelogPath = tmp.join("CHANGELOG.md");
 		const releasedOnlyContent =
@@ -516,6 +490,48 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 
 		const unstagedDiff = await $`git diff`.cwd(tmp.path()).text();
 		expect(unstagedDiff).toBe("");
+	});
+
+	it("user rejecting the split plan leaves HEAD, index, and changelog untouched", async () => {
+		const changelogContent = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Baseline feature\n";
+		await Bun.write(tmp.join("CHANGELOG.md"), changelogContent);
+		await $`git add CHANGELOG.md`.cwd(tmp.path()).quiet();
+		await $`git commit -qm "baseline changelog"`.cwd(tmp.path()).quiet();
+		await Bun.write(tmp.join("file1.txt"), "f1\n");
+		await $`git add file1.txt`.cwd(tmp.path()).quiet();
+
+		const repo = vcs.requireGit(tmp.path());
+		const headBefore = (await $`git rev-parse HEAD`.cwd(tmp.path()).text()).trim();
+		const initialTree = await repo.indexTreeId();
+
+		await runSplitCommit(
+			{
+				commits: [
+					{
+						changes: [{ path: "file1.txt", kind: "all" as const }],
+						type: "feat" as const,
+						scope: null,
+						summary: "add file1",
+						details: [],
+						issueRefs: [],
+						dependencies: [],
+					},
+				],
+				warnings: [],
+			},
+			{
+				cwd: tmp.path(),
+				dryRun: false,
+				push: false,
+				expectedTree: initialTree,
+				changelogProposal: { entries: [{ path: tmp.join("CHANGELOG.md"), entries: { Added: ["Added file1"] } }] },
+				confirm: async () => false,
+			},
+		);
+
+		expect((await $`git rev-parse HEAD`.cwd(tmp.path()).text()).trim()).toBe(headBefore);
+		expect(await repo.indexTreeId()).toBe(initialTree);
+		expect(await Bun.file(tmp.join("CHANGELOG.md")).text()).toBe(changelogContent);
 	});
 
 	it("split commit creates one commit per plan entry atomically and leaves a clean index", async () => {

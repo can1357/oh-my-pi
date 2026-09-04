@@ -36,7 +36,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 	} catch (error) {
 		if (vcs.isVcsError(error)) abortOnGitFailure("Commit generation failed", error);
 		if (error instanceof Error && error.message === "No staged changes to analyze") {
-			if (args.push) {
+			if (args.push && !args.dryRun) {
 				process.stdout.write("No changes to commit; pushing existing commits...\n");
 				await pushOrAbort(cwd);
 				return;
