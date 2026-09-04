@@ -150,14 +150,19 @@ describe("SelectorController.showCopySelector overlay lifecycle", () => {
 
 	it("serializes clipboard writes across selector reopenings", async () => {
 		const order: string[] = [];
+		const firstCallStarted = Promise.withResolvers<void>();
+		const releaseFirstCall = Promise.withResolvers<void>();
 		const secondDone = Promise.withResolvers<void>();
-		let secondCount = 0;
+		let callCount = 0;
 		vi.spyOn(clipboard, "copyToClipboard").mockImplementation(async (text: string) => {
+			callCount++;
+			if (callCount === 1) {
+				firstCallStarted.resolve();
+				await releaseFirstCall.promise;
+			}
 			order.push(text);
-			secondCount++;
-			if (secondCount === 2) secondDone.resolve();
+			if (callCount === 2) secondDone.resolve();
 		});
-
 		let mountedSelector: CopySelectorComponent | undefined;
 		const editor = { id: "editor" };
 		const ctx = {
@@ -196,6 +201,9 @@ describe("SelectorController.showCopySelector overlay lifecycle", () => {
 		mountedSelector!.handleInput(ENTER);
 		mountedSelector!.handleInput("q");
 
+		// Wait for first call to start and hold it open
+		await firstCallStarted.promise;
+
 		// Second opening: copy third block and exit
 		controller.showCopySelector();
 		mountedSelector!.render(100);
@@ -205,6 +213,13 @@ describe("SelectorController.showCopySelector overlay lifecycle", () => {
 		mountedSelector!.handleInput(DOWN);
 		mountedSelector!.handleInput(ENTER);
 		mountedSelector!.handleInput("q");
+
+		// Verify second call has not completed because first call is still held open
+		expect(order).toEqual([]);
+
+		// Release first call
+		releaseFirstCall.resolve();
+
 		await secondDone.promise;
 		expect(order).toEqual([CODE, "bun test"]);
 	});
