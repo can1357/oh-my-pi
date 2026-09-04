@@ -2130,7 +2130,7 @@ export class StatusLineComponent implements Component {
 						ctx.contextPercent ?? 0,
 						ctx.contextWindow,
 						embedCompactContext,
-						showEmbeddedContextWindow,
+						showEmbeddedContextWindow && !embedCompactContext,
 					)
 			: 0;
 		const minimumGapWidth = () => embeddedContextWidth || (left.length > 0 && right.length > 0 ? 1 : 0);
@@ -2308,6 +2308,7 @@ export class StatusLineComponent implements Component {
 		let windowLabel = "";
 		let percentStart = -1;
 		let windowStart = -1;
+		let renderWindowLabel = false;
 		let scaleWidth = gapWidth;
 		// >100%: usage anchored past the active window (e.g. model switch to a
 		// smaller window). The bar clamps full, but the embedded label breaks
@@ -2334,6 +2335,7 @@ export class StatusLineComponent implements Component {
 				if (!showEmbeddedContextWindow) {
 					if (percentOverflow) percentStart = gapWidth - percentLabel.length;
 				} else {
+					renderWindowLabel = true;
 					windowLabel = candidateWindow;
 					if (percentOverflow) {
 						percentStart = gapWidth - percentLabel.length;
@@ -2343,6 +2345,11 @@ export class StatusLineComponent implements Component {
 					}
 					scaleWidth = windowStart;
 				}
+			} else if (gapWidth >= candidatePercent.length) {
+				// The compact percentage is the primary readout. Keep it when an
+				// explicitly configured context total cannot share the narrow gauge.
+				percentLabel = candidatePercent;
+				if (percentOverflow) percentStart = gapWidth - percentLabel.length;
 			}
 		}
 
@@ -2369,10 +2376,8 @@ export class StatusLineComponent implements Component {
 		}
 
 		if (percentLabel && percentStart < 0) {
-			const minStart = showEmbeddedContextWindow ? 1 : 0;
-			const maxStart = showEmbeddedContextWindow
-				? scaleWidth - percentLabel.length - 1
-				: scaleWidth - percentLabel.length;
+			const minStart = renderWindowLabel ? 1 : 0;
+			const maxStart = renderWindowLabel ? scaleWidth - percentLabel.length - 1 : scaleWidth - percentLabel.length;
 			const preferredStart = Math.min(maxStart, Math.max(minStart, usedCount));
 			const overlapsBoundary = (start: number): boolean => {
 				const end = start + percentLabel.length;
