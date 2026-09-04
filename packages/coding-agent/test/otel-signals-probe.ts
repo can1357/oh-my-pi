@@ -146,7 +146,7 @@ logger.error("probe error", { code: "probe" });
 // Metric instruments via the agent telemetry hooks.
 const usage: ChatUsageEvent = {
 	span: undefined as never,
-	agent: { id: "main", name: "Main" },
+	agent: { id: "probe-unbounded-agent-id", name: "Main" },
 	conversationId: "probe-session",
 	stepNumber: 0,
 	model: "claude-haiku-4-5",
@@ -201,6 +201,13 @@ await flushTelemetryExport();
 assertSingleMetricPoint("pi.omp.agent.chat.calls");
 assertSingleMetricPoint("pi.omp.agent.tool.calls");
 assertSingleMetricPoint("pi.omp.agent.tool.duration");
+const metricPayloadText = metricPayloads.map(payload => new TextDecoder().decode(payload)).join("\n");
+if (metricPayloadText.includes("pi.gen_ai.agent.id") || metricPayloadText.includes("probe-unbounded-agent-id")) {
+	throw new Error("gen_ai.client.token.usage leaked the unbounded agent ID metric attribute");
+}
+if (!metricPayloadText.includes("pi.gen_ai.agent.name") || !metricPayloadText.includes("Main")) {
+	throw new Error("gen_ai.client.token.usage dropped the bounded agent name metric attribute");
+}
 await server.stop(true);
 
 const ok = seen.has("logs") && seen.has("metrics");

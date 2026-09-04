@@ -49,6 +49,7 @@ import type { TelemetrySignalConfig } from "./telemetry-export";
 const FLUSH_INTERVAL_MS = 30_000;
 
 const SERVICE_NAME = "oh-my-pi";
+const SERVICE_INSTANCE_ID = crypto.randomUUID();
 
 type OtelLogLevel = "none" | logger.LogLevel;
 
@@ -118,9 +119,10 @@ export async function registerProviders(signalConfig: TelemetrySignalConfig): Pr
 	// OTEL_SERVICE_NAME; merged last so both take precedence over the fallback
 	// service.name — with OTEL_SERVICE_NAME still winning service.name inside the
 	// detector itself.
-	const resource = resourceFromAttributes({ "service.name": SERVICE_NAME }).merge(
-		detectResources({ detectors: [envDetector] }),
-	);
+	const resource = resourceFromAttributes({
+		"service.name": SERVICE_NAME,
+		"service.instance.id": SERVICE_INSTANCE_ID,
+	}).merge(detectResources({ detectors: [envDetector] }));
 
 	if (signalConfig.trace) {
 		const exporter = new OTLPTraceExporter();
@@ -233,7 +235,6 @@ class AgentMetricRecorder {
 			"gen_ai.provider.name": event.provider,
 			"gen_ai.request.model": event.model,
 			"gen_ai.response.service_tier": event.serviceTier,
-			"pi.gen_ai.agent.id": event.agent?.id,
 			"pi.gen_ai.agent.name": event.agent?.name,
 		});
 
