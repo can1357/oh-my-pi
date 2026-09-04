@@ -678,9 +678,27 @@ struct CodexModelRow {
 	#[serde(default)]
 	default_reasoning_level: Option<Str>,
 	#[serde(default)]
-	supported_reasoning_levels: Vec<Str>,
+	supported_reasoning_levels: Vec<CodexReasoningLevel>,
 	#[serde(default)]
 	input_modalities: Vec<Str>,
+}
+
+/// One supported reasoning level. The live endpoint sends presets shaped
+/// `{"effort":"high","description":"…"}`; older payloads and fixtures use the
+/// bare effort name.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CodexReasoningLevel {
+	Named(Str),
+	Preset { effort: Str },
+}
+
+impl CodexReasoningLevel {
+	fn effort(&self) -> &str {
+		match self {
+			Self::Named(effort) | Self::Preset { effort } => effort.as_str(),
+		}
+	}
 }
 
 struct CodexModelsDecoder {
@@ -712,12 +730,12 @@ impl CodexModelsDecoder {
 			OperationKind, ReasoningCapabilities, ReasoningEffort, ReasoningFeatureBits,
 		};
 		let mut efforts = Vec::new();
-		for level in row
-			.default_reasoning_level
-			.iter()
-			.chain(row.supported_reasoning_levels.iter())
-		{
-			let effort = match level.as_str() {
+		for level in row.default_reasoning_level.as_deref().into_iter().chain(
+			row.supported_reasoning_levels
+				.iter()
+				.map(CodexReasoningLevel::effort),
+		) {
+			let effort = match level {
 				"none" | "off" => Some(ReasoningEffort::Off),
 				"minimal" => Some(ReasoningEffort::Minimal),
 				"low" => Some(ReasoningEffort::Low),
@@ -1323,5 +1341,61 @@ mod tests {
 		);
 		assert_eq!(rows[1].wire_model.as_str(), "opaque-model");
 		assert!(rows[1].declared_class.is_none());
+	}
+
+	#[test]
+	fn decodes_live_codex_models_payload_with_reasoning_presets() {
+		use bytes::Bytes;
+
+		use crate::{
+			catalog::{Availability, ProviderId, ReasoningEffort, RouteId},
+			codec::{Decoder as _, RawEvent},
+			transport::Frame,
+		};
+		let mut decoder = CodexModelsDecoder {
+			provider: ProviderId::from("openai-codex"),
+			route:    RouteId::from("openai-codex"),
+			done:     false,
+		};
+		let mut output = None;
+		decoder
+			.push(
+				Frame::Raw(Bytes::from_static(
+					br#"{"models":[
+				{"slug":"gpt-6-astra","display_name":"GPT-6-Astra","visibility":"list","priority":1,
+				 "default_reasoning_level":"medium",
+				 "supported_reasoning_levels":[
+				   {"effort":"low","description":"Fast responses with lighter reasoning"},
+				   {"effort":"medium","description":"Balances speed and reasoning depth"},
+				   {"effort":"high","description":"Greater reasoning depth"},
+				   {"effort":"xhigh","description":"Extra high reasoning"}],
+				 "service_tiers":[{"id":"priority","name":"Fast","description":"2x speed"}],
+				 "context_window":272000,"max_context_window":872000,
+				 "input_modalities":["text","image"]},
+				{"slug":"gpt-reserve","display_name":"GPT-Reserve","visibility":"hide","priority":3}
+			]}"#,
+				)),
+				&mut |event| output = Some(event),
+			)
+			.expect("live Codex discovery response");
+		let Some(RawEvent::DiscoveredModels { rows, next_cursor: None }) = output else {
+			panic!("expected discovered rows");
+		};
+		assert_eq!(rows.len(), 1, "hidden models are skipped");
+		assert_eq!(rows[0].wire_model.as_str(), "gpt-6-astra");
+		let chat = rows[0]
+			.declared_capabilities
+			.as_ref()
+			.and_then(|capabilities| capabilities.chat.as_ref())
+			.expect("chat capabilities");
+		let Availability::Native(reasoning) = &chat.reasoning else {
+			panic!("reasoning presets should be recorded as native reasoning");
+		};
+		assert_eq!(reasoning.efforts.as_ref(), [
+			ReasoningEffort::Medium,
+			ReasoningEffort::Low,
+			ReasoningEffort::High,
+			ReasoningEffort::Xhigh
+		]);
 	}
 }
