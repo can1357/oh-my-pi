@@ -37,7 +37,7 @@ import {
 	readProviderApiKeyBundleFd,
 } from "./cli/provider-api-keys";
 import { selectSession } from "./cli/session-picker";
-import { applyStartupCwd } from "./cli/startup-cwd";
+import { applyStartupCwd, recordLaunchDirectory } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
 import { CliUsageError } from "./cli/usage-error";
 import { findConfigFile } from "./config";
@@ -1416,6 +1416,9 @@ export async function runRootCommand(
 		// Relative named bundle paths resolve from the launch directory, before
 		// automatic home relocation or explicit --cwd handling.
 		const launchCwd = process.cwd();
+		// `/restart` replays this argv from the post-relocation directory, so the
+		// launch directory has to outlive the chdir for relative bundle paths.
+		recordLaunchDirectory(launchCwd);
 		const providerApiKeysPath =
 			parsedArgs.providerApiKeys && !nodePath.isAbsolute(parsedArgs.providerApiKeys)
 				? nodePath.resolve(launchCwd, parsedArgs.providerApiKeys)
@@ -1449,16 +1452,6 @@ export async function runRootCommand(
 		// already initialized its cached theme synchronously for the first frame.
 		await logger.time("initTheme:initial", ensureTheme);
 
-		const parsedArgs = parsed;
-		const startupDirectoryState = {
-			cwd: process.cwd(),
-			projectDir: getProjectDir(),
-			parsedCwd: parsedArgs.cwd,
-		};
-		const providerApiKeysPath =
-			parsedArgs.providerApiKeys && !nodePath.isAbsolute(parsedArgs.providerApiKeys)
-				? nodePath.resolve(startupDirectoryState.cwd, parsedArgs.providerApiKeys)
-				: parsedArgs.providerApiKeys;
 		try {
 			await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 		} catch (error: unknown) {

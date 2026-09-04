@@ -244,4 +244,39 @@ describe("restartArgv (/restart relaunch argv)", () => {
 			"sid",
 		]);
 	});
+
+	it("re-anchors a relative bundle path against the launch directory", () => {
+		// `omp --provider-api-keys keys.json --cwd /work/project` resolves the
+		// bundle from the launch directory and then chdirs. Replaying the bare
+		// relative token would make the replacement resolve /work/project/keys.json
+		// and exit with a credential-bundle error, so the absolute path is replayed.
+		expect(restartArgv(["--provider-api-keys", "keys.json", "--cwd", "/work/project"], "sid", "/launch/dir")).toEqual(
+			["--provider-api-keys", "/launch/dir/keys.json", "--cwd", "/work/project", "--resume", "sid"],
+		);
+	});
+
+	it("re-anchors the inline equals form of a relative bundle path", () => {
+		expect(restartArgv(["--provider-api-keys=sub/keys.json"], "sid", "/launch/dir")).toEqual([
+			"--provider-api-keys=/launch/dir/sub/keys.json",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("leaves an absolute bundle path and other path-valued flags untouched", () => {
+		// Only --provider-api-keys is launch-relative; --cwd is rewritten by
+		// applyStartupCwd itself, so restartArgv must not second-guess it.
+		expect(
+			restartArgv(["--provider-api-keys", "/run/keys.json", "--cwd", "relative/dir"], "sid", "/launch/dir"),
+		).toEqual(["--provider-api-keys", "/run/keys.json", "--cwd", "relative/dir", "--resume", "sid"]);
+	});
+
+	it("replays the relative bundle path unchanged when no launch directory is known", () => {
+		expect(restartArgv(["--provider-api-keys", "keys.json"], "sid")).toEqual([
+			"--provider-api-keys",
+			"keys.json",
+			"--resume",
+			"sid",
+		]);
+	});
 });

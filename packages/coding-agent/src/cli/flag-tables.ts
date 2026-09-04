@@ -30,6 +30,7 @@
  * real implementations at the dispatch site.
  */
 
+import * as nodePath from "node:path";
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { Args } from "./args";
@@ -396,6 +397,25 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
 const CONSUMED_ONCE_FLAGS: ReadonlySet<string> = new Set(["--provider-api-keys-fd"]);
 
 /**
+ * The one flag whose value is a filesystem path resolved against the *launch*
+ * directory rather than the directory the process ends up in.
+ *
+ * `applyStartupCwd` may relocate the process (automatic home relocation or an
+ * explicit `--cwd`), and `/restart` re-executes the original argv from that new
+ * directory. A relative value would then resolve somewhere else, so the
+ * replacement process gets the launch-resolved absolute path instead. `--cwd`
+ * itself is exempt: `applyStartupCwd` already rewrites it in place.
+ */
+const LAUNCH_RELATIVE_PATH_FLAG = "--provider-api-keys";
+
+/** Re-anchor a launch-relative flag value so it survives a cwd change. */
+function resolveLaunchRelativeValue(flag: string, value: string, launchCwd: string | undefined): string {
+	if (launchCwd === undefined || flag !== LAUNCH_RELATIVE_PATH_FLAG) return value;
+	if (value.length === 0 || nodePath.isAbsolute(value)) return value;
+	return nodePath.resolve(launchCwd, value);
+}
+
+/**
  * Rewrite the launch argv for an in-place self-restart (`/restart`).
  *
  * Keeps every configuration flag as launched, but drops:
@@ -411,8 +431,13 @@ const CONSUMED_ONCE_FLAGS: ReadonlySet<string> = new Set(["--provider-api-keys-f
  * its value token with it and an unknown extension flag keeps its value.
  * `resumeSessionId` is omitted for a session that never materialized on disk;
  * the relaunch then starts fresh with the same configuration.
+ *
+ * `launchCwd` is the directory the process was launched from. When given, a
+ * relative {@link LAUNCH_RELATIVE_PATH_FLAG} value is rewritten to its
+ * launch-resolved absolute form, so a relaunch from a different working
+ * directory still finds the same file.
  */
-export function restartArgv(argv: string[], resumeSessionId: string | undefined): string[] {
+export function restartArgv(argv: string[], resumeSessionId: string | undefined, launchCwd?: string): string[] {
 	const kept: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -424,8 +449,13 @@ export function restartArgv(argv: string[], resumeSessionId: string | undefined)
 			if (consumesNext) i++;
 			continue;
 		}
+		if (flag === LAUNCH_RELATIVE_PATH_FLAG && arg.startsWith(`${flag}=`)) {
+			const inlineValue = arg.slice(flag.length + 1);
+			kept.push(`${flag}=${resolveLaunchRelativeValue(flag, inlineValue, launchCwd)}`);
+			continue;
+		}
 		kept.push(arg);
-		if (consumesNext) kept.push(argv[++i]);
+		if (consumesNext) kept.push(resolveLaunchRelativeValue(flag, argv[++i], launchCwd));
 	}
 	if (resumeSessionId !== undefined) kept.push("--resume", resumeSessionId);
 	return kept;

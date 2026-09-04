@@ -9,12 +9,9 @@
 ## [18.1.10] - 2026-09-04
 ### Added
 
-- Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.
-- Added the `omp if-bench` command: a zero-tool instruction-following and working-memory benchmark that drives one cached conversation per model, adding one more glyph array action every turn while a `nya{1,N}` directive moves through the prompt, with a live turn-ladder board and a ranked scoreboard
-- Added `q` shortcut to exit the git TUI
-- Added a third state to the git TUI whitespace toggle (`b`): beyond ignoring whitespace-only line changes, it hides formatting-only changes (indentation, line splits/joins, blank lines) and import-only changes in TypeScript/JavaScript, Rust, and Go
-- Compressed single-child directory chains in the sidebar tree view
 - Added `--provider-api-keys` for loading a named provider-key bundle and `--provider-api-keys-fd` for consuming an exact launcher descriptor, both process-local and never persisted ([#8286](https://github.com/can1357/oh-my-pi/pull/8286) by [@ghosty-11](https://github.com/ghosty-11))
+
+## [18.1.10] - 2026-09-04
 
 ### Changed
 
@@ -368,10 +365,6 @@
 - Fixed a macOS composer display issue where undercurl could remain attached to stale text after rapid typing.
 - Improved `xd://` MCP failure messages with actionable transport stages, failure categories, server and tool context, retryability, trace IDs, and redacted JSON-RPC details.
 - Fixed ACP `read` tool-call locations so clients such as Zed Follow receive the resolved filesystem path rather than the OMP line-range selector.
-
-### Added
-
-- Added `--provider-api-keys` for loading a named provider-key bundle and `--provider-api-keys-fd` for consuming an exact launcher descriptor, both process-local and never persisted ([#8286](https://github.com/can1357/oh-my-pi/pull/8286) by [@ghosty-11](https://github.com/ghosty-11))
 
 ## [18.0.9] - 2026-08-28
 
