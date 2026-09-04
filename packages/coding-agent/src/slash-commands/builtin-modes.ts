@@ -144,6 +144,23 @@ function shortDetail(value: string, limit = AUTOCOMPLETE_DETAIL_LIMIT): string {
 	return singleLine.length <= limit ? singleLine : `${singleLine.slice(0, limit - 1)}…`;
 }
 
+/** Shared `/mode` logic: list mode skills or toggle one's pin; returns operator feedback. */
+async function applyModeCommand(session: AgentSession, arg: string): Promise<string> {
+	const modeSkills = session.skills.filter(skill => skill.mode === true);
+	const pinned = session.getPinnedModeSkillNames();
+	if (!arg || arg === "list" || arg === "status") {
+		if (modeSkills.length === 0) return "No mode skills available (skills with frontmatter `mode: true`).";
+		return modeSkills.map(skill => `${skill.name}${pinned.includes(skill.name) ? " (pinned)" : ""}`).join("\n");
+	}
+	const outcome = await session.toggleModeSkill(arg);
+	if (outcome === "pinned") return `Mode skill "${arg}" pinned: its reminder now rides the system prompt.`;
+	if (outcome === "unpinned") return `Mode skill "${arg}" unpinned.`;
+	return session.skills.some(skill => skill.name === arg)
+		? `Skill "${arg}" is not a mode skill (frontmatter mode: true required).`
+		: `Unknown skill "${arg}".` +
+				(modeSkills.length > 0 ? ` Mode skills: ${modeSkills.map(skill => skill.name).join(", ")}.` : "");
+}
+
 export function formatTokenCount(value: number): string {
 	return value.toLocaleString();
 }
@@ -533,6 +550,33 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /skillful [on|off|status]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "mode",
+		icon: "compass",
+		description:
+			"Pin or unpin a mode skill (frontmatter mode: true); its reminder stays in the system prompt while pinned",
+		acpInputHint: "<skill>|list|status",
+		subcommands: [
+			{ name: "list", description: "List mode skills and their pin state" },
+			{ name: "status", description: "List mode skills and their pin state" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const pinned = runtime.ctx.session.getPinnedModeSkillNames();
+			return pinned.length > 0 ? `Mode: ${pinned.join(", ")}` : "Mode: none";
+		},
+		handle: async (command, runtime) => {
+			await runtime.output(await applyModeCommand(runtime.session, command.args.trim()));
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			await runtime.ctx.showStatus(await applyModeCommand(runtime.ctx.session, command.args.trim()));
+			const pinned = runtime.ctx.session.getPinnedModeSkillNames();
+			runtime.ctx.statusLine.setSkillModeStatus(pinned.length > 0 ? [...pinned] : undefined);
+			runtime.ctx.ui.requestRender();
 			runtime.ctx.editor.setText("");
 		},
 	},

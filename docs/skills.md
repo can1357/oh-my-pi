@@ -56,6 +56,8 @@ Supported frontmatter fields on the skill type:
 - `globs?: string[]`
 - `alwaysApply?: boolean`
 - `hide?: boolean`
+- `mode?: boolean`
+- `reminder?: string`
 - `disableModelInvocation?: boolean` (Agent Skills equivalent of `hide`; normalized from kebab-case `disable-model-invocation`)
 - additional keys are preserved as unknown metadata
 
@@ -63,9 +65,9 @@ Current runtime behavior:
 
 - `name` defaults to the skill directory name
 - `description` is required for:
-  - native `.omp` provider skill discovery (`requireDescription: true`)
-  - `omp-plugins` extension-package skills and the `github` provider (`.github/skills/`), which also pass `requireDescription: true`
-  - `skills.customDirectories` scans via `scanSkillsFromDir` in `src/discovery/helpers.ts` (non-recursive)
+   - native `.omp` provider skill discovery (`requireDescription: true`)
+   - `omp-plugins` extension-package skills and the `github` provider (`.github/skills/`), which also pass `requireDescription: true`
+   - `skills.customDirectories` scans via `scanSkillsFromDir` in `src/discovery/helpers.ts` (non-recursive)
 - the claude/codex/agents/opencode/claude-plugins providers can load skills without description
 
 ## Discovery pipeline
@@ -119,9 +121,9 @@ The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location 
 
 - Capability dedup already keeps first skill per name (highest-precedence provider)
 - `extensibility/skills.ts` additionally:
-  - de-duplicates identical files by `realpath` (symlink-safe)
-  - emits collision warnings when a later skill name conflicts
-  - keeps the convenience `loadSkillsFromDir({ dir, source })` API as a thin adapter over `scanSkillsFromDir`
+   - de-duplicates identical files by `realpath` (symlink-safe)
+   - emits collision warnings when a later skill name conflicts
+   - keeps the convenience `loadSkillsFromDir({ dir, source })` API as a thin adapter over `scanSkillsFromDir`
 - Custom-directory skills are merged after provider skills and override same-named default-path provider skills. Among custom directories, the first same-named skill wins.
 
 ## Runtime usage behavior
@@ -131,9 +133,9 @@ The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location 
 System prompt construction (`src/system-prompt.ts`) uses discovered skills as follows:
 
 - if `read` tool is available:
-  - include discovered skills list in prompt, excluding skills with `hide: true`
+   - include discovered skills list in prompt, excluding skills with `hide: true`
 - otherwise:
-  - omit discovered list
+   - omit discovered list
 
 `hide: true` does not disable the skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and `/skill:<name>` when skill commands are enabled.
 
@@ -152,8 +154,8 @@ If `skills.enableSkillCommands` is true, interactive mode registers one slash co
 - strips frontmatter
 - wraps the body with skill name, base directory, and optional user arguments, then injects it as a custom message
 - delivery mode follows the **submission keybinding**:
-  - **Enter** → invokes the skill on the `steer` queue while streaming (matches free-text Enter, which also steers), or as a normal idle prompt when the agent is not streaming
-  - **Ctrl+Enter** (`app.message.followUp`) → invokes the skill on the `followUp` queue while streaming, or as a normal idle prompt when the agent is not streaming
+   - **Enter** → invokes the skill on the `steer` queue while streaming (matches free-text Enter, which also steers), or as a normal idle prompt when the agent is not streaming
+   - **Ctrl+Enter** (`app.message.followUp`) → invokes the skill on the `followUp` queue while streaming, or as a normal idle prompt when the agent is not streaming
 
 There is no flag, mode-selector, or frontmatter knob to override delivery mode — the keybinding _is_ the choice, identical to free-text routing during streaming. Both submission paths dispatch through `#invokeSkillCommand` in `input-controller.ts`, which delegates to `invokeSkillCommandFromText` in `src/modes/skill-command.ts`.
 
@@ -161,6 +163,22 @@ Invoked skill content is identified by invocation kind, each with its own prompt
 
 - **User-invoked** (`user-invocation.md`, used by `/skill:<name>`): the message opens by announcing that the user invoked the skill, embeds the skill body, and appends the skill directory (`[Skill directory: <baseDir>]`) with instructions to resolve the skill's relative paths (scripts, templates) against it, plus optional `User: <args>`.
 - **Autoloaded** (`autoload.md`): a minimal provenance-only format — body followed by `Skill: <path>` and optional `User: <args>` — used when subagents auto-inject skills declared via the `autoloadSkills` agent frontmatter field; these hidden messages must not claim the user invoked them.
+
+### Mode skills
+
+A skill can mark itself as a **mode skill** with the `mode: true` frontmatter key and set a standing reminder with `reminder: "..."`.
+
+Pins are per-session and controlled with `/mode`:
+
+- `/mode <skill>` toggles the pin for that skill (pin when unpinned, unpin when pinned); skills without `mode: true` are not valid targets
+- `/mode list` (or `/mode status`, or no argument) lists mode skills with their pin state
+
+While a mode skill is pinned:
+
+- its `reminder` rides the system prompt every turn: each pinned skill's reminder is rendered from `src/prompts/system/skill-mode-reminder.md` as a `<system-reminder>` block and appended to the base prompt when it is rebuilt (`src/sdk.ts`)
+- the status line's `mode` segment shows the pinned skill name next to the pin icon; with multiple pins, the first name is shown with a `+N` suffix
+
+Pins persist across resume, branching, and in-place session switches. Each pin and unpin is recorded as a `skill-mode-pin` custom entry in the session transcript; on restore, `replaySkillModePins` in `src/session/mode-skills.ts` replays those entries in order, so the last write per skill wins and an unpin clears the pin. Pinned names that no longer resolve to a `mode: true` skill (e.g. the skill was removed after pinning) are dropped by `resolvePinnedModeSkills`.
 
 ## `skill://` URL behavior
 

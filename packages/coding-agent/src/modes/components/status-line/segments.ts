@@ -346,6 +346,7 @@ const modeSegment: StatusLineSegment = {
 	render(ctx) {
 		const pauseSuffix = theme.icon.pause ? ` ${theme.icon.pause}` : " (paused)";
 
+		// Most transient, operationally urgent state wins; a standing pin is last.
 		const plan = ctx.planMode;
 		if (plan && (plan.enabled || plan.paused)) {
 			const label = plan.paused ? `Plan${pauseSuffix}` : "Plan";
@@ -381,6 +382,16 @@ const modeSegment: StatusLineSegment = {
 			const limit = formatLoopLimit(loop.limit, ctx.now?.getTime());
 			if (limit) parts.push(statusValue(ctx, limit));
 			return { content: theme.fg(color, parts.join(" ")), visible: true };
+		}
+
+		const skill = ctx.skillMode;
+		if (skill && skill.length > 0) {
+			const names = skill.map(sanitizeStatusText).filter(Boolean);
+			if (names.length > 0) {
+				const label = names.length === 1 ? names[0] : `${names[0]} +${names.length - 1}`;
+				const content = withIcon(theme.icon.pin, statusValue(ctx, label));
+				return { content: accentFg(ctx, "accent", content), visible: true };
+			}
 		}
 
 		return { content: "", visible: false };

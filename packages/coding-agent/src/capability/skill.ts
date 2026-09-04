@@ -28,6 +28,17 @@ export interface SkillFrontmatter {
 	 * @see https://agentskills.io/specification
 	 */
 	disableModelInvocation?: boolean;
+	/**
+	 * When `true`, the skill declares a pinned "mode" (e.g. a persona like
+	 * poteto-mode): while the mode is active, its `reminder` is injected into
+	 * the system prompt every turn.
+	 */
+	mode?: boolean;
+	/**
+	 * Reminder text for mode skills; injected into the system prompt while the
+	 * mode is pinned. Only meaningful when `mode` is `true`.
+	 */
+	reminder?: string;
 	[key: string]: unknown;
 }
 
@@ -43,6 +54,10 @@ export interface Skill {
 	content: string;
 	/** Parsed frontmatter */
 	frontmatter?: SkillFrontmatter;
+	/** `true` when frontmatter declares `mode: true` (pinnable mode skill) */
+	mode?: boolean;
+	/** Reminder text for mode skills; injected while the mode is pinned */
+	reminder?: string;
 	/**
 	 * Filesystem-resolved plugin root this skill was packaged in (Agent Plugins
 	 * §4.1). When set, every `skill://` resource access must realpath-resolve
@@ -53,6 +68,26 @@ export interface Skill {
 	level: "user" | "project";
 	/** Source metadata */
 	_source: SourceMeta;
+}
+
+/**
+ * Maximum length (in characters) of a mode skill's `reminder`. Reminders are
+ * injected into the system prompt, so every skill-loading path enforces this
+ * cap through {@link validateSkillReminder}.
+ */
+export const SKILL_REMINDER_MAX_LENGTH = 1024;
+
+/**
+ * Validate a skill's `reminder` frontmatter value. Returns `null` when the
+ * value is acceptable (including absent), otherwise an error message.
+ */
+export function validateSkillReminder(reminder: unknown): string | null {
+	if (reminder === undefined) return null;
+	if (typeof reminder !== "string") return `"reminder" must be a string`;
+	if (reminder.length > SKILL_REMINDER_MAX_LENGTH) {
+		return `"reminder" exceeds ${SKILL_REMINDER_MAX_LENGTH} characters`;
+	}
+	return null;
 }
 
 export const skillCapability = defineCapability<Skill>({

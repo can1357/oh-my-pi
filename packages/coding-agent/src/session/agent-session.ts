@@ -326,6 +326,7 @@ import {
 	USER_INTERRUPT_LABEL,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
+import { replaySkillModePins, resolvePinnedModeSkills, SKILL_MODE_PIN_CUSTOM_TYPE } from "./mode-skills";
 import { ModelControls, type ModelControlsHost } from "./model-controls";
 import { isPrewalkPlanNudge, PrewalkCoordinator, type PrewalkCoordinatorHost } from "./prewalk";
 import {
@@ -7905,6 +7906,62 @@ export class AgentSession {
 			}
 		}
 		return enabled;
+	}
+
+	// =========================================================================
+	// Skill Modes (pinned `mode: true` skills)
+	// =========================================================================
+
+	/**
+	 * Names of `mode: true` skills pinned for this session, in pin order.
+	 * Replayed from session entries on every read, so the answer is correct
+	 * across resume, branch, and in-place session switches with no in-memory
+	 * handoff state to rekey.
+	 */
+	getPinnedModeSkillNames(): readonly string[] {
+		return replaySkillModePins(this.sessionManager.getEntries());
+	}
+
+	/** Pinned mode skills resolved against the loaded skills. */
+	getPinnedModeSkills(): readonly Skill[] {
+		return resolvePinnedModeSkills(this.getPinnedModeSkillNames(), this.skills);
+	}
+
+	/**
+	 * Pin a `mode: true` skill: its `reminder` rides the base system prompt
+	 * for the rest of this session (persisted as a skill-mode-pin entry so it
+	 * survives resume). Rebuilds the base prompt so the reminder is live
+	 * immediately. Returns false when the name is not a pinnable mode skill
+	 * or is already pinned.
+	 */
+	async pinModeSkill(name: string): Promise<boolean> {
+		if (this.getPinnedModeSkillNames().includes(name)) return false;
+		const skill = this.skills.find(candidate => candidate.name === name);
+		if (!skill || skill.mode !== true) return false;
+		this.sessionManager.appendCustomEntry(SKILL_MODE_PIN_CUSTOM_TYPE, { skill: name, pinned: true });
+		await this.refreshBaseSystemPrompt();
+		return true;
+	}
+
+	/**
+	 * Unpin a previously pinned mode skill (the entry is accepted even when
+	 * the skill no longer loads, so stale pins stay cleanable). Rebuilds the
+	 * base prompt so the reminder drops out immediately. Returns false when
+	 * the name is not pinned.
+	 */
+	async unpinModeSkill(name: string): Promise<boolean> {
+		if (!this.getPinnedModeSkillNames().includes(name)) return false;
+		this.sessionManager.appendCustomEntry(SKILL_MODE_PIN_CUSTOM_TYPE, { skill: name, pinned: false });
+		await this.refreshBaseSystemPrompt();
+		return true;
+	}
+
+	/** Pin when not pinned, unpin when pinned; null when nothing changes. */
+	async toggleModeSkill(name: string): Promise<"pinned" | "unpinned" | null> {
+		if (this.getPinnedModeSkillNames().includes(name)) {
+			return (await this.unpinModeSkill(name)) ? "unpinned" : null;
+		}
+		return (await this.pinModeSkill(name)) ? "pinned" : null;
 	}
 
 	/** Lists thinking levels supported by the active model. */

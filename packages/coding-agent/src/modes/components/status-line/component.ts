@@ -434,6 +434,7 @@ export class StatusLineComponent implements Component {
 	#loopModeStatus: SegmentContext["loopMode"] = null;
 	#goalModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#vibeModeStatus: { enabled: boolean } | null = null;
+	#skillModeStatus: string[] | null = null;
 	/**
 	 * Injected aggregator that returns the aggregate tok/s of this session's
 	 * live vibe worker sessions, or null when no workers are streaming. Kept as
@@ -722,6 +723,15 @@ export class StatusLineComponent implements Component {
 
 	setVibeModeStatus(status: { enabled: boolean } | undefined): void {
 		this.#vibeModeStatus = status ?? null;
+	}
+
+	/**
+	 * Set the names of pinned mode skills (frontmatter `mode: true`) for the
+	 * mode segment's pin indicator; pass `undefined` when none are pinned.
+	 * Wired by interactive-mode, which owns the session pin/unpin state.
+	 */
+	setSkillModeStatus(status: string[] | undefined): void {
+		this.#skillModeStatus = status ?? null;
 	}
 
 	/**
@@ -1865,6 +1875,7 @@ export class StatusLineComponent implements Component {
 					: null,
 			goalMode: this.#goalModeStatus,
 			vibeMode: this.#vibeModeStatus,
+			skillMode: this.#skillModeStatus,
 			collab: this.#collabStatus,
 			usageStats,
 			contextPercent,

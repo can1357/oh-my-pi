@@ -57,6 +57,7 @@ function createCtx(overrides?: {
 		prewalk: null,
 		goalMode: null,
 		vibeMode: null,
+		skillMode: null,
 		collab: null,
 		usageStats: {
 			input: 0,

@@ -44,6 +44,7 @@ function createCtx(activeMs: number): SegmentContext {
 		prewalk: null,
 		goalMode: null,
 		vibeMode: null,
+		skillMode: null,
 		collab: null,
 		usageStats: {
 			input: 0,
