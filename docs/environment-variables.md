@@ -24,6 +24,21 @@ The agent/root locations respect profiles, `PI_CONFIG_DIR`, and—only for the d
 
 Additional rule inside each `.env` file: every `OMP_*` key is mirrored to its `PI_*` alias, and that mirrored value replaces a same-file `PI_*` value. This mirroring applies to parsed dotenv files, not arbitrary variables inherited from the parent process.
 
+### Disabling project dotenv loading
+
+Set `PI_IGNORE_PROJECT_ENV=1` in the launcher environment or an OMP-owned dotenv file (`~/.omp/agent/.env`, `~/.omp/.env`, or `~/.env`) to exclude the launch directory's `.env` files from OMP:
+
+```dotenv
+# ~/.omp/.env
+PI_IGNORE_PROJECT_ENV=1
+```
+
+An exact `1` in the launcher, agent, config-root, or home source enables the opt-out; all other values have no effect, so a project value cannot negate an OMP-owned opt-out. Launcher variables remain available, and agent/config-root/home dotenv files retain their normal precedence.
+
+Shipped compiled binaries skip the project `.env` parse entirely. Linux source/npm launches use `/proc/self/environ` to remove Bun-preloaded `.env`, `.env.local`, and mode-specific values without deleting same-valued launcher variables. On platforms without an authoritative launch-environment snapshot, source/npm launches must also disable Bun's preload with `--no-env-file`; OMP exits with an actionable error rather than guessing variable provenance. `BUN_OPTIONS=--no-env-file` supplies that flag to an installed npm launcher.
+
+Bun's `--no-env-file` flag alone disables only Bun's loader; OMP still loads the project `.env` unless `PI_IGNORE_PROJECT_ENV=1` is also set.
+
 ---
 
 ## 1) Model/provider authentication

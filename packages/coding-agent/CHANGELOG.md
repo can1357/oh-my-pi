@@ -113,6 +113,7 @@
 
 ### Added
 
+- Added `PI_IGNORE_PROJECT_ENV=1` to prevent launch-directory dotenv files from supplying OMP provider credentials and runtime configuration ([#4599](https://github.com/can1357/oh-my-pi/issues/4599)).
 - Added agent reactions: a reply that opens with a lone emoji line shows the emoji as a badge on your message bubble instead of in the text; toggle the prompt invitation with the tui.reactions setting.
 - Added video attachment and reading support through ffmpeg, including preview grids with metadata and timestamp/frame selectors such as :412 and :1h5m42s.
 - Enhanced the model picker with intelligence indicators, catalog TPS estimates, provider-aware ranking, and provider-supplied badges and descriptions.

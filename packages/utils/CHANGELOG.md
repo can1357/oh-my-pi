@@ -14,6 +14,10 @@
 
 - Fixed retry classification for Bun's bare `Socket is closed` transport error.
 
+### Added
+
+- Added `PI_IGNORE_PROJECT_ENV=1` to exclude launch-directory dotenv files while retaining launcher and OMP-level environment sources ([#4599](https://github.com/can1357/oh-my-pi/issues/4599)).
+
 ## [18.1.6] - 2026-09-03
 
 ### Added
