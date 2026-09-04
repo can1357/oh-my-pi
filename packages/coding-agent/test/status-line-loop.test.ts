@@ -87,4 +87,33 @@ describe("status line loop mode segment", () => {
 		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(icon, "Loop paused"));
 		expect(rendered.content).toBe(theme.fg("warning", withIcon(icon, "Loop paused")));
 	});
+
+	it("shows the gating condition alongside the remaining iterations", () => {
+		const rendered = renderSegment(
+			"mode",
+			createContext({
+				state: "running",
+				limit: { kind: "iterations", initial: 3, remaining: 3 },
+				condition: { command: "bun test", until: true },
+			}),
+		);
+
+		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(theme.icon.loop, "Loop running 3/3 until: bun test"));
+	});
+
+	// The command is arbitrary user input; an unbounded one would push every
+	// other segment off the status line.
+	it("bounds a long condition command", () => {
+		const rendered = renderSegment(
+			"mode",
+			createContext({
+				state: "running",
+				condition: { command: `bun test ${"x".repeat(200)}`, until: false },
+			}),
+		);
+		const content = Bun.stripANSI(rendered.content);
+
+		expect(content.startsWith(withIcon(theme.icon.loop, "Loop running while: bun test x"))).toBe(true);
+		expect(content.length).toBeLessThan(60);
+	});
 });

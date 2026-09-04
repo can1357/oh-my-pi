@@ -198,13 +198,20 @@ import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
 import {
+	describeLoopCondition,
+	evaluateLoopCondition,
+	type LoopConditionConfig,
+	type LoopConditionVerdict,
+} from "./loop-condition";
+import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
 	describeLoopLimit,
 	describeLoopLimitRuntime,
 	isLoopDurationExpired,
+	isLoopLimitExhausted,
 	type LoopLimitRuntime,
-	parseLoopLimitArgs,
+	parseLoopArgs,
 } from "./loop-limit";
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { getRunningSubagentBadgeAgentIds, getRunningSubagentBadgeRegistry } from "./running-subagent-badge";
@@ -604,6 +611,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	loopModePaused = false;
 	loopPrompt: string | undefined = undefined;
 	loopLimit: LoopLimitRuntime | undefined = undefined;
+	loopCondition: LoopConditionConfig | undefined = undefined;
+	/**
+	 * Aborts the in-flight `--while` / `--until` evaluation. Esc between
+	 * iterations lands while the condition command is still running, and
+	 * `#cancelLoopAutoSubmit` only clears the pending timer — without this the
+	 * child process would outlive the loop it was gating.
+	 */
+	#loopConditionAbort: AbortController | undefined;
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
@@ -1791,6 +1806,18 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		// An exhausted budget ends the loop regardless of the condition, so check
+		// it first: the user's command must not run one last time for nothing.
+		if (isLoopLimitExhausted(this.loopLimit)) {
+			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
+			return;
+		}
+
+		// The gate sits before the budget consume so a halt never burns an
+		// iteration that did not run, and after the blocked-check/defer above so
+		// a streaming turn cannot re-run the command on every retry tick.
+		if (this.loopCondition && !(await this.#passesLoopCondition(prompt))) return;
+
 		if (!consumeLoopLimitIteration(this.loopLimit)) {
 			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
 			return;
@@ -1805,13 +1832,58 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#submitLoopPromptWhenReady(prompt);
 	}
 
+	/**
+	 * Evaluate the `--while` / `--until` condition for one iteration.
+	 *
+	 * Returns false when the loop must not continue: either the condition said
+	 * to stop (already reported through {@link disableLoopMode}) or the loop was
+	 * paused/disabled while the command was still running.
+	 */
+	async #passesLoopCondition(prompt: string): Promise<boolean> {
+		const condition = this.loopCondition;
+		if (!condition) return true;
+
+		const controller = new AbortController();
+		// A prior evaluation can still be in flight when the next iteration
+		// starts (the user submitted mid-command); drop it instead of leaking a
+		// child process that Esc can no longer reach.
+		this.#abortLoopCondition();
+		this.#loopConditionAbort = controller;
+		let verdict: LoopConditionVerdict;
+		try {
+			verdict = await evaluateLoopCondition(condition, {
+				cwd: this.sessionManager.getCwd(),
+				timeoutMs: settings.get("loop.conditionTimeoutMs"),
+				signal: controller.signal,
+			});
+		} finally {
+			if (this.#loopConditionAbort === controller) this.#loopConditionAbort = undefined;
+		}
+
+		// Running the condition is an await point: Esc (pauseLoop) or a second
+		// /loop (disableLoopMode) can land mid-command, so re-check the same
+		// guards the method entry used before acting on a now-stale verdict.
+		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return false;
+		if (verdict.kind === "continue") return true;
+		if (verdict.kind === "aborted") return false;
+		this.disableLoopMode(verdict.message);
+		return false;
+	}
+
+	#abortLoopCondition(): void {
+		this.#loopConditionAbort?.abort();
+		this.#loopConditionAbort = undefined;
+	}
+
 	#syncLoopModeStatus(): void {
 		const state: "waiting" | "running" | "paused" = this.loopModePaused
 			? "paused"
 			: this.loopPrompt
 				? "running"
 				: "waiting";
-		this.statusLine.setLoopModeStatus(this.loopModeEnabled ? { state, limit: this.loopLimit } : undefined);
+		this.statusLine.setLoopModeStatus(
+			this.loopModeEnabled ? { state, limit: this.loopLimit, condition: this.loopCondition } : undefined,
+		);
 		this.ui.requestRender();
 	}
 
@@ -1821,7 +1893,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopModePaused = false;
 		this.loopPrompt = undefined;
 		this.loopLimit = undefined;
+		this.loopCondition = undefined;
 		this.#cancelLoopAutoSubmit();
+		this.#abortLoopCondition();
 		this.#syncLoopModeStatus();
 		if (wasEnabled) {
 			this.showStatus(message);
@@ -1844,6 +1918,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopPrompt = undefined;
 		this.loopModePaused = true;
 		this.#cancelLoopAutoSubmit();
+		this.#abortLoopCondition();
 		this.#syncLoopModeStatus();
 	}
 
@@ -1852,7 +1927,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.disableLoopMode();
 			return undefined;
 		}
-		const parsed = parseLoopLimitArgs(args);
+		const parsed = parseLoopArgs(args);
 		if (typeof parsed === "string") {
 			this.showError(parsed);
 			return undefined;
@@ -1861,12 +1936,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopModePaused = false;
 		this.loopPrompt = undefined;
 		this.loopLimit = createLoopLimitRuntime(parsed.limit);
+		this.loopCondition = parsed.condition;
 		this.#syncLoopModeStatus();
 		const limitSuffix = parsed.limit ? ` Limited to ${describeLoopLimit(parsed.limit)}.` : "";
 		const remainingSuffix = this.loopLimit ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
+		// The condition is a *continuation* signal: the first iteration always
+		// runs, and it is re-evaluated before each subsequent one.
+		const conditionSuffix = parsed.condition ? ` Continuing ${describeLoopCondition(parsed.condition)}.` : "";
 		const tail = parsed.prompt ? "Repeating it after each turn." : "Your next prompt will repeat after each turn.";
 		this.showStatus(
-			`Loop mode enabled.${limitSuffix}${remainingSuffix} ${tail} Esc cancels the current iteration; /loop again to disable.`,
+			`Loop mode enabled.${limitSuffix}${remainingSuffix}${conditionSuffix} ${tail} Esc cancels the current iteration; /loop again to disable.`,
 		);
 		// Hand any inline prompt back to the dispatcher so the normal submit flow
 		// runs the first iteration — it records the text as the loop prompt and

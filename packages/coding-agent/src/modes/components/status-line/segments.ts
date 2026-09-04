@@ -7,6 +7,7 @@ import { type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { fileHyperlink } from "../../../tui/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
+import { summarizeLoopCondition } from "../../loop-condition";
 import { sanitizeStatusText } from "../../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./context-thresholds";
 import type { RenderedSegment, SegmentContext, StatusLineSegment, StatusLineSegmentId } from "./types";
@@ -380,6 +381,9 @@ const modeSegment: StatusLineSegment = {
 			const parts = [withIcon(icon, `Loop ${statusValue(ctx, loop.state)}`)];
 			const limit = formatLoopLimit(loop.limit, ctx.now?.getTime());
 			if (limit) parts.push(statusValue(ctx, limit));
+			if (loop.condition) {
+				parts.push(statusValue(ctx, summarizeLoopCondition(loop.condition, TRUNCATE_LENGTHS.SHORT)));
+			}
 			return { content: theme.fg(color, parts.join(" ")), visible: true };
 		}
 

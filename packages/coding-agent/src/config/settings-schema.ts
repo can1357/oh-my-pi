@@ -2026,6 +2026,24 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"loop.conditionTimeoutMs": {
+		type: "number",
+		default: 30_000,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Loop Condition Timeout (ms)",
+			description:
+				"Max wait for a `/loop --while` / `--until` condition command before treating it as broken and stopping the loop. Set to 0 to wait indefinitely",
+			options: [
+				{ value: "0", label: "Unlimited" },
+				{ value: "10000", label: "10 seconds" },
+				{ value: "30000", label: "30 seconds" },
+				{ value: "120000", label: "2 minutes" },
+			],
+		},
+	},
+
 	// Input and startup
 	doubleEscapeAction: {
 		type: "enum",
