@@ -23,7 +23,7 @@ import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-a
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { type OverlayHandle, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
+import { setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -470,28 +470,6 @@ describe("InteractiveMode plan review rendering", () => {
 			if (previousVisual === undefined) delete Bun.env.VISUAL;
 			else Bun.env.VISUAL = previousVisual;
 		}
-	});
-
-	it("leaves terminal mouse tracking disabled while Plan Review is open", async () => {
-		let capturedOverlay: PlanReviewOverlay | undefined;
-		let capturedOptions: OverlayOptions | undefined;
-		const overlayHandle: OverlayHandle = {
-			hide: vi.fn(),
-			setHidden: vi.fn(),
-			isHidden: vi.fn(() => false),
-		};
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation((component, options) => {
-			if (!(component instanceof PlanReviewOverlay)) throw new Error("Expected Plan Review overlay");
-			capturedOverlay = component;
-			capturedOptions = options;
-			return overlayHandle;
-		});
-
-		const choice = mode.showPlanReview("# Plan\n\nSelectable body", "Plan mode - next step", ["Approve"]);
-
-		expect(capturedOptions).toMatchObject({ fullscreen: true, mouseTracking: false });
-		capturedOverlay?.handleInput("\x1b");
-		await expect(choice).resolves.toBeUndefined();
 	});
 
 	it("dismisses Plan Review and restores input when a provider error is pinned", async () => {

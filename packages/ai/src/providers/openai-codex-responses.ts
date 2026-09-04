@@ -1535,16 +1535,18 @@ async function buildCodexRequestContext(
 	});
 }
 
-/** @internal Exported for tests. */
+/** Serialize normal Codex turns and V2 compaction with the same cacheable prefix. */
 export async function buildTransformedCodexRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
 	options: OpenAICodexResponsesOptions | undefined,
 	promptCacheKey = getOpenAIPromptCacheKey(options),
+	inputPrefix?: InputItem[],
 ): Promise<RequestBody> {
+	const input = convertMessages(model, context);
 	const params: RequestBody = {
 		model: model.requestModelId ?? model.id,
-		input: convertMessages(model, context),
+		input: inputPrefix?.length ? [...inputPrefix, ...input] : input,
 		stream: true,
 		prompt_cache_key: promptCacheKey,
 	};

@@ -2614,15 +2614,15 @@ function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: 
  * and nullable for the one caller whose block is NOT pre-resolved: MCP without
  * an `mcp` handler, which `agent-loop.ts` runs locally and pairs itself.
  */
-export async function resolveExecHandler<TArgs, TResult>(
+export async function resolveExecHandler<TArgs, R>(
 	args: TArgs,
-	handler: ((args: TArgs) => Promise<CursorExecHandlerResult<TResult>>) | undefined,
+	handler: ((args: TArgs) => Promise<CursorExecHandlerResult<R>>) | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
-	buildFromToolResult: (toolResult: ToolResultMessage) => TResult,
-	buildRejected: (reason: string) => TResult,
-	buildError: (error: string) => TResult,
+	buildFromToolResult: (toolResult: ToolResultMessage) => R,
+	buildRejected: (reason: string) => R,
+	buildError: (error: string) => R,
 	pairing: CursorExecPairing | null,
-): Promise<{ execResult: TResult; toolResult?: ToolResultMessage }> {
+): Promise<{ execResult: R; toolResult?: ToolResultMessage }> {
 	const pair = async (text: string, isError: boolean): Promise<ToolResultMessage | undefined> => {
 		// `null` only for MCP without a handler: that block is never marked
 		// resolved, so `agent-loop.ts` runs it locally and pairs its own result.
@@ -2650,7 +2650,7 @@ export async function resolveExecHandler<TArgs, TResult>(
 		const finalToolResult = await applyToolResultHandler(toolResult, onToolResult);
 
 		if (execResult) {
-			// TResult-only is a supported return form, so the transcript entry has to
+			// R-only is a supported return form, so the transcript entry has to
 			// be synthesized here. Deriving its state from the raw result keeps the
 			// two views consistent: every exec result is a proto oneof whose only
 			// non-failure variant is `success`, so a `rejected`/`error`/
@@ -2673,7 +2673,7 @@ export async function resolveExecHandler<TArgs, TResult>(
 
 /**
  * Derive the transcript state of an exec result the SDK handler returned in the
- * TResult-only form, which carries no `toolResult` to copy it from.
+ * R-only form, which carries no `toolResult` to copy it from.
  *
  * Every exec result in `agent.proto` is a `oneof result` whose success variant
  * is named `success` — the rest (`error`, `rejected`, `file_not_found`,
@@ -2716,8 +2716,8 @@ function mcpContentToText(content: unknown[] | undefined): string {
 	return parts.join("\n");
 }
 
-function splitExecHandlerResult<TResult>(result: CursorExecHandlerResult<TResult>): {
-	execResult?: TResult;
+function splitExecHandlerResult<R>(result: CursorExecHandlerResult<R>): {
+	execResult?: R;
 	toolResult?: ToolResultMessage;
 } {
 	if (isToolResultMessage(result)) {
@@ -2727,27 +2727,27 @@ function splitExecHandlerResult<TResult>(result: CursorExecHandlerResult<TResult
 		const record = result as Record<string, unknown>;
 		if ("execResult" in record) {
 			const { execResult, toolResult } = record as {
-				execResult: TResult;
+				execResult: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 		if ("toolResult" in record && !isToolResultMessage(record)) {
 			const { result: execResult, toolResult } = record as {
-				result?: TResult;
+				result?: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 		if ("result" in record && !("$typeName" in record)) {
 			const { result: execResult, toolResult } = record as {
-				result: TResult;
+				result: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 	}
-	return { execResult: result as TResult };
+	return { execResult: result as R };
 }
 
 function isToolResultMessage(value: unknown): value is ToolResultMessage {
@@ -3549,13 +3549,10 @@ function describeEditResult(toolCall: CursorEditToolCallCarrier | undefined): { 
 	return { text: "Edit reported no result", isError: true };
 }
 
-function remapExecHandlerToolName<TResult>(
-	result: CursorExecHandlerResult<TResult>,
-	toolName: string,
-): CursorExecHandlerResult<TResult> {
+function remapExecHandlerToolName<R>(result: CursorExecHandlerResult<R>, toolName: string): CursorExecHandlerResult<R> {
 	if (isToolResultMessage(result)) return { ...result, toolName };
 	if (result && typeof result === "object" && "toolResult" in result) {
-		const record = result as { result?: TResult; toolResult?: ToolResultMessage };
+		const record = result as { result?: R; toolResult?: ToolResultMessage };
 		if (record.toolResult && record.result !== undefined) {
 			return { result: record.result, toolResult: { ...record.toolResult, toolName } };
 		}

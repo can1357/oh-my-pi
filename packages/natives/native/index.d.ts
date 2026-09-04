@@ -233,6 +233,23 @@ export declare class MacAppearanceObserver {
   stop(): void
 }
 
+/** A transactional, process-owned native OAuth callback receiver. */
+export declare class NativeOAuthCallback {
+  /** Create a receiver without touching the filesystem or OS registration. */
+  constructor(options: NativeOAuthCallbackOptions)
+  /**
+   * Register the scheme transactionally. Returns false on unsupported or
+   * remote sessions.
+   */
+  start(): Promise<boolean>
+  /** Cancel an in-progress start and every pending callback wait. */
+  cancel(): void
+  /** Wait for and atomically claim the callback URL. */
+  waitForCallback(timeoutMs?: number | undefined | null): Promise<string>
+  /** Restore prior OS state and release ownership. Safe to call repeatedly. */
+  dispose(): Promise<undefined>
+}
+
 /**
  * Long-lived cross-platform power assertion.
  *
@@ -631,7 +648,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV18_1_8(): void
+export declare function __piNativesV18_1_10(): void
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -993,6 +1010,16 @@ export declare function cosineSimilarityPairs(vectors: Float64Array, count: numb
  * counts, or the matching family encoding for Qwen/DeepSeek/Kimi/GLM.
  */
 export declare function countTokens(input: string | string[], encoding?: Encoding | undefined | null): number
+
+/**
+ * Decode one complete SIXEL control string into a PNG.
+ *
+ * The decoder is deliberately bounded before handing the stream to
+ * `icy_sixel`: raster declarations, repeats, and row advances are scanned
+ * first so hostile dimensions cannot make the dependency allocate its much
+ * larger internal maximum.
+ */
+export declare function decodeSixelToPng(bytes: Uint8Array): Uint8Array
 
 export interface DesktopCapabilities {
   backend: string
@@ -2165,6 +2192,12 @@ export interface MinimizerResult {
  * unless a text mixes U+FFFD words with lone-surrogate words.
  */
 export declare function mmrRerankIndices(contents: Array<string>, scores: Float64Array, lambdaParam: number, topK: number): Uint32Array
+
+/** Construction options for [`NativeOAuthCallback`]. */
+export interface NativeOAuthCallbackOptions {
+  /** Custom URL scheme to register. */
+  scheme: string
+}
 
 /**
  * Named-node chain containing `options.line`, innermost-first, excluding the
