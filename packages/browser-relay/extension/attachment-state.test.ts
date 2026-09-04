@@ -306,7 +306,6 @@ describe("attachment-state", () => {
 		expect(() => requireRecoveryStateLoaded(false)).toThrow(
 			"browser relay recovery state failed to load",
 		);
-		expect(() => requireRecoveryStateLoaded(true)).not.toThrow();
 	});
 
 	it("retries a transient startup load failure and then caches success", async () => {

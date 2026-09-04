@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { snapshotAfterPendingOperationsSettle } from "./pending-ops";
+import {
+	afterPendingOperationsSettle,
+	snapshotAfterPendingOperationsSettle,
+} from "./pending-ops";
 
 function deferred<T>() {
 	const { promise, resolve } = Promise.withResolvers<T>();
@@ -10,7 +13,19 @@ async function flushMicrotasks(times = 10): Promise<void> {
 	for (let i = 0; i < times; i++) await Promise.resolve();
 }
 
-describe("snapshotAfterPendingOperationsSettle", () => {
+describe("pending operation settlement", () => {
+	it("runs the callback after a pending operation rejects", async () => {
+		let callbacks = 0;
+
+		await expect(
+			afterPendingOperationsSettle(
+				[Promise.reject(new Error("detach failed"))],
+				async () => ++callbacks,
+			),
+		).resolves.toBe(1);
+		expect(callbacks).toBe(1);
+	});
+
 	it("retries when a new pending operation is added while waiting for the current set", async () => {
 		let generation = 0;
 		const first = deferred<void>();

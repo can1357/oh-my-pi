@@ -42,7 +42,10 @@ import {
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
 } from "./orphan-sweep";
-import { snapshotAfterPendingOperationsSettle } from "./pending-ops";
+import {
+	afterPendingOperationsSettle,
+	snapshotAfterPendingOperationsSettle,
+} from "./pending-ops";
 import { PendingAttaches, type PendingAttachToken } from "./pending-attaches";
 
 const DEFAULT_PORT = 9224;
@@ -500,9 +503,10 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 				}),
 			);
 		}
-		void Promise.all([...pendingDetaches]).then(async () => {
-			await persistRecoveryLoaderIds();
-		});
+		void afterPendingOperationsSettle(
+			[...pendingDetaches],
+			persistRecoveryLoaderIds,
+		);
 	},
 });
 

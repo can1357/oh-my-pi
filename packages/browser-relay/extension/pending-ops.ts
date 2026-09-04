@@ -1,3 +1,11 @@
+export async function afterPendingOperationsSettle<T>(
+	operations: Promise<unknown>[],
+	callback: () => Promise<T>,
+): Promise<T> {
+	await Promise.allSettled(operations);
+	return callback();
+}
+
 /**
  * Wait for a pending-operation set to settle and stay unchanged long enough to
  * take a consistent snapshot. If a new operation starts while we're waiting or
