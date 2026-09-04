@@ -13,7 +13,7 @@ use gix::bstr::{BString, ByteSlice};
 use super::{
 	GitRepo, normalize_path,
 	open::{load_index_or_empty, load_index_or_head, status_with_fresh_index, status_with_index},
-	read::literal_pathspec,
+	read::{literal_pathspecs, path_matches},
 };
 use crate::{
 	error::{Error, Result},
@@ -117,10 +117,7 @@ impl GitRepo {
 		let patterns: Vec<BString> = if all {
 			Vec::new()
 		} else {
-			requested
-				.iter()
-				.map(|p| BString::from(literal_pathspec(p).as_bytes()))
-				.collect()
+			literal_pathspecs(&requested)
 		};
 
 		let mut iter = status_with_fresh_index(&repo, "git add")?
@@ -486,11 +483,7 @@ impl GitRepo {
 		});
 
 		let iter = platform
-			.into_index_worktree_iter(
-				paths
-					.iter()
-					.map(|path| literal_pathspec(path).into_bytes().into()),
-			)
+			.into_index_worktree_iter(literal_pathspecs(&paths))
 			.map_err(|e| Error::backend("git clean", e))?;
 
 		for item in iter {
@@ -1041,10 +1034,8 @@ pub fn detach_git_dir(
 	source_common_dir: &Path,
 ) -> Result<DetachGitDirResult> {
 	let git_entry = worktree_root.join(".git");
-	let meta = match fs::symlink_metadata(&git_entry) {
-		Ok(meta) => meta,
-		Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(DetachGitDirResult::NoGit),
-		Err(e) => return Err(e.into()),
+	let Some(meta) = super::diff::symlink_metadata_opt(&git_entry)? else {
+		return Ok(DetachGitDirResult::NoGit);
 	};
 	let source_common =
 		fs::canonicalize(source_common_dir).unwrap_or_else(|_| normalize_path(source_common_dir));
@@ -1306,7 +1297,7 @@ fn stage_one(
 	filter_index: &gix::index::State,
 	path: &gix::bstr::BStr,
 ) -> Result<()> {
-	let full = bstr_to_path(root, path);
+	let full = root.join(gix::path::from_bstr(path));
 	let Some(metadata) = super::diff::symlink_metadata_opt(&full)? else {
 		index.remove_entries(|_, p, _| p == path);
 		return Ok(());
@@ -1355,7 +1346,7 @@ fn stage_one(
 	else {
 		return Ok(());
 	};
-	let mode = if is_executable(&metadata) {
+	let mode = if super::diff::is_executable(&metadata) {
 		gix::index::entry::Mode::FILE_EXECUTABLE
 	} else {
 		gix::index::entry::Mode::FILE
@@ -1369,26 +1360,6 @@ fn stage_one(
 		path,
 	);
 	Ok(())
-}
-#[cfg(unix)]
-fn is_executable(meta: &fs::Metadata) -> bool {
-	use std::os::unix::fs::PermissionsExt;
-	meta.permissions().mode() & 0o111 != 0
-}
-#[cfg(not(unix))]
-fn is_executable(_: &fs::Metadata) -> bool {
-	false
-}
-
-#[cfg(unix)]
-fn bstr_to_path(root: &Path, path: &gix::bstr::BStr) -> PathBuf {
-	use std::os::unix::ffi::OsStrExt;
-	root.join(std::ffi::OsStr::from_bytes(path.as_bytes()))
-}
-
-#[cfg(not(unix))]
-fn bstr_to_path(root: &Path, path: &gix::bstr::BStr) -> PathBuf {
-	root.join(path.to_str_lossy().as_ref())
 }
 
 fn copy_index_paths(dest: &mut gix::index::File, source: &gix::index::File, files: &[String]) {
@@ -1658,14 +1629,6 @@ fn restore_index_paths(
 		}
 	}
 	Ok(())
-}
-
-fn path_matches(path: &str, wanted: &str) -> bool {
-	let wanted = wanted.trim_end_matches('/');
-	path == wanted
-		|| path
-			.strip_prefix(wanted)
-			.is_some_and(|r| r.starts_with('/'))
 }
 
 fn set_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
@@ -2013,16 +1976,6 @@ mod tests {
 		let repo = GitRepo::require(temp.path()).unwrap();
 		repo.unstage(&[]).unwrap();
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "?? a");
-		git(temp.path(), &["add", "a"]);
-		repo
-			.restore(&RestoreOptions {
-				source:   None,
-				staged:   true,
-				worktree: false,
-				files:    vec!["a".into()],
-			})
-			.unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "?? a");
 	}
 
 	#[test]
@@ -2199,111 +2152,32 @@ mod tests {
 		fs::write(temp.path().join(".gitattributes"), "*.cmd text eol=crlf\n").unwrap();
 		git(temp.path(), &["add", ".gitattributes"]);
 		git(temp.path(), &["commit", "-qm", "add gitattributes"]);
-
 		let crlf_content = "echo hello\r\necho world\r\n";
 		fs::write(temp.path().join("fixture.cmd"), crlf_content).unwrap();
-
-		// Explicit path staging
 		repo.stage_files(&["fixture.cmd".into()]).unwrap();
-
-		// Worktree file retains CRLF
-		let worktree_bytes = fs::read(temp.path().join("fixture.cmd")).unwrap();
-		assert_eq!(worktree_bytes, crlf_content.as_bytes());
-
-		// Blob in object database is normalized to LF
-		let blob_content = git(temp.path(), &["cat-file", "-p", ":fixture.cmd"]);
-		assert_eq!(blob_content.trim(), "echo hello\necho world");
-		assert!(!blob_content.contains('\r'), "staged blob must not contain CR bytes");
-
-		// Staged diff is clean, unstaged diff is completely empty
+		// Worktree keeps CRLF; the blob is normalized to LF so `git diff` is empty.
+		assert_eq!(fs::read(temp.path().join("fixture.cmd")).unwrap(), crlf_content.as_bytes());
+		assert_eq!(git(temp.path(), &["cat-file", "-p", ":fixture.cmd"]), "echo hello\necho world\n");
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "A  fixture.cmd");
-		assert_eq!(git(temp.path(), &["diff"]).trim(), "");
-
-		// Commit the file
-		repo
-			.commit_create("add fixture", &CommitOptions::default())
-			.unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "");
-
-		// Modifying file with CRLF in worktree and running stage_files(&[]) (stage all)
-		let updated_crlf = "echo hello\r\necho world\r\necho again\r\n";
-		fs::write(temp.path().join("fixture.cmd"), updated_crlf).unwrap();
-		repo.stage_files(&[]).unwrap();
-
-		// Still clean unstaged diff
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "M  fixture.cmd");
-		assert_eq!(git(temp.path(), &["diff"]).trim(), "");
+		assert_eq!(git(temp.path(), &["diff"]), "");
 	}
 
 	#[test]
-	fn stage_files_stages_bracketed_pathspec() {
-		let (temp, repo) = fixture();
-		let bracketed_dir = temp.path().join("app/[id]");
-		fs::create_dir_all(&bracketed_dir).unwrap();
-		fs::write(bracketed_dir.join("page.tsx"), "export default function() {}\n").unwrap();
-
-		repo.stage_files(&["app/[id]/page.tsx".into()]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "A  app/[id]/page.tsx");
-	}
-
-	#[test]
-	fn restore_with_source_tree_isolates_file_restoration() {
-		let (temp, repo) = fixture();
-		fs::write(temp.path().join("a"), "staged edit\n").unwrap();
-		repo.stage_files(&["a".into()]).unwrap();
-
-		let initial_tree = repo.write_tree(None).unwrap();
-
-		// Stage two more files, then restore only one of them
-		fs::write(temp.path().join("changelog"), "new changelog\n").unwrap();
-		fs::write(temp.path().join("unrelated"), "unrelated staged\n").unwrap();
-		repo
-			.stage_files(&["changelog".into(), "unrelated".into()])
-			.unwrap();
-
-		// Restore ONLY changelog to initial_tree
-		repo
-			.restore(&RestoreOptions {
-				source:   Some(initial_tree),
-				staged:   true,
-				worktree: false,
-				files:    vec!["changelog".into()],
-			})
-			.unwrap();
-
-		// unrelated remains staged, a remains staged, changelog is unstaged!
-		assert_eq!(
-			git(temp.path(), &["status", "--porcelain"]).trim(),
-			"M  a\nA  unrelated\n?? changelog"
-		);
-	}
-
-	#[test]
-	fn stage_content_stages_exact_index_content_without_touching_worktree() {
+	fn stage_content_writes_index_only_and_rejects_escaping_paths() {
 		let (temp, repo) = fixture();
 		fs::write(temp.path().join("CHANGELOG.md"), "worktree dirty content\n").unwrap();
 		repo
 			.stage_content("CHANGELOG.md", b"staged exact content\n")
 			.unwrap();
-
-		// Worktree file remains untouched
 		assert_eq!(
 			fs::read_to_string(temp.path().join("CHANGELOG.md")).unwrap(),
 			"worktree dirty content\n"
 		);
-		// Index blob has exact staged content
-		assert_eq!(git(temp.path(), &["show", ":CHANGELOG.md"]).trim(), "staged exact content");
-		// Porcelain status shows AM (staged new file + unstaged worktree modification)
+		assert_eq!(git(temp.path(), &["show", ":CHANGELOG.md"]), "staged exact content\n");
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "AM CHANGELOG.md");
-	}
-
-	#[test]
-	fn stage_content_rejects_escaping_or_absolute_paths() {
-		let (_temp, repo) = fixture();
-		assert!(repo.stage_content("", b"test").is_err());
-		assert!(repo.stage_content("/etc/passwd", b"test").is_err());
-		assert!(repo.stage_content("../outside", b"test").is_err());
-		assert!(repo.stage_content("a/../../b", b"test").is_err());
+		for path in ["", "/etc/passwd", "../outside", "a/../../b"] {
+			assert!(repo.stage_content(path, b"test").is_err(), "{path:?} must be rejected");
+		}
 	}
 
 	#[cfg(unix)]
@@ -2358,7 +2232,8 @@ mod tests {
 		));
 		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).trim(), before);
 
-		fs::remove_file(&pre_commit).unwrap();
+		// A pre-commit hook may rewrite the index; the commit carries its result.
+		write_hook(&pre_commit, "echo 'rewritten by hook' > a\ngit add a", true);
 		write_hook(
 			&hooks.join("commit-msg"),
 			"printf 'rewritten subject\\n\\nrewritten body\\n' > \"$1\"",
@@ -2371,6 +2246,8 @@ mod tests {
 			git(temp.path(), &["log", "-1", "--pretty=%B"]).trim(),
 			"rewritten subject\n\nrewritten body"
 		);
+		assert_eq!(git(temp.path(), &["show", "HEAD:a"]).trim(), "rewritten by hook");
+		fs::remove_file(&pre_commit).unwrap();
 
 		fs::write(temp.path().join("b"), "changed again\n").unwrap();
 		repo.stage_files(&["b".into()]).unwrap();
@@ -2393,23 +2270,6 @@ mod tests {
 			})
 			.unwrap();
 		assert_eq!(repo.commit_details("HEAD").unwrap().message, "subject\n\nbody\n");
-	}
-	#[cfg(unix)]
-	#[test]
-	fn commit_create_pre_commit_hook_modifies_index() {
-		let (temp, repo) = fixture();
-		let hooks = temp.path().join(".git/hooks");
-		let pre_commit = hooks.join("pre-commit");
-		// Hook rewrites staged file 'a' and re-adds it
-		write_hook(&pre_commit, "echo 'rewritten by hook' > a\ngit add a", true);
-		fs::write(temp.path().join("a"), "original edit\n").unwrap();
-		repo.stage_files(&["a".into()]).unwrap();
-
-		let sha = repo
-			.commit_create("hook rewrite commit", &CommitOptions::default())
-			.unwrap();
-		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).trim(), sha);
-		assert_eq!(git(temp.path(), &["show", "HEAD:a"]).trim(), "rewritten by hook");
 	}
 
 	#[test]

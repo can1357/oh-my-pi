@@ -1111,13 +1111,13 @@ fn is_null_device(path: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn is_executable(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn is_executable(metadata: &std::fs::Metadata) -> bool {
 	use std::os::unix::fs::PermissionsExt;
 	metadata.permissions().mode() & 0o111 != 0
 }
 
 #[cfg(not(unix))]
-fn is_executable(_metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn is_executable(_metadata: &std::fs::Metadata) -> bool {
 	false
 }
 

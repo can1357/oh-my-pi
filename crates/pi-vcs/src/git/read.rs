@@ -5,7 +5,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use gix::bstr::ByteSlice;
+use gix::bstr::{BString, ByteSlice};
 
 use super::{
 	GitRepo,
@@ -758,11 +758,7 @@ impl GitRepo {
 			});
 		}
 		let iter = platform
-			.into_index_worktree_iter(
-				paths
-					.iter()
-					.map(|path| literal_pathspec(path).into_bytes().into()),
-			)
+			.into_index_worktree_iter(literal_pathspecs(paths))
 			.map_err(|e| Error::backend("git ls-files", e))?;
 		let mut out = Vec::new();
 		for item in iter {
@@ -1200,7 +1196,14 @@ pub(crate) fn literal_pathspec(path: &str) -> String {
 	format!(":(literal){path}")
 }
 
-fn path_matches(path: &str, wanted: &str) -> bool {
+pub(crate) fn literal_pathspecs<'a>(paths: impl IntoIterator<Item = &'a String>) -> Vec<BString> {
+	paths
+		.into_iter()
+		.map(|p| literal_pathspec(p).into_bytes().into())
+		.collect()
+}
+
+pub(crate) fn path_matches(path: &str, wanted: &str) -> bool {
 	let wanted = wanted.trim_end_matches('/');
 	path == wanted
 		|| path

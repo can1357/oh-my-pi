@@ -1407,10 +1407,6 @@ fn tree_map(repo: &gix::Repository, tree: gix::ObjectId) -> Result<BTreeMap<Stri
 	Ok(map)
 }
 
-fn worktree_map(repo: &GitRepo, gix_repo: &gix::Repository) -> Result<BTreeMap<String, FileEntry>> {
-	let index = index_map(gix_repo)?;
-	tracked_worktree_map(repo, gix_repo, &index)
-}
 fn augment_patch_sources(
 	repo: &GitRepo,
 	gix_repo: &gix::Repository,
@@ -1452,7 +1448,7 @@ fn patch_target_map(
 	let mut state = if options.cached {
 		index_map_at(repo, options.index_path.as_deref())?
 	} else {
-		worktree_map(repo_handle, repo)?
+		tracked_worktree_map(repo_handle, repo, &index_map(repo)?)?
 	};
 	if !options.cached {
 		augment_patch_sources(repo_handle, repo, &mut state, patches, options.reverse)?;
@@ -2175,24 +2171,17 @@ mod tests {
 	}
 
 	#[test]
-	fn commit_split_rejects_plan_not_covering_staged_tree() {
+	fn commit_split_rejects_invalid_plans_without_committing() {
 		let fixture = staged_fixture();
-		let err = fixture
+		let partial = fixture
 			.repo
 			.commit_split(&SplitCommitOptions {
 				commits:     vec![single_spec("feat: only a", &["a.txt"])],
-				staged_diff: fixture.staged_diff,
+				staged_diff: fixture.staged_diff.clone(),
 			})
 			.unwrap_err();
-
-		assert!(err.to_string().contains("does not cover"));
-		assert_eq!(git(fixture.temp.path(), &["rev-list", "--count", "HEAD"]), fixture.count_before);
-	}
-
-	#[test]
-	fn commit_split_rejects_empty_commit() {
-		let fixture = staged_fixture();
-		let err = fixture
+		assert!(partial.to_string().contains("does not cover"), "{partial}");
+		let empty = fixture
 			.repo
 			.commit_split(&SplitCommitOptions {
 				commits:     vec![
@@ -2202,56 +2191,40 @@ mod tests {
 				staged_diff: fixture.staged_diff,
 			})
 			.unwrap_err();
-
-		assert!(err.to_string().contains("would be empty"));
+		assert!(empty.to_string().contains("would be empty"), "{empty}");
 		assert_eq!(git(fixture.temp.path(), &["rev-list", "--count", "HEAD"]), fixture.count_before);
 	}
 
 	#[test]
 	#[cfg(unix)]
-	fn commit_split_fails_when_pre_commit_hook_modifies_index() {
+	fn commit_split_pre_commit_hook_may_read_but_not_modify_index() {
 		let fixture = staged_fixture();
+		let options = SplitCommitOptions {
+			commits:     vec![single_spec("feat: all", &["a.txt", "b.txt"])],
+			staged_diff: fixture.staged_diff,
+		};
 		install_pre_commit_hook(
 			fixture.temp.path(),
 			"#!/bin/sh\necho 'hook-rewrite' > a.txt\ngit add a.txt\n",
 		);
-
-		let err = fixture
-			.repo
-			.commit_split(&SplitCommitOptions {
-				commits:     vec![single_spec("feat: all", &["a.txt", "b.txt"])],
-				staged_diff: fixture.staged_diff,
-			})
-			.unwrap_err();
-
+		let err = fixture.repo.commit_split(&options).unwrap_err();
 		assert!(
 			err.to_string()
-				.contains("pre-commit hook modified the index")
+				.contains("pre-commit hook modified the index"),
+			"{err}"
 		);
 		assert_eq!(git(fixture.temp.path(), &["rev-list", "--count", "HEAD"]), fixture.count_before);
-	}
 
-	#[test]
-	#[cfg(unix)]
-	fn commit_split_succeeds_when_pre_commit_hook_runs_git_status() {
-		let fixture = staged_fixture();
-		let count_before: usize = fixture.count_before.trim().parse().unwrap();
+		// Undo the hook's rewrite, then retry under a read-only hook: refreshing
+		// index stat data must not count as a modification.
+		fs::write(fixture.temp.path().join("a.txt"), b"v2\n").unwrap();
+		git(fixture.temp.path(), &["add", "a.txt"]);
 		install_pre_commit_hook(fixture.temp.path(), "#!/bin/sh\ngit status --porcelain\n");
-
-		let commits = fixture
-			.repo
-			.commit_split(&SplitCommitOptions {
-				commits:     vec![single_spec("feat: all", &["a.txt", "b.txt"])],
-				staged_diff: fixture.staged_diff,
-			})
-			.unwrap();
-
-		assert_eq!(commits.len(), 1);
-		let count_after: usize = git(fixture.temp.path(), &["rev-list", "--count", "HEAD"])
-			.trim()
-			.parse()
-			.unwrap();
-		assert_eq!(count_after, count_before + 1);
+		assert_eq!(fixture.repo.commit_split(&options).unwrap().len(), 1);
+		assert_eq!(
+			git(fixture.temp.path(), &["rev-list", "--count", "HEAD"]).trim(),
+			(fixture.count_before.trim().parse::<usize>().unwrap() + 1).to_string()
+		);
 	}
 
 	#[test]
