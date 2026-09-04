@@ -2811,6 +2811,18 @@ export interface FollowUpTurnOptions {
 	workPoolYieldItems?: WorkPoolYieldItem[];
 }
 
+async function installWorkPoolYieldItems(session: AgentSession, items: readonly WorkPoolYieldItem[]): Promise<void> {
+	const current = session.getWorkPoolYieldItems();
+	if (
+		current.length === items.length &&
+		current.every((item, index) => item.id === items[index]?.id && item.index === items[index]?.index)
+	) {
+		return;
+	}
+	session.setWorkPoolYieldItems(items);
+	await session.refreshBaseSystemPrompt();
+}
+
 /**
  * Continue a previously spawned (keep-alive) subagent with one more monitored
  * turn: revive it if parked, send `message` as a real prompt, drive it to
@@ -2827,7 +2839,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const index = options.index ?? 0;
 	const startTime = Date.now();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
-	session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
+	await installWorkPoolYieldItems(session, options.workPoolYieldItems ?? []);
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
@@ -3506,7 +3518,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
 			}
-			if (options.workPoolYieldItems) session.setWorkPoolYieldItems(options.workPoolYieldItems);
+			if (options.workPoolYieldItems) {
+				await awaitAbortable(installWorkPoolYieldItems(session, options.workPoolYieldItems));
+			}
 			const enabledSubagentTools = session.getEnabledToolNames();
 			// The enabled set includes the synthetic write transport injected for
 			// explicit tool lists that omitted write. `session_init.tools` is later
