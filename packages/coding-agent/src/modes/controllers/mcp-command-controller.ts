@@ -1480,18 +1480,23 @@ export class MCPCommandController {
 				for (const name of userServers) {
 					const config = userConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
+					const manager = this.ctx.mcpManager;
 					const state =
 						config.enabled === false
 							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
+							: manager?.getFilterEmptyToolCount(name) !== undefined
+								? "filter-empty"
+								: (manager?.getConnectionStatus(name) ?? "disconnected");
 					const status =
 						state === "inactive"
 							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+							: state === "filter-empty"
+								? theme.fg("error", " ✕ filter excludes all tools")
+								: state === "connected"
+									? theme.fg("success", " ● connected")
+									: state === "connecting"
+										? theme.fg("muted", " ◌ connecting")
+										: theme.fg("muted", " ○ not connected");
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1503,18 +1508,23 @@ export class MCPCommandController {
 				for (const name of projectServers) {
 					const config = projectConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
+					const manager = this.ctx.mcpManager;
 					const state =
 						config.enabled === false
 							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
+							: manager?.getFilterEmptyToolCount(name) !== undefined
+								? "filter-empty"
+								: (manager?.getConnectionStatus(name) ?? "disconnected");
 					const status =
 						state === "inactive"
 							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+							: state === "filter-empty"
+								? theme.fg("error", " ✕ filter excludes all tools")
+								: state === "connected"
+									? theme.fg("success", " ● connected")
+									: state === "connecting"
+										? theme.fg("muted", " ◌ connecting")
+										: theme.fg("muted", " ○ not connected");
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");

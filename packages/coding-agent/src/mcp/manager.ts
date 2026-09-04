@@ -709,12 +709,14 @@ export class MCPManager {
 						// mark it failed even if a previous branch already recorded
 						// this failure. Reporting (errors map + status event) happens
 						// once, but `connected` must never follow a filter-empty.
-						if (!reportedErrors.has(name)) {
-							const message = mcpFilterEmptyMessage(serverTools.length);
-							errors.set(name, message);
-							reportedErrors.add(name);
-							notify(createMcpStartupFailure(name, message, sources[name]));
-						}
+						MCPManager.#reportFilterEmpty(
+							name,
+							serverTools.length,
+							sources[name],
+							errors,
+							reportedErrors,
+							notify,
+						);
 						await this.#loadServerResourcesAndPrompts(name, connection);
 						return;
 					}
@@ -793,11 +795,14 @@ export class MCPManager {
 					// Mirror the background-continuation diagnostic: a filter that
 					// excluded everything is a failure, not a silent empty server.
 					if (customTools.length === 0 && serverTools.length > 0) {
-						const message = mcpFilterEmptyMessage(serverTools.length);
-						errors.set(name, message);
-						reportedErrors.add(name);
-						this.#replaceServerTools(name, []);
-						notify(createMcpStartupFailure(name, message, sources[name]));
+						MCPManager.#reportFilterEmpty(
+							name,
+							serverTools.length,
+							sources[name],
+							errors,
+							reportedErrors,
+							notify,
+						);
 						continue;
 					}
 					connectedServers.add(name);
@@ -827,10 +832,7 @@ export class MCPManager {
 							// the server as silently connecting. An empty cached list
 							// (server previously advertised zero tools) is unrelated to
 							// filtering and stays unreported, as before.
-							const message = mcpFilterEmptyMessage(cached.length);
-							errors.set(name, message);
-							reportedErrors.add(name);
-							notify(createMcpStartupFailure(name, message, source));
+							MCPManager.#reportFilterEmpty(name, cached.length, source, errors, reportedErrors, notify);
 						}
 					}
 				}
@@ -845,6 +847,30 @@ export class MCPManager {
 			connectedServers: Array.from(connectedServers),
 			exaApiKeys: [], // Will be populated by discoverAndConnect
 		};
+	}
+
+	/**
+	 * Record a filter-empty failure for one startup registration path: fills the
+	 * result `errors` map, dedupes repeated reports through `reportedErrors`,
+	 * and emits a single `failed` status event. All startup paths that observe
+	 * an all-excluding filter (background continuation, sync loop, deferred
+	 * cache) funnel through this so the message and reporting order stay
+	 * identical.
+	 */
+	static #reportFilterEmpty(
+		name: string,
+		advertisedCount: number,
+		source: SourceMeta | undefined,
+		errors: Map<string, string>,
+		reportedErrors: Set<string>,
+		notify: (event: McpConnectionStatusEvent) => void,
+	): void {
+		const message = mcpFilterEmptyMessage(advertisedCount);
+		errors.set(name, message);
+		if (!reportedErrors.has(name)) {
+			reportedErrors.add(name);
+			notify(createMcpStartupFailure(name, message, source));
+		}
 	}
 
 	/**
@@ -991,6 +1017,18 @@ export class MCPManager {
 		)
 			return "connecting";
 		return "disconnected";
+	}
+
+	/**
+	 * Raw advertised tool count for a server whose configured tool filter
+	 * excluded every advertised tool, or `undefined` when the server is not
+	 * filter-empty. A filter-empty server has a healthy transport (resources
+	 * and prompts stay available) but contributes zero tools; query-based
+	 * surfaces (status lists, tool catalogs) should treat it as failed even
+	 * though the transport-level status reads `connected`.
+	 */
+	getFilterEmptyToolCount(name: string): number | undefined {
+		return this.#connections.get(name)?.filterEmptyByToolFilter;
 	}
 
 	/**
@@ -1434,10 +1472,14 @@ export class MCPManager {
 		const wasFilterEmpty = customTools.length === 0 && serverTools.length > 0;
 		if (wasFilterEmpty) {
 			// The applyMCPToolFilter diagnostic inside fromTools already logged
-			// the error; only the status event is missing here.
+			// the error; only the status event is missing here. The flag must be
+			// set too: query-based surfaces read it (getFilterEmptyToolCount) and
+			// the reconnect path keys its failed/connected emit on it.
+			connection.filterEmptyByToolFilter = serverTools.length;
 			const message = mcpFilterEmptyMessage(serverTools.length);
 			this.#emitConnectionStatus({ type: "failed", serverName: name, error: message });
 		} else {
+			connection.filterEmptyByToolFilter = undefined;
 			this.#emitConnectionStatus({ type: "connected", serverName: name });
 		}
 		await this.#onToolsChanged?.(this.#tools);

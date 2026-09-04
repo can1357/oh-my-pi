@@ -97,6 +97,7 @@ function sourceFor(status: "connected" | "connecting" | "disconnected", conn?: M
 	return {
 		getConnectionStatus: () => status,
 		getConnection: () => conn,
+		getFilterEmptyToolCount: () => undefined,
 		getTools: () =>
 			(conn?.tools ?? []).map(tool => ({
 				mcpServerName: conn?.name,
@@ -204,6 +205,17 @@ describe("snapshotMcpRuntime", () => {
 		expect(snap.description).toBe("Access GitHub");
 		expect(snap.tools[0]?.description).toBe("Search code");
 		expect(snap.instructions).toBe("Prefer search_code");
+	});
+	test("reports filter-empty health when the filter excluded every advertised tool", () => {
+		const conn = connection();
+		const filterEmptySource: MCPRuntimeSource = {
+			...sourceFor("connected", conn),
+			getFilterEmptyToolCount: () => 2,
+		};
+		const snap = snapshotMcpRuntime(server(), filterEmptySource);
+		expect(snap.health).toBe("filter-empty");
+		expect(formatMcpHealthLabel("filter-empty")).toBe("Filter excludes all tools");
+		expect(formatMcpListHint(snap)).toBe("tool filter excludes every tool");
 	});
 });
 

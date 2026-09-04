@@ -42,20 +42,37 @@ export interface MCPToolFilterResult {
  * entry `*` must match a tool named `admin/delete` — so both the pattern and
  * the name are matched in a slash-free domain: every `/` is transliterated
  * to NUL (a character no glob metacharacter treats specially, and one that
- * cannot appear in a JSON config string). Literal per-segment semantics are
- * preserved because the transliteration is injective (`a/b` → `a\0b`).
+ * cannot appear in a JSON config string). The transliteration collides only
+ * for names containing a literal NUL (`a/b` ≡ `a\0b`) — pathological, since
+ * NUL cannot appear in a JSON config string either.
  * Patterns containing explicit `/` classes (`[/]`) are not supported.
  */
 const MATCH_OPTIONS = { dot: true } as const;
 
 const SLASH_SENTINEL = "\0";
 
-function matches(name: string, pattern: string): boolean {
-	if (pattern === name) return true;
-	if (!/[*?[\]{}]/.test(pattern)) return false;
-	const p = pattern.replaceAll("/", SLASH_SENTINEL);
-	const n = name.replaceAll("/", SLASH_SENTINEL);
-	return picomatch.isMatch(n, p, MATCH_OPTIONS);
+/**
+ * A compiled pattern: a literal fast path plus a picomatch matcher built once
+ * per filter application (not per name), so filtering a 10k-tool server is
+ * O(tools × patterns) matcher lookups instead of O(tools × patterns) regex
+ * compilations.
+ */
+class CompiledPattern {
+	readonly #raw: string;
+	readonly #isMatch: ((name: string) => boolean) | undefined;
+
+	constructor(pattern: string) {
+		this.#raw = pattern;
+		if (/[*?[\]{}]/.test(pattern)) {
+			this.#isMatch = picomatch(pattern.replaceAll("/", SLASH_SENTINEL), MATCH_OPTIONS);
+		}
+	}
+
+	matches(name: string): boolean {
+		if (this.#raw === name) return true;
+		if (!this.#isMatch) return false;
+		return this.#isMatch(name.replaceAll("/", SLASH_SENTINEL));
+	}
 }
 
 /**
@@ -73,20 +90,28 @@ export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
 		return { allowed: [...toolNames], unmatched: [], filterEmpty: false };
 	}
 
+	// Compile each pattern once per call; matches(name, pattern) per pair
+	// would recompile the picomatch regex for every tool × pattern.
+	const enabled = enabledTools?.length ? enabledTools.map(pattern => new CompiledPattern(pattern)) : undefined;
+	const disabled = disabledTools?.length ? disabledTools.map(pattern => new CompiledPattern(pattern)) : undefined;
+
 	let allowed: string[];
 	let unmatched: string[];
 
-	if (enabledTools?.length) {
-		allowed = toolNames.filter(name => enabledTools.some(pattern => matches(name, pattern)));
-		unmatched = enabledTools.filter(pattern => !toolNames.some(name => matches(name, pattern)));
+	if (enabled) {
+		allowed = toolNames.filter(name => enabled.some(matcher => matcher.matches(name)));
+		unmatched = enabledTools!.filter((_, i) => !toolNames.some(name => enabled[i].matches(name)));
 	} else {
 		allowed = [...toolNames];
 		unmatched = [];
 	}
 
-	if (disabledTools?.length) {
-		allowed = allowed.filter(name => !disabledTools.some(pattern => matches(name, pattern)));
-		unmatched = [...unmatched, ...disabledTools.filter(pattern => !toolNames.some(name => matches(name, pattern)))];
+	if (disabled) {
+		allowed = allowed.filter(name => !disabled.some(matcher => matcher.matches(name)));
+		unmatched = [
+			...unmatched,
+			...disabledTools!.filter((_, i) => !toolNames.some(name => disabled[i].matches(name))),
+		];
 	}
 
 	return { allowed, unmatched, filterEmpty: allowed.length === 0 && toolNames.length > 0 };
@@ -117,7 +142,10 @@ export function applyMCPToolFilter(serverName: string, input: MCPToolFilterInput
 		logger.warn(`MCP server "${serverName}": tool filter entries matched no advertised tool; ignoring them`, {
 			path: `mcp:${serverName}`,
 			unmatched,
-			advertised: input.toolNames,
+			advertised:
+				input.toolNames.length <= 20
+					? input.toolNames
+					: [...input.toolNames.slice(0, 20), `… (+${input.toolNames.length - 20} more)`],
 		});
 	}
 

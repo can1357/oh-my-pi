@@ -31,7 +31,7 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
-	parseMCPToolFilterEntries,
+	parseMCPToolFilterEntry,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -164,8 +164,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				);
 			}
 			// Strict array-of-nonempty-strings; comma globs like "{a,b}_*" survive intact
-			const enabledTools = parseMCPToolFilterEntries(serverConfig.enabledTools);
-			const disabledTools = parseMCPToolFilterEntries(serverConfig.disabledTools);
+			const enabledTools = parseMCPToolFilterEntry(serverConfig.enabledTools);
+			const disabledTools = parseMCPToolFilterEntry(serverConfig.disabledTools);
 			result.push({
 				name: serverName,
 				enabled,

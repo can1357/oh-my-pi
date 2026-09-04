@@ -27,7 +27,7 @@ import {
 	sanitizeDisplayText,
 } from "./display-text";
 
-export type MCPConnectionHealth = "connected" | "connecting" | "disconnected" | "inactive";
+export type MCPConnectionHealth = "connected" | "connecting" | "disconnected" | "inactive" | "filter-empty";
 
 export interface MCPRuntimeCatalogItem {
 	name: string;
@@ -59,6 +59,7 @@ export interface MCPRuntimeSnapshot {
 export interface MCPRuntimeSource {
 	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected";
 	getConnection(name: string): MCPServerConnection | undefined;
+	getFilterEmptyToolCount?(name: string): number | undefined;
 	getTools(): Array<{
 		mcpServerName?: string;
 		mcpToolName?: string;
@@ -236,8 +237,10 @@ export function snapshotMcpRuntime(
 	if (opts?.shadowed || !enabled || !manager) {
 		return base;
 	}
-
-	const health = manager.getConnectionStatus(server.name);
+	const health: MCPConnectionHealth =
+		manager.getFilterEmptyToolCount?.(server.name) !== undefined
+			? "filter-empty"
+			: manager.getConnectionStatus(server.name);
 	const connection = manager.getConnection(server.name);
 	const identity = identityFrom(connection?.serverInfo, server.name);
 	const connectedTools = (connection?.tools ?? []).map(tool =>
@@ -278,6 +281,8 @@ export function formatMcpListHint(snapshot: MCPRuntimeSnapshot): string {
 			return "connecting…";
 		case "disconnected":
 			return "unavailable";
+		case "filter-empty":
+			return "tool filter excludes every tool";
 		case "connected": {
 			const parts = [`${snapshot.tools.length} tool${snapshot.tools.length === 1 ? "" : "s"}`];
 			if (snapshot.resources.length > 0) {
@@ -301,6 +306,8 @@ export function formatMcpHealthLabel(health: MCPConnectionHealth): string {
 			return "Not connected";
 		case "inactive":
 			return "Inactive";
+		case "filter-empty":
+			return "Filter excludes all tools";
 	}
 }
 

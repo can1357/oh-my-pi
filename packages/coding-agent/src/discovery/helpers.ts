@@ -8,6 +8,7 @@ import {
 	getConfigDirName,
 	getPluginsDir,
 	getProjectDir,
+	logger,
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
@@ -189,6 +190,25 @@ export function parseMCPToolFilterEntries(value: unknown): string[] | undefined 
 	if (!Array.isArray(value)) return undefined;
 	const filtered = value.filter((item): item is string => typeof item === "string" && item.length > 0);
 	return filtered.length > 0 ? filtered : undefined;
+}
+
+/**
+ * Parse and validate an MCP `enabledTools` / `disabledTools` value, warning
+ * when the configured value is not a valid filter: non-array values (a typo
+ * like `"tool_a, tool_b"` or an object) would otherwise be silently dropped
+ * and the server would contribute ALL tools — the opposite of the allowlist
+ * intent, with no diagnostic. An empty array (`[]`) is valid but filters
+ * nothing, matching the "no filter" semantics of an absent field.
+ *
+ * Invalid values degrade to `undefined` (filter off) so a typo never breaks
+ * an otherwise usable server; the warning is the diagnostic.
+ */
+export function parseMCPToolFilterEntry(value: unknown): string[] | undefined {
+	const parsed = parseMCPToolFilterEntries(value);
+	if (parsed === undefined && value !== undefined && !(Array.isArray(value) && value.length === 0)) {
+		logger.warn(`MCP server config has invalid tool filter value, ignoring: ${JSON.stringify(value)}`);
+	}
+	return parsed;
 }
 
 /**

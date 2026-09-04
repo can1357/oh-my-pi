@@ -34,7 +34,7 @@ import {
 	createSourceMeta,
 	expandEnvVarsDeep,
 	loadFilesFromDir,
-	parseMCPToolFilterEntries,
+	parseMCPToolFilterEntry,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -330,8 +330,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			// session cwd (MCP stdio spawning resolves relative values there).
 			const rooted = resolvePluginStdioPaths({ command: cfg.command, cwd: cfg.cwd }, root.path);
 			const requestIdFormat = parseRequestIdFormat(cfg.requestIdFormat);
-			const enabledTools = parseMCPToolFilterEntries(cfg.enabledTools);
-			const disabledTools = parseMCPToolFilterEntries(cfg.disabledTools);
+			const enabledTools = parseMCPToolFilterEntry(cfg.enabledTools);
+			const disabledTools = parseMCPToolFilterEntry(cfg.disabledTools);
 			items.push({
 				name: serverName,
 				...(cfg.enabled !== undefined && { enabled: cfg.enabled }),

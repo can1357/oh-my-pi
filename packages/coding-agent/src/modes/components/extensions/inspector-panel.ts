@@ -617,6 +617,8 @@ export class InspectorPanel implements Component {
 				return theme.fg("dim", theme.status.shadowed);
 			case "inactive":
 				return theme.fg("warning", theme.status.disabled);
+			case "filter-empty":
+				return theme.fg("error", theme.status.error);
 		}
 	}
 
