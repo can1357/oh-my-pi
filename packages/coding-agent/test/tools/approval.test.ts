@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { customToolToDefinition } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import { LSP_READONLY_ACTIONS } from "@oh-my-pi/pi-coding-agent/lsp";
 import {
@@ -210,6 +211,22 @@ describe("MCP fallback and prompt formatting", () => {
 	it("ignores legacyName for tools whose mint did not change", () => {
 		const unchanged = { ...tool("mcp__puppeteer_screenshot", "write"), legacyName: "mcp__puppeteer_screenshot" };
 		expect(resolveApproval(unchanged, {}, "yolo", { mcp__puppeteer_screenshot: "deny" }).policy).toBe("deny");
+	});
+
+	it("survives the sdk custom-tool → definition bridge", () => {
+		// The eager/headless path (sdk.ts customToolToDefinition) rebuilds the
+		// tool as a ToolDefinition; legacyName must be forwarded so the alias
+		// still reaches RegisteredToolAdapter → resolveApproval.
+		const definition = customToolToDefinition({
+			name: "mcp__context7_query_docs",
+			label: "context7/query-docs",
+			description: "MCP tool from context7",
+			parameters: { type: "object" },
+			legacyName: "mcp__context_query_docs",
+			approval: "write",
+		} as never);
+		expect(definition.legacyName).toBe("mcp__context_query_docs");
+		expect(resolveApproval(definition, {}, "yolo", { mcp__context_query_docs: "deny" }).policy).toBe("deny");
 	});
 
 	it("formats MCP origin, reason, and per-tool details", () => {
