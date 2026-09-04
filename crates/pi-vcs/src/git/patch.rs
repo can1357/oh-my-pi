@@ -937,31 +937,39 @@ fn apply_file_bytes(
 		return Ok(source.to_vec());
 	}
 	let mut lines = split_lines(source);
-	let mut offset: isize = 0;
+	// Postimage numbering already carries every earlier hunk's size delta, so
+	// only the drift the previous hunk had to absorb is forwarded (git starts
+	// each search at `newpos - 1` and never forwards drift; this is a superset).
+	let mut drift: isize = 0;
+	// First line not written by an earlier hunk. Like `git apply` without
+	// `--allow-overlap`, a hunk may not match into a region a previous hunk in
+	// this pass produced.
+	let mut floor: usize = 0;
 	for hunk in &patch.hunks {
-		let (start, count, replacement, expected) = hunk_sides(hunk, reverse);
-		let anchor = if count == 0 {
-			start
-		} else {
-			start.saturating_sub(1)
-		} as isize;
-		let preferred = anchor + offset;
-		let position = if expected.is_empty() {
+		let sides = hunk_sides(hunk, reverse);
+		let preferred = sides.anchor as isize + drift;
+		let position = if sides.expected.is_empty() {
 			// Pure insertion with no context (`-U0` or empty file): nothing to
 			// search for, the anchor must simply be inside the file.
 			usize::try_from(preferred)
 				.ok()
-				.filter(|position| *position <= lines.len())
+				.filter(|position| (floor..=lines.len()).contains(position))
 		} else {
-			locate_hunk(&lines, &expected, preferred, start <= 1, trailing_context(hunk) == 0)
+			locate_hunk(
+				&lines,
+				&sides.expected,
+				floor,
+				preferred,
+				sides.start <= 1,
+				trailing_context(hunk) == 0,
+			)
 		};
 		let Some(position) = position else {
-			return Err(ApplyFailure::Context(format!("hunk at line {start} does not apply")));
+			return Err(ApplyFailure::Context(format!("hunk at line {} does not apply", sides.start)));
 		};
-		lines.splice(position..position + expected.len(), replacement.clone());
-		// Carry both the drift we just absorbed and the size change forward so
-		// later hunks start their search from where git would.
-		offset = position as isize - anchor + replacement.len() as isize - expected.len() as isize;
+		drift = position as isize - sides.anchor as isize;
+		floor = position + sides.replacement.len();
+		lines.splice(position..position + sides.expected.len(), sides.replacement);
 	}
 	Ok(lines.concat())
 }
@@ -976,20 +984,27 @@ fn trailing_context(hunk: &Hunk) -> usize {
 		.count()
 }
 
-/// Find where `expected` occurs in `lines`, mirroring `git apply`'s
-/// `find_pos`: try `preferred` first, then fan out one line at a time in both
-/// directions so a hunk still applies after earlier edits shifted the file.
-/// A hunk that starts at the top of the old file or has no trailing context is
-/// pinned to the beginning / end of the file respectively, exactly as git does.
+/// Find where `expected` occurs in `lines` at or after `floor`, mirroring
+/// `git apply`'s `find_pos`: try `preferred` first, then fan out one line at a
+/// time — forward before backward — so a hunk still applies after earlier
+/// edits shifted the file. A hunk that starts at the top of the old file or
+/// has no trailing context is pinned to the beginning / end of the file
+/// respectively, exactly as git does.
 fn locate_hunk(
 	lines: &[Vec<u8>],
 	expected: &[Vec<u8>],
+	floor: usize,
 	preferred: isize,
 	match_beginning: bool,
 	match_end: bool,
 ) -> Option<usize> {
 	let last = lines.len().checked_sub(expected.len())?;
-	let matches_at = |position: usize| lines[position..position + expected.len()] == *expected;
+	if last < floor {
+		return None;
+	}
+	let matches_at = |position: usize| {
+		position >= floor && lines[position..position + expected.len()] == *expected
+	};
 	if match_beginning || match_end {
 		let pinned = match (match_beginning, match_end) {
 			(true, true) if last != 0 => return None,
@@ -998,25 +1013,37 @@ fn locate_hunk(
 		};
 		return matches_at(pinned).then_some(pinned);
 	}
-	let preferred = preferred.clamp(0, last as isize) as usize;
+	let preferred = preferred.clamp(floor as isize, last as isize) as usize;
 	if matches_at(preferred) {
 		return Some(preferred);
 	}
-	for distance in 1..=last.max(preferred) {
+	for distance in 1..=last - floor {
+		let after = preferred + distance;
+		if after <= last && matches_at(after) {
+			return Some(after);
+		}
 		if let Some(before) = preferred.checked_sub(distance)
 			&& matches_at(before)
 		{
 			return Some(before);
 		}
-		let after = preferred + distance;
-		if after <= last && matches_at(after) {
-			return Some(after);
-		}
 	}
 	None
 }
 
-fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+/// One hunk oriented for application: `expected` is the preimage to find and
+/// `replacement` the postimage to splice in.
+struct HunkSides {
+	/// 1-based preimage start line (`oldpos` in git); 0 for an empty file.
+	start:       usize,
+	/// 0-based line where git begins searching: the postimage start, which
+	/// already accounts for every earlier hunk in the same patch.
+	anchor:      usize,
+	replacement: Vec<Vec<u8>>,
+	expected:    Vec<Vec<u8>>,
+}
+
+fn hunk_sides(hunk: &Hunk, reverse: bool) -> HunkSides {
 	let mut old = Vec::new();
 	let mut new = Vec::new();
 	for line in &hunk.lines {
@@ -1031,10 +1058,29 @@ fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Vec<u8>>, Vec<Ve
 			new.push(content);
 		}
 	}
+	// A zero-count range names the line *before* the hunk, so it is already
+	// the 0-based insertion index.
+	let anchor = |start: usize, count: usize| {
+		if count == 0 {
+			start
+		} else {
+			start.saturating_sub(1)
+		}
+	};
 	if reverse {
-		(hunk.new_start, hunk.new_count, old, new)
+		HunkSides {
+			start:       hunk.new_start,
+			anchor:      anchor(hunk.old_start, hunk.old_count),
+			replacement: old,
+			expected:    new,
+		}
 	} else {
-		(hunk.old_start, hunk.old_count, new, old)
+		HunkSides {
+			start:       hunk.old_start,
+			anchor:      anchor(hunk.new_start, hunk.new_count),
+			replacement: new,
+			expected:    old,
+		}
 	}
 }
 
@@ -2013,6 +2059,52 @@ mod tests {
 			)
 			.expect("stage second hunk from stale diff");
 		assert_eq!(git(temp.path(), &["show", ":file.txt"]), changed);
+
+		// Repeated blocks: hunk 2 targets the SECOND `X Y W`. Once hunk 1 is in
+		// the index, the first block sits exactly where hunk 2's HEAD numbering
+		// points. Anchoring on the postimage line (as git does) lands on the
+		// right block; searching from the preimage line would patch the wrong one.
+		let temp = init(&[("dup.txt", b"a\nb\nX\nY\nW\nc\nX\nY\nW\nd\n")]);
+		let wanted = "a\np\nq\nr\nb\nX\nY\nW\nc\nX\nZ\nW\nd\n";
+		fs::write(temp.path().join("dup.txt"), wanted).expect("edit");
+		let diff = git(temp.path(), &["diff", "--unified=1"]);
+		let repository = repo(temp.path());
+		for hunk in 1..=2 {
+			repository
+				.stage_hunks(
+					&[HunkSelection { path: "dup.txt".into(), hunks: HunkSpec::Indices(vec![hunk]) }],
+					Some(&diff),
+				)
+				.expect("stage hunk from stale diff");
+		}
+		assert_eq!(git(temp.path(), &["show", ":dup.txt"]), wanted);
+
+		// A later hunk may not match into lines an earlier hunk just wrote
+		// (git rejects this without `--allow-overlap`): hunk 2's context would
+		// only be found inside hunk 1's replacement.
+		let overlap = concat!(
+			"--- a/o.txt\n",
+			"+++ b/o.txt\n",
+			"@@ -1,2 +1,4 @@\n",
+			" k\n",
+			"-v\n",
+			"+m\n",
+			"+n\n",
+			"+v\n",
+			"@@ -4,3 +6,3 @@\n",
+			" n\n",
+			"-v\n",
+			"+w\n",
+			" q\n",
+		);
+		let temp = init(&[("o.txt", b"k\nv\nq\nr\ns\n")]);
+		let patch_file = temp.path().join("o.patch");
+		fs::write(&patch_file, overlap).expect("write patch");
+		git_expecting(temp.path(), &["apply", "--check", patch_file.to_str().unwrap()], 1);
+		let ours = repo(temp.path())
+			.can_apply_patch(overlap, &ApplyOptions::default())
+			.expect("check");
+		assert!(!ours, "hunk must not match inside a previous hunk's replacement");
 
 		// Drift search must not rescue a hunk git rejects: one with no trailing
 		// context is pinned to EOF, even when its context still matches mid-file.

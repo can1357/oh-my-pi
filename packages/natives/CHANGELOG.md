@@ -11,7 +11,10 @@
 ### Fixed
 - Fixed filter/attribute (CRLF) normalization in native staging.
 - Fixed index writes serialized under `.git/index.lock`.
-- Fixed hunk application (`stageHunks`, `commitSplit`, `applyPatch`) failing with "hunk does not apply" when an earlier hunk in the same file shifted line numbers; hunks are now located with `git apply`'s drift search and EOF/BOF pinning.
+- Fixed hunk application (`stageHunks`, `commitSplit`, `applyPatch`) failing with "hunk does not apply" when an earlier hunk in the same file shifted line numbers; hunks are now located like `git apply` does — searching from the postimage line, so a hunk lands on the right block even when an identical block sits nearby.
+
+### Changed
+- `applyPatch`/`canApplyPatch` now follow `git apply`'s default context rules: a hunk with no trailing context must match at end of file, a hunk starting at line 1 must match at the start, and a hunk may not overlap lines a previous hunk wrote. Zero-context (`-U0`) patches that previously applied by exact position are rejected, as with `git apply` without `--unidiff-zero`.
 ## [18.1.9] - 2026-09-04
 
 ### Added

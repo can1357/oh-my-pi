@@ -2527,7 +2527,7 @@ mod tests {
 		// commit_create with matching expected_tree succeeds and commits hook's content
 		let sha = repo
 			.commit_create("hook rewrite commit", &CommitOptions {
-				expected_tree: Some(expected_tree.clone()),
+				expected_tree: Some(expected_tree),
 				..Default::default()
 			})
 			.unwrap();
