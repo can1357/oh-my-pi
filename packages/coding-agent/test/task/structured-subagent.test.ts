@@ -177,7 +177,6 @@ describe("structured subagent primitive", () => {
 				request({ session: session({ planMode: true }), isolation: { requested: false } }),
 			),
 		).resolves.toBeDefined();
-
 		const planSession = session({ planMode: true });
 		const customTools = createEvalCustomTools(planSession, [
 			{
@@ -187,11 +186,15 @@ describe("structured subagent primitive", () => {
 				language: "python",
 			},
 		]);
+		const discover2 = vi
+			.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValue({ agents: [AGENT], projectAgentsDir: null });
 		await expect(resolveEffectiveSubagentPolicy(request({ session: planSession, customTools }))).rejects.toThrow(
 			"Eval-defined tools are unavailable in plan mode.",
 		);
-		expect(discover).not.toHaveBeenCalled();
+		expect(discover2).toHaveBeenCalledTimes(1);
 	});
+
 	it("reloads model roles before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
 		const projectDir = path.join(root, "project");
