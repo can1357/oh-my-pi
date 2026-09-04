@@ -70726,41 +70726,44 @@
 		}
 	},
 	"firepass": {
-		"kimi-k2.6-turbo": {
-			"id": "kimi-k2.6-turbo",
-			"name": "Kimi K2.6 Turbo (Fire Pass)",
+		"glm-5.2-fast": {
+			"id": "glm-5.2-fast",
+			"name": "GLM 5.2 Fast (Fire Pass)",
 			"api": "openai-completions",
 			"provider": "firepass",
 			"baseUrl": "https://api.fireworks.ai/inference/v1",
 			"reasoning": true,
 			"input": [
-				"text",
-				"image"
+				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 2.1,
+				"output": 6.6,
+				"cacheRead": 0.21,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
-			"maxTokens": 32768,
+			"contextWindow": 1048576,
+			"maxTokens": 131072,
+			"tokenizer": "glm5",
+			"identity": {
+				"class": "glm",
+				"revision": "5.2.0"
+			},
+			"requiresGlyphTokenization": false,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"minimal",
 					"low",
 					"medium",
 					"high",
-					"xhigh",
 					"max"
-				]
+				],
+				"effortMap": {
+					"minimal": "none"
+				}
 			},
-			"tokenizer": "kimi-k2",
-			"requiresGlyphTokenization": false,
-			"identity": {
-				"class": "kimi",
-				"family": "k2.6"
-			},
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -70770,6 +70773,105 @@
 				"supportsSamplingParams": true,
 				"supportsPenaltyAndStopParams": true,
 				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "firepass",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			}
+		},
+		"kimi-k3-fast": {
+			"id": "kimi-k3-fast",
+			"name": "Kimi K3 Fast (Fire Pass)",
+			"api": "openai-completions",
+			"provider": "firepass",
+			"baseUrl": "https://api.fireworks.ai/inference/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 3,
+				"output": 15,
+				"cacheRead": 0.3,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 131072,
+			"tokenizer": "kimi-k2",
+			"identity": {
+				"class": "kimi",
+				"family": "k3"
+			},
+			"requiresGlyphTokenization": false,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				],
+				"defaultLevel": "max",
+				"effortMap": {
+					"max": "max"
+				},
+				"requiresEffort": true
+			},
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": true,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {
+					"minimal": "low",
+					"medium": "high",
+					"xhigh": "max",
+					"max": "max"
+				},
 				"supportsUsageInStreaming": true,
 				"alwaysSendMaxTokens": true,
 				"disableReasoningOnForcedToolChoice": true,
@@ -70802,9 +70904,8 @@
 				"supportsStrictMode": false,
 				"toolStrictMode": "mixed",
 				"toolSchemaFlavor": "moonshot-mfjs",
-				"streamIdleTimeoutMs": 300000,
 				"stripDeepseekSpecialTokens": false,
-				"streamMarkupHealingPattern": "kimi",
+				"streamMarkupHealingPattern": "thinking",
 				"reasoningDeltasMayBeCumulative": false,
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
@@ -70816,8 +70917,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
-			},
-			"supportsComputerUse": false
+			}
 		}
 	},
 	"fireworks": {

@@ -196,7 +196,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "firepass",
-		defaultModel: "kimi-k2.6-turbo",
+		defaultModel: "glm-5.2-fast",
 		envVars: ["FIREPASS_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => firepassModelManagerOptions(config),
 	},

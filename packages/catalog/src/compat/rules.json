@@ -7997,25 +7997,37 @@
 				}
 			},
 			{
-				"source": "providers/firepass.kdl:11",
+				"source": "providers/firepass.kdl:10",
+				"class": "glm",
 				"providers": [
 					"firepass"
 				],
-				"models": [
-					{
-						"kind": "exact",
-						"value": "kimi-k2.6-turbo"
-					}
-				],
+				"priority": 1,
 				"thinking": {
+					"mode": "effort",
 					"efforts": [
+						"minimal",
 						"low",
 						"medium",
 						"high",
-						"xhigh",
 						"max"
-					],
-					"mode": "effort"
+					]
+				}
+			},
+			{
+				"source": "providers/firepass.kdl:15",
+				"class": "kimi",
+				"providers": [
+					"firepass"
+				],
+				"priority": 1,
+				"thinking": {
+					"mode": "effort",
+					"efforts": [
+						"low",
+						"high",
+						"max"
+					]
 				}
 			},
 			{
@@ -16352,7 +16364,7 @@
 			{
 				"id": "firepass",
 				"apiKeyFormat": "bearer",
-				"name": "Fire Pass (Fireworks Kimi K2.6 Turbo subscription)",
+				"name": "Fire Pass (Fireworks subscription)",
 				"login": {
 					"kind": "api-key",
 					"authUrl": "https://app.fireworks.ai/settings/users/api-keys",
@@ -16363,7 +16375,7 @@
 						"kind": "chat-completions",
 						"label": "Fire Pass",
 						"baseUrl": "https://api.fireworks.ai/inference/v1",
-						"model": "accounts/fireworks/routers/kimi-k2p6-turbo"
+						"model": "accounts/fireworks/routers/glm-5p2-fast"
 					}
 				}
 			},

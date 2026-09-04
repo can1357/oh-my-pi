@@ -11,6 +11,9 @@
 ### Fixed
 
 - Fixed GPT-6 Astra requests through GitHub Copilot failing with an unsupported endpoint error ([#10874](https://github.com/can1357/oh-my-pi/pull/10874) by [@xpcmdshell](https://github.com/xpcmdshell)).
+### Changed
+
+- Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@$$USERNAME_8OOFD76HY655:L$$](https://github.com/$$USERNAME_8OOFD76HY655:L$$)).
 
 ## [18.1.9] - 2026-09-04
 
