@@ -30,6 +30,7 @@ use omp_driver::{
 };
 use omp_envd::tool_url::host;
 use omp_inference::{
+	Registry,
 	answer::{AccountState, AccountSummary, AuthAnswer, AuthEvent, AuthPromptKind, AuthSession},
 	auth::manager::AuthManager,
 	call::{AccountPins, AuthInput, AuthMethod, AuthRequest, LoginRequest},
@@ -87,6 +88,10 @@ const MAX_SUBAGENT_TRANSCRIPTS: usize = 256;
 const SUBAGENT_READ_BYTES: usize = 768 * 1024;
 const ACCOUNT_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const ANTHROPIC_PROVIDER: &str = "anthropic";
+const CODEX_PROVIDER: &str = "openai-codex";
+/// Providers whose authenticated discovery endpoint reports account-specific
+/// models beyond the bundled catalog.
+const ACCOUNT_DISCOVERY_PROVIDERS: [&str; 2] = [ANTHROPIC_PROVIDER, CODEX_PROVIDER];
 // Claude Code carries its normal subscription tiers in the client and lets the
 // authenticated bootstrap response add account-specific options. The
 // bootstrap endpoint is deliberately not a complete model catalog.
@@ -230,36 +235,17 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 			.collect::<HashSet<_>>(),
 		_ => HashSet::new(),
 	};
-	let anthropic = ProviderId::from(ANTHROPIC_PROVIDER);
-	let discovered_anthropic_models = if authenticated.contains(ANTHROPIC_PROVIDER) {
-		match crate::models_cmd::fresh_provider_models(&data, &anthropic)? {
-			Some(models) => models,
-			None => match time::timeout(
-				ACCOUNT_MODEL_DISCOVERY_TIMEOUT,
-				crate::models_cmd::refresh_provider(&registry, &data, &anthropic),
-			)
-			.await
-			{
-				Ok(Ok(models)) => models,
-				Ok(Err(error)) => {
-					eprintln!("warning: Anthropic account model discovery failed: {error}");
-					Vec::new()
-				},
-				Err(_) => {
-					eprintln!(
-						"warning: Anthropic account model discovery exceeded {} seconds",
-						ACCOUNT_MODEL_DISCOVERY_TIMEOUT.as_secs()
-					);
-					Vec::new()
-				},
-			},
-		}
-	} else {
-		Vec::new()
-	};
+	let discovered = discover_account_models(&registry, &data, &authenticated, false).await;
 	let available_anthropic_models = authenticated
 		.contains(ANTHROPIC_PROVIDER)
-		.then(|| anthropic_subscription_models(discovered_anthropic_models))
+		.then(|| {
+			anthropic_subscription_models(
+				discovered
+					.get(ANTHROPIC_PROVIDER)
+					.cloned()
+					.unwrap_or_default(),
+			)
+		})
 		.unwrap_or_default();
 	let mut models = registry
 		.catalog()
@@ -276,11 +262,20 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 				.then(|| selector.to_owned())
 		})
 		.collect::<Vec<_>>();
-	models.extend(available_anthropic_models.iter().filter_map(|selector| {
+	// Account discovery adds models the bundled catalog does not know yet,
+	// such as a newly released Codex model; the headless session hydrates the
+	// same cache when it composes its catalog, so these stay selectable.
+	let additions = available_anthropic_models.iter().cloned().chain(
+		discovered
+			.get(CODEX_PROVIDER)
+			.into_iter()
+			.flat_map(|selectors| selectors.iter().cloned()),
+	);
+	models.extend(additions.filter_map(|selector| {
 		let (provider, model) = selector.split_once('/')?;
 		model_settings
 			.model_allowed(provider, model)
-			.then(|| selector.clone())
+			.then_some(selector)
 	}));
 	models.sort_by_key(|selector| {
 		let (provider, model) = selector.split_once('/').unwrap_or(("", selector.as_str()));
@@ -423,6 +418,8 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 	let runtime = Arc::new(Runtime {
 		headless: AsyncMutex::new(HeadlessRuntime { session: headless, events: headless_events }),
 		account_pins,
+		registry: registry.clone(),
+		data_dir: data.clone(),
 		auth,
 		settings_manager,
 		ui_enabled,
@@ -497,6 +494,72 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 	dispatch_result?;
 	read_result?;
 	write_result
+}
+
+/// Account-verified model selectors per provider: the fresh discovery cache
+/// when one exists (unless `force_refresh`), otherwise one bounded live
+/// discovery. Failures degrade to no additions so startup never stalls on a
+/// provider.
+async fn discover_account_models(
+	registry: &Registry,
+	data_dir: &Path,
+	authenticated: &HashSet<String>,
+	force_refresh: bool,
+) -> HashMap<String, Vec<String>> {
+	// Providers are probed concurrently so a stalled endpoint costs one
+	// timeout, not one per provider, which keeps startup inside the host's
+	// ready deadline.
+	let probes = ACCOUNT_DISCOVERY_PROVIDERS
+		.into_iter()
+		.filter(|provider_id| authenticated.contains(*provider_id))
+		.map(|provider_id| async move {
+			let models =
+				discover_provider_models(registry, data_dir, provider_id, force_refresh).await;
+			(provider_id.to_owned(), models)
+		});
+	futures::future::join_all(probes)
+		.await
+		.into_iter()
+		.collect()
+}
+
+async fn discover_provider_models(
+	registry: &Registry,
+	data_dir: &Path,
+	provider_id: &str,
+	force_refresh: bool,
+) -> Vec<String> {
+	let provider = ProviderId::from(provider_id);
+	let cached = if force_refresh {
+		None
+	} else {
+		crate::models_cmd::fresh_provider_models(data_dir, &provider).unwrap_or_else(|error| {
+			eprintln!("warning: {provider_id} model cache is unreadable: {error}");
+			None
+		})
+	};
+	if let Some(models) = cached {
+		return models;
+	}
+	match time::timeout(
+		ACCOUNT_MODEL_DISCOVERY_TIMEOUT,
+		crate::models_cmd::refresh_provider(registry, data_dir, &provider),
+	)
+	.await
+	{
+		Ok(Ok(models)) => models,
+		Ok(Err(error)) => {
+			eprintln!("warning: {provider_id} account model discovery failed: {error}");
+			Vec::new()
+		},
+		Err(_) => {
+			eprintln!(
+				"warning: {provider_id} account model discovery exceeded {} seconds",
+				ACCOUNT_MODEL_DISCOVERY_TIMEOUT.as_secs()
+			);
+			Vec::new()
+		},
+	}
 }
 
 fn anthropic_subscription_models(discovered: Vec<String>) -> HashSet<String> {
@@ -1078,6 +1141,8 @@ impl omp_tool::HostToolExecutor for RpcHostToolExecutor {
 struct Runtime {
 	headless:         AsyncMutex<HeadlessRuntime>,
 	account_pins:     AccountPins,
+	registry:         Registry,
+	data_dir:         PathBuf,
 	auth:             AuthManager,
 	settings_manager: Arc<SettingsManager>,
 	ui_enabled:       bool,
@@ -1483,6 +1548,7 @@ impl Runtime {
 				self.change_model(&params.provider, &params.model_id).await
 			},
 			"list_accounts" => self.list_accounts().await,
+			"refresh_models" => self.refresh_models().await,
 			"set_account" => {
 				let params = parse_params::<AccountParams>(params)?;
 				self.change_account(&params.account_id).await
@@ -2314,6 +2380,32 @@ impl Runtime {
 		self.sync_provider_authentication(&accounts);
 		let accounts = accounts.into_iter().map(rpc_account).collect::<Vec<_>>();
 		Ok(json!({ "accounts": accounts }))
+	}
+
+	/// Re-runs account model discovery for every authenticated provider,
+	/// bypassing the cache, and publishes the widened model list. The live
+	/// session's catalog was composed at launch, so a host must relaunch the
+	/// child before newly discovered models can be selected.
+	async fn refresh_models(&self) -> Result<Value, CommandError> {
+		let accounts = self.stored_accounts().await?;
+		let authenticated = accounts
+			.iter()
+			.filter(|account| account.state == AccountState::Active)
+			.map(|account| account.provider.as_str().to_owned())
+			.collect::<HashSet<_>>();
+		let discovered =
+			discover_account_models(&self.registry, &self.data_dir, &authenticated, true).await;
+		let mut state = self.state.lock();
+		for selector in discovered.values().flatten() {
+			if !state.models.contains(selector) {
+				state.models.push(selector.clone());
+			}
+		}
+		let models = state.models.clone();
+		drop(state);
+		let mut refreshed = discovered.keys().cloned().collect::<Vec<_>>();
+		refreshed.sort();
+		Ok(json!({ "models": models, "refreshed": refreshed, "restartRequired": true }))
 	}
 
 	fn publish_account_pins(&self) -> Result<(), CommandError> {

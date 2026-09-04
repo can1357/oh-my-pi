@@ -1311,6 +1311,13 @@ impl RpcClient {
 		Ok(messages)
 	}
 
+	/// Re-runs account model discovery for every authenticated provider and
+	/// returns the widened model list; the child must be relaunched before new
+	/// models can be selected.
+	pub async fn refresh_models(&self) -> Result<Value, ClientError> {
+		self.request("refresh_models", &()).await
+	}
+
 	/// Lists stored non-secret account summaries across every provider.
 	pub async fn list_accounts(&self) -> Result<Vec<crate::protocol::RpcAccount>, ClientError> {
 		#[derive(serde::Deserialize)]
