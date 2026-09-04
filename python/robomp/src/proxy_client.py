@@ -283,11 +283,14 @@ class GitHubProxyClient:
         )
         return [_review_comment_from(item) for item in (data.get("items") if isinstance(data, dict) else None) or []]
 
-    async def get_review_comment(self, repo: str, comment_id: int) -> ReviewCommentInfo:
+    async def get_review_comment(self, repo: str, comment_id: int, pr_number: int | None = None) -> ReviewCommentInfo:
+        params: dict[str, Any] = {"repo": repo, "comment_id": comment_id}
+        if pr_number is not None:
+            params["pr_number"] = pr_number
         data = await self._request(
             "GET",
             "/gh/v1/get_review_comment",
-            params={"repo": repo, "comment_id": comment_id},
+            params=params,
         )
         return _review_comment_from(data)
 
