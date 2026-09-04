@@ -3,6 +3,7 @@ import {
 	captureRecoveryLoaderNavigation,
 	consumeRelayInitiatedDetach,
 	createRetryableLoader,
+	detachWithRecoveryLoaderObservation,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
 	isAttachmentStateCurrent,
@@ -41,6 +42,41 @@ describe("attachment-state", () => {
 		expect(captureRecoveryLoaderNavigation(loaderIds, generations, 1, "Runtime.ready", {})).toBe(false);
 		expect(loaderIds.get(1)).toBe("loader-before");
 		expect(generations.get(1)).toBe(1);
+	});
+
+	it("observes navigation until an orphan detach finishes", async () => {
+		const loaderIds = new Map([[1, "loader-before"]]);
+		const generations = new Map([[1, 1]]);
+		const detach = Promise.withResolvers<void>();
+		const calls: string[] = [];
+		const pending = detachWithRecoveryLoaderObservation(
+			loaderIds,
+			generations,
+			1,
+			async () => {
+				calls.push("Page.enable");
+			},
+			async () => {
+				calls.push("Page.getFrameTree");
+				return "loader-snapshot";
+			},
+			async () => {
+				calls.push("detach");
+				await detach.promise;
+			},
+		);
+
+		while (!calls.includes("detach")) await Promise.resolve();
+		expect(calls).toEqual(["Page.enable", "Page.getFrameTree", "detach"]);
+		expect(loaderIds.get(1)).toBe("loader-snapshot");
+
+		captureRecoveryLoaderNavigation(loaderIds, generations, 1, "Page.frameNavigated", {
+			frame: { id: "main", loaderId: "loader-during-detach" },
+		});
+		detach.resolve();
+		await pending;
+
+		expect(loaderIds.get(1)).toBe("loader-during-detach");
 	});
 
 	it("keeps unrelated attached tabs fresh when one tab changes after a shared snapshot", () => {

@@ -98,6 +98,18 @@ function captureRecoveryLoaderNavigation(loaderIds, loaderGenerations, tabId, me
   loaderIds.set(tabId, loaderId);
   return true;
 }
+async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations, tabId, enablePage, readMainFrameLoaderId, detach) {
+  const loaderGeneration = loaderGenerations.get(tabId) ?? 0;
+  await enablePage().catch(() => {
+    return;
+  });
+  const loaderId = await readMainFrameLoaderId().catch(() => {
+    return;
+  });
+  if (loaderGeneration === loaderGenerations.get(tabId) && typeof loaderId === "string")
+    loaderIds.set(tabId, loaderId);
+  await detach();
+}
 function isAttachmentStateCurrent(epochs, tabId, epoch) {
   return (epochs.get(tabId) ?? 0) === epoch;
 }
@@ -473,19 +485,14 @@ var attachmentGuard = new AttachmentGuard({
   detachAll: (tabIds, source) => {
     for (const tabId of tabIds) {
       noteAttachmentStateChange(recoveryLoaderGenerations, tabId);
-      const loaderGeneration = recoveryLoaderGenerations.get(tabId) ?? 0;
       const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
       guardDetachments.add(tabId);
       recoveryLoaderIds.delete(tabId);
-      trackPendingDetach((async () => {
-        const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree").catch(() => {
-          return;
-        });
+      trackPendingDetach(detachWithRecoveryLoaderObservation(recoveryLoaderIds, recoveryLoaderGenerations, tabId, () => chrome.debugger.sendCommand({ tabId }, "Page.enable"), async () => {
+        const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree");
         const loaderId = frameTree?.frameTree?.frame?.loaderId;
-        if (loaderGeneration === recoveryLoaderGenerations.get(tabId) && typeof loaderId === "string")
-          recoveryLoaderIds.set(tabId, loaderId);
-        await chrome.debugger.detach({ tabId });
-      })().catch(async () => {
+        return typeof loaderId === "string" ? loaderId : undefined;
+      }, () => chrome.debugger.detach({ tabId })).catch(async () => {
         guardDetachments.delete(tabId);
         const targets = await chrome.debugger.getTargets().catch(() => null);
         if ((attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch && shouldRetrackAfterDetachFailure(targets, tabId)) {

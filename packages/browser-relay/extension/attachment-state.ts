@@ -26,6 +26,29 @@ export function captureRecoveryLoaderNavigation(
 	return true;
 }
 
+export async function detachWithRecoveryLoaderObservation(
+	loaderIds: Map<number, string>,
+	loaderGenerations: Map<number, number>,
+	tabId: number,
+	enablePage: () => Promise<unknown>,
+	readMainFrameLoaderId: () => Promise<string | undefined>,
+	detach: () => Promise<void>,
+): Promise<void> {
+	const loaderGeneration = loaderGenerations.get(tabId) ?? 0;
+	// Page events may have been disabled after recovery. Observe them for the
+	// entire snapshot-to-detach window so a committed navigation can supersede
+	// the snapshot before debugger ownership ends. Observation is best-effort:
+	// failure to enable Page must not strand the orphaned attachment.
+	await enablePage().catch(() => undefined);
+	const loaderId = await readMainFrameLoaderId().catch(() => undefined);
+	if (
+		loaderGeneration === loaderGenerations.get(tabId) &&
+		typeof loaderId === "string"
+	)
+		loaderIds.set(tabId, loaderId);
+	await detach();
+}
+
 export function isAttachmentStateCurrent(
 	epochs: ReadonlyMap<number, number>,
 	tabId: number,

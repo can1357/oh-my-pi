@@ -19,6 +19,7 @@ import {
 	captureRecoveryLoaderNavigation,
 	consumeRelayInitiatedDetach,
 	createRetryableLoader,
+	detachWithRecoveryLoaderObservation,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
 	isAttachmentStateCurrent,
@@ -423,25 +424,25 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 		// storage write that MV3 may terminate with the worker.
 		for (const tabId of tabIds) {
 			noteAttachmentStateChange(recoveryLoaderGenerations, tabId);
-			const loaderGeneration = recoveryLoaderGenerations.get(tabId) ?? 0;
 			const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
 			guardDetachments.add(tabId);
 			recoveryLoaderIds.delete(tabId);
 			void trackPendingDetach(
-				(async () => {
-					const frameTree = (await chrome.debugger
-						.sendCommand({ tabId }, "Page.getFrameTree")
-						.catch(() => undefined)) as
-						| { frameTree?: { frame?: { loaderId?: unknown } } }
-						| undefined;
-					const loaderId = frameTree?.frameTree?.frame?.loaderId;
-					if (
-						loaderGeneration === recoveryLoaderGenerations.get(tabId) &&
-						typeof loaderId === "string"
-					)
-						recoveryLoaderIds.set(tabId, loaderId);
-					await chrome.debugger.detach({ tabId });
-				})().catch(async () => {
+				detachWithRecoveryLoaderObservation(
+					recoveryLoaderIds,
+					recoveryLoaderGenerations,
+					tabId,
+					() => chrome.debugger.sendCommand({ tabId }, "Page.enable"),
+					async () => {
+						const frameTree = (await chrome.debugger.sendCommand(
+							{ tabId },
+							"Page.getFrameTree",
+						)) as { frameTree?: { frame?: { loaderId?: unknown } } } | undefined;
+						const loaderId = frameTree?.frameTree?.frame?.loaderId;
+						return typeof loaderId === "string" ? loaderId : undefined;
+					},
+					() => chrome.debugger.detach({ tabId }),
+				).catch(async () => {
 					guardDetachments.delete(tabId);
 					// The detach rejected. If Chrome still reports the tab attached, the
 					// #sweep() that fired this already dropped it from the guard's tracked
