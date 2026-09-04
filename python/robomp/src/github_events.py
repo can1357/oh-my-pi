@@ -193,7 +193,9 @@ def is_implementation_authorizer(
     return False
 
 
-def _pr_review_pr(pr: Mapping[str, Any], repo: str, action: str, bot_login: str) -> RouteDecision:
+def _pr_review_pr(
+    pr: Mapping[str, Any], repo: str, action: str, bot_login: str, skip_bots: frozenset[str] = frozenset()
+) -> RouteDecision:
     """Build a `review_pr` decision for an incoming PR, or the matching skip."""
     if str(pr.get("state") or "open") != "open":
         return RouteDecision("skip", None, repo, None, "PR not open")
@@ -201,6 +203,8 @@ def _pr_review_pr(pr: Mapping[str, Any], repo: str, action: str, bot_login: str)
         return RouteDecision("skip", None, repo, None, "draft PR")
     if _is_bot_account(pr.get("user") or {}, bot_login):
         return RouteDecision("skip", None, repo, None, "bot-authored PR")
+    if skip_bots and _normalize_bot_login(str((pr.get("user") or {}).get("login") or "")) in skip_bots:
+        return RouteDecision("skip", None, repo, None, "bot-authored PR (skip list)")
     number = pr.get("number")
     if not isinstance(number, int):
         return RouteDecision("skip", None, repo, None, "PR missing number")
@@ -226,6 +230,7 @@ def route(
     reviewer_bots: frozenset[str] = frozenset(),
     resolve_issue_from_pr: PrIssueResolver = None,
     pr_review_enabled: bool = True,
+    pr_review_skip_bots: frozenset[str] = frozenset(),
     release_sentinel_enabled: bool = False,
     release_commit_prefix: str = "chore: bump version to ",
 ) -> RouteDecision:
@@ -389,7 +394,7 @@ def route(
         if not pr_review_enabled:
             return RouteDecision("skip", None, repo, None, "PR review disabled")
         pr = payload.get("pull_request") or {}
-        return _pr_review_pr(pr, repo, action, bot_login)
+        return _pr_review_pr(pr, repo, action, bot_login, skip_bots=pr_review_skip_bots)
 
     if event_type == "pull_request_review_comment" and action == "created":
         comment = payload.get("comment") or {}
