@@ -1342,6 +1342,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			"options.authStorage and options.modelRegistry.authStorage must be the same instance when both are provided",
 		);
 	}
+	// Discovery only read `<agentDir>/config.yml`; the settings layer also carries
+	// `--config` / `PI_CONFIG_FILES` overlays and project settings, so it decides the
+	// account-selection policy for storage this session created.
+	if (ownsAuthStorage) authStorage.setAccountSelection(settings.get("auth.accountSelection"));
 	// Subscribe before any getApiKey() call so startup model probes can't fire a
 	// credential_disabled event past us. An embedder's constructor handler makes the
 	// listener set non-empty from construction, which defeats AuthStorage's no-listener

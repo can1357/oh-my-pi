@@ -88,6 +88,7 @@ export function seedCredentialPins(authStorage: AuthStorage, sessionManager: Ses
 		if (!match) continue;
 		authStorage.pinSessionOAuthAccount(provider, sessionId, match.credentialId, {
 			lastUsedAtMs: pin.lastUsedAt,
+			origin: "restore",
 		});
 	}
 }

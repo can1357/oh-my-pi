@@ -206,8 +206,21 @@ function resolveSnapshotTtlMs(): number {
 export async function resolveAuthBrokerConfig(
 	options: ResolveAuthBrokerConfigOptions = {},
 ): Promise<AuthBrokerClientConfig | null> {
+	return (await resolveAuthBrokerConfigWithSnapshot(options)).config;
+}
+
+/**
+ * {@link resolveAuthBrokerConfig} plus a memoised reader for the parsed
+ * `config.yml`, so callers that need other keys from the same file (account
+ * selection) do not parse it a second time.
+ */
+async function resolveAuthBrokerConfigWithSnapshot(
+	options: ResolveAuthBrokerConfigOptions,
+): Promise<{ config: AuthBrokerClientConfig | null; readSnapshot: () => Promise<ConfigSnapshot> }> {
 	const agentDir = options.agentDir ?? getAgentDir();
 	const resolveConfig = options.configValueResolver ?? defaultResolveConfigValue;
+	let snapshot: Promise<ConfigSnapshot> | undefined;
+	const readSnapshot = (): Promise<ConfigSnapshot> => (snapshot ??= readConfigYaml(agentDir));
 
 	const envUrl = process.env.OMP_AUTH_BROKER_URL;
 	const envToken = process.env.OMP_AUTH_BROKER_TOKEN;
@@ -215,7 +228,7 @@ export async function resolveAuthBrokerConfig(
 	let url = envUrl && envUrl.length > 0 ? envUrl : undefined;
 	let configToken: string | undefined;
 	if (!url || !envToken) {
-		const fromConfig = await readConfigYaml(agentDir);
+		const fromConfig = await readSnapshot();
 		if (!url && fromConfig.url) {
 			const resolved = await resolveConfig(fromConfig.url);
 			if (resolved && resolved.length > 0) url = resolved;
@@ -225,7 +238,7 @@ export async function resolveAuthBrokerConfig(
 			if (resolved && resolved.length > 0) configToken = resolved;
 		}
 	}
-	if (!url) return null;
+	if (!url) return { config: null, readSnapshot };
 
 	const token =
 		(envToken && envToken.length > 0 ? envToken : undefined) ?? configToken ?? (await readTokenFile()) ?? undefined;
@@ -236,7 +249,7 @@ export async function resolveAuthBrokerConfig(
 				`Set OMP_AUTH_BROKER_TOKEN, the \`auth.broker.token\` config entry, or place one at ${getAuthBrokerTokenFilePath()}.`,
 		);
 	}
-	return { url, token };
+	return { config: { url, token }, readSnapshot };
 }
 
 /**
@@ -246,11 +259,11 @@ export async function resolveAuthBrokerConfig(
  */
 export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
 	const agentDir = options.agentDir ?? getAgentDir();
-	const brokerConfig = await resolveAuthBrokerConfig({
+	const { config: brokerConfig, readSnapshot } = await resolveAuthBrokerConfigWithSnapshot({
 		agentDir,
 		configValueResolver: options.configValueResolver,
 	});
-	const accountSelection = options.accountSelection ?? (await readConfigYaml(agentDir)).accountSelection;
+	const accountSelection = options.accountSelection ?? (await readSnapshot()).accountSelection;
 
 	if (brokerConfig) {
 		const accountPool = options.accountPool ?? (await loadAuthBrokerAccountPool());

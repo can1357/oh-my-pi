@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const OAUTH_PROVIDER = "unit-account-selection";
@@ -274,5 +275,99 @@ describe("AuthStorage account selection policy", () => {
 		expect(await storage.getApiKey(CODEX_PROVIDER, "codex-fixed-plan", { modelId: PLAN_GATED_CODEX_MODEL })).toBe(
 			"access-second",
 		);
+	});
+
+	const SHORT_BLOCK_MS = 20;
+
+	test("balanced (default) keeps a session on the sibling it fell through to after the primary unblocks", async () => {
+		// Negative contract for the fixed test below: warm-cache stickiness is the
+		// documented balanced behaviour and must not silently change.
+		mockOAuthRefresh();
+		const storage = openStorage();
+		await seedThreeOAuthAccounts(storage);
+		expect(await resolveEmail(storage, "sticky-session")).toBe("a@example.com");
+		await storage.markUsageLimitReached(OAUTH_PROVIDER, "sticky-session", { retryAfterMs: SHORT_BLOCK_MS });
+		expect(await resolveEmail(storage, "sticky-session")).toBe("b@example.com");
+
+		await Bun.sleep(SHORT_BLOCK_MS * 3);
+
+		expect(await resolveEmail(storage, "sticky-session")).toBe("b@example.com");
+	});
+
+	test("fixed: a session that fell through to a sibling returns to the first account once it unblocks", async () => {
+		// Regression: automatic stickiness keeps the session on the backup account
+		// forever, so "always use the first account" only holds for new sessions.
+		mockOAuthRefresh();
+		const storage = openStorage("fixed");
+		await seedThreeOAuthAccounts(storage);
+		expect(await resolveEmail(storage, "recovering-session")).toBe("a@example.com");
+		await storage.markUsageLimitReached(OAUTH_PROVIDER, "recovering-session", { retryAfterMs: SHORT_BLOCK_MS });
+		expect(await resolveEmail(storage, "recovering-session")).toBe("b@example.com");
+
+		await Bun.sleep(SHORT_BLOCK_MS * 3);
+
+		expect(await resolveEmail(storage, "recovering-session")).toBe("a@example.com");
+	});
+
+	test("fixed: an explicit session pin still wins, survives resolves and restarts, but a restored pin yields", async () => {
+		// Regression: `/session pin` becomes a no-op under fixed selection, or a
+		// resumed session's replayed sticky keeps it off the first account.
+		mockOAuthRefresh();
+		const credentialStore = store;
+		if (!credentialStore) throw new Error("test setup failed");
+		const storage = openStorage("fixed");
+		await seedThreeOAuthAccounts(storage);
+		const second = storage.listOAuthAccounts(OAUTH_PROVIDER)[1];
+		if (!second) throw new Error("expected second OAuth account");
+
+		expect(storage.pinSessionOAuthAccount(OAUTH_PROVIDER, "user-pin", second.credentialId)).toBe(true);
+		expect(await resolveEmail(storage, "user-pin")).toBe("b@example.com");
+		expect(await resolveEmail(storage, "user-pin")).toBe("b@example.com");
+
+		const restarted = new AuthStorage(credentialStore, { accountSelection: "fixed" });
+		await restarted.reload();
+		expect(await resolveEmail(restarted, "user-pin")).toBe("b@example.com");
+
+		expect(
+			restarted.pinSessionOAuthAccount(OAUTH_PROVIDER, "resumed", second.credentialId, { origin: "restore" }),
+		).toBe(true);
+		expect(await resolveEmail(restarted, "resumed")).toBe("a@example.com");
+	});
+
+	test("fixed: a tier-scoped rate-limit block on the first API key falls through for that tier only", async () => {
+		// Regression: fixed API-key selection ignores scoped blocks, so the gateway
+		// retry after a Fable 429 receives the same blocked key again.
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockResolvedValue(null);
+		const storage = openStorage("fixed");
+		await storage.set("anthropic", [
+			{ type: "api_key", key: "sk-first", source: "login" },
+			{ type: "api_key", key: "sk-second", source: "login" },
+		]);
+		expect(await storage.getApiKey("anthropic", "fable-session", { modelId: "claude-fable-5" })).toBe("sk-first");
+
+		await storage.markUsageLimitReached("anthropic", "fable-session", { modelId: "claude-fable-5" });
+
+		expect(await storage.getApiKey("anthropic", "fable-retry", { modelId: "claude-fable-5" })).toBe("sk-second");
+		expect(await storage.getApiKey("anthropic", "sonnet-session", { modelId: "claude-sonnet-4-5" })).toBe("sk-first");
+	});
+
+	test("setAccountSelection switches the policy for subsequent lookups", async () => {
+		// Regression: the settings layer (config overlays) can no longer override
+		// what discovery read from config.yml.
+		mockOAuthRefresh();
+		const storage = openStorage();
+		await seedThreeOAuthAccounts(storage);
+		expect([await storage.getApiKey(OAUTH_PROVIDER), await storage.getApiKey(OAUTH_PROVIDER)]).toEqual([
+			"access-a",
+			"access-b",
+		]);
+
+		storage.setAccountSelection("fixed");
+
+		expect(storage.accountSelection).toBe("fixed");
+		expect([await storage.getApiKey(OAUTH_PROVIDER), await storage.getApiKey(OAUTH_PROVIDER)]).toEqual([
+			"access-a",
+			"access-a",
+		]);
 	});
 });
