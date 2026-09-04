@@ -118,4 +118,29 @@ describe("session-pins", () => {
 		// Pin unknown id -> no change to order
 		expect(sortPinnedFirst(all, new Set(["unknown-id"])).map(s => s.id)).toEqual(["s1", "s2", "s3", "s4"]);
 	});
+
+	it("keeps every pin when many toggles race concurrently", async () => {
+		// Regression: toggleSessionPin used to load-modify-write without a lock,
+		// so overlapping toggles from multiple omp instances (CLI picker,
+		// interactive mode, collab guest) interleaved load-load-write-write and
+		// silently dropped each other's pins.
+		const ids = Array.from({ length: 24 }, (_, i) => `session-race-${i}`);
+		await Promise.all(ids.map(id => toggleSessionPin(id, tempDir)));
+
+		const loaded = await loadPinnedSessionIds(tempDir);
+		expect(loaded.size).toBe(ids.length);
+		for (const id of ids) expect(loaded.has(id)).toBe(true);
+	});
+
+	it("never leaves a truncated pins file behind after concurrent writes", async () => {
+		const ids = Array.from({ length: 12 }, (_, i) => `session-torn-${i}`);
+		await Promise.all(ids.map(id => toggleSessionPin(id, tempDir)));
+
+		// Every intermediate state on disk must be valid JSON: a torn write used
+		// to truncate in place, and the next launch degraded it to an empty set.
+		const raw = await fs.readFile(path.join(tempDir, "session-pins.json"), "utf-8");
+		expect(() => JSON.parse(raw)).not.toThrow();
+		expect((JSON.parse(raw) as string[]).length).toBe(ids.length);
+		expect(await fs.readdir(tempDir)).not.toContain(expect.stringMatching(/\.tmp$/));
+	});
 });
