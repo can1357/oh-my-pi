@@ -206,6 +206,43 @@ describe("runSubprocess yield reminders", () => {
 		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("refreshes the provider-facing prompt after installing workpool yield items", async () => {
+		const calls: string[] = [];
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-workpool-yield-schema",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		const mutableSession = session as unknown as {
+			setWorkPoolYieldItems: AgentSession["setWorkPoolYieldItems"];
+			refreshBaseSystemPrompt: AgentSession["refreshBaseSystemPrompt"];
+		};
+		mutableSession.setWorkPoolYieldItems = items => {
+			calls.push("set:" + items.map(item => item.id).join(","));
+		};
+		mutableSession.refreshBaseSystemPrompt = async () => {
+			calls.push("refresh");
+		};
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-workpool-yield-schema",
+			workPoolYieldItems: [{ id: "pool#1", index: 1 }],
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.exitCode).toBe(0);
+		expect(calls).toEqual(["set:pool#1", "refresh"]);
+	});
+
 	it("splices the subagent role prompt before the trailing system section", async () => {
 		let userPrompt = "";
 		const session = createMockSession(({ text, emit }) => {

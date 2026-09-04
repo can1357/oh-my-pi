@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed WorkPool children receiving the ordinary `yield` contract in Gemini-formatted tool prompts after pooled items were installed.
+
 ## [18.1.9] - 2026-09-04
 
 ### Breaking Changes
