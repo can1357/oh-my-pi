@@ -2140,12 +2140,23 @@ export class ModelRegistry {
 	}
 
 	#restoreRuntimeDiscoveryAuthPrecedence(model: Model<Api>): Model<Api> {
-		if (!this.authStorage.getRuntimeApiKey(model.provider) || !model.headers) return model;
+		if (!model.headers) return model;
+		const providerOverride = this.#providerOverrides.get(model.provider);
+		// Gating on a *present* runtime key left the bearer that started the probe
+		// frozen on the model whenever the key was removed while discovery was in
+		// flight — beside the configured header, ahead of it for a
+		// case-insensitive reader. Rebuild whenever some live source can supply an
+		// authorization again; rebuilding without one would strip the materialized
+		// header and leave the model with no credential at all.
+		const restorable =
+			!!this.authStorage.getRuntimeApiKey(model.provider) ||
+			(providerOverride?.authHeader === true && !!providerOverride.apiKey) ||
+			Object.keys(providerOverride?.headers ?? {}).some(name => name.toLowerCase() === "authorization");
+		if (!restorable) return model;
 		const fallbackHeaders = { ...model.headers };
 		for (const name in fallbackHeaders) {
 			if (name.toLowerCase() === "authorization") delete fallbackHeaders[name];
 		}
-		const providerOverride = this.#providerOverrides.get(model.provider);
 		const headers = createLiveConfigHeaders([fallbackHeaders, providerOverride?.headers], {
 			authHeader: true,
 			apiKeyConfig: providerOverride?.authHeader === true ? providerOverride.apiKey : undefined,

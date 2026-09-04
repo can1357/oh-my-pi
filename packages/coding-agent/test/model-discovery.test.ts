@@ -2573,6 +2573,36 @@ providers:
 		});
 	});
 
+	test("a runtime key removed mid-discovery does not survive on the merged model", async () => {
+		// The discovered model carries the bearer that started the probe. If the
+		// SDK host removes that key before the refresh merges, the merge must
+		// still rebuild live headers — otherwise the materialized bearer sticks
+		// and keeps being sent after removal.
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				headers: { authorization: "Bearer stale-token", "X-Proxy": "configured" },
+				discovery: { type: "proxy" },
+			},
+		});
+		authStorage.setRuntimeApiKey("proxy-test", "runtime-token");
+		const fetchMock: FetchImpl = async (_input, init) => {
+			expect(new Headers(init?.headers).get("authorization")).toBe("Bearer runtime-token");
+			// Removal lands while the probe is in flight, before the merge.
+			authStorage.removeRuntimeApiKey("proxy-test");
+			return Response.json({
+				data: [{ id: "anthropic-model", supported_endpoint_types: ["anthropic"], context_length: 200000 }],
+			});
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("proxy-test", "anthropic-model");
+		expect(model?.headers).toEqual({
+			authorization: "Bearer stale-token",
+			"X-Proxy": "configured",
+		});
+	});
+
 	test("proxy discovery uses proxy-reported name over bundled placeholder", async () => {
 		writeRawModelsJson({
 			"proxy-test": {
