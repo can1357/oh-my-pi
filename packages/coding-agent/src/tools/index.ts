@@ -378,6 +378,8 @@ export interface ToolSession {
 	getTodoPhases?: () => TodoPhase[];
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
+	/** Persist a todo snapshot produced outside the direct agent-loop tool-result path. */
+	persistTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/** Replace the active workpool item contract before a pooled turn starts. */

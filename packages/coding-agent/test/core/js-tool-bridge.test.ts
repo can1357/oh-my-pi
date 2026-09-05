@@ -130,6 +130,38 @@ describe("callSessionTool", () => {
 		expect(phases[0]?.tasks.map(task => task.status)).toEqual(["completed"]);
 	});
 
+	it("persists successful todo mutations and skips view plus failures", async () => {
+		let phases: TodoPhase[] = [
+			{
+				name: "Bridge persistence",
+				tasks: [{ content: "finish phase", status: "in_progress" }],
+			},
+		];
+		const persistTodoPhases = vi.fn((_next: TodoPhase[]) => {});
+		const base: ToolSession = {
+			...createSession([]),
+			getTodoPhases: () => phases,
+			setTodoPhases: next => {
+				phases = next;
+			},
+			persistTodoPhases,
+		};
+		const todoTool = new TodoTool(base);
+		const session: ToolSession = {
+			...base,
+			getToolByName: name => (name === "todo" ? (todoTool as unknown as AgentTool) : undefined),
+		};
+
+		await callSessionTool("todo", { op: "done", phase: "Bridge persistence" }, { session });
+		expect(phases[0]?.tasks.map(task => task.status)).toEqual(["completed"]);
+		expect(persistTodoPhases).toHaveBeenCalledWith(phases);
+
+		persistTodoPhases.mockClear();
+		await callSessionTool("todo", { op: "view" }, { session });
+		await callSessionTool("todo", { op: "done", task: "missing" }, { session });
+		expect(persistTodoPhases).not.toHaveBeenCalled();
+	});
+
 	it("rejects null for a required field before executing a strict tool", async () => {
 		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "unexpected" }] });
 		const tool: AgentTool = {

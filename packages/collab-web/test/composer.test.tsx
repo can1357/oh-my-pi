@@ -22,6 +22,7 @@ function snapshot(uiRequest: GuestSnapshot["uiRequest"]): GuestSnapshot {
 		stream: null,
 		streamDone: false,
 		activeTools: new Map(),
+		todoPhases: [],
 		working: true,
 		readOnly: false,
 		uiRequest,

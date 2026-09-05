@@ -32,6 +32,7 @@ import {
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import {
 	MAX_REPLICATED_PAYLOAD_BYTES,
+	boundTodoPhasesForReplication,
 	shrinkForReplication,
 } from "@oh-my-pi/pi-coding-agent/collab/replication-shrink";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -330,5 +331,46 @@ describe("shrinkForReplication (#3740 review)", () => {
 		expect(shrunk.toolCallId).toBe("call-1");
 		expect(shrunk.toolName).toBe("read");
 		expect(JSON.stringify(shrunk).length).toBeLessThanOrEqual(MAX_REPLICATED_PAYLOAD_BYTES);
+	});
+});
+
+describe("boundTodoPhasesForReplication (PR #10648 review)", () => {
+	it("passes fitting boards through by reference", () => {
+		const phases = [{ name: "Build", tasks: [{ content: "step one", status: "in_progress" as const }] }];
+		expect(boundTodoPhasesForReplication(phases, 1024)).toBe(phases);
+	});
+
+	it("head-clips an oversized board while keeping the TodoPhase shape", () => {
+		const phases = Array.from({ length: 200 }, (_, p) => ({
+			name: `Phase ${p} ${"x".repeat(200)}`,
+			tasks: Array.from({ length: 50 }, (_, t) => ({
+				content: `task ${t} ${"y".repeat(500)}`,
+				status: "in_progress" as const,
+				blocker: `waiting ${"z".repeat(300)}`,
+			})),
+		}));
+		expect(JSON.stringify(phases).length).toBeGreaterThan(4096);
+		const bounded = boundTodoPhasesForReplication(phases, 4096);
+		expect(JSON.stringify(bounded).length).toBeLessThanOrEqual(4096);
+		// Shape preserved: every phase still carries a task-object array the
+		// guest can dereference — no string elision markers in `tasks`.
+		for (const phase of bounded) {
+			expect(typeof phase.name).toBe("string");
+			expect(Array.isArray(phase.tasks)).toBe(true);
+			for (const task of phase.tasks) {
+				expect(typeof task).toBe("object");
+				expect(typeof task.content).toBe("string");
+			}
+		}
+	});
+
+	it("measures the budget in UTF-8 bytes, not UTF-16 code units", () => {
+		// "あ" is 1 UTF-16 unit but 3 UTF-8 bytes: 400 chars fit a 1024-char
+		// budget yet encode to 1200+ bytes. The bounder must clip, since the
+		// sealed frame bills `TEXT_ENCODER.encode(...).length`.
+		const phases = [{ name: "あ".repeat(400), tasks: [{ content: "あ".repeat(400), status: "pending" as const }] }];
+		expect(JSON.stringify(phases).length).toBeLessThan(1100);
+		const bounded = boundTodoPhasesForReplication(phases, 1024);
+		expect(new TextEncoder().encode(JSON.stringify(bounded)).length).toBeLessThanOrEqual(1024);
 	});
 });

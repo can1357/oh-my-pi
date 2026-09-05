@@ -501,6 +501,10 @@
 	text-decoration: line-through;
 }
 
+.tv-task--blocked .tv-task-icon {
+	color: var(--tv-warn);
+}
+
 /* ---- notes ---- */
 
 .tv-note {

@@ -50,6 +50,52 @@ function toolResultHasError(result: AgentToolResult): boolean {
 	return isRecord(result.details) && result.details.isError === true;
 }
 
+function isTodoMutationOperation(value: unknown): boolean {
+	switch (value) {
+		case "init":
+		case "start":
+		case "done":
+		case "rm":
+		case "drop":
+		case "block":
+		case "unblock":
+		case "append":
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Structural twin of `isTodoPhase` from `../../tools/todo`, inlined to avoid
+ * a value import: `tools/todo` pulls the render/theme chain, which cycles
+ * back through eval-adjacent modules and TDZ-crashes `PREVIEW_LIMITS`
+ * (`tools/hub/jobs.ts`) under chunk import orders the UI suite hits.
+ */
+function isBridgedTodoPhase(value: unknown): boolean {
+	if (!isRecord(value) || typeof value.name !== "string" || !Array.isArray(value.tasks)) return false;
+	return value.tasks.every(
+		task =>
+			isRecord(task) &&
+			typeof task.content === "string" &&
+			(task.status === "pending" ||
+				task.status === "in_progress" ||
+				task.status === "completed" ||
+				task.status === "abandoned" ||
+				task.status === "blocked"),
+	);
+}
+
+function persistTodoMutation(name: string, result: AgentToolResult, hasError: boolean, session: ToolSession): void {
+	if (name !== "todo" || hasError) return;
+	const details = result.details;
+	if (!details || typeof details !== "object" || !("op" in details) || !("phases" in details)) return;
+	if (!isTodoMutationOperation(details.op) || !Array.isArray(details.phases) || !details.phases.every(isBridgedTodoPhase)) {
+		return;
+	}
+	session.persistTodoPhases?.(details.phases);
+}
+
 function getTool(session: ToolSession, name: string): AgentTool {
 	const tool = session.getToolForEvalBridge ? session.getToolForEvalBridge(name) : session.getToolByName?.(name);
 	if (!tool) {
@@ -139,6 +185,7 @@ function normalizeAgentToolResult(
 	);
 	const text = textBlocks.map(block => block.text).join("");
 	const hasError = toolResultHasError(result);
+	if (name === "todo") persistTodoMutation(name, result, hasError, options.session);
 	options.emitStatus?.(summarizeToolResult(name, args, result, text, hasError));
 	if (result.details === undefined && imageBlocks.length === 0 && !hasError) {
 		return text;

@@ -106,6 +106,34 @@ class ReplayTestSession {
 }
 
 describe("ACP event mapper", () => {
+	it("maps canonical todo updates to ACP plans", () => {
+		const event = {
+			type: "todo_updated",
+			phases: [
+				{
+					name: "Work",
+					tasks: [
+						{ content: "active", status: "in_progress" },
+						{ content: "blocked", status: "blocked", blocker: "review" },
+						{ content: "done", status: "completed" },
+					],
+				},
+			],
+		} satisfies AgentSessionEvent;
+
+		const updates = mapAgentSessionEventToAcpSessionUpdates(event, "session-1");
+
+		expect(updates).toHaveLength(1);
+		expect(updates[0]?.update).toEqual({
+			sessionUpdate: "plan",
+			entries: [
+				{ content: "active", priority: "medium", status: "in_progress" },
+				{ content: "blocked", priority: "medium", status: "pending" },
+				{ content: "done", priority: "medium", status: "completed" },
+			],
+		});
+	});
+
 	it("attaches a stable messageId to live assistant chunks", () => {
 		const assistantMessage = makeAssistantMessage("chunk");
 		const getMessageId = (message: unknown): string | undefined =>

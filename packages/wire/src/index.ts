@@ -165,7 +165,6 @@ export type SessionEntry =
 	| BranchSummaryEntry
 	| ModelChangeEntry
 	| ThinkingLevelChangeEntry;
-
 /** customType of collab guest prompts injected on the host. */
 export const COLLAB_PROMPT_MESSAGE_TYPE = "collab-prompt";
 
@@ -177,6 +176,19 @@ export interface CollabPromptDetails {
 // ═══════════════════════════════════════════════════════════════════════════
 // Events (handled subset)
 // ═══════════════════════════════════════════════════════════════════════════
+
+export type WireTodoTaskStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
+
+export interface WireTodoTask {
+	content: string;
+	status: WireTodoTaskStatus;
+	blocker?: string;
+}
+
+export interface WireTodoPhase {
+	name: string;
+	tasks: WireTodoTask[];
+}
 
 export type AgentEvent =
 	| { type: "agent_start" }
@@ -190,6 +202,10 @@ export type AgentEvent =
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: unknown; intent?: string }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: unknown; partialResult: unknown }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: unknown; isError?: boolean }
+	| {
+			type: "todo_updated";
+			phases: WireTodoPhase[];
+	  }
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
 	| { type: "auto_compaction_start"; reason: string; action: string }
 	| { type: "auto_compaction_end"; aborted: boolean; willRetry: boolean; errorMessage?: string; skipped?: boolean }
@@ -349,6 +365,7 @@ export type HostFrame =
 			header: SessionHeader;
 			state: SessionState;
 			agents: AgentSnapshot[];
+			todoPhases?: WireTodoPhase[];
 			/**
 			 * Total number of `SessionEntry` items the host will deliver in the
 			 * `snapshot-chunk` frames that follow. Guests stay in the loading

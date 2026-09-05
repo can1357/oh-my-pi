@@ -4,13 +4,14 @@ import { Badges, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
 import { detailsRecord, isRecord, normalizeWs, str, truncate } from "../util";
 
-type TaskStatus = "pending" | "in_progress" | "completed" | "abandoned";
+type TaskStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
 
 const TASK_ICONS: Record<TaskStatus, string> = {
 	completed: "✓",
 	in_progress: "→",
 	abandoned: "✕",
 	pending: "○",
+	blocked: "!",
 };
 
 const ROMAN_PAIRS: ReadonlyArray<readonly [number, string]> = [
@@ -108,7 +109,7 @@ function opRow(entry: unknown, key: number): ReactNode {
 	);
 }
 
-function Board({ phases }: { phases: unknown[] }): ReactNode {
+export function Board({ phases }: { phases: unknown[] }): ReactNode {
 	const rendered: ReactNode[] = [];
 	for (let i = 0; i < phases.length; i++) {
 		const phase = phases[i];
@@ -124,11 +125,15 @@ function Board({ phases }: { phases: unknown[] }): ReactNode {
 			if (!isRecord(task)) continue;
 			const raw: unknown = task.status;
 			const status: TaskStatus =
-				raw === "completed" || raw === "in_progress" || raw === "abandoned" ? raw : "pending";
+				raw === "completed" || raw === "in_progress" || raw === "abandoned" || raw === "blocked" ? raw : "pending";
+			const blocker = status === "blocked" ? str(task.blocker) : undefined;
 			rendered.push(
 				<div key={`p${i}t${t}`} className={`tv-task tv-task--${status}`}>
 					<span className="tv-task-icon">{TASK_ICONS[status]}</span>
-					<span>{str(task.content) ?? ""}</span>
+					<span>
+						{str(task.content) ?? ""}
+						{status === "blocked" ? ` (blocked${blocker ? `: ${truncate(normalizeWs(blocker), 120)}` : ""})` : ""}
+					</span>
 				</div>,
 			);
 		}

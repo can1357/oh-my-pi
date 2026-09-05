@@ -45,6 +45,30 @@
 	min-height: 0;
 }
 
+.sh-transcript > .sh-todo {
+	flex: 0 0 auto;
+	margin: 8px 8px 0;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--bg);
+	overflow: hidden;
+}
+
+.sh-todo-summary {
+	cursor: pointer;
+	padding: 6px 10px;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--muted);
+	user-select: none;
+}
+
+.sh-todo-body {
+	max-height: 30vh;
+	overflow-y: auto;
+	padding: 0 10px 8px;
+}
+
 .sh-rail {
 	width: 300px;
 	flex: none;

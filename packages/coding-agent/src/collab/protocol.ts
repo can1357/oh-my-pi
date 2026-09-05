@@ -16,6 +16,7 @@ import type {
 	Participant,
 	SessionState,
 	AgentSnapshot as WireAgentSnapshot,
+	WireTodoPhase,
 } from "@oh-my-pi/pi-wire";
 import {
 	DEFAULT_RELAY_URL,
@@ -38,6 +39,7 @@ export type {
 	RelayControlMessage,
 	RelayControlToGuest,
 	RelayControlToHost,
+	WireTodoPhase,
 } from "@oh-my-pi/pi-wire";
 export { COLLAB_PROMPT_MESSAGE_TYPE, COLLAB_PROTO } from "@oh-my-pi/pi-wire";
 export { DEFAULT_RELAY_URL, ENVELOPE_HEADER_LENGTH, ROOM_ID_BYTES };
@@ -72,6 +74,7 @@ export type CollabFrame =
 			header: SessionHeader;
 			state: CollabSessionState;
 			agents: AgentSnapshot[];
+			todoPhases?: WireTodoPhase[];
 			/**
 			 * Total number of `SessionEntry` items the host will deliver in the
 			 * `snapshot-chunk` frames that follow. The guest stays in the

@@ -9,6 +9,7 @@
  */
 
 import type {
+	AgentEvent,
 	AgentSnapshot,
 	AssistantMessage,
 	CollabUiRequest,
@@ -35,6 +36,9 @@ export interface ActiveTool {
 	startedAt: number;
 }
 
+/** Live todo board phase, mirrored from the host's `todo_updated` broadcast. */
+export type TodoPhase = Extract<AgentEvent, { type: "todo_updated" }>["phases"][number];
+
 export interface Notice {
 	id: number;
 	level: "info" | "warning" | "error";
@@ -57,6 +61,8 @@ export interface GuestSnapshot {
 	stream: AssistantMessage | null;
 	streamDone: boolean;
 	activeTools: ReadonlyMap<string, ActiveTool>;
+	/** Live todo board, mirrored from the host's `todo_updated` broadcast. */
+	todoPhases: readonly TodoPhase[];
 	/** agent_start..agent_end, reconciled by state.isStreaming. */
 	working: boolean;
 	/** True when this guest joined through a read-only (view) link. */
@@ -113,6 +119,7 @@ export class GuestClient {
 	#stream: AssistantMessage | null = null;
 	#streamDone = false;
 	#activeTools: ReadonlyMap<string, ActiveTool> = new Map();
+	#todoPhases: readonly TodoPhase[] = [];
 	#working = false;
 	#readOnly = false;
 	#uiRequest: CollabUiRequest | null = null;
@@ -294,6 +301,7 @@ export class GuestClient {
 				this.#stream = null;
 				this.#streamDone = false;
 				this.#activeTools = new Map();
+				this.#todoPhases = frame.todoPhases ? [...frame.todoPhases] : [];
 				this.#progress = new Map();
 				this.#lifecycle = new Map();
 				this.#working = frame.state.isStreaming;
@@ -452,6 +460,9 @@ export class GuestClient {
 			case "agent_start":
 				this.#working = true;
 				break;
+			case "todo_updated":
+				this.#todoPhases = event.phases;
+				break;
 			case "agent_end":
 				this.#working = false;
 				break;
@@ -516,6 +527,7 @@ export class GuestClient {
 			stream: this.#stream,
 			streamDone: this.#streamDone,
 			activeTools: this.#activeTools,
+			todoPhases: this.#todoPhases,
 			working: this.#working,
 			readOnly: this.#readOnly,
 			uiRequest: this.#uiRequest,
