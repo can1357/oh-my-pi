@@ -178,25 +178,13 @@ export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undef
 	if (value === "string" || value === "number") return value;
 	return undefined;
 }
-
 /**
- * Parse an MCP `enabledTools` / `disabledTools` value: a strict array of
- * non-empty strings. Strings are rejected (not CSV-split) so glob entries
- * with commas like `"{create,delete}_*"` survive intact. Unrecognized values
- * are dropped so a typo degrades to an empty filter rather than reaching a
- * transport.
- */
-export function parseMCPToolFilterEntries(value: unknown): string[] | undefined {
-	if (!Array.isArray(value)) return undefined;
-	const filtered = value.filter((item): item is string => typeof item === "string" && item.length > 0);
-	return filtered.length > 0 ? filtered : undefined;
-}
-
-/**
- * Parse and validate an MCP `enabledTools` / `disabledTools` value, warning
- * when the configured value is not a valid filter: non-array values (a typo
- * like `"tool_a, tool_b"` or an object) would otherwise be silently dropped
- * and the server would contribute ALL tools — the opposite of the allowlist
+ * Parse and validate an MCP `enabledTools` / `disabledTools` value: a strict
+ * array of non-empty strings. Strings are rejected (not CSV-split) so glob
+ * entries with commas like `"{create,delete}_*"` survive intact. Warns when
+ * the configured value is not a valid filter: non-array values (a typo like
+ * `"tool_a, tool_b"` or an object) would otherwise be silently dropped and
+ * the server would contribute ALL tools — the opposite of the allowlist
  * intent, with no diagnostic. An empty array (`[]`) is valid but filters
  * nothing, matching the "no filter" semantics of an absent field.
  *
@@ -204,11 +192,14 @@ export function parseMCPToolFilterEntries(value: unknown): string[] | undefined 
  * an otherwise usable server; the warning is the diagnostic.
  */
 export function parseMCPToolFilterEntry(serverName: string, value: unknown): string[] | undefined {
-	const parsed = parseMCPToolFilterEntries(value);
-	if (parsed === undefined && value !== undefined && !(Array.isArray(value) && value.length === 0)) {
-		logger.warn(`MCP server "${serverName}": invalid tool filter value ${JSON.stringify(value)}, ignoring`);
+	if (!Array.isArray(value)) {
+		if (value !== undefined) {
+			logger.warn(`MCP server "${serverName}": invalid tool filter value ${JSON.stringify(value)}, ignoring`);
+		}
+		return undefined;
 	}
-	return parsed;
+	const filtered = value.filter((item): item is string => typeof item === "string" && item.length > 0);
+	return filtered.length > 0 ? filtered : undefined;
 }
 
 /**
