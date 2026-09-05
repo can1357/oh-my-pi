@@ -5005,6 +5005,7 @@ export function aiandModelManagerOptions(config?: AiandModelManagerConfig): Mode
 	const baseUrl = normalizeAiandBaseUrl(config?.baseUrl ?? Bun.env.AIAND_BASE_URL);
 	return {
 		providerId: "aiand",
+		cacheProviderId: resolveModelCacheProviderId("aiand", { apiKey, baseUrl }),
 		dynamicModelsAuthoritative: true,
 		dropCachedModelIdsOnStaticMismatch: [...AIAND_STATIC_MODEL_IDS, ...AIAND_RETIRED_MODEL_IDS],
 		...(apiKey && {

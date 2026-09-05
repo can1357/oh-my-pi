@@ -367,4 +367,77 @@ describe("ai& provider support", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	test("isolates org caches by credential across AIAND_API_KEY switches", async () => {
+		// ai& keys are org-scoped and pricing follows the org's billing
+		// currency. A JPY org's zero rates must never serve a USD org from a
+		// fresh cache: the namespace is credential-keyed, so the key switch
+		// misses the prior org's cache and re-runs discovery.
+		const jpyNs = aiandModelManagerOptions({ apiKey: "jpy-org-key" }).cacheProviderId;
+		const usdNs = aiandModelManagerOptions({ apiKey: "usd-org-key" }).cacheProviderId;
+		expect(jpyNs).not.toBe(usdNs);
+
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-aiand-key-switch-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const jpyFetch: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "qwen/qwen3.6-27b",
+					context_window: 262144,
+					capabilities: ["reasoning", "tool_calling", "vision"],
+					reasoning_efforts: ["none", "high"],
+					reasoning_effort_default: "high",
+					currency: "jpy",
+					input_per_1m: "48.000000",
+					output_per_1m: "480.000000",
+					cached_input_per_1m: "30.000000",
+				},
+			]),
+		) as unknown as FetchImpl;
+		const usdFetch: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "qwen/qwen3.6-27b",
+					context_window: 262144,
+					capabilities: ["reasoning", "tool_calling", "vision"],
+					reasoning_efforts: ["none", "high"],
+					reasoning_effort_default: "high",
+					currency: "usd",
+					input_per_1m: "0.320000",
+					output_per_1m: "3.200000",
+					cached_input_per_1m: "0.200000",
+				},
+			]),
+		) as unknown as FetchImpl;
+
+		try {
+			await resolveProviderModels(
+				{
+					...aiandModelManagerOptions({ apiKey: "jpy-org-key", fetch: jpyFetch }),
+					staticModels: [...AIAND_STATIC_MODELS],
+					cacheDbPath: dbPath,
+				},
+				"online",
+			);
+
+			const { models } = await resolveProviderModels(
+				{
+					...aiandModelManagerOptions({ apiKey: "usd-org-key", fetch: usdFetch }),
+					staticModels: [...AIAND_STATIC_MODELS],
+					cacheDbPath: dbPath,
+				},
+				"online",
+			);
+
+			expect(usdFetch).toHaveBeenCalled();
+			expect(models.find(item => item.id === "qwen/qwen3.6-27b")?.cost).toEqual({
+				input: 0.32,
+				output: 3.2,
+				cacheRead: 0.2,
+				cacheWrite: 0,
+			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 });

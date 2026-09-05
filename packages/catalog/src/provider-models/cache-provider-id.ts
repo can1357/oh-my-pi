@@ -87,6 +87,18 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `github-copilot:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
+		case "aiand": {
+			// ai& keys are org-scoped and the org's billing currency shapes served
+			// pricing (non-USD orgs map to zero rather than USD figures).
+			// Discovery writes an authoritative cache, so a fresh cache is served
+			// for the full TTL without re-probing. Keying the namespace on the
+			// credential means switching `AIAND_API_KEY` to a different org misses
+			// the prior org's cache and re-runs discovery instead of serving its
+			// zero rates to the new org.
+			const baseUrl = options.baseUrl ?? "https://api.aiand.com/v1";
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `aiand:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
 		case "openrouter":
 			return "openrouter:pseudo-api";
 		case "vllm": {
