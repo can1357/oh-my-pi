@@ -683,11 +683,36 @@ export class ModelRegistry {
 		await this.#refreshRuntimeDiscoveries(strategy, new Set(this.#runtimeModelManagers.keys()));
 	}
 
-	#reloadStaticModels(): void {
+	#reloadStaticModels(options?: { force?: boolean; preserveRuntimeDiscovery?: boolean }): void {
 		const currentMtime = this.#modelsConfigFile.getMtimeMs();
-		if (currentMtime !== null && currentMtime === this.#lastStaticLoadMtime) {
+		const staticConfigUnchanged = currentMtime === this.#lastStaticLoadMtime;
+		if (!options?.force && currentMtime !== null && staticConfigUnchanged) {
 			// Models config unchanged since last load; reloading would be redundant.
 			return;
+		}
+		let preservedRuntimeState:
+			| {
+					models: Model<Api>[];
+					authoritativeProviders: Set<string>;
+					discoveryStates: Map<string, ProviderDiscoveryState>;
+					runtimeProviderIds: Set<string>;
+					configuredProviders: Map<string, DiscoveryProviderConfig>;
+					providerOverrides: Map<string, ProviderOverride>;
+					modelOverrides: Map<string, Map<string, ModelOverride>>;
+					keylessProviders: Set<string>;
+			  }
+			| undefined;
+		if (options?.preserveRuntimeDiscovery) {
+			preservedRuntimeState = {
+				models: this.#runtimeDiscoveredModels,
+				authoritativeProviders: new Set(this.#runtimeAuthoritativeProviders),
+				discoveryStates: new Map(this.#providerDiscoveryStates),
+				runtimeProviderIds: new Set(this.#runtimeModelManagers.keys()),
+				configuredProviders: new Map(this.#discoverableProviders.map(config => [config.provider, config])),
+				providerOverrides: new Map(this.#providerOverrides),
+				modelOverrides: new Map(this.#modelOverrides),
+				keylessProviders: new Set(this.#keylessProviders),
+			};
 		}
 		this.#modelsConfigFile.invalidate();
 		this.#customProviderApiKeys.clear();
@@ -707,6 +732,49 @@ export class ModelRegistry {
 		this.#configError = undefined;
 		this.#providerDiscoveryStates.clear();
 		this.#loadModels();
+		if (!preservedRuntimeState) return;
+
+		const preservedProviderIds = preservedRuntimeState.runtimeProviderIds;
+		const candidateProviderIds = new Set(preservedRuntimeState.models.map(model => model.provider));
+		for (const providerId of preservedRuntimeState.authoritativeProviders) candidateProviderIds.add(providerId);
+		for (const providerId of preservedRuntimeState.discoveryStates.keys()) candidateProviderIds.add(providerId);
+		if (staticConfigUnchanged) {
+			for (const providerId of candidateProviderIds) preservedProviderIds.add(providerId);
+		} else {
+			const configuredProviders = new Map(this.#discoverableProviders.map(config => [config.provider, config]));
+			const startupProviderIds = new Set(STARTUP_MODEL_CACHE_PROVIDER_IDS);
+			for (const providerId of candidateProviderIds) {
+				const previousConfig = preservedRuntimeState.configuredProviders.get(providerId);
+				const currentConfig = configuredProviders.get(providerId);
+				const providerSettingsUnchanged =
+					Bun.deepEquals(
+						preservedRuntimeState.providerOverrides.get(providerId),
+						this.#providerOverrides.get(providerId),
+					) &&
+					Bun.deepEquals(
+						preservedRuntimeState.modelOverrides.get(providerId),
+						this.#modelOverrides.get(providerId),
+					) &&
+					preservedRuntimeState.keylessProviders.has(providerId) === this.#keylessProviders.has(providerId);
+				const discoveryIdentityUnchanged =
+					(previousConfig !== undefined &&
+						currentConfig !== undefined &&
+						Bun.deepEquals(previousConfig, currentConfig)) ||
+					(previousConfig === undefined && currentConfig === undefined && startupProviderIds.has(providerId));
+				if (providerSettingsUnchanged && discoveryIdentityUnchanged) {
+					preservedProviderIds.add(providerId);
+				}
+			}
+		}
+		this.#runtimeDiscoveredModels = preservedRuntimeState.models.filter(model =>
+			preservedProviderIds.has(model.provider),
+		);
+		this.#runtimeAuthoritativeProviders = new Set(
+			[...preservedRuntimeState.authoritativeProviders].filter(providerId => preservedProviderIds.has(providerId)),
+		);
+		for (const [providerId, state] of preservedRuntimeState.discoveryStates) {
+			if (preservedProviderIds.has(providerId)) this.#providerDiscoveryStates.set(providerId, state);
+		}
 	}
 
 	/**
@@ -2491,6 +2559,21 @@ export class ModelRegistry {
 		this.#runtimeModelManagers.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);
 		this.#lastModelModifierWarnings.delete(providerName);
+		// A credential-scoped built-in provider (e.g. opencode-go) populates its
+		// slice of #runtimeDiscoveredModels from startup cache hydration, not from
+		// this extension. #reloadStaticModels excludes credential-scoped providers
+		// from synchronous cache loading and refreshRuntimeProviders only refetches
+		// registered managers, so neither restores that slice — discarding it here
+		// makes account-specific models vanish until a full refresh. Keep it for
+		// credential-scoped providers; discard for everyone else, where the slice is
+		// the extension's own discovery (or a non-credential-scoped built-in slice
+		// that baked this provider's now-removed override and must be recomposed).
+		if (!isCredentialScopedModelCacheProvider(providerName)) {
+			this.#runtimeDiscoveredModels = this.#runtimeDiscoveredModels.filter(model => model.provider !== providerName);
+			this.#runtimeAuthoritativeProviders.delete(providerName);
+			this.#providerDiscoveryStates.delete(providerName);
+		}
+		this.#invalidateProviderModelCache(providerName);
 		this.authStorage.removeConfigApiKey(providerName);
 		this.authStorage.removeRuntimeUsageProvider(providerName);
 	}
@@ -2514,8 +2597,7 @@ export class ModelRegistry {
 			this.#runtimeProviderSourceByName.delete(providerName);
 			this.#clearRuntimeProviderState(providerName);
 		}
-		this.#lastStaticLoadMtime = null;
-		this.#reloadStaticModels();
+		this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 	}
 
 	/**
@@ -2534,8 +2616,7 @@ export class ModelRegistry {
 		unregisterOAuthProvider(providerName);
 		this.#ensureFullSnapshot();
 		this.#clearRuntimeProviderState(providerName);
-		this.#lastStaticLoadMtime = null;
-		this.#reloadStaticModels();
+		this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 	}
 
 	/**
@@ -2612,8 +2693,7 @@ export class ModelRegistry {
 			this.#runtimeProviderSourceByName.set(providerName, sourceId);
 		}
 		if (sourceHandoff) {
-			this.#lastStaticLoadMtime = null;
-			this.#reloadStaticModels();
+			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 		}
 
 		// Extension usage providers override built-ins/configured resolvers for the
