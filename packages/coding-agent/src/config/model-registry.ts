@@ -1650,6 +1650,24 @@ export class ModelRegistry {
 		});
 		if (discoveryError) {
 			this.#warnProviderDiscoveryFailure(providerConfig, discoveryError);
+		} else if (
+			effectiveStrategy !== "offline" &&
+			result.source !== "provider" &&
+			result.models.length === 0 &&
+			cached !== null &&
+			!cached.authoritative
+		) {
+			// No successful fetch was applied this launch: the manager is inside the
+			// non-authoritative retry backoff after an earlier failed discovery, and
+			// that failure left no models behind. Every model of this provider now
+			// resolves to "not found", so without this line the only warning ever
+			// emitted was the one on the launch that failed — every later launch was
+			// silent (issue #10964). Routed through the same dedupe as a live failure
+			// so it prints once per process.
+			this.#warnProviderDiscoveryFailure(
+				providerConfig,
+				`no models cached: the last discovery attempt (${new Date(cached.updatedAt).toISOString()}) produced none and is backed off; retry happens automatically after the retry window`,
+			);
 		}
 		return this.#applyProviderModelOverrides(
 			providerId,

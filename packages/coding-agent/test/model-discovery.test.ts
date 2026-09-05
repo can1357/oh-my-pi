@@ -19,7 +19,7 @@ import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-r
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry runtime discovery", () => {
 	let tempDir: string;
@@ -2697,6 +2697,151 @@ providers:
 
 		expect(registry.find("litellm-test", "default-litellm")?.baseUrl).toBe("http://localhost:4000/v1");
 		expect(registry.find("litellm-test", "openai/gpt-5")?.api).toBe("openai-responses");
+	});
+
+	test("litellm discovery falls back to /v1/models when the rich endpoints time out (#10964)", async () => {
+		writeRawModelsJson({
+			"litellm-test": {
+				baseUrl: "http://127.0.0.1:4000/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "litellm", timeoutMs: 200 },
+			},
+		});
+		const richUrls = new Set([
+			"http://127.0.0.1:4000/model_group/info",
+			"http://127.0.0.1:4000/v2/model/info",
+			"http://127.0.0.1:4000/model/info",
+			"http://127.0.0.1:4000/v1/model/info",
+		]);
+		const seen: string[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			seen.push(url);
+			if (richUrls.has(url)) {
+				// Slow management endpoint: only ever settles when the caller gives up.
+				const { promise, reject } = Promise.withResolvers<Response>();
+				init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+					once: true,
+				});
+				return promise;
+			}
+			if (url === "http://127.0.0.1:4000/v1/models") {
+				return Response.json({ data: [{ id: "vendor/slow-proxy-model" }] });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refresh();
+
+			expect(registry.find("litellm-test", "vendor/slow-proxy-model")?.baseUrl).toBe("http://127.0.0.1:4000/v1");
+			expect(seen).toContain("http://127.0.0.1:4000/v1/models");
+			expect(registry.getProviderDiscoveryState("litellm-test")?.status).toBe("ok");
+			expect(warn.mock.calls.some(([message]) => String(message).includes("falling back to /v1/models"))).toBe(true);
+			// Built-in providers (ollama, llama.cpp, …) may legitimately log their own
+			// probe failures here; only THIS provider must not be reported as failed.
+			const reportedFailures = warn.mock.calls
+				.filter(
+					([message, details]) =>
+						String(message) === "model discovery failed for provider" &&
+						(details as { provider?: string } | undefined)?.provider === "litellm-test",
+				)
+				.map(([, details]) => (details as { error?: string } | undefined)?.error);
+			expect(reportedFailures).toEqual([]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	test("litellm discovery falls back to /v1/models when a rich endpoint returns 5xx (#10964)", async () => {
+		writeRawModelsJson({
+			"litellm-test": {
+				baseUrl: "http://127.0.0.1:4000/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "litellm" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:4000/model_group/info") {
+				return new Response("upstream exploded", { status: 502 });
+			}
+			if (
+				url === "http://127.0.0.1:4000/v2/model/info" ||
+				url === "http://127.0.0.1:4000/model/info" ||
+				url === "http://127.0.0.1:4000/v1/model/info"
+			) {
+				return new Response("not json at all", { status: 200 });
+			}
+			if (url === "http://127.0.0.1:4000/v1/models") {
+				return Response.json({ data: [{ id: "vendor/plain-model" }] });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refresh();
+
+			expect(registry.find("litellm-test", "vendor/plain-model")?.api).toBe("openai-completions");
+			expect(registry.getProviderDiscoveryState("litellm-test")?.status).toBe("ok");
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	test("provider served from an empty backed-off discovery snapshot warns on every launch (#10964)", async () => {
+		writeRawModelsJson({
+			"litellm-test": {
+				baseUrl: "http://127.0.0.1:4000/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "litellm", timeoutMs: 200 },
+			},
+		});
+		// Launch 1: everything, including /v1/models, is unreachable → discovery
+		// fails and the manager writes an empty non-authoritative snapshot.
+		const deadFetch: FetchImpl = async () => {
+			throw new TypeError("Unable to connect");
+		};
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const first = new ModelRegistry(authStorage, modelsJsonPath, { fetch: deadFetch });
+			await first.refresh();
+			expect(first.getProviderDiscoveryState("litellm-test")?.status).toBe("unavailable");
+			expect(warn.mock.calls.some(([message]) => String(message) === "model discovery failed for provider")).toBe(
+				true,
+			);
+			warn.mockClear();
+
+			// Launch 2 (a new process, seconds later): the proxy is healthy again, but
+			// the manager is inside its retry backoff and serves the cached empty
+			// snapshot without fetching. The user must still be told why every model
+			// of this provider is missing.
+			const healthyFetch: FetchImpl = async input => {
+				const url = String(input);
+				if (url === "http://127.0.0.1:4000/model_group/info") {
+					return Response.json({ data: [{ model_group: "vendor/recovered-model" }] });
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const second = new ModelRegistry(authStorage, modelsJsonPath, { fetch: healthyFetch });
+			await second.refresh();
+
+			expect(second.find("litellm-test", "vendor/recovered-model")).toBeUndefined();
+			expect(
+				warn.mock.calls.some(
+					([message, details]) =>
+						String(message) === "model discovery failed for provider" &&
+						String((details as { error?: string } | undefined)?.error).includes("backed off"),
+				),
+			).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	test("litellm discovery reuses configured bearer on rich and fallback requests", async () => {

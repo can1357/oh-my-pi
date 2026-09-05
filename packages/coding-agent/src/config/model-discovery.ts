@@ -22,7 +22,7 @@ import {
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
 // Default cap on `max_tokens` for auto-discovered models that do not advertise
@@ -972,9 +972,25 @@ export async function discoverLiteLLMModels(
 			? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
 			: await attempt(baseHeaders);
 	} catch (error) {
+		// The rich management endpoints (`/model_group/info`, `/v2/model/info`, …)
+		// only ENRICH the catalog; the runtime `/v1/models` list is what actually
+		// names the models. A proxy whose management endpoints are slow (the rich
+		// loop fetches them sequentially under one `timeoutMs` budget), return
+		// 5xx, or serve an unparseable body must therefore not take the whole
+		// provider offline — fall through to `/v1/models` exactly as an empty rich
+		// result does, and say so. Without this, one timed-out rich fetch left the
+		// provider with zero models and that empty result was cached for the
+		// non-authoritative retry window, so every discovery-only model resolved
+		// to "not found" on later launches while the proxy was perfectly healthy
+		// (issue #10964). A 401 is still the auth-retry path's business and stays
+		// silent here.
 		const status = typeof error === "object" && error !== null && "status" in error ? error.status : undefined;
 		if (status !== 401) {
-			throw error;
+			logger.warn("LiteLLM rich model discovery failed; falling back to /v1/models", {
+				provider: providerConfig.provider,
+				url: baseUrl,
+				error: error instanceof Error ? error.message : String(error),
+			});
 		}
 		richModels = null;
 	}
