@@ -63,7 +63,10 @@ export interface SessionToolsHost {
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
-	setCodeModeNamespacesInfo?(info: unknown): void;
+	setCodeModeNamespacesInfo?(
+		info: unknown,
+	): void /** Lifts (or re-applies) the session's LSP read-only restriction; the host ignores it when the restriction is a durable CLI restriction. */;
+	setSessionLspReadOnly?(value: boolean): void;
 }
 
 interface SessionToolsOptions {
@@ -609,7 +612,8 @@ export class SessionTools {
 
 	/**
 	 * Compute the tool set a fresh non-persona session on this registry would
-	 * have: every registered tool except `goal` and default-inactive tools,
+	 * have: every registered tool except `goal`, hidden tools, and
+	 * default-inactive tools,
 	 * partitioned into the top-level versus `xd://` presentation the SDK's
 	 * launch baseline uses. Mirrors the SDK's baseline computation
 	 * (`toolNamesFromRegistry` minus `defaultInactiveToolNames` minus `goal`,
@@ -623,7 +627,7 @@ export class SessionTools {
 	 */
 	computeBaselineToolNames(): { names: string[]; mounted: string[] } {
 		const names = Array.from(this.#toolRegistry.keys()).filter(
-			name => name !== "goal" && !this.#isDefaultInactiveTool(name),
+			name => name !== "goal" && !this.#isDefaultInactiveTool(name) && !this.#isHiddenTool(name),
 		);
 		if (this.#baselineLspEnabled && !names.includes("lsp")) names.push("lsp");
 		if (this.#baselineHubEnabled && !names.includes("hub")) names.push("hub");
@@ -641,6 +645,12 @@ export class SessionTools {
 	#isDefaultInactiveTool(name: string): boolean {
 		const tool = this.#toolRegistry.get(name);
 		return (tool as { defaultInactive?: boolean } | undefined)?.defaultInactive === true;
+	}
+
+	/** Hidden tools are excluded from the SDK's initial assembly; the baseline mirrors that. */
+	#isHiddenTool(name: string): boolean {
+		const tool = this.#toolRegistry.get(name);
+		return (tool as { hidden?: boolean } | undefined)?.hidden === true;
 	}
 
 	/**
@@ -1732,6 +1742,12 @@ export class SessionTools {
 		this.#personaActiveToolRestriction = this.#residualCliToolRestriction
 			? new Set(this.#residualCliToolRestriction)
 			: undefined;
+		// The launch persona's `tools:` list forced `lspReadOnly` at creation;
+		// leaving the persona lifts it so the restored LSP accepts write-tier
+		// actions again. With a residual CLI restriction the LSP stays
+		// read-only for the session's lifetime (the CLI restriction is
+		// durable), so the host ignores the lift in that case.
+		this.#host.setSessionLspReadOnly?.(this.#residualCliToolRestriction !== undefined);
 	}
 
 	/**

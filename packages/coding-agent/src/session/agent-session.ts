@@ -1157,8 +1157,6 @@ export class AgentSession {
 		this.#sessionSpawns = config.spawns;
 		this.#baselineToolNames = config.baselineToolNames;
 		this.#baselineMountedToolNames = config.baselineMountedToolNames;
-		this.#baselineLspEnabled = config.baselineLspEnabled === true;
-		this.#baselineHubEnabled = config.baselineHubEnabled === true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#extensionRoots =
 			config.extensionRoots ??
@@ -2013,21 +2011,6 @@ export class AgentSession {
 	 * baseline name top-level and losing the xdev presentation.
 	 */
 	#baselineMountedToolNames: string[] | undefined;
-	/**
-	 * Whether the persona baseline includes `lsp` even though the session's
-	 * `enableLsp` is false (the restricted-session DEFAULT, not an explicit
-	 * `--no-lsp`). `restoreBaselineTools` registers `lsp` on demand when set.
-	 */
-	#baselineLspEnabled: boolean;
-	/**
-	 * Whether the persona baseline includes `hub` even though the session's
-	 * `restrictToolNames`/`enableIrc` (both forced off for a restricted
-	 * session) made the launch registry omit it. `restoreBaselineTools`
-	 * registers `hub` on demand when set, restoring the tool a normal
-	 * unrestricted session (spawning enabled, IRC not explicitly disabled)
-	 * would have.
-	 */
-	#baselineHubEnabled: boolean;
 
 	getSessionSpawns(): string | null {
 		return this.#sessionSpawns ?? null;

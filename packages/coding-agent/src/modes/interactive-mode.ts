@@ -3181,6 +3181,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.session.restoreBaselineTools();
 		this.session.setSessionSpawns(null);
 		this.session.setPersonaAppendPrompt(undefined);
+		// The baseline restore's prompt rebuild ran while the persona's spawn
+		// policy and append were still present, and neither setter triggers a
+		// rebuild; if the restored baseline already contains the target mode's
+		// tool set (commonly `read`/`write` for `/plan`), the signature is
+		// unchanged and the mode would keep the persona's system prompt and
+		// scout policy. Force a refresh now that every persona field is cleared
+		// (codex #3845551582 / P2 prompt-after-clear).
+		await this.session.refreshBaseSystemPrompt();
 	}
 
 	/** Reconcile mode state from session entries on resume/switch. */

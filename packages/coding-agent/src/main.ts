@@ -1337,7 +1337,9 @@ export async function reconcilePersistedPersona(
 		await session.restoreBaselineTools();
 		session.setSessionSpawns(null);
 		session.setPersonaAppendPrompt(undefined);
-		return;
+		// The baseline restore's rebuild ran before these clears; force a refresh
+		// so the restored prompt drops the persona's spawn policy and append.
+		await session.refreshBaseSystemPrompt();
 	}
 	const disabledAgents = (session.settings.get("task.disabledAgents") as string[] | undefined) ?? [];
 	if (isMainSessionPersonaUsable(agent, disabledAgents)) {
@@ -1374,6 +1376,9 @@ export async function reconcilePersistedPersona(
 		await session.restoreBaselineTools();
 		session.setSessionSpawns(null);
 		session.setPersonaAppendPrompt(undefined);
+		// Same ordering gap as above: refresh after the clears so the rebuilt
+		// prompt reflects the cleared spawn policy and append.
+		await session.refreshBaseSystemPrompt();
 		session.emitNotice("warning", `Agent "${name}" is no longer available. Restored model and thinking level.`);
 	}
 }

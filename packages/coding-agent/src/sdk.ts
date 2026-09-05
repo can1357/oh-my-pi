@@ -1841,7 +1841,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// (not the restricted gate) so leaving agent mode restores `hub` exactly
 	// like a fresh non-persona session would have it.
 	const baselineHubEnabled = options.enableIrc !== false && isIrcEnabled(settings, taskDepth);
-	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
+	// `lspReadOnly` is a LIVE value like `enableLsp`: a launch persona's
+	// `tools:` list forces it true at creation (`restrictToolNames`), and
+	// leaving the persona must lift it back so the restored LSP tool accepts
+	// write-tier actions again (the restore path calls the
+	// `setSessionLspReadOnly` host hook below). An explicit
+	// `lspReadOnly: true` (e.g. the security coordinator) is a durable CLI
+	// restriction and stays fixed forever.
+	const lspReadOnlyExplicit = options.lspReadOnly !== undefined;
+	let lspReadOnlyLive = options.lspReadOnly ?? restrictToolNames;
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
 	// Only the first top-level session in a process owns an AsyncJobManager.
 	// Subagents inherit the parent's manager via `AsyncJobManager.instance()`
@@ -1950,7 +1958,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get enableLsp() {
 				return enableLspLive;
 			},
-			lspReadOnly,
+			get lspReadOnly() {
+				return lspReadOnlyLive;
+			},
 			enableIrc: restrictToolNames ? false : options.enableIrc,
 			restrictToolNames,
 			// Persona launch path only: lets `createTools` lift `hub` through
@@ -4324,6 +4334,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
 			setActiveToolNames: setSessionActiveToolNames,
+			setSessionLspReadOnly: value => {
+				if (!lspReadOnlyExplicit) lspReadOnlyLive = value;
+			},
 			ensureWriteRegistered,
 			isDeviceOnlyWrite: () => toolSession.deviceOnlyWrite === true,
 			setDeviceOnlyWrite: enabled => {

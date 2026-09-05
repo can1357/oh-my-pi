@@ -256,6 +256,12 @@ export interface AgentSessionConfig {
 	createMemoryTools?: () => Promise<AgentTool[]>;
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
 	createThinkTool?: () => Promise<AgentTool | null>;
+	/**
+	 * Lifts the session's LSP read-only restriction (leaving a persona whose
+	 * `tools:` list had forced it on via `restrictToolNames`). Ignored by the
+	 * host when the restriction was set explicitly (durable CLI restriction).
+	 */
+	setSessionLspReadOnly?: (value: boolean) => void;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
 	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */
