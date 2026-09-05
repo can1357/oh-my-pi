@@ -969,8 +969,13 @@ export class ModelSelectorComponent extends Container {
 				const badgeLabel = roleInfo.tag ?? roleInfo.name;
 				roleBadgeTokens.push(makeRoleBadgeToken(badgeLabel, roleInfo.color ?? "muted", assigned));
 			}
-			const badgeText = roleBadgeTokens.length > 0 ? ` ${roleBadgeTokens.join(" ")}` : "";
 
+			// Multi-provider routing badge: surface when duplicate equivalent providers exist for this model
+			const pool = this.#modelRegistry.resolvePool(item.model);
+			if (pool && pool.candidates.length > 1) {
+				roleBadgeTokens.push(theme.fg("accent", `[pooled:${pool.candidates.length}]`));
+			}
+			const badgeText = roleBadgeTokens.length > 0 ? ` ${roleBadgeTokens.join(" ")}` : "";
 			let line = "";
 			if (isSelected) {
 				const prefix = theme.fg("accent", `${theme.nav.cursor} `);
@@ -1039,8 +1044,17 @@ export class ModelSelectorComponent extends Container {
 						` — current context ${formatNumber(this.#currentContextTokens).toLowerCase()} > ${formatNumber(selected.model.contextWindow ?? 0).toLowerCase()} limit`,
 					)
 				: "";
+			const pool = this.#modelRegistry.resolvePool(selected.model);
+			const routingNotice =
+				pool && pool.candidates.length > 1
+					? theme.fg("accent", ` | Pooled: ${pool.candidates.map(c => c.provider).join(", ")} (${pool.strategy})`)
+					: "";
 			this.#listContainer.addChild(
-				new Text(theme.fg("muted", `  Model Name: ${selected.model.name}${suffix}`) + limitWarning, 0, 0),
+				new Text(
+					theme.fg("muted", `  Model Name: ${selected.model.name}${suffix}`) + routingNotice + limitWarning,
+					0,
+					0,
+				),
 			);
 		}
 	}

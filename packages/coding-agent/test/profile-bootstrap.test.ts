@@ -223,6 +223,16 @@ describe("extractProfileFlags", () => {
 			profile: "work",
 			aliasName: undefined,
 		});
+		expect(extractProfileFlags(["--skills-off", "--profile", "work"])).toEqual({
+			argv: ["--skills-off"],
+			profile: "work",
+			aliasName: undefined,
+		});
+		expect(extractProfileFlags(["--agentmd-off", "--profile", "work"])).toEqual({
+			argv: ["--agentmd-off"],
+			profile: "work",
+			aliasName: undefined,
+		});
 		expect(extractProfileFlags(["-p", "--profile", "work"])).toEqual({
 			argv: ["-p"],
 			profile: "work",

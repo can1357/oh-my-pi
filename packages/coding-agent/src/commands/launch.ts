@@ -127,6 +127,9 @@ export default class Index extends Command {
 		"no-skills": Flags.boolean({
 			description: "Disable skills discovery and loading",
 		}),
+		"skills-off": Flags.boolean({
+			description: "Disable skills discovery and loading (alias of --no-skills)",
+		}),
 		"project-skills": Flags.boolean({
 			description: "Load only project-level skills for this session",
 		}),
@@ -135,6 +138,9 @@ export default class Index extends Command {
 		}),
 		"no-rules": Flags.boolean({
 			description: "Disable rules discovery and loading",
+		}),
+		"agentmd-off": Flags.boolean({
+			description: "Disable AGENTS.md instruction file discovery and loading",
 		}),
 		export: Flags.string({
 			description: "Export session file to HTML and exit",

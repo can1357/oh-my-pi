@@ -38,7 +38,7 @@ The finite batch queue IS the coverage guarantee: the run is complete when the q
 
 One `mr-worker` per batch, all in ONE `task` call (`tasks[]` array, shared `context`). For editing tasks (migrations), use `task` agents with worktree isolation instead of `mr-worker`.
 
-Format each assignment with the `promptbtw-handoff` skill's SUBAGENT HANDOFF PROMPT structure:
+Format each assignment with the `promptbtw-handoff` skill's SUBAGENT HANDOFF PROMPT structure, applying that skill's Fable 5.1 default stack when workers may edit:
 
 ```
 # Role

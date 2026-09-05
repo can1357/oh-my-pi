@@ -13,7 +13,7 @@ import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
 import type { Personality, SkillsSettings } from "./config/settings";
-import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
+import { type ContextFile, loadCapability, type SourceMeta, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
 import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
@@ -277,11 +277,11 @@ export async function resolvePromptInput(input: string | undefined, description:
 export interface LoadContextFilesOptions {
 	/** Working directory to start walking up from. Default: getProjectDir() */
 	cwd?: string;
+	/** Optional provider IDs to exclude from discovery */
+	excludeProviders?: string[];
 }
 
-function dedupeExactContextFiles(
-	contextFiles: Array<{ path: string; content: string; depth?: number }>,
-): Array<{ path: string; content: string; depth?: number }> {
+function dedupeExactContextFiles<T extends { path: string; content: string; depth?: number }>(contextFiles: T[]): T[] {
 	const lastIndexByContent = new Map<string, number>();
 	for (const [index, file] of contextFiles.entries()) {
 		// Keep the closest matching context entry when content is byte-for-byte identical.
@@ -298,10 +298,13 @@ function dedupeExactContextFiles(
  */
 export async function loadProjectContextFiles(
 	options: LoadContextFilesOptions = {},
-): Promise<Array<{ path: string; content: string; depth?: number }>> {
+): Promise<Array<{ path: string; content: string; depth?: number; _source?: SourceMeta }>> {
 	const resolvedCwd = options.cwd ?? getProjectDir();
 
-	const result = await loadCapability(contextFileCapability.id, { cwd: resolvedCwd });
+	const result = await loadCapability(contextFileCapability.id, {
+		cwd: resolvedCwd,
+		excludeProviders: options.excludeProviders,
+	});
 
 	// Materialize ContextFile items, expanding any `@path/to/file` includes
 	// in their content. The expansion uses the file's own directory as the
@@ -314,6 +317,7 @@ export async function loadProjectContextFiles(
 				path: contextFile.path,
 				content: await expandAtImports(contextFile.content, contextFile.path),
 				depth: contextFile.depth,
+				_source: contextFile._source,
 			};
 		}),
 	);

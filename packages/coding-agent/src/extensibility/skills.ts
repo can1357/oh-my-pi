@@ -223,8 +223,12 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const disabledSkillNames = new Set(
 		(disabledExtensions ?? []).filter(id => id.startsWith("skill:")).map(id => id.slice(6)),
 	);
-	// Filter skills by source and patterns first
-	const filteredSkills = result.items.filter(capSkill => {
+	// Filter skills by source and patterns first. Source from result.all
+	// (pre-dedup): capability-level dedup runs across all providers before
+	// isSourceEnabled, so an enabled skill (e.g. a builtin-skills fallback)
+	// could be shadowed at the capability layer by a higher-priority provider
+	// that is itself disabled by options (e.g. enableClaudeUser: false).
+	const filteredSkills = result.all.filter(capSkill => {
 		if (disabledSkillNames.has(capSkill.name)) return false;
 		if (!isSourceEnabled(capSkill._source)) return false;
 		if (matchesIgnorePatterns(capSkill.name)) return false;

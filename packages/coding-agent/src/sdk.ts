@@ -40,6 +40,7 @@ import { loadCapability } from "./capability";
 import { findRepoRoot } from "./capability/fs";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
+import type { SourceMeta } from "./capability/types";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { resolveMoaConfig } from "./config/moa-resolver";
 import { ModelRegistry } from "./config/model-registry";
@@ -64,6 +65,7 @@ import {
 import { CursorExecHandlers } from "./cursor";
 import type { AgentExecutionProfile } from "./orchestration/agent-execution-profile";
 import type { CollaborationPolicy } from "./orchestration/collaboration-policy";
+import { FastStreamRouter } from "./routing";
 import { TRUNCATE_LENGTHS } from "./tools/render-utils";
 import type { ResolvedToolProfile, ToolSource } from "./tools/tool-profiles";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
@@ -582,7 +584,9 @@ export interface CreateAgentSessionOptions {
 	/** Rules. Default: discovered from multiple locations */
 	rules?: Rule[];
 	/** Context files (AGENTS.md content). Default: discovered walking up from cwd */
-	contextFiles?: Array<{ path: string; content: string }>;
+	contextFiles?: Array<{ path: string; content: string; depth?: number; _source?: SourceMeta }>;
+	/** Disable discovery of standalone AGENTS.md files (preserves other context-file providers). */
+	disableAgentsMd?: boolean;
 	/** Pre-built workspace tree (skips re-scanning; passed by parents to subagents). */
 	workspaceTree?: WorkspaceTree;
 	/** Prompt templates. Default: discovered from cwd/.ompk/prompts/ + agentDir/prompts/ */
@@ -876,9 +880,11 @@ export async function discoverSkills(
 export async function discoverContextFiles(
 	cwd?: string,
 	_agentDir?: string,
-): Promise<Array<{ path: string; content: string; depth?: number }>> {
+	options?: { excludeProviders?: string[] },
+): Promise<Array<{ path: string; content: string; depth?: number; _source?: SourceMeta }>> {
 	return await loadContextFilesInternal({
 		cwd: cwd ?? getProjectDir(),
+		excludeProviders: options?.excludeProviders,
 	});
 }
 
@@ -928,7 +934,7 @@ export async function discoverMCPServers(cwd?: string): Promise<MCPToolsLoadResu
 export interface BuildSystemPromptOptions {
 	tools?: Tool[];
 	skills?: Skill[];
-	contextFiles?: Array<{ path: string; content: string }>;
+	contextFiles?: Array<{ path: string; content: string; depth?: number; _source?: SourceMeta }>;
 	cwd?: string;
 	customPrompt?: string;
 	appendPrompt?: string;
@@ -1283,9 +1289,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Independent discoveries that depend only on cwd/agentDir — kicked off in parallel and awaited
 	// at their respective consumer sites. Their work can overlap with model resolution, secret loading,
 	// session-context build, tool creation, MCP discovery, and extension discovery.
+	const contextFileExcludeProviders = options.disableAgentsMd ? ["agents-md"] : undefined;
 	const contextFilesPromise = options.contextFiles
 		? Promise.resolve(options.contextFiles)
-		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
+		: logger.time("discoverContextFiles", () =>
+				discoverContextFiles(cwd, agentDir, {
+					excludeProviders: contextFileExcludeProviders,
+				}),
+			);
 	contextFilesPromise.catch(() => {});
 	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () => discoverWatchdogFiles(cwd, agentDir));
 	watchdogFilesPromise.catch(() => {});
@@ -1535,11 +1546,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		return result;
 	};
-	const [contextFiles, resolvedWorkspaceTree, watchdogFiles] = await Promise.all([
+	const [rawContextFiles, resolvedWorkspaceTree, watchdogFiles] = await Promise.all([
 		contextFilesPromise,
 		raceWithDeadline("buildWorkspaceTree", workspaceTreePromise),
 		watchdogFilesPromise,
 	]);
+	const contextFiles = options.disableAgentsMd
+		? rawContextFiles.filter(file => (file as { _source?: SourceMeta })._source?.provider !== "agents-md")
+		: rawContextFiles;
 
 	let agent: Agent;
 	let session!: AgentSession;
@@ -2913,16 +2927,36 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const openrouterVariant =
 					openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
 				const antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
-				return streamSimple(streamModel, context, {
-					...streamOptions,
-					openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
-					antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
-					loopGuard: {
-						enabled: settings.get("model.loopGuard.enabled"),
-						checkAssistantContent: settings.get("model.loopGuard.checkAssistantContent"),
-						...streamOptions?.loopGuard,
-					},
-				});
+				const dispatchStream = (modelToStream: Model, ctx: Context, opts?: SimpleStreamOptions) => {
+					return streamSimple(modelToStream, ctx, {
+						...opts,
+						openrouterVariant: opts?.openrouterVariant ?? openrouterVariant,
+						antigravityEndpointMode: opts?.antigravityEndpointMode ?? antigravityEndpointMode,
+						loopGuard: {
+							enabled: settings.get("model.loopGuard.enabled"),
+							checkAssistantContent: settings.get("model.loopGuard.checkAssistantContent"),
+							...opts?.loopGuard,
+						},
+					});
+				};
+
+				// High-performance dynamic multi-provider routing (zero-overhead if no pool configured)
+				const pool = modelRegistry.resolvePool(streamModel);
+				if (pool && pool.candidates.length > 1) {
+					const router = new FastStreamRouter(modelRegistry.poolManager, target =>
+						modelRegistry.resolver(target, agent.sessionId),
+					);
+					return router.streamWithRouting(
+						streamModel,
+						context,
+						streamOptions,
+						pool,
+						dispatchStream,
+						agent.sessionId,
+					);
+				}
+
+				return dispatchStream(streamModel, context, streamOptions);
 			},
 			cursorExecHandlers,
 			transformToolCallArguments: (args, _toolName) => {

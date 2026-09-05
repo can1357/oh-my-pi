@@ -294,9 +294,25 @@ const EquivalenceConfigSchema = type({
 	return true;
 });
 
+const RoutingPoolConfigSchema = type({
+	"enabled?": "boolean",
+	"name?": "string",
+	"strategy?": "'affinity-fallback' | 'round-robin'",
+	members: "string[]",
+});
+
+const DynamicRoutingConfigSchema = type({
+	"enabled?": "boolean",
+	"strategy?": "'affinity-fallback' | 'round-robin'",
+	"cooldownDurationMs?": "number",
+	"pools?": { "[string]": RoutingPoolConfigSchema },
+	"vetoes?": "string[][]",
+});
+
 export const ModelsConfigSchema = type({
 	"providers?": { "[string]": ProviderConfigSchema },
 	"equivalence?": EquivalenceConfigSchema,
+	"routing?": DynamicRoutingConfigSchema,
 });
 
 export type ModelsConfig = typeof ModelsConfigSchema.infer;

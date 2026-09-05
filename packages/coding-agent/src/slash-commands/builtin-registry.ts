@@ -57,6 +57,7 @@ import { handleMcpAcp } from "./helpers/mcp";
 import { handleOkfSlashCommand } from "./helpers/okf";
 import { commandConsumed, errorMessage, parseSlashCommand, parseSubcommand, usage } from "./helpers/parse";
 import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } from "./helpers/reset-usage";
+import { handleRouteSlashCommand } from "./helpers/route";
 import { handleSshAcp } from "./helpers/ssh";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleSubagentSlashCommand } from "./helpers/subagent";
@@ -2942,6 +2943,24 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => handleGraphtreeCommand(command.args, runtime),
 		handleTui: async (command, runtime) => handleGraphtreeCommandTui(command.args, runtime),
+	},
+	{
+		name: "route",
+		aliases: ["router", "pool"],
+		description: "Configure dynamic multi-provider routing, pools, and fallbacks",
+		acpDescription: "Manage dynamic multi-provider model routing and fallbacks",
+		inlineHint: "[status|on|off|pool|veto|unpool|reset]",
+		subcommands: [
+			{ name: "status", description: "View routing status, configured pools, and provider cooldowns" },
+			{ name: "on", description: "Enable dynamic multi-provider routing" },
+			{ name: "off", description: "Disable dynamic multi-provider routing" },
+			{ name: "pool", description: "Link models into a shared pool", usage: "<modelA> <modelB> [poolName]" },
+			{ name: "veto", description: "Prevent models from being grouped together", usage: "<modelA> <modelB>" },
+			{ name: "unpool", description: "Remove a pool or model from routing", usage: "<pool-id-or-model>" },
+			{ name: "reset", description: "Reset active provider cooldowns" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => handleRouteSlashCommand(command, runtime),
 	},
 	{
 		name: "quit",

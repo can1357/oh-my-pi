@@ -23,14 +23,17 @@ export type {
 	GainSourceTotals,
 	GainTimeSeriesPoint,
 } from "./shared-types";
+export { aggregateTasks, getRecentTaskStats, getTaskEconomicsByModel } from "./task-aggregator";
 export type {
 	AggregatedStats,
 	DashboardStats,
 	FolderStats,
 	MessageStats,
+	ModelEconomics,
 	ModelPerformancePoint,
 	ModelStats,
 	ModelTimeSeriesPoint,
+	TaskLedgerRecord,
 	TimeSeriesPoint,
 } from "./types";
 

@@ -104,7 +104,7 @@ Current registered skill providers:
 5. `opencode` (priority 55)
 6. `github` (priority 30) — `.github/skills/<name>/SKILL.md` (GitHub Agent Skills layout, project-only)
 7. `omp-managed` (priority 5) — auto-learn skills under `~/.ompk/agent/managed-skills`, registered in `src/discovery/builtin.ts` and discovered unconditionally (only writing/nudging is gated by `autolearn.enabled`); always defers to a same-named authored skill
-8. `builtin-skills` (priority 1) — bundled skills (`agentic-mapreduce`, `tree-of-thoughts`, `promptbtw-handoff`) embedded into the binary from `src/discovery/builtin-skills/`, registered in `src/discovery/builtin-defaults.ts`. Served in-memory via `Skill.embeddedContent` (no on-disk file; `skill://<name>/<relative>` sub-paths are rejected). Lowest priority, so any same-named skill from any other provider overrides them. Gated by `skills.enableBuiltinSkills` (default `true`); individual skills disable via `disabledExtensions: ["skill:<name>"]` or `ignoredSkills`.
+8. `builtin-skills` (priority 1) — bundled skills (`agentic-mapreduce`, `ompk-swarm-core`, `promptbtw-handoff`, `tree-of-thoughts`) embedded into the binary from `src/discovery/builtin-skills/`, registered in `src/discovery/builtin-defaults.ts`. Served in-memory via `Skill.embeddedContent` (no on-disk file; `skill://<name>/<relative>` sub-paths are rejected). Lowest priority, so any same-named skill from any other provider overrides them. Gated by `skills.enableBuiltinSkills` (default `true`); individual skills disable via `disabledExtensions: ["skill:<name>"]` or `ignoredSkills`.
 
 Dedup key is skill name. First item with a given name wins.
 

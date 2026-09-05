@@ -65,6 +65,8 @@ export interface Args {
 	projectSkills?: boolean;
 	skills?: string[];
 	noRules?: boolean;
+	/** Disable AGENTS.md instruction file discovery and loading. */
+	noAgentMd?: boolean;
 	noTitle?: boolean;
 	autoApprove?: boolean;
 	approvalMode?: "always-ask" | "write" | "yolo";
@@ -223,12 +225,14 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.printThoughts = true;
 		} else if (arg === "--no-extensions") {
 			result.noExtensions = true;
-		} else if (arg === "--no-skills") {
+		} else if (arg === "--no-skills" || arg === "--skills-off") {
 			result.noSkills = true;
 		} else if (arg === "--project-skills") {
 			result.projectSkills = true;
 		} else if (arg === "--no-rules") {
 			result.noRules = true;
+		} else if (arg === "--agentmd-off") {
+			result.noAgentMd = true;
 		} else if (arg === "--no-title") {
 			result.noTitle = true;
 		} else if (arg === "--auto-approve" || arg === "--yolo") {

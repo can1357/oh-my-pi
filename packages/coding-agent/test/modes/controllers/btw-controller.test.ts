@@ -125,6 +125,8 @@ describe("BtwController", () => {
 		// The rendered btw wrapper must keep the no-tools rule and the prompt-btw handoff branch.
 		expect(callArg?.promptText).toContain("NEVER use tools.");
 		expect(callArg?.promptText).toContain("SUBAGENT HANDOFF PROMPT");
+		expect(callArg?.promptText).toContain("Fable 5.1");
+		expect(callArg?.promptText).toContain("prompt-optimizer");
 		expect(callArg?.signal).toBeInstanceOf(AbortSignal);
 		expect(typeof callArg?.onTextDelta).toBe("function");
 		expect(controller.hasActiveRequest()).toBe(true);

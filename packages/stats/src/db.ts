@@ -804,6 +804,68 @@ export function getMessageById(id: number): MessageStats | null {
 	return row ? rowToMessageStats(row) : null;
 }
 
+function rowToUserMessageStats(row: any): UserMessageStats {
+	return {
+		id: row.id,
+		sessionFile: row.session_file,
+		entryId: row.entry_id,
+		folder: row.folder,
+		timestamp: row.timestamp,
+		model: row.model ?? null,
+		provider: row.provider ?? null,
+		chars: row.chars,
+		words: row.words,
+		yelling: row.yelling,
+		profanity: row.profanity,
+		anguish: row.anguish,
+		negation: row.negation ?? 0,
+		repetition: row.repetition ?? 0,
+		blame: row.blame ?? 0,
+	};
+}
+
+export interface TaskRowFilter {
+	cutoffMs?: number;
+	folder?: string;
+	limit?: number;
+}
+
+function taskRowWhere(filter: TaskRowFilter | undefined, prefix: "AND" | "WHERE"): string {
+	const clauses: string[] = [];
+	if (filter?.cutoffMs !== undefined && filter.cutoffMs > 0) clauses.push("timestamp >= ?");
+	if (filter?.folder !== undefined) clauses.push("folder = ?");
+	if (clauses.length === 0) return "";
+	return ` ${prefix} ${clauses.join(" AND ")}`;
+}
+
+function taskRowParams(filter: TaskRowFilter | undefined): (number | string)[] {
+	const params: (number | string)[] = [];
+	if (filter?.cutoffMs !== undefined && filter.cutoffMs > 0) params.push(filter.cutoffMs);
+	if (filter?.folder !== undefined) params.push(filter.folder);
+	return params;
+}
+
+/**
+ * Fetch raw assistant-request rows for task aggregation. Rows only — span
+ * grouping lives in `task-aggregator.ts`.
+ */
+export function getMessageRows(filter?: TaskRowFilter): MessageStats[] {
+	if (!db) return [];
+	const limit = filter?.limit !== undefined && filter.limit > 0 ? ` LIMIT ${Math.floor(filter.limit)}` : "";
+	const stmt = db.prepare(`SELECT * FROM messages${taskRowWhere(filter, "WHERE")} ORDER BY timestamp ASC${limit}`);
+	return (stmt.all(...taskRowParams(filter)) as any[]).map(rowToMessageStats);
+}
+
+/**
+ * Fetch raw user-message rows used to confirm task anchors. Rows only —
+ * anchor resolution and span grouping live in `task-aggregator.ts`.
+ */
+export function getUserMessageRows(filter?: TaskRowFilter): UserMessageStats[] {
+	if (!db) return [];
+	const stmt = db.prepare(`SELECT * FROM user_messages${taskRowWhere(filter, "WHERE")} ORDER BY timestamp ASC`);
+	return (stmt.all(...taskRowParams(filter)) as any[]).map(rowToUserMessageStats);
+}
+
 /**
  * Get daily cost time series data for the last N days, broken down by model.
  */

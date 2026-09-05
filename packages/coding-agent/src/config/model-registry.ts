@@ -31,6 +31,7 @@ import {
 	getVariantAliasSources,
 	resolveVariantAlias,
 } from "@pk-nerdsaver-ai/pi-catalog/variant-collapse";
+import { type DynamicRoutingConfig, ModelPoolManager } from "../routing";
 
 const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
 	"google-antigravity",
@@ -264,6 +265,7 @@ interface CustomModelsResult {
 	discoverableProviders?: DiscoveryProviderConfig[];
 	configuredProviders?: Set<string>;
 	equivalence?: ModelEquivalenceConfig;
+	routing?: DynamicRoutingConfig;
 	error?: ConfigError;
 	found: boolean;
 }
@@ -690,6 +692,7 @@ export class ModelRegistry {
 	#providerOverrides: Map<string, ProviderOverride> = new Map();
 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
 	#equivalenceConfig: ModelEquivalenceConfig | undefined;
+	#poolManager: ModelPoolManager = new ModelPoolManager();
 	#configError: ConfigError | undefined = undefined;
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
@@ -764,6 +767,11 @@ export class ModelRegistry {
 		});
 		// Load models synchronously in constructor.
 		this.#loadModels();
+	}
+
+	/** Active models config path, including SDK/test relocations. */
+	get modelsConfigPath(): string {
+		return this.#modelsConfigFile.path();
 	}
 
 	/**
@@ -922,8 +930,17 @@ export class ModelRegistry {
 			discoverableProviders = [],
 			configuredProviders = new Set(),
 			equivalence,
+			routing,
 			error: configError,
 		} = this.#loadCustomModels();
+		this.#configError = configError;
+		this.#keylessProviders = keylessProviders;
+		this.#discoverableProviders = discoverableProviders;
+		this.#customModelOverlays = customModels;
+		this.#providerOverrides = overrides;
+		this.#modelOverrides = modelOverrides;
+		this.#equivalenceConfig = equivalence;
+		this.#poolManager = new ModelPoolManager(routing);
 		this.#configError = configError;
 		this.#keylessProviders = keylessProviders;
 		this.#discoverableProviders = discoverableProviders;
@@ -1330,6 +1347,7 @@ export class ModelRegistry {
 			discoverableProviders,
 			configuredProviders,
 			equivalence: value.equivalence,
+			routing: value.routing,
 			found: true,
 		};
 	}
@@ -2026,6 +2044,17 @@ export class ModelRegistry {
 
 	getProviderDiscoveryState(provider: string): ProviderDiscoveryState | undefined {
 		return this.#providerDiscoveryStates.get(provider);
+	}
+
+	get poolManager(): ModelPoolManager {
+		return this.#poolManager;
+	}
+
+	/**
+	 * Resolve an active multi-provider pool for a model, if one exists and dynamic routing is configured.
+	 */
+	resolvePool(model: Model<Api>) {
+		return this.#poolManager.resolvePool(model, this.getAvailable(), this.#ensureCanonicalIndex());
 	}
 
 	/**

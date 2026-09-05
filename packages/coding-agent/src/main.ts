@@ -789,7 +789,7 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
-async function buildSessionOptions(
+export async function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
 	sessionManager: SessionManager | undefined,
@@ -945,6 +945,11 @@ async function buildSessionOptions(
 	// Rules
 	if (parsed.noRules) {
 		options.rules = [];
+	}
+
+	// AGENTS.md
+	if (parsed.noAgentMd) {
+		options.disableAgentsMd = true;
 	}
 
 	// Additional extension paths from CLI

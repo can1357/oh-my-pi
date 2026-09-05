@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Taught `/btw` prompt-btw and `promptbtw-handoff` to auto-select Claude Fable 5.1 quirk patches (effort, progress updates, tool batching, writing density, task completion, scope/tests, targeted edits, and related harness notes) instead of dumping the full guide.
+
 ### Fixed
 
+- Isolated credentials and request headers per routing target, enabled failover for pre-output provider error events, made `/route off` disable manual pools, and refused routing configuration writes after load or validation failures.
 - Updated the compiled binary alias that actually launched `oh-my-pk update`, so `ompk update` and `omp update` no longer leave their invoked command on the old version.
 - Serialized local tiny-model downloads across OMPK processes, pruned abandoned PID-tagged partials before loading, stopped canceled last-request work, and retired idle workers after five minutes, preventing duplicate cache growth and long-lived native CPU or memory use.
 

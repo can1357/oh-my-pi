@@ -126,3 +126,53 @@ export interface UserMessageLink {
 	model: string;
 	provider: string;
 }
+
+/**
+ * Aggregated statistics for a single task span (user prompt turn).
+ */
+export interface TaskLedgerRecord {
+	/** Unique task identifier: `${sessionFile}#${anchorUserEntryId}` */
+	taskId: string;
+	/** Session file path */
+	sessionFile: string;
+	/** Folder/project path (extracted from session filename) */
+	folder: string;
+	/** Which agent produced this task (main agent, task subagent, advisor) */
+	agentType: AgentType;
+	/** Responding model of the task's final request */
+	model: string;
+	/** Responding provider of the task's final request */
+	provider: string;
+	/** Anchor user-message timestamp (epoch ms) */
+	startedAt: number;
+	/** Final linked assistant timestamp (epoch ms) */
+	completedAt: number;
+	/** Sum of per-request duration in milliseconds, excluding idle time between requests */
+	wallMs: number;
+	/** Time to first token of the first request in the span, or null */
+	ttftMs: number | null;
+	/** Total input tokens across all requests in the span */
+	inputTokens: number;
+	/** Total output tokens across all requests in the span */
+	outputTokens: number;
+	/** Total cache-read tokens across all requests in the span */
+	cacheReadTokens: number;
+	/** Number of assistant requests in this task span */
+	requestCount: number;
+	/** Total cost in USD across all requests in the span */
+	costUsd: number;
+	/** Stop reason of the final assistant request */
+	stopReason: StopReason;
+}
+
+/**
+ * Economic summary aggregated by model and provider.
+ */
+export interface ModelEconomics {
+	model: string;
+	provider: string;
+	taskCount: number;
+	avgCostUsd: number;
+	avgWallMs: number;
+	avgTtftMs: number | null;
+}
