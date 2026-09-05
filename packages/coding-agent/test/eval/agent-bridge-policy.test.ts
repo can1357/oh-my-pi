@@ -792,22 +792,29 @@ describe("agent() through eval runtimes", () => {
 
 		expect(result.exitCode).toBe(0);
 
+		// runEvalWait emits the current progress snapshot at wait-start, on its
+		// 1s interval, and at wait-end, so the number of op:"agent" events is a
+		// timing-dependent race (was flaky on CI under parallel load, #10821).
+		// The contract that matters is that the LAST delivered snapshot is the
+		// completed, enriched one — not that exactly one is delivered.
 		const agentEvents = events.filter(event => event.op === "agent");
-		expect(agentEvents).toHaveLength(1);
+		expect(agentEvents.length).toBeGreaterThanOrEqual(1);
 
-		const completed = agentEvents[0];
-		expect(completed.status).toBe("completed");
-		expect(completed.toolCount).toBe(7);
-		expect(completed.cost).toBeCloseTo(0.06);
-		expect(completed.contextTokens).toBe(8000);
-		expect(completed.taskPreview).toBe("investigate");
-		expect(typeof completed.id).toBe("string");
+		const completed = agentEvents.at(-1);
+		expect(completed?.status).toBe("completed");
+		expect(completed?.toolCount).toBe(7);
+		expect(completed?.cost).toBeCloseTo(0.06);
+		expect(completed?.contextTokens).toBe(8000);
+		expect(completed?.taskPreview).toBe("investigate");
+		expect(typeof completed?.id).toBe("string");
 
-		// The same final snapshot is retained in the executor's display outputs.
+		// The same final snapshot is retained as the last executor display output.
 		const displayAgentEvents = result.displayOutputs.filter(
 			(output): output is Extract<typeof output, { type: "status" }> => output.type === "status",
 		);
-		expect(displayAgentEvents).toHaveLength(1);
+		expect(displayAgentEvents.length).toBeGreaterThanOrEqual(1);
+		expect(displayAgentEvents.at(-1)?.event.status).toBe("completed");
+		expect(displayAgentEvents.at(-1)?.event.toolCount).toBe(7);
 	});
 
 	it("pauses the idle watchdog while a quiet agent() runs past the budget", async () => {
