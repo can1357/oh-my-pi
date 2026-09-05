@@ -36,6 +36,9 @@ describe("isFullyQualifiedPath", () => {
 		expect(isFullyQualifiedPath("C:omp", "win32")).toBe(false);
 		expect(isFullyQualifiedPath(".\\omp", "win32")).toBe(false);
 		expect(isFullyQualifiedPath("\\bin\\omp", "win32")).toBe(false);
+		expect(isFullyQualifiedPath("/bin/omp", "win32")).toBe(false);
+		expect(isFullyQualifiedPath("//", "win32")).toBe(false);
+		expect(isFullyQualifiedPath("\\\\", "win32")).toBe(false);
 	});
 
 	it("identifies absolute POSIX paths", () => {
