@@ -106,6 +106,8 @@ Shared fields for every transport:
 - `enabledTools?: string[]` — per-server tool allowlist. Entries are raw advertised tool names or glob patterns (`*`, `?`, `[...]`, `{a,b}`); only matching tools are contributed to the session. This OMP-specific field follows the same scoping rule as `requestIdFormat`.
 - `disabledTools?: string[]` — per-server tool denylist; matching tools are excluded. When both fields are set, `disabledTools` wins (deny subtracts from allow).
 
+Glob semantics: tool names are opaque strings, not paths — `*` and `?` cross `/`, so `admin*` matches `admin/delete`, and a class member `/` matches a slash (`admin[/]delete` matches `admin/delete`). A leading `!` or extglob prefix (`+(a|b)`) is treated as a literal. Caveat: a *negated* class cannot exclude the slash character — `[^/]` matches slash-containing names too (picomatch hardcodes `/` into negated-class output).
+
 `OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the 30-second default; invalid values are logged and ignored.
 
 ### `stdio` transport

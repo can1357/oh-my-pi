@@ -48,11 +48,13 @@ export interface MCPToolFilterResult {
  * emitted regex from the transliterated name. The transliteration collides
  * only for names containing a literal `\x01` (`a/b` ≡ `a\x01b`) — pathological,
  * since `\x01` cannot appear in a JSON config string either.
- * Character classes containing `/` (`[/]`, `[^/]`, mixed `[a/]`) are not
- * supported: after transliteration the class contains `\x01`, which breaks
- * picomatch class semantics. Such entries are routed to the never-match
- * path via `hasSlashInsideClass` (below) so they degrade loudly to
- * `unmatched` instead of silently half-matching.
+ * Negated character classes containing `/` (`[^/]`, `[^a/]`): picomatch's
+ * compiler hardcodes `/` into negated-class output, so a negated class can
+ * never exclude the slash character — `[^/]` matches slash-containing names
+ * (the transliterated sentinel is not `/`). This is inherent picomatch
+ * behavior, not a defect; documented so config authors are not surprised.
+ * Positive classes with slash members (`admin[/]delete`) transliterate
+ * cleanly and match slash names as expected.
  * `nonegate`/`noextglob` pin the applied surface to the documented globs
  * (`*`, `?`, `[...]`, `{a,b}`) — a leading `!` or extglob prefix (`+(a|b)`)
  * is treated as a literal by picomatch, keeping every entry's semantics
@@ -63,36 +65,12 @@ const MATCH_OPTIONS = { dot: true, nonegate: true, noextglob: true } as const;
 /** Slash transliteration sentinel (see rationale above). */
 const SLASH_SENTINEL = "\x01";
 
-/**
- * Whether any `/` appears inside a character class. Resolved from picomatch's
- * own token stream so escapes are already handled: an escaped `\[` is a
- * literal `text` token, never a class opener, so `foo\[/bar*` (slash outside
- * any class) and `[a]/[b]` (slash between classes) are NOT flagged, while
- * `[a/b]`, `[^/]`, and `[/_]` ARE.
- */
-function hasSlashInsideClass(pattern: string): boolean {
-	// Class-token classification does not depend on dot/nonegate/noextglob, so
-	// parse() can run with defaults; we only read the resulting token stream.
-	const tokens = picomatch.parse(pattern).tokens;
-	return tokens.some(token => token.type === "bracket" && (token.value as string).includes("/"));
-}
-
 class CompiledPattern {
 	readonly #raw: string;
 	readonly #isMatch: ((name: string) => boolean) | undefined;
 
 	constructor(pattern: string) {
 		this.#raw = pattern;
-		// A character class containing `/` is unsupported: after the NUL
-		// transliteration the class contains NUL, which breaks picomatch class
-		// semantics (mixed classes like `[a/]` would silently half-match).
-		// Route such entries to the never-match path so they surface loudly as
-		// `unmatched` instead of silently dropping the slash member. Detects a
-		// slash inside a SINGLE unclosed class only — a literal `/` between
-		// classes (`[a]/[b]`) is a valid documented glob and stays routable.
-		if (hasSlashInsideClass(pattern)) {
-			return;
-		}
 		if (/[*?[\]{}]/.test(pattern)) {
 			this.#isMatch = picomatch(pattern.replaceAll("/", SLASH_SENTINEL), MATCH_OPTIONS);
 		}

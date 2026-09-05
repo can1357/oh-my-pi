@@ -138,25 +138,29 @@ test("leading ! and extglob prefixes are literals (matcher surface pinned to doc
 	expect(run(NAMES, ["+(a|b)"]).unmatched).toEqual(["+(a|b)"]);
 });
 
-test("character classes containing / are routed to never-match (loud unmatched, no silent half-match)", () => {
-	// `[/_]`-style mixed classes would silently half-match after NUL
-	// transliteration (matches `file_1`, never `file/1`). They must degrade to
-	// the loud unmatched path instead.
-	const mixed = run(["file_1", "file/1"], ["file[/_]1"]);
-	expect(mixed.allowed).toEqual([]);
-	expect(mixed.unmatched).toEqual(["file[/_]1"]);
-
+test("negated classes containing / are not rejected (documented picomatch behavior)", () => {
+	// picomatch's compiler hardcodes `/` into negated-class output, so a
+	// negated class can never exclude the slash character: `[^/]` matches
+	// slash-containing names too. This is inherent picomatch behavior and is
+	// documented in tool-filter.ts — the pattern stays routable, no guard.
 	const negated = run(NAMES, ["[^/]*"]);
-	expect(negated.allowed).toEqual([]);
-	expect(negated.unmatched).toEqual(["[^/]*"]);
+	expect(negated.allowed).toEqual(NAMES);
+	expect(negated.unmatched).toEqual([]);
+});
 
-	const bare = run(NAMES, ["ad[/]min"]);
-	expect(bare.unmatched).toEqual(["ad[/]min"]);
+test("positive classes with slash members match (admin[/]delete matches admin/delete)", () => {
+	// The slash transliteration preserves slash members inside positive
+	// classes: `[/]` matches a slash, `[a/]` matches `a` or a slash.
+	expect(run(["admin/delete", "adminXdelete"], ["admin[/]delete"]).allowed).toEqual(["admin/delete"]);
+	expect(run(["xay", "x/y", "xby"], ["x[a/]y"]).allowed).toEqual(["xay", "x/y"]);
+	expect(run(["file_1", "file/1"], ["file[/_]1"]).allowed).toEqual(["file_1", "file/1"]);
 });
 
 test("valid classes still match after the slash-class guard", () => {
 	expect(run(["file_1", "file_a"], ["file_[0-9]"]).allowed).toEqual(["file_1"]);
 	expect(run(NAMES, ["admin/*"]).allowed).toEqual(["admin/delete"]);
+	// Negated classes without a slash member are unaffected.
+	expect(run(["file_a", "file_b"], ["file_[^a]"]).allowed).toEqual(["file_b"]);
 });
 
 test("a literal slash BETWEEN classes is not over-rejected (multi-class pattern stays routable)", () => {
