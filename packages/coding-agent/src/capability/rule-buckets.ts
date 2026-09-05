@@ -9,7 +9,7 @@
  *   1. disabledRules  — dropped before any bucket assignment
  *   2. builtin drop   — `builtinRules === false` drops `builtin-defaults` rules
  *   3. agents scope   — rules whose `agents` globs do not match `options.agentName` are dropped
- *   4. TTSR           — non-empty `condition`/`astCondition` that `TtsrManager.addRule` accepts
+ *   4. TTSR           — non-empty `condition`/`astCondition` the manager already tracks or newly accepts
  *   5. always         — `alwaysApply === true`
  *   6. rulebook       — has a `description`
  */
@@ -61,7 +61,10 @@ export function bucketRules(
 
 		const hasTtsrCondition =
 			(rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
-		const isTtsrRule = hasTtsrCondition ? ttsrManager.addRule(rule) : false;
+		// `hasRule` first so re-bucketing against an already-populated manager (the
+		// mid-session rule re-discovery on /clear and /new) recognizes a rule it
+		// registered earlier as TTSR instead of leaking it into the rulebook bucket.
+		const isTtsrRule = hasTtsrCondition ? ttsrManager.hasRule(rule.name) || ttsrManager.addRule(rule) : false;
 		if (isTtsrRule) continue;
 		if (rule.alwaysApply === true) {
 			alwaysApplyRules.push(rule);

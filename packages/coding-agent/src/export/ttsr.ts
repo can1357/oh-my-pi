@@ -568,6 +568,11 @@ export class TtsrManager {
 		return this.#rules.size > 0;
 	}
 
+	/** Whether a rule with this name is already registered for monitoring. */
+	hasRule(name: string): boolean {
+		return this.#rules.has(name);
+	}
+
 	/** All rules currently registered for TTSR monitoring, in registration order. */
 	getRules(): Rule[] {
 		return Array.from(this.#rules.values(), entry => entry.rule);
