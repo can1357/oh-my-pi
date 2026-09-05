@@ -2432,8 +2432,35 @@ export function fireworksModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
-// 7.6 Fire Pass (Fireworks Kimi K2.6 Turbo subscription)
+// 7.6 Fire Pass (Fireworks subscription)
 // ---------------------------------------------------------------------------
+
+export const FIREPASS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "glm-5.2-fast",
+		name: "GLM 5.2 Fast (Fire Pass)",
+		api: "openai-completions",
+		provider: "firepass",
+		baseUrl: "https://api.fireworks.ai/inference/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 2.1, output: 6.6, cacheRead: 0.21, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+	{
+		id: "kimi-k3-fast",
+		name: "Kimi K3 Fast (Fire Pass)",
+		api: "openai-completions",
+		provider: "firepass",
+		baseUrl: "https://api.fireworks.ai/inference/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+];
 
 export interface FirepassModelManagerConfig {
 	apiKey?: string;
@@ -2442,8 +2469,8 @@ export interface FirepassModelManagerConfig {
 }
 
 /**
- * Fire Pass is a Fireworks subscription product that exposes a single router
- * model (Kimi K2.6 Turbo) under `accounts/fireworks/routers/kimi-k2p6-turbo`.
+ * Fire Pass is a Fireworks subscription product that exposes router models
+ * (GLM 5.2 Fast, Kimi K3 Fast) under `accounts/fireworks/routers/<id>`.
  * The dedicated `fpk_…` keys do not authorize `/v1/models`, so this manager
  * never performs dynamic discovery — the bundled catalog entry is canonical.
  * See https://docs.fireworks.ai/firepass.
