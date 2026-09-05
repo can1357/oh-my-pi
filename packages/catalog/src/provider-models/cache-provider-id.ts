@@ -1,4 +1,8 @@
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+// Cycle-safe: openzoo.ts imports resolveModelCacheProviderId from this module,
+// but both edges bind at call time, and sharing the resolver is the point —
+// two normalizers is exactly how the cache id and the fetch URL drifted apart.
+import { resolveOpenzooBaseUrl } from "./openzoo";
 
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
@@ -26,6 +30,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/zen/go/v1";
 		case "opencode-zen":
 			return "https://opencode.ai/zen/v1";
+		case "openzoo":
+			return Bun.env.OPENZOO_BASE_URL?.trim() || "http://localhost:8402/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
 		default:
@@ -89,6 +95,15 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";
+		case "openzoo": {
+			// The proxy port is user-configurable (`OPENZOO_PORT` / `OPENZOO_BASE_URL`)
+			// and a public tunnel URL serves a different wallet's catalog, so rows
+			// cached against one endpoint must not answer for another. Normalized
+			// through the same resolver the manager uses, so a configured trailing
+			// slash cannot mint a second cache id for the same endpoint.
+			const baseUrl = resolveOpenzooBaseUrl(options.baseUrl);
+			return `openzoo:models-v1:${Bun.hash(baseUrl).toString(36)}`;
+		}
 		case "vllm": {
 			// v2: qwen3.8 rows cached before the reasoning/template-effort upgrade
 			// carry `reasoning: false` and must be refetched.

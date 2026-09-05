@@ -56,6 +56,7 @@
 		"auth/opencode-go.kdl",
 		"auth/opencode-zen.kdl",
 		"auth/openrouter.kdl",
+		"auth/openzoo.kdl",
 		"auth/parallel.kdl",
 		"auth/perplexity.kdl",
 		"auth/qianfan.kdl",
@@ -148,6 +149,7 @@
 		"providers/opencode-go.kdl",
 		"providers/opencode-zen.kdl",
 		"providers/openrouter.kdl",
+		"providers/openzoo.kdl",
 		"providers/qianfan.kdl",
 		"providers/sakana.kdl",
 		"providers/synthetic.kdl",
@@ -12109,6 +12111,82 @@
 				}
 			},
 			{
+				"source": "providers/openzoo.kdl:10",
+				"class": "anthropic",
+				"providers": [
+					"openzoo"
+				],
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/openzoo.kdl:13",
+				"class": "gemini",
+				"providers": [
+					"openzoo"
+				],
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/openzoo.kdl:17",
+				"class": "glm",
+				"providers": [
+					"openzoo"
+				],
+				"family": "vision",
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/openzoo.kdl:22",
+				"providers": [
+					"openzoo"
+				],
+				"models": [
+					{
+						"kind": "token",
+						"value": "vision"
+					}
+				],
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/openzoo.kdl:25",
+				"providers": [
+					"openzoo"
+				],
+				"models": [
+					{
+						"kind": "token",
+						"value": "vl"
+					}
+				],
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
 				"source": "providers/qianfan.kdl:5",
 				"providers": [
 					"qianfan"
@@ -16900,6 +16978,22 @@
 					"prompt": "Paste your vLLM API key (optional for local no-auth)",
 					"placeholder": "vllm-local",
 					"emptyFallback": "vllm-local"
+				}
+			},
+			{
+				"id": "openzoo",
+				"apiKeyFormat": "bearer",
+				"name": "openzoo (local x402 pay-per-call proxy)",
+				"env": {
+					"hook": "openzoo-local"
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://openzoo.fun",
+					"instructions": "Run `npx openzoo` (default base URL: http://localhost:8402/v1; set OPENZOO_BASE_URL to customize). The local proxy is keyless — leave this empty. Paste the oz_… bearer only when pointing OMP at an openzoo public tunnel URL.",
+					"prompt": "Paste your openzoo tunnel bearer (optional; the local proxy is keyless)",
+					"placeholder": "openzoo-local",
+					"emptyFallback": "openzoo-local"
 				}
 			},
 			{

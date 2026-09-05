@@ -63,6 +63,7 @@ import {
 	zenmuxModelManagerOptions,
 	zhipuCodingPlanModelManagerOptions,
 } from "./openai-compat";
+import { openzooModelManagerOptions } from "./openzoo";
 import {
 	cursorModelManagerOptions,
 	devinModelManagerOptions,
@@ -399,6 +400,19 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["OPENROUTER_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => openrouterModelManagerOptions(config),
 		catalogDiscovery: { label: "OpenRouter", allowUnauthenticated: true },
+	},
+	{
+		id: "openzoo",
+		// The router. Contract pinned upstream (staccDOTsol/openzoo@211f6cf):
+		// the shim mints no auto row of its own, but the backend catalog
+		// publishes the aliases, they pass through /v1/models, and the wire
+		// routes them — measured on 0.50.84 (auto listed; paid completion 200).
+		defaultModel: "auto",
+		createModelManagerOptions: (config: ModelManagerConfig) => openzooModelManagerOptions(config),
+		// The local proxy is keyless (it pays per call from its own wallet), and
+		// the live `/v1/models` is the whole catalog: nothing is bundled.
+		allowUnauthenticated: true,
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "qianfan",

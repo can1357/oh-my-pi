@@ -18,6 +18,7 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"llama.cpp",
 	"lm-studio",
 	"vllm",
+	"openzoo", // local x402 proxy; live /v1/models is the catalog (`openzooModelManagerOptions`)
 	"openai-codex-device",
 ]);
 
