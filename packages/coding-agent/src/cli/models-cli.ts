@@ -72,7 +72,7 @@ export function resolveModelsArgs(
 	return { action: "ls", pattern: first };
 }
 
-export interface ModelJson {
+interface ModelJson {
 	provider: string;
 	kind: ModelKind;
 	id: string;
@@ -118,7 +118,7 @@ function byProviderThenId(left: Model<Api>, right: Model<Api>): number {
 	return left.id.localeCompare(right.id);
 }
 
-export function toModelJson(model: Model<Api>): ModelJson {
+function toModelJson(model: Model<Api>): ModelJson {
 	const metrics = catalogMetricsOf(model);
 	return {
 		provider: model.provider,
