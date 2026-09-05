@@ -72,6 +72,7 @@ import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
 	ExtensionCustomOptions,
+	ExtensionStatusOptions,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
@@ -6003,8 +6004,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.setHookWidget(key, content, options);
 	}
 
-	setHookStatus(key: string, text: string | undefined): void {
-		this.#extensionUiController.setHookStatus(key, text);
+	setHookStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void {
+		this.#extensionUiController.setHookStatus(key, text, options);
 	}
 
 	showHookSelector(

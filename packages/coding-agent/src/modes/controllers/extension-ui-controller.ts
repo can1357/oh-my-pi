@@ -12,6 +12,7 @@ import type {
 	ExtensionContextActions,
 	ExtensionCustomOptions,
 	ExtensionError,
+	ExtensionStatusOptions,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
@@ -108,7 +109,7 @@ export class ExtensionUiController {
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
-			setStatus: (key, text) => this.setHookStatus(key, text),
+			setStatus: (key, text, options) => this.setHookStatus(key, text, options),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
 			setTitle: title => setExtensionTerminalTitle(title),
@@ -573,8 +574,8 @@ export class ExtensionUiController {
 	/**
 	 * Set hook status text in the footer.
 	 */
-	setHookStatus(key: string, text: string | undefined): void {
-		this.ctx.statusLine.setHookStatus(key, text);
+	setHookStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void {
+		this.ctx.statusLine.setHookStatus(key, text, options);
 		this.ctx.ui.requestRender();
 	}
 

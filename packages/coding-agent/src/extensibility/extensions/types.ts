@@ -61,6 +61,7 @@ import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "../../modes/components/custom-editor";
+import type { ThemeColor } from "../../modes/theme/schema";
 import type { Theme } from "../../modes/theme/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { CompactMode } from "../../session/compact-modes";
@@ -225,6 +226,15 @@ export interface ExtensionWidgetOptions {
 	placement?: WidgetPlacement;
 }
 
+/** Options for `ExtensionUIContext.setStatus()`. */
+export interface ExtensionStatusOptions {
+	/**
+	 * Theme token used to colour this status entry, e.g. `"warning"` or
+	 * `"error"`. Unknown tokens fall back to the default accent colour.
+	 */
+	color?: ThemeColor;
+}
+
 export type ExtensionUiComponent = Component & { dispose?(): void };
 export type ExtensionUiComponentFactory = (tui: TUI, theme: Theme) => ExtensionUiComponent;
 export type ExtensionWidgetContent = string[] | ExtensionUiComponentFactory | undefined;
@@ -281,8 +291,15 @@ export interface ExtensionUIContext {
 	/** Listen to raw terminal input (interactive mode only). Returns an unsubscribe function. */
 	onTerminalInput(handler: TerminalInputHandler): () => void;
 
-	/** Set status text in the footer/status bar. Pass undefined to clear. */
-	setStatus(key: string, text: string | undefined): void;
+	/**
+	 * Set status text in the footer/status bar. Pass undefined to clear.
+	 *
+	 * Status text is sanitized, so embedded ANSI never reaches the terminal.
+	 * Request colour with `options.color` instead: it names a theme token, so the
+	 * status stays legible when the user switches themes. Without it the status
+	 * keeps the default accent colour.
+	 */
+	setStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void;
 
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;

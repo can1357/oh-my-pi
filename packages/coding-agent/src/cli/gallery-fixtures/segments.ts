@@ -93,7 +93,19 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 			];
 		case "status":
 			return [
-				{ label: "multiple extension statuses", context: { hookStatuses: ["Indexer ready", "Tests passing"] } },
+				{
+					label: "multiple extension statuses",
+					context: { hookStatuses: [{ text: "Indexer ready" }, { text: "Tests passing" }] },
+				},
+				{
+					label: "themed extension statuses",
+					context: {
+						hookStatuses: [
+							{ text: "Cache cold", color: "error" },
+							{ text: "Reindexing", color: "warning" },
+						],
+					},
+				},
 			];
 		case "model":
 			return [

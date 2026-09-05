@@ -6,7 +6,7 @@ import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme, type ThemeColor } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -215,6 +215,75 @@ describe("StatusLineComponent effective settings cache", () => {
 		const cleared = stripVTControlCharacters(component.getTopBorder(120).content);
 		expect(cleared).not.toContain("Indexer ready");
 		expect(cleared).not.toContain("Tests passing");
+	});
+
+	it("paints an extension status with the requested theme colour in the status segment", () => {
+		const component = makeComponent({
+			preset: "custom",
+			leftSegments: ["status"],
+			rightSegments: [],
+			separator: "none",
+			showHookStatus: false,
+			sessionAccent: false,
+		});
+
+		component.setHookStatus("cache", "cache cold", { color: "error" });
+		component.setHookStatus("indexer", "indexing");
+
+		const border = component.getTopBorder(120).content;
+		expect(border).toContain(theme.fg("error", "cache cold"));
+		// The uncoloured entry keeps the accent treatment it had before.
+		expect(border).not.toContain(theme.fg("error", "indexing"));
+		expect(stripVTControlCharacters(border)).toContain("indexing");
+	});
+
+	it("repaints when only the status colour changes", () => {
+		const component = makeComponent({
+			preset: "custom",
+			leftSegments: ["status"],
+			rightSegments: [],
+			separator: "none",
+			showHookStatus: false,
+			sessionAccent: false,
+		});
+
+		component.setHookStatus("cache", "5m", { color: "warning" });
+		const warning = component.getTopBorder(120).content;
+		component.setHookStatus("cache", "5m", { color: "error" });
+		const error = component.getTopBorder(120).content;
+
+		expect(warning).toContain(theme.fg("warning", "5m"));
+		expect(error).toContain(theme.fg("error", "5m"));
+		expect(error).not.toEqual(warning);
+	});
+
+	it("colours standalone hook status rows below the editor", () => {
+		const component = makeComponent({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: [],
+			separator: "none",
+			showHookStatus: true,
+		});
+
+		component.setHookStatus("cache", "cache cold", { color: "error" });
+
+		expect(component.render(80)).toEqual([theme.fg("error", "cache cold")]);
+	});
+
+	it("falls back to the plain status when an extension requests an unknown theme token", () => {
+		const component = makeComponent({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: [],
+			separator: "none",
+			showHookStatus: true,
+		});
+
+		// A JS extension carries no compile-time ThemeColor check, so garbage can arrive here.
+		component.setHookStatus("cache", "cache cold", { color: "banana" as ThemeColor });
+
+		expect(component.render(80)).toEqual(["cache cold"]);
 	});
 
 	it("does not mutate shared preset segment options during narrow renders", () => {

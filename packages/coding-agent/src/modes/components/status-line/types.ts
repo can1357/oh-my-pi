@@ -8,6 +8,7 @@ import type {
 import type { AgentSession } from "../../../session/agent-session";
 import type { ActiveRepoContext } from "../../../utils/active-repo-context";
 import type { LoopLimitRuntime } from "../../loop-limit";
+import type { ThemeColor } from "../../theme/schema";
 
 export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
 
@@ -17,6 +18,18 @@ export interface CollabStatus {
 	participantCount: number;
 	/** Guest only: host footer snapshot that overrides locally computed values. */
 	stateOverride?: CollabSessionState | null;
+}
+
+/**
+ * One extension/hook status entry.
+ *
+ * Status text is sanitized before display, which strips any ANSI the extension
+ * might embed, so colour is requested as a theme token instead. That keeps the
+ * status readable under every theme rather than hardcoding terminal colours.
+ */
+export interface HookStatusEntry {
+	text: string;
+	color?: ThemeColor;
 }
 
 export interface StatusLineSegmentOptions {
@@ -76,8 +89,8 @@ export interface SegmentContext {
 	options: StatusLineSegmentOptions;
 	/** Render the model segment's thinking level as a compact leading glyph. */
 	compactThinkingLevel: boolean;
-	/** Key-sorted extension/hook status values. Segment renderers sanitize before display. */
-	hookStatuses?: readonly string[];
+	/** Key-sorted extension/hook status entries. Segment renderers sanitize before display. */
+	hookStatuses?: readonly HookStatusEntry[];
 	planMode: {
 		enabled: boolean;
 		paused: boolean;
