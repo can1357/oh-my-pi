@@ -227,6 +227,7 @@ describe("selector setting side effects", () => {
 			modelRoles: { default: `${previousModel.provider}/${previousModel.id}:high` },
 		});
 		const setModel = vi.fn(async () => ({ switched: true }));
+		const assignmentApplied = Promise.withResolvers<void>();
 		const autoApplied = Promise.withResolvers<void>();
 		const setThinkingLevel = vi.fn((level: ThinkingLevel | typeof AUTO_THINKING, persist: boolean) => {
 			if (level === AUTO_THINKING && persist) {
@@ -268,7 +269,9 @@ describe("selector setting side effects", () => {
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
 			keybindings: { getKeys: () => [], getDisplayString: () => "" },
-			showStatus: vi.fn(),
+			showStatus: vi.fn((message: string) => {
+				if (message.startsWith("Default model:")) assignmentApplied.resolve();
+			}),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
 
@@ -282,6 +285,8 @@ describe("selector setting side effects", () => {
 			hub.handleInput("\n"); // Enter the role rows.
 			hub.handleInput("\n"); // Assign DEFAULT.
 			hub.handleInput("\n"); // Pick the scoped replacement model.
+			await assignmentApplied.promise;
+			await Promise.resolve();
 
 			const levels = [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(nextModel)];
 			const highIndex = levels.indexOf(ThinkingLevel.High);
@@ -550,6 +555,7 @@ describe("selector setting side effects", () => {
 			hub.handleInput("\x1b[B"); // Project scope → global scope.
 			hub.handleInput("\n");
 			await assignmentApplied.promise;
+			await Promise.resolve();
 
 			expect(setModel).not.toHaveBeenCalled();
 			expect(settings.getGlobalModelRole("default")).toBe(globalSelector);
@@ -569,6 +575,7 @@ describe("selector setting side effects", () => {
 			hub.handleInput("\x1b[B"); // Project scope → global scope.
 			hub.handleInput("\n");
 			await capturedRuntimeAssignmentApplied.promise;
+			await Promise.resolve();
 
 			expect(setModel).not.toHaveBeenCalled();
 			expect(settings.getGlobalModelRole("default")).toBe(globalSelector);
@@ -858,6 +865,7 @@ describe("selector setting side effects", () => {
 				hub.handleInput("\n"); // Pick the project model.
 				hub.handleInput("\n"); // Save to project scope.
 				await projectAssignmentApplied.promise;
+				await Promise.resolve();
 				hub.handleInput("\x1b[C"); // Inherit → off.
 				hub.handleInput("\x1b[C"); // Off → auto.
 				hub.handleInput("\n");
@@ -883,6 +891,7 @@ describe("selector setting side effects", () => {
 				hub.handleInput("\x1b[B"); // Project scope → global scope.
 				hub.handleInput("\n"); // Save the hidden global fallback.
 				await globalAssignmentApplied.promise;
+				await Promise.resolve();
 
 				expect(settings.getGlobalModelRole("default")).toBe(projectSelector);
 				expect(settings.getModelRole("default")).toBe(overlaySelector);

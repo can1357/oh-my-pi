@@ -506,6 +506,66 @@ describe("ModelHub", () => {
 			expect(thinking).toContain("xhigh");
 			expect(thinking).not.toContain("max");
 		});
+		test("awaits an async default assignment and does not recommit its preselected thinking", async () => {
+			const model = getBundledModel("openai", "gpt-5.5");
+			if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+			const assignment = Promise.withResolvers<boolean>();
+			const onAssign = vi.fn(() => assignment.promise);
+			const { hub } = createHub({ models: [model], scoped: true, callbacks: { onAssign } });
+
+			hub.handleInput("\n"); // Open role strip.
+			hub.handleInput("\n"); // Assign default.
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(normalize(hub.render(220))).toContain("Applying model");
+
+			hub.handleInput("\n"); // A repeated Enter while persistence is pending is ignored.
+			expect(onAssign).toHaveBeenCalledTimes(1);
+
+			assignment.resolve(true);
+			await assignment.promise;
+			await Promise.resolve();
+			expect(footerLine(hub.render(220))).toContain("inherit");
+
+			hub.handleInput("\n"); // Confirming unchanged thinking only closes the strip.
+			expect(onAssign).toHaveBeenCalledTimes(1);
+		});
+		test("does not open thinking controls when an async assignment is rejected", async () => {
+			const model = getBundledModel("openai", "gpt-5.5");
+			if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+			const assignment = Promise.withResolvers<boolean>();
+			const onAssign = vi.fn(() => assignment.promise);
+			const { hub } = createHub({ models: [model], scoped: true, callbacks: { onAssign } });
+
+			hub.handleInput("\n");
+			hub.handleInput("\n");
+			assignment.resolve(false);
+			await assignment.promise;
+			await Promise.resolve();
+
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(footerLine(hub.render(220))).not.toContain("inherit");
+		});
+		test("hides thinking chips while a changed level is being applied", async () => {
+			const model = getBundledModel("openai", "gpt-5.5");
+			if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+			const thinking = Promise.withResolvers<boolean>();
+			let assignments = 0;
+			const onAssign = vi.fn(() => (++assignments === 1 ? true : thinking.promise));
+			const { hub } = createHub({ models: [model], scoped: true, callbacks: { onAssign } });
+
+			hub.handleInput("\n");
+			hub.handleInput("\n");
+			hub.handleInput("\x1b[C"); // Inherit → off.
+			hub.handleInput("\n");
+
+			expect(normalize(hub.render(220))).toContain("Applying model");
+			expect(footerLine(hub.render(220))).not.toContain("inherit");
+
+			thinking.resolve(true);
+			await thinking.promise;
+			await Promise.resolve();
+			expect(onAssign).toHaveBeenCalledTimes(2);
+		});
 		test("project storage exposes project and global role actions with callback scopes", () => {
 			const model = makeModel("test", "scoped-role-model");
 			const settings = Settings.isolated({ modelRoleStorage: "project" });
@@ -641,9 +701,8 @@ describe("ModelHub", () => {
 
 			expect(onAssign.mock.calls[0]?.[2]).toBe(ThinkingLevel.Low);
 			expect(onAssign.mock.calls[0]?.[4]).toBe("global");
-			hub.handleInput("\n"); // Reapply the preselected global thinking level.
-			expect(onAssign.mock.calls[1]?.[2]).toBe(ThinkingLevel.Low);
-			expect(onAssign.mock.calls[1]?.[4]).toBe("global");
+			hub.handleInput("\n"); // Confirm the already committed thinking level.
+			expect(onAssign).toHaveBeenCalledTimes(1);
 		});
 		test("project-scope alias falls back to the global role when the project role is absent", () => {
 			const configuredModel = getBundledModel("openai", "gpt-5.5");
