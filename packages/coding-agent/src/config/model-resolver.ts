@@ -1197,6 +1197,33 @@ function resolveDefaultInheritedPatterns(
 	return resolved;
 }
 
+/**
+ * Expand any configured role value that itself points at another role
+ * (`modelRoles.fast_worker = "@task"`) into that target role's concrete model
+ * patterns, recursively. Non-alias entries pass through unchanged. `visited`
+ * carries the roles already being resolved so a reference cycle terminates
+ * instead of recursing forever. This runs independently of retry
+ * model-fallback, so a role reference resolves even when `retry.modelFallback`
+ * is disabled (#10853).
+ */
+function expandRoleReferencePatterns(
+	patterns: string[],
+	settings: ModelRoleLookup | undefined,
+	visited: Set<string>,
+): string[] {
+	return patterns.flatMap(pattern => {
+		const { base } = splitThinkingSuffix(
+			pattern,
+			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+			MAX_THINKING_SUFFIX_OPTIONS,
+		);
+		const aliasRole = getModelRoleAlias(base, settings);
+		if (!aliasRole || visited.has(aliasRole)) return [pattern];
+		const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
+		return recursed && recursed.length > 0 ? recursed : [pattern];
+	});
+}
+
 function resolveConfiguredRolePattern(
 	value: string,
 	settings?: ModelRoleLookup,
@@ -1219,7 +1246,7 @@ function resolveConfiguredRolePattern(
 	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
 	const roleDefaults = isModelRole(role) ? rolePriorityDefaults(role) : [];
 	const resolved = configured
-		? normalizeModelPatternList(configured)
+		? expandRoleReferencePatterns(normalizeModelPatternList(configured), settings, visited)
 		: isModelRole(role)
 			? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
 			: roleDefaults;
