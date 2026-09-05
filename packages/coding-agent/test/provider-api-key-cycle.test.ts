@@ -172,5 +172,30 @@ describe("ModelRegistry provider API key cycling", () => {
 			secondStorage.close();
 		}
 	});
-});
 
+	test("cycling refreshes live model headers: an authHeader:true model's Authorization follows the new key", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: ["key-one", "key-two"],
+						authHeader: true,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		expect(registry.find("custom-proxy", "custom-model")?.headers?.Authorization).toBe("Bearer key-one");
+		expect(registry.cycleProviderApiKey("custom-proxy")).toBe(true);
+		expect(registry.find("custom-proxy", "custom-model")?.headers?.Authorization).toBe("Bearer key-two");
+		// The full-snapshot path serves the same refreshed headers.
+		expect(registry.getAll().find(model => model.provider === "custom-proxy")?.headers?.Authorization).toBe(
+			"Bearer key-two",
+		);
+	});
+});

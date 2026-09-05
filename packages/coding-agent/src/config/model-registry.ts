@@ -2439,9 +2439,40 @@ export class ModelRegistry {
 		logger.debug("provider apiKey cycled", { provider, index: resolved.index, total: keyConfig.length });
 		const override = this.#providerOverrides.get(provider);
 		if (override) {
-			this.#providerOverrides.set(provider, { ...override, apiKey: keyConfig[resolved.index] });
+			// Store the resolved key, not the raw config element: the header
+			// merge below must agree exactly with the key the resolver just
+			// activated — re-resolving a `!cmd` element could yield a different
+			// value than the one now serving requests.
+			const nextOverride = { ...override, apiKey: resolved.value };
+			this.#providerOverrides.set(provider, nextOverride);
+			this.#refreshProviderModelHeaders(provider, nextOverride);
 		}
 		return true;
+	}
+
+	/**
+	 * Re-merge live headers for `provider`'s models after a cycle, through the
+	 * same transport-override path composition uses. Only `authHeader: true`
+	 * providers derive headers from the apiKey — anything else is untouched.
+	 * Overlays are rebuilt so a later lazy lookup recomposes fresh headers;
+	 * composed snapshots are re-merged in place and the per-provider lookup
+	 * cache is dropped.
+	 */
+	#refreshProviderModelHeaders(provider: string, override: ProviderOverride): void {
+		if (override.authHeader !== true) return;
+		for (const overlay of this.#customModelOverlays) {
+			if (overlay.provider !== provider) continue;
+			overlay.headers = mergeAuthHeaderSources([overlay.headers], override.authHeader, override.apiKey);
+		}
+		if (this.#hasFullSnapshot) {
+			this.#unprojectedModels = this.#applyLlamaCppModelFixups(
+				this.#unprojectedModels.map(model =>
+					model.provider === provider ? this.#applyProviderTransportOverrideToModel(model, override) : model,
+				),
+			);
+			this.#models = this.#withCatalogMetrics(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
+		}
+		this.#invalidateProviderModelCache(provider);
 	}
 
 	/**
