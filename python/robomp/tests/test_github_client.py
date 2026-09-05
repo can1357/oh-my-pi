@@ -434,9 +434,10 @@ def test_close_issue_propagates_error() -> None:
 
 def test_search_issues_forgejo_uses_scoped_list_issues_endpoint() -> None:
     """The Forgejo branch uses the repo-scoped, PR-inclusive `ListIssues` GET
-    (`/repos/{owner}/{repo}/issues`) with a bare query and omits the `type` param
-    so both issues AND pull requests come back, parsing the bare JSON array
-    through `_summary_from_item`."""
+    (`/repos/{owner}/{repo}/issues`) with the first keyword as `q` (the API is
+    only reliable for single-word full-text) and omits the `type` param so both
+    issues AND pull requests come back, parsing the bare JSON array through
+    `_summary_from_item`. Every page requests the API-max `limit=50`."""
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -467,7 +468,8 @@ def test_search_issues_forgejo_uses_scoped_list_issues_endpoint() -> None:
     assert captured["params"] == {
         "q": "parser",
         "state": "all",
-        "limit": "10",
+        # API max per page; the branch fetches a full page for headroom.
+        "limit": "50",
         # no `type` -> returns both issues AND pull requests
     }
     assert len(results) == 1
@@ -509,12 +511,117 @@ def test_search_issues_forgejo_maps_is_pr_to_type_pulls() -> None:
 
     assert captured["path"] == "/repos/my_org/widget/issues"
     assert captured["params"]["type"] == "pulls"
-    assert captured["params"]["q"] == "flaky is:pr"
+    # Only the first keyword goes to the API; qualifiers stay client-side.
+    assert captured["params"]["q"] == "flaky"
     assert captured["params"]["state"] == "all"
-    assert captured["params"]["limit"] == "10"
+    assert captured["params"]["limit"] == "50"
     assert len(results) == 1
     assert results[0].number == 12
     assert results[0].is_pull_request is True
+
+
+def _forgejo_issue(number: int, *, title: str = "", body: str = "", **extra) -> dict:
+    item = {
+        "number": number,
+        "title": title,
+        "body": body,
+        "state": "open",
+        "user": {"login": "bob"},
+        "labels": [],
+        "comments": 0,
+        "updated_at": "2026-02-01T00:00:00Z",
+        "created_at": "2026-01-01T00:00:00Z",
+        "html_url": f"https://example/{number}",
+    }
+    item.update(extra)
+    return item
+
+
+def test_search_issues_forgejo_and_filters_multi_word() -> None:
+    """Only items whose title AND body together contain ALL keywords survive
+    the client-side AND filter; the API `q` carries just the first keyword."""
+    items = [
+        _forgejo_issue(1, title="signed update broke"),  # both keywords in title
+        _forgejo_issue(2, title="signed release notes"),  # missing "update"
+        _forgejo_issue(3, title="update notes", body="signed off"),  # keywords split across fields
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=items)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    results = _run_async(client.search_issues("my_org/widget", "signed update"))
+    assert [r.number for r in results] == [1, 3]
+
+
+def test_search_issues_forgejo_zero_keyword_query_sends_no_q() -> None:
+    """A pure-qualifier query has no bare keywords, so `q` is omitted entirely
+    and recent items of the requested type come back unfiltered."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["params"] = dict(request.url.params)
+        return httpx.Response(200, json=[_forgejo_issue(7, title="anything")])
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    results = _run_async(client.search_issues("my_org/widget", "is:pr"))
+    assert "q" not in captured["params"]
+    assert captured["params"]["type"] == "pulls"
+    assert captured["params"]["state"] == "all"
+    assert captured["params"]["limit"] == "50"
+    assert [r.number for r in results] == [7]
+
+
+def test_search_issues_forgejo_fetch_headroom_and_truncation() -> None:
+    """Page 2 is fetched only when page 1 returned the API max (50) AND the
+    caller's limit is large enough to need headroom (limit > 25); matches
+    beyond `limit` are truncated; a non-full first page stops at one request."""
+    full_page = [_forgejo_issue(1000 + i, title="crash everywhere") for i in range(50)]
+    page_two = [_forgejo_issue(2000 + i, title="crash again") for i in range(10)]
+
+    def run(page1: list, page2: list, limit: int):
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            page = request.url.params.get("page", "1")
+            calls.append(page)
+            return httpx.Response(200, json=page1 if page == "1" else page2)
+
+        client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+        results = _run_async(client.search_issues("my_org/widget", "crash", limit=limit))
+        return calls, results
+
+    # Full first page + small limit -> no headroom fetch, truncated to limit.
+    calls, results = run(full_page, page_two, limit=10)
+    assert calls == ["1"]
+    assert len(results) == 10
+
+    # Full first page + large limit -> second page fetched, truncated to limit.
+    calls, results = run(full_page, page_two, limit=30)
+    assert calls == ["1", "2"]
+    assert len(results) == 30
+
+    # Non-full first page -> exactly one request even with a large limit.
+    calls, results = run(full_page[:5], page_two, limit=30)
+    assert calls == ["1"]
+    assert len(results) == 5
+
+
+def test_search_issues_forgejo_keyword_match_is_case_insensitive() -> None:
+    """An uppercase keyword matches lowercase title/body text."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                _forgejo_issue(1, title="Crash Report", body="the app crashes"),
+                _forgejo_issue(2, title="unrelated", body="nothing here"),
+            ],
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    results = _run_async(client.search_issues("my_org/widget", "CRASH"))
+    assert [r.number for r in results] == [1]
 
 
 def test_search_issues_github_uses_search_issues_with_items() -> None:
