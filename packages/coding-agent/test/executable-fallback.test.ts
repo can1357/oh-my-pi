@@ -7,9 +7,15 @@ import { resolveCliEntryCmd, resolveExecutablePath, resolveWorkerSpawnCmd } from
 describe("executable fallback on unlinked binary", () => {
 	const originalExecPathDesc = Object.getOwnPropertyDescriptor(process, "execPath");
 	const originalArgv0Desc = Object.getOwnPropertyDescriptor(process, "argv0");
+	const originalPath = process.env.PATH;
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		if (originalPath === undefined) {
+			delete process.env.PATH;
+		} else {
+			process.env.PATH = originalPath;
+		}
 		if (originalExecPathDesc) {
 			Object.defineProperty(process, "execPath", originalExecPathDesc);
 		}
@@ -27,12 +33,20 @@ describe("executable fallback on unlinked binary", () => {
 		});
 	}
 
-	it("returns process.execPath when the file exists", () => {
+	function mockFileStat(isFile: boolean, mode = 0o755): fs.Stats {
+		return {
+			isFile: () => isFile,
+			mode,
+		} as unknown as fs.Stats;
+	}
+
+	it("returns process.execPath when the file exists and is executable", () => {
 		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		vi.spyOn(fs, "statSync").mockReturnValue(mockFileStat(true, 0o755));
 		expect(resolveExecutablePath()).toBe(process.execPath);
 	});
 
-	it("prefers original absolute launcher path over generic PATH match", () => {
+	it("prefers original absolute launcher path over generic PATH match when executable", () => {
 		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
 		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
 		const originalLauncher = "/opt/homebrew/bin/omp";
@@ -45,15 +59,37 @@ describe("executable fallback on unlinked binary", () => {
 			if (cmd === "omp") return otherOmpInPath;
 			return null;
 		});
-		vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
-			if (p === missingPath) return false;
-			if (p === originalLauncher) return true;
-			if (p === otherOmpInPath) return true;
-			return false;
+		(vi.spyOn(fs, "statSync") as any).mockImplementation((p: fs.PathLike) => {
+			if (p === originalLauncher || p === otherOmpInPath) return mockFileStat(true, 0o755);
+			throw new Error("ENOENT");
 		});
 
 		const resolved = resolveExecutablePath();
 		expect(resolved).toBe(originalLauncher);
+	});
+
+	it("falls back to PATH when original absolute launcher is a directory or not executable", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
+		const originalLauncher = "/opt/homebrew/bin/omp";
+		const otherOmpInPath = "/usr/local/bin/omp";
+
+		setProcessProp("execPath", missingPath);
+		setProcessProp("argv0", originalLauncher);
+
+		vi.spyOn(Bun, "which").mockImplementation((cmd: string) => {
+			if (cmd === "omp") return otherOmpInPath;
+			return null;
+		});
+		(vi.spyOn(fs, "statSync") as any).mockImplementation((p: fs.PathLike) => {
+			// Launcher exists but is a directory or has no execute bit (mode 0644)
+			if (p === originalLauncher) return mockFileStat(false, 0o644);
+			if (p === otherOmpInPath) return mockFileStat(true, 0o755);
+			throw new Error("ENOENT");
+		});
+
+		const resolved = resolveExecutablePath();
+		expect(resolved).toBe(otherOmpInPath);
 	});
 
 	it("does not resolve relative argv0 against the working tree", () => {
@@ -63,18 +99,100 @@ describe("executable fallback on unlinked binary", () => {
 		setProcessProp("argv0", "./omp");
 
 		const cwdRogueBinary = path.resolve("./omp");
-		// Simulate Bun.which's native behavior of resolving relative paths against cwd:
 		vi.spyOn(Bun, "which").mockImplementation((cmd: string) => {
 			if (cmd === "./omp") return cwdRogueBinary;
 			return null;
 		});
-		vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
-			if (p === cwdRogueBinary) return true; // untrusted file exists in repo cwd
-			return false;
+		(vi.spyOn(fs, "statSync") as any).mockImplementation((p: fs.PathLike) => {
+			if (p === cwdRogueBinary) return mockFileStat(true, 0o755);
+			throw new Error("ENOENT");
 		});
 
 		// Relative argv0 must not resolve against cwd; falls back to missingPath gracefully
 		const resolved = resolveExecutablePath();
+		expect(resolved).toBe(missingPath);
+	});
+
+	it("does not treat Windows drive-relative paths (e.g. C:omp) as bare commands", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		const missingPath = "C:\\Tools\\omp.exe";
+		setProcessProp("execPath", missingPath);
+		setProcessProp("argv0", "C:omp");
+
+		let whichCalledWith: string | undefined;
+		vi.spyOn(Bun, "which").mockImplementation((cmd: string) => {
+			whichCalledWith = cmd;
+			return null;
+		});
+		(vi.spyOn(fs, "statSync") as any).mockImplementation(() => {
+			throw new Error("ENOENT");
+		});
+
+		resolveExecutablePath();
+
+		// Should not pass "C:omp" to which as a bare name; only "omp" generic fallback is queried
+		expect(whichCalledWith).toBe("omp");
+	});
+
+	it("rejects relative PATH entries and empty components when searching PATH fallbacks", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
+		setProcessProp("execPath", missingPath);
+		setProcessProp("argv0", "omp");
+
+		// Set PATH with relative components: '.', './bin', and empty slot '::'
+		process.env.PATH = [".", "./bin", "", "/usr/bin"].join(path.delimiter);
+
+		let inspectedSearchPath: string | undefined;
+		vi.spyOn(Bun, "which").mockImplementation((cmd: string, options?: { PATH?: string }) => {
+			inspectedSearchPath = options?.PATH;
+			return null;
+		});
+		(vi.spyOn(fs, "statSync") as any).mockImplementation(() => {
+			throw new Error("ENOENT");
+		});
+
+		resolveExecutablePath();
+
+		// PATH passed to Bun.which must only contain absolute entries (/usr/bin)
+		expect(inspectedSearchPath).toBe("/usr/bin");
+	});
+
+	it("does not call Bun.which when PATH contains only relative entries or is empty", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
+		setProcessProp("execPath", missingPath);
+		setProcessProp("argv0", "omp");
+
+		// PATH containing only relative entries
+		process.env.PATH = [".", "./bin", "node_modules/.bin"].join(path.delimiter);
+
+		const whichSpy = vi.spyOn(Bun, "which");
+		(vi.spyOn(fs, "statSync") as any).mockImplementation(() => {
+			throw new Error("ENOENT");
+		});
+
+		const resolved = resolveExecutablePath();
+		expect(whichSpy).not.toHaveBeenCalled();
+		expect(resolved).toBe(missingPath);
+	});
+
+	it("rejects non-absolute results returned from Bun.which", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
+		setProcessProp("execPath", missingPath);
+		setProcessProp("argv0", "omp");
+
+		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue("./relative/omp" as string);
+		(vi.spyOn(fs, "statSync") as any).mockImplementation((p: fs.PathLike) => {
+			// missingPath does NOT exist, but the relative candidate exists:
+			if (p === "./relative/omp") return mockFileStat(true, 0o755);
+			throw new Error("ENOENT");
+		});
+
+		// Fallback must be engaged, Bun.which called, and the non-absolute result rejected
+		const resolved = resolveExecutablePath();
+		expect(whichSpy).toHaveBeenCalled();
 		expect(resolved).toBe(missingPath);
 	});
 
@@ -89,10 +207,9 @@ describe("executable fallback on unlinked binary", () => {
 			if (cmd === "omp") return mockUpgradedPath;
 			return null;
 		});
-		vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
-			if (p === missingPath) return false;
-			if (p === mockUpgradedPath) return true;
-			return false;
+		(vi.spyOn(fs, "statSync") as any).mockImplementation((p: fs.PathLike) => {
+			if (p === mockUpgradedPath) return mockFileStat(true, 0o755);
+			throw new Error("ENOENT");
 		});
 
 		const resolved = resolveExecutablePath();
@@ -103,24 +220,19 @@ describe("executable fallback on unlinked binary", () => {
 		});
 	});
 
-	it("falls back to process.argv0 when Bun.which('omp') is unavailable", () => {
-		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
-		const missingPath = "/custom/install/bin/omp";
+	it("does not perform fallback lookup when isCompiledBinary is false", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(false);
+		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
 		setProcessProp("execPath", missingPath);
-		setProcessProp("argv0", "my-omp");
 
-		const mockCustomPath = "/usr/local/bin/my-omp";
-		vi.spyOn(Bun, "which").mockImplementation((cmd: string) => {
-			if (cmd === "my-omp") return mockCustomPath;
-			return null;
-		});
-		vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
-			if (p === missingPath) return false;
-			if (p === mockCustomPath) return true;
-			return false;
+		const whichSpy = vi.spyOn(Bun, "which");
+		(vi.spyOn(fs, "statSync") as any).mockImplementation(() => {
+			throw new Error("ENOENT");
 		});
 
-		expect(resolveExecutablePath()).toBe(mockCustomPath);
+		const resolved = resolveExecutablePath();
+		expect(whichSpy).not.toHaveBeenCalled();
+		expect(resolved).toBe(missingPath);
 	});
 
 	it("returns original execPath gracefully if no fallback candidate exists", () => {
@@ -128,7 +240,9 @@ describe("executable fallback on unlinked binary", () => {
 		const missingPath = "/nonexistent/omp";
 		setProcessProp("execPath", missingPath);
 		vi.spyOn(Bun, "which").mockReturnValue(null);
-		vi.spyOn(fs, "existsSync").mockReturnValue(false);
+		(vi.spyOn(fs, "statSync") as any).mockImplementation(() => {
+			throw new Error("ENOENT");
+		});
 
 		expect(resolveExecutablePath()).toBe(missingPath);
 	});
