@@ -7,6 +7,7 @@ import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { createApiKeyResolver } from "@oh-my-pi/pi-coding-agent/config/api-key-resolver";
 
 /** Minimal successful chat-completions SSE stream for the openai-completions provider. */
 function okChatCompletionStream(): Response {
@@ -154,5 +155,34 @@ describe("provider API key auto-rotation on auth failure", () => {
 		expect(seen[0]).toBe("Bearer exhausted-key");
 		expect(seen.at(-1)).toBe("Bearer fresh-key");
 		expect(seen.slice(0, -1).every(key => key === "Bearer exhausted-key")).toBe(true);
+	});
+
+	test("concurrent refresh-path failures serialize per provider: two interleaved recoveries advance twice and re-resolve distinct siblings", async () => {
+		const keys = ["key-one", "key-two", "key-three"];
+		let cursor = 0;
+		const advances: number[] = [];
+		const fakeRegistry = {
+			getApiKeyForProvider: async (_provider: string): Promise<string | undefined> => {
+				// Suspend one microtask before reading: both resolvers start
+				// synchronously (so both cycles land first), then each reads.
+				// A registry shell that resolves asynchronously (the structural
+				// ApiKeyResolverRegistry permits it) exposes the interleave the
+				// per-provider lock must close. No wall-clock involved.
+				await Promise.resolve();
+				return keys[cursor];
+			},
+			authStorage: { rotateSessionCredential: async () => false },
+			cycleProviderApiKey: (_provider: string): boolean => {
+				cursor = (cursor + 1) % keys.length;
+				advances.push(cursor);
+				return true;
+			},
+		};
+		const first = createApiKeyResolver(fakeRegistry, "custom-proxy");
+		const second = createApiKeyResolver(fakeRegistry, "custom-proxy");
+		const failure = { lastChance: false as const, error: new Error("socket hang up"), signal: undefined };
+		const [keyA, keyB] = await Promise.all([first(failure), second(failure)]);
+		expect(advances).toEqual([1, 2]);
+		expect([keyA, keyB].sort()).toEqual(["key-three", "key-two"]);
 	});
 });
