@@ -355,6 +355,23 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 	return content.length > 0 ? content : [{ type: "text", text: "" }];
 }
 
+/**
+ * Normalize `content: null` on message input items to `[]` in place.
+ *
+ * Codex (and other OpenAI clients) emit `content: null` on empty message items
+ * during multi-turn/tool turns. OpenAI tolerates it; coercing to `[]` before
+ * validation lets the item take the same path as an explicit empty content
+ * array — for both request validation and the native history replay clone —
+ * instead of 400ing. Only message items carry `content`; other input items
+ * (function_call_output, custom_tool_call_output) carry `output`. See #10956.
+ */
+function coerceNullMessageContent(body: unknown): void {
+	if (!isObj(body) || !Array.isArray(body.input)) return;
+	for (const item of body.input) {
+		if (isObj(item) && item.content === null) item.content = [];
+	}
+}
+
 // ─── parseRequest ───────────────────────────────────────────────────────────
 
 export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
@@ -365,6 +382,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	// `resolvePromptCacheKey` call further down.
 
 	rejectUnsupportedExplicitPromptCacheFields(body);
+	coerceNullMessageContent(body);
 	const data = openaiResponsesRequestSchema(body);
 	if (data instanceof type.errors) {
 		throw new AIError.ValidationError(`openai-responses: ${data.summary}`);
