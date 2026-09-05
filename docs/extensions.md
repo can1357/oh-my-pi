@@ -215,6 +215,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `shutdown()`
 - `getSystemPrompt()`
 - `memory` (optional structured memory runtime — status/search/save across the configured backend)
+- `agentIdentity` — identity of the agent this handler runs in, fixed at session creation: `kind` (`"main" | "sub"`, mirroring the session's pre-existing classification verbatim), `depth` (`0` = top-level; derives from `taskDepth`, not the parent chain — a `/tan` fork is a special tangential fork agent, `kind: "sub"` with `depth: 0`; ask "am I a spawned worker?" via `kind === "sub"`, not `depth > 0`), `agentId` (registry id, `"Main"` top-level), `displayName`, optional `parentId` (parent's registry id — linkage reported verbatim, not a spawn guarantee: a `parentAgentId`-only SDK caller is `kind: "main"`), `parentChain` (nearest-first ancestors, excluding `"Main"` and the agent's own id; `[]` for the top-level session and every child of `"Main"` — `parentId` is still `"Main"` there). One frozen snapshot per session; copy rather than mutate. May be `undefined` on hosts that construct a runner without identity (provider-only listings, legacy embedders) — fail open rather than assume `"main"`.
 - `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
 
 ### Background work (`ctx.setInterval` / `ctx.setTimeout`)
