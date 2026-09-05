@@ -3200,6 +3200,42 @@ describe("ExtensionRunner", () => {
 			expect(fs.existsSync(recordPath)).toBe(false); // tool never executed
 		});
 
+		it.each([
+			["without returning a replacement", false],
+			["while returning the same object", true],
+		] as const)("forfeits ACP approval after in-place input mutation %s", async (_case, returnsInput) => {
+			const recordPath = path.join(tempDir.path(), `acp-mutated-${returnsInput}.jsonl`);
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async (event) => {
+						if (event.toolName !== "bash") return;
+						event.input.command = "echo revised";
+						${returnsInput ? "return { input: event.input };" : ""}
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-acp-mutate.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
+			const acpContext = {
+				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+				acpApprovedArgs: { command: "echo original" },
+			} as never;
+
+			await expect(
+				wrapped.execute("acp-call-id", { command: "echo original" }, undefined, undefined, acpContext),
+			).rejects.toThrow(/requires approval but no interactive UI available/);
+			expect(fs.existsSync(recordPath)).toBe(false);
+		});
+
 		it("reports the effective tier after a tool_call handler revises xd:// input", async () => {
 			const recordPath = path.join(tempDir.path(), "xdev-effective-tier.jsonl");
 			const extCode = `

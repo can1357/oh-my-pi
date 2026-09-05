@@ -8,11 +8,14 @@ declare module "@oh-my-pi/pi-agent-core" {
 		hasUI?: boolean;
 		toolNames?: string[];
 		toolCall?: ToolCallContext;
-		/** Set on `xd://` device dispatches: the write tool's outer approval gate
-		 *  already resolved this call at the mounted tool's tier, so the inner
-		 *  wrapper must not re-prompt for the same action (explicit per-tool
-		 *  policies and overrides still apply). */
+		/** Set after the write tool's outer gate approves an `xd://` device call
+		 *  at the mounted tool's tier. The inner wrapper skips its tier-only
+		 *  prompt, while explicit policies and overrides still apply. */
 		xdevApproved?: boolean;
+		/** Immutable snapshot of the arguments an ACP client approved. The inner
+		 *  wrapper skips tier and explicit prompts only while the effective input
+		 *  remains equal; deny policies and provider safety checks still apply. */
+		acpApprovedArgs?: unknown;
 		/** Reports the approval tier resolved after an extension rewrites an
 		 *  xd:// device call, so dispatch metadata describes the input that ran. */
 		xdevTierResolved?(tier: "read" | "write" | "exec"): void;
