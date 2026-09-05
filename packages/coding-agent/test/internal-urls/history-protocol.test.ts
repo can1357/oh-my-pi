@@ -14,14 +14,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/history-protocol";
+import {
+	formatCurrentBranchFullHistory,
+	HistoryProtocolHandler,
+} from "@oh-my-pi/pi-coding-agent/internal-urls/history-protocol";
 import {
 	registerArtifactsDir,
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { CURRENT_SESSION_VERSION, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -39,7 +42,11 @@ function fakeLiveSession(messages: unknown[]): AgentSession {
 	return { messages } as unknown as AgentSession;
 }
 
-function makeToolSession(cwd: string, sessionFile: string = path.join(cwd, "session.jsonl")): ToolSession {
+function makeToolSession(
+	cwd: string,
+	sessionFile: string = path.join(cwd, "session.jsonl"),
+	overrides: Partial<ToolSession> = {},
+): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
@@ -51,6 +58,7 @@ function makeToolSession(cwd: string, sessionFile: string = path.join(cwd, "sess
 			path: path.join(cwd, "artifacts", `history-read.${toolType}.log`),
 		}),
 		settings: Settings.isolated(),
+		...overrides,
 	};
 }
 
@@ -88,6 +96,57 @@ function sessionFixtureJsonl(): string {
 		},
 	};
 	return `${JSON.stringify(header)}\n${JSON.stringify(userEntry)}\n${JSON.stringify(assistantEntry)}\n`;
+}
+
+function currentBranchFixture(): SessionEntry[] {
+	const timestamp = new Date().toISOString();
+	return [
+		{
+			type: "message",
+			id: "before-first-compaction",
+			parentId: null,
+			timestamp,
+			message: { role: "user", content: "oldest raw request survives", timestamp: 1 },
+		},
+		{
+			type: "compaction",
+			id: "first-compaction",
+			parentId: "before-first-compaction",
+			timestamp,
+			summary: "first compacted window",
+			firstKeptEntryId: "between-compactions",
+			tokensBefore: 100,
+		},
+		{
+			type: "message",
+			id: "between-compactions",
+			parentId: "first-compaction",
+			timestamp,
+			message: { role: "user", content: "middle raw request survives", timestamp: 2 },
+		},
+		{
+			type: "compaction",
+			id: "second-compaction",
+			parentId: "between-compactions",
+			timestamp,
+			summary: "second compacted window",
+			firstKeptEntryId: "latest-entry",
+			tokensBefore: 200,
+		},
+		{
+			type: "reset_boundary",
+			id: "window-reset",
+			parentId: "second-compaction",
+			timestamp,
+		},
+		{
+			type: "message",
+			id: "latest-entry",
+			parentId: "window-reset",
+			timestamp,
+			message: { role: "user", content: "latest raw request survives", timestamp: 3 },
+		},
+	] as unknown as SessionEntry[];
 }
 
 describe("history:// protocol", () => {
@@ -134,6 +193,131 @@ describe("history:// protocol", () => {
 		expect(resource.content).toContain("## user");
 		expect(resource.content).toContain("hello from live");
 		expect(resource.notes).toContain("Source: live session");
+	});
+
+	it("preserves the existing bare history://current named-agent route", async () => {
+		AgentRegistry.global().register({
+			id: "current",
+			displayName: "named current",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "named current transcript", timestamp: 1 }]),
+			status: "idle",
+		});
+
+		const resource = await InternalUrlRouter.instance().resolve("history://current");
+
+		expect(resource.content).toContain("named current transcript");
+	});
+
+	it("renders full execution output and metadata in current-branch history", () => {
+		const content = formatCurrentBranchFullHistory([
+			{
+				type: "message",
+				id: "bash-entry",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				message: {
+					role: "bashExecution",
+					command: "git status",
+					output: "working tree clean",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 1,
+				},
+			},
+			{
+				type: "message",
+				id: "python-entry",
+				parentId: "bash-entry",
+				timestamp: new Date().toISOString(),
+				message: {
+					role: "pythonExecution",
+					code: "print('ok')",
+					output: "ok",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 2,
+				},
+			},
+		] as unknown as SessionEntry[]);
+
+		expect(content).toContain("working tree clean");
+		expect(content).toContain('"truncated": false');
+		expect(content).toContain("print('ok')");
+		expect(content).toContain("Output:");
+	});
+
+	it("renders the caller-bound branch's full pre-compaction transcript without a disk source", async () => {
+		const branch = currentBranchFixture();
+		const siblingOnly = "sibling branch text must not leak";
+		const resource = await InternalUrlRouter.instance().resolve("history://current/full", {
+			experimentalContextManagement: true,
+			getSessionBranch: () => branch,
+		});
+
+		expect(resource.content).toContain("oldest raw request survives");
+		expect(resource.content).toContain("middle raw request survives");
+		expect(resource.content).toContain("latest raw request survives");
+		expect(resource.content).toContain("Entry first-compaction · compaction");
+		expect(resource.content).toContain("Entry window-reset · reset_boundary");
+		expect(resource.content).not.toContain(siblingOnly);
+		expect(resource.sourcePath).toBeUndefined();
+	});
+
+	it("rejects current/full when disabled or without a caller-bound branch", async () => {
+		await expect(
+			InternalUrlRouter.instance().resolve("history://current/full", {
+				experimentalContextManagement: false,
+				getSessionBranch: currentBranchFixture,
+			}),
+		).rejects.toThrow("experimentalContextManagement");
+		await expect(
+			InternalUrlRouter.instance().resolve("history://current/full", {
+				experimentalContextManagement: true,
+			}),
+		).rejects.toThrow("bound live session branch");
+	});
+
+	it("rejects malformed current history routes without consulting agent history", async () => {
+		await expect(
+			InternalUrlRouter.instance().resolve("history://current/full?unexpected=true", {
+				experimentalContextManagement: true,
+				getSessionBranch: currentBranchFixture,
+			}),
+		).rejects.toThrow("Invalid history://current route");
+		await expect(
+			InternalUrlRouter.instance().resolve("history://current/extra", {
+				experimentalContextManagement: true,
+				getSessionBranch: currentBranchFixture,
+			}),
+		).rejects.toThrow("Invalid history://current route");
+	});
+
+	it("read applies selectors to caller-bound full history", async () => {
+		const settings = Settings.isolated();
+		settings.set("compaction.experimentalContextManagement", true);
+		const branch = currentBranchFixture();
+		const manager = {
+			getBranch: () => branch,
+			getSessionId: () => "current-session",
+		} as unknown as NonNullable<ToolSession["sessionManager"]>;
+		const tool = new ReadTool(
+			makeToolSession(os.tmpdir(), undefined, {
+				settings,
+				getSessionId: () => "current-session",
+				sessionManager: manager,
+			}),
+		);
+
+		const result = await tool.execute("current-history-range", { path: "history://current/full:1-1" });
+		const output = result.content.find(content => content.type === "text");
+
+		expect(output?.type).toBe("text");
+		if (output?.type !== "text") throw new Error("Expected text output");
+		expect(output.text).toContain("# Current branch — full history");
+		expect(output.text).not.toContain("oldest raw request survives");
 	});
 
 	it("read applies line selectors to history transcripts", async () => {

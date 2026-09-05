@@ -379,6 +379,12 @@ import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
+	context_notes: true,
+	new_context: true,
+	read: true,
+	grep: true,
+};
 
 /** Internal marker for hook messages queued through the agent loop */
 // ============================================================================
@@ -592,6 +598,8 @@ export class AgentSession {
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
+	/** A single model-only notebook reminder queued for the current prompt generation. */
+	#experimentalContextNotesReminder: { prompt: string; generation: number } | undefined;
 	#planModeState: PlanModeState | undefined;
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
@@ -1473,6 +1481,19 @@ export class AgentSession {
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
 			thunks.push(() => this.#todo.takeMidRunNudge());
+			const contextNotesReminder = this.#experimentalContextNotesReminder;
+			if (contextNotesReminder) {
+				this.#experimentalContextNotesReminder = undefined;
+				if (contextNotesReminder.generation === this.#promptGeneration) {
+					thunks.push(() => ({
+						role: "custom",
+						customType: "experimental-context-notes-reminder",
+						content: contextNotesReminder.prompt,
+						display: false,
+						timestamp: Date.now(),
+					}));
+				}
+			}
 			return thunks;
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
@@ -1739,6 +1760,31 @@ export class AgentSession {
 			goalModeState: () => this.#goalModeState,
 			planReferencePath: () => this.#planReferencePath,
 			nonMessageTokenSource: () => this,
+			hasExperimentalContextRolloverTools: () => {
+				const enabled = this.#tools.getEnabledToolNames();
+				for (const name in EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS) {
+					if (!enabled.includes(name) || !this.#tools.getToolByName(name)) return false;
+				}
+				return true;
+			},
+			takeExperimentalContextRolloverRequest: context => {
+				for (const toolResult of context?.toolResults ?? []) {
+					if (toolResult.isError) continue;
+					const dispatch = writeDeviceDispatch(toolResult.toolName, toolResult);
+					const details =
+						toolResult.toolName === "new_context"
+							? toolResult.details
+							: dispatch?.mode === "execute" && dispatch.tool === "new_context"
+								? dispatch.inner
+								: undefined;
+					if (isRecord(details) && details.requested === true) return true;
+				}
+				return false;
+			},
+			queueExperimentalContextNotesReminder: prompt => {
+				if (this.#isDisposed) return;
+				this.#experimentalContextNotesReminder = { prompt, generation: this.#promptGeneration };
+			},
 			memoryBackendSession: () => this,
 			emitSessionEvent: (event, options) => this.#emitSessionEvent(event, options),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
@@ -4730,6 +4776,7 @@ export class AgentSession {
 		// calls, and error state. agent.reset() keeps the model and system prompt.
 		this.agent.reset();
 		this.#pendingNextTurnMessages = [];
+		this.#experimentalContextNotesReminder = undefined;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		// Reset the session_stop continuation chain: the queued continuation
 		// message is gone with the conversation, but the counters would otherwise

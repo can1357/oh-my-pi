@@ -2539,6 +2539,17 @@ export const SETTINGS_SCHEMA = {
 			description: "Automatically compact context when it gets too large",
 		},
 	},
+	"compaction.experimentalContextManagement": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Notes-backed context windows (experimental)",
+			description:
+				"Keep persistent notes and searchable raw history across context windows. Restart to update available tools.",
+		},
+	},
 
 	"compaction.midTurnEnabled": {
 		type: "boolean",
@@ -6149,6 +6160,7 @@ export type Personality = SettingValue<"personality">;
 
 export interface CompactionSettings {
 	enabled: boolean;
+	experimentalContextManagement?: boolean;
 	methodOrder: CompactionMethod[];
 	thresholdPercent: number;
 	thresholdTokens: number;

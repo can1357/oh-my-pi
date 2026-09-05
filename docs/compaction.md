@@ -29,15 +29,15 @@ Both are persisted as session entries and converted back into user-context messa
 Compaction and branch summaries are first-class session entries, not plain assistant/user messages.
 
 - `CompactionEntry`
-  - `type: "compaction"`
-  - `summary`, optional `shortSummary`
-  - `firstKeptEntryId` (compaction boundary)
-  - `tokensBefore`
-  - optional `details`, `preserveData`, `fromExtension`
+   - `type: "compaction"`
+   - `summary`, optional `shortSummary`
+   - `firstKeptEntryId` (compaction boundary)
+   - `tokensBefore`
+   - optional `details`, `preserveData`, `fromExtension`
 - `BranchSummaryEntry`
-  - `type: "branch_summary"`
-  - `fromId`, `summary`
-  - optional `details`, `fromExtension`
+   - `type: "branch_summary"`
+   - `fromId`, `summary`
+   - optional `details`, `fromExtension`
 
 When context is rebuilt (`buildSessionContext`):
 
@@ -106,32 +106,81 @@ What the LLM sees:
 The automatic paths are intentionally different:
 
 - **Overflow recovery**
-  - Trigger: current-model assistant error is detected as context overflow and the error is not older than the latest compaction.
-  - The failing assistant error message is removed from active agent state before retry.
-  - Context promotion is tried first; if a configured larger model is available, the agent switches model and retries without compacting.
-  - If promotion is unavailable and compaction is enabled, automatic maintenance walks `compaction.methodOrder` with `reason: "overflow"` and `willRetry: true`; handoff is skipped because its request would reuse the overflowing input.
-  - On success, `agent.continue()` is scheduled to retry the turn.
+   - Trigger: current-model assistant error is detected as context overflow and the error is not older than the latest compaction.
+   - The failing assistant error message is removed from active agent state before retry.
+   - Context promotion is tried first; if a configured larger model is available, the agent switches model and retries without compacting.
+   - If promotion is unavailable and compaction is enabled, automatic maintenance walks `compaction.methodOrder` with `reason: "overflow"` and `willRetry: true`; handoff is skipped because its request would reuse the overflowing input.
+   - On success, `agent.continue()` is scheduled to retry the turn.
 
 - **Incomplete-output recovery**
-  - Trigger: same-model assistant message ends with `stopReason === "length"` and the message is not older than the latest compaction.
-  - The incomplete assistant message is removed from active agent state before recovery.
-  - Context promotion is tried first.
-  - If promotion is unavailable and compaction is enabled, auto maintenance walks `compaction.methodOrder` with `reason: "incomplete"` and `willRetry: true`.
-  - Unlike overflow, a reachable `handoff` preference may run because the input context is still usable.
-  - On soft-compaction success, `agent.continue()` is scheduled to retry the turn.
+   - Trigger: same-model assistant message ends with `stopReason === "length"` and the message is not older than the latest compaction.
+   - The incomplete assistant message is removed from active agent state before recovery.
+   - Context promotion is tried first.
+   - If promotion is unavailable and compaction is enabled, auto maintenance walks `compaction.methodOrder` with `reason: "incomplete"` and `willRetry: true`.
+   - Unlike overflow, a reachable `handoff` preference may run because the input context is still usable.
+   - On soft-compaction success, `agent.continue()` is scheduled to retry the turn.
 
 - **Threshold maintenance**
-  - Trigger: successful, non-error assistant message whose adjusted context tokens exceed `resolveThresholdTokens(...)`. The measured count comes from `calculateContextTokens(...)`, which subtracts provider-side orchestration tokens (billable, but never replayed into the conversation prefix) so auto-compaction and context-promotion thresholds are not inflated by them.
-  - Mid-turn maintenance also checks safe tool-loop boundaries before the next provider request when `compaction.midTurnEnabled !== false`.
-  - Tool-output pruning can reduce the measured token count before threshold comparison.
-  - Context promotion is tried before post-turn compaction.
-  - If promotion is unavailable, auto maintenance walks `compaction.methodOrder` with `reason: "threshold"` and `willRetry: false`.
-  - When `handoff` is the next runnable method, post-turn threshold maintenance normally schedules a post-prompt task that generates the handoff document and commits it as a compaction entry; pre-prompt and mid-turn checks run all methods inline to avoid racing the next turn.
-  - On success, if `compaction.autoContinue !== false`, post-turn maintenance schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`; mid-turn maintenance never schedules a separate continuation because the core loop already owns the next provider request.
+   - Trigger: successful, non-error assistant message whose adjusted context tokens exceed `resolveThresholdTokens(...)`. The measured count comes from `calculateContextTokens(...)`, which subtracts provider-side orchestration tokens (billable, but never replayed into the conversation prefix) so auto-compaction and context-promotion thresholds are not inflated by them.
+   - Mid-turn maintenance also checks safe tool-loop boundaries before the next provider request when `compaction.midTurnEnabled !== false`.
+   - Tool-output pruning can reduce the measured token count before threshold comparison.
+   - Context promotion is tried before post-turn compaction.
+   - If promotion is unavailable, auto maintenance walks `compaction.methodOrder` with `reason: "threshold"` and `willRetry: false`.
+   - When `handoff` is the next runnable method, post-turn threshold maintenance normally schedules a post-prompt task that generates the handoff document and commits it as a compaction entry; pre-prompt and mid-turn checks run all methods inline to avoid racing the next turn.
+   - On success, if `compaction.autoContinue !== false`, post-turn maintenance schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`; mid-turn maintenance never schedules a separate continuation because the core loop already owns the next provider request.
 
 - **Idle maintenance**
-  - Trigger: `runIdleCompaction()` when not streaming or already compacting.
-  - Uses `reason: "idle"` and does not auto-continue afterward.
+   - Trigger: `runIdleCompaction()` when not streaming or already compacting.
+   - Uses `reason: "idle"` and does not auto-continue afterward.
+
+### Experimental notes-backed context windows
+
+Enable **Notes-backed context windows (experimental)** in `/settings`, then restart
+the session to refresh its tool roster. The equivalent configuration is:
+
+```yaml
+compaction:
+   experimentalContextManagement: true
+```
+
+This opt-in mode replaces automatic summary recompression with local context-window
+boundaries. It also applies to `/compact` without an explicit mode or focus text.
+Explicit compaction modes and focused instructions retain their existing behavior.
+
+- `context_notes` reads the current notebook when `text` is omitted, replaces it
+  when `text` is supplied, and clears it with `text: ""`.
+- Notebook revisions are journal entries on the active branch. Only the latest
+  visible revision is injected into model context, including after resume or fork.
+  A context reset clears the visible notebook. Each replacement is limited to
+  **16,384 UTF-8 bytes**; oversized writes fail without replacing the notes.
+- `new_context` requests rollover at the next safe tool-loop boundary. Rollover
+  retains complete recent tool-call/result units and the notebook without calling
+  a summarization model. Near the automatic threshold, the model receives a
+  once-per-window reminder to save its working state.
+- `read` and `grep` can recover original messages and tool outputs through
+  `history://current/full`. The text includes stable entry IDs and window
+  boundaries. Shared selectors work, for example
+  `history://current/full:1-200` and `history://current/full:raw:1-200`.
+  Queries, fragments, trailing slashes, and additional path components are rejected.
+- The full-history route is bound to the calling session's current branch. It
+  never falls back to another registered agent or an on-disk session search.
+  Existing `history://<id>` routes retain their concise transcript behavior.
+
+Experimental rollover requires the effective tool set to contain `context_notes`,
+`new_context`, `read`, and `grep`. Restricted sessions without all four retain
+legacy maintenance. Disabling the setting restores legacy compaction and disables
+the experimental tools and full-history route; existing notes remain in the journal
+and provider context.
+
+The default is `false`. This is an independent implementation of persistent notes
+and searchable history, with the existing session journal as its only transcript
+store.[^experimental-context-history]
+
+[^experimental-context-history]:
+    Earlier pruning or explicit destructive history
+    operations cannot be undone by enabling the setting. Text history represents
+    images as markers. Notebook quality and timely updates remain the model's
+    responsibility; the mode does not automatically generate missing notes.
 
 ### Shake method
 
@@ -253,8 +302,8 @@ Remote summarization modes, consulted in order (each stage falls back to the nex
 - **V2 streaming Responses compaction** (tried first, on by default via `compaction.remoteStreamingV2Enabled`): for eligible models — `shouldUseCompactionV2Streaming(...)`: `openai-responses`, `azure-openai-responses`, or `openai-codex-responses` APIs with `remoteCompaction.v2StreamingEnabled` and a resolvable Responses endpoint — compaction forwards the full conversation, including provider-native tool-call history replay, to the model's normal Responses streaming endpoint with a trailing `compaction_trigger` input item, and requires exactly one streamed `compaction` output item. The request carries session routing and prompt-cache identifiers (routing/session-id headers plus `prompt_cache_key`) and resolves the model's reasoning effort the same way a normal turn does. Replacement history is Codex-style: retained real user messages within the `compaction.v2RetainedMessageBudget` (default `64000` tokens, clamped to that ceiling) followed by the compaction item, stored in `preserveData.openaiRemoteCompaction` (version `"v2"`). Transient stream errors retry up to `V2_COMPACTION_MAX_RETRIES` (`2`) times with exponential backoff under a 3-minute timeout (`V2_COMPACTION_TIMEOUT_MS`, same as V1); user aborts are never retried.
 - **V1 native `/responses/compact`**: for OpenAI/OpenAI Codex models (`shouldUseOpenAiRemoteCompaction`), when remote compaction is enabled and V2 did not run (ineligible or failed), compaction tries the provider-native `/responses/compact` endpoint. It preserves provider replacement history in `preserveData.openaiRemoteCompaction`. A native failure surfaces its transport error instead of silently switching to generic summarization — unless `compaction.remoteEndpoint` is set, in which case summary generation falls through to that endpoint/local summarization.
 - **Custom remote endpoint**: if `compaction.remoteEndpoint` is set and remote compaction is enabled, local summary generation POSTs one of two wire formats:
-  - custom omp summarizer endpoints receive `{ systemPrompt, prompt }` and must return JSON containing at least `{ summary }`.
-  - OpenAI-compatible endpoints whose path ends in `/chat/completions` receive `{ model, messages, stream: false }`, where `messages` contains one system prompt and one user prompt. The summary is read from `choices[0].message.content`, which lets self-hosted servers such as llama.cpp and vLLM act as remote compactors without a separate summarizer shim.
+   - custom omp summarizer endpoints receive `{ systemPrompt, prompt }` and must return JSON containing at least `{ summary }`.
+   - OpenAI-compatible endpoints whose path ends in `/chat/completions` receive `{ model, messages, stream: false }`, where `messages` contains one system prompt and one user prompt. The summary is read from `choices[0].message.content`, which lets self-hosted servers such as llama.cpp and vLLM act as remote compactors without a separate summarizer shim.
 
 When a native remote compaction (V2 or V1) succeeds, local LLM summarization is skipped entirely — the durable history lives in the provider replay payload and the stored `summary` is a placeholder lead-in plus the file-operation list.
 
@@ -413,9 +462,9 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 - Auto compaction can try multiple model candidates and retry transient failures; long retry delays prefer the next candidate when one is available.
 - Overflow errors are excluded from generic retry path because they are handled by context promotion/compaction.
 - If auto-compaction fails:
-  - overflow path emits `Context overflow recovery failed: ...`
-  - incomplete-output path emits `Incomplete response recovery failed: ...`
-  - threshold/idle paths emit `Auto-compaction failed: ...`
+   - overflow path emits `Context overflow recovery failed: ...`
+   - incomplete-output path emits `Incomplete response recovery failed: ...`
+   - threshold/idle paths emit `Auto-compaction failed: ...`
 - Branch summarization can be cancelled via abort signal (e.g., Escape), returning canceled/aborted navigation result.
 
 ## Settings and defaults
@@ -423,6 +472,7 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 From `settings-schema.ts`:
 
 - `compaction.enabled` = `true`
+- `compaction.experimentalContextManagement` = `false`. Opt-in persistent notes, branch-bound raw-history retrieval, and local context-window rollover; restart after enabling to refresh available tools.
 - `compaction.methodOrder` = `["remote", "snapcompact", "handoff", "shake", "soft"]`. `remote` uses provider-native OpenAI-compatible server compaction when available; unavailable or failed methods advance to the next preference.
 - `compaction.asyncEnabled` = `true`. Async (speculative) compaction: when context enters the pre-threshold band `[threshold − lead, threshold)` (lead = `clamp(threshold × 0.125, 8192, 32000)`), maintenance starts a background summarization for the first configured LLM-backed method (`remote`, `handoff`, or `soft`) off a branch snapshot, isolated from the live turn by a side session id. The armed result is committed instantly when the threshold is actually crossed, hiding summarization latency; post-snapshot turns are appended after the summary unchanged. Armed results are discarded when the branch prefix changes (new compaction, reset boundary, `/tree` navigation), when a provider-native replay payload is no longer readable by the active model, or when context grows past `keepRecentTokens` since compute (a fresh speculation replaces it). Speculation is skipped while an extension registers `session_before_compact`. The status line pulses the auto-compact icon while a speculation runs and holds it in accent when a result is armed.
 - `compaction.reserveTokens` is unset by default. The compaction layer normally applies a `16384`-token floor and at least 15% of the context window; on small windows where that default would be impractical, budget checks use the 15% proportional reserve. An explicit configured reserve is honored.

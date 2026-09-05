@@ -17,6 +17,7 @@ import {
 	PREWALK_PLAN_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
+import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
 import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
@@ -450,6 +451,24 @@ export function buildSessionContext(
 		// Find compaction index in path
 		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
 
+		// Notes-backed windows do not summarize a discarded turn prefix. Recover
+		// its latest user request verbatim, independently of the disposable tail.
+		// Resolve from the branch journal so repeated rollovers and resume retain
+		// it too, without copying messages into compaction metadata or transcripts.
+		if (
+			!options?.transcript &&
+			isRecord(compaction.details) &&
+			compaction.details.kind === "experimental-context-rollover"
+		) {
+			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
+			for (let i = compactionIdx - 1; i > resetBoundaryIdx; i--) {
+				const entry = path[i];
+				if (entry.type !== "message" || entry.message.role !== "user") continue;
+				if (i < firstKeptIdx) appendMessage(entry);
+				break;
+			}
+		}
+
 		// The remote replacement payload (OpenAI remote compaction) carries the
 		// kept turns for the LLM context only; it is not rendered as visible
 		// messages. The collapsed display transcript must still emit the kept
@@ -495,6 +514,19 @@ export function buildSessionContext(
 		// No compaction - emit all messages, handle branch summaries and custom messages
 		for (const entry of path) {
 			appendMessage(entry);
+		}
+	}
+
+	if (!options?.transcript) {
+		const notes = getContextNotes(path);
+		const renderedNotes = renderContextNotes(path);
+		if (notes && renderedNotes.length > 0) {
+			const sourceEntry = path.find(entry => entry.id === notes.entryId);
+			if (sourceEntry) {
+				messages.unshift(
+					createCustomMessage(CONTEXT_NOTES_ENTRY_TYPE, renderedNotes, false, undefined, sourceEntry.timestamp),
+				);
+			}
 		}
 	}
 
