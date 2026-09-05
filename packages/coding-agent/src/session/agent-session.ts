@@ -2104,11 +2104,17 @@ export class AgentSession {
 	 * Atomic in both directions: the spawns/prompt fields are cleared only
 	 * AFTER the baseline restoration succeeds, so a failed restore leaves the
 	 * persona fully intact instead of a partially cleared state (codex
-	 * #3821198710); conversely, the persona-owned fields are snapshotted
-	 * before the clears commit and restored if the post-clear prompt refresh
-	 * rejects, so a failed refresh leaves the session either fully on the
-	 * persona or fully off it (never an installed prompt describing a persona
-	 * the session state no longer has).
+	 * #3821198710); conversely, the full persona-owned presentation (enabled
+	 * tool set, `xd://` partition, persona tool restriction, mutation/edit
+	 * drop signals) is snapshotted before `restoreBaselineTools` and restored
+	 * — alongside the spawn policy and persona prompt append — if the
+	 * post-clear prompt refresh rejects, so a failed refresh leaves the
+	 * session either fully on the persona or fully off it (never an installed
+	 * prompt describing a persona the session state no longer has). The LSP
+	 * read-only lift inside `restoreBaselineTools` is not reverted: it is a
+	 * host-side live value (a durable CLI restriction ignores lifts anyway),
+	 * and the LSP tool only relaxes toward the restored persona's pre-clear
+	 * presentation on the next reconcile.
 	 */
 	async clearPersonaOwnedState(): Promise<void> {
 		// A persona is "currently active" when its mutable session state is
@@ -2124,11 +2130,27 @@ export class AgentSession {
 		if (!hadPersona) return;
 		const previousSpawns = this.getSessionSpawns();
 		const previousAppendPrompt = this.getPersonaAppendPrompt();
+		// Full persona-owned presentation snapshot (mirrors
+		// `snapshotPersonaSwitch` minus model/thinking, which a clear never
+		// changes): if the post-clear prompt refresh rejects, `restoreBaselineTools`
+		// has already swapped in the unrestricted baseline — a read-only persona's
+		// session would keep mutating baseline tools active while the installed
+		// prompt still describes the persona. Public accessors only: agent-session
+		// must not import session/persona-apply (it owns the AgentSession type).
+		const snapshotTools = this.getEnabledToolNames();
+		const snapshotMountedToolNames = this.getMountedXdevToolNames();
+		const snapshotPersonaToolRestriction = this.getPersonaToolRestriction();
+		const snapshotPersonaDroppedMutation = this.getLastPersonaDroppedMutation();
+		const snapshotPersonaDroppedEdit = this.getLastPersonaDroppedEdit();
 		// Restore the pre-persona tool set (launch baseline or first-switch
 		// capture) so a restricted persona's `tools:` list does not leak into
 		// the unrelated mode. Runs BEFORE the spawns/prompt clear: if it fails,
 		// the persona state stays intact and the caller's error path (or the
 		// next reconcile) can retry instead of leaving a half-cleared persona.
+		// `restoreBaselineTools` also lifts the LSP read-only restriction; that
+		// lift is not reverted in the rollback below — it is a host-side live
+		// value that the LSP tool reads through `session.lspReadOnly`, and no
+		// public AgentSession getter/setter exists to restore it precisely.
 		await this.restoreBaselineTools();
 		this.setSessionSpawns(null);
 		this.setPersonaAppendPrompt(undefined);
@@ -2150,10 +2172,21 @@ export class AgentSession {
 		} catch (error) {
 			// Prompt build failed after the clears committed (e.g. a memory
 			// backend's instruction build rejects once the persona restriction
-			// is lifted). Restore the persona-owned fields so the installed
+			// is lifted). Restore the FULL persona presentation (same ordering
+			// and arguments as `rollbackPersonaSwitch` in session/persona-apply,
+			// minus model/thinking which a clear never changed) so the installed
 			// base prompt (which still describes the persona) and the session
 			// state don't desync; the caller's error path or the next
 			// reconcile can retry the clear.
+			await this.setActiveToolPresentation(
+				snapshotTools,
+				snapshotMountedToolNames,
+				undefined,
+				undefined,
+				snapshotPersonaDroppedMutation,
+				snapshotPersonaDroppedEdit,
+			);
+			this.setPersonaToolRestriction(snapshotPersonaToolRestriction);
 			this.setSessionSpawns(previousSpawns);
 			this.setPersonaAppendPrompt(previousAppendPrompt);
 			throw error;

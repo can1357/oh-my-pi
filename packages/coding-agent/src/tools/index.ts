@@ -658,9 +658,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const restrictToolNames = session.restrictToolNames === true;
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
+	// An explicitly supplied empty array (`tools: []`, `--no-tools`) normalizes
+	// to an EMPTY active set — the caller's exact request. Only `undefined`
+	// (no list at all) widens to the full default set (upstream #9664).
 	const requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
-		: toolNames && toolNames.length > 0
+		: toolNames !== undefined
 			? normalizeToolNames(toolNames)
 			: undefined;
 	const goalEnabled = session.settings.get("goal.enabled");
@@ -680,7 +683,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
 	// we only probe Python when JS is disabled — otherwise allowEval is
 	// already true and per-backend availability is checked at first invocation.
-	const evalRequested = requestedTools === undefined || requestedTools.includes("eval");
+	const evalRequested = requestedTools === undefined || requestedTools.length === 0 || requestedTools.includes("eval");
 	const { allowEval } = await resolveEvalAllowance(session, evalRequested);
 
 	// Checkpoint and rewind are a pair: listing one without the other strands

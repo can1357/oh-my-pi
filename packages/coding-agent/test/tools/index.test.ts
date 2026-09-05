@@ -45,6 +45,25 @@ describe("createTools", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("keeps an explicit empty tool selection empty and undefined as the default set", async () => {
+		// Upstream #9664: an explicitly supplied `[]` (`--no-tools`, `tools: []`)
+		// normalizes to an EMPTY active set — the caller's exact request. Only
+		// `undefined` (no list at all) widens to the full default set.
+		const emptySession = createTestSession({
+			skipPythonPreflight: true,
+			settings: createSettingsWithOverrides({ "tools.xdev": false }),
+		});
+		const emptyTools = await createTools(emptySession, []);
+		expect(emptyTools.map(t => t.name)).toEqual([]);
+
+		const defaultSession = createTestSession({
+			settings: createSettingsWithOverrides({ "tools.xdev": false }),
+		});
+		const defaultTools = await createTools(defaultSession);
+		expect(defaultTools.map(t => t.name)).toContain("read");
+		expect(defaultTools.map(t => t.name)).toContain("bash");
+	});
+
 	it("creates all builtin tools by default", async () => {
 		// xdev mounting (default-on) would unmount discoverables like lsp and
 		// web_search into xd://; disable it to assert the full builtin set.
