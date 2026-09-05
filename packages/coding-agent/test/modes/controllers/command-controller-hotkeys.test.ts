@@ -10,6 +10,7 @@ describe("buildHotkeysMarkdown", () => {
 			"app.clipboard.copyLine": "Alt+Shift+L",
 			"app.clipboard.copyPrompt": "Ctrl+Shift+P",
 			"app.plan.toggle": "Alt+Shift+P",
+			"app.vibe.toggle": "Alt+Shift+V",
 			"app.tools.expand": "Ctrl+O",
 			"app.tools.toggleVisibility": "Ctrl+Shift+O",
 			"app.display.reset": "Alt+L",
@@ -47,6 +48,7 @@ describe("buildHotkeysMarkdown", () => {
 		expect(markdown).toContain("| `Ctrl+L` | Start/stop live voice mode (/live) |");
 		expect(markdown).toContain("| `Alt+R` | Retry last failed assistant turn |");
 		expect(markdown).toContain("| `Alt+Shift+P` | Toggle plan mode |");
+		expect(markdown).toContain("| `Alt+Shift+V` | Toggle vibe mode |");
 		expect(markdown).toContain("| `Ctrl+Shift+O` | Toggle tool activity visibility |");
 		expect(markdown).toContain("| `#<number>` | GitHub issue/PR reference");
 		expect(markdown).toContain("| `#` / `#<text>` | Prompt actions");

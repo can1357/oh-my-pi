@@ -456,6 +456,7 @@
 
 - Added nonblocking shared model-catalog refresh with cached startup hydration and source freshness diagnostics, allowing newly published models for known providers to appear without a binary release.
 - Added `omp usage clients` to report per-client token usage recorded by the auth broker, including the machine and application responsible for usage by provider. Supports `--days` and `--json` output.
+- Added an unbound `app.vibe.toggle` keybinding action for toggling vibe mode ([#9654](https://github.com/can1357/oh-my-pi/issues/9654)).
 
 ### Changed
 

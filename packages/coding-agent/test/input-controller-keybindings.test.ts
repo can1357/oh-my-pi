@@ -22,6 +22,7 @@ type FakeEditor = {
 	onSelectModel?: () => void;
 	onHistorySearch?: () => void;
 	onPasteImage?: () => Promise<boolean>;
+	onToggleVibe?: () => void;
 	onCopyPrompt?: () => void;
 	onExpandTools?: () => void;
 	onToggleToolActivity?: () => void;
@@ -61,6 +62,10 @@ function registeredInputListeners(addInputListener: Mock<(listener: InputListene
 	return addInputListener.mock.calls.map(call => call[0]);
 }
 
+async function flushMicrotasks(): Promise<void> {
+	for (let index = 0; index < 8; index++) await Promise.resolve();
+}
+
 async function createContext() {
 	let editorText = "";
 	const keyMap: Record<string, KeyId[]> = {
@@ -69,6 +74,7 @@ async function createContext() {
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
 		"app.clipboard.pasteImage": ["ctrl+v"],
+		"app.vibe.toggle": ["alt+shift+v"],
 		"app.tools.toggleVisibility": ["ctrl+shift+o"],
 		"app.tools.expand": ["ctrl+o"],
 	};
@@ -217,6 +223,7 @@ async function createContext() {
 		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
+		handleVibeModeCommand: vi.fn(),
 		handleClearCommand: vi.fn(),
 		showTreeSelector: vi.fn(),
 		showUserMessageSelector: vi.fn(),
@@ -276,6 +283,43 @@ async function createContext() {
 }
 
 describe("InputController keybinding setup", () => {
+	it("serializes configured vibe mode toggles", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const controller = new InputController(ctx);
+		const firstToggle = Promise.withResolvers<boolean>();
+		const handleVibeModeCommand = ctx.handleVibeModeCommand as Mock<InteractiveModeContext["handleVibeModeCommand"]>;
+		handleVibeModeCommand.mockImplementationOnce(() => firstToggle.promise).mockResolvedValueOnce(false);
+
+		controller.setupKeyHandlers();
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.vibe.toggle", ["alt+shift+v"]);
+
+		editor.onToggleVibe?.();
+		editor.onToggleVibe?.();
+		await Promise.resolve();
+		expect(handleVibeModeCommand).toHaveBeenCalledTimes(1);
+
+		firstToggle.resolve(true);
+		await flushMicrotasks();
+		expect(handleVibeModeCommand).toHaveBeenCalledTimes(2);
+	});
+
+	it("surfaces a rejected vibe mode toggle and allows a retry", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const controller = new InputController(ctx);
+		const handleVibeModeCommand = ctx.handleVibeModeCommand as Mock<InteractiveModeContext["handleVibeModeCommand"]>;
+		handleVibeModeCommand.mockRejectedValueOnce(new Error("journal write failed"));
+
+		controller.setupKeyHandlers();
+		editor.onToggleVibe?.();
+
+		await flushMicrotasks();
+		expect(spies.showError).toHaveBeenCalledWith("journal write failed");
+
+		editor.onToggleVibe?.();
+		await flushMicrotasks();
+		expect(handleVibeModeCommand).toHaveBeenCalledTimes(2);
+	});
+
 	it("registers model selector and display reset actions separately", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
 		const controller = new InputController(ctx);

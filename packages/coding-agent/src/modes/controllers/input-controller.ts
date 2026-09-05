@@ -195,6 +195,14 @@ export class InputController {
 	#btwBranchListenerInstalled = false;
 	#btwCopyListenerInstalled = false;
 	#expandToolsListenerInstalled = false;
+	#vibeModeTransition: Promise<void> = Promise.resolve();
+
+	#toggleVibeMode(): void {
+		this.#vibeModeTransition = this.#vibeModeTransition
+			.then(() => this.ctx.handleVibeModeCommand())
+			.then(() => undefined)
+			.catch(error => this.ctx.showError(error instanceof Error ? error.message : String(error)));
+	}
 
 	/** Return the last full editor snapshot delivered by its change contract. */
 	getDraftText(): string {
@@ -539,6 +547,8 @@ export class InputController {
 		this.ctx.editor.onDequeue = () => this.handleDequeue();
 		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
 		this.ctx.editor.onRetry = () => void this.handleRetry();
+		this.ctx.editor.setActionKeys("app.vibe.toggle", this.ctx.keybindings.getKeys("app.vibe.toggle"));
+		this.ctx.editor.onToggleVibe = () => this.#toggleVibeMode();
 		this.ctx.editor.clearCustomKeyHandlers();
 		// Wire up extension shortcuts
 		this.registerExtensionShortcuts();
@@ -546,7 +556,6 @@ export class InputController {
 		for (const key of planModeKeys) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handlePlanModeCommand());
 		}
-
 		for (const key of this.ctx.keybindings.getKeys("app.session.new")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleClearCommand());
 		}
