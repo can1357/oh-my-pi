@@ -6,6 +6,10 @@
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
 
+### Fixed
+
+- Standalone `omp read skill://…` commands now discover configured skills before resolving the URI ([#10961](https://github.com/can1357/oh-my-pi/issues/10961)).
+
 ## [18.1.11] - 2026-09-05
 
 ### Added
