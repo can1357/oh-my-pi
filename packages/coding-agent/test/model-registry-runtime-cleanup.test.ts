@@ -108,6 +108,47 @@ describe("ModelRegistry runtime source cleanup", () => {
 		}
 	});
 
+	test("unloading an override-only extension keeps a built-in provider's hydrated discoveries", async () => {
+		using tempDir = TempDir.createSync("@omp-model-registry-override-only-");
+		const provider = "opencode-go";
+		const apiKey = "opencode-go-test-key";
+		const cachedModel = buildModel({
+			id: "cached-credential-model",
+			name: "Cached Credential Model",
+			api: "openai-responses",
+			provider,
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+		authStorage.setRuntimeApiKey(provider, apiKey);
+		writeModelCache(
+			resolveModelCacheProviderId(provider, { apiKey }),
+			Date.now(),
+			[cachedModel],
+			true,
+			"",
+			tempDir.join("models.db"),
+		);
+		const registry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		await registry.hydrateCredentialScopedModelCaches();
+		expect(registry.getAvailable().some(model => model.provider === provider && model.id === cachedModel.id)).toBe(
+			true,
+		);
+
+		// An extension registers only a transport override for the built-in
+		// provider — no models, no fetchDynamicModels manager.
+		registry.registerProvider(provider, { baseUrl: "https://gateway.example.com/v1" }, sourceId);
+		registry.clearSourceRegistrations(sourceId);
+
+		expect(registry.getAvailable().some(model => model.provider === provider && model.id === cachedModel.id)).toBe(
+			true,
+		);
+	});
+
 	test("extension rebinding discards discoveries removed from the model config", async () => {
 		using tempDir = TempDir.createSync("@omp-model-registry-config-rebind-");
 		const modelsPath = tempDir.join("models.json");

@@ -2559,9 +2559,20 @@ export class ModelRegistry {
 		this.#runtimeModelManagers.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);
 		this.#lastModelModifierWarnings.delete(providerName);
-		this.#runtimeDiscoveredModels = this.#runtimeDiscoveredModels.filter(model => model.provider !== providerName);
-		this.#runtimeAuthoritativeProviders.delete(providerName);
-		this.#providerDiscoveryStates.delete(providerName);
+		// A credential-scoped built-in provider (e.g. opencode-go) populates its
+		// slice of #runtimeDiscoveredModels from startup cache hydration, not from
+		// this extension. #reloadStaticModels excludes credential-scoped providers
+		// from synchronous cache loading and refreshRuntimeProviders only refetches
+		// registered managers, so neither restores that slice — discarding it here
+		// makes account-specific models vanish until a full refresh. Keep it for
+		// credential-scoped providers; discard for everyone else, where the slice is
+		// the extension's own discovery (or a non-credential-scoped built-in slice
+		// that baked this provider's now-removed override and must be recomposed).
+		if (!isCredentialScopedModelCacheProvider(providerName)) {
+			this.#runtimeDiscoveredModels = this.#runtimeDiscoveredModels.filter(model => model.provider !== providerName);
+			this.#runtimeAuthoritativeProviders.delete(providerName);
+			this.#providerDiscoveryStates.delete(providerName);
+		}
 		this.#invalidateProviderModelCache(providerName);
 		this.authStorage.removeConfigApiKey(providerName);
 		this.authStorage.removeRuntimeUsageProvider(providerName);
