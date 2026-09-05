@@ -258,6 +258,15 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 		expect(reminderEvents).toEqual([]);
 	});
 
+	it("does not nudge when a canonical todo mutation resets the counter mid-window", async () => {
+		for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("write");
+		session.setTodoPhases(session.getTodoPhases());
+		for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("write");
+
+		expect(await drainNudges()).toEqual([]);
+		expect(reminderEvents).toEqual([]);
+	});
+
 	it("caps nudges per prompt cycle", async () => {
 		let fired = 0;
 		for (let cycle = 0; cycle < MAX_PER_CYCLE + 2; cycle++) {

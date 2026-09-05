@@ -18,6 +18,7 @@ import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-co
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: shared FakeWebSocket + InMemoryRelay harness (see
@@ -54,7 +55,7 @@ function makeLargeSnapshot(): SizedSnapshot {
 	};
 }
 
-function makeHostContext(snapshot: SizedSnapshot): InteractiveModeContext {
+function makeHostContext(snapshot: SizedSnapshot, options: { todoPhases?: unknown[] } = {}): InteractiveModeContext {
 	const ctx = {
 		settings: { get: () => "" },
 		sessionManager: {
@@ -73,6 +74,7 @@ function makeHostContext(snapshot: SizedSnapshot): InteractiveModeContext {
 			emitNotice: () => {},
 			promptCustomMessage: () => Promise.resolve(),
 			abort: () => Promise.resolve(),
+			getTodoPhases: () => options.todoPhases ?? [],
 		},
 		eventBus: undefined,
 		statusLine: {
@@ -126,7 +128,9 @@ function makeFailingGuestContext(failure: Error): InteractiveModeContext {
 function makeCancelledSwitchGuestContext(
 	switchSession: () => Promise<boolean>,
 	events: string[],
+	initialTodoPhases: TodoPhase[] = [],
 ): InteractiveModeContext {
+	let todoPhases = initialTodoPhases;
 	return {
 		settings: { get: () => "" },
 		sessionManager: {
@@ -138,6 +142,11 @@ function makeCancelledSwitchGuestContext(
 			switchSession,
 			newSession: () => Promise.resolve(),
 			messages: [],
+			getTodoPhases: () => todoPhases,
+			setTodoPhases: (phases: TodoPhase[]) => {
+				todoPhases = phases;
+				events.push(`todos:${JSON.stringify(phases)}`);
+			},
 			agent: {
 				state: { model: undefined },
 				setModel: () => events.push("host-model"),
@@ -269,6 +278,7 @@ describe("collab chunked welcome (#3144)", () => {
 		}
 	});
 	it("does not clear the old guest session when replica activation is cancelled", async () => {
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(1);
 		const events: string[] = [];
 		const guest = new CollabGuestLink(makeCancelledSwitchGuestContext(async () => false, events));
 		guest.agentRegistry.register({
@@ -287,10 +297,12 @@ describe("collab chunked welcome (#3144)", () => {
 			expect(events).not.toContain("clear-transient-ui");
 			expect(events).not.toContain("status:Joined collab session");
 		} finally {
+			writeSpy.mockRestore();
 			await guest.leave("test cleanup").catch(() => {});
 		}
 	});
 	it("applies host state only after the replica activates", async () => {
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(1);
 		const events: string[] = [];
 		const guest = new CollabGuestLink(
 			makeCancelledSwitchGuestContext(async () => {
@@ -307,7 +319,117 @@ describe("collab chunked welcome (#3144)", () => {
 				events.indexOf("host-thinking"),
 			);
 		} finally {
+			writeSpy.mockRestore();
 			await guest.leave("test cleanup").catch(() => {});
+		}
+	});
+
+	it("includes canonical todoPhases in welcome without replicating custom entries", async () => {
+		const todoPhases: TodoPhase[] = [
+			{
+				name: "Build",
+				tasks: [{ content: "compile", status: "completed" }],
+			},
+		];
+		const todoSnapshot: SizedSnapshot = {
+			header: { type: "session", id: "sess-todo", timestamp: "2026-06-20T00:00:00Z", cwd: "/tmp" },
+			entries: [
+				{
+					type: "custom",
+					id: "custom-todo-1",
+					parentId: null,
+					timestamp: "2026-06-20T00:00:00Z",
+					customType: "user_todo_edit",
+					data: { phases: todoPhases },
+				},
+			],
+		};
+		// The in-memory relay holds a single host: park the shared large-snapshot
+		// host so this test's guest routes to `todoHost`, then restore it.
+		await host.stop("todo welcome test setup");
+		const hostCtx = makeHostContext(todoSnapshot, { todoPhases });
+		const todoHost = new CollabHost(hostCtx);
+		await todoHost.start("ws://localhost:8788");
+		const parsed = parseCollabLink(todoHost.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+		const key = await importRoomKey(parsed.key);
+		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+		guestCleanups.push(() => socket.close());
+
+		const frames: CollabFrame[] = [];
+		const trainDone = Promise.withResolvers<void>();
+		socket.onFrame = frame => {
+			frames.push(frame);
+			if (frame.t === "snapshot-chunk" && frame.final) trainDone.resolve();
+		};
+		socket.onOpen = () => socket.send({ t: "hello", proto: COLLAB_PROTO, name: "todo-guest", writeToken });
+		socket.connect();
+		await trainDone.promise;
+
+		const welcome = frames.find((frame): frame is Extract<CollabFrame, { t: "welcome" }> => frame.t === "welcome");
+		expect(welcome?.todoPhases).toEqual(todoPhases);
+
+		const chunks = frames.filter(
+			(frame): frame is Extract<CollabFrame, { t: "snapshot-chunk" }> => frame.t === "snapshot-chunk",
+		);
+		expect(chunks.flatMap(chunk => chunk.entries).some(entry => entry.type === "custom")).toBe(false);
+		await todoHost.stop("test done");
+		host = new CollabHost(makeHostContext(snapshot));
+		await host.start("ws://localhost:8788");
+	});
+
+	it("replaces reconstructed guest todos with every canonical welcome snapshot", async () => {
+		const stale: TodoPhase[] = [
+			{
+				name: "Old",
+				tasks: [{ content: "stale task", status: "pending" }],
+			},
+		];
+		const cases: Array<{ name: string; canonical: TodoPhase[] }> = [
+			{
+				name: "newer non-empty state",
+				canonical: [{ name: "Current", tasks: [{ content: "live task", status: "in_progress" }] }],
+			},
+			{ name: "canonical empty state", canonical: [] },
+		];
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(1);
+		// Same single-host relay constraint as the welcome test above.
+		await host.stop("canonical welcome test setup");
+
+		try {
+			for (const testCase of cases) {
+				const canonicalHost = new CollabHost(
+					makeHostContext(
+						{
+							header: {
+								type: "session",
+								id: `sess-${testCase.name}`,
+								timestamp: "2026-06-20T00:00:00Z",
+								cwd: "/tmp",
+							},
+							entries: [],
+						},
+						{ todoPhases: testCase.canonical },
+					),
+				);
+				await canonicalHost.start("ws://localhost:8788");
+				const events: string[] = [];
+				const guest = new CollabGuestLink(makeCancelledSwitchGuestContext(async () => true, events, stale));
+				try {
+					await guest.join(canonicalHost.link);
+					expect(events.filter(event => event.startsWith("todos:"))).toEqual([
+						`todos:${JSON.stringify(testCase.canonical)}`,
+					]);
+				} finally {
+					await guest.leave("test cleanup").catch(() => {});
+					await canonicalHost.stop("test done");
+				}
+			}
+		} finally {
+			host = new CollabHost(makeHostContext(snapshot));
+			await host.start("ws://localhost:8788");
+			writeSpy.mockRestore();
 		}
 	});
 });

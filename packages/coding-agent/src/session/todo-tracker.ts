@@ -50,6 +50,7 @@ export interface TodoTrackerHost {
 	model(): Model | undefined;
 	agentKind(): "main" | "sub";
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
+	emitTodoUpdated(phases: TodoPhase[]): void;
 	scheduleAgentContinue(options: { source: string; generation?: number }): void;
 	promptGeneration(): number;
 	hasPendingAsyncWake(): boolean;
@@ -80,9 +81,23 @@ export class TodoTracker {
 		return this.#clonePhases(this.#phases);
 	}
 
-	/** Replaces todo phases with a defensive clone. */
+	/** Replaces todo phases, resets stale-progress bookkeeping, and publishes a defensive snapshot. */
 	setPhases(phases: TodoPhase[]): void {
 		this.#phases = this.#clonePhases(phases);
+		this.#mutationsSinceLastTouch = 0;
+		this.#reminderAwaitingProgress = false;
+		this.#host.emitTodoUpdated(this.#clonePhases(this.#phases));
+	}
+
+	/**
+	 * Replaces todo phases without publishing a snapshot. Collaboration guests
+	 * use this for host-replicated state: re-emitting would loop back through
+	 * the guest's own event subscription.
+	 */
+	replacePhasesSilently(phases: TodoPhase[]): void {
+		this.#phases = this.#clonePhases(phases);
+		this.#mutationsSinceLastTouch = 0;
+		this.#reminderAwaitingProgress = false;
 	}
 
 	/** Rehydrates todo phases from the current transcript branch. */

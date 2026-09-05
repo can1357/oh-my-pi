@@ -44,7 +44,7 @@ import {
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
-import { shrinkForReplication } from "./replication-shrink";
+import { boundTodoPhasesForReplication, shrinkForReplication } from "./replication-shrink";
 
 /** Events that change the footer state guests render. */
 const STATE_TRIGGER_EVENTS: Record<string, true> = {
@@ -73,6 +73,7 @@ const WIRE_AGENT_EVENT_TYPES: Record<WireAgentEvent["type"], true> = {
 	tool_execution_start: true,
 	tool_execution_update: true,
 	tool_execution_end: true,
+	todo_updated: true,
 	notice: true,
 	auto_compaction_start: true,
 	auto_compaction_end: true,
@@ -269,7 +270,17 @@ export class CollabHost {
 		}
 
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
-			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
+			if (isWireAgentEvent(event)) {
+				// `todo_updated` carries a TodoPhase[] the guest dereferences per
+				// phase: generic shrinking would clip an over-long board by
+				// appending a string elision marker where `.tasks` must be an
+				// array. Bound the board shape-preservingly instead.
+				const frame =
+					event.type === "todo_updated"
+						? { ...event, phases: boundTodoPhasesForReplication(event.phases, SNAPSHOT_CHUNK_BYTES) }
+						: event;
+				this.#broadcast({ t: "event", event: shrinkForReplication(frame) });
+			}
 			this.#onEventForState(event);
 		});
 		// Subagent frames publish on the session tree's observability bus at
@@ -402,6 +413,10 @@ export class CollabHost {
 		const entries = snapshot.entries.filter(isWireSessionEntry);
 		const socket = this.#socket;
 		if (!socket) return;
+		// Bound the board before embedding it in the single welcome frame: a
+		// large `set_todos`/imported board would otherwise bypass snapshot
+		// chunking and the 1 MiB replication cap, blocking join/reconnect.
+		const todoPhases = boundTodoPhasesForReplication(this.#ctx.session.getTodoPhases?.() ?? [], SNAPSHOT_CHUNK_BYTES);
 		socket.send(
 			{
 				t: "welcome",
@@ -409,6 +424,7 @@ export class CollabHost {
 				header: snapshot.header,
 				state: this.#buildState(),
 				agents: this.#snapshotAgents(),
+				todoPhases,
 				entryCount: entries.length,
 				readOnly: canWrite ? undefined : true,
 			},

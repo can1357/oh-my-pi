@@ -35,6 +35,7 @@ import {
 	type CollabFrame,
 	type CollabSessionState,
 	type CollabUiRequest,
+	type WireTodoPhase,
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
@@ -83,6 +84,7 @@ interface PendingSnapshot {
 	entryCount: number;
 	entries: SessionEntry[];
 	isResync: boolean;
+	todoPhases?: WireTodoPhase[];
 }
 
 /** Minimal context surface the idle-state reconciler mutates. */
@@ -404,6 +406,7 @@ export class CollabGuestLink {
 			entryCount: frame.entryCount,
 			entries: [],
 			isResync,
+			todoPhases: frame.todoPhases,
 		};
 		this.#armSnapshotProgressTimer();
 	}
@@ -458,6 +461,10 @@ export class CollabGuestLink {
 		this.#ctx.chatContainer.disposeChildren();
 		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
+		if (pending.todoPhases !== undefined) {
+			this.#ctx.session.setTodoPhases(pending.todoPhases);
+			await this.#ctx.reloadTodos();
+		}
 		this.#updateStatusSegment();
 		this.#readOnly = pending.readOnly;
 		this.#welcomed = true;

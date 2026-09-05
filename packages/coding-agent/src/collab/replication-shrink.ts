@@ -30,6 +30,12 @@
  */
 export const MAX_REPLICATED_PAYLOAD_BYTES = 1 * 1024 * 1024;
 
+const TEXT_ENCODER = new TextEncoder();
+
+/** UTF-8 byte length of the JSON serialization — the unit the sealed WebSocket frame bills. */
+function utf8Length(value: unknown): number {
+	return TEXT_ENCODER.encode(JSON.stringify(value)).length;
+}
 /**
  * Progressive shrink passes. Each pass tightens both the per-string cap and
  * the per-array head limit; the loop stops at the first pass whose output
@@ -109,4 +115,45 @@ export function shrinkForReplication<T>(value: T): T {
 		if (JSON.stringify(shrunk).length <= MAX_REPLICATED_PAYLOAD_BYTES) return shrunk as T;
 	}
 	return shrunk as T;
+}
+
+/**
+ * Head-clip a todo board to `budgetBytes` without breaking its shape.
+ *
+ * Unlike {@link shrinkForReplication}, which clips any over-long array by
+ * appending a string elision marker, this keeps every phase's `tasks` an
+ * array of task objects: generic shrinking of a `todo_updated` event would
+ * leave the guest dereferencing `.tasks` on a marker string. Boards that
+ * already fit pass through by reference; oversized boards are rebuilt with
+ * head-clipped phases/tasks and truncated text fields, extras preserved.
+ */
+export function boundTodoPhasesForReplication<
+	TPhase extends { name: string; tasks: TTask[] },
+	TTask extends { content: string; blocker?: unknown },
+>(phases: readonly TPhase[], budgetBytes: number): TPhase[] {
+	// Byte budget, not char budget: the sealed frame is produced by
+	// `TEXT_ENCODER.encode(JSON.stringify(frame))` (collab/crypto.ts), so a
+	// CJK-heavy board can pass a UTF-16 `.length` check while producing a
+	// substantially larger WebSocket frame.
+	if (utf8Length(phases) <= budgetBytes) return phases as TPhase[];
+	const passes = [
+		{ phases: 128, tasks: 64, stringCap: 4096 },
+		{ phases: 32, tasks: 16, stringCap: 1024 },
+		{ phases: 8, tasks: 8, stringCap: 256 },
+		{ phases: 4, tasks: 4, stringCap: 64 },
+	];
+	let bounded: TPhase[] = [];
+	for (const pass of passes) {
+		bounded = phases.slice(0, pass.phases).map(phase => ({
+			...phase,
+			name: phase.name.slice(0, pass.stringCap),
+			tasks: phase.tasks.slice(0, pass.tasks).map(task => {
+				const clipped: Record<string, unknown> = { ...task, content: task.content.slice(0, pass.stringCap) };
+				if (typeof task.blocker === "string") clipped.blocker = task.blocker.slice(0, pass.stringCap);
+				return clipped as TTask;
+			}),
+		}));
+		if (utf8Length(bounded) <= budgetBytes) return bounded;
+	}
+	return bounded;
 }

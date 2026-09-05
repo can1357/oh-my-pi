@@ -283,6 +283,8 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			}
 			return notifications;
 		}
+		case "todo_updated":
+			return [toSessionNotification(sessionId, mapTodoPhasesToPlanUpdate(event.phases))];
 		case "todo_reminder": {
 			const entries = event.todos.map(todo => ({
 				content: todo.content,
@@ -415,6 +417,17 @@ function mapTodoStatus(status: TodoStatus): "pending" | "in_progress" | "complet
 	return todoStatusMap[status];
 }
 
+function mapTodoPhasesToPlanUpdate(phases: unknown[]): SessionUpdate {
+	return {
+		sessionUpdate: "plan",
+		entries: extractTodoEntries(phases).map(todo => ({
+			content: todo.content,
+			priority: "medium" as const,
+			status: mapTodoStatus(todo.status),
+		})),
+	};
+}
+
 function mapTodoResultToPlanUpdate(
 	event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
 ): SessionUpdate | undefined {
@@ -425,14 +438,7 @@ function mapTodoResultToPlanUpdate(
 	if (!Array.isArray(phases)) {
 		return undefined;
 	}
-	return {
-		sessionUpdate: "plan",
-		entries: extractTodoEntries(phases).map(todo => ({
-			content: todo.content,
-			priority: "medium" as const,
-			status: mapTodoStatus(todo.status),
-		})),
-	};
+	return mapTodoPhasesToPlanUpdate(phases);
 }
 
 function extractTodoPhases(result: unknown): unknown {

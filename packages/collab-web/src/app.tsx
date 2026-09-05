@@ -7,6 +7,7 @@ import { Composer } from "./components/shell/Composer";
 import { ConnectScreen } from "./components/shell/ConnectScreen";
 import { HeaderBar } from "./components/shell/HeaderBar";
 import { Toasts } from "./components/shell/Toasts";
+import { TodoPanel } from "./components/shell/TodoPanel";
 import { Transcript } from "./components/transcript/Transcript";
 import { GuestClient } from "./lib/client";
 import { useGuestSnapshot } from "./lib/use-guest";
@@ -166,6 +167,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 			<main className="sh-main">
 				<section className="sh-content" data-rail={railOpen ? "true" : "false"}>
 					<div className="sh-transcript">
+						<TodoPanel phases={snap.todoPhases} />
 						<Transcript
 							entries={snap.entries}
 							stream={snap.stream}

@@ -1232,6 +1232,7 @@ export class AgentSession {
 			model: () => this.model,
 			agentKind: () => this.#agentKind,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
+			emitTodoUpdated: phases => this.#emit({ type: "todo_updated", phases }),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			promptGeneration: () => this.#promptGeneration,
 			hasPendingAsyncWake: () => this.#hasPendingAsyncWake(),
@@ -7289,6 +7290,16 @@ export class AgentSession {
 
 	setTodoPhases(phases: TodoPhase[]): void {
 		this.#todo.setPhases(phases);
+	}
+
+	/**
+	 * Replace todo phases without emitting `todo_updated`. Collaboration guests
+	 * apply host-replicated snapshots through this so a later `reloadTodos`
+	 * reads the live board instead of the older welcome snapshot — without the
+	 * replica rebroadcasting the host's own event.
+	 */
+	replaceTodoPhasesSilently(phases: TodoPhase[]): void {
+		this.#todo.replacePhasesSilently(phases);
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
