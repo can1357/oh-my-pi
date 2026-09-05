@@ -18,6 +18,8 @@ import type {
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
+import type { PanelRunOptions, PanelRunResult } from "../panel/runtime";
+import type { PanelSettings, PanelTaskMode } from "../panel/types";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
 import type { CompactMode } from "../session/compact-modes";
@@ -443,6 +445,12 @@ export interface InteractiveModeContext {
 	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
 	showGitUi(revision?: string): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
+	showPanelRolePicker(settings: PanelSettings): Promise<string | undefined>;
+	runPanelWithConfirmation(
+		options: Omit<PanelRunOptions, "onProgress" | "plan" | "session" | "signal">,
+	): Promise<PanelRunResult | undefined>;
+	showPanelLineupBuilder(taskMode: PanelTaskMode, request: string): Promise<PanelRunResult | undefined>;
+	showPanelPersonaEditor(): void;
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): void;

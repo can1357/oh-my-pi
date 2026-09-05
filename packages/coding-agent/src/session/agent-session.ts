@@ -164,6 +164,13 @@ import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
+import {
+	type PanelRunOptions,
+	type PanelRunPlan,
+	type PanelRunResult,
+	preparePanelRun as preparePanelRunRuntime,
+	runPanel as runPanelRuntime,
+} from "../panel/runtime";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
@@ -199,7 +206,7 @@ import {
 } from "../thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import type { ImageAttachmentEntry } from "../tools";
+import type { ImageAttachmentEntry, ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
@@ -611,6 +618,14 @@ export class AgentSession {
 
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
+
+	/** Session-owned cancellation and settlement state for the active panel run. */
+	#panelAbortController: AbortController | undefined;
+	#panelRun: Promise<PanelRunResult> | undefined;
+	/** Pre-dispatch plans retain their original ToolSession through approval. */
+	#panelPlanSessions = new WeakMap<PanelRunPlan, ToolSession>();
+	/** Output-id registry retained across panel runs for stable agent:// artifacts. */
+	#panelAgentOutputManager: ToolSession["agentOutputManager"];
 
 	readonly #handoff: SessionHandoff;
 
@@ -7466,6 +7481,110 @@ export class AgentSession {
 	}
 
 	/**
+	 * Project this live session into the tool contract consumed by panel workers.
+	 * AgentSession is not asserted to ToolSession because SDK bootstrap state is
+	 * not its public surface; every adapter field below is backed by active
+	 * session state instead.
+	 */
+	#createPanelToolSession(): ToolSession {
+		const session = this;
+		const sessionManager = this.sessionManager;
+		return {
+			get cwd() {
+				return sessionManager.getCwd();
+			},
+			get additionalDirectories() {
+				return sessionManager.getAdditionalDirectories();
+			},
+			get hasUI() {
+				return session.#extensionRunner?.hasUI() ?? false;
+			},
+			settings: this.settings,
+			getSessionFile: () => sessionManager.getSessionFile() ?? null,
+			// Panel definitions prohibit nested spawns. The panel policy does not
+			// inspect this value, but ToolSession requires a concrete policy.
+			getSessionSpawns: () => null,
+			sessionManager,
+			getArtifactsDir: () => sessionManager.getArtifactsDir(),
+			getArtifactManager: () => sessionManager.getArtifactManager(),
+			getSessionId: () => sessionManager.getSessionId(),
+			getHindsightSessionState: () => session.getHindsightSessionState(),
+			getMnemopiSessionState: () => session.getMnemopiSessionState(),
+			getEvalSessionId: () => session.getEvalSessionId(),
+			getAgentId: () => session.#agentId ?? null,
+			getActiveModel: () => session.model,
+			getServiceTierByFamily: () => session.serviceTierByFamily,
+			authStorage: this.#modelRegistry.authStorage,
+			modelRegistry: this.#modelRegistry,
+			get agentOutputManager() {
+				return session.#panelAgentOutputManager;
+			},
+			set agentOutputManager(manager: ToolSession["agentOutputManager"]) {
+				session.#panelAgentOutputManager = manager;
+			},
+			localProtocolOptions: this.#localProtocolOptions(),
+			getPlanModeState: () => session.getPlanModeState(),
+			getPlanReferencePath: () => session.getPlanReferencePath(),
+			getTelemetry: () => session.agent.telemetry,
+		};
+	}
+
+	/** Whether this session currently owns a panel run. */
+	get isPanelRunning(): boolean {
+		return this.#panelRun !== undefined;
+	}
+
+	/** Prepare an immutable panel lineup and assignments for a TUI review step. */
+	preparePanelRun(options: Omit<PanelRunOptions, "onProgress" | "plan" | "session" | "signal">): PanelRunPlan {
+		const toolSession = this.#createPanelToolSession();
+		const plan = preparePanelRunRuntime({ ...options, session: toolSession });
+		this.#panelPlanSessions.set(plan, toolSession);
+		return plan;
+	}
+
+	/**
+	 * Run one saved panel role, or a fully parsed and validated one-off
+	 * `ephemeralRole` lineup that is never persisted to settings, through this
+	 * session. `ephemeralRole` cannot be combined with `requestedRole`; the
+	 * runtime rejects both being supplied. A session admits one panel run at a
+	 * time so a user abort has one unambiguous cancellation target.
+	 */
+	runPanel(options: Omit<PanelRunOptions, "session">): Promise<PanelRunResult> {
+		if (this.#panelRun) {
+			return Promise.reject(new Error("A panel is already running."));
+		}
+
+		const toolSession =
+			options.plan === undefined ? this.#createPanelToolSession() : this.#panelPlanSessions.get(options.plan);
+		if (toolSession === undefined) {
+			return Promise.reject(new Error("Panel plan does not belong to this session."));
+		}
+
+		const controller = new AbortController();
+		const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+		const panelRun: Promise<PanelRunResult> = Promise.resolve()
+			.then(() => runPanelRuntime({ ...options, session: toolSession, signal }))
+			.finally(() => {
+				if (this.#panelRun === panelRun) {
+					this.#panelRun = undefined;
+					this.#panelAbortController = undefined;
+				}
+			});
+		this.#panelAbortController = controller;
+		this.#panelRun = panelRun;
+		return panelRun;
+	}
+
+	/** Abort the active panel, if any, and wait for its retained children to settle. */
+	async abortPanel(): Promise<void> {
+		const panelRun = this.#panelRun;
+		if (!panelRun) return;
+
+		this.#panelAbortController?.abort();
+		await panelRun.catch(() => {});
+	}
+
+	/**
 	 * Abort current operation and wait for agent to become idle.
 	 *
 	 * `reason` (e.g. `USER_INTERRUPT_LABEL`) rides the agent's `AbortController`
@@ -7491,6 +7610,7 @@ export class AgentSession {
 		// auto-starting a fresh turn during cleanup.
 		this.#abortInProgress = true;
 		try {
+			if (this.#panelRun) await this.abortPanel();
 			this.#abortAutolearnCapture();
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 			this.abortRetry();

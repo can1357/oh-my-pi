@@ -43,6 +43,10 @@ import {
 	theme,
 } from "../../modes/theme/theme";
 import type { AgentHubOpenOptions, InteractiveModeContext } from "../../modes/types";
+import { parsePanelSettings } from "../../panel/config";
+import type { PanelRunOptions, PanelRunPreview, PanelRunResult } from "../../panel/runtime";
+import { formatPanelCompletionStatus, formatPanelProgress } from "../../panel/status";
+import type { PanelPersona, PanelSettings, PanelTaskMode } from "../../panel/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import {
@@ -65,6 +69,7 @@ import {
 } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import { loadDailyActivity } from "../../stats/activity-client";
+import type { AgentProgress } from "../../task/types";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -99,6 +104,10 @@ import { LogoutAccountSelectorComponent } from "../components/logout-account-sel
 import { ModelHubComponent, type ModelRoleSelectionScope } from "../components/model-hub";
 import { ModelPickerComponent } from "../components/model-picker";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
+import { PanelConfirmationComponent } from "../components/panel-confirmation";
+import { PanelLineupBuilderOverlayComponent } from "../components/panel-lineup-builder";
+import { PanelPersonaEditorComponent } from "../components/panel-persona-editor";
+import { PanelRolePickerComponent } from "../components/panel-role-picker";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
@@ -115,6 +124,28 @@ import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
+
+type InteractivePanelRunOptions = Omit<PanelRunOptions, "onProgress" | "plan" | "session" | "signal">;
+
+function panelPreviewDetails(preview: PanelRunPreview, request: string): string[] {
+	const normalizedRequest = request.replace(/\s+/g, " ").trim();
+	const requestPreview =
+		normalizedRequest.length <= 160 ? normalizedRequest : `${normalizedRequest.slice(0, 157).trimEnd()}...`;
+	return [
+		`Role: @${preview.role.roleId} · ${preview.role.role.strategy}`,
+		...preview.members.map(member => {
+			const parts = [`${member.index + 1}. ${member.selector}`];
+			if (member.thinking !== undefined) parts.push(`thinking ${member.thinking}`);
+			if (member.persona !== undefined) parts.push(`persona ${member.persona}`);
+			return parts.join(" · ");
+		}),
+		...(requestPreview ? [`Request: ${requestPreview}`] : []),
+	];
+}
+
+function panelHasCompletedResults(result: PanelRunResult): boolean {
+	return result.results.some(member => member.status === "completed");
+}
 
 export class SelectorController {
 	constructor(private ctx: InteractiveModeContext) {}
@@ -800,6 +831,221 @@ export class SelectorController {
 			return;
 		}
 		this.#showModelHub({});
+	}
+
+	/**
+	 * Saved-role picker shown when a standard `/panel` invocation omits `@role`
+	 * and no default role is configured. Resolves with the picked role id, or
+	 * `undefined` on cancel; settles exactly once.
+	 */
+	showPanelRolePicker(settings: PanelSettings): Promise<string | undefined> {
+		return new Promise<string | undefined>(resolve => {
+			let settled = false;
+			this.showSelector(done => {
+				const picker = new PanelRolePickerComponent({
+					roles: settings.roles,
+					defaultRole: settings.defaultRole,
+					onSelect: roleId => {
+						if (settled) return;
+						settled = true;
+						done();
+						resolve(roleId);
+					},
+					onCancel: () => {
+						if (settled) return;
+						settled = true;
+						done();
+						resolve(undefined);
+					},
+				});
+				return { component: picker, focus: picker.getSelectList() };
+			});
+		});
+	}
+
+	/**
+	 * Review a resolved lineup before dispatch, then keep one compact status
+	 * line current until all members settle or are aborted.
+	 */
+	async runPanelWithConfirmation(options: InteractivePanelRunOptions): Promise<PanelRunResult | undefined> {
+		const plan = this.ctx.session.preparePanelRun(options);
+		const { preview } = plan;
+		const approved = await this.#showPanelConfirmation({
+			title: "Run panel?",
+			details: panelPreviewDetails(preview, options.request),
+			confirmLabel: `Run ${preview.members.length}-member panel`,
+			cancelLabel: "Cancel",
+		});
+		if (!approved) return undefined;
+
+		const progress = new Map<string, Pick<AgentProgress, "status">>();
+		this.ctx.showStatus(formatPanelProgress(preview.members.length, progress));
+		const result = await this.ctx.session.runPanel({
+			...options,
+			plan,
+			onProgress: update => {
+				progress.set(update.id, { status: update.status });
+				this.ctx.showStatus(formatPanelProgress(preview.members.length, progress));
+			},
+		});
+		this.ctx.showStatus(formatPanelCompletionStatus(result));
+
+		if (result.cancelled) {
+			if (!panelHasCompletedResults(result)) {
+				this.ctx.showStatus("Panel cancelled before any member completed.");
+				return undefined;
+			}
+			if (!(await this.#confirmPartialPanelSynthesis(result))) {
+				this.ctx.showStatus("Panel partial synthesis discarded.");
+				return undefined;
+			}
+		}
+		return result;
+	}
+
+	#showPanelConfirmation(options: {
+		title: string;
+		details: readonly string[];
+		confirmLabel: string;
+		cancelLabel: string;
+	}): Promise<boolean> {
+		return new Promise<boolean>(resolve => {
+			let settled = false;
+			this.showSelector(done => {
+				const settle = (approved: boolean) => {
+					if (settled) return;
+					settled = true;
+					done();
+					resolve(approved);
+				};
+				const component = new PanelConfirmationComponent({
+					...options,
+					onConfirm: () => settle(true),
+					onCancel: () => settle(false),
+				});
+				return { component, focus: component.getSelectList() };
+			});
+		});
+	}
+
+	#confirmPartialPanelSynthesis(result: PanelRunResult): Promise<boolean> {
+		const completed = result.results.filter(member => member.status === "completed").length;
+		const failed = result.results.filter(member => member.status === "failed").length;
+		const aborted = result.results.filter(member => member.status === "aborted").length;
+		return this.#showPanelConfirmation({
+			title: "Panel cancelled",
+			details: [
+				`${completed} completed · ${failed} failed · ${aborted} aborted`,
+				"Use the retained completed results for a partial synthesis?",
+			],
+			confirmLabel: "Synthesize partial results",
+			cancelLabel: "Discard partial results",
+		});
+	}
+
+	/**
+	 * Fullscreen one-off panel lineup builder (`/panel lineup <answer|plan>
+	 * <request>`). The component hands its parsed ephemeral role to the host;
+	 * the host closes the builder and presents the same resolved-lineup review
+	 * that saved roles use before any member is dispatched.
+	 */
+	showPanelLineupBuilder(taskMode: PanelTaskMode, request: string): Promise<PanelRunResult | undefined> {
+		return new Promise<PanelRunResult | undefined>(resolve => {
+			let panelSettings: PanelSettings;
+			try {
+				panelSettings = parsePanelSettings(this.ctx.settings.get("panel"));
+			} catch (error) {
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				resolve(undefined);
+				return;
+			}
+			let settled = false;
+			const done = () => {
+				if (settled) return;
+				settled = true;
+				overlayHandle?.hide();
+				this.focusActiveEditorArea();
+				this.ctx.ui.requestRender();
+			};
+			const builder = new PanelLineupBuilderOverlayComponent(
+				this.ctx.ui,
+				{
+					modelRegistry: this.ctx.session.modelRegistry,
+					settings: this.ctx.settings,
+					scopedModels: this.ctx.session.scopedModels,
+				},
+				{ panelSettings, taskMode, request },
+				{
+					onSubmit: async role => {
+						done();
+						try {
+							resolve(await this.runPanelWithConfirmation({ taskMode, request, ephemeralRole: role }));
+						} catch (error) {
+							this.ctx.showError(error instanceof Error ? error.message : String(error));
+							resolve(undefined);
+						}
+					},
+					onAbort: () => this.ctx.session.abortPanel(),
+					onClose: () => {
+						done();
+						resolve(undefined);
+					},
+					notify: message => this.ctx.showStatus(message),
+					requestRender: () => this.ctx.ui.requestRender(),
+				},
+			);
+			const overlayHandle = this.ctx.ui.showOverlay(builder, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+				fullscreen: true,
+			});
+			this.ctx.ui.setFocus(builder);
+			this.ctx.ui.requestRender();
+		});
+	}
+
+	/**
+	 * Fullscreen explicit-save panel persona editor (`/panel personas`). Raw
+	 * current personas (valid or not) are handed to the editor unfiltered so
+	 * malformed entries stay inspectable/deletable until saved away. Save
+	 * persists only `{ ...existingPanel, personas: next }`, leaving `roles`
+	 * and `defaultRole` untouched.
+	 */
+	showPanelPersonaEditor(): void {
+		const existingPanel = this.ctx.settings.get("panel");
+		let settled = false;
+		const done = () => {
+			if (settled) return;
+			settled = true;
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		const editor = new PanelPersonaEditorComponent(this.ctx.ui, existingPanel.personas, {
+			save: next => {
+				// `next` mixes re-validated persona shapes with unchanged raw
+				// quarantined entries (see PanelPersonaEditorCallbacks.save); it is
+				// intentionally not a fully-typed PanelPersona record pre-persist.
+				this.ctx.settings.set("panel", {
+					...existingPanel,
+					personas: next as Readonly<Record<string, PanelPersona>>,
+				});
+			},
+			close: () => done(),
+			notify: message => this.ctx.showStatus(message),
+			requestRender: () => this.ctx.ui.requestRender(),
+		});
+		const overlayHandle = this.ctx.ui.showOverlay(editor, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.ctx.ui.setFocus(editor);
+		this.ctx.ui.requestRender();
 	}
 
 	/**
