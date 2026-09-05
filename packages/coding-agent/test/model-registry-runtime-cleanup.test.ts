@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
 import { type AssistantMessageEventStream, clearCustomApis, getCustomApi } from "@oh-my-pi/pi-ai";
 import { getOAuthProvider } from "@oh-my-pi/pi-ai/oauth";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -105,6 +106,67 @@ describe("ModelRegistry runtime source cleanup", () => {
 				true,
 			);
 		}
+	});
+
+	test("extension rebinding discards discoveries removed from the model config", async () => {
+		using tempDir = TempDir.createSync("@omp-model-registry-config-rebind-");
+		const modelsPath = tempDir.join("models.json");
+		const cacheDbPath = tempDir.join("models.db");
+		const provider = "configured-ollama";
+		const baseUrl = "http://127.0.0.1:11435";
+		const discoveredModel = buildModel({
+			id: "removed-config-model",
+			name: "Removed Config Model",
+			api: "openai-completions",
+			provider,
+			baseUrl,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					[provider]: {
+						baseUrl,
+						api: "openai-completions",
+						auth: "none",
+						discovery: { type: "ollama" },
+					},
+				},
+			}),
+		);
+		const oldMtime = new Date("2020-01-01T00:00:00Z");
+		await fs.utimes(modelsPath, oldMtime, oldMtime);
+		writeModelCache(
+			resolveOllamaModelCacheProviderId(provider, baseUrl),
+			Date.now(),
+			[discoveredModel],
+			true,
+			"",
+			cacheDbPath,
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		await registry.refresh("offline");
+		expect(registry.find(provider, discoveredModel.id)).toBeDefined();
+		registry.registerProvider(
+			"runtime-provider",
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [baseModel],
+			},
+			sourceId,
+		);
+
+		await Bun.write(modelsPath, JSON.stringify({ providers: {} }));
+		registry.clearSourceRegistrations(sourceId);
+
+		expect(registry.find(provider, discoveredModel.id)).toBeUndefined();
 	});
 
 	test("unregisterProvider removes only the named provider and its login entry", () => {
