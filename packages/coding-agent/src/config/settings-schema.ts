@@ -4895,6 +4895,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.isolation.allowNested": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Allow Nested Isolation",
+			description:
+				"Permit spawning an isolated subagent from inside an already-isolated subagent. Disabled by default: nested isolated spawns are rejected with a clear error and the `isolated` field is omitted from the task tool prompt and constrained to false in its schema inside isolated sessions.",
+		},
+	},
+
 	"worktree.clone": {
 		type: "boolean",
 		default: true,

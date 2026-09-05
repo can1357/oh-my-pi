@@ -81,6 +81,8 @@ export interface SecurityCoordinatorHost {
 	sessionId?: string;
 	agentId?: string;
 	asyncJobManager?: AsyncJobManager;
+	/** Whether the hosting session runs inside an isolation worktree (nested isolation gate). */
+	isIsolated?: boolean;
 }
 
 export interface SecurityPreflightInput {
@@ -126,6 +128,8 @@ export interface SecurityScanSessionFactoryInput {
 	plan: SecurityScanPlan;
 	executionRoot: string;
 	scanId: string;
+	/** The execution root is itself an isolation worktree (ref_diff target) — applies the nested-isolation gate. */
+	isIsolated?: boolean;
 	model: Model;
 	publicationTool: ToolDefinition;
 	sessionManager: SessionManager;
@@ -264,6 +268,15 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		hasUI: false,
 		autoApprove: true,
 		skipPythonPreflight: true,
+		// The scan session executes inside the host session's isolation worktree
+		// when the host is isolated, or inside the ref_diff throwaway worktree;
+		// either way the nested-isolation gate must keep applying to it (its
+		// `task` spawns would otherwise re-expose `isolated`).
+		isIsolated: input.host.isIsolated === true || input.isIsolated === true,
+		// Distinct registry id: reusing the host's "Main" would make
+		// `AgentRegistry.register` replace the live parent's entry, and the
+		// scan session's disposal would unregister it — leaving the
+		// still-running parent absent from hub/IRC routing.
 		agentId: `Security-${input.scanId.slice(-12)}`,
 		agentDisplayName: "security",
 	});
@@ -304,8 +317,14 @@ interface PreparedSecurityExecutionTarget {
 	cwd: string;
 	diffText?: string;
 	cleanup(): Promise<void>;
+	/**
+	 * The execution root is itself an isolation-like worktree (currently only
+	 * `ref_diff` targets create one), so the nested-isolation gate applies to
+	 * the scan session's `task` spawns even when the host session is not
+	 * isolated.
+	 */
+	isIsolated?: boolean;
 }
-
 const ACTIVE_SECURITY_OPERATIONS = new Set<string>();
 
 function operationIdFromBundle(bundle: SecurityScanBundle): string | undefined {
@@ -352,6 +371,10 @@ async function prepareSecurityExecutionTarget(
 		return {
 			cwd,
 			diffText,
+			// The scan runs inside a throwaway worktree, so the nested-isolation
+			// gate must keep applying to its `task` spawns even though the host
+			// session itself is not isolated.
+			isIsolated: true,
 			async cleanup() {
 				const removed = await tryRemoveWorktree(repo, cwd);
 				if (!removed) await fs.rm(cwd, { recursive: true, force: true });
@@ -611,6 +634,10 @@ export class SecurityCoordinator {
 				plan,
 				scanId: record.snapshot.scanId,
 				executionRoot: executionTarget.cwd,
+				// The ref_diff throwaway worktree counts as isolation: the scan
+				// session's `task` spawns stay behind the nested-isolation gate
+				// even when the host session itself is not isolated.
+				isIsolated: executionTarget.isIsolated === true,
 				model,
 				// Bare `ToolDefinition` erases the concrete schema; the sdk.ts
 				// `as unknown as CustomTool` precedent applies to the same variance wall.
@@ -706,7 +733,7 @@ export class SecurityCoordinator {
 const COORDINATORS = new Map<string, SecurityCoordinator>();
 
 export function getSecurityCoordinator(host: SecurityCoordinatorHost): SecurityCoordinator {
-	const key = `${path.resolve(host.cwd)}\u0000${host.sessionId ?? "sessionless"}`;
+	const key = `${path.resolve(host.cwd)}\u0000${host.sessionId ?? "sessionless"}\u0000${host.isIsolated === true}`;
 	const existing = COORDINATORS.get(key);
 	if (existing) return existing;
 	const coordinator = new SecurityCoordinator(host);

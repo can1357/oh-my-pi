@@ -161,13 +161,22 @@ describe("structured subagent primitive", () => {
 		expect(policy.enableIrc).toBe(false);
 
 		vi.restoreAllMocks();
-		const discover = vi.spyOn(discoveryModule, "discoverAgents");
+		const discover = vi
+			.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValue({ agents: [AGENT], projectAgentsDir: null });
+		await expect(
+			resolveEffectiveSubagentPolicy(
+				request({ session: session({ planMode: true }), isolation: { requested: true } }),
+			),
+		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
+		expect(discover).not.toHaveBeenCalled();
+		// An explicit `false` control is a no-op (requests the default
+		// non-isolated behavior plan mode already enforces) and must pass.
 		await expect(
 			resolveEffectiveSubagentPolicy(
 				request({ session: session({ planMode: true }), isolation: { requested: false } }),
 			),
-		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
-
+		).resolves.toBeDefined();
 		const planSession = session({ planMode: true });
 		const customTools = createEvalCustomTools(planSession, [
 			{
@@ -177,11 +186,15 @@ describe("structured subagent primitive", () => {
 				language: "python",
 			},
 		]);
+		const discover2 = vi
+			.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValue({ agents: [AGENT], projectAgentsDir: null });
 		await expect(resolveEffectiveSubagentPolicy(request({ session: planSession, customTools }))).rejects.toThrow(
 			"Eval-defined tools are unavailable in plan mode.",
 		);
-		expect(discover).not.toHaveBeenCalled();
+		expect(discover2).toHaveBeenCalledTimes(1);
 	});
+
 	it("reloads model roles before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
 		const projectDir = path.join(root, "project");

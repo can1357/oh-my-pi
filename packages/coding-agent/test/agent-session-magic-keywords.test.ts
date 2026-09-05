@@ -34,6 +34,7 @@ const mockEvalTool: AgentTool = {
 async function createMagicKeywordSession(
 	modelRegistry: ModelRegistry,
 	tools: AgentTool[] = [mockTaskTool, mockEvalTool],
+	isIsolated = false,
 ): Promise<{
 	session: AgentSession;
 	settings: Settings;
@@ -55,6 +56,7 @@ async function createMagicKeywordSession(
 		sessionManager: SessionManager.inMemory(),
 		settings,
 		modelRegistry,
+		isIsolated,
 	});
 	return { session, settings };
 }
@@ -155,6 +157,76 @@ describe("AgentSession magic keyword settings", () => {
 		const notice = promptMessages.find(message => message.customType === "workflow-notice")?.content ?? "";
 		expect(notice.toLowerCase()).not.toContain("scout");
 		expect(notice).toContain("Explore inline FIRST");
+	});
+
+	it("omits isolation controls from the workflowz notice when isolation is unavailable", async () => {
+		// Default settings: task.isolation.enabled is false, so the preflight
+		// rejects `isolated`/`apply`/`merge`. The notice must not advertise
+		// controls the spawn preflight refuses (regression: the notice
+		// unconditionally advertised them, steering the model into rejected
+		// calls).
+		const created = await createMagicKeywordSession(modelRegistry);
+		session = created.session;
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("please workflowz this");
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ content?: string; customType?: string }>;
+		const notice = promptMessages.find(message => message.customType === "workflow-notice")?.content ?? "";
+		expect(notice).not.toContain("isolated=None");
+		expect(notice).not.toContain("apply=None");
+		expect(notice).not.toContain("merge=None");
+	});
+
+	it("advertises isolation controls in the workflowz notice when isolation is available", async () => {
+		const created = await createMagicKeywordSession(modelRegistry);
+		session = created.session;
+		created.settings.set("task.isolation.enabled", true);
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("please workflowz this");
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ content?: string; customType?: string }>;
+		const notice = promptMessages.find(message => message.customType === "workflow-notice")?.content ?? "";
+		expect(notice).toContain("isolated=None");
+		expect(notice).toContain("apply=None");
+		expect(notice).toContain("merge=None");
+	});
+
+	it("omits isolation controls from the workflowz notice for an isolated session without allowNested", async () => {
+		// The PR's headline scenario (#3760): an isolated subagent whose
+		// settings leave task.isolation.allowNested false must not be told to
+		// pass `isolated`/`apply`/`merge` — the preflight rejects those calls.
+		// Pins the AgentSession.isIsolated input to the gate, not just the
+		// settings axis.
+		const created = await createMagicKeywordSession(modelRegistry, [mockTaskTool, mockEvalTool], true);
+		session = created.session;
+		created.settings.set("task.isolation.enabled", true);
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("please workflowz this");
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ content?: string; customType?: string }>;
+		const notice = promptMessages.find(message => message.customType === "workflow-notice")?.content ?? "";
+		expect(notice).not.toContain("isolated=None");
+		expect(notice).not.toContain("apply=None");
+		expect(notice).not.toContain("merge=None");
+	});
+
+	it("advertises isolation controls in the workflowz notice for an isolated session with allowNested", async () => {
+		const created = await createMagicKeywordSession(modelRegistry, [mockTaskTool, mockEvalTool], true);
+		session = created.session;
+		created.settings.set("task.isolation.enabled", true);
+		created.settings.set("task.isolation.allowNested", true);
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("please workflowz this");
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ content?: string; customType?: string }>;
+		const notice = promptMessages.find(message => message.customType === "workflow-notice")?.content ?? "";
+		expect(notice).toContain("isolated=None");
+		expect(notice).toContain("apply=None");
+		expect(notice).toContain("merge=None");
 	});
 
 	it("skips workflowz notice when the task tool is inactive", async () => {

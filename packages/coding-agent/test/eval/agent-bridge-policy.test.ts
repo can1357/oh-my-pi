@@ -74,6 +74,7 @@ interface SessionOptions {
 	artifactsDir?: string | null;
 	spawns?: string | null;
 	depth?: number;
+	isIsolated?: boolean;
 	activeModel?: string;
 	modelString?: string;
 	enableLsp?: boolean;
@@ -100,6 +101,7 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 		settings,
 		asyncJobManager,
 		taskDepth: options.depth ?? 0,
+		isIsolated: options.isIsolated ?? false,
 		enableLsp: options.enableLsp ?? true,
 		agentOutputManager: options.outputManager,
 		getSessionFile: () => options.sessionFile ?? null,
@@ -1028,8 +1030,12 @@ describe("runEvalAgent isolation", () => {
 		vi.restoreAllMocks();
 	});
 
-	function isolatedSession(overrides: Partial<Parameters<typeof Settings.isolated>[0]> = {}): ToolSession {
+	function isolatedSession(
+		overrides: Partial<Parameters<typeof Settings.isolated>[0]> = {},
+		isIsolated = false,
+	): ToolSession {
 		return makeSession({
+			isIsolated,
 			settings: Settings.isolated({
 				"async.enabled": false,
 				"task.isolation.enabled": true,
@@ -1513,5 +1519,38 @@ describe("runEvalAgent isolation", () => {
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
 		);
 		expect(removedArtifactsDir).toBe(false);
+	});
+
+	it("rejects isolated=true inside an isolated session unless task.isolation.allowNested is enabled", async () => {
+		mockAgents();
+		const prepSpy = vi.spyOn(isolationRunner, "prepareIsolationContext");
+		const runSpy = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
+
+		const session = isolatedSession({}, true);
+		await expect(runEvalAgent({ prompt: "x", isolated: true }, { session })).rejects.toThrow(
+			"Subagent isolated execution inside an already-isolated agent requires task.isolation.allowNested to be enabled.",
+		);
+		expect(prepSpy).not.toHaveBeenCalled();
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("allows isolated=true inside an isolated session when task.isolation.allowNested is enabled", async () => {
+		mockAgents();
+		mockIsolationContext();
+		const isolatedSpy = vi
+			.spyOn(isolationRunner, "runIsolatedSubprocess")
+			.mockImplementation(async opts => singleResult(opts.baseOptions, { output: "nested-isolated-run" }));
+		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+			summary: "\n\nApplied",
+			changesApplied: true,
+			hadAnyChanges: true,
+			mergedBranchForNestedPatches: false,
+		});
+
+		const session = isolatedSession({ "task.isolation.allowNested": true }, true);
+		const result = await runEvalAgentAndWait({ prompt: "x", isolated: true }, { session });
+
+		expect(isolatedSpy).toHaveBeenCalledTimes(1);
+		expect(result.text).toContain("nested-isolated-run");
 	});
 });

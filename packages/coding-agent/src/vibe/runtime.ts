@@ -1333,6 +1333,7 @@ export class VibeSessionRegistry {
 			index: 0,
 			id: record.id,
 			taskDepth: session.taskDepth ?? 0,
+			isIsolated: session.isIsolated === true,
 			detached: true,
 			modelOverride: record.modelOverride,
 			modelRole: record.modelRole,

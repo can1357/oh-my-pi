@@ -20,7 +20,7 @@ import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalCodeModeDescription from "../prompts/tools/eval-code-mode.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "../session/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
-import { resolveSpawnPolicy } from "../task/spawn-policy";
+import { isIsolationAvailable, resolveSpawnPolicy } from "../task/spawn-policy";
 import { webpExclusionForModel } from "../utils/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
@@ -162,7 +162,9 @@ export interface EvalToolDescriptionOptions {
 	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
 	 */
 	spawns?: boolean | string | null;
-	/** Advertise auto-backgrounding of long-running cells in the tool prompt. */
+	/** Whether `isolated`/`apply`/`merge` controls are offered in the prompt. */
+	isolationEnabled?: boolean;
+	/** Whether eval auto-backgrounding is enabled (hides the backgrounding controls in the prompt when off). */
 	autoBackgroundEnabled?: boolean;
 	/** Advertise `@tool` / `tool(fn)` and the `tools` spawn option (`eval.tools.enabled`). */
 	evalTools?: boolean;
@@ -185,6 +187,7 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 		spawns: spawnPolicy.enabled,
 		spawnDefaultAgent: spawnPolicy.defaultAgent,
 		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
+		isolationEnabled: options.isolationEnabled ?? true,
 		preludeDocumentation: options.preludeDocumentation,
 	});
 }
@@ -288,6 +291,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				py: backends.python,
 				js: backends.js,
 				spawns: sessionSpawns,
+				isolationEnabled: isIsolationAvailable(this.session, this.session.getPlanModeState?.()?.enabled === true),
 				autoBackgroundEnabled: this.session.settings.get("eval.autoBackground.enabled"),
 				evalTools: this.session.settings.get("eval.tools.enabled"),
 				eagerDelegation: sessionDelegationBias(this.session) === "eager",
