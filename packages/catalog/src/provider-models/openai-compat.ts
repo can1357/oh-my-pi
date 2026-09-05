@@ -7390,7 +7390,11 @@ export function nebiusModelManagerOptions(
 	config?: NebiusModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = normalizeNebiusBaseUrl(config?.baseUrl ?? Bun.env.NEBIUS_BASE_URL);
+	// `NEBIUS_BASE_URL` wins over the configured URL because the registry
+	// injects the bundled global endpoint as `config.baseUrl` (snapshot
+	// default), which would otherwise mask the environment override forever.
+	// An explicitly configured URL still applies when no env override is set.
+	const baseUrl = normalizeNebiusBaseUrl(Bun.env.NEBIUS_BASE_URL ?? config?.baseUrl ?? NEBIUS_DEFAULT_BASE_URL);
 	return {
 		providerId: "nebius",
 		dynamicModelsAuthoritative: true,

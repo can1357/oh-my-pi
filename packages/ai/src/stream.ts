@@ -1729,7 +1729,11 @@ function streamSimpleRequest<TApi extends Api>(
 	}
 	// Nebius Token Factory - single-protocol OpenAI-compatible endpoint
 	if (isNebiusModel(model)) {
-		return withThinkingLoopGuard(model, requestOptions, opts =>
+		// Mandatory-reasoning clamp is a request-shaping concern owned here:
+		// requiresEffort routes (e.g. Kimi K3) reject omitted thinking, so
+		// clamp unset requests to the lowest supported effort (mirrors Kimi).
+		const nebiusOptions = normalizeMandatoryReasoningOptions(model, requestOptions);
+		return withThinkingLoopGuard(model, nebiusOptions, opts =>
 			withProviderInFlightLimit(model, opts, () =>
 				streamNebius(model as Model<"openai-completions">, context, {
 					...opts,

@@ -71,4 +71,21 @@ describe("Nebius Token Factory routing", () => {
 		const request = await captureRequest(nebiusModel());
 		expect(request.headers.authorization).toBe("Bearer nebius-test-key");
 	});
+
+	it("floors omitted thinking to the lowest supported effort on requiresEffort routes", async () => {
+		const k3 = buildModel({
+			id: "moonshotai/Kimi-K3",
+			name: "Kimi K3",
+			api: "openai-completions",
+			provider: "nebius",
+			baseUrl: NEBIUS_BASE_URL,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_024_000,
+			maxTokens: 131_072,
+		} satisfies ModelSpec<"openai-completions">);
+		const request = await captureRequest(k3);
+		expect(request.body.reasoning_effort).toBe("low");
+	});
 });

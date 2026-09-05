@@ -119,8 +119,29 @@ describe("Nebius Token Factory provider support", () => {
 		expect(embedding).toBeUndefined();
 	});
 
-	test("prefers explicit base URL over NEBIUS_BASE_URL and appends /v1", async () => {
+	test("NEBIUS_BASE_URL wins over the registry-injected bundled URL", async () => {
 		Bun.env.NEBIUS_BASE_URL = "https://env.tokenfactory.test";
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			nebiusModelsResponse([{ id: "moonshotai/Kimi-K2.7-Code" }]),
+		) as unknown as FetchImpl;
+
+		// The registry injects the bundled global endpoint as config.baseUrl;
+		// the environment override must still steer discovery to the region.
+		const options = nebiusModelManagerOptions({
+			apiKey: "nebius-key",
+			baseUrl: "https://api.tokenfactory.nebius.com/v1",
+			fetch: fetchMock,
+		});
+		await options.fetchDynamicModels?.();
+
+		expect(fetchMock).toHaveBeenCalledWith(
+			"https://env.tokenfactory.test/v1/models",
+			expect.objectContaining({ method: "GET" }),
+		);
+	});
+
+	test("explicit base URL applies when no env override is set", async () => {
+		delete Bun.env.NEBIUS_BASE_URL;
 		const fetchMock: FetchImpl = vi.fn(async () =>
 			nebiusModelsResponse([{ id: "moonshotai/Kimi-K2.7-Code" }]),
 		) as unknown as FetchImpl;
@@ -137,6 +158,7 @@ describe("Nebius Token Factory provider support", () => {
 			expect.objectContaining({ method: "GET" }),
 		);
 	});
+
 	test("caps effort tiers at the wire-accepted vocabulary per route", () => {
 		const policy = (id: string) =>
 			buildModel({
@@ -152,6 +174,7 @@ describe("Nebius Token Factory provider support", () => {
 				maxTokens: 32768,
 			});
 		// Live-probed 2026-09-05: these backends reject `max`, so the
+		// provider residue caps them at high with remaps for the rest.
 		for (const id of ["NousResearch/Hermes-4-405B", "nvidia/nemotron-3-super-120b-a12b"]) {
 			const thinking = policy(id).thinking;
 			expect(thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
