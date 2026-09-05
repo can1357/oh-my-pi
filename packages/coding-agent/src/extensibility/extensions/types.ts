@@ -230,7 +230,8 @@ export interface ExtensionWidgetOptions {
 export interface ExtensionStatusOptions {
 	/**
 	 * Theme token used to colour this status entry, e.g. `"warning"` or
-	 * `"error"`. Unknown tokens fall back to the default accent colour.
+	 * `"error"`. A token the theme does not define is dropped, leaving each
+	 * surface with its pre-existing styling — see {@link ExtensionUIContext.setStatus}.
 	 */
 	color?: ThemeColor;
 }
@@ -296,8 +297,12 @@ export interface ExtensionUIContext {
 	 *
 	 * Status text is sanitized, so embedded ANSI never reaches the terminal.
 	 * Request colour with `options.color` instead: it names a theme token, so the
-	 * status stays legible when the user switches themes. Without it the status
-	 * keeps the default accent colour.
+	 * status stays legible when the user switches themes.
+	 *
+	 * A token the active theme does not define is dropped, and each surface then
+	 * renders as it did before this option existed: the `status` segment of the
+	 * status line accents the entry, while the standalone hook-status row below
+	 * the editor leaves it unstyled.
 	 */
 	setStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void;
 

@@ -232,9 +232,9 @@ describe("StatusLineComponent effective settings cache", () => {
 
 		const border = component.getTopBorder(120).content;
 		expect(border).toContain(theme.fg("error", "cache cold"));
-		// The uncoloured entry keeps the accent treatment it had before.
-		expect(border).not.toContain(theme.fg("error", "indexing"));
-		expect(stripVTControlCharacters(border)).toContain("indexing");
+		// With `sessionAccent: false` the accent token is fixed, so assert the exact
+		// styling: unstyled text would otherwise pass a mere "not error" check.
+		expect(border).toContain(theme.fg("accent", "indexing"));
 	});
 
 	it("repaints when only the status colour changes", () => {
