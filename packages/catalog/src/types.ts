@@ -804,6 +804,20 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		/** Send the normalized prompt-cache key as top-level `prompt_cache_key` on chat completions. */
 		supportsPromptCacheKey: boolean;
 		dropThinkingWhenReasoningEffort: boolean;
+		/**
+		 * Discovery may narrow the served input modalities: when the live catalog
+		 * drops image support, the served row wins over bundled references instead
+		 * of OR-merging. Set by catalog rules for providers whose org-scoped
+		 * discovery is the whole truth for modality.
+		 */
+		discoveryInputAuthoritative: boolean;
+		/**
+		 * Discovery pricing is confirmed, including explicit zeros: the served
+		 * cost row wins verbatim instead of falling back to bundled rates for
+		 * zero fields. Set by catalog rules where discovery quotes every model
+		 * (e.g. ai&, whose non-USD orgs map to zero rather than USD figures).
+		 */
+		discoveryCostAuthoritative: boolean;
 		/** Complete alternate view for thinking-engaged requests; swap pointers, never spread. */
 		whenThinking?: ResolvedOpenAICompat;
 	};

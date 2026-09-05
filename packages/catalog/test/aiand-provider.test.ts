@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import { aiandModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { AIAND_STATIC_MODELS, aiandModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 const ORIGINAL_ENV = {
 	AIAND_API_KEY: Bun.env.AIAND_API_KEY,
@@ -152,5 +156,292 @@ describe("ai& provider support", () => {
 			"https://config.aiand.test/v1/models",
 			expect.objectContaining({ method: "GET" }),
 		);
+	});
+
+	test("backs wire none through the minimal selector with a none effort map", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "deepseek-ai/deepseek-v4-flash",
+					context_window: 1048576,
+					capabilities: ["reasoning", "tool_calling"],
+					reasoning_efforts: ["none", "high", "max"],
+					reasoning_effort_default: "none",
+					currency: "usd",
+					input_per_1m: "0.150000",
+					output_per_1m: "0.250000",
+					cached_input_per_1m: "0.080000",
+				},
+			]),
+		) as unknown as FetchImpl;
+
+		const options = aiandModelManagerOptions({ apiKey: "aiand-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+		const flash = models?.find(model => model.id === "deepseek-ai/deepseek-v4-flash");
+		// `none` is the thinking-off state, not a ladder rung: minimal selects it.
+		expect(flash?.thinking?.efforts).toEqual([Effort.Minimal, Effort.High, Effort.Max]);
+		expect(flash?.thinking?.effortMap).toEqual({ [Effort.Minimal]: "none" });
+		expect(flash?.thinking?.defaultLevel).toBe(Effort.Minimal);
+		expect(flash?.cost).toEqual({ input: 0.15, output: 0.25, cacheRead: 0.08, cacheWrite: 0 });
+	});
+
+	test("maps qwen3.8-27b census row: none-backed minimal plus low/medium/xhigh", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "qwen/qwen3.8-27b",
+					description: "Qwen3.8-27B",
+					context_window: 262144,
+					capabilities: ["reasoning", "tool_calling", "vision", "video", "document"],
+					reasoning_efforts: ["none", "low", "medium", "xhigh"],
+					reasoning_effort_default: "medium",
+					currency: "usd",
+					input_per_1m: "0.400000",
+					output_per_1m: "3.000000",
+					cached_input_per_1m: "0.200000",
+				},
+			]),
+		) as unknown as FetchImpl;
+
+		const options = aiandModelManagerOptions({ apiKey: "aiand-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+		const qwen = models?.find(model => model.id === "qwen/qwen3.8-27b");
+		// First wire tier is `none`, so minimal selects thinking-off; the
+		// remaining tiers map verbatim and the server default is medium.
+		expect(qwen?.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.XHigh]);
+		expect(qwen?.thinking?.effortMap).toEqual({ [Effort.Minimal]: "none" });
+		expect(qwen?.thinking?.defaultLevel).toBe(Effort.Medium);
+		expect(qwen?.input).toEqual(["text", "image"]);
+	});
+
+	test("keeps a live vision removal authoritative through the production manager merge", async () => {
+		// The CLI resolves models through the manager, which merges the
+		// discovered row over the bundled reference. `mergeDynamicModel` ORs
+		// image support when both sides share a base URL — and every ai& row
+		// does — so without the provider override a model that dropped
+		// `vision` would keep advertising image input and the agent would send
+		// images to a now text-only route.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-aiand-refresh-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const bundledVisionModel: ModelSpec<"openai-completions"> = {
+			id: "qwen/qwen3.6-27b",
+			name: "Qwen3.6 27B",
+			api: "openai-completions",
+			provider: "aiand",
+			baseUrl: "https://api.aiand.com/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.32, output: 3.2, cacheRead: 0.2, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: null,
+		};
+		const fetchMock = async (): Promise<Response> =>
+			aiandModelsResponse([
+				{
+					id: "qwen/qwen3.6-27b",
+					context_window: 262144,
+					// Live org-scoped catalog no longer lists this model as vision-capable.
+					capabilities: ["reasoning", "tool_calling"],
+					reasoning_efforts: ["none", "high"],
+					reasoning_effort_default: "high",
+					currency: "usd",
+					input_per_1m: "0.320000",
+					output_per_1m: "3.200000",
+					cached_input_per_1m: "0.200000",
+				},
+			]);
+
+		try {
+			const { models } = await resolveProviderModels<"openai-completions">(
+				{
+					...aiandModelManagerOptions({ apiKey: "aiand-key", fetch: fetchMock as unknown as FetchImpl }),
+					staticModels: [bundledVisionModel],
+					cacheDbPath: dbPath,
+				},
+				"online",
+			);
+
+			const model = models.find(item => item.id === "qwen/qwen3.6-27b");
+			expect(model?.input).toEqual(["text"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test("drops retired roster ids from a stale cache when discovery is unavailable", async () => {
+		// kimi-k2.6 and glm-5.1 left the served roster. An upgrading install
+		// holds their rows in the model cache; with discovery down the
+		// cache-mismatch fallback must drop them via the migration list
+		// instead of merging them back as selectable. Both passes share the
+		// credential-keyed namespace so the test exercises the migration
+		// branch rather than a cache miss.
+		const cacheProviderId = aiandModelManagerOptions({ apiKey: "aiand-key" }).cacheProviderId;
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-aiand-stale-cache-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const retiredK26: ModelSpec<"openai-completions"> = {
+			id: "moonshotai/kimi-k2.6",
+			name: "Kimi K2.6",
+			api: "openai-completions",
+			provider: "aiand",
+			baseUrl: "https://api.aiand.com/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.85, output: 3.5, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: null,
+		};
+		const retiredGlm51: ModelSpec<"openai-completions"> = {
+			...retiredK26,
+			id: "zai-org/glm-5.1",
+			name: "GLM 5.1",
+			input: ["text"],
+			cost: { input: 1.4, output: 4.4, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 202752,
+		};
+
+		try {
+			await resolveProviderModels(
+				{
+					providerId: "aiand",
+					cacheProviderId,
+					staticModels: [retiredK26, retiredGlm51],
+					dynamicModelsAuthoritative: true,
+					fetchDynamicModels: async () => [retiredK26, retiredGlm51],
+					cacheDbPath: dbPath,
+				},
+				"online",
+			);
+
+			const offline = await resolveProviderModels(
+				{
+					...aiandModelManagerOptions({
+						apiKey: "aiand-key",
+						fetch: async () => new Response(null, { status: 503 }),
+					}),
+					staticModels: [...AIAND_STATIC_MODELS],
+					cacheDbPath: dbPath,
+				},
+				"offline",
+			);
+
+			const ids = offline.models.map(model => model.id);
+			expect(ids).not.toContain("moonshotai/kimi-k2.6");
+			expect(ids).not.toContain("zai-org/glm-5.1");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test("preserves confirmed JPY zero pricing through the manager merge", async () => {
+		// A JPY-billed org maps every rate to zero rather than USD figures.
+		// The merge treats zero as missing by default, so without cost
+		// authority the bundled USD seed rates would win and the resolved
+		// model would charge USD despite the JPY guard.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-aiand-jpy-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "qwen/qwen3.6-27b",
+					context_window: 262144,
+					capabilities: ["reasoning", "tool_calling", "vision"],
+					reasoning_efforts: ["none", "high"],
+					reasoning_effort_default: "high",
+					currency: "jpy",
+					input_per_1m: "48.000000",
+					output_per_1m: "480.000000",
+					cached_input_per_1m: "30.000000",
+				},
+			]),
+		) as unknown as FetchImpl;
+
+		try {
+			const { models } = await resolveProviderModels<"openai-completions">(
+				{
+					...aiandModelManagerOptions({ apiKey: "aiand-key", fetch: fetchMock }),
+					staticModels: [...AIAND_STATIC_MODELS],
+					cacheDbPath: dbPath,
+				},
+				"online",
+			);
+
+			const model = models.find(item => item.id === "qwen/qwen3.6-27b");
+			expect(model?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test("isolates org caches by credential across AIAND_API_KEY switches", async () => {
+		// ai& keys are org-scoped and pricing follows the org's billing
+		// currency. A JPY org's zero rates must never serve a USD org from a
+		// fresh cache: the namespace is credential-keyed, so the key switch
+		// misses the prior org's cache and re-runs discovery.
+		const jpyNs = aiandModelManagerOptions({ apiKey: "jpy-org-key" }).cacheProviderId;
+		const usdNs = aiandModelManagerOptions({ apiKey: "usd-org-key" }).cacheProviderId;
+		expect(jpyNs).not.toBe(usdNs);
+
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-aiand-key-switch-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const jpyFetch: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "qwen/qwen3.6-27b",
+					context_window: 262144,
+					capabilities: ["reasoning", "tool_calling", "vision"],
+					reasoning_efforts: ["none", "high"],
+					reasoning_effort_default: "high",
+					currency: "jpy",
+					input_per_1m: "48.000000",
+					output_per_1m: "480.000000",
+					cached_input_per_1m: "30.000000",
+				},
+			]),
+		) as unknown as FetchImpl;
+		const usdFetch: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "qwen/qwen3.6-27b",
+					context_window: 262144,
+					capabilities: ["reasoning", "tool_calling", "vision"],
+					reasoning_efforts: ["none", "high"],
+					reasoning_effort_default: "high",
+					currency: "usd",
+					input_per_1m: "0.320000",
+					output_per_1m: "3.200000",
+					cached_input_per_1m: "0.200000",
+				},
+			]),
+		) as unknown as FetchImpl;
+
+		try {
+			await resolveProviderModels(
+				{
+					...aiandModelManagerOptions({ apiKey: "jpy-org-key", fetch: jpyFetch }),
+					staticModels: [...AIAND_STATIC_MODELS],
+					cacheDbPath: dbPath,
+				},
+				"online",
+			);
+
+			const { models } = await resolveProviderModels(
+				{
+					...aiandModelManagerOptions({ apiKey: "usd-org-key", fetch: usdFetch }),
+					staticModels: [...AIAND_STATIC_MODELS],
+					cacheDbPath: dbPath,
+				},
+				"online",
+			);
+
+			expect(usdFetch).toHaveBeenCalled();
+			expect(models.find(item => item.id === "qwen/qwen3.6-27b")?.cost).toEqual({
+				input: 0.32,
+				output: 3.2,
+				cacheRead: 0.2,
+				cacheWrite: 0,
+			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });

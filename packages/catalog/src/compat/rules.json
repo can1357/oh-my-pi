@@ -6670,73 +6670,108 @@
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:4",
+				"source": "providers/aiand.kdl:23",
 				"providers": [
 					"aiand"
 				],
 				"models": [
 					{
 						"kind": "exact",
-						"value": "moonshotai/kimi-k3"
-					},
-					{
-						"kind": "exact",
 						"value": "deepseek-ai/deepseek-v4-pro"
-					},
-					{
-						"kind": "exact",
-						"value": "deepseek-ai/deepseek-v4-flash"
-					},
-					{
-						"kind": "exact",
-						"value": "openai/gpt-oss-120b"
-					},
-					{
-						"kind": "exact",
-						"value": "zai-org/glm-5.2"
-					},
-					{
-						"kind": "exact",
-						"value": "google/gemma-4-31b-it"
-					},
-					{
-						"kind": "exact",
-						"value": "moonshotai/kimi-k2.7-code"
-					},
-					{
-						"kind": "exact",
-						"value": "qwen/qwen3.6-27b"
-					},
-					{
-						"kind": "exact",
-						"value": "motif-technologies/motif-3"
 					}
 				],
+				"wire": {
+					"reasoningDisableMode": "none-effort"
+				},
 				"thinking": {
-					"mode": "effort"
+					"efforts": [
+						"minimal",
+						"high",
+						"max"
+					],
+					"effortMap": {
+						"minimal": "none"
+					},
+					"defaultLevel": "minimal"
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:10",
+				"source": "providers/aiand.kdl:31",
 				"providers": [
 					"aiand"
 				],
 				"models": [
 					{
 						"kind": "exact",
-						"value": "deepseek-ai/deepseek-v4-pro"
+						"value": "deepseek-ai/deepseek-v4-flash"
+					}
+				],
+				"wire": {
+					"reasoningDisableMode": "none-effort"
+				},
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"high",
+						"max"
+					],
+					"effortMap": {
+						"minimal": "none"
+					},
+					"defaultLevel": "minimal"
+				},
+				"catalog": {
+					"editRevision": "sloppy.1"
+				}
+			},
+			{
+				"source": "providers/aiand.kdl:40",
+				"providers": [
+					"aiand"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "google/gemma-4-31b-it"
+					}
+				],
+				"wire": {
+					"reasoningDisableMode": "none-effort"
+				},
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"high"
+					],
+					"effortMap": {
+						"minimal": "none"
+					},
+					"defaultLevel": "minimal"
+				}
+			},
+			{
+				"source": "providers/aiand.kdl:48",
+				"providers": [
+					"aiand"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "moonshotai/kimi-k2.7-code"
 					}
 				],
 				"thinking": {
 					"efforts": [
-						"low",
-						"high",
-						"max"
-					]
+						"high"
+					],
+					"defaultLevel": "high"
+				},
+				"catalog": {
+					"editRevision": "sloppy.1"
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:13",
+				"source": "providers/aiand.kdl:53",
 				"providers": [
 					"aiand"
 				],
@@ -6746,33 +6781,109 @@
 						"value": "motif-technologies/motif-3"
 					}
 				],
+				"wire": {
+					"reasoningDisableMode": "none-effort"
+				},
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"high"
+					],
+					"effortMap": {
+						"minimal": "none"
+					},
+					"defaultLevel": "high"
+				}
+			},
+			{
+				"source": "providers/aiand.kdl:61",
+				"providers": [
+					"aiand"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "qwen/qwen3.6-27b"
+					}
+				],
+				"wire": {
+					"reasoningDisableMode": "none-effort"
+				},
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"high"
+					],
+					"effortMap": {
+						"minimal": "none"
+					},
+					"defaultLevel": "high"
+				}
+			},
+			{
+				"source": "providers/aiand.kdl:69",
+				"providers": [
+					"aiand"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "qwen/qwen3.8-27b"
+					}
+				],
+				"wire": {
+					"reasoningDisableMode": "none-effort"
+				},
 				"thinking": {
 					"efforts": [
 						"minimal",
 						"low",
 						"medium",
-						"high",
 						"xhigh"
-					]
+					],
+					"effortMap": {
+						"minimal": "none"
+					},
+					"defaultLevel": "medium"
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:16",
+				"source": "providers/aiand.kdl:77",
 				"providers": [
 					"aiand"
 				],
 				"models": [
 					{
 						"kind": "exact",
-						"value": "moonshotai/kimi-k2.7-code"
-					},
-					{
-						"kind": "exact",
-						"value": "deepseek-ai/deepseek-v4-flash"
+						"value": "zai-org/glm-5.2"
 					}
 				],
-				"catalog": {
-					"editRevision": "sloppy.1"
+				"wire": {
+					"reasoningDisableMode": "none-effort"
+				},
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"high",
+						"max"
+					],
+					"effortMap": {
+						"minimal": "none"
+					},
+					"defaultLevel": "max"
+				}
+			},
+			{
+				"source": "providers/aiand.kdl:3",
+				"providers": [
+					"aiand"
+				],
+				"wire": {
+					"discoveryInputAuthoritative": true,
+					"discoveryCostAuthoritative": true
+				},
+				"thinking": {
+					"mode": "effort"
 				}
 			},
 			{

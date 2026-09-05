@@ -298,7 +298,7 @@
 			"cost": {
 				"input": 0.15,
 				"output": 0.25,
-				"cacheRead": 0,
+				"cacheRead": 0.08,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -306,10 +306,14 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"low",
+					"minimal",
 					"high",
 					"max"
-				]
+				],
+				"defaultLevel": "minimal",
+				"effortMap": {
+					"minimal": "none"
+				}
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
@@ -341,7 +345,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -365,6 +369,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false,
+				"discoveryInputAuthoritative": true,
+				"discoveryCostAuthoritative": true,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
@@ -389,7 +395,7 @@
 			"cost": {
 				"input": 1,
 				"output": 2.5,
-				"cacheRead": 0,
+				"cacheRead": 0.25,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -397,10 +403,14 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"low",
+					"minimal",
 					"high",
 					"max"
-				]
+				],
+				"defaultLevel": "minimal",
+				"effortMap": {
+					"minimal": "none"
+				}
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
@@ -432,7 +442,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -456,6 +466,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false,
+				"discoveryInputAuthoritative": true,
+				"discoveryCostAuthoritative": true,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
@@ -481,7 +493,7 @@
 			"cost": {
 				"input": 0.2,
 				"output": 0.5,
-				"cacheRead": 0,
+				"cacheRead": 0.05,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -490,11 +502,12 @@
 				"mode": "effort",
 				"efforts": [
 					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				]
+					"high"
+				],
+				"defaultLevel": "minimal",
+				"effortMap": {
+					"minimal": "none"
+				}
 			},
 			"requiresGlyphTokenization": false,
 			"identity": {
@@ -522,7 +535,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -546,6 +559,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false,
+				"discoveryInputAuthoritative": true,
+				"discoveryCostAuthoritative": true,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
@@ -570,7 +585,7 @@
 			"cost": {
 				"input": 0.75,
 				"output": 3.5,
-				"cacheRead": 0,
+				"cacheRead": 0.2,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -578,12 +593,9 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				]
+					"high"
+				],
+				"defaultLevel": "high"
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "kimi-k2",
@@ -640,6 +652,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false,
+				"discoveryInputAuthoritative": true,
+				"discoveryCostAuthoritative": true,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
@@ -664,7 +678,7 @@
 			"cost": {
 				"input": 3,
 				"output": 12.5,
-				"cacheRead": 0,
+				"cacheRead": 0.5,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -742,6 +756,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false,
+				"discoveryInputAuthoritative": true,
+				"discoveryCostAuthoritative": true,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
@@ -765,7 +781,7 @@
 			"cost": {
 				"input": 0.5,
 				"output": 2,
-				"cacheRead": 0,
+				"cacheRead": 0.2,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -774,11 +790,12 @@
 				"mode": "effort",
 				"efforts": [
 					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				]
+					"high"
+				],
+				"defaultLevel": "high",
+				"effortMap": {
+					"minimal": "none"
+				}
 			},
 			"requiresGlyphTokenization": false,
 			"identity": {
@@ -806,7 +823,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -830,6 +847,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false,
+				"discoveryInputAuthoritative": true,
+				"discoveryCostAuthoritative": true,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
@@ -853,7 +872,7 @@
 			"cost": {
 				"input": 0.15,
 				"output": 0.6,
-				"cacheRead": 0,
+				"cacheRead": 0.08,
 				"cacheWrite": 0
 			},
 			"contextWindow": 131072,
@@ -919,6 +938,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false,
+				"discoveryInputAuthoritative": true,
+				"discoveryCostAuthoritative": true,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
@@ -943,7 +964,7 @@
 			"cost": {
 				"input": 0.32,
 				"output": 3.2,
-				"cacheRead": 0,
+				"cacheRead": 0.2,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -952,10 +973,12 @@
 				"mode": "effort",
 				"efforts": [
 					"minimal",
-					"low",
-					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "high",
+				"effortMap": {
+					"minimal": "none"
+				}
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
@@ -987,7 +1010,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -1011,6 +1034,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false,
+				"discoveryInputAuthoritative": true,
+				"discoveryCostAuthoritative": true,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
@@ -1035,7 +1060,7 @@
 			"cost": {
 				"input": 0.4,
 				"output": 3,
-				"cacheRead": 0,
+				"cacheRead": 0.2,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -1046,8 +1071,12 @@
 					"minimal",
 					"low",
 					"medium",
-					"high"
-				]
+					"xhigh"
+				],
+				"defaultLevel": "medium",
+				"effortMap": {
+					"minimal": "none"
+				}
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
@@ -1079,7 +1108,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -1103,6 +1132,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false,
+				"discoveryInputAuthoritative": true,
+				"discoveryCostAuthoritative": true,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
@@ -1126,7 +1157,7 @@
 			"cost": {
 				"input": 1,
 				"output": 4,
-				"cacheRead": 0,
+				"cacheRead": 0.3,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -1135,11 +1166,13 @@
 				"mode": "effort",
 				"efforts": [
 					"minimal",
-					"low",
-					"medium",
 					"high",
 					"max"
-				]
+				],
+				"defaultLevel": "max",
+				"effortMap": {
+					"minimal": "none"
+				}
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "glm5",
@@ -1169,7 +1202,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "none-effort",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -1193,6 +1226,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false,
+				"discoveryInputAuthoritative": true,
+				"discoveryCostAuthoritative": true,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
@@ -1216,7 +1251,7 @@
 			"cost": {
 				"input": 1,
 				"output": 4,
-				"cacheRead": 0,
+				"cacheRead": 0.3,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -1283,6 +1318,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false,
+				"discoveryInputAuthoritative": true,
+				"discoveryCostAuthoritative": true,
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,

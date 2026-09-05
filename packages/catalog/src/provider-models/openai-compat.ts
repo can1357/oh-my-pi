@@ -4759,6 +4759,9 @@ const AIAND_EFFORT_BY_WIRE_VALUE: Record<string, Effort> = {
 	max: Effort.Max,
 };
 
+/** ai&'s thinking-off wire tier — a disable state, not a user effort. */
+const AIAND_WIRE_EFFORT_NONE = "none";
+
 function normalizeAiandBaseUrl(baseUrl: string | undefined): string {
 	const value = baseUrl?.trim() || AIAND_DEFAULT_BASE_URL;
 	const normalized = value.replace(/\/+$/, "");
@@ -4768,9 +4771,10 @@ function normalizeAiandBaseUrl(baseUrl: string | undefined): string {
 function createAiandStaticModel(
 	id: string,
 	name: string,
-	cost: { input: number; output: number },
+	cost: { input: number; output: number; cached: number },
 	contextWindow: number,
 	input: ModelSpec<"openai-completions">["input"],
+	thinking: ThinkingConfig,
 ): ModelSpec<"openai-completions"> {
 	return {
 		id,
@@ -4780,66 +4784,169 @@ function createAiandStaticModel(
 		baseUrl: AIAND_DEFAULT_BASE_URL,
 		reasoning: true,
 		input: [...input],
-		cost: { input: cost.input, output: cost.output, cacheRead: 0, cacheWrite: 0 },
+		cost: { input: cost.input, output: cost.output, cacheRead: cost.cached, cacheWrite: 0 },
 		contextWindow,
 		maxTokens: null,
-		thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High], defaultLevel: Effort.Medium },
+		thinking,
 	};
 }
 
 /**
- * Documented ai& catalog (docs.aiand.com/models/catalog, 2026-08) bundled so
- * the provider is usable when generation and first boot have no live key.
- * The org-scoped `/v1/models` response is authoritative once discovery runs.
+ * ai& catalog snapshot (live USD-org `/v1/models` census, 2026-09-05) bundled
+ * so the provider is usable when generation and first boot have no live key.
+ * Values mirror what `mapAiandModel` derives from the same wire shape, so a
+ * keyless boot resolves the same ladders discovery would. The org-scoped
+ * `/v1/models` response stays authoritative once discovery runs.
  */
 export const AIAND_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
-	createAiandStaticModel("qwen/qwen3.6-27b", "Qwen3.6 27B", { input: 0, output: 0 }, 262_144, ["text"]),
+	createAiandStaticModel("zai-org/glm-5.3", "GLM 5.3", { input: 1, output: 4, cached: 0.3 }, 1_048_576, ["text"], {
+		mode: "effort",
+		efforts: [Effort.Low, Effort.High, Effort.Max],
+		defaultLevel: Effort.Max,
+	}),
+	createAiandStaticModel(
+		"qwen/qwen3.8-27b",
+		"Qwen3.8-27B",
+		{ input: 0.4, output: 3, cached: 0.2 },
+		262_144,
+		["text", "image"],
+		{
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.XHigh],
+			effortMap: { [Effort.Minimal]: AIAND_WIRE_EFFORT_NONE },
+			defaultLevel: Effort.Medium,
+		},
+	),
+	createAiandStaticModel(
+		"moonshotai/kimi-k3",
+		"Kimi K3",
+		{ input: 3, output: 12.5, cached: 0.5 },
+		1_048_576,
+		["text", "image"],
+		{ mode: "effort", efforts: [Effort.Low, Effort.High, Effort.Max], defaultLevel: Effort.Max },
+	),
+	createAiandStaticModel("zai-org/glm-5.2", "GLM 5.2", { input: 1, output: 4, cached: 0.3 }, 1_048_576, ["text"], {
+		mode: "effort",
+		efforts: [Effort.Minimal, Effort.High, Effort.Max],
+		effortMap: { [Effort.Minimal]: AIAND_WIRE_EFFORT_NONE },
+		defaultLevel: Effort.Max,
+	}),
+	createAiandStaticModel(
+		"google/gemma-4-31b-it",
+		"Gemma 4 31B IT",
+		{ input: 0.2, output: 0.5, cached: 0.05 },
+		262_144,
+		["text", "image"],
+		{
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.High],
+			effortMap: { [Effort.Minimal]: AIAND_WIRE_EFFORT_NONE },
+			defaultLevel: Effort.Minimal,
+		},
+	),
+	createAiandStaticModel(
+		"motif-technologies/motif-3",
+		"Motif 3",
+		{ input: 0.5, output: 2, cached: 0.2 },
+		262_144,
+		["text"],
+		{
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.High],
+			effortMap: { [Effort.Minimal]: AIAND_WIRE_EFFORT_NONE },
+			defaultLevel: Effort.High,
+		},
+	),
+	createAiandStaticModel(
+		"moonshotai/kimi-k2.7-code",
+		"Kimi K2.7 Code",
+		{ input: 0.75, output: 3.5, cached: 0.2 },
+		262_144,
+		["text", "image"],
+		{ mode: "effort", efforts: [Effort.High], defaultLevel: Effort.High },
+	),
+	createAiandStaticModel(
+		"qwen/qwen3.6-27b",
+		"Qwen3.6 27B",
+		{ input: 0.32, output: 3.2, cached: 0.2 },
+		262_144,
+		["text", "image"],
+		{
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.High],
+			effortMap: { [Effort.Minimal]: AIAND_WIRE_EFFORT_NONE },
+			defaultLevel: Effort.High,
+		},
+	),
 	createAiandStaticModel(
 		"deepseek-ai/deepseek-v4-flash",
 		"DeepSeek V4 Flash",
-		{ input: 0.15, output: 0.25 },
-		1_000_000,
+		{ input: 0.15, output: 0.25, cached: 0.08 },
+		1_048_576,
 		["text"],
+		{
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.High, Effort.Max],
+			effortMap: { [Effort.Minimal]: AIAND_WIRE_EFFORT_NONE },
+			defaultLevel: Effort.Minimal,
+		},
 	),
-	createAiandStaticModel("google/gemma-4-31b-it", "Gemma 4 31B IT", { input: 0.2, output: 0.5 }, 262_144, [
-		"text",
-		"image",
-	]),
-	createAiandStaticModel("openai/gpt-oss-120b", "GPT OSS 120B", { input: 0.15, output: 0.6 }, 131_072, ["text"]),
-	createAiandStaticModel("deepseek-ai/deepseek-v4-pro", "DeepSeek V4 Pro", { input: 1, output: 2.5 }, 1_000_000, [
-		"text",
-	]),
-	createAiandStaticModel("moonshotai/kimi-k2.7-code", "Kimi K2.7 Code", { input: 0.75, output: 3.5 }, 262_144, [
-		"text",
-		"image",
-	]),
-	createAiandStaticModel("moonshotai/kimi-k2.6", "Kimi K2.6", { input: 0.85, output: 3.5 }, 262_144, [
-		"text",
-		"image",
-	]),
-	createAiandStaticModel("zai-org/glm-5.2", "GLM 5.2", { input: 1, output: 4 }, 1_000_000, ["text"]),
-	createAiandStaticModel("zai-org/glm-5.1", "GLM 5.1", { input: 1.4, output: 4.4 }, 202_752, ["text"]),
+	createAiandStaticModel(
+		"deepseek-ai/deepseek-v4-pro",
+		"DeepSeek V4 Pro",
+		{ input: 1, output: 2.5, cached: 0.25 },
+		1_048_576,
+		["text"],
+		{
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.High, Effort.Max],
+			effortMap: { [Effort.Minimal]: AIAND_WIRE_EFFORT_NONE },
+			defaultLevel: Effort.Minimal,
+		},
+	),
+	createAiandStaticModel(
+		"openai/gpt-oss-120b",
+		"GPT OSS 120B",
+		{ input: 0.15, output: 0.6, cached: 0.08 },
+		131_072,
+		["text"],
+		{ mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High], defaultLevel: Effort.Medium },
+	),
 ];
 
 const AIAND_STATIC_MODEL_IDS = AIAND_STATIC_MODELS.map(model => model.id);
+/**
+ * ai& ids retired from the served roster. The static list above no longer
+ * contains them, so without this migration list a cache-mismatch fallback
+ * would merge their stale cached rows back and keep them selectable.
+ */
+const AIAND_RETIRED_MODEL_IDS = ["moonshotai/kimi-k2.6", "zai-org/glm-5.1"] as const;
 
 function mapAiandThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
-	const efforts = Array.isArray(entry.reasoning_efforts)
-		? entry.reasoning_efforts.flatMap(value =>
-				typeof value === "string" && AIAND_EFFORT_BY_WIRE_VALUE[value] ? [AIAND_EFFORT_BY_WIRE_VALUE[value]] : [],
-			)
+	const wireEfforts = Array.isArray(entry.reasoning_efforts)
+		? entry.reasoning_efforts.filter((value): value is string => typeof value === "string")
 		: [];
-	if (efforts.length === 0) {
+	const efforts = wireEfforts.flatMap(value =>
+		value === AIAND_WIRE_EFFORT_NONE || !AIAND_EFFORT_BY_WIRE_VALUE[value] ? [] : [AIAND_EFFORT_BY_WIRE_VALUE[value]],
+	);
+	const wireHasNone = wireEfforts.includes(AIAND_WIRE_EFFORT_NONE);
+	if (efforts.length === 0 && !wireHasNone) {
 		return undefined;
 	}
+	const prependMinimal = wireHasNone && !efforts.includes(Effort.Minimal);
+	const ladder = prependMinimal ? [Effort.Minimal, ...efforts] : efforts;
+	const rawDefault = typeof entry.reasoning_effort_default === "string" ? entry.reasoning_effort_default : undefined;
 	const defaultLevel =
-		typeof entry.reasoning_effort_default === "string"
-			? AIAND_EFFORT_BY_WIRE_VALUE[entry.reasoning_effort_default]
-			: undefined;
+		rawDefault === AIAND_WIRE_EFFORT_NONE
+			? Effort.Minimal
+			: rawDefault !== undefined
+				? AIAND_EFFORT_BY_WIRE_VALUE[rawDefault]
+				: undefined;
 	return {
 		mode: "effort",
-		efforts,
-		...(defaultLevel && efforts.includes(defaultLevel) && { defaultLevel }),
+		efforts: ladder,
+		...(prependMinimal && { effortMap: { [Effort.Minimal]: AIAND_WIRE_EFFORT_NONE } }),
+		...(defaultLevel && ladder.includes(defaultLevel) && { defaultLevel }),
 	};
 }
 
@@ -4847,6 +4954,8 @@ function mapAiandThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | 
  * ai& reports prices as decimal strings per 1M tokens in the org's billing
  * currency (`usd` or `jpy`). Costs are only mapped for USD orgs — JPY figures
  * would corrupt the USD-denominated cost model, so they fall back to zero.
+ * Every model also quotes a reduced `cached_input_per_1m` rate for prompt-
+ * cached input, mapped onto cacheRead.
  */
 function mapAiandCost(entry: OpenAICompatibleModelRecord): ModelSpec<"openai-completions">["cost"] {
 	if (typeof entry.currency === "string" && entry.currency !== "usd") {
@@ -4855,7 +4964,7 @@ function mapAiandCost(entry: OpenAICompatibleModelRecord): ModelSpec<"openai-com
 	return {
 		input: toPositiveNumber(entry.input_per_1m, 0),
 		output: toPositiveNumber(entry.output_per_1m, 0),
-		cacheRead: 0,
+		cacheRead: toPositiveNumber(entry.cached_input_per_1m, 0),
 		cacheWrite: 0,
 	};
 }
@@ -4896,8 +5005,9 @@ export function aiandModelManagerOptions(config?: AiandModelManagerConfig): Mode
 	const baseUrl = normalizeAiandBaseUrl(config?.baseUrl ?? Bun.env.AIAND_BASE_URL);
 	return {
 		providerId: "aiand",
+		cacheProviderId: resolveModelCacheProviderId("aiand", { apiKey, baseUrl }),
 		dynamicModelsAuthoritative: true,
-		dropCachedModelIdsOnStaticMismatch: AIAND_STATIC_MODEL_IDS,
+		dropCachedModelIdsOnStaticMismatch: [...AIAND_STATIC_MODEL_IDS, ...AIAND_RETIRED_MODEL_IDS],
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
