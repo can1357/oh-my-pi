@@ -2134,12 +2134,18 @@ export class StatusLineComponent implements Component {
 					)
 			: 0;
 		// A default (non-compact) gauge may fall back to its short percentage-only
-		// label when the whole bar cannot hold both context labels. In that case,
-		// do not sacrifice the last ordinary segment to an impossible reservation.
+		// label when both context labels cannot coexist with the final ordinary
+		// segment. Do not drop that last segment merely to satisfy the larger
+		// two-label reservation; the remaining gap can still show the percentage.
 		// Compact mode is explicit and keeps its configured total reservation.
-		const reservedEmbeddedContextWidth =
-			!embedCompactContext && embeddedContextWidth > topFillWidth ? 0 : embeddedContextWidth;
-		const minimumGapWidth = () => reservedEmbeddedContextWidth || (left.length > 0 && right.length > 0 ? 1 : 0);
+		const minimumGapWidth = () => {
+			const ordinaryWidth = leftWidth + rightWidth;
+			const ordinaryCount = left.length + right.length;
+			const preserveLastOrdinarySegment =
+				!embedCompactContext && ordinaryCount === 1 && ordinaryWidth + embeddedContextWidth > topFillWidth;
+			if (!preserveLastOrdinarySegment && embeddedContextWidth > 0) return embeddedContextWidth;
+			return left.length > 0 && right.length > 0 ? 1 : 0;
+		};
 		const totalWidth = () => leftWidth + rightWidth + minimumGapWidth();
 
 		if (topFillWidth > 0) {

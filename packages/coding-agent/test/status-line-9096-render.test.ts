@@ -485,8 +485,9 @@ test("preserves the last ordinary segment when non-compact context labels cannot
 		segmentOptions: { model: { showThinkingLevel: false } },
 	});
 
-	const rendered = stripVTControlCharacters(component.getTopBorder(6).content);
+	const rendered = stripVTControlCharacters(component.getTopBorder(12).content);
 	expect(rendered).toContain("M");
+	expect(rendered).toContain("8%");
 	expect(rendered).not.toContain("100K");
 });
 
