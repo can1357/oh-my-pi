@@ -1,0 +1,2056 @@
+# Vendored from https://github.com/SublimeText/Liquid/blob/e01e397a13e21bbd4b81dfd2fb0db1b03134dee2/Syntaxes/Liquid.sublime-syntax
+# Updated for Liquid 5.13.0's `self` keyword:
+# https://github.com/Shopify/liquid/commit/532b4390634b111b0cae447347d7a6afd04b8d75
+# Updated for Shopify Liquid's July '26 `block` and `partial` preview tags:
+# https://shopify.dev/changelog/developer-preview-liquid-block-and-partial-tags
+# Adjusted HTML, JavaScript, and CSS embeds to use syntect's bundled base scopes.
+#
+# MIT License
+#
+# Copyright (c) 2022 Sublime Text Packages
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+%YAML 1.2
+---
+# https://shopify.github.io/liquid
+# https://shopify.dev/api/liquid
+# http://www.sublimetext.com/docs/syntax.html
+name: Liquid
+scope: source.liquid
+version: 2
+hidden: true
+
+variables:
+  liquid_variables: \b[a-zA-Z_][0-9a-zA-Z_]*\b
+
+  jekyll_highlight_begin: (?:({%)\s*(highlight)\s+)
+  jekyll_highlight_params: (?:(?:\s+(\S.*?))?\s*(%}))
+  jekyll_highlight_escape: (({%)\s*(endhighlight)\s*(%}))
+
+contexts:
+
+  main:
+    - include: liquid
+
+  liquid:
+    - include: liquid-tags
+    - include: liquid-objects
+
+  liquid-tags:
+    - include: jekyll-highlight-tags
+    - include: liquid-doc-tags
+    - include: liquid-comment-tags
+    - include: liquid-schema-tags
+    - include: liquid-javascript-tags
+    - include: liquid-style-tags
+    - include: liquid-stylesheet-tags
+    - include: liquid-raw-tags
+    - include: liquid-statement-tags
+
+###[ LIQUID INTERPOLATIONS ]###################################################
+
+  interpolations:
+    - match: (?={[{%])
+      push: interpolation-body
+
+  interpolation-body:
+    - clear_scopes: 1
+    - meta_include_prototype: false
+    - include: liquid-tags
+    - include: liquid-objects
+    - include: immediately-pop
+
+###[ LIQUID COMMENT TAGS ]#####################################################
+
+  liquid-comment-tags:
+    # https://shopify.github.io/liquid/tags/template
+    - match: ({%-?)\s*(comment)\s*(-?%})
+      scope: meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.comment.liquid
+        3: punctuation.section.embedded.end.liquid
+      push: liquid-comment-tag-body
+
+  liquid-comment-tag-body:
+    - meta_scope: meta.embedded.liquid source.liquid
+    - meta_content_scope: comment.block.liquid
+    - match: ({%-?)\s*(endcomment)\s*(-?%})
+      scope: meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.comment.liquid
+        3: punctuation.section.embedded.end.liquid
+      pop: 1
+
+###[ LIQUID DOC TAGS ]####################################################
+
+  liquid-doc-tags:
+    # https://shopify.dev/docs/api/liquid/tags/theme-tags#doc
+    - match: ({%-?)\s*(doc)\s*(-?%})
+      scope: meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.comment.liquid
+        3: punctuation.section.embedded.end.liquid
+      push: liquid-doc-tag-body
+
+  liquid-doc-tag-body:
+    - meta_scope: meta.embedded.liquid source.liquid
+    - meta_content_scope: comment.block.documentation.liquid
+    - match: ({%-?)\s*(enddoc)\s*(-?%})
+      scope: meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.comment.liquid
+        3: punctuation.section.embedded.end.liquid
+      pop: 1
+    - match: '@description\b'
+      scope: entity.name.tag.documentation.liquid
+    - match: '(@param)\s+(({){{liquid_variables}}(}))\s+(\[?{{liquid_variables}}\]?)'
+      captures:
+        1: entity.name.tag.documentation.liquid
+        2: storage.type.liquid
+        3: punctuation.definition.type.begin.liquid
+        4: punctuation.definition.type.end.liquid
+        5: variable.other.liquid
+    - match: '@example\b'
+      scope: entity.name.tag.documentation.liquid
+      embed: scope:text.html.basic
+      escape: (?=@example\b|{%-?\s*enddoc\s*-?%})
+
+###[ LIQUID JAVASCRIPT TAGS ]##################################################
+
+  liquid-javascript-tags:
+    - match: ({%-?)\s*(javascript)\s*(-?%})
+      scope: meta.embedded.liquid source.liquid meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.raw.liquid
+        3: punctuation.section.embedded.end.liquid
+      embed: scope:source.js
+      embed_scope: source.js.embedded.liquid
+      escape: ({%-?)\s*(endjavascript)\s*(-?%})
+      escape_captures:
+        0: meta.embedded.liquid source.liquid meta.statement.liquid
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.raw.liquid
+        3: punctuation.section.embedded.end.liquid
+
+###[ LIQUID RAW TAGS ]#########################################################
+
+  liquid-raw-tags:
+    # https://shopify.github.io/liquid/tags/template
+    - match: ({%)\s*(raw)\s*(%})
+      scope: meta.embedded.liquid source.liquid meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.raw.liquid
+        3: punctuation.section.embedded.end.liquid
+      push: liquid-raw-tag-body
+
+  liquid-raw-tag-body:
+    - meta_content_scope: meta.raw.liquid
+    - match: ({%)\s*(endraw)\s*(%})
+      scope: meta.embedded.liquid source.liquid meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.raw.liquid
+        3: punctuation.section.embedded.end.liquid
+      pop: 1
+
+###[ LIQUID SCHEMA TAGS ]######################################################
+
+  liquid-schema-tags:
+    - match: ({%-?)\s*(schema)\s*(-?%})
+      scope: meta.embedded.liquid source.liquid meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.schema.liquid
+        3: punctuation.section.embedded.end.liquid
+      embed: scope:source.json
+      embed_scope: markup.json.schema.liquid
+      escape: ({%-?)\s*(endschema)\s*(-?%})
+      escape_captures:
+        0: meta.embedded.liquid source.liquid meta.statement.liquid
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.schema.liquid
+        3: punctuation.section.embedded.end.liquid
+
+###[ LIQUID STYLE TAGS ]#######################################################
+
+  liquid-style-tags:
+    # https://shopify.dev/api/liquid/tags/theme-tags#style
+    - match: ({%-?)\s*(style)\s*(-?%})
+      scope: meta.embedded.liquid source.liquid meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.raw.liquid
+        3: punctuation.section.embedded.end.liquid
+      embed: scope:source.css
+      embed_scope: source.css.embedded.liquid
+      escape: ({%-?)\s*(endstyle)\s*(-?%})
+      escape_captures:
+        0: meta.embedded.liquid source.liquid meta.statement.liquid
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.raw.liquid
+        3: punctuation.section.embedded.end.liquid
+
+###[ LIQUID STYLESHEET TAGS ]##################################################
+
+  liquid-stylesheet-tags:
+    # https://shopify.dev/docs/api/liquid/tags/theme-tags#stylesheet
+    - match: ({%-?)\s*(stylesheet)\s*(-?%})
+      scope: meta.embedded.liquid source.liquid meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.raw.liquid
+        3: punctuation.section.embedded.end.liquid
+      embed: scope:source.css
+      embed_scope: source.css.embedded.liquid
+      escape: ({%-?)\s*(endstylesheet)\s*(-?%})
+      escape_captures:
+        0: meta.embedded.liquid source.liquid meta.statement.liquid
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.raw.liquid
+        3: punctuation.section.embedded.end.liquid
+
+###[ LIQUID STATEMENT TAGS ]###################################################
+
+  liquid-statement-tags:
+    - match: ({%-?)\s*(liquid\b)?
+      scope: meta.embedded.liquid source.liquid meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.liquid
+      embed: liquid-statement-tag-body
+      embed_scope: meta.embedded.liquid source.liquid meta.statement.liquid
+      escape: -?%}
+      escape_captures:
+        0: meta.embedded.liquid source.liquid meta.statement.liquid punctuation.section.embedded.end.liquid
+
+  liquid-statement-tag-body:
+    - include: jekyll-links
+    - include: liquid-block-comments
+    - include: liquid-line-comments
+    - include: liquid-assignments
+    - include: liquid-conditionals
+    - include: liquid-iterations
+    - include: liquid-functions
+    - include: liquid-filters
+    - include: liquid-expression-continuation
+    - include: liquid-other
+
+  liquid-expression:
+    - include: liquid-operators
+    - include: liquid-parens
+    - include: liquid-object-body
+    - include: eol-pop
+
+###[ LIQUID OBJECTS ]##########################################################
+
+  liquid-object-interpolations:
+    - match: (?={{)
+      push: liquid-object-interpolation-body
+
+  liquid-object-interpolation-body:
+    - clear_scopes: 1
+    - meta_include_prototype: false
+    - include: liquid-objects
+    - include: immediately-pop
+
+  liquid-objects:
+    - match: '{{-?'
+      scope: meta.interpolation.liquid punctuation.section.interpolation.begin.liquid
+      embed: liquid-object-body
+      embed_scope: meta.interpolation.liquid source.liquid
+      escape: '-?}}'
+      escape_captures:
+        0: meta.interpolation.liquid punctuation.section.interpolation.end.liquid
+
+  liquid-object-body:
+    - include: jekyll-variables
+    - include: liquid-line-comments
+    - include: liquid-constants
+    - include: liquid-filters
+    - include: liquid-item-access
+    - include: liquid-numbers
+    - include: liquid-punctuations
+    - include: liquid-strings
+    - include: liquid-variables
+
+###[ LIQUID ASSIGNMENTS ]######################################################
+
+  liquid-assignments:
+    # https://shopify.github.io/liquid/tags/variable
+    - match: \b(?:assign|capture|endcapture)\b
+      scope: keyword.control.liquid
+      push: liquid-expression
+    - match: \b(?:decrement|increment)\b
+      scope: support.function.liquid
+      push: liquid-expression
+
+###[ LIQUID COMMENTS ]#########################################################
+
+  liquid-block-comments:
+    - match: \bcomment\b
+      scope: keyword.declaration.comment.liquid
+      push: liquid-block-comment-body
+
+  liquid-block-comment-body:
+    - meta_content_scope: comment.block.liquid
+    - match: \bendcomment\b
+      scope: keyword.declaration.comment.liquid
+      pop: 1
+
+  liquid-line-comments:
+    - match: \#+
+      scope: punctuation.definition.comment.liquid
+      push: liquid-line-comment-body
+
+  liquid-line-comment-body:
+    - meta_scope: comment.line.number-sign.liquid
+    - match: \n
+      pop: 1
+
+###[ LIQUID CONTITIONALS ]#####################################################
+
+  liquid-conditionals:
+    # https://shopify.github.io/liquid/tags/control-flow
+    - match: \bif\b
+      scope: keyword.control.conditional.if.liquid
+      push: liquid-expression
+    - match: \belse\b
+      scope: keyword.control.conditional.else.liquid
+      push: liquid-expression
+    - match: \belsif\b
+      scope: keyword.control.conditional.elseif.liquid
+      push: liquid-expression
+    - match: \bcase\b
+      scope: keyword.control.conditional.case.liquid
+      push: liquid-expression
+    - match: \bunless\b
+      scope: keyword.control.conditional.unless.liquid
+      push: liquid-expression
+    - match: \bwhen\b
+      scope: keyword.control.conditional.when.liquid
+      push: liquid-expression
+    - match: \b(?:endif|endcase|endunless)\b
+      scope: keyword.control.conditional.end.liquid
+
+###[ LIQUID ITERATIONS ]#######################################################
+
+  liquid-iterations:
+    # https://shopify.github.io/liquid/tags/iteration
+    - match: \bcycle\b
+      scope: support.function.cycle.liquid
+      push:
+        - liquid-expression
+        - liquid-cycle-group-name
+    - match: \bfor\b
+      scope: keyword.control.loop.for.liquid
+      push: liquid-for-parameters
+    - match: \btablerow\b
+      scope: keyword.control.loop.tablerow.liquid
+      push: liquid-tablerow-parameters
+    - match: \bbreak\b
+      scope: keyword.control.flow.break.liquid
+    - match: \bcontinue\b
+      scope: keyword.control.flow.continue.liquid
+    - match: \b(?:endfor|endtablerow)\b
+      scope: keyword.control.loop.end.liquid
+
+  liquid-cycle-group-name:
+    - match: (")[^"]+(")(?=\s*:)
+      scope: constant.other.group.liquid
+      captures:
+        1: punctuation.definition.constant.begin.liquid
+        2: punctuation.definition.constant.end.liquid
+    - match: (')[^']+(')(?=\s*:)
+      scope: constant.other.group.liquid
+      captures:
+        1: punctuation.definition.constant.begin.liquid
+        2: punctuation.definition.constant.end.liquid
+    - include: else-pop
+
+  liquid-for-parameters:
+    - match: \b(?:limit|offset|reversed)\b
+      scope: variable.parameter.loop.liquid
+    - include: liquid-iteration-common
+
+  liquid-tablerow-parameters:
+    - match: \b(?:cols|limit|offset)\b
+      scope: variable.parameter.loop.liquid
+    - include: liquid-iteration-common
+
+  liquid-iteration-common:
+    - match: \bin\b
+      scope: keyword.control.loop.in.liquid
+    - include: liquid-expression
+
+###[ LIQUID FUNCTIONS ]########################################################
+
+  liquid-functions:
+    # https://shopify.github.io/liquid/tags/template
+    - match: \becho\b
+      scope: support.function.liquid
+      push: liquid-expression
+    - match: \binclude\b # deprecated
+      scope: keyword.control.import.liquid
+      push: liquid-expression
+    - match: \brender\b
+      scope: support.function.liquid
+      push: liquid-render-arguments
+
+    # https://shopify.dev/changelog/developer-preview-liquid-block-and-partial-tags
+    - match: \bblock\b
+      scope: support.function.block.liquid
+      push: liquid-expression
+    - match: \bendblock\b
+      scope: keyword.control.block.end.liquid
+    - match: \bpartial\b
+      scope: support.function.partial.liquid
+      push: liquid-expression
+    - match: \bendpartial\b
+      scope: keyword.control.partial.end.liquid
+
+    # https://shopify.dev/api/liquid/tags/theme-tags#form
+    - match: \b(?:form|endform)\b
+      scope: keyword.declaration.form.liquid
+      push: liquid-expression
+    # https://shopify.dev/api/liquid/tags/theme-tags#layout
+    - match: \blayout\b
+      scope: keyword.declaration.layout.liquid
+      push: liquid-expression
+    # https://shopify.dev/api/liquid/tags/theme-tags#paginate
+    - match: \b(?:paginate|endpaginate)\b
+      scope: keyword.control.paginate.liquid
+      push: liquid-expression
+    # https://shopify.dev/api/liquid/tags/theme-tags#section
+    - match: \bsection\b
+      scope: keyword.declaration.section.liquid
+      push: liquid-expression
+
+  liquid-render-arguments:
+    - match: \bas\b
+      scope: keyword.operator.assignment.liquid
+    - match: \bfor\b
+      scope: keyword.control.loop.for.liquid
+    - match: \bwith\b
+      scope: keyword.declaration.with.liquid
+    - match: ({{liquid_variables}})\s*(:)
+      captures:
+        1: variable.parameter.liquid
+        2: punctuation.separator.key-value.liquid
+    - include: liquid-object-body
+    - include: eol-pop
+
+  liquid-other:
+    # unknown tags added by plugins
+    - match: '{{liquid_variables}}'
+      scope: keyword.other.liquid
+      push: liquid-expression
+
+###[ LIQUID BRACKETS ]#########################################################
+
+  liquid-parens:
+    - match: (?=\()
+      branch_point: liquid-parens
+      branch:
+        - liquid-group
+        - liquid-range
+
+  liquid-group:
+    - meta_include_prototype: false
+    - match: \(
+      scope: punctuation.section.group.begin.liquid
+      set: liquid-group-body
+
+  liquid-group-body:
+    - meta_scope: meta.group.liquid
+    - match: \)
+      scope: punctuation.section.group.end.liquid
+      pop: 1
+    - match: (?=\.\.)
+      fail: liquid-parens
+    - include: liquid-object-body
+
+  liquid-range:
+    - meta_include_prototype: false
+    - match: \(
+      scope: punctuation.section.sequence.begin.liquid
+      set: liquid-range-body
+
+  liquid-range-body:
+    - meta_scope: meta.sequence.range.liquid
+    - match: \)
+      scope: punctuation.section.sequence.end.liquid
+      pop: 1
+    - match: \.\.
+      scope: punctuation.separator.range.liquid
+    - include: liquid-object-body
+
+  liquid-item-access:
+    - match: \[
+      scope: punctuation.section.brackets.begin.liquid
+      push: liquid-item-access-body
+
+  liquid-item-access-body:
+    - meta_scope: meta.item-access.liquid meta.brackets.liquid
+    - match: \]
+      scope: punctuation.section.brackets.end.liquid
+      pop: 1
+    - include: liquid-object-body
+
+###[ LIQUID OPERATORS ]########################################################
+
+  liquid-filters:
+    - match: \|
+      scope: keyword.operator.logical.pipe.liquid
+      push: liquid-filter-name
+
+  liquid-filter-name:
+    - meta_scope: meta.filter.liquid
+    - match: \b[a-zA-Z_-]+\b
+      scope: support.function.filter.liquid
+      pop: 1
+    - include: else-pop
+
+  liquid-punctuations:
+    - match: \.
+      scope: punctuation.accessor.dot.liquid
+      push: liquid-member-variable
+    - match: ':'
+      scope: punctuation.separator.key-value.liquid
+    - match: ','
+      scope: punctuation.separator.sequence.liquid
+
+  liquid-operators:
+    # https://shopify.github.io/liquid/basics/operators
+    - match: =
+      scope: keyword.operator.assignment.liquid
+    - match: (?:!=|==|<=|>=|<|>)
+      scope: keyword.operator.comparison.liquid
+    - match: \b(?:and|or|not|contains)\b
+      scope: keyword.operator.logical.liquid
+    - match: \bby\b
+      scope: keyword.operator.liquid
+
+  liquid-expression-continuation:
+    # hack to handle multi-line expressions
+    #  If first token of a new line matches one of the following patterns
+    #  it is most likely a continuation of an expression.
+    - match: ':'
+      scope: punctuation.separator.key-value.liquid
+      push: liquid-expression
+    - match: ','
+      scope: punctuation.separator.sequence.liquid
+      push: liquid-expression
+    - match: =
+      scope: keyword.operator.assignment.liquid
+      push: liquid-expression
+    - match: (?:!=|==|<=|>=|<|>)
+      scope: keyword.operator.comparison.liquid
+      push: liquid-expression
+    - match: \bas\b
+      scope: keyword.operator.assignment.liquid
+      push: liquid-expression
+    - match: \b(?:and|or|not|contains)\b
+      scope: keyword.operator.logical.liquid
+      push: liquid-expression
+    - match: \bby\b
+      scope: keyword.operator.liquid
+      push: liquid-expression
+
+###[ LIQUID LITERALS ]#########################################################
+
+  liquid-constants:
+    - match: \bself\b
+      scope: variable.language.self.liquid
+    - match: \b(?:blank|empty|nil|null)\b
+      scope: constant.language.null.liquid
+    - match: \bfalse\b
+      scope: constant.language.boolean.false.liquid
+    - match: \btrue\b
+      scope: constant.language.boolean.true.liquid
+
+  liquid-numbers:
+    - match: ([-+])?\d+(\.)\d+\b
+      scope: meta.number.float.decimal.liquid constant.numeric.value.liquid
+      captures:
+        1: keyword.operator.arithmetic.liquid
+        2: punctuation.separator.decimal.liquid
+    - match: ([-+])?\d+\b
+      scope: meta.number.integer.decimal.liquid constant.numeric.value.liquid
+      captures:
+        1: keyword.operator.arithmetic.liquid
+
+  liquid-strings:
+    - match: \"
+      scope: punctuation.definition.string.begin.liquid
+      push: liquid-double-quoted-string-body
+    - match: \'
+      scope: punctuation.definition.string.begin.liquid
+      push: liquid-single-quoted-string-body
+
+  liquid-double-quoted-string-body:
+    - meta_scope: meta.string.liquid string.quoted.double.liquid
+    - match: \"
+      scope: punctuation.definition.string.end.liquid
+      pop: 1
+    - match: \n
+      scope: invalid.illegal.newline.liquid
+      pop: 1
+
+  liquid-single-quoted-string-body:
+    - meta_scope: meta.string.liquid string.quoted.single.liquid
+    - match: \'
+      scope: punctuation.definition.string.end.liquid
+      pop: 1
+    - match: \n
+      scope: invalid.illegal.newline.liquid
+      pop: 1
+
+  liquid-variables:
+    - match: '{{liquid_variables}}'
+      scope: variable.other.liquid
+
+  liquid-member-variable:
+    - match: '{{liquid_variables}}'
+      scope: variable.other.member.liquid
+      pop: 1
+    - include: else-pop
+
+###[ JEKYLL LINK TAGS ]########################################################
+
+  jekyll-links:
+    - match: \b(?i:link|post_url)\b
+      scope: keyword.declaration.link.liquid.jekyll
+      push: jekyll-url
+
+  jekyll-url:
+    - meta_include_prototype: false
+    - match: \"
+      scope:
+        meta.string.liquid string.quoted.double.liquid
+        punctuation.definition.string.begin.liquid
+      set: jekyll-url-double-quoted-body
+    - match: \'
+      scope:
+        meta.string.liquid string.quoted.single.liquid
+        punctuation.definition.string.begin.liquid
+      set: jekyll-url-single-quoted-body
+    - match: (?=\S)
+      set: jekyll-url-unquoted-body
+
+  jekyll-url-double-quoted-body:
+    - meta_include_prototype: false
+    - meta_content_scope: meta.path.url.liquid meta.string.liquid string.quoted.double.liquid
+    - match: \"
+      scope:
+        meta.string.liquid string.quoted.single.liquid
+        punctuation.definition.string.end.liquid
+      pop: 1
+    - match: \n
+      scope: invalid.illegal.newline.liquid
+      pop: 1
+    - include: jekyll-url-content
+
+  jekyll-url-single-quoted-body:
+    - meta_include_prototype: false
+    - meta_content_scope: meta.path.url.liquid meta.string.liquid string.quoted.single.liquid
+    - match: \'
+      scope:
+        meta.string.liquid string.quoted.single.liquid
+        punctuation.definition.string.end.liquid
+      pop: 1
+    - match: \n
+      scope: invalid.illegal.newline.liquid
+      pop: 1
+    - include: jekyll-url-content
+
+  jekyll-url-unquoted-body:
+    - meta_include_prototype: false
+    - meta_content_scope: meta.path.url.liquid meta.string.liquid string.unquoted.liquid
+    - match: (?=\s)
+      pop: 1
+    - include: jekyll-url-content
+
+  jekyll-url-content:
+    - match: (%)\h{2}
+      scope: constant.character.escape.url.liquid
+      captures:
+        1: punctuation.definition.escape.liquid
+    - match: '[/&?#]|://'
+      scope: punctuation.separator.path.liquid
+    - include: liquid-object-interpolations
+
+###[ JEKYLL HIGHLIGHT TAGS ]###################################################
+
+  jekyll-highlight-tags:
+    - match: '{{jekyll_highlight_begin}}'
+      scope: meta.embedded.liquid source.liquid meta.statement.liquid
+      captures:
+        1: punctuation.section.embedded.begin.liquid
+        2: keyword.declaration.highlight.liquid.jekyll
+      push: jekyll-highlight-tag-body
+
+  jekyll-highlight-tag-body:
+    - include: jekyll-highlight-syntaxes
+    - include: jekyll-highlight-raw
+    - include: immediately-pop
+
+  jekyll-highlight-syntaxes:
+    - include: jekyll-highlight-actionscript
+    - include: jekyll-highlight-applescript
+    - include: jekyll-highlight-clojure
+    - include: jekyll-highlight-c
+    - include: jekyll-highlight-cpp
+    - include: jekyll-highlight-csharp
+    - include: jekyll-highlight-css
+    - include: jekyll-highlight-diff
+    - include: jekyll-highlight-dosbatch
+    - include: jekyll-highlight-erlang
+    - include: jekyll-highlight-graphviz
+    - include: jekyll-highlight-golang
+    - include: jekyll-highlight-haskell
+    - include: jekyll-highlight-html-php
+    - include: jekyll-highlight-html
+    - include: jekyll-highlight-java
+    - include: jekyll-highlight-javascript
+    - include: jekyll-highlight-jsonc
+    - include: jekyll-highlight-jspx
+    - include: jekyll-highlight-jsx
+    - include: jekyll-highlight-lisp
+    - include: jekyll-highlight-lua
+    - include: jekyll-highlight-matlab
+    - include: jekyll-highlight-objc
+    - include: jekyll-highlight-objcpp
+    - include: jekyll-highlight-ocaml
+    - include: jekyll-highlight-perl
+    - include: jekyll-highlight-php
+    - include: jekyll-highlight-python
+    - include: jekyll-highlight-regexp
+    - include: jekyll-highlight-rscript
+    - include: jekyll-highlight-ruby
+    - include: jekyll-highlight-rust
+    - include: jekyll-highlight-scala
+    - include: jekyll-highlight-shell
+    - include: jekyll-highlight-shell-script
+    - include: jekyll-highlight-sql
+    - include: jekyll-highlight-tsx
+    - include: jekyll-highlight-typescript
+    - include: jekyll-highlight-xml
+    - include: jekyll-highlight-yaml
+    # 3rd-party syntaxes
+    - include: jekyll-highlight-ada
+    - include: jekyll-highlight-akh
+    - include: jekyll-highlight-arduino
+    - include: jekyll-highlight-coffee
+    - include: jekyll-highlight-dart
+    - include: jekyll-highlight-docker
+    - include: jekyll-highlight-elixir
+    - include: jekyll-highlight-fish
+    - include: jekyll-highlight-graphql
+    - include: jekyll-highlight-http
+    - include: jekyll-highlight-ini
+    - include: jekyll-highlight-jade
+    - include: jekyll-highlight-julia
+    - include: jekyll-highlight-kotlin
+    - include: jekyll-highlight-less
+    - include: jekyll-highlight-mermaid
+    - include: jekyll-highlight-nim
+    - include: jekyll-highlight-powershell
+    - include: jekyll-highlight-protobuf
+    - include: jekyll-highlight-reason
+    - include: jekyll-highlight-sass
+    - include: jekyll-highlight-scheme
+    - include: jekyll-highlight-scss
+    - include: jekyll-highlight-stata
+    - include: jekyll-highlight-svelte
+    - include: jekyll-highlight-swift
+    - include: jekyll-highlight-terraform
+    - include: jekyll-highlight-toml
+    - include: jekyll-highlight-twig
+    - include: jekyll-highlight-verilog
+    - include: jekyll-highlight-xonsh
+
+  jekyll-highlight-raw:
+    - match: ((\S*){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      set: jekyll-highlight-raw-body
+
+  jekyll-highlight-raw-body:
+    - meta_content_scope: markup.raw.code-fence.liquid.jekyll
+    - match: '{{jekyll_highlight_escape}}'
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-actionscript:
+    - match: (((?i:actionscript|as)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.actionscript.2
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.actionscript.2.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-applescript:
+    - match: (((?i:applescript|osascript)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.applescript
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.applescript.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-clojure:
+    - match: (((?i:clojure|clj)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.clojure
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.clojure.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-c:
+    - match: (((?i:c|h)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.c
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.c.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-cpp:
+    - match: (((?i:c\+\+|cc|cpp|cxx|h\+\+|hpp|hxx)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.c++
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.c++.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-csharp:
+    - match: (((?i:csharp|c\#|cs)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.cs
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.cs.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-css:
+    - match: (((?i:css)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.css
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.css.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-diff:
+    - match: (((?i:diff|patch)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.diff
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.diff.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-dosbatch:
+    - match: (((?i:bat|cmd|dos)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.dosbatch
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.dosbatch.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-erlang:
+    - match: (((?i:erlang|escript)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.erlang
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.erlang.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-graphviz:
+    - match: (((?i:graphviz)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.dot
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.dot.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-golang:
+    - match: (((?i:go(?:lang)?)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.go
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.go.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-haskell:
+    - match: (((?i:haskell)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.haskell
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.haskell.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-html-php:
+    - match: (((?i:html\+php)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:embedding.php
+      embed_scope: markup.raw.code-fence.liquid.jekyll embedding.php.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-html:
+    - match: (((?i:html)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:text.html.basic
+      embed_scope: markup.raw.code-fence.liquid.jekyll text.html.basic.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-java:
+    - match: (((?i:java)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.java
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.java.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-javascript:
+    - match: (((?i:javascript|js)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.js
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.js.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-jsonc:
+    - match: (((?i:jsonc?)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.json
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.json.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-jspx:
+    - match: (((?i:jspx?)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:text.html.jsp
+      embed_scope: markup.raw.code-fence.liquid.jekyll text.html.jsp.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-jsx:
+    - match: (((?i:jsx)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.jsx
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.jsx.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-lisp:
+    - match: (((?i:lisp)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.lisp
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.lisp.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-lua:
+    - match: (((?i:lua)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.lua
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.lua.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-matlab:
+    - match: (((?i:matlab)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.matlab
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.matlab.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-objc:
+    - match: (((?i:objc|obj-c|objectivec|objective-c)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.objc
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.objc.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-objcpp:
+    - match: (((?i:objc\+\+|obj-c\+\+|objectivec\+\+|objective-c\+\+)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.objc++
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.objc++.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-ocaml:
+    - match: (((?i:ocaml)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.ocaml
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.ocaml.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-perl:
+    - match: (((?i:perl)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.perl
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.perl.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-php:
+    - match: (((?i:php|inc)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.php
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.php.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-python:
+    - match: (((?i:python|py)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.python
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.python.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-regexp:
+    - match: (((?i:regexp?)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.regexp
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.regexp.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-rscript:
+    - match: (((?i:rscript|r|splus)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.r
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.r.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-ruby:
+    - match: (((?i:ruby|rb|rbx)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.ruby
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.ruby.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-rust:
+    - match: (((?i:rust|rs)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.rust
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.rust.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-scala:
+    - match: (((?i:scala)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.scala
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.scala.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-shell:
+    - match: (((?i:console|shell)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.shell.interactive.markdown
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.shell.interactive.markdown.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-shell-script:
+    - match: (((?i:shell-script|sh|bash|zsh)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.shell.bash
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.shell.bash.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-sql:
+    - match: (((?i:sql)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.sql
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.sql.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-tsx:
+    - match: (((?i:tsx)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.tsx
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.tsx.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-typescript:
+    - match: (((?i:typescript|ts)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.ts
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.ts.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-xml:
+    - match: (((?i:atom|plist|svg|xjb|xml|xsd|xsl)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:text.xml
+      embed_scope: markup.raw.code-fence.liquid.jekyll text.xml.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-yaml:
+    - match: (((?i:yaml|yml)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.yaml
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.yaml.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-ada:
+    - match: (((?i:ada)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.ada
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.ada.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-akh:
+    - match: (((?i:akh)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.akh
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.akh.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-arduino:
+    - match: (((?i:arduino|ino)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.arduino
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.arduino.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-coffee:
+    - match: (((?i:coffee(?:script)?|cjsx|cson|iced)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.coffee
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.coffee.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-dart:
+    - match: (((?i:dart)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.dart
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.dart.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-docker:
+    - match: (((?i:docker(?:file)?)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.shell.docker
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.shell.docker.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-elixir:
+    - match: (((?i:elixir)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.elixir
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.elixir.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-fish:
+    - match: (((?i:fish)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.shell.fish
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.shell.fish.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-graphql:
+    - match: (((?i:graphql)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.graphql
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.graphql.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-http:
+    - match: (((?i:http)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:text.http-request-response
+      embed_scope: markup.raw.code-fence.liquid.jekyll text.http-request-response.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-ini:
+    - match: (((?i:ini)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.ini
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.ini.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-jade:
+    - match: (((?i:jade)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.jade
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.jade.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-julia:
+    - match: (((?i:julia)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.julia
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.julia.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-kotlin:
+    - match: (((?i:kotlin)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.kotlin
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.kotlin.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-less:
+    - match: (((?i:less)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.less
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.less.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-mermaid:
+    - match: (((?i:mermaid)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.mermaid
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.mermaid.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-nim:
+    - match: (((?i:nim)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.nim
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.nim.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-powershell:
+    - match: (((?i:pwsh|powershell)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.powershell
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.powershell.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-protobuf:
+    - match: (((?i:protobuf)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.proto
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.proto.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-reason:
+    - match: (((?i:re|reason)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.reason
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.reason.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-sass:
+    - match: (((?i:sass)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.sass
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.sass.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-scheme:
+    - match: (((?i:scheme)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.scheme
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.scheme.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-scss:
+    - match: (((?i:scss)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.scss
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.scss.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-stata:
+    - match: (((?i:s|stata|\{s\}|\{s[\s,].*\}|\{stata\}|\{stata[\s,].*\})){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.stata
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.stata.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-svelte:
+    - match: (((?i:svelte)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:text.html.svelte
+      embed_scope: markup.raw.code-fence.liquid.jekyll text.html.svelte.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-swift:
+    - match: (((?i:swift)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.swift
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.swift.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-terraform:
+    - match: (((?i:terraform|tf|hcl)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.json.terraform
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.json.terraform.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-toml:
+    - match: (((?i:toml)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.toml
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.toml.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-twig:
+    - match: (((?i:twig|craftcms)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:text.html.twig
+      embed_scope: markup.raw.code-fence.liquid.jekyll text.html.twig.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-verilog:
+    - match: (((?i:verilog|v)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.verilog
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.verilog.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+  jekyll-highlight-xonsh:
+    - match: (((?i:xonsh|xsh)){{jekyll_highlight_params}})\s*
+      captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: constant.other.language-name.liquid.jekyll
+        3: constant.other.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      embed: scope:source.xonsh
+      embed_scope: markup.raw.code-fence.liquid.jekyll source.xonsh.embedded.liquid.jekyll
+      escape: '{{jekyll_highlight_escape}}'
+      escape_captures:
+        1: meta.embedded.liquid source.liquid meta.statement.liquid
+        2: punctuation.section.embedded.begin.liquid
+        3: keyword.declaration.highlight.liquid.jekyll
+        4: punctuation.section.embedded.end.liquid
+      pop: 1
+
+###[ JEKYLL OBJECT EXTENSIONS ]################################################
+
+  jekyll-variables:
+    # https://jekyllrb.com/docs/variables/
+    - match: \b(?:site|page|layout|content|paginator)\b
+      scope: variable.language.globals.jekyll
+
+###[ PROTOTYPES ]##############################################################
+
+  eol-pop:
+    - match: $
+      pop: 1
+
+  else-pop:
+    - match: (?=\S)
+      pop: 1
+
+  immediately-pop:
+    - match: ''
+      pop: 1
