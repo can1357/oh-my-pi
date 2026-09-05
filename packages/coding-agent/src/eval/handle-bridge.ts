@@ -28,7 +28,7 @@ export interface EvalHandleSnapshot extends EvalHandleRef {
 	status: EvalHandleState;
 	text?: string;
 	data?: unknown;
-	model?: string | string[];
+	model?: string;
 	family?: string;
 	error?: string;
 }
@@ -106,9 +106,7 @@ function agentSnapshot(ref: EvalHandleRef, job: AsyncJob): EvalHandleSnapshot {
 		if (Object.hasOwn(evalResult, "data")) snapshot.data = evalResult.data;
 		if (isUnknownRecord(evalResult.details)) {
 			const { model, family } = evalResult.details;
-			if (typeof model === "string" || (Array.isArray(model) && model.every(item => typeof item === "string"))) {
-				snapshot.model = model;
-			}
+			if (typeof model === "string") snapshot.model = model;
 			if (typeof family === "string") snapshot.family = family;
 		}
 	}

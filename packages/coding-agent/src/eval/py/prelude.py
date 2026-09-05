@@ -804,10 +804,12 @@ if "__omp_prelude_loaded__" not in globals():
         else:
             text = snapshot.get("text", "") if isinstance(snapshot, dict) else ""
             value = json.loads(text) if handle._schema is not None else text
+        if isinstance(handle, AgentHandle):
+            if isinstance(snapshot.get("model"), str):
+                handle.model = snapshot["model"]
+            if isinstance(snapshot.get("family"), str):
+                handle.family = snapshot["family"]
         handle._result = value
-        if handle.kind == "agent":
-            handle.model = snapshot.get("model")
-            handle.family = snapshot.get("family")
         return value
 
     def wait(handles, timeout=None, *, raise_errors=True):

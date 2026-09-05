@@ -215,8 +215,8 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 - `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
 - `timeout` caps the subagent's wall-clock seconds; exactly `0` disables the cap and every positive value is bounded to at least 1 ms. Omitted inherits `task.maxRuntimeMs`.
 - `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel. Agents with `restrictTools: true` cannot receive these custom tools; their declared built-in allowlist remains in effect.
-- Handle surface: .id, .agent, .handle (agent://<id>), .status, .done(), .wait(timeout?), .send(message), .cancel(), .output(). Settled results report the served model and canonical family. Python handles are awaitable; JavaScript uses await handle.wait().
-- The job is a regular async job owned by the calling agent: unwaited results auto-deliver; handle .wait() consumes delivery. Eval subagents remain addressable through hub and history://, each with a separate eval executor.
+- Handle: `.id`, `.agent`, `.handle` (`agent://<id>`), `.status`, `.done()`, `.wait(timeout?)`, `.send(message)`, `.cancel()`, `.output()`. After `wait()`, `.model` and `.family` report served identity when available. Python handles are awaitable.
+- Unwaited jobs auto-deliver; waiting consumes the delivery. Subagents remain addressable through `hub` and `history://`, each with its own eval executor.
 
 ### `wait()`
 
