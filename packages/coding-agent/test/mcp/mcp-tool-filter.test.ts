@@ -156,15 +156,19 @@ test("positive classes with slash members match (admin[/]delete matches admin/de
 	expect(run(["file_1", "file/1"], ["file[/_]1"]).allowed).toEqual(["file_1", "file/1"]);
 });
 
-test("slash-to-sentinel encoding is injective (sentinel-carrying names cannot collide)", () => {
-	// A tool name containing the sentinel character (\uD800) is reachable via
-	// JSON "\ud800" escapes; the encoding escapes sentinels before mapping
-	// slashes, so `admin/*` must NOT admit `admin\uD800delete`.
-	const sentinel = "\uD800";
-	expect(run(["admin/delete", `admin${sentinel}delete`], ["admin/*"]).allowed).toEqual(["admin/delete"]);
-	// And a literal pattern matching a sentinel-carrying name still works.
-	expect(run([`admin${sentinel}delete`], ["admin/delete"]).allowed).toEqual([]);
-	expect(run([`admin${sentinel}delete`], [`admin${sentinel}delete`]).allowed).toEqual([`admin${sentinel}delete`]);
+test("slash encoding is injective (sentinel-carrying names cannot collide with slash names)", () => {
+	// A tool name containing the sentinel character (§) is reachable via JSON;
+	// the encoding escapes sentinels (§ → ¤§) before mapping slashes (/ → §),
+	// so `admin/*` must NOT admit `admin§delete` — the encoded strings differ.
+	expect(run(["admin/delete", "admin§delete"], ["admin/*"]).allowed).toEqual(["admin/delete"]);
+	// A star crosses the encoded slash unit, so admin* DOES match admin§delete:
+	// the encoding is injective but the star is opaque over the whole domain.
+	expect(run(["admin§delete"], ["admin*"]).allowed).toEqual(["admin§delete"]);
+	// A literal pattern matching a sentinel-carrying name still works.
+	expect(run(["admin§delete"], ["admin/delete"]).allowed).toEqual([]);
+	expect(run(["admin§delete"], ["admin§delete"]).allowed).toEqual(["admin§delete"]);
+	// The escape character (¤) is injective too: admin¤delete ≠ admin§delete.
+	expect(run(["admin¤delete", "admin§delete"], ["admin§delete"]).allowed).toEqual(["admin§delete"]);
 });
 
 test("valid classes still match after the slash-class guard", () => {
