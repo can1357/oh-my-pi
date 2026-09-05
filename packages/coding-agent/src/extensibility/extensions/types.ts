@@ -468,15 +468,20 @@ export interface AgentIdentity {
 	/**
 	 * Whether this session runs as the top-level session or as a spawned
 	 * worker. Mirrors the session's pre-existing `agentKind` classification
-	 * (`taskDepth > 0 || parentTaskPrefix !== undefined`) verbatim — identity
-	 * never widens or narrows it. A caller linking via `parentAgentId` while
-	 * omitting `taskDepth`/`parentTaskPrefix` observes `"main"`.
+	 * (`(taskDepth ?? 0) > 0 || Boolean(parentTaskPrefix)`) exactly — identity
+	 * never widens or narrows it. Truthiness, not `!== undefined`: an
+	 * explicitly empty `parentTaskPrefix: ""` classifies as `"main"`. A caller
+	 * linking via `parentAgentId` while omitting `taskDepth`/`parentTaskPrefix`
+	 * also observes `"main"`.
 	 */
 	readonly kind: "main" | "sub";
 	/**
-	 * Recursion depth of this agent: `0` = top-level. Mirrors the session's own
-	 * `taskDepth` (the pre-existing gate input for IRC/memory/spawn capability
-	 * gates) exactly — it is NOT re-derived here from the parent chain.
+	 * Recursion depth of this agent, mirroring the session's own `taskDepth`
+	 * (the pre-existing gate input for IRC/memory/spawn capability gates)
+	 * exactly — it is NOT re-derived here from the parent chain. `0` means no
+	 * task-tool nesting (no `taskDepth` was supplied), NOT "top-level": a
+	 * `/tan` fork observes `{ kind: "sub", depth: 0 }`. Classify main/sub via
+	 * `kind`, never via `depth`.
 	 */
 	readonly depth: number;
 	/**
@@ -530,9 +535,12 @@ export interface ExtensionContext {
 	models: ExtensionModelQuery;
 	/**
 	 * Identity of the agent this context serves: top-level or subagent,
-	 * depth, registry id, display name, and parent chain. Read lazily;
-	 * `undefined` when the host does not report identity (e.g. provider-only
-	 * runner hosts) — handlers must fail open rather than assume `"main"`.
+	 * depth, registry id, display name, and parent chain. A fixed
+	 * construction-time snapshot: the runner freezes it in its constructor and
+	 * every context handed to a handler copies the same frozen reference, so
+	 * registry mutations after construction are never observable. `undefined`
+	 * when the host does not report identity (e.g. provider-only runner
+	 * hosts) — handlers must fail open rather than assume `"main"`.
 	 */
 	readonly agentIdentity?: AgentIdentity;
 	/** Whether the agent is idle (not streaming) */

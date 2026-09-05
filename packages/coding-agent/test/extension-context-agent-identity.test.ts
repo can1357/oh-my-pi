@@ -229,6 +229,58 @@ describe("ExtensionContext agentIdentity", () => {
 		}
 	});
 
+	const CYCLE_SESSION = {
+		cwd: "",
+		authStorage: null as AuthStorage | null,
+	};
+
+	it("walks a cyclic agent registry to termination, self-exclusion, and nearest-first order through the public SDK path", async () => {
+		// Regression guard for the sdk.ts parent-chain walk: the registry holds a
+		// genuine A -> B -> A cycle, so a `seen`-less walk would loop forever and
+		// an unseeded one would emit ["B", "A"]. The walk must cut at A's own id,
+		// exclude "Main", and report the pre-cycle ancestors nearest-first.
+		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-identity-sdk-cycle-"));
+		const registry = new AgentRegistry();
+		registry.register({ id: MAIN_AGENT_ID, displayName: "Main", kind: "main", session: null });
+		registry.register({ id: "B", displayName: "bee", kind: "sub", parentId: "A", session: null });
+		registry.register({ id: "A", displayName: "ay", kind: "sub", parentId: "B", session: null });
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			const { session } = await createAgentSession({
+				cwd: path.join(tempDir, "project"),
+				agentDir: path.join(tempDir, "agent"),
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				toolNames: [],
+				enableMCP: false,
+				enableLsp: false,
+				agentRegistry: registry,
+				agentId: "A",
+				parentAgentId: "B",
+			});
+			try {
+				const identity = session.extensionRunner?.createContext().agentIdentity;
+				// A's parent chain: B (parent), then B's parent A — the agent's own
+				// id, already seeded into `seen`, so the cycle terminates and A
+				// never appears in its own ancestry.
+				expect(identity?.agentId).toBe("A");
+				expect(identity?.parentId).toBe("B");
+				expect(identity?.parentChain).toEqual(["B"]);
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			authStorage.close();
+			await fsp.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("reports a task-subagent identity for an ordinary taskDepth spawn through the public SDK path", async () => {
 		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-identity-sdk-depth-"));
 		const registry = new AgentRegistry();
