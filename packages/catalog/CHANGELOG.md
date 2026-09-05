@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `buildModel` no longer aborts the process when a discovered or custom model id ties two identity classes (for example OmniRoute `openai-compatible-chat-<uuid>/cohere/...` vs the `openai` namespace). Classification is lenient on that path; `classifyModel` without `lenient` still throws so rule-authoring CI stays strict.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added
