@@ -6981,36 +6981,8 @@
 					}
 				],
 				"wire": {
-					"supportsReasoningEffort": true
-				}
-			},
-			{
-				"source": "providers/alibaba-token-plan.kdl:16",
-				"providers": [
-					"alibaba-token-plan"
-				],
-				"models": [
-					{
-						"kind": "exact",
-						"value": "deepseek-v4-pro"
-					}
-				],
-				"wire": {
-					"thinkingFormat": "qwen"
-				}
-			},
-			{
-				"source": "providers/alibaba-token-plan.kdl:20",
-				"providers": [
-					"alibaba-token-plan"
-				],
-				"models": [
-					{
-						"kind": "exact",
-						"value": "qwen3.8-max"
-					}
-				],
-				"wire": {
+					"supportsReasoningEffort": true,
+					"replayReasoningContent": true,
 					"whenThinking": {
 						"extraBody": {
 							"enable_thinking": true
@@ -7028,7 +7000,22 @@
 				}
 			},
 			{
-				"source": "providers/alibaba-token-plan.kdl:31",
+				"source": "providers/alibaba-token-plan.kdl:25",
+				"providers": [
+					"alibaba-token-plan"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "deepseek-v4-pro"
+					}
+				],
+				"wire": {
+					"thinkingFormat": "qwen"
+				}
+			},
+			{
+				"source": "providers/alibaba-token-plan.kdl:29",
 				"providers": [
 					"alibaba-token-plan"
 				],
