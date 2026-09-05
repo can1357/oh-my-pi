@@ -155,6 +155,100 @@ export interface SettingsOptions {
 	configFiles?: string[];
 }
 
+/** Outcome of a {@link Settings.reloadGlobal} call. */
+export interface SettingsReloadReport {
+	/**
+	 * `applied` when at least one effective value changed, `unchanged` when the
+	 * file matched live state, `failed` when the previous layer was kept intact.
+	 */
+	status: "applied" | "unchanged" | "failed";
+	/** Setting paths whose effective value changed, with hooks already fired. */
+	changed: SettingPath[];
+	/**
+	 * Subset of {@link changed} known to have no runtime consumer, so the new value
+	 * does nothing until the process restarts.
+	 *
+	 * NOT exhaustive, and deliberately so: entries are added only after tracing a
+	 * key to a consumer that never re-reads it, because a wrong entry tells the user
+	 * to restart when they need not. An empty array therefore means "nothing known
+	 * to be restart-only", not "everything took effect". Callers should word their
+	 * output accordingly rather than implying a guarantee.
+	 */
+	restartRequired: SettingPath[];
+	/**
+	 * Subset of {@link changed} that did not simply take effect, with the reason.
+	 *
+	 * Covers two shapes a binary applied/restart split cannot express: a value that
+	 * reached some consumers but not all, and one that needs a different action
+	 * entirely (for example `/reload-plugins` re-running extension discovery). The
+	 * reason distinguishes them, so callers should surface it rather than assuming
+	 * either meaning.
+	 */
+	partiallyApplied: Array<{ key: SettingPath; reason: string }>;
+	/** Why the reload was abandoned, when `status` is `failed`. */
+	error?: string;
+}
+
+/**
+ * Settings a live reload cannot make effective at all, because no consumer
+ * re-reads them after startup.
+ *
+ * Keep this list traced, not guessed: a wrong entry tells the user to restart when
+ * they need not, and a missing one lets them believe a reload took effect when it
+ * did not. Add a key only after following it to a consumer that never re-reads it,
+ * and prefer fixing an under-triggered subscriber over declaring a key dead.
+ *
+ * Two keys were checked and rejected. `statusLine.*` is live because
+ * `StatusLineComponent.updateSettings` (`modes/components/status-line/component.ts:411-415`)
+ * replaces the whole settings record and `#syncStatusLineSettings`
+ * (`modes/interactive-mode.ts:1648-1659`) feeds it every key; the constructor snapshot
+ * is replaceable, so it was only under-triggered, which `statusLineSignal` now fixes.
+ * `advisor.enabled` is live for the same reason: `advisorEnabledSignal` drives
+ * `SessionAdvisors.setAdvisorEnabled` (`session/session-advisors.ts:1352`), the same
+ * setter behind `/advisor on|off`.
+ */
+const RESTART_REQUIRED_SETTINGS: ReadonlySet<SettingPath> = new Set<SettingPath>([
+	// The workspace tree is built once during startup (`sdk.ts:1219-1224`) and handed
+	// to the session; nothing rebuilds it when the setting flips.
+	"includeWorkspaceTree",
+]);
+
+/**
+ * Settings whose reload reaches some consumers but not all, with the reason to
+ * surface. A binary applied/restart-required split cannot describe these, and
+ * reporting them as fully applied would be a lie.
+ */
+const PARTIAL_RELOAD_SETTINGS: ReadonlyMap<SettingPath, string> = new Map([
+	[
+		"disabledProviders" as SettingPath,
+		"provider availability updates immediately, but the discovered-provider list built during model-registry init stays frozen until restart",
+	],
+	[
+		// Read once while assembling extension paths for discovery (`sdk.ts:665-667`).
+		// A restart is NOT required: `/reload-plugins` re-runs discovery. This is a
+		// separate action rather than an unreachable value.
+		"extensions" as SettingPath,
+		"a config reload does not re-run extension discovery; run /reload-plugins to pick this up",
+	],
+	[
+		"disabledExtensions" as SettingPath,
+		"a config reload does not re-run extension discovery; run /reload-plugins to pick this up",
+	],
+	[
+		// `plan.enabled` only gates `ensureWriteRegistered()` as one arm of a disjunction
+		// with deferrable and xdev tools (`sdk.ts:2592-2595`), so whether a restart is
+		// needed depends on what else this session registered at startup.
+		"plan.enabled" as SettingPath,
+		"plan mode reads this live, but the write tool it depends on is only registered at startup; a session that registered no deferrable or xdev tools needs a restart before plan mode works",
+	],
+	// `modelRoles` is deliberately absent. `AgentSession.reapplyDefaultRoleModel`
+	// now rebinds the active model when the `default` role resolves elsewhere,
+	// deferring to the next turn boundary while streaming. It intentionally declines
+	// over a manual `/model` pick and over an active retry fallback, but those are
+	// correct outcomes rather than partial application, and the session reports them
+	// to the caller instead of being described here.
+]);
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Path Utilities
 // ═══════════════════════════════════════════════════════════════════════════
@@ -511,6 +605,12 @@ export class Settings {
 	#modifiedGlobalModelRoleMutations = new Map<string, PendingYamlMutation>();
 	/** Changes whenever a live API mutates a persisted layer. */
 	#persistedMutationGeneration = 0;
+	/** Change stamp across the main config and overlays at the last outside-edit check. */
+	#configSignature: string | undefined;
+	/** Whether {@link Settings.reloadGlobalIfChangedOnDisk} has taken its baseline yet. */
+	#configSignatureSeen = false;
+	/** Serializes config reloads so overlapping callers cannot skip an uncommitted one. */
+	#configReloadInFlight: Promise<unknown> | undefined;
 	/**
 	 * Original process-wide model-role overrides captured before a project edit
 	 * temporarily replaced them via `#updateRuntimeModelRoleOverride`. Restored
@@ -735,11 +835,23 @@ export class Settings {
 		if (path === "statusLine.sessionAccent") {
 			statusLineSessionAccentSignal.fire();
 		}
+		// Any status-line value needs the component's settings record replaced, not
+		// just the accent. Without this the group is only refreshed when the accent
+		// happens to change, so a reload of e.g. `statusLine.preset` would report
+		// success while the rendered status line kept the old value.
+		if (path.startsWith("statusLine.")) {
+			statusLineSignal.fire();
+		}
 		if (path === "modelRoles") {
 			modelRolesSignal.fire();
 		}
 		if (CODE_MODE_SIGNAL_PATHS.includes(path)) {
 			codeModeSignal.fire();
+		}
+		// A session caches `advisor.enabled` at construction, so without this a config
+		// edit could not start or stop an advisor even though `setAdvisorEnabled` can.
+		if (path === "advisor.enabled" && typeof value === "boolean") {
+			advisorEnabledSignal.fire(value);
 		}
 	}
 
@@ -793,6 +905,258 @@ export class Settings {
 		if (this.#modifiedProjectModelRoles.size > 0) {
 			await this.#saveProjectNow();
 		}
+	}
+
+	/**
+	 * Re-read the global (`~/.omp/agent/config.yml`) layer of a live session and
+	 * apply it transactionally.
+	 *
+	 * {@link reloadForCwd} deliberately does not cover this: it early-returns when
+	 * the cwd is unchanged and otherwise reloads only the project layer, so an
+	 * external edit to the global config never reaches a running session.
+	 *
+	 * Ordering matters and is the whole point of this method:
+	 *
+	 * 1. `flush()` first. {@link #saveNow} snapshots and then CLEARS both modified
+	 *    sets before awaiting the file lock, and only afterwards reads the values
+	 *    it writes out of the live `#global`. Replacing `#global` inside that
+	 *    window makes the in-flight save persist the on-disk value over an
+	 *    in-session `set()`, silently reverting it — and because the sets are
+	 *    already empty, no amount of "preserve modified paths" catches it. The
+	 *    flush drains the debounce and any in-flight save, and `#saveNow`'s
+	 *    in-lock re-read merges concurrent external edits, so the file we then
+	 *    read is the merged truth rather than a racing snapshot.
+	 * 2. Stage and validate before mutating. A malformed file aborts the reload
+	 *    with the previous layer intact. `#loadYamlIfPresent` cannot be used here:
+	 *    it maps a parse failure to `{}`, which a caller cannot tell from an empty
+	 *    file, and adopting it would reset every global setting to its schema
+	 *    default and re-fire every hook with that default.
+	 * 3. Diff effective values and notify per key, firing both the `SETTING_HOOKS`
+	 *    side effect and `#fireEffectiveSettingChanged`. `#fireAllHooks` alone is
+	 *    not enough — it never reaches the latter, which is what drives the
+	 *    `modelRoles` and status-accent signals.
+	 */
+	async reloadGlobal(): Promise<SettingsReloadReport> {
+		return this.#serializeConfigReload(() => this.#reloadGlobalOnce());
+	}
+
+	/**
+	 * Run one config-reload operation at a time.
+	 *
+	 * Every entry point funnels through here because the mtime bookkeeping in
+	 * {@link reloadGlobalIfChangedOnDisk} records the new value before awaiting the
+	 * reload: two overlapping checks would let the second decide there was nothing to
+	 * do while the first was still committing, and a caller awaiting that second one
+	 * would proceed on uncommitted settings. Serializing also stops `/reload-config`
+	 * from overlapping a turn-boundary pickup and double-firing hooks.
+	 */
+	async #serializeConfigReload<T>(operation: () => Promise<T>): Promise<T> {
+		const previous = this.#configReloadInFlight;
+		const run = (async () => {
+			if (previous) await previous.catch(() => {});
+			return operation();
+		})();
+		this.#configReloadInFlight = run;
+		try {
+			return await run;
+		} finally {
+			if (this.#configReloadInFlight === run) this.#configReloadInFlight = undefined;
+		}
+	}
+
+	async #reloadGlobalOnce(): Promise<SettingsReloadReport> {
+		const inert: SettingsReloadReport = {
+			status: "unchanged",
+			changed: [],
+			restartRequired: [],
+			partiallyApplied: [],
+		};
+		if (!this.#persist || !this.#configPath) return inert;
+
+		// Bounded optimistic retry. `flush()` closes the window around a save that
+		// is already pending, but the staged read below awaits I/O, and a `set()`
+		// landing in that window queues a fresh save which clears `#modified`
+		// before taking the file lock — so neither the flush nor a
+		// preserve-the-modified-set pass can see it. Any such write necessarily
+		// mutates the very layer this method is about to overwrite, so fingerprint
+		// `#global` across the read and start over if it moved.
+		// Snapshot BEFORE the flush, not after. `#saveNow` re-reads the file, merges
+		// our modified paths onto it and then assigns `this.#global = current`
+		// (`#saveNow`, "Update our global with any external changes we preserved"),
+		// so a save silently adopts external edits into the live layer — with only
+		// `#rebuildMerged()` and no hooks or change notifications. Snapshotting after
+		// the flush would attribute those changes to nobody and skip their hooks;
+		// taking it first makes this reload report and notify them.
+		const keys = Object.keys(SETTINGS_SCHEMA) as SettingPath[];
+		const before = new Map<SettingPath, unknown>();
+		for (const key of keys) before.set(key, this.get(key));
+
+		for (let attempt = 0; attempt < 3; attempt++) {
+			try {
+				await this.flush();
+			} catch (error) {
+				return { ...inert, status: "failed", error: `pending save did not settle: ${String(error)}` };
+			}
+			// `#saveNow` logs and swallows a write failure, re-adding the paths for
+			// retry, so `flush()` resolves even when nothing reached disk. A drained
+			// pair of modified sets is the only proof the flush actually persisted;
+			// committing with them non-empty would drop those unsaved values and
+			// then let the next save write the stale file values back.
+			if (this.#modified.size > 0 || this.#modifiedGlobalModelRoles.size > 0) {
+				return {
+					...inert,
+					status: "failed",
+					error: this.#savesCancelled
+						? "saves are cancelled for this session, so unsaved settings cannot be reconciled"
+						: "unsaved global settings could not be persisted; reload would discard them",
+				};
+			}
+
+			const fingerprint = JSON.stringify(this.#global);
+			const staged = await this.#stageMainYaml();
+			if (!staged.ok) {
+				logger.warn("Settings: global reload aborted, keeping previous layer", { error: staged.error });
+				return { ...inert, status: "failed", error: staged.error };
+			}
+			// `--config` / `PI_CONFIG_FILES` overlays are re-read as part of the same
+			// transaction. They outrank global and project in `#rebuildMerged`, so
+			// refreshing global alone would leave a stale overlay masking the values
+			// this reload just picked up. `#loadOverlayYaml` is already strict, so a
+			// missing or malformed overlay throws and aborts with state intact.
+			let stagedOverlay: RawSettings;
+			try {
+				stagedOverlay = await this.#loadConfigOverlays();
+			} catch (error) {
+				logger.warn("Settings: global reload aborted on overlay", { error: String(error) });
+				return { ...inert, status: "failed", error: String(error) };
+			}
+			if (JSON.stringify(this.#global) !== fingerprint) continue;
+
+			this.#global = staged.data;
+			// Committed together with the layer, after every stage succeeded.
+			this.#configPath = staged.configPath;
+			this.#configOverlay = stagedOverlay;
+			this.#rebuildMerged();
+
+			const changed: SettingPath[] = [];
+			for (const key of keys) {
+				const prev = before.get(key);
+				const next = this.get(key);
+				if (Bun.deepEquals(next, prev)) continue;
+				changed.push(key);
+				const hook = SETTING_HOOKS[key];
+				if (hook) hook(next, prev);
+				this.#fireEffectiveSettingChanged(key, next, prev);
+			}
+
+			if (changed.length === 0) return inert;
+			return {
+				status: "applied",
+				changed,
+				restartRequired: changed.filter(key => RESTART_REQUIRED_SETTINGS.has(key)),
+				partiallyApplied: changed.flatMap(key => {
+					const reason = PARTIAL_RELOAD_SETTINGS.get(key);
+					return reason ? [{ key, reason }] : [];
+				}),
+			};
+		}
+
+		return {
+			...inert,
+			status: "failed",
+			error: "global settings changed concurrently on every attempt; try again once writes settle",
+		};
+	}
+
+	/**
+	 * Reload the global layer only when the config file changed on disk since this
+	 * session last looked.
+	 *
+	 * Cheap enough for a turn boundary: one `stat` when nothing changed. Returns
+	 * `undefined` when there was nothing to do, so a caller can stay quiet.
+	 *
+	 * This session's own saves also move the mtime, so the first check after a local
+	 * `set()` costs one reload that reports `unchanged`. That is preferable to
+	 * threading mtime bookkeeping through the save path.
+	 */
+	async reloadGlobalIfChangedOnDisk(): Promise<SettingsReloadReport | undefined> {
+		if (!this.#persist || !this.#configPath) return undefined;
+		// The stat and the reload share one critical section. Checked outside it, a
+		// caller could stat while another reload was mid-commit, see that reload's
+		// already-recorded signature, conclude there was nothing to do, and return —
+		// letting an awaiting prompt start on settings that had not landed yet.
+		return this.#serializeConfigReload(async () => {
+			const signature = await this.#readConfigSignature();
+			if (this.#configSignatureSeen && this.#configSignature === signature) return undefined;
+			this.#configSignature = signature;
+			this.#configSignatureSeen = true;
+			return this.#reloadGlobalOnce();
+		});
+	}
+
+	/**
+	 * Change stamp across every file the global layer could be built from: each
+	 * `MAIN_CONFIG_FILENAMES` candidate in the agent dir, plus each `--config` /
+	 * `PI_CONFIG_FILES` overlay.
+	 *
+	 * Every candidate is stamped rather than just the currently selected
+	 * `#configPath`, because `#stageMainYaml` picks the first that exists: creating a
+	 * higher-priority filename changes which file wins, and watching only the old
+	 * selection would miss that entirely. Overlays are included because they are
+	 * re-staged in the same transaction and outrank global in the merge. Absent files
+	 * contribute a marker instead of being skipped, so a file appearing or
+	 * disappearing counts as a change.
+	 *
+	 * Each stamp carries more than `mtime` because a rewrite inside the filesystem's
+	 * timestamp granularity can reuse the same value, which would make a rapid edit
+	 * invisible. Nanosecond mtime, inode-change time, size and inode together catch
+	 * that: a same-mtime rewrite still moves `ctime` and usually `size`, and a
+	 * replace-by-rename moves `ino`. Still one `stat` per path.
+	 */
+	async #readConfigSignature(): Promise<string> {
+		const candidates = [
+			...MAIN_CONFIG_FILENAMES.map(filename => path.join(this.#agentDir, filename)),
+			...this.#configFiles,
+		];
+		const parts: string[] = [];
+		for (const filePath of candidates) {
+			let stamp = "absent";
+			try {
+				const stats = await fs.promises.stat(filePath, { bigint: true });
+				stamp = `${stats.mtimeNs}:${stats.ctimeNs}:${stats.size}:${stats.ino}`;
+			} catch {
+				// Missing or unreadable: the marker above is the signal.
+			}
+			parts.push(`${filePath}@${stamp}`);
+		}
+		return parts.join("|");
+	}
+
+	/**
+	 * Read the main config file without touching live state.
+	 *
+	 * Builds on `#loadYamlIfPresent`, whose `YamlLoadResult` already separates a
+	 * missing file from an invalid one; a reload must distinguish them because
+	 * adopting a parse failure as an empty layer would reset every global setting to
+	 * its schema default and re-fire every hook with that default.
+	 *
+	 * Returns the selected path rather than assigning `#configPath`, because staging
+	 * runs before the overlays are staged: mutating it here would leave the instance
+	 * pointing at a newly discovered file after an overlay parse failure aborted the
+	 * reload, which is exactly the "previous state intact" promise being made.
+	 */
+	async #stageMainYaml(): Promise<{ ok: true; data: RawSettings; configPath: string } | { ok: false; error: string }> {
+		for (const filename of MAIN_CONFIG_FILENAMES) {
+			const candidate = path.join(this.#agentDir, filename);
+			const result = await this.#loadYamlIfPresent(candidate);
+			if (result.kind === "missing") continue;
+			if (result.kind === "invalid" || result.kind === "unreadable") {
+				return { ok: false, error: `${candidate}: ${String(result.error)}` };
+			}
+			return { ok: true, data: result.settings, configPath: candidate };
+		}
+		// No config file on disk is a legitimate empty global layer, not a failure.
+		return { ok: true, data: {}, configPath: path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]) };
 	}
 
 	async cloneForCwd(cwd: string): Promise<Settings> {
@@ -3144,6 +3508,27 @@ const extendedContextSignal = new SettingSignal("extendedContext");
  * Returns an unsubscribe function.
  */
 export const onExtendedContextChanged = (cb: () => void) => extendedContextSignal.on(cb);
+
+/** Fires when `advisor.enabled` changes at runtime. */
+const advisorEnabledSignal = new SettingSignal<[value: boolean]>("advisor.enabled");
+
+/**
+ * Subscribe to `advisor.enabled` changes. Returns an unsubscribe function.
+ *
+ * A session caches this at construction, so without a subscriber a config edit
+ * cannot start or stop an advisor even though `setAdvisorEnabled` can.
+ */
+export const onAdvisorEnabledChanged = (cb: (value: boolean) => void) => advisorEnabledSignal.on(cb);
+
+/** Fires when any `statusLine.*` value changes at runtime. */
+const statusLineSignal = new SettingSignal("statusLine");
+
+/**
+ * Subscribe to any status-line setting change. Returns an unsubscribe function.
+ * Distinct from {@link onStatusLineSessionAccentChanged}, which is accent-only:
+ * this fires for the whole group so a consumer can replace its settings record.
+ */
+export const onStatusLineChanged = (cb: () => void) => statusLineSignal.on(cb);
 
 /** Fires when `statusLine.sessionAccent` changes at runtime. */
 const statusLineSessionAccentSignal = new SettingSignal("statusLine.sessionAccent");

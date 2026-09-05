@@ -715,6 +715,12 @@ For a custom status line, set `statusLine.preset: custom` and configure `statusL
 | `ask.timeout`          | number  | `0`             | Seconds before an `ask` prompt times out; `0` = no timeout. (Legacy ms values are migrated to seconds.) |
 | `ask.notify`           | enum    | `on`            | `on`, `off`.                                                                                            |
 
+### Startup and updates
+
+| Key | Type | Default | Values |
+|---|---|---|---|
+| `settings.hotReload` | boolean | `false` | Re-read `config.yml` after an outside edit, before the next turn when idle or at the end of the current turn. |
+
 ### Providers and services
 
 ```yaml

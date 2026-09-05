@@ -37,6 +37,7 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
+	concreteThinkingLevel,
 	modelSupportsEffortCeiling,
 } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -1512,6 +1513,50 @@ export class TurnRecovery {
 	clearActiveRetryFallback(): void {
 		this.#activeRetryFallback = undefined;
 		this.#fallbackRoutedFor = undefined;
+	}
+
+	/** Selector this session will return to when the active fallback is released. */
+	get retryFallbackRestoreSelector(): string | undefined {
+		return this.#activeRetryFallback?.originalSelector;
+	}
+
+	/**
+	 * Point an active fallback's restore target at a different primary, without
+	 * touching the cascade itself.
+	 *
+	 * Used when the `default` role is reassigned mid-cascade. The session must stay
+	 * on its fallback model, but `#maybeRestoreRetryFallbackPrimary` restores the
+	 * selector captured when the cascade started, so leaving it alone would quietly
+	 * return the session to the model the operator just stopped using and discard
+	 * the role change for good.
+	 *
+	 * `expectedFrom` is an ownership proof, not a convenience: a cascade's chain key
+	 * is often an exact model selector rather than a role name
+	 * (`retry-fallback-chains.ts:47-48`), so the key cannot tell a role-owned cascade
+	 * from one rooted at a manually chosen model. Retargeting only when the cascade
+	 * started from the caller's role-bound model keeps a manual `/model` pick
+	 * restoring to the model the operator actually chose.
+	 *
+	 * @returns whether a fallback was retargeted.
+	 */
+	retargetActiveRetryFallbackPrimary(
+		expectedFrom: Model,
+		model: Model,
+		thinkingLevel: ConfiguredThinkingLevel | undefined,
+	): boolean {
+		if (!this.#activeRetryFallback) return false;
+		const currentPrimary = parseRetryFallbackSelector(
+			this.#activeRetryFallback.originalSelector,
+			this.#host.modelRegistry,
+		);
+		if (!currentPrimary) return false;
+		if (currentPrimary.provider !== expectedFrom.provider || currentPrimary.id !== expectedFrom.id) return false;
+		this.#activeRetryFallback.originalSelector = formatRetryFallbackSelector(
+			model,
+			concreteThinkingLevel(thinkingLevel),
+		);
+		this.#activeRetryFallback.originalThinkingLevel = thinkingLevel;
+		return true;
 	}
 
 	/** Checks whether a fallback selector remains in cooldown. */
