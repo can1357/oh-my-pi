@@ -388,7 +388,7 @@ test("falls back to compact context when an explicit total cannot fit", () => {
 	expect(rendered).toBe("ctx:8%");
 });
 
-test("drops an ordinary segment to preserve an explicit compact context total", () => {
+test("preserves the last ordinary segment when compact context labels cannot fit", () => {
 	const component = new StatusLineComponent({
 		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
 		messages: [],
@@ -433,10 +433,10 @@ test("drops an ordinary segment to preserve an explicit compact context total", 
 		segmentOptions: { context_pct: { compact: true } },
 	});
 
-	const rendered = stripVTControlCharacters(component.getTopBorder(14).content);
+	const rendered = stripVTControlCharacters(component.getTopBorder(12).content);
 	expect(rendered).toContain("ctx:8%");
-	expect(rendered).toContain("100K");
-	expect(rendered).not.toContain("M");
+	expect(rendered).toContain("M");
+	expect(rendered).not.toContain("100K");
 });
 
 test("preserves the last ordinary segment when non-compact context labels cannot fit", () => {

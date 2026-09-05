@@ -2133,16 +2133,21 @@ export class StatusLineComponent implements Component {
 						showEmbeddedContextWindow,
 					)
 			: 0;
+		const embeddedContextPercentWidth =
+			embedContext && !ctx.startupPlaceholder
+				? embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow, embedCompactContext, false)
+				: embeddedContextWidth;
 		// A default (non-compact) gauge may fall back to its short percentage-only
 		// label when both context labels cannot coexist with the final ordinary
 		// segment. Do not drop that last segment merely to satisfy the larger
 		// two-label reservation; the remaining gap can still show the percentage.
-		// Compact mode is explicit and keeps its configured total reservation.
 		const minimumGapWidth = () => {
 			const ordinaryWidth = leftWidth + rightWidth;
 			const ordinaryCount = left.length + right.length;
 			const preserveLastOrdinarySegment =
-				!embedCompactContext && ordinaryCount === 1 && ordinaryWidth + embeddedContextWidth > topFillWidth;
+				ordinaryCount === 1 &&
+				ordinaryWidth + embeddedContextWidth > topFillWidth &&
+				ordinaryWidth + embeddedContextPercentWidth <= topFillWidth;
 			if (!preserveLastOrdinarySegment && embeddedContextWidth > 0) return embeddedContextWidth;
 			if (preserveLastOrdinarySegment) return 1;
 			return left.length > 0 && right.length > 0 ? 1 : 0;
