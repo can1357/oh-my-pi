@@ -31,8 +31,10 @@ import {
 	calculateDepth,
 	createSourceMeta,
 	getProjectPath,
+	isAlwaysApplyGlob,
 	loadFilesFromDir,
 	parseCSV,
+	parseGlobList,
 	resolveCopilotHome,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -201,7 +203,7 @@ function transformInstructionRule(
 	}
 
 	const { frontmatter } = parseFrontmatter(content, { source: filePath });
-	const applyToGlobs = normalizeApplyToGlobs(frontmatter.applyTo);
+	const applyToGlobs = parseGlobList(frontmatter.applyTo, { splitCommas: true });
 	if (!applyToGlobs) {
 		warnings.push(`Missing applyTo in ${filePath}; loaded without GitHub glob scoping.`);
 	}
@@ -216,19 +218,6 @@ function transformInstructionRule(
 
 	const description = rule.description ?? describeInstructionRule(applyToGlobs);
 	return { ...rule, alwaysApply: false, globs: applyToGlobs, description };
-}
-
-function normalizeApplyToGlobs(value: unknown): string[] | undefined {
-	// GitHub documents applyTo as a single comma-separated string (e.g.
-	// "**/*.ts,**/*.tsx"); also tolerate a YAML array of such strings.
-	const raw = Array.isArray(value) ? value : [value];
-	const globs = raw.flatMap(item => (typeof item === "string" ? parseCSV(item) : []));
-	return globs.length > 0 ? globs : undefined;
-}
-
-function isAlwaysApplyGlob(glob: string): boolean {
-	// GitHub treats "*", "**", and "**/*" as matching every file.
-	return glob === "*" || glob === "**" || glob === "**/*";
 }
 
 function describeInstructionRule(globs: string[] | undefined): string {
