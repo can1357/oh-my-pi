@@ -16,10 +16,17 @@ provider "alibaba-token-plan" {
 	models "deepseek-v4-pro" {
 		thinking-format "qwen"
 	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "qwen3.8-max" {
-		thinking-default-level "xhigh"
-		thinking-efforts "low" "medium" "xhigh"
+	// Max Preview rides only Alibaba's binary enable_thinking toggle: it stays on
+	// the Qwen dialect and must not emit an unsupported reasoning_effort field.
+	models "qwen3.8-max-preview" {
+		thinking-efforts "low" "high" "xhigh"
+		thinking-requires-effort #true
+	}
+	// Max and Flash steer thinking depth through the OpenAI reasoning_effort
+	// control and replay reasoning_content across turns (preserve_thinking
+	// defaults on for both).
+	models "qwen3.8-max" "qwen3.8-flash" {
+		replay-reasoning-content #true
 		when-thinking {
 			extra-body {
 				enable_thinking #true
@@ -27,9 +34,10 @@ provider "alibaba-token-plan" {
 			thinking-format "openai"
 		}
 	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "qwen3.8-max-preview" {
-		thinking-efforts "low" "high" "xhigh"
-		thinking-requires-effort #true
+	// Max exposes a distinct low/medium/xhigh ladder; Flash retains its
+	// provider-authored minimal/low/medium/high ladder.
+	models "qwen3.8-max" {
+		thinking-default-level "xhigh"
+		thinking-efforts "low" "medium" "xhigh"
 	}
 }

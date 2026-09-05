@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Qwen 3.8 models on Alibaba Token Plan now send the selected reasoning effort and replay reasoning history across turns.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

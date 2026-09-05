@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
@@ -181,13 +182,23 @@ describe("QwenCloud Token Plan provider", () => {
 				},
 			},
 		});
-		expect(models?.find(model => model.id === "qwen3.8-flash")).toMatchObject({
+		const flash = models?.find(model => model.id === "qwen3.8-flash");
+		if (!flash) throw new Error("qwen3.8-flash missing from discovery");
+		expect(buildModel(flash)).toMatchObject({
 			id: "qwen3.8-flash",
 			provider: "alibaba-token-plan",
 			reasoning: true,
 			input: ["text", "image"],
 			contextWindow: 1_000_000,
 			maxTokens: 131_072,
+			compat: {
+				supportsReasoningEffort: true,
+				replayReasoningContent: true,
+				whenThinking: {
+					thinkingFormat: "openai",
+					extraBody: { enable_thinking: true },
+				},
+			},
 		});
 		expect(options.dynamicModelsAuthoritative).toBe(true);
 	});
