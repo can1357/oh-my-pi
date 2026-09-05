@@ -9,6 +9,10 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
+	// ai& cache namespaces hash the org-scoped API key (billing currency
+	// shapes served pricing), so hydration must wait for credential
+	// resolution instead of reading the empty-key namespace at startup.
+	aiand: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */

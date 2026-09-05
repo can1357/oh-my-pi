@@ -272,7 +272,10 @@ describe("ai& provider support", () => {
 		// kimi-k2.6 and glm-5.1 left the served roster. An upgrading install
 		// holds their rows in the model cache; with discovery down the
 		// cache-mismatch fallback must drop them via the migration list
-		// instead of merging them back as selectable.
+		// instead of merging them back as selectable. Both passes share the
+		// credential-keyed namespace so the test exercises the migration
+		// branch rather than a cache miss.
+		const cacheProviderId = aiandModelManagerOptions({ apiKey: "aiand-key" }).cacheProviderId;
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-aiand-stale-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
 		const retiredK26: ModelSpec<"openai-completions"> = {
@@ -300,6 +303,7 @@ describe("ai& provider support", () => {
 			await resolveProviderModels(
 				{
 					providerId: "aiand",
+					cacheProviderId,
 					staticModels: [retiredK26, retiredGlm51],
 					dynamicModelsAuthoritative: true,
 					fetchDynamicModels: async () => [retiredK26, retiredGlm51],
