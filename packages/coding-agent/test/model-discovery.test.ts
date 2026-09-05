@@ -2641,6 +2641,41 @@ providers:
 		expect(model?.api).toBe("openai-responses");
 	});
 
+	test("litellm discovery falls back to /v1/models when the rich phase times out (#10964)", async () => {
+		writeRawModelsJson({
+			"litellm-test": {
+				baseUrl: "http://127.0.0.1:4013/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "litellm", timeoutMs: 50 },
+			},
+		});
+		const richHang = new Promise<Response>(() => {}); // never resolves
+		const richEndpoints = ["/model_group/info", "/v2/model/info", "/model/info", "/v1/model/info"];
+		let v1ModelsHits = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:4013/v1/models") {
+				v1ModelsHits++;
+				return Response.json({
+					object: "list",
+					data: [{ id: "vendor-7/model-7", object: "model", owned_by: "mockvendor" }],
+				});
+			}
+			// Rich metadata endpoints stall past the discovery budget; anything else
+			// (unrelated implicit probes) fails fast so it cannot hang the suite.
+			if (richEndpoints.some(endpoint => url === `http://127.0.0.1:4013${endpoint}`)) {
+				return richHang;
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		expect(v1ModelsHits).toBeGreaterThan(0);
+		expect(registry.find("litellm-test", "vendor-7/model-7")?.baseUrl).toBe("http://127.0.0.1:4013/v1");
+	});
+
 	test("litellm discovery enriches configured proxy models with bundled references", async () => {
 		writeRawModelsJson({
 			"litellm-test": {

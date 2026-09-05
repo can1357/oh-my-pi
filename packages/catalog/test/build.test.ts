@@ -1203,6 +1203,45 @@ describe("model cache spec round trip", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+	it("does not cache an empty row when discovery fails, so the next launch retries immediately (#10964)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-failed-discovery-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const recoveredModel = completionsSpec({ id: "vendor-7/model-7", provider: "failed-discovery-test" });
+		let fetches = 0;
+		let fail = true;
+		const currentTime = 1_000_000;
+		const options = {
+			providerId: "failed-discovery-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			now: () => currentTime,
+			fetchDynamicModels: async () => {
+				fetches++;
+				// A timeout/network failure surfaces to the manager as null (distinct
+				// from a successful but empty [] catalog, which stays cached).
+				return fail ? null : [recoveredModel];
+			},
+		};
+		try {
+			const failed = await resolveProviderModels(options, "online");
+			expect(failed.models).toEqual([]);
+			expect(fetches).toBe(1);
+
+			// With no prior catalog and nothing static, the failure writes no cache
+			// row. Had it persisted an empty non-authoritative snapshot, the next
+			// launch inside the 5-min window would serve that empty catalog and skip
+			// discovery, hiding every discovery-only model. The clock does not advance,
+			// so a retry here proves the row is absent rather than aged out.
+			fail = false;
+			const recovered = await resolveProviderModels(options, "online-if-uncached");
+			expect(recovered.models.map(model => model.id)).toEqual([recoveredModel.id]);
+			expect(recovered.stale).toBe(false);
+			expect(fetches).toBe(2);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 	it("reports an authoritative catalog emptying as non-stale so removed models prune", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-empty-transition-"));
 		const dbPath = path.join(tempDir, "models.db");
