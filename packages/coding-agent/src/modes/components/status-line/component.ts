@@ -2144,6 +2144,7 @@ export class StatusLineComponent implements Component {
 			const preserveLastOrdinarySegment =
 				!embedCompactContext && ordinaryCount === 1 && ordinaryWidth + embeddedContextWidth > topFillWidth;
 			if (!preserveLastOrdinarySegment && embeddedContextWidth > 0) return embeddedContextWidth;
+			if (preserveLastOrdinarySegment) return 1;
 			return left.length > 0 && right.length > 0 ? 1 : 0;
 		};
 		const totalWidth = () => leftWidth + rightWidth + minimumGapWidth();
