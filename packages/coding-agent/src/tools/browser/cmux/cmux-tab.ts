@@ -105,6 +105,12 @@ interface ViewportOptions {
 	deviceScaleFactor?: number;
 }
 
+export function cmuxViewportUnsupportedError(requested: ViewportOptions, actual: ReadyInfo["viewport"]): ToolError {
+	return new ToolError(
+		`CMUX cannot honor requested viewport ${requested.width}x${requested.height}: this terminal-pane surface is ${actual.width}x${actual.height}. CMUX cannot resize panes or emulate a virtual viewport. Omit viewport to use the current surface dimensions.`,
+	);
+}
+
 const PAGE_SELECTOR_HELPERS = `
 const isVisible = element => {
 	const style = getComputedStyle(element);
@@ -359,11 +365,7 @@ export class CmuxTab {
 	}
 
 	async setViewport(viewport: ViewportOptions): Promise<void> {
-		this.#lastViewport = {
-			width: viewport.width,
-			height: viewport.height,
-			deviceScaleFactor: viewport.deviceScaleFactor,
-		};
+		throw cmuxViewportUnsupportedError(viewport, this.#lastViewport);
 	}
 
 	url(): string {
@@ -376,7 +378,7 @@ export class CmuxTab {
 		return this.#lastTitle;
 	}
 
-	async readyInfo(viewport: ReadyInfo["viewport"] = DEFAULT_VIEWPORT): Promise<ReadyInfo> {
+	async readyInfo(): Promise<ReadyInfo> {
 		const urlResult = (await this.#request("browser.url.get", {})) as CmuxUrlGetResult;
 		if (typeof urlResult.url === "string" && urlResult.url.length > 0) {
 			this.#lastUrl = urlResult.url;
@@ -384,7 +386,7 @@ export class CmuxTab {
 		const geometry = await this.#readGeometry().catch(() => undefined);
 		this.#lastViewport = geometry
 			? { width: geometry.innerWidth, height: geometry.innerHeight, deviceScaleFactor: geometry.dpr }
-			: viewport;
+			: DEFAULT_VIEWPORT;
 		await this.title().catch(() => "");
 		return {
 			url: this.#lastUrl,
@@ -1240,7 +1242,11 @@ class CmuxLocator {
 
 class CmuxPageFacade {
 	readonly #tab: CmuxTab;
-	readonly keyboard: { press: (key: string) => Promise<void> };
+	readonly keyboard: {
+		press: (key: string) => Promise<void>;
+		down: (key: string) => Promise<never>;
+		up: (key: string) => Promise<never>;
+	};
 	readonly mouse: {
 		wheel: (delta: { deltaX?: number; deltaY?: number }) => Promise<void>;
 		move: (x: number, y: number) => Promise<void>;
@@ -1250,7 +1256,11 @@ class CmuxPageFacade {
 
 	constructor(tab: CmuxTab) {
 		this.#tab = tab;
-		this.keyboard = { press: key => this.#tab.press(key) };
+		this.keyboard = {
+			press: key => this.#tab.press(key),
+			down: key => Promise.reject(this.#unsupportedHeldKey("down", key)),
+			up: key => Promise.reject(this.#unsupportedHeldKey("up", key)),
+		};
 		let lastPoint = { x: 0, y: 0 };
 		let dragStart: { x: number; y: number } | undefined;
 		this.mouse = {
@@ -1331,6 +1341,12 @@ class CmuxPageFacade {
 
 	async screenshot(opts: ScreenshotOptions = {}): Promise<Buffer | string> {
 		return await this.#tab.pageScreenshot(opts);
+	}
+
+	#unsupportedHeldKey(action: "down" | "up", key: string): ToolError {
+		return new ToolError(
+			`page.keyboard.${action}(${JSON.stringify(key)}) is unsupported on CMUX browser surfaces: CMUX only supports discrete key presses. Use page.keyboard.press(${JSON.stringify(key)}) or tab.press(${JSON.stringify(key)}); held-key input is unavailable.`,
+		);
 	}
 }
 

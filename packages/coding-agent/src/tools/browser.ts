@@ -288,6 +288,11 @@ async function openBrowser(
 			`URL: ${url}`,
 			title ? `Title: ${title}` : null,
 		].filter((line): line is string => typeof line === "string");
+		if (kind.kind === "cmux") {
+			lines.push(
+				`Viewport: ${tab.info.viewport.width}x${tab.info.viewport.height} (current CMUX terminal-pane surface; viewport emulation is unavailable)`,
+			);
+		}
 		return toolResult(details).text(lines.join("\n")).done();
 	} catch (error) {
 		// Caller cancellation stays a ToolAbortError; the requested timeout

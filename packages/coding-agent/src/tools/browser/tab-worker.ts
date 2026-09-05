@@ -558,73 +558,84 @@ function createRunPageScope(page: Page): RunPageScope {
 	const off = page.off;
 	const once = page.once;
 	const removeAllListeners = page.removeAllListeners;
-	const onDescriptor = Object.getOwnPropertyDescriptor(page, "on");
-	const offDescriptor = Object.getOwnPropertyDescriptor(page, "off");
-	const onceDescriptor = Object.getOwnPropertyDescriptor(page, "once");
-	const removeAllDescriptor = Object.getOwnPropertyDescriptor(page, "removeAllListeners");
 
-	Object.defineProperties(page, {
-		on: {
-			configurable: true,
-			value: (type: unknown, handler: unknown): Page => {
-				Reflect.apply(on, page, [type, handler]);
-				if (type === "request") requestHandlers.push(handler);
-				return page;
-			},
-		},
-		once: {
-			configurable: true,
-			value: (type: unknown, handler: unknown): Page => {
-				if (type !== "request" || typeof handler !== "function") {
-					Reflect.apply(once, page, [type, handler]);
-					return page;
-				}
-				const wrapper = (event: unknown): void => {
-					const index = requestHandlers.lastIndexOf(wrapper);
-					if (index >= 0) requestHandlers.splice(index, 1);
-					Reflect.apply(off, page, ["request", wrapper]);
-					Reflect.apply(handler, page, [event]);
+	// The patched Puppeteer runtime deliberately sends ordinary Page.evaluate()
+	// calls to its isolated realm so its own probes remain unobtrusive. That is
+	// not the public Puppeteer contract: code supplied to tab.run must see the
+	// page's globals and return handles from the page's main realm. Keep this
+	// behavior on the per-run facade rather than changing the actual Page, so
+	// worker internals retain the patched default.
+	const evaluate = (pageFunction: unknown, ...args: unknown[]): Promise<unknown> =>
+		typeof pageFunction === "string"
+			? page.mainFrame().mainRealm().evaluate(pageFunction)
+			: page
+					.mainFrame()
+					.mainRealm()
+					.evaluate(pageFunction as (...a: unknown[]) => unknown, ...args);
+	const evaluateHandle = (pageFunction: unknown, ...args: unknown[]): Promise<unknown> =>
+		typeof pageFunction === "string"
+			? page.mainFrame().mainRealm().evaluateHandle(pageFunction)
+			: page
+					.mainFrame()
+					.mainRealm()
+					.evaluateHandle(pageFunction as (...a: unknown[]) => unknown, ...args);
+
+	const runPage: Page = new Proxy(page, {
+		get(target, property) {
+			if (property === "evaluate") return evaluate as unknown as Page["evaluate"];
+			if (property === "evaluateHandle") return evaluateHandle as unknown as Page["evaluateHandle"];
+			if (property === "on") {
+				return (type: unknown, handler: unknown): Page => {
+					Reflect.apply(on, page, [type, handler]);
+					if (type === "request") requestHandlers.push(handler);
+					return runPage;
 				};
-				requestHandlers.push(wrapper);
-				Reflect.apply(on, page, [type, wrapper]);
-				return page;
-			},
-		},
-		off: {
-			configurable: true,
-			value: (type: unknown, handler?: unknown): Page => {
-				Reflect.apply(off, page, [type, handler]);
-				if (type === "request") {
-					if (handler === undefined) requestHandlers.length = 0;
-					else {
-						const index = requestHandlers.lastIndexOf(handler);
-						if (index >= 0) requestHandlers.splice(index, 1);
+			}
+			if (property === "once") {
+				return (type: unknown, handler: unknown): Page => {
+					if (type !== "request" || typeof handler !== "function") {
+						Reflect.apply(once, page, [type, handler]);
+						return runPage;
 					}
-				}
-				return page;
-			},
+					const wrapper = (event: unknown): void => {
+						const index = requestHandlers.lastIndexOf(wrapper);
+						if (index >= 0) requestHandlers.splice(index, 1);
+						Reflect.apply(off, page, ["request", wrapper]);
+						Reflect.apply(handler, page, [event]);
+					};
+					requestHandlers.push(wrapper);
+					Reflect.apply(on, page, [type, wrapper]);
+					return runPage;
+				};
+			}
+			if (property === "off") {
+				return (type: unknown, handler?: unknown): Page => {
+					Reflect.apply(off, page, [type, handler]);
+					if (type === "request") {
+						if (handler === undefined) requestHandlers.length = 0;
+						else {
+							const index = requestHandlers.lastIndexOf(handler);
+							if (index >= 0) requestHandlers.splice(index, 1);
+						}
+					}
+					return runPage;
+				};
+			}
+			if (property === "removeAllListeners") {
+				return (type?: unknown): Page => {
+					Reflect.apply(removeAllListeners, page, [type]);
+					if (type === undefined || type === "request") requestHandlers.length = 0;
+					return runPage;
+				};
+			}
+			const value = Reflect.get(target, property, target);
+			return typeof value === "function" ? value.bind(target) : value;
 		},
-		removeAllListeners: {
-			configurable: true,
-			value: (type?: unknown): Page => {
-				Reflect.apply(removeAllListeners, page, [type]);
-				if (type === undefined || type === "request") requestHandlers.length = 0;
-				return page;
-			},
-		},
-	});
+	}) as Page;
 
 	return {
-		page,
+		page: runPage,
 		async cleanup() {
-			if (onDescriptor) Object.defineProperty(page, "on", onDescriptor);
-			else Reflect.deleteProperty(page, "on");
-			if (offDescriptor) Object.defineProperty(page, "off", offDescriptor);
-			else Reflect.deleteProperty(page, "off");
-			if (onceDescriptor) Object.defineProperty(page, "once", onceDescriptor);
-			else Reflect.deleteProperty(page, "once");
-			if (removeAllDescriptor) Object.defineProperty(page, "removeAllListeners", removeAllDescriptor);
-			else Reflect.deleteProperty(page, "removeAllListeners");
 			for (const handler of requestHandlers) Reflect.apply(off, page, ["request", handler]);
 			requestHandlers.length = 0;
 			try {
@@ -1102,6 +1113,7 @@ export class WorkerCore {
 				const page = await target.page();
 				if (!page) throw new ToolError(`Target ${payload.targetId} is no longer available on the attached browser`);
 				this.#page = page;
+				if (payload.viewport) await applyViewport(this.#page, payload.viewport);
 				await this.#claimRelayTarget(page);
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
