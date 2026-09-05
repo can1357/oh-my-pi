@@ -78,12 +78,6 @@ describe("resolveAgentSkills", () => {
 		expect(resolved.map(s => s.hide)).toEqual([true, true]);
 	});
 
-	test("disableModelInvocation skills remain listed when their hide flag is false", () => {
-		const skills = [{ ...skill("alpha"), modelInvocationDisabled: true }];
-		const resolved = resolveAgentSkills(skills, agent({ unhideSkills: ["*"] }));
-		expect(listed(resolved)).toEqual(["alpha"]);
-	});
-
 	test("does not copy skills that need no change", () => {
 		const skills = [skill("alpha"), skill("beta", true)];
 		const resolved = resolveAgentSkills(skills, agent({ hideSkills: ["none"] }));

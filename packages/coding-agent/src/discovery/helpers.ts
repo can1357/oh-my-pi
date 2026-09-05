@@ -190,26 +190,20 @@ export function parseCSV(value: string): string[] {
 
 /**
  * Parse a value that may be an array of strings or a comma-separated string.
- * Returns undefined if the result would be empty.
+ * Returns undefined if the result would be empty, unless `options.keepEmpty`
+ * preserves an explicitly empty value as `[]` (fields where "present but
+ * empty" is distinct from absent; a CSV string yields `[]` only when every
+ * entry is blank or the string is empty).
  */
-export function parseArrayOrCSV(value: unknown): string[] | undefined {
-	const parsed = parseArrayOrCSVKeepEmpty(value);
-	return parsed && parsed.length > 0 ? parsed : undefined;
-}
-
-/**
- * Like {@link parseArrayOrCSV} but preserves an explicitly empty value as `[]`.
- * Used for fields where `[]` ("present but empty") is distinct from absent.
- * A CSV string yields `[]` only when every entry is blank or the string is empty.
- */
-export function parseArrayOrCSVKeepEmpty(value: unknown): string[] | undefined {
+export function parseArrayOrCSV(value: unknown, options?: { keepEmpty?: boolean }): string[] | undefined {
+	let parsed: string[] | undefined;
 	if (Array.isArray(value)) {
-		return value.filter((item): item is string => typeof item === "string");
+		parsed = value.filter((item): item is string => typeof item === "string");
+	} else if (typeof value === "string") {
+		parsed = parseCSV(value);
 	}
-	if (typeof value === "string") {
-		return parseCSV(value);
-	}
-	return undefined;
+	if (!parsed) return undefined;
+	return options?.keepEmpty || parsed.length > 0 ? parsed : undefined;
 }
 
 interface RuleMarkdownOptions {
@@ -337,8 +331,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		return null;
 	}
 
-	let tools =
-		Array.isArray(frontmatter.tools) && frontmatter.tools.length === 0 ? [] : parseArrayOrCSV(frontmatter.tools);
+	let tools = parseArrayOrCSV(frontmatter.tools, { keepEmpty: true });
 	if (tools) tools = normalizeToolNames(tools);
 
 	// Subagents with explicit tool lists always need yield
@@ -395,7 +388,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		.filter(Boolean);
 	// `skills: "none"` is sugar for an empty allowlist (`[]`): zero skills listed.
 	// An absent field stays `undefined` (unrestricted, all skills listed as today).
-	const rawSkills = frontmatter.skills === "none" ? [] : parseArrayOrCSVKeepEmpty(frontmatter.skills);
+	const rawSkills = frontmatter.skills === "none" ? [] : parseArrayOrCSV(frontmatter.skills, { keepEmpty: true });
 	const skills = rawSkills?.map(s => s.trim()).filter(Boolean);
 	const hideSkills = parseArrayOrCSV(frontmatter.hideSkills)
 		?.map(s => s.trim())

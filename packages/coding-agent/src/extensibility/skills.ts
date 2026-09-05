@@ -95,6 +95,22 @@ export interface LoadSkillsFromDirOptions {
 	source: string;
 }
 
+/** Map a discovered capability skill to a session {@link Skill}. */
+function capSkillToSkill(capSkill: CapabilitySkill, source: string, description?: string): Skill {
+	return {
+		name: capSkill.name,
+		description:
+			description ?? (typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : ""),
+		filePath: capSkill.path,
+		baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
+		source,
+		...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+		hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+		modelInvocationDisabled: capSkill.frontmatter?.disableModelInvocation === true,
+		_source: capSkill._source,
+	};
+}
+
 export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Promise<LoadSkillsResult> {
 	const [rawProviderId, rawLevel] = options.source.split(":", 2);
 	const providerId = rawProviderId || "custom";
@@ -110,17 +126,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 	);
 
 	return {
-		skills: result.items.map(capSkill => ({
-			name: capSkill.name,
-			description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
-			filePath: capSkill.path,
-			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
-			source: options.source,
-			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-			modelInvocationDisabled: capSkill.frontmatter?.disableModelInvocation === true,
-			_source: capSkill._source,
-		})),
+		skills: result.items.map(capSkill => capSkillToSkill(capSkill, options.source)),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
 	};
 }
@@ -255,17 +261,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				message: `name collision: "${capSkill.name}" already loaded from ${existing.filePath}, skipping this one`,
 			});
 		} else {
-			skillMap.set(capSkill.name, {
-				name: capSkill.name,
-				description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
-				filePath: capSkill.path,
-				baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
-				source: `${capSkill._source.provider}:${capSkill.level}`,
-				...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-				modelInvocationDisabled: capSkill.frontmatter?.disableModelInvocation === true,
-				_source: capSkill._source,
-			});
+			skillMap.set(capSkill.name, capSkillToSkill(capSkill, `${capSkill._source.provider}:${capSkill.level}`));
 			realPathSet.add(resolvedPath);
 		}
 	}
@@ -294,15 +290,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			if (!matchesIncludePatterns(capSkill.name)) continue;
 			allCustomSkills.push({
 				skill: {
-					name: capSkill.name,
-					description:
-						typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
-					filePath: capSkill.path,
-					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
-					source: "custom:user",
-					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-					modelInvocationDisabled: capSkill.frontmatter?.disableModelInvocation === true,
+					...capSkillToSkill(capSkill, "custom:user"),
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
@@ -396,17 +384,14 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		if (skillMap.has(capSkill.name)) continue;
 		const rawDescription =
 			typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "";
-		skillMap.set(capSkill.name, {
-			name: capSkill.name,
-			description: sanitizeManagedDescription(rawDescription),
-			filePath: capSkill.path,
-			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
-			source: `${capSkill._source.provider}:${capSkill.level}`,
-			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-			modelInvocationDisabled: capSkill.frontmatter?.disableModelInvocation === true,
-			_source: capSkill._source,
-		});
+		skillMap.set(
+			capSkill.name,
+			capSkillToSkill(
+				capSkill,
+				`${capSkill._source.provider}:${capSkill.level}`,
+				sanitizeManagedDescription(rawDescription),
+			),
+		);
 		realPathSet.add(resolvedPath);
 	}
 
