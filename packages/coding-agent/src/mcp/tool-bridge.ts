@@ -20,6 +20,7 @@ import type { Theme } from "../modes/theme/theme";
 import type { OutputMeta } from "../tools/output-meta";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
 import { renderMCPCall, renderMCPResult } from "./render";
@@ -114,12 +115,12 @@ function omitUnusedOptionalArgs(args: MCPToolArgs, inputSchema: MCPToolDefinitio
  * carries `i`. The MCP boundary is the authoritative guard so callers don't
  * have to pre-strip.
  *
- * Leaves `i` in place when the server's own `inputSchema.properties` declares
- * it, so a server that legitimately uses `i` as a parameter is unaffected.
+ * Leaves `i` in place when the server's own input schema declares or
+ * constrains it, so legitimate tool data is not discarded at forwarding.
  */
 function stripHarnessIntent(args: MCPToolArgs, inputSchema: MCPToolDefinition["inputSchema"]): MCPToolArgs {
 	if (!Object.hasOwn(args, INTENT_FIELD)) return args;
-	if (inputSchema.properties && Object.hasOwn(inputSchema.properties, INTENT_FIELD)) return args;
+	if (schemaDeclaresIntentField(inputSchema)) return args;
 	const { [INTENT_FIELD]: _intent, ...rest } = args;
 	return rest;
 }
