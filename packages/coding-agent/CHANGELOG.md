@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
 ### Added
 
@@ -8,6 +9,10 @@
 ### Changed
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
+
+### Fixed
+
+	- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.1.11] - 2026-09-05
 

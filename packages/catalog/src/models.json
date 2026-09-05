@@ -261365,9 +261365,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 10,
+				"output": 50,
+				"cacheRead": 1,
 				"cacheWrite": 0
 			},
 			"remoteCompaction": {
@@ -261454,7 +261454,7 @@
 			},
 			"serviceTierCost": {
 				"flex": 0.5,
-				"priority": 2
+				"priority": 2.5
 			},
 			"applyPatchToolType": "freeform"
 		},
