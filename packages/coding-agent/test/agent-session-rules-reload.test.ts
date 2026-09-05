@@ -35,6 +35,31 @@ function buildLocalModel(api: string): Model<Api> {
 	} as ModelSpec<Api>) as Model<Api>;
 }
 
+async function createReloadSession(tempDir: TempDir): Promise<{ session: AgentSession; authStorage: AuthStorage }> {
+	const marker = Bun.nanoseconds().toString(36);
+	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+	authStorage.setRuntimeApiKey("managed-primary", "test-key");
+	const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+	const { session } = await createAgentSession({
+		cwd: tempDir.path(),
+		agentDir: tempDir.path(),
+		sessionManager: SessionManager.inMemory(tempDir.path()),
+		authStorage,
+		modelRegistry,
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		model: buildLocalModel(`rules-reload-${marker}`),
+		disableExtensionDiscovery: true,
+		skills: [],
+		// rules intentionally omitted so discovery runs against disk.
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		skipPythonPreflight: true,
+	});
+	return { session, authStorage };
+}
+
 async function expectStickyRuleReload(
 	reset: (session: AgentSession) => Promise<unknown>,
 	opts: { seedInitial: boolean },
@@ -50,28 +75,7 @@ async function expectStickyRuleReload(
 		await fs.writeFile(rulesMd, original);
 	}
 
-	const api = `rules-reload-${marker}`;
-	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-	authStorage.setRuntimeApiKey("managed-primary", "test-key");
-	const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
-
-	const { session } = await createAgentSession({
-		cwd: tempDir.path(),
-		agentDir: tempDir.path(),
-		sessionManager: SessionManager.inMemory(tempDir.path()),
-		authStorage,
-		modelRegistry,
-		settings: Settings.isolated({ "compaction.enabled": false }),
-		model: buildLocalModel(api),
-		disableExtensionDiscovery: true,
-		skills: [],
-		// rules intentionally omitted so discovery runs against disk.
-		promptTemplates: [],
-		slashCommands: [],
-		enableMCP: false,
-		enableLsp: false,
-		skipPythonPreflight: true,
-	});
+	const { session, authStorage } = await createReloadSession(tempDir);
 
 	try {
 		await session.refreshBaseSystemPrompt();
@@ -109,5 +113,55 @@ describe("AgentSession sticky RULES.md reload on session reset", () => {
 
 	it("picks up a RULES.md created after startup on resetSessionContext()", async () => {
 		await expectStickyRuleReload(session => session.resetSessionContext(), { seedInitial: false });
+	});
+});
+
+describe("AgentSession session-local rule snapshot reload on session reset", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("resolves rule://<name> for a rulebook rule created after startup once the context resets", async () => {
+		using tempDir = TempDir.createSync("@pi-rules-reload-book-");
+		const marker = Bun.nanoseconds().toString(36);
+		const body = `RULEBOOK_BODY_${marker}`;
+		const ruleName = `reload-book-${marker}`;
+		// Empty `.omp/rules/` keeps the project config scope present without any rulebook rule yet.
+		const rulesDir = path.join(tempDir.path(), ".omp", "rules");
+		await fs.mkdir(rulesDir, { recursive: true });
+
+		const { session, authStorage } = await createReloadSession(tempDir);
+		const readRule = async (label: string): Promise<string> => {
+			const readTool = session.getToolByName("read");
+			expect(readTool).toBeDefined();
+			try {
+				const result = await readTool!.execute(
+					`${label}-${marker}`,
+					{ path: `rule://${ruleName}` },
+					new AbortController().signal,
+				);
+				return result.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+			} catch (err) {
+				return String(err);
+			}
+		};
+
+		try {
+			await session.refreshBaseSystemPrompt();
+			// The read tool cannot resolve a rule that discovery has not seen yet.
+			expect(await readRule("before")).not.toContain(body);
+
+			await fs.writeFile(
+				path.join(rulesDir, `${ruleName}.md`),
+				`---\ndescription: reloaded rulebook rule\n---\n${body}\n`,
+			);
+			expect(await session.resetSessionContext()).toBeTruthy();
+
+			// After the reset, `toolSession.activeRules` reflects the new snapshot, so `rule://` resolves.
+			expect(await readRule("after")).toContain(body);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
 	});
 });

@@ -3118,8 +3118,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				});
 				rulebookRules = buckets.rulebookRules;
 				alwaysApplyRules = buckets.alwaysApplyRules;
+				const nextActiveRules = [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()];
+				// Refresh the session-local snapshots too: `rule://` resolution reads
+				// `toolSession.activeRules` and spawned subagents inherit `toolSession.rules`,
+				// so leaving the construction-time arrays would advertise a new `rule://<name>`
+				// the read tool rejects and hand children the stale set.
+				toolSession.rules = rulesResult.items;
+				toolSession.activeRules = nextActiveRules;
 				if (!options.parentTaskPrefix) {
-					setActiveRules([...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()]);
+					setActiveRules(nextActiveRules);
 				}
 			}
 			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
