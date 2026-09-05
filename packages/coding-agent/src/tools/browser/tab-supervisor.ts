@@ -14,9 +14,8 @@ import type { ToolSession } from "../index";
 import { expandPath } from "../path-utils";
 import { ToolAbortError, ToolError } from "../tool-errors";
 import { pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
-import { CmuxTab, runCmuxCode } from "./cmux/cmux-tab";
+import { CmuxTab, cmuxViewportUnsupportedError, runCmuxCode } from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
-import { DEFAULT_VIEWPORT } from "./launch";
 import { closeCdpTarget, forgetSharedTarget, recordSharedTarget, type SharedTargetScope } from "./orphan-registry";
 import {
 	type BrowserHandle,
@@ -274,6 +273,9 @@ async function acquireTabImpl(
 				await releaseTab(name, { kill: false });
 			} else {
 				const reuseSteps: string[] = [];
+				if (opts.viewport && existing.backend === "cmux") {
+					throw cmuxViewportUnsupportedError(opts.viewport, existing.cmuxTab.viewport());
+				}
 				if (opts.viewport && browser.kind.kind !== "cmux") {
 					const dsf = opts.viewport.deviceScaleFactor;
 					reuseSteps.push(
@@ -456,10 +458,14 @@ async function acquireCmuxTab(
 		}
 
 		const cmuxTab = new CmuxTab({ client: browser.client, surfaceId, url: initialUrl });
+		if (opts.viewport) {
+			const actual = await cmuxTab.readyInfo();
+			throw cmuxViewportUnsupportedError(opts.viewport, actual.viewport);
+		}
 		if (attachedSurface && opts.url) {
 			await cmuxTab.goto(opts.url, { waitUntil: opts.waitUntil ?? "load", timeoutMs: opts.timeoutMs });
 		}
-		const info = await cmuxTab.readyInfo(opts.viewport ?? DEFAULT_VIEWPORT);
+		const info = await cmuxTab.readyInfo();
 		// If the caller aborted while we were opening the cmux surface, close the
 		// surface (if we own it) instead of taking a browser hold on it.
 		if (opts.signal?.aborted) {
@@ -800,6 +806,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		browserWSEndpoint,
 		safeDir,
 		targetId,
+		viewport: opts.viewport,
 		dialogs: opts.dialogs,
 		url: opts.url,
 		waitUntil: opts.waitUntil,

@@ -17,7 +17,7 @@ import {
 	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { acquireTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { acquireTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Browser, HTTPRequest, Page, Target } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
@@ -50,6 +50,27 @@ function fakePage(options: FakePageOptions): Page {
 		title: async () => options.title,
 		evaluate: async () => options.visible === true,
 	} as unknown as Page;
+}
+
+async function readLayoutViewport(page: Page): Promise<{ width: number; height: number }> {
+	const session = await page.target().createCDPSession();
+	try {
+		const response = await session.send("Runtime.evaluate", {
+			expression: "({ width: globalThis.innerWidth, height: globalThis.innerHeight })",
+			returnByValue: true,
+		});
+		const value = response.result.value;
+		if (!value || typeof value !== "object" || !("width" in value) || !("height" in value)) {
+			throw new Error("Expected Runtime.evaluate to return layout viewport dimensions");
+		}
+		const { width, height } = value;
+		if (typeof width !== "number" || typeof height !== "number") {
+			throw new Error("Expected Runtime.evaluate to return numeric layout viewport dimensions");
+		}
+		return { width, height };
+	} finally {
+		await session.detach();
+	}
 }
 
 function fakeTarget(type: string, page: Page | null): Target {
@@ -286,6 +307,96 @@ describe("pickElectronTarget", () => {
 				expect(targetPage.url()).toBe(requested);
 			} finally {
 				if (opened) await invokeBrowser({ action: "close", name: tabName });
+			}
+		},
+		30_000,
+	);
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"runs public page.evaluate and evaluateHandle in the page main world",
+		async () => {
+			const launched = sharedHeadless;
+			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
+			const endpoint = new URL(launched.browser.wsEndpoint());
+			const tabName = `attach-main-world-${process.pid}-${Math.random().toString(36).slice(2)}`;
+			const attached = await acquireBrowser(
+				{ kind: "connected", cdpUrl: `http://${endpoint.host}` },
+				{ cwd: process.cwd() },
+			);
+			let opened = false;
+			try {
+				await acquireTab(tabName, attached, { timeoutMs: 15_000 });
+				opened = true;
+				const result = await runInTab(tabName, {
+					code: `
+						await tab.evaluate(() => {
+							globalThis.__ompMainWorldProbe = { value: "page-global" };
+						});
+						const fromPage = await page.evaluate(() => globalThis.__ompMainWorldProbe.value);
+						const handle = await page.evaluateHandle(() => globalThis.__ompMainWorldProbe);
+						const fromHandle = await handle.evaluate(probe => probe.value);
+						await handle.dispose();
+						return { fromPage, fromHandle };
+					`,
+					timeoutMs: 15_000,
+					session: makeSession(),
+				});
+				expect(result.returnValue).toEqual({ fromPage: "page-global", fromHandle: "page-global" });
+			} finally {
+				if (opened) await releaseTab(tabName, { kill: false });
+				else await releaseBrowser(attached, { kill: false });
+			}
+		},
+		30_000,
+	);
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"applies an explicit attached viewport without changing omitted-viewports",
+		async () => {
+			const launched = sharedHeadless;
+			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
+			const endpoint = new URL(launched.browser.wsEndpoint());
+			const targetPage = (await launched.browser.pages())[0];
+			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
+			const preservedViewport = { width: 701, height: 503, deviceScaleFactor: 1 };
+			const requestedViewport = { width: 777, height: 555, deviceScaleFactor: 1 };
+			const explicitName = `attach-viewport-explicit-${process.pid}-${Math.random().toString(36).slice(2)}`;
+			const omittedName = `attach-viewport-omitted-${process.pid}-${Math.random().toString(36).slice(2)}`;
+
+			await targetPage.setViewport(preservedViewport);
+			const explicitBrowser = await acquireBrowser(
+				{ kind: "connected", cdpUrl: `http://${endpoint.host}` },
+				{ cwd: process.cwd() },
+			);
+			let explicitOpened = false;
+			try {
+				await acquireTab(explicitName, explicitBrowser, { timeoutMs: 15_000, viewport: requestedViewport });
+				explicitOpened = true;
+				expect(await readLayoutViewport(targetPage)).toEqual({
+					width: requestedViewport.width,
+					height: requestedViewport.height,
+				});
+			} finally {
+				if (explicitOpened) await releaseTab(explicitName, { kill: false });
+				else await releaseBrowser(explicitBrowser, { kill: false });
+			}
+
+			await targetPage.setViewport(preservedViewport);
+			const omittedBrowser = await acquireBrowser(
+				{ kind: "connected", cdpUrl: `http://${endpoint.host}` },
+				{ cwd: process.cwd() },
+			);
+			let omittedOpened = false;
+			try {
+				await acquireTab(omittedName, omittedBrowser, { timeoutMs: 15_000 });
+				omittedOpened = true;
+				expect(await readLayoutViewport(targetPage)).toEqual({
+					width: preservedViewport.width,
+					height: preservedViewport.height,
+				});
+			} finally {
+				if (omittedOpened) await releaseTab(omittedName, { kill: false });
+				else await releaseBrowser(omittedBrowser, { kill: false });
 			}
 		},
 		30_000,

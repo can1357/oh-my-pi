@@ -32,7 +32,8 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { CmuxKind } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/rpc";
+import { GEOMETRY_SCRIPT, type CmuxKind } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/rpc";
+import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
 import { acquireBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import {
@@ -77,6 +78,72 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 		} finally {
 			vi.restoreAllMocks();
 		}
+	});
+
+	it("rejects unsupported cmux viewport and held-key APIs with actionable errors", async () => {
+		const tab = new CmuxTab({
+			client: new CmuxSocketClient({ socketPath: "/tmp/unused-cmux-capability-probe.sock" }),
+			surfaceId: "capability-probe",
+		});
+
+		await expect(tab.setViewport({ width: 1440, height: 900 })).rejects.toThrow(
+			/CMUX cannot honor requested viewport 1440x900.*1365x768/,
+		);
+		await expect(tab.page.setViewport({ width: 1440, height: 900 })).rejects.toThrow(
+			/CMUX cannot honor requested viewport 1440x900/,
+		);
+		await expect(tab.page.keyboard.down("Shift")).rejects.toThrow(
+			/page\.keyboard\.down\("Shift"\) is unsupported.*page\.keyboard\.press\("Shift"\)/,
+		);
+		await expect(tab.page.keyboard.up("Shift")).rejects.toThrow(
+			/page\.keyboard\.up\("Shift"\) is unsupported.*held-key input is unavailable/,
+		);
+	});
+
+	it("closes an owned cmux split when an explicit viewport cannot be honored", async () => {
+		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
+		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
+		const closedSurfaces: string[] = [];
+		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
+			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+				switch (method) {
+					case "browser.open_split":
+						return { surface_id: "surface-viewport-rejected", url: "about:blank" };
+					case "browser.eval":
+						return {
+							value:
+								params.script === GEOMETRY_SCRIPT
+									? {
+											innerWidth: 635,
+											innerHeight: 859,
+											dpr: 1,
+											scrollX: 0,
+											scrollY: 0,
+											scrollWidth: 635,
+											scrollHeight: 859,
+										}
+									: "",
+						};
+					case "surface.close":
+						closedSurfaces.push(String(params.surface_id));
+						return {};
+					default:
+						return {};
+				}
+			},
+		);
+
+		const browser = await acquireBrowser(
+			{ kind: "cmux", socketPath: "/tmp/omp-test-viewport-rejected.sock" },
+			{ cwd: "/tmp" },
+		);
+		await expect(
+			acquireTab("cmux-viewport-rejected", browser, {
+				timeoutMs: 5_000,
+				viewport: { width: 1440, height: 900 },
+			}),
+		).rejects.toThrow(/requested viewport 1440x900.*surface is 635x859/);
+		expect(closedSurfaces).toEqual(["surface-viewport-rejected"]);
 	});
 
 	it("releaseTab() during an in-flight cmux run rejects the run and never emits unhandledRejection", async () => {

@@ -43,6 +43,8 @@ await tab.close();
 
 `open` accepts `name`, `url`, `viewport`, `wait_until`, `dialogs`, `app`, and `timeout`. `timeout` is in seconds, defaults to 30, and is clamped to 1–300.
 
+For worker-backed tabs, an explicit `viewport` is applied during the first attached/spawned/CDP open; omitting it preserves a visible tab's existing layout. CMUX surfaces are terminal panes, not emulated browser viewports: `open({ viewport })` and `page.setViewport(...)` fail with the requested and actual pane dimensions rather than resizing a user pane.
+
 ### Direct tab helpers
 
 Direct helpers cross the host bridge and return real structured values:
@@ -79,6 +81,8 @@ Functions receive `{ tab, page, browser, wait, assert }` as their first argument
 The inner `tab` is the full worker helper API. In addition to the direct surface it includes handle-returning `waitFor`/`waitForSelector` and run-scoped `waitForNavigation`/`waitForResponse`. Start a navigation/response wait before the action that triggers it.
 
 Runs use the shared JavaScript runtime with ordinary Eval helpers and full Bun/Node and tool-bridge access. This is API isolation, not a security sandbox. Request interception is cleaned up at the end of each run.
+
+In worker-backed modes, the raw Puppeteer `page` and `browser` objects are available. Public `page.evaluate` and `page.evaluateHandle` execute in the page's main world, including page-defined globals and handles. Cmux instead exposes a limited compatible facade: it does not provide `evaluateHandle`, and only supports discrete `page.keyboard.press(key)` / `tab.press(key)`. Its `page.keyboard.down(key)` and `.up(key)` methods fail descriptively because CMUX cannot deliver genuine held-key input.
 
 The return value stays structured. Nonempty text emitted by inner `display(...)` calls prints in the outer Eval cell, object/image displays remain Eval output, and a run with no display text emits no placeholder.
 
