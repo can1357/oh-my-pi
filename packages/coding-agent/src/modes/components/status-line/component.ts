@@ -2130,7 +2130,7 @@ export class StatusLineComponent implements Component {
 						ctx.contextPercent ?? 0,
 						ctx.contextWindow,
 						embedCompactContext,
-						showEmbeddedContextWindow && !embedCompactContext,
+						showEmbeddedContextWindow,
 					)
 			: 0;
 		const minimumGapWidth = () => embeddedContextWidth || (left.length > 0 && right.length > 0 ? 1 : 0);
