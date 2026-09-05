@@ -36,13 +36,19 @@ function ageCredentialBlockRows(dbPath: string): void {
 	}
 }
 
-function tierLimit(tier: "fable" | "mythos", usedFraction: number, resetInMs: number): UsageLimit {
+type ClaudeTier = "fable" | "mythos";
+
+function tierLimit(tier: ClaudeTier, usedFraction: number, resetInMs?: number): UsageLimit {
 	const used = Math.min(Math.max(usedFraction, 0), 1);
 	return {
 		id: `anthropic:7d:${tier}`,
 		label: `Claude 7 Day (${tier})`,
 		scope: { provider: "anthropic", windowId: "7d", tier },
-		window: { id: "7d", label: "7 Day", resetsAt: Date.now() + resetInMs },
+		window: {
+			id: "7d",
+			label: "7 Day",
+			...(resetInMs === undefined ? {} : { resetsAt: Date.now() + resetInMs }),
+		},
 		amount: { unit: "percent", used: used * 100, limit: 100, usedFraction: used },
 		status: used >= 1 ? "exhausted" : "ok",
 	};
@@ -93,6 +99,29 @@ const usageProvider: UsageProvider = {
 	},
 };
 
+async function seedStaleTierBlocks(tiers: readonly ClaudeTier[]): Promise<{
+	credentialId: number;
+	blockedUntilMs: number;
+}> {
+	if (!authStorage || !store?.upsertCredentialBlock) throw new Error("test setup failed");
+	await authStorage.set("anthropic", [{ type: "oauth", ...createCredential("acct-1", "user@example.com") }]);
+	const row = store.listAuthCredentials("anthropic")[0];
+	if (!row) throw new Error("expected credential row");
+
+	const blockedUntilMs = Date.now() + WEEK_MS;
+	for (const tier of tiers) {
+		store.upsertCredentialBlock({
+			credentialId: row.id,
+			providerKey: "anthropic:oauth",
+			blockScope: `tier:${tier}`,
+			blockedUntilMs,
+		});
+	}
+	ageCredentialBlockRows(dbPath);
+	store.cleanExpiredCredentialBlocks?.(Date.now() + STALE_BLOCK_GUARD_MS);
+	return { credentialId: row.id, blockedUntilMs };
+}
+
 beforeEach(async () => {
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-claude-heal-"));
 	dbPath = path.join(tempDir, "agent.db");
@@ -121,33 +150,10 @@ afterEach(async () => {
 });
 
 test("a recovered Fable usage report clears its stale tier block without touching a still-exhausted Mythos block", async () => {
-	if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {
-		throw new Error("test setup failed");
-	}
+	if (!authStorage || !store?.getCredentialBlock) throw new Error("test setup failed");
+	const { credentialId, blockedUntilMs } = await seedStaleTierBlocks(["fable", "mythos"]);
 
-	await authStorage.set("anthropic", [{ type: "oauth", ...createCredential("acct-1", "user@example.com") }]);
-	const row = store.listAuthCredentials("anthropic")[0];
-	if (!row) throw new Error("expected credential row");
-
-	// Both scopes were blocked by a 429 whose retry-after pointed at the
-	// advertised weekly reset, days ahead of the real recovery.
-	const weekAhead = Date.now() + WEEK_MS;
-	store.upsertCredentialBlock({
-		credentialId: row.id,
-		providerKey: "anthropic:oauth",
-		blockScope: "tier:fable",
-		blockedUntilMs: weekAhead,
-	});
-	store.upsertCredentialBlock({
-		credentialId: row.id,
-		providerKey: "anthropic:oauth",
-		blockScope: "tier:mythos",
-		blockedUntilMs: weekAhead,
-	});
-	ageCredentialBlockRows(dbPath);
-	store.cleanExpiredCredentialBlocks?.(Date.now() + STALE_BLOCK_GUARD_MS);
-
-	// Fable is back to ok; Mythos is still pinned at the cap.
+	// Fable is back to ok; Mythos is still pinned at the cap with a live reset.
 	usageByAccount.set(
 		"acct-1",
 		claudeReport("acct-1", "user@example.com", [tierLimit("fable", 0.04, WEEK_MS), tierLimit("mythos", 1, WEEK_MS)]),
@@ -155,11 +161,45 @@ test("a recovered Fable usage report clears its stale tier block without touchin
 
 	await authStorage.fetchUsageReports();
 
-	expect(store.getCredentialBlock(row.id, "anthropic:oauth", "tier:fable")).toBeUndefined();
-	expect(store.getCredentialBlock(row.id, "anthropic:oauth", "tier:mythos")).toBe(weekAhead);
+	expect(store.getCredentialBlock(credentialId, "anthropic:oauth", "tier:fable")).toBeUndefined();
+	expect(store.getCredentialBlock(credentialId, "anthropic:oauth", "tier:mythos")).toBe(blockedUntilMs);
 
 	// The recovered Fable scope is selectable again instead of falling back to
 	// another model; the per-scope store assertions above prove the still-exhausted
 	// Mythos block was left intact.
 	expect(await authStorage.getApiKey("anthropic", "session-fable", { modelId: "claude-fable-5" })).toBe("api-acct-1");
+});
+
+test("clears a stale Fable block when the exhausted tier row has no reset timestamp", async () => {
+	if (!authStorage || !store?.getCredentialBlock) throw new Error("test setup failed");
+	const { credentialId } = await seedStaleTierBlocks(["fable"]);
+	usageByAccount.set("acct-1", claudeReport("acct-1", "user@example.com", [tierLimit("fable", 1)]));
+
+	await authStorage.fetchUsageReports();
+
+	expect(store.getCredentialBlock(credentialId, "anthropic:oauth", "tier:fable")).toBeUndefined();
+});
+
+test("clears a stale Fable block when the exhausted tier row reset has elapsed", async () => {
+	if (!authStorage || !store?.getCredentialBlock) throw new Error("test setup failed");
+	const { credentialId } = await seedStaleTierBlocks(["fable"]);
+	usageByAccount.set("acct-1", claudeReport("acct-1", "user@example.com", [tierLimit("fable", 1, -HOUR_MS)]));
+
+	await authStorage.fetchUsageReports();
+
+	expect(store.getCredentialBlock(credentialId, "anthropic:oauth", "tier:fable")).toBeUndefined();
+});
+
+test("keeps a stale Fable block while an applicable shared window remains exhausted", async () => {
+	if (!authStorage || !store?.getCredentialBlock) throw new Error("test setup failed");
+	const { credentialId, blockedUntilMs } = await seedStaleTierBlocks(["fable"]);
+	const report = claudeReport("acct-1", "user@example.com", [tierLimit("fable", 0.04, WEEK_MS)]);
+	usageByAccount.set("acct-1", {
+		...report,
+		limits: [sharedLimit("5h", 1), ...report.limits.filter(limit => limit.id !== "anthropic:5h")],
+	});
+
+	await authStorage.fetchUsageReports();
+
+	expect(store.getCredentialBlock(credentialId, "anthropic:oauth", "tier:fable")).toBe(blockedUntilMs);
 });

@@ -748,11 +748,7 @@ function isConfirmedExhaustedTierRow(limit: UsageLimit, nowMs: number): boolean 
  * while unconfirmed rows remain ranking pressure and opt-in reserve health via
  * scopeClaudeLimitsForModel.
  */
-function scopeClaudeLimitsForModelHardBlock(
-	report: UsageReport,
-	context: CredentialRankingContext | undefined,
-): UsageLimit[] {
-	const kind = getClaudeModelKind(context);
+function scopeClaudeLimitsForKindHardBlock(report: UsageReport, kind: ClaudeModelKind | undefined): UsageLimit[] {
 	const requireConfirmedTierRow = kind === "fable" || kind === "mythos";
 	const nowMs = Date.now();
 	return report.limits.filter(limit => {
@@ -760,6 +756,13 @@ function scopeClaudeLimitsForModelHardBlock(
 		if (kind === undefined || limit.scope.tier !== kind) return false;
 		return !requireConfirmedTierRow || isConfirmedExhaustedTierRow(limit, nowMs);
 	});
+}
+
+function scopeClaudeLimitsForModelHardBlock(
+	report: UsageReport,
+	context: CredentialRankingContext | undefined,
+): UsageLimit[] {
+	return scopeClaudeLimitsForKindHardBlock(report, getClaudeModelKind(context));
 }
 
 function rankingUsedFraction(limit: UsageLimit): number {
@@ -809,20 +812,22 @@ function findClaudeSecondaryLimit(
 /**
  * Backoff scopes a fresh usage report can vouch for. A Fable/Mythos usage-limit
  * error writes a reactive `tier:` block whose deadline follows the 429
- * retry-after (the advertised weekly reset); when a later live counter for that
- * tier is below the cap, the block is stale and must clear instead of idling the
- * account until the clock runs out. Each tier is judged only by its own weekly
- * row so an exhausted Fable cap never keeps a recovered Mythos block alive, and
- * vice versa. Only Fable/Mythos are returned because {@link blockScope} scopes
- * backoff for exactly those tiers; every other Anthropic exhaustion blocks the
- * whole credential and expires by clock. Mirrors the per-counter healing in
- * packages/ai/src/usage/google-antigravity.ts.
+ * retry-after (the advertised weekly reset); when a later report no longer
+ * confirms that tier's exhaustion, the block is stale and must clear instead
+ * of idling the account until the clock runs out. Each tier is judged with the
+ * same hard-block predicate as selection, including shared limits, so a missing
+ * or elapsed tier reset authorizes a probe while an account-wide exhaustion
+ * still preserves the block. Only Fable/Mythos are returned because
+ * {@link blockScope} scopes backoff for exactly those tiers.
  */
 function healableClaudeTierBlockScopes(report: UsageReport): { blockScope: string; limits: UsageLimit[] }[] {
 	const scopes: { blockScope: string; limits: UsageLimit[] }[] = [];
 	for (const tier of ["fable", "mythos"] as const) {
-		const limits = report.limits.filter(limit => limit.scope.tier === tier);
-		if (limits.length > 0) scopes.push({ blockScope: `tier:${tier}`, limits });
+		if (!report.limits.some(limit => limit.scope.tier === tier)) continue;
+		scopes.push({
+			blockScope: `tier:${tier}`,
+			limits: scopeClaudeLimitsForKindHardBlock(report, tier),
+		});
 	}
 	return scopes;
 }
