@@ -8,6 +8,11 @@ import { resolveModelPolicy } from "./resolve";
  * at catalog composition time so frozen bundled rows need no runtime mutation.
  */
 export function resolveMaxContextWindow(model: Model): number | undefined {
-	const maximum = model.maxContextWindow ?? resolveModelPolicy(toModelSpec(model)).catalog.maxContextWindow;
-	return typeof maximum === "number" && Number.isFinite(maximum) && maximum > 0 ? maximum : undefined;
+	const maximum = model.maxContextWindow;
+	if (typeof maximum === "number" && Number.isFinite(maximum) && maximum > 0) {
+		return maximum;
+	}
+
+	const fallback = resolveModelPolicy(toModelSpec(model)).catalog.maxContextWindow;
+	return typeof fallback === "number" && Number.isFinite(fallback) && fallback > 0 ? fallback : undefined;
 }
