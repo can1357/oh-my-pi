@@ -65,6 +65,13 @@ type BabelExpressionStatement = {
 	expression?: { type?: string };
 };
 
+type BabelReturnStatement = {
+	type: "ReturnStatement";
+	start: number;
+	end: number;
+	argument?: { start: number; end: number } | null;
+};
+
 type BabelProgramNode = BabelImportDeclaration | BabelLexicalDecl | BabelExpressionStatement | { type: string };
 type BabelModuleSourceDeclaration = {
 	type: "ImportDeclaration" | "ExportNamedDeclaration" | "ExportAllDeclaration";
@@ -348,6 +355,46 @@ function appendGlobalBindingPublish(source: string, names: readonly string[]): s
 }
 
 /**
+ * Republish current top-level binding values immediately before a mid-cell `return` unwinds
+ * the async wrapper. Without this, a successful early `return` (conditional or bare) skips the
+ * trailing republish and later cells see the binding's declaration value instead of its final
+ * assignment. A thrown error still bypasses every republish, preserving incremental semantics.
+ */
+function buildReturnRepublish(names: readonly string[], argument: string | undefined): string {
+	const assignments = names.map(name => `this[${JSON.stringify(name)}] = ${name};`).join(" ");
+	if (argument === undefined) return `{ ${assignments} return; }`;
+	// Evaluate the return argument first (it may mutate a published binding), then republish,
+	// then return the captured value. The arrow inherits the wrapper's `this` (the worker global)
+	// and closes over the top-level bindings.
+	return `return (__ompReturn => { ${assignments} return __ompReturn; })((${argument}));`;
+}
+
+/**
+ * Collect every `return` that would unwind the async cell wrapper — returns not nested inside a
+ * function/method boundary. A return's argument cannot itself contain a top-level return, so we
+ * stop descending once one is found.
+ */
+function collectTopLevelReturns(value: unknown, out: BabelReturnStatement[]): void {
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const item of value) collectTopLevelReturns(item, out);
+		return;
+	}
+	const node = value as Record<string, unknown>;
+	const type = node.type;
+	if (type === "ReturnStatement") {
+		out.push(node as unknown as BabelReturnStatement);
+		return;
+	}
+	if (typeof type === "string" && isExecutionBoundary(type)) return;
+	for (const key in node) {
+		if (key === "loc" || key === "extra" || key === "range") continue;
+		if (key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
+		collectTopLevelReturns(node[key], out);
+	}
+}
+
+/**
  * Demote top-level `const`/`let`/`class` declarations to `var` so they persist on the
  * worker's globalThis across indirect `eval` calls. Indirect eval gives each call its own
  * lexical environment, so `const x = 1` in one cell would be invisible to the next.
@@ -360,7 +407,8 @@ function appendGlobalBindingPublish(source: string, names: readonly string[]): s
  * When the source must run inside the async wrapper (top-level `await`), demoted `var`s —
  * and the user's own top-level `var` and `function` declarations — would be scoped to the
  * wrapper function and die with the cell. In that mode we publish every top-level binding
- * back to the wrapper's lexical `this`, which is the worker global object.
+ * after its declaration, before each mid-cell `return` that unwinds the wrapper, and once more
+ * after the cell body so later assignments persist regardless of how the cell completes.
  *
  * Nested declarations (inside functions, blocks, classes) are left alone — they're
  * scoped to their enclosing function/block regardless of `var` vs `let`/`const`.
@@ -391,10 +439,24 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 	}
 	if (targets.length === 0) return code;
 
-	targets.sort((a, b) => b.node.start - a.node.start);
-	let result = code;
+	const finalPublishNames: string[] = [];
+	if (publishGlobals) {
+		const seen = new Set<string>();
+		for (const { node } of targets) {
+			for (const name of getLexicalBindingNames(node)) {
+				if (seen.has(name)) continue;
+				seen.add(name);
+				finalPublishNames.push(name);
+			}
+		}
+	}
+
+	// Position-anchored edits over the original source. Declaration demotions and mid-cell
+	// return republishes never overlap (a top-level return is a statement, never inside a
+	// demoted declaration), so applying them back-to-front keeps every offset valid.
+	const edits: Array<{ start: number; end: number; text: string }> = [];
 	for (const { node, demote } of targets) {
-		const segment = result.slice(node.start, node.end);
+		const segment = code.slice(node.start, node.end);
 		const bindingNames = publishGlobals ? getLexicalBindingNames(node) : [];
 		let replacement: string;
 		if (!demote) {
@@ -409,10 +471,24 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 			const hasTrailingSemi = segment.endsWith(";");
 			replacement = `var ${id.name} = class${tail}${hasTrailingSemi ? "" : ";"}`;
 		}
-		result =
-			result.slice(0, node.start) + appendGlobalBindingPublish(replacement, bindingNames) + result.slice(node.end);
+		edits.push({ start: node.start, end: node.end, text: appendGlobalBindingPublish(replacement, bindingNames) });
 	}
-	return result;
+
+	if (finalPublishNames.length > 0) {
+		const returns: BabelReturnStatement[] = [];
+		for (const node of ast.program.body) collectTopLevelReturns(node, returns);
+		for (const ret of returns) {
+			const argument = ret.argument ? code.slice(ret.argument.start, ret.argument.end) : undefined;
+			edits.push({ start: ret.start, end: ret.end, text: buildReturnRepublish(finalPublishNames, argument) });
+		}
+	}
+
+	edits.sort((a, b) => b.start - a.start);
+	let result = code;
+	for (const edit of edits) {
+		result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);
+	}
+	return appendGlobalBindingPublish(result, finalPublishNames);
 }
 
 async function returnFinalExpression(code: string): Promise<{ source: string; returned: boolean }> {
