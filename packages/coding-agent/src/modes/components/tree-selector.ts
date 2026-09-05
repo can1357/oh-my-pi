@@ -618,6 +618,15 @@ class TreeList implements Component {
 		const rowWidth = contentRowWidth(width, this.#filteredNodes.length, this.maxVisibleLines);
 		const rows: string[] = [];
 
+		// One horizontal scroll position for the whole window: a per-row offset
+		// would put a different tree depth in the same column on each line, so
+		// connectors and gutters would stop describing one shape.
+		const depthOf = (flatNode: FlatNode): number =>
+			this.#multipleRoots ? Math.max(0, flatNode.indent - 1) : flatNode.indent;
+		const windowDepths = this.#filteredNodes.slice(startIndex, endIndex).map(depthOf);
+		const deepest = windowDepths.length > 0 ? Math.max(...windowDepths) : 0;
+		const windowOffset = Math.max(0, deepest - maxIndentLevels);
+
 		for (let i = startIndex; i < endIndex; i++) {
 			const flatNode = this.#filteredNodes[i];
 			const entry = flatNode.node.entry;
@@ -627,7 +636,7 @@ class TreeList implements Component {
 			const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
 
 			// If multiple roots, shift display (roots at 0, not 1)
-			const displayIndent = this.#multipleRoots ? Math.max(0, flatNode.indent - 1) : flatNode.indent;
+			const displayIndent = depthOf(flatNode);
 
 			// Build prefix with gutters at their correct positions, clamped to
 			// `maxIndentLevels` cells so the content always fits. When clamped, the
@@ -636,8 +645,8 @@ class TreeList implements Component {
 			const hasConnector = flatNode.showConnector && !flatNode.isVirtualRootChild;
 			const connectorSymbol = hasConnector ? (flatNode.isLast ? theme.tree.last : theme.tree.branch) : "";
 			const connectorChars = hasConnector ? Array.from(connectorSymbol) : [];
-			const renderedIndent = Math.min(displayIndent, maxIndentLevels);
-			const scrollOffset = displayIndent - renderedIndent;
+			const scrollOffset = Math.min(windowOffset, displayIndent);
+			const renderedIndent = displayIndent - scrollOffset;
 			const connectorPositionDisplay = hasConnector ? renderedIndent - 1 : -1;
 			// Linear rows reuse their branch head's depth. Existing sibling
 			// gutters remain visible; terminal gutters remain terminated.
