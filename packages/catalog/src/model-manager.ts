@@ -539,6 +539,16 @@ export function fingerprintStaticModels<TApi extends Api>(
 	return fingerprint;
 }
 
+/**
+ * Whether catalog rules grant this model's discovery input authority
+ * (`discovery-input-authoritative`). Read off the resolved compat record —
+ * the same shape `resolve.ts` uses for dynamic compat lookups — so the
+ * policy lives in KDL rather than a provider branch here.
+ */
+function hasDiscoveryInputAuthority(model: Model<Api>): boolean {
+	return model.compat !== undefined && Reflect.get(model.compat, "discoveryInputAuthoritative") === true;
+}
+
 function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamicModel: Model<TApi>): Model<TApi> {
 	// When discovery resolves the same model id to a different endpoint (e.g.
 	// a GitHub Copilot business/enterprise host), the bundled reference's
@@ -552,18 +562,16 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	// there: without this carve-out a model that dropped those tags would keep
 	// the bundled reference's image support and the agent would go on sending
 	// images to a now text-only route.
-	// ai&'s discovery is authoritative (`dynamicModelsAuthoritative`) and its
-	// org-scoped `capabilities` are the route's whole truth for modality.
-	// Every row shares the single ai& endpoint, so `endpointChanged` never
-	// fires there: without this carve-out a model that dropped `vision` would
-	// keep the bundled reference's image support and the agent would go on
-	// sending images to a now text-only route.
+	// Providers whose org-scoped discovery is the whole truth for modality
+	// declare `discovery-input-authoritative` in catalog rules (e.g. ai&):
+	// a served row that drops image support wins over the bundled reference
+	// instead of OR-merging it back.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
 	const dynamicInputAuthoritative =
 		endpointChanged ||
 		(existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot") ||
 		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra") ||
-		(existingModel.provider === "aiand" && dynamicModel.provider === "aiand");
+		(hasDiscoveryInputAuthority(existingModel) && hasDiscoveryInputAuthority(dynamicModel));
 	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");

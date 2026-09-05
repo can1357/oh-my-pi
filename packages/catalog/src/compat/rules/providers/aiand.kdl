@@ -7,6 +7,10 @@ provider "aiand" {
 	// (dynamicModelsAuthoritative), so frozen model-id lists would fight
 	// discovery; class-level ladders below still win per lineage.
 	thinking-mode "effort"
+	// The org-scoped catalog is the whole truth for modality: a served row
+	// that drops `vision` wins over bundled references in the manager merge
+	// instead of OR-merging image support back.
+	discovery-input-authoritative #true
 	// Exact deployment ladders from the live USD-org /v1/models census
 	// (2026-09-05) where ai& serving differs from class lineage truth.
 	// Wire `none` is ai&'s thinking-off tier: it backs the `minimal` selector

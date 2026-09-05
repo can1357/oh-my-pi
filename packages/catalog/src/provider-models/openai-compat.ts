@@ -4915,6 +4915,12 @@ export const AIAND_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
 ];
 
 const AIAND_STATIC_MODEL_IDS = AIAND_STATIC_MODELS.map(model => model.id);
+/**
+ * ai& ids retired from the served roster. The static list above no longer
+ * contains them, so without this migration list a cache-mismatch fallback
+ * would merge their stale cached rows back and keep them selectable.
+ */
+const AIAND_RETIRED_MODEL_IDS = ["moonshotai/kimi-k2.6", "zai-org/glm-5.1"] as const;
 
 function mapAiandThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
 	const wireEfforts = Array.isArray(entry.reasoning_efforts)
@@ -5000,7 +5006,7 @@ export function aiandModelManagerOptions(config?: AiandModelManagerConfig): Mode
 	return {
 		providerId: "aiand",
 		dynamicModelsAuthoritative: true,
-		dropCachedModelIdsOnStaticMismatch: AIAND_STATIC_MODEL_IDS,
+		dropCachedModelIdsOnStaticMismatch: [...AIAND_STATIC_MODEL_IDS, ...AIAND_RETIRED_MODEL_IDS],
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({

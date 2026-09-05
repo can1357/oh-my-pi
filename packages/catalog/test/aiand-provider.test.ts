@@ -267,4 +267,15 @@ describe("ai& provider support", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	test("keeps retired roster ids in the cache-migration list", () => {
+		// kimi-k2.6 and glm-5.1 left the served roster, so the static seed no
+		// longer contains them. Without explicit migration ids a
+		// cache-mismatch fallback would merge their stale cached rows back
+		// and keep them selectable after upgrade.
+		const options = aiandModelManagerOptions({ apiKey: "aiand-key" });
+		const dropIds = options.dropCachedModelIdsOnStaticMismatch ?? [];
+		expect(dropIds).toContain("moonshotai/kimi-k2.6");
+		expect(dropIds).toContain("zai-org/glm-5.1");
+	});
 });

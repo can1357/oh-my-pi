@@ -557,6 +557,7 @@ function detectOpenAICompat(
 		usesOpenAIToolCallIdLimit: false,
 		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
 		dropThinkingWhenReasoningEffort: false,
+		discoveryInputAuthoritative: false,
 		nativeKimiK3Reasoning: false,
 		zaiReasoningEffortDialect: false,
 		clampOutputToModelMax: false,
