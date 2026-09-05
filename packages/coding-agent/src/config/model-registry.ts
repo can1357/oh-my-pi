@@ -2355,7 +2355,7 @@ export class ModelRegistry {
 	hasConfiguredAuth(model: Model<Api>): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(model.provider);
 		return (
-			ModelRegistry.isCommandApiKeyConfig(keyConfig) ||
+			ModelRegistry.#isCommandApiKeyConfig(keyConfig) ||
 			this.#keylessProviders.has(model.provider) ||
 			this.authStorage.hasResolvableAuth(model.provider)
 		);
@@ -2373,7 +2373,7 @@ export class ModelRegistry {
 	hasConcreteAuth(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
 		return (
-			ModelRegistry.isCommandApiKeyConfig(keyConfig) ||
+			ModelRegistry.#isCommandApiKeyConfig(keyConfig) ||
 			this.#keylessProviders.has(provider) ||
 			this.authStorage.hasConcreteAuth(provider)
 		);
@@ -2387,14 +2387,14 @@ export class ModelRegistry {
 	 */
 	hasCommandBackedApiKey(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
-		return ModelRegistry.isCommandApiKeyConfig(keyConfig);
+		return ModelRegistry.#isCommandApiKeyConfig(keyConfig);
 	}
 
 	/**
 	 * Whether any element of a configured apiKey (single string or list) is
 	 * command-backed (`!cmd`). A list counts when at least one element is.
 	 */
-	private static isCommandApiKeyConfig(keyConfig: string | string[] | undefined): boolean {
+	static #isCommandApiKeyConfig(keyConfig: string | string[] | undefined): boolean {
 		if (typeof keyConfig === "string") return isCommandConfigValue(keyConfig);
 		return keyConfig?.some(element => isCommandConfigValue(element)) ?? false;
 	}
