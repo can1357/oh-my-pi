@@ -621,14 +621,14 @@ jobs:
          matrix:
             include:
                - {
-                    os: macos-15-intel,
+                    os: macos-26-intel,
                     platform: darwin,
                     target_id: darwin-x64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-x64,
                     native_targets: darwin-x64-baseline,
                  }
                - {
-                    os: macos-14,
+                    os: macos-26,
                     platform: darwin,
                     target_id: darwin-arm64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-arm64,
@@ -724,6 +724,13 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
+         - name: Upload Apple speech sidecar artifact
+           if: matrix.platform == 'darwin'
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: apple-speech-sidecar-${{ matrix.target_id }}
+              path: packages/coding-agent/dist/omp-speech-analyzer-*
+              if-no-files-found: error
 
    # Publishes the six @oh-my-pi/pi-natives-<tag> leaf packages once
    # validation passes and every binary built. Runs on one linux runner: leaf
@@ -925,6 +932,16 @@ jobs:
            uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
+         - name: Install Apple speech sidecars
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              pattern: apple-speech-sidecar-*
+              path: packages/coding-agent/dist
+              merge-multiple: true
+         - name: Verify Apple speech sidecars
+           run: |
+              test -s packages/coding-agent/dist/omp-speech-analyzer-arm64
+              test -s packages/coding-agent/dist/omp-speech-analyzer-x64
          - name: Publish to npm
            env:
               # Fallback auth: setup-node wrote an .npmrc referencing

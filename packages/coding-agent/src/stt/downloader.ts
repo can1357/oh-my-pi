@@ -1,9 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
+import { appleSpeechClient } from "./apple-speech-client";
 import { sttClient } from "./asr-client";
 import type { SttProgressStatus } from "./asr-protocol";
-import { resolveSttModelSpec } from "./models";
+import { resolveSttModelSpec, resolveWorkerSttModelSpec } from "./models";
 
 export interface DownloadProgress {
 	stage: string;
@@ -12,6 +13,7 @@ export interface DownloadProgress {
 
 export interface EnsureOptions {
 	modelName?: string;
+	language?: string;
 	signal?: AbortSignal;
 	onProgress?: (progress: DownloadProgress) => void;
 }
@@ -46,7 +48,7 @@ export interface SttDownloadProgress {
  * present (`.part` sidecars from an interrupted fetch are ignored).
  */
 export async function isSttModelCached(key: string): Promise<boolean> {
-	const spec = resolveSttModelSpec(key);
+	const spec = resolveWorkerSttModelSpec(key);
 	const repoDir = path.join(getTinyModelsCacheDir(), spec.repo);
 	if (spec.engine === "sherpa") {
 		try {
@@ -87,7 +89,7 @@ export async function downloadSttModel(
 	onProgress?: (progress: SttDownloadProgress) => void,
 	options?: { signal?: AbortSignal },
 ): Promise<void> {
-	const spec = resolveSttModelSpec(key);
+	const spec = resolveWorkerSttModelSpec(key);
 	const files = new Map<string, { loaded: number; total: number }>();
 	const result = await sttClient.downloadModel(spec.key, {
 		signal: options?.signal,
@@ -128,8 +130,19 @@ export async function downloadSttModel(
 // ── Public API ─────────────────────────────────────────────────────
 
 export async function ensureSTTDependencies(options?: EnsureOptions): Promise<void> {
+	const spec = resolveSttModelSpec(options?.modelName);
+	if (spec.engine === "speech-analyzer") {
+		options?.signal?.throwIfAborted();
+		options?.onProgress?.({ stage: "Preparing system-managed Apple speech recognition" });
+		const status = await appleSpeechClient.prepare(options?.language, options?.signal);
+		options?.onProgress?.({
+			stage: `Apple speech recognition ready${status.locale ? ` (${status.locale})` : ""}`,
+			percent: 100,
+		});
+		return;
+	}
 	await downloadSttModel(
-		resolveSttModelSpec(options?.modelName).key,
+		spec.key,
 		progress => {
 			const stage =
 				progress.status === "ready" || progress.status === "done"

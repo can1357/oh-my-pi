@@ -29,9 +29,9 @@ import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtyp
 import type { SttTransport, SttWorkerInbound } from "./asr-protocol";
 import { type EndpointerEvent, StreamEndpointer } from "./endpointer";
 import {
-	getSttModelSpec,
+	getWorkerSttModelSpec as getSttModelSpec,
 	type SherpaSttModelSpec,
-	type SttModel,
+	type WorkerSttModel as SttModel,
 	type SttModelKey,
 	type TransformersSttModelSpec,
 } from "./models";

@@ -38,6 +38,11 @@ declare module "*.applescript" {
 	export default content;
 }
 
+declare module "*.swift" {
+	const content: string;
+	export default content;
+}
+
 declare module "*.bdf" {
 	const content: string;
 	export default content;

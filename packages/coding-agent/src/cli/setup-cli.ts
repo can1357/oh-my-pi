@@ -9,8 +9,9 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings, settings } from "../config/settings";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { theme } from "../modes/theme/theme";
+import { appleSpeechClient } from "../stt/apple-speech-client";
 import { downloadSttModel, isSttModelCached } from "../stt/downloader";
-import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
+import { isSttModelKey, resolveSttModelSpec, STT_MODEL_OPTIONS } from "../stt/models";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODEL_OPTIONS } from "../tts";
 import { selectSetupModel } from "./setup-model-picker";
 
@@ -147,9 +148,9 @@ async function handlePythonSetup(flags: { json?: boolean; check?: boolean }): Pr
 }
 
 /**
- * One installable speech dependency. `isReady`/`status` are read-only probes;
- * `pick` (optional) lets an interactive user choose + persist a model; `ensure`
- * performs the download, streaming a normalized progress event.
+ * One speech dependency. `isReady`/`status` are read-only probes; `pick`
+ * (optional) lets an interactive user choose + persist an engine; `ensure`
+ * prepares its application-managed model or system-managed locale asset.
  */
 interface SpeechComponent {
 	name: string;
@@ -163,10 +164,23 @@ function buildSpeechComponents(): SpeechComponent[] {
 	return [
 		{
 			name: "Speech-to-Text model",
-			isReady: () => isSttModelCached(settings.get("stt.modelName")),
+			isReady: async () => {
+				const spec = resolveSttModelSpec(settings.get("stt.modelName"));
+				if (spec.engine === "speech-analyzer") {
+					return (await appleSpeechClient.status(settings.get("stt.language"))).installed;
+				}
+				return await isSttModelCached(spec.key);
+			},
 			status: async () => {
-				const key = settings.get("stt.modelName");
-				return (await isSttModelCached(key)) ? key : `${key} — not downloaded`;
+				const spec = resolveSttModelSpec(settings.get("stt.modelName"));
+				if (spec.engine === "speech-analyzer") {
+					const status = await appleSpeechClient.status(settings.get("stt.language"));
+					if (status.installed) {
+						return `${spec.key} — ${status.locale ?? "system locale"} (system-managed)`;
+					}
+					return `${spec.key} — ${status.error ?? "locale asset not prepared"}`;
+				}
+				return (await isSttModelCached(spec.key)) ? spec.key : `${spec.key} — not downloaded`;
 			},
 			pick: async () => {
 				const chosen = await selectSetupModel(
@@ -181,10 +195,21 @@ function buildSpeechComponents(): SpeechComponent[] {
 				}
 				return true;
 			},
-			ensure: onProgress =>
-				downloadSttModel(settings.get("stt.modelName"), progress =>
+			ensure: async onProgress => {
+				const spec = resolveSttModelSpec(settings.get("stt.modelName"));
+				if (spec.engine === "speech-analyzer") {
+					onProgress({ stage: "Preparing system-managed Apple speech recognition" });
+					const status = await appleSpeechClient.prepare(settings.get("stt.language"));
+					onProgress({
+						stage: `Apple speech recognition ready${status.locale ? ` (${status.locale})` : ""}`,
+						percent: 100,
+					});
+					return;
+				}
+				await downloadSttModel(spec.key, progress =>
 					onProgress({ stage: `Downloading ${progress.label} model`, percent: progress.percent }),
-				),
+				);
+			},
 		},
 		{
 			name: "Text-to-Speech model",

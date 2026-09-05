@@ -2479,7 +2479,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Speech",
 			label: "Speech Model",
 			description:
-				"Local on-device speech model. Parakeet TDT v3 (sherpa-onnx) is the SoTA default; Whisper base/small/large-v3-turbo tiers (transformers.js) trade size for multilingual coverage. Downloaded on first use.",
+				"Local on-device speech engine. Parakeet TDT v3 remains the cross-platform default; Whisper tiers trade size for language coverage; Apple SpeechAnalyzer is an opt-in macOS 26 engine with system-managed locale assets.",
 			options: STT_MODEL_OPTIONS,
 		},
 	},
