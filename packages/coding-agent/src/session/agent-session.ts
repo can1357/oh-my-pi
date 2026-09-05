@@ -5900,10 +5900,7 @@ export class AgentSession {
 						// isolated session without allowNested) must not be told
 						// to pass `isolated`/`apply`/`merge` — the preflight
 						// rejects those calls.
-						isolationEnabled: isIsolationAvailable(
-							{ settings: this.settings, isIsolated: this.#isIsolated },
-							this.#planModeState?.enabled === true,
-						),
+						isolationEnabled: isIsolationAvailable(this, this.#planModeState?.enabled === true),
 						evalTools: this.settings.get("eval.tools.enabled"),
 					}),
 					display: false,
