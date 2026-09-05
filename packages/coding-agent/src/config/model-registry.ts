@@ -223,7 +223,9 @@ export class ModelRegistry {
 	#catalogMetrics = new CatalogMetricsIndex();
 	#internedStaticModels: Map<string, Model<Api>> = new Map();
 	#providerLookupSnapshots: Map<string, Model<Api>[]> = new Map();
-	#customProviderApiKeys: Map<string, string> = new Map();
+	#customProviderApiKeys: Map<string, string | string[]> = new Map();
+	/** Active position per provider for list-form `providers.<name>.apiKey`. Defaults to 0. */
+	#providerApiKeyIndex: Map<string, number> = new Map();
 	// Every command-backed (`!cmd`) config value a provider carries — apiKey plus
 	// provider/model-override header values — keyed by provider. The 401 auth
 	// retry invalidates these command caches so refreshed credentials reach the
@@ -287,8 +289,18 @@ export class ModelRegistry {
 
 	#resolveCommandBackedApiKey(provider: string, options?: { forceCommandRefresh?: boolean }): CommandApiKeyResolution {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
-		if (!isCommandConfigValue(keyConfig)) return { configured: false };
-		const value = resolveConfigValue(keyConfig, options);
+		if (keyConfig === undefined) return { configured: false };
+		if (!Array.isArray(keyConfig)) {
+			if (!isCommandConfigValue(keyConfig)) return { configured: false };
+			const value = resolveConfigValue(keyConfig, options);
+			if (value) {
+				this.authStorage.setConfigApiKey(provider, value);
+				return { configured: true, value };
+			}
+			this.authStorage.removeConfigApiKey(provider);
+			return { configured: true };
+		}
+		const value = this.#resolveActiveApiKeyElement(provider, keyConfig, options);
 		if (value) {
 			this.authStorage.setConfigApiKey(provider, value);
 			return { configured: true, value };
@@ -298,16 +310,51 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Resolve the active element of a list-form apiKey, starting at the
+	 * provider's cycle index and wrapping around. Unresolvable elements
+	 * (failed `!cmd`, missing env) are skipped, never returned literally.
+	 */
+	#resolveActiveApiKeyElement(
+		provider: string,
+		keyConfigs: readonly string[],
+		options?: { forceCommandRefresh?: boolean },
+	): string | undefined {
+		if (keyConfigs.length === 0) return undefined;
+		const start = this.#providerApiKeyIndex.get(provider) ?? 0;
+		for (let step = 0; step < keyConfigs.length; step++) {
+			const value = resolveConfigValue(keyConfigs[(start + step) % keyConfigs.length], options);
+			if (value) return value;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Raw (unresolved, `!cmd`-intact) apiKey element for override/overlay
+	 * records: the active list element, or the single string unchanged.
+	 */
+	#activeApiKeyConfig(provider: string, keyConfig: string | string[] | undefined): string | undefined {
+		if (!Array.isArray(keyConfig)) return keyConfig;
+		if (keyConfig.length === 0) return undefined;
+		return keyConfig[(this.#providerApiKeyIndex.get(provider) ?? 0) % keyConfig.length];
+	}
+
+	/**
 	 * Accumulate every command-backed (`!cmd`) config value from an apiKey and a
 	 * header record into `target`. Used at load time to record which commands a
 	 * provider depends on so the 401 refresh path can invalidate all of them.
 	 */
 	#collectCommandConfigValues(
 		target: Set<string>,
-		apiKey: string | undefined,
+		apiKey: string | string[] | undefined,
 		headers: Record<string, string> | undefined,
 	): void {
-		if (isCommandConfigValue(apiKey)) target.add(apiKey);
+		if (typeof apiKey === "string") {
+			if (isCommandConfigValue(apiKey)) target.add(apiKey);
+		} else if (apiKey) {
+			for (const element of apiKey) {
+				if (isCommandConfigValue(element)) target.add(element);
+			}
+		}
 		if (!headers) return;
 		for (const key in headers) {
 			const value = headers[key];
@@ -323,18 +370,32 @@ export class ModelRegistry {
 	 * credentials pinned to their stale value across the retry (#9760).
 	 */
 	#invalidateProviderCommandConfigs(provider: string): void {
-		invalidateCommandConfig(this.#customProviderApiKeys.get(provider));
+		const keyConfig = this.#customProviderApiKeys.get(provider);
+		if (typeof keyConfig === "string") {
+			invalidateCommandConfig(keyConfig);
+		} else if (keyConfig) {
+			for (const element of keyConfig) invalidateCommandConfig(element);
+		}
 		const configs = this.#commandConfigsByProvider.get(provider);
 		if (!configs) return;
 		for (const config of configs) invalidateCommandConfig(config);
 	}
 
-	#installProviderApiKey(provider: string, keyConfig: string): void {
+	#installProviderApiKey(provider: string, keyConfig: string | string[]): void {
 		this.#customProviderApiKeys.set(provider, keyConfig);
-		const resolved = resolveConfigValue(keyConfig);
+		if (!Array.isArray(keyConfig)) {
+			const resolved = resolveConfigValue(keyConfig);
+			if (resolved) {
+				this.authStorage.setConfigApiKey(provider, resolved);
+			} else if (isCommandConfigValue(keyConfig)) {
+				this.authStorage.removeConfigApiKey(provider);
+			}
+			return;
+		}
+		const resolved = this.#resolveActiveApiKeyElement(provider, keyConfig);
 		if (resolved) {
 			this.authStorage.setConfigApiKey(provider, resolved);
-		} else if (isCommandConfigValue(keyConfig)) {
+		} else {
 			this.authStorage.removeConfigApiKey(provider);
 		}
 	}
@@ -380,7 +441,8 @@ export class ModelRegistry {
 		this.authStorage.setFallbackResolver(provider => {
 			const keyConfig = this.#customProviderApiKeys.get(provider);
 			if (!keyConfig) return undefined;
-			return resolveConfigValue(keyConfig);
+			if (!Array.isArray(keyConfig)) return resolveConfigValue(keyConfig);
+			return this.#resolveActiveApiKeyElement(provider, keyConfig);
 		});
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
@@ -691,6 +753,7 @@ export class ModelRegistry {
 		}
 		this.#modelsConfigFile.invalidate();
 		this.#customProviderApiKeys.clear();
+		this.#providerApiKeyIndex.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
 		// Drop config-sourced apiKeys from AuthStorage before reload; entries
@@ -1366,7 +1429,7 @@ export class ModelRegistry {
 								? normalizeBareDiscoveryBaseUrl(providerConfig.baseUrl)
 								: providerConfig.baseUrl,
 					headers: providerConfig.headers,
-					apiKey: providerConfig.apiKey,
+					apiKey: this.#activeApiKeyConfig(providerName, providerConfig.apiKey),
 					authHeader: providerConfig.authHeader,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
@@ -2175,7 +2238,7 @@ export class ModelRegistry {
 					providerConfig.baseUrl!,
 					providerConfig.api as Api | undefined,
 					providerConfig.headers,
-					providerConfig.apiKey,
+					this.#activeApiKeyConfig(providerName, providerConfig.apiKey),
 					providerConfig.authHeader,
 					providerCompat,
 					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
@@ -2285,7 +2348,7 @@ export class ModelRegistry {
 	hasConfiguredAuth(model: Model<Api>): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(model.provider);
 		return (
-			isCommandConfigValue(keyConfig) ||
+			ModelRegistry.isCommandApiKeyConfig(keyConfig) ||
 			this.#keylessProviders.has(model.provider) ||
 			this.authStorage.hasResolvableAuth(model.provider)
 		);
@@ -2303,7 +2366,7 @@ export class ModelRegistry {
 	hasConcreteAuth(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
 		return (
-			isCommandConfigValue(keyConfig) ||
+			ModelRegistry.isCommandApiKeyConfig(keyConfig) ||
 			this.#keylessProviders.has(provider) ||
 			this.authStorage.hasConcreteAuth(provider)
 		);
@@ -2317,7 +2380,40 @@ export class ModelRegistry {
 	 */
 	hasCommandBackedApiKey(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
-		return isCommandConfigValue(keyConfig);
+		return ModelRegistry.isCommandApiKeyConfig(keyConfig);
+	}
+
+	/**
+	 * Whether any element of a configured apiKey (single string or list) is
+	 * command-backed (`!cmd`). A list counts when at least one element is.
+	 */
+	private static isCommandApiKeyConfig(keyConfig: string | string[] | undefined): boolean {
+		if (typeof keyConfig === "string") return isCommandConfigValue(keyConfig);
+		return keyConfig?.some(element => isCommandConfigValue(element)) ?? false;
+	}
+
+	/**
+	 * Advance a list-form `providers.<name>.apiKey` to its next key, wrapping
+	 * around. The next `getApiKeyForProvider` (and every resolver-built
+	 * request) uses the new key. Returns false when there is no list to
+	 * advance: unknown provider, single string, or single-element list.
+	 */
+	cycleProviderApiKey(provider: string): boolean {
+		const keyConfig = this.#customProviderApiKeys.get(provider);
+		if (!Array.isArray(keyConfig) || keyConfig.length < 2) return false;
+		const next = ((this.#providerApiKeyIndex.get(provider) ?? 0) + 1) % keyConfig.length;
+		this.#providerApiKeyIndex.set(provider, next);
+		const resolved = this.#resolveActiveApiKeyElement(provider, keyConfig);
+		if (resolved) {
+			this.authStorage.setConfigApiKey(provider, resolved);
+		} else {
+			this.authStorage.removeConfigApiKey(provider);
+		}
+		const override = this.#providerOverrides.get(provider);
+		if (override) {
+			this.#providerOverrides.set(provider, { ...override, apiKey: keyConfig[next] });
+		}
+		return true;
 	}
 
 	getDiscoverableProviders(): string[] {
