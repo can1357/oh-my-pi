@@ -1,19 +1,77 @@
 // Provider-wire compat for "aiand"; regenerated from the frozen census using deployment contract selectors.
 
 provider "aiand" {
-	models "moonshotai/kimi-k3" "deepseek-ai/deepseek-v4-pro" \
-		"deepseek-ai/deepseek-v4-flash" "openai/gpt-oss-120b" "zai-org/glm-5.2" \
-		"google/gemma-4-31b-it" "moonshotai/kimi-k2.7-code" "qwen/qwen3.6-27b" \
-		"motif-technologies/motif-3" {
-		thinking-mode "effort"
-	}
+	// ai& drives thinking through OpenAI-style reasoning_effort on every model
+	// it serves (docs: chat-completions reasoning_effort validated per model).
+	// Provider-level on purpose: the roster is org-scoped /v1/models truth
+	// (dynamicModelsAuthoritative), so frozen model-id lists would fight
+	// discovery; class-level ladders below still win per lineage.
+	thinking-mode "effort"
+	// Exact deployment ladders from the live USD-org /v1/models census
+	// (2026-09-05) where ai& serving differs from class lineage truth.
+	// Wire `none` is ai&'s thinking-off tier: it backs the `minimal` selector
+	// through the effort map and the disable path through `none-effort`
+	// (same shape as the Fireworks minimal → none map).
 	models "deepseek-ai/deepseek-v4-pro" {
-		thinking-efforts "low" "high" "max"
+		thinking-efforts "minimal" "high" "max"
+		thinking-effort-map {
+			minimal "none"
+		}
+		thinking-default-level "minimal"
+		reasoning-disable-mode "none-effort"
+	}
+	models "deepseek-ai/deepseek-v4-flash" {
+		thinking-efforts "minimal" "high" "max"
+		thinking-effort-map {
+			minimal "none"
+		}
+		thinking-default-level "minimal"
+		reasoning-disable-mode "none-effort"
+		edit-revision "sloppy.1"
+	}
+	models "google/gemma-4-31b-it" {
+		thinking-efforts "minimal" "high"
+		thinking-effort-map {
+			minimal "none"
+		}
+		thinking-default-level "minimal"
+		reasoning-disable-mode "none-effort"
+	}
+	models "moonshotai/kimi-k2.7-code" {
+		thinking-efforts "high"
+		thinking-default-level "high"
+		edit-revision "sloppy.1"
 	}
 	models "motif-technologies/motif-3" {
-		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-efforts "minimal" "high"
+		thinking-effort-map {
+			minimal "none"
+		}
+		thinking-default-level "high"
+		reasoning-disable-mode "none-effort"
 	}
-	models "moonshotai/kimi-k2.7-code" "deepseek-ai/deepseek-v4-flash" {
-		edit-revision "sloppy.1"
+	models "qwen/qwen3.6-27b" {
+		thinking-efforts "minimal" "high"
+		thinking-effort-map {
+			minimal "none"
+		}
+		thinking-default-level "high"
+		reasoning-disable-mode "none-effort"
+	}
+	models "qwen/qwen3.8-27b" {
+		thinking-efforts "minimal" "low" "medium" "xhigh"
+		thinking-effort-map {
+			minimal "none"
+		}
+		thinking-default-level "medium"
+		reasoning-disable-mode "none-effort"
+	}
+	models "zai-org/glm-5.2" {
+		thinking-efforts "minimal" "high" "max"
+		thinking-effort-map {
+			minimal "none"
+		}
+		thinking-default-level "max"
+		reasoning-disable-mode "none-effort"
 	}
 }

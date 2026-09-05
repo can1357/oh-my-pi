@@ -153,4 +153,31 @@ describe("ai& provider support", () => {
 			expect.objectContaining({ method: "GET" }),
 		);
 	});
+
+	test("backs wire none through the minimal selector with a none effort map", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "deepseek-ai/deepseek-v4-flash",
+					context_window: 1048576,
+					capabilities: ["reasoning", "tool_calling"],
+					reasoning_efforts: ["none", "high", "max"],
+					reasoning_effort_default: "none",
+					currency: "usd",
+					input_per_1m: "0.150000",
+					output_per_1m: "0.250000",
+					cached_input_per_1m: "0.080000",
+				},
+			]),
+		) as unknown as FetchImpl;
+
+		const options = aiandModelManagerOptions({ apiKey: "aiand-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+		const flash = models?.find(model => model.id === "deepseek-ai/deepseek-v4-flash");
+		// `none` is the thinking-off state, not a ladder rung: minimal selects it.
+		expect(flash?.thinking?.efforts).toEqual([Effort.Minimal, Effort.High, Effort.Max]);
+		expect(flash?.thinking?.effortMap).toEqual({ [Effort.Minimal]: "none" });
+		expect(flash?.thinking?.defaultLevel).toBe(Effort.Minimal);
+		expect(flash?.cost).toEqual({ input: 0.15, output: 0.25, cacheRead: 0.08, cacheWrite: 0 });
+	});
 });

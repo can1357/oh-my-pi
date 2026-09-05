@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Refreshed the ai& catalog from live `/v1/models` data: per-model reasoning ladders (including the thinking-off tier), model-specific defaults, cached-input pricing, and the current 11-model roster.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added
