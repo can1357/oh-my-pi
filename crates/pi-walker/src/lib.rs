@@ -2217,6 +2217,7 @@ impl<E> EntryVisitor for CollectVisitor<E> {
 	}
 }
 
+#[allow(clippy::missing_const_for_fn, reason = "calls non-const root_device_id on unix")]
 fn root_device_for_options(root: &Path, options: WalkOptions) -> Option<u64> {
 	if options.same_file_system {
 		root_device_id(root, options.follow_links)
@@ -2312,7 +2313,7 @@ impl DirScratch {
 	}
 
 	#[cfg(not(unix))]
-	#[allow(clippy::unused_self)]
+	#[allow(clippy::unused_self, reason = "matches unix signature where self is used")]
 	fn name<'a>(&'a self, entry: &'a DirEntryRecord) -> &'a OsStr {
 		&entry.name
 	}

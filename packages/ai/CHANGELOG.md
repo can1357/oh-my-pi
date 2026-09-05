@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.11] - 2026-09-05
+
 ### Fixed
 - Fixed Grok Bot router responses to publish the concrete `responseInfo.model` on `upstreamModel` for session stats.
 - Fixed Grok Bot Anthropic+tools auto wire to read catalog `sand-tools-wire` for routers instead of hard-coded model ids.
@@ -36,8 +38,6 @@
 ### Fixed
 
 - Fixed DeepSeek-family Responses replay (e.g. opencode-go) rejecting a resumed thinking-mode turn with `400 The reasoning_text in the thinking mode must be passed back to the API` when compaction dropped the turn's reasoning; a non-empty placeholder is now synthesized instead of an empty `reasoning_text` ([#10690](https://github.com/can1357/oh-my-pi/issues/10690)).
-### Fixed
-
 - Fixed pi-native streams treating a connection that closed before its terminal event as a successful empty response; incomplete streams and namespaced gateway 5xx failures now remain retryable.
 
 ## [18.1.6] - 2026-09-03
