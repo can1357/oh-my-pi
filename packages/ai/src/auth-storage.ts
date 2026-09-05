@@ -1344,6 +1344,12 @@ export class AuthStorage {
 	#data: Map<string, StoredCredential[]> = new Map();
 	#runtimeOverrides: Map<string, string> = new Map();
 	#configOverrides: Map<string, string> = new Map();
+	/**
+	 * Active element position per list-form config apiKey, for masked
+	 * operator display (`key i/N`). Carries no key material; the registry
+	 * publishes it on install/cycle and it drops with the override.
+	 */
+	#configKeyPositions: Map<string, { index: number; total: number }> = new Map();
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
@@ -1602,6 +1608,19 @@ export class AuthStorage {
 	 */
 	removeConfigApiKey(provider: string): void {
 		this.#configOverrides.delete(provider);
+		this.#configKeyPositions.delete(provider);
+	}
+
+	/**
+	 * Record which element of a list-form config apiKey is active, for masked
+	 * operator display. Pass undefined for single-string keys (no suffix).
+	 */
+	setConfigApiKeyPosition(provider: string, position: { index: number; total: number } | undefined): void {
+		if (position === undefined) {
+			this.#configKeyPositions.delete(provider);
+		} else {
+			this.#configKeyPositions.set(provider, position);
+		}
 	}
 
 	/**
@@ -1610,6 +1629,7 @@ export class AuthStorage {
 	 */
 	clearConfigApiKeys(): void {
 		this.#configOverrides.clear();
+		this.#configKeyPositions.clear();
 	}
 
 	/**
@@ -7311,7 +7331,9 @@ export class AuthStorage {
 			return "runtime override (--api-key)";
 		}
 		if (this.#configOverrides.has(provider)) {
-			return "config override (models.yml)";
+			const position = this.#configKeyPositions.get(provider);
+			// Masked position only (`key i/N`) — never key material.
+			return position ? `config override (models.yml) key ${position.index + 1}/${position.total}` : "config override (models.yml)";
 		}
 
 		const baseLabel = this.#sourceLabel ?? "local store";

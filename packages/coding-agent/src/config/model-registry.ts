@@ -390,6 +390,7 @@ export class ModelRegistry {
 			} else if (isCommandConfigValue(keyConfig)) {
 				this.authStorage.removeConfigApiKey(provider);
 			}
+			this.authStorage.setConfigApiKeyPosition(provider, undefined);
 			return;
 		}
 		const resolved = this.#resolveActiveApiKeyElement(provider, keyConfig);
@@ -398,6 +399,12 @@ export class ModelRegistry {
 		} else {
 			this.authStorage.removeConfigApiKey(provider);
 		}
+		this.authStorage.setConfigApiKeyPosition(
+			provider,
+			keyConfig.length > 0
+				? { index: (this.#providerApiKeyIndex.get(provider) ?? 0) % keyConfig.length, total: keyConfig.length }
+				: undefined,
+		);
 	}
 
 	/**
@@ -2396,7 +2403,10 @@ export class ModelRegistry {
 	 * Advance a list-form `providers.<name>.apiKey` to its next key, wrapping
 	 * around. The next `getApiKeyForProvider` (and every resolver-built
 	 * request) uses the new key. Returns false when there is no list to
-	 * advance: unknown provider, single string, or single-element list.
+	 * advance (unknown provider, single string, or single-element list) or
+	 * when no element resolves. Process-local: the index lives in this
+	 * registry, so sibling processes and separate CLI invocations each track
+	 * their own active key.
 	 */
 	cycleProviderApiKey(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
@@ -2409,9 +2419,12 @@ export class ModelRegistry {
 			// No usable key at the new position: stay where we were and report
 			// failure instead of printing success with no usable key.
 			this.#providerApiKeyIndex.set(provider, prev);
+			this.authStorage.setConfigApiKeyPosition(provider, { index: prev, total: keyConfig.length });
 			return false;
 		}
 		this.authStorage.setConfigApiKey(provider, resolved);
+		this.authStorage.setConfigApiKeyPosition(provider, { index: next, total: keyConfig.length });
+		logger.debug("provider apiKey cycled", { provider, index: next, total: keyConfig.length });
 		const override = this.#providerOverrides.get(provider);
 		if (override) {
 			this.#providerOverrides.set(provider, { ...override, apiKey: keyConfig[next] });
