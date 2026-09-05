@@ -7,8 +7,13 @@ import { isRecord } from "@oh-my-pi/pi-utils";
  * and lazy compilation on first encode/decode/create invocation.
  */
 
+/** JSON objects carried by `google.protobuf.Struct` fields. */
+export interface JsonObject {
+	[key: string]: JsonValue;
+}
+
 /** JSON values carried by `google.protobuf.Value` fields. */
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -184,6 +189,18 @@ export function encodeJsonValue(value: JsonValue): Uint8Array {
 /** Decodes `google.protobuf.Value` wire bytes into a JSON value. */
 export function decodeJsonValue(value: Uint8Array): JsonValue {
 	return readJsonValue(new Reader(value));
+}
+
+/** Encodes a JSON object as `google.protobuf.Struct`. */
+export function encodeJsonStruct(value: JsonObject): Uint8Array {
+	const writer = new Writer();
+	writeJsonStruct(writer, value);
+	return writer.finish();
+}
+
+/** Decodes a JSON object from `google.protobuf.Struct`. */
+export function decodeJsonStruct(value: Uint8Array): JsonObject {
+	return readJsonStruct(new Reader(value));
 }
 
 function compileCodec<T extends ProtoMessage>(typeName: string, fieldDescs: readonly FieldDesc[]): MessageCodec<T> {
@@ -924,6 +941,21 @@ class Reader {
 	}
 }
 
+function writeJsonStruct(writer: Writer, value: JsonObject): void {
+	for (const key in value) {
+		const item = value[key];
+		const entryWriter = new Writer();
+		entryWriter.tag(1, 2);
+		entryWriter.string(key);
+		entryWriter.tag(2, 2);
+		const valueWriter = new Writer();
+		writeJsonValue(valueWriter, item);
+		entryWriter.lengthDelimited(valueWriter.finish());
+		writer.tag(1, 2);
+		writer.lengthDelimited(entryWriter.finish());
+	}
+}
+
 function writeJsonValue(writer: Writer, value: JsonValue): void {
 	if (value === null) {
 		writer.tag(1, 0);
@@ -959,18 +991,7 @@ function writeJsonValue(writer: Writer, value: JsonValue): void {
 	}
 	if (isRecord(value)) {
 		const structWriter = new Writer();
-		for (const key in value) {
-			const item = value[key];
-			const entryWriter = new Writer();
-			entryWriter.tag(1, 2);
-			entryWriter.string(key);
-			entryWriter.tag(2, 2);
-			const valueWriter = new Writer();
-			writeJsonValue(valueWriter, item);
-			entryWriter.lengthDelimited(valueWriter.finish());
-			structWriter.tag(1, 2);
-			structWriter.lengthDelimited(entryWriter.finish());
-		}
+		writeJsonStruct(structWriter, value);
 		writer.tag(5, 2);
 		writer.lengthDelimited(structWriter.finish());
 	}
@@ -1019,8 +1040,8 @@ function readJsonValue(reader: Reader): JsonValue {
 	return value;
 }
 
-function readJsonStruct(reader: Reader): { [key: string]: JsonValue } {
-	const output: { [key: string]: JsonValue } = {};
+function readJsonStruct(reader: Reader): JsonObject {
+	const output: JsonObject = {};
 	while (reader.pos < reader.len) {
 		const tag = reader.uint32();
 		const fieldNumber = tag >>> 3;
@@ -1045,7 +1066,12 @@ function readJsonStruct(reader: Reader): { [key: string]: JsonValue } {
 					entryReader.skip(entryWire);
 				}
 			}
-			output[entryKey] = entryVal;
+			Object.defineProperty(output, entryKey, {
+				value: entryVal,
+				enumerable: true,
+				configurable: true,
+				writable: true,
+			});
 		} else {
 			reader.skip(wireType);
 		}

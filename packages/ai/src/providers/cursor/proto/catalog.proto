@@ -1,0 +1,271 @@
+// Narrow catalog closure reconstructed from cursor-agent 2026.09.02-fa0c06e.
+// Selected messages retain their complete fields and transitive message dependencies.
+syntax = "proto3";
+
+package aiserver.v1;
+
+import "agent.proto";
+
+enum AvailableModelsScope {
+  AVAILABLE_MODELS_SCOPE_UNSPECIFIED = 0;
+  AVAILABLE_MODELS_SCOPE_USER_AVAILABLE = 1;
+  AVAILABLE_MODELS_SCOPE_AUTOMATIONS = 2;
+  AVAILABLE_MODELS_SCOPE_ADMIN_SETTINGS_ALL_APPLICATION_MODELS = 3;
+}
+
+enum CloudAgentEffortMode {
+  CLOUD_AGENT_EFFORT_MODE_UNSPECIFIED = 0;
+  CLOUD_AGENT_EFFORT_MODE_STANDARD = 1;
+  CLOUD_AGENT_EFFORT_MODE_GRIND = 2;
+}
+
+message AvailableModelsRequest {
+  bool is_nightly = 1;
+  bool include_long_context_models = 2;
+  bool exclude_max_named_models = 3;
+  repeated string additional_model_names = 4;
+  optional bool use_model_parameters = 5;
+  optional bool include_hidden_models = 6;
+  optional bool do_not_use_markdown = 7;
+  optional bool variants_will_be_shown_in_exploded_list = 8;
+  optional bool for_automations = 9;
+  optional AvailableModelsScope scope = 10;
+  optional bool use_react_model_picker = 11;
+  optional bool use_cloud_agent_effort_modes = 12;
+  optional string admin_settings_group_public_id = 13;
+  optional bool byok_enabled = 14;
+  optional bool use_parameterized_automations_models = 15;
+}
+
+message AvailableModelsResponse {
+  repeated string model_names = 1;
+  repeated AvailableModel models = 2;
+  optional FeatureModelConfig composer_model_config = 4;
+  optional FeatureModelConfig cmd_k_model_config = 5;
+  optional FeatureModelConfig background_composer_model_config = 6;
+  optional FeatureModelConfig plan_execution_model_config = 7;
+  optional FeatureModelConfig spec_model_config = 8;
+  optional FeatureModelConfig deep_search_model_config = 9;
+  optional FeatureModelConfig quick_agent_model_config = 10;
+  bool use_model_parameters = 11;
+  optional int32 disable_unused_models_after_n_hours = 12;
+  optional int32 upgrade_unchanged_models_after_n_hours = 13;
+  ModelPickerDisplayConfiguration display_configuration = 15;
+  map<string, FeatureModelConfig> subagent_model_configs = 16;
+  optional string experimental_model_id = 19;
+  optional string experimental_model_display_name = 20;
+  optional string nudge_new_chats_to_auto_optimize_for = 21;
+
+  message AvailableModel {
+    string name = 1;
+    bool default_on = 2;
+    optional bool is_long_context_only = 3;
+    optional bool is_chat_only = 4;
+    optional bool supports_agent = 5;
+    optional DegradationStatus degradation_status = 6;
+    optional double price = 7;
+    optional TooltipData tooltip_data = 8;
+    optional bool supports_thinking = 9;
+    optional bool supports_images = 10;
+    optional bool supports_auto_context = 11;
+    optional int32 auto_context_max_tokens = 12;
+    optional int32 auto_context_extended_max_tokens = 13;
+    optional bool supports_max_mode = 14;
+    optional int32 context_token_limit = 15;
+    optional int32 context_token_limit_for_max_mode = 16;
+    optional string client_display_name = 17;
+    optional string server_model_name = 18;
+    optional bool supports_non_max_mode = 19;
+    optional TooltipData tooltip_data_for_max_mode = 20;
+    optional bool is_recommended_for_background_composer = 21;
+    optional bool supports_plan_mode = 22;
+    optional bool is_user_added = 23;
+    optional string inputbox_short_model_name = 24;
+    optional bool supports_sandboxing = 25;
+    optional bool supports_cmd_k = 26;
+    optional bool only_supports_cmd_k = 27;
+    optional int32 background_composer_sort_order = 28;
+    repeated ModelParameterDefinition parameter_definitions = 29;
+    repeated ModelVariantConfig variants = 30;
+    optional CloudAgentEffortMode cloud_agent_effort_mode = 32;
+    optional string cloud_migrate_to_model = 33;
+    optional string upgrade_model_id = 34;
+    optional bool is_hidden = 35;
+    repeated string legacy_slugs = 36;
+    repeated string id_aliases = 37;
+    optional int32 named_model_section_index = 38;
+    optional string tagline = 39;
+    optional bool visible_in_routed_model_view = 40;
+    optional string vendor_name = 41;
+    optional ModelVendor vendor = 42;
+    optional bool default_disabled_in_admin_allowlist = 43;
+    repeated CloudAgentEffortMode cloud_agent_effort_modes = 44;
+    optional bool supports_smart_mode_classifier = 45;
+    optional bool requires_data_retention = 46;
+    optional string reason_for_zdr_consent_block = 47;
+    repeated ModelPickerBadge model_picker_badges = 48;
+  }
+
+  message ConfirmationDialogue {
+    string title = 1;
+    string body = 2;
+    string key = 3;
+    bool blocks_submission = 4;
+    optional Presentation presentation = 5;
+
+    enum Presentation {
+      PRESENTATION_UNSPECIFIED = 0;
+      PRESENTATION_POST_PICKER_WARNING = 1;
+    }
+  }
+
+  message FeatureModelConfig {
+    string default_model = 1;
+    repeated string fallback_models = 2;
+    repeated string best_of_n_default_models = 3;
+  }
+
+  message ModelPickerBadge {
+    string label = 1;
+    Variant variant = 2;
+    bool dismiss_on_selection = 3;
+
+    enum Variant {
+      VARIANT_UNSPECIFIED = 0;
+      VARIANT_ACCENT = 1;
+      VARIANT_NEUTRAL = 2;
+      VARIANT_SUCCESS = 3;
+      VARIANT_WARN = 4;
+      VARIANT_DANGER = 5;
+    }
+  }
+
+  message ModelPickerDisplayConfiguration {
+    RoutedModelViewConfig routed_model_view_config = 1;
+    NamedModelsViewConfig named_models_view_config = 2;
+    optional bool hide_search_bar = 3;
+    optional bool hide_add_models = 4;
+    optional string model_selection_restriction_message = 5;
+
+    message NamedModelsViewConfig {
+      optional NamedViewToRoutedModelViewToggle named_view_to_routed_model_view_toggle = 2;
+      optional NamedViewToRoutedModelViewNoButton named_view_to_routed_model_view_no_button = 3;
+      optional NamedViewToRoutedModelViewButton named_view_to_routed_model_view_button = 4;
+
+      message NamedViewToRoutedModelViewButton {
+        string markdown = 1;
+      }
+
+      message NamedViewToRoutedModelViewNoButton {}
+
+      message NamedViewToRoutedModelViewToggle {
+        string markdown = 1;
+      }
+    }
+
+    message RoutedModelViewConfig {
+      optional string title = 1;
+      optional RoutedModelViewToNamedViewToggle routed_model_view_to_named_view_toggle = 2;
+      optional RoutedModelViewToNamedViewButton routed_model_view_to_named_view_button = 3;
+      optional bool hide_search_bar = 4;
+      optional bool hide_routed_model_view = 5;
+
+      message RoutedModelViewToNamedViewButton {
+        string markdown = 1;
+      }
+
+      message RoutedModelViewToNamedViewToggle {
+        string title_markdown = 1;
+        optional string subtitle = 2;
+        optional bool set_to_last_named_model = 3;
+      }
+    }
+  }
+
+  message ModelVariantConfig {
+    repeated agent.v1.RequestedModel.ModelParameterValue parameter_values = 1;
+    string display_name = 2;
+    bool is_max_mode = 3;
+    optional bool is_default_max_config = 4;
+    optional bool is_default_non_max_config = 5;
+    optional TooltipData tooltip_data = 6;
+    optional string tagline = 7;
+    optional string display_name_outside_picker = 8;
+    optional string variant_string_representation = 9;
+    optional ConfirmationDialogue confirmation_dialogue = 10;
+    optional string legacy_slug = 11;
+  }
+
+  message ModelVendor {
+    ModelVendorId id = 1;
+    string display_name = 2;
+  }
+
+  message TooltipData {
+    string primary_text = 1;
+    string secondary_text = 2;
+    bool secondary_warning_text = 3;
+    string icon = 4;
+    string tertiary_text = 5;
+    string tertiary_text_url = 6;
+    optional string markdown_content = 7;
+  }
+
+  enum DegradationStatus {
+    DEGRADATION_STATUS_UNSPECIFIED = 0;
+    DEGRADATION_STATUS_DEGRADED = 1;
+    DEGRADATION_STATUS_DISABLED = 2;
+  }
+
+  enum ModelVendorId {
+    MODEL_VENDOR_ID_UNSPECIFIED = 0;
+    MODEL_VENDOR_ID_ANTHROPIC = 1;
+    MODEL_VENDOR_ID_OPENAI = 2;
+    MODEL_VENDOR_ID_GOOGLE = 3;
+    MODEL_VENDOR_ID_XAI = 4;
+    MODEL_VENDOR_ID_MOONSHOT = 5;
+    MODEL_VENDOR_ID_CURSOR = 6;
+    MODEL_VENDOR_ID_NVIDIA = 7;
+    MODEL_VENDOR_ID_ZAI = 8;
+    MODEL_VENDOR_ID_META = 9;
+  }
+}
+
+message ModelParameterDefinition {
+  string id = 1;
+  string name = 2;
+  optional string markdown_tooltip = 3;
+  ModelParameterType parameter_type = 4;
+  optional bool is_cycleable_by_hotkey = 5;
+
+  message BooleanParameterDefinition {
+    repeated BooleanParameterValue values = 1;
+
+    message BooleanParameterValue {
+      string value = 1;
+      optional string display_name = 2;
+      optional bool increases_model_cost = 3;
+      optional bool default_blocked_in_admin_allowlist = 4;
+      optional bool hide_from_user_picker_when_admin_blocked = 5;
+      optional bool blocked_by_admin_allowlist = 6;
+    }
+  }
+
+  message EnumParameterDefinition {
+    repeated EnumParameterValue values = 1;
+
+    message EnumParameterValue {
+      string value = 1;
+      optional string display_name = 2;
+      optional bool increases_model_cost = 3;
+      optional bool blocked_by_admin_allowlist = 4;
+      optional string markdown_tooltip = 5;
+      repeated AvailableModelsResponse.ModelPickerBadge model_picker_badges = 6;
+    }
+  }
+
+  message ModelParameterType {
+    optional BooleanParameterDefinition boolean_parameter = 1;
+    optional EnumParameterDefinition enum_parameter = 2;
+  }
+}

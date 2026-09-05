@@ -32,11 +32,6 @@ import {
 } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import {
-	type CursorExecResolvedCarrier,
-	copyCursorExecResolved,
-	kCursorExecResolved,
-} from "@oh-my-pi/pi-ai/utils/block-symbols";
-import {
 	createHarmonyAuditEvent,
 	detectHarmonyLeakInAssistantMessage,
 	extractHarmonyRemoved,
@@ -361,18 +356,12 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 			return { ...block, block: structuredCloneJSON(block.block) };
 		case "fallback":
 			return { ...block, from: { ...block.from }, to: { ...block.to } };
-		case "toolCall": {
-			const snap = {
+		case "toolCall":
+			return {
 				...block,
 				arguments: structuredCloneJSON(block.arguments),
 				providerMetadata: snapshotToolCallProviderMetadata(block.providerMetadata),
 			};
-			// Object spread copies enumerable symbols in Bun, but the Cursor
-			// exec-resolved marker is load-bearing for skip-on-dispatch — copy
-			// it explicitly so a projector/snapshot path cannot drop it.
-			copyCursorExecResolved(snap, block);
-			return snap;
-		}
 	}
 }
 
@@ -561,18 +550,15 @@ export function agentLoop(
  * A harness that strips failed/aborted tool results in order to re-execute
  * the calls (e.g. `AgentSession.retry`'s tool replay) leaves the transcript
  * in this shape; {@link agentLoopContinue} resumes it by running those calls
- * before the next model call. Cursor exec-resolved blocks are excluded — the
- * provider already executed those server-side. `length`-truncated turns never
- * qualify: their trailing call arguments may be incomplete.
+ * before the next model call. `length`-truncated turns never qualify: their
+ * trailing call arguments may be incomplete.
  */
 export function unpairedToolCallTail(messages: readonly AgentMessage[]): AssistantMessage | undefined {
 	const tail = messages[messages.length - 1];
 	if (tail?.role !== "assistant") return undefined;
 	// Mirrors the loop's `runnableStop` rule for fresh turns.
 	if (tail.stopReason !== "toolUse" && tail.stopReason !== "stop") return undefined;
-	const hasRunnable = tail.content.some(
-		c => c.type === "toolCall" && (c as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
-	);
+	const hasRunnable = tail.content.some(c => c.type === "toolCall");
 	return hasRunnable ? tail : undefined;
 }
 
@@ -1319,13 +1305,7 @@ async function runLoopBody(
 					// Create placeholder tool results for any tool calls in the aborted message
 					// This maintains the tool_use/tool_result pairing that the API requires
 					type ToolCallContent = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
-					// Cursor exec-resolved blocks already have their toolResult buffered
-					// for out-of-band emission; a placeholder aborted result here would
-					// pair a duplicate to the same toolCallId (issue #4348 codex review).
-					const toolCalls = message.content.filter(
-						(c): c is ToolCallContent =>
-							c.type === "toolCall" && (c as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
-					);
+					const toolCalls = message.content.filter((c): c is ToolCallContent => c.type === "toolCall");
 					// Provider-built aborted messages (stream error events) carry no
 					// per-tool labels; derive them from a tool-scoped abort signal so
 					// only the matching call is blamed and siblings stay neutral.
@@ -1373,15 +1353,7 @@ async function runLoopBody(
 				// trailing tool_use may be truncated with incomplete arguments — those calls
 				// are abandoned below. (`error`/`aborted` already returned above.)
 				type ToolCallContent = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
-				// A Cursor exec-channel synthesized `toolCall` block carries
-				// `kCursorExecResolved` because Cursor already executed the tool
-				// server-side (via the bridge) and buffered the result for
-				// out-of-band emission — running it here again would duplicate the
-				// same side-effecting call (issue #4348 review by @chatgpt-codex-connector).
-				const toolCalls = message.content.filter(
-					(c): c is ToolCallContent =>
-						c.type === "toolCall" && (c as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
-				);
+				const toolCalls = message.content.filter((c): c is ToolCallContent => c.type === "toolCall");
 				const runnableStop = message.stopReason === "toolUse" || message.stopReason === "stop";
 				hasMoreToolCalls = runnableStop && toolCalls.length > 0;
 
@@ -2289,7 +2261,6 @@ async function prepareToolCallDispatch(
 	const prepared = new Map<string, PreparedToolCall>();
 	for (const toolCall of assistantMessage.content) {
 		if (toolCall.type !== "toolCall") continue;
-		if ((toolCall as CursorExecResolvedCarrier)[kCursorExecResolved] === true) continue;
 		const tool = resolveToolForCall(context.tools, toolCall, resolveFallbackTool);
 		const entry: PreparedToolCall = { tool, args: toolCall.arguments as Record<string, unknown> };
 		prepared.set(toolCall.id, entry);
@@ -2384,13 +2355,7 @@ async function executeToolCalls(
 		afterToolCall,
 	} = config;
 	type ToolCallContent = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
-	// Defensive: the outer loop already filters exec-resolved blocks before
-	// deciding to invoke `executeToolCalls`, but skip them here too so the
-	// guarantee lives with the code that would re-run the tool.
-	const toolCalls = assistantMessage.content.filter(
-		(c): c is ToolCallContent =>
-			c.type === "toolCall" && (c as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
-	);
+	const toolCalls = assistantMessage.content.filter((c): c is ToolCallContent => c.type === "toolCall");
 	const emittedToolResults: ToolResultMessage[] = [];
 	const toolCallInfos = toolCalls.map(call => ({ id: call.id, name: call.name }));
 	const batchId = `${assistantMessage.timestamp ?? Date.now()}_${toolCalls[0]?.id ?? "batch"}`;

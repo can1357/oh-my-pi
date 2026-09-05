@@ -3,13 +3,14 @@
  *
  * Ports the o2 runtime-behavior grammar (openai-responses-heuristic,
  * model-operations, cursor-effort, cursor-model-parameter, quota-tiers,
- * hosted-default) and adds the pi-only nodes: api-routes, model-limits,
- * exclude-models, plan-requirement, pricing-peer. Every node kind is
+ * hosted-default) and adds the pi-only nodes: cursor-model-route, api-routes,
+ * model-limits, exclude-models, plan-requirement, pricing-peer. Every node kind is
  * optional; per-node shapes are strict.
  */
 import type {
 	CompiledApiRoutes,
 	CompiledBehavior,
+	CompiledCursorRoute,
 	CompiledExcludeModels,
 	CompiledMatchList,
 	CompiledModelLimits,
@@ -266,11 +267,27 @@ function parsePricingPeer(node: KdlNodeView): CompiledPricingPeer {
 	return rule;
 }
 
+function parseCursorModelRoute(node: KdlNodeView): CompiledCursorRoute {
+	const children = ensureContainer(node, ["model", "target"]);
+	const model = requiredProp(node, "model");
+	const target = requiredProp(node, "target");
+	const parameters = children.map(child => {
+		ensureLeaf(child, []);
+		if (child.name !== "parameter") malformed(child);
+		const values = positionalStrings(child);
+		if (values.length !== 2 || !values[0] || !values[1]) malformed(child);
+		return { id: values[0], value: values[1] };
+	});
+	if (!model || !target) malformed(node);
+	return { model, target, parameters };
+}
+
 /** Compiles the runtime behavior source (may be absent → empty vocabulary). */
 export function compileBehavior(source: { file: string; text: string } | undefined): CompiledBehavior {
 	const behavior: CompiledBehavior = {
 		modelOperations: [],
 		cursorParameters: [],
+		cursorRoutes: [],
 		quotaTiers: [],
 		hostedDefaults: [],
 		apiRoutes: [],
@@ -300,13 +317,45 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				if (behavior.cursorEffort) malformed(node);
 				const children = ensureContainer(node, ["family-marker"]);
 				const familyMarker = requiredProp(node, "family-marker");
-				if (!familyMarker || children.length !== 1 || children[0].name !== "tier" || children[0].children) {
+				const tierNodes = children.filter(child => child.name === "tier");
+				const preferredNodes = children.filter(child => child.name === "prefer");
+				const parameterNodes = children.filter(child => child.name === "parameter");
+				if (!familyMarker || tierNodes.length === 0 || preferredNodes.length !== 1) malformed(node);
+				const tiers = tierNodes.map(child => {
+					ensureLeaf(child, ["level", "display"]);
+					const values = positionalStrings(child);
+					const level = requiredProp(child, "level");
+					const display = requiredProp(child, "display");
+					if (values.length !== 1 || !values[0] || !level || !display) malformed(child);
+					return { suffix: values[0], level, display };
+				});
+				const preferredNode = preferredNodes[0];
+				ensureLeaf(preferredNode, []);
+				const preferredTiers = positionalStrings(preferredNode);
+				const parameters = parameterNodes.map(child => {
+					ensureLeaf(child, ["source"]);
+					const values = positionalStrings(child);
+					const sourceValue = requiredProp(child, "source");
+					if (values.length !== 1 || !values[0] || (sourceValue !== "tier" && sourceValue !== "fast")) {
+						malformed(child);
+					}
+					const source: "tier" | "fast" = sourceValue;
+					return { id: values[0], source };
+				});
+				const suffixes = tiers.map(tier => tier.suffix);
+				if (
+					children.length !== tiers.length + parameterNodes.length + 1 ||
+					preferredTiers.length !== tiers.length ||
+					new Set(suffixes).size !== suffixes.length ||
+					new Set(preferredTiers).size !== preferredTiers.length ||
+					preferredTiers.some(tier => !suffixes.includes(tier)) ||
+					parameters.length === 0 ||
+					new Set(parameters.map(parameter => parameter.id)).size !== parameters.length ||
+					new Set(parameters.map(parameter => parameter.source)).size !== parameters.length
+				) {
 					malformed(node);
 				}
-				validateProps(children[0], []);
-				const tiers = positionalStrings(children[0]);
-				if (tiers.length === 0) malformed(node);
-				behavior.cursorEffort = { familyMarker, tiers };
+				behavior.cursorEffort = { familyMarker, tiers, preferredTiers, parameters };
 				break;
 			}
 			case "cursor-model-parameter": {
@@ -318,6 +367,9 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				behavior.cursorParameters.push({ model, id, value });
 				break;
 			}
+			case "cursor-model-route":
+				behavior.cursorRoutes.push(parseCursorModelRoute(node));
+				break;
 			case "quota-tiers":
 				behavior.quotaTiers.push(parseQuotaTiers(node));
 				break;

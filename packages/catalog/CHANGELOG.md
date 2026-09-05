@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the complete selected Cursor `RunInference`, model-catalog, and structured-error protocol closure while removing the AgentService-only tool-schema projection flag from Cursor catalog models.
+
+### Changed
+
+- Moved Cursor effort-family discovery suffixes, normalized levels, display labels, representative-tier preference, and generic route parameters into the compiled KDL policy.
+
+### Fixed
+
+- Restored Cursor's authoritative model context windows, image/thinking capabilities, and distinct Max Mode rows from the complete Available/Usable/Default catalog join, with caches isolated by bearer account and endpoint.
+- Fixed Cursor selector variants sending picker aliases as wire model IDs; normal, Max, thinking, effort, context, and Fast selections now use the catalog's base model and complete parameter set.
+- Fixed compressed Cursor catalog responses expanding beyond the catalog response-size limit during gzip or Brotli decompression.
+- Fixed distinct Cursor Max configurations being mislabeled as 1M rows when their authoritative context is smaller or unchanged.
+- Fixed provider model discovery losing either explicit text-only/non-reasoning capabilities or shared capability enrichment for authoritative ID-only rosters.
+- Fixed Cursor discovery inventing or inheriting an output-token ceiling that none of its three fetched catalog surfaces reports.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

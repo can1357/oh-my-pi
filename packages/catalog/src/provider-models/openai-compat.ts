@@ -1454,6 +1454,7 @@ export function deepinfraModelManagerOptions(
 	return {
 		providerId: "deepinfra",
 		dynamicModelsAuthoritative: true,
+		dynamicModelCapabilitiesAuthoritative: true,
 		fetchDynamicModels: () => fetchDeepinfraModels({ baseUrl, apiKey, fetch: config?.fetch, references }),
 	};
 }
@@ -4122,6 +4123,7 @@ export function syntheticModelManagerOptions(
 	return {
 		providerId: "synthetic",
 		dynamicModelsAuthoritative: true,
+		dynamicModelCapabilitiesAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({

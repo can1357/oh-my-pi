@@ -1,7 +1,10 @@
 import { expect, it } from "bun:test";
 import {
+	decodeJsonStruct,
 	decodeJsonValue,
+	encodeJsonStruct,
 	encodeJsonValue,
+	type JsonObject,
 	type JsonValue,
 	type MessageCodec,
 	type ProtoMessage,
@@ -65,6 +68,22 @@ it("round-trips JSON values with empty struct keys", () => {
 	const value: JsonValue = { "": ["kept", { nested: true }], count: 1 };
 
 	expect(decodeJsonValue(encodeJsonValue(value))).toEqual(value);
+});
+
+it("round-trips direct JSON structs without a Value wrapper", () => {
+	const value: JsonObject = { "": ["kept", { nested: true }], count: 1 };
+
+	expect(decodeJsonStruct(encodeJsonStruct(value))).toEqual(value);
+});
+
+it("round-trips a Struct __proto__ field as own data", () => {
+	const value = JSON.parse('{"__proto__":{"polluted":true},"safe":"ok"}') as JsonObject;
+	const decoded = decodeJsonStruct(encodeJsonStruct(value));
+
+	expect(Object.getPrototypeOf(decoded)).toBe(Object.prototype);
+	expect(Object.keys(decoded).sort()).toEqual(["__proto__", "safe"]);
+	expect(Reflect.get(decoded, "__proto__")).toEqual({ polluted: true });
+	expect(decoded.safe).toBe("ok");
 });
 
 it("resolves recursive static message descriptors on demand", () => {

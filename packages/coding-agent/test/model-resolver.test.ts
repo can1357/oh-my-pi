@@ -375,6 +375,45 @@ describe("pickDefaultAvailableModel", () => {
 		expect(result?.id).toBe("gpt-5.5");
 	});
 
+	test("recognizes a collapsed Cursor family containing the declared default", () => {
+		const other = buildModel({
+			id: "cursor-grok-4.6",
+			name: "Grok 4.6",
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 256000,
+			maxTokens: 64000,
+		});
+		const collapsedDefault = buildModel({
+			id: "claude-4.6-opus",
+			name: "Claude Opus 4.6",
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				effortRouting: {
+					[Effort.Low]: "claude-4.6-opus-low",
+					[Effort.Medium]: "claude-4.6-opus-medium",
+					[Effort.High]: DEFAULT_MODEL_PER_PROVIDER.cursor,
+				},
+			},
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 300000,
+			maxTokens: 64000,
+		});
+
+		expect(pickDefaultAvailableModel([other, collapsedDefault])?.id).toBe("claude-4.6-opus");
+	});
+
 	test("keeps earlier unrelated provider defaults ahead of shared Codex defaults", () => {
 		const anthropicDefault = buildModel({
 			id: DEFAULT_MODEL_PER_PROVIDER.anthropic,

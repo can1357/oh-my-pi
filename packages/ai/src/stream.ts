@@ -882,11 +882,8 @@ export function stream<TApi extends Api>(
 		);
 	}
 	const codec = applyGlyphCodec(context);
-	const execHandlers = options?.execHandlers;
-	const wireOptions: OptionsForApi<TApi> | undefined =
-		execHandlers === undefined ? options : { ...options, execHandlers: codec.wrapCursorExecHandlers(execHandlers) };
 	return codec.wrap(
-		withThinkingLoopGuard(model, wireOptions, opts =>
+		withThinkingLoopGuard(model, options, opts =>
 			withProviderInFlightLimit(model, opts, () => streamDispatch(model, codec.context, opts)),
 		),
 	);
@@ -1447,17 +1444,7 @@ export function streamSimple<TApi extends Api>(
 		return streamSimpleWithAnthropicCacheRefresh(model, context, sessionOptions);
 	}
 	const codec = applyGlyphCodec(context);
-	const execHandlers = sessionOptions.cursorExecHandlers ?? sessionOptions.execHandlers;
-	const wrappedExecHandlers = execHandlers === undefined ? undefined : codec.wrapCursorExecHandlers(execHandlers);
-	const wireOptions =
-		wrappedExecHandlers === undefined
-			? sessionOptions
-			: {
-					...sessionOptions,
-					execHandlers: wrappedExecHandlers,
-					cursorExecHandlers: wrappedExecHandlers,
-				};
-	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, wireOptions));
+	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, sessionOptions));
 }
 
 /**
@@ -2008,7 +1995,6 @@ function mapOptionsForApi<TApi extends Api>(
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,
-		execHandlers: options?.execHandlers,
 		fetch: options?.fetch,
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
@@ -2393,8 +2379,6 @@ function mapOptionsForApi<TApi extends Api>(
 			});
 
 		case "cursor-agent": {
-			const execHandlers = options?.cursorExecHandlers ?? options?.execHandlers;
-			const onToolResult = options?.cursorOnToolResult ?? execHandlers?.onToolResult;
 			const cursorModel = model as Model<"cursor-agent">;
 			const effort =
 				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff && cursorModel.reasoning
@@ -2402,9 +2386,8 @@ function mapOptionsForApi<TApi extends Api>(
 					: undefined;
 			return castApi<"cursor-agent">({
 				...base,
-				execHandlers,
-				onToolResult,
-				externalToolExecutor: options?.cursorExternalToolExecutor,
+				stopSequences: options?.stopSequences,
+				toolChoice: options?.toolChoice,
 				wireModelId: resolveWireModelId(cursorModel, effort),
 			});
 		}

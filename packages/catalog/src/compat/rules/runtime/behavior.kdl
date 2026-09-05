@@ -36,10 +36,125 @@ behavior {
 	// family marker uses a `gpt-` prefix followed immediately by an ASCII
 	// version digit.
 	cursor-effort family-marker="gpt-" {
-		tier "minimal" "low" "medium" "high" "xhigh" "max"
+		tier "none" level="off" display="None"
+		tier "minimal" level="minimal" display="Minimal"
+		tier "low" level="low" display="Low"
+		tier "medium" level="medium" display="Medium"
+		tier "high" level="high" display="High"
+		tier "xhigh" level="xhigh" display="Extra High"
+		tier "extra-high" level="xhigh" display="Extra High"
+		tier "max" level="max" display="Max"
+		prefer "medium" "high" "low" "minimal" "xhigh" "max" "none" "extra-high"
+		parameter "reasoning" source="tier"
+		parameter "fast" source="fast"
 	}
-	// A bare composer-2.5 request defaults to the Fast lane server-side.
+	// Exact fixed parameters observed outside effort-suffixed families.
+	cursor-model-parameter model="auto-smart" id="optimize_for" value="balanced"
 	cursor-model-parameter model="composer-2.5" id="fast" value="false"
+
+	// Exact requested-model shapes measured from Cursor's catalog/selector and
+	// passed unchanged by IDE 3.18.9 into the RunInference outer handshake.
+	cursor-model-route model="cursor-grok-4.6-low" target="grok-4.6" {
+		parameter "effort" "low"
+		parameter "fast" "false"
+	}
+	cursor-model-route model="cursor-grok-4.6-medium" target="grok-4.6" {
+		parameter "effort" "medium"
+		parameter "fast" "false"
+	}
+	cursor-model-route model="cursor-grok-4.6-high" target="grok-4.6" {
+		parameter "effort" "high"
+		parameter "fast" "false"
+	}
+	cursor-model-route model="cursor-grok-4.6-xhigh" target="grok-4.6" {
+		parameter "effort" "xhigh"
+		parameter "fast" "false"
+	}
+	cursor-model-route model="cursor-grok-4.6-low-fast" target="grok-4.6" {
+		parameter "effort" "low"
+		parameter "fast" "true"
+	}
+	cursor-model-route model="cursor-grok-4.6-medium-fast" target="grok-4.6" {
+		parameter "effort" "medium"
+		parameter "fast" "true"
+	}
+	cursor-model-route model="cursor-grok-4.6-high-fast" target="grok-4.6" {
+		parameter "effort" "high"
+		parameter "fast" "true"
+	}
+	cursor-model-route model="cursor-grok-4.6-xhigh-fast" target="grok-4.6" {
+		parameter "effort" "xhigh"
+		parameter "fast" "true"
+	}
+	cursor-model-route model="gemini-3.7-flash-low" target="gemini-3.7-flash" {
+		parameter "effort" "low"
+	}
+	cursor-model-route model="gemini-3.7-flash-medium" target="gemini-3.7-flash" {
+		parameter "effort" "medium"
+	}
+	cursor-model-route model="gemini-3.7-flash-high" target="gemini-3.7-flash" {
+		parameter "effort" "high"
+	}
+	cursor-model-route model="claude-opus-5-thinking-low" target="claude-opus-5" {
+		parameter "thinking" "true"
+		parameter "context" "300k"
+		parameter "effort" "low"
+		parameter "fast" "false"
+	}
+	cursor-model-route model="claude-opus-5-thinking-medium" target="claude-opus-5" {
+		parameter "thinking" "true"
+		parameter "context" "300k"
+		parameter "effort" "medium"
+		parameter "fast" "false"
+	}
+	cursor-model-route model="claude-opus-5-thinking-high" target="claude-opus-5" {
+		parameter "thinking" "true"
+		parameter "context" "300k"
+		parameter "effort" "high"
+		parameter "fast" "false"
+	}
+	cursor-model-route model="claude-opus-5-thinking-xhigh" target="claude-opus-5" {
+		parameter "thinking" "true"
+		parameter "context" "300k"
+		parameter "effort" "xhigh"
+		parameter "fast" "false"
+	}
+	cursor-model-route model="claude-opus-5-thinking-max" target="claude-opus-5" {
+		parameter "thinking" "true"
+		parameter "context" "300k"
+		parameter "effort" "max"
+		parameter "fast" "false"
+	}
+	cursor-model-route model="claude-opus-5-thinking-low-fast" target="claude-opus-5" {
+		parameter "thinking" "true"
+		parameter "context" "300k"
+		parameter "effort" "low"
+		parameter "fast" "true"
+	}
+	cursor-model-route model="claude-opus-5-thinking-medium-fast" target="claude-opus-5" {
+		parameter "thinking" "true"
+		parameter "context" "300k"
+		parameter "effort" "medium"
+		parameter "fast" "true"
+	}
+	cursor-model-route model="claude-opus-5-thinking-high-fast" target="claude-opus-5" {
+		parameter "thinking" "true"
+		parameter "context" "300k"
+		parameter "effort" "high"
+		parameter "fast" "true"
+	}
+	cursor-model-route model="claude-opus-5-thinking-xhigh-fast" target="claude-opus-5" {
+		parameter "thinking" "true"
+		parameter "context" "300k"
+		parameter "effort" "xhigh"
+		parameter "fast" "true"
+	}
+	cursor-model-route model="claude-opus-5-thinking-max-fast" target="claude-opus-5" {
+		parameter "thinking" "true"
+		parameter "context" "300k"
+		parameter "effort" "max"
+		parameter "fast" "true"
+	}
 
 	// Exact quota bucket memberships reported by Google Gemini CLI.
 	quota-tiers provider="google-gemini-cli" {

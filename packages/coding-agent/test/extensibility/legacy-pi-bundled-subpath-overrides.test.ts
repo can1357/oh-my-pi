@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
 import { __buildLegacyPiPackageRootOverrides } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
@@ -82,46 +81,6 @@ export const finalBeta = Reflect.get(globalThis, "__betaLoads") ?? 0;
 		// pinned to e.g. `@oh-my-pi/pi-ai/providers/openai` keep resolving.
 		expect(bundledModuleKeys.has("@oh-my-pi/pi-ai/oauth/anthropic")).toBe(true);
 		expect(bundledModuleKeys.has("@oh-my-pi/pi-ai/oauth/openai-codex")).toBe(true);
-	});
-
-	it("actually loads the shim's shared Pi translation through the bundled registry", async () => {
-		// The legacy shim performs the same Pi arg translation as the modern
-		// bridge and imports the shared helpers rather than copying them. Those
-		// use the explicit single-segment `providers/cursor-pi-args` target; wildcard
-		// exports may also match nested paths, whose registry coverage is tested below.
-		//
-		// Executing the generated registry is the contract — a key present in the
-		// override map still proves nothing if the module cannot be imported.
-		const key = "@oh-my-pi/pi-ai/providers/cursor-pi-args";
-		const entry = bundledEntries.find(candidate => candidate.key === key);
-		expect(entry).toBeDefined();
-
-		// The rendered registry imports by bare specifier, exactly as the real
-		// bundle does, so it must run somewhere those specifiers resolve — the
-		// package itself. A temp dir has no workspace links and would fail for
-		// a reason unrelated to the export map.
-		const packageRoot = path.join(path.dirname(url.fileURLToPath(import.meta.url)), "..", "..");
-		const registryPath = path.join(packageRoot, `.probe-legacy-pi-args-${Bun.randomUUIDv7()}.ts`);
-		await Bun.write(
-			registryPath,
-			`${__renderLegacyPiVirtualModule([entry!])}
-const mod = await BUNDLED_PI_MODULE_LOADERS[${JSON.stringify(key)}]();
-export const observed = [
-	mod.piEscapeRegexLiteral("a.b*c"),
-	mod.piJoinPath("src", "*.ts"),
-];
-`,
-		);
-		try {
-			// The generated registry has a runtime-selected package-root path; importing it exercises bare resolution.
-			const registryModule = await import(url.pathToFileURL(registryPath).href);
-			expect(registryModule.observed).toEqual(["a\\.b\\*c", path.join("src", "*.ts")]);
-		} finally {
-			await fs.rm(registryPath, { force: true });
-		}
-
-		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
-		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 	});
 
 	it("expands web search provider wildcard exports for compiled plugin imports", () => {

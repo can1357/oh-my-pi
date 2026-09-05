@@ -233,8 +233,23 @@ behavior {
         exclude-substring "embedding"
     }
     model-operations provider="openai" { exact "o3"; prefix "gpt-"; operation "generate_image" }
-    cursor-effort family-marker="gpt-" { tier "minimal" "low" "medium" "high" "xhigh" "max" }
+    cursor-effort family-marker="gpt-" {
+        tier "none" level="off" display="None"
+        tier "minimal" level="minimal" display="Minimal"
+        tier "low" level="low" display="Low"
+        tier "medium" level="medium" display="Medium"
+        tier "high" level="high" display="High"
+        tier "xhigh" level="xhigh" display="Extra High"
+        tier "extra-high" level="xhigh" display="Extra High"
+        tier "max" level="max" display="Max"
+        prefer "medium" "high" "low" "minimal" "xhigh" "max" "none" "extra-high"
+        parameter "reasoning" source="tier"
+        parameter "fast" source="fast"
+    }
     cursor-model-parameter model="composer-2.5" id="fast" value="false"
+    cursor-model-route model="gemini-3.7-flash-high" target="gemini-3.7-flash" {
+        parameter "effort" "high"
+    }
     quota-tiers provider="openai-codex" {
         tier "spark" "gpt-5.3-codex-spark"
         fallback "chat" substring="gpt-"

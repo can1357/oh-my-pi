@@ -6,6 +6,7 @@ export interface ModelCacheProviderIdOptions {
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
+	cursor: true,
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
@@ -20,6 +21,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 	switch (providerId) {
 		case "ollama":
 			return "http://127.0.0.1:11434";
+		case "cursor":
+			return "https://api2.cursor.sh";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
 		case "opencode-go":
@@ -53,11 +56,13 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 	switch (providerId) {
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
-		case "cursor":
-			// v4: Grok 4.5/4.6 rows cached before the effort-less default-tier fix
-			// carry `requestModelId: *-low`, which the Start plan refuses; refetch
-			// so the collapsed default is re-pointed to `-medium` (issue #9478).
-			return "cursor:default-effort-v4";
+		case "cursor": {
+			// v8 preserves the fetched catalog's unknown output ceiling. Invalidate
+			// v7 rows that invented 64,000 max output tokens for every Cursor model.
+			const baseUrl = (options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!).replace(/\/+$/u, "");
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `cursor:complete-catalog-v8:${Bun.hash(scope).toString(36)}`;
+		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			// rich-v8 invalidates rows whose `compatConfig` retained a colliding

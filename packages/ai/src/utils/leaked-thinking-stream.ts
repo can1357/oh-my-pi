@@ -44,7 +44,6 @@ import type {
 } from "../types";
 import {
 	clearStreamingPartialJson,
-	copyCursorExecResolved,
 	getStreamingPartialJson,
 	type StreamingPartialJsonCarrier,
 	setStreamingPartialJson,
@@ -57,7 +56,6 @@ function cloneToolCall(source: StreamingToolCall): StreamingToolCall {
 	const block: StreamingToolCall = { ...source, arguments: source.arguments };
 	const partialJson = getStreamingPartialJson(source);
 	if (partialJson !== undefined) setStreamingPartialJson(block, partialJson);
-	copyCursorExecResolved(block, source);
 	return block;
 }
 
@@ -66,7 +64,6 @@ function syncToolCall(target: StreamingToolCall, source: StreamingToolCall): voi
 	const partialJson = getStreamingPartialJson(source);
 	if (partialJson === undefined) clearStreamingPartialJson(target);
 	else setStreamingPartialJson(target, partialJson);
-	copyCursorExecResolved(target, source);
 }
 
 /**
@@ -175,8 +172,8 @@ class LeakedThinkingProjector {
 	#partial: AssistantMessage;
 	#text: OpenBlock;
 	#thinking: OpenBlock;
-	/** Visible text consumed per source block, used to recover terminal-only tails. */
-	#fedTextLengths = new Map<number, number>();
+	/** Visible text consumed per source block, used to reconcile terminal corrections and tails. */
+	#fedTexts = new Map<number, string>();
 	/** Source text block whose held healer output has not crossed a content boundary. */
 	#activeTextSourceIndex: number | undefined;
 	/** Original terminal content index for every projected block. */
@@ -205,7 +202,7 @@ class LeakedThinkingProjector {
 			this.#closeThinking();
 		}
 		this.#activeTextSourceIndex = srcIndex;
-		this.#fedTextLengths.set(srcIndex, (this.#fedTextLengths.get(srcIndex) ?? 0) + delta.length);
+		this.#fedTexts.set(srcIndex, `${this.#fedTexts.get(srcIndex) ?? ""}${delta}`);
 		if (startsSource || signature !== undefined) this.#lastTextSignature = signature;
 		this.#apply(this.#healer.feed(delta), this.#lastTextSignature, srcIndex);
 	}
@@ -354,11 +351,70 @@ class LeakedThinkingProjector {
 			if (this.#thinkingBlocks.has(srcIndex)) continue;
 			this.#projectSignedThinking(srcIndex, block.thinking, block.thinkingSignature);
 		}
+		this.#flushHealer();
+		this.#closeText();
+		this.#closeThinking();
+		const unclaimedText = this.#partial.content.filter((block): block is TextContent => block.type === "text");
+		const terminalTextCount = message.content.filter(block => block.type === "text").length;
+		let terminalTextIndex = 0;
+		const claimText = (srcIndex: number, text: string, exactOnly: boolean): TextContent | undefined => {
+			let index = exactOnly
+				? unclaimedText.findIndex(block => block.text === text)
+				: unclaimedText.findIndex(block => this.#sourceAnchors.get(block) === srcIndex);
+			if (index < 0 && !exactOnly) index = unclaimedText.findIndex(block => block.text === text);
+			if (index < 0) return undefined;
+			return unclaimedText.splice(index, 1)[0];
+		};
 		for (let srcIndex = 0; srcIndex < message.content.length; srcIndex++) {
 			const block = message.content[srcIndex];
 			if (block?.type !== "text") continue;
-			const fedLength = this.#fedTextLengths.get(srcIndex) ?? 0;
-			if (block.text.length <= fedLength) continue;
+			const remainingTerminalText = terminalTextCount - terminalTextIndex++;
+			const fedText = this.#fedTexts.get(srcIndex);
+			const fedLength = fedText?.length ?? 0;
+			let replayStart = fedLength;
+			if (fedText !== undefined) {
+				const claimed = claimText(srcIndex, block.text, false);
+				if (block.text === fedText) continue;
+				if (block.text.startsWith(fedText)) {
+					if (block.text.length === fedLength) continue;
+				} else if (claimed !== undefined) {
+					for (const candidate of unclaimedText) {
+						if (this.#sourceAnchors.get(candidate) !== srcIndex) continue;
+						const contentIndex = this.#partial.content.indexOf(candidate);
+						if (contentIndex >= 0) this.#partial.content.splice(contentIndex, 1);
+					}
+					for (let index = unclaimedText.length - 1; index >= 0; index--) {
+						if (this.#sourceAnchors.get(unclaimedText[index]!) === srcIndex) unclaimedText.splice(index, 1);
+					}
+					claimed.text = block.text;
+					if (block.textSignature === undefined) delete claimed.textSignature;
+					else claimed.textSignature = block.textSignature;
+					continue;
+				} else {
+					replayStart = 0;
+				}
+			} else {
+				const shifted = claimText(srcIndex, block.text, true);
+				if (shifted !== undefined) {
+					this.#sourceAnchors.set(shifted, srcIndex);
+					continue;
+				}
+				const plainCandidates = unclaimedText.filter(candidate => {
+					const source = this.#sourceAnchors.get(candidate);
+					const sourceText = source === undefined ? undefined : this.#fedTexts.get(source);
+					return sourceText !== undefined && candidate.text === sourceText;
+				});
+				if (plainCandidates.length > 0 && plainCandidates.length === remainingTerminalText) {
+					const corrected = plainCandidates[0];
+					const index = unclaimedText.indexOf(corrected);
+					if (index >= 0) unclaimedText.splice(index, 1);
+					corrected.text = block.text;
+					if (block.textSignature === undefined) delete corrected.textSignature;
+					else corrected.textSignature = block.textSignature;
+					this.#sourceAnchors.set(corrected, srcIndex);
+					continue;
+				}
+			}
 			if (this.#activeTextSourceIndex !== undefined && this.#activeTextSourceIndex !== srcIndex) {
 				this.#flushHealer();
 				this.#closeText();
@@ -366,12 +422,40 @@ class LeakedThinkingProjector {
 			}
 			this.#activeTextSourceIndex = srcIndex;
 			this.#lastTextSignature = block.textSignature;
-			this.#apply(this.#healer.feed(block.text.slice(fedLength)), this.#lastTextSignature, srcIndex);
+			this.#apply(this.#healer.feed(block.text.slice(replayStart)), this.#lastTextSignature, srcIndex);
+		}
+		for (const candidate of unclaimedText) {
+			const sourceIndex = this.#sourceAnchors.get(candidate);
+			if (sourceIndex === undefined || message.content[sourceIndex]?.type === "text") continue;
+			const contentIndex = this.#partial.content.indexOf(candidate);
+			if (contentIndex >= 0) this.#partial.content.splice(contentIndex, 1);
 		}
 		this.#flushHealer();
 		this.#closeText();
 		this.#closeThinking();
+		this.#mergeTerminalToolCalls(message);
 		return this.#mergeServerToolHistory(message);
+	}
+
+	#mergeTerminalToolCalls(message: AssistantMessage): void {
+		const unclaimed = this.#partial.content.filter((block): block is StreamingToolCall => block.type === "toolCall");
+		for (let srcIndex = 0; srcIndex < message.content.length; srcIndex++) {
+			const terminal = message.content[srcIndex];
+			if (terminal?.type !== "toolCall") continue;
+			let index = unclaimed.findIndex(block => this.#sourceAnchors.get(block) === srcIndex);
+			if (index < 0) {
+				index = unclaimed.findIndex(block => block.id === terminal.id && block.name === terminal.name);
+			}
+			if (index >= 0) {
+				const projected = unclaimed.splice(index, 1)[0];
+				syncToolCall(projected, terminal);
+				this.#sourceAnchors.set(projected, srcIndex);
+				continue;
+			}
+			const projected = cloneToolCall(terminal);
+			this.#partial.content.push(projected);
+			this.#anchor(this.#partial.content.length - 1, srcIndex);
+		}
 	}
 
 	#apply(events: readonly InbandScanEvent[], signature: string | undefined, srcIndex: number): void {

@@ -1,65 +1,43 @@
 import * as http2 from "node:http2";
-import { type } from "@oh-my-pi/omptype";
-import { compareRevision, parseRevision } from "../compat/revision";
+import { brotliDecompressSync, gunzipSync } from "node:zlib";
+import {
+	cursorEffortDisplayLabels,
+	cursorEffortLevel,
+	cursorEffortPreference,
+	cursorEffortTierSuffix,
+	cursorModelRoute,
+} from "../compat/behavior";
 import { classifyModel } from "../compat/taxonomy";
+import { Effort, THINKING_EFFORTS } from "../effort";
 import { getBundledModels } from "../models";
 import { toModelSpec } from "../provider-models/bundled-references";
 import type { Model, ModelSpec } from "../types";
-import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./cursor-proto";
-import { create, fromBinary, toBinary } from "./protobuf";
+import type {
+	AvailableModelsResponse,
+	AvailableModelsResponse_AvailableModel,
+	GetDefaultModelForCliResponse,
+	GetUsableModelsResponse,
+	ModelDetails,
+} from "./cursor-proto";
+import {
+	AvailableModelsRequestSchema,
+	AvailableModelsResponseSchema,
+	GetDefaultModelForCliRequestSchema,
+	GetDefaultModelForCliResponseSchema,
+	GetUsableModelsRequestSchema,
+	GetUsableModelsResponseSchema,
+} from "./cursor-proto";
+import { create, fromBinary, type MessageCodec, type ProtoMessage, toBinary } from "./protobuf";
 
 const CURSOR_DEFAULT_BASE_URL = "https://api2.cursor.sh";
-const CURSOR_DEFAULT_CLIENT_VERSION = "cli-2026.02.13-41ac335";
+const CURSOR_DEFAULT_CLIENT_VERSION = "cli-2026.09.02-fa0c06e-lab";
+const CURSOR_AVAILABLE_MODELS_PATH = "/aiserver.v1.AiService/AvailableModels";
 const CURSOR_GET_USABLE_MODELS_PATH = "/agent.v1.AgentService/GetUsableModels";
-
+const CURSOR_GET_DEFAULT_MODEL_PATH = "/agent.v1.AgentService/GetDefaultModelForCli";
+const CURSOR_RESPONSE_LIMIT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_CONTEXT_WINDOW = 200_000;
-const DEFAULT_MAX_TOKENS = 64_000;
 
-/**
- * `GetUsableModels` carries no context-window field, so the 1M ceiling is
- * recovered from the signals Cursor does send:
- * - display-name labels ("Opus 5 1M", "GPT-5.5 1M High") across families,
- * - natively 1M families Cursor serves unlabeled (Kimi K3, GLM 5.2+),
- * - the max-mode flag on Claude/Gemini ids, whose max-mode ceiling is 1M.
- */
-const CURSOR_1M_CONTEXT_WINDOW = 1_000_000;
-// residue: a display-name label is the only signal for these rows; ids carry
-// no marker the taxonomy could classify.
-const CURSOR_1M_NAME_PATTERN = /\b1m\b/i;
-
-const OptionalDisplayNameSchema = type("unknown").pipe(raw => (typeof raw === "string" ? raw : undefined));
-const CursorAliasesSchema = type("unknown").pipe(raw => {
-	if (Array.isArray(raw)) {
-		return raw.filter((alias: unknown): alias is string => typeof alias === "string");
-	}
-	return [];
-});
-
-const CursorModelDetailsSchema = type({
-	modelId: "string",
-	displayName: OptionalDisplayNameSchema.default(undefined),
-	displayNameShort: OptionalDisplayNameSchema.default(undefined),
-	displayModelId: OptionalDisplayNameSchema.default(undefined),
-	aliases: CursorAliasesSchema.default(() => []),
-	"thinkingDetails?": "unknown",
-	maxMode: "boolean = false",
-});
-
-const CursorModelsInnerSchema = type("unknown[]");
-const ResilientCursorModelsSchema = type("unknown").pipe(raw => {
-	const out = CursorModelsInnerSchema(raw);
-	return out instanceof type.errors ? [] : out;
-});
-
-const CursorDecodedResponseSchema = type({
-	models: ResilientCursorModelsSchema.default(() => []),
-});
-
-type CursorModelDetailsValue = typeof CursorModelDetailsSchema.infer;
-
-/**
- * Options for fetching dynamic Cursor models from `GetUsableModels`.
- */
+/** Options for fetching and joining Cursor's three model-catalog surfaces. */
 export interface CursorModelDiscoveryOptions {
 	/** Cursor access token used for bearer authentication. */
 	apiKey: string;
@@ -73,39 +51,9 @@ export interface CursorModelDiscoveryOptions {
 	customModelIds?: string[];
 }
 
-/**
- * Fetches Cursor models through `GetUsableModels` and normalizes them into canonical model entries.
- *
- * Returns `null` on request/decode failures.
- * Returns `[]` only when the endpoint responds successfully with no usable models.
- */
-export async function fetchCursorUsableModels(
-	options: CursorModelDiscoveryOptions,
-): Promise<ModelSpec<"cursor-agent">[] | null> {
-	const timeoutMs = options.timeoutMs ?? 5_000;
-	try {
-		const requestPayload = create(GetUsableModelsRequestSchema, {
-			customModelIds: normalizeCustomModelIds(options.customModelIds),
-		});
-		const body = toBinary(GetUsableModelsRequestSchema, requestPayload);
-		const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
-
-		const responseBuffer = await fetchViaHttp2(baseUrl, body, options, timeoutMs);
-
-		if (!responseBuffer) {
-			return null;
-		}
-		const decoded = decodeGetUsableModelsResponse(responseBuffer);
-		const parsedDecoded = CursorDecodedResponseSchema(decoded);
-		if (parsedDecoded instanceof type.errors) {
-			return null;
-		}
-
-		const references = createCursorReferenceMap();
-		return normalizeCursorModels(parsedDecoded.models, options.baseUrl, references);
-	} catch {
-		return null;
-	}
+interface ModelFamily {
+	readonly id: string;
+	readonly members: readonly { readonly model: ModelDetails; readonly level: Effort | "off" }[];
 }
 
 function buildRequestHeaders(options: CursorModelDiscoveryOptions): Record<string, string> {
@@ -113,83 +61,109 @@ function buildRequestHeaders(options: CursorModelDiscoveryOptions): Record<strin
 		"content-type": "application/proto",
 		te: "trailers",
 		authorization: `Bearer ${options.apiKey}`,
-		"x-ghost-mode": "true",
+		"x-ghost-mode": "false",
 		"x-cursor-client-version": options.clientVersion ?? CURSOR_DEFAULT_CLIENT_VERSION,
 		"x-cursor-client-type": "cli",
 	};
 }
 
+function decodeBody(body: Uint8Array, encoding: string | undefined): Uint8Array {
+	if (encoding === "gzip") {
+		return new Uint8Array(gunzipSync(body, { maxOutputLength: CURSOR_RESPONSE_LIMIT_BYTES }));
+	}
+	if (encoding === "br") {
+		return new Uint8Array(brotliDecompressSync(body, { maxOutputLength: CURSOR_RESPONSE_LIMIT_BYTES }));
+	}
+	return body;
+}
+
 /** HTTP/2 transport required by Cursor API (HTTP/1.1 is rejected with 464). */
 async function fetchViaHttp2(
 	baseUrl: string,
+	path: string,
 	body: Uint8Array,
 	options: CursorModelDiscoveryOptions,
 	timeoutMs: number,
 ): Promise<Uint8Array | null> {
 	const { promise, resolve } = Promise.withResolvers<Uint8Array | null>();
 	const client = http2.connect(baseUrl);
+	let settled = false;
+	const finish = (value: Uint8Array | null): void => {
+		if (settled) return;
+		settled = true;
+		clearTimeout(timer);
+		client.close();
+		resolve(value);
+	};
 	const timer = setTimeout(() => {
 		client.destroy();
-		resolve(null);
+		finish(null);
 	}, timeoutMs);
+	client.on("error", () => finish(null));
 
-	client.on("error", () => {
-		clearTimeout(timer);
-		resolve(null);
-	});
-
-	const req = client.request({
-		":method": "POST",
-		":path": CURSOR_GET_USABLE_MODELS_PATH,
-		...buildRequestHeaders(options),
-	});
-
-	const chunks: Buffer[] = [];
-	req.on("data", (chunk: Buffer) => chunks.push(chunk));
-	req.on("end", () => {
-		clearTimeout(timer);
-		client.close();
-		resolve(new Uint8Array(Buffer.concat(chunks)));
-	});
-	req.on("error", () => {
-		clearTimeout(timer);
-		client.close();
-		resolve(null);
-	});
-	req.on("response", headers => {
+	const request = client.request({ ":method": "POST", ":path": path, ...buildRequestHeaders(options) });
+	const chunks: Uint8Array[] = [];
+	let responseBytes = 0;
+	let encoding: string | undefined;
+	request.on("response", headers => {
 		const status = Number(headers[":status"] ?? 0);
-		if (status < 200 || status >= 300) {
-			clearTimeout(timer);
-			client.close();
-			resolve(null);
+		encoding = typeof headers["content-encoding"] === "string" ? headers["content-encoding"] : undefined;
+		if (status < 200 || status >= 300) finish(null);
+	});
+	request.on("data", (chunk: Uint8Array) => {
+		responseBytes += chunk.byteLength;
+		if (responseBytes > CURSOR_RESPONSE_LIMIT_BYTES) {
+			request.destroy(new Error("Cursor catalog response exceeded its size limit"));
+			finish(null);
+			return;
+		}
+		chunks.push(chunk);
+	});
+	request.on("end", () => {
+		try {
+			finish(decodeBody(Buffer.concat(chunks), encoding));
+		} catch {
+			finish(null);
 		}
 	});
-
-	if (body.length > 0) {
-		req.end(Buffer.from(body));
-	} else {
-		req.end();
-	}
-
-	return promise;
+	request.on("error", () => finish(null));
+	request.end(body.byteLength === 0 ? undefined : Buffer.from(body));
+	return await promise;
 }
 
 function normalizeCustomModelIds(customModelIds: readonly string[] | undefined): string[] {
-	if (!customModelIds) {
-		return [];
-	}
+	if (!customModelIds) return [];
 	const normalized = new Set<string>();
 	for (const value of customModelIds) {
-		if (typeof value !== "string") {
-			continue;
-		}
 		const trimmed = value.trim();
-		if (!trimmed) {
-			continue;
-		}
-		normalized.add(trimmed);
+		if (trimmed) normalized.add(trimmed);
 	}
 	return [...normalized];
+}
+
+function decodeConnectUnaryBody(payload: Uint8Array): Uint8Array | null {
+	if (payload.length < 5) return null;
+	let offset = 0;
+	while (offset + 5 <= payload.length) {
+		const flags = payload[offset];
+		const view = new DataView(payload.buffer, payload.byteOffset + offset, payload.byteLength - offset);
+		const messageLength = view.getUint32(1, false);
+		const frameEnd = offset + 5 + messageLength;
+		if (frameEnd > payload.length || (flags & 0b0000_0001) !== 0) return null;
+		if ((flags & 0b0000_0010) === 0) return payload.subarray(offset + 5, frameEnd);
+		offset = frameEnd;
+	}
+	return null;
+}
+
+function decodeUnary<T extends ProtoMessage>(codec: MessageCodec<T>, payload: Uint8Array): T | null {
+	if (payload.length === 0) return null;
+	const framed = decodeConnectUnaryBody(payload);
+	try {
+		return fromBinary(codec, framed ?? payload);
+	} catch {
+		return null;
+	}
 }
 
 function createCursorReferenceMap(): Map<string, ModelSpec<"cursor-agent">> {
@@ -200,211 +174,395 @@ function createCursorReferenceMap(): Map<string, ModelSpec<"cursor-agent">> {
 	return references;
 }
 
-function decodeGetUsableModelsResponse(payload: Uint8Array) {
-	if (payload.length === 0) {
-		return null;
-	}
+function localEffortLevel(value: string | undefined): Effort | "off" | undefined {
+	if (value === "off" || value === "none") return "off";
+	return THINKING_EFFORTS.find(effort => effort === value);
+}
 
-	const framedBody = decodeConnectUnaryBody(payload);
-	if (framedBody) {
-		try {
-			return fromBinary(GetUsableModelsResponseSchema, framedBody);
-		} catch {
-			return null;
+function variantParameter(
+	variant: AvailableModelsResponse_AvailableModel["variants"][number],
+	id: string,
+): string | undefined {
+	return variant.parameterValues.find(parameter => parameter.id === id)?.value;
+}
+
+function variantLevel(variant: AvailableModelsResponse_AvailableModel["variants"][number]): Effort | "off" | undefined {
+	if (variantParameter(variant, "thinking") === "false") return "off";
+	return localEffortLevel(variantParameter(variant, "effort") ?? variantParameter(variant, "reasoning"));
+}
+
+function variantFast(variant: AvailableModelsResponse_AvailableModel["variants"][number]): boolean {
+	return variantParameter(variant, "fast") === "true";
+}
+
+function variantForLegacySlug(
+	modelId: string,
+	availableModels: readonly AvailableModelsResponse_AvailableModel[],
+):
+	| {
+			readonly base: AvailableModelsResponse_AvailableModel;
+			readonly variant: AvailableModelsResponse_AvailableModel["variants"][number];
+	  }
+	| undefined {
+	for (const base of availableModels) {
+		const matches = base.variants.filter(variant => variant.legacySlug === modelId);
+		const variant =
+			matches.find(candidate => candidate.isDefaultNonMaxConfig === true) ??
+			matches.find(candidate => candidate.isDefaultMaxConfig === true) ??
+			matches[0];
+		if (variant !== undefined) return { base, variant };
+	}
+	return undefined;
+}
+
+function routedEffortSuffix(
+	modelId: string,
+): { readonly base: string; readonly level: Effort | "off"; readonly fast: boolean } | undefined {
+	const route = cursorModelRoute(modelId);
+	const routedLevel = localEffortLevel(route?.parameters.find(parameter => parameter.id === "effort")?.value);
+	if (route === undefined || routedLevel === undefined) return undefined;
+	const fast = route.parameters.some(parameter => parameter.id === "fast" && parameter.value === "true");
+	const candidate = fast && modelId.endsWith("-fast") ? modelId.slice(0, -"-fast".length) : modelId;
+	for (const tier of cursorEffortPreference()) {
+		if (localEffortLevel(cursorEffortLevel(tier)) !== routedLevel || !candidate.endsWith(`-${tier}`)) continue;
+		return { base: candidate.slice(0, -tier.length - 1), level: routedLevel, fast };
+	}
+	return undefined;
+}
+
+function familyFor(
+	model: ModelDetails,
+	availableModels: readonly AvailableModelsResponse_AvailableModel[],
+): { readonly id: string; readonly level: Effort | "off" } {
+	const selection = variantForLegacySlug(model.modelId, availableModels);
+	const selectionLevel = selection === undefined ? undefined : variantLevel(selection.variant);
+	if (selection !== undefined && selectionLevel !== undefined) {
+		return { id: `${selection.base.name}${variantFast(selection.variant) ? "-fast" : ""}`, level: selectionLevel };
+	}
+	const generic = cursorEffortTierSuffix(model.modelId);
+	const genericLevel = localEffortLevel(generic?.level);
+	const matched =
+		generic !== undefined && genericLevel !== undefined
+			? { base: generic.base, level: genericLevel, fast: generic.fast }
+			: routedEffortSuffix(model.modelId);
+	if (matched === undefined) return { id: model.modelId, level: "off" };
+	const id = `${matched.base}${matched.fast ? "-fast" : ""}`;
+	const described = availableModels.some(
+		available =>
+			available.name === id ||
+			available.idAliases.includes(id) ||
+			available.legacySlugs.includes(model.modelId) ||
+			available.variants.some(variant => variant.legacySlug === model.modelId),
+	);
+	return described ? { id, level: matched.level } : { id: model.modelId, level: "off" };
+}
+
+function modelFamilies(
+	models: readonly ModelDetails[],
+	availableModels: readonly AvailableModelsResponse_AvailableModel[],
+): ModelFamily[] {
+	const grouped = new Map<string, { model: ModelDetails; level: Effort | "off" }[]>();
+	for (const model of models) {
+		if (model.modelId === "") continue;
+		const member = familyFor(model, availableModels);
+		const group = grouped.get(member.id) ?? [];
+		group.push({ model, level: member.level });
+		grouped.set(member.id, group);
+	}
+	return [...grouped].map(([id, members]) => ({ id, members }));
+}
+
+function baseModelFor(
+	family: ModelFamily,
+	models: readonly AvailableModelsResponse_AvailableModel[],
+): AvailableModelsResponse_AvailableModel | undefined {
+	const memberIds = new Set(family.members.map(({ model }) => model.modelId));
+	return models.find(
+		model =>
+			model.name === family.id ||
+			model.idAliases.includes(family.id) ||
+			model.legacySlugs.some(slug => memberIds.has(slug)) ||
+			model.variants.some(variant => variant.legacySlug !== undefined && memberIds.has(variant.legacySlug)),
+	);
+}
+
+function tooltipText(tooltip: AvailableModelsResponse_AvailableModel["tooltipData"]): string {
+	return tooltip === undefined
+		? ""
+		: [tooltip.primaryText, tooltip.secondaryText, tooltip.tertiaryText, tooltip.markdownContent ?? ""].join("\n");
+}
+
+function hasDistinctMaxMode(model: AvailableModelsResponse_AvailableModel): boolean {
+	if (model.supportsMaxMode !== true) return false;
+	if (model.supportsNonMaxMode === false) return true;
+	if (
+		model.contextTokenLimitForMaxMode !== undefined &&
+		model.contextTokenLimitForMaxMode !== model.contextTokenLimit
+	) {
+		return true;
+	}
+	if (tooltipText(model.tooltipDataForMaxMode) !== tooltipText(model.tooltipData)) return true;
+	if (model.variants.some(variant => variant.isMaxMode)) return true;
+	const normal = model.variants.find(variant => variant.isDefaultNonMaxConfig === true);
+	const max = model.variants.find(variant => variant.isDefaultMaxConfig === true);
+	return normal !== undefined && max !== undefined && normal !== max;
+}
+
+function variantContext(model: AvailableModelsResponse_AvailableModel, maxMode: boolean): string | undefined {
+	const variant = model.variants.find(candidate =>
+		maxMode ? candidate.isDefaultMaxConfig === true : candidate.isDefaultNonMaxConfig === true,
+	);
+	return variant?.parameterValues.find(parameter => parameter.id === "context")?.value;
+}
+
+function contextParameterTokens(value: string | undefined): number | undefined {
+	const match = /^(\d+(?:\.\d+)?)([km])$/u.exec(value ?? "");
+	if (match === null) return undefined;
+	const amount = Number(match[1]);
+	const tokens = amount * (match[2] === "m" ? 1_000_000 : 1_000);
+	return Number.isSafeInteger(tokens) && tokens > 0 ? tokens : undefined;
+}
+
+function contextWindow(model: AvailableModelsResponse_AvailableModel, maxMode: boolean): number {
+	const selected = contextParameterTokens(variantContext(model, maxMode));
+	if (selected !== undefined) return selected;
+	const captured = maxMode ? (model.contextTokenLimitForMaxMode ?? model.contextTokenLimit) : model.contextTokenLimit;
+	return captured !== undefined && captured > 0 ? captured : DEFAULT_CONTEXT_WINDOW;
+}
+
+function contextSuffix(tokens: number): string {
+	if (tokens % 1_000_000 === 0) return `${tokens / 1_000_000}m`;
+	if (tokens % 1_000 === 0) return `${tokens / 1_000}k`;
+	return String(tokens);
+}
+
+function maxModeModelId(familyId: string, model: AvailableModelsResponse_AvailableModel): string {
+	const normalContext = contextWindow(model, false);
+	const maxContext = contextWindow(model, true);
+	return `${familyId}-${maxContext === normalContext ? "max" : contextSuffix(maxContext)}`;
+}
+
+function displayName(model: ModelDetails): string {
+	return model.displayName || model.displayNameShort || model.displayModelId || model.modelId;
+}
+
+function stripEffortDisplayLabel(name: string): string {
+	for (const label of cursorEffortDisplayLabels()) {
+		const beforeFast = ` ${label} Fast`;
+		if (name.endsWith(beforeFast)) return `${name.slice(0, -beforeFast.length)} Fast`;
+		const suffix = ` ${label}`;
+		if (name.endsWith(suffix)) return name.slice(0, -suffix.length);
+	}
+	return name;
+}
+
+function familyReference(
+	family: ModelFamily,
+	references: ReadonlyMap<string, ModelSpec<"cursor-agent">>,
+): ModelSpec<"cursor-agent"> | undefined {
+	return references.get(family.id) ?? family.members.flatMap(({ model }) => references.get(model.modelId) ?? [])[0];
+}
+
+function providerModel(
+	family: ModelFamily,
+	baseUrl: string,
+	base: AvailableModelsResponse_AvailableModel,
+	maxMode: boolean,
+	references: ReadonlyMap<string, ModelSpec<"cursor-agent">>,
+): ModelSpec<"cursor-agent"> {
+	const memberIds = new Set(family.members.map(member => member.model.modelId));
+	const fast = family.id.endsWith("-fast");
+	const variants = base.variants.filter(
+		variant =>
+			variant.legacySlug !== undefined &&
+			memberIds.has(variant.legacySlug) &&
+			variant.isMaxMode === maxMode &&
+			variantFast(variant) === fast,
+	);
+	const defaultVariant =
+		variants.find(variant =>
+			maxMode ? variant.isDefaultMaxConfig === true : variant.isDefaultNonMaxConfig === true,
+		) ?? variants[0];
+	const defaultEffort =
+		defaultVariant === undefined
+			? undefined
+			: (variantParameter(defaultVariant, "effort") ?? variantParameter(defaultVariant, "reasoning"));
+	const effortRouting: Partial<Record<Effort | "off", string>> = {};
+	for (const variant of variants) {
+		const level = variantLevel(variant);
+		if (level === undefined || variant.legacySlug === undefined || level === "off") continue;
+		effortRouting[level] = variant.legacySlug;
+	}
+	const offVariant =
+		variants.find(
+			variant => variantLevel(variant) === "off" && variantParameter(variant, "effort") === defaultEffort,
+		) ?? variants.find(variant => variantLevel(variant) === "off");
+	if (offVariant?.legacySlug !== undefined) effortRouting.off = offVariant.legacySlug;
+	if (variants.length === 0) {
+		for (const member of family.members) effortRouting[member.level] = member.model.modelId;
+	}
+	const preferred =
+		(defaultVariant?.legacySlug === undefined
+			? undefined
+			: family.members.find(member => member.model.modelId === defaultVariant.legacySlug)) ??
+		cursorEffortPreference().flatMap(tier => {
+			const level = localEffortLevel(cursorEffortLevel(tier));
+			return level === undefined ? [] : family.members.filter(member => member.level === level);
+		})[0] ??
+		family.members[0];
+	if (preferred === undefined) throw new Error(`Cursor model family '${family.id}' is empty`);
+	const cursorModelRoutes = Object.fromEntries(
+		variants.flatMap(variant =>
+			variant.legacySlug === undefined
+				? []
+				: [
+						[
+							variant.legacySlug,
+							{
+								modelId: base.name,
+								parameters: variant.parameterValues.map(({ id, value }) => ({ id, value })),
+							},
+						] as const,
+					],
+		),
+	);
+	const efforts = THINKING_EFFORTS.filter(level => effortRouting[level] !== undefined);
+	const reasoning = base.supportsThinking === true;
+	const reference = familyReference(family, references);
+	const capturedName =
+		base.clientDisplayName === undefined || base.clientDisplayName === ""
+			? stripEffortDisplayLabel(displayName(preferred.model)).trim()
+			: `${base.clientDisplayName}${fast ? " Fast" : ""}`;
+	const cursorContext = variantContext(base, maxMode);
+	return {
+		...(reference ?? {
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		}),
+		id: maxMode ? maxModeModelId(family.id, base) : family.id,
+		name: `${capturedName}${maxMode ? " Max" : ""}`,
+		provider: "cursor",
+		api: "cursor-agent",
+		baseUrl,
+		reasoning,
+		input: base.supportsImages === true ? ["text", "image"] : ["text"],
+		contextWindow: contextWindow(base, maxMode),
+		// None of Cursor's fetched catalog surfaces reports a model output ceiling.
+		maxTokens: null,
+		cursorMaxMode: maxMode,
+		...(cursorContext === undefined ? {} : { cursorContext }),
+		...(Object.keys(cursorModelRoutes).length === 0 ? {} : { cursorModelRoutes }),
+		requestModelId: defaultVariant?.legacySlug ?? preferred.model.modelId,
+		...(reasoning && efforts.length > 0
+			? {
+					thinking: {
+						mode: "effort" as const,
+						efforts,
+						effortRouting,
+						requiresEffort: effortRouting.off === undefined,
+					},
+				}
+			: { thinking: undefined }),
+	};
+}
+
+/** Joins selectable families to authoritative capability, context, variant, and Max Mode metadata. */
+export function cursorCatalogModels(
+	available: AvailableModelsResponse,
+	usable: GetUsableModelsResponse,
+	defaultModel: GetDefaultModelForCliResponse,
+	baseUrl: string,
+	references: ReadonlyMap<string, ModelSpec<"cursor-agent">> = createCursorReferenceMap(),
+): ModelSpec<"cursor-agent">[] {
+	if (available.models.length === 0) throw new Error("Cursor AvailableModels returned no models");
+	const families = modelFamilies(usable.models, available.models);
+	const models = families.flatMap(family => {
+		const base = baseModelFor(family, available.models);
+		if (base === undefined) return [];
+		return [
+			...(base.supportsNonMaxMode === false ? [] : [providerModel(family, baseUrl, base, false, references)]),
+			...(hasDistinctMaxMode(base) ? [providerModel(family, baseUrl, base, true, references)] : []),
+		];
+	});
+	if (models.length === 0) throw new Error("Cursor catalog returned no fully described usable models");
+	const selected = defaultModel.model;
+	if (selected !== undefined && selected.modelId !== "") {
+		const usableIds = new Set(usable.models.map(model => model.modelId));
+		if (!usableIds.has(selected.modelId)) throw new Error(`Cursor default model '${selected.modelId}' is not usable`);
+		const selectedFamily = families.find(family =>
+			family.members.some(({ model }) => model.modelId === selected.modelId),
+		);
+		if (selectedFamily === undefined) {
+			throw new Error(`Cursor default model '${selected.modelId}' has no complete catalog metadata`);
+		}
+		const base = baseModelFor(selectedFamily, available.models);
+		if (
+			base === undefined ||
+			!models.some(model => model.id === selectedFamily.id || model.id === maxModeModelId(selectedFamily.id, base))
+		) {
+			throw new Error(`Cursor default model '${selected.modelId}' has no complete catalog metadata`);
 		}
 	}
+	return models;
+}
 
+/**
+ * Fetches and joins `AvailableModels`, `GetUsableModels`, and `GetDefaultModelForCli`.
+ * Returns `null` on request/decode/join failures and never falls back to stale partial metadata.
+ */
+export async function fetchCursorUsableModels(
+	options: CursorModelDiscoveryOptions,
+): Promise<ModelSpec<"cursor-agent">[] | null> {
+	const timeoutMs = options.timeoutMs ?? 10_000;
 	try {
-		return fromBinary(GetUsableModelsResponseSchema, payload);
+		const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
+		const availableRequest = create(AvailableModelsRequestSchema, {
+			useModelParameters: true,
+			doNotUseMarkdown: true,
+		});
+		const usableRequest = create(GetUsableModelsRequestSchema, {
+			customModelIds: normalizeCustomModelIds(options.customModelIds),
+		});
+		const defaultRequest = create(GetDefaultModelForCliRequestSchema);
+		const [availableBytes, usableBytes, defaultBytes] = await Promise.all([
+			fetchViaHttp2(
+				baseUrl,
+				CURSOR_AVAILABLE_MODELS_PATH,
+				toBinary(AvailableModelsRequestSchema, availableRequest),
+				options,
+				timeoutMs,
+			),
+			fetchViaHttp2(
+				baseUrl,
+				CURSOR_GET_USABLE_MODELS_PATH,
+				toBinary(GetUsableModelsRequestSchema, usableRequest),
+				options,
+				timeoutMs,
+			),
+			fetchViaHttp2(
+				baseUrl,
+				CURSOR_GET_DEFAULT_MODEL_PATH,
+				toBinary(GetDefaultModelForCliRequestSchema, defaultRequest),
+				options,
+				timeoutMs,
+			),
+		]);
+		if (availableBytes === null || usableBytes === null || defaultBytes === null) return null;
+		const available = decodeUnary(AvailableModelsResponseSchema, availableBytes);
+		const usable = decodeUnary(GetUsableModelsResponseSchema, usableBytes);
+		const defaultModel = decodeUnary(GetDefaultModelForCliResponseSchema, defaultBytes);
+		if (available === null || usable === null || defaultModel === null) return null;
+		return cursorCatalogModels(available, usable, defaultModel, baseUrl);
 	} catch {
 		return null;
 	}
 }
 
-function decodeConnectUnaryBody(payload: Uint8Array): Uint8Array | null {
-	if (payload.length < 5) {
-		return null;
-	}
-
-	let offset = 0;
-	while (offset + 5 <= payload.length) {
-		const flags = payload[offset];
-		const view = new DataView(payload.buffer, payload.byteOffset + offset, payload.byteLength - offset);
-		const messageLength = view.getUint32(1, false);
-		const frameEnd = offset + 5 + messageLength;
-		if (frameEnd > payload.length) {
-			return null;
-		}
-		const compressionFlagSet = (flags & 0b0000_0001) !== 0;
-		if (compressionFlagSet) {
-			return null;
-		}
-		const endStreamFlagSet = (flags & 0b0000_0010) !== 0;
-		if (!endStreamFlagSet) {
-			return payload.subarray(offset + 5, frameEnd);
-		}
-
-		offset = frameEnd;
-	}
-
-	return null;
-}
-
-function isCursorKimiK3(id: string): boolean {
-	const identity = classifyModel("cursor", id, { lenient: true });
-	return identity.class === "kimi" && identity.family === "k3";
-}
-function isCursorVersionedGrok(id: string): boolean {
-	const identity = classifyModel("cursor", id, { lenient: true });
-	if (identity.class !== "xai" || identity.revision === undefined) return false;
-	const revision = parseRevision(identity.revision);
-	const floor = parseRevision("4");
-	return revision !== undefined && floor !== undefined && compareRevision(revision, floor) >= 0;
-}
-
-function isCursorGlm52CodingModel(id: string): boolean {
-	const identity = classifyModel("cursor", id, { lenient: true });
-	if (identity.class !== "glm" || identity.revision === undefined) return false;
-	if (identity.family !== undefined && identity.family !== "air" && identity.family !== "turbo") return false;
-	const revision = parseRevision(identity.revision);
-	const floor = parseRevision("5.2");
-	return revision !== undefined && floor !== undefined && compareRevision(revision, floor) >= 0;
-}
-
-function normalizeCursorModels(
-	models: readonly unknown[] | undefined,
-	baseUrlOverride: string | undefined,
-	references: Map<string, ModelSpec<"cursor-agent">>,
-): ModelSpec<"cursor-agent">[] {
-	if (!models || models.length === 0) {
-		return [];
-	}
-
-	const byId = new Map<string, ModelSpec<"cursor-agent">>();
-	for (const model of models) {
-		const normalized = normalizeCursorModel(model, baseUrlOverride, references);
-		if (!normalized) {
-			continue;
-		}
-		byId.set(normalized.id, normalized);
-	}
-
-	return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
-}
-
-function normalizeCursorModel(
-	model: unknown,
-	baseUrlOverride: string | undefined,
-	references: Map<string, ModelSpec<"cursor-agent">>,
-): ModelSpec<"cursor-agent"> | null {
-	const parsedModel = CursorModelDetailsSchema(model);
-	if (parsedModel instanceof type.errors) {
-		return null;
-	}
-
-	const details = parsedModel;
-	const id = details.modelId.trim();
-	if (!id) {
-		return null;
-	}
-
-	const name = pickModelDisplayName(details, id);
-	const reference = references.get(id);
-	// Versioned Cursor Grok ids (`cursor-grok-4.5`, `cursor-grok-4.6-high`)
-	// are reasoning models whose effort rides the per-tier sibling id;
-	// `GetUsableModels` ships no `thinkingDetails` for them and the bundled
-	// references read `reasoning: false`. The `grok-code-fast-*` family
-	// classifies below the 4.x floor and stays out.
-	const reasoning =
-		isCursorKimiK3(id) ||
-		isCursorVersionedGrok(id) ||
-		Boolean(details.thinkingDetails) ||
-		reference?.reasoning === true;
-
-	if (reference) {
-		return {
-			...reference,
-			id,
-			name,
-			baseUrl: baseUrlOverride ?? reference.baseUrl,
-			reasoning,
-			input: resolveCursorInput(id, reference.input),
-			contextWindow: resolveCursorContextWindow(details, id, reference.contextWindow),
-			cursorMaxMode: details.maxMode,
-		};
-	}
-	return {
-		id,
-		name,
-		api: "cursor-agent",
-		provider: "cursor",
-		baseUrl: baseUrlOverride ?? CURSOR_DEFAULT_BASE_URL,
-		reasoning,
-		input: resolveCursorInput(id),
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: resolveCursorContextWindow(details, id, DEFAULT_CONTEXT_WINDOW),
-		maxTokens: DEFAULT_MAX_TOKENS,
-		cursorMaxMode: details.maxMode,
-	};
-}
-
 /**
- * Context window for a discovered Cursor model: the 1M ceiling when any 1M
- * signal fires (never below a larger bundled reference), else the fallback.
- */
-function resolveCursorContextWindow(
-	model: CursorModelDetailsValue,
-	id: string,
-	fallback: number | null,
-): number | null {
-	const labeled1M =
-		CURSOR_1M_NAME_PATTERN.test(id) ||
-		[model.displayName, model.displayNameShort, model.displayModelId, ...model.aliases].some(
-			candidate => typeof candidate === "string" && CURSOR_1M_NAME_PATTERN.test(candidate),
-		);
-	const identity = classifyModel("cursor", id, { lenient: true });
-	const maxMode1M = model.maxMode && (identity.class === "anthropic" || identity.class === "gemini");
-	if (labeled1M || isCursorNative1MModelId(id) || maxMode1M) {
-		return Math.max(fallback ?? 0, CURSOR_1M_CONTEXT_WINDOW);
-	}
-	return fallback;
-}
-
-/**
- * Natively 1M-context families Cursor serves without a "1M" label: GLM 5.2+
- * base/air/turbo coding SKUs (structured family and revision gates exclude
- * vision and sub-1M variants). K3 — including Cursor's bare `k3` alias — is
- * rule-owned via `context-window-floor` in `providers/cursor.kdl`.
- */
-function isCursorNative1MModelId(id: string): boolean {
-	return isCursorGlm52CodingModel(id);
-}
-
-function pickModelDisplayName(model: CursorModelDetailsValue, fallbackId: string): string {
-	const candidates = [model.displayName, model.displayNameShort, model.displayModelId, ...model.aliases, fallbackId];
-	for (const candidate of candidates) {
-		if (typeof candidate !== "string") {
-			continue;
-		}
-		const trimmed = candidate.trim();
-		if (trimmed) {
-			return trimmed;
-		}
-	}
-	return fallbackId;
-}
-
-/**
- * Resolves input modalities from a bundled reference when available. The
- * Cursor-verified families (K3, grok-4, composer-2.5) are rule-owned via
- * `input-modalities` in `providers/cursor.kdl` and corrected at build time.
- * Without a reference, families whose native catalogs are multimodal
- * (anthropic, gemini, openai) fall back to id classification.
+ * Resolves input modalities from a bundled reference when available. Without a
+ * reference, known multimodal model classes retain image support.
  */
 export function resolveCursorInput(id: string, referenceInput?: ("text" | "image")[]): ("text" | "image")[] {
-	if (referenceInput) {
-		return referenceInput;
-	}
+	if (referenceInput) return referenceInput;
 	const identity = classifyModel("cursor", id, { lenient: true });
 	if (identity.class === "anthropic" || identity.class === "gemini" || identity.class === "openai") {
 		return ["text", "image"];

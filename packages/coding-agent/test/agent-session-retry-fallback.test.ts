@@ -5459,6 +5459,81 @@ describe("AgentSession retry fallback", () => {
 		expect(session.getContextUsage()?.contextWindow).toBe(400_000);
 	});
 
+	it("rebinds a stale startup selector through its post-discovery wire route", async () => {
+		authStorage.setRuntimeApiKey("ollama-cloud", "ollama-cloud-test-key");
+		const refreshedModel = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "ollama-chat",
+			provider: "ollama-cloud",
+			baseUrl: "https://ollama.com",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				effortRouting: {
+					[Effort.Low]: "cursor-grok-4.6-low",
+					[Effort.Medium]: "cursor-grok-4.6",
+					[Effort.High]: "cursor-grok-4.6-high",
+					[Effort.XHigh]: "cursor-grok-4.6-xhigh",
+				},
+			},
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 256_000,
+			maxTokens: null,
+		});
+		writeModelCache("ollama-cloud", Date.now(), [refreshedModel], true, "", path.join(tempDir.path(), "models.db"));
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.json"));
+		const staleModel = buildModel({
+			id: "cursor-grok-4.6",
+			name: "Grok 4.6",
+			api: "ollama-chat",
+			provider: "ollama-cloud",
+			baseUrl: "https://ollama.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			requestModelId: "cursor-grok-4.6-medium",
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: staleModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				throw new Error("Not exercised");
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: registry,
+			rebindModelAfterDiscovery: true,
+		});
+
+		const { promise: modelChanged, resolve: resolveModelChanged } = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "model_changed") {
+				unsubscribe();
+				resolveModelChanged();
+			}
+		});
+		registry.refreshInBackground("offline");
+		await Promise.race([
+			modelChanged,
+			scheduler.wait(5_000).then(() => {
+				throw new Error("model_changed was not emitted after discovery renamed the selector");
+			}),
+		]);
+
+		expect(session.model?.id).toBe("grok-4.6");
+		expect(session.model?.contextWindow).toBe(256_000);
+		expect(session.model?.maxTokens).toBeNull();
+		expect(session.getContextUsage()?.contextWindow).toBe(256_000);
+	});
+
 	it("warns on unknown or malformed model-selector chain keys at startup", () => {
 		const primaryModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel) {

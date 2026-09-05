@@ -1834,8 +1834,7 @@ export class EventController {
 			const textContent = event.result.content.find(
 				(content: { type: string; text?: string }) => content.type === "text",
 			)?.text;
-			// This text can be a provider error copied verbatim off the wire (the
-			// Cursor todo bridge forwards the server's string), so it may carry
+			// This text can include a provider or tool error copied verbatim, so it may carry
 			// ANSI escapes, other C0/C1 controls, tabs, newlines, or a line far
 			// wider than the terminal. `showWarning` renders through a plain `Text`,
 			// which strips none of that — an escape reaches the terminal

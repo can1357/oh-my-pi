@@ -10,6 +10,7 @@
 
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
+- Fixed discovery-backed startup models retaining stale bundled metadata when the fetched catalog renames their logical selector.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
 
 ## [18.1.10] - 2026-09-04
@@ -30,6 +31,9 @@
 - Browser and computer automation now use JavaScript/Python evaluation preludes with reusable tab and element handles, replacing the previous standalone tool schemas and object-shaped run APIs.
 - Replaced the `inspect_image` tool and `/vision` controls with `read <image>?q=<question>` for image questions; text-only models now receive image metadata and guidance for using this selector.
 - Renamed `inspect_image.timeoutMs` to `images.questionTimeoutMs`; existing settings are migrated automatically.
+### Breaking Changes
+
+- Removed the Cursor exec-bridge modules and their server-owned tool adapters; integrations should use ordinary coding-agent tools through the native provider stream.
 
 ### Added
 
@@ -43,8 +47,13 @@
 
 - Agent delegation is now model-aware, allowing some models to favor focused inline work instead of spawning subagents.
 
+### Changed
+
+- Changed Cursor sessions and advisors to execute their selected OMP tools through the normal coding-agent loop instead of Cursor-specific exec, todo, and MCP bridges.
+
 ### Fixed
 
+- Fixed a collapsed Cursor model family not being selected when one of its effort-routed wire IDs is the provider's declared default.
 - Fixed fallback authorization-code prompts remaining active after native OAuth callback completion.
 - Fixed reciprocal idle subagents repeatedly waking one another indefinitely.
 - Fixed `/wt` and `git worktree add` failing when the new worktree targeted the same commit as the clean source checkout.
@@ -60,6 +69,11 @@
 ### Removed
 
 - Removed the librarian agent.
+- Fixed two idle subagents exchanging a single IRC message ping-ponging forever: wake-turn relays are now tagged and never relayed back, so each automated relay is delivered exactly once instead of waking a reciprocal relay until manual cancellation.
+- Fixed large MCP tool-result previews collapsing their tail window to closing braces when an oversized output line preceded them ([#10761](https://github.com/can1357/oh-my-pi/issues/10761)).
+- Fixed `Ctrl+V` preserving CJK text from XWayland clipboard owners on Wayland instead of replacing characters with `?` ([#10762](https://github.com/can1357/oh-my-pi/issues/10762)).
+- Fixed byte-limited artifact reads reporting the displayed byte count as the read limit instead of the actual budget ([#10764](https://github.com/can1357/oh-my-pi/issues/10764)).
+- Fixed the read tool's truncation notice reporting `Showing 0 of N lines` (with `outputLines`/`outputBytes` of 0) when a single line larger than the byte budget is shown as a partial preview; it now reports the delivered partial line, e.g. `Showing line N (partial, 50.0KB of 68.4KB) of N` ([#10768](https://github.com/can1357/oh-my-pi/issues/10768)).
 
 ## [18.1.8] - 2026-09-03
 

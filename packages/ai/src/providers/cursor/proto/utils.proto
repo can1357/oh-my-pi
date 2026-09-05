@@ -1,0 +1,150 @@
+// Narrow utility-error closure reconstructed from cursor-agent 2026.09.02-fa0c06e.
+// Selected messages retain their complete fields and transitive message dependencies.
+syntax = "proto3";
+
+package aiserver.v1;
+
+message ClientAction {
+  string command_id = 1;
+  map<string, string> args = 2;
+}
+
+message ConfigureSpendLimitAction {
+  string confirm_label = 1;
+}
+
+message DashboardAction {
+  string action = 1;
+  map<string, string> args = 2;
+  optional string success_message = 3;
+}
+
+message ErrorAnalyticsMetadata {
+  optional string action_required = 1;
+}
+
+message ErrorButton {
+  string label = 1;
+  oneof action {
+    UpgradeAction upgrade = 2;
+    SwitchModelAction switch_model = 3;
+    ConfigureSpendLimitAction configure_spend_limit = 4;
+    UrlAction url = 5;
+    UpgradeChoice upgrade_choice = 6;
+    DashboardAction dashboard_action = 7;
+    ReloadWindowAction reload_window = 8;
+    ClientAction client_action = 9;
+  }
+}
+
+message PlanChoice {
+  string label = 1;
+  optional string sublabel = 2;
+  optional string description = 3;
+  string value = 4;
+}
+
+message ReloadWindowAction {}
+
+message SwitchModelAction {
+  optional string suggested_model = 1;
+  repeated ModelParameterValue parameters = 2;
+  optional bool max_mode = 3;
+
+  message ModelParameterValue {
+    string id = 1;
+    string value = 2;
+  }
+}
+
+message UpgradeAction {
+  string membership_to_upgrade_to = 1;
+  optional bool try_immediate_upgrade = 2;
+  optional bool allow_trial = 3;
+}
+
+message UpgradeChoice {}
+
+message UrlAction {
+  string url = 1;
+}
+
+message CustomErrorDetails {
+  string title = 1;
+  string detail = 2;
+  optional bool allow_command_links_potentially_unsafe_please_only_use_for_handwritten_trusted_markdown = 3;
+  optional bool is_retryable = 4;
+  optional bool show_request_id = 5;
+  optional bool should_show_immediate_error = 6;
+  map<string, string> additional_info = 7;
+  repeated ErrorButton buttons = 8;
+  repeated PlanChoice plan_choices = 9;
+  optional ErrorAnalyticsMetadata analytics_metadata = 10;
+}
+
+message ErrorDetails {
+  Error error = 1;
+  CustomErrorDetails details = 2;
+  optional bool is_expected = 3;
+
+  enum Error {
+    ERROR_UNSPECIFIED = 0;
+    ERROR_BAD_API_KEY = 1;
+    ERROR_NOT_LOGGED_IN = 2;
+    ERROR_INVALID_AUTH_ID = 3;
+    ERROR_NOT_HIGH_ENOUGH_PERMISSIONS = 4;
+    ERROR_BAD_MODEL_NAME = 5;
+    ERROR_USER_NOT_FOUND = 6;
+    ERROR_FREE_USER_RATE_LIMIT_EXCEEDED = 7;
+    ERROR_PRO_USER_RATE_LIMIT_EXCEEDED = 8;
+    ERROR_FREE_USER_USAGE_LIMIT = 9;
+    ERROR_PRO_USER_USAGE_LIMIT = 10;
+    ERROR_AUTH_TOKEN_NOT_FOUND = 11;
+    ERROR_AUTH_TOKEN_EXPIRED = 12;
+    ERROR_OPENAI = 13;
+    ERROR_OPENAI_RATE_LIMIT_EXCEEDED = 14;
+    ERROR_AGENT_REQUIRES_LOGIN = 18;
+    ERROR_MAX_TOKENS = 20;
+    ERROR_USER_ABORTED_REQUEST = 21;
+    ERROR_GENERIC_RATE_LIMIT_EXCEEDED = 22;
+    ERROR_PRO_USER_ONLY = 23;
+    ERROR_TIMEOUT = 25;
+    ERROR_GPT_4_VISION_PREVIEW_RATE_LIMIT = 28;
+    ERROR_CUSTOM_MESSAGE = 29;
+    ERROR_OUTDATED_CLIENT = 30;
+    ERROR_CLAUDE_IMAGE_TOO_LARGE = 31;
+    ERROR_FILE_NOT_FOUND = 33;
+    ERROR_API_KEY_RATE_LIMIT = 34;
+    ERROR_DEBOUNCED = 35;
+    ERROR_BAD_REQUEST = 36;
+    ERROR_REPOSITORY_SERVICE_REPOSITORY_IS_NOT_INITIALIZED = 37;
+    ERROR_UNAUTHORIZED = 38;
+    ERROR_NOT_FOUND = 39;
+    ERROR_DEPRECATED = 40;
+    ERROR_RESOURCE_EXHAUSTED = 41;
+    ERROR_BAD_USER_API_KEY = 42;
+    ERROR_CONVERSATION_TOO_LONG = 43;
+    ERROR_USAGE_PRICING_REQUIRED = 44;
+    ERROR_USAGE_PRICING_REQUIRED_CHANGEABLE = 45;
+    ERROR_GITHUB_NO_USER_CREDENTIALS = 46;
+    ERROR_GITHUB_USER_NO_ACCESS = 47;
+    ERROR_GITHUB_APP_NO_ACCESS = 48;
+    ERROR_GITHUB_MULTIPLE_OWNERS = 49;
+    ERROR_RATE_LIMITED = 50;
+    ERROR_RATE_LIMITED_CHANGEABLE = 51;
+    ERROR_CUSTOM = 52;
+    ERROR_HOOKS_BLOCKED = 53;
+    ERROR_SUSPICIOUS_USAGE_BLOCKED = 54;
+    ERROR_EXTENSION_HOST_TIMEOUT = 55;
+    ERROR_NETWORK_ERROR = 56;
+    ERROR_PROVIDER_ERROR = 57;
+    ERROR_MODEL_BLOCKED = 58;
+    ERROR_INTERNAL = 59;
+    ERROR_MAX_MODE_REQUIRED = 60;
+    ERROR_MODEL_NO_LONGER_SUPPORTED = 61;
+    ERROR_PRICING_WARNING = 62;
+    ERROR_SLOW_POOL = 63;
+    ERROR_UNSUPPORTED_REGION = 64;
+    ERROR_ACCOUNT_CLOSED = 65;
+  }
+}

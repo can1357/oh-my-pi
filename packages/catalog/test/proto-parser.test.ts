@@ -35,3 +35,34 @@ it("emits a requested message's transitive schema and enum dependencies", () => 
 	expect(output).toContain('name: "enabled", kind: "bool", optional: true');
 	expect(output).not.toContain("export interface Unused");
 });
+
+it("resolves canonical dotted references to nested message and enum types", () => {
+	const output = generateProtoTs(
+		parseProto(`
+			syntax = "proto3";
+			package example;
+
+			message Parent {
+				message Child {
+					string value = 1;
+				}
+
+				enum State {
+					STATE_UNSPECIFIED = 0;
+					STATE_READY = 1;
+				}
+			}
+
+			message Root {
+				example.Parent.Child child = 1;
+				example.Parent.State state = 2;
+			}
+		`),
+		{ includeMessages: ["example.Root"] },
+	);
+
+	expect(output).toContain("child?: Parent_Child");
+	expect(output).toContain("state: State");
+	expect(output).toContain("T: () => Parent_ChildSchema");
+	expect(output).toContain("export enum State");
+});

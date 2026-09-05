@@ -1049,6 +1049,11 @@ export type ModelTokenizer =
 	| "kimi-k2"
 	| "glm5";
 
+export interface CursorRequestedModelRoute {
+	readonly modelId: string;
+	readonly parameters: readonly { readonly id: string; readonly value: string }[];
+}
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
@@ -1064,8 +1069,6 @@ export interface Model<TApi extends Api = Api> {
 	 * inferring it from the transport API.
 	 */
 	requiresGlyphTokenization?: boolean;
-	/** Whether this model requires Cursor's tool-schema combiner projection. */
-	requiresCursorToolSchemaProjection?: boolean;
 	/**
 	 * Model id to send on the wire when it differs from `id`. Used by catalog
 	 * variants that present one upstream model under several local entries —
@@ -1112,8 +1115,12 @@ export interface Model<TApi extends Api = Api> {
 	supportsComputerUseConfig?: boolean;
 	/** GitLab Duo Workflow root namespace selected during catalog discovery. */
 	gitlabDuoWorkflowRootNamespaceId?: string;
-	/** Cursor `max_mode` request flag returned by `GetUsableModels` for premium models that require max mode. */
+	/** Cursor `max_mode` request flag selected from the complete Cursor catalog. */
 	cursorMaxMode?: boolean;
+	/** Cursor catalog variant `context` parameter (for example `272k`, `300k`, or `1m`). */
+	cursorContext?: string;
+	/** Cursor selector legacy slug to exact AvailableModels base model and parameter values. */
+	cursorModelRoutes?: Readonly<Record<string, CursorRequestedModelRoute>>;
 	cost: ModelCost;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
@@ -1233,12 +1240,7 @@ export interface Model<TApi extends Api = Api> {
  */
 export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	Model<TApi>,
-	| "compat"
-	| "identity"
-	| "compatConfig"
-	| "requiresGlyphTokenization"
-	| "requiresCursorToolSchemaProjection"
-	| "supportsComputerUseConfig"
+	"compat" | "identity" | "compatConfig" | "requiresGlyphTokenization" | "supportsComputerUseConfig"
 > {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;

@@ -46,9 +46,6 @@ const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
 	"onPayload",
 	"onResponse",
 	"onSseEvent",
-	"execHandlers",
-	"cursorExecHandlers",
-	"cursorOnToolResult",
 	"providerSessionState",
 ]);
 const PI_NATIVE_STREAM_IDLE_TIMEOUT_ERROR = "pi-native stream stalled while waiting for the next event";

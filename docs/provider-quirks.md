@@ -430,60 +430,110 @@ The Ollama integration consists of two distinct provider definitions in `package
 
 ## Cursor
 
-Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transport (`/agent.v1.AgentService/Run`) sending length-prefixed binary Protobuf messages (`AgentClientMessage` and `AgentServerMessage`). Key implementation entry points include `packages/ai/src/providers/cursor.ts` for connection lifecycle, Connect message streaming, and frame dispatching; `packages/ai/src/providers/cursor-pi-args.ts` for pure argument and path transformations; `packages/ai/src/providers/cursor/exec-modern.ts` for local tool result frame builders; auth policy in `packages/catalog/src/compat/rules/auth/cursor.kdl` (`login "custom" hook="cursor"`) and `packages/ai/src/registry/oauth/cursor.ts` for PKCE browser authentication and token refresh; `packages/ai/src/usage/cursor.ts` for multi-endpoint quota tracking; and `packages/catalog/src/discovery/cursor.ts` for Connect RPC model discovery.
+Cursor inference uses the IDE's HTTP/2 Connect RPC,
+`/aiserver.v1.InferenceService/RunInference`. OMP sends its complete provider
+context and ordinary tool schemas, then receives thinking, text, usage, and
+tool-call argument deltas. Cursor does not run OMP tools: returned calls enter
+the same validation, approval, execution, result, and continuation loop as every
+other native provider.
 
-### Special casings
-- **Pure Argument Translation (`cursor-pi-args.ts`)**: Path and argument formatting functions (`piReadPath`, `piReadPathHasRange`, `piReadDisplayPath`, `piGrepSkip`, `piJoinPath`, `piLsPath`, `piEscapeRegexLiteral`, `piLimit`, `piTimeout`) are kept strictly independent of Protobuf imports so legacy shims can share them without bundling protobuf schemas into virtual registries.
-- **Empty Grep Pattern Rejection**: `grepArgs` frames with an empty `pattern` and non-empty `glob` are rejected up front (`emptyGrepPatternRejection`) with a descriptive error, forcing the model to retry or switch tools rather than triggering local tool failure after block persistence.
-- **Native Tools & `SoftToolRequirement` Interplay**:
-  - Native tools (`CURSOR_NATIVE_TOOL_NAMES`: `bash`, `read`, `write`, `delete`, `ls`, `grep`, `todo`) are omitted when building `requestContext` MCP tool definitions.
-  - **Exception**: `write` is explicitly re-included in `buildMcpToolDefinitions` whenever pi-agent tools are advertised. `write` acts as the `xd://` transport for staged previews (e.g. `ast_edit`). Without `write`, staged previews cannot be resolved and `SoftToolRequirement('write')` escalation aborts the turn.
-- **`rootPromptMessagesJson` & Blob Store**:
-  - `buildGrpcRequest` passes conversation history as SHA-256 binary blob IDs (`blobStore`) in `rootPromptMessagesJson` and `turns`.
-  - System prompts are stored as individual JSON blobs (`buildCursorSystemPromptJsons`), allowing independent server-side prefix blob caching hits when only downstream prompts change.
-- **Thinking Replay Safeguards**:
-  - Assistant thinking content is replayed in turn history (`canReplayCursorThinking`) only for same-model Kimi K3 variants (`assertCursorKimiK3HistoryReplayable`). Foreign or hidden reasoning is omitted to prevent leaking non-Cursor thinking blocks into native conversation turns.
+Key modules are `packages/ai/src/providers/cursor.ts` for provider integration,
+`packages/ai/src/providers/cursor/request.ts` for context/tool projection,
+`packages/ai/src/providers/cursor/response.ts` for event mapping and final
+reconciliation, and `packages/ai/src/providers/cursor/transport.ts` for the
+multiplexed HTTP/2 run lifecycle. The reconstructed wire closure lives in
+`packages/ai/src/providers/cursor/proto/inference.proto` and is generated into
+`packages/catalog/src/discovery/cursor-proto.ts` with the separate model-discovery
+messages.
 
-### Stream behavior
-- **Length-Prefixed Connect Framing**:
-  - Connect HTTP/2 streams use 5-byte headers (1-byte flag + 4-byte big-endian uint32 payload length).
-  - `CONNECT_END_STREAM_FLAG` (`0b00000010`) flags terminal frames carrying JSON error objects (`parseConnectEndStream`).
-- **Trailer & Transport Error Handling**:
-  - Monitors HTTP/2 trailers (`grpc-status`, `grpc-message`) and maps socket or TLS disconnects using `mapH2TransportError`.
-- **Bi-Directional RPC Dispatch**:
-  - Server streams `AgentServerMessage` (`interactionUpdate`, `execServerMessage`, `kvServerMessage`, `interactionQuery`).
-  - Client writes `AgentClientMessage` (`runRequest`, periodic `clientHeartbeat` every 5 seconds, `interactionResponse`) and `ExecClientMessage` tool responses (`readResult`, `writeResult`, `execClientThrow`, `requestContextResult`).
-- **Interaction Query Handshake**:
-  - Hosted web search / Exa / unnamed field-9 WebFetch send `interactionQuery` and block the turn until the client writes `interactionResponse`.
-  - Heartbeats keep HTTP/2 alive but are not semantic progress; an unanswered query sits silent until the 300s idle watchdog (`Provider stream stalled while waiting for the next event`).
-  - `handleInteractionQuery` approves network permission gates and rejects interactive ask / switch-mode / create-plan. VM setup is left unanswered because its result oneof is success-only.
-- **Async Execution Drain & Turn Completion**:
-  - `handleServerMessage` processes frames asynchronously so the socket continues draining. Dispatches are tracked in `inFlightDispatches` and bounded by `options.signal` abort handling before finalizing stream completion.
-  - Stream completion verifies `turnEnded` (`sawTurnEnded`) or throws `incomplete-stream`.
-- **Tool Call Synthesis**:
-  - `synthesizeCursorExecToolCall` generates display `toolCall` blocks on assistant output messages to mirror local tool execution in the UI and transcript.
+### Request and stream behavior
 
-### Auth & usage
-- **Credentials & Headers**:
-  - Authenticates via `CURSOR_ACCESS_TOKEN` sent in `Authorization: Bearer <token>`.
-  - Client headers: `x-ghost-mode: true`, `x-cursor-client-version: cli-2026.07.23-e383d2b`, `x-cursor-client-type: cli`, `x-request-id`.
-- **PKCE OAuth & Polling**:
-  - Deep-link PKCE login generates verifier/challenge and redirects to `https://cursor.com/loginDeepControl`.
-  - Polls `https://api2.cursor.sh/auth/poll?uuid=...&verifier=...` with exponential backoff (1s to 10s delay, up to 150 attempts).
-  - Refresh trades refresh token via POST `https://api2.cursor.sh/auth/exchange_user_api_key`.
-- **Usage & Quota Tracking (`packages/ai/src/usage/cursor.ts`)**:
-  - Standard quota fetched from `https://api2.cursor.sh/auth/usage` (`parseCursorUsage`).
-  - For OAuth credentials with WorkOS user sessions (`WorkosCursorSessionToken=${userId}::${accessToken}`), fetches personal usage from `https://cursor.com/api/usage-summary` (`parseCursorIndividualUsage`) and user profile email from `https://cursor.com/api/auth/me`.
+- **Context ownership:** every normalized OMP system, user, developer, assistant,
+  tool-call, and tool-result message is projected into `InferenceCoreMessage`.
+  Cross-provider history, reasoning signatures, redacted reasoning, images, and
+  image-bearing tool results remain in context. Tool-call and matching result IDs
+  use one collision-resistant, occurrence-aware per-context mapping into Cursor's
+  accepted charset and length during replay. The shared message transformer repairs
+  orphan results before projection so Cursor never receives an unmatched tool message.
+- **Tool ownership:** active OMP tools are serialized as `InferenceAgentTool`.
+  `toolChoice: "none"` omits the catalog; required choice degrades to automatic
+  selection and named choice narrows the catalog to that tool because
+  `RunInference` exposes no equivalent forcing field. The server returns
+  correlated `toolCallPart` deltas; completed JSON arguments become ordinary
+  `ToolCall` blocks and execute only through `agent-loop`.
+- **Model routing:** the outer run carries the stable session identity, routing
+  conversation, and resolved Cursor model parameters. Tool-result continuations
+  reuse that run; each later user turn cleanly finishes it and opens a new run so
+  updated routing conversation can select a different model. Opaque reasoning
+  signatures and redacted data are scoped to the outer run that produced them:
+  active tool continuations retain them, while a new or replacement run keeps
+  visible thinking text and the complete visible/tool history without stale opaque
+  state. The shutdown budget covers
+  cancellation writes, `finishRun`, and the terminal trailer; timeout aborts the
+  stale stream before replacement routing proceeds.
+- **Multiplexing:** one credential/base/proxy-scoped runtime reuses its HTTP/2
+  session and keeps independent routed runs per OMP session. Concurrent runtime
+  creation is serialized per scope, while different credentials remain isolated.
+  Invocation responses are correlated by exact ID, delivered in order per
+  invocation, bounded in count/bytes, and cancellable without cancelling siblings.
+  A connection that completes after runtime shutdown is destroyed before it can
+  become the active session.
+- **Connect framing:** messages use five-byte Connect envelopes, gzip for larger
+  client frames, a 16 MiB frame cap, and a required JSON end-stream trailer.
+- **Final reconciliation:** completed streamed tools must equal the final response
+  by exact ID, name, and deep arguments. Terminal-only final tool calls survive
+  the leaked-thinking wrapper for normal agent execution. Final text wins when present, including
+  non-prefix corrections after streamed drafts pass through the leaked-thinking
+  wrapper; non-empty streamed thinking survives empty, signature-only, or
+  redacted final reasoning. Several opaque reasoning records are never paired by
+  array position.
+- **Hooks and proxying:** caller headers are lower-cased and sanitized before the
+  transport-owned header set wins. `onPayload`, `onResponse`, configured provider
+  proxies, abort signals, request limits, and standard OMP error classification
+  remain active.
+
+### Identity, auth, and usage
+
+- **IDE-compatible identity:** RunInference uses the pinned Cursor 3.18.9 desktop
+  identity, including host-derived machine and MAC hashes, minute checksum,
+  per-runtime client key, request UUID, cookie, timezone, architecture, version,
+  and commit headers. If host identity cannot be derived, OMP persists one
+  owner-only UUID fallback under the agent directory and logs the fallback. Host
+  lookup runs through the shared supervised process utility with a five-second
+  deadline and concurrent stdout/stderr draining; fallback creation uses the
+  shared cross-process file lock before any winning-file read.
+- **PKCE OAuth:** the existing browser login, polling, and refresh flow remains in
+  `packages/ai/src/registry/oauth/cursor.ts`.
+- **Usage:** `packages/ai/src/usage/cursor.ts` continues to combine the standard
+  `api2.cursor.sh/auth/usage` report with personal plan usage and profile identity
+  when the OAuth credential supports those surfaces.
 
 ### Catalog model handling
-- **Descriptor Config (`packages/catalog/src/provider-models/descriptors.ts`)**:
-  - Configured with provider ID `"cursor"`, default model `"claude-4.6-opus-high"`, runtime env var `CURSOR_ACCESS_TOKEN`, and catalog discovery env var `CURSOR_API_KEY`.
-- **Cache Provider ID (`packages/catalog/src/provider-models/cache-provider-id.ts`)**:
-  - Returns `"cursor:max-mode-v3"` to ensure context window cache invalidation.
-- **Model Discovery (`packages/catalog/src/discovery/cursor.ts`)**:
-  - `fetchCursorUsableModels` calls `GetUsableModels` (`/agent.v1.AgentService/GetUsableModels`) over Connect RPC.
-  - Sets `cursorMaxMode` from `details.maxMode`, assigns `api: "cursor-agent"`, maps 1M max-mode vs 200k default context windows, and defaults `maxTokens` to 64,000.
-  - Dynamic discovery merges with bundled reference models from `models.json`.
+
+- `packages/catalog/src/discovery/cursor.ts` fetches three unary RPCs in
+  parallel: `/aiserver.v1.AiService/AvailableModels` for authoritative
+  capabilities, context limits, variants, and Max Mode metadata;
+  `/agent.v1.AgentService/GetUsableModels` for the account's selectable wire
+  model families and effort siblings; and
+  `/agent.v1.AgentService/GetDefaultModelForCli` to validate that Cursor's
+  default is present in the joined result.
+- Discovery publishes only models that have both usable and complete available
+  metadata. A request, decode, or join failure returns no dynamic result rather
+  than reusing partial metadata. The cache namespace
+  credential-and-endpoint-scoped `cursor:complete-catalog-v6` namespace
+  invalidates earlier partial rows and prevents one account's authoritative
+  roster from hydrating another account.
+- Dynamic models keep the public `cursor-agent` API identifier. Capabilities and
+  context windows come from `AvailableModels`; effort routing comes from usable
+  family members; bundled references supply stable cost and output-token data.
+  Effort suffixes, normalized levels, representative-tier preference, and generic
+  display labels, and route parameters come from the compiled `cursor-effort` KDL policy rather than
+  discovery or request code. Context is sent only when the selected catalog
+  variant provides an authoritative `cursorContext` value.
+- A distinct Max catalog row is emitted only when Cursor reports a real
+  non-Max/Max difference. The selected row carries `cursorMaxMode` and the
+  variant's exact `cursorContext` value, which `RunInference` sends with the
+  KDL-resolved wire model ID and model parameters.
 
 ## Devin
 The Devin integration (`devin-agent` API) communicates with Codeium Cascade backend services over HTTP/1.1 using the Connect protocol and gRPC/Protobuf messages. Its implementation spans provider stream logic in `packages/ai/src/providers/devin.ts` (`streamDevin`, `DEVIN_API_URL`), auth policy in `packages/catalog/src/compat/rules/auth/devin.kdl` (`login "oauth-code"` rule, `packages/ai/src/registry/engine/oauth-code.ts`), and Connect protobuf schemas located in `packages/catalog/src/discovery/devin-gen/exa/*`.
@@ -569,7 +619,7 @@ Pi Native is a lossless internal server/client transport protocol used when a pi
 ### Special casings
 - **Lossless Pass-through & Dialect Absence**: Unlike OpenAI/Anthropic routes, `pi-native` is not a textual tool-call dialect (`docs/toolconv/pi-native.md`). Tool calls remain canonical pi-ai `ToolCall` content blocks inside `Context` and `AssistantMessageEvent`. It preserves first-class pi-ai fields (service tier, cache markers, thinking budgets, tool-choice variants, image blocks, tool-call IDs) without foreign-wire quantization.
 - **Wire Request & Minimal Boundary Validation**: Client POSTs `{ modelId: "${provider}/${id}", context, options, stream: true }` to `${model.baseUrl}/v1/pi/stream` (`packages/ai/src/providers/pi-native-client.ts` `resolveStreamUrl`). `packages/ai/src/providers/pi-native-server.ts` `parseRequest` accepts `modelId`, `model.id`, or string `model` (supporting `streamProxy` target swaps). Validation checks only object shapes and arrays (`context.messages`, optional `context.systemPrompt`, `context.tools`), leaving message/tool internals unvalidated until downstream provider execution.
-- **Option Allow-list & Non-Wire Key Stripping**: Server filters `options` against `ALLOWED_OPTION_KEYS` (31 keys) in `packages/ai/src/providers/pi-native-server.ts` `parseRequest`, silently dropping unknown keys for cross-version compatibility. Client strips runtime-only and function-valued fields (`signal`, `apiKey`, `fetch`, `onPayload`, `onResponse`, `onSseEvent`, `execHandlers`, `cursorExecHandlers`, `cursorOnToolResult`, `providerSessionState`) via `NON_WIRE_KEYS` in `packages/ai/src/providers/pi-native-client.ts` `buildWireOptions`.
+- **Option Allow-list & Non-Wire Key Stripping**: Server filters `options` against `ALLOWED_OPTION_KEYS` (31 keys) in `packages/ai/src/providers/pi-native-server.ts` `parseRequest`, silently dropping unknown keys for cross-version compatibility. Client strips runtime-only and function-valued fields (`signal`, `apiKey`, `fetch`, `onPayload`, `onResponse`, `onSseEvent`, `providerSessionState`) via `NON_WIRE_KEYS` in `packages/ai/src/providers/pi-native-client.ts` `buildWireOptions`.
 - **Gateway Options Modification**: On the auth-gateway (`packages/ai/src/auth-gateway/server.ts`), sampling controls (`temperature`, `topP`, `topK`, `minP`, `stopSequences`, penalties) are stripped for `openai-codex-responses` models to prevent 400 errors, and passthrough request headers are captured (`captureRequestHeaders`) and merged under client headers.
 - **Dispatch Precedence & Cache Bypass**: In `packages/ai/src/stream.ts` `streamSimple`, `model.transport === "pi-native"` takes precedence over extension-registered custom APIs (`getCustomApi`). `packages/ai/src/stream.ts` `assertExplicitOpenAIResponsesPromptCacheSupport` explicitly bypasses prompt cache assertions for `pi-native` transports because validation is deferred to the gateway-resolved model.
 

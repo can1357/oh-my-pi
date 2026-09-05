@@ -1,4 +1,4 @@
-import type { AssistantMessage, Context, CursorExecHandlers, ImageContent, Message, TextContent } from "../types";
+import type { AssistantMessage, Context, ImageContent, Message, TextContent } from "../types";
 import { getStreamingPartialJson, setStreamingPartialJson } from "./block-symbols";
 import { AssistantMessageEventStream } from "./event-stream";
 import glyphNotice from "./glyph-notice.md" with { type: "text" };
@@ -22,8 +22,6 @@ export interface GlyphCodec {
 	context: Context;
 	/** Decodes glyph tokens in the stream's terminal assistant message. */
 	wrap(inner: AssistantMessageEventStream): AssistantMessageEventStream;
-	/** Decodes Cursor Pi calls and encodes their provider-bound results. */
-	wrapCursorExecHandlers(handlers: CursorExecHandlers): CursorExecHandlers;
 	/** Whether this request has encoded at least one glyph or literal token prefix. */
 	active: boolean;
 }
@@ -51,7 +49,6 @@ export function applyGlyphCodec(context: Context): GlyphCodec {
 		return {
 			context,
 			wrap: inner => inner,
-			wrapCursorExecHandlers: handlers => handlers,
 			active: false,
 		};
 	}
@@ -113,18 +110,10 @@ export function applyGlyphCodec(context: Context): GlyphCodec {
 		messages,
 		[kGlyphEncoded]: true,
 	};
-	let cursorHandlersWrapped = false;
 	return {
 		context: encodedContext,
 		wrap(inner) {
-			return active || cursorHandlersWrapped ? wrapGlyphStream(inner) : inner;
-		},
-		wrapCursorExecHandlers(handlers) {
-			cursorHandlersWrapped = true;
-			const wrapped = createCursorExecHandlersCodec(handlers, () => {
-				active = true;
-			});
-			return wrapped;
+			return active ? wrapGlyphStream(inner) : inner;
 		},
 		get active() {
 			return active;
@@ -306,153 +295,4 @@ function wrapGlyphStream(inner: AssistantMessageEventStream): AssistantMessageEv
 		}
 	})();
 	return out;
-}
-
-type GlyphStringPredicate = (text: string) => boolean;
-
-function containsTransformableString(value: unknown, predicate: GlyphStringPredicate): boolean {
-	if (typeof value === "string") return predicate(value);
-	if (Array.isArray(value)) return value.some(item => containsTransformableString(item, predicate));
-	if (!isPlainRecord(value)) return false;
-	for (const key in value) {
-		if (predicate(key) || containsTransformableString(value[key], predicate)) return true;
-	}
-	return false;
-}
-
-function transformClonedValue(value: unknown, transform: GlyphTextTransform): unknown {
-	if (typeof value === "string") return transform(value);
-	if (typeof value === "object" && value !== null) transformObjectStringsInPlace(value, transform);
-	return value;
-}
-
-function transformObjectStringsInPlace(value: object, transform: GlyphTextTransform): void {
-	if (Array.isArray(value)) {
-		const items: unknown[] = value;
-		for (const [index, item] of items.entries()) items[index] = transformClonedValue(item, transform);
-		return;
-	}
-	if (!isPlainRecord(value)) return;
-	const entries = Object.entries(value);
-	const transformedEntries: Array<[string, unknown]> = [];
-	let keyChanged = false;
-	for (const [key, child] of entries) {
-		const transformedKey = transform(key);
-		keyChanged ||= transformedKey !== key;
-		transformedEntries.push([transformedKey, transformClonedValue(child, transform)]);
-	}
-	if (keyChanged) {
-		for (const [key] of entries) delete value[key];
-	}
-	for (const [key, child] of transformedEntries) value[key] = child;
-}
-
-function transformObjectStrings<T extends object>(
-	value: T,
-	predicate: GlyphStringPredicate,
-	transform: GlyphTextTransform,
-): T {
-	if (!containsTransformableString(value, predicate)) return value;
-	const cloned = structuredClone(value);
-	transformObjectStringsInPlace(cloned, transform);
-	return cloned;
-}
-
-function decodeCursorArgs<T extends object>(args: T): T {
-	return transformObjectStrings(args, text => decodeGlyphText(text) !== text, decodeGlyphText);
-}
-
-function encodeCursorResult<T extends object>(result: T, onEncoded: () => void): T {
-	return transformObjectStrings(
-		result,
-		text => encodeGlyphText(text) !== text,
-		text => {
-			const encoded = encodeGlyphText(text);
-			if (encoded !== text) onEncoded();
-			return encoded;
-		},
-	);
-}
-
-function createCursorExecHandlersCodec(handlers: CursorExecHandlers, onEncoded: () => void): CursorExecHandlers {
-	const sourcePiRead = handlers.piRead;
-	const piRead: CursorExecHandlers["piRead"] = sourcePiRead
-		? async call => {
-				const args = decodeCursorArgs(call.args);
-				const result = await sourcePiRead.call(handlers, args === call.args ? call : { ...call, args });
-				return encodeCursorResult(result, onEncoded);
-			}
-		: undefined;
-	const sourcePiBash = handlers.piBash;
-	const piBash: CursorExecHandlers["piBash"] = sourcePiBash
-		? async call => {
-				const args = decodeCursorArgs(call.args);
-				const result = await sourcePiBash.call(handlers, args === call.args ? call : { ...call, args });
-				return encodeCursorResult(result, onEncoded);
-			}
-		: undefined;
-	const sourcePiEdit = handlers.piEdit;
-	const piEdit: CursorExecHandlers["piEdit"] = sourcePiEdit
-		? async call => {
-				const args = decodeCursorArgs(call.args);
-				const result = await sourcePiEdit.call(handlers, args === call.args ? call : { ...call, args });
-				return encodeCursorResult(result, onEncoded);
-			}
-		: undefined;
-	const sourcePiWrite = handlers.piWrite;
-	const piWrite: CursorExecHandlers["piWrite"] = sourcePiWrite
-		? async call => {
-				const args = decodeCursorArgs(call.args);
-				const result = await sourcePiWrite.call(handlers, args === call.args ? call : { ...call, args });
-				return encodeCursorResult(result, onEncoded);
-			}
-		: undefined;
-	const sourcePiGrep = handlers.piGrep;
-	const piGrep: CursorExecHandlers["piGrep"] = sourcePiGrep
-		? async call => {
-				const args = decodeCursorArgs(call.args);
-				const result = await sourcePiGrep.call(handlers, args === call.args ? call : { ...call, args });
-				return encodeCursorResult(result, onEncoded);
-			}
-		: undefined;
-	const sourcePiFind = handlers.piFind;
-	const piFind: CursorExecHandlers["piFind"] = sourcePiFind
-		? async call => {
-				const args = decodeCursorArgs(call.args);
-				const result = await sourcePiFind.call(handlers, args === call.args ? call : { ...call, args });
-				return encodeCursorResult(result, onEncoded);
-			}
-		: undefined;
-	const sourcePiLs = handlers.piLs;
-	const piLs: CursorExecHandlers["piLs"] = sourcePiLs
-		? async call => {
-				const args = decodeCursorArgs(call.args);
-				const result = await sourcePiLs.call(handlers, args === call.args ? call : { ...call, args });
-				return encodeCursorResult(result, onEncoded);
-			}
-		: undefined;
-
-	// Preserve class-backed handler objects; object spread drops prototype methods.
-	return new Proxy(handlers, {
-		get(target, property, receiver) {
-			switch (property) {
-				case "piRead":
-					return piRead;
-				case "piBash":
-					return piBash;
-				case "piEdit":
-					return piEdit;
-				case "piWrite":
-					return piWrite;
-				case "piGrep":
-					return piGrep;
-				case "piFind":
-					return piFind;
-				case "piLs":
-					return piLs;
-				default:
-					return Reflect.get(target, property, receiver);
-			}
-		},
-	});
 }

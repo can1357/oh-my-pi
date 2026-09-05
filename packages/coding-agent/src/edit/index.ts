@@ -63,7 +63,6 @@ import {
 	hashlineEditParamsSchema,
 	type PatchParams,
 	patchEditSchema,
-	type ReplaceBatchParams,
 	type ReplaceParams,
 	replaceEditSchema,
 	type SloppyParams,
@@ -83,7 +82,7 @@ type TInput =
 	| typeof applyPatchSchema
 	| typeof sloppyEditSchema;
 
-type EditParams = ReplaceParams | ReplaceBatchParams | PatchParams | HashlineParams | ApplyPatchParams | SloppyParams;
+type EditParams = ReplaceParams | PatchParams | HashlineParams | ApplyPatchParams | SloppyParams;
 
 const PATCH_EXAMPLES = [
 	{

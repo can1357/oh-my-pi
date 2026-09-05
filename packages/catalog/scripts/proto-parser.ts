@@ -1169,19 +1169,21 @@ export class ProtoContext {
 			this.#enumsByShortName.set(enm.name, enm);
 		}
 		for (const msg of file.messages) {
-			this.#indexMessage(msg);
+			this.#indexMessage(msg, msg.fullName);
 		}
 	}
 
-	#indexMessage(msg: ProtoMessage): void {
+	#indexMessage(msg: ProtoMessage, canonicalName: string): void {
 		this.#messagesByFullName.set(msg.fullName, msg);
+		this.#messagesByFullName.set(canonicalName, msg);
 		this.#messagesByShortName.set(msg.name, msg);
 		for (const enm of msg.nestedEnums) {
 			this.#enumsByFullName.set(enm.fullName, enm);
+			this.#enumsByFullName.set(`${canonicalName}.${enm.name}`, enm);
 			this.#enumsByShortName.set(enm.name, enm);
 		}
 		for (const child of msg.nestedMessages) {
-			this.#indexMessage(child);
+			this.#indexMessage(child, `${canonicalName}.${child.name}`);
 		}
 	}
 

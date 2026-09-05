@@ -9,12 +9,6 @@ export const replaceEditSchema = type({
 
 export type ReplaceParams = typeof replaceEditSchema.infer;
 
-/** Internal batch form produced only by the Cursor exec bridge. */
-export interface ReplaceBatchParams {
-	path: string;
-	edits: Omit<ReplaceParams, "path">[];
-}
-
 export const patchEditEntrySchema = type({
 	"op?": "'create' | 'delete' | 'update'",
 	"rename?": "string",

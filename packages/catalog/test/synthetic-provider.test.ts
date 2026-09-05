@@ -277,4 +277,45 @@ describe("Synthetic provider discovery", () => {
 	test("serves no dynamic models without an API key", () => {
 		expect(syntheticModelManagerOptions().fetchDynamicModels).toBeUndefined();
 	});
+
+	test("keeps authoritative Synthetic capabilities when models.dev also succeeds", async () => {
+		const { fetch } = syntheticModelsFetch([
+			{
+				id: "hf:zai-org/GLM-5.2",
+				object: "model",
+				name: "zai-org/GLM-5.2",
+				reasoning_parameters: { efforts: ["none"] },
+				input_modalities: ["text"],
+				context_length: 202752,
+				max_output_length: 32768,
+				supported_features: ["tools"],
+			},
+		]);
+		const options = syntheticModelManagerOptions({ apiKey: "syn-test-key", fetch });
+		const manager = createModelManager({
+			...options,
+			modelsDev: {
+				fetch: async () => true,
+				map: () => [
+					{
+						id: "hf:zai-org/GLM-5.2",
+						name: "GLM-5.2",
+						provider: "synthetic",
+						api: "openai-completions",
+						baseUrl: "https://api.synthetic.new/openai/v1",
+						reasoning: true,
+						input: ["text", "image"],
+						cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 202752,
+						maxTokens: 32768,
+					},
+				],
+			},
+		});
+		const { models } = await manager.refresh("online");
+
+		const glm = models.find(model => model.id === "hf:zai-org/GLM-5.2");
+		expect(glm).toMatchObject({ reasoning: false, input: ["text"] });
+		expect(glm?.thinking).toBeUndefined();
+	});
 });

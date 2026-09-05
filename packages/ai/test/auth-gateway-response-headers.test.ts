@@ -102,7 +102,6 @@ describe("auth-gateway diagnostic response headers", () => {
 				}),
 			});
 			expect(res.status).toBe(200);
-			expect(gw.mock.calls[0]?.options?.cursorExternalToolExecutor).toBe(true);
 		} finally {
 			await gw.close();
 		}

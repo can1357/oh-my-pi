@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { generateProtoTs, ProtoContext, parseProto } from "./proto-parser";
 
 const PACKAGES_DIR = path.resolve(import.meta.dir, "../..");
-const CURSOR_PROTO = path.join(PACKAGES_DIR, "ai/src/providers/cursor/proto/agent.proto");
+const CURSOR_PROTO_DIR = path.join(PACKAGES_DIR, "ai/src/providers/cursor/proto");
 const DEVIN_PROTO_DIR = path.join(PACKAGES_DIR, "ai/src/providers/devin/proto");
 const DISCOVERY_DIR = path.resolve(import.meta.dir, "../src/discovery");
 
@@ -14,7 +14,7 @@ const CURSOR_CONSUMER_DIRS = [
 	path.join(PACKAGES_DIR, "coding-agent/test"),
 ];
 
-const CURSOR_ENUMS = ["CursorRuleSource", "ForceBackgroundShellStatus", "ForceBackgroundSubagentStatus"];
+const CURSOR_ENUMS = ["InferenceMessageRole", "InferenceStreamErrorType", "RunInferenceRoutingRole"];
 const DEVIN_MESSAGES = [
 	"exa.api_server_pb.AssignModelRequest",
 	"exa.api_server_pb.AssignModelResponse",
@@ -100,16 +100,18 @@ async function parseProtoDirectory(directory: string): Promise<ProtoContext> {
 }
 
 async function generateProtocols(): Promise<void> {
-	const cursorSource = await Bun.file(CURSOR_PROTO).text();
-	const cursorContext = new ProtoContext();
-	cursorContext.addFile(parseProto(cursorSource, "agent.proto"));
-
-	const cursor = generateProtoTs(cursorContext, {
+	const cursor = generateProtoTs(await parseProtoDirectory(CURSOR_PROTO_DIR), {
 		includeMessages: await collectCursorMessages(),
 		includeEnums: CURSOR_ENUMS,
 		includeDependencies: true,
-		packagePrefix: "Cursor agent",
+		packagePrefix: "Cursor",
 		protobufImportPath: "./protobuf",
+		headerComment: `/**
+ * Cursor protocol declarations used by Oh My Pi.
+ *
+ * Generation selects only runtime and test roots, while each selected message retains
+ * its complete vendor-declared fields and transitive message and enum dependencies.
+ */`,
 	});
 	const devin = generateProtoTs(await parseProtoDirectory(DEVIN_PROTO_DIR), {
 		includeMessages: DEVIN_MESSAGES,

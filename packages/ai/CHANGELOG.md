@@ -2,9 +2,27 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the Cursor exec-channel handler types and stream options; Cursor now returns ordinary native tool calls for the caller's existing agent loop to execute.
+
+### Changed
+
+- Changed Cursor inference to the IDE's native `InferenceService/RunInference` HTTP/2 stream, preserving OMP context and reasoning while returning ordinary streamed OMP tool calls instead of delegating execution to Cursor's agent runtime. Repeated terminal text copies are collapsed without dropping signature-only reasoning.
+
 ### Fixed
 
 - GitHub Copilot sign-in now requests only basic profile access, restoring login for Enterprise organizations that reject repository, gist, and Codespaces permissions ([#10656](https://github.com/can1357/oh-my-pi/issues/10656)).
+- Fixed concurrent Cursor callers with different credentials shutting down one another, concurrent first use creating duplicate runtimes, generic Connect and invocation errors hiding structured diagnostic details, unbounded host-identity commands, HTTP/2 sessions leaking when connection completed after shutdown, cross-provider tool IDs violating Cursor's charset, colliding after normalization, or repeating across turns, public stop-sequence/tool-choice options being dropped or agent-generated forced choices terminating turns, authoritative final text corrections being lost by the leaked-thinking wrapper, later user turns reusing stale routing conversations, generic GPT routing forcing a 272K context value instead of the selected catalog context, concurrent fallback-identity creation reading partial files, stale routed runs or blocked shutdown control writes surviving the complete shutdown timeout, terminal-only native tool calls being dropped by the leaked-thinking wrapper, and orphan or incomplete tool-result windows producing malformed Cursor history.
+- Fixed final Cursor error metadata replacing authentication, quota, overload, and output-limit classifications from typed stream errors.
+- Fixed foreign provider reasoning being replayed as Cursor-native reasoning, orphan results splitting pending tool-call windows, and aborted invocations waiting for cancellation writes to drain.
+- Fixed Cursor validating returned tool calls against the broader context catalog instead of the final narrowed post-hook wire catalog.
+- Fixed Cursor replay treating pipe-delimited results from non-Responses providers as composite IDs, blocked startup and invocation writes escaping timeout or abort settlement, fallback identity publication leaving partial files after interruption, and the host interface import violating the Node namespace convention.
+- Fixed text-only Cursor routes replaying unsupported images and malformed persisted tool calls wedging later requests.
+- Fixed custom `cursor-agent` providers losing signed reasoning, cancelled callers waiting behind another session run lock, and healed leaked-reasoning text overriding authoritative final corrections.
+- Fixed resumed and later Cursor turns replaying outer-run-only opaque reasoning, and made structured invocation errors preserve embedded provider status while rendering readable details.
+- Fixed Cursor outer-run routing sending prior visible history instead of only the current user action; complete history remains in each inference request.
+- Fixed Cursor requests inventing a provider output limit absent from the fetched catalog, combined segmented OMP instructions into one provider system message, and removed terminal provider end-of-sequence markers from visible answers; explicit per-call output caps remain supported.
 
 ## [18.1.9] - 2026-09-04
 

@@ -8,6 +8,13 @@
 
 - Fixed Codex V2 remote compaction ignoring explicit thinking-off.
 - Fixed Codex V2 remote compaction rebuilding the request prefix differently from normal turns, restoring prompt-cache reuse ([#10786](https://github.com/can1357/oh-my-pi/issues/10786)).
+### Breaking Changes
+
+- Removed `cursorExecHandlers` and `cursorOnToolResult` from `AgentOptions`; Cursor tool calls no longer bypass the agent loop.
+
+### Changed
+
+- Changed Cursor tool calls to use the same validation, approval, execution, result, and continuation lifecycle as every other native inference provider.
 
 ## [18.1.6] - 2026-09-03
 

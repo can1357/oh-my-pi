@@ -1,5 +1,6 @@
 export { once, untilAborted } from "./abortable";
 export * from "./async";
+export * from "./atomic-file";
 export * from "./binary";
 export * from "./color";
 export * from "./dirs";

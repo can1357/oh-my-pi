@@ -52,33 +52,83 @@ export function modelOperationOverrides(provider: string, model: string): readon
 }
 
 /**
+ * Splits any KDL-declared Cursor effort suffix without applying a family gate.
+ */
+export function cursorEffortTierSuffix(
+	model: string,
+): { base: string; tier: string; level: string; fast: boolean } | undefined {
+	const rule = behavior.cursorEffort;
+	if (!rule) return undefined;
+	const fast = model.endsWith("-fast");
+	const candidate = fast ? model.slice(0, -"-fast".length) : model;
+	for (const tier of rule.tiers.toSorted((left, right) => right.suffix.length - left.suffix.length)) {
+		if (!candidate.endsWith(tier.suffix)) continue;
+		const prefix = candidate.slice(0, candidate.length - tier.suffix.length);
+		if (!prefix.endsWith("-")) continue;
+		return { base: prefix.slice(0, -1), tier: tier.suffix, level: tier.level, fast };
+	}
+	return undefined;
+}
+
+/**
  * Splits a Cursor effort-suffixed OpenAI sibling id into its base id and
  * declared effort tier. The family gate requires the declared marker
  * (`gpt-`) followed immediately by an ASCII digit; matching stays
  * case-sensitive to preserve Cursor wire-id behavior.
  */
-export function cursorEffortSuffix(model: string): { base: string; tier: string } | undefined {
+export function cursorEffortSuffix(
+	model: string,
+): { base: string; tier: string; level: string; fast: boolean } | undefined {
 	const rule = behavior.cursorEffort;
-	if (!rule) return undefined;
-	for (const tier of rule.tiers) {
-		if (!model.endsWith(tier)) continue;
-		const prefix = model.slice(0, model.length - tier.length);
-		if (!prefix.endsWith("-")) continue;
-		const base = prefix.slice(0, -1);
-		let family = false;
-		let index = base.indexOf(rule.familyMarker);
-		while (index !== -1) {
-			const next = base.charCodeAt(index + rule.familyMarker.length);
-			if (next >= 48 && next <= 57) {
-				family = true;
-				break;
-			}
-			index = base.indexOf(rule.familyMarker, index + 1);
-		}
-		if (!family) return undefined;
-		return { base, tier };
+	const matched = cursorEffortTierSuffix(model);
+	if (!rule || !matched) return undefined;
+	let index = matched.base.indexOf(rule.familyMarker);
+	while (index !== -1) {
+		const next = matched.base.charCodeAt(index + rule.familyMarker.length);
+		if (next >= 48 && next <= 57) return matched;
+		index = matched.base.indexOf(rule.familyMarker, index + 1);
 	}
 	return undefined;
+}
+
+/** Cursor effort suffixes in KDL-authored representative selection order. */
+export function cursorEffortPreference(): readonly string[] {
+	return behavior.cursorEffort?.preferredTiers ?? [];
+}
+
+/** Cursor effort display labels, longest first for unambiguous fallback-name stripping. */
+export function cursorEffortDisplayLabels(): readonly string[] {
+	return [
+		...new Set(
+			behavior.cursorEffort?.tiers.map(tier => tier.display).toSorted((left, right) => right.length - left.length) ??
+				[],
+		),
+	];
+}
+
+/** KDL-authored local effort level for one Cursor wire-id suffix. */
+export function cursorEffortLevel(tier: string): string | undefined {
+	return behavior.cursorEffort?.tiers.find(candidate => candidate.suffix === tier)?.level;
+}
+
+/** KDL-authored parameters for a generic Cursor effort-suffixed model. */
+export function cursorEffortParameters(tier: string, fast: boolean): readonly { id: string; value: string }[] {
+	return (
+		behavior.cursorEffort?.parameters.map(parameter => ({
+			id: parameter.id,
+			value: parameter.source === "tier" ? tier : String(fast),
+		})) ?? []
+	);
+}
+
+/** Exact source-measured Cursor requested-model route declared in behavior KDL. */
+export function cursorModelRoute(
+	model: string,
+):
+	| { readonly modelId: string; readonly parameters: readonly { readonly id: string; readonly value: string }[] }
+	| undefined {
+	const route = behavior.cursorRoutes.find(candidate => candidate.model === model);
+	return route === undefined ? undefined : { modelId: route.target, parameters: route.parameters };
 }
 
 /** Fixed Cursor `requestedModel` parameters declared for an exact wire model. */

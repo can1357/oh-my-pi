@@ -102,7 +102,7 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import { resolveProviderModelReference, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -1705,10 +1705,6 @@ export class AgentSession {
 		this.#advisors = new SessionAdvisors(advisorsHost, {
 			enabled: this.settings.get("advisor.enabled"),
 			tools: config.advisorTools,
-			createGrepTool: config.advisorCreateGrepTool,
-			createEditTool: config.advisorCreateEditTool,
-			getToolContext: config.advisorGetToolContext,
-			mcpResources: config.advisorMcpResources,
 			watchdogPrompt: config.advisorWatchdogPrompt,
 			sharedInstructions: config.advisorSharedInstructions,
 			contextPrompt: config.advisorContextPrompt,
@@ -10387,11 +10383,12 @@ export class AgentSession {
 	 * context window and synthesizes a separate `-1m` sibling only during live
 	 * discovery; the bundled base entry still carries the full long-context
 	 * window, so a fresh session runs with the 1.05M window that contradicts the
-	 * 400K catalog value until the user re-selects the same model. Re-look-up the
-	 * active selector post-discovery and, when its context window changed, fold
-	 * the refreshed spec into the live model. Same selector, so this is a metadata
-	 * refresh with no provider-session reset; reconcile model-dependent tools and
-	 * append-only state before `model_changed` notifies the status line and RPC
+	 * 400K catalog value until the user re-selects the same model. Re-resolve the
+	 * active selector post-discovery, falling back through its wire id when the
+	 * fetched catalog renamed the logical row, and fold a changed context window
+	 * into the live model. This metadata refresh does not reset the provider
+	 * session. Reconcile model-dependent tools and append-only state before
+	 * `model_changed` notifies the status line and RPC
 	 * subscribers. Issue #10488.
 	 */
 	async #rebindActiveModelAfterModelDiscovery(): Promise<void> {
@@ -10404,7 +10401,12 @@ export class AgentSession {
 		// switched models while discovery was in flight.
 		const current = this.model;
 		if (!current || !modelsAreEqual(current, boundAtStartup)) return;
-		const refreshed = this.#modelRegistry.find(current.provider, current.id);
+		const available = this.#modelRegistry.getAll();
+		const refreshed =
+			resolveProviderModelReference(current.provider, current.id, available) ??
+			(current.requestModelId
+				? resolveProviderModelReference(current.provider, current.requestModelId, available)
+				: undefined);
 		if (!refreshed || refreshed.contextWindow === current.contextWindow) return;
 		this.agent.setModel(refreshed);
 		await this.#reconcileModelDependentState(current, refreshed);

@@ -242,7 +242,9 @@ export interface CompiledModelOperations {
 /** Cursor effort-suffix sibling vocabulary. */
 export interface CompiledCursorEffort {
 	familyMarker: string;
-	tiers: string[];
+	tiers: { suffix: string; level: string; display: string }[];
+	preferredTiers: string[];
+	parameters: { id: string; source: "tier" | "fast" }[];
 }
 
 /** One fixed Cursor `requestedModel` parameter. */
@@ -250,6 +252,13 @@ export interface CompiledCursorParameter {
 	model: string;
 	id: string;
 	value: string;
+}
+
+/** One exact Cursor wire-model remap and its source-measured parameters. */
+export interface CompiledCursorRoute {
+	model: string;
+	target: string;
+	parameters: { id: string; value: string }[];
 }
 
 /** One provider quota-scope table. */
@@ -310,6 +319,7 @@ export interface CompiledBehavior {
 	modelOperations: CompiledModelOperations[];
 	cursorEffort?: CompiledCursorEffort;
 	cursorParameters: CompiledCursorParameter[];
+	cursorRoutes: CompiledCursorRoute[];
 	quotaTiers: CompiledQuotaRule[];
 	hostedDefaults: CompiledHostedDefault[];
 	apiRoutes: CompiledApiRoutes[];

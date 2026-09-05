@@ -1,12 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { wrapInbandToolStream } from "../src/dialect/owned-stream";
+import { wrapLeakedThinkingStream } from "../src/utils/leaked-thinking-stream";
 import type { AssistantMessage, AssistantMessageEvent, ThinkingContent, ToolCall, Usage } from "../src/types";
-import {
-	getStreamingPartialJson,
-	isCursorExecResolved,
-	kCursorExecResolved,
-	setStreamingPartialJson,
-} from "../src/utils/block-symbols";
+import { getStreamingPartialJson, setStreamingPartialJson } from "../src/utils/block-symbols";
 import { AssistantMessageEventStream } from "../src/utils/event-stream";
 
 const TOOLS = [
@@ -304,29 +300,6 @@ describe("wrapInbandToolStream native tool-call passthrough", () => {
 		expect(events).toContain("toolcall_end");
 	});
 
-	it("preserves kCursorExecResolved across the owned/in-band projector", async () => {
-		// Cursor + tools.format: gemini wraps every provider stream in
-		// wrapInbandToolStream. The projector rebuilds toolCall objects
-		// field-by-field; dropping the exec-resolved marker lets agent-loop
-		// re-run a call Cursor already settled.
-		const inner = drive((push, out) => {
-			const block: ToolCall = {
-				type: "toolCall",
-				id: "cursor-bash-1",
-				name: "bash",
-				arguments: { command: "echo hi" },
-			};
-			(block as ToolCall & { [kCursorExecResolved]?: true })[kCursorExecResolved] = true;
-			out.content.push(block);
-			push({ type: "toolcall_start", contentIndex: 0, partial: out });
-			push({ type: "toolcall_end", contentIndex: 0, toolCall: block, partial: out });
-		});
-		const { message } = await collect(wrapInbandToolStream(inner, TOOLS, "gemini"));
-		const calls = message.content.filter((b): b is ToolCall => b.type === "toolCall");
-		expect(calls).toHaveLength(1);
-		expect(isCursorExecResolved(calls[0])).toBe(true);
-	});
-
 	it("drops a nameless native ghost but keeps the real native call", async () => {
 		const { message } = await collect(wrapInbandToolStream(ghostThenRealNative(), TOOLS, "gemini"));
 		const calls = message.content.filter((b): b is ToolCall => b.type === "toolCall");
@@ -342,5 +315,148 @@ describe("wrapInbandToolStream native tool-call passthrough", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]!.name).toBe("todo");
 		expect(calls[0]!.arguments).toEqual({ ops: [{ op: "view" }] });
+	});
+});
+
+describe("leaked-thinking terminal reconciliation", () => {
+	it("reanchors multi-delta text whose terminal index shifted around signed reasoning", async () => {
+		const source = new AssistantMessageEventStream();
+		const projected = wrapLeakedThinkingStream(source);
+		const message = makeAssistant([]);
+		const streamedText = { type: "text" as const, text: "Hello world" };
+		message.content.push(streamedText);
+		source.push({ type: "start", partial: message });
+		source.push({ type: "text_start", contentIndex: 0, partial: message });
+		source.push({ type: "text_delta", contentIndex: 0, delta: "Hello", partial: message });
+		source.push({ type: "text_delta", contentIndex: 0, delta: " world", partial: message });
+		const signature = { type: "thinking" as const, thinking: "", thinkingSignature: "opaque" };
+		message.content.push(signature);
+		source.push({ type: "thinking_start", contentIndex: 1, partial: message });
+		source.push({ type: "thinking_end", contentIndex: 1, content: "", partial: message });
+		message.content = [signature, streamedText];
+		source.push({ type: "done", reason: "stop", message });
+
+		const result = await projected.result();
+		expect(result.content).toEqual([signature, streamedText]);
+	});
+
+	it("keeps an additional equal terminal text block after claiming the streamed copy", async () => {
+		const source = new AssistantMessageEventStream();
+		const projected = wrapLeakedThinkingStream(source);
+		const message = makeAssistant([]);
+		const streamedText = { type: "text" as const, text: "same" };
+		message.content.push(streamedText);
+		source.push({ type: "start", partial: message });
+		source.push({ type: "text_start", contentIndex: 0, partial: message });
+		source.push({ type: "text_delta", contentIndex: 0, delta: "same", partial: message });
+		const signature = { type: "thinking" as const, thinking: "", thinkingSignature: "opaque" };
+		const repeatedText = { type: "text" as const, text: "same" };
+		message.content.push(signature, repeatedText);
+		source.push({ type: "done", reason: "stop", message });
+
+		const result = await projected.result();
+		expect(result.content).toEqual([streamedText, signature, repeatedText]);
+	});
+
+	it("replaces a shifted streamed draft with authoritative final text", async () => {
+		const source = new AssistantMessageEventStream();
+		const projected = wrapLeakedThinkingStream(source);
+		const message = makeAssistant([]);
+		const draft = { type: "text" as const, text: "stream-1" };
+		message.content.push(draft);
+		source.push({ type: "start", partial: message });
+		source.push({ type: "text_start", contentIndex: 0, partial: message });
+		source.push({ type: "text_delta", contentIndex: 0, delta: draft.text, partial: message });
+		const signature = { type: "thinking" as const, thinking: "", thinkingSignature: "opaque" };
+		const final = { type: "text" as const, text: "final-1" };
+		message.content = [signature, final];
+		source.push({ type: "done", reason: "stop", message });
+
+		const result = await projected.result();
+		expect(result.content).toEqual([signature, final]);
+	});
+
+	it("replaces healed leaked-reasoning text with the authoritative final correction", async () => {
+		const source = new AssistantMessageEventStream();
+		const projected = wrapLeakedThinkingStream(source);
+		const message = makeAssistant([]);
+		const streamed = { type: "text" as const, text: "before<think>draft reasoning</think>stale answer" };
+		message.content.push(streamed);
+		source.push({ type: "start", partial: message });
+		source.push({ type: "text_start", contentIndex: 0, partial: message });
+		source.push({ type: "text_delta", contentIndex: 0, delta: streamed.text, partial: message });
+		const final = { type: "text" as const, text: "final" };
+		message.content = [final];
+		source.push({ type: "done", reason: "stop", message });
+
+		const result = await projected.result();
+		expect(result.content.filter(block => block.type === "text")).toEqual([final]);
+		expect(result.content.some(block => block.type === "thinking" && block.thinking === "draft reasoning")).toBe(
+			true,
+		);
+	});
+
+	it("creates visible text for a correction after a fully leaked reasoning source", async () => {
+		const source = new AssistantMessageEventStream();
+		const projected = wrapLeakedThinkingStream(source);
+		const message = makeAssistant([]);
+		const streamed = { type: "text" as const, text: "<think>draft reasoning</think>" };
+		message.content.push(streamed);
+		source.push({ type: "start", partial: message });
+		source.push({ type: "text_start", contentIndex: 0, partial: message });
+		source.push({ type: "text_delta", contentIndex: 0, delta: streamed.text, partial: message });
+		const final = { type: "text" as const, text: "final" };
+		message.content = [final];
+		source.push({ type: "done", reason: "stop", message });
+
+		const result = await projected.result();
+		expect(result.content.filter(block => block.type === "text")).toEqual([final]);
+		expect(result.content.some(block => block.type === "thinking" && block.thinking === "draft reasoning")).toBe(
+			true,
+		);
+	});
+
+	it("drops streamed text whose source block is absent from the terminal message", async () => {
+		const source = new AssistantMessageEventStream();
+		const projected = wrapLeakedThinkingStream(source);
+		const message = makeAssistant([]);
+		const first = { type: "text" as const, text: "first draft" };
+		const thinking = { type: "thinking" as const, thinking: "reasoning" };
+		const second = { type: "text" as const, text: "second draft" };
+		message.content.push(first, thinking, second);
+		source.push({ type: "start", partial: message });
+		source.push({ type: "text_start", contentIndex: 0, partial: message });
+		source.push({ type: "text_delta", contentIndex: 0, delta: first.text, partial: message });
+		source.push({ type: "text_end", contentIndex: 0, content: first.text, partial: message });
+		source.push({ type: "thinking_start", contentIndex: 1, partial: message });
+		source.push({ type: "thinking_delta", contentIndex: 1, delta: thinking.thinking, partial: message });
+		source.push({ type: "thinking_end", contentIndex: 1, content: thinking.thinking, partial: message });
+		source.push({ type: "text_start", contentIndex: 2, partial: message });
+		source.push({ type: "text_delta", contentIndex: 2, delta: second.text, partial: message });
+		const final = { type: "text" as const, text: "final" };
+		message.content = [final];
+		source.push({ type: "done", reason: "stop", message });
+
+		const result = await projected.result();
+		expect(result.content.filter(block => block.type === "text")).toEqual([final]);
+	});
+
+	it("retains a terminal-only native tool call", async () => {
+		const source = new AssistantMessageEventStream();
+		const projected = wrapLeakedThinkingStream(source);
+		const message = makeAssistant([]);
+		source.push({ type: "start", partial: message });
+		const terminal: ToolCall = {
+			type: "toolCall",
+			id: "terminal-only",
+			name: "todo",
+			arguments: { ops: [{ op: "view" }] },
+		};
+		message.content = [terminal];
+		source.push({ type: "done", reason: "toolUse", message });
+
+		const result = await projected.result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([terminal]);
 	});
 });

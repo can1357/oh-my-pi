@@ -1,0 +1,407 @@
+// Reconstructed from exact Cursor IDE 3.18.9 protobuf-es runtime metadata.
+// google.protobuf.Struct and Value fields use wire-equivalent bytes because OMP's
+// generated protocol closure owns their JSON codecs directly.
+
+syntax = "proto3";
+
+package aiserver.v1;
+
+message InferenceAgentTool {
+  string name = 1;
+  string description = 2;
+  bytes parameters = 3;
+  optional InferenceCustomToolFormat custom_tool_format = 4;
+}
+
+message InferenceAnthropicOptions {
+  optional InferenceCacheControl cache_control = 1;
+}
+
+message InferenceCacheControl {
+  string type = 1;
+}
+
+message InferenceContentPart {
+  oneof part {
+    InferenceTextPart text = 1;
+    InferenceImagePart image = 2;
+    InferenceFilePart file = 3;
+  }
+}
+
+message InferenceContentParts {
+  repeated InferenceContentPart parts = 1;
+}
+
+message InferenceCoreMessage {
+  InferenceMessageRole role = 1;
+  oneof content {
+    string text = 2;
+    InferenceContentParts parts = 3;
+    InferenceToolResultContent tool_content = 6;
+  }
+  repeated InferenceToolCall tool_calls = 4;
+  repeated InferenceReasoningPart reasoning_parts = 7;
+  optional string model_provider_message_id = 8;
+  optional string openai_phase = 9;
+  optional bool openai_phase_null = 10;
+  optional string cursor_inference_reason = 11;
+  optional string cursor_feature_type = 12;
+}
+
+message InferenceCursorOptions {
+  optional string image_description = 1;
+  map<int32, string> image_descriptions = 2;
+}
+
+message InferenceCustomToolFormat {
+  string type = 1;
+  string definition = 2;
+  string syntax = 3;
+}
+
+message InferenceExtendedUsageInfo {
+  int32 input_tokens = 1;
+  int32 output_tokens = 2;
+  int32 cache_read_tokens = 3;
+  int32 cache_write_tokens = 4;
+  int32 max_tokens = 5;
+}
+
+message InferenceExtraData {
+  repeated InferenceTokenLogprobs token_logprobs = 1;
+  repeated InferenceTokenIds token_ids = 2;
+  repeated InferenceTokenIds prompt_token_ids = 3;
+  repeated InferenceTokenIds extra_tokens = 4;
+  repeated InferenceTokenLogprobs extra_logprobs = 5;
+  repeated InferenceRoutingRow routing_matrix = 6;
+}
+
+message InferenceFilePart {
+  string data = 1;
+  string media_type = 2;
+  optional string filename = 3;
+  optional InferenceProviderOptions provider_options = 4;
+}
+
+message InferenceImageDescription {
+  int32 message_index = 1;
+  int32 part_index = 2;
+  optional int32 exp_content_index = 3;
+  string description = 4;
+}
+
+message InferenceImageDescriptionsInfo {
+  repeated InferenceImageDescription descriptions = 1;
+}
+
+message InferenceImagePart {
+  string data = 1;
+  optional string mime_type = 2;
+  optional InferenceProviderOptions provider_options = 3;
+}
+
+message InferenceInvocationIdInfo {
+  string invocation_id = 1;
+}
+
+enum InferenceMessageRole {
+  INFERENCE_MESSAGE_ROLE_UNSPECIFIED = 0;
+  INFERENCE_MESSAGE_ROLE_USER = 1;
+  INFERENCE_MESSAGE_ROLE_ASSISTANT = 2;
+  INFERENCE_MESSAGE_ROLE_TOOL = 3;
+  INFERENCE_MESSAGE_ROLE_SYSTEM = 4;
+}
+
+message InferenceModelConfig {
+  optional int32 max_tokens = 1;
+  optional float temperature = 2;
+  optional float top_p = 3;
+  repeated string stop_sequences = 4;
+}
+
+message InferenceModelParameterValue {
+  string id = 1;
+  string value = 2;
+}
+
+message InferenceNamedProviderDefinedTool {
+  string name = 1;
+  string id = 2;
+  string type = 3;
+  bytes options = 4;
+}
+
+message InferenceProviderMetadataInfo {
+  bytes metadata = 1;
+}
+
+message InferenceProviderOptions {
+  optional InferenceAnthropicOptions anthropic = 1;
+  optional InferenceCursorOptions cursor = 2;
+}
+
+message InferenceReasoningPart {
+  bool is_redacted = 1;
+  string text = 2;
+  optional string signature = 3;
+  optional string redacted_data = 4;
+  optional string model_name = 5;
+}
+
+message InferenceRequestedModel {
+  string model_id = 1;
+  bool max_mode = 2;
+  repeated InferenceModelParameterValue parameters = 3;
+  bool built_in_model = 4;
+  bool is_variant_string_representation = 5;
+}
+
+message InferenceResponseInfo {
+  string id = 1;
+  string model = 2;
+  int64 created_at = 3;
+  repeated InferenceResponseMessage messages = 4;
+  optional string error_message = 5;
+  optional InferenceExtraData inference_extra_data = 6;
+  optional bool supports_self_summary = 7;
+}
+
+message InferenceResponseMessage {
+  string id = 1;
+  InferenceMessageRole role = 2;
+  optional string content = 3;
+  repeated InferenceToolCall tool_calls = 4;
+  optional InferenceToolResultContent tool_result = 5;
+  repeated InferenceReasoningPart reasoning_parts = 6;
+}
+
+message InferenceRoutingRow {
+  repeated string values = 1;
+}
+
+message InferenceStreamError {
+  string message = 1;
+  string code = 2;
+  bool is_input_token_limit_error = 3;
+  bool is_output_token_limit_error = 4;
+  InferenceStreamErrorType error_type = 5;
+}
+
+enum InferenceStreamErrorType {
+  INFERENCE_STREAM_ERROR_TYPE_UNSPECIFIED = 0;
+  INFERENCE_STREAM_ERROR_TYPE_UNKNOWN = 1;
+  INFERENCE_STREAM_ERROR_TYPE_INPUT_TOKEN_LIMIT = 2;
+  INFERENCE_STREAM_ERROR_TYPE_OUTPUT_TOKEN_LIMIT = 3;
+  INFERENCE_STREAM_ERROR_TYPE_RATE_LIMIT = 4;
+  INFERENCE_STREAM_ERROR_TYPE_AUTHENTICATION = 5;
+  INFERENCE_STREAM_ERROR_TYPE_PERMISSION = 6;
+  INFERENCE_STREAM_ERROR_TYPE_OVERLOADED = 7;
+  INFERENCE_STREAM_ERROR_TYPE_CONTENT_FILTER = 8;
+}
+
+message InferenceStreamRequest {
+  repeated InferenceCoreMessage messages = 1;
+  repeated InferenceAgentTool tools = 2;
+  repeated InferenceNamedProviderDefinedTool provider_defined_tools = 3;
+  optional InferenceModelConfig model_config = 4;
+  optional string model_id = 5;
+  optional string invocation_id = 6;
+  optional InferenceRequestedModel requested_model = 7;
+  optional string conversation_id = 8;
+  repeated string accepted_unadvertised_tool_names = 9;
+  optional string automation_id = 10;
+  optional InferenceReason inference_reason = 11;
+  optional string conversation_group_id = 12;
+}
+
+enum InferenceReason {
+  INFERENCE_REASON_UNSPECIFIED = 0;
+  INFERENCE_REASON_GEMINI_VIDEO_SUBAGENT = 1;
+}
+
+message InferenceStreamResponse {
+  oneof response {
+    InferenceTextStreamPart text_part = 1;
+    InferenceToolCallStreamPart tool_call_part = 2;
+    InferenceUsageInfo usage = 3;
+    InferenceResponseInfo response_info = 4;
+    InferenceExtendedUsageInfo extended_usage = 5;
+    InferenceProviderMetadataInfo provider_metadata = 6;
+    InferenceInvocationIdInfo invocation_id = 7;
+    InferenceStreamError error = 8;
+    InferenceThinkingStreamPart thinking_part = 9;
+    InferenceImageDescriptionsInfo image_descriptions = 10;
+  }
+}
+
+message InferenceTextPart {
+  string text = 1;
+  optional InferenceProviderOptions provider_options = 2;
+}
+
+message InferenceTextStreamPart {
+  string text = 1;
+  bool is_final = 2;
+}
+
+message InferenceThinkingStreamPart {
+  string text = 1;
+  optional string signature = 2;
+  bool is_final = 3;
+}
+
+message InferenceTokenIds {
+  repeated int64 values = 1;
+}
+
+message InferenceTokenLogprobs {
+  repeated double values = 1;
+}
+
+message InferenceToolCall {
+  string tool_call_id = 1;
+  string tool_name = 2;
+  bytes args = 3;
+  optional string raw_tool_call_args = 4;
+}
+
+message InferenceToolCallStreamPart {
+  string tool_call_id = 1;
+  string tool_name = 2;
+  string args = 3;
+  bool is_complete = 4;
+  optional int32 tool_index = 5;
+}
+
+message InferenceToolResultContent {
+  repeated InferenceToolResultPart parts = 1;
+}
+
+message InferenceToolResultPart {
+  string tool_call_id = 1;
+  string tool_name = 2;
+  bytes result = 3;
+  bool is_error = 4;
+  repeated InferenceContentPart experimental_content = 5;
+  optional InferenceProviderOptions provider_options = 6;
+}
+
+message InferenceUsageInfo {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  optional int32 total_tokens = 3;
+}
+
+message RunInferenceCancelInvocation {
+  string invocation_id = 1;
+}
+
+message RunInferenceClientMessage {
+  oneof message {
+    RunInferenceRunRequest run_request = 1;
+    RunInferenceInvokeModel invoke_model = 2;
+    RunInferenceCancelInvocation cancel_invocation = 3;
+    RunInferenceFinishRun finish_run = 4;
+  }
+}
+
+message RunInferenceErrorDetail {
+  string type = 1;
+  bytes value = 2;
+}
+
+message RunInferenceFinishRun {}
+message RunInferenceHeartbeat {}
+
+message RunInferenceInvocationEnd {
+  string invocation_id = 1;
+  optional RunInferenceInvocationError error = 2;
+}
+
+message RunInferenceInvocationError {
+  int32 code = 1;
+  string message = 2;
+  repeated RunInferenceErrorDetail details = 3;
+}
+
+message RunInferenceInvocationResponse {
+  string invocation_id = 1;
+  InferenceStreamResponse response = 2;
+}
+
+message RunInferenceInvokeModel {
+  string invocation_id = 1;
+  InferenceStreamRequest request = 2;
+}
+
+message RunInferencePromptModelMetadata {
+  string vendor = 1;
+  string prompt_version = 2;
+  bool is_sonnet45 = 3;
+  bool is_gemini3 = 4;
+  bool is_gpt51 = 5;
+  bool is_gpt52 = 6;
+  bool is_gpt5 = 7;
+  bool is_gpt55 = 8;
+  bool is_gpt56 = 9;
+  bool is_sonnet4 = 10;
+  bool is_codex_family = 11;
+  bool is_gpt54 = 12;
+  bool is_gpt52_codex = 13;
+  bool is_gpt53_codex = 14;
+  bool is_gpt53_codex_spark = 15;
+  bool is_claude_4x = 16;
+  bool is_opus45 = 17;
+  bool is_opus46 = 18;
+  bool is_opus48 = 19;
+  bool is_opus5 = 20;
+  bool is_fable5 = 21;
+  bool is_fruitcake = 22;
+  bool is_gpt5_family = 23;
+  bool is_composer1 = 24;
+  bool is_composer15 = 25;
+  bool is_composer2 = 26;
+  bool is_composer_matterhorn = 27;
+  bool is_grok45_product_prompt = 28;
+  bool is_raw_training_slug = 29;
+  optional string reasoning_effort = 30;
+  bool use_dsv3_harness = 31;
+  optional int32 agent_token_limit = 32;
+  optional int32 estimated_cache_ttl_ms = 33;
+}
+
+message RunInferenceRoutingMessage {
+  RunInferenceRoutingRole role = 1;
+  string text = 2;
+}
+
+enum RunInferenceRoutingRole {
+  RUN_INFERENCE_ROUTING_ROLE_UNSPECIFIED = 0;
+  RUN_INFERENCE_ROUTING_ROLE_USER = 1;
+  RUN_INFERENCE_ROUTING_ROLE_ASSISTANT = 2;
+}
+
+message RunInferenceRunReady {
+  InferenceRequestedModel resolved_model = 1;
+  bool supports_self_summary = 2;
+  optional string routed_model_display_name = 3;
+  RunInferencePromptModelMetadata prompt_model_metadata = 4;
+}
+
+message RunInferenceRunRequest {
+  string conversation_id = 1;
+  optional string conversation_group_id = 2;
+  InferenceRequestedModel requested_model = 3;
+  repeated RunInferenceRoutingMessage routing_conversation = 4;
+  optional string agent_mode = 5;
+}
+
+message RunInferenceServerMessage {
+  oneof message {
+    RunInferenceHeartbeat heartbeat = 1;
+    RunInferenceRunReady run_ready = 2;
+    RunInferenceInvocationResponse invocation_response = 3;
+    RunInferenceInvocationEnd invocation_end = 4;
+  }
+}

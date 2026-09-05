@@ -2133,29 +2133,6 @@ function b() {
 			const content = await Bun.file(testFile).text();
 			expect(content).toBe("hello universe");
 		});
-
-		it("applies the bridge's internal edits batch form as one aggregate result", async () => {
-			// Only the Cursor exec bridge produces this shape (multi-replacement
-			// pi_edit frames); it must apply every replacement in order and
-			// return a single aggregated diff.
-			const testFile = path.join(testDir, "edit-batch.txt");
-			fs.writeFileSync(testFile, "alpha\nbeta\n");
-
-			const result = await editTool.execute("test-batch-1", {
-				path: testFile,
-				edits: [
-					{ old_string: "alpha", new_string: "ALPHA" },
-					{ old_string: "beta", new_string: "BETA" },
-				],
-			});
-
-			expect(result.isError).toBeUndefined();
-			const content = await Bun.file(testFile).text();
-			expect(content).toBe("ALPHA\nBETA\n");
-			const details = result.details as { diff?: string } | undefined;
-			expect(details?.diff).toContain("ALPHA");
-			expect(details?.diff).toContain("BETA");
-		});
 	});
 
 	describe("bash tool", () => {
