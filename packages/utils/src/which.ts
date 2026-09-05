@@ -212,13 +212,12 @@ function filterAbsoluteSearchPath(rawPath: string | undefined): string | null {
 export const whichFresh = os.platform() === "darwin" ? darwinWhich : Bun.which;
 
 // Derive stable cache key from command and lookup options
-function cacheKey(command: string, options?: WhichOptions): CacheKey {
+function cacheKey(command: string, options?: Bun.WhichOptions): CacheKey {
 	if (!options) return command;
-	if (!options.cwd && !options.PATH && !options.requireAbsolutePaths) return command;
+	if (!options.cwd && !options.PATH) return command;
 	let h = Bun.hash(command);
 	if (options.cwd) h = Bun.hash(options.cwd, h);
 	if (options.PATH) h = Bun.hash(options.PATH, h);
-	if (options.requireAbsolutePaths) h = Bun.hash("reqAbs", h);
 	return h;
 }
 
