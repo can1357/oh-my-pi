@@ -6,7 +6,7 @@
 import * as path from "node:path";
 import { describe, expect, it, spyOn } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 import { runPrintMode } from "../../src/modes/print-mode";
 import type { AgentSession } from "../../src/session/agent-session";
 import * as telemetryExport from "../../src/telemetry-export";
@@ -88,5 +88,63 @@ describe("print mode disposes the session before exit", () => {
 			throw new Error(`Print session was not disposed before signal exit ${exitCode}: ${stderr}`);
 		}
 		expect(await markerFile.text()).toBe("sigterm");
+	});
+
+	it("defers to the signal exit code instead of process.exit(1) when a signal aborts the turn", async () => {
+		const abortedMsg: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "cursor-agent",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: {} as AssistantMessage["usage"],
+			stopReason: "aborted",
+			errorMessage: "Request aborted",
+			timestamp: 1,
+		};
+
+		let signalCallback: ((reason: postmortem.Reason) => void | Promise<void>) | undefined;
+		let disposeReason: postmortem.Reason | "dispose" | undefined;
+		const session = {
+			extensionRunner: undefined,
+			subscribe: () => {},
+			settings: { get: () => false },
+			sessionManager: { buildSessionContext: () => ({ messages: [] }), getEntries: () => [] },
+			getLastAssistantMessage: () => abortedMsg,
+			prepareForHeadlessAdvisorDrain: () => {},
+			setTextOutputCommitted: () => {},
+			waitForAdvisorCatchup: async () => true,
+			// Mimic a real mid-turn signal: the postmortem teardown fires (which
+			// disposes and aborts the agent), and only then does the awaited turn
+			// settle with an aborted assistant message.
+			prompt: async () => {
+				await signalCallback?.(postmortem.Reason.SIGTERM);
+			},
+			dispose: async (options: { reason?: postmortem.Reason } = {}) => {
+				disposeReason ??= options.reason ?? "dispose";
+			},
+		} as unknown as AgentSession;
+
+		const registerSpy = spyOn(postmortem, "register").mockImplementation(
+			(_id: string, cb: (reason: postmortem.Reason) => void | Promise<void>) => {
+				signalCallback = cb;
+				return () => {};
+			},
+		);
+		const exitSpy = spyOn(process, "exit").mockImplementation(((code: number) => {
+			throw new ProcessExit(code);
+		}) as never);
+		const stderrSpy = spyOn(process.stderr, "write").mockImplementation((() => true) as never);
+
+		try {
+			await runPrintMode(session, { mode: "text", initialMessage: "go" });
+		} finally {
+			registerSpy.mockRestore();
+			exitSpy.mockRestore();
+			stderrSpy.mockRestore();
+		}
+
+		expect(exitSpy).not.toHaveBeenCalled();
+		expect(disposeReason).toBe(postmortem.Reason.SIGTERM);
 	});
 });

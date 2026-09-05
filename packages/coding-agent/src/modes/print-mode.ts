@@ -91,17 +91,26 @@ export function printableEvent(event: AgentSessionEvent): unknown {
  * Sends prompts to the agent and outputs the result.
  */
 export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<void> {
-	const cancelSignalTeardown = postmortem.register("print-mode-session", reason =>
-		session.dispose({ reason, mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS }),
-	);
+	// A signal (SIGINT/SIGTERM/SIGHUP) landing mid-turn drives the exit code
+	// through postmortem (130/143/129). Record the reason so the aborted-response
+	// branch below never races that with its own process.exit(1).
+	let signalReason: postmortem.Reason | undefined;
+	const cancelSignalTeardown = postmortem.register("print-mode-session", reason => {
+		signalReason = reason;
+		return session.dispose({ reason, mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+	});
 	try {
-		await runPrintModeCore(session, options);
+		await runPrintModeCore(session, options, () => signalReason !== undefined);
 	} finally {
 		cancelSignalTeardown();
 	}
 }
 
-async function runPrintModeCore(session: AgentSession, options: PrintModeOptions): Promise<void> {
+async function runPrintModeCore(
+	session: AgentSession,
+	options: PrintModeOptions,
+	signalTeardownActive: () => boolean,
+): Promise<void> {
 	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
 
 	// process.stdout.write is fire-and-forget: a large final record (e.g. a
@@ -204,10 +213,16 @@ async function runPrintModeCore(session: AgentSession, options: PrintModeOptions
 		const assistantMsg = session.getLastAssistantMessage();
 
 		if (assistantMsg) {
-			// Check for error/aborted — skip silent-abort (plan-mode compaction transition)
+			// Check for error/aborted — skip silent-abort (plan-mode compaction
+			// transition) and any abort a signal teardown produced: on SIGINT/
+			// SIGTERM/SIGHUP `dispose()` calls `agent.abort()`, which finalizes the
+			// turn as `stopReason:"aborted"`. Racing that with process.exit(1) here
+			// would clobber the postmortem-driven 130/143/129 with an ordinary
+			// failure code, so defer the exit to the signal handler.
 			if (
 				(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
-				!isSilentAbort(assistantMsg)
+				!isSilentAbort(assistantMsg) &&
+				!signalTeardownActive()
 			) {
 				const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
 				// This branch hard-exits, bypassing the `await session.dispose()` at
