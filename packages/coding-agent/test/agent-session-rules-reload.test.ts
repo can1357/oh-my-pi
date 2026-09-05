@@ -18,7 +18,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function buildLocalModel(api: string): Model<Api> {
 	return buildModel({
@@ -33,6 +33,20 @@ function buildLocalModel(api: string): Model<Api> {
 		contextWindow: 4096,
 		maxTokens: 1024,
 	} as ModelSpec<Api>) as Model<Api>;
+}
+
+// User-scope `RULES.md` resolves through the process-global agent dir (getAgentDir()),
+// not the createAgentSession `agentDir` option, so a user-scope case must redirect it.
+const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+
+function restoreAgentDir(): void {
+	if (originalAgentDirEnv) {
+		setAgentDir(originalAgentDirEnv);
+	} else {
+		setAgentDir(fallbackAgentDir);
+		delete process.env.PI_CODING_AGENT_DIR;
+	}
 }
 
 async function createReloadSession(tempDir: TempDir): Promise<{ session: AgentSession; authStorage: AuthStorage }> {
@@ -62,14 +76,17 @@ async function createReloadSession(tempDir: TempDir): Promise<{ session: AgentSe
 
 async function expectStickyRuleReload(
 	reset: (session: AgentSession) => Promise<unknown>,
-	opts: { seedInitial: boolean },
+	opts: { seedInitial: boolean; scope: "user" | "project" },
 ): Promise<void> {
 	using tempDir = TempDir.createSync("@pi-rules-reload-");
 	const marker = Bun.nanoseconds().toString(36);
 	const original = `ORIGINAL_STICKY_${marker}`;
 	const updated = `UPDATED_STICKY_${marker}`;
-	// Project-scope sticky rule: nearest `.omp/RULES.md` walking up from cwd.
-	const rulesMd = path.join(tempDir.path(), ".omp", "RULES.md");
+	// User scope: `<agentDir>/RULES.md` via the process-global getAgentDir().
+	// Project scope: nearest `.omp/RULES.md` walking up from cwd.
+	if (opts.scope === "user") setAgentDir(tempDir.path());
+	const rulesMd =
+		opts.scope === "user" ? path.join(tempDir.path(), "RULES.md") : path.join(tempDir.path(), ".omp", "RULES.md");
 	if (opts.seedInitial) {
 		await fs.mkdir(path.dirname(rulesMd), { recursive: true });
 		await fs.writeFile(rulesMd, original);
@@ -95,6 +112,7 @@ async function expectStickyRuleReload(
 	} finally {
 		await session.dispose();
 		authStorage.close();
+		if (opts.scope === "user") restoreAgentDir();
 	}
 }
 
@@ -103,16 +121,24 @@ describe("AgentSession sticky RULES.md reload on session reset", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("re-reads an edited RULES.md after resetSessionContext()", async () => {
-		await expectStickyRuleReload(session => session.resetSessionContext(), { seedInitial: true });
+	it("re-reads an edited project RULES.md after resetSessionContext()", async () => {
+		await expectStickyRuleReload(session => session.resetSessionContext(), { seedInitial: true, scope: "project" });
 	});
 
-	it("re-reads an edited RULES.md after newSession()", async () => {
-		await expectStickyRuleReload(session => session.newSession(), { seedInitial: true });
+	it("re-reads an edited project RULES.md after newSession()", async () => {
+		await expectStickyRuleReload(session => session.newSession(), { seedInitial: true, scope: "project" });
 	});
 
-	it("picks up a RULES.md created after startup on resetSessionContext()", async () => {
-		await expectStickyRuleReload(session => session.resetSessionContext(), { seedInitial: false });
+	it("picks up a project RULES.md created after startup on resetSessionContext()", async () => {
+		await expectStickyRuleReload(session => session.resetSessionContext(), { seedInitial: false, scope: "project" });
+	});
+
+	it("re-reads an edited user RULES.md after resetSessionContext()", async () => {
+		await expectStickyRuleReload(session => session.resetSessionContext(), { seedInitial: true, scope: "user" });
+	});
+
+	it("picks up a user RULES.md created after startup on resetSessionContext()", async () => {
+		await expectStickyRuleReload(session => session.resetSessionContext(), { seedInitial: false, scope: "user" });
 	});
 });
 
