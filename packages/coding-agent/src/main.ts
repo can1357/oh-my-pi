@@ -59,7 +59,11 @@ import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
-import { registerDaemonProjectPresence } from "./launch/presence";
+import {
+	type DaemonProjectPresence,
+	type DaemonProjectPresenceSession,
+	registerDaemonProjectPresence,
+} from "./launch/presence";
 import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
@@ -1392,6 +1396,8 @@ interface RunRootCommandDependencies {
 	createForeignSessionStore?: (source: ForeignSessionSource) => ForeignSessionStore;
 	settings?: Settings;
 	forceSetupWizard?: boolean;
+	registerDaemonProjectPresence?: typeof registerDaemonProjectPresence;
+	runInteractiveMode?: typeof runInteractiveMode;
 }
 const DEFAULT_RUN_ROOT_DEPENDENCIES: RunRootCommandDependencies = {};
 
@@ -1807,8 +1813,22 @@ export async function runRootCommand(
 			}
 		}
 		await pluginPreloadPromise;
-		if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
-			await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
+		let daemonPresence: DaemonProjectPresence | undefined;
+		const registerPresence =
+			deps.registerDaemonProjectPresence ??
+			(deps === DEFAULT_RUN_ROOT_DEPENDENCIES ? registerDaemonProjectPresence : undefined);
+		if (registerPresence) {
+			const presenceSessionId = sessionManager?.getSessionId();
+			const initialSession: DaemonProjectPresenceSession | undefined = presenceSessionId
+				? { sessionId: presenceSessionId, title: sessionManager?.getSessionName() }
+				: undefined;
+			daemonPresence = await logger.time(
+				"registerDaemonProjectPresence",
+				registerPresence,
+				cwd,
+				undefined,
+				initialSession,
+			);
 		}
 
 		scheduleMarketplaceAutoUpdate({
@@ -1974,6 +1994,21 @@ export async function runRootCommand(
 				subagentEventBus,
 				preloadedExtensions: extensionsResult,
 			});
+			if (daemonPresence) {
+				const syncPresence = (): void => {
+					const sessionId = session.sessionManager.getSessionId();
+					const title = session.sessionManager.getSessionName();
+					void daemonPresence?.update({ sessionId, title }).catch(error => {
+						logger.warn("Failed to update daemon project presence", { error: String(error) });
+					});
+				};
+				await daemonPresence.update({
+					sessionId: session.sessionManager.getSessionId(),
+					title: session.sessionManager.getSessionName(),
+				});
+				session.registerSessionChangeCallback(syncPresence);
+				session.sessionManager.onSessionNameChanged(syncPresence);
+			}
 
 			try {
 				validateToolNames(initialArgs.tools, session.getAllToolNames());
@@ -2072,7 +2107,8 @@ export async function runRootCommand(
 				try {
 					stopStartupWatchdog();
 					logger.endTiming();
-					await runInteractiveMode(
+					const runInteractiveModeImpl = deps.runInteractiveMode ?? runInteractiveMode;
+					await runInteractiveModeImpl(
 						session,
 						VERSION,
 						startupChangelog,
