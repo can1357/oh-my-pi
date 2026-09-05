@@ -12,6 +12,7 @@
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added opt-in `bash.allowCompoundCommands` approval for conservative literal `&&` chains, with ordered per-segment rules and normal bash policy fallback for unmatched segments. The opt-in requires a positively classified POSIX-quoting shell; incompatible and unknown shells retain legacy approval. Whole-chain denies take precedence over earlier prompts.
+- Added per-provider API key lists: `providers.<name>.apiKey` in `models.yml` accepts a list of keys, `omp key-cycle <provider>` advances to the next key, failed keys automatically fail over to a sibling on 401/403 and quota exhaustion (each key tried at most once per operation), and credential provenance shows the masked active position (`key i/N`) without ever printing key material ([#10871](https://github.com/can1357/oh-my-pi/issues/10871)).
 
 ### Fixed
 

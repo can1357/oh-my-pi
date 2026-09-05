@@ -73,6 +73,9 @@ export const installHelp = {
 } satisfies CommandMetadata;
 
 export const joinHelp = { description: "Join a shared collab session (same as /join)" } satisfies CommandMetadata;
+export const keyCycleHelp = {
+	description: "Cycle to the next configured API key for a provider",
+} satisfies CommandMetadata;
 
 export const modelsHelp = { description: "List, search, and refresh available models" } satisfies CommandMetadata;
 

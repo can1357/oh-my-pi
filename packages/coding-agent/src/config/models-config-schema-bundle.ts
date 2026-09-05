@@ -297,7 +297,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const ProviderConfigSchema = type({
 		"baseUrl?": "string",
-		"apiKey?": "string",
+		"apiKey?": "string | string[]",
 		"api?": ApiSchema,
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
@@ -335,8 +335,11 @@ export const getModelsConfigSchemaBundle = once(() => {
 		if (value.baseUrl !== undefined && typeof value.baseUrl === "string" && value.baseUrl.length === 0) {
 			return ctx.mustBe("baseUrl a non-empty string");
 		}
-		if (value.apiKey !== undefined && typeof value.apiKey === "string" && value.apiKey.length === 0) {
-			return ctx.mustBe("apiKey a non-empty string");
+		if (value.apiKey !== undefined) {
+			const keys = Array.isArray(value.apiKey) ? value.apiKey : [value.apiKey];
+			if (keys.length === 0 || keys.some(key => typeof key !== "string" || key.length === 0)) {
+				return ctx.mustBe("apiKey a non-empty string or array of non-empty strings");
+			}
 		}
 		return true;
 	});

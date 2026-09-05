@@ -115,6 +115,51 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(rotatedKeys).toEqual(["first-kagi-key", "second-kagi-key"]);
 	});
 
+	it("user can store two keys via login, remove the first, and subsequent resolution uses the remaining key", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+
+		const keys = ["first-kagi-key", "second-kagi-key"];
+		const controller = {
+			onAuth: () => {},
+			onPrompt: async () => keys.shift() ?? "",
+		};
+
+		await authStorage.login("kagi", controller);
+		await authStorage.login("kagi", controller);
+
+		const listed = store.listAuthCredentials("kagi");
+		expect(listed.map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "first-kagi-key", source: "login" },
+			{ type: "api_key", key: "second-kagi-key", source: "login" },
+		]);
+		const removed = await authStorage.removeCredential("kagi", listed[0]?.id ?? -1);
+		expect(removed).toBe(true);
+
+		expect(store.listAuthCredentials("kagi").map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "second-kagi-key", source: "login" },
+		]);
+		expect(await authStorage.getApiKey("kagi")).toBe("second-kagi-key");
+		expect(await authStorage.getApiKey("kagi", "session-after-removal")).toBe("second-kagi-key");
+	});
+
+	it("existing single-key login behavior is unchanged (one row, same resolution as before)", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+
+		const controller = {
+			onAuth: () => {},
+			onPrompt: async () => "only-kagi-key",
+		};
+
+		await authStorage.login("kagi", controller);
+
+		expect(countCredentialRows(dbPath, "kagi")).toBe(1);
+		expect(store.listAuthCredentials("kagi").map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "only-kagi-key", source: "login" },
+		]);
+		expect(store.getApiKey("kagi")).toBe("only-kagi-key");
+		expect(await authStorage.getApiKey("kagi", "session-single-key")).toBe("only-kagi-key");
+	});
+
 	it("replaces Token Plan Cookies by API-token identity without collapsing different tokens", () => {
 		if (!store) throw new Error("test setup failed");
 		const firstToken = "sk-sp-first";
