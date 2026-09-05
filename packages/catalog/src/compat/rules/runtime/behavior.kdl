@@ -127,6 +127,7 @@ behavior {
 	// Meta's /v1/models lists image generation and transcription SKUs beside
 	// the Muse Spark chat models.
 	exclude-models provider="meta" prefix="muse-image-" prefix="muse-voice-"
+	exclude-models provider="muse-code" prefix="muse-image-" prefix="muse-voice-"
 	// NanoGPT's roster interleaves non-text SKUs by name token.
 	exclude-models provider="nanogpt" substring="embedding" substring="image" substring="vision" \
 		substring="audio" substring="speech" substring="transcribe" substring="moderation" \
