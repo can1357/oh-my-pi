@@ -94,8 +94,8 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				});
 			}
 
-			const enabledTools = parseMCPToolFilterEntry(serverConfig.enabledTools);
-			const disabledTools = parseMCPToolFilterEntry(serverConfig.disabledTools);
+			const enabledTools = parseMCPToolFilterEntry(name, serverConfig.enabledTools);
+			const disabledTools = parseMCPToolFilterEntry(name, serverConfig.disabledTools);
 
 			const server: MCPServer = {
 				name,

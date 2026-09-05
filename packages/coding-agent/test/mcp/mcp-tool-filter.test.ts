@@ -123,3 +123,32 @@ test("applyMCPToolFilter preserves tool definitions and schemas", () => {
 	expect(filtered[0]).toEqual(defs[0]);
 	expect(filtered[1]).toEqual(defs[2]);
 });
+
+test("leading ! and extglob prefixes are literals (matcher surface pinned to documented globs)", () => {
+	// `!foo*` must NOT invert into a picomatch negation — otherwise a denylist
+	// entry `["!admin*"]` would silently exclude everything EXCEPT admin*.
+	expect(run(NAMES, ["!search*"]).allowed).toEqual([]);
+	expect(run(NAMES, undefined, ["!search*"]).unmatched).toEqual(["!search*"]);
+	expect(run(NAMES, ["+(a|b)"]).unmatched).toEqual(["+(a|b)"]);
+});
+
+test("character classes containing / are routed to never-match (loud unmatched, no silent half-match)", () => {
+	// `[/_]`-style mixed classes would silently half-match after NUL
+	// transliteration (matches `file_1`, never `file/1`). They must degrade to
+	// the loud unmatched path instead.
+	const mixed = run(["file_1", "file/1"], ["file[/_]1"]);
+	expect(mixed.allowed).toEqual([]);
+	expect(mixed.unmatched).toEqual(["file[/_]1"]);
+
+	const negated = run(NAMES, ["[^/]*"]);
+	expect(negated.allowed).toEqual([]);
+	expect(negated.unmatched).toEqual(["[^/]*"]);
+
+	const bare = run(NAMES, ["ad[/]min"]);
+	expect(bare.unmatched).toEqual(["ad[/]min"]);
+});
+
+test("valid classes still match after the slash-class guard", () => {
+	expect(run(["file_1", "file_a"], ["file_[0-9]"]).allowed).toEqual(["file_1"]);
+	expect(run(NAMES, ["admin/*"]).allowed).toEqual(["admin/delete"]);
+});

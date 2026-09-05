@@ -206,17 +206,19 @@ describe("loadFilesFromDir recursion", () => {
 
 describe("parseMCPToolFilterEntry", () => {
 	test("accepts arrays of non-empty strings", () => {
-		expect(parseMCPToolFilterEntry(["read", "write_*"])).toEqual(["read", "write_*"]);
-		expect(parseMCPToolFilterEntry([])).toBeUndefined();
-		expect(parseMCPToolFilterEntry(undefined)).toBeUndefined();
+		expect(parseMCPToolFilterEntry("srv", ["read", "write_*"])).toEqual(["read", "write_*"]);
+		expect(parseMCPToolFilterEntry("srv", [])).toBeUndefined();
+		expect(parseMCPToolFilterEntry("srv", undefined)).toBeUndefined();
 	});
 
 	test("warns and rejects non-array values (the allowlist failure mode is silent over-permission)", () => {
 		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
 		try {
-			expect(parseMCPToolFilterEntry("read, write")).toBeUndefined();
-			expect(parseMCPToolFilterEntry({ read: true })).toBeUndefined();
+			expect(parseMCPToolFilterEntry("srv", "read, write")).toBeUndefined();
+			expect(parseMCPToolFilterEntry("srv", { read: true })).toBeUndefined();
 			expect(warnSpy).toHaveBeenCalledTimes(2);
+			// Attribution: the warn names the server (mirrors requestIdFormat warns).
+			expect(String(warnSpy.mock.calls[0]?.[0])).toContain('MCP server "srv"');
 			expect(String(warnSpy.mock.calls[0]?.[0])).toContain("invalid tool filter value");
 			expect(String(warnSpy.mock.calls[0]?.[0])).toContain("read, write");
 		} finally {
@@ -227,7 +229,7 @@ describe("parseMCPToolFilterEntry", () => {
 	test("dropping empty string members does not warn (valid array with filtered members)", () => {
 		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
 		try {
-			expect(parseMCPToolFilterEntry(["read", ""])).toEqual(["read"]);
+			expect(parseMCPToolFilterEntry("srv", ["read", ""])).toEqual(["read"]);
 			expect(warnSpy).not.toHaveBeenCalled();
 		} finally {
 			warnSpy.mockRestore();

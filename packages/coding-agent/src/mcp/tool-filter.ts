@@ -45,9 +45,17 @@ export interface MCPToolFilterResult {
  * cannot appear in a JSON config string). The transliteration collides only
  * for names containing a literal NUL (`a/b` ≡ `a\0b`) — pathological, since
  * NUL cannot appear in a JSON config string either.
- * Patterns containing explicit `/` classes (`[/]`) are not supported.
+ * Character classes containing `/` (`[/]`, `[^/]`, mixed `[a/]`) are not
+ * supported: after transliteration the class contains NUL, which breaks
+ * picomatch class semantics. Such entries are routed to the unmatched-warn
+ * path by the metacharacter check below, so they degrade loudly to
+ * never-match instead of silently half-matching.
+ * `nonegate`/`noextglob` pin the applied surface to the documented globs
+ * (`*`, `?`, `[...]`, `{a,b}`) — a leading `!` or extglob prefix (`+(a|b)`)
+ * is treated as a literal by picomatch, keeping every entry's semantics
+ * uniform regardless of whether it also contains `*`/`?`.
  */
-const MATCH_OPTIONS = { dot: true } as const;
+const MATCH_OPTIONS = { dot: true, nonegate: true, noextglob: true } as const;
 
 const SLASH_SENTINEL = "\0";
 
@@ -63,6 +71,14 @@ class CompiledPattern {
 
 	constructor(pattern: string) {
 		this.#raw = pattern;
+		// A character class containing `/` is unsupported: after the NUL
+		// transliteration the class contains NUL, which breaks picomatch class
+		// semantics (mixed classes like `[a/]` would silently half-match).
+		// Route such entries to the never-match path so they surface loudly as
+		// `unmatched` instead of silently dropping the slash member.
+		if (/[[\]]/.test(pattern) && /\[.*\/.*\]/.test(pattern)) {
+			return;
+		}
 		if (/[*?[\]{}]/.test(pattern)) {
 			this.#isMatch = picomatch(pattern.replaceAll("/", SLASH_SENTINEL), MATCH_OPTIONS);
 		}

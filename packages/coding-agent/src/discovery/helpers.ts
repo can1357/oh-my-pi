@@ -203,10 +203,10 @@ export function parseMCPToolFilterEntries(value: unknown): string[] | undefined 
  * Invalid values degrade to `undefined` (filter off) so a typo never breaks
  * an otherwise usable server; the warning is the diagnostic.
  */
-export function parseMCPToolFilterEntry(value: unknown): string[] | undefined {
+export function parseMCPToolFilterEntry(serverName: string, value: unknown): string[] | undefined {
 	const parsed = parseMCPToolFilterEntries(value);
 	if (parsed === undefined && value !== undefined && !(Array.isArray(value) && value.length === 0)) {
-		logger.warn(`MCP server config has invalid tool filter value, ignoring: ${JSON.stringify(value)}`);
+		logger.warn(`MCP server "${serverName}": invalid tool filter value ${JSON.stringify(value)}, ignoring`);
 	}
 	return parsed;
 }

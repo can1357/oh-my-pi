@@ -164,8 +164,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				);
 			}
 			// Strict array-of-nonempty-strings; comma globs like "{a,b}_*" survive intact
-			const enabledTools = parseMCPToolFilterEntry(serverConfig.enabledTools);
-			const disabledTools = parseMCPToolFilterEntry(serverConfig.disabledTools);
+			const enabledTools = parseMCPToolFilterEntry(serverName, serverConfig.enabledTools);
+			const disabledTools = parseMCPToolFilterEntry(serverName, serverConfig.disabledTools);
 
 			result.push({
 				name: serverName,
