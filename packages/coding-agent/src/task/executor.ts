@@ -2842,8 +2842,15 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 			throw new Error(`Agent "${id}" is not available for a follow-up turn.`);
 		}
 		try {
-			session.setWorkPoolYieldItems(workPoolYieldItems);
-			await session.refreshBaseSystemPrompt();
+			await session.runToolRegistryMutation(async () => {
+				session.setWorkPoolYieldItems(workPoolYieldItems);
+				try {
+					await session.refreshBaseSystemPrompt();
+				} catch (error) {
+					session.setWorkPoolYieldItems(existingWorkPoolYieldItems);
+					throw error;
+				}
+			});
 		} catch (error) {
 			const current = registry.get(id);
 			if (!session.isStreaming && current?.session === session && current.status === "running") {
