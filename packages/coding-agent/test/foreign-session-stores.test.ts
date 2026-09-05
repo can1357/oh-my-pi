@@ -89,6 +89,53 @@ async function createClaudeFixture(): Promise<{ info: ForeignSessionInfo; store:
 }
 
 describe("ClaudeSessionStore", () => {
+	it("imports an API error as a failed turn", async () => {
+		const root = path.join(tempRoot, ".claude");
+		const cwd = path.join(tempRoot, "overloaded");
+		const id = "22222222-2222-4222-8222-222222222222";
+		await writeJsonl(path.join(root, "history.jsonl"), [
+			{ sessionId: id, timestamp: 1_767_225_600_000, display: ".", project: cwd },
+		]);
+		await writeJsonl(path.join(root, "projects", cwd.replaceAll(path.sep, "-"), `${id}.jsonl`), [
+			{
+				type: "user",
+				uuid: "u",
+				parentUuid: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd,
+				message: { content: "." },
+			},
+			{
+				type: "assistant",
+				uuid: "a",
+				parentUuid: "u",
+				timestamp: "2026-01-01T00:00:01.000Z",
+				isApiErrorMessage: true,
+				apiErrorStatus: 529,
+				error: "server_error",
+				// Claude Code stamps a completed stop_reason on the record even
+				// though nothing was answered.
+				message: {
+					id: "msg_err",
+					model: "claude-sonnet-4-5",
+					stop_reason: "stop_sequence",
+					content: [{ type: "text", text: "API Error: 529 Overloaded." }],
+				},
+			},
+		]);
+		const store = new ClaudeSessionStore(root);
+		const info = (await store.list())[0];
+		if (!info) throw new Error("Overloaded fixture was not listed");
+		const manager = await store.load(info);
+
+		const assistant = manager.getEntries().find(e => e.type === "message" && e.message.role === "assistant");
+		if (assistant?.type !== "message" || assistant.message.role !== "assistant") {
+			throw new Error("Missing imported assistant");
+		}
+		expect(assistant.message.stopReason).toBe("error");
+		expect(assistant.message.errorStatus).toBe(529);
+	});
+
 	it("uses current history metadata and converts linked messages in memory", async () => {
 		const { info, store } = await createClaudeFixture();
 

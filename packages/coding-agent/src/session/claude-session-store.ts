@@ -254,7 +254,9 @@ function convertRecord(
 			provider: "anthropic",
 			model,
 			usage: claudeUsage(record.message.usage),
-			stopReason: stopReason(record.message.stop_reason),
+			// An API-error record still carries a completed stop_reason, so the flag
+			// beside it is the only thing that says the turn failed.
+			stopReason: record.isApiErrorMessage === true ? "error" : stopReason(record.message.stop_reason),
 			timestamp,
 		};
 		const responseId = stringField(record.message, "id");
