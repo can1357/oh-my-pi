@@ -10,7 +10,7 @@
 
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
-- Keep workpool `yield` descriptions and schemas aligned with the active batch during initial session construction and reused-worker turns.
+- Keep workpool `yield` descriptions and schemas aligned during initial session construction and managed batch changes, without rebuilding prompts for unchanged or ordinary non-pooled follow-ups.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
 
 ## [18.1.10] - 2026-09-04

@@ -2830,18 +2830,27 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const session = await AgentLifecycleManager.global().ensureLive(id);
 	const ref = registry.get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
-	if (ref?.session !== session || ref.status !== "idle" || !registry.setStatus(id, "running", session)) {
-		throw new Error(`Agent "${id}" is not available for a follow-up turn.`);
-	}
-	try {
-		session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
-		await session.refreshBaseSystemPrompt();
-	} catch (error) {
-		const current = registry.get(id);
-		if (!session.isStreaming && current?.session === session && current.status === "running") {
-			registry.setStatus(id, "idle", session);
+	const workPoolYieldItems = options.workPoolYieldItems ?? [];
+	const existingWorkPoolYieldItems = session.getWorkPoolYieldItems();
+	const workPoolBatchChanged =
+		existingWorkPoolYieldItems.length !== workPoolYieldItems.length ||
+		existingWorkPoolYieldItems.some(
+			(item, index) => item.id !== workPoolYieldItems[index].id || item.index !== workPoolYieldItems[index].index,
+		);
+	if (workPoolBatchChanged) {
+		if (ref?.session !== session || ref.status !== "idle" || !registry.setStatus(id, "running", session)) {
+			throw new Error(`Agent "${id}" is not available for a follow-up turn.`);
 		}
-		throw error;
+		try {
+			session.setWorkPoolYieldItems(workPoolYieldItems);
+			await session.refreshBaseSystemPrompt();
+		} catch (error) {
+			const current = registry.get(id);
+			if (!session.isStreaming && current?.session === session && current.status === "running") {
+				registry.setStatus(id, "idle", session);
+			}
+			throw error;
+		}
 	}
 
 	const monitor = createSubagentRunMonitor({
@@ -2891,9 +2900,11 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		const active = monitor.takeActiveSession();
 		if (active) monitor.captureSalvage(active);
 		monitor.finish();
-		const current = registry.get(id);
-		if (!session.isStreaming && current?.session === session && current.status === "running") {
-			registry.setStatus(id, "idle", session);
+		if (workPoolBatchChanged) {
+			const current = registry.get(id);
+			if (!session.isStreaming && current?.session === session && current.status === "running") {
+				registry.setStatus(id, "idle", session);
+			}
 		}
 	}
 

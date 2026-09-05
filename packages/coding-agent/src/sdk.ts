@@ -567,6 +567,10 @@ export interface CreateAgentSessionOptions {
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
 	outputSchemaMode?: StructuredSubagentSchemaMode;
+	/**
+	 * Initial workpool batch, copied into the session and available before initial tool metadata/system prompt construction.
+	 * Defaults to [] for ordinary yield behavior.
+	 */
 	workPoolYieldItems?: readonly WorkPoolYieldItem[];
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;

@@ -165,6 +165,10 @@ export interface AgentSessionConfig {
 	thinkingLevelCeiling?: Effort;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
+	/**
+	 * Initial workpool batch, copied into the session and available before initial tool metadata/system prompt construction.
+	 * Defaults to [] for ordinary yield behavior.
+	 */
 	workPoolYieldItems?: readonly WorkPoolYieldItem[];
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
 	prewalk?: Prewalk;

@@ -361,7 +361,7 @@ For SDK consumers building orchestrators (similar to task executor flow):
 
 These are optional for normal single-agent embedding.
 
-Before a reused session starts a different pooled turn, call `session.setWorkPoolYieldItems(items)` and await `session.refreshBaseSystemPrompt()` to rebuild tool descriptions and rerun any system-prompt callback. Use an empty array to restore ordinary yield behavior. The task executor performs both steps for managed follow-up turns while holding the session out of idle-TTL parking. A fixed system-prompt override cannot adapt its own text to a changed batch.
+Before a reused session starts a different pooled turn, call `session.setWorkPoolYieldItems(items)` and await `session.refreshBaseSystemPrompt()` to rebuild tool descriptions and rerun any system-prompt callback. Use an empty array to restore ordinary yield behavior. The task executor compares item IDs and indexes and performs both steps only when the batch changes, while holding the session out of idle-TTL parking. Unchanged batches, including ordinary non-pooled follow-ups, do not rerun the callback. A fixed system-prompt override cannot adapt its own text to a changed batch.
 
 ## `createAgentSession()` return value
 
