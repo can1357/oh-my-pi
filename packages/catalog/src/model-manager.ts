@@ -338,12 +338,13 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		} else {
 			// Remote fetch failed. Re-persist any prior catalog as a
 			// non-authoritative snapshot so stale state stays visible while the
-			// retry backoff applies. When there is nothing to preserve (a
-			// discovery-only provider with no prior cache), leave the row absent
-			// rather than writing an empty snapshot: an empty non-authoritative row
-			// reads back as a fresh catalog and suppresses refetch for
-			// NON_AUTHORITATIVE_RETRY_MS, hiding every discovery-only model until it
-			// ages out. Writing nothing lets the next launch retry immediately (#10964).
+			// retry backoff applies. When there is no prior cache and nothing to
+			// preserve (a discovery-only provider on its first failed fetch), leave
+			// the row absent rather than writing an empty snapshot: an empty
+			// non-authoritative row reads back as a fresh catalog and suppresses
+			// refetch for NON_AUTHORITATIVE_RETRY_MS, hiding every discovery-only
+			// model until it ages out. Writing nothing lets the next launch retry
+			// immediately (#10964).
 			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
 			const latestRestoredCache = restoreCachedModelHeaders(
 				latestCache?.models ?? cache?.models ?? [],
@@ -368,7 +369,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			const fallbackSnapshotModels = collapseBuiltVariants(
 				mergeDynamicModels(mergeDynamicModels(staticModels, latestCacheModels), modelsDevModels),
 			);
-			if (fallbackSnapshotModels.length > 0) {
+			if (fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null) {
 				writeModelCache(
 					cacheProviderId,
 					now(),

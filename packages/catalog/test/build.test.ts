@@ -1203,6 +1203,51 @@ describe("model cache spec round trip", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	it("refreshes an existing empty cache row when discovery fails to preserve retry backoff", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-empty-failure-backoff-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const recoveredModel = completionsSpec({ id: "recovered-model", provider: "empty-failure-backoff-test" });
+		let discoveredModels: readonly ModelSpec<"openai-completions">[] | null = [];
+		let fetches = 0;
+		let currentTime = 1_000_000;
+		const options = {
+			providerId: "empty-failure-backoff-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			now: () => currentTime,
+			fetchDynamicModels: async () => {
+				fetches++;
+				return discoveredModels;
+			},
+		};
+		try {
+			const empty = await resolveProviderModels(options, "online");
+			expect(empty.models).toEqual([]);
+			expect(fetches).toBe(1);
+
+			currentTime += 5 * 60 * 1_000;
+			discoveredModels = null;
+			const failedRefresh = await resolveProviderModels(options, "online-if-uncached");
+			expect(failedRefresh.models).toEqual([]);
+			expect(fetches).toBe(2);
+
+			// The failed refresh advances the existing empty row's timestamp, so
+			// another launch waits for the normal backoff instead of retrying now.
+			discoveredModels = [recoveredModel];
+			const backedOff = await resolveProviderModels(options, "online-if-uncached");
+			expect(backedOff.models).toEqual([]);
+			expect(fetches).toBe(2);
+
+			currentTime += 5 * 60 * 1_000;
+			const recovered = await resolveProviderModels(options, "online-if-uncached");
+			expect(recovered.models.map(model => model.id)).toEqual([recoveredModel.id]);
+			expect(fetches).toBe(3);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 	it("does not cache an empty row when discovery fails, so the next launch retries immediately (#10964)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-failed-discovery-"));
 		const dbPath = path.join(tempDir, "models.db");
