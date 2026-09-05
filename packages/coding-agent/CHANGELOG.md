@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
+
+## [18.1.11] - 2026-09-05
+
 ### Added
 
 - Added `--agent <name>`, `/agent <name>`, and `/switch-agent` to apply a discovered agent definition (tools, model, thinking, spawns, system prompt) as the main-session persona, persisting across resume; explicit `--model`/`--tools`/`--thinking` flags take precedence. Closes [#6836](https://github.com/can1357/oh-my-pi/issues/6836), [#5306](https://github.com/can1357/oh-my-pi/issues/5306), [#7056](https://github.com/can1357/oh-my-pi/issues/7056).
