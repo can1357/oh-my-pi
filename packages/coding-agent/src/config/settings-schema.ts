@@ -3885,6 +3885,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"bash.allowCompoundCommands": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Bash",
+			label: "Allow Compound Commands",
+			description:
+				"Evaluate literal && chains per command; unmatched commands use normal bash approval policy and mode",
+		},
+	},
+
 	"bash.autoBackground.enabled": {
 		type: "boolean",
 		default: true,
