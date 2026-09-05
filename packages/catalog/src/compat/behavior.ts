@@ -184,6 +184,16 @@ export function isRetiredProvider(provider: string): boolean {
 	return behavior.retiredProviders.includes(provider);
 }
 
+/**
+ * Whether a provider's bundled rows may seed cross-provider bare-id enrichment
+ * references. Gateway-namespaced providers (ClinePass) are isolated so their
+ * limits, pricing, and reasoning controls never contaminate an unrelated proxy
+ * model that happens to advertise the same bare id.
+ */
+export function isBareIdReferenceProvider(provider: string): boolean {
+	return !behavior.referenceIsolatedProviders.includes(provider);
+}
+
 /** The declared subscription tier required to use a provider model id, if any. */
 export function planRequirementFor(provider: string, model: string): string | undefined {
 	const rule = behavior.planRequirements.find(candidate => candidate.provider === provider);

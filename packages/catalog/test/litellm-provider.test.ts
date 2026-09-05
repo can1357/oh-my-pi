@@ -114,6 +114,52 @@ function makeCollisionFetchMock(): FetchImpl {
 	}) as FetchImpl;
 }
 
+function makeClinePassCollisionFetchMock(): FetchImpl {
+	return vi.fn(async (input: string | URL | Request) => {
+		const url = inputUrl(input);
+		if (url === MODELS_DEV_URL) {
+			return Response.json({
+				"cline-pass": {
+					models: {
+						"cline-pass/glm-5.3-flash": {
+							id: "cline-pass/glm-5.3-flash",
+							name: "cline-pass/glm-5.3-flash",
+							tool_call: true,
+							reasoning: true,
+							limit: { context: 1_000_000, output: 131_072 },
+							cost: { input: 0.15, output: 0.5, cache_read: 0.03 },
+						},
+					},
+				},
+				zai: {
+					models: {
+						"glm-5.3-flash": {
+							id: "glm-5.3-flash",
+							name: "GLM-5.3-Flash",
+							tool_call: true,
+							reasoning: true,
+							limit: { context: 1_000_000, output: 131_072 },
+							cost: { input: 0.075, output: 0.25, cache_read: 0.015 },
+						},
+					},
+				},
+			});
+		}
+		if (url === "http://primary:4000/model_group/info") {
+			return Response.json({
+				data: [
+					{
+						model_group: "glm-5.3-flash",
+						model_name: "glm-5.3-flash",
+						litellm_params: { model: "openrouter/z-ai/glm-5.3-flash" },
+					},
+				],
+			});
+		}
+		return new Response("Not found", { status: 404 });
+	}) as FetchImpl;
+}
+
 afterEach(() => {
 	restoreLiteLLMBaseUrl();
 	vi.restoreAllMocks();
@@ -131,7 +177,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
+			`litellm:rich-v9:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -155,7 +201,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
+			`litellm:rich-v9:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -184,6 +230,28 @@ describe("LiteLLM provider discovery", () => {
 			cost: {
 				input: 1,
 				output: 2,
+			},
+		});
+	});
+
+	test("does not inherit ClinePass metadata through a colliding bare model id (#10932)", async () => {
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-litellm-test",
+			baseUrl: "http://primary:4000/v1",
+			fetch: makeClinePassCollisionFetchMock(),
+		});
+
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models).toHaveLength(1);
+		expect(models?.[0]).toMatchObject({
+			id: "glm-5.3-flash",
+			name: "GLM-5.3-Flash",
+			provider: "litellm",
+			cost: {
+				input: 0.075,
+				output: 0.25,
+				cacheRead: 0.015,
 			},
 		});
 	});

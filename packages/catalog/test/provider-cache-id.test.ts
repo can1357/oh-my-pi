@@ -25,6 +25,12 @@ test("lightweight cache resolver matches scoped descriptor inputs", () => {
 	}
 });
 
+test("canonical-reference consumers invalidate pre-isolation cache rows", () => {
+	for (const providerId of ["gmi-cloud", "siliconflow", "siliconflow-cn"]) {
+		expect(resolveModelCacheProviderId(providerId)).toBe(`${providerId}:models-v1`);
+	}
+});
+
 test("ollama cache scope preserves reverse-proxy path prefixes", () => {
 	const teamA = resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a/v1/" });
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a" }));

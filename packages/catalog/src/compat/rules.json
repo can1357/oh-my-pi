@@ -14815,6 +14815,9 @@
 			"wandb",
 			"opencode"
 		],
+		"referenceIsolatedProviders": [
+			"cline-pass"
+		],
 		"planRequirements": [
 			{
 				"provider": "openai-codex",

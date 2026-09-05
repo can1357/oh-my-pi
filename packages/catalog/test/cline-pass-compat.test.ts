@@ -35,6 +35,15 @@ const CLINEPASS_MODELS_DEV_FIXTURE = {
 				limit: { context: 1_000_000, output: 384_000 },
 				cost: { input: 5, output: 10 },
 			},
+			"cline-pass/unlisted-model": {
+				id: "cline-pass/unlisted-model",
+				name: "cline-pass/unlisted-model",
+				tool_call: true,
+				reasoning: false,
+				modalities: { input: ["text"] },
+				limit: { context: 131_072, output: 8_192 },
+				cost: { input: 1, output: 2 },
+			},
 		},
 	},
 };
@@ -80,6 +89,10 @@ describe("ClinePass catalog", () => {
 			contextWindow: 1_048_576,
 			maxTokens: 1_048_576,
 		});
+	});
+
+	it("keeps uncurated model names free of the Cline wire namespace", () => {
+		expect(sourceModel("unlisted-model").name).toBe("unlisted-model");
 	});
 
 	it("maps Cline's per-model reasoning controls from the curated snapshot", () => {

@@ -60,11 +60,16 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			return "cursor:default-effort-v4";
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
-			// rich-v8 invalidates rows whose `compatConfig` retained a colliding
-			// bundled model's provider-specific transport (e.g. Fireworks
-			// `wireModelIdMode`) before that leak was fixed (issue #9938).
-			return `litellm:rich-v8:${Bun.hash(baseUrl).toString(36)}`;
+			// rich-v9 invalidates rows that inherited ClinePass gateway metadata
+			// through generic models.dev bare-id enrichment (issue #10932).
+			return `litellm:rich-v9:${Bun.hash(baseUrl).toString(36)}`;
 		}
+		case "gmi-cloud":
+		case "siliconflow":
+		case "siliconflow-cn":
+			// models-v1 moves rows enriched before cross-provider reference
+			// isolation out of the legacy bare-provider namespaces (#10932).
+			return `${providerId}:models-v1`;
 		case "opencode-go":
 		case "opencode-zen": {
 			// v3: gateway-first rows cached before stencil enrichment carry null
