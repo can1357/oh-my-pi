@@ -20,7 +20,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition, SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const taskAgent: AgentDefinition = {
@@ -122,11 +122,19 @@ describe("task spawn routing", () => {
 			createSession({ manager, settings: { "task.agentModelOverrides": { task: "openai/gpt-4.1-mini" } } }),
 		);
 
-		const result = await tool.execute("tc-spawn", {
-			agent: "task",
-			name: "Spawnling",
-			task: "Do the thing.",
-		} as TaskParams);
+		const updates: TaskToolDetails[] = [];
+		const result = await tool.execute(
+			"tc-spawn",
+			{
+				agent: "task",
+				name: "Spawnling",
+				task: "Do the thing.",
+			} as TaskParams,
+			undefined,
+			update => {
+				if (update.details) updates.push(update.details);
+			},
+		);
 
 		// Tool returned while the job body is still gated on the deferred.
 		const text = getFirstText(result);
@@ -134,12 +142,24 @@ describe("task spawn routing", () => {
 		const jobId = result.details?.async?.jobId;
 		expect(jobId).toBeTruthy();
 		expect(text).toContain(`job \`${jobId}\``);
+		expect(result.details?.progress).toMatchObject([{ id: "Spawnling", jobId }]);
+		// Existing consumers that key progress by dispatch id continue to see
+		// the original shape; the manager id is additive.
+		expect(result.details?.progress?.map(({ id, status }) => ({ id, status }))).toEqual([
+			{ id: "Spawnling", status: expect.stringMatching(/pending|running/) },
+		]);
 		const job = manager.getJob(jobId!);
 		expect(job?.status).toBe("running");
 		expect(job?.resultText).toBeUndefined();
 
 		gate.resolve();
 		await job!.promise;
+		expect(updates.length).toBeGreaterThan(0);
+		for (const update of updates) {
+			const spawn = update.progress?.find(progress => progress.id === "Spawnling");
+			if (spawn) expect(spawn.jobId).toBe(jobId);
+		}
+		expect(updates.at(-1)?.progress).toMatchObject([{ id: "Spawnling", jobId, status: "completed" }]);
 
 		expect(job!.status).toBe("completed");
 		expect(job!.resultText).toContain("Spawnling is now idle");
@@ -283,6 +303,7 @@ describe("task spawn routing", () => {
 
 		const jobId = result.details?.async?.jobId;
 		expect(jobId).toBe("Foo-2");
+		expect(result.details?.progress).toMatchObject([{ id: "Foo", jobId: "Foo-2" }]);
 		const job = manager.getJob(jobId!);
 		await job!.promise;
 

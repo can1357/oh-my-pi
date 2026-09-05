@@ -417,6 +417,8 @@ export interface YieldItem {
 export interface AgentProgress {
 	index: number;
 	id: string;
+	/** Actual async manager job id; differs from `id` when registration resolves a collision. */
+	jobId?: string;
 	agent: string;
 	agentSource: AgentSource;
 	status: "pending" | "running" | "completed" | "failed" | "aborted";

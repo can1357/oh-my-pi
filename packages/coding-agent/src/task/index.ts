@@ -932,6 +932,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						if (failed) failedCount += 1;
 					},
 				});
+				spawn.progress.jobId = jobId;
 				if (started.length === 0) primaryJobId = jobId;
 				started.push({ agentId: spawn.agentId, jobId });
 			} catch (error) {
