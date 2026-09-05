@@ -661,3 +661,59 @@ describe("persisted subagent revival", () => {
 		});
 	});
 });
+
+describe("persisted allowlist revival", () => {
+	it("revives an enforced allowlist from the declared tool list, not the enabled snapshot", async () => {
+		const cwd = makeTempDir("@pi-declared-revive-");
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		manager.appendSessionInit({
+			systemPrompt: "persisted prompt",
+			task: "persisted task",
+			// Effective snapshot taken before a late `session_start` registration:
+			// the declared `late_tool` is missing from the enabled set.
+			tools: ["read", "yield"],
+			declaredTools: ["read", "late_tool", "yield"],
+			enforceToolAllowlist: true,
+		});
+		manager.appendMessage({
+			role: "assistant",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			content: [{ type: "text", text: "persisted" }],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			api: "anthropic-messages",
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		await manager.close();
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+
+		const activeToolNames: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.enforceToolAllowlist).toBe(true);
+		expect(capturedOptions?.toolNames).toEqual(["read", "late_tool", "yield"]);
+		// The post-create clamp must scope to the declaration, not the stale
+		// snapshot — a declared tool that is available again at revival time (no
+		// later registration event) stays active.
+		expect(activeToolNames).toEqual([["read", "late_tool", "yield"]]);
+	});
+});

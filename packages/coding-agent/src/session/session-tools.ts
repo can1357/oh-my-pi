@@ -20,7 +20,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
-import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
+import { isMCPToolName, isToolScopedIn, normalizeToolNames } from "../tools/builtin-names";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
@@ -74,6 +74,12 @@ interface SessionToolsOptions {
 	createThinkTool?: () => Promise<AgentTool | null>;
 	builtInToolNames?: Iterable<string>;
 	presentationPinnedToolNames?: ReadonlySet<string>;
+	/** Subagent tool scoping: every runtime active-set mutation preserves the startup scope. */
+	enforceToolAllowlist?: boolean;
+	/** Names the enforced `tools:` allowlist permits (hidden protocol tools are always permitted). */
+	allowedToolNames?: ReadonlySet<string>;
+	/** Disallow patterns removed from every runtime selection (trailing `*` = prefix wildcard). */
+	disallowedToolPatterns?: readonly string[];
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
 	ensureWriteRegistered?: () => Promise<boolean>;
@@ -210,6 +216,10 @@ export class SessionTools {
 	#announcedMountsSeeded = false;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
+	/** Enforced subagent scope (`tools:` allowlist + `disallowedTools:`) applied to every active-set mutation. */
+	#enforceToolAllowlist: boolean;
+	#allowedToolNames: ReadonlySet<string> | undefined;
+	#disallowedToolPatterns: readonly string[];
 	#baseSystemPrompt: string[];
 	/**
 	 * Per-turn system prompt returned by a `before_agent_start` extension hook
@@ -278,6 +288,9 @@ export class SessionTools {
 			}
 		}
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
+		this.#enforceToolAllowlist = options.enforceToolAllowlist === true;
+		this.#allowedToolNames = options.allowedToolNames;
+		this.#disallowedToolPatterns = options.disallowedToolPatterns ?? [];
 		this.#ensureWriteRegistered = options.ensureWriteRegistered;
 		this.#isDeviceOnlyWrite = options.isDeviceOnlyWrite;
 		this.#deviceOnlyWriteTransportAvailable = this.#isDeviceOnlyWrite?.() === true;
@@ -401,9 +414,16 @@ export class SessionTools {
 		return [...(this.#xdev?.mountedNames ?? [])];
 	}
 
-	/** Whether the edit tool is registered. */
+	/**
+	 * Whether the edit tool is effectively granted: registered AND scoped into
+	 * the active set. `disallowedTools:` (or an enforced `tools:` allowlist)
+	 * keeps the registry entry but removes it from every active-set mutation,
+	 * so hashline anchors must be suppressed for the subagent (the
+	 * `resolveFileDisplayMode` contract). No-op for unrestricted sessions:
+	 * `#isToolScopedIn` admits everything then.
+	 */
 	get hasEditTool(): boolean {
-		return this.#toolRegistry.has("edit");
+		return this.#toolRegistry.has("edit") && this.#isToolScopedIn("edit");
 	}
 
 	/** Looks up a registered tool by its canonical name or `xd://` alias. */
@@ -821,9 +841,39 @@ export class SessionTools {
 		);
 	}
 
+	/**
+	 * Scope invariant for runtime mutations: a tool the startup scoping removed
+	 * (unlisted under an enforced `tools:` allowlist, or matched by
+	 * `disallowedTools:`) can never re-enter the active set through
+	 * {@link setActiveToolsByName}, extension hooks, or internal toggles. Hidden
+	 * protocol tools stay permitted, mirroring the shared
+	 * {@link isToolScopedIn} predicate from builtin-names.
+	 */
+	#isToolScopedIn(name: string): boolean {
+		// Metadata-aware disallow: pass the registered tool's raw `mcpServerName`
+		// so `mcp__<server>_*` still matches length-capped minted names (a plain
+		// name-prefix match misses the truncated + hashed registry key).
+		const mcpServerName = (this.#toolRegistry.get(name) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
+		return isToolScopedIn(
+			name,
+			this.#disallowedToolPatterns,
+			{
+				enforceToolAllowlist: this.#enforceToolAllowlist,
+				allowedToolNames: this.#allowedToolNames,
+			},
+			typeof mcpServerName === "string" ? mcpServerName : undefined,
+		);
+	}
+
+	#scopeActiveToolSelection(toolNames: string[]): string[] {
+		if (!this.#enforceToolAllowlist && this.#disallowedToolPatterns.length === 0) return toolNames;
+		return toolNames.filter(name => this.#isToolScopedIn(name));
+	}
+
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
+		toolNames = this.#scopeActiveToolSelection(toolNames);
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
 			toolMode: this.#host.model()?.toolMode,
@@ -898,7 +948,7 @@ export class SessionTools {
 		}
 		if (transportNeeded && builtInWriteAvailable) {
 			const write = this.#toolRegistry.get("write");
-			if (write && !validToolNames.includes("write")) {
+			if (write && !validToolNames.includes("write") && this.#isToolScopedIn("write")) {
 				tools.push(this.#wrapToolForAcpPermission(write));
 				validToolNames.push("write");
 			}

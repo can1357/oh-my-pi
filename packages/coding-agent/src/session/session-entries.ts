@@ -251,6 +251,17 @@ export interface SessionInitEntry extends SessionEntryBase {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	/** Whether revival must retain only the explicitly persisted tool names. */
 	restrictToolNames?: boolean;
+	/** Whether the original run enforced `tools:` as a hard allowlist for custom/extension/MCP tools. */
+	enforceToolAllowlist?: boolean;
+	/** Disallow patterns the original run applied to the active tool set. */
+	disallowedTools?: string[];
+	/**
+	 * Declarative `tools:` allowlist the original run enforced (post auto-includes),
+	 * as opposed to {@link SessionInitEntry.tools}' effective enabled snapshot.
+	 * Cold revival must scope from this list: tools that register after the
+	 * snapshot (late extensions, MCP reconnects) stay allowed under it.
+	 */
+	declaredTools?: string[];
 	/** Spawn allowlist the subagent ran with ("" = none, "*" = any, else CSV); absent on pre-spawns files. */
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */

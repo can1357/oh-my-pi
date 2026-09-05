@@ -2397,6 +2397,9 @@ export class SessionManager {
 		outputSchema?: unknown;
 		outputSchemaMode?: StructuredSubagentSchemaMode;
 		restrictToolNames?: boolean;
+		enforceToolAllowlist?: boolean;
+		disallowedTools?: string[];
+		declaredTools?: string[];
 		spawns?: string;
 		readSummarize?: boolean;
 		advisor?: string;
@@ -2962,6 +2965,9 @@ export class SessionManager {
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
+			enforceToolAllowlist?: boolean;
+			disallowedTools?: string[];
+			declaredTools?: string[];
 			spawns?: string;
 			readSummarize?: boolean;
 			advisor?: string;
@@ -2979,6 +2985,9 @@ export class SessionManager {
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
+			enforceToolAllowlist?: boolean;
+			disallowedTools?: string[];
+			declaredTools?: string[];
 			spawns?: string;
 			readSummarize?: boolean;
 			advisor?: string;
@@ -3000,6 +3009,9 @@ export class SessionManager {
 					outputSchema: entry.outputSchema,
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,
+					enforceToolAllowlist: entry.enforceToolAllowlist,
+					disallowedTools: entry.disallowedTools,
+					declaredTools: entry.declaredTools,
 					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
 					advisor: entry.advisor,

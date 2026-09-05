@@ -17,9 +17,13 @@ import type {
 } from "../extensibility/custom-tools/types";
 import { resolveLocalUrlToFile } from "../internal-urls/local-protocol";
 import type { Theme } from "../modes/theme/theme";
+import { sanitizeMCPToolNamePart } from "../tools/builtin-names";
 import type { OutputMeta } from "../tools/output-meta";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+
+export { sanitizeMCPToolNamePart };
+
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
 import { renderMCPCall, renderMCPResult } from "./render";
@@ -396,24 +400,6 @@ async function reconnectWithAbort(
 }
 
 /**
- * Create a unique tool name for an MCP tool.
- *
- * Prefixes with server name to avoid conflicts. If the tool name already
- * starts with the server name (e.g., server "puppeteer" with tool
- * "puppeteer_screenshot"), strips the redundant prefix to produce
- * "mcp__puppeteer_screenshot" instead of "mcp__puppeteer_puppeteer_screenshot".
- */
-function sanitizeMCPToolNamePart(value: string, fallback: string): string {
-	const sanitized = value
-		.toLowerCase()
-		.replace(/[^a-z_]+/g, "_")
-		.replace(/_+/g, "_")
-		.replace(/^_+|_+$/g, "");
-
-	return sanitized.length > 0 ? sanitized : fallback;
-}
-
-/**
  * Longest tool name strict validators accept. OpenAI Responses/Completions and
  * Meta Responses enforce `^[a-zA-Z0-9_-]{1,64}$`; names over 64 chars are
  * rejected with HTTP 400 `name must be at most 64 characters` (#9130).
@@ -436,6 +422,14 @@ function capMCPToolNameLength(name: string): string {
 	return `${name.slice(0, keep)}_${hash}`;
 }
 
+/**
+ * Create a unique tool name for an MCP tool.
+ *
+ * Prefixes with server name to avoid conflicts. If the tool name already
+ * starts with the server name (e.g., server "puppeteer" with tool
+ * "puppeteer_screenshot"), strips the redundant prefix to produce
+ * "mcp__puppeteer_screenshot" instead of "mcp__puppeteer_puppeteer_screenshot".
+ */
 export function createMCPToolName(serverName: string, toolName: string): string {
 	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server");
 	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool");

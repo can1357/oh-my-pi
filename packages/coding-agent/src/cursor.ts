@@ -66,6 +66,21 @@ interface CursorExecBridgeOptions {
 	/** Resolves execution overrides (mounted-device permission wrappers) before the canonical map. */
 	getExecutableTool?: (name: string) => AgentTool | undefined;
 	/**
+	 * Scope gate for frame-driven tool resolution: a name it rejects resolves to
+	 * nothing (unadvertised-tool error), so scoped subagents cannot reach tools
+	 * that stay in the canonical registry but outside the active set.
+	 */
+	isToolExecutable?: (name: string) => boolean;
+	/**
+	 * Per-server gate for resource-only servers (advertise resources, no tools):
+	 * such servers have no registry tool to satisfy {@link isToolExecutable},
+	 * so the handler consults this predicate instead. A scope that does not
+	 * target MCP access at all keeps every resource-only server; an MCP-targeting
+	 * scope keeps only servers its `mcp__` disallow patterns do not name. The
+	 * adapter's own filtering and this handler gate must agree.
+	 */
+	allowToollessMcpServers?: (serverName: string) => boolean;
+	/**
 	 * The `replace`-mode `edit` instance `pi_edit` must run, when the session
 	 * granted `edit` at all.
 	 *
@@ -227,6 +242,69 @@ function buildToolErrorResult(message: string): AgentToolResult<unknown> {
 		details: {},
 	};
 }
+/**
+ * Whether a server's resources may be listed/read under a scope gate: no gate
+ * configured (unrestricted), or at least one of the server's registered tools
+ * is executable under it. Resource frames answer by server name and never run
+ * a registry tool, so every adapter answering them (primary bridge AND the
+ * advisor bridge, which shares the same adapter) must consult the gate —
+ * otherwise a scoped subagent could still enumerate and read every connected
+ * server's contents through an advisor. Ownership is matched via
+ * `mcpServerName` (never a lossy sanitized name prefix), mirroring the
+ * instructions filter.
+ */
+export function mcpServerScopedIn(
+	tools: Iterable<AgentTool>,
+	isToolExecutable: ((name: string) => boolean) | undefined,
+	serverName: string,
+): boolean {
+	if (!isToolExecutable) return true;
+	return Array.from(tools).some(
+		tool =>
+			(tool as { mcpServerName?: unknown }).mcpServerName === serverName &&
+			isToolExecutable((tool as { name?: string }).name ?? ""),
+	);
+}
+
+/**
+ * Whether a server's resources may be surfaced at all under a scope gate:
+ * the single decision shared by every resource-listing/read path (primary
+ * handler, adapter `serverNames`, adapter `getServerResources`/`readServerResource`,
+ * and the advisor bridge that shares the adapter).
+ *
+ * A server that owns registry tools is gated purely by tool executability (at
+ * least one owned tool scoped in); resource-only servers (no owned tool at
+ * all) survive only when the per-server predicate allows them, so an
+ * MCP-targeting scope strips servers its `mcp__` disallow patterns name.
+ */
+export function mcpServerResourcesAllowed(
+	tools: Iterable<AgentTool>,
+	isToolExecutable: ((name: string) => boolean) | undefined,
+	allowToollessServers: ((serverName: string) => boolean) | undefined,
+	serverName: string,
+): boolean {
+	if (!isToolExecutable) return true;
+	// Materialize once: `tools` may be a single-shot iterator (e.g. a Map's
+	// `.values()`), and the ownership pass below would read an exhausted
+	// iterable as "owns no tools", rescuing gated-out servers.
+	const roster = Array.from(tools);
+	if (mcpServerScopedIn(roster, isToolExecutable, serverName)) return true;
+	const ownsAnyTool = roster.some(tool => (tool as { mcpServerName?: unknown }).mcpServerName === serverName);
+	return !ownsAnyTool && allowToollessServers?.(serverName) === true;
+}
+
+/** Shared frame-tool resolution: scope gate first, then overrides, then the canonical map. */
+function resolveFrameTool(options: CursorExecBridgeOptions, toolName: string): AgentTool | undefined {
+	if (options.isToolExecutable && !options.isToolExecutable(toolName)) return undefined;
+	return options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
+}
+
+/** MCP names the scope gate lets this bridge execute, for not-found error hints. */
+function executableMcpToolNames(options: CursorExecBridgeOptions): string[] {
+	return Array.from(options.tools.keys()).filter(
+		name => name.startsWith("mcp__") && (!options.isToolExecutable || options.isToolExecutable(name)),
+	);
+}
 
 async function executeTool(
 	options: CursorExecBridgeOptions,
@@ -235,7 +313,7 @@ async function executeTool(
 	args: Record<string, unknown>,
 	overrideTool?: CursorBridgeTool,
 ): Promise<ToolResultMessage> {
-	const tool = overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
+	const tool = overrideTool ?? resolveFrameTool(options, toolName);
 	if (!tool) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
@@ -437,6 +515,20 @@ function buildTodoSyncResult(
 
 export class CursorExecHandlers implements ICursorExecHandlers {
 	constructor(private options: CursorExecBridgeOptions) {}
+	/**
+	 * Whether a server's resources may be listed/read: the shared
+	 * {@link mcpServerResourcesAllowed} decision, so every resource path
+	 * (this handler, the sdk adapter the advisor bridge shares, and the
+	 * instructions filter's reach) answers with one scope verdict.
+	 */
+	#serverScopedIn(serverName: string): boolean {
+		return mcpServerResourcesAllowed(
+			this.options.tools.values(),
+			this.options.isToolExecutable,
+			this.options.allowToollessMcpServers,
+			serverName,
+		);
+	}
 
 	/**
 	 * Modern Cursor builds paginate the legacy `read` frame with
@@ -513,7 +605,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const toolName = "bash";
-		const tool = this.options.tools.get(toolName);
+		const tool = resolveFrameTool(this.options, toolName);
 		if (!tool) {
 			const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 			return createToolResultMessage(toolCallId, toolName, result, true);
@@ -745,9 +837,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const mcp = this.options.mcpResources;
 		if (!mcp) return [];
 		const names = server ? [server] : mcp.serverNames();
+		const filtered = names.filter(name => this.#serverScopedIn(name));
 		// Concurrently: each name may block on that server's first catalog load,
 		// and a slow server should not delay the rest of the listing.
-		const catalogs = await Promise.all(names.map(async name => [name, await mcp.getServerResources(name)] as const));
+		const catalogs = await Promise.all(
+			filtered.map(async name => [name, await mcp.getServerResources(name)] as const),
+		);
 		const listed: CursorMcpResource[] = [];
 		for (const [name, catalog] of catalogs) {
 			for (const resource of catalog?.resources ?? []) {
@@ -797,6 +892,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		}
 		const mcp = this.options.mcpResources;
 		if (!mcp) return null;
+		// Same scope gate as the listing: a scoped-out server's resources are
+		// not readable, even by direct server address.
+		if (!this.#serverScopedIn(server)) return null;
 		const read = await mcp.readServerResource(server, uri);
 		if (!read) return null;
 		// The mime type must describe the bytes actually sent, not whatever item
@@ -867,6 +965,29 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * back would let a call that changed nothing overwrite live UI state.
 	 */
 	todoSync(snapshot: CursorTodoSnapshot | null, toolCallId: string, error: string | null = null): ToolResultMessage {
+		// `update_todos` / `read_todos` are resolved server-side and dispatched
+		// straight here, never passing through `resolveFrameTool`'s scope gate.
+		// A scope that denies `todo` must therefore be checked in-band: without
+		// it a scoped session would still see its local todo state mutated and
+		// persisted by calls the scope refuses everywhere else. The call still
+		// settles (the interactive card resolves on this result), it just never
+		// mirrors — the same "leave local state untouched" contract as a refused
+		if (this.options.isToolExecutable && !this.options.isToolExecutable("todo")) {
+			// Still settle the interactive card: resolved todo blocks never run
+			// through the agent loop (which emits `tool_execution_end` for
+			// ordinary calls), so this event is the only thing that clears the
+			// call's card from `pendingTools`. Without it a denied scope leaves
+			// the card animating until end-of-turn cleanup.
+			const result = buildTodoSyncResult(toolCallId, undefined, error);
+			this.options.emitEvent?.({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: "todo",
+				result: { content: result.content, details: result.details },
+				isError: error !== null,
+			});
+			return result;
+		}
 		const setPhases = this.options.setTodoPhases;
 		const existing = this.options.getTodoPhases?.() ?? [];
 
@@ -934,15 +1055,15 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		if (cursorMcpPrefersReplaceEdit(toolName, args)) {
 			const replaceTool = this.options.getEditReplaceTool?.();
 			if (!replaceTool) {
-				const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
+				const availableTools = executableMcpToolNames(this.options);
 				const message = formatMcpToolErrorMessage(toolName, availableTools);
 				return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
 			}
 			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
 		}
-		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
+		const tool = resolveFrameTool(this.options, toolName);
 		if (!tool) {
-			const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
+			const availableTools = executableMcpToolNames(this.options);
 			const message = formatMcpToolErrorMessage(toolName, availableTools);
 			const result = buildToolErrorResult(message);
 			return createToolResultMessage(toolCallId, toolName, result, true);
@@ -964,9 +1085,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const toolName = call.toolName || call.name;
 		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
 		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
-		const tool = preferReplace
-			? this.options.getEditReplaceTool?.()
-			: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
+		const tool = preferReplace ? this.options.getEditReplaceTool?.() : resolveFrameTool(this.options, toolName);
 		if (!tool) return false;
 		const context = this.options.getToolContext?.();
 		const settings = context?.settings;

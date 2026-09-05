@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,6 +15,7 @@ import {
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import * as memoryBackendModule from "@oh-my-pi/pi-coding-agent/memory-backend";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import {
@@ -26,8 +27,17 @@ import {
 } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { sanitizeMCPToolNamePart } from "@oh-my-pi/pi-coding-agent/tools/builtin-names";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { SERVER_INSTRUCTIONS } from "./fixtures/instructions-mcp";
+
+// Server whose minted tool names exceed the 64-char cap: `createMCPToolName`
+// truncates the whole name and appends a hash suffix, so `mcp__<server>_*`
+// cannot match by name prefix and must match by `mcpServerName` ownership.
+const LONG_SERVER_NAME = "very long server name that gets truncated at the 64 character cap boundary for testing";
+const LONG_SERVER_DISALLOW_PATTERN = `mcp__${sanitizeMCPToolNamePart(LONG_SERVER_NAME, "server")}_*`;
 
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
@@ -60,6 +70,9 @@ const sdkCustomTool = {
 		return { content: [{ type: "text", text: "sdk custom" }] };
 	},
 } satisfies CustomTool;
+// Deferred-discovery MCP fixture used by the mounted-instructions regression:
+// a real stdio server exposing `mcp__instr_do_thing` with `SERVER_INSTRUCTIONS`.
+const FIXTURE_MCP_PATH = path.join(import.meta.dir, "fixtures", "instructions-mcp.ts");
 
 describe("createAgentSession defaultInactive tool activation", () => {
 	const tempDirs: string[] = [];
@@ -2143,6 +2156,639 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("excludes unlisted custom, extension, and MCP tools when the allowlist is enforced", async () => {
+		const tempDir = makeTempDir();
+		const mcpProxy: CustomTool = {
+			name: "mcp__db_query",
+			label: "DB Query",
+			description: "MCP proxy tool",
+			parameters: type({}),
+			mcpServerName: "db",
+			mcpToolName: "query",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [toolActivationExtension],
+			customTools: [mcpProxy, sdkCustomTool],
+			toolNames: ["read", "yield"],
+			requireYieldTool: true,
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			const active = session.getActiveToolNames();
+			expect(active).toEqual(expect.arrayContaining(["read", "yield"]));
+			expect(active).not.toContain("mcp__db_query");
+			expect(active).not.toContain("default_active_tool");
+			expect(active).not.toContain("sdk_custom_tool");
+			// Unlisted tools are not mounted under xd:// either.
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__db_query");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("excludes MCP tools matching a disallow pattern without an allowlist", async () => {
+		const tempDir = makeTempDir();
+		const mcpProxy = (name: string, server: string, tool: string): CustomTool => ({
+			name,
+			label: name,
+			description: `MCP proxy tool from ${server}`,
+			parameters: type({}),
+			mcpServerName: server,
+			mcpToolName: tool,
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		});
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [mcpProxy("mcp__foo_bar", "foo", "bar"), mcpProxy("mcp__baz_qux", "baz", "qux")],
+			// No write tool: custom tools surface top-level instead of mounting under xd://.
+			toolNames: ["read", "yield"],
+			disallowedTools: ["mcp__foo_*"],
+		});
+
+		try {
+			// Non-disallowed MCP tools stay enabled and reachable; under the
+			// device's xd:// transport they mount off the top-level active set,
+			// so assert against enabled names plus mounts rather than active.
+			const enabled = [...session.getEnabledToolNames(), ...session.getMountedXdevToolNames()];
+			expect(enabled).not.toContain("mcp__foo_bar");
+			expect(enabled).toContain("mcp__baz_qux");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("disallows a length-capped MCP tool by mcpServerName ownership", async () => {
+		// Regression for the 64-char minted-name cap: a server whose minted name is
+		// truncated + hash-suffixed no longer prefix-matches `mcp__<server>_*`, so
+		// the documented one-server disallow silently retained the tools. The
+		// session must match by `mcpServerName` ownership metadata instead.
+		const tempDir = makeTempDir();
+		const cappedName = createMCPToolName(LONG_SERVER_NAME, "query");
+		expect(cappedName.length).toBe(64);
+		const mcpProxy: CustomTool = {
+			name: cappedName,
+			label: "Capped MCP Tool",
+			description: `MCP proxy tool from ${LONG_SERVER_NAME}`,
+			parameters: type({}),
+			mcpServerName: LONG_SERVER_NAME,
+			mcpToolName: "query",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [mcpProxy],
+			// No write tool: custom tools surface top-level instead of mounting under xd://.
+			toolNames: ["read", "yield"],
+			disallowedTools: [LONG_SERVER_DISALLOW_PATTERN],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).not.toContain(cappedName);
+			expect(session.getEnabledToolNames()).not.toContain(cappedName);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps extension tools when only MCP tools are disallowed", async () => {
+		const tempDir = makeTempDir();
+		const mcpProxy: CustomTool = {
+			name: "mcp__db_query",
+			label: "DB Query",
+			description: "MCP proxy tool",
+			parameters: type({}),
+			mcpServerName: "db",
+			mcpToolName: "query",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [toolActivationExtension],
+			customTools: [mcpProxy],
+			disallowedTools: ["mcp__*"],
+		});
+
+		try {
+			const active = session.getActiveToolNames();
+			expect(active).not.toContain("mcp__db_query");
+			// Extension tools survive the MCP-only disallow; discoverable ones mount under xd://.
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("default_active_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not mount xd:// tools when the write transport is disallowed", async () => {
+		const tempDir = makeTempDir();
+		const mcpProxy: CustomTool = {
+			name: "mcp__db_query",
+			label: "DB Query",
+			description: "MCP proxy tool",
+			parameters: type({}),
+			mcpServerName: "db",
+			mcpToolName: "query",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [mcpProxy],
+			disallowedTools: ["write"],
+		});
+
+		try {
+			// A disallowed write transport prevents xd:// mounting entirely, so the
+			// proxy surfaces top-level and write never re-enters the active set.
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__db_query");
+			expect(session.getActiveToolNames()).not.toContain("write");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not mount xd:// tools when the read transport is disallowed", async () => {
+		const tempDir = makeTempDir();
+		const mcpProxy: CustomTool = {
+			name: "mcp__db_query",
+			label: "DB Query",
+			description: "MCP proxy tool",
+			parameters: type({}),
+			mcpServerName: "db",
+			mcpToolName: "query",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [mcpProxy],
+			disallowedTools: ["read"],
+		});
+
+		try {
+			// A disallowed read transport prevents xd:// mounting: the model can no
+			// longer read xd:// results, so advertising mounted tools would mislead.
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__db_query");
+			expect(session.getActiveToolNames()).not.toContain("read");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	// Late registrations flow through scheduleToolRegistration after startup, so every
+	// arm of the scopedOut clause must hold there too, not just during initial activation:
+	//   scopedOut = (enforceToolAllowlist && !explicitlyRequested) || isToolDisallowed(...)
+	// A scoped-out tool stays in the registry (same-name collision handling keeps working)
+	// but never reaches the enabled set, the xd:// catalog, or the system prompt.
+
+	it("keeps a late extension tool registered but inactive when it matches a disallow pattern", async () => {
+		const tempDir = makeTempDir();
+		const lateDisallowedExtension: ExtensionFactory = pi => {
+			pi.on("session_start", async () => {
+				await Promise.resolve();
+				pi.registerTool({
+					name: "mcp__private_late",
+					label: "Private Late Tool",
+					description: "Late registration matching a disallow pattern.",
+					parameters: type({}),
+					async execute() {
+						return { content: [{ type: "text", text: "private late" }] };
+					},
+				});
+			});
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [lateDisallowedExtension],
+			disallowedTools: ["mcp__private_*"],
+		});
+
+		try {
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("expected extension runner");
+			await runner.emit({ type: "session_start" });
+
+			expect(session.getAllToolNames()).toContain("mcp__private_late");
+			expect(session.getEnabledToolNames()).not.toContain("mcp__private_late");
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__private_late");
+			expect(session.systemPrompt.join("\n")).not.toContain("mcp__private_late");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps a late extension tool inactive when the enforced allowlist does not list it", async () => {
+		const tempDir = makeTempDir();
+		const lateUnlistedExtension: ExtensionFactory = pi => {
+			pi.on("session_start", async () => {
+				await Promise.resolve();
+				pi.registerTool({
+					name: "late_unlisted_tool",
+					label: "Late Unlisted Tool",
+					description: "Late registration outside an enforced allowlist.",
+					parameters: type({}),
+					async execute() {
+						return { content: [{ type: "text", text: "late unlisted" }] };
+					},
+				});
+			});
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [lateUnlistedExtension],
+			toolNames: ["read", "yield"],
+			requireYieldTool: true,
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("expected extension runner");
+			await runner.emit({ type: "session_start" });
+
+			// The allowlist itself still holds: only granted tools stay active.
+			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "yield"]));
+			expect(session.getAllToolNames()).toContain("late_unlisted_tool");
+			expect(session.getEnabledToolNames()).not.toContain("late_unlisted_tool");
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("late_unlisted_tool");
+			expect(session.systemPrompt.join("\n")).not.toContain("late_unlisted_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("activates a late extension tool the caller explicitly requested despite an enforced allowlist", async () => {
+		const tempDir = makeTempDir();
+		const lateRequestedExtension: ExtensionFactory = pi => {
+			pi.on("session_start", async () => {
+				await Promise.resolve();
+				pi.registerTool({
+					name: "late_allowed_tool",
+					label: "Late Allowed Tool",
+					description: "Explicitly requested late registration under an enforced allowlist.",
+					parameters: type({}),
+					async execute() {
+						return { content: [{ type: "text", text: "late allowed" }] };
+					},
+				});
+			});
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [lateRequestedExtension],
+			toolNames: ["read", "write", "late_allowed_tool"],
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("expected extension runner");
+			await runner.emit({ type: "session_start" });
+
+			// Explicit request wins over the allowlist: top-level active, not xd://-mounted.
+			expect(session.getAllToolNames()).toContain("late_allowed_tool");
+			expect(session.getEnabledToolNames()).toContain("late_allowed_tool");
+			expect(session.getActiveToolNames()).toContain("late_allowed_tool");
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("late_allowed_tool");
+			expect(session.systemPrompt.join("\n")).toContain("late_allowed_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("activates an unscoped late registration like a startup one", async () => {
+		const tempDir = makeTempDir();
+		const lateControlExtension: ExtensionFactory = pi => {
+			pi.on("session_start", async () => {
+				await Promise.resolve();
+				pi.registerTool({
+					name: "late_control_tool",
+					label: "Late Control Tool",
+					description: "Late registration with no scoping flags.",
+					parameters: type({}),
+					async execute() {
+						return { content: [{ type: "text", text: "late control" }] };
+					},
+				});
+			});
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [lateControlExtension],
+		});
+
+		try {
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("expected extension runner");
+			await runner.emit({ type: "session_start" });
+
+			// Without scoping flags the late tool activates normally: enabled,
+			// discoverable-mounted under xd://, advertised in the prompt.
+			expect(session.getAllToolNames()).toContain("late_control_tool");
+			expect(session.getEnabledToolNames()).toContain("late_control_tool");
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("late_control_tool");
+			expect(session.systemPrompt.join("\n")).toContain("late_control_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not let an explicit request bypass a matching disallow pattern", async () => {
+		const tempDir = makeTempDir();
+		const lateOvertExtension: ExtensionFactory = pi => {
+			pi.on("session_start", async () => {
+				await Promise.resolve();
+				pi.registerTool({
+					name: "mcp__private_overt",
+					label: "Private Overt Tool",
+					description: "Explicitly requested but matching a disallow pattern.",
+					parameters: type({}),
+					async execute() {
+						return { content: [{ type: "text", text: "private overt" }] };
+					},
+				});
+			});
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [lateOvertExtension],
+			toolNames: ["read", "mcp__private_overt"],
+			disallowedTools: ["mcp__private_*"],
+		});
+
+		try {
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("expected extension runner");
+			await runner.emit({ type: "session_start" });
+
+			// Disallow patterns bind harder than naming the tool: registered, never active.
+			expect(session.getAllToolNames()).toContain("mcp__private_overt");
+			expect(session.getEnabledToolNames()).not.toContain("mcp__private_overt");
+			expect(session.getActiveToolNames()).not.toContain("mcp__private_overt");
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__private_overt");
+			expect(session.systemPrompt.join("\n")).not.toContain("mcp__private_overt");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	// Runtime mutations must preserve the startup scope too: an extension hook that
+	// calls `pi.setActiveTools([...pi.getAllTools().map(t => t.name)])` cannot
+	// reactivate a tool the enforced allowlist or a disallow pattern removed.
+
+	it("does not let setActiveToolsByName reactivate an allowlist-scoped tool", async () => {
+		const tempDir = makeTempDir();
+		const mcpProxy: CustomTool = {
+			name: "mcp__db_query",
+			label: "DB Query",
+			description: "MCP proxy tool",
+			parameters: type({}),
+			mcpServerName: "db",
+			mcpToolName: "query",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [toolActivationExtension],
+			customTools: [mcpProxy, sdkCustomTool],
+			toolNames: ["read", "yield"],
+			requireYieldTool: true,
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			// Simulates the bypass attempt: select every registered tool by name.
+			await session.setActiveToolsByName(session.getAllToolNames());
+
+			const active = session.getActiveToolNames();
+			expect(active).toEqual(expect.arrayContaining(["read", "yield"]));
+			expect(active).not.toContain("mcp__db_query");
+			expect(active).not.toContain("sdk_custom_tool");
+			expect(active).not.toContain("default_active_tool");
+			expect(session.getEnabledToolNames()).not.toContain("mcp__db_query");
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__db_query");
+			expect(session.systemPrompt.join("\n")).not.toContain("mcp__db_query");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not let setActiveToolsByName reactivate a disallowed MCP tool", async () => {
+		const tempDir = makeTempDir();
+		const mcpProxy = (name: string, server: string, tool: string): CustomTool => ({
+			name,
+			label: name,
+			description: `MCP proxy tool from ${server}`,
+			parameters: type({}),
+			mcpServerName: server,
+			mcpToolName: tool,
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		});
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [mcpProxy("mcp__foo_bar", "foo", "bar"), mcpProxy("mcp__baz_qux", "baz", "qux")],
+			toolNames: ["read", "yield"],
+			disallowedTools: ["mcp__foo_*"],
+		});
+
+		try {
+			await session.setActiveToolsByName(session.getAllToolNames());
+
+			// Disallow patterns persist; the non-disallowed server stays
+			// runtime-selectable (mounted under xd://, never re-activatable for
+			// the denied server's pattern).
+			expect(session.getEnabledToolNames()).not.toContain("mcp__foo_bar");
+			expect(session.getMountedXdevToolNames()).toContain("mcp__baz_qux");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps hidden protocol tools selectable under an enforced allowlist", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "yield"],
+			requireYieldTool: true,
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			await session.setActiveToolsByName(["read", "goal", "yield"]);
+
+			const active = session.getActiveToolNames();
+			expect(active).toEqual(expect.arrayContaining(["read", "goal", "yield"]));
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("enforces an explicit empty toolNames list down to protocol tools", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [toolActivationExtension],
+			customTools: [sdkCustomTool],
+			toolNames: [],
+			requireYieldTool: true,
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			// Declared-but-empty is a real allowlist: only `yield` stays active;
+			// custom, extension, and MCP tools are excluded despite registration.
+			expect(session.getActiveToolNames()).toEqual(["yield"]);
+			expect(session.getAllToolNames()).toContain("sdk_custom_tool");
+			expect(session.getEnabledToolNames()).not.toContain("sdk_custom_tool");
+			expect(session.getEnabledToolNames()).not.toContain("default_active_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("reports hasEditTool false when the edit builtin is disallowed", async () => {
+		// Regression for the hasEditTool scope fix: `disallowedTools: ["edit"]`
+		// keeps `edit` in the registry but out of the active set, so hashline
+		// anchors must be suppressed (resolveFileDisplayMode contract). Before
+		// the fix the registered-but-scoped-out edit still advertised true.
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			disallowedTools: ["edit"],
+		});
+
+		try {
+			expect(session.getAllToolNames()).toContain("edit");
+			expect(session.getActiveToolNames()).not.toContain("edit");
+			expect(session.hasEditTool).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("reports hasEditTool false when the enforced allowlist omits edit", async () => {
+		// Regression for the hasEditTool scope fix: an enforced `tools:`
+		// allowlist that does not name `edit` never grants it, so hashline
+		// anchors must be suppressed (resolveFileDisplayMode contract).
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "yield"],
+			requireYieldTool: true,
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			expect(session.getActiveToolNames()).not.toContain("edit");
+			expect(session.hasEditTool).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("reports hasEditTool true for an unscoped session with the edit built-in registered", async () => {
+		// Control for the two scoped regressions above: without disallow or
+		// allowlist scoping, `edit` is registered and active, and hashline
+		// anchors stay advertised (resolveFileDisplayMode contract).
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession(baseOptions(tempDir));
+
+		try {
+			expect(session.getAllToolNames()).toContain("edit");
+			expect(session.getActiveToolNames()).toContain("edit");
+			expect(session.hasEditTool).toBe(true);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("renders hashline anchor guidance in the read description for unrestricted sessions", async () => {
+		// Regression for the construction-time edit grant: ReadTool caches its
+		// description while the registry and the startup active set are still
+		// empty, so the getter must answer from the requested scope then.
+		// Unrestricted sessions keep the hashline anchor instructions that the
+		// anchors their read results actually emit.
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession(baseOptions(tempDir));
+
+		try {
+			expect(session.getToolByName("read")?.description).toContain(
+				"Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag",
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("suppresses hashline anchor guidance in the read description when edit is disallowed", async () => {
+		// Scoped counterpart of the construction-time grant regression: a
+		// disallow-only scope still removes the edit grant, so the cached read
+		// description must omit the anchor instructions even though it is
+		// rendered before the startup active set exists.
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			disallowedTools: ["edit"],
+		});
+
+		try {
+			expect(session.getToolByName("read")?.description).not.toContain(
+				"Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag",
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
+	it("suppresses hashline anchor guidance for restricted sessions when edit is disallowed", async () => {
+		// Restricted-branch construction probe: restrictToolNames + an explicit
+		// list naming edit still loses the grant when disallowedTools removes it —
+		// the requested-list check alone would cache anchors the session cannot use.
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["edit", "read"],
+			restrictToolNames: true,
+			disallowedTools: ["edit"],
+		});
+
+		try {
+			expect(session.getToolByName("read")?.description).not.toContain(
+				"Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag",
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("renders report-issue guidance only for unrestricted sessions", async () => {
 		const normalDir = makeTempDir();
 		const restrictedDir = makeTempDir();
@@ -2534,6 +3180,97 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			}
 		});
 	});
+	it("keeps the cursor scope gate consistent with the finalized active set", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "checkpoint.enabled": true }),
+			toolNames: ["checkpoint"],
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			// The checkpoint/rewind safety pairing activates both tools even though
+			// only `checkpoint` was declared; the Cursor frame gate is built from
+			// this same finalized grant set, so a native frame for the paired tool
+			// resolves instead of being refused as unadvertised.
+			const active = session.getActiveToolNames();
+			expect(active).toEqual(expect.arrayContaining(["checkpoint", "rewind"]));
+			expect(active).not.toContain("bash");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps a mounted MCP server's instructions when a disallow-only scope admits its tools", async () => {
+		// Regression: an xd://-mounted MCP tool leaves the top-level active set
+		// (presentation moves to `mountedNames`) while staying enabled and
+		// callable via `write xd://<tool>`, so the instructions filter must
+		// count it. Before the fix the filter only saw `toolNames` and dropped
+		// the allowed server's instructions.
+		const originalAgentDir = getAgentDir();
+		const isolatedHome = path.join(os.tmpdir(), `pi-sdk-tool-activation-mcp-home-${Snowflake.next()}`);
+		fs.mkdirSync(isolatedHome, { recursive: true });
+		const isolatedAgentDir = path.join(isolatedHome, ".omp", "agent");
+		fs.mkdirSync(isolatedAgentDir, { recursive: true });
+		setAgentDir(isolatedAgentDir);
+		const homedirSpy = spyOn(os, "homedir").mockReturnValue(isolatedHome);
+
+		const tempDir = makeTempDir();
+		fs.writeFileSync(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					instr: { type: "stdio", command: process.execPath, args: [FIXTURE_MCP_PATH] },
+				},
+			}),
+		);
+
+		try {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				enableMCP: true,
+				hasUI: true,
+				skipPythonPreflight: true,
+				// Scopes only the unrelated server, leaving the fixture server's
+				// tool granted (and, being discoverable, mounted under xd://).
+				disallowedTools: ["mcp__unrelated_*"],
+			});
+			try {
+				// The scope gate keeps the disallowed pattern inert for the fixture
+				// server, but its tool still lands in the registry only when
+				// deferred discovery connects — the first observable proof that the
+				// server came up.
+				const deadline = Date.now() + 12_000;
+				while (session.getToolByName("mcp__instr_do_thing") === undefined && Date.now() < deadline) {
+					await Bun.sleep(10);
+				}
+				expect(session.getToolByName("mcp__instr_do_thing")).toBeDefined();
+
+				// `refreshBaseSystemPrompt` is serialized FIFO on the same mutation
+				// queue as the discovery-triggered `refreshMCPTools`, so awaiting it
+				// proves the post-connection rebuild that would append the server's
+				// instructions has already committed. Regression: the rebuild's
+				// instructions filter used to drop the allowed server's text because
+				// its tool had moved from the top-level active set into the xd://
+				// mounted set (the filter only consulted `toolNames`).
+				await session.refreshBaseSystemPrompt();
+				const prompt = session.systemPrompt.join("\n");
+				expect(prompt).toContain(SERVER_INSTRUCTIONS);
+				// The granted fixture tool is mounted as an xd:// device, not
+				// top-level — exactly the state the instructions filter used to
+				// misread as scoped out.
+				expect(session.getActiveToolNames()).not.toContain("mcp__instr_do_thing");
+				expect(session.getMountedXdevToolNames()).toContain("mcp__instr_do_thing");
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			homedirSpy.mockRestore();
+			setAgentDir(originalAgentDir);
+			removeSyncWithRetries(isolatedHome);
+		}
+	}, 20_000);
 
 	it("keeps advisor write full-access when the primary has a device-only transport", async () => {
 		const tempDir = makeTempDir();

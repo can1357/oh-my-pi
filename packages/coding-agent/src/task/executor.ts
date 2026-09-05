@@ -56,6 +56,7 @@ import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
+import { expandExecToolAlias, isToolDisallowed } from "../tools/builtin-names";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { LIST_STATUS_ORDER } from "../tools/hub/messaging";
@@ -3005,13 +3006,26 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 	// Add tools if specified
 	let toolNames: string[] | undefined;
-	if (agent.tools) {
+	if (Array.isArray(agent.tools)) {
 		toolNames = agent.tools;
-		// Auto-include task tool if spawns defined but task not in tools
-		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
+		// Auto-include task tool if spawns defined but task not in tools —
+		// unless the agent disallows it, matching isReadOnlyAgent's classifier:
+		// re-adding an explicitly-disallowed `task` would widen the effective
+		// grant past the declared scope.
+		if (
+			agent.spawns !== undefined &&
+			!toolNames.includes("task") &&
+			!atMaxDepth &&
+			!(agent.disallowedTools?.length && isToolDisallowed("task", agent.disallowedTools))
+		) {
 			toolNames = [...toolNames, "task"];
 		}
 	}
+	// A declared `tools:` list is a hard allowlist for custom/extension/MCP tools
+	// too (not just built-ins) — an explicit empty list enforces down to the
+	// protocol tools; `disallowedTools:` removes matching names after.
+	const enforceToolAllowlist = Array.isArray(agent.tools);
+	const disallowedTools = agent.disallowedTools?.length ? agent.disallowedTools : undefined;
 
 	if (atMaxDepth && toolNames?.includes("task")) {
 		toolNames = toolNames.filter(name => name !== "task");
@@ -3021,12 +3035,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	if (toolNames && !options.restrictToolNames && !toolNames.includes("hub")) {
 		toolNames = [...toolNames, "hub"];
 	}
-	if (toolNames?.includes("exec")) {
-		const backends = resolveEvalBackends({ settings } as ToolSession);
-		const expanded = toolNames.filter(name => name !== "exec");
-		if (backends.python || backends.js) expanded.push("eval");
-		expanded.push("bash");
-		toolNames = Array.from(new Set(expanded));
+	const evalBackends = resolveEvalBackends({ settings } as ToolSession);
+	if (toolNames) {
+		toolNames = expandExecToolAlias(toolNames, agent.disallowedTools ?? [], evalBackends);
 	}
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
@@ -3345,6 +3356,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				thinkingLevel: effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
 				toolNames,
+				enforceToolAllowlist,
+				disallowedTools,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: options.restrictToolNames,
@@ -3524,13 +3537,27 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
-				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
-				readSummarize: agent.readSummarize,
+				// Persist the resolved advisor opt-in for cold revival: `"on"` = the
+				// advisor-role model (no explicit pattern), otherwise the pattern the
+				// original spawn stamped onto `modelRoles.advisor`. Absent = unadvised
+				// (the createSubagentSettings default).
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
+				readSummarize: agent.readSummarize,
+				readOnly: isReadOnlyAgent(agent, evalBackends),
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				enforceToolAllowlist: enforceToolAllowlist || undefined,
+				disallowedTools,
+				// The declarative allowlist minus parent-owned tools, not the enabled
+				// snapshot: tools that register after this snapshot (late extensions,
+				// MCP reconnects) must stay allowed for cold revival, while a
+				// parent-owned tool the live spawn stripped (`todo` outside prewalk)
+				// must not regain a capability the original generation lacked.
+				declaredTools: enforceToolAllowlist
+					? (toolNames ?? []).filter(name => !isParentOwnedTool(name))
+					: undefined,
 			});
 
 			abortSignal.addEventListener(
