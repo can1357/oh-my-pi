@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
+- `omp models --json` now reports each model's catalog intelligence score (`int`) and estimated output speed (`tps`), the same numbers the model browser shows; both are `null` when the catalog has not scored the model.
 
 ### Fixed
 
