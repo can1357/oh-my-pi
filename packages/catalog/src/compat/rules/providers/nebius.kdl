@@ -1,0 +1,13 @@
+// Provider-wire compat for "nebius": Token Factory drives thinking through
+// OpenAI-style reasoning_effort (live-validated values:
+// none|minimal|low|medium|high|xhigh — "max" is rejected, so xhigh tops the
+// ladder). Provider-level on purpose: the roster is /v1/models truth
+// (dynamicModelsAuthoritative), so frozen model-id lists would fight
+// discovery; class-level ladders still win per lineage.
+
+provider "nebius" {
+	thinking-mode "effort"
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+}

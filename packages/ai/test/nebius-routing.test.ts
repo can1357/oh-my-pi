@@ -1,0 +1,69 @@
+import { describe, expect, it } from "bun:test";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+
+// Nebius Token Factory is a pure OpenAI-compatible endpoint. These tests pin
+// the routing contract: nebius models must reach the OpenAI chat-completions
+// transport at the Token Factory base URL with plain Bearer auth.
+const NEBIUS_BASE_URL = "https://api.tokenfactory.nebius.com/v1";
+
+const context: Context = {
+	messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+};
+
+function nebiusModel(): Model<"openai-completions"> {
+	return buildModel({
+		id: "zai-org/GLM-5.3-Flash",
+		name: "GLM-5.3-Flash",
+		api: "openai-completions",
+		provider: "nebius",
+		// Deliberately NOT the Token Factory URL: streamNebius must pin the
+		// official base URL regardless of the catalog entry's placeholder.
+		baseUrl: "https://unset.example.invalid/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 131_072,
+	} satisfies ModelSpec<"openai-completions">);
+}
+
+async function captureRequest(
+	model: Model<"openai-completions">,
+): Promise<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> {
+	let url = "";
+	let headers: Record<string, string> = {};
+	let requestBody: string | undefined;
+	const fetchMock: FetchImpl = (input, init) => {
+		url = String(input);
+		headers = Object.fromEntries(new Headers(init?.headers).entries());
+		requestBody = typeof init?.body === "string" ? init.body : undefined;
+		return Promise.resolve(
+			new Response(
+				'data: {"choices":[{"delta":{"content":"ok"}}]}\ndata: {"choices":[{"finish_reason":"stop"}]}\ndata: [DONE]\n',
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			),
+		);
+	};
+	const stream = streamSimple(model, context, { apiKey: "nebius-test-key", fetch: fetchMock });
+	await stream.result();
+	if (!requestBody) throw new Error("request body was not captured");
+	return { url, headers, body: JSON.parse(requestBody) };
+}
+
+describe("Nebius Token Factory routing", () => {
+	it("routes nebius models to the OpenAI chat-completions transport at the Token Factory base URL", async () => {
+		const request = await captureRequest(nebiusModel());
+		expect(request.url).toBe(`${NEBIUS_BASE_URL}/chat/completions`);
+		expect(request.body.model).toBe("zai-org/GLM-5.3-Flash");
+		expect(request.body.messages).toBeArrayOfSize(1);
+	});
+
+	it("authenticates with a plain Bearer token and no custom headers", async () => {
+		const request = await captureRequest(nebiusModel());
+		expect(request.headers.authorization).toBe("Bearer nebius-test-key");
+	});
+});

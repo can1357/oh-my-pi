@@ -37,6 +37,7 @@ import {
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
+	nebiusModelManagerOptions,
 	novitaModelManagerOptions,
 	nvidiaModelManagerOptions,
 	ollamaModelManagerOptions,
@@ -337,6 +338,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["NANO_GPT_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => nanoGptModelManagerOptions(config),
 		catalogDiscovery: { label: "NanoGPT" },
+	},
+	{
+		id: "nebius",
+		defaultModel: "moonshotai/Kimi-K2.7-Code",
+		envVars: ["NEBIUS_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => nebiusModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Nebius" },
 	},
 	{
 		id: "nvidia",

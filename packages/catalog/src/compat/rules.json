@@ -46,6 +46,7 @@
 		"auth/mistral.kdl",
 		"auth/moonshot.kdl",
 		"auth/nanogpt.kdl",
+		"auth/nebius.kdl",
 		"auth/novita.kdl",
 		"auth/nvidia.kdl",
 		"auth/ollama-cloud.kdl",
@@ -139,6 +140,7 @@
 		"providers/mistral.kdl",
 		"providers/moonshot.kdl",
 		"providers/nanogpt.kdl",
+		"providers/nebius.kdl",
 		"providers/novita.kdl",
 		"providers/nvidia.kdl",
 		"providers/ollama-cloud.kdl",
@@ -10124,6 +10126,31 @@
 				}
 			},
 			{
+				"source": "providers/nebius.kdl:10",
+				"class": "unknown",
+				"providers": [
+					"nebius"
+				],
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"low",
+						"medium",
+						"high",
+						"xhigh"
+					]
+				}
+			},
+			{
+				"source": "providers/nebius.kdl:8",
+				"providers": [
+					"nebius"
+				],
+				"thinking": {
+					"mode": "effort"
+				}
+			},
+			{
 				"source": "providers/novita.kdl:6",
 				"class": "glm",
 				"providers": [
@@ -16916,6 +16943,23 @@
 						"kind": "models-endpoint",
 						"label": "GMI Cloud",
 						"url": "https://api.gmi-serving.com/v1/models"
+					}
+				}
+			},
+			{
+				"id": "nebius",
+				"apiKeyFormat": "bearer",
+				"name": "Nebius",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://tokenfactory.nebius.com/project/api-keys",
+					"instructions": "Copy your API key from the Token Factory console",
+					"prompt": "Paste your Nebius API key",
+					"placeholder": "v1....",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "Nebius",
+						"url": "https://api.tokenfactory.nebius.com/v1/models"
 					}
 				}
 			},
