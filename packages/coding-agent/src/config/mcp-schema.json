@@ -131,6 +131,24 @@
         },
         "oauth": {
           "$ref": "#/$defs/oauthConfig"
+        },
+        "enabledTools": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Per-server tool allowlist: only tools whose raw advertised name matches one entry are contributed to the session. Entries are literal tool names or glob patterns (`*`, `?`, `[...]`, `{a,b}`). OMP-specific; servers translated from other tools' configs ignore it."
+        },
+        "disabledTools": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Per-server tool denylist: matching tools are excluded. When both enabledTools and disabledTools are set, disabledTools wins (deny subtracts from allow). OMP-specific; servers translated from other tools' configs ignore it."
         }
       }
     },

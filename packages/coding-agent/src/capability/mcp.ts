@@ -5,6 +5,7 @@
  * All providers translate their native format to this shape.
  */
 
+import { mcpToolFilterKey } from "../mcp/tool-filter";
 import type { MCPRequestIdFormat } from "../mcp/types";
 import { defineCapability } from ".";
 import type { SourceMeta } from "./types";
@@ -21,6 +22,10 @@ export interface MCPServer {
 	timeout?: number;
 	/** Encoding for outgoing JSON-RPC request ids (default: `"number"`) */
 	requestIdFormat?: MCPRequestIdFormat;
+	/** Per-server tool allowlist (picomatch globs over raw advertised names). */
+	enabledTools?: string[];
+	/** Per-server tool denylist; wins over `enabledTools`. */
+	disabledTools?: string[];
 	/** Command to run (for stdio transport) */
 	command?: string;
 	/** Command arguments */
@@ -74,6 +79,14 @@ export interface MCPServer {
 /** Compare the transport inputs that determine which MCP endpoint gets connected. */
 export function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean {
 	if (!Bun.deepEquals(left.auth, right.auth) || !Bun.deepEquals(left.oauth, right.oauth)) return false;
+	// Filter members determine which tools a connection contributes; compare
+	// normalized (unique, sorted) so alias order/duplicates dedup to one.
+	if (
+		mcpToolFilterKey(left.enabledTools, left.disabledTools) !==
+		mcpToolFilterKey(right.enabledTools, right.disabledTools)
+	) {
+		return false;
+	}
 	// Normalize against the allocator's own default so an explicit "number" is
 	// equivalent to leaving the option unset, not a distinct connection.
 	if ((left.requestIdFormat ?? "number") !== (right.requestIdFormat ?? "number")) return false;
