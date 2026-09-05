@@ -101,6 +101,13 @@ function stringArg(args: Record<string, unknown>, key: string): string | undefin
 	return typeof value === "string" ? value : undefined;
 }
 
+function nonEmptyStringArg(args: Record<string, unknown>, key: string): string | undefined {
+	const value = args[key];
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
 export function isCursorStrReplaceMcpName(name: string): boolean {
 	return CURSOR_STRREPLACE_MCP_NAMES.has(name);
 }
@@ -160,4 +167,155 @@ export function cursorMcpPrefersReplaceEdit(name: string, args: Record<string, u
 		stringArg(args, "newString") ??
 		stringArg(args, "newText");
 	return old_string !== undefined && new_string !== undefined;
+}
+
+/**
+ * Server-injected or fine-tuned Cursor subagent tool names that are not "task"
+ * in the OMP registry, or Cursor's native name for subagent delegation.
+ */
+const CURSOR_TASK_MCP_NAMES = new Set(["task", "Task", "subagent", "Subagent", "run_subagent", "spawn_subagent"]);
+
+export function isCursorTaskMcpName(name: string): boolean {
+	if (name.startsWith("mcp__")) return false;
+	return CURSOR_TASK_MCP_NAMES.has(name);
+}
+
+/**
+ * Return the target subagent ID if this Cursor task call requests a resume.
+ *
+ * Cursor's native `TaskArgs` defines `resume?: string` to continue an existing
+ * subagent. When present at top-level or on any batch item, the bridge must
+ * not silently spawn a fresh subagent without its prior context.
+ */
+export function getCursorTaskResumeId(args: Record<string, unknown>): string | undefined {
+	const topLevel = nonEmptyStringArg(args, "resume");
+	if (topLevel !== undefined) return topLevel;
+	if (Array.isArray(args.tasks)) {
+		for (const item of args.tasks) {
+			if (item && typeof item === "object") {
+				const itemResume = nonEmptyStringArg(item as Record<string, unknown>, "resume");
+				if (itemResume !== undefined) return itemResume;
+			}
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Return the requested model override if this Cursor task call specifies one
+ * that cannot be honored by OMP's subagent configuration.
+ *
+ * Cursor's native `TaskArgs` defines `model?: string`. A model value of
+ * `"inherit"`, `""`, or `undefined` delegates to the agent's default model,
+ * which matches OMP's behavior. An explicit model string (e.g. `"gpt-4o"`)
+ * would be silently stripped by the task schema (`+delete`) and run under the
+ * default model instead; this helper detects that override so callers can
+ * reject it rather than silently running the wrong model.
+ */
+export function getCursorTaskUnsupportedModel(args: Record<string, unknown>): string | undefined {
+	const check = (val: unknown): string | undefined => {
+		if (typeof val !== "string") return undefined;
+		const trimmed = val.trim();
+		if (trimmed.length > 0 && trimmed.toLowerCase() !== "inherit") {
+			return trimmed;
+		}
+		return undefined;
+	};
+
+	const topLevel = check(args.model);
+	if (topLevel !== undefined) return topLevel;
+	if (Array.isArray(args.tasks)) {
+		for (const item of args.tasks) {
+			if (item && typeof item === "object") {
+				const itemModel = check((item as Record<string, unknown>).model);
+				if (itemModel !== undefined) return itemModel;
+			}
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Extract an OMP agent identifier from Cursor's `subagent_type` field.
+ *
+ * Cursor defines subagent types as `explore` (read-only codebase search),
+ * `computer_use`, or `custom` (with a `name` field). `explore` maps cleanly
+ * onto OMP's `scout` agent.
+ */
+function resolveSubagentTypeToAgent(typeVal: unknown): string | undefined {
+	if (typeof typeVal === "string") {
+		const lower = typeVal.toLowerCase();
+		if (lower === "explore" || lower.includes("explore")) return "scout";
+		return undefined;
+	}
+	if (typeVal && typeof typeVal === "object") {
+		const rec = typeVal as Record<string, unknown>;
+		if (rec.explore !== undefined || rec.case === "explore") return "scout";
+		if (rec.custom && typeof rec.custom === "object") {
+			const customRec = rec.custom as Record<string, unknown>;
+			if (typeof customRec.name === "string" && customRec.name.trim()) {
+				return customRec.name.trim();
+			}
+		}
+		if (rec.case === "custom" && rec.value && typeof rec.value === "object") {
+			const customVal = rec.value as Record<string, unknown>;
+			if (typeof customVal.name === "string" && customVal.name.trim()) {
+				return customVal.name.trim();
+			}
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Project a Cursor-style subagent invocation payload onto OMP `task` kwargs.
+ *
+ * Cursor's models are fine-tuned to emit `{ description, prompt, subagent_type }`
+ * rather than OMP's `{ task, agent, name }` or `{ context, tasks: [...] }`.
+ * This adapts single-task calls and per-item batch prompts so models can invoke
+ * subagents reliably without schema rejection. Canonical fields (`task`, `name`,
+ * `agent`) take precedence over Cursor aliases when both are present.
+ */
+export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<string, unknown> {
+	if (Array.isArray(args.tasks) && args.tasks.length > 0) {
+		const tasks = args.tasks.map(item => {
+			if (!item || typeof item !== "object") return item;
+			const itemRecord = item as Record<string, unknown>;
+			const itemTask =
+				nonEmptyStringArg(itemRecord, "task") ??
+				nonEmptyStringArg(itemRecord, "prompt") ??
+				nonEmptyStringArg(itemRecord, "instruction");
+			const itemName = nonEmptyStringArg(itemRecord, "name") ?? nonEmptyStringArg(itemRecord, "description");
+			const itemAgent =
+				nonEmptyStringArg(itemRecord, "agent") ?? resolveSubagentTypeToAgent(itemRecord.subagent_type);
+			return {
+				...itemRecord,
+				...(itemTask !== undefined ? { task: itemTask } : {}),
+				...(itemName !== undefined ? { name: itemName } : {}),
+				...(itemAgent !== undefined ? { agent: itemAgent } : {}),
+			};
+		});
+		const context = nonEmptyStringArg(args, "context") ?? nonEmptyStringArg(args, "description");
+		return {
+			...args,
+			...(context !== undefined ? { context } : {}),
+			tasks,
+		};
+	}
+
+	const task =
+		nonEmptyStringArg(args, "task") ?? nonEmptyStringArg(args, "prompt") ?? nonEmptyStringArg(args, "instruction");
+	const name = nonEmptyStringArg(args, "name") ?? nonEmptyStringArg(args, "description");
+	const agent = nonEmptyStringArg(args, "agent") ?? resolveSubagentTypeToAgent(args.subagent_type);
+
+	if (task === undefined && name === undefined && agent === undefined) {
+		return args;
+	}
+
+	return {
+		...args,
+		...(task !== undefined ? { task } : {}),
+		...(name !== undefined ? { name } : {}),
+		...(agent !== undefined ? { agent } : {}),
+	};
 }

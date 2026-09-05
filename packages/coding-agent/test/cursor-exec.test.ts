@@ -25,7 +25,10 @@ import {
 	createBridgeEditTool,
 	createBridgeGrepFactory,
 	cursorMcpPrefersReplaceEdit,
+	getCursorTaskResumeId,
+	getCursorTaskUnsupportedModel,
 	normalizeCursorReplaceArgs,
+	normalizeCursorTaskArgs,
 } from "@oh-my-pi/pi-coding-agent/cursor-bridge-tools";
 
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
@@ -715,6 +718,411 @@ describe("Cursor MCP StrReplace fallback", () => {
 
 		expect(result.isError).toBe(true);
 		expect(await Bun.file(target).text()).toBe("alpha\nbeta\n");
+	});
+});
+
+describe("Cursor MCP task tool adapter", () => {
+	let cwd: string;
+	let executedCalls: Array<{ toolCallId: string; args: Record<string, unknown> }>;
+	let taskTool: Tool;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-task-mcp-"));
+		executedCalls = [];
+		taskTool = {
+			name: "task",
+			label: "Task",
+			summary: "Delegate work to subagents",
+			approval: "exec",
+			execute: async (toolCallId: string, args: Record<string, unknown>) => {
+				executedCalls.push({ toolCallId, args });
+				return {
+					content: [{ type: "text", text: "Subagent completed successfully" }],
+					details: {},
+				};
+			},
+		} as unknown as Tool;
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("routes all subagent aliases through the MCP handler to the task tool", async () => {
+		const aliases = ["task", "Task", "subagent", "Subagent", "run_subagent", "spawn_subagent"];
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		for (let i = 0; i < aliases.length; i++) {
+			const alias = aliases[i];
+			const result = await handlers.mcp({
+				name: alias,
+				providerIdentifier: "cursor",
+				toolName: alias,
+				toolCallId: `call-${i}`,
+				args: {
+					prompt: `Do work via ${alias}`,
+					description: `Task-${alias}`,
+				},
+				rawArgs: {},
+			});
+
+			expect(result.isError).toBe(false);
+			expect(executedCalls.length).toBe(i + 1);
+			expect(executedCalls[i].args.task).toBe(`Do work via ${alias}`);
+			expect(executedCalls[i].args.name).toBe(`Task-${alias}`);
+		}
+	});
+
+	it("treats blank agent and name fields as absent during adaptation", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const result = await handlers.mcp({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "t-blank",
+			args: {
+				prompt: "Explore auth subsystem",
+				name: "   ",
+				agent: "",
+				description: "AuthExplorer",
+				subagent_type: "explore",
+			},
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(false);
+		expect(executedCalls.length).toBe(1);
+		expect(executedCalls[0].args.task).toBe("Explore auth subsystem");
+		expect(executedCalls[0].args.name).toBe("AuthExplorer");
+		expect(executedCalls[0].args.agent).toBe("scout");
+	});
+
+	it("preserves an explicitly registered Task tool without falling back to task", async () => {
+		const customTaskExecuted: Array<{ toolCallId: string; args: Record<string, unknown> }> = [];
+		const uppercaseTaskTool: Tool = {
+			name: "Task",
+			label: "UppercaseTask",
+			summary: "Explicitly registered Task tool",
+			approval: "exec",
+			execute: async (toolCallId: string, args: Record<string, unknown>) => {
+				customTaskExecuted.push({ toolCallId, args });
+				return {
+					content: [{ type: "text", text: "Uppercase Task executed" }],
+					details: {},
+				};
+			},
+		} as unknown as Tool;
+
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([
+				["task", taskTool],
+				["Task", uppercaseTaskTool],
+			]),
+		});
+
+		const result = await handlers.mcp({
+			name: "Task",
+			providerIdentifier: "custom",
+			toolName: "Task",
+			toolCallId: "call-uppercase-task",
+			args: { customParam: 123 },
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(false);
+		expect(customTaskExecuted.length).toBe(1);
+		expect(customTaskExecuted[0].args.customParam).toBe(123);
+		expect(executedCalls.length).toBe(0);
+	});
+
+	it("adapts Cursor batch tasks with prompt items and description context", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const result = await handlers.mcp({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "t3",
+			args: {
+				description: "Refactor auth layer",
+				tasks: [
+					{ prompt: "Search auth files", description: "Search", subagent_type: "explore" },
+					{ prompt: "Run auth tests", name: "Test" },
+				],
+			},
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(false);
+		expect(executedCalls.length).toBe(1);
+		expect(executedCalls[0].args.context).toBe("Refactor auth layer");
+		const tasks = executedCalls[0].args.tasks as Array<Record<string, unknown>>;
+		expect(tasks.length).toBe(2);
+		expect(tasks[0].task).toBe("Search auth files");
+		expect(tasks[0].name).toBe("Search");
+		expect(tasks[0].agent).toBe("scout");
+		expect(tasks[1].task).toBe("Run auth tests");
+		expect(tasks[1].name).toBe("Test");
+	});
+
+	it("supports mcpApprovalPreflight for task and subagent aliases", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const approvedTask = await handlers.mcpApprovalPreflight({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "pre1",
+			args: { prompt: "do something" },
+			rawArgs: {},
+		});
+		expect(approvedTask).toBe(true);
+
+		const approvedSubagent = await handlers.mcpApprovalPreflight({
+			name: "subagent",
+			providerIdentifier: "cursor",
+			toolName: "subagent",
+			toolCallId: "pre2",
+			args: { prompt: "do something" },
+			rawArgs: {},
+		});
+		expect(approvedSubagent).toBe(true);
+	});
+
+	it("returns 404 error when task tool was not granted", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+		});
+
+		const result = await handlers.mcp({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "t-deny",
+			args: { prompt: "do something" },
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.content[0].type === "text" && result.content[0].text).toContain("not found");
+	});
+
+	it("detects resume subagent IDs from top-level and batch task payloads", () => {
+		expect(getCursorTaskResumeId({ prompt: "continue", resume: "agent-123" })).toBe("agent-123");
+		expect(
+			getCursorTaskResumeId({
+				tasks: [{ prompt: "part 1" }, { prompt: "part 2", resume: "agent-456" }],
+			}),
+		).toBe("agent-456");
+		expect(getCursorTaskResumeId({ prompt: "fresh task" })).toBeUndefined();
+	});
+
+	it("rejects task.resume with an actionable error rather than launching a fresh subagent", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const result = await handlers.mcp({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "t-resume",
+			args: {
+				prompt: "Continue the previous investigation",
+				resume: "subagent-alpha-99",
+			},
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.content[0].type === "text" && result.content[0].text).toContain(
+			'Resuming subagents via task.resume ("subagent-alpha-99") is not supported. Use the `hub` tool',
+		);
+		expect(executedCalls.length).toBe(0);
+	});
+
+	it("refuses mcpApprovalPreflight when task.resume is present", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const approved = await handlers.mcpApprovalPreflight({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "pre-resume",
+			args: {
+				prompt: "Continue the previous investigation",
+				resume: "subagent-alpha-99",
+			},
+			rawArgs: {},
+		});
+
+		expect(approved).toBe(false);
+	});
+
+	it("detects explicit unsupported model overrides from top-level and batch task payloads", () => {
+		expect(getCursorTaskUnsupportedModel({ prompt: "work", model: "claude-3.5-sonnet" })).toBe("claude-3.5-sonnet");
+		expect(
+			getCursorTaskUnsupportedModel({
+				tasks: [{ prompt: "part 1" }, { prompt: "part 2", model: "gpt-4o" }],
+			}),
+		).toBe("gpt-4o");
+		expect(getCursorTaskUnsupportedModel({ prompt: "work", model: "inherit" })).toBeUndefined();
+		expect(getCursorTaskUnsupportedModel({ prompt: "work", model: "" })).toBeUndefined();
+		expect(getCursorTaskUnsupportedModel({ prompt: "work" })).toBeUndefined();
+	});
+
+	it("rejects explicit task.model override with an actionable error rather than silently running default model", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const result = await handlers.mcp({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "t-model",
+			args: {
+				prompt: "Run benchmarks",
+				model: "claude-3.5-sonnet",
+			},
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.content[0].type === "text" && result.content[0].text).toContain(
+			'Explicit subagent model override via task.model ("claude-3.5-sonnet") is not supported.',
+		);
+		expect(executedCalls.length).toBe(0);
+	});
+
+	it("refuses mcpApprovalPreflight when explicit task.model override is present", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const approved = await handlers.mcpApprovalPreflight({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "pre-model",
+			args: {
+				prompt: "Run benchmarks",
+				model: "claude-3.5-sonnet",
+			},
+			rawArgs: {},
+		});
+
+		expect(approved).toBe(false);
+	});
+
+	it("preserves canonical task, name, and agent fields over Cursor aliases", () => {
+		const raw = {
+			task: "canonical task",
+			prompt: "fallback prompt",
+			name: "CanonicalName",
+			description: "FallbackDesc",
+			agent: "reviewer",
+			subagent_type: "explore",
+		};
+		const normalized = normalizeCursorTaskArgs(raw);
+		expect(normalized.task).toBe("canonical task");
+		expect(normalized.name).toBe("CanonicalName");
+		expect(normalized.agent).toBe("reviewer");
+
+		const batchRaw = {
+			context: "canonical context",
+			description: "fallback description",
+			tasks: [
+				{
+					task: "canonical item task",
+					prompt: "fallback item prompt",
+					name: "ItemCanonical",
+					description: "ItemFallback",
+					agent: "reviewer",
+					subagent_type: "explore",
+				},
+			],
+		};
+		const batchNormalized = normalizeCursorTaskArgs(batchRaw);
+		expect(batchNormalized.context).toBe("canonical context");
+		const items = batchNormalized.tasks as Array<Record<string, unknown>>;
+		expect(items[0].task).toBe("canonical item task");
+		expect(items[0].name).toBe("ItemCanonical");
+		expect(items[0].agent).toBe("reviewer");
+	});
+
+	it("leaves batch context undefined when neither context nor description is provided", () => {
+		const raw = {
+			tasks: [{ prompt: "scan files" }],
+		};
+		const normalized = normalizeCursorTaskArgs(raw);
+		expect(normalized.context).toBeUndefined();
+	});
+
+	it("does not promote whitespace-only prompt to task", () => {
+		const raw = { prompt: "   " };
+		const normalized = normalizeCursorTaskArgs(raw);
+		expect(normalized.task).toBeUndefined();
+	});
+
+	it("does not shadow an explicitly registered third-party tool named subagent", async () => {
+		const customSubagentExecuted: Array<{ toolCallId: string; args: Record<string, unknown> }> = [];
+		const customSubagentTool: Tool = {
+			name: "subagent",
+			label: "CustomSubagent",
+			summary: "Third-party subagent tool",
+			approval: "exec",
+			execute: async (toolCallId: string, args: Record<string, unknown>) => {
+				customSubagentExecuted.push({ toolCallId, args });
+				return {
+					content: [{ type: "text", text: "Custom subagent output" }],
+					details: {},
+				};
+			},
+		} as unknown as Tool;
+
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([
+				["task", taskTool],
+				["subagent", customSubagentTool],
+			]),
+		});
+
+		const result = await handlers.mcp({
+			name: "subagent",
+			providerIdentifier: "third-party",
+			toolName: "subagent",
+			toolCallId: "custom1",
+			args: { customArg: "hello" },
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(false);
+		expect(customSubagentExecuted.length).toBe(1);
+		expect(customSubagentExecuted[0].args.customArg).toBe("hello");
+		expect(executedCalls.length).toBe(0);
 	});
 });
 

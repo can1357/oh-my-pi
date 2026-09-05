@@ -28,7 +28,14 @@ import {
 	piTimeout,
 } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
+import {
+	cursorMcpPrefersReplaceEdit,
+	getCursorTaskResumeId,
+	getCursorTaskUnsupportedModel,
+	isCursorTaskMcpName,
+	normalizeCursorReplaceArgs,
+	normalizeCursorTaskArgs,
+} from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
 import type { ApprovalMode } from "./tools/approval";
 import { resolveApproval } from "./tools/approval";
@@ -940,6 +947,32 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			}
 			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
 		}
+		if (isCursorTaskMcpName(toolName)) {
+			const isExplicitAlias = toolName !== "task";
+			const exactAliasTool = isExplicitAlias
+				? (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName))
+				: undefined;
+			if (!exactAliasTool) {
+				const resumeId = getCursorTaskResumeId(args);
+				if (resumeId) {
+					const message = `Resuming subagents via task.resume ("${resumeId}") is not supported. Use the \`hub\` tool to message and resume existing subagents.`;
+					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+				}
+				const unsupportedModel = getCursorTaskUnsupportedModel(args);
+				if (unsupportedModel) {
+					const message = `Explicit subagent model override via task.model ("${unsupportedModel}") is not supported. Subagents use the model configured for their agent role.`;
+					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+				}
+				const targetToolName = "task";
+				const tool = this.options.getExecutableTool?.(targetToolName) ?? this.options.tools.get(targetToolName);
+				if (!tool) {
+					const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
+					const message = formatMcpToolErrorMessage(toolName, availableTools);
+					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+				}
+				return await executeTool(this.options, targetToolName, toolCallId, normalizeCursorTaskArgs(args));
+			}
+		}
 		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
 		if (!tool) {
 			const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
@@ -964,17 +997,34 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const toolName = call.toolName || call.name;
 		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
 		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
+		const isTask = isCursorTaskMcpName(toolName);
+		const isExplicitAlias = isTask && toolName !== "task";
+		const exactAliasTool = isExplicitAlias
+			? (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName))
+			: undefined;
+		const routeToTask = isTask && !exactAliasTool;
+		if (routeToTask && (getCursorTaskResumeId(args) || getCursorTaskUnsupportedModel(args))) {
+			return false;
+		}
+
 		const tool = preferReplace
 			? this.options.getEditReplaceTool?.()
-			: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
+			: routeToTask
+				? (this.options.getExecutableTool?.("task") ?? this.options.tools.get("task"))
+				: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
 		if (!tool) return false;
 		const context = this.options.getToolContext?.();
 		const settings = context?.settings;
 		const approvalMode: ApprovalMode =
 			context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
+		const normalizedArgs = preferReplace
+			? normalizeCursorReplaceArgs(args)
+			: routeToTask
+				? normalizeCursorTaskArgs(args)
+				: args;
 		const approval = resolveApproval(
 			tool,
-			preferReplace ? normalizeCursorReplaceArgs(args) : args,
+			normalizedArgs,
 			approvalMode,
 			(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
 		);

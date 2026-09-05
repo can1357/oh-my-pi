@@ -1978,6 +1978,42 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
 		expect(answer.value.result.case).toBe("success");
 	});
+
+	it("canonicalizes synthesized toolCall block name when handler returns a different canonical toolName", async () => {
+		const handlers: CursorExecHandlers = {
+			async mcp(call) {
+				return {
+					role: "toolResult",
+					toolCallId: call.toolCallId ?? "c3",
+					toolName: "task",
+					content: [{ type: "text", text: "canonicalized" }],
+					isError: false,
+					timestamp: Date.now(),
+				};
+			},
+		};
+
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "mcpArgs",
+				value: create(McpArgsSchema, {
+					name: "Subagent",
+					toolName: "Subagent",
+					toolCallId: "c3",
+					providerIdentifier: "cursor",
+				}),
+			}),
+			{ execHandlers: handlers },
+		);
+
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("success");
+
+		const blocks = output.content.filter(block => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0].name).toBe("task");
+	});
 });
 
 describe("Cursor MCP frame: external executor handoff", () => {
