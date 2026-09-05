@@ -31127,11 +31127,11 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"minimal",
 					"low",
 					"medium",
-					"xhigh"
-				],
-				"defaultLevel": "xhigh"
+					"high"
+				]
 			},
 			"compat": {
 				"supportsStore": false,

@@ -26,8 +26,6 @@ provider "alibaba-token-plan" {
 	// control and replay reasoning_content across turns (preserve_thinking
 	// defaults on for both).
 	models "qwen3.8-max" "qwen3.8-flash" {
-		thinking-default-level "xhigh"
-		thinking-efforts "low" "medium" "xhigh"
 		replay-reasoning-content #true
 		when-thinking {
 			extra-body {
@@ -35,5 +33,11 @@ provider "alibaba-token-plan" {
 			}
 			thinking-format "openai"
 		}
+	}
+	// Max exposes a distinct low/medium/xhigh ladder; Flash retains its
+	// provider-authored minimal/low/medium/high ladder.
+	models "qwen3.8-max" {
+		thinking-default-level "xhigh"
+		thinking-efforts "low" "medium" "xhigh"
 	}
 }

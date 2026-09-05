@@ -18,6 +18,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
@@ -909,10 +910,13 @@ describe("openai-completions compatibility", () => {
 	});
 
 	it("sends Alibaba Qwen 3.8 Flash reasoning effort on the wire", async () => {
+		expect(getSupportedEfforts(alibabaQwen38Flash)).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
+		const selectedEffort = clampThinkingLevelForModel(alibabaQwen38Flash, Effort.Minimal);
+		expect(selectedEffort).toBe(Effort.Minimal);
 		const payload = toObject(
 			await captureOpenAICompletionsPayload(alibabaQwen38Flash, undefined, {
 				apiKey: alibabaTokenPlanApiKey,
-				reasoning: "minimal",
+				reasoning: selectedEffort,
 			}),
 		);
 

@@ -7042,7 +7042,19 @@
 						},
 						"thinkingFormat": "openai"
 					}
-				},
+				}
+			},
+			{
+				"source": "providers/alibaba-token-plan.kdl:39",
+				"providers": [
+					"alibaba-token-plan"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "qwen3.8-max"
+					}
+				],
 				"thinking": {
 					"defaultLevel": "xhigh",
 					"efforts": [
