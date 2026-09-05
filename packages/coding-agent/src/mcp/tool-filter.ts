@@ -42,16 +42,12 @@ export interface MCPToolFilterResult {
  * negated-class output). MCP tool names are opaque strings — a denylist
  * entry `*` must match a tool named `admin/delete` — so both the pattern and
  * the name are matched in a slash-free domain: every `/` is transliterated
- * to the lone surrogate `\uD800`.
- *
- * Injectivity: a tool name may itself contain `\uD800` (Bun/V8 JSON.parse
- * accepts unpaired surrogates in `"\ud800"` escapes), which would collide
- * with the transliterated slash — `admin/*` would admit a tool named
- * `admin\uD800delete`. The encoding therefore escapes sentinel occurrences
- * first (`\uD800` → `\\uD800`) and maps `/` → `\uD800` second. The escape is
- * prefix-free: in the encoded string every lone `\uD800` decodes to exactly
- * one `/`, and no other unit can produce it, so encoded names collide only
- * when the originals are identical.
+ * to `§` (an ordinary printable character that is not a glob metacharacter,
+ * survives picomatch's class compilation, and is excluded from MCP tool-name
+ * characters). Literal `§` in the input is escaped to `¤§` and literal `¤` to
+ * `¤¤`; the units `§`, `¤§`, `¤¤` are prefix-free (verified exhaustively over
+ * the {§, ¤, /} alphabet), so the encoding is injective — encoded strings
+ * collide only when the originals do.
  *
  * Known limitation (documented, not guarded): picomatch hardcodes `/` into
  * NEGATED character classes during compilation (`[^a]` → `[^a/]`), so a
@@ -68,16 +64,24 @@ export interface MCPToolFilterResult {
  */
 const MATCH_OPTIONS = { dot: true, nonegate: true, noextglob: true } as const;
 
-/** Slash transliteration sentinel (see rationale above). */
-const SLASH_SENTINEL = "\uD800";
+/** The code character a transliterated `/` is replaced with (see rationale above). */
+const SLASH_CODE = "§";
+/** The escape marker used for the two code characters above. */
+const ESCAPE = "¤";
 
 /**
  * Transliterate a pattern or name into the slash-free matching domain:
- * escape sentinel occurrences first so the subsequent `/` → sentinel map is
- * injective even for names containing the sentinel character.
+ * `/` → `§`, literal `§` → `¤§`, literal `¤` → `¤¤` (prefix-free, injective).
  */
 function toSlashFreeDomain(text: string): string {
-	return text.replaceAll(SLASH_SENTINEL, `\\${SLASH_SENTINEL}`).replaceAll("/", SLASH_SENTINEL);
+	let out = "";
+	for (const ch of text) {
+		if (ch === "/") out += SLASH_CODE;
+		else if (ch === SLASH_CODE) out += ESCAPE + SLASH_CODE;
+		else if (ch === ESCAPE) out += ESCAPE + ESCAPE;
+		else out += ch;
+	}
+	return out;
 }
 
 class CompiledPattern {
