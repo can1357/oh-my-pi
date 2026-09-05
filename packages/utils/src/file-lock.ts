@@ -13,12 +13,29 @@ export interface FileLockOptions {
 	retries?: number;
 	/** Delay between acquisition attempts. */
 	retryDelayMs?: number;
+	/** Abort waiting for a contended lock. */
+	signal?: AbortSignal;
 }
 
-const DEFAULT_OPTIONS: Required<FileLockOptions> = {
+const DEFAULT_OPTIONS = {
 	retries: 50,
 	retryDelayMs: 100,
-};
+} as const;
+
+/**
+ * Thrown when a contended lock is still unavailable after the retry budget.
+ * Callers that map lock contention onto their own domain errors match on
+ * this type instead of the message text.
+ */
+export class LockAcquireError extends Error {
+	constructor(
+		readonly filePath: string,
+		readonly attempts: number,
+	) {
+		super(`Failed to acquire lock for ${filePath} after ${attempts} attempts`);
+		this.name = "LockAcquireError";
+	}
+}
 
 function getLockPath(filePath: string): string {
 	return `${path.resolve(filePath)}.lock`;
@@ -29,17 +46,49 @@ function tryAcquireLock(lockPath: string): NativeFileLock | null {
 	return lock.acquired ? lock : null;
 }
 
+async function delay(ms: number, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) {
+		throw signal.reason instanceof Error
+			? signal.reason
+			: new DOMException("The operation was aborted.", "AbortError");
+	}
+	if (!signal) {
+		await Bun.sleep(ms);
+		return;
+	}
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	const timer = setTimeout(resolve, ms);
+	const onAbort = (): void => {
+		reject(
+			signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted.", "AbortError"),
+		);
+	};
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		await promise;
+	} finally {
+		clearTimeout(timer);
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
 async function acquireLock(filePath: string, options: FileLockOptions = {}): Promise<NativeFileLock> {
-	const opts = { ...DEFAULT_OPTIONS, ...options };
+	const retries = options.retries ?? DEFAULT_OPTIONS.retries;
+	const retryDelayMs = options.retryDelayMs ?? DEFAULT_OPTIONS.retryDelayMs;
 	const lockPath = getLockPath(filePath);
 
-	for (let attempt = 0; attempt < opts.retries; attempt++) {
+	for (let attempt = 0; attempt < retries; attempt++) {
+		if (options.signal?.aborted) {
+			throw options.signal.reason instanceof Error
+				? options.signal.reason
+				: new DOMException("The operation was aborted.", "AbortError");
+		}
 		const lock = tryAcquireLock(lockPath);
 		if (lock) return lock;
-		if (attempt + 1 < opts.retries) await Bun.sleep(opts.retryDelayMs);
+		if (attempt + 1 < retries) await delay(retryDelayMs, options.signal);
 	}
 
-	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
+	throw new LockAcquireError(filePath, retries);
 }
 
 /** Run `fn` while holding an OS-backed exclusive lock for `filePath`. */

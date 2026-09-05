@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+
+### Added
+
+- `withFileLock` now rejects with a typed `LockAcquireError` when the retry budget is exhausted, so callers can detect contention without matching the message text.
+
+### Fixed
+
+- Cancelled lock waits now clear the retry timer so short-lived processes can exit promptly.
+- `withFileLock` now honors `AbortSignal` so contended lock waits can be cancelled.
+
+
 ## [18.1.11] - 2026-09-05
 
 ### Fixed

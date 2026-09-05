@@ -33,6 +33,16 @@ declare module "*.sh" {
 	export default content;
 }
 
+declare module "*.swift" {
+	const content: string;
+	export default content;
+}
+
+declare module "*/omp-apple-fm" {
+	const filePath: string;
+	export default filePath;
+}
+
 declare module "*.applescript" {
 	const content: string;
 	export default content;
