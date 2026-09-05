@@ -225,6 +225,18 @@ describe("executeJs", () => {
 		expect(persisted.output.trim()).toBe("2");
 	});
 
+	it("persists reassignments when a cell exits through a mid-body early return", async () => {
+		const first = await executeJs(
+			"var reassignedBeforeReturn = 1; await Promise.resolve(); reassignedBeforeReturn = 2; if (true) return;",
+			{ sessionId, session, sessionFile },
+		);
+		expect(first.exitCode).toBe(0);
+
+		const persisted = await executeJs("return reassignedBeforeReturn;", { sessionId, session, sessionFile });
+		expect(persisted.exitCode).toBe(0);
+		expect(persisted.output.trim()).toBe("2");
+	});
+
 	it("persists bindings when auto-displaying the final expression", async () => {
 		const first = await executeJs("const inspected = 40; inspected + 2;", { sessionId, session, sessionFile });
 		expect(first.exitCode).toBe(0);
