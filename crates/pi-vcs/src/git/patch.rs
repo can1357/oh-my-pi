@@ -2196,6 +2196,35 @@ mod tests {
 	}
 
 	#[test]
+	fn commit_split_ignores_intent_to_add_entries() {
+		// `git add -N` leaves a placeholder index entry that neither the staged
+		// diff nor `git write-tree` include; the split must compare against the
+		// same view or every plan is rejected as not covering the staged tree.
+		let temp = init(&[("a.txt", b"v1\n")]);
+		fs::write(temp.path().join("a.txt"), b"v2\n").unwrap();
+		fs::write(temp.path().join("promised.txt"), b"later\n").unwrap();
+		git(temp.path(), &["add", "a.txt"]);
+		git(temp.path(), &["add", "-N", "promised.txt"]);
+		let staged_diff = git(temp.path(), &["diff", "--cached", "--binary"]);
+		assert!(!staged_diff.contains("promised.txt"), "{staged_diff}");
+
+		let commits = repo(temp.path())
+			.commit_split(&SplitCommitOptions {
+				commits: vec![single_spec("feat: update a", &["a.txt"])],
+				staged_diff,
+			})
+			.unwrap();
+		assert_eq!(commits.len(), 1);
+		assert_eq!(git(temp.path(), &["show", "HEAD:a.txt"]), "v2\n");
+		git_expecting(temp.path(), &["cat-file", "-e", "HEAD:promised.txt"], 128);
+		assert_eq!(
+			git(temp.path(), &["rev-parse", "HEAD^{tree}"]).trim(),
+			git(temp.path(), &["write-tree"]).trim()
+		);
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), " A promised.txt\n");
+	}
+
+	#[test]
 	#[cfg(unix)]
 	fn commit_split_pre_commit_hook_may_read_but_not_modify_index() {
 		let fixture = staged_fixture();

@@ -1409,15 +1409,20 @@ struct TreeNode {
 	dirs:  BTreeMap<BString, Self>,
 }
 
+/// Write the unconflicted index entries as a tree, like `git write-tree`.
+/// Intent-to-add entries (`git add -N`) hold a placeholder blob and are not
+/// part of the staged tree; git skips them and so does the staged diff.
 pub(crate) fn write_index_tree(
 	repo: &gix::Repository,
 	index: &gix::index::File,
 ) -> Result<gix::hash::ObjectId> {
+	use gix::index::entry::{Flags, Stage};
+
 	let mut root = TreeNode::default();
 	for entry in index
 		.entries()
 		.iter()
-		.filter(|e| e.stage() == gix::index::entry::Stage::Unconflicted)
+		.filter(|e| e.stage() == Stage::Unconflicted && !e.flags.contains(Flags::INTENT_TO_ADD))
 	{
 		let parts: Vec<&[u8]> = entry.path(index).split(|b| *b == b'/').collect();
 		let mut node = &mut root;

@@ -12,6 +12,7 @@
 ### Fixed
 - `stageFiles` now runs the filter pipeline, so `.gitattributes`/`autocrlf` normalization matches `git add`.
 - Concurrent `git` invocations no longer clobber staged changes while native staging or patch application writes the index.
+- `commitCreate`/`commitSplit`/`writeTree` skip intent-to-add (`git add -N`) index entries like `git write-tree`, so an unrelated promised path no longer rejects every split plan as not covering the staged tree.
 
 ## [18.1.9] - 2026-09-04
 
