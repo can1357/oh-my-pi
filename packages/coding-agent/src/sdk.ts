@@ -3212,7 +3212,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				toolSession.contextFiles = contextFiles;
 				session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
 			}
-			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
+			// A scope that disallows the memory tools (any of them, or bare `*`)
+			// must not receive the backend's instructions: they direct the child
+			// to call `recall`/`retain`/`reflect`, which the scope invariant
+			// would reject (guaranteed unavailable-tool errors). Same rule as
+			// the auto-learn guidance below — tool-specific guidance follows the
+			// effective set.
+			const memoryToolsDisallowed =
+				MEMORY_BACKEND_TOOL_NAMES.some(name => isToolDisallowed(name, disallowedPatterns)) ||
+				disallowedPatterns.includes("*");
+			const memoryBackend =
+				restrictToolNames || memoryToolsDisallowed ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
 				? await memoryBackend.buildDeveloperInstructions(agentDir, settings, session)
 				: undefined;
