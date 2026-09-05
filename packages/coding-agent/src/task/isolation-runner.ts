@@ -10,7 +10,7 @@
  * Shape:
  *   1. {@link prepareIsolationContext} — resolve git root + capture baseline.
  *   2. {@link runIsolatedSubprocess}    — start worktree, run, capture
- *                                        branch/patch, tear worktree down.
+ *                                        changes, and transfer cleanup ownership.
  *   3. {@link mergeIsolatedChanges}     — apply captured changes back to the
  *                                        parent repo (skip when the caller
  *                                        opted out).
@@ -21,6 +21,7 @@
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
@@ -192,11 +193,22 @@ async function writeIsolationPatch(
  * the caller can still surface the subagent's output; only isolation setup
  * itself routes through {@link IsolatedRunOptions.buildFailureResult}.
  *
- * The isolation handle is always torn down in `finally`.
+ * A kept-alive subagent retains the isolation handle until its agent lifecycle
+ * is released; one-shot and failed startup paths tear it down in `finally`.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
 	let handle: IsolationHandle | undefined;
 	let deferredCleanup: Promise<void> | undefined;
+	let released = false;
+	const releaseIsolation = async (): Promise<void> => {
+		if (released || !handle) return;
+		released = true;
+		try {
+			await opts.baseOptions.onRelease?.();
+		} finally {
+			await cleanupIsolation(handle);
+		}
+	};
 	try {
 		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
@@ -211,6 +223,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				deferredCleanup = completion;
 				opts.baseOptions.onCleanupDeferred?.(completion);
 			},
+			onRelease: releaseIsolation,
 		});
 		opts.onSubprocessResult?.(result);
 		// A successful result cannot be captured while deferred owner jobs or
@@ -291,18 +304,14 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} catch (err) {
 		return rememberAgentArtifacts(opts.buildFailureResult(err));
 	} finally {
-		if (handle) {
-			const isolationHandle = handle;
+		if (handle && !(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))) {
 			if (deferredCleanup) {
-				trackLateCleanup(
-					deferredCleanup.then(() => cleanupIsolation(isolationHandle)),
-					{
-						agentId: opts.agentId,
-						resource: "isolation",
-					},
-				);
+				trackLateCleanup(deferredCleanup.then(releaseIsolation), {
+					agentId: opts.agentId,
+					resource: "isolation",
+				});
 			} else {
-				await cleanupIsolation(isolationHandle);
+				await releaseIsolation();
 			}
 		}
 	}

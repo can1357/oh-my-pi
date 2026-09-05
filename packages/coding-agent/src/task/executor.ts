@@ -555,6 +555,8 @@ export interface ExecutorOptions {
 	keepAlive?: boolean;
 	/** Internal ownership handoff for cleanup that outlives the visible Task result. */
 	onCleanupDeferred?: (completion: Promise<void>) => void;
+	/** Releases resources retained for a kept-alive agent when its lifecycle ends. */
+	onRelease?: () => Promise<void>;
 	/** Internal cleanup grace override for deterministic lifecycle tests. */
 	cleanupGraceMs?: number;
 }
@@ -2657,10 +2659,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 
 /**
  * Settle a subagent's registry lifecycle after a run: terminal teardown for
- * hard aborts, unregister for one-shot helpers, park for isolated runs, and
- * idle + lifecycle adoption for kept-alive agents. A soft-budget abort on a
- * kept-alive, revivable agent is treated as a self-inflicted stop rather than
- * a kill — the agent stays interrogable and resumable (irc wake / revival).
+ * hard aborts, unregister for one-shot helpers, and idle + lifecycle adoption
+ * for kept-alive agents. A soft-budget abort on a kept-alive, revivable agent
+ * is treated as a self-inflicted stop rather than a kill — the agent stays
+ * interrogable and resumable (IRC wake / revival).
  */
 export async function finalizeSubagentLifecycle(args: {
 	id: string;
@@ -2674,6 +2676,7 @@ export async function finalizeSubagentLifecycle(args: {
 	reviveSession: AgentReviver | null;
 	cleanupDeadlineAt?: number;
 	onCleanupDeferred?: (completion: Promise<void>) => void;
+	onRelease?: () => Promise<void>;
 }): Promise<void> {
 	const registry = AgentRegistry.global();
 	const ref = registry.get(args.id);
@@ -2704,13 +2707,19 @@ export async function finalizeSubagentLifecycle(args: {
 			});
 		}
 	};
+	const releaseOwnedResources = async (): Promise<void> => {
+		try {
+			await args.onRelease?.();
+		} catch (error) {
+			logger.warn("Subagent lifecycle resource cleanup failed", { id: args.id, error: String(error) });
+		}
+	};
 
 	// A budget abort leaves a consistent session with its transcript on disk.
 	// Manager shutdown also preserves the transcript, but disposes and unregisters
 	// the process-local session. Caller signals, wall-clock timeouts, and internal
 	// terminations are genuine kills and stay terminal.
-	const resumableAbort =
-		args.abortKind === "budget" && args.keepAlive && !args.isolated && args.reviveSession !== null;
+	const resumableAbort = args.abortKind === "budget" && args.keepAlive && args.reviveSession !== null;
 	if (args.aborted && !resumableAbort) {
 		if (ref && ownsRef) {
 			if (args.abortKind === "shutdown") {
@@ -2740,6 +2749,7 @@ export async function finalizeSubagentLifecycle(args: {
 		} else {
 			await disposeSession();
 		}
+		await releaseOwnedResources();
 		return;
 	}
 
@@ -2747,18 +2757,7 @@ export async function finalizeSubagentLifecycle(args: {
 		// One-shot helper: dispose and unregister. No IRC, no revival.
 		await disposeSession();
 		if (ref && ownsRef) registry.unregister(args.id, ref);
-		return;
-	}
-
-	if (args.isolated) {
-		// Isolated run: the worktree is merged + cleaned after the run, so
-		// the session is not resumable. Park the ref WITHOUT adopting — the
-		// transcript stays reachable (history://), but ensureLive will throw.
-		// Status must flip to "parked" before dispose so the sdk dispose
-		// wrapper skips unregister.
-		if (ref && ownsRef) registry.setStatus(args.id, "parked", ref);
-		await disposeSession();
-		if (ref && ownsRef) registry.detachSession(args.id, ref);
+		await releaseOwnedResources();
 		return;
 	}
 
@@ -2766,6 +2765,7 @@ export async function finalizeSubagentLifecycle(args: {
 	// The lifecycle manager owns idle-TTL parking + revival from here on.
 	if (!ref || !ownsRef || !registry.setStatus(args.id, "idle", ref)) {
 		await disposeSession();
+		await releaseOwnedResources();
 		return;
 	}
 	AgentLifecycleManager.global().adopt(
@@ -2773,6 +2773,7 @@ export async function finalizeSubagentLifecycle(args: {
 		{
 			idleTtlMs: args.agentIdleTtlMs,
 			revive: args.reviveSession ?? undefined,
+			onRelease: args.onRelease,
 		},
 		ref,
 	);
@@ -3443,11 +3444,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Run-state notifications precede deferrable wire-level `agent_end`,
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
 			AgentRegistry.global().syncSessionStatus(id, session);
-			if (sessionFile !== null && worktree === undefined) {
+			if (sessionFile !== null) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
 				// the single-writer lock cleanly and restores the full message history
-				// (createAgentSession → agent.replaceMessages). Isolated runs are not
-				// resumable (worktree is merged + cleaned) and never get a reviver.
+				// (createAgentSession → agent.replaceMessages). Isolated runs keep their
+				// worktree for the same lifecycle, so they can use this path too.
 				reviveSession = async expectedAgentRef => {
 					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
 						suppressBreadcrumb: true,
@@ -3708,7 +3709,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
-				if (options.keepAlive !== false && worktree === undefined) {
+				if (options.keepAlive !== false) {
 					installIrcWakeTurnMonitor(session);
 				}
 				await finalizeSubagentLifecycle({
@@ -3721,6 +3722,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					agentIdleTtlMs,
 					reviveSession,
 					cleanupDeadlineAt,
+					onRelease: options.onRelease,
 					onCleanupDeferred: completion => {
 						deferredSessionShutdown = completion;
 						deferCleanup(completion);
