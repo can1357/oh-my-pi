@@ -461,6 +461,95 @@ describe("runIsolatedSubprocess", () => {
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("captures a one-shot isolated patch before cleanup when its lifecycle releases early", async () => {
+		// One-shot runs (keepAlive === false) invoke onRelease inside
+		// finalizeSubagentLifecycle, before runIsolatedSubprocess performs its
+		// post-run patch capture. The worktree must survive that early release so
+		// capture succeeds; cleanup happens once afterwards in `finally`.
+		const isolationDir = "/repo/isolated";
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-oneshot-"));
+		tempRoots.push(artifactsDir);
+		const rootPatch = "diff --git a/task.txt b/task.txt\n+captured\n";
+		const baseline = {
+			root: {
+				repoRoot: "/repo",
+				headCommit: "base",
+				staged: "",
+				unstaged: "",
+				untracked: [],
+				untrackedPatch: "",
+			},
+			nested: [],
+		};
+		const order: string[] = [];
+		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
+			mergedDir: isolationDir,
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		const oneShotSession = {
+			prepareForHeadlessAdvisorDrain: () => {},
+			waitForAdvisorCatchup: async () => true,
+			dispose: async () => {},
+		} as unknown as AgentSession;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				session: oneShotSession,
+				sessionFile: "/tmp/OneShotIsolation.jsonl",
+				status: "running",
+			});
+			// Eval-bridge one-shot: keepAlive false drives onRelease immediately.
+			await executorModule.finalizeSubagentLifecycle({
+				id: options.id,
+				session: oneShotSession,
+				aborted: false,
+				keepAlive: false,
+				isolated: true,
+				agentIdleTtlMs: 0,
+				reviveSession: null,
+				onRelease: options.onRelease,
+			});
+			return result({ id: options.id, exitCode: 0 });
+		});
+		const captureSpy = vi.spyOn(worktreeModule, "captureDeltaPatch").mockImplementation(async () => {
+			order.push("capture");
+			return { rootPatch, nestedPatches: [] };
+		});
+		const cleanupSpy = vi.spyOn(worktreeModule, "cleanupIsolation").mockImplementation(async () => {
+			order.push("cleanup");
+		});
+
+		const outcome = await runIsolatedSubprocess({
+			baseOptions: {
+				cwd: "/repo",
+				agent: { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" },
+				task: "Do work",
+				index: 0,
+				id: "OneShotIsolation",
+				keepAlive: false,
+			},
+			context: { repoRoot: "/repo", baseline },
+			preferredBackend: undefined,
+			agentId: "OneShotIsolation",
+			mergeMode: "patch",
+			artifactsDir,
+			buildFailureResult: error => result({ exitCode: 1, error: String(error) }),
+		});
+
+		const patchPath = path.join(artifactsDir, "OneShotIsolation.patch");
+		expect(outcome.exitCode).toBe(0);
+		expect(outcome.error).toBeUndefined();
+		expect(outcome.patchPath).toBe(patchPath);
+		expect(await Bun.file(patchPath).text()).toBe(rootPatch);
+		expect(order).toEqual(["capture", "cleanup"]);
+		expect(captureSpy).toHaveBeenCalledTimes(1);
+		expect(cleanupSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("observes real child usage before fallible isolation cleanup", async () => {
 		const childResult = result({
 			exitCode: 1,

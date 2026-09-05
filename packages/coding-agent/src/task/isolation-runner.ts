@@ -246,6 +246,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				deferredCleanup = completion;
 				opts.baseOptions.onCleanupDeferred?.(completion);
 			},
+			// One-shot runs get `releaseBase` (never touches the worktree): their
+			// `finalizeSubagentLifecycle` calls `onRelease` before this function's
+			// post-run capture, so the handle must survive until the `finally`
+			// below cleans it up. Only kept-alive runs hand full capture+cleanup
+			// (`releaseIsolation`) to the agent lifecycle.
 			onRelease: opts.baseOptions.keepAlive === false ? releaseBase : releaseIsolation,
 		});
 		opts.onSubprocessResult?.(result);
