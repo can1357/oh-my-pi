@@ -20,6 +20,12 @@ behavior {
 	// `opencode` provider in the picker.
 	retired-providers "wafer-pass" "wandb" "opencode"
 
+	// ClinePass exposes gateway-specific limits, pricing, and reasoning
+	// controls; matching them by bare model id contaminates unrelated proxy
+	// models (a LiteLLM proxy serving `glm-5.3-flash`), so its rows are barred
+	// from seeding cross-provider bare-id enrichment references (#10932).
+	reference-isolated-providers "cline-pass"
+
 	// Discovered Responses/Codex models receive these additional operations.
 	model-operations provider="openai" {
 		exact "o3"

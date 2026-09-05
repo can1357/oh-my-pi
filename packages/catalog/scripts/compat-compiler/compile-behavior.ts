@@ -277,6 +277,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		modelLimits: [],
 		excludeModels: [],
 		retiredProviders: [],
+		referenceIsolatedProviders: [],
 		planRequirements: [],
 		pricingPeers: [],
 	};
@@ -349,6 +350,13 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				const values = positionalStrings(node);
 				if (values.length === 0 || values.some(value => !value)) malformed(node);
 				behavior.retiredProviders.push(...values);
+				break;
+			}
+			case "reference-isolated-providers": {
+				ensureLeaf(node, []);
+				const values = positionalStrings(node);
+				if (values.length === 0 || values.some(value => !value)) malformed(node);
+				behavior.referenceIsolatedProviders.push(...values);
 				break;
 			}
 			default:

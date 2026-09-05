@@ -318,6 +318,7 @@ export interface CompiledBehavior {
 	planRequirements: CompiledPlanRequirement[];
 	pricingPeers: CompiledPricingPeer[];
 	retiredProviders: string[];
+	referenceIsolatedProviders: string[];
 }
 
 /**

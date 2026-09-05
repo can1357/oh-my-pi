@@ -1,3 +1,4 @@
+import { isBareIdReferenceProvider } from "../compat/behavior";
 import { isZeroCostXaiOAuthReference } from "../identity/reference";
 import { getBundledModels, getBundledProviders } from "../models";
 import type { Api, Model, ModelSpec } from "../types";
@@ -34,11 +35,6 @@ export function createBundledReferenceMap<TApi extends Api>(
 }
 
 type ProviderReferenceSource<TApi extends Api> = Map<string, ModelSpec<TApi>> | (() => Map<string, ModelSpec<TApi>>);
-
-/** Whether a provider's rows may enrich proxy models through bare model ids. */
-export function isBareIdReferenceProvider(provider: string): boolean {
-	return provider !== "cline-pass";
-}
 
 let globalReferences: Map<string, Model<Api>> | undefined;
 

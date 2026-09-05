@@ -4,6 +4,7 @@ import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
 	apiRouteExactModelIds,
 	apiRouteFor,
+	isBareIdReferenceProvider,
 	isExcludedModel,
 	isLikelyOpenAIResponsesId,
 	modelLimitsFor,
@@ -40,12 +41,7 @@ import {
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
-import {
-	createBundledReferenceMap,
-	createReferenceResolver,
-	isBareIdReferenceProvider,
-	toModelSpec,
-} from "./bundled-references";
+import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
 import type { ModelManagerConfig } from "./descriptor-types";
