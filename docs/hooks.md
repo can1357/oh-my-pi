@@ -242,7 +242,9 @@ Hook status text set via `ctx.ui.setStatus(key, text, options?)` is:
 Because sanitization strips ANSI, embedded escape sequences never colour a
 status. Pass a theme token instead — `ctx.ui.setStatus("cache", "cold", { color: "error" })` —
 and the entry is painted with `theme.fg(color, …)`, so it follows the user's
-theme. Entries without a colour keep the default accent.
+theme. Entries without a colour — and entries naming a token the theme does not
+define — render exactly as before: accented in the `status` segment of the
+status line, unstyled in the standalone hook-status row below the editor.
 
 ## Error propagation and fallback
 
