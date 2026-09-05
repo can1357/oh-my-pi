@@ -41,7 +41,7 @@ interface Rule {
   alwaysApply?: boolean;
   description?: string;
   condition?: string[];
-  astCondition?: string[];
+  astCondition?: (string | Record<string, unknown>)[];
   scope?: string[];
   agents?: string[];
   interruptMode?: "never" | "prose-only" | "tool-only" | "always";
@@ -272,7 +272,24 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 ### `condition`, `astCondition`, `scope`, and `interruptMode`
 
 - `condition` is the regex TTSR trigger field; legacy `ttsr_trigger` / `ttsrTrigger` are accepted as fallback inputs during parsing. A leading `(?i)`, `(?m)`, or `(?s)` inline flag group is translated to the equivalent JavaScript `RegExp` flags.
-- `astCondition` is the ast-grep trigger field: a string or YAML sequence of structural patterns, kept verbatim (no glob inference). It only matches on edit/write tool streams, where the language is inferred from the file path. A rule may set `condition`, `astCondition`, or both.
+- `astCondition` is the ast-grep trigger field: a pattern string, structured ast-grep rule object, or YAML sequence mixing both. Structured rules support ast-grep's relational and composite clauses (`inside`, `has`, `not`, `all`, `any`, and others). Use a full rule core with top-level `rule` when `constraints` or `utils` are needed; an object without `rule` is treated as the rule itself. AST conditions never trigger glob inference. They only match on edit/write tool streams, where the language is inferred from the file path. A rule may set `condition`, `astCondition`, or both.
+
+  ```yaml
+  astCondition:
+    rule:
+      pattern: console.log($ARG)
+    constraints:
+      ARG:
+        regex: ^secret
+  ```
+
+  ```yaml
+  astCondition:
+    all:
+      - pattern: console.log($ARG)
+      - not:
+          pattern: console.log("safe")
+  ```
 - `scope` narrows TTSR matching to an allowlist of stream surfaces. It accepts either a comma-separated YAML string or a YAML sequence. Omitting it watches assistant prose (`text`) and all tool arguments (`tool`), but not thinking.
 
   ```yaml

@@ -6,6 +6,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
+use ast_grep_config::{DeserializeEnv, SerializableRuleCore};
 use ast_grep_core::{MatchStrictness, matcher::Pattern, source::Edit, tree_sitter::LanguageExt};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -255,8 +256,10 @@ pub struct AstMatchOptions<'env> {
 	pub source:       String,
 	/// Language of `source` (required; e.g. "ts", "tsx", "rust", "python").
 	pub lang:         String,
-	/// ast-grep patterns to search for (OR across patterns).
+	/// Shorthand ast-grep patterns to search for (OR with `rule_configs`).
 	pub patterns:     Vec<String>,
+	/// Serialized ast-grep rule cores to search for (OR with `patterns`).
+	pub rule_configs: Option<Vec<String>>,
 	/// Rule selector for multi-rule ast-grep configurations.
 	pub selector:     Option<String>,
 	/// Pattern strictness; defaults to smart matching when omitted.
@@ -282,7 +285,7 @@ pub struct AstMatchResult {
 	pub total_matches: u32,
 	/// True when results were truncated by `limit`.
 	pub limit_reached: bool,
-	/// Non-fatal parse or pattern-compile errors collected during the run.
+	/// Non-fatal parse or condition-compile errors collected during the run.
 	pub parse_errors:  Option<Vec<String>>,
 }
 
@@ -497,10 +500,10 @@ fn apply_edits(content: &str, edits: &[Edit<String>]) -> Result<String> {
 	shared_ops::apply_edits(content, edits).map_err(|err| Error::from_reason(err.to_string()))
 }
 
-fn normalize_pattern_list(patterns: Option<Vec<String>>) -> Result<Vec<String>> {
+fn normalize_nonempty_strings(values: Option<Vec<String>>) -> Vec<String> {
 	let mut normalized = Vec::new();
 	let mut seen = BTreeSet::new();
-	for raw in patterns.unwrap_or_default() {
+	for raw in values.unwrap_or_default() {
 		let pattern = raw.trim();
 		if pattern.is_empty() || seen.contains(pattern) {
 			continue;
@@ -513,6 +516,11 @@ fn normalize_pattern_list(patterns: Option<Vec<String>>) -> Result<Vec<String>> 
 		seen.insert(owned.clone());
 		normalized.push(owned);
 	}
+	normalized
+}
+
+fn normalize_pattern_list(patterns: Option<Vec<String>>) -> Result<Vec<String>> {
+	let normalized = normalize_nonempty_strings(patterns);
 	if normalized.is_empty() {
 		return Err(Error::from_reason(
 			"`patterns` is required and must include at least one non-empty pattern".to_string(),
@@ -791,8 +799,8 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 	})
 }
 
-/// Match ast-grep patterns against an in-memory source string; returns a
-/// promise resolved on a worker thread.
+/// Match ast-grep patterns or structured rule cores against an in-memory source
+/// string; returns a promise resolved on a worker thread.
 ///
 /// This is the file-free counterpart to [`ast_grep`]: callers that already hold
 /// the source (streaming buffers, generated code, editor contents) avoid a
@@ -804,6 +812,7 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 		source,
 		lang,
 		patterns,
+		rule_configs,
 		selector,
 		strictness,
 		limit,
@@ -818,7 +827,13 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 	let normalized_offset = offset.unwrap_or(0);
 
 	task::blocking("ast_match", ct, move |ct| {
-		let patterns = normalize_pattern_list(Some(patterns))?;
+		let rule_configs = normalize_nonempty_strings(rule_configs);
+		let patterns = normalize_nonempty_strings(Some(patterns));
+		if patterns.is_empty() && rule_configs.is_empty() {
+			return Err(Error::from_reason(
+				"`patterns` or `ruleConfigs` must include at least one condition".to_string(),
+			));
+		}
 		let strictness = resolve_strictness(strictness);
 		let include_meta = include_meta.unwrap_or(false);
 		let lang_str = lang.trim();
@@ -836,12 +851,27 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 				Err(err) => parse_errors.push(format!("{pattern}: {err}")),
 			}
 		}
+		let mut compiled_rules = Vec::with_capacity(rule_configs.len());
+		for (index, config) in rule_configs.iter().enumerate() {
+			ct.heartbeat()?;
+			let compiled = ast_grep_config::from_str::<SerializableRuleCore>(config)
+				.map_err(|err| err.to_string())
+				.and_then(|rule| {
+					rule
+						.get_matcher(DeserializeEnv::new(language))
+						.map_err(|err| err.to_string())
+				});
+			match compiled {
+				Ok(rule) => compiled_rules.push(rule),
+				Err(err) => parse_errors.push(format!("structured rule {}: {err}", index + 1)),
+			}
+		}
 
 		let retained_capacity = retained_find_capacity(normalized_offset, normalized_limit);
 		let mut retained_matches = BinaryHeap::new();
 		let mut total_matches = 0u32;
 		let mut match_sequence = 0u64;
-		if !compiled_patterns.is_empty() {
+		if !compiled_patterns.is_empty() || !compiled_rules.is_empty() {
 			let ast = language.ast_grep(&source);
 			if ast.root().dfs().any(|node| node.is_error()) {
 				parse_errors.push("parse error (syntax tree contains error nodes)".to_string());
@@ -849,6 +879,43 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 			for pattern in &compiled_patterns {
 				ct.heartbeat()?;
 				for matched in ast.root().find_all(pattern.clone()) {
+					ct.heartbeat()?;
+					total_matches = total_matches.saturating_add(1);
+					let range = matched.range();
+					let start = matched.start_pos();
+					let end = matched.end_pos();
+					let key = AstFindOrderKey {
+						path:         String::new(),
+						start_line:   to_u32(start.line().saturating_add(1)),
+						start_column: to_u32(start.column(matched.get_node()).saturating_add(1)),
+						end_line:     to_u32(end.line().saturating_add(1)),
+						end_column:   to_u32(end.column(matched.get_node()).saturating_add(1)),
+						byte_start:   to_u32(range.start),
+						byte_end:     to_u32(range.end),
+						sequence:     match_sequence,
+					};
+					match_sequence = match_sequence.saturating_add(1);
+					if should_retain_match(&retained_matches, retained_capacity, &key) {
+						let meta_variables = if include_meta {
+							Some(HashMap::<String, String>::from(matched.get_env().clone()))
+						} else {
+							None
+						};
+						retain_bounded_match(
+							&mut retained_matches,
+							retained_capacity,
+							RetainedAstFindMatch {
+								key,
+								text: matched.text().into_owned(),
+								meta_variables,
+							},
+						);
+					}
+				}
+			}
+			for rule in &compiled_rules {
+				ct.heartbeat()?;
+				for matched in ast.root().find_all(rule) {
 					ct.heartbeat()?;
 					total_matches = total_matches.saturating_add(1);
 					let range = matched.range();

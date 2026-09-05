@@ -70,7 +70,7 @@ async function run(args: TtsrCommandArgs): Promise<void> {
 async function writeTempRule(
 	condition: string,
 	scope: string[],
-	options: { astCondition?: string; agents?: string[] } = {},
+	options: { astCondition?: string | Record<string, unknown>; agents?: string[] } = {},
 ): Promise<string> {
 	// Stable basename "test-rule.md" so buildRuleFromMarkdown derives name
 	// "test-rule" — assertions rely on it. Each call uses a unique parent dir
@@ -79,7 +79,7 @@ async function writeTempRule(
 	fs.mkdirSync(dir, { recursive: true });
 	const tmp = path.join(dir, "test-rule.md");
 	const fm: string[] = [`description: test rule`, `condition: "${condition.replace(/"/g, '\\"')}"`];
-	if (options.astCondition) fm.push(`astCondition: "${options.astCondition.replace(/"/g, '\\"')}"`);
+	if (options.astCondition) fm.push(`astCondition: ${JSON.stringify(options.astCondition)}`);
 	fm.push(`scope: [${scope.map(s => `"${s}"`).join(", ")}]`);
 	if (options.agents) fm.push(`agents: [${options.agents.map(a => `"${a}"`).join(", ")}]`);
 	await Bun.write(tmp, `---\n${fm.join("\n")}\n---\nbody\n`);
@@ -186,6 +186,67 @@ describe("omp ttsr", () => {
 			expect(stdout).toContain("Triggered");
 			expect(stdout).toContain("astCondition");
 		});
+
+		// Needs this PR's Rust; PR CI loads the published natives leaf.
+		it.skipIf(process.env.GITHUB_EVENT_NAME === "pull_request")(
+			"astCondition accepts structured negative and constraint clauses",
+			async () => {
+				const rule = await writeTempRule("never-match", ["tool:edit(*.ts)"], {
+					astCondition: {
+						rule: {
+							all: [{ pattern: "console.log($A)" }, { not: { pattern: 'console.log("safe")' } }],
+						},
+						constraints: { A: { regex: "^secret$" } },
+					},
+				});
+
+				captureStreams();
+				await run({
+					action: "test",
+					test: {
+						rule,
+						snippet: 'console.log("safe"); console.log(secret);',
+						source: "tool",
+						tool: "edit",
+						filePath: "src/example.ts",
+					},
+				});
+
+				expect(process.exitCode).toBe(0);
+				expect(stdout).toContain("test-rule");
+				expect(stdout).toContain('"not"');
+				expect(stdout).toContain('"constraints"');
+			},
+		);
+
+		it.skipIf(process.env.GITHUB_EVENT_NAME === "pull_request")(
+			"preserves hyphenated structured utility identifiers through frontmatter parsing",
+			async () => {
+				const rule = await writeTempRule("never-match", ["tool:edit(*.ts)"], {
+					astCondition: {
+						rule: { matches: "is-number" },
+						utils: { "is-number": { kind: "number" } },
+					},
+				});
+
+				captureStreams();
+				await run({
+					action: "test",
+					test: {
+						rule,
+						snippet: "const count = 1;",
+						source: "tool",
+						tool: "edit",
+						filePath: "src/example.ts",
+					},
+				});
+
+				expect(process.exitCode).toBe(0);
+				expect(stdout).toContain("Triggered");
+				expect(stdout).toContain('"is-number"');
+				expect(stdout).not.toContain("isNumber");
+			},
+		);
 
 		it("infers tool/edit context for a newly-allowlisted .cs file", async () => {
 			captureStreams();
@@ -509,6 +570,36 @@ describe("omp ttsr", () => {
 			expect(stdout).toContain("1 matches across 1 files");
 			expect(stdout).not.toContain("src/foo.ts");
 		});
+
+		// Needs this PR's Rust; PR CI loads the published natives leaf.
+		it.skipIf(process.env.GITHUB_EVENT_NAME === "pull_request")(
+			"scans matching and nonmatching files with a structured AST condition",
+			async () => {
+				const projectDir = path.join(testTmpDir, `.tmp-ttsr-project-${Math.random().toString(36).slice(2)}`);
+				fs.mkdirSync(path.join(projectDir, "src"), { recursive: true });
+				setProjectDir(projectDir);
+
+				await Bun.write(path.join(projectDir, "src/match.ts"), "const count = 1;");
+				await Bun.write(path.join(projectDir, "src/no-match.ts"), 'const count = "one";');
+				const rulePath = await writeTempRule("never-match", ["tool:edit(src/**/*.ts)"], {
+					astCondition: {
+						rule: { matches: "is-number" },
+						utils: { "is-number": { kind: "number" } },
+					},
+				});
+				const scan: TtsrScanArgs = { directory: "src", rule: rulePath };
+
+				captureStreams();
+				await run({ action: "scan", scan });
+				expect(stdout).toContain("1 matches across 1 files");
+
+				captureStreams();
+				await run({ action: "scan", scan, json: true });
+				const result = JSON.parse(stdout);
+				expect(result.files.map((file: { filePath: string }) => file.filePath)).toEqual(["src/match.ts"]);
+				expect(result.summary).toMatchObject({ totalFiles: 2, scannedFiles: 2, matchedFiles: 1, totalMatches: 1 });
+			},
+		);
 
 		it("skips files larger than the scan byte limit", async () => {
 			captureStreams();

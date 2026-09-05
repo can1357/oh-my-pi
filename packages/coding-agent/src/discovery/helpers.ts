@@ -8,6 +8,7 @@ import {
 	getConfigDirName,
 	getPluginsDir,
 	getProjectDir,
+	normalizeFrontmatterKeys,
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
@@ -209,6 +210,29 @@ interface RuleMarkdownOptions {
 	stripNamePattern?: RegExp;
 }
 
+interface ParsedRuleMarkdown {
+	frontmatter: RuleFrontmatter;
+	body: string;
+}
+
+function parseRuleMarkdown(content: string, filePath: string): ParsedRuleMarkdown {
+	const { frontmatter: rawFrontmatter, body } = parseFrontmatter(content, { source: filePath, rawKeys: true });
+	const normalizableFrontmatter: Record<string, unknown> = {};
+	let rawAstCondition: unknown;
+	let hasAstCondition = false;
+	for (const [key, value] of Object.entries(rawFrontmatter)) {
+		if (key === "astCondition" || key === "ast-condition") {
+			rawAstCondition = value;
+			hasAstCondition = true;
+			continue;
+		}
+		normalizableFrontmatter[key] = value;
+	}
+	const frontmatter = normalizeFrontmatterKeys(normalizableFrontmatter);
+	if (hasAstCondition) frontmatter.astCondition = rawAstCondition;
+	return { frontmatter: frontmatter as RuleFrontmatter, body };
+}
+
 function buildRule(
 	name: string,
 	body: string,
@@ -256,8 +280,8 @@ export function buildRuleFromMarkdown(
 	source: SourceMeta,
 	options?: RuleMarkdownOptions,
 ): Rule {
-	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
-	return buildRule(name, body, frontmatter as RuleFrontmatter, filePath, source, options);
+	const { frontmatter, body } = parseRuleMarkdown(content, filePath);
+	return buildRule(name, body, frontmatter, filePath, source, options);
 }
 
 /** Build a discovered rule from Markdown, returning null when its frontmatter disables it. */
@@ -268,9 +292,9 @@ export function discoverRuleFromMarkdown(
 	source: SourceMeta,
 	options?: RuleMarkdownOptions,
 ): Rule | null {
-	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
+	const { frontmatter, body } = parseRuleMarkdown(content, filePath);
 	if (frontmatter.enabled === false) return null;
-	return buildRule(name, body, frontmatter as RuleFrontmatter, filePath, source, options);
+	return buildRule(name, body, frontmatter, filePath, source, options);
 }
 
 /**

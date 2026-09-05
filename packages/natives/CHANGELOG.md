@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `astMatch` now accepts serialized structured ast-grep rule cores through `ruleConfigs`.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

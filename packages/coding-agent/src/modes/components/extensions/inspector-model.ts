@@ -8,7 +8,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { normalizePathForComparison, parseFrontmatter } from "@oh-my-pi/pi-utils";
-import { parseRuleAgents, parseRuleConditionAndScope } from "../../../capability/rule";
+import {
+	formatAstCondition,
+	parseRuleAgents,
+	parseRuleConditionAndScope,
+	type RuleFrontmatter,
+} from "../../../capability/rule";
 import { slashCommandFrontmatterDisplay } from "../../../capability/slash-command";
 import { isFilesystemSourcePath } from "../../../tools/path-utils";
 import {
@@ -350,7 +355,7 @@ export function ruleInspectorData(ext: Extension): {
 	const globs = stringArray(raw.globs);
 	const parsed = parseRuleConditionAndScope({
 		condition: stringArray(raw.condition) ?? stringField(raw, "condition"),
-		astCondition: stringArray(raw.astCondition) ?? stringField(raw, "astCondition"),
+		astCondition: raw.astCondition as RuleFrontmatter["astCondition"],
 		scope: stringArray(raw.scope) ?? stringField(raw, "scope"),
 	});
 	const agents = parseRuleAgents(raw.agents);
@@ -361,7 +366,7 @@ export function ruleInspectorData(ext: Extension): {
 		alwaysApply,
 		globs,
 		condition: parsed.condition,
-		astCondition: parsed.astCondition,
+		astCondition: parsed.astCondition?.map(formatAstCondition),
 		scope: parsed.scope,
 		agents,
 		interruptMode,
