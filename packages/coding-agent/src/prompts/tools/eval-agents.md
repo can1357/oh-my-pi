@@ -9,8 +9,8 @@ await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, m
   - Handle: `.id`, `.handle` ("agent://<id>"), {{#if py}}`.status`{{else}}`.status()`{{/if}}, `.done()`, `.wait(timeout?)` → final text (parsed with `schema`),
     `.send(message)`, `.cancel()`, `.output()`.
   - Unwaited results auto-deliver like async jobs.
-  - `timeout` caps wall-clock seconds; omitted inherits `task.maxRuntimeMs`, 0 disables, and positive values have a 1 ms minimum.
-  - After `wait()`, `.model` and `.family` report served identity when available.
+  - `timeout` caps wall-clock seconds; omitted inherits `task.maxRuntimeMs`, 0 disables, positive values have a 1 ms minimum.
+  - After `wait()`, `handle.model`/`handle.family` report the served identity when available.
 {{#if perCallModel}}
   - `model`: one exact `provider/model-id[@upstream][:level]` string for this call only.
     - `@upstream` pins an aggregator route and is part of the model identity.
@@ -31,6 +31,7 @@ await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, m
   - `{{#if py}}merge=False{{else}}merge: false{{/if}}` forces patch mode, otherwise `task.isolation.merge` decides.
 {{#if evalTools}}
   - `tools`: names of tools you defined with {{#ifAll py js}}`@tool` / `tool(fn)`{{else}}{{#if py}}`@tool`{{else}}`tool(fn)`{{/if}}{{/ifAll}} that the child may call.
+    - Agents with `restrictTools: true` keep their built-in allowlist; `tools` cannot widen it.
 {{/if}}
 {{#ifAll py js}}
   - Python: call without `await`; `await agent(…)` returns the final result, not a handle (`await h` = `h.wait()`).
