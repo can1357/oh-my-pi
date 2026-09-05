@@ -49,13 +49,17 @@ export interface MCPToolFilterResult {
  * the {§, ¤, /} alphabet), so the encoding is injective — encoded strings
  * collide only when the originals do.
  *
- * Known limitation (documented, not guarded): picomatch hardcodes `/` into
- * NEGATED character classes during compilation (`[^a]` → `[^a/]`), so a
- * negated class can never exclude the slash character — `[^/]` matches
- * slash-containing names. This is inherent picomatch behavior, not a defect;
- * documented so config authors are not surprised. Positive classes with
- * slash members (`admin[/]delete`) transliterate cleanly and match slash
- * names as expected.
+ * Known limitations (documented, not guarded — the matching domain is
+ * character-substituted, so picomatch sees encoded text):
+ * - picomatch hardcodes `/` into NEGATED character classes (`[^a]` →
+ *   `[^a/]`), so a negated class can never exclude the slash character —
+ *   `[^/]` matches slash-containing names;
+ * - `?` and class *ranges* resolve against encoded text, so they cannot span
+ *   a slash position (`admin??delete` matches one-char `admin§delete`, and
+ *   `[.-0]` does not span it) — use `*`, `**`, or an explicit `/` class
+ *   member instead.
+ * The common patterns (`*`, `**`, explicit `/` class members, braces,
+ * literals) are unaffected and match as documented.
  *
  * `nonegate`/`noextglob` pin the applied surface to the documented globs
  * (`*`, `?`, `[...]`, `{a,b}`) — a leading `!` or extglob prefix (`+(a|b)`)
