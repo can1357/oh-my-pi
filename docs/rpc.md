@@ -877,3 +877,7 @@ with RpcClient(provider="anthropic", model="claude-sonnet-4-5") as client:
 ```
 
 By default, `RpcClient` starts `omp --mode rpc`; pass `command=[...]` to own the exact child command. It handles request correlation, typed notifications, v2 negotiation and chunk reassembly, message pagination, extension UI, and host-owned tools and URI schemes. The Python package owns that client API and process lifecycle; this document and `rpc-types.ts` remain the canonical wire contract. Use raw protocol frames when a client library does not wrap the surface you need.
+
+### Community application
+
+[OMP Desktop](https://github.com/Eijnewgnaw/omp-desktop) is an independent, local-first desktop client built on `--mode rpc-ui`. It turns common OMP workflows—starting projects, choosing Profiles and models, resuming sessions, managing history, and returning to the terminal—into direct visual actions on Apple Silicon macOS, native Windows, and WSL2, reducing the need to remember commands, flags, and session paths. OMP remains the agent runtime and source of truth, while the desktop client makes it easier for more people to discover and use OMP.
