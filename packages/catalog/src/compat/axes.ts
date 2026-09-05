@@ -289,6 +289,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"credential-scoped-catalog": { key: "credentialScopedCatalog", set: "catalog", shape: "scalar" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
+	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	"requires-cursor-tool-schema-projection": {
 		key: "requiresCursorToolSchemaProjection",
 		set: "catalog",
