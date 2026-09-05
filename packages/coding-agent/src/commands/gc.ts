@@ -14,6 +14,9 @@ export default class Gc extends Command {
 		"agent-dir": Flags.string({ description: "Agent directory to maintain" }),
 		blobs: Flags.boolean({ description: "Sweep unreferenced blobs" }),
 		archive: Flags.boolean({ description: "Archive cold sessions" }),
+		"merge-sessions": Flags.boolean({
+			description: "Reunite sessions split across files: duplicate copies and forks",
+		}),
 		wal: Flags.boolean({ description: "Checkpoint history/model database WAL files" }),
 		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
 		"retain-newest-global": Flags.integer({ description: "Always keep this many newest sessions active" }),
@@ -29,6 +32,7 @@ export default class Gc extends Command {
 				agentDir: flags["agent-dir"],
 				blobs: flags.blobs,
 				archive: flags.archive,
+				mergeSessions: flags["merge-sessions"],
 				wal: flags.wal,
 				coldArchiveAfterDays: flags["cold-archive-after-days"],
 				retainNewestGlobal: flags["retain-newest-global"],

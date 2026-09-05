@@ -49,7 +49,13 @@ export const galleryHelp = {
 	description: "Preview tool, composer, and status-line renderers in a deterministic visual gallery",
 } satisfies CommandMetadata;
 
-export const gcHelp = { description: "Run storage garbage collection" } satisfies CommandMetadata;
+export const gcHelp = {
+	description: "Run storage garbage collection, including session merges",
+	examples: [
+		"omp gc --merge-sessions          # Reunite duplicate copies and forks of the same conversation",
+		"omp gc --merge-sessions --apply  # Same, but actually rewrite the sessions",
+	],
+} satisfies CommandMetadata;
 export const ifBenchHelp = {
 	description:
 		"Benchmark instruction following and working memory: one cached thread of glyph array actions with a moving cat-sound directive",

@@ -1107,6 +1107,16 @@
 - Fixed `hub jobs` and empty `hub wait` snapshots hiding running subagents that have no live turn, which removed the only way to discover and `hub cancel` a stale registration; such agents are listed again and flagged as having no turn in flight.
 - Fixed external thinking being offered on xAI reasoning-only Responses models (grok-4 family) that reject `reasoning.effort`, where the private scratchpad ran alongside native reasoning instead of replacing it.
 - Fixed the extension tool-call handler timeout rendering outside a titled section in `/settings` by registering its Extensions group on the Tools tab.
+### Added
+
+- Added collapsible branches to the HTML export's session tree: every node with children gets a ▾/▸ toggle that folds its subtree, alongside the existing active-path bullet.
+- Added collapsible branches to the `/tree` selector: `Space` folds the selected node's subtree behind a `▸` marker with a hidden-entry count, `Shift+Tab` folds every branch off the current thread down to one row each, and `←`/`→` jump to the fork above the cursor or the next fork below it along the branch.
+- Added a `/prune` slash command that deletes conversation branches with nothing to read in them: an entry survives only if an answered assistant reply sits at or below it, so unanswered prompts, replies that errored or were aborted, replies left waiting on a tool call that never came back, and the tool traffic under them all go. The active branch is always kept intact.
+- `/prune` now hides empty branches instead of deleting them. An archive record is appended to the session file, the branch stays on disk byte for byte, and the tree, the HTML export, and `/share` stop offering it. `/prune delete` is the old destructive behavior, now opt-in, and archiving a branch also shields it from it.
+- Added `/unarchive` to bring hidden branches back: `/unarchive` restores them all, `/unarchive <branch id>` restores one, and `/unarchive list` shows what is hidden.
+- Added archiving from the `/tree` selector: `Shift+A` hides the highlighted branch whether or not it is empty, `Alt+R` reveals archived branches in place, and `Shift+A` on a revealed branch restores it.
+- Added `omp gc --merge-sessions`, which reunites a conversation that got split across files. Two things split one: a session written to two project directories, where each copy can hold branches the other lost, and `/fork`, which writes a whole new session file — new id, a verbatim copy of the parent's history, a `parentSession` header — so work done in the fork never appears in the tree it branched from. Both are found by the one flag: duplicates are unioned by entry id with the copy matching the recorded `cwd` staying authoritative, forks are grafted at the point they diverged, and `parentSession` resolves whether it holds an id or a path. Duplicates are merged first, so a fork whose parent had a duplicate grafts onto the reunited file rather than a stale copy. Dry-run by default; `--apply` backs up each destination and archives the consumed files with their artifacts rather than deleting them.
+- Session-rewriting gc passes now ask the OS whether a session is live — advisory locks, open file handles, POSIX locks — and name the holding process when they skip one, instead of inferring liveness from the file's modification time. A conversation you just closed is no longer mistaken for one that is still open.
 
 ## [17.3.4] - 2026-08-14
 
@@ -1214,6 +1224,10 @@
 - Fixed `/handoff` losing local artifacts (plans, scratch files, research notes) by copying them across the handoff session boundary.
 - Replaced libarchive-based tar parsing with a hardened, in-process tar reader to prevent crashes and safely handle complex archive structures, symlinks, and sparse metadata.
 - Fixed `Ctrl+O` tool-output expansion failing to reach launch-completion messages wrapped in the hidden tool activity container.
+- Added a `/prune` slash command that deletes conversation branches with nothing to read in them: an entry survives only if an answered assistant reply sits at or below it, so unanswered prompts, replies that errored or were aborted, replies left waiting on a tool call that never came back, and the tool traffic under them all go. The active branch is always kept intact.
+- `/prune` now hides empty branches instead of deleting them. An archive record is appended to the session file, the branch stays on disk byte for byte, and the tree, the HTML export, and `/share` stop offering it. `/prune delete` is the old destructive behavior, now opt-in, and archiving a branch also shields it from it.
+- Added `/unarchive` to bring hidden branches back: `/unarchive` restores them all, `/unarchive <branch id>` restores one, and `/unarchive list` shows what is hidden.
+- Added archiving from the `/tree` selector: `Shift+A` hides the highlighted branch whether or not it is empty, `Alt+R` reveals archived branches in place, and `Shift+A` on a revealed branch restores it.
 
 ## [17.2.14] - 2026-08-11
 
