@@ -26,6 +26,12 @@ export interface ApiKeyResolverRegistry {
 	): Promise<string | undefined>;
 	authStorage: Pick<AuthStorage, "rotateSessionCredential">;
 	/**
+	 * Advance a list-form config apiKey (`models.yml`
+	 * `providers.<name>.apiKey`) to its next element. Optional so narrower
+	 * registry shells without key lists keep stored-only rotation.
+	 */
+	cycleProviderApiKey?(provider: string): boolean;
+	/**
 	 * Build an {@link ApiKeyResolver} implementing the central a/b/c auth-retry
 	 * policy: initial → resolve; step (b) → force-refresh same account; step (c)
 	 * → rotate to a sibling and re-resolve, unless quota exhaustion has no sibling.
@@ -45,7 +51,7 @@ export interface ApiKeyResolverRegistry {
  * Also usable standalone for structural registries that don't carry the method.
  */
 export function createApiKeyResolver(
-	registry: Pick<ApiKeyResolverRegistry, "getApiKeyForProvider" | "authStorage">,
+	registry: Pick<ApiKeyResolverRegistry, "getApiKeyForProvider" | "authStorage" | "cycleProviderApiKey">,
 	provider: string,
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
@@ -74,6 +80,12 @@ export function createApiKeyResolver(
 				// auth decline can instead mean a peer refreshed the bearer.
 				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 			}
+			// A pinned config key list shadows the stored pool, so rotating
+			// stored rows alone never changes the effective key — advance the
+			// list (no-op without one) so the re-resolve hands out the next
+			// sibling. One attempt per sibling is enforced downstream by the
+			// already-attempted key set.
+			registry.cycleProviderApiKey?.(provider);
 			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
 		}
 		return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });

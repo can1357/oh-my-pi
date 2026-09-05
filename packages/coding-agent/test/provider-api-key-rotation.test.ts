@@ -1,0 +1,100 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { streamSimple } from "@oh-my-pi/pi-ai";
+import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+/** Minimal successful chat-completions SSE stream for the openai-completions provider. */
+function okChatCompletionStream(): Response {
+	const chunks = [
+		JSON.stringify({
+			id: "cmpl",
+			object: "chat.completion.chunk",
+			choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: null }],
+		}),
+		JSON.stringify({
+			id: "cmpl",
+			object: "chat.completion.chunk",
+			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+		}),
+		"[DONE]",
+	];
+	return new Response(chunks.map(c => `data: ${c}\n\n`).join(""), {
+		status: 200,
+		headers: { "Content-Type": "text/event-stream" },
+	});
+}
+
+describe("provider API key auto-rotation on auth failure", () => {
+	let tempDir = "";
+	let authStorage: AuthStorage;
+	let modelsPath = "";
+
+	beforeEach(async () => {
+		tempDir = path.join(os.tmpdir(), `pi-test-provider-api-key-rotation-${Snowflake.next()}`);
+		fs.mkdirSync(tempDir, { recursive: true });
+		modelsPath = path.join(tempDir, "models.json");
+		authStorage = await AuthStorage.create(":memory:");
+	});
+
+	afterEach(() => {
+		authStorage.close();
+		if (!tempDir || !fs.existsSync(tempDir)) return;
+		try {
+			removeSyncWithRetries(tempDir);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+		}
+	});
+
+	test("user can survive one dead key: with keys [bad, good], a 401 on the first attempt is followed by a success on the second key", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: ["bad-key", "good-key"],
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+
+		const seen: Array<string | undefined> = [];
+		const fetchImpl: FetchImpl = async (_url, init) => {
+			const headers = (init?.headers ?? {}) as Record<string, string>;
+			seen.push(headers.Authorization);
+			if (headers.Authorization !== "Bearer good-key") {
+				return new Response(JSON.stringify({ error: { message: "invalid api key", type: "authentication_error" } }), {
+					status: 401,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return okChatCompletionStream();
+		};
+
+		const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+		const streamHandle = streamSimple(model, context, {
+			apiKey: registry.resolver(model),
+			fetch: fetchImpl,
+			maxTokens: 16,
+		});
+		for await (const _event of streamHandle) {
+			// drain
+		}
+		const result = await streamHandle.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(seen).toEqual(["Bearer bad-key", "Bearer good-key"]);
+	});
+});
