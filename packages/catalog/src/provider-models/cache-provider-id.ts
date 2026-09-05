@@ -64,6 +64,12 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// through generic models.dev bare-id enrichment (issue #10932).
 			return `litellm:rich-v9:${Bun.hash(baseUrl).toString(36)}`;
 		}
+		case "gmi-cloud":
+		case "siliconflow":
+		case "siliconflow-cn":
+			// models-v1 moves rows enriched before cross-provider reference
+			// isolation out of the legacy bare-provider namespaces (#10932).
+			return `${providerId}:models-v1`;
 		case "opencode-go":
 		case "opencode-zen": {
 			// v3: gateway-first rows cached before stencil enrichment carry null
