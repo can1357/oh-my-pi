@@ -8,7 +8,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import { aiandModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { AIAND_STATIC_MODELS, aiandModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 const ORIGINAL_ENV = {
@@ -268,14 +268,63 @@ describe("ai& provider support", () => {
 		}
 	});
 
-	test("keeps retired roster ids in the cache-migration list", () => {
-		// kimi-k2.6 and glm-5.1 left the served roster, so the static seed no
-		// longer contains them. Without explicit migration ids a
-		// cache-mismatch fallback would merge their stale cached rows back
-		// and keep them selectable after upgrade.
-		const options = aiandModelManagerOptions({ apiKey: "aiand-key" });
-		const dropIds = options.dropCachedModelIdsOnStaticMismatch ?? [];
-		expect(dropIds).toContain("moonshotai/kimi-k2.6");
-		expect(dropIds).toContain("zai-org/glm-5.1");
+	test("drops retired roster ids from a stale cache when discovery is unavailable", async () => {
+		// kimi-k2.6 and glm-5.1 left the served roster. An upgrading install
+		// holds their rows in the model cache; with discovery down the
+		// cache-mismatch fallback must drop them via the migration list
+		// instead of merging them back as selectable.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-aiand-stale-cache-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const retiredK26: ModelSpec<"openai-completions"> = {
+			id: "moonshotai/kimi-k2.6",
+			name: "Kimi K2.6",
+			api: "openai-completions",
+			provider: "aiand",
+			baseUrl: "https://api.aiand.com/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.85, output: 3.5, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: null,
+		};
+		const retiredGlm51: ModelSpec<"openai-completions"> = {
+			...retiredK26,
+			id: "zai-org/glm-5.1",
+			name: "GLM 5.1",
+			input: ["text"],
+			cost: { input: 1.4, output: 4.4, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 202752,
+		};
+
+		try {
+			await resolveProviderModels(
+				{
+					providerId: "aiand",
+					staticModels: [retiredK26, retiredGlm51],
+					dynamicModelsAuthoritative: true,
+					fetchDynamicModels: async () => [retiredK26, retiredGlm51],
+					cacheDbPath: dbPath,
+				},
+				"online",
+			);
+
+			const offline = await resolveProviderModels(
+				{
+					...aiandModelManagerOptions({
+						apiKey: "aiand-key",
+						fetch: async () => new Response(null, { status: 503 }),
+					}),
+					staticModels: [...AIAND_STATIC_MODELS],
+					cacheDbPath: dbPath,
+				},
+				"offline",
+			);
+
+			const ids = offline.models.map(model => model.id);
+			expect(ids).not.toContain("moonshotai/kimi-k2.6");
+			expect(ids).not.toContain("zai-org/glm-5.1");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });
