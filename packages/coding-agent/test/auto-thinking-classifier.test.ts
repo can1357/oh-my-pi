@@ -508,4 +508,50 @@ describe("auto thinking classifier helpers", () => {
 			expect(parseConfiguredThinkingLevel(selector)).toBeUndefined();
 		}
 	});
+
+	it("walks retry.fallbackChains when the smol classifier returns a provider error", async () => {
+		const smol = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!smol) throw new Error("Expected bundled Claude Sonnet 4.6 model");
+		const fallback = buildLadderModel("fallback-smol", XHIGH_LADDER);
+		const target = buildLadderModel("mock-max", MAX_LADDER);
+		const settings = {
+			get(path: string) {
+				if (path === "providers.autoThinkingModel") return "online";
+				if (path === "providers.autoThinkingMaxEffort") return "xhigh";
+				if (path === "retry.fallbackChains") return { smol: [`${fallback.provider}/${fallback.id}`] };
+				return undefined;
+			},
+			getModelRole(role: string) {
+				return role === "smol" ? `${smol.provider}/${smol.id}` : undefined;
+			},
+			getStorage() {
+				return undefined;
+			},
+		} as never;
+		const registry = {
+			getAvailable: () => [smol, fallback],
+			getApiKey: async () => "test-key",
+			resolver: () => async () => "test-key",
+		} as never;
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(async model => {
+			if (model.id === smol.id) {
+				return {
+					stopReason: "error",
+					errorStatus: 400,
+					errorMessage: "Model is not available in the active live catalog",
+					content: [],
+				} as never;
+			}
+			return {
+				stopReason: "stop",
+				content: [{ type: "text", text: "medium" }],
+			} as never;
+		});
+
+		const effort = await classifyDifficulty("rename a helper", { settings, registry, model: target });
+		expect(effort).toBe(Effort.Medium);
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(smol);
+		expect(completeSimpleMock.mock.calls[1]?.[0]).toBe(fallback);
+	});
 });

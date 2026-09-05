@@ -577,6 +577,53 @@ describe("title generator", () => {
 		expect(mockComplete).toHaveBeenCalled();
 		expect(mockComplete.mock.calls[0]?.[0]).toBe(smolModel);
 	});
+
+	it("walks retry.fallbackChains when the title model returns a provider error", async () => {
+		const smolModel = getModelOrThrow("claude-opus-4-8");
+		const fallbackModel = getModelOrThrow("claude-sonnet-4-5");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(async model => {
+			if (model.id === smolModel.id) {
+				return {
+					stopReason: "error",
+					errorStatus: 400,
+					errorMessage: "Model is not available in the active live catalog",
+					content: [],
+				} as never;
+			}
+			return {
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Recovered Title</title>" }],
+			} as never;
+		});
+		const settings = {
+			get(path: string) {
+				if (path === "providers.tinyModel") return "online";
+				if (path === "retry.fallbackChains") {
+					return { smol: [`${fallbackModel.provider}/${fallbackModel.id}`] };
+				}
+				return undefined;
+			},
+			getModelRole(role: string) {
+				return role === "smol" ? `${smolModel.provider}/${smolModel.id}` : undefined;
+			},
+			getStorage() {
+				return undefined;
+			},
+		} as never;
+		const registry = {
+			getAvailable: () => [smolModel, fallbackModel],
+			getApiKey: async () => "test-key",
+			getApiKeyForProvider: async () => "test-key",
+			authStorage: { rotateSessionCredential: async () => false },
+			resolver: () => async () => "test-key",
+		} as never;
+
+		const title = await generateSessionTitle("Investigate the resolver", registry, settings);
+		expect(title).toBe("Recovered Title");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(smolModel);
+		expect(completeSimpleMock.mock.calls[1]?.[0]).toBe(fallbackModel);
+	});
 });
 
 // The terminal title runtime is a module-global. `emitTerminalTitle()` composes
