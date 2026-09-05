@@ -4365,16 +4365,10 @@ const META_MUSE_SPARK_COST = { input: 1.25, output: 4.25, cacheRead: 0.15, cache
 // Contributor SKUs (`-contributor`): same model, discounted because prompts
 // are used for training.
 const META_MUSE_SPARK_CONTRIBUTOR_COST = { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 } as const;
-const META_MUSE_SPARK_THINKING: ThinkingConfig = {
-	mode: "effort",
-	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-};
-// Meta documents the `max` effort tier for Muse Spark 1.3 (standard) only;
-// contributor tiers and other revisions stay on the 5-tier ladder.
-const META_MUSE_SPARK_MAX_THINKING: ThinkingConfig = {
-	mode: "effort",
-	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
-};
+// Effort ladders are KDL-owned (compat/rules/classes/meta.kdl): Meta's
+// `/v1/models` lists bare ids with no thinking metadata, and explicit spec
+// thinking would shadow the per-revision rules at build time — so the seed
+// carries no `thinking` and each revision resolves its ladder from KDL.
 
 function museSparkSpec(revision: string, tier: "standard" | "contributor"): ModelSpec<"openai-responses"> {
 	const contributor = tier === "contributor";
@@ -4389,7 +4383,6 @@ function museSparkSpec(revision: string, tier: "standard" | "contributor"): Mode
 		cost: contributor ? META_MUSE_SPARK_CONTRIBUTOR_COST : META_MUSE_SPARK_COST,
 		contextWindow: 1_048_576,
 		maxTokens: 131_072,
-		thinking: revision === "1.3" && tier === "standard" ? META_MUSE_SPARK_MAX_THINKING : META_MUSE_SPARK_THINKING,
 		compat: {
 			supportsReasoningEffort: true,
 			includeEncryptedReasoning: true,
@@ -4417,10 +4410,11 @@ const META_MUSE_MODEL_BY_ID: Partial<Record<string, ModelSpec<"openai-responses"
 
 /**
  * Lineage reference for a Muse Spark revision Meta ships before the seed
- * lists it. Every revision so far has kept the 1M window, the effort ladder,
- * and per-tier pricing, so a new one inherits them (with its own display
- * name) instead of surfacing as a text-only model with no limits. Only ids
- * that classify into the `muse-spark` family with a revision qualify.
+ * lists it. Every revision so far has kept the 1M window and per-tier
+ * pricing, so a new one inherits them (with its own display name) instead
+ * of surfacing as a text-only model with no limits; the effort ladder stays
+ * KDL-owned per revision. Only ids that classify into the `muse-spark`
+ * family with a revision qualify.
  */
 function museSparkLineageSpec(id: string): ModelSpec<"openai-responses"> | undefined {
 	const identity = classifyModel("meta", id, { lenient: true });

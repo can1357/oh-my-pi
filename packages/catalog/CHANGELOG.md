@@ -7,6 +7,12 @@
 - Added Muse Code as a provider with Muse Spark models and live account-scoped discovery.
 - Muse Code subscriptions now resolve a compact edit-prompt variant, cutting recurring per-request tool bytes without touching other providers.
 - Added Meta's new `max` reasoning effort tier to Muse Spark 1.3 (standard) on the Meta Model API and Muse Code.
+- Added the `max` thinking-effort tier to Muse Spark 1.3 and its contributor variant.
+
+### Fixed
+
+- Existing model caches no longer hide Muse Spark 1.3's new `max` thinking effort after upgrading.
+- Vercel's Muse Spark Anthropic route retains its supported thinking ladder instead of offering a duplicate `max` budget.
 
 ## [18.1.9] - 2026-09-04
 

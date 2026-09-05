@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
@@ -15,8 +15,8 @@ const MUSE_SPARK_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 };
-// Meta documents the `max` tier for Muse Spark 1.3 (standard) only.
-const MUSE_SPARK_MAX_THINKING: ThinkingConfig = {
+
+const MUSE_SPARK_1_3_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 };
@@ -35,6 +35,9 @@ describe("Meta Model API provider", () => {
 			"muse-spark-1.3",
 			"muse-spark-1.3-contributor",
 		]);
+		// The seed carries no `thinking`: effort ladders are KDL-owned
+		// (compat/rules/classes/meta.kdl) and explicit spec thinking would
+		// shadow the per-revision rules at build time.
 		expect(byId.get("muse-spark-1.3")).toEqual({
 			id: "muse-spark-1.3",
 			name: "Muse Spark 1.3",
@@ -46,14 +49,28 @@ describe("Meta Model API provider", () => {
 			cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
 			contextWindow: 1_048_576,
 			maxTokens: 131_072,
-			thinking: MUSE_SPARK_MAX_THINKING,
 			compat: { supportsReasoningEffort: true, includeEncryptedReasoning: true },
 		});
 		expect(byId.get("muse-spark-1.3-contributor")).toMatchObject({
 			name: "Muse Spark 1.3 (C)",
 			cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
-			thinking: MUSE_SPARK_THINKING,
 		});
+		expect(byId.get("muse-spark-1.3")).not.toHaveProperty("thinking");
+		expect(byId.get("muse-spark-1.3-contributor")).not.toHaveProperty("thinking");
+		const options = metaModelManagerOptions();
+		expect(options.providerId).toBe("meta");
+		expect(options.staticModels).toEqual(META_MUSE_STATIC_MODELS);
+	});
+
+	test("resolves the 1.3 max tier from KDL while older revisions stay capped at xhigh", () => {
+		// Built-model contract, not seed text: the exact-id KDL rule owns `max`.
+		const built = new Map(META_MUSE_STATIC_MODELS.map(model => [model.id, buildModel(model)]));
+		for (const id of ["muse-spark-1.3", "muse-spark-1.3-contributor"]) {
+			expect(built.get(id)?.thinking).toEqual(MUSE_SPARK_1_3_THINKING);
+		}
+		for (const id of ["muse-spark-1.1", "muse-spark-1.2", "muse-spark-1.2-contributor"]) {
+			expect(built.get(id)?.thinking).toEqual(MUSE_SPARK_THINKING);
+		}
 		const options = metaModelManagerOptions();
 		expect(options.providerId).toBe("meta");
 		expect(options.staticModels).toEqual(META_MUSE_STATIC_MODELS);
@@ -63,24 +80,26 @@ describe("Meta Model API provider", () => {
 		// api.meta.ai/v1/models returns bare `{id}` rows: no name, limits,
 		// reasoning, or pricing. Without the seed as reference, a newly shipped
 		// revision surfaced as a text-only model with an unknown context window
-		// and "Current model does not support thinking".
+		// and "Current model does not support thinking". Seeded ids copy the
+		// bundled snapshot (already KDL-applied); assert the built ladder.
 		const options = metaModelManagerOptions({
 			apiKey: "meta-key",
 			fetch: async () => modelListResponse(["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-image-1.0"]),
 		});
-		const models = await options.fetchDynamicModels?.();
-		const byId = new Map((models ?? []).map(model => [model.id, model]));
+		const specs = await options.fetchDynamicModels?.();
+		const byId = new Map((specs ?? []).map(spec => [spec.id, buildModel(spec)]));
 		expect(byId.get("muse-spark-1.3")).toMatchObject({
 			name: "Muse Spark 1.3",
 			reasoning: true,
 			input: ["text", "image"],
 			contextWindow: 1_048_576,
 			maxTokens: 131_072,
-			thinking: MUSE_SPARK_MAX_THINKING,
+			thinking: MUSE_SPARK_1_3_THINKING,
 		});
 		expect(byId.get("muse-spark-1.3-contributor")).toMatchObject({
 			name: "Muse Spark 1.3 (C)",
 			cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+			thinking: MUSE_SPARK_1_3_THINKING,
 		});
 		// Image/voice SKUs on the same roster are not chat models.
 		expect(byId.has("muse-image-1.0")).toBe(false);
@@ -89,13 +108,17 @@ describe("Meta Model API provider", () => {
 	test("unseeded Muse Spark revisions inherit lineage capabilities and tier naming", async () => {
 		// Meta ships revisions gateway-first; until the seed lists one it must
 		// still resolve with the lineage's window, thinking ladder, and pricing
-		// rather than the bare discovery defaults.
+		// rather than the bare discovery defaults. The ladder is KDL-owned, so
+		// the raw mapper rows carry no `thinking` — assert the built contract,
+		// exactly as the model manager materializes it.
 		const options = metaModelManagerOptions({
 			apiKey: "meta-key",
 			fetch: async () => modelListResponse(["muse-spark-1.4", "muse-spark-1.4-contributor", "muse-spark-2.0.1"]),
 		});
-		const models = await options.fetchDynamicModels?.();
-		const byId = new Map((models ?? []).map(model => [model.id, model]));
+		const specs = await options.fetchDynamicModels?.();
+		expect(specs?.find(model => model.id === "muse-spark-1.4")).not.toHaveProperty("thinking");
+		const models = (specs ?? []).map(spec => buildModel(spec));
+		const byId = new Map(models.map(model => [model.id, model]));
 		expect(byId.get("muse-spark-1.4")).toMatchObject({
 			name: "Muse Spark 1.4",
 			reasoning: true,
@@ -200,22 +223,19 @@ describe("Muse Code subscription provider", () => {
 		expect(getBundledModel("meta", "muse-spark-1.3-contributor")?.applyPatchToolType).toBeUndefined();
 	});
 
-	test("exposes the max tier on bundled 1.3 standard rows only", () => {
+	test("exposes the max tier on bundled 1.3 family rows including contributor", () => {
 		for (const provider of ["muse-code", "meta"] as const) {
-			expect(getBundledModel(provider, "muse-spark-1.3")?.thinking?.efforts).toEqual([
-				Effort.Minimal,
-				Effort.Low,
-				Effort.Medium,
-				Effort.High,
-				Effort.XHigh,
-				Effort.Max,
-			]);
-			for (const id of [
-				"muse-spark-1.1",
-				"muse-spark-1.2",
-				"muse-spark-1.2-contributor",
-				"muse-spark-1.3-contributor",
-			]) {
+			for (const id of ["muse-spark-1.3", "muse-spark-1.3-contributor"]) {
+				expect(getBundledModel(provider, id)?.thinking?.efforts).toEqual([
+					Effort.Minimal,
+					Effort.Low,
+					Effort.Medium,
+					Effort.High,
+					Effort.XHigh,
+					Effort.Max,
+				]);
+			}
+			for (const id of ["muse-spark-1.1", "muse-spark-1.2", "muse-spark-1.2-contributor"]) {
 				expect(getBundledModel(provider, id)?.thinking?.efforts).toEqual([
 					Effort.Minimal,
 					Effort.Low,
