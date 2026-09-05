@@ -18,7 +18,7 @@ import {
 	rollbackPersonaSwitch,
 	snapshotPersonaSwitch,
 } from "../session/persona-apply";
-import { mainSessionTools, spawnsToString } from "../task/agent-tools";
+import { mainSessionTools, spawnsDisabled, spawnsToString } from "../task/agent-tools";
 import { discoverAgents, getAgent } from "../task/discovery";
 import type { AgentDefinition } from "../task/types";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
@@ -104,6 +104,19 @@ async function applyAgentPersonaToSession(
 		await session.restoreBaselineTools();
 		if (agent.tools) {
 			await session.applyPersonaTools(mainSessionTools(agent.tools, agent.spawns));
+		}
+		if (!agent.tools && spawnsDisabled(agent.spawns)) {
+			// A `spawns: []`-only persona keeps the normal top-level baseline
+			// active — which includes `task` — while the disabled spawn policy
+			// makes every invocation fail preflight. Re-apply the current set
+			// minus `task` (mirrors `mainSessionTools`'s tools-case suppression
+			// and the launch `--agent` path); leaving the persona restores the
+			// unrestricted baseline, which re-includes `task`.
+			const enabledToolNames = session.getEnabledToolNames();
+			const withoutTask = enabledToolNames.filter(toolName => toolName !== "task");
+			if (withoutTask.length < enabledToolNames.length) {
+				await session.setActiveToolsByName(withoutTask);
+			}
 		}
 		// ACP has no `#pendingModelSwitch` queue (that is an InteractiveMode
 		// field): mid-turn the model switch is skipped and surfaced as text

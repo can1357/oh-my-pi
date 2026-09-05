@@ -227,6 +227,34 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("drops task for a spawns-disabled launch persona and restores it when the persona is left", async () => {
+		// PRRT_kwDOQxs0bc6fkJJu: a `--agent` persona with `spawns: []` and NO
+		// `tools:` frontmatter leaves the normal top-level baseline active —
+		// which includes `task` — while `spawnsToString([])` installs the
+		// disabled policy (`""`), so `task` was advertised while every
+		// invocation failed spawn preflight. The registry-derived launch set
+		// must drop `task` for the persona's lifetime (mirroring the
+		// subagent executor's at-max-depth strip), and leaving the persona
+		// restores the unrestricted baseline, which re-includes it.
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			personaName: "nospawn-persona",
+			spawns: "",
+		});
+		try {
+			expect(session.getSessionSpawns()).toBe("");
+			expect(session.getActiveToolNames()).not.toContain("task");
+			// Leaving the persona restores the full-registry baseline — `task`
+			// returns (the caller clears the spawn policy separately).
+			await session.restoreBaselineTools();
+			expect(session.getActiveToolNames()).toContain("task");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("retains an empty residual restriction after leaving a --no-tools persona", async () => {
 		// `--agent ... --no-tools` grants nothing: the residual CLI restriction
 		// must be an EMPTY set, not `undefined` — undefined would lift the gate
@@ -2870,6 +2898,63 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				} as never);
 				expect(back.isError).toBe(false);
 				expect(fs.existsSync(thirdTarget)).toBe(false);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("answers pi_edit after leaving a persona whose tools list omitted edit", async () => {
+		// PRT_kwDOQxs0bc6fkNgL: a launch `--agent` persona whose `tools:` list
+		// omits `edit` sets editWasGranted=false, and while it is active the
+		// live persona restriction does not contain `edit` either. Leaving
+		// agent mode (restoreBaselineTools) re-activates the baseline — which
+		// includes `edit` (essential load mode) — and CLEARS the restriction,
+		// so neither grant face held and getCursorBridgeEditTool returned
+		// undefined: native pi_edit failed although `edit` was active and
+		// advertised. The predicate now also reads the live active set.
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+
+		await withProviderAuth(["cursor"], async () => {
+			const sessionManager = SessionManager.inMemory(tempDir);
+			// Launch persona WITHOUT edit (no CLI override, so the baseline is
+			// the full registry): editWasGranted=false, restriction=["read"].
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager,
+				model: cursorModel,
+				toolNames: ["read"],
+				personaName: "readonly-persona",
+				personaAppendPrompt: "You are readonly-persona.",
+			});
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+
+				// Control: while the persona is active, no grant face holds —
+				// the bridge must stay closed (issue #5680 guard unchanged).
+				const target = path.join(tempDir, "persona-leave-edit.txt");
+				fs.writeFileSync(target, "alpha\nbeta\n");
+				const denied = await handlers.piEdit({
+					toolCallId: "sdk-persona-leave-1",
+					args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+				} as never);
+				expect(denied.isError).toBe(true);
+				expect(fs.readFileSync(target, "utf8")).toBe("alpha\nbeta\n");
+
+				// Leaving agent mode: the baseline restore re-activates `edit`
+				// and clears the persona restriction — the active set is now
+				// the live grant, so pi_edit must execute.
+				await session.restoreBaselineTools();
+				expect(session.getPersonaToolRestriction()).toBeUndefined();
+				expect(session.getActiveToolNames()).toContain("edit");
+				const granted = await handlers.piEdit({
+					toolCallId: "sdk-persona-leave-2",
+					args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+				} as never);
+				expect(granted.isError).toBe(false);
+				expect(fs.readFileSync(target, "utf8")).toBe("alpha\ngamma\n");
 			} finally {
 				await session.dispose();
 			}

@@ -3,19 +3,21 @@
  * availability gating, model/thinking application, the resume-reconcile apply
  * pipeline, and atomic live-switch snapshot/rollback.
  *
- * Consumers: `main.ts` (`reconcilePersistedPersona`, ACP factory),
- * `modes/interactive-mode.ts` (`#reconcilePersonaFromSession`,
- * `switchAgentPersona`), and `slash-commands/builtin-modes.ts` (ACP/text
- * `/agent`). The interactive live-switch owns the `#pendingModelSwitch` class
+ * Consumers: `main.ts` (thin wrapper, ACP factory), `modes/interactive-mode.ts`
+ * (`switchAgentPersona`, resume reconcile), and `slash-commands/builtin-modes.ts`
+ * (ACP/text `/agent`). The interactive live-switch owns the `#pendingModelSwitch` class
  * state and threads it through the hooks below; everything else lives here so
  * every path applies (and rolls back) persona state in exactly one order.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import { type ResolvedModelOverride, resolveModelOverride } from "../config/model-resolver";
-import { mainSessionTools, spawnsToString } from "../task/agent-tools";
+import { discoverAgents, getAgent } from "../task/discovery";
+import { mainSessionTools, spawnsDisabled, spawnsToString } from "../task/agent-tools";
 import type { AgentDefinition } from "../task/types";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSession } from "./agent-session";
+import { type SessionManager } from "./session-manager";
 
 /**
  * Which persona-relevant inputs the user set explicitly on the CLI; a persona's
@@ -155,6 +157,22 @@ export async function applyPersonaToSession(
 		// before activating the persona's list.
 		await session.applyPersonaTools(mainSessionTools(agent.tools, agent.spawns));
 	}
+	if (!explicit.toolsSet && agent.tools === undefined && spawnsDisabled(agent.spawns)) {
+		// A `spawns: []`-only persona (no `tools:`) keeps the normal top-level
+		// baseline active — which includes `task` — while the disabled spawn
+		// policy makes every invocation fail preflight. Re-apply the current
+		// set minus `task` for the persona's lifetime (mirrors
+		// `mainSessionTools`'s tools-case suppression and the launch `--agent`
+		// path). `setActiveToolsByName` (not `applyPersonaTools`) so no persona
+		// tool restriction is recorded — the persona grants everything else.
+		// Leaving the persona restores the unrestricted baseline via
+		// `restoreBaselineTools`, which re-includes `task`.
+		const enabledToolNames = session.getEnabledToolNames();
+		const withoutTask = enabledToolNames.filter(name => name !== "task");
+		if (withoutTask.length < enabledToolNames.length) {
+			await session.setActiveToolsByName(withoutTask);
+		}
+	}
 	session.setSessionSpawns(spawnsToString(agent.spawns));
 	session.setPersonaAppendPrompt(agent.systemPrompt);
 	await applyPersonaModelAndThinking(session, agent, explicit, hooks);
@@ -269,4 +287,81 @@ export async function rollbackPersonaSwitch(
 		session.clearBaselineTools();
 	}
 	await session.refreshBaseSystemPrompt();
+}
+
+/**
+ * Reconcile a persisted persona (`mode_change: agent`) into a session at
+ * startup. Shared by the RPC and print branches (`main.ts`) and the TUI resume
+ * path (`InteractiveMode.#reconcileModeFromSession`). The agent is
+ * re-discovered fresh against the session manager's cwd and its CURRENT
+ * definition is applied (tools, spawns, prompt; model/thinking only when the
+ * CLI did not explicitly set them). When the agent is missing, subagent-only,
+ * or disabled the persona-owned state (spawns, prompt, baseline) is cleared so
+ * it does not leak into the resumed transcript, exactly like the interactive
+ * else-branch. The `mode_change` entry is already persisted; nothing is
+ * appended here.
+ */
+export async function reconcilePersistedPersona(
+	session: AgentSession,
+	sessionManager: SessionManager,
+	explicit: PersonaExplicitOverrides,
+): Promise<void> {
+	const context = sessionManager.buildSessionContext();
+	if (context.mode !== "agent") return;
+	const name = context.modeData?.name as string | undefined;
+	if (!name) return;
+	let agent: AgentDefinition | undefined;
+	try {
+		const { agents } = await discoverAgents(sessionManager.getCwd());
+		agent = getAgent(agents, name);
+	} catch (error) {
+		// Discovery failure must not leave the target transcript under the
+		// source session's persona state: switchSession catches reconciler
+		// errors and still commits the target, so clear the persona-owned
+		// state for a coherent non-persona baseline (codex #3821198710).
+		logger.warn("Failed to discover agents during persona restore", { error: String(error) });
+		await session.clearPersonaOwnedState();
+		// Discovery failure is not proof the agent is gone: stop here instead
+		// of falling through to the gone/disabled branch, which would emit a
+		// spurious "no longer available" warning (TUI reconcile semantics).
+		return;
+	}
+	const disabledAgents = (session.settings.get("task.disabledAgents") as string[] | undefined) ?? [];
+	if (isMainSessionPersonaUsable(agent, disabledAgents)) {
+		// Snapshot/rollback mirrors the live-switch path, with one
+		// reconcile-specific difference: switchSession catches reconciler
+		// errors and still commits the target, so restoring the SOURCE
+		// persona's snapshot wholesale would leave the committed target
+		// running the source persona's tools, spawns, and prompt. Restore
+		// the snapshot's model/thinking (the target transcript's restored
+		// values) and then clear the persona-owned state to a coherent
+		// non-persona baseline instead (codex #3821198710).
+		const snapshot = snapshotPersonaSwitch(session);
+		try {
+			await applyPersonaToSession(session, agent, explicit);
+		} catch (error) {
+			try {
+				await rollbackPersonaSwitch(session, snapshot);
+				// Finish with clearPersonaOwnedState: it restores the baseline
+				// tools, clears the spawns/prompt fields, and — unlike the bare
+				// clears it replaces — refreshes the base system prompt after the
+				// clears, so the committed target cannot keep the persona's
+				// system prompt (codex #3845551582 / P2 prompt-after-clear).
+				await session.clearPersonaOwnedState();
+			} catch (rollbackError) {
+				logger.warn("Failed to clear persona state after reconcile failure", {
+					error: String(rollbackError),
+				});
+			}
+			throw error;
+		}
+	} else {
+		// The persisted persona is gone/disabled: clear the previous session's
+		// persona-owned state so it does not leak into this transcript.
+		// clearPersonaOwnedState keeps the restore-before-clear ordering: if
+		// the restoration fails, the persona state stays intact instead of
+		// leaving a half-cleared persona (the next reconcile can retry).
+		await session.clearPersonaOwnedState();
+		session.emitNotice("warning", `Agent "${name}" is no longer available. Restored model and thinking level.`);
+	}
 }

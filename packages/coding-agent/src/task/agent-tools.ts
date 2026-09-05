@@ -5,13 +5,17 @@
  * results; the main session has no parent executor to consume a yield, so the
  * subagent-only tools are stripped before the persona's toolset is applied.
  */
+export function spawnsDisabled(spawns: string[] | "*" | undefined): boolean {
+	return spawns !== undefined && spawns !== "*" && spawns.length === 0;
+}
+
 export function mainSessionTools(tools: string[], spawns?: string[] | "*"): string[] {
 	const filtered = tools.filter(name => name !== "yield" && name !== "goal");
 	// A persona that declares `spawns` must be able to invoke them: auto-include
 	// the task tool exactly like the subagent executor does, so e.g. the bundled
 	// reviewer persona (`tools: [read, write]`, `spawns: [scout]`) can actually
 	// spawn its configured scout from the main session.
-	if (spawns !== undefined && spawns !== "*" && spawns.length === 0) {
+	if (spawnsDisabled(spawns)) {
 		// An explicit empty list is the DISABLED policy (`spawnsToString` maps
 		// it to `""`, which `resolveSpawnPolicy` treats as spawning disabled) —
 		// advertising a `task` tool whose every invocation fails preflight

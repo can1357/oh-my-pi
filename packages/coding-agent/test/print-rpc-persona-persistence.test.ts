@@ -88,12 +88,20 @@ function makeFakeSession(
 		setSessionSpawns: (spawns: string | null) => {
 			state.spawns = spawns;
 		},
+		setModelTemporary: async () => {},
 		getSessionSpawns: () => state.spawns,
 		setPersonaAppendPrompt: (prompt: string | undefined) => {
 			state.personaPrompt = prompt;
 		},
 		getPersonaAppendPrompt: () => state.personaPrompt,
-		setModelTemporary: async () => {},
+		// Mirrors the real AgentSession.clearPersonaOwnedState contract: no-op
+		// unless a persona is active, then restoreBaselineTools → clears →
+		// refreshBaseSystemPrompt, in that order.
+		clearPersonaOwnedState: async () => {
+			if (state.personaPrompt === undefined && state.spawns === null) return;
+			state.spawns = null;
+			state.personaPrompt = undefined;
+		},
 		refreshBaseSystemPrompt: async () => {},
 		emitNotice: () => {},
 		getLastPersonaDroppedMutation: () => undefined,

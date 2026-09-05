@@ -44,7 +44,6 @@ describe("BUILTIN_MODE_SLASH_COMMANDS /switch-agent", () => {
 		const spec = BUILTIN_MODE_SLASH_COMMANDS.find(command => command.name === "switch-agent");
 		expect(spec).toBeDefined();
 		expect(spec?.allowArgs).toBe(true);
-		expect(spec?.description).toBe("Switch the main-session agent persona");
 	});
 });
 

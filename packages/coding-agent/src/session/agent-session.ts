@@ -2093,6 +2093,50 @@ export class AgentSession {
 	}
 
 	/**
+	 * Clear persona-owned session state (spawns, persona prompt append, and the
+	 * persona's restricted tool set) back to the pre-persona baseline. Shared by
+	 * the reconcile paths (non-agent target session, gone/disabled persona) and
+	 * the caller mode-entry paths (/plan, /vibe, /goal, /guided-goal) so a
+	 * running session switching out of agent mode never keeps the persona's
+	 * prompt/spawn policy or restricted tools. No-op unless a persona is
+	 * currently active.
+	 *
+	 * Atomic: the spawns/prompt fields are cleared only AFTER the baseline
+	 * restoration succeeds, so a failed restore (e.g. a system-prompt rebuild
+	 * error) leaves the persona fully intact instead of a partially cleared
+	 * state (codex #3821198710).
+	 */
+	async clearPersonaOwnedState(): Promise<void> {
+		// A persona is "currently active" when its mutable session state is
+		// present: every persona apply path (launch `--agent`, live `/agent`
+		// switch, resume reconcile) sets the spawn policy and the persona prompt
+		// append together, and this helper clears them together. The baseline
+		// tool set stays populated after a persona is left (first-write
+		// capture), so an unconditional restore would re-apply the stale
+		// pre-persona tool set and discard tools activated since (e.g. MCP
+		// tools) when a later /plan, /goal, /vibe, or /guided-goal runs from a
+		// normal session.
+		const hadPersona = this.getPersonaAppendPrompt() !== undefined || this.getSessionSpawns() !== null;
+		if (!hadPersona) return;
+		// Restore the pre-persona tool set (launch baseline or first-switch
+		// capture) so a restricted persona's `tools:` list does not leak into
+		// the unrelated mode. Runs BEFORE the spawns/prompt clear: if it fails,
+		// the persona state stays intact and the caller's error path (or the
+		// next reconcile) can retry instead of leaving a half-cleared persona.
+		await this.restoreBaselineTools();
+		this.setSessionSpawns(null);
+		this.setPersonaAppendPrompt(undefined);
+		// The baseline restore's prompt rebuild ran while the persona's spawn
+		// policy and append were still present, and neither setter triggers a
+		// rebuild; if the restored baseline already contains the target mode's
+		// tool set (commonly `read`/`write` for `/plan`), the signature is
+		// unchanged and the mode would keep the persona's system prompt and
+		// scout policy. Force a refresh now that every persona field is cleared
+		// (codex #3845551582 / P2 prompt-after-clear).
+		await this.refreshBaseSystemPrompt();
+	}
+
+	/**
 	 * Re-anchor mode state to the session a branch just minted. Branching mints a
 	 * new session id/file (see {@link SessionManager.createBranchedSession}), so
 	 * without this the interactive-mode reconciler keeps the pre-branch vibe owner

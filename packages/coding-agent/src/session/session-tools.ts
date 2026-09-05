@@ -2087,10 +2087,9 @@ export class SessionTools {
 		// session to that grant (see {@link applyPersonaTools}); a later MCP
 		// refresh must not widen the active set past it, so connected manager
 		// tools (and retained extension MCP tools) activate only when the persona
-		// granted them. A launch `--agent` restriction is enforced at creation
-		// time — `restrictToolNames` disables MCP entirely, and a launch persona
-		// with an explicit CLI tool grant (`--agent ... --tools`) keeps MCP off
-		// for the same reason — so neither ever reaches here (codex
+		// granted them. A launch `--agent` persona with a frontmatter `tools:`
+		// grant reaches here under the same seeded restriction; a persona with
+		// an explicit CLI tool grant keeps MCP disabled at creation (codex
 		// #3819553918).
 		const restriction = this.#personaActiveToolRestriction;
 		const retainedActiveExtensionToolNames = previousActiveMcpToolNames.filter(

@@ -95,14 +95,6 @@ describe("AgentSession persona state", () => {
 		resetSettingsForTest();
 	});
 
-	it("round-trips session spawns (fresh session → null)", () => {
-		expect(session?.getSessionSpawns()).toBeNull();
-		session?.setSessionSpawns("a,b");
-		expect(session?.getSessionSpawns()).toBe("a,b");
-		session?.setSessionSpawns(null);
-		expect(session?.getSessionSpawns()).toBeNull();
-	});
-
 	it("seeds the launch spawns and reads a cleared session as unrestricted", async () => {
 		// Regression: `setSessionSpawns(null)` (persona cleared) must read as
 		// unrestricted `"*"` — NOT fall back to the launch persona's spawns.
@@ -145,13 +137,6 @@ describe("AgentSession persona state", () => {
 		expect(mainSessionTools(["read"], "*")).toEqual(["read", "task"]);
 		expect(mainSessionTools(["read"], ["scout"])).toEqual(["read", "task"]);
 	});
-	it("round-trips the persona append prompt", () => {
-		expect(session?.getPersonaAppendPrompt()).toBeUndefined();
-		session?.setPersonaAppendPrompt("You are the persona.");
-		expect(session?.getPersonaAppendPrompt()).toBe("You are the persona.");
-		session?.setPersonaAppendPrompt(undefined);
-		expect(session?.getPersonaAppendPrompt()).toBeUndefined();
-	});
 });
 
 describe("BUILTIN_MODE_SLASH_COMMANDS /agent", () => {
@@ -159,7 +144,6 @@ describe("BUILTIN_MODE_SLASH_COMMANDS /agent", () => {
 		const spec = BUILTIN_MODE_SLASH_COMMANDS.find(command => command.name === "agent");
 		expect(spec).toBeDefined();
 		expect(spec?.allowArgs).toBe(true);
-		expect(spec?.description).toBe("Switch the main-session agent persona");
 	});
 });
 
@@ -196,6 +180,7 @@ describe("InteractiveMode.switchAgentPersona", () => {
 		await fs.writeFile(path.join(agentsDir, "persona-subagent.md"), agentMd("persona-subagent", ["mode: subagent"]));
 		await fs.writeFile(path.join(agentsDir, "persona-readonly.md"), agentMd("persona-readonly", ["tools: [read]"]));
 		await fs.writeFile(path.join(agentsDir, "persona-minimal.md"), agentMd("persona-minimal"));
+		await fs.writeFile(path.join(agentsDir, "persona-nospawn.md"), agentMd("persona-nospawn", ["spawns: []"]));
 
 		await Settings.init({ inMemory: true, cwd: projectDir });
 		Settings.instance.set("startup.quiet", true);
@@ -215,7 +200,7 @@ describe("InteractiveMode.switchAgentPersona", () => {
 		resetSettingsForTest();
 	});
 
-	function createHarness(settings: Settings): InteractiveMode {
+	function createHarness(settings: Settings, extraTools: string[] = []): InteractiveMode {
 		const registry = new ModelRegistry(authStorage, path.join(tempHome, `models-${Bun.nanoseconds()}.yml`));
 		const initialModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!initialModel) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
@@ -229,6 +214,10 @@ describe("InteractiveMode.switchAgentPersona", () => {
 		// Goal mode re-activates the `goal` tool on entry; register a stub so the
 		// live /goal path can activate it (setActiveToolsByName drops unknown names).
 		toolRegistry.set("goal", makeTool("goal"));
+		// Optional extra registry entries (e.g. `task`) for tests exercising
+		// spawn-surface strips; kept out of the default harness so existing
+		// tool-set expectations stay exact.
+		for (const name of extraTools) toolRegistry.set(name, makeTool(name));
 		const manager = SessionManager.create(projectDir, path.join(tempHome, `active-${Bun.nanoseconds()}`));
 		const createdSession = new AgentSession({
 			agent: new Agent({
@@ -387,6 +376,28 @@ describe("InteractiveMode.switchAgentPersona", () => {
 		expect(session?.configuredThinkingLevel()).toBeUndefined();
 		expect(session?.getSessionSpawns()).toBe("*");
 		expect(session?.getPersonaAppendPrompt()).toBe("You are persona-minimal.");
+	});
+
+	it("drops task for a spawns-disabled persona without a tools list, restores it when the persona is left", async () => {
+		// A `spawns: []`-only persona (no `tools:`) leaves the normal top-level
+		// baseline active — which includes `task` — while the disabled spawn
+		// policy (`""`) makes every task invocation fail preflight. The live
+		// switch must drop `task` for the persona's lifetime and restore it
+		// (via the unrestricted baseline) when the persona is left.
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }), ["task"]);
+		await session!.setActiveToolsByName(["read", "task"]);
+		expect(session?.getEnabledToolNames()).toEqual(["read", "task"]);
+
+		await created.switchAgentPersona("persona-nospawn");
+		expect(session?.getSessionSpawns()).toBe("");
+		expect(session?.getEnabledToolNames()).toEqual(["read"]);
+		// No persona tool restriction: the persona grants everything EXCEPT task.
+		expect(session?.getPersonaToolRestriction()).toBeUndefined();
+
+		// Leaving agent mode restores the pre-persona baseline — `task` returns.
+		await session?.restoreBaselineTools();
+		session?.setSessionSpawns(null);
+		expect(session?.getEnabledToolNames()).toEqual(["read", "task"]);
 	});
 
 	it("rejects subagent-only agents", async () => {

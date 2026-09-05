@@ -2159,8 +2159,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			evalActive: activeToolNames.has("eval"),
 		});
 
-		// Restricted sessions cannot inherit or discover MCP capabilities.
-		const enableMCP = !restrictToolNames && !cliGrantRestrictsActive && (options.enableMCP ?? true);
+		// Restricted sessions cannot inherit or discover MCP capabilities —
+		// EXCEPT a launch `--agent` persona (its `tools:` grant set
+		// `restrictToolNames`): discovery/activation stay on so the persona can
+		// use an `mcp__…` tool it granted, and the seeded live persona
+		// restriction filters refresh activation to that grant exactly as for a
+		// live `/agent` switch (the launch persona is liftable, unlike a plain
+		// `--tools` session). An explicit CLI grant (`--agent … --tools`) keeps
+		// MCP off: the CLI list is the durable authority, and late MCP
+		// registrations must not widen it.
+		const enableMCP =
+			(!restrictToolNames || canLiveSwitchPersona) && !cliGrantRestrictsActive && (options.enableMCP ?? true);
 		let mcpManager: MCPManager | undefined = enableMCP ? options.mcpManager : undefined;
 		toolSession.mcpManager = mcpManager;
 		toolSession.enableMCP = enableMCP;
@@ -3192,11 +3201,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// persona omits `edit` specifically (even if `write` keeps the broader
 			// mutation flag false) — codex #3818999447.
 			// A launch that did not grant `edit` (read-only `--tools`/`--no-tools`/persona)
-			// can still gain it via a live `/agent` switch to a persona whose `tools:`
-			// list includes `edit`; the live persona restriction records that grant, so
-			// consult it in addition to the launch-time floor (codex #3818999447).
+			// can still gain it later, by two live paths: a `/agent` switch to a
+			// persona whose `tools:` list includes `edit` (the live persona
+			// restriction records that grant — codex #3818999447), or leaving a
+			// persona whose list omitted it (`restoreBaselineTools` re-activates
+			// the baseline, which contains `edit` — essential load mode — and
+			// clears the restriction, so neither the launch capture nor a live
+			// restriction holds at that point). The LIVE ACTIVE SET is the third
+			// and widest face of the same grant: every restriction layer (launch
+			// roster, persona restriction, residual CLI restriction) already
+			// gates what it contains, so membership proves whichever layer is
+			// currently authoritative granted `edit`. It cannot re-grant below
+			// any of them: a still-restricted persona and a plain `--no-edit`
+			// CLI roster both keep `edit` out of the active set, making this
+			// term false exactly where the other two are (PRT_kwDOQxs0bc6fkNgL:
+			// pi_edit stayed dead after a persona leave).
 			const liveGrantedEdit = session?.getPersonaToolRestriction()?.has("edit") === true;
-			if ((!editWasGranted && !liveGrantedEdit) || personaDroppedEdit) return undefined;
+			const activeEdit = toolSession.isToolActive?.("edit") === true;
+			if ((!editWasGranted && !liveGrantedEdit && !activeEdit) || personaDroppedEdit) return undefined;
 			cursorBridgeEditTool ??= createBridgeEditTool(toolSession, extensionRunner);
 			return cursorBridgeEditTool;
 		};
@@ -3734,7 +3756,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return tool?.defaultInactive === true || tool?.hidden === true;
 			}),
 		);
-		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
+		// A launch persona that disables spawning (`spawns: []`, no `tools:`)
+		// keeps the normal top-level baseline active — which includes `task` —
+		// while its disabled policy (`""`) makes every invocation fail
+		// preflight. Mirror the subagent executor's at-max-depth strip:
+		// registry-derived sessions drop `task` for the persona's lifetime;
+		// leaving the persona restores the full-registry baseline, which
+		// re-includes `task`. Explicit lists (a persona's `tools:` grant —
+		// `mainSessionTools` already suppresses `task` there — or a CLI
+		// `--tools` grant) are untouched: they are the caller's EXACT request.
+		const launchSpawnsDisabled =
+			options.personaName !== undefined && options.toolNames === undefined && options.spawns === "";
+		const requestedActiveToolNames = normalizedRequested.filter(
+			name => name !== "goal" && !(launchSpawnsDisabled && name === "task"),
+		);
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
 			: undefined;
