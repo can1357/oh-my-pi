@@ -1360,6 +1360,8 @@ export class AuthStorage {
 	#configKeyPositions: Map<string, { index: number; total: number }> = new Map();
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
+	/** Manual per-provider rotation offset for stored api_key rows (user-initiated key cycling). */
+	#manualApiKeyOffset = new Map<string, number>();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
 	#sessionLastCredential: Map<
 		string,
@@ -1861,14 +1863,31 @@ export class AuthStorage {
 	 */
 	#getCredentialOrder(providerKey: string, sessionId: string | undefined, total: number): number[] {
 		if (total <= 1) return [0];
+		const manual = this.#manualApiKeyOffset.get(providerKey) ?? 0;
 		const start = sessionId
-			? this.#getHashedIndex(sessionId, total)
-			: this.#getNextRoundRobinIndex(providerKey, total);
+			? (this.#getHashedIndex(sessionId, total) + manual) % total
+			: (this.#getNextRoundRobinIndex(providerKey, total) + manual) % total;
 		const order: number[] = [];
 		for (let i = 0; i < total; i++) {
 			order.push((start + i) % total);
 		}
 		return order;
+	}
+
+	/**
+	 * Manually advance to the next stored api_key row for a provider
+	 * (user-initiated key cycling, e.g. Alt+Z in the model hub). Unlike
+	 * failure-driven rotation this marks nothing suspect, blocks nothing,
+	 * and clears nothing: it only shifts where the next resolution starts.
+	 * Scoped to api_key rows; OAuth and other types are untouched. Returns
+	 * the stored total, or undefined when fewer than two api_key rows exist.
+	 */
+	cycleStoredApiKey(provider: string): { total: number } | undefined {
+		const total = this.#getStoredCredentials(provider).filter(entry => entry.credential.type === "api_key").length;
+		if (total < 2) return undefined;
+		const key = this.#getProviderTypeKey(provider, "api_key");
+		this.#manualApiKeyOffset.set(key, (((this.#manualApiKeyOffset.get(key) ?? 0) % total) + 1) % total);
+		return { total };
 	}
 
 	#toScopedBackoffKey(providerKey: string, blockScope: string | undefined): string {
@@ -2437,6 +2456,11 @@ export class AuthStorage {
 		for (const key of this.#providerRoundRobinIndex.keys()) {
 			if (key.startsWith(`${provider}:`)) {
 				this.#providerRoundRobinIndex.delete(key);
+			}
+		}
+		for (const key of this.#manualApiKeyOffset.keys()) {
+			if (key.startsWith(`${provider}:`)) {
+				this.#manualApiKeyOffset.delete(key);
 			}
 		}
 		this.#sessionLastCredential.delete(provider);

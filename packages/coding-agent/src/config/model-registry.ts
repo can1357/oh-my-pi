@@ -2451,6 +2451,24 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Cycle to the next API key for a provider across both key sources:
+	 * the models.yml list first, then stored api_key rows. Returns where the
+	 * new active key came from, or undefined when the provider holds fewer
+	 * than two keys in every source. Never logs or returns key material.
+	 */
+	async cycleProviderKeys(
+		provider: string,
+	): Promise<{ source: "config"; index: number; total: number } | { source: "stored"; total: number } | undefined> {
+		if (this.cycleProviderApiKey(provider)) {
+			const position = this.getProviderApiKeyPosition(provider);
+			return { source: "config", index: position?.index ?? 0, total: position?.total ?? 0 };
+		}
+		const stored = this.authStorage.cycleStoredApiKey(provider);
+		if (stored) return { source: "stored", total: stored.total };
+		return undefined;
+	}
+
+	/**
 	 * Re-merge live headers for `provider`'s models after a cycle, through the
 	 * same transport-override path composition uses. Only `authHeader: true`
 	 * providers derive headers from the apiKey — anything else is untouched.

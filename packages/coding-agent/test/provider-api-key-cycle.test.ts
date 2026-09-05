@@ -198,4 +198,44 @@ describe("ModelRegistry provider API key cycling", () => {
 			"Bearer key-two",
 		);
 	});
+
+	test("cycleProviderKeys prefers the models.yml list and reports its position", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: ["key-one", "key-two"],
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		expect(await registry.cycleProviderKeys("custom-proxy")).toEqual({ source: "config", index: 1, total: 2 });
+		expect(await registry.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-two");
+	});
+
+	test("cycleProviderKeys returns undefined with a single key and no stored rows", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: "only-key",
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		expect(await registry.cycleProviderKeys("custom-proxy")).toBeUndefined();
+		expect(await registry.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("only-key");
+	});
 });
