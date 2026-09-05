@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import * as utils from "@oh-my-pi/pi-utils";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { resolveCliEntryCmd, resolveExecutablePath, resolveWorkerSpawnCmd } from "../src/subprocess/worker-client";
@@ -18,10 +19,53 @@ describe("executable fallback on unlinked binary", () => {
 		expect(resolveExecutablePath()).toBe(originalExecPath);
 	});
 
-	it("falls back to Bun.which('omp') when original execPath was unlinked", () => {
+	it("prefers original launcher path with path separator over generic PATH match", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
+		const originalLauncher = "/opt/homebrew/bin/omp";
+		const otherOmpInPath = "/usr/local/bin/omp";
+
+		Object.defineProperty(process, "execPath", { value: missingPath, configurable: true });
+		Object.defineProperty(process, "argv0", { value: originalLauncher, configurable: true });
+
+		vi.spyOn(Bun, "which").mockImplementation((cmd: string) => {
+			if (cmd === "omp") return otherOmpInPath;
+			return null;
+		});
+		vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
+			if (p === missingPath) return false;
+			if (p === originalLauncher) return true;
+			if (p === otherOmpInPath) return true;
+			return false;
+		});
+
+		const resolved = resolveExecutablePath();
+		expect(resolved).toBe(originalLauncher);
+	});
+
+	it("does not resolve bare argv0 against the working tree", () => {
 		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
 		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
 		Object.defineProperty(process, "execPath", { value: missingPath, configurable: true });
+		Object.defineProperty(process, "argv0", { value: "omp", configurable: true });
+
+		const cwdRogueBinary = path.resolve("omp");
+		vi.spyOn(Bun, "which").mockReturnValue(null);
+		vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
+			if (p === cwdRogueBinary) return true; // untrusted file exists in repo cwd
+			return false;
+		});
+
+		// Must not pick up cwdRogueBinary; falls back to missingPath gracefully
+		const resolved = resolveExecutablePath();
+		expect(resolved).toBe(missingPath);
+	});
+
+	it("falls back to Bun.which('omp') when original execPath was unlinked and argv0 has no path", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
+		Object.defineProperty(process, "execPath", { value: missingPath, configurable: true });
+		Object.defineProperty(process, "argv0", { value: "omp", configurable: true });
 
 		const mockUpgradedPath = "/opt/homebrew/bin/omp";
 		vi.spyOn(Bun, "which").mockImplementation((cmd: string) => {

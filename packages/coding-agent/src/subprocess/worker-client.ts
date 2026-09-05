@@ -115,10 +115,11 @@ export const SMOKE_TEST_TIMEOUT_MS = 30_000;
 export function resolveExecutablePath(): string {
 	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
 	if (isCompiledBinary() && !fs.existsSync(executable)) {
+		const argv0 = process.argv0;
 		const candidates = [
+			argv0.includes("/") || argv0.includes("\\") ? path.resolve(argv0) : null,
+			Bun.which(argv0),
 			Bun.which("omp"),
-			process.argv0 ? Bun.which(process.argv0) : null,
-			process.argv0 ? path.resolve(process.argv0) : null,
 		];
 		for (const candidate of candidates) {
 			if (candidate && fs.existsSync(candidate)) {
@@ -128,6 +129,7 @@ export function resolveExecutablePath(): string {
 	}
 	return executable;
 }
+
 /**
  * Resolve the command that re-enters this CLI's entrypoint: the compiled
  * binary itself, or the runtime plus the declared worker-host entry. Used by
@@ -136,7 +138,6 @@ export function resolveExecutablePath(): string {
  * package root for `bun test` IPC). Outside a CLI host this falls back to the
  * absolute path of `src/cli.ts` so the relaunch keeps the caller's cwd.
  */
-
 export function resolveCliEntryCmd(): string[] {
 	const executable = resolveExecutablePath();
 	if (isCompiledBinary()) return [executable];
