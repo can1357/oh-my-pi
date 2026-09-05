@@ -5,6 +5,17 @@ export function noteAttachmentStateChange(
 	epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
 }
 
+export function noteDebuggerDetach(
+	attachmentEpochs: Map<number, number>,
+	loaderGenerations: Map<number, number>,
+	tabId: number,
+): void {
+	noteAttachmentStateChange(attachmentEpochs, tabId);
+	// A pending loader probe belongs to the detached debugger root. Invalidate
+	// it immediately so its late result cannot restore a stale recovery baseline.
+	noteAttachmentStateChange(loaderGenerations, tabId);
+}
+
 export function captureRecoveryLoaderNavigation(
 	loaderIds: Map<number, string>,
 	loaderGenerations: Map<number, number>,

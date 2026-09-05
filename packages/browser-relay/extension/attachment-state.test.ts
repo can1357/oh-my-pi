@@ -8,6 +8,7 @@ import {
 	filterFreshAttachmentState,
 	isAttachmentStateCurrent,
 	noteAttachmentStateChange,
+	noteDebuggerDetach,
 	noteRelayDetachOutcome,
 	requireRecoveryStateLoaded,
 	restoreRecoverableState,
@@ -210,6 +211,16 @@ describe("attachment-state", () => {
 		noteAttachmentStateChange(epochs, 1);
 
 		expect(filterFreshAttachmentState(epochs, snapshot, [1])).toEqual([]);
+	});
+
+	it("invalidates attachment and loader snapshots when the debugger detaches", () => {
+		const attachmentEpochs = new Map([[1, 3]]);
+		const loaderGenerations = new Map([[1, 7]]);
+
+		noteDebuggerDetach(attachmentEpochs, loaderGenerations, 1);
+
+		expect(attachmentEpochs.get(1)).toBe(4);
+		expect(loaderGenerations.get(1)).toBe(8);
 	});
 
 	it("keeps canceled attach cleanup from deleting replacement ownership", () => {

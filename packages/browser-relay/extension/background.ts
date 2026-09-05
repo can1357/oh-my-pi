@@ -24,6 +24,7 @@ import {
 	filterFreshAttachmentState,
 	isAttachmentStateCurrent,
 	noteAttachmentStateChange,
+	noteDebuggerDetach,
 	noteRelayDetachOutcome,
 	requireRecoveryStateLoaded,
 	restoreRecoverableState,
@@ -1249,7 +1250,11 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 chrome.debugger.onDetach.addListener((source, reason) => {
 	if (source.tabId === undefined) return;
-	noteAttachmentStateChange(attachmentStateEpochs, source.tabId);
+	noteDebuggerDetach(
+		attachmentStateEpochs,
+		recoveryLoaderGenerations,
+		source.tabId,
+	);
 	// Every detach ends this extension's live debugger ownership immediately. A
 	// guard detach retains separate recovery authorization, while user/relay
 	// detaches clear both sets below.
