@@ -7259,13 +7259,16 @@ function resolveNebiusCost(
 function mapNebiusModel(
 	entry: OpenAICompatibleModelRecord,
 	defaults: ModelSpec<"openai-completions">,
-): ModelSpec<"openai-completions"> {
+): ModelSpec<"openai-completions"> | null {
 	const record = entry as NebiusModelRecord;
+	// Token Factory's `/v1/models` mixes chat and embedding models; only rows
+	// whose modality targets text are usable here. `mapModel` returning null
+	// skips the entry so embedding-only models never reach the chat roster.
+	if (!isNebiusChatModel(record)) {
+		return null;
+	}
 	const features = toNebiusStringList(record.supported_features);
-	const modality =
-		isRecord(record.architecture) && typeof record.architecture.modality === "string"
-			? record.architecture.modality
-			: "";
+	const modality = nebiusModality(record);
 	return {
 		...defaults,
 		name: toModelName(entry.name, defaults.name),
@@ -7278,6 +7281,19 @@ function mapNebiusModel(
 		contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
 	};
 }
+
+function nebiusModality(record: NebiusModelRecord): string {
+	return isRecord(record.architecture) && typeof record.architecture.modality === "string"
+		? record.architecture.modality
+		: "";
+}
+
+/** Token Factory modalities look like "text->text" or "text+image->text". */
+function isNebiusChatModel(record: NebiusModelRecord): boolean {
+	const modality = nebiusModality(record);
+	return modality === "" || modality.split("->")[1] === "text";
+}
+
 function createNebiusStaticModel(
 	id: string,
 	name: string,

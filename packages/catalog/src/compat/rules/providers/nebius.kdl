@@ -1,13 +1,33 @@
 // Provider-wire compat for "nebius": Token Factory drives thinking through
-// OpenAI-style reasoning_effort (live-validated values:
-// none|minimal|low|medium|high|xhigh — "max" is rejected, so xhigh tops the
-// ladder). Provider-level on purpose: the roster is /v1/models truth
-// (dynamicModelsAuthoritative), so frozen model-id lists would fight
-// discovery; class-level ladders still win per lineage.
+// OpenAI-style reasoning_effort. Most routes accept the shared enum
+// (none|minimal|low|medium|high|xhigh); per-model backends diverge, so the
+// ladder below only covers unclassified models while exact-id residues pin
+// the routes that reject documented tiers (all live-probed 2026-09-05).
+// Class-level ladders still win per lineage.
 
 provider "nebius" {
 	thinking-mode "effort"
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	// Hermes-4-405B's vLLM backend accepts only none|low|medium|high.
+	models "NousResearch/Hermes-4-405B" {
+		thinking-efforts "low" "medium" "high"
+		reasoning-effort-map {
+			minimal "low"
+			xhigh "high"
+			max "high"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	// Nemotron-3-Super's backend accepts only Low|Medium|High.
+	models "nvidia/nemotron-3-super-120b-a12b" {
+		thinking-efforts "low" "medium" "high"
+		reasoning-effort-map {
+			minimal "low"
+			xhigh "high"
+			max "high"
+		}
 	}
 }

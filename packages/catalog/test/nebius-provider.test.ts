@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { nebiusModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
-
 const ORIGINAL_ENV = {
 	NEBIUS_API_KEY: Bun.env.NEBIUS_API_KEY,
 	NEBIUS_BASE_URL: Bun.env.NEBIUS_BASE_URL,
@@ -115,7 +116,7 @@ describe("Nebius Token Factory provider support", () => {
 		expect(vision?.input).toEqual(["text", "image"]);
 
 		const embedding = models?.find(model => model.id === "Qwen/Qwen3-Embedding-8B");
-		expect(embedding?.supportsTools).toBe(false);
+		expect(embedding).toBeUndefined();
 	});
 
 	test("prefers explicit base URL over NEBIUS_BASE_URL and appends /v1", async () => {
@@ -135,5 +136,30 @@ describe("Nebius Token Factory provider support", () => {
 			"https://config.tokenfactory.test/v1/models",
 			expect.objectContaining({ method: "GET" }),
 		);
+	});
+	test("caps effort tiers at the wire-accepted vocabulary per route", () => {
+		const policy = (id: string) =>
+			buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				provider: "nebius",
+				baseUrl: "https://api.tokenfactory.nebius.com/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 262144,
+				maxTokens: 32768,
+			});
+		// Live-probed 2026-09-05: these backends reject `max`, so the
+		for (const id of ["NousResearch/Hermes-4-405B", "nvidia/nemotron-3-super-120b-a12b"]) {
+			const thinking = policy(id).thinking;
+			expect(thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+			expect(thinking?.efforts).not.toContain(Effort.Max);
+		}
+		// Routes that accept `max` keep their lineage ladders untouched.
+		for (const id of ["moonshotai/Kimi-K3", "zai-org/GLM-5.3-Flash", "deepseek-ai/DeepSeek-V4-Pro"]) {
+			expect(policy(id).thinking?.efforts).toContain(Effort.Max);
+		}
 	});
 });

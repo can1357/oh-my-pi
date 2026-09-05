@@ -10142,6 +10142,58 @@
 				}
 			},
 			{
+				"source": "providers/nebius.kdl:15",
+				"providers": [
+					"nebius"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "NousResearch/Hermes-4-405B"
+					}
+				],
+				"wire": {
+					"reasoningEffortMap": {
+						"minimal": "low",
+						"xhigh": "high",
+						"max": "high"
+					}
+				},
+				"thinking": {
+					"efforts": [
+						"low",
+						"medium",
+						"high"
+					]
+				}
+			},
+			{
+				"source": "providers/nebius.kdl:25",
+				"providers": [
+					"nebius"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "nvidia/nemotron-3-super-120b-a12b"
+					}
+				],
+				"wire": {
+					"reasoningEffortMap": {
+						"minimal": "low",
+						"xhigh": "high",
+						"max": "high"
+					}
+				},
+				"thinking": {
+					"efforts": [
+						"low",
+						"medium",
+						"high"
+					]
+				}
+			},
+			{
 				"source": "providers/nebius.kdl:8",
 				"providers": [
 					"nebius"

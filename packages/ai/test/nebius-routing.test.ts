@@ -7,22 +7,22 @@ import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 // Nebius Token Factory is a pure OpenAI-compatible endpoint. These tests pin
 // the routing contract: nebius models must reach the OpenAI chat-completions
-// transport at the Token Factory base URL with plain Bearer auth.
+// transport at the model's own base URL with plain Bearer auth, so a
+// `NEBIUS_BASE_URL` region override steers discovery and inference together.
 const NEBIUS_BASE_URL = "https://api.tokenfactory.nebius.com/v1";
+const NEBIUS_REGION_BASE_URL = "https://api.tokenfactory.us-central1.nebius.com/v1";
 
 const context: Context = {
 	messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 };
 
-function nebiusModel(): Model<"openai-completions"> {
+function nebiusModel(baseUrl: string = NEBIUS_BASE_URL): Model<"openai-completions"> {
 	return buildModel({
 		id: "zai-org/GLM-5.3-Flash",
 		name: "GLM-5.3-Flash",
 		api: "openai-completions",
 		provider: "nebius",
-		// Deliberately NOT the Token Factory URL: streamNebius must pin the
-		// official base URL regardless of the catalog entry's placeholder.
-		baseUrl: "https://unset.example.invalid/v1",
+		baseUrl,
 		reasoning: true,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -60,6 +60,11 @@ describe("Nebius Token Factory routing", () => {
 		expect(request.url).toBe(`${NEBIUS_BASE_URL}/chat/completions`);
 		expect(request.body.model).toBe("zai-org/GLM-5.3-Flash");
 		expect(request.body.messages).toBeArrayOfSize(1);
+	});
+
+	it("honors a region base URL instead of rerouting to the global endpoint", async () => {
+		const request = await captureRequest(nebiusModel(NEBIUS_REGION_BASE_URL));
+		expect(request.url).toBe(`${NEBIUS_REGION_BASE_URL}/chat/completions`);
 	});
 
 	it("authenticates with a plain Bearer token and no custom headers", async () => {

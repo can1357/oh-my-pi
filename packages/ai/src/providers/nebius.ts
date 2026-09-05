@@ -2,8 +2,11 @@
  * Nebius Token Factory provider - thin wrapper over the OpenAI-compatible API.
  *
  * Nebius exposes a single OpenAI-compatible surface (no Anthropic protocol):
- * - Base URL: https://api.tokenfactory.nebius.com/v1
+ * - Default base URL: https://api.tokenfactory.nebius.com/v1
  * - Auth: plain Bearer token (Authorization: Bearer <NEBIUS_API_KEY>)
+ *
+ * Inference honors `model.baseUrl`, so a `NEBIUS_BASE_URL` region override
+ * flows through discovery onto the model and reaches the same region here.
  *
  * @see https://docs.tokenfactory.nebius.com/
  */
@@ -11,8 +14,6 @@
 import type { Api, Context, Model } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import { type OpenAIAnthropicShimOptions, streamOpenAIAnthropicShim } from "./openai-anthropic-shim";
-
-const NEBIUS_TOKEN_FACTORY_BASE_URL = "https://api.tokenfactory.nebius.com/v1";
 
 export type NebiusOptions = OpenAIAnthropicShimOptions;
 
@@ -26,15 +27,7 @@ export function streamNebius(
 	context: Context,
 	options?: NebiusOptions,
 ): AssistantMessageEventStream {
-	return streamOpenAIAnthropicShim(
-		model,
-		context,
-		{ ...options, format: "openai" },
-		{
-			openaiBaseUrl: NEBIUS_TOKEN_FACTORY_BASE_URL,
-			defaultFormat: "openai",
-		},
-	);
+	return streamOpenAIAnthropicShim(model, context, { ...options, format: "openai" }, { defaultFormat: "openai" });
 }
 
 /**
