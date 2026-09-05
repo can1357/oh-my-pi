@@ -45,7 +45,8 @@ export interface ExecutableUpdateMonitorOptions {
 /**
  * Detect a completed replacement of the process image or entrypoint. A changed
  * fingerprint must appear twice before it is accepted, so an in-place build
- * cannot restart a session against a partially written executable.
+ * cannot restart a session against a partially written executable, and a
+ * watched artifact that has vanished is never accepted at all.
  */
 export class ExecutableUpdateMonitor {
 	readonly #paths: readonly string[];
@@ -98,11 +99,17 @@ export class ExecutableUpdateMonitor {
 				return;
 			}
 			const next = await this.#capture();
-			if (!this.#baseline) {
+			const baseline = this.#baseline;
+			if (!baseline) {
 				this.#baseline = next;
 				return;
 			}
-			if (sameFingerprintSet(next, this.#baseline)) {
+			if (sameFingerprintSet(next, baseline)) {
+				this.#candidate = undefined;
+				return;
+			}
+			// Moved-aside or mid-build: the replacement has not landed yet.
+			if (next.some((value, index) => value === undefined && baseline[index] !== undefined)) {
 				this.#candidate = undefined;
 				return;
 			}
