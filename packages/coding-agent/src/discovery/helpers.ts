@@ -190,18 +190,20 @@ export function parseCSV(value: string): string[] {
 
 /**
  * Parse a value that may be an array of strings or a comma-separated string.
- * Returns undefined if the result would be empty.
+ * Returns undefined if the result would be empty, unless `options.keepEmpty`
+ * preserves an explicitly empty value as `[]` (fields where "present but
+ * empty" is distinct from absent; a CSV string yields `[]` only when every
+ * entry is blank or the string is empty).
  */
-export function parseArrayOrCSV(value: unknown): string[] | undefined {
+export function parseArrayOrCSV(value: unknown, options?: { keepEmpty?: boolean }): string[] | undefined {
+	let parsed: string[] | undefined;
 	if (Array.isArray(value)) {
-		const filtered = value.filter((item): item is string => typeof item === "string");
-		return filtered.length > 0 ? filtered : undefined;
+		parsed = value.filter((item): item is string => typeof item === "string");
+	} else if (typeof value === "string") {
+		parsed = parseCSV(value);
 	}
-	if (typeof value === "string") {
-		const parsed = parseCSV(value);
-		return parsed.length > 0 ? parsed : undefined;
-	}
-	return undefined;
+	if (!parsed) return undefined;
+	return options?.keepEmpty || parsed.length > 0 ? parsed : undefined;
 }
 
 interface RuleMarkdownOptions {
@@ -293,6 +295,12 @@ export interface ParsedAgentFields {
 	output?: unknown;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	autoloadSkills?: string[];
+	/** Skill-name globs listed in the child's `<skills>` block. Absent = unrestricted; `[]`/`"none"` = none listed. */
+	skills?: string[];
+	/** Skill-name globs excluded from the child's `<skills>` block. Takes precedence over `skills` and `unhideSkills`. */
+	hideSkills?: string[];
+	/** Skill-name globs whose source `hide: true` is overridden for the child's `<skills>` block. */
+	unhideSkills?: string[];
 	readSummarize?: boolean;
 	blocking?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
@@ -323,8 +331,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		return null;
 	}
 
-	let tools =
-		Array.isArray(frontmatter.tools) && frontmatter.tools.length === 0 ? [] : parseArrayOrCSV(frontmatter.tools);
+	let tools = parseArrayOrCSV(frontmatter.tools, { keepEmpty: true });
 	if (tools) tools = normalizeToolNames(tools);
 
 	// Subagents with explicit tool lists always need yield
@@ -379,6 +386,16 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
+	// `skills: "none"` is sugar for an empty allowlist (`[]`): zero skills listed.
+	// An absent field stays `undefined` (unrestricted, all skills listed as today).
+	const rawSkills = frontmatter.skills === "none" ? [] : parseArrayOrCSV(frontmatter.skills, { keepEmpty: true });
+	const skills = rawSkills?.map(s => s.trim()).filter(Boolean);
+	const hideSkills = parseArrayOrCSV(frontmatter.hideSkills)
+		?.map(s => s.trim())
+		.filter(Boolean);
+	const unhideSkills = parseArrayOrCSV(frontmatter.unhideSkills)
+		?.map(s => s.trim())
+		.filter(Boolean);
 	return {
 		name,
 		description,
@@ -389,6 +406,9 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		thinkingLevel,
 		blocking,
 		autoloadSkills,
+		skills,
+		hideSkills,
+		unhideSkills,
 		readSummarize,
 		prewalk,
 		advisor,

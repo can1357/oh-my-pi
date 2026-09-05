@@ -366,6 +366,39 @@ describe("structured subagent primitive", () => {
 		expect(path.basename(settled.artifactsDir)).toStartWith("omp-task-");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+	it("applies the agent's skill visibility frontmatter to the child session's skill list", async () => {
+		const skills = [
+			{ name: "alpha", description: "a", filePath: "/skills/alpha/SKILL.md", baseDir: "/skills", source: "user" },
+			{
+				name: "secret",
+				description: "s",
+				filePath: "/skills/secret/SKILL.md",
+				baseDir: "/skills",
+				source: "user",
+				hide: true,
+			},
+			{ name: "beta", description: "b", filePath: "/skills/beta/SKILL.md", baseDir: "/skills", source: "user" },
+		];
+		const visibilityAgent = {
+			...AGENT,
+			skills: ["alpha", "beta", "secret"],
+			unhideSkills: ["secret"],
+			hideSkills: ["beta"],
+		};
+		mockDiscovery(visibilityAgent);
+		const childSession = session();
+		childSession.skills = skills;
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
+
+		expect(dispatched[0]?.skills?.map(s => s.name)).toEqual(["alpha", "secret", "beta"]);
+		expect(dispatched[0]?.skills?.filter(s => s.hide !== true).map(s => s.name)).toEqual(["alpha", "secret"]);
+	});
 
 	it("retains temporary artifacts when the run failed but yielded schema-valid structured output", async () => {
 		// Regression: a task can produce schema-valid data and then fail (or

@@ -151,6 +151,73 @@ describe("parseAgentFields", () => {
 		expect(fields?.autoloadSkills).toBeUndefined();
 	});
 
+	test("parses skills allowlist from array frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: ["alpha", "beta-*"],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual(["alpha", "beta-*"]);
+	});
+
+	test("parses skills allowlist from CSV string", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: "alpha, beta-*",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual(["alpha", "beta-*"]);
+	});
+
+	test("keeps empty skills allowlist as an empty array", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: [],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual([]);
+	});
+
+	test("treats skills none as an empty allowlist", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			skills: "none",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toEqual([]);
+	});
+
+	test("returns undefined skills when field absent", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.skills).toBeUndefined();
+	});
+
+	test("parses hideSkills and unhideSkills from frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "worker",
+			description: "desc",
+			hideSkills: ["internal-*"],
+			unhideSkills: ["internal-tools"],
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.hideSkills).toEqual(["internal-*"]);
+		expect(fields?.unhideSkills).toEqual(["internal-tools"]);
+	});
+
 	test("parses readSummarize from boolean frontmatter", () => {
 		expect(parseAgentFields({ name: "scout", description: "desc", readSummarize: false })?.readSummarize).toBe(false);
 		expect(parseAgentFields({ name: "scout", description: "desc", readSummarize: true })?.readSummarize).toBe(true);

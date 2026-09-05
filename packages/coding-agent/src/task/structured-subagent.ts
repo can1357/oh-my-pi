@@ -22,6 +22,7 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { resolveAgentSkills } from "./agents";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
@@ -380,10 +381,15 @@ async function leaseArtifacts(
 	return { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
 }
 
-function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
-	const skills = [...(session.skills ?? [])];
+function resolveAgentSkillsForExecutor(session: ToolSession, agent: AgentDefinition) {
+	const fullSkills = session.skills ?? [];
+	const skills = resolveAgentSkills(fullSkills, agent);
+	// Autoload resolves against the full unfiltered list: a skill hidden from
+	// the `<skills>` listing can still be preloaded into the child's context.
 	const autoloadSkills = agent.autoloadSkills?.length
-		? agent.autoloadSkills.map(name => skills.find(skill => skill.name === name)).filter(skill => skill !== undefined)
+		? agent.autoloadSkills
+				.map(name => fullSkills.find(skill => skill.name === name))
+				.filter(skill => skill !== undefined)
 		: [];
 	return { skills, autoloadSkills };
 }
@@ -395,7 +401,7 @@ function buildExecutorOptions(
 	id: string,
 ): ExecutorOptions {
 	const { session } = request;
-	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
+	const { skills, autoloadSkills } = resolveAgentSkillsForExecutor(session, policy.agent);
 	const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
 		getSessionId: session.getSessionId ?? (() => null),
