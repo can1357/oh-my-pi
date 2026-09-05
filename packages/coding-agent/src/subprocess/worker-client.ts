@@ -3,11 +3,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	$env,
+	$which,
 	isBunTestRuntime,
 	isCompiledBinary,
+	isExecutable,
+	isFullyQualifiedPath,
 	logger,
 	postmortem,
 	stripWindowsExtendedLengthPathPrefix,
+	WhichCachePolicy,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
@@ -107,6 +111,34 @@ export interface WorkerSpawnCommand {
 export const SMOKE_TEST_TIMEOUT_MS = 30_000;
 
 /**
+ * Resolve the current executable path, falling back to finding the binary on
+ * PATH if the original physical path was unlinked on disk (e.g. Homebrew or a
+ * package manager pruned the prior version directory during an in-flight
+ * upgrade, leaving `process.execPath` pointing at a missing path).
+ */
+export function resolveExecutablePath(): string {
+	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
+	if (isCompiledBinary() && !isExecutable(executable)) {
+		const argv0 = process.argv0;
+		const isPath = argv0.includes("/") || argv0.includes("\\") || argv0.includes(":");
+		const candidates = [
+			// Prefer the original launcher when invoked with an absolute path
+			isFullyQualifiedPath(argv0) ? argv0 : null,
+			// Search PATH for the launcher name only if it is a bare command name
+			!isPath ? $which(argv0, { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass }) : null,
+			// Generic fallback to finding "omp" on PATH
+			$which("omp", { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass }),
+		];
+		for (const candidate of candidates) {
+			if (candidate && isExecutable(candidate)) {
+				return candidate;
+			}
+		}
+	}
+	return executable;
+}
+
+/**
  * Resolve the command that re-enters this CLI's entrypoint: the compiled
  * binary itself, or the runtime plus the declared worker-host entry. Used by
  * the TUI `/restart` relaunch; workers go through {@link resolveWorkerSpawnCmd},
@@ -115,7 +147,7 @@ export const SMOKE_TEST_TIMEOUT_MS = 30_000;
  * absolute path of `src/cli.ts` so the relaunch keeps the caller's cwd.
  */
 export function resolveCliEntryCmd(): string[] {
-	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
+	const executable = resolveExecutablePath();
 	if (isCompiledBinary()) return [executable];
 	const hostEntry = workerHostEntry();
 	if (hostEntry) return [executable, hostEntry];
@@ -134,7 +166,7 @@ export function resolveCliEntryCmd(): string[] {
  * IPC handles more reliably under `bun test`.
  */
 export function resolveWorkerSpawnCmd(workerArg: string): WorkerSpawnCommand {
-	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
+	const executable = resolveExecutablePath();
 	if (isCompiledBinary()) return { cmd: [executable, workerArg] };
 	const hostEntry = workerHostEntry();
 	if (hostEntry) {

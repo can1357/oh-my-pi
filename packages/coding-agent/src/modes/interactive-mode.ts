@@ -4851,8 +4851,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				process.stderr.write(`${chalk.red(`Restart exec failed: ${err instanceof Error ? err.message : err}`)}\n`);
 			}
 		}
-		const child = Bun.spawn(cmd, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
-		await postmortem.quit(await child.exited);
+		try {
+			const child = Bun.spawn(cmd, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+			await postmortem.quit(await child.exited);
+		} catch (err) {
+			process.stderr.write(`${chalk.red(`Restart spawn failed: ${err instanceof Error ? err.message : err}`)}\n`);
+			await postmortem.quit(1);
+		}
 	}
 
 	/**

@@ -34,4 +34,25 @@ describe("$which", () => {
 		process.env.PATH = secondDir;
 		expect($which(command)).toBe(secondExecutable);
 	});
+
+	it("returns null when requireAbsolutePaths is true and PATH contains only relative entries", () => {
+		process.env.PATH = [".", "./bin", ""].join(path.delimiter);
+		expect($which("some-command", { requireAbsolutePaths: true })).toBeNull();
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"resolves absolute PATH entries while ignoring relative ones when requireAbsolutePaths is true",
+		() => {
+			const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-which-abs-"));
+			tempDirs.push(testDir);
+
+			const command = `omp-test-cmd-${process.pid}`;
+			const executable = path.join(testDir, command);
+			fs.writeFileSync(executable, "#!/bin/sh\n");
+			fs.chmodSync(executable, 0o755);
+
+			process.env.PATH = [".", "./bin", "", testDir].join(path.delimiter);
+			expect($which(command, { requireAbsolutePaths: true })).toBe(executable);
+		},
+	);
 });
