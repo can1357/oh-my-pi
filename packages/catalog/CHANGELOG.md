@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed DeepInfra model cost reporting so promotional pricing is reflected: the `metadata.discount` fraction is now applied to input, output, and cache-read rates ([#10935](https://github.com/can1357/oh-my-pi/issues/10935)).
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

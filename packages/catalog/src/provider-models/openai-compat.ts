@@ -1339,6 +1339,13 @@ function mapDeepinfraModel(
 		return null;
 	}
 	const pricing = isRecord(metadata.pricing) ? metadata.pricing : {};
+	// `metadata.discount` is a promotional fraction in [0, 1): DeepInfra bills
+	// `pricing * (1 - discount)` (verified against the site — GLM-5.2 lists
+	// input 0.75 with discount 0.35 and charges 0.4875), while `pricing.*`
+	// stays at list price. Fold it into the rate card so cost reporting matches
+	// what the user is actually billed. Values outside (0, 1) are ignored.
+	const discount = toNumber(metadata.discount);
+	const discountMultiplier = discount !== undefined && discount > 0 && discount < 1 ? 1 - discount : 1;
 	// `reasoning_effort` marks models whose effort dial is advertised. The
 	// parameter itself is validated and accepted platform-wide on DeepInfra
 	// (verified: 200 on effort-tagged, reasoning-only, and plain-chat models;
@@ -1381,9 +1388,9 @@ function mapDeepinfraModel(
 		...(thinking ? { thinking } : {}),
 		input: tags.includes("vision") || tags.includes("vlm") ? ["text", "image"] : ["text"],
 		cost: {
-			input: toPositiveNumber(pricing.input_tokens, 0),
-			output: toPositiveNumber(pricing.output_tokens, 0),
-			cacheRead: toPositiveNumber(pricing.cache_read_tokens, 0),
+			input: toPositiveNumber(pricing.input_tokens, 0) * discountMultiplier,
+			output: toPositiveNumber(pricing.output_tokens, 0) * discountMultiplier,
+			cacheRead: toPositiveNumber(pricing.cache_read_tokens, 0) * discountMultiplier,
 			cacheWrite: 0,
 		},
 		contextWindow,
