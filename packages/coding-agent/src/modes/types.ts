@@ -9,6 +9,7 @@ import type { Settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
 	ExtensionCustomOptions,
+	ExtensionStatusOptions,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
@@ -530,7 +531,7 @@ export interface InteractiveModeContext {
 		previousSessionFile?: string,
 	): Promise<void>;
 	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
-	setHookStatus(key: string, text: string | undefined): void;
+	setHookStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void;
 	showHookSelector(
 		title: string,
 		options: ExtensionUISelectItem[],

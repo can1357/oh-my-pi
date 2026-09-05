@@ -281,6 +281,37 @@ class ProtocolParsingTests(unittest.TestCase):
             ({}, {"description": "Push to production"}),
         )
 
+    def test_parse_set_status_carries_theme_color(self) -> None:
+        notification = parse_notification(
+            {
+                "type": "extension_ui_request",
+                "id": "ui-3",
+                "method": "setStatus",
+                "statusKey": "cache",
+                "statusText": "cold 6m",
+                "statusColor": "error",
+            }
+        )
+
+        self.assertIsInstance(notification, ExtensionUiRequest)
+        self.assertEqual(notification.status_key, "cache")
+        self.assertEqual(notification.status_text, "cold 6m")
+        self.assertEqual(notification.status_color, "error")
+
+    def test_parse_set_status_without_color(self) -> None:
+        notification = parse_notification(
+            {
+                "type": "extension_ui_request",
+                "id": "ui-4",
+                "method": "setStatus",
+                "statusKey": "indexer",
+                "statusText": "indexing",
+            }
+        )
+
+        self.assertIsInstance(notification, ExtensionUiRequest)
+        self.assertIsNone(notification.status_color)
+
     def test_extension_ui_request_preserves_positional_constructor(self) -> None:
         request = ExtensionUiRequest(
             "ui-legacy", "confirm", "Confirm", None, "Continue?"

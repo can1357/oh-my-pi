@@ -181,15 +181,17 @@ function brandTimer(elapsedMs: number): string {
 const statusSegment: StatusLineSegment = {
 	id: "status",
 	render(ctx) {
-		let text = "";
+		const parts: string[] = [];
 		for (const status of ctx.hookStatuses ?? []) {
-			const sanitized = sanitizeStatusText(status);
+			const sanitized = sanitizeStatusText(status.text);
 			if (!sanitized) continue;
-			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+			// Entries without a requested colour keep the session-accent look they
+			// have always had; a requested theme token wins over the accent.
+			parts.push(status.color ? theme.fg(status.color, sanitized) : accentFg(ctx, "accent", sanitized));
 		}
 		return {
-			content: text ? accentFg(ctx, "accent", text) : "",
-			visible: text.length > 0,
+			content: parts.join(theme.sep.dot),
+			visible: parts.length > 0,
 		};
 	},
 };

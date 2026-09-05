@@ -13,6 +13,7 @@ import type { Theme } from "../../modes/theme/theme";
 import type { CustomMessagePayload, HookMessage } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
 import type { BashToolDetails, GlobToolDetails, GrepToolDetails, ReadToolDetails } from "../../tools";
+import type { ExtensionStatusOptions } from "../extensions/types";
 import type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -90,10 +91,14 @@ export interface HookUIContext {
 	 * ANSI/VT escape sequences and most control characters are stripped; tabs and newlines become spaces.
 	 * Repeated spaces are collapsed and surrounding whitespace is trimmed.
 	 * The combined status line is truncated to terminal width.
+	 *
+	 * Because escapes are stripped, colour is requested through `options.color`
+	 * as a theme token rather than embedded ANSI.
 	 * @param key - Unique key to identify this status (e.g., hook name)
 	 * @param text - Status text to display, or undefined to clear
+	 * @param options - Optional presentation options, e.g. `{ color: "warning" }`
 	 */
-	setStatus(key: string, text: string | undefined): void;
+	setStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void;
 
 	/**
 	 * Show a custom component with keyboard focus.

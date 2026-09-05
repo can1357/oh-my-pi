@@ -17,6 +17,7 @@ import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
+	type ExtensionStatusOptions,
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
@@ -30,7 +31,7 @@ import {
 	type Skill,
 } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
-import { type Theme, theme } from "../../modes/theme/theme";
+import { isValidThemeColor, type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -614,6 +615,32 @@ function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscr
 	return value === "off" || value === "progress" || value === "events";
 }
 
+/**
+ * Emits a `setStatus` frame, dropping a colour the theme does not define.
+ *
+ * Extensions are plain JavaScript at runtime, so the `ThemeColor` type is
+ * erased and `{ color: "banana" }` reaches us intact. The TUI store already
+ * discards such a token and falls back to the accent; the wire has to do the
+ * same, or a host receives a frame that violates `RpcExtensionUIRequest` and
+ * fails its own theme lookup.
+ */
+export function emitRpcStatus(
+	output: RpcOutput,
+	key: string,
+	text: string | undefined,
+	options?: ExtensionStatusOptions,
+): void {
+	const color = options?.color && isValidThemeColor(options.color) ? options.color : undefined;
+	output({
+		type: "extension_ui_request",
+		id: Snowflake.next() as string,
+		method: "setStatus",
+		statusKey: key,
+		statusText: text,
+		statusColor: color,
+	} as RpcExtensionUIRequest);
+}
+
 /** Sends an RPC select request while retaining aligned option descriptions. */
 export function requestRpcSelect(
 	pendingRequests: Map<string, PendingExtensionRequest>,
@@ -904,15 +931,9 @@ export async function runRpcMode(
 			} as RpcExtensionUIRequest);
 		}
 
-		setStatus(key: string, text: string | undefined): void {
+		setStatus(key: string, text: string | undefined, options?: ExtensionStatusOptions): void {
 			// Fire and forget - no response needed
-			this.output({
-				type: "extension_ui_request",
-				id: Snowflake.next() as string,
-				method: "setStatus",
-				statusKey: key,
-				statusText: text,
-			} as RpcExtensionUIRequest);
+			emitRpcStatus(this.output, key, text, options);
 		}
 
 		setWorkingMessage(_message?: string): void {

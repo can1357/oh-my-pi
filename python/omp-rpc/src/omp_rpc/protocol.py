@@ -965,6 +965,7 @@ class ExtensionUiRequest:
     notify_type: NotifyType | None = None
     status_key: str | None = None
     status_text: str | None = None
+    status_color: str | None = None
     widget_key: str | None = None
     widget_lines: tuple[str, ...] | None = None
     widget_placement: WidgetPlacement | None = None
@@ -1593,6 +1594,7 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
         ),
         status_key=_optional_str(payload, "statusKey"),
         status_text=_optional_str(payload, "statusText"),
+        status_color=_optional_str(payload, "statusColor"),
         widget_key=_optional_str(payload, "widgetKey"),
         widget_lines=_tuple_of_strings(
             payload.get("widgetLines"), field="extension_ui_request.widgetLines"

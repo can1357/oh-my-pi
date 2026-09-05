@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
+- Extensions and hooks can colour their status-line entry with a theme token: `ctx.ui.setStatus(key, text, { color: "warning" })`.
 
 ### Fixed
 
