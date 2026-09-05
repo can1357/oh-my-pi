@@ -93,10 +93,12 @@ class IdentityFacts {
 }
 
 function resolveIdentity<TApi extends Api>(spec: ModelSpec<TApi>): ModelIdentity {
-	// Strict on purpose: ambiguous identity is a rule-authoring defect surfaced
-	// at build/CI time, never silently degraded to `unknown`. Discovery
-	// normalization opts into leniency through `classifyModel` directly.
-	return classifyModel(spec.provider, spec.id);
+	// `buildModel` only runs for discovered, custom, and override specs — never
+	// the curated bundled catalog. Those ids cannot be enumerated in rules.json,
+	// so a class/family tie must not abort the process (issue #10598, OmniRoute
+	// `openai-compatible-chat-<uuid>/cohere/...` vs `openai` namespace).
+	// Generator/CI still call `classifyModel` without `lenient` to catch rule defects.
+	return classifyModel(spec.provider, spec.id, { lenient: true });
 }
 
 // ---------------------------------------------------------------------------
