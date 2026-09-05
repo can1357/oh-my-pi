@@ -34,6 +34,7 @@ const agentArgsSchema = type({
 	"isolated?": "boolean",
 	"apply?": "boolean",
 	"merge?": "boolean",
+	/** Child runtime cap in SECONDS (JS `agent(prompt, { timeout })`); 0 disables. */
 	"timeout?": "number>=0",
 	"tools?": "string[]",
 	"+": "delete",
@@ -72,7 +73,7 @@ export interface EvalAgentResult {
 	details: {
 		agent: string;
 		id: string;
-		model?: string | string[];
+		model?: string;
 		family?: string;
 		structured: boolean;
 		schemaSource?: "caller" | "agent" | "session";
@@ -131,7 +132,10 @@ function buildSubagentFailureMessage(agentName: string, result: SingleResult): s
 	);
 }
 
-async function buildEvalAgentResult(execution: StructuredSubagentResult, session: ToolSession): Promise<EvalAgentResult> {
+async function buildEvalAgentResult(
+	execution: StructuredSubagentResult,
+	session: ToolSession,
+): Promise<EvalAgentResult> {
 	const { result, policy, mergeSummary, changesApplied, artifactsDir } = execution;
 	if (result.exitCode !== 0 || result.error || result.aborted) {
 		const failureMessage = buildSubagentFailureMessage(policy.agentName, result)
@@ -163,7 +167,7 @@ async function buildEvalAgentResult(execution: StructuredSubagentResult, session
 	const schemaSource = structuredOutput?.source === "none" ? undefined : structuredOutput?.source;
 	const schemaMode = structured ? structuredOutput?.mode : undefined;
 	const schemaStatus = structuredOutput?.status === "unavailable" ? undefined : structuredOutput?.status;
-	const model = result.resolvedModel ?? policy.modelOverride;
+	const model = result.resolvedModel;
 	const family = resolveServedModelFamily(result.resolvedModel, session);
 	const nestedPatches = result.nestedPatches?.length ? result.nestedPatches : undefined;
 	const isolationSummary = mergeSummary ? mergeSummary.trim() : undefined;
@@ -247,7 +251,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 						...(parsed.model !== undefined ? { perCallModel: parsed.model } : {}),
 						...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
-						// Omitted timeout inherits `task.maxRuntimeMs`; 0 disables the cap.
+						// `timeout` is seconds. Omitted inherits `task.maxRuntimeMs`; 0 disables the cap.
 						...(parsed.timeout !== undefined
 							? { maxRuntimeMs: parsed.timeout === 0 ? 0 : Math.max(1, Math.round(parsed.timeout * 1000)) }
 							: {}),
