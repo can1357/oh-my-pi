@@ -134,8 +134,11 @@ describe("date-cwd-reminder", () => {
 		it("renders a system-reminder block with a UTC instant, local clock, timezone name, and numeric offset", () => {
 			const stamp = renderNowStamp(new Date("2026-08-30T02:51:16Z"));
 
+			// The short timezone name is whatever Intl emits for the host's
+			// zone — alphabetic (e.g. `CST`) or numeric (e.g. `GMT+5:30` under
+			// TZ=Asia/Kolkata) — so assert the semantic structure, not a charset.
 			expect(stamp).toMatch(
-				/^<system-reminder>\nNow: 2026-08-30T02:51:16Z \(\d{2}:\d{2} [A-Za-z]{2,5}, UTC[+-]\d{2}:\d{2}\)\n<\/system-reminder>$/,
+				/^<system-reminder>\nNow: 2026-08-30T02:51:16Z \(\d{2}:\d{2} [^(,]+, UTC[+-]\d{2}:\d{2}\)\n<\/system-reminder>$/,
 			);
 		});
 	});
@@ -353,12 +356,12 @@ describe("now stamp across processes", () => {
 	// The design holds no module-level value state (only a WeakMap), so the
 	// second process must re-derive the first process's stamped bytes.
 	const CHILD_FIXTURE = `${import.meta.dir}/fixtures/now-stamp-process-child.ts`;
-	async function stampInColdProcess(mode: "orig" | "resumed"): Promise<string[]> {
+	async function stampInColdProcess(mode: "orig" | "resumed", tz = "America/Chicago"): Promise<string[]> {
 		const proc = Bun.spawn([process.execPath, "--no-env-file", "--no-install", CHILD_FIXTURE, mode], {
 			cwd: import.meta.dir,
 			env: {
 				...process.env,
-				TZ: "America/Chicago",
+				TZ: tz,
 			},
 			stdout: "pipe",
 			stderr: "pipe",
@@ -366,6 +369,22 @@ describe("now stamp across processes", () => {
 		});
 		const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
 		expect(code, `child "${mode}" exited ${code}: ${stdout}`).toBe(0);
+		return JSON.parse(stdout.trim().split("\n").at(-1)!);
+	}
+
+	async function formatInColdProcess(tz: string): Promise<string> {
+		const proc = Bun.spawn([process.execPath, "--no-env-file", "--no-install", CHILD_FIXTURE, "format"], {
+			cwd: import.meta.dir,
+			env: {
+				...process.env,
+				TZ: tz,
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: 30_000,
+		});
+		const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		expect(code, `child "format" exited ${code}: ${stdout}`).toBe(0);
 		return JSON.parse(stdout.trim().split("\n").at(-1)!);
 	}
 
@@ -383,6 +402,21 @@ describe("now stamp across processes", () => {
 		// from its own instant.
 		expect(resumed).toHaveLength(orig.length + 1);
 		expect(resumed[3]).toContain("Now: 2026-08-30T03:12:45Z");
+	});
+
+	it("keeps the stamp's semantic structure when the host zone's short label is numeric (TZ=Asia/Kolkata)", async () => {
+		// Charset-regression guard: under TZ=Asia/Kolkata, Bun's Intl emits
+		// `GMT+5:30` for the short zone name, which the old `[A-Za-z]{2,5}`
+		// assertion rejected. With the TZ pinned, the local clock (08:21)
+		// and numeric offset (UTC+05:30) are deterministic; the zone name
+		// itself is whatever charset Intl emits for that zone.
+		const stamp = await formatInColdProcess("Asia/Kolkata");
+
+		expect(stamp).toMatch(
+			/^<system-reminder>\nNow: 2026-08-30T02:51:16Z \(\d{2}:\d{2} [^(,]+, UTC[+-]\d{2}:\d{2}\)\n<\/system-reminder>$/,
+		);
+		expect(stamp).toContain("Now: 2026-08-30T02:51:16Z (08:21 ");
+		expect(stamp).toContain(", UTC+05:30)");
 	});
 });
 

@@ -7,14 +7,16 @@
  * assistant, newTurn], with fresh object identities as buildSessionContext
  * produces from the session store) — and prints the transformed context's
  * wire bytes as JSON. The parent compares the two processes' outputs to prove
- * the resume re-stamp is a byte no-op with an empty module cache.
+ * the resume re-stamp is a byte no-op with an empty module cache. A third
+ * mode, `format`, prints just the rendered stamp for the parent to assert
+ * the semantic structure of the local part under a pinned host TZ.
  *
  * Deterministic fixture: the stamp's parenthesized local part renders per
  * host (timezone/locale/ICU), so the parent pins TZ for both children and
  * the test compares bytes *between* the processes, not against a golden.
  */
 import type { Context, Message } from "@oh-my-pi/pi-ai";
-import { applyNowStamp } from "@oh-my-pi/pi-coding-agent/session/date-cwd-reminder";
+import { applyNowStamp, renderNowStamp } from "@oh-my-pi/pi-coding-agent/session/date-cwd-reminder";
 
 const T1 = Date.parse("2026-08-30T02:51:16Z");
 const T2 = Date.parse("2026-08-30T03:12:45Z");
@@ -50,12 +52,20 @@ const newTurn: Message = {
 };
 
 const mode = process.argv[2];
-const messages: Message[] = mode === "orig" ? [firstTurn, assistant] : [firstTurn, assistant, newTurn];
-const context: Context = { systemPrompt: ["SYSTEM"], messages };
-const stamped = applyNowStamp(context);
-console.log(
-	JSON.stringify([
-		JSON.stringify(stamped.systemPrompt),
-		...stamped.messages.map(message => JSON.stringify(message.content)),
-	]),
-);
+if (mode === "format") {
+	// Prints the stamp rendered in THIS process's timezone (the parent pins
+	// TZ per spawn) so the parent can assert the semantic structure of the
+	// parenthesized local part for a host zone whose short Intl label is
+	// numeric (e.g. `GMT+5:30` under TZ=Asia/Kolkata).
+	console.log(JSON.stringify(renderNowStamp(new Date(T1))));
+} else {
+	const messages: Message[] = mode === "orig" ? [firstTurn, assistant] : [firstTurn, assistant, newTurn];
+	const context: Context = { systemPrompt: ["SYSTEM"], messages };
+	const stamped = applyNowStamp(context);
+	console.log(
+		JSON.stringify([
+			JSON.stringify(stamped.systemPrompt),
+			...stamped.messages.map(message => JSON.stringify(message.content)),
+		]),
+	);
+}
