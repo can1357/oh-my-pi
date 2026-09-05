@@ -135,14 +135,12 @@ function cancelResolved(resolved: ResolvedHandle, reason?: unknown): boolean {
 function emitProgress(
 	resolved: ResolvedHandle,
 	emitStatus: ((event: JsStatusEvent) => void) | undefined,
-	previousDetails: AsyncJob["latestDetails"],
-): AsyncJob["latestDetails"] {
-	if (!emitStatus || !("job" in resolved)) return previousDetails;
-	const details = resolved.job.latestDetails;
-	if (!details || details === previousDetails) return previousDetails;
-	const progress = details.progress;
+	previousProgress: unknown,
+): unknown {
+	if (!emitStatus || !("job" in resolved)) return previousProgress;
+	const progress = resolved.job.latestDetails?.progress;
 	const first = Array.isArray(progress) ? progress[0] : undefined;
-	if (!isUnknownRecord(first)) return previousDetails;
+	if (!isUnknownRecord(first) || first === previousProgress) return previousProgress;
 	const task = typeof first.assignment === "string" ? first.assignment : first.task;
 	const taskPreview = typeof task === "string" ? task.split("\n")[0]?.slice(0, 120) : undefined;
 	emitStatus({
@@ -151,7 +149,7 @@ function emitProgress(
 		id: resolved.job.agentId ?? resolved.job.id,
 		taskPreview: taskPreview || undefined,
 	});
-	return details;
+	return first;
 }
 
 async function waitForSettlement(
@@ -193,11 +191,11 @@ export async function runEvalWait(
 ): Promise<{ items: EvalHandleSnapshot[] }> {
 	const { items, timeoutMs } = parseRefs(args);
 	const resolved = items.map(item => resolveHandle(item, options));
-	const emittedDetails = new Map<string, AsyncJob["latestDetails"]>();
+	const emittedProgress = new Map<string, unknown>();
 	const emitLatestProgress = (handle: ResolvedHandle): void => {
 		if (!("job" in handle)) return;
-		const details = emitProgress(handle, options.emitStatus, emittedDetails.get(handle.ref.id));
-		if (details) emittedDetails.set(handle.ref.id, details);
+		const progress = emitProgress(handle, options.emitStatus, emittedProgress.get(handle.ref.id));
+		if (progress) emittedProgress.set(handle.ref.id, progress);
 	};
 	return await withBridgeTimeoutPause(
 		options.emitStatus,

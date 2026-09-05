@@ -780,7 +780,7 @@ describe("agent() through eval runtimes", () => {
 
 		const events: Array<{ op: string; [key: string]: unknown }> = [];
 		const result = await executeJs(
-			'const handle = await agent("investigate", { label: "Scout" }); await Bun.sleep(20); await handle.wait();',
+			'const handle = await agent("investigate", { label: "Scout" }); while (!(await handle.done())) await Promise.resolve(); await handle.wait();',
 			{
 				cwd: tempDir.path(),
 				sessionId: sharedJsSessionId,
