@@ -43,6 +43,12 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	{ value: "kagi", label: "Kagi", description: "Requires KAGI_API_KEY and Kagi Search API beta access" },
 	{ value: "tavily", label: "Tavily", description: "Requires TAVILY_API_KEY" },
 	{
+		value: "keenable",
+		label: "Keenable",
+		description:
+			"Requires KEENABLE_API_KEY or /login keenable; explicit selection falls back to the public keyless API",
+	},
+	{
 		value: "firecrawl",
 		label: "Firecrawl",
 		description: "Uses Firecrawl API when FIRECRAWL_API_KEY is set; falls back to keyless mode",

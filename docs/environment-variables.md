@@ -355,6 +355,7 @@ therefore completes through the paste-code path.
 | `FIRECRAWL_BASE_URL`                                | Firecrawl API endpoint override (`FIRECRAWL_API_URL` is a fallback alias) |
 | `GOOGLE_GEMINI_BASE_URL`                            | Gemini search endpoint override; must be a valid absolute HTTP(S) URL     |
 | `TAVILY_API_KEY`                                    | Tavily search provider                                                    |
+| `KEENABLE_API_KEY`                                  | Keenable search and fetch; alternatively use `/login keenable`            |
 | `ZAI_API_KEY`                                       | z.ai search provider (also checks stored OAuth in `agent.db`)             |
 | `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search provider availability/auth                                   |
 | `PI_CODEX_WEB_SEARCH_MODEL`                         | Codex search provider model override                                      |
