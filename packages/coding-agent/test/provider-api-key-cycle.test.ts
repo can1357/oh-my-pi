@@ -80,4 +80,35 @@ describe("ModelRegistry provider API key cycling", () => {
 			else process.env[missingEnv] = savedEnv;
 		}
 	});
+
+	test("cycle skips a poisoned middle element and reports the actual resolved index (key 3/3), with the next advance continuing from it", async () => {
+		const failCmd = `!${JSON.stringify(process.execPath)} -e ${JSON.stringify("process.exit(1)")}`;
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: ["key-one", failCmd, "key-three"],
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		expect(await registry.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-one");
+		expect(registry.cycleProviderApiKey("custom-proxy")).toBe(true);
+		// The resolver skips the failing middle element, so the live key is key-three…
+		expect(await registry.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-three");
+		// …and the reported position/override must agree with the actual slot, not the poisoned one.
+		expect(registry.getProviderApiKeyPosition("custom-proxy")).toEqual({ index: 2, total: 3 });
+		expect(authStorage.describeCredentialSource("custom-proxy")).toContain("key 3/3");
+		// The next advance continues from the actual slot (wraps to key-one), not from the poisoned slot.
+		expect(registry.cycleProviderApiKey("custom-proxy")).toBe(true);
+		expect(await registry.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-one");
+		expect(registry.getProviderApiKeyPosition("custom-proxy")).toEqual({ index: 0, total: 3 });
+	});
 });
+

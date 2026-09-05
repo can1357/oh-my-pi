@@ -300,10 +300,10 @@ export class ModelRegistry {
 			this.authStorage.removeConfigApiKey(provider);
 			return { configured: true };
 		}
-		const value = this.#resolveActiveApiKeyElement(provider, keyConfig, options);
-		if (value) {
-			this.authStorage.setConfigApiKey(provider, value);
-			return { configured: true, value };
+		const resolved = this.#resolveActiveApiKeyElement(provider, keyConfig, options);
+		if (resolved) {
+			this.authStorage.setConfigApiKey(provider, resolved.value);
+			return { configured: true, value: resolved.value };
 		}
 		this.authStorage.removeConfigApiKey(provider);
 		return { configured: true };
@@ -318,12 +318,13 @@ export class ModelRegistry {
 		provider: string,
 		keyConfigs: readonly string[],
 		options?: { forceCommandRefresh?: boolean },
-	): string | undefined {
+	): { value: string; index: number } | undefined {
 		if (keyConfigs.length === 0) return undefined;
-		const start = this.#providerApiKeyIndex.get(provider) ?? 0;
+		const start = (this.#providerApiKeyIndex.get(provider) ?? 0) % keyConfigs.length;
 		for (let step = 0; step < keyConfigs.length; step++) {
-			const value = resolveConfigValue(keyConfigs[(start + step) % keyConfigs.length], options);
-			if (value) return value;
+			const index = (start + step) % keyConfigs.length;
+			const value = resolveConfigValue(keyConfigs[index], options);
+			if (value) return { value, index };
 		}
 		return undefined;
 	}
@@ -395,16 +396,18 @@ export class ModelRegistry {
 		}
 		const resolved = this.#resolveActiveApiKeyElement(provider, keyConfig);
 		if (resolved) {
-			this.authStorage.setConfigApiKey(provider, resolved);
+			this.#providerApiKeyIndex.set(provider, resolved.index);
+			this.authStorage.setConfigApiKey(provider, resolved.value);
+			this.authStorage.setConfigApiKeyPosition(provider, { index: resolved.index, total: keyConfig.length });
 		} else {
 			this.authStorage.removeConfigApiKey(provider);
+			this.authStorage.setConfigApiKeyPosition(
+				provider,
+				keyConfig.length > 0
+					? { index: (this.#providerApiKeyIndex.get(provider) ?? 0) % keyConfig.length, total: keyConfig.length }
+					: undefined,
+			);
 		}
-		this.authStorage.setConfigApiKeyPosition(
-			provider,
-			keyConfig.length > 0
-				? { index: (this.#providerApiKeyIndex.get(provider) ?? 0) % keyConfig.length, total: keyConfig.length }
-				: undefined,
-		);
 	}
 
 	/**
@@ -449,7 +452,7 @@ export class ModelRegistry {
 			const keyConfig = this.#customProviderApiKeys.get(provider);
 			if (!keyConfig) return undefined;
 			if (!Array.isArray(keyConfig)) return resolveConfigValue(keyConfig);
-			return this.#resolveActiveApiKeyElement(provider, keyConfig);
+			return this.#resolveActiveApiKeyElement(provider, keyConfig)?.value;
 		});
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
@@ -2422,12 +2425,13 @@ export class ModelRegistry {
 			this.authStorage.setConfigApiKeyPosition(provider, { index: prev, total: keyConfig.length });
 			return false;
 		}
-		this.authStorage.setConfigApiKey(provider, resolved);
-		this.authStorage.setConfigApiKeyPosition(provider, { index: next, total: keyConfig.length });
-		logger.debug("provider apiKey cycled", { provider, index: next, total: keyConfig.length });
+		this.#providerApiKeyIndex.set(provider, resolved.index);
+		this.authStorage.setConfigApiKey(provider, resolved.value);
+		this.authStorage.setConfigApiKeyPosition(provider, { index: resolved.index, total: keyConfig.length });
+		logger.debug("provider apiKey cycled", { provider, index: resolved.index, total: keyConfig.length });
 		const override = this.#providerOverrides.get(provider);
 		if (override) {
-			this.#providerOverrides.set(provider, { ...override, apiKey: keyConfig[next] });
+			this.#providerOverrides.set(provider, { ...override, apiKey: keyConfig[resolved.index] });
 		}
 		return true;
 	}
