@@ -11,6 +11,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import {
 	DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
 	formatBackgroundNotice,
@@ -59,7 +60,7 @@ import {
 	previewWindowRows,
 	replaceTabs,
 } from "./render-utils";
-import { extractLeadingCdTarget, tokenizeShellSegments } from "./shell-tokenize";
+import { extractLeadingCdTarget, extractLiteralAndChainSegments, tokenizeShellSegments } from "./shell-tokenize";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
@@ -596,7 +597,31 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const rawCommand = (args as Partial<BashToolInput>).command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
 		const patternRules = getBashApprovalPatternRules(this.session.settings.get("bash.patterns"));
-		const patternRule = findBashApprovalPatternRule(command, patternRules);
+		const shell = this.session.settings.get("bash.allowCompoundCommands")
+			? this.session.settings.getShellConfig().shell
+			: undefined;
+		const compoundSegments = shell && isPosixShell(shell) ? extractLiteralAndChainSegments(command) : null;
+		// Segment rules keep their ordered first-match semantics. Restrictions
+		// matching only the complete chain are aggregated separately: retain the
+		// first prompt, but keep scanning because any later deny takes precedence.
+		let patternRule: BashApprovalPatternRule | undefined;
+		if (compoundSegments) {
+			for (const rule of patternRules) {
+				if (
+					rule.approval !== "allow" &&
+					commandMatchesBashApprovalPattern(command, rule.match) &&
+					!compoundSegments.some(segment => commandSegmentMatchesBashApprovalPattern(segment.text, rule.match))
+				) {
+					if (rule.approval === "deny") {
+						patternRule = rule;
+						break;
+					}
+					patternRule ??= rule;
+				}
+			}
+		} else {
+			patternRule = findBashApprovalPatternRule(command, patternRules);
+		}
 		if (patternRule?.approval === "deny") {
 			return {
 				tier: "exec",
@@ -605,8 +630,42 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				reason: `Blocked by bash pattern: ${patternRule.match}`,
 			};
 		}
-		if (command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command))) {
+		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
+		if (!compoundSegments && criticalCommand) {
 			return { tier: "exec", override: true, reason: "Critical pattern detected" };
+		}
+		if (compoundSegments) {
+			let promptRule: BashApprovalPatternRule | undefined = patternRule;
+			let hasUnmatchedSegment = false;
+			for (const segment of compoundSegments) {
+				const segmentRule = findBashApprovalPatternRule(segment.text, patternRules);
+				if (segmentRule?.approval === "deny") {
+					return {
+						tier: "exec",
+						override: true,
+						policy: "deny",
+						reason: `Blocked by bash pattern: ${segmentRule.match}`,
+					};
+				}
+				if (segmentRule?.approval === "prompt") promptRule ??= segmentRule;
+				if (!segmentRule) hasUnmatchedSegment = true;
+			}
+			if (promptRule) {
+				return {
+					tier: "exec",
+					override: true,
+					policy: "prompt",
+					reason: `Prompt required by bash pattern: ${promptRule.match}`,
+				};
+			}
+			for (const segment of compoundSegments) {
+				const literalCommand = segment.argv.join(" ");
+				if (criticalCommand || CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand))) {
+					return { tier: "exec", override: true, reason: "Critical pattern detected" };
+				}
+			}
+			// Unmatched segments retain the standalone tool-policy and mode fallback.
+			return hasUnmatchedSegment ? "exec" : { tier: "write", policy: "allow" };
 		}
 		if (patternRule?.approval === "allow") return { tier: "write", policy: "allow" };
 		if (patternRule?.approval === "prompt") {
