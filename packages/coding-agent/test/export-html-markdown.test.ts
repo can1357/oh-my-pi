@@ -20,6 +20,16 @@ interface MinimalMessageEntry {
 	};
 }
 
+interface MinimalModelChangeEntry {
+	type: "model_change";
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+	model: string;
+}
+
+type MinimalSessionEntry = MinimalMessageEntry | MinimalModelChangeEntry;
+
 interface MinimalSession {
 	header: {
 		type: "session";
@@ -28,7 +38,7 @@ interface MinimalSession {
 		timestamp: string;
 		cwd: string;
 	};
-	entries: MinimalMessageEntry[];
+	entries: MinimalSessionEntry[];
 	leafId: string;
 }
 
@@ -82,7 +92,7 @@ function renderSession(session: MinimalSession) {
 	return document;
 }
 
-function createSession(entries: MinimalMessageEntry[], leafId: string, id: string): MinimalSession {
+function createSession(entries: MinimalSessionEntry[], leafId: string, id: string): MinimalSession {
 	return {
 		header: {
 			type: "session",
@@ -169,5 +179,34 @@ describe("HTML export Markdown", () => {
 		expect(document.querySelectorAll(".tree-node").length).toBe(1);
 		expect(document.querySelector(".tree-node.active")?.getAttribute("data-id")).toBe("message-0");
 		expect(document.querySelector("#messages")?.textContent).toContain("root");
+	});
+
+	test("omits a collapse toggle when filtering hides every descendant", () => {
+		const document = renderSession(
+			createSession(
+				[
+					{
+						type: "message",
+						id: "root",
+						parentId: null,
+						timestamp: "2026-01-01T00:00:00.000Z",
+						message: { role: "user", content: "root", timestamp: 0 },
+					},
+					{
+						type: "model_change",
+						id: "hidden-child",
+						parentId: "root",
+						timestamp: "2026-01-01T00:00:01.000Z",
+						model: "openai/gpt-5",
+					},
+				],
+				"root",
+				"filtered-collapse-test",
+			),
+		);
+
+		const collapse = document.querySelector('[data-id="root"] .tree-collapse');
+		expect(collapse?.classList.contains("empty")).toBe(true);
+		expect(collapse?.getAttribute("type")).toBe("button");
 	});
 });

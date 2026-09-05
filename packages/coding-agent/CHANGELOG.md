@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added accessible collapse controls to the HTML export’s session tree for folding branches with visible descendants.
+
 ### Changed
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
