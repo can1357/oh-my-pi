@@ -138,6 +138,34 @@ describe("AttachmentGuard", () => {
 		expect(guard.attachedTabIds()).toEqual([]);
 	});
 
+	it("re-arms targeted cleanup when a retry detach leaves the attachment alive", () => {
+		const timers = new FakeTimers();
+		const detached: Array<{ tabIds: number[]; source: "sweep" | "retry" }> = [];
+		const guard = new AttachmentGuard<number>({
+			graceMs: 5_000,
+			setTimer: (fn, ms) => timers.set(fn, ms),
+			clearTimer: handle => timers.clear(handle),
+			detachAll: (tabIds, source) => {
+				detached.push({ tabIds, source });
+				// Chrome still reports the attachment and persisting that restored
+				// ownership succeeds, so cleanup must remain armed.
+				guard.track(tabIds[0]);
+				guard.retry(tabIds[0]);
+			},
+		});
+		guard.retry(1);
+
+		timers.flush();
+		expect(detached).toEqual([{ tabIds: [1], source: "retry" }]);
+		expect(timers.pendingCount).toBe(1);
+
+		timers.flush();
+		expect(detached).toEqual([
+			{ tabIds: [1], source: "retry" },
+			{ tabIds: [1], source: "retry" },
+		]);
+	});
+
 	it("arms a sweep when a new attachment appears after the relay already disconnected", () => {
 		const { guard, timers, detached } = makeGuard();
 		guard.onDisconnected();

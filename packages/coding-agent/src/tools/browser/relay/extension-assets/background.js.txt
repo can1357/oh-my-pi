@@ -8,9 +8,10 @@ class AttachmentGuard {
   constructor(options) {
     this.options = options;
   }
-  track(tabId) {
+  track(tabId, preserveRetry = false) {
     this.#attached.add(tabId);
-    this.#cancelRetry(tabId);
+    if (!preserveRetry)
+      this.#cancelRetry(tabId);
     this.#scheduleSweep();
   }
   untrack(tabId) {
@@ -523,13 +524,16 @@ var attachmentGuard = new AttachmentGuard({
         guardDetachments.delete(tabId);
         const targets = await chrome.debugger.getTargets().catch(() => null);
         if ((attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch && shouldRetrackAfterDetachFailure(targets, tabId)) {
+          const isCurrent = () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch;
           try {
-            await trackAttachments([tabId], () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch);
+            await trackAttachments([tabId], isCurrent);
+            if (source === "retry" && isCurrent())
+              attachmentGuard.retry(tabId, isCurrent);
           } catch {
-            if ((attachmentStateEpochs.get(tabId) ?? 0) !== attachmentEpoch)
+            if (!isCurrent())
               return;
             if (source === "retry") {
-              attachmentGuard.retry(tabId, () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch);
+              attachmentGuard.retry(tabId, isCurrent);
             } else {
               attachmentGuard.onDisconnected();
               attachmentGuard.track(tabId);
@@ -542,13 +546,13 @@ var attachmentGuard = new AttachmentGuard({
     afterPendingOperationsSettle([...pendingDetaches], persistRecoveryLoaderIds);
   }
 });
-async function trackAttachments(tabIds, isFresh = () => true, attachmentState = snapshotAttachmentState(attachmentStateEpochs, tabIds)) {
+async function trackAttachments(tabIds, isFresh = () => true, attachmentState = snapshotAttachmentState(attachmentStateEpochs, tabIds), preserveRetry = false) {
   if (tabIds.length === 0)
     return;
   const freshTabIds = () => isFresh() ? filterFreshAttachmentState(attachmentStateEpochs, attachmentState, tabIds) : [];
   await rememberRecoverable(freshTabIds);
   for (const tabId of freshTabIds())
-    attachmentGuard.track(tabId);
+    attachmentGuard.track(tabId, preserveRetry);
 }
 async function loadSettings() {
   const stored = await chrome.storage.local.get({
@@ -866,7 +870,7 @@ async function reconcileOrphans() {
   ]);
   const targets = await chrome.debugger.getTargets();
   const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
-  await trackAttachments(attachedTabIds, () => true, attachmentState);
+  await trackAttachments(attachedTabIds, () => true, attachmentState, true);
   if (attachedTabIds.length > 0 && orphanSweepSeesRelayDisconnected({
     socketReadyState: relayInitializedReadyState(),
     openReadyState: WebSocket.OPEN

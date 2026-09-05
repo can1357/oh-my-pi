@@ -489,20 +489,16 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 						(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch &&
 						shouldRetrackAfterDetachFailure(targets, tabId)
 					) {
+						const isCurrent = () =>
+							(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch;
 						try {
-							await trackAttachments([tabId], () =>
-								(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
-							);
+							await trackAttachments([tabId], isCurrent);
+							if (source === "retry" && isCurrent())
+								attachmentGuard.retry(tabId, isCurrent);
 						} catch {
-							if ((attachmentStateEpochs.get(tabId) ?? 0) !== attachmentEpoch)
-								return;
+							if (!isCurrent()) return;
 							if (source === "retry") {
-								attachmentGuard.retry(
-									tabId,
-									() =>
-										(attachmentStateEpochs.get(tabId) ?? 0) ===
-										attachmentEpoch,
-								);
+								attachmentGuard.retry(tabId, isCurrent);
 							} else {
 								attachmentGuard.onDisconnected();
 								attachmentGuard.track(tabId);
