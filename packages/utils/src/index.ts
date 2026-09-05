@@ -25,7 +25,6 @@ export * from "./peek-file";
 export * as postmortem from "./postmortem";
 export * from "./process-name";
 export * as procmgr from "./procmgr";
-export { isExecutable } from "./procmgr";
 export * as prompt from "./prompt";
 export * as ptree from "./ptree";
 export { AbortError, ChildProcess, Exception, NonZeroExitError } from "./ptree";

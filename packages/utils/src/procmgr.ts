@@ -4,8 +4,10 @@ import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Subprocess } from "bun";
 import { getAgentDir, MAIN_CONFIG_FILENAMES } from "./dirs";
 import { $env, filterChildShellEnv } from "./env";
+import { isExecutable } from "./path";
 import { $which } from "./which";
 
+export { isExecutable };
 export interface ShellConfig {
 	shell: string;
 	args: string[];
@@ -19,22 +21,6 @@ export interface ShellConfigOptions {
 	configSource?: string;
 }
 let cachedShellConfig: ShellConfig | null = null;
-
-/**
- * Check if a file path exists, is a regular file, and has effective execute permission.
- */
-export function isExecutable(filePath: string): boolean {
-	try {
-		const stat = fs.statSync(filePath);
-		if (!stat.isFile()) return false;
-		if (process.platform !== "win32") {
-			fs.accessSync(filePath, fs.constants.X_OK);
-		}
-		return true;
-	} catch {
-		return false;
-	}
-}
 
 /**
  * Build the spawn environment (cached).
