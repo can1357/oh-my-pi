@@ -18,16 +18,16 @@ import type {
 import {
 	captureRecoveryLoaderNavigation,
 	consumeRelayInitiatedDetach,
-	noteRelayDetachOutcome,
 	createRetryableLoader,
 	detachWithRecoveryLoaderObservation,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
 	isAttachmentStateCurrent,
 	noteAttachmentStateChange,
+	noteRelayDetachOutcome,
 	requireRecoveryStateLoaded,
-	retryFailedStateUpdate,
 	restoreRecoverableState,
+	retryFailedStateUpdate,
 	serializeRecoverableStateUpdate,
 	shouldRetrackAfterDetachFailure,
 	snapshotAttachmentState,
@@ -43,11 +43,11 @@ import {
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
 } from "./orphan-sweep";
+import { PendingAttaches, type PendingAttachToken } from "./pending-attaches";
 import {
 	afterPendingOperationsSettle,
 	snapshotAfterPendingOperationsSettle,
 } from "./pending-ops";
-import { PendingAttaches, type PendingAttachToken } from "./pending-attaches";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -90,6 +90,7 @@ const relayDetachedTabIds = new Set<number>();
 
 const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 const LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
+const RELAY_DETACHED_TAB_IDS_KEY = "ompRelayDetachedTabIds";
 const RECOVERY_LOADER_IDS_KEY = "ompRecoveryLoaderIds";
 const FRESH_ROOT_REQUIRED_TAB_IDS_KEY = "ompFreshRootRequiredTabIds";
 const recoverableTabIds = new Set<number>();
@@ -112,6 +113,7 @@ const loadRecoverableState = createRetryableLoader(() => {
 		.get({
 			[RECOVERABLE_TAB_IDS_KEY]: [],
 			[LIVE_OWNED_TAB_IDS_KEY]: [],
+			[RELAY_DETACHED_TAB_IDS_KEY]: [],
 			[RECOVERY_LOADER_IDS_KEY]: {},
 			[FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [],
 			[ORPHAN_SWEEP_DEADLINE_KEY]: null,
@@ -128,6 +130,11 @@ const loadRecoverableState = createRetryableLoader(() => {
 			restoreRecoverableState(
 				liveOwnedTabIds,
 				stored[LIVE_OWNED_TAB_IDS_KEY],
+				recoverableStartupMutations,
+			);
+			restoreRecoverableState(
+				relayDetachedTabIds,
+				stored[RELAY_DETACHED_TAB_IDS_KEY],
 				recoverableStartupMutations,
 			);
 			restoreRecoverableState(
@@ -226,6 +233,7 @@ function updateRecoverable(
 			chrome.storage.session.set({
 				[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
 				[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+				[RELAY_DETACHED_TAB_IDS_KEY]: [...relayDetachedTabIds],
 				[FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds],
 			}),
 		)
@@ -246,6 +254,7 @@ function persistRecoveryState(): Promise<void> {
 	return chrome.storage.session.set({
 		[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
 		[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+		[RELAY_DETACHED_TAB_IDS_KEY]: [...relayDetachedTabIds],
 		[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
 		[FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds],
 	});
@@ -266,7 +275,10 @@ function rememberRecoverable(freshTabIds: () => number[]): Promise<void> {
 	});
 }
 
-function forgetRecoverable(tabId: number): Promise<void> {
+function forgetRecoverable(
+	tabId: number,
+	preserveRelayDetach = false,
+): Promise<void> {
 	return updateRecoverable(
 		() => [tabId],
 		() => {
@@ -274,6 +286,7 @@ function forgetRecoverable(tabId: number): Promise<void> {
 			liveOwnedTabIds.delete(tabId);
 			recoveryLoaderIds.delete(tabId);
 			freshRootRequiredTabIds.delete(tabId);
+			if (!preserveRelayDetach) relayDetachedTabIds.delete(tabId);
 		},
 	);
 }
@@ -301,6 +314,15 @@ function forgetLiveOwnership(tabId: number): Promise<void> {
 		() => [tabId],
 		() => {
 			liveOwnedTabIds.delete(tabId);
+		},
+	);
+}
+
+function forgetRelayDetach(tabId: number): Promise<void> {
+	return updateRecoverable(
+		() => [tabId],
+		() => {
+			relayDetachedTabIds.delete(tabId);
 		},
 	);
 }
@@ -475,7 +497,9 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 						const frameTree = (await chrome.debugger.sendCommand(
 							{ tabId },
 							"Page.getFrameTree",
-						)) as { frameTree?: { frame?: { loaderId?: unknown } } } | undefined;
+						)) as
+							| { frameTree?: { frame?: { loaderId?: unknown } } }
+							| undefined;
 						const loaderId = frameTree?.frameTree?.frame?.loaderId;
 						return typeof loaderId === "string" ? loaderId : undefined;
 					},
@@ -539,7 +563,8 @@ async function trackAttachments(
 				)
 			: [];
 	await rememberRecoverable(freshTabIds);
-	for (const tabId of freshTabIds()) attachmentGuard.track(tabId, preserveRetry);
+	for (const tabId of freshTabIds())
+		attachmentGuard.track(tabId, preserveRetry);
 }
 
 interface RelaySettings {
@@ -900,16 +925,16 @@ async function attachTabOperation(
 					shouldRetrackAfterDetachFailure(targets, tabId)
 				) {
 					try {
-						await trackAttachments([tabId], () =>
-							(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
+						await trackAttachments(
+							[tabId],
+							() => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
 						);
 					} catch {
 						if ((attachmentStateEpochs.get(tabId) ?? 0) !== attachmentEpoch)
 							return;
 						attachmentGuard.retry(
 							tabId,
-							() =>
-								(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
+							() => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
 						);
 					}
 				}
@@ -931,8 +956,7 @@ async function attachTabOperation(
 				) {
 					attachmentGuard.retry(
 						tabId,
-						() =>
-							(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
+						() => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
 					);
 				}
 			},
@@ -958,7 +982,7 @@ async function attachTabOperation(
 		}
 		throw new Error("debugger attachment detached before attach completed");
 	}
-	relayDetachedTabIds.delete(tabId);
+	await forgetRelayDetach(tabId);
 }
 
 async function runRpc(
@@ -974,7 +998,7 @@ async function runRpc(
 			try {
 				await trackPendingDetach(chrome.debugger.detach({ tabId: msg.tabId }));
 				attachmentGuard.untrack(msg.tabId);
-				await forgetRecoverable(msg.tabId);
+				await forgetRecoverable(msg.tabId, true);
 				return {};
 			} catch (error) {
 				relayInitiatedDetachTabs.delete(msg.tabId);
@@ -1268,7 +1292,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 			attachmentStateEpochs.get(source.tabId) ?? 0,
 		);
 	}
-	void forgetRecoverable(source.tabId);
+	void forgetRecoverable(source.tabId, relayInitiated);
 	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 	// A detach can land after buildHello() snapshots getTargets() while that
 	// refresh is still persisting its recovery markers. Invalidate the stale

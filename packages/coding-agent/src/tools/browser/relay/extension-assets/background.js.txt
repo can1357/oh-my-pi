@@ -229,23 +229,6 @@ function serializeOrphanSweepDeadlineUpdate(previousUpdate, alarmUpdate, isCurre
   });
 }
 
-// extension/pending-ops.ts
-async function afterPendingOperationsSettle(operations, callback) {
-  await Promise.allSettled(operations);
-  return callback();
-}
-async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOperations, takeSnapshot) {
-  for (;; ) {
-    const generation = getGeneration();
-    await Promise.allSettled(getPendingOperations());
-    if (getGeneration() !== generation)
-      continue;
-    const snapshot = await takeSnapshot();
-    if (getGeneration() === generation)
-      return snapshot;
-  }
-}
-
 // extension/pending-attaches.ts
 class PendingAttaches {
   #byTab = new Map;
@@ -275,6 +258,23 @@ class PendingAttaches {
   }
 }
 
+// extension/pending-ops.ts
+async function afterPendingOperationsSettle(operations, callback) {
+  await Promise.allSettled(operations);
+  return callback();
+}
+async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOperations, takeSnapshot) {
+  for (;; ) {
+    const generation = getGeneration();
+    await Promise.allSettled(getPendingOperations());
+    if (getGeneration() !== generation)
+      continue;
+    const snapshot = await takeSnapshot();
+    if (getGeneration() === generation)
+      return snapshot;
+  }
+}
+
 // extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
@@ -298,6 +298,7 @@ var relayInitiatedDetachTabs = new Set;
 var relayDetachedTabIds = new Set;
 var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 var LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
+var RELAY_DETACHED_TAB_IDS_KEY = "ompRelayDetachedTabIds";
 var RECOVERY_LOADER_IDS_KEY = "ompRecoveryLoaderIds";
 var FRESH_ROOT_REQUIRED_TAB_IDS_KEY = "ompFreshRootRequiredTabIds";
 var recoverableTabIds = new Set;
@@ -315,6 +316,7 @@ var loadRecoverableState = createRetryableLoader(() => {
   return chrome.storage.session.get({
     [RECOVERABLE_TAB_IDS_KEY]: [],
     [LIVE_OWNED_TAB_IDS_KEY]: [],
+    [RELAY_DETACHED_TAB_IDS_KEY]: [],
     [RECOVERY_LOADER_IDS_KEY]: {},
     [FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [],
     [ORPHAN_SWEEP_DEADLINE_KEY]: null
@@ -322,6 +324,7 @@ var loadRecoverableState = createRetryableLoader(() => {
     const ids = stored[RECOVERABLE_TAB_IDS_KEY];
     restoreRecoverableState(recoverableTabIds, ids, recoverableStartupMutations);
     restoreRecoverableState(liveOwnedTabIds, stored[LIVE_OWNED_TAB_IDS_KEY], recoverableStartupMutations);
+    restoreRecoverableState(relayDetachedTabIds, stored[RELAY_DETACHED_TAB_IDS_KEY], recoverableStartupMutations);
     restoreRecoverableState(freshRootRequiredTabIds, stored[FRESH_ROOT_REQUIRED_TAB_IDS_KEY], recoverableStartupMutations);
     recoverableStartupMutations.clear();
     const storedLoaderIds = stored[RECOVERY_LOADER_IDS_KEY];
@@ -379,6 +382,7 @@ function updateRecoverable(tabIds, update) {
   const immediateWrite = loadCurrent().then(() => chrome.storage.session.set({
     [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
     [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+    [RELAY_DETACHED_TAB_IDS_KEY]: [...relayDetachedTabIds],
     [FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds]
   })).catch(() => {});
   recoverableUpdates = serializeRecoverableStateUpdate(recoverableUpdates, immediateWrite, () => generation === recoverableUpdateGeneration, async () => {
@@ -391,6 +395,7 @@ function persistRecoveryState() {
   return chrome.storage.session.set({
     [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
     [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+    [RELAY_DETACHED_TAB_IDS_KEY]: [...relayDetachedTabIds],
     [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
     [FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds]
   });
@@ -408,12 +413,14 @@ function rememberRecoverable(freshTabIds) {
     }
   });
 }
-function forgetRecoverable(tabId) {
+function forgetRecoverable(tabId, preserveRelayDetach = false) {
   return updateRecoverable(() => [tabId], () => {
     recoverableTabIds.delete(tabId);
     liveOwnedTabIds.delete(tabId);
     recoveryLoaderIds.delete(tabId);
     freshRootRequiredTabIds.delete(tabId);
+    if (!preserveRelayDetach)
+      relayDetachedTabIds.delete(tabId);
   });
 }
 function requireFreshRoot(tabId) {
@@ -429,6 +436,11 @@ function clearFreshRootRequirement(tabId) {
 function forgetLiveOwnership(tabId) {
   return updateRecoverable(() => [tabId], () => {
     liveOwnedTabIds.delete(tabId);
+  });
+}
+function forgetRelayDetach(tabId) {
+  return updateRecoverable(() => [tabId], () => {
+    relayDetachedTabIds.delete(tabId);
   });
 }
 async function setOrphanSweepDeadline(deadlineMs) {
@@ -791,7 +803,7 @@ async function attachTabOperation(tabId, socket, operation) {
     }
     throw new Error("debugger attachment detached before attach completed");
   }
-  relayDetachedTabIds.delete(tabId);
+  await forgetRelayDetach(tabId);
 }
 async function runRpc(msg, socket) {
   switch (msg.op) {
@@ -803,7 +815,7 @@ async function runRpc(msg, socket) {
       try {
         await trackPendingDetach(chrome.debugger.detach({ tabId: msg.tabId }));
         attachmentGuard.untrack(msg.tabId);
-        await forgetRecoverable(msg.tabId);
+        await forgetRecoverable(msg.tabId, true);
         return {};
       } catch (error) {
         relayInitiatedDetachTabs.delete(msg.tabId);
@@ -983,7 +995,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (!relayInitiated && pendingAttachOperations.has(source.tabId)) {
     pendingAttachOperations.cancel(source.tabId, attachmentStateEpochs.get(source.tabId) ?? 0);
   }
-  forgetRecoverable(source.tabId);
+  forgetRecoverable(source.tabId, relayInitiated);
   post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
   refreshHello();
 });

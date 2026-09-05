@@ -2,16 +2,16 @@ import { describe, expect, it } from "bun:test";
 import {
 	captureRecoveryLoaderNavigation,
 	consumeRelayInitiatedDetach,
-	noteRelayDetachOutcome,
 	createRetryableLoader,
 	detachWithRecoveryLoaderObservation,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
 	isAttachmentStateCurrent,
 	noteAttachmentStateChange,
+	noteRelayDetachOutcome,
 	requireRecoveryStateLoaded,
-	retryFailedStateUpdate,
 	restoreRecoverableState,
+	retryFailedStateUpdate,
 	serializeRecoverableStateUpdate,
 	shouldRetrackAfterDetachFailure,
 	snapshotAttachmentState,
@@ -23,9 +23,15 @@ describe("attachment-state", () => {
 		const generations = new Map([[1, 1]]);
 
 		expect(
-			captureRecoveryLoaderNavigation(loaderIds, generations, 1, "Page.frameNavigated", {
-				frame: { id: "main", loaderId: "loader-at-detach" },
-			}),
+			captureRecoveryLoaderNavigation(
+				loaderIds,
+				generations,
+				1,
+				"Page.frameNavigated",
+				{
+					frame: { id: "main", loaderId: "loader-at-detach" },
+				},
+			),
 		).toBe(true);
 		expect(loaderIds.get(1)).toBe("loader-at-detach");
 		expect(generations.get(1)).toBe(2);
@@ -36,11 +42,25 @@ describe("attachment-state", () => {
 		const generations = new Map([[1, 1]]);
 
 		expect(
-			captureRecoveryLoaderNavigation(loaderIds, generations, 1, "Page.frameNavigated", {
-				frame: { id: "child", parentId: "main", loaderId: "child-loader" },
-			}),
+			captureRecoveryLoaderNavigation(
+				loaderIds,
+				generations,
+				1,
+				"Page.frameNavigated",
+				{
+					frame: { id: "child", parentId: "main", loaderId: "child-loader" },
+				},
+			),
 		).toBe(false);
-		expect(captureRecoveryLoaderNavigation(loaderIds, generations, 1, "Runtime.ready", {})).toBe(false);
+		expect(
+			captureRecoveryLoaderNavigation(
+				loaderIds,
+				generations,
+				1,
+				"Runtime.ready",
+				{},
+			),
+		).toBe(false);
 		expect(loaderIds.get(1)).toBe("loader-before");
 		expect(generations.get(1)).toBe(1);
 	});
@@ -74,12 +94,23 @@ describe("attachment-state", () => {
 		);
 
 		while (!calls.includes("detach")) await Promise.resolve();
-		expect(calls).toEqual(["Page.enable", "fresh-root-required", "Page.getFrameTree", "detach"]);
+		expect(calls).toEqual([
+			"Page.enable",
+			"fresh-root-required",
+			"Page.getFrameTree",
+			"detach",
+		]);
 		expect(loaderIds.get(1)).toBe("loader-snapshot");
 
-		captureRecoveryLoaderNavigation(loaderIds, generations, 1, "Page.frameNavigated", {
-			frame: { id: "main", loaderId: "loader-during-detach" },
-		});
+		captureRecoveryLoaderNavigation(
+			loaderIds,
+			generations,
+			1,
+			"Page.frameNavigated",
+			{
+				frame: { id: "main", loaderId: "loader-during-detach" },
+			},
+		);
 		detach.resolve();
 		await pending;
 
@@ -156,7 +187,9 @@ describe("attachment-state", () => {
 
 		noteAttachmentStateChange(generations, 2);
 
-		expect(filterFreshAttachmentState(generations, targetedCapture, [1])).toEqual([1]);
+		expect(
+			filterFreshAttachmentState(generations, targetedCapture, [1]),
+		).toEqual([1]);
 	});
 
 	it("drops every tab when the caller freshness gate is already invalid", () => {
@@ -217,6 +250,22 @@ describe("attachment-state", () => {
 		// A later user cancellation must revoke the stale relay authorization.
 		noteRelayDetachOutcome(completedTabs, 1, false);
 		expect(completedTabs.has(1)).toBe(false);
+	});
+
+	it("restores a completed relay detach after a worker restart", () => {
+		const firstWorker = new Set<number>();
+		noteRelayDetachOutcome(firstWorker, 1, true);
+		const storedIds = [...firstWorker];
+
+		const replacementWorker = new Set<number>();
+		restoreRecoverableState(replacementWorker, storedIds, new Set());
+		expect(replacementWorker.has(1)).toBe(true);
+
+		// A user detach observed by the replacement worker must remain
+		// authoritative over the older persisted marker.
+		noteRelayDetachOutcome(replacementWorker, 1, false);
+		restoreRecoverableState(replacementWorker, storedIds, new Set([1]));
+		expect(replacementWorker.has(1)).toBe(false);
 	});
 
 	it("preserves detach retry state when target discovery fails", () => {
