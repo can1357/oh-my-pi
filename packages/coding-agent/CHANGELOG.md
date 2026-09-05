@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
+
+## [18.1.11] - 2026-09-05
+
 ### Added
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
