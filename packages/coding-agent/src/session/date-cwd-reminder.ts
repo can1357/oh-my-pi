@@ -122,9 +122,6 @@ export class DateCwdReminderInjector {
 // Per-turn Now stamp
 // ---------------------------------------------------------------------------
 
-/** Matches a rendered Now stamp at the tail of a message's final text. */
-const nowStampTail = /Now: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \([^()]*\)\n<\/system-reminder>$/;
-
 /** Renders the per-turn stamp payload, e.g. `2026-08-30T02:51:16Z (20:51 CST, UTC-06:00)`. */
 export function renderNowStamp(now: Date = new Date()): string {
 	const { clock, offset } = formatLocalClockAndOffset(now);
@@ -139,6 +136,11 @@ export function renderNowStamp(now: Date = new Date()): string {
  * Appends each user message's own-turn `Now:` stamp to `messages`,
  * returning a new array. The input is never mutated.
  *
+ * User-initiated developer continuation turns (the `.`, `c` continue
+ * shortcuts) are stamped the same way — their timestamp is the fresh
+ * prompt time of the turn — while agent-initiated developer turns stay
+ * excluded.
+ *
  * The stamp is a pure function of the message's persisted identity — its
  * own `timestamp` — so re-stamps are byte-identical across requests and
  * across session resumes: a resumed process rehydrates history as fresh
@@ -147,8 +149,11 @@ export function renderNowStamp(now: Date = new Date()): string {
  * and locale (the parenthesized local part of the stamp renders host-locally).
  * Only the genuinely-new last turn adds bytes, at the tail, so the
  * prompt-cache prefix stays stable.
- * Idempotent per user message: a message already carrying a stamp keeps
- * it — a fresh stamp would duplicate and invalidate the prompt cache from message 0.
+ * Idempotent per message: a trailing block that byte-matches the stamp
+ * derived from the message's own timestamp is that stamp and is kept as-is —
+ * a fresh stamp would duplicate and invalidate the prompt cache from message 0.
+ * A pasted or echoed `Now:` block carrying any other value does not suppress
+ * the stamp; the derived one is injected alongside it deterministically.
  *
  * The stamp value is computed, never held in a process-global structure:
  * two distinct turns in the same second share the correct instant rather
@@ -161,7 +166,7 @@ export function renderNowStamp(now: Date = new Date()): string {
 const nowStampCache = new WeakMap<Message, Message>();
 
 /**
- * The deterministic stamp for a user message: its own-turn instant
+ * The deterministic stamp for a stamped message: its own-turn instant
  * rendered as a `Now:` system reminder. Messages without a finite
  * timestamp are left unstamped rather than fabricated.
  */
@@ -184,16 +189,23 @@ export function injectNowStamp(messages: Message[]): Message[] {
 	let out: Message[] | undefined;
 	for (let i = 0; i < messages.length; i++) {
 		const message = messages[i]!;
-		if (message.role !== "user") continue;
-		const tail = finalMessageText(message.content);
-		if (tail !== undefined && nowStampTail.test(tail)) continue;
-		const stamp = nowStampFor(message);
-		if (stamp === undefined) continue;
+		// User turns, plus user-initiated developer continuation turns (the
+		// `.`, `c` shortcuts), whose timestamp is the fresh prompt time of the
+		// turn; agent-initiated developer turns stay excluded.
+		if (message.role !== "user" && !(message.role === "developer" && message.userInitiated === true)) continue;
 		const cached = nowStampCache.get(message);
 		if (cached !== undefined) {
 			(out ??= messages.slice())[i] = cached;
 			continue;
 		}
+		const stamp = nowStampFor(message);
+		if (stamp === undefined) continue;
+		// Idempotent per message, value-sensitive: only a trailing block that
+		// byte-matches the stamp derived from this message's own timestamp is
+		// an already-applied stamp. A pasted or echoed Now block carrying any
+		// other value must not suppress it.
+		const tail = finalMessageText(message.content);
+		if (tail !== undefined && tail.endsWith(stamp)) continue;
 		const content =
 			typeof message.content === "string"
 				? `${message.content}\n\n${stamp}`

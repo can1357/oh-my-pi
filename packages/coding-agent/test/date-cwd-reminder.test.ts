@@ -168,6 +168,34 @@ describe("date-cwd-reminder", () => {
 			expect(messages[2]!.content).toBe("last");
 		});
 
+		it("stamps user-initiated developer continuation turns from their own turn timestamp", () => {
+			// The `.`, `c` continue shortcuts submit a synthetic developer
+			// message (userInitiated: true) with a fresh turn timestamp; the
+			// model must see a stamp for this turn, not only the previous
+			// user turn's potentially stale one.
+			const t = Date.parse("2026-08-30T04:12:00Z");
+			const continuation: Message = {
+				role: "developer",
+				content: "Continue the task.",
+				synthetic: true,
+				userInitiated: true,
+				timestamp: t,
+			};
+
+			const out = injectNowStamp([continuation])[0]!;
+
+			expect(out).not.toBe(continuation);
+			expect(textOf(out)).toBe(`Continue the task.\n\n${renderNowStamp(new Date(t))}`);
+		});
+
+		it("leaves agent-initiated developer turns unstamped", () => {
+			const t = Date.parse("2026-08-30T04:12:00Z");
+			const autoContinue: Message = { role: "developer", content: "Continue.", synthetic: true, timestamp: t };
+			const turns: Message[] = [createAssistantMessage("hi"), autoContinue];
+
+			expect(injectNowStamp(turns)).toBe(turns);
+		});
+
 		it("appends a trailing text part when a user message has array content", () => {
 			const t = Date.parse("2026-08-30T02:51:16Z");
 			const messages: Message[] = [
@@ -191,18 +219,33 @@ describe("date-cwd-reminder", () => {
 			expect(content[2]!).toEqual({ type: "text", text: renderNowStamp(new Date(t)) });
 		});
 
-		it("leaves a user message already carrying a Now stamp unchanged", () => {
-			const stamped: Message = {
-				role: "user",
-				content: "hi\n\n<system-reminder>\nNow: 2026-01-02T03:04:05Z (04:04 XYZ, UTC+01:00)\n</system-reminder>",
-				timestamp: 1,
-			};
+		it("keeps a prompt byte-identical when its trailing Now block equals its derived stamp", () => {
+			// A prompt whose tail is exactly the stamp derived from its own
+			// timestamp (e.g. a transcript echo) is already stamped: passthrough.
+			const t = Date.parse("2026-08-30T02:51:16Z");
+			const derived = renderNowStamp(new Date(t));
+			const stamped: Message = { role: "user", content: `hi\n\n${derived}`, timestamp: t };
 			const messages = [stamped];
 
 			const out = injectNowStamp(messages);
 
 			expect(out).toBe(messages);
+			expect(out[0]!).toBe(stamped);
 			expect(textOf(out[0]!).match(/Now: /g)).toHaveLength(1);
+		});
+
+		it("re-stamps a prompt ending in a pasted Now block with a different value", () => {
+			// A pasted or previously generated Now block carrying another
+			// timestamp must not suppress the real stamp: the derived one is
+			// injected alongside it, deterministically.
+			const t = Date.parse("2026-08-30T02:51:16Z");
+			const derived = renderNowStamp(new Date(t));
+			const pasted = `<system-reminder>\nNow: 2025-01-02T03:04:05Z (04:04 XYZ, UTC+01:00)\n</system-reminder>`;
+			const message: Message = { role: "user", content: `quote this verbatim\n\n${pasted}`, timestamp: t };
+
+			const out = injectNowStamp([message])[0]!;
+
+			expect(textOf(out)).toBe(`quote this verbatim\n\n${pasted}\n\n${derived}`);
 		});
 
 		it("re-stamps the same pristine message with the same stamped object across requests", () => {
