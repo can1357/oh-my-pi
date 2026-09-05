@@ -720,6 +720,25 @@ describe("model thinking derivation", () => {
 		expect(() => mapEffortToAnthropicAdaptiveEffort(sonnet46, Effort.Max)).toThrow(/not supported/);
 	});
 
+	it("clamps a custom adaptive ladder's minimal tier to low (issue #10994)", () => {
+		// Built-in Claude ladders exclude minimal, but a custom anthropic-messages
+		// provider can declare it. The Anthropic adaptive wire has no minimal tier,
+		// so the mapper must clamp rather than forward it verbatim (400).
+		const custom = createModel({
+			id: "claude-opus-5",
+			api: "anthropic-messages",
+			provider: "ccs",
+			baseUrl: "https://ccs.example/anthropic",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+		});
+		expect(getSupportedEfforts(custom)).toContain(Effort.Minimal);
+		expect(mapEffortToAnthropicAdaptiveEffort(custom, Effort.Minimal)).toBe("low");
+		expect(mapEffortToAnthropicAdaptiveEffort(custom, Effort.High)).toBe("high");
+	});
+
 	it("bakes adaptive display support for Opus 4.7+, Sonnet 5+, and Fable/Mythos 5", () => {
 		const opus46 = createModel({ id: "claude-opus-4.6", api: "anthropic-messages", provider: "anthropic" });
 		const opus47 = createModel({ id: "claude-opus-4-7", api: "anthropic-messages", provider: "anthropic" });
