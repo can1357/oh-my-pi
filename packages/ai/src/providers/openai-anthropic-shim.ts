@@ -153,6 +153,8 @@ export function streamOpenAIAnthropicShim(
 					onResponse: options?.onResponse,
 					onSseEvent: options?.onSseEvent,
 					fetch: options?.fetch,
+					streamFirstEventTimeoutMs: options?.streamFirstEventTimeoutMs,
+					streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 					reasoning: reasoningEffort,
 					toolChoice: options?.toolChoice,
 					serviceTier: options?.serviceTier,

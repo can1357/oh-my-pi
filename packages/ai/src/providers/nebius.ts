@@ -7,10 +7,14 @@
  *
  * Inference honors `model.baseUrl`, so a `NEBIUS_BASE_URL` region override
  * flows through discovery onto the model and reaches the same region here.
+ * The override is also applied here so bundled and cached rows (which keep
+ * the global endpoint) follow it even when discovery never restamped them.
  *
  * @see https://docs.tokenfactory.nebius.com/
  */
 
+import { normalizeNebiusBaseUrl } from "@oh-my-pi/pi-catalog/provider-models";
+import { $env } from "@oh-my-pi/pi-utils";
 import type { Api, Context, Model } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import { type OpenAIAnthropicShimOptions, streamOpenAIAnthropicShim } from "./openai-anthropic-shim";
@@ -27,7 +31,13 @@ export function streamNebius(
 	context: Context,
 	options?: NebiusOptions,
 ): AssistantMessageEventStream {
-	return streamOpenAIAnthropicShim(model, context, { ...options, format: "openai" }, { defaultFormat: "openai" });
+	const envBaseUrl = $env.NEBIUS_BASE_URL?.trim() ? normalizeNebiusBaseUrl($env.NEBIUS_BASE_URL) : undefined;
+	return streamOpenAIAnthropicShim(
+		model,
+		context,
+		{ ...options, format: "openai" },
+		{ ...(envBaseUrl ? { openaiBaseUrl: envBaseUrl } : {}), defaultFormat: "openai" },
+	);
 }
 
 /**

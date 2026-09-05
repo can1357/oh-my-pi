@@ -7200,7 +7200,7 @@ export function modelsDevCatalogFallback(
 
 const NEBIUS_DEFAULT_BASE_URL = "https://api.tokenfactory.nebius.com/v1";
 
-function normalizeNebiusBaseUrl(baseUrl: string | undefined): string {
+export function normalizeNebiusBaseUrl(baseUrl: string | undefined): string {
 	const value = baseUrl?.trim() || NEBIUS_DEFAULT_BASE_URL;
 	const normalized = value.replace(/\/+$/, "");
 	return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;

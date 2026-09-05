@@ -4,6 +4,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { withEnv } from "./helpers";
 
 // Nebius Token Factory is a pure OpenAI-compatible endpoint. These tests pin
 // the routing contract: nebius models must reach the OpenAI chat-completions
@@ -88,4 +89,27 @@ describe("Nebius Token Factory routing", () => {
 		const request = await captureRequest(k3);
 		expect(request.body.reasoning_effort).toBe("low");
 	});
+
+	it("applies NEBIUS_BASE_URL to bundled rows that keep the global endpoint", async () => {
+		await withEnv({ NEBIUS_BASE_URL: NEBIUS_REGION_BASE_URL }, async () => {
+			const request = await captureRequest(nebiusModel());
+			expect(request.url).toBe(`${NEBIUS_REGION_BASE_URL}/chat/completions`);
+		});
+	});
+	it("honors per-request first-event timeout overrides", async () => {
+		const hangingFetch: FetchImpl = () =>
+			Promise.resolve(
+				new Response(new ReadableStream<Uint8Array>(), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+			);
+		const stream = streamSimple(nebiusModel(), context, {
+			apiKey: "nebius-test-key",
+			fetch: hangingFetch,
+			streamFirstEventTimeoutMs: 100,
+		});
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+	}, 15000);
 });
