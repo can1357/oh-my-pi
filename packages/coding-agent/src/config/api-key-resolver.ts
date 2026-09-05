@@ -95,6 +95,11 @@ export function createApiKeyResolver(
 			registry.cycleProviderApiKey?.(provider);
 			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
 		}
-		return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });
+	// A failed list key is dead for this operation while a force-refreshed
+	// single key may have been re-minted, so advance past the failure before
+	// re-resolving (no-op without a list). The central loop still caps the
+	// operation: one refresh-same plus one lastChance rotation.
+	registry.cycleProviderApiKey?.(provider);
+	return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });
 	};
 }
