@@ -169,6 +169,72 @@ describe("ModelRegistry runtime source cleanup", () => {
 		expect(registry.find(provider, discoveredModel.id)).toBeUndefined();
 	});
 
+	test("extension rebinding discards discoveries whose model overrides changed", async () => {
+		using tempDir = TempDir.createSync("@omp-model-registry-override-rebind-");
+		const modelsPath = tempDir.join("models.json");
+		const cacheDbPath = tempDir.join("models.db");
+		const provider = "configured-ollama";
+		const baseUrl = "http://127.0.0.1:11436";
+		const modelId = "override-config-model";
+		const discoveredModel = buildModel({
+			id: modelId,
+			name: "Override Config Model",
+			api: "openai-completions",
+			provider,
+			baseUrl,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+		const writeConfig = (modelOverrides: Record<string, unknown> | undefined) =>
+			Bun.write(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						[provider]: {
+							baseUrl,
+							api: "openai-completions",
+							auth: "none",
+							discovery: { type: "ollama" },
+							...(modelOverrides ? { modelOverrides } : {}),
+						},
+					},
+				}),
+			);
+		await writeConfig({ [modelId]: { headers: { "X-Override": "stale" } } });
+		const oldMtime = new Date("2020-01-01T00:00:00Z");
+		await fs.utimes(modelsPath, oldMtime, oldMtime);
+		writeModelCache(
+			resolveOllamaModelCacheProviderId(provider, baseUrl),
+			Date.now(),
+			[discoveredModel],
+			true,
+			"",
+			cacheDbPath,
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		await registry.refresh("offline");
+		expect(registry.find(provider, modelId)?.headers?.["X-Override"]).toBe("stale");
+		registry.registerProvider(
+			"runtime-provider",
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [baseModel],
+			},
+			sourceId,
+		);
+
+		// Remove the per-model override, keeping the discovery config identical.
+		await writeConfig(undefined);
+		registry.clearSourceRegistrations(sourceId);
+
+		expect(registry.find(provider, modelId)?.headers?.["X-Override"]).toBeUndefined();
+	});
+
 	test("unregisterProvider removes only the named provider and its login entry", () => {
 		const registry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 		registry.registerProvider(

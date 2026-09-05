@@ -698,6 +698,7 @@ export class ModelRegistry {
 					runtimeProviderIds: Set<string>;
 					configuredProviders: Map<string, DiscoveryProviderConfig>;
 					providerOverrides: Map<string, ProviderOverride>;
+					modelOverrides: Map<string, Map<string, ModelOverride>>;
 					keylessProviders: Set<string>;
 			  }
 			| undefined;
@@ -709,6 +710,7 @@ export class ModelRegistry {
 				runtimeProviderIds: new Set(this.#runtimeModelManagers.keys()),
 				configuredProviders: new Map(this.#discoverableProviders.map(config => [config.provider, config])),
 				providerOverrides: new Map(this.#providerOverrides),
+				modelOverrides: new Map(this.#modelOverrides),
 				keylessProviders: new Set(this.#keylessProviders),
 			};
 		}
@@ -748,7 +750,12 @@ export class ModelRegistry {
 					Bun.deepEquals(
 						preservedRuntimeState.providerOverrides.get(providerId),
 						this.#providerOverrides.get(providerId),
-					) && preservedRuntimeState.keylessProviders.has(providerId) === this.#keylessProviders.has(providerId);
+					) &&
+					Bun.deepEquals(
+						preservedRuntimeState.modelOverrides.get(providerId),
+						this.#modelOverrides.get(providerId),
+					) &&
+					preservedRuntimeState.keylessProviders.has(providerId) === this.#keylessProviders.has(providerId);
 				const discoveryIdentityUnchanged =
 					(previousConfig !== undefined &&
 						currentConfig !== undefined &&
