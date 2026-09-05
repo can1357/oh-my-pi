@@ -11,11 +11,20 @@ import {
 	getSessionsDir,
 	getStatsDbPath,
 	readLines,
+	tryAcquireFileLock,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
+import {
+	isProcessAlive,
+	journalIdentity,
+	ownerClaimIsLive,
+	readOwnerClaims,
+	SessionManager,
+	sameJournalIdentity,
+} from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
@@ -37,6 +46,8 @@ export interface GcCommandFlags {
 	blobs?: boolean;
 	archive?: boolean;
 	wal?: boolean;
+	undoTails?: boolean;
+	keepUndoTails?: number;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
@@ -44,6 +55,17 @@ export interface GcCommandFlags {
 
 export interface GcCommandArgs {
 	flags: GcCommandFlags;
+}
+
+export interface UndoTailGcResult {
+	/** Sessions skipped because a live owner process holds the append writer. */
+	skippedLive: number;
+	filesScanned: number;
+	markersPruned: number;
+	entriesRemoved: number;
+	keep: number;
+	files: Array<{ file: string; markers: number; removed: number }>;
+	errors: string[];
 }
 
 export interface BlobGcResult {
@@ -91,6 +113,7 @@ export interface GcResult {
 	blobs?: BlobGcResult;
 	archive?: ArchiveGcResult;
 	wal?: WalGcResult;
+	undoTails?: UndoTailGcResult;
 	lockPath: string;
 }
 
@@ -114,6 +137,8 @@ interface ResolvedGcOptions {
 	runBlobs: boolean;
 	runArchive: boolean;
 	runWal: boolean;
+	runUndoTails: boolean;
+	keepUndoTails: number;
 	coldArchiveAfterDays: number;
 	retainNewestGlobal: number;
 	retainNewestPerCwd: number;
@@ -150,7 +175,7 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
-	const selected = flags.blobs === true || flags.archive === true || flags.wal === true;
+	const selected = flags.blobs === true || flags.archive === true || flags.wal === true || flags.undoTails === true;
 	const archiveSelected = selected && flags.archive === true;
 	const needsArchiveSettings =
 		archiveSelected &&
@@ -173,6 +198,8 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		runBlobs: selected ? flags.blobs === true : getBoolean("gc.blobs"),
 		runArchive: selected ? flags.archive === true : getBoolean("gc.archive"),
 		runWal: selected ? flags.wal === true : getBoolean("gc.wal"),
+		runUndoTails: selected ? flags.undoTails === true : false,
+		keepUndoTails: Math.max(0, flags.keepUndoTails ?? 1),
 		coldArchiveAfterDays: numberSetting(
 			flags.coldArchiveAfterDays,
 			getNumber("gc.coldArchiveAfterDays"),
@@ -195,6 +222,7 @@ export function collectGcErrors(result: GcResult): string[] {
 	return [
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
+		...(result.undoTails?.errors ?? []).map(error => `undo-tails: ${error}`),
 	];
 }
 
@@ -1358,17 +1386,6 @@ function gcLockPid(lockText: string): number | undefined {
 	return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
 }
 
-function processExists(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		const code = codeOf(error);
-		if (code === "ESRCH" || code === "EINVAL") return false;
-		return true;
-	}
-}
-
 function gcLockStatSnapshot(stat: {
 	dev: number;
 	ino: number;
@@ -1422,7 +1439,7 @@ async function gcLockSnapshotStillCurrent(lockPath: string, snapshot: GcLockSnap
 
 function shouldBreakGcLock(snapshot: GcLockSnapshot): boolean {
 	const pid = gcLockPid(snapshot.text);
-	if (pid) return !processExists(pid);
+	if (pid) return !isProcessAlive(pid);
 
 	const createdAtMs = Date.parse(snapshot.text.split(/\r?\n/, 2)[1] ?? "");
 	const ageFromMs = Number.isFinite(createdAtMs) ? createdAtMs : snapshot.mtimeMs;
@@ -1552,6 +1569,14 @@ function renderText(result: GcResult): string {
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
 	}
+	if (result.undoTails) {
+		const t = result.undoTails;
+		lines.push(
+			`undo tails: ${t.markersPruned} markers pruned, ${t.entriesRemoved} entries removed, keep=${t.keep}, ${t.filesScanned} files scanned`,
+		);
+		if (t.skippedLive) lines.push(`sessions skipped live: ${t.skippedLive}`);
+		if (t.errors.length > 0) lines.push(`undo tail errors: ${t.errors.length}`);
+	}
 	if (result.wal) {
 		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";
 		lines.push(`wal: ${state}, ${formatBytes(result.wal.walBytes)} across ${result.wal.databases.length} dbs`);
@@ -1559,11 +1584,133 @@ function renderText(result: GcResult): string {
 	return `${lines.join("\n")}\n`;
 }
 
+/**
+ * Prune off-branch tails of older user-undo branches across active sessions.
+ * Sessions with any live owner process (append-writer pid sidecar) are
+ * skipped: an open AgentSession holds those entries in memory and would
+ * re-append them.
+ */
+async function runUndoTailGc(options: ResolvedGcOptions): Promise<UndoTailGcResult> {
+	const sessionsRoot = getSessionsDir(options.agentDir);
+	const result: UndoTailGcResult = {
+		filesScanned: 0,
+		markersPruned: 0,
+		entriesRemoved: 0,
+		skippedLive: 0,
+		keep: options.keepUndoTails,
+		files: [],
+		errors: [],
+	};
+	const candidates = await listActiveSessions(sessionsRoot);
+	for (const session of candidates) {
+		// Liveness gate via the owner sidecar: a live process holding this
+		// session's append writer would re-append pruned entries from its
+		// in-memory tree. SessionStatus is journal-tail state ("complete"
+		// means the last turn yielded, not that nobody has it open), so it is
+		// deliberately not used here.
+		let liveOwner: boolean;
+		try {
+			// Instance-aware liveness: a recycled pid holding a stale claim
+			// line must not pin the session against collection forever.
+			const claims = await readOwnerClaims(session.path);
+			liveOwner = [...claims.values()].some(ownerClaimIsLive);
+		} catch (error) {
+			// Unreadable sidecar fails closed: skip the session as an error
+			// rather than treating it as unowned and pruning beneath a
+			// possibly-live manager.
+			result.errors.push(`${session.path}: owner sidecar unreadable: ${errorMessage(error)}`);
+			continue;
+		}
+		if (liveOwner) {
+			result.skippedLive++;
+			continue;
+		}
+		result.filesScanned++;
+		try {
+			// suppressBreadcrumb keeps storage maintenance side-effect-free:
+			// otherwise scanning repoints this terminal's --continue target
+			// at whichever session happened to be read last. apply=false
+			// returns before any rewrite, so dry runs never write the file.
+			const before = await fs.stat(session.path);
+			const beforeIdentity = { dev: before.dev, ino: before.ino, size: before.size, mtimeMs: before.mtimeMs };
+			const manager = await SessionManager.open(session.path, undefined, undefined, {
+				suppressBreadcrumb: true,
+				// Dry runs are read-only end to end: a claim append would both
+				// mutate the directory and fail outright on a read-only mount.
+				noOwnerClaim: !options.apply,
+			});
+			try {
+				// Identity of the generation the gated load actually accepted:
+				// if the journal was updated and closed between the `before`
+				// stat and the load, restoring `before`'s timestamp would let a
+				// later archive pass treat the just-updated session as cold.
+				// Probed INSIDE the guarded region: a throw here must still
+				// close the manager, or its live-pid owner claim pins the
+				// session against every later undo-tail scan in this process.
+				const atLoad = await journalIdentity(session.path);
+				const counts = await manager.pruneUserUndoTails(options.keepUndoTails, options.apply);
+				if (counts.skippedLive) {
+					// An owner registered between the preflight and the
+					// publish claim; the file was left untouched.
+					result.skippedLive++;
+				} else {
+					result.markersPruned += counts.markers;
+					result.entriesRemoved += counts.removed;
+					if (counts.markers > 0) result.files.push({ file: session.path, ...counts });
+					if (options.apply && counts.published) {
+						// The prune rewrote the journal; pruning does not
+						// change the session's logical age, so the original
+						// mtime is restored — otherwise a later pass in this
+						// same run (archive's write grace) would skip the
+						// file as just-modified. The final validation AND the
+						// utimes run under the journal's exclusive lock: a
+						// manager appending between an unlocked check and
+						// the restore would have its fresh mtime clobbered,
+						// and the archive pass in this same run would then
+						// move a session that was just updated.
+						const restoreLock = tryAcquireFileLock(session.path);
+						try {
+							if (!restoreLock?.acquired) {
+								// Held by a live writer — its fresh mtime is
+								// exactly what must survive; skip the restore.
+								restoreLock?.release();
+							} else if (
+								sameJournalIdentity(beforeIdentity, atLoad) &&
+								sameJournalIdentity(counts.published, await journalIdentity(session.path)) &&
+								// This gc manager contributes exactly one own-pid
+								// claim line; a second same-process line is a
+								// sibling manager that went live during the prune.
+								![...(await readOwnerClaims(session.path))].some(([pid, entry]) =>
+									pid === process.pid ? entry.count > 1 : ownerClaimIsLive(entry),
+								)
+							) {
+								await fs.utimes(session.path, before.atime, before.mtime);
+							}
+						} finally {
+							if (restoreLock?.acquired) restoreLock.release();
+						}
+					}
+				}
+			} finally {
+				await manager.close();
+			}
+		} catch (error) {
+			result.errors.push(`${session.path}: ${errorMessage(error)}`);
+		}
+	}
+	return result;
+}
+
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const options = await resolveOptions(args.flags);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
+		// Undo-tail pruning must run before the passes that consume the
+		// active-session tree: archive would move still-tailed journals out
+		// of the tree before the scan, and blob GC would record references
+		// from tails that are pruned afterward.
+		if (options.runUndoTails) next.undoTails = await runUndoTailGc(options);
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
 		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);

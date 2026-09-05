@@ -22,7 +22,7 @@ import {
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { resolveToCwd } from "../tools/path-utils";
-import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import { commandConsumed, errorMessage, parsePositiveSteps, parseTurnNumber, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
 	ParsedSlashCommand,
@@ -198,6 +198,113 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleFreshCommand();
+		},
+	},
+	{
+		name: "undo",
+		description: "Undo the last user turn(s) from context — files untouched (use git)",
+		inlineHint: "[steps]",
+		acpInputHint: "[steps]",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			runtime.ctx.session.isStreaming ? "Undo: unavailable while streaming" : "Undo: drop last turn(s) from context",
+		handle: async (command, runtime) => {
+			const parsed = parsePositiveSteps(command.args);
+			if (!parsed.ok) {
+				await runtime.output(parsed.error);
+				return commandConsumed();
+			}
+			const result = await runtime.session.userUndo(parsed.steps);
+			await runtime.output(result.ok ? `Undid ${result.droppedTurns} turn(s).` : (result.error ?? "Undo failed."));
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const parsed = parsePositiveSteps(command.args);
+			if (!parsed.ok) {
+				runtime.ctx.showError(parsed.error);
+				return;
+			}
+			const result = await runtime.ctx.session.userUndo(parsed.steps);
+			if (result.ok) {
+				runtime.ctx.rebuildChatFromMessages();
+				runtime.ctx.showStatus(`Undid ${result.droppedTurns} turn(s) — context rewound (files untouched)`);
+			} else {
+				runtime.ctx.showError(result.error ?? "Undo failed");
+			}
+		},
+	},
+	{
+		name: "redo",
+		description: "Restore the turns dropped by the last /undo",
+		getTuiAutocompleteDescription: runtime =>
+			runtime.ctx.session.isStreaming ? "Redo: unavailable while streaming" : "Redo: restore undone turns",
+		handle: async (_command, runtime) => {
+			const result = await runtime.session.userRedo();
+			await runtime.output(result.ok ? "Redone — undone turns restored." : (result.error ?? "Redo failed."));
+			return commandConsumed();
+		},
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const result = await runtime.ctx.session.userRedo();
+			if (result.ok) {
+				runtime.ctx.rebuildChatFromMessages();
+				runtime.ctx.showStatus("Redone — undone turns restored");
+			} else {
+				runtime.ctx.showError(result.error ?? "Redo failed");
+			}
+		},
+	},
+	{
+		name: "revert",
+		description: "Pick any earlier user turn and rewind the context to before it (files untouched)",
+		inlineHint: "[turn#]",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			runtime.ctx.session.isStreaming ? "Revert: unavailable while streaming" : "Revert: rewind to a chosen turn",
+		handle: async (command, runtime) => {
+			const turns = runtime.session.getUserTurns();
+			if (turns.length === 0) {
+				await runtime.output("No user turns to revert to.");
+				return commandConsumed();
+			}
+			const arg = command.args.trim();
+			if (!arg) {
+				const listing = turns.map((turn, i) => `${i + 1}. ${turn.preview} (${turn.timestamp})`).join("\n");
+				await runtime.output(`User turns (oldest first):\n${listing}\nUse /revert <turn#>.`);
+				return commandConsumed();
+			}
+			const parsed = parseTurnNumber(arg);
+			if (!parsed.ok || parsed.index >= turns.length) {
+				await runtime.output(parsed.ok ? `Invalid turn number: ${arg}` : parsed.error);
+				return commandConsumed();
+			}
+			const result = await runtime.session.userUndoTo(turns[parsed.index]!.entryId);
+			await runtime.output(
+				result.ok ? `Reverted — dropped ${result.droppedTurns} turn(s).` : (result.error ?? "Revert failed."),
+			);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const arg = command.args.trim();
+			if (arg) {
+				const turns = runtime.ctx.session.getUserTurns();
+				const parsed = parseTurnNumber(arg);
+				if (!parsed.ok || parsed.index >= turns.length) {
+					runtime.ctx.showError(parsed.ok ? `Invalid turn number: ${arg}` : parsed.error);
+					return;
+				}
+				const result = await runtime.ctx.session.userUndoTo(turns[parsed.index]!.entryId);
+				if (result.ok) {
+					runtime.ctx.rebuildChatFromMessages();
+					runtime.ctx.showStatus(`Reverted — dropped ${result.droppedTurns} turn(s) (files untouched)`);
+				} else {
+					runtime.ctx.showError(result.error ?? "Revert failed");
+				}
+				return;
+			}
+			runtime.ctx.showRevertTurnSelector();
 		},
 	},
 	{

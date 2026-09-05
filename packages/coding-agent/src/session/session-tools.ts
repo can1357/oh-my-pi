@@ -180,7 +180,7 @@ const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
  * (and re-splice a redundant developer message that busts the provider
  * prompt-cache prefix).
  */
-interface XdevMountNoticeDetails {
+export interface XdevMountNoticeDetails {
 	added: string[];
 	removed: string[];
 }
@@ -1136,6 +1136,52 @@ export class SessionTools {
 	resetAnnouncedMounts(): void {
 		this.#announcedMounts.clear();
 		this.#announcedMountsSeeded = false;
+	}
+
+	/**
+	 * Reconcile the announced-mount baseline against the transcript the host
+	 * just installed (operator rollback). Like {@link resetAnnouncedMounts} the
+	 * replaced branch's notices are forgotten, but the baseline is re-seeded
+	 * immediately from the surviving messages and the difference between the
+	 * live mount set and that baseline is requeued into the pending delta:
+	 * undoing a turn that delivered an unmount notice leaves the rewound
+	 * transcript believing the device is still mounted, and without the
+	 * requeue no later prompt would re-deliver the removal (the mount event
+	 * already happened, so no fresh churn re-queues it). A rolled-back mount
+	 * notice is covered symmetrically. Call after the new messages are in
+	 * `agent.state.messages`.
+	 */
+	reconcileAnnouncedMounts(): void {
+		this.#announcedMounts.clear();
+		this.#announcedMountsSeeded = false;
+		this.#ensureAnnouncedMountsSeeded();
+		const current = this.#xdev?.mountedNames;
+		if (!current) return;
+		const pending = this.#pendingXdevMountDelta ?? { added: new Set<string>(), removed: new Set<string>() };
+		// First drop pending entries the restored branch already satisfies: a
+		// queued mount (rolled back by /undo) whose notice /redo then restores
+		// is known to the transcript again, and delivering it would duplicate
+		// the notice; symmetrically a queued removal for a device the restored
+		// transcript no longer announces is moot.
+		for (const name of [...pending.added]) {
+			if (this.#announcedMounts.has(name)) pending.added.delete(name);
+		}
+		for (const name of [...pending.removed]) {
+			if (!this.#announcedMounts.has(name)) pending.removed.delete(name);
+		}
+		// Live but not announced by the surviving transcript: requeue a mount
+		// notice; announced by the transcript but not live: requeue a removal.
+		// Coalesce against any surviving pending delta exactly like
+		// #notifyXdevMountDelta so an unmount cancels an undelivered mount.
+		for (const name of current) {
+			if (this.#announcedMounts.has(name)) continue;
+			if (!pending.removed.delete(name)) pending.added.add(name);
+		}
+		for (const name of this.#announcedMounts) {
+			if (current.has(name)) continue;
+			if (!pending.added.delete(name)) pending.removed.add(name);
+		}
+		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
 	}
 
 	/**

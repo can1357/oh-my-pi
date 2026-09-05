@@ -449,6 +449,8 @@ export interface InteractiveModeContext {
 	showUserMessageSelector(): void;
 	showCopySelector(): void;
 	showTreeSelector(): void;
+	/** Open the /revert turn picker (delegates to SelectorController.showRevertTurnSelector). */
+	showRevertTurnSelector(): void;
 	showSessionSelector(source?: ForeignSessionSource): void;
 	handleResumeSession(sessionPath: string): Promise<void>;
 	handleSessionDeleteCommand(): Promise<void>;

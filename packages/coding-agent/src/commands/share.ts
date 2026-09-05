@@ -46,7 +46,7 @@ export default class Share extends Command {
 			sessionPath = match.session.path;
 		}
 
-		const sm = await SessionManager.open(sessionPath);
+		const sm = await SessionManager.open(sessionPath, undefined, undefined, { noOwnerClaim: true });
 		// Settings resolve against the session's own project so its
 		// share.redactSecrets/secrets.enabled policy governs, not the invoking cwd's.
 		const settings = await Settings.loadReadOnly({ cwd: sm.getCwd() });

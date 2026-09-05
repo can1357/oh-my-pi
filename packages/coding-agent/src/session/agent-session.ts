@@ -81,6 +81,7 @@ import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
+import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import {
 	$env,
 	escapeXmlText,
@@ -93,10 +94,13 @@ import {
 	postmortem,
 	prompt,
 	Snowflake,
+	sanitizeText,
 	stringProperty,
+	toError,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
-import { type AdvisorConfig, loadAdvisorTranscriptCosts } from "../advisor";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
+import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -206,6 +210,7 @@ import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { TRUNCATE_LENGTHS } from "../tools/render-utils";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -215,7 +220,12 @@ import {
 	writeDeviceDispatch,
 } from "../tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import type { TodoPhase } from "../tools/todo";
+import {
+	getLatestTodoPhasesFromEntries,
+	type TodoPhase,
+	todoPhasesEqual,
+	USER_TODO_EDIT_CUSTOM_TYPE,
+} from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import { parseCommandArgs } from "../utils/command-args";
@@ -329,6 +339,7 @@ import {
 import { ModelControls, type ModelControlsHost } from "./model-controls";
 import { isPrewalkPlanNudge, PrewalkCoordinator, type PrewalkCoordinatorHost } from "./prewalk";
 import {
+	IMAGE_ATTACHMENT_DESCRIPTION_TYPE,
 	isAdvisorCard,
 	isDisplayableQueuedMessage,
 	isHiddenUserCompanion,
@@ -346,7 +357,7 @@ import {
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import type { BranchSummaryEntry, NewSessionOptions, SessionEntry, SessionMessageEntry } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -354,12 +365,17 @@ import {
 	SessionMaintenance,
 	type SessionMaintenanceHost,
 } from "./session-maintenance";
-import { cleanupEmptyMoveSession, copySessionArtifacts, type SessionManager } from "./session-manager";
+import {
+	cleanupEmptyMoveSession,
+	copySessionArtifacts,
+	SessionFileLockError,
+	type SessionManager,
+} from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
-import { SessionTools, type SessionToolsHost } from "./session-tools";
+import { SessionTools, type SessionToolsHost, type XdevMountNoticeDetails } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -2699,6 +2715,10 @@ export class AgentSession {
 					// otherwise records emission time, which on rebuild excludes
 					// provider preparation / hook time from the prompt→yield anchor.
 					message.timestamp,
+					// hookMessage never carries a rollback marker.
+					message.role === "custom"
+						? { userTurn: message.userTurn, promptPrelude: message.promptPrelude }
+						: undefined,
 				);
 			}
 			if (message.role === "custom" && message.customType === "ttsr-injection") {
@@ -4614,10 +4634,22 @@ export class AgentSession {
 		// file after a revival reopens it. The seal also bumps the disk epoch,
 		// superseding queued tail work and fencing already-running atomic
 		// rewrites at their commit guard; hot-path appends drained above are
-		// already durable, and close() (scheduled post-seal) still flushes and
-		// closes the writer.
+		// already durable, and close() (scheduled post-seal) still closes the writer.
+		// A divergent journal (deferred rollback) must flush BEFORE the seal:
+		// a released manager's atomic rewrite is fenced off, so close()'s own
+		// flush would silently no-op and the pre-rollback branch would stay
+		// on disk across shutdown.
+		const preSealFlushError = await this.sessionManager.flushDivergentJournal();
 		this.sessionManager.seal();
-		await this.sessionManager.close();
+		// close() rethrows a failed close-time flush of a divergent journal;
+		// the remaining dispose steps (memory release) must still run, and
+		// the close error still propagates to the disposer.
+		let closeError: Error | undefined;
+		try {
+			await this.sessionManager.close();
+		} catch (error) {
+			closeError = toError(error);
+		}
 
 		// Release retained conversation memory. dispose() is terminal, and every
 		// revival path reopens the transcript from disk (AgentLifecycleManager
@@ -4642,6 +4674,8 @@ export class AgentSession {
 				this.#releaseRetainedSessionMemory();
 			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
 		}
+		if (closeError) throw closeError;
+		if (preSealFlushError) throw preSealFlushError;
 	}
 
 	/** Drop the in-memory conversation state after the terminal dispose flush. */
@@ -5510,6 +5544,130 @@ export class AgentSession {
 	 *     `#checkpointState` so the next `rewind` call can complete the
 	 *     checkpoint instead of failing with "No active checkpoint".
 	 */
+	/**
+	 * Rebuild TTSR injection records from the active branch: a rollback can
+	 * strand records for rules whose ttsr_injection entries went off-branch
+	 * (repeatMode "once" would then never fire again in this process while a
+	 * reload of the same branch would allow them).
+	 */
+	/**
+	 * The plan-reference delivery flag must mirror the active branch: an
+	 * undo/redo that removes or restores the delivered `plan-mode-reference`
+	 * message has to flip it too, or the next prompt would skip re-injecting
+	 * the approved plan (or re-inject a duplicate of) it.
+	 */
+	#reconcilePlanReference(): void {
+		// Only the context-visible region counts: a reference older than the
+		// latest /clear or compaction boundary is excluded from the rebuilt
+		// model context (session-context.ts), so it must not mark the plan
+		// as delivered either.
+		const branch = this.sessionManager.getBranch();
+		let contextStart = 0;
+		for (let i = 0; i < branch.length; i++) {
+			const entry = branch[i];
+			if (entry && (entry.type === "reset_boundary" || entry.type === "compaction")) contextStart = i + 1;
+		}
+		this.#planReferenceSent = branch.slice(contextStart).some(
+			entry =>
+				// Custom messages persist as `custom_message` journal entries
+				// carrying customType directly (there is no message-role
+				// "custom" entry on a reloaded journal), so both shapes are
+				// recognized here.
+				(entry.type === "custom_message" && entry.customType === "plan-mode-reference") ||
+				(entry.type === "message" &&
+					entry.message.role === "custom" &&
+					entry.message.customType === "plan-mode-reference"),
+		);
+	}
+
+	#reconcileTtsrInjections(): void {
+		const manager = this.#ttsr.manager;
+		if (!manager) return;
+		const ruleNames = new Set<string>();
+		// Captured BEFORE restoreInjected clears the live records: each
+		// surviving rule's process-local elapsed-since-injection distance.
+		const liveGaps = manager.getInjectionGaps();
+		// Injection positions in turn units, taken from where each rule's
+		// LAST ttsr_injection entry sits on the branch: a rule a redo
+		// reintroduces has no live timing record to preserve, and zeroing it
+		// against the restored branch's full turn count would make it
+		// instantly eligible.
+		const injectionPositions = new Map<string, number>();
+		// The live counter advances once per MODEL turn end
+		// (TtsrCoordinator.onTurnEnd fires per assistant turn — a tool-using
+		// user prompt produces several), so rewind in the same units: count
+		// assistant messages, the persisted model-turn boundary.
+		let branchTurnCount = 0;
+		let lastMessageWasAssistant = false;
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type === "message") {
+				const message = entry.message as { role?: string; customType?: string; details?: { rules?: unknown } };
+				if (message.role === "assistant") {
+					branchTurnCount++;
+					lastMessageWasAssistant = true;
+					continue;
+				}
+				lastMessageWasAssistant = false;
+				if (message.role === "custom" && message.customType === "ttsr-injection") {
+					if (Array.isArray(message.details?.rules)) {
+						for (const name of message.details.rules) {
+							if (typeof name === "string") ruleNames.add(name);
+						}
+					}
+				}
+			} else if (entry.type === "custom_message") {
+				// The steering text ahead of a ttsr_injection persists here as
+				// well, and interrupt-mode delivery lands AFTER the assistant
+				// turn ended (the live counter already advanced): reset the
+				// per-tool adjustment, or the injection that follows would be
+				// classified pre-turn-end and restore one turn too low after
+				// /undo or /redo, making an after-gap rule repeat early.
+				lastMessageWasAssistant = false;
+				if (entry.customType === "ttsr-injection") {
+					const details = entry.details as { rules?: unknown } | undefined;
+					const rules = details?.rules;
+					if (Array.isArray(rules)) {
+						for (const name of rules) {
+							if (typeof name === "string") ruleNames.add(name);
+						}
+					}
+				}
+			} else if (entry.type === "ttsr_injection") {
+				for (const name of entry.injectedRules) {
+					ruleNames.add(name);
+					// Per-tool injections are appended by afterToolCall once
+					// the assistant message that issued the tool call is
+					// already persisted but BEFORE onTurnEnd advances the
+					// live counter — their pre-turn-end timing is one behind
+					// the assistant count at the entry. In-message
+					// injections ride a custom message before the turn
+					// starts and need no adjustment.
+					injectionPositions.set(
+						name,
+						lastMessageWasAssistant ? Math.max(0, branchTurnCount - 1) : branchTurnCount,
+					);
+				}
+			}
+		}
+		// Rules whose live record is PROCESS-LOCAL (resume-seeded: counter and
+		// record both started at zero in this process) keep their elapsed gap —
+		// their coordinates cannot be compared against branch positions, and
+		// substituting the branch's lifetime turn count would make an after-gap
+		// rule injected before resume instantly eligible merely because a
+		// rollback ran. Records in JOURNAL coordinates are NOT substituted: the
+		// walk above already positioned the branch's latest SURVIVING injection,
+		// and a live record can describe an injection the rollback dropped (a
+		// repeatable rule re-injected inside the undone turn) or an older
+		// survivor that a redo's restored reinjection supersedes — overriding
+		// with either stale gap would mis-time the next trigger.
+		for (const [name, { gap, journalCoords }] of liveGaps) {
+			if (journalCoords) continue;
+			injectionPositions.set(name, Math.max(0, branchTurnCount - gap));
+		}
+		manager.restoreInjected([...ruleNames], injectionPositions);
+		manager.rewindMessageCount(branchTurnCount);
+	}
+
 	#rehydrateCheckpointRewindState(): void {
 		this.#clearCheckpointRuntimeState();
 		let completed: CompletedRewindState | undefined;
@@ -6269,12 +6427,32 @@ export class AgentSession {
 				return false;
 			}
 
+			// Persisted ownership stamp: every custom message ahead of the user
+			// message in this array was placed there by the prompt pipeline
+			// (plan/goal/vibe mode context, plan reference, caller preludes) and
+			// belongs to the turn that follows. `#persistMessageEnd` copies
+			// `details` to the journal entry verbatim, so the flag survives
+			// restarts and lets /undo rewind the whole batch with its turn
+			// instead of matching customType strings.
+			for (const msg of messages) {
+				if (msg?.role !== "custom") continue;
+				stampCustomMessageMarker(msg, "promptPrelude");
+			}
 			// Pending tool-roster and xd:// deltas accompany the next user-authored
 			// prompt, never an agent-initiated continuation. Reserve their pre-user
 			// position, but consume xd:// only after before_agent_start determines
 			// whether the final provider prompt still carries the base catalog.
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
+			// A user-attributed custom message entering the prompt flow IS the
+			// turn (user-invoked skills, collab guest prompts, extension
+			// sendMessage({ triggerTurn: true })): stamp persisted ownership so
+			// /undo recognizes every prompt-shaped custom message, not just the
+			// known customTypes. Non-triggering custom context (deliverAs
+			// queues) never passes through here and stays unstamped.
+			if (message.role === "custom" && message.attribution === "user") {
+				stampCustomMessageMarker(message, "userTurn");
+			}
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			for (const msg of this.#pendingNextTurnMessages) {
 				messages.push(msg);
@@ -6374,6 +6552,10 @@ export class AgentSession {
 				: undefined;
 			const toolRosterNotice = isUserQueuedMessage(message) ? this.#tools.takePendingToolRosterNotice() : undefined;
 			if (xdevMountNotice || toolRosterNotice) {
+				// Same ownership stamp: the notice is spliced ahead of the
+				// user message and belongs to this turn.
+				if (xdevMountNotice) stampCustomMessageMarker(xdevMountNotice, "promptPrelude");
+				if (toolRosterNotice) stampCustomMessageMarker(toolRosterNotice, "promptPrelude");
 				messages.splice(
 					xdevMountNoticeIndex,
 					0,
@@ -8109,6 +8291,581 @@ export class AgentSession {
 		this.#checkpointState = undefined;
 		this.#pendingRewindReport = undefined;
 	}
+
+	/** Operator-facing context rollback: `/undo [steps]`. */
+	/**
+	 * Re-record the live model/thinking/tier controls on the rewound branch.
+	 * Rollback drops control-change entries that lived in the discarded tail,
+	 * but the operator's live controls survive the rollback (same contract as
+	 * todos): without re-recording, the branch would describe the old controls
+	 * while turns run under the new ones, and a reload would silently resume
+	 * the old model. Entries land after the undo marker; userRedo tolerates
+	 * control entries between the marker and the leaf for exactly this reason.
+	 */
+	#rejournalControlEntries(liveRole: string = "default"): void {
+		const branchModels: Record<string, string> = {};
+		let lastModelRole: string | undefined;
+		let branchThinkingLevel: string | undefined;
+		let branchThinkingConfigured: string | undefined;
+		let branchTier: string | undefined;
+		let sawTierEntry = false;
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type === "model_change") {
+				if (entry.model) {
+					const role = entry.role ?? "default";
+					branchModels[role] = entry.model;
+					lastModelRole = role;
+				}
+			} else if (entry.type === "thinking_level_change") {
+				branchThinkingLevel = entry.thinkingLevel ?? "off";
+				branchThinkingConfigured = entry.configured ?? entry.thinkingLevel ?? "off";
+			} else if (entry.type === "service_tier_change") {
+				sawTierEntry = true;
+				branchTier = JSON.stringify(entry.serviceTier ?? null);
+			}
+		}
+		const live = this.model;
+		if (live) {
+			const liveModel = `${live.provider}/${live.id}`;
+			// Re-journal when the live role's recorded model differs (the
+			// concrete model changed under this role) or when the branch's
+			// last role is not the live role (a same-model role switch would
+			// otherwise reload as default and break role-keyed fallbacks).
+			if (branchModels[liveRole] !== liveModel || lastModelRole !== liveRole) {
+				this.sessionManager.appendModelChange(liveModel, liveRole);
+			}
+		}
+		const liveThinking = this.thinkingLevel;
+		// Compare the configured selector too: `medium` vs `auto` resolving to
+		// medium differ in what a reload should restore even at equal levels.
+		if (
+			liveThinking !== undefined &&
+			(liveThinking !== branchThinkingLevel || this.configuredThinkingLevel() !== branchThinkingConfigured)
+		) {
+			this.sessionManager.appendThinkingLevelChange(liveThinking, this.configuredThinkingLevel());
+		}
+		// Tier clears are durable state: a null live entry must still
+		// overwrite a non-null branch value, so compare null-normalized forms
+		// and re-record the null explicitly.
+		const liveTier = this.#models.serviceTierEntry();
+		const liveTierJson = JSON.stringify(liveTier ?? null);
+		const branchTierJson = sawTierEntry ? branchTier : "null";
+		if (liveTierJson !== branchTierJson) {
+			this.sessionManager.appendServiceTierChange(liveTier);
+		}
+	}
+
+	/**
+	 * Record the live todo phases as a durable `user_todo_edit` snapshot on
+	 * the rewound branch. The rollback contract keeps live todo state, but a
+	 * reload syncs phases from the branch, where the latest todo tool result
+	 * is now off-branch; without a snapshot the visible list reverts on load.
+	 */
+	/**
+	 * Re-record the live mode on the rewound branch. Mode transitions always
+	 * journal, so the pre-rewind journal entry IS the live state; when the
+	 * rewind drops the transition, a reload would otherwise reconcile to
+	 * `none` while the process keeps running in that mode.
+	 */
+	#rejournalModeEntry(mode: string, modeData: Record<string, unknown> | undefined): void {
+		const rewound = this.sessionManager.buildSessionContext();
+		if (rewound.mode === mode && JSON.stringify(rewound.modeData ?? null) === JSON.stringify(modeData ?? null)) {
+			return;
+		}
+		this.sessionManager.appendModeChange(mode, modeData);
+	}
+
+	#recordTodoSnapshot(): void {
+		const phases = this.getTodoPhases();
+		const branchLatest = getLatestTodoPhasesFromEntries(this.sessionManager.getBranch());
+		if (todoPhasesEqual(branchLatest, phases)) return;
+		// Journal the empty list too: the branch's older non-empty state is
+		// what a reload would otherwise restore.
+		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+	}
+
+	/**
+	 * Why rollback must refuse right now, or undefined when idle. Mirrors the
+	 * /btw branch guard: streaming, in-flight bash/python results, compaction,
+	 * handoff generation, and retries all append or rewrite history after the
+	 * operator pressed the key, and would land past the rollback boundary
+	 * (reintroducing retracted content or an invalid compaction boundary).
+	 */
+	#rollbackBlockReason(): string | undefined {
+		if (this.isStreaming) return "streaming";
+		if (this.isBashRunning) return "a bash execution is running";
+		if (this.isEvalRunning) return "a python execution is running";
+		if (this.isCompacting) return "compaction is running";
+		if (this.isGeneratingHandoff) return "handoff generation is running";
+		if (this.isRetrying) return "a retry is in progress";
+		if (this.hasPendingAsyncWork()) return "async work is still pending";
+		if (this.hasPostPromptWork) return "post-prompt work is still pending";
+		return undefined;
+	}
+
+	async userUndo(steps = 1): Promise<{ ok: boolean; error?: string; droppedTurns?: number; rewoundTo?: string }> {
+		const busy = this.#rollbackBlockReason();
+		if (busy) {
+			return { ok: false, error: `Cannot /undo while ${busy}.` };
+		}
+		const entries = this.sessionManager.getBranch();
+		const userIdx = entries.reduce<number[]>((acc, entry, i) => {
+			if (this.#isUserTurnEntry(entry)) acc.push(i);
+			return acc;
+		}, []);
+		if (userIdx.length === 0) {
+			return { ok: false, error: "No user turns to undo." };
+		}
+		const n = Math.max(1, Math.min(Math.floor(steps) || 1, userIdx.length));
+		return this.#rewindUserTurnsBefore(entries, userIdx[userIdx.length - n]!, n);
+	}
+
+	/** Active-path user turns (oldest first), for the `/revert` picker. */
+	getUserTurns(limit = Number.POSITIVE_INFINITY): Array<{ entryId: string; timestamp: string; preview: string }> {
+		return this.sessionManager
+			.getBranch()
+			.filter(entry => this.#isUserTurnEntry(entry))
+			.slice(-limit)
+			.map(entry => ({
+				entryId: entry.id,
+				timestamp: entry.timestamp,
+				preview: this.#userTurnPreview(entry),
+			}));
+	}
+
+	/**
+	 * Sanitized, display-width-bounded first line of a message, for pickers
+	 * and journal metadata: tabs expand, control/escape sequences strip, and
+	 * truncation follows rendered width rather than code units.
+	 */
+	#previewText(message: AgentMessage): string {
+		return truncateToWidth(replaceTabs(sanitizeText(this.#messageTextPreview(message))), TRUNCATE_LENGTHS.LINE);
+	}
+
+	/** First non-empty text line of a message, for previews and prompt lists. */
+	#messageTextPreview(message: AgentMessage): string {
+		if (!("content" in message)) return "(empty)";
+		const { content } = message;
+		const text =
+			typeof content === "string"
+				? content
+				: content.flatMap(part => (part.type === "text" ? [part.text] : [])).join(" ");
+		return text.split("\n").find(line => line.trim().length > 0) ?? "(empty)";
+	}
+
+	/**
+	 * A user turn: a user message, a user-invoked `/skill:<name>` prompt, a
+	 * collaborative guest prompt, or any user-attributed custom message that
+	 * went through the prompt flow (extension sendMessage with triggerTurn) —
+	 * the latter is persisted ownership via the userTurn marker (a sibling of
+	 * details), stamped by #promptWithMessage. Skill and collab prompts also
+	 * reach the journal as legacy customTypes. Centralized so /undo, /revert,
+	 * and the picker agree.
+	 */
+	#isUserTurnEntry(entry: SessionEntry): boolean {
+		if (entry.type === "custom_message") {
+			if (entry.userTurn === true && entry.attribution === "user") {
+				return true;
+			}
+			return (
+				(entry.customType === SKILL_PROMPT_MESSAGE_TYPE || entry.customType === COLLAB_PROMPT_MESSAGE_TYPE) &&
+				entry.attribution === "user"
+			);
+		}
+		if (entry.type !== "message") return false;
+		const message = entry.message;
+		// Agent-authored messages that ride the provider-facing `user` role
+		// (parent IRC steers, MCP notification batches carry attribution
+		// "agent") are internal context, not operator turns.
+		return (
+			(message.role === "user" && message.attribution !== "agent") ||
+			(message.role === "custom" &&
+				((message.userTurn === true && message.attribution === "user") ||
+					isUserInvokedSkillPrompt(message) ||
+					(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")))
+		);
+	}
+
+	/** Preview line for either user-turn shape: message or persisted skill prompt. */
+	#userTurnPreview(entry: SessionEntry): string {
+		if (entry.type === "custom_message") {
+			const text =
+				typeof entry.content === "string"
+					? entry.content
+					: (entry.content ?? []).flatMap(part => (part.type === "text" ? [part.text] : [])).join(" ");
+			return truncateToWidth(
+				replaceTabs(sanitizeText(text.split("\n").find(line => line.trim().length > 0) ?? "(empty)")),
+				TRUNCATE_LENGTHS.LINE,
+			);
+		}
+		return entry.type === "message" ? this.#previewText(entry.message) : "(empty)";
+	}
+
+	/** `/revert <entryId>`: rewind to before an arbitrary earlier user turn. */
+	async userUndoTo(entryId: string): Promise<{ ok: boolean; error?: string; droppedTurns?: number }> {
+		const busy = this.#rollbackBlockReason();
+		if (busy) {
+			return { ok: false, error: `Cannot /revert while ${busy}.` };
+		}
+		const entries = this.sessionManager.getBranch();
+		const idx = entries.findIndex(entry => entry.id === entryId && this.#isUserTurnEntry(entry));
+		if (idx === -1) {
+			return { ok: false, error: "Turn not found on the active path." };
+		}
+		let turns = 0;
+		for (let i = idx; i < entries.length; i++) {
+			if (this.#isUserTurnEntry(entries[i]!)) turns++;
+		}
+		return this.#rewindUserTurnsBefore(entries, idx, turns);
+	}
+
+	/** Shared `/undo`|`/revert` core: branch off just before `entries[userTurnIdx]`. */
+	async #rewindUserTurnsBefore(
+		entries: SessionEntry[],
+		userTurnIdx: number,
+		n: number,
+	): Promise<{ ok: boolean; error?: string; droppedTurns?: number; rewoundTo?: string }> {
+		const target = entries[userTurnIdx] as SessionMessageEntry;
+		// The prompt-owned prelude (magic-keyword notices, eager todo/task
+		// guidance, image-description notices) is persisted immediately
+		// before the user message: anchor BEFORE the whole batch, or /undo
+		// leaves the dropped turn's hidden prelude — e.g. an image
+		// description — in the model context, violating the silent-rollback
+		// contract.
+		let anchorIdx = userTurnIdx - 1;
+		while (anchorIdx >= 0 && this.#isPromptPreludeEntry(entries[anchorIdx]!)) anchorIdx--;
+		const anchorId = anchorIdx >= 0 ? entries[anchorIdx]!.id : null;
+		const previousLeafId = this.sessionManager.getLeafId();
+		// Live role and mode state are only derivable from the pre-rewind
+		// journal: capture before the branch switch, then re-journal what the
+		// rewound branch lost (role for retry-fallback chains, mode so a
+		// reload does not silently exit plan/vibe/goal).
+		const liveRole = this.sessionManager.getLastModelChangeRole() ?? "default";
+		const preRewindMode = this.sessionManager.buildSessionContext();
+		const droppedEntries = entries.slice(anchorIdx + 1);
+		const droppedPrompts = droppedEntries
+			.filter(entry => this.#isUserTurnEntry(entry))
+			.map(entry => `- ${this.#userTurnPreview(entry)}`)
+			.join("\n");
+		// Cancellable pre-tree hook, same contract as ordinary tree
+		// navigation: extensions that guard tree mutation get a say before
+		// the rollback commits.
+		const cancelledByHook = await this.#beforeRollbackTreeChange(anchorId);
+		if (cancelledByHook) {
+			return { ok: false, error: cancelledByHook };
+		}
+		// SILENT undo contract: state after /undo is indistinguishable in
+		// context from the dropped turns never having happened. No rendered
+		// summary, no undo-report message — the rewound context is
+		// self-coherent because /undo drops a TAIL (kept, earlier entries
+		let markerId: string | undefined;
+		try {
+			this.#bash.withBranchTransition(() => {
+				markerId = this.sessionManager.branchWithSummary(anchorId, "", {
+					kind: "user-undo",
+					undoOf: previousLeafId,
+					steps: n,
+					droppedPrompts,
+					rewoundAt: new Date().toISOString(),
+				});
+			});
+		} catch (error) {
+			if (!(error instanceof SessionFileLockError)) throw error;
+			// branchWithSummary threw AFTER inserting the marker in memory:
+			// recover its id from the new leaf so the session_tree event still
+			// carries the summaryEntry extensions identify rollbacks by.
+			markerId ??= this.sessionManager.getLeafId() ?? undefined;
+			// Contended append-writer lock: the branch switch and marker
+			// already applied in-memory and the journal is marked divergent
+			// (the next append publishes a full rewrite), so the rollback is
+			// durable-deferred, not lost. Complete the in-memory transition
+			// below — aborting halfway would run the next turn with the
+			// pre-undo agent messages while persisting beneath the undo
+			// branch that excludes them.
+			logger.warn("Undo branch persistence contended; deferred to full rewrite", {
+				error: String(error),
+			});
+		}
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#advisors.resetSessionState({ preserveCost: true });
+		this.#reconcileTtsrInjections();
+		this.#reconcilePlanReference();
+		// The replaced branch's xdev mount notices no longer apply: re-seed the
+		// announced-mount baseline from the rewound transcript and requeue the
+		// difference against the live mount set, so a rolled-back unmount (or
+		// mount) notice is re-delivered on the next prompt.
+		this.#tools.reconcileAnnouncedMounts();
+		// Todos are deliberately NOT rehydrated from the rewound branch: the
+		// rollback contract is context-only, so live todo state survives.
+		// Checkpoint/rewind runtime state IS rebuilt from the new branch (same
+		// as session switch): a #checkpointState pointing into the dropped
+		// tail would make #enforceRewindBeforeYield branch straight back to
+		// it, restoring what /undo just removed.
+		this.#rehydrateCheckpointRewindState();
+		// Each staging append is guarded INDIVIDUALLY: a contended append
+		// throws AFTER its entry landed in memory, but a shared try would skip
+		// the remaining calls entirely — their entries (live mode, todo
+		// state) would be missing even from the promised later full rewrite.
+		this.#stageDespiteContention("Undo control re-journal", () => this.#rejournalControlEntries(liveRole));
+		this.#stageDespiteContention("Undo todo snapshot", () => this.#recordTodoSnapshot());
+		this.#stageDespiteContention("Undo mode re-journal", () =>
+			this.#rejournalModeEntry(preRewindMode.mode, preRewindMode.modeData),
+		);
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+		// The rollback is a branch the journal-derived extensions must see:
+		// emit session_tree (like every other branch move) so handlers that
+		// reconstruct state from journal entries — autoresearch controls,
+		// modes — resynchronize instead of keeping discarded-tail state.
+		await this.#emitHistoryTreeChange(previousLeafId, markerId);
+		return { ok: true, droppedTurns: n, rewoundTo: target.timestamp };
+	}
+
+	/**
+	 * `/redo`: reattach the turns dropped by the most recent `/undo`. Only
+	 * valid while that undo marker is still the active leaf; once the operator
+	 * appends new turns, redo refuses rather than abandon them.
+	 */
+	async userRedo(): Promise<{ ok: boolean; error?: string }> {
+		const busy = this.#rollbackBlockReason();
+		if (busy) {
+			return { ok: false, error: `Cannot /redo while ${busy}.` };
+		}
+		const entries = this.sessionManager.getBranch();
+		let lastBranch: BranchSummaryEntry | undefined;
+		for (let i = entries.length - 1; i >= 0; i--) {
+			if (entries[i]!.type === "branch_summary") {
+				lastBranch = entries[i] as BranchSummaryEntry;
+				break;
+			}
+		}
+		const details = lastBranch?.details as { kind?: string; undoOf?: string | null } | undefined;
+		if (details?.kind !== "user-undo" || !details.undoOf) {
+			return {
+				ok: false,
+				error: "No /undo to redo (last branch change was not a /undo, or turns were appended since).",
+			};
+		}
+		// Appending plain turns creates no branch summaries, so the marker can
+		// still be found after the operator continued. Redo is only safe while
+		// the marker is the active leaf: rebranching past newer turns would
+		// silently abandon them. Tolerated trailing kinds carry no conversation:
+		// control entries re-recorded by the rollback itself, and `custom`
+		// entries — the /undo emits session_tree, so a journal-derived handler
+		// may legitimately persist reconstructed state right after the marker
+		// (todo snapshots, mode state, extension reconciliation). Redo re-emits
+		// the corresponding tree event, letting those handlers rebuild their
+		// state on the restored branch, so replacing the entries is safe.
+		// Conversational `message` entries still block redo.
+		const branchEntries = this.sessionManager.getBranch();
+		const markerIdx = lastBranch ? branchEntries.findIndex(entry => entry.id === lastBranch!.id) : -1;
+		const onlyNonConversationalTrailing =
+			markerIdx !== -1 &&
+			branchEntries
+				.slice(markerIdx + 1)
+				.every(
+					entry =>
+						entry.type === "model_change" ||
+						entry.type === "thinking_level_change" ||
+						entry.type === "service_tier_change" ||
+						entry.type === "mode_change" ||
+						entry.type === "custom",
+				);
+		if (!lastBranch || (lastBranch.id !== this.sessionManager.getLeafId() && !onlyNonConversationalTrailing)) {
+			return { ok: false, error: "Turns were appended after the /undo — redo is no longer possible." };
+		}
+		const tipId = details.undoOf;
+		if (!this.sessionManager.hasEntry(tipId)) {
+			return { ok: false, error: "The undone turns were pruned by gc; redo is no longer possible." };
+		}
+		// Live role comes from the pre-restore journal (the undo path's
+		// re-journal made it the last role); pass it so redo does not flatten
+		// a smol/slow selection back to default. The same holds for a mode
+		// change made after the undo: re-journal the live payload on the
+		// restored branch so a reload keeps it.
+		const liveRole = this.sessionManager.getLastModelChangeRole() ?? "default";
+		const preRedoMode = this.sessionManager.buildSessionContext();
+		// Silent like /undo: the marker renders nothing, so context after
+		// /redo is simply the restored turns — no trace that an undo cycle
+		// happened.
+		// Cancellable pre-tree hook before the restore commits, mirroring
+		// the /undo path and ordinary tree navigation.
+		const cancelledByHook = await this.#beforeRollbackTreeChange(tipId);
+		if (cancelledByHook) {
+			return { ok: false, error: cancelledByHook };
+		}
+		const previousLeafId = this.sessionManager.getLeafId();
+		let markerId: string | undefined;
+		try {
+			this.#bash.withBranchTransition(() => {
+				markerId = this.sessionManager.branchWithSummary(tipId, "", { kind: "user-redo", redoOf: lastBranch!.id });
+			});
+		} catch (error) {
+			if (!(error instanceof SessionFileLockError)) throw error;
+			// Same recovery as /undo: the marker landed in memory before the
+			// persistence throw.
+			markerId ??= this.sessionManager.getLeafId() ?? undefined;
+			// Same deferred-persistence contract as /undo: the rebranch
+			// applied in-memory and the journal is marked divergent, so
+			// complete the in-memory restore rather than half-transition.
+			logger.warn("Redo branch persistence contended; deferred to full rewrite", {
+				error: String(error),
+			});
+		}
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#advisors.resetSessionState({ preserveCost: true });
+		this.#reconcileTtsrInjections();
+		this.#reconcilePlanReference();
+		// Same as /undo: the restored branch's xdev mount notices re-seed the
+		// announced-mount baseline and requeue the live-mount difference.
+		this.#tools.reconcileAnnouncedMounts();
+		// Same as /undo: rebuild checkpoint state from the restored branch.
+		this.#rehydrateCheckpointRewindState();
+		// Individual guards, same contract as the undo block above.
+		this.#stageDespiteContention("Redo control re-journal", () => this.#rejournalControlEntries(liveRole));
+		this.#stageDespiteContention("Redo todo snapshot", () => this.#recordTodoSnapshot());
+		this.#stageDespiteContention("Redo mode re-journal", () =>
+			this.#rejournalModeEntry(preRedoMode.mode, preRedoMode.modeData),
+		);
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+		// Same as /undo: journal-derived extensions must see the restored
+		// branch so they resynchronize their state to it.
+		await this.#emitHistoryTreeChange(previousLeafId, markerId);
+		return { ok: true };
+	}
+
+	/**
+	 * Run one rollback staging append, tolerating lock contention: the entry
+	 * has already landed in the in-memory tree when the append throws, and the
+	 * journal is marked divergent (the next append or close publishes the
+	 * full rewrite) — so only the warning is needed, never an abort.
+	 */
+	#stageDespiteContention(label: string, stage: () => void): void {
+		try {
+			stage();
+		} catch (error) {
+			if (!(error instanceof SessionFileLockError)) throw error;
+			logger.warn(`${label} persistence contended; deferred to full rewrite`, {
+				error: String(error),
+			});
+		}
+	}
+
+	/**
+	 * Prompt-owned prelude entries: custom_message entries the prompt
+	 * pipeline places immediately before a user turn (plan/goal/vibe mode
+	 * context, plan reference, magic-keyword notices, eager todo/task
+	 * guidance, image-description and xdev-mount notices). They belong to
+	 * the turn that follows them, so a rollback anchor must precede the
+	 * whole batch.
+	 *
+	 * Ownership is persisted: #promptWithMessage stamps each prelude
+	 * message with the promptPrelude marker (a sibling of `details`)
+	 * before dispatch and #persistMessageEnd copies it to the journal
+	 * entry, so any future prelude type is covered without touching this
+	 * predicate. The
+	 * customType whitelist below remains only for journals persisted before
+	 * the stamp existed. An extension's independent
+	 * sendCustomMessage({ triggerTurn: false }) carries neither marker and
+	 * survives.
+	 */
+	#isPromptPreludeEntry(entry: SessionEntry): boolean {
+		if (entry.type !== "custom_message") return false;
+		if (entry.promptPrelude === true) return true;
+		const customType = entry.customType;
+		return (
+			customType === "ultrathink-notice" ||
+			customType === "orchestrate-notice" ||
+			customType === "workflow-notice" ||
+			customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE ||
+			customType === "eager-todo-prelude" ||
+			customType === "eager-task-prelude" ||
+			// Legacy journals persisted before the stamp: the context types
+			// #promptWithMessage already placed immediately before the user
+			// message (plan reference/context, mode contexts, xdev notices).
+			customType === "plan-mode-reference" ||
+			customType === "plan-mode-context" ||
+			customType === "goal-mode-context" ||
+			customType === "vibe-mode-context" ||
+			customType === "xdev-mount-notice"
+		);
+	}
+
+	/**
+	 * Emit the cancellable `session_before_tree` event for an operator
+	 * rollback (/undo, /revert, /redo) BEFORE the branch switch commits —
+	 * same contract as ordinary tree navigation: the preparation is computed
+	 * from the current leaf and the rollback target, so commonAncestorId and
+	 * entriesToSummarize reflect the actual branch delta. Returns an error
+	 * message when a handler cancelled, undefined to proceed.
+	 */
+	async #beforeRollbackTreeChange(anchorId: string | null): Promise<string | undefined> {
+		if (!this.#extensionRunner?.hasHandlers("session_before_tree")) return undefined;
+		const oldLeafId = this.sessionManager.getLeafId();
+		let entriesToSummarize: SessionEntry[];
+		let commonAncestorId: string | null;
+		if (anchorId === null) {
+			// Root rewind: the target is BEFORE the first entry, so the entire
+			// old chain — including its first entry — is abandoned and there
+			// is no common ancestor on the target branch. Substituting the
+			// first entry as the collection anchor would exclude it from the
+			// reported delta.
+			entriesToSummarize = [];
+			let current = oldLeafId;
+			while (current) {
+				const entry = this.sessionManager.getEntry(current);
+				if (!entry) break;
+				entriesToSummarize.push(entry);
+				current = entry.parentId;
+			}
+			entriesToSummarize.reverse();
+			commonAncestorId = null;
+		} else {
+			const collected = collectEntriesForBranchSummary(this.sessionManager, oldLeafId, anchorId);
+			entriesToSummarize = collected.entries;
+			commonAncestorId = collected.commonAncestorId;
+		}
+		const result = (await this.#extensionRunner.emit({
+			type: "session_before_tree",
+			preparation: {
+				// Empty targetId means "before the first entry" (rewind to
+				// the session root), mirroring the null-leaf tree semantics.
+				targetId: anchorId ?? "",
+				oldLeafId,
+				commonAncestorId,
+				entriesToSummarize,
+				userWantsSummary: false,
+			},
+			signal: new AbortController().signal,
+		})) as SessionBeforeTreeResult | undefined;
+		if (result?.cancel) return "An extension cancelled the rollback.";
+		return undefined;
+	}
+
+	/**
+	 * Emit the `session_tree` history-change event for an operator rollback
+	 * (/undo, /revert, /redo), mirroring the regular branch paths: handlers
+	 * that reconstruct state from journal entries (autoresearch controls,
+	 * modes) resynchronize to the new branch instead of keeping state from
+	 * the discarded tail. Handlers can mutate entries, so the display
+	 * context is rebuilt afterwards.
+	 */
+	async #emitHistoryTreeChange(oldLeafId: string | null, markerId: string | undefined): Promise<void> {
+		if (!this.#extensionRunner?.hasHandlers("session_tree")) return;
+		const summaryEntry = markerId
+			? (this.sessionManager.getEntry(markerId) as BranchSummaryEntry | undefined)
+			: undefined;
+		await this.#extensionRunner.emit({
+			type: "session_tree",
+			newLeafId: this.sessionManager.getLeafId(),
+			oldLeafId,
+			summaryEntry,
+		});
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+	}
+
 	/** Plan-mode decision affordances: `ask`, or plan approval via `write xd://propose`. */
 	#isPlanDecisionTool(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
 		return toolCall.name === "ask" || isProposeToolCall(toolCall);
@@ -10598,4 +11355,16 @@ export class AgentSession {
 	get extensionRunner(): ExtensionRunner | undefined {
 		return this.#extensionRunner;
 	}
+}
+
+/**
+ * Stamp a persisted ownership marker (`promptPrelude` / `userTurn`) onto a
+ * custom message as a sibling of `details`: `CustomMessage<T = unknown>`
+ * allows primitives and arrays, so nesting the marker inside `details` would
+ * either coerce such payloads into character-keyed records or be unstickable.
+ * The extension-owned payload is never touched; #persistMessageEnd forwards
+ * the marker to the journal entry, and replay restores it.
+ */
+export function stampCustomMessageMarker(message: CustomMessage, marker: "promptPrelude" | "userTurn"): void {
+	message[marker] = true;
 }

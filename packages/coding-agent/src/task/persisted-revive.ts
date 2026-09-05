@@ -123,81 +123,106 @@ export function createPersistedSubagentReviverFactory(
 			const restrictToolNames = init.restrictToolNames === true;
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
-			const { session } = await createAgentSession({
-				cwd: ctx.session.sessionManager.getCwd(),
-				authStorage: ctx.authStorage,
-				// Revived agents join the root session tree, so their observability
-				// frames ride the same bus the RPC/collab surfaces subscribed to.
-				subagentEventBus: ctx.subagentEventBus,
-				modelRegistry: ctx.modelRegistry,
-				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
-				modelPatternAuthFallback: init.resolvedModel,
-				settings: subagentSettings,
-				sessionManager: reopened,
-				agentId: ref.id,
-				agentDisplayName: ref.displayName,
-				// `agents` rule scoping keys on the durable definition name (`scout`,
-				// `reviewer`, …), not the registry display label — cold-revived refs
-				// register with `displayName: id` (registry/persisted-agents.ts), so a
-				// generated task id would silently drop every agent-scoped rule.
-				// `init.agent` carries the real name; only files predating that field
-				// fall back to the display label. A parked transcript may also predate
-				// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
-				// persisted `init.agent` of either sentinel value from such a legacy
-				// custom agent must not masquerade as that sentinel here, so it falls
-				// back to the display label too, keeping it scoped as an ordinary
-				// subagent under its generated id instead of `main` or the shared `sub`
-				// bucket.
-				agentName:
-					init.agent &&
-					init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
-					init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
-						? init.agent
-						: ref.displayName,
-				parentTaskPrefix: ref.id,
-				parentAgentId: ref.parentId,
-				expectedAgentRef: expectedRef,
-				taskDepth,
-				toolNames: revivedToolNames,
-				outputSchema: init.outputSchema,
-				outputSchemaMode: init.outputSchemaMode,
-				restrictToolNames: restrictToolNames || undefined,
-				requireYieldTool: true,
-				systemPrompt: () => [init.systemPrompt],
-				// Old files predate persisted spawns: deny re-spawning rather than let
-				// createAgentSession default to wildcard ("*").
-				spawns: init.spawns ?? "",
-				hasUI: false,
-				enableLsp: restrictToolNames ? false : ctx.enableLsp,
-				...(restrictToolNames
-					? {
-							enableIrc: false,
-							enableMCP: false,
-							preloadedExtensionPaths: [],
-							preloadedPreparedExtensions: [],
-							preloadedCustomToolPaths: [],
-						}
-					: {
-							enableMCP: !mcpManager,
-							mcpManager,
-							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
-						}),
-			});
-			// Clamp the active set to the persisted list: createAgentSession's
-			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
-			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
-			// Wire the extension runtime exactly as the live executor does. Without
-			// this the runner stays pre-init, every action method throws
-			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
-			// touches a runtime action trips the fail-closed gate in `emitToolCall`,
-			// blocking every tool — including the hidden `yield` — in the revived
-			// agent. `session_start` also re-runs so extensions restore per-session
-			// state (issue #8824).
-			await initializeExtensions(session, {
-				reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
-				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
-			});
+			// The factory can reject before constructing an AgentSession (e.g.
+			// expected registry generation gone) and does not dispose an
+			// externally supplied manager — close the reopened manager so its
+			// live-pid owner claim does not pin the session against undo-tail
+			// gc in the parent.
+			let session: AgentSession;
+			try {
+				({ session } = await createAgentSession({
+					cwd: ctx.session.sessionManager.getCwd(),
+					authStorage: ctx.authStorage,
+					// Revived agents join the root session tree, so their observability
+					// frames ride the same bus the RPC/collab surfaces subscribed to.
+					subagentEventBus: ctx.subagentEventBus,
+					modelRegistry: ctx.modelRegistry,
+					...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
+					modelPatternAuthFallback: init.resolvedModel,
+					settings: subagentSettings,
+					sessionManager: reopened,
+					agentId: ref.id,
+					agentDisplayName: ref.displayName,
+					// `agents` rule scoping keys on the durable definition name (`scout`,
+					// `reviewer`, …), not the registry display label — cold-revived refs
+					// register with `displayName: id` (registry/persisted-agents.ts), so a
+					// generated task id would silently drop every agent-scoped rule.
+					// `init.agent` carries the real name; only files predating that field
+					// fall back to the display label. A parked transcript may also predate
+					// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
+					// persisted `init.agent` of either sentinel value from such a legacy
+					// custom agent must not masquerade as that sentinel here, so it falls
+					// back to the display label too, keeping it scoped as an ordinary
+					// subagent under its generated id instead of `main` or the shared `sub`
+					// bucket.
+					agentName:
+						init.agent &&
+						init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
+						init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
+							? init.agent
+							: ref.displayName,
+					parentTaskPrefix: ref.id,
+					parentAgentId: ref.parentId,
+					expectedAgentRef: expectedRef,
+					taskDepth,
+					toolNames: revivedToolNames,
+					outputSchema: init.outputSchema,
+					outputSchemaMode: init.outputSchemaMode,
+					restrictToolNames: restrictToolNames || undefined,
+					requireYieldTool: true,
+					systemPrompt: () => [init.systemPrompt],
+					// Old files predate persisted spawns: deny re-spawning rather than let
+					// createAgentSession default to wildcard ("*").
+					spawns: init.spawns ?? "",
+					hasUI: false,
+					enableLsp: restrictToolNames ? false : ctx.enableLsp,
+					...(restrictToolNames
+						? {
+								enableIrc: false,
+								enableMCP: false,
+								preloadedExtensionPaths: [],
+								preloadedPreparedExtensions: [],
+								preloadedCustomToolPaths: [],
+							}
+						: {
+								enableMCP: !mcpManager,
+								mcpManager,
+								customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+							}),
+				}));
+			} catch (err) {
+				// Factory rejected before constructing a session: nothing will
+				// dispose the externally supplied manager — close it so its
+				// live-pid owner claim does not pin the session against
+				// undo-tail gc in the parent.
+				void reopened.close().catch(() => {});
+				throw err;
+			}
+			// Post-factory setup can still reject before the caller receives
+			// the session; on failure nobody disposes it, so guard the whole
+			// revival setup interval and dispose the constructed session (its
+			// dispose closes the reopened manager) rather than leaking both.
+			try {
+				// Clamp the active set to the persisted list: createAgentSession's
+				// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
+				// the original run didn't carry. Unknown/missing names are ignored.
+				await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
+				// Wire the extension runtime exactly as the live executor does. Without
+				// this the runner stays pre-init, every action method throws
+				// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
+				// touches a runtime action trips the fail-closed gate in `emitToolCall`,
+				// blocking every tool — including the hidden `yield` — in the revived
+				// agent. `session_start` also re-runs so extensions restore per-session
+				// state (issue #8824).
+				await initializeExtensions(session, {
+					reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
+					reportRuntimeError: err =>
+						logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+				});
+			} catch (err) {
+				void session.dispose().catch(() => {});
+				throw err;
+			}
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// The internal run-state signal precedes deferrable public `agent_end`,

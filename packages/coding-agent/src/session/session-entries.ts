@@ -288,6 +288,10 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	display: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Persisted rollback ownership forwarded from the stamped CustomMessage
+	 * (`/undo`, `/revert`); never nested inside the extension-owned details. */
+	userTurn?: boolean;
+	promptPrelude?: boolean;
 }
 
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */

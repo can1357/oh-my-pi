@@ -10,6 +10,8 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import {
 	directoryIsEnterable,
+	type FileLockHandle,
+	lockPathFor,
 	getBlobsDir,
 	getProjectDir,
 	getSessionsDir,
@@ -17,6 +19,8 @@ import {
 	logger,
 	stringifyJson,
 	toError,
+	tryAcquireFileLock,
+	withFileLock,
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
@@ -69,6 +73,449 @@ import {
 	visitEntriesFromFile,
 } from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
+
+/**
+ * Owner sidecar (`<session>.jsonl.owner`): append-only registry of the pids
+ * holding this session's append writer, one per line. A process appends its
+ * line when it acquires the writer and removes only its own line on close
+ * (the file is unlinked once empty). Crash-safe liveness signal for
+ * out-of-process maintenance (gc): concurrent owners each keep a line, and
+ * stale lines name dead pids, so the session counts as unowned only when
+ * every recorded pid is gone.
+ */
+/** File identity used to detect a journal replacement (atomic rename). */
+export type JournalIdentity = { dev: number; ino: number; size: number; mtimeMs: number };
+
+export async function journalIdentity(sessionFile: string): Promise<JournalIdentity | undefined> {
+	try {
+		const stat = await fs.promises.stat(sessionFile);
+		return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+	} catch (error) {
+		// Only ENOENT means "journal absent". A transient I/O or permission
+		// error must not read as absence: two failed probes would compare
+		// equal (undefined === undefined) and accept a stale snapshot while
+		// a concurrent prune replaced the file.
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+export function sameJournalIdentity(a: JournalIdentity | undefined, b: JournalIdentity | undefined): boolean {
+	// Both absent (file never existed) is stable; one-sided presence or any
+	// field difference means the journal was replaced or appended to.
+	if (!a || !b) return a === b;
+	return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+}
+
+function ownerSidecarPath(sessionFile: string): string {
+	return `${sessionFile}.owner`;
+}
+
+/** One claim line for THIS manager: `pid startToken` when the process start
+ * identity is available, bare `pid` otherwise. The token lets readers
+ * distinguish a recycled pid from the manager that actually claimed. */
+function ownerClaimLine(pid: number = process.pid): string {
+	const token = processStartToken(pid);
+	return token === undefined ? `${pid}\n` : `${pid} ${token}\n`;
+}
+
+/** Parse one sidecar claim line into pid + optional start token. */
+function parseOwnerClaimLine(line: string): { pid: number; startToken: string | undefined } | undefined {
+	const [pidRaw, tokenRaw] = line.trim().split(/\s+/);
+	const pid = Number.parseInt(pidRaw ?? "", 10);
+	if (!Number.isInteger(pid) || pid <= 0) return undefined;
+	return { pid, startToken: tokenRaw };
+}
+
+export interface OwnerClaimsEntry {
+	pid: number;
+	/** Claim lines for this pid (one per manager instance). */
+	count: number;
+	/** Start tokens recorded on this pid's lines (legacy lines contribute
+	 * none and force conservative pid-only liveness for the whole pid). */
+	startTokens: string[];
+	/** Lines recorded before start tokens existed. */
+	legacyCount: number;
+}
+
+/**
+ * True when an owner-claims entry represents a still-live manager process:
+ * the pid is alive AND — for token-carrying lines — the process occupying it
+ * is the same launch. Legacy pid-only lines stay conservative (pid-only
+ * liveness), matching the pre-token behavior.
+ */
+export function ownerClaimIsLive(entry: OwnerClaimsEntry): boolean {
+	if (entry.legacyCount > 0) return isProcessAlive(entry.pid);
+	return isProcessAlive(entry.pid) && entry.startTokens.some(token => isProcessInstanceAlive(entry.pid, token));
+}
+
+// Same-process holders of a sidecar lock, by resolved lock path (abstract
+// socket locks are per-process: a second acquire from the same process
+// fails even though the first holder is our own queued async op).
+const sidecarLockHolders = new Map<string, number>();
+
+function getSidecarLockPath(sessionFile: string): string {
+	return lockPathFor(ownerSidecarPath(sessionFile));
+}
+
+// Same-process owner of each session file's append-writer lock, keyed by
+// lock path: #appendWriter uses it to hand the claim off to a contending
+// sibling manager (close-and-take) instead of throwing.
+const sessionWriterOwners = new Map<string, SessionManager>();
+
+async function withOwnerSidecarLock<T>(sessionFile: string, fn: () => Promise<T>): Promise<T> {
+	// withFileLock derives `<sidecar>.lock` for the sidecar file itself —
+	// distinct from the session file's own lock, which this process may
+	// already hold for its append writer.
+	const lockPath = getSidecarLockPath(sessionFile);
+	sidecarLockHolders.set(lockPath, (sidecarLockHolders.get(lockPath) ?? 0) + 1);
+	try {
+		return await withFileLock(ownerSidecarPath(sessionFile), fn);
+	} finally {
+		const remaining = (sidecarLockHolders.get(lockPath) ?? 1) - 1;
+		if (remaining > 0) sidecarLockHolders.set(lockPath, remaining);
+		else sidecarLockHolders.delete(lockPath);
+	}
+}
+
+async function writeOwnerSidecar(sessionFile: string): Promise<boolean> {
+	// Serialized against removal in other processes: an unregister's
+	// read-modify-write must never discard a claim appended concurrently.
+	// One line per manager instance — two managers in one process each
+	// append, and each close removes exactly one own-pid line, so the
+	// surviving manager keeps the session owned. Readers dedup by pid.
+	// Reports whether THIS append landed: a same-process sibling's existing
+	// pid line must not mask this manager's failed registration.
+	try {
+		await withOwnerSidecarLock(sessionFile, () =>
+			fs.promises.appendFile(ownerSidecarPath(sessionFile), ownerClaimLine(), {
+				encoding: "utf-8",
+				mode: 0o600,
+			}),
+		);
+		return true;
+	} catch {
+		// Best-effort ownership hint; readers fall back to treating the
+		// session as unowned when the sidecar is unreadable.
+		return false;
+	}
+}
+
+/**
+ * Synchronous {@link writeOwnerSidecar} for callers that must have the
+ * claim durable BEFORE the session file itself becomes visible on disk
+ * (branch creation publishes via a synchronous rewrite). Same locking and
+ * one-line-per-manager contract as the async variant.
+ */
+function writeOwnerSidecarSync(sessionFile: string): boolean {
+	const lock = tryAcquireFileLock(ownerSidecarPath(sessionFile));
+	if (!lock?.acquired) {
+		lock?.release();
+		// A same-process holder is one of OUR queued async sidecar ops:
+		// while we hold the OS lock, no other process can be inside a
+		// remove's read-modify-write, and our own removes serialize behind
+		// the sidecar tail — so a direct append cannot lose the update.
+		// Skipping this re-entrancy path deadlocks instead: the sync retry
+		// loop freezes the event loop with Atomics.wait and starves the very
+		// async holder whose completion would free the lock.
+		if ((sidecarLockHolders.get(getSidecarLockPath(sessionFile)) ?? 0) === 0) return false;
+		try {
+			fs.appendFileSync(ownerSidecarPath(sessionFile), ownerClaimLine(), {
+				encoding: "utf-8",
+				mode: 0o600,
+			});
+			return true;
+		} catch {
+			// Best-effort ownership hint, same contract as below.
+			return false;
+		}
+	}
+	try {
+		fs.appendFileSync(ownerSidecarPath(sessionFile), ownerClaimLine(), {
+			encoding: "utf-8",
+			mode: 0o600,
+		});
+		return true;
+	} catch {
+		// Best-effort ownership hint, same contract as the async variant.
+		return false;
+	} finally {
+		lock.release();
+	}
+}
+
+function pruneMarkerPath(sessionFile: string): string {
+	return `${ownerSidecarPath(sessionFile)}.pruning`;
+}
+
+/**
+ * Record that an undo-tail prune is publishing under the session claim.
+ * Openers check this after registering: a marker present during their load
+ * means the loaded journal may be pre-prune, so they wait for it to clear
+ * and reload — closing the load-vs-publish race without sharing the
+ * session claim (which same-process siblings must never double-acquire).
+ */
+async function readUndoTailPruneMarker(
+	sessionFile: string,
+): Promise<{ pid: number; startToken: string | undefined } | undefined> {
+	try {
+		const content = await fs.promises.readFile(pruneMarkerPath(sessionFile), "utf-8");
+		const [pidRaw, tokenRaw] = content.trim().split(/\s+/);
+		const pid = Number.parseInt(pidRaw ?? "", 10);
+		if (!Number.isInteger(pid)) return undefined;
+		// Legacy markers recorded only a pid: no token, pid-only liveness.
+		return { pid, startToken: tokenRaw };
+	} catch (error) {
+		// Only a genuinely absent marker means "no prune in flight". Other
+		// read failures (permissions, transient I/O) fail closed: reporting
+		// a cleared marker could accept a pre-prune journal.
+		if (isEnoent(error)) return undefined;
+		throw error;
+	}
+}
+
+async function markUndoTailPruneInProgress(sessionFile: string): Promise<void> {
+	// Record the process start identity beside the pid so a recycled pid is
+	// never mistaken for the still-running pruner.
+	const token = processStartToken(process.pid);
+	const payload = token === undefined ? `${process.pid}\n` : `${process.pid} ${token}\n`;
+	await withOwnerSidecarLock(sessionFile, () =>
+		fs.promises.writeFile(pruneMarkerPath(sessionFile), payload, { encoding: "utf-8", mode: 0o600 }),
+	);
+}
+
+async function clearUndoTailPruneMarker(sessionFile: string): Promise<void> {
+	await withOwnerSidecarLock(sessionFile, () => fs.promises.rm(pruneMarkerPath(sessionFile), { force: true }));
+}
+
+/**
+ * Remove a marker whose recording gc process is provably dead (ESRCH).
+ * Re-validated under the sidecar lock so a marker a successor prune just
+ * re-created with its own live pid is never removed.
+ */
+async function removeStaleUndoTailPruneMarker(sessionFile: string): Promise<void> {
+	await withOwnerSidecarLock(sessionFile, async () => {
+		const marker = await readUndoTailPruneMarker(sessionFile);
+		if (marker === undefined || isProcessInstanceAlive(marker.pid, marker.startToken)) return;
+		await fs.promises.rm(pruneMarkerPath(sessionFile), { force: true });
+	});
+}
+
+/**
+ * Wait for an in-flight prune to finish publishing. Bounded: a marker whose
+ * gc process died is removed (dead pids are proven by liveness, fail-closed),
+ * and a hard 30s cap ends the wait — the caller reloads either way, and it is
+ * already registered, so every later prune's owner recheck skips it.
+ */
+async function waitClearUndoTailPruneMarker(sessionFile: string): Promise<void> {
+	const deadline = Date.now() + 30_000;
+	while (Date.now() < deadline) {
+		const marker = await readUndoTailPruneMarker(sessionFile);
+		if (marker === undefined) return;
+		if (!isProcessInstanceAlive(marker.pid, marker.startToken)) {
+			await removeStaleUndoTailPruneMarker(sessionFile).catch(() => undefined);
+			return;
+		}
+		await Bun.sleep(50);
+	}
+}
+
+export async function removeOwnerSidecar(sessionFile: string): Promise<boolean> {
+	const file = ownerSidecarPath(sessionFile);
+	// Serialized against registration in other processes so this
+	// read-modify-write cannot discard a concurrently appended claim.
+	// Removes exactly ONE own-pid line: sibling managers in this process
+	// keep theirs, so ownership survives until the last manager closes.
+	let removed = false;
+	await withOwnerSidecarLock(sessionFile, async () => {
+		try {
+			const content = await fs.promises.readFile(file, "utf-8");
+			const lines = content
+				.split("\n")
+				.map(line => line.trim())
+				.filter(line => line !== "");
+			// Remove exactly ONE own claim: pid matches AND the line is either
+			// tokenless (legacy / token-unavailable host) or carries this
+			// process's current start token. A same-pid line with a different
+			// token is a recycled pid's unrelated claim — never ours to remove.
+			const ownToken = processStartToken(process.pid);
+			const own = lines.findIndex(line => {
+				const claim = parseOwnerClaimLine(line);
+				if (!claim || claim.pid !== process.pid) return false;
+				return claim.startToken === undefined || claim.startToken === ownToken;
+			});
+			if (own !== -1) lines.splice(own, 1);
+			if (lines.length === 0) {
+				await fs.promises.rm(file, { force: true });
+			} else {
+				// Atomic replacement, never an in-place truncate-rewrite: a
+				// crash after truncation but before the surviving lines land
+				// would silently strip still-live managers of their ownership
+				// record, and a later gc could prune beneath them. A crash
+				// mid-sequence leaves the untouched original plus a tmp
+				// orphan (never parsed as a sidecar).
+				const tmp = `${file}.tmp-${process.pid}`;
+				await fs.promises.writeFile(tmp, `${lines.join("\n")}\n`, { encoding: "utf-8", mode: 0o600 });
+				await fs.promises.rename(tmp, file);
+			}
+			removed = true;
+		} catch (error) {
+			// Only genuine absence counts as removed (AGENTS.md L139-147):
+			// reporting success on an unreadable or unwritable sidecar drops
+			// the caller's claim accounting while the pid line lives on,
+			// pinning the session as owned with no retry path.
+			removed = isEnoent(error);
+		}
+	});
+	return removed;
+}
+
+/** Recorded owner pids for a session file (stale/dead pids included). */
+export async function readSessionOwnerPids(sessionFile: string): Promise<number[]> {
+	const claims = await readOwnerClaims(sessionFile);
+	return [...claims.keys()];
+}
+
+/**
+ * Per-pid claim entries with process-start identity, NOT deduplicated by
+ * line: two managers in one process each append an own claim line, and
+ * losing either would erase the sibling. Same fail-closed read contract as
+ * {@link readSessionOwnerPids}.
+ */
+export async function readOwnerClaims(sessionFile: string): Promise<Map<number, OwnerClaimsEntry>> {
+	const claims = new Map<number, OwnerClaimsEntry>();
+	// Under the same lock registration and removal hold: removal rewrites
+	// the sidecar with a truncating writeFile, so an unlocked read can
+	// observe a partially-written file, miss a remaining live owner, and
+	// let gc publish a prune beneath it.
+	const content = await withOwnerSidecarLock(sessionFile, async () =>
+		fs.promises.readFile(ownerSidecarPath(sessionFile), "utf-8"),
+	).catch((error: unknown) => {
+		// Only a genuinely absent sidecar means "no owners". Any other read
+		// failure (permissions, transient I/O) must fail closed — reporting
+		// no owners would let gc prune beneath a live manager.
+		if (isEnoent(error)) return "";
+		throw error;
+	});
+	for (const line of content.split("\n")) {
+		const claim = parseOwnerClaimLine(line);
+		if (!claim) continue;
+		const entry = claims.get(claim.pid) ?? { pid: claim.pid, count: 0, startTokens: [], legacyCount: 0 };
+		entry.count++;
+		if (claim.startToken === undefined) entry.legacyCount++;
+		else entry.startTokens.push(claim.startToken);
+		claims.set(claim.pid, entry);
+	}
+	return claims;
+}
+
+/**
+ * Raised when the session file's exclusive claim is held elsewhere (gc or
+ * another writer). Callers surface this instead of queueing a rewrite: a
+ * queued rewrite would interleave with the holder's replacement and tear the
+ * file or resurrect pruned history.
+ */
+export class SessionFileLockError extends Error {
+	constructor(sessionFile: string) {
+		super(`Session file is locked by another process (maintenance or gc); retry shortly: ${sessionFile}`);
+		this.name = "SessionFileLockError";
+	}
+}
+
+/**
+ * True when a pid is still running. Fails CLOSED: only ESRCH (no such
+ * process) and EINVAL prove death — EPERM (exists, not ours) and any
+ * unknown probe error count as alive, so gc never prunes a live owner
+ * because a platform/runtime hiccup made the probe ambiguous.
+ */
+export function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		return !(code === "ESRCH" || code === "EINVAL");
+	}
+}
+
+/**
+ * Start-identity token for a pid, unique per process launch. Linux reads
+ * /proc field 22 (starttime, ticks since boot); other POSIX platforms fall
+ * back to `ps -o lstart=` (the process's local start timestamp, parsed as a
+ * normalized string); Windows has no portable equivalent and returns
+ * `undefined`, where callers fall back to pid-only liveness. `undefined`
+ * anywhere else means "unavailable": callers treat it conservatively.
+ */
+export function processStartToken(pid: number): string | undefined {
+	return linuxProcStartToken(pid) ?? psStartToken(pid);
+}
+
+function linuxProcStartToken(pid: number): string | undefined {
+	try {
+		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+		// The comm field can contain spaces and parens; fields resume after
+		// the final ')'.
+		const afterComm = stat.slice(stat.lastIndexOf(")") + 2);
+		const fields = afterComm.split(" ");
+		// field 22 (starttime) is index 19 after state (field 3).
+		const starttime = fields[19];
+		return starttime && /^\d+$/.test(starttime) ? starttime : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * `ps -o lstart=` for the pid — the kernel-reported start time, formatted by
+ * ps. Two launches can only collide if the pid was recycled within the same
+ * second, a strictly tighter guarantee than pid-only liveness.
+ */
+function psStartToken(pid: number): string | undefined {
+	if (process.platform === "win32") return undefined;
+	try {
+		const proc = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], {
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		return parsePsLstart(proc.stdout.toString());
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Normalize `ps -o lstart=` output into a comparable token. ALL whitespace is
+ * stripped: the token is serialized into whitespace-delimited claim lines and
+ * prune markers (`pid token`), so a multiword `lstart` must encode as a single
+ * field or readers would truncate it to the weekday.
+ */
+export function parsePsLstart(output: string): string | undefined {
+	const token = output.replace(/\s+/g, "");
+	return token.length > 0 ? token : undefined;
+}
+
+/**
+ * Liveness bound to a process instance: the pid is alive AND — when a start
+ * token was recorded — the process now occupying it is the same launch. This
+ * is what distinguishes a crashed pruner's leftover marker from pid reuse:
+ * a recycled pid is alive but carries a different starttime, so the marker
+ * is treated as stale instead of blocking opens for the full timeout.
+ */
+export function isProcessInstanceAlive(pid: number, startToken: string | undefined): boolean {
+	if (!isProcessAlive(pid)) return false;
+	if (startToken === undefined) return true;
+	const current = processStartToken(pid);
+	// Unreadable token (no provider, or a race with exit): fail closed —
+	// treat as the same instance so a possibly-live pruner is never declared
+	// dead. Provider mismatch (claim recorded from /proc ticks, current read
+	// via ps — e.g. a procfs mount disappeared) also fails closed: the two
+	// token encodings are incomparable strings, and a spurious mismatch would
+	// release a live owner's claim.
+	if (current === undefined) return true;
+	if (/^\d+$/.test(current) !== /^\d+$/.test(startToken)) return true;
+	return current === startToken;
+}
+
 import {
 	computeDefaultSessionDir,
 	readTerminalBreadcrumbEntry,
@@ -520,6 +967,30 @@ export class SessionManager {
 
 	/** The single open append writer; the manager only ever writes one file at a time. */
 	#writer: SessionStorageWriter | undefined;
+	#writerLock: FileLockHandle | undefined;
+	/**
+	 * Successful sidecar claim appends by THIS manager, per session file,
+	 * decremented one-for-one by removals. Read/written only inside
+	 * sidecar-tail callbacks, so the accounting settles in tail order — a
+	 * registration still in flight when close() chains its removal is
+	 * counted before that removal runs. Per-file rather than a single
+	 * slot: a release that fails during a transfer (switch/fork/moveTo)
+	 * must keep BOTH files as retry targets, or the source's live-pid
+	 * line is orphaned until process exit.
+	 */
+	#ownerClaims = new Map<string, number>();
+	/**
+	 * Identity of the journal this manager last accepted (gated load) or
+	 * published (atomic rewrite). The gc prune rechecks it under the
+	 * publish lock so a concurrent manager's append-and-close between the
+	 * load and the prune cannot be overwritten by a stale snapshot.
+	 */
+	#loadedJournalIdentity: JournalIdentity | undefined;
+	/** True only while a gc undo-tail prune is publishing; gates the owner recheck. */
+	#undoTailPruneActive = false;
+	#sidecarTail: Promise<void> = Promise.resolve();
+	/** Read-only inspection mode: never append owner sidecar claims (gc dry runs). */
+	#noOwnerClaim = false;
 	/** Sealed by {@link releaseRetainedEntries}: every later append/title/rewrite is a dropped no-op. */
 	#released = false;
 	/** Serializes async disk work (flush/close/atomic rewrite). Appends are synchronous and bypass it. */
@@ -635,6 +1106,11 @@ export class SessionManager {
 			});
 
 		const reported = scheduled.catch(err => {
+			// Transient lock contention is not a disk failure: latching it
+			// would poison the manager (close() rethrows #diskFailure) for
+			// what every other rewrite path already treats as a retryable
+			// SessionFileLockError passthrough.
+			if (err instanceof SessionFileLockError) throw err;
 			throw this.#noteDiskFailure(err);
 		});
 		this.#diskTail = reported.catch(() => undefined);
@@ -670,14 +1146,135 @@ export class SessionManager {
 	#closeWriterEventually(): void {
 		const writer = this.#writer;
 		this.#writer = undefined;
-		if (writer) void writer.close().catch(() => undefined);
+		if (writer) {
+			void writer.close().catch(() => undefined);
+		}
+		this.#releaseWriterLock();
 	}
 
 	async #closeWriterHandle(): Promise<void> {
 		const writer = this.#writer;
 		if (!writer) return;
 		this.#writer = undefined;
+		// Release the claim before awaiting the fd close: an append landing
+		// during the in-flight close must be able to open a fresh writer, not
+		// collide with our own unreleased handle.
+		this.#releaseWriterLock();
 		await writer.close();
+	}
+
+	#releaseWriterLock(): void {
+		this.#writerLock?.release();
+		this.#writerLock = undefined;
+		if (this.#sessionFile) {
+			const key = lockPathFor(this.#sessionFile);
+			if (sessionWriterOwners.get(key) === this) sessionWriterOwners.delete(key);
+		}
+	}
+
+	/**
+	 * Ownership follows the LIVE manager, not the append writer: a session
+	 * stays owned while this process holds it open, so gc skips it even
+	 * between writer reopens (compaction rewrites, recovery, mid-close).
+	 */
+	#registerOwnerSidecar(): Promise<boolean> {
+		if (!this.#persist) return Promise.resolve(true);
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile || !(this.#storage instanceof FileSessionStorage)) return Promise.resolve(true);
+		if (this.#noOwnerClaim) return Promise.resolve(true);
+		if ((this.#ownerClaims.get(sessionFile) ?? 0) > 0) return Promise.resolve(true);
+		// Serialized against other processes' removals; chained on the
+		// sidecar tail so register/remove keep strict per-manager order.
+		// The count is latched SYNCHRONOUSLY when the write is chained —
+		// not when it lands — so the guard above suppresses a duplicate
+		// registration racing this one, and a close() that snapshots the
+		// claims while the write is still queued still releases it (the
+		// release runs later in tail order, after the write). A failed
+		// append rolls the latch back so the #recordEntry backstop can
+		// retry instead of leaving a live manager unowned.
+		this.#ownerClaims.set(sessionFile, (this.#ownerClaims.get(sessionFile) ?? 0) + 1);
+		let written = false;
+		this.#sidecarTail = this.#sidecarTail.then(async () => {
+			written = await writeOwnerSidecar(sessionFile);
+			if (!written) {
+				this.#ownerClaims.set(sessionFile, Math.max(0, (this.#ownerClaims.get(sessionFile) ?? 0) - 1));
+			}
+		});
+		return this.#sidecarTail.then(() => written);
+	}
+
+	/**
+	 * Synchronous {@link #registerOwnerSidecar} for callers that expose a
+	 * manager (detached clones for in-flight bash) before any await can
+	 * drain the queued sidecar tail: the claim must be durable the moment
+	 * the clone exists, or a session switch that releases the SOURCE
+	 * manager's claim in the same turn leaves a window where gc sees the
+	 * session unowned and prunes undo tails beneath the clone — which its
+	 * close-time full rewrite would then resurrect. Returns false when the
+	 * claim could not be established synchronously (sidecar lock busy or
+	 * transient I/O); callers fall back to the queued async registration.
+	 */
+	#registerOwnerSidecarSync(): boolean {
+		if (!this.#persist) return true;
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile || !(this.#storage instanceof FileSessionStorage)) return true;
+		if (this.#noOwnerClaim) return true;
+		if ((this.#ownerClaims.get(sessionFile) ?? 0) > 0) return true;
+		if (!writeOwnerSidecarSync(sessionFile)) return false;
+		this.#ownerClaims.set(sessionFile, (this.#ownerClaims.get(sessionFile) ?? 0) + 1);
+		return true;
+	}
+
+	#claimOwnerSidecarFor(sessionFile: string): Promise<boolean> {
+		return writeOwnerSidecar(sessionFile).then(written => {
+			if (written) this.#ownerClaims.set(sessionFile, (this.#ownerClaims.get(sessionFile) ?? 0) + 1);
+			return written;
+		});
+	}
+
+	#releaseOwnerClaim(sessionFile: string | undefined): void {
+		if (!sessionFile) return;
+		// The release is latched SYNCHRONOUSLY at call time — mirroring
+		// #registerOwnerSidecar's synchronous latch — never inside the tail
+		// callback. A resume of file A racing a switch-away's queued removal
+		// must see the contribution already gone and queue a fresh
+		// registration behind the removal; accepting the pending-to-be-
+		// removed count as durable ownership would leave the manager idle on
+		// A with no owner row once the queued removal lands.
+		const count = this.#ownerClaims.get(sessionFile) ?? 0;
+		if (count <= 0) return;
+		this.#ownerClaims.set(sessionFile, count - 1);
+		this.#sidecarTail = this.#sidecarTail.then(async () => {
+			let removed = false;
+			try {
+				removed = await removeOwnerSidecar(sessionFile);
+			} catch {
+				// Lock-acquisition contention or transient I/O: the tail must
+				// NEVER reject — a rejected tail silently skips every later
+				// chained register/release and permanently disables this
+				// manager's ownership bookkeeping. Fall through to the
+				// retain path below so a later release retries.
+			}
+			if (removed) return;
+			// Removal failed for a non-absence reason: retain the
+			// contribution so a later release from this still-alive manager
+			// retries instead of leaving a stale live-pid line nothing will
+			// ever shed. Per-file accounting keeps this file a retry target
+			// even when the manager has since claimed another session.
+			this.#ownerClaims.set(sessionFile, (this.#ownerClaims.get(sessionFile) ?? 0) + 1);
+		});
+	}
+
+	#unregisterOwnerSidecar(except?: string): void {
+		// Release every claim this manager holds, optionally sparing one
+		// file: close() sheds everything, while transfers release the
+		// source and keep the destination they already claimed. The full
+		// per-file count is shed — a file can legitimately hold more than
+		// one contribution (registration plus a transfer preclaim).
+		for (const [file, count] of [...this.#ownerClaims]) {
+			if (except !== undefined && file === except) continue;
+			for (let i = 0; i < count; i++) this.#releaseOwnerClaim(file);
+		}
 	}
 
 	#latchIndeterminate(operationError: Error, recoveryErrors: readonly Error[]): SessionPersistenceIndeterminateError {
@@ -721,6 +1318,23 @@ export class SessionManager {
 		this.#diskEpoch++;
 		const epoch = this.#diskEpoch;
 		this.#writer = undefined;
+		// Hold ONE exclusive claim across the entire repair — writer close,
+		// drain, and atomic publication. A resumed process must not open an
+		// append fd onto the old inode between the writer dropping and the
+		// replace publishing. When the append writer's claim is already held,
+		// keep it (gapless handoff; the repair's inline writeTextAtomic does
+		// not reacquire). The sidecar is removed once the fd close succeeds,
+		// matching #closeWriterHandle.
+		const fileBacked = this.#sessionFile ? this.#storage instanceof FileSessionStorage : false;
+		let repairLock: FileLockHandle | null = this.#writerLock ?? null;
+		this.#writerLock = undefined;
+		if (fileBacked && !repairLock) {
+			repairLock = tryAcquireFileLock(this.#sessionFile!);
+			if (!repairLock?.acquired) {
+				repairLock?.release();
+				throw new SessionFileLockError(this.#sessionFile!);
+			}
+		}
 		this.#diskTail = Promise.resolve();
 		this.#forceFileCreation = true;
 		this.#fileIsCurrent = false;
@@ -798,6 +1412,7 @@ export class SessionManager {
 			throw this.#latchIndeterminate(operationError, [toError(error)]);
 		} finally {
 			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
+			repairLock?.release();
 		}
 	}
 
@@ -806,10 +1421,49 @@ export class SessionManager {
 
 		if (this.#writer?.isOpen()) return this.#writer;
 
-		this.#writer = this.#storage.openWriter(this.#sessionFile, {
-			flags: "a",
-			onError: err => this.#noteDiskFailure(err),
-		});
+		// OS-path locks and the owner sidecar only exist for file-backed
+		// storage: IndexedSessionStorage backends (Redis/SQL) and memory
+		// storage no-op directory creation and would otherwise fail lock file
+		// creation on their virtual session paths.
+		const fileBacked = this.#storage instanceof FileSessionStorage;
+		if (this.#persist && fileBacked) {
+			// Exclusive claim, held until the writer closes: a gc rewrite (or
+			// any other whole-file replacement) must never interleave with an
+			// open append fd, or appends land on the replaced-away inode and
+			// vanish. Exactly one OS handle owns a session file at a time;
+			// same-process contention resolves by handoff (below), not failure.
+			let lock = tryAcquireFileLock(this.#sessionFile);
+			if (!lock?.acquired) {
+				lock?.release();
+				// Contended by OUR OWN process: the SDK resume contract (and
+				// upstream tests) open a second manager on a file a live sibling
+				// built and never closed. Hand off rather than fail — close the
+				// sibling's writer (releasing its claim synchronously) and take
+				// over. POSIX O_APPEND keeps concurrent small writes line-atomic,
+				// and the sibling reopens lazily on its next append, stealing back
+				// symmetrically. Cross-process contention still throws.
+				const holder = sessionWriterOwners.get(lockPathFor(this.#sessionFile));
+				if (holder) holder.#closeWriterEventually();
+				lock = tryAcquireFileLock(this.#sessionFile);
+				if (!lock?.acquired) {
+					lock?.release();
+					throw new SessionFileLockError(this.#sessionFile);
+				}
+			}
+			this.#writerLock = lock;
+			sessionWriterOwners.set(lockPathFor(this.#sessionFile), this);
+		}
+		try {
+			this.#writer = this.#storage.openWriter(this.#sessionFile, {
+				flags: "a",
+				onError: err => this.#noteDiskFailure(err),
+			});
+		} catch (error) {
+			// The claim outlived the writer it was taken for: drop it or this
+			// process (and every other) stays locked out of the session.
+			this.#releaseWriterLock();
+			throw error;
+		}
 		return this.#writer;
 	}
 
@@ -870,11 +1524,31 @@ export class SessionManager {
 		const targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
 		if (!targetPath) return;
 
+		// Close (and release the append-writer claim on) any open writer
+		// before claiming the rewrite lock: both claims use the same lock
+		// path and a second same-process acquire fails by design. With the
+		// writer closed, no append fd outlives the replacement below.
+		this.#closeWriterEventually();
+
+		let rewriteLock: FileLockHandle | null = null;
+		if (this.#persist) {
+			// Same exclusive claim the append writer holds, covering the
+			// replacement itself: an appender that woke up between gc's owner
+			// preflight and this rewrite fails its writer open (or we fail
+			// here when it got there first) instead of silently losing turns
+			// to the swapped-out inode.
+			if (this.#storage instanceof FileSessionStorage) {
+				rewriteLock = tryAcquireFileLock(targetPath);
+				if (!rewriteLock?.acquired) {
+					rewriteLock?.release();
+					throw new SessionFileLockError(targetPath);
+				}
+			}
+		}
 		try {
 			const body = this.#fileBody();
 			this.#diskEpoch++;
 			this.#diskTail = Promise.resolve();
-			this.#closeWriterEventually();
 			this.#storage.writeTextSync(targetPath, body);
 			this.#clearDiskError();
 			// Only mark the manager current when writing the active session path.
@@ -893,7 +1567,10 @@ export class SessionManager {
 				this.#hasTitleSlot = true;
 			}
 		} catch (err) {
+			if (err instanceof SessionFileLockError) throw err;
 			this.#noteDiskFailure(err);
+		} finally {
+			rewriteLock?.release();
 		}
 	}
 
@@ -907,10 +1584,11 @@ export class SessionManager {
 	 * synchronous rewrite from being overwritten by the stale body serialized
 	 * before it ran.
 	 */
-	async #rewriteAtomically(): Promise<void> {
-		if (!this.#persist || !this.#sessionFile) return;
-		if (this.#released) return;
+	async #rewriteAtomically(): Promise<boolean> {
+		if (!this.#persist || !this.#sessionFile) return true;
+		if (this.#released) return false;
 
+		let published = false;
 		const startEpoch = this.#diskEpoch;
 		await this.#scheduleDiskWork(
 			async () => {
@@ -919,10 +1597,12 @@ export class SessionManager {
 					this.#materializeBreadcrumb();
 					this.#rewriteRequired = false;
 					this.#hasTitleSlot = true;
+					published = true;
 				}
 			},
 			{ epoch: startEpoch },
 		);
+		return published;
 	}
 
 	/**
@@ -944,9 +1624,69 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
-				await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
-					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
-				});
+				// Same exclusive claim as the append writer and the sync
+				// rewrite: held across the atomic publication so a process
+				// resuming the session after gc's owner preflight cannot open
+				// an append fd onto the inode this replace detaches.
+				let publishLock: FileLockHandle | null = null;
+				if (this.#storage instanceof FileSessionStorage) {
+					publishLock = tryAcquireFileLock(sessionFile);
+					if (!publishLock?.acquired) {
+						publishLock?.release();
+						throw new SessionFileLockError(sessionFile);
+					}
+				}
+				try {
+					// Gc's undo-tail prune rechecks ownership INSIDE the
+					// exclusive claim: a manager that opened after gc's
+					// preflight loaded the pre-prune history, and publishing
+					// under it would set up a resurrect-on-rewrite. Aborting
+					// here leaves disk untouched; gc reports a skip.
+					if (this.#undoTailPruneActive) {
+						// Out-of-band writes: a concurrent manager can open,
+						// append, and close entirely between this manager's
+						// gated load and the prune marker, leaving no live
+						// owner here. Rewriting from the older in-memory
+						// snapshot would silently drop that append, so the
+						// journal must still be the exact generation this
+						// manager accepted or last published.
+						if (!sameJournalIdentity(this.#loadedJournalIdentity, await journalIdentity(sessionFile))) {
+							return false;
+						}
+						// Unreadable sidecar (non-ENOENT) throws and aborts
+						// the publish rather than risk pruning under a live
+						// owner. Raw claim counts, not deduplicated pids: this
+						// manager contributes exactly one own-pid line, so a
+						// second same-process line is a sibling manager
+						// holding the pre-prune in-memory tree.
+						const claims = await readOwnerClaims(sessionFile);
+						for (const [pid, entry] of claims) {
+							if (pid === process.pid) {
+								if (entry.count > 1) return false;
+								continue;
+							}
+							if (ownerClaimIsLive(entry)) return false;
+						}
+					}
+					await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
+						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
+					});
+					if (this.#storage instanceof FileSessionStorage) {
+						// The atomic rename already landed: a failing identity
+						// probe must not escape as a publish failure — the prune
+						// recovery path would restore the pre-prune tree and a
+						// later rewrite would resurrect the tails that just
+						// published away. Clear the cached identity instead:
+						// identity-gated callers fail closed on the mismatch.
+						try {
+							this.#loadedJournalIdentity = await journalIdentity(sessionFile);
+						} catch {
+							this.#loadedJournalIdentity = undefined;
+						}
+					}
+				} finally {
+					publishLock?.release();
+				}
 				if (this.#diskEpoch !== epoch) return false;
 			} while (this.#atomicRewriteDirty);
 			return true;
@@ -1031,8 +1771,16 @@ export class SessionManager {
 				});
 			}
 		} catch (err) {
+			// The entry never reached disk — not for a plain write failure,
+			// and not for transient lock contention either. Diverge the
+			// journal BEFORE any rethrow: #recordEntry has already inserted
+			// the entry into the in-memory tree, so a rethrown lock error
+			// that left #fileIsCurrent true would let the next append take
+			// the hot path, persist only that later entry, and orphan the
+			// locked-out one (its parentId names an id never written).
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
+			if (err instanceof SessionFileLockError) throw err;
 			this.#noteDiskFailure(err);
 		}
 	}
@@ -1083,11 +1831,24 @@ export class SessionManager {
 					await this.#storage.updateSessionTitle(sessionFile, update);
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
 				} catch {
-					if (!(await this.#runFencedAtomicRewrite(epoch))) return;
-					this.#clearDiskError();
-					this.#fileIsCurrent = true;
-					this.#rewriteRequired = false;
-					this.#hasTitleSlot = true;
+					try {
+						if (!(await this.#runFencedAtomicRewrite(epoch))) return;
+						this.#clearDiskError();
+						this.#fileIsCurrent = true;
+						this.#rewriteRequired = false;
+						this.#hasTitleSlot = true;
+					} catch (fallbackError) {
+						// The full-rewrite fallback failed too (journal lock
+						// held by another manager): the title entry is already
+						// in the in-memory tree but not on disk. Diverge the
+						// journal BEFORE propagating — exactly like the append
+						// path's lock-contention handling — so the next append
+						// performs a full rewrite instead of appending a line
+						// whose parentId references the missing title entry.
+						this.#fileIsCurrent = false;
+						this.#rewriteRequired = true;
+						throw fallbackError;
+					}
 				}
 			},
 			{ epoch },
@@ -1152,6 +1913,7 @@ export class SessionManager {
 		this.#inMemoryArtifactCounter = 0;
 
 		if (this.#persist) {
+			this.#unregisterOwnerSidecar();
 			this.#sessionFile =
 				forcedSessionFile ??
 				path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
@@ -1195,6 +1957,7 @@ export class SessionManager {
 			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
 			return;
 		}
+		this.#registerOwnerSidecar();
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		const batch = this.#atomicEntryBatch;
@@ -1333,7 +2096,7 @@ export class SessionManager {
 		const persist = options?.persist ?? this.#persist;
 		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
-		clone.restoreState(this.captureState());
+		clone.restoreState(this.captureState(), { requireDurableOwnership: true });
 		if (!persist) {
 			clone.#sessionFile = undefined;
 			clone.#fileIsCurrent = false;
@@ -1343,14 +2106,46 @@ export class SessionManager {
 		return clone;
 	}
 
-	restoreState(snapshot: SessionManagerStateSnapshot): void {
+	restoreState(snapshot: SessionManagerStateSnapshot, options?: { requireDurableOwnership?: boolean }): void {
 		this.#closeWriterEventually();
+		// Restoring the SAME session must not churn its ownership claim:
+		// switchSession's rollback lands here after a failed switch, and an
+		// unregister→re-register gap there lets gc publish beneath the
+		// restored in-memory snapshot. A different file keeps the old
+		const targetSessionFile = snapshot.sessionFile ? path.resolve(snapshot.sessionFile) : undefined;
+		this.#unregisterOwnerSidecar(targetSessionFile);
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 
 		this.#cwd = snapshot.cwd;
 		this.#sessionDir = snapshot.sessionDir;
 		this.#sessionFile = snapshot.sessionFile;
+		if (this.#registerOwnerSidecarSync()) {
+			// Claim durable before restoreState returns: a detached clone is
+			// exposed to its caller immediately, with no later await that
+			// could drain a queued registration before the source manager's
+			// claim is released by a session switch.
+		} else if (options?.requireDurableOwnership) {
+			// The clone must not be exposed without a durable claim: retry
+			// the synchronous write briefly (sidecar lock contention is
+			// momentary), then fail creation rather than return a clone gc
+			// can prune beneath once the source's claim is released.
+			let registered = false;
+			for (let attempt = 0; attempt < 5 && !registered; attempt++) {
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+				registered = this.#registerOwnerSidecarSync();
+			}
+			if (!registered) {
+				throw new Error(
+					`Failed to establish session ownership for detached clone (${this.#sessionFile}); refusing to expose it`,
+				);
+			}
+		} else {
+			logger.warn("Session owner sidecar claim not established synchronously; queued", {
+				sessionFile: this.#sessionFile,
+			});
+			this.#registerOwnerSidecar();
+		}
 		this.#fileIsCurrent = snapshot.onDisk;
 		this.#rewriteRequired = snapshot.needsRewrite;
 		this.#forceFileCreation = snapshot.onDisk;
@@ -1407,22 +2202,137 @@ export class SessionManager {
 		await this.#setSessionFile(sessionFile);
 	}
 
-	async #setSessionFile(sessionFile: string, loadedSession?: SessionLoadResult): Promise<void> {
+	async #setSessionFile(
+		sessionFile: string,
+		loadedSession?: SessionLoadResult,
+		loadedIdentity?: JournalIdentity,
+	): Promise<void> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
-		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
-		if (loaded.invalidHeader) {
-			throw new Error(
-				`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
-			);
-		}
-
+		// The PREVIOUS claim is kept until the new session's gates pass: a
+		// switch that fails mid-load rolls back to the old in-memory
+		// snapshot, and releasing the old journal's claim early would let gc
+		// prune it during the fallible reconciliation and set up a resurrect
+		// when the stale snapshot is restored.
+		const previousClaims = new Map(this.#ownerClaims);
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
+		// Ownership established below must not outlive a failed load: a
+		// rejected open() leaves no manager reference to close, so gc would
+		// treat the session as owned until this process exits.
+		try {
+			await this.#setSessionFileGated(resolvedSessionFile, loadedSession, loadedIdentity);
+			// The switch committed only now — release every retained claim
+			// that is not for the new file (a same-file switch keeps it).
+			for (const [file, count] of previousClaims) {
+				if (file === resolvedSessionFile) continue;
+				for (let i = 0; i < count; i++) this.#releaseOwnerClaim(file);
+			}
+		} catch (error) {
+			// Release only what THIS load established — never the retained
+			// previous claims (a same-file reload failure must keep them).
+			// The delta matters: a same-file reload whose gates churn registers
+			// fresh claims per attempt, and those must all go; the pre-existing
+			// count for the file stays. A failed switch cannot orphan the old
+			// session's claim, and the gated load's new-file claims are dropped
+			// here in full.
+			// NEUTER: old all-or-nothing release
+			const established = this.#ownerClaims.get(resolvedSessionFile) ?? 0;
+			if ((previousClaims.get(resolvedSessionFile) ?? 0) === 0) {
+				for (let i = 0; i < established; i++) this.#releaseOwnerClaim(resolvedSessionFile);
+			}
+			await this.#sidecarTail;
+			throw error;
+		}
+	}
+
+	async #setSessionFileGated(
+		resolvedSessionFile: string,
+		loadedSession: SessionLoadResult | undefined,
+		loadedIdentity: JournalIdentity | undefined,
+	): Promise<void> {
+		// Load gates, all bounded (exhaustion refuses the load rather than
+		// accepting history a concurrent gc prune just removed — a later
+		// full rewrite would resurrect it):
+		// 1. Durable, awaited owner registration before ANY loaded journal is
+		//    accepted. gc creates its marker before its publish-time recheck,
+		//    so once our pid is on disk, a marker that appears afterwards
+		//    implies a recheck that saw us and aborted.
+		// 2. A marker present after registration means an in-flight prune:
+		//    wait for it, then discard the snapshot (it is pre-prune).
+		// 3. A prune that completed ENTIRELY between our load and
+		//    registration leaves no marker, but its publish is an atomic
+		//    rename — the journal identity probe after registration catches
+		//    it and forces a reload. The identity is anchored at the load
+		//    read (open() captures it for its preload).
+		let loaded: SessionLoadResult | undefined = loadedSession;
+		let loadIdentity = loadedIdentity;
+		for (let attempt = 0; attempt < 5; attempt++) {
+			if (loaded === undefined) {
+				loadIdentity =
+					this.#storage instanceof FileSessionStorage ? await journalIdentity(resolvedSessionFile) : undefined;
+				loaded = await loadSessionFile(resolvedSessionFile, this.#storage);
+			}
+
+			if (loaded.invalidHeader) {
+				throw new Error(
+					`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
+				);
+			}
+
+			if (this.#persist && this.#storage instanceof FileSessionStorage) {
+				let ownershipEstablished = false;
+				for (let registrationAttempt = 0; registrationAttempt < 5; registrationAttempt++) {
+					if (await this.#registerOwnerSidecar()) {
+						ownershipEstablished = true;
+						break;
+					}
+					// A failed append records no claim, so a plain retry is safe.
+				}
+				// Live without a durable claim is exactly what gc would
+				// misclassify; the flag stays cleared for the #recordEntry
+				// backstop if the caller retries. A directory we cannot
+				// write into cannot host a gc prune either (its publish is a
+				// sidecar write + rename): loading read-only storage without
+				// a claim is safe and matches the switch-under-readonly
+				// contract (issue #505).
+				if (!ownershipEstablished) {
+					const dirWritable = await fs.promises
+						.access(path.dirname(resolvedSessionFile), fs.constants.W_OK)
+						.then(() => true)
+						.catch(() => false);
+					if (!dirWritable) this.#noOwnerClaim = true;
+					else throw new SessionFileLockError(resolvedSessionFile);
+				}
+				if ((await readUndoTailPruneMarker(resolvedSessionFile)) !== undefined) {
+					await waitClearUndoTailPruneMarker(resolvedSessionFile);
+					// A marker that outlived the bounded wait means a live
+					// gc is still mid-publish; refuse rather than race it.
+					if ((await readUndoTailPruneMarker(resolvedSessionFile)) !== undefined) {
+						throw new SessionFileLockError(resolvedSessionFile);
+					}
+					loaded = undefined; // the prune published; snapshot is stale
+					continue;
+				}
+				if (!sameJournalIdentity(loadIdentity, await journalIdentity(resolvedSessionFile))) {
+					loaded = undefined; // replaced or appended underneath us
+					continue;
+				}
+			}
+			break;
+		}
+		if (loaded === undefined) {
+			// The journal kept churning across every retry.
+			throw new SessionFileLockError(resolvedSessionFile);
+		}
+		// The gates accepted exactly this generation of the journal; later
+		// rewrites (gc prune publishes) revalidate against it under the
+		// exclusive claim.
+		this.#loadedJournalIdentity = loadIdentity;
 		const { entries: fileEntries, titleSlot } = loaded;
 		if (fileEntries.length === 0) {
 			// Explicit but empty/missing path (e.g. --session flag): start fresh but
@@ -1431,6 +2341,7 @@ export class SessionManager {
 			this.#forceFileCreation = true;
 			await this.#rewriteAtomically();
 			this.#fileIsCurrent = true;
+			this.#registerOwnerSidecar();
 			return;
 		}
 
@@ -1473,6 +2384,10 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+		// Ownership on open, not first entry: a resumed session that stays
+		// idle (or only retitles, a path that bypasses #recordEntry) is still
+		// a live manager whose in-memory tree gc must not prune under.
+		this.#registerOwnerSidecar();
 	}
 
 	/**
@@ -1513,7 +2428,32 @@ export class SessionManager {
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
-		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+		const forkedSessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+		// Claim the fork target BEFORE switching the manager onto it: an
+		// idle fork with no durable claim and no later entry would never hit
+		// the registration backstop, and gc could prune its in-memory
+		// history. A failed claim refuses the fork with nothing changed —
+		// the old session stays claimed and active. Filesystem claims only
+		// exist for file-backed storage; a virtual session path would fail
+		// the append and refuse every fork of a memory/indexed session.
+		const fileBacked = this.#storage instanceof FileSessionStorage;
+		let forkClaimed = !fileBacked;
+		if (fileBacked) {
+			this.#sidecarTail = this.#sidecarTail.then(async () => {
+				forkClaimed = await this.#claimOwnerSidecarFor(forkedSessionFile);
+			});
+			await this.#sidecarTail;
+		}
+		if (!forkClaimed) {
+			this.#sessionId = parentSessionId;
+			throw new SessionFileLockError(forkedSessionFile);
+		}
+		// The fork target's claim is already durable; shed only the old
+		// session's claim (queued after, in tail order) so both files stay
+		// correctly accounted through the switch.
+		this.#unregisterOwnerSidecar(forkedSessionFile);
+		this.#sessionFile = forkedSessionFile;
+		await this.#sidecarTail;
 		this.#header = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -1576,6 +2516,11 @@ export class SessionManager {
 			this.#sessionFileRelocating = { source, dest };
 		}
 
+		// Held from before the rename until the destination rewrite lands:
+		// a foreign append writer keyed to the source path would keep
+		// appending to the replaced-away inode while this manager rewrites
+		// the destination, losing those entries.
+		let sourceLock: FileLockHandle | undefined;
 		try {
 			if (this.#persist && this.#sessionFile) {
 				this.#storage.ensureDirSync(nextSessionDir);
@@ -1593,8 +2538,45 @@ export class SessionManager {
 					path.resolve(oldArtifactsDir) !== path.resolve(newArtifactsDir);
 				sessionFileExisted = this.#storage.existsSync(oldSessionFile);
 
+				// Only a path-changing move can split a foreign writer's
+				// appends across a rename; a same-path move is serialized by
+				// the fenced rewrite's own publish lock (acquiring here too
+				// would collide with it in-process).
+				if (sessionFileExisted && sessionPathChanged && this.#storage instanceof FileSessionStorage) {
+					// Our own writer lock was released by the drain above, so
+					// acquiring here fails only when a foreign manager owns
+					// the journal — refuse the move rather than split its
+					// appends across the rename.
+					const lock = tryAcquireFileLock(oldSessionFile);
+					if (!lock?.acquired) {
+						lock?.release();
+						throw new SessionFileLockError(oldSessionFile);
+					}
+					sourceLock = lock;
+				}
+
 				let sessionMoved = false;
 				let artifactsMoved = false;
+				const preClaimedDestination = sessionFileExisted && sessionPathChanged;
+
+				if (preClaimedDestination) {
+					// Destination ownership BEFORE the rename: between the
+					// journal rename and the old claim's release, gc could
+					// discover the moved file with no destination sidecar,
+					// prune it, and have this manager's stale tree resurrect
+					// the tail on its next rewrite. A failed preclaim aborts
+					// the move (nothing renamed, source claim intact) —
+					// moving without a destination claim would leave a live
+					// manager gc treats as unowned.
+					let destinationClaimed = false;
+					this.#sidecarTail = this.#sidecarTail.then(async () => {
+						destinationClaimed = await this.#claimOwnerSidecarFor(newSessionFile);
+					});
+					await this.#sidecarTail;
+					if (!destinationClaimed) {
+						throw new SessionFileLockError(newSessionFile);
+					}
+				}
 
 				try {
 					if (sessionFileExisted && sessionPathChanged) {
@@ -1634,6 +2616,11 @@ export class SessionManager {
 						}
 					}
 
+					if (preClaimedDestination) {
+						// The journal never stayed at the destination — drop
+						// the premature claim; the old one is untouched.
+						this.#releaseOwnerClaim(newSessionFile);
+					}
 					throw err;
 				}
 
@@ -1644,6 +2631,15 @@ export class SessionManager {
 				}
 
 				this.#sessionFile = newSessionFile;
+				if (preClaimedDestination) {
+					// Claim already durable at the destination since before
+					// the rename — adopt it and release the source claim.
+					this.#releaseOwnerClaim(oldSessionFile);
+				} else {
+					this.#unregisterOwnerSidecar();
+					this.#registerOwnerSidecar();
+				}
+				await this.#sidecarTail;
 				this.#artifactManager = null;
 				this.#artifactManagerSessionFile = null;
 				// Path is repointed; hot-path appends may use `#sessionFile` again.
@@ -1677,6 +2673,7 @@ export class SessionManager {
 			if (this.#sessionFile) this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
 		} finally {
 			this.#sessionFileRelocating = null;
+			sourceLock?.release();
 		}
 	}
 
@@ -1711,7 +2708,22 @@ export class SessionManager {
 		manager.#entries = structuredClone(this.#entries);
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
+		// Same contract as forkFrom: preclaim before the copy's journal
+		// becomes visible, and drop the claim if materialization fails.
+		if (manager.#storage instanceof FileSessionStorage) {
+			let claimed = false;
+			manager.#sidecarTail = manager.#sidecarTail.then(async () => {
+				claimed = await manager.#claimOwnerSidecarFor(manager.#sessionFile!);
+			});
+			await manager.#sidecarTail;
+			if (!claimed) throw new SessionFileLockError(manager.#sessionFile!);
+		}
+		try {
+			await manager.#rewriteAtomically();
+		} catch (error) {
+			manager.#releaseOwnerClaim(manager.#sessionFile!);
+			throw error;
+		}
 		return manager;
 	}
 
@@ -1811,6 +2823,9 @@ export class SessionManager {
 		// on IndexedSessionStorage during `flushSync`) so callers relying on
 		// flush() see the write durably visible to readers.
 		await this.#storage.drain();
+		// Ownership removal is durable before close resolves, so a gc run
+		// started right after close never sees this process as an owner.
+		await this.#sidecarTail;
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
@@ -1865,21 +2880,95 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Flush a divergent journal (rollback under lock contention deferred its
+	 * full rewrite to "the next append") that has no later append coming.
+	 * Shared by close() and the dispose path — the dispose MUST call this
+	 * BEFORE seal(), because a released manager's atomic rewrite is fenced
+	 * off and the deferred rollback would otherwise never publish.
+	 * Returns the flush error instead of throwing, so close() can finish its
+	 * remaining steps before rethrowing.
+	 */
+	async flushDivergentJournal(): Promise<Error | undefined> {
+		if (!(this.#rewriteRequired && !this.#fileIsCurrent && this.#sessionFile)) return undefined;
+		try {
+			await this.rewriteEntries();
+		} catch (error) {
+			const flushError = toError(error);
+			logger.error("Session journal divergent at close; on-disk history is stale", {
+				sessionFile: this.#sessionFile,
+				error: flushError,
+			});
+			return flushError;
+		}
+		return undefined;
+	}
+
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
-		await this.#scheduleDiskWork(async () => {
-			const hadWriter = this.#writer !== undefined;
-			await this.#closeWriterHandle();
-			if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
-				this.#fileIsCurrent = true;
-		});
+		// The divergent-journal flush must run while the owner claim is STILL
+		// held: releasing the claim first lets a concurrent undo-tail gc
+		// classify the session as unowned, prune beneath this closing
+		// manager, and release the journal lock — and the close-time rewrite
+		// (which does not revalidate the prune marker) would then resurrect
+		// the just-pruned tail.
+		const closeFlushError = await this.flushDivergentJournal();
+		// Close the append writer (releasing the journal lock) while the
+		// owner claim is STILL held: unregistering first opens a window where
+		// a concurrent undo-tail gc sees the session as unowned, opens it, and
+		// fails its prune against the still-held journal lock — an otherwise
+		// routine gc run reports an error and exits nonzero. Queued disk work
+		// can make that window much longer than the immediate close path.
+		// A latched #diskFailure must NOT skip this cleanup: rejecting before
+		// the writer close would leave the journal lock held and the owner
+		// sidecar claiming a live pid, pinning the session against undo-tail
+		// gc until process exit. Run the close despite prior failures, then
+		// rethrow the stored persistence error at the end of close().
+		let closeWorkError: Error | undefined;
+		try {
+			await this.#scheduleDiskWork(
+				async () => {
+					const hadWriter = this.#writer !== undefined;
+					await this.#closeWriterHandle();
+					if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+						this.#fileIsCurrent = true;
+				},
+				{ ignorePriorError: true },
+			);
+		} catch (error) {
+			// Non-lock errors already latched #diskFailure (rethrown below);
+			// a raw SessionFileLockError is rethrown after the claim release.
+			closeWorkError = toError(error);
+		}
+		this.#unregisterOwnerSidecar();
+		// Removal is fs-async now: make the sidecar claim release durable
+		// before close() returns, or a gc run right after close would still
+		// see this manager as a live owner. A release that failed for a
+		// non-absence reason retained its claim as a retry target, and this
+		// close is the last retry this manager will ever get — without it
+		// the session stays pinned by this live pid until process exit.
+		await this.#sidecarTail;
+		if ([...this.#ownerClaims.values()].some(count => count > 0)) {
+			this.#unregisterOwnerSidecar();
+			await this.#sidecarTail;
+		}
+		for (const [file, count] of this.#ownerClaims) {
+			if (count > 0) {
+				// Fail-open for close(): the session journal is already
+				// durable, only the ownership hint survives. The dead-pid
+				// sweep sheds the stale line once this process exits.
+				logger.warn("Session owner sidecar claim survived close", { sessionFile: file, claims: count });
+			}
+		}
 		await this.#dropIfEmptyAndNoDraft();
 		// Wait for any queued backing writes (IndexedSessionStorage per-path
 		// tail) to become durable so a graceful shutdown does not exit while
 		// a fire-and-forget publish is still on the wire.
 		await this.#storage.drain();
+		if (closeFlushError) throw closeFlushError;
 		if (this.#diskFailure) throw this.#diskFailure;
+		if (closeWorkError) throw closeWorkError;
 	}
 
 	/**
@@ -1920,6 +3009,7 @@ export class SessionManager {
 	 */
 	releaseRetainedEntries(): void {
 		this.seal();
+		this.#unregisterOwnerSidecar();
 		this.#entries = [];
 		this.#index.clear();
 		this.#closeWriterEventually();
@@ -2460,9 +3550,9 @@ export class SessionManager {
 	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
 	 * outputs). Use sparingly.
 	 */
-	async rewriteEntries(): Promise<void> {
-		if (!this.#persist || !this.#sessionFile) return;
-		await this.#rewriteAtomically();
+	async rewriteEntries(): Promise<boolean> {
+		if (!this.#persist || !this.#sessionFile) return true;
+		return await this.#rewriteAtomically();
 	}
 
 	/**
@@ -2472,6 +3562,9 @@ export class SessionManager {
 	 * @param display Whether to show in TUI (true = styled display, false = hidden)
 	 * @param details Optional extension-specific metadata (not sent to LLM)
 	 * @param attribution Who initiated this message for billing/attribution semantics
+	 * @param ownership Persisted rollback ownership (userTurn / promptPrelude)
+	 * forwarded from a stamped CustomMessage; kept beside `details` so
+	 * extension payloads of any shape are never merged into.
 	 */
 	appendCustomMessageEntry<T = unknown>(
 		customType: string | undefined,
@@ -2480,6 +3573,7 @@ export class SessionManager {
 		details?: T,
 		attribution: MessageAttribution | undefined = "agent",
 		timestamp?: number,
+		ownership?: Partial<Pick<CustomMessageEntry, "userTurn" | "promptPrelude">>,
 	): string {
 		const normalized = normalizeCustomMessagePayload<T>({ customType, content, display, details, attribution });
 		const fresh = this.#freshEntryFields();
@@ -2491,6 +3585,7 @@ export class SessionManager {
 			// Drop AgentSession-internal transient fields before disk persistence.
 			details: stripInternalDetailsFields(normalized.details),
 			attribution: normalized.attribution,
+			...ownership,
 			...fresh,
 			// Prefer the initiating message's own timestamp: without it the entry
 			// records the emission time, which on rebuild excludes provider
@@ -2715,6 +3810,217 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/** Whether an entry id exists in the journal (on- or off-branch). */
+	hasEntry(id: string): boolean {
+		return this.#index.has(id);
+	}
+
+	/**
+	 * gc: prune the off-branch tails of older user-undo branches, keeping the
+	 * newest `keep` tails intact so their `/redo` still works.
+	 *
+	 * Only entries unreachable from the current leaf are removed; the active
+	 * path is never touched. Pruned markers keep their metadata (steps, count)
+	 * but are scrubbed of `droppedPrompts` and `undoOf` — after the tail is
+	 * gone, the prompt list would be the last surviving copy of content the
+	 * operator explicitly retracted.
+	 */
+	async pruneUserUndoTails(
+		keep = 1,
+		apply = true,
+	): Promise<{
+		markers: number;
+		removed: number;
+		skippedLive?: boolean;
+		/** Identity statted immediately after the publish, so callers can
+		 *  detect third-party writes that land between publish and their
+		 *  next read (the rewrite's atomic rename changes the inode, so a
+		 *  pre-prune identity can never match). */
+		published?: JournalIdentity;
+	}> {
+		// Already-pruned markers (scrubbed of undoOf, stamped prunedAt) are
+		// excluded so repeated runs are idempotent and never rewrite a file
+		// just to refresh prunedAt.
+		const markers = this.#entries.filter(entry => {
+			if (entry.type !== "branch_summary") return false;
+			const details = (entry as BranchSummaryEntry).details as
+				| { kind?: string; undoOf?: string | null; prunedAt?: string }
+				| undefined;
+			if (details?.kind !== "user-undo") return false;
+			return !!details.undoOf && !details.prunedAt;
+		}) as BranchSummaryEntry[];
+		if (markers.length <= keep) return { markers: 0, removed: 0 };
+
+		// Reachability from the current leaf (active path + its ancestors).
+		const reachable = new Set<string>();
+		for (let id = this.getLeafId(); id; ) {
+			reachable.add(id);
+			id = this.#index.get(id)?.parentId ?? null;
+		}
+
+		// Retained markers stay fully redoable, which protects more than their
+		// own tail: a newer undo can live inside an older undo's tail (undo,
+		// redo back into it, undo again), and its marker is topologically a
+		// descendant of that tail. Deleting the older tail would orphan the
+		// retained marker, so protection covers the retained marker itself,
+		// its rewind target's full ancestor spine (journal integrity: a kept
+		// entry needs its parents), and the target's subtree (the restored
+		// conversation). When a retained marker sits inside an older tail,
+		// that older prune degrades to a marker scrub with nothing removed.
+		const protectedIds = new Set<string>();
+		const protectSubtree = (root: string): void => {
+			const queue = [root];
+			while (queue.length > 0) {
+				const id = queue.pop()!;
+				if (protectedIds.has(id)) continue;
+				protectedIds.add(id);
+				for (const child of this.#index.childrenOf(id)) queue.push(child.id);
+			}
+		};
+		for (const retained of markers.slice(markers.length - keep)) {
+			protectedIds.add(retained.id);
+			const details = retained.details as { undoOf?: string | null } | undefined;
+			const tip = details?.undoOf ?? null;
+			if (!tip || !this.#index.has(tip)) continue;
+			protectSubtree(tip);
+			for (let id = this.#index.get(tip)?.parentId ?? null; id; id = this.#index.get(id)?.parentId ?? null) {
+				if (protectedIds.has(id)) break;
+				protectedIds.add(id);
+			}
+		}
+
+		const doomed = new Set<string>();
+		const toScrub: BranchSummaryEntry[] = [];
+		for (const marker of markers.slice(0, markers.length - keep)) {
+			toScrub.push(marker);
+			const details = marker.details as { undoOf?: string | null } | undefined;
+			const stop = marker.parentId ?? null;
+			let id = details?.undoOf ?? null;
+			while (id && id !== stop && !reachable.has(id) && !protectedIds.has(id)) {
+				const entry = this.#index.get(id);
+				if (!entry) break;
+				doomed.add(id);
+				for (const child of this.#index.childrenOf(id)) {
+					if (!protectedIds.has(child.id)) doomed.add(child.id);
+				}
+				id = entry.parentId ?? null;
+			}
+			// Descendants of the chain (redo remnants, subagent forks off the
+			// dropped tail) are covered by childrenOf only one level deep;
+			// collect transitively, never crossing into protected subtrees.
+			const queue = [...doomed];
+			while (queue.length > 0) {
+				const current = queue.pop()!;
+				for (const child of this.#index.childrenOf(current)) {
+					if (!doomed.has(child.id) && !protectedIds.has(child.id)) {
+						doomed.add(child.id);
+						queue.push(child.id);
+					}
+				}
+			}
+		}
+		// Never remove anything on the active path (post-redo scenarios can
+		// make an old tail live again).
+		if (!apply) return { markers: toScrub.length, removed: doomed.size };
+
+		// The publish can still abort (a live owner appeared under the
+		// exclusive claim). Everything mutated below must be restorable, or
+		// this manager would later rewrite its pruned in-memory tree over
+		// the untouched journal and silently publish the prune anyway.
+		const entriesBeforePrune = this.#entries;
+		const detailsBeforeScrub = new Map<BranchSummaryEntry, unknown>();
+		for (const marker of toScrub) {
+			const details = marker.details as { steps?: number; rewoundAt?: string } | undefined;
+			detailsBeforeScrub.set(marker, marker.details);
+			marker.details = {
+				kind: "user-undo",
+				steps: details?.steps,
+				rewoundAt: details?.rewoundAt,
+				prunedAt: nowIso(),
+			};
+		}
+		this.#entries = this.#entries.filter(entry => !doomed.has(entry.id));
+		this.#index.rebuild(this.#entries);
+		// The publish rechecks ownership under the exclusive claim; if an
+		// owner appeared since the preflight, nothing lands on disk and the
+		// caller reports a skip instead of a prune.
+		this.#undoTailPruneActive = true;
+		const sessionFileForPrune = this.#sessionFile!;
+		let published = false;
+		let markerPlaced = false;
+		try {
+			await markUndoTailPruneInProgress(sessionFileForPrune);
+			markerPlaced = true;
+			published = await this.rewriteEntries();
+		} catch (error) {
+			// Pre-publication failures — marker creation I/O as well as a
+			// throwing publish (e.g. another writer took the journal lock
+			// mid-rewrite): nothing landed on disk, so restore the scrubbed
+			// markers and pruned in-memory tree and remove the marker (only
+			// if one was placed — a cleanup error must not mask the original
+			// failure) BEFORE rethrowing — otherwise a caller that catches
+			// the error could later flush or rewrite the mutated tree and
+			// silently commit the reported-as-failed prune, and a surviving
+			// marker names this still-running pid, blocking opens of the
+			// session for as long as this process lives.
+			this.#undoTailPruneActive = false;
+			for (const [marker, details] of detailsBeforeScrub) marker.details = details as typeof marker.details;
+			this.#entries = entriesBeforePrune;
+			this.#index.rebuild(this.#entries);
+			if (markerPlaced) {
+				// Same retry ladder as the committed path: a transient cleanup
+				// failure must not REPLACE the publication error (and a
+				// surviving marker names this live pid, refusing opens for as
+				// long as it lives) — so retry once, then best-effort, and
+				// always rethrow the ORIGINAL failure.
+				try {
+					await clearUndoTailPruneMarker(sessionFileForPrune);
+				} catch (cleanupError) {
+					logger.warn("Undo-tail prune failed and its marker could not be cleared.", {
+						sessionFile: sessionFileForPrune,
+						error: toError(cleanupError),
+					});
+					await clearUndoTailPruneMarker(sessionFileForPrune).catch(() => undefined);
+				}
+			}
+			throw error;
+		} finally {
+			this.#undoTailPruneActive = false;
+		}
+		if (published) {
+			// The prune is COMMITTED: a marker-cleanup failure must not
+			// misreport it as an error. Retry once; if the marker still
+			// cannot be cleared it names this live pid, so other opens stay
+			// refused (fail-closed) until the dead-pid sweep can remove it.
+			try {
+				await clearUndoTailPruneMarker(sessionFileForPrune);
+			} catch (error) {
+				logger.warn("Undo-tail prune published but its marker could not be cleared.", {
+					sessionFile: sessionFileForPrune,
+					error: toError(error),
+				});
+				await clearUndoTailPruneMarker(sessionFileForPrune).catch(() => undefined);
+			}
+			// #loadedJournalIdentity was captured under the publication
+			// lock, immediately after the atomic rename (see
+			// #runFencedAtomicRewrite): re-statting here instead would let a
+			// manager that waited out the marker append and close first, and
+			// its fresh identity would be accepted as the prune's baseline —
+			// letting the caller's mtime restore clobber that append.
+			return { markers: toScrub.length, removed: doomed.size, published: this.#loadedJournalIdentity };
+		}
+		// Aborted publish: restore the in-memory tree FIRST (nothing landed
+		// on disk, but a cleanup failure thrown from a finally would
+		// otherwise skip this and let a later rewrite resurrect the prune),
+		// then clear the marker — and let that failure propagate, since the
+		// surviving marker must fail opens closed until it is gone.
+		for (const [marker, details] of detailsBeforeScrub) marker.details = details as typeof marker.details;
+		this.#entries = entriesBeforePrune;
+		this.#index.rebuild(this.#entries);
+		await clearUndoTailPruneMarker(sessionFileForPrune);
+		return { markers: 0, removed: 0, skippedLive: true };
+	}
+
 	/**
 	 * Create a new session file containing only the path from root to `leafId`.
 	 * Returns the new file path, or undefined when not persisting.
@@ -2763,6 +4069,25 @@ export class SessionManager {
 			parentId = labelEntry.id;
 		}
 
+		// Durable owner claim BEFORE anything in memory switches and before
+		// the branch file becomes visible: the rewrite below publishes
+		// synchronously and the branched journal already carries its
+		// user-undo marker, so gc must see this pid on disk the moment the
+		// file appears, or a concurrent `omp gc --undo-tails --apply` could
+		// prune beneath this manager's retained tree and a later full
+		// rewrite resurrect the removed entries. A failed preclaim refuses
+		// the branch while the manager is still exactly on its source
+		// state — header, tree, index, and session file untouched.
+		// FileSessionStorage only: a Memory/Indexed backend keeps the journal
+		// inside the storage, so a filesystem sidecar there would either
+		// throw on an absent virtual directory or litter an unrelated
+		// .owner file. Same guard every other claim path uses.
+		if (this.#persist && this.#storage instanceof FileSessionStorage) {
+			if (!writeOwnerSidecarSync(newSessionFile)) {
+				throw new SessionFileLockError(newSessionFile);
+			}
+			this.#ownerClaims.set(newSessionFile, (this.#ownerClaims.get(newSessionFile) ?? 0) + 1);
+		}
 		this.#header = header;
 		this.#entries = [...entriesToKeep, ...labels];
 		this.#sessionId = newSessionId;
@@ -2783,6 +4108,11 @@ export class SessionManager {
 		}
 
 		this.#sessionFile = newSessionFile;
+		// Release the source claim only now — queued in tail order after any
+		// earlier writes to it — while the destination claim recorded above
+		// stays, so both files remain correctly accounted through the switch
+		// and close() sheds each exactly once.
+		this.#unregisterOwnerSidecar(newSessionFile);
 		this.#rewriteSynchronously();
 		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
 		return newSessionFile;
@@ -2883,9 +4213,27 @@ export class SessionManager {
 		manager.#index.rebuild(history);
 		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
 		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
-		if (options?.copyArtifacts !== false) {
-			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+		// Preclaim BEFORE the materializing rewrite makes the journal
+		// visible: between the rewrite (plus a potentially large artifact
+		// copy) and registration, concurrent gc would see the file as
+		// unowned and could prune it beneath this manager's tree.
+		if (manager.#storage instanceof FileSessionStorage) {
+			let claimed = false;
+			manager.#sidecarTail = manager.#sidecarTail.then(async () => {
+				claimed = await manager.#claimOwnerSidecarFor(manager.#sessionFile!);
+			});
+			await manager.#sidecarTail;
+			if (!claimed) throw new SessionFileLockError(manager.#sessionFile!);
+		}
+		try {
+			await manager.#rewriteAtomically();
+			if (options?.copyArtifacts !== false) {
+				await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+			}
+		} catch (error) {
+			// Materialization failed after the preclaim: drop it again.
+			manager.#releaseOwnerClaim(manager.#sessionFile!);
+			throw error;
 		}
 		return manager;
 	}
@@ -2914,8 +4262,15 @@ export class SessionManager {
 		filePath: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
+		options?: { initialCwd?: string; suppressBreadcrumb?: boolean; noOwnerClaim?: boolean },
 	): Promise<SessionManager> {
+		// Identity strictly before the read: a publish landing between the
+		// two would pair pre-prune content with a post-prune identity, and
+		// the gate loop would accept the stale snapshot as current. Only the
+		// FILE backend has a filesystem generation to probe: a virtual key
+		// (memory/indexed storage) must not fail on whatever host path the
+		// key string resolves to (EACCES/ENOTDIR) before the backend read.
+		const loadedIdentity = storage instanceof FileSessionStorage ? await journalIdentity(filePath) : undefined;
 		const loaded = await loadSessionFile(filePath, storage);
 		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		// Resume into the session's recorded cwd only when it is verifiably
@@ -2934,7 +4289,10 @@ export class SessionManager {
 				: path.dirname(path.resolve(filePath)));
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
-		await manager.#setSessionFile(filePath, loaded);
+		// Read-only inspection (gc dry runs): never claim ownership, so a
+		// sessions directory stays byte-identical and read-only mounts work.
+		manager.#noOwnerClaim = options?.noOwnerClaim === true;
+		await manager.#setSessionFile(filePath, loaded, loadedIdentity);
 		return manager;
 	}
 
