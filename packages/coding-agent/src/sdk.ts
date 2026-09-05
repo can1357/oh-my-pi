@@ -1813,7 +1813,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skills() {
 				return session?.skills ?? skills;
 			},
-			refreshSkills: () => session.refreshSkills(),
+			refreshSkills: () => session?.refreshSkills(),
 			rules: allRules,
 			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
 			eventBus,
@@ -1875,20 +1875,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return next;
 			},
 			getFileMutationVersion: path => fileMutationVersions.get(path) ?? 0,
-			getTodoPhases: () => session.getTodoPhases(),
-			setTodoPhases: phases => session.setTodoPhases(phases),
+			getTodoPhases: () => session?.getTodoPhases() ?? [],
+			setTodoPhases: phases => session?.setTodoPhases(phases),
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
-			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
-			getCheckpointState: () => session.getCheckpointState(),
-			setCheckpointState: state => session.setCheckpointState(state ?? undefined),
-			getLastCompletedRewind: () => session.getLastCompletedRewind(),
-			getToolChoiceQueue: () => session.toolChoiceQueue,
+			setWorkPoolYieldItems: items => session?.setWorkPoolYieldItems(items),
+			getCheckpointState: () => session?.getCheckpointState(),
+			setCheckpointState: state => session?.setCheckpointState(state ?? undefined),
+			getLastCompletedRewind: () => session?.getLastCompletedRewind(),
+			getToolChoiceQueue: () => session?.toolChoiceQueue,
 			buildToolChoice: name => {
-				const m = session.model;
+				const m = session?.model;
 				return m ? buildNamedToolChoice(name, m) : undefined;
 			},
 			steer: msg =>
-				session.agent.steer({
+				session?.agent.steer({
 					role: "custom",
 					customType: msg.customType,
 					content: msg.content,
@@ -1897,11 +1897,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					attribution: "agent",
 					timestamp: Date.now(),
 				}),
-			peekQueueInvoker: () => session.peekQueueInvoker(),
-			peekPendingInvoker: () => session.peekPendingInvoker(),
-			clearPendingInvokers: () => session.clearPendingInvokers(),
-			peekPlanProposalHandler: () => session.peekPlanProposalHandler(),
-			setPlanProposalHandler: handler => session.setPlanProposalHandler(handler),
+			peekQueueInvoker: () => session?.peekQueueInvoker(),
+			peekPendingInvoker: () => session?.peekPendingInvoker(),
+			clearPendingInvokers: () => session?.clearPendingInvokers(),
+			peekPlanProposalHandler: () => session?.peekPlanProposalHandler(),
+			setPlanProposalHandler: handler => session?.setPlanProposalHandler(handler),
 			allocateOutputArtifact: async toolType => {
 				try {
 					return await sessionManager.allocateArtifactPath(toolType);

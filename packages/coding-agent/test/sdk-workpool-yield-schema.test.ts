@@ -78,4 +78,27 @@ describe("SDK workpool yield schema", () => {
 		const result = await tool.execute("yield-pool-1", { key: 1, data: { answer: 42 } });
 		expect(result.details).toMatchObject({ type: ["pool#1"], complete: true });
 	});
+
+	it("initializes a subagent session with requireYieldTool when inlineToolDescriptors is enabled", async () => {
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ inlineToolDescriptors: "on" }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			requireYieldTool: true,
+			toolNames: ["yield"],
+		});
+		sessions.push(session);
+		expect(session.getToolByName("yield")).toBeDefined();
+	});
 });
