@@ -20,7 +20,7 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { effectiveReserveTokens, prepareCompaction } from "@oh-my-pi/pi-agent-core/compaction";
+import { effectiveReserveTokens, prepareCompaction, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -43,8 +43,8 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
-	beforeEach(() => {
-		sessionManager = SessionManager.inMemory();
+	function createHarness(turnPairs = 64): { session: AgentSession; sessionManager: SessionManager } {
+		const sessionManager = SessionManager.inMemory();
 
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected bundled claude-sonnet-4-5 model");
@@ -62,11 +62,11 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		// substantial filler so prepareCompaction() splits the branch into
 		// "discard + summarize" (oldest) vs "kept-recent" (newest).
 		const filler = "the quick brown fox jumps over the lazy dog. ".repeat(64);
-		for (let i = 0; i < 64; i++) {
+		for (let i = 0; i < turnPairs; i++) {
 			sessionManager.appendMessage({
 				role: "user",
 				content: [{ type: "text", text: `turn ${i}: ${filler}` }],
-				timestamp: Date.now() - (64 - i) * 1000,
+				timestamp: Date.now() - (turnPairs - i) * 1000,
 			});
 			sessionManager.appendMessage({
 				role: "assistant",
@@ -83,23 +83,30 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 					totalTokens: 2000,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				},
-				timestamp: Date.now() - (64 - i) * 1000 + 100,
+				timestamp: Date.now() - (turnPairs - i) * 1000 + 100,
 			});
 		}
 
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settings: Settings.isolated({
-				"compaction.methodOrder": ["snapcompact", "soft"],
-				"compaction.autoContinue": false,
-				// Force a small kept-recent window so the seeded conversation
-				// definitely splits into discard + kept and prepareCompaction()
-				// returns a non-empty preparation.
-				"compaction.keepRecentTokens": 4000,
+		return {
+			session: new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({
+					"compaction.methodOrder": ["snapcompact", "soft"],
+					"compaction.autoContinue": false,
+					// Force a small kept-recent window so the seeded conversation
+					// definitely splits into discard + kept and prepareCompaction()
+					// returns a non-empty preparation.
+					"compaction.keepRecentTokens": 4000,
+				}),
+				modelRegistry,
 			}),
-			modelRegistry,
-		});
+			sessionManager,
+		};
+	}
+
+	beforeEach(() => {
+		({ session, sessionManager } = createHarness());
 	});
 
 	afterEach(async () => {
@@ -180,6 +187,82 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		const worstCaseEdgeTokens = Math.ceil((2 * edgeCap) / 4) + 2000;
 		const fullProjection = baseTokens + (maxFrames ?? 0) * snapcompact.FRAME_TOKEN_ESTIMATE + worstCaseEdgeTokens;
 		expect(fullProjection).toBeLessThanOrEqual(budget);
+	});
+
+	it("uses the recovery-band boundary for a threshold archive before frame rescue is needed", async () => {
+		// A manual archive preserves the old window-fit contract. Its retained
+		// history is valid for the model request but too large for a threshold
+		// maintenance continuation, which is the legacy first-pass shape that
+		// required a second local frame rescue.
+		await session.dispose();
+		({ session, sessionManager } = createHarness(128));
+		const manualHarness = createHarness(128);
+		try {
+			const model = session.model;
+			if (!model) throw new Error("Expected model");
+			const contextWindow = model.contextWindow ?? 0;
+			const thresholdTokens = 100_000;
+			session.settings.set("compaction.thresholdTokens", thresholdTokens);
+			manualHarness.session.settings.set("compaction.thresholdTokens", thresholdTokens);
+			session.settings.set("compaction.methodOrder", ["snapcompact"]);
+			manualHarness.session.settings.set("compaction.methodOrder", ["snapcompact"]);
+			session.settings.set("contextPromotion.enabled", false);
+
+			const recoveryBand = Math.floor(
+				resolveThresholdTokens(contextWindow, session.settings.getGroup("compaction")) * 0.8,
+			);
+			const windowBudget =
+				contextWindow - effectiveReserveTokens(contextWindow, session.settings.getGroup("compaction"));
+
+			await manualHarness.session.compact(undefined, { mode: "snapcompact" });
+			const manualEntry = manualHarness.sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+			if (manualEntry?.type !== "compaction" || manualEntry.tokensAfter === undefined) {
+				throw new Error("Expected a window-fit manual snapcompact archive");
+			}
+			const manualArchive = snapcompact.getPreservedArchive(manualEntry.preserveData);
+			if (!manualArchive) throw new Error("Expected the manual archive to retain frames");
+			expect(manualEntry.tokensAfter).toBeLessThanOrEqual(windowBudget);
+			expect(manualEntry.tokensAfter).toBeGreaterThan(recoveryBand);
+
+			const { promise: compactionDone, resolve: finishCompaction } = Promise.withResolvers<void>();
+			session.subscribe(event => {
+				if (event.type === "auto_compaction_end") finishCompaction();
+			});
+			const thresholdAssistant = {
+				role: "assistant" as const,
+				content: [{ type: "text" as const, text: "Threshold pass." }],
+				api: "anthropic-messages" as const,
+				provider: "anthropic" as const,
+				model: "claude-sonnet-4-5",
+				stopReason: "stop" as const,
+				usage: {
+					input: 150_000,
+					output: 100,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 150_100,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			session.agent.emitExternalEvent({ type: "message_end", message: thresholdAssistant });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [thresholdAssistant] });
+			await compactionDone;
+			await session.waitForIdle();
+
+			const automaticEntries = sessionManager.getBranch().filter(entry => entry.type === "compaction");
+			expect(automaticEntries).toHaveLength(1);
+			const automaticEntry = automaticEntries[0];
+			if (!automaticEntry || automaticEntry.tokensAfter === undefined) {
+				throw new Error("Expected a persisted threshold snapcompact archive");
+			}
+			const automaticArchive = snapcompact.getPreservedArchive(automaticEntry.preserveData);
+			if (!automaticArchive) throw new Error("Expected the threshold archive to retain frames");
+			expect(automaticEntry.tokensAfter).toBeLessThanOrEqual(recoveryBand);
+			expect(automaticArchive.frames.length).toBeLessThan(manualArchive.frames.length);
+		} finally {
+			await manualHarness.session.dispose();
+		}
 	});
 
 	it("still invokes snapcompact with maxFrames=1 when residual headroom is below the summary-text reserve", async () => {
