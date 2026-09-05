@@ -1893,6 +1893,34 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("registers Ask for UI sessions and ignores it in a headless Vibe allowlist", async () => {
+		const uiTempDir = makeTempDir();
+		const headlessTempDir = makeTempDir();
+		const { session: uiSession } = await createAgentSession({
+			...baseOptions(uiTempDir),
+			hasUI: true,
+		});
+		const { session: headlessSession } = await createAgentSession({
+			...baseOptions(headlessTempDir),
+			hasUI: false,
+		});
+
+		try {
+			expect(uiSession.hasBuiltInTool("ask")).toBe(true);
+			expect(headlessSession.hasBuiltInTool("ask")).toBe(false);
+			expect(headlessSession.getToolByName("ask")).toBeUndefined();
+
+			await uiSession.activateVibeTools(["read", "ask"]);
+			await headlessSession.activateVibeTools(["read", "ask"]);
+
+			expect(uiSession.getActiveToolNames()).toContain("ask");
+			expect(headlessSession.getActiveToolNames()).not.toContain("ask");
+			expect(headlessSession.getToolByName("ask")).toBeUndefined();
+		} finally {
+			await Promise.all([uiSession.dispose(), headlessSession.dispose()]);
+		}
+	});
+
 	it("rehydrates completed parent Todo work from persisted session history", async () => {
 		const tempDir = makeTempDir();
 		const sessionManager = SessionManager.create(tempDir, tempDir);

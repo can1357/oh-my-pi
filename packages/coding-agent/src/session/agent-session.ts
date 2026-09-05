@@ -5757,6 +5757,7 @@ export class AgentSession {
 			role: "custom",
 			customType: VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 			content: prompt.render(vibeModeActivePrompt, {
+				askAvailable: this.getActiveToolNames().includes("ask"),
 				todoAvailable: this.getActiveToolNames().includes("todo"),
 			}),
 			display: false,
