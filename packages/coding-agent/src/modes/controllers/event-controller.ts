@@ -1487,6 +1487,7 @@ export class EventController {
 						event.message.ttft,
 						event.message.timestamp,
 						turnElapsed,
+						event.message.upstreamProvider,
 					) ??
 						false);
 				if (!usageAttached) {
@@ -1498,6 +1499,7 @@ export class EventController {
 							event.message.ttft,
 							event.message.timestamp,
 							turnElapsed,
+							event.message.upstreamProvider,
 						),
 					);
 				}

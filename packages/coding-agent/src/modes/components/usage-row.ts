@@ -1,5 +1,5 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { Container, Ellipsis, Spacer, Text, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
 
@@ -38,6 +38,7 @@ export function formatUsageRow(
 	ttftMs?: number,
 	timestamp?: number,
 	turnElapsedMs?: number,
+	upstreamProvider?: string,
 ): string {
 	const totalInput = usage.input + usage.cacheWrite;
 	const parts: string[] = [];
@@ -68,6 +69,21 @@ export function formatUsageRow(
 		const tokPerSec = (usage.output / durationMs) * 1000;
 		parts.push(`${theme.icon.throughput} ${tokPerSec.toFixed(1)}/s`);
 	}
+	// `upstreamProvider` is aggregator-reported text (OpenRouter) rendered
+	// verbatim into the transcript: strip ANSI escapes and control characters
+	// and cap the length so a misbehaving aggregator can't decorate or flood
+	// the usage row. Absent for direct provider connections.
+	if (upstreamProvider) {
+		// `truncateToWidth` is width-aware (grapheme/emoji safe) — `.slice` on
+		// UTF-16 code units can split surrogate pairs and miscount display width.
+		const providerLabel = Bun.stripANSI(upstreamProvider)
+			.replace(/[\u0000-\u001f\u007f]/g, "")
+			.trim();
+		const truncated = providerLabel ? truncateToWidth(providerLabel, 40, Ellipsis.Omit) : "";
+		if (truncated) {
+			parts.push(`via ${truncated}`);
+		}
+	}
 	return parts.join("  ");
 }
 
@@ -88,10 +104,17 @@ export function createUsageRowBlock(
 	ttftMs?: number,
 	timestamp?: number,
 	turnElapsedMs?: number,
+	upstreamProvider?: string,
 ): Container {
 	const block = new Container();
 	block.addChild(new Spacer(1));
-	block.addChild(new Text(theme.fg("dim", formatUsageRow(usage, durationMs, ttftMs, timestamp, turnElapsedMs)), 1, 0));
+	block.addChild(
+		new Text(
+			theme.fg("dim", formatUsageRow(usage, durationMs, ttftMs, timestamp, turnElapsedMs, upstreamProvider)),
+			1,
+			0,
+		),
+	);
 	usageRowBlocks.add(block);
 	return block;
 }
