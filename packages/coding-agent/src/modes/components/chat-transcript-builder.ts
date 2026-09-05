@@ -28,6 +28,7 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionMessageEntry } from "../../session/session-entries";
+import { isCursorTaskMcpName } from "../../cursor-bridge-tools";
 import { theme } from "../theme/theme";
 import {
 	assistantHasVisibleContent,
@@ -455,16 +456,19 @@ export class ChatTranscriptBuilder {
 
 			this.#readGroup?.seal();
 			this.#readGroup = null;
+			const isTaskAlias = isCursorTaskMcpName(content.name);
+			const resolvedTool =
+				this.deps.getTool?.(content.name) ?? (isTaskAlias ? this.deps.getTool?.("task") : undefined);
 			const component = new ToolExecutionComponent(
 				content.name,
 				content.arguments,
 				{
-					useBuiltInRenderer: this.deps.isBuiltInTool?.(content.name) ?? true,
+					useBuiltInRenderer: isTaskAlias || (this.deps.isBuiltInTool?.(content.name) ?? true),
 					// Stable ids and Kitty placeholder cells keep images anchored
 					// while the transcript viewport scrolls and reflows.
 					showImages: settings.get("terminal.showImages"),
 				},
-				this.deps.getTool?.(content.name),
+				resolvedTool,
 				this.deps.ui,
 				this.deps.cwd,
 				content.id,

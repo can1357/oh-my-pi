@@ -1950,7 +1950,7 @@ async function handleExecServerMessage(
 					state.resolvedMcpToolCallIds.add(mcpCall.toolCallId);
 				}
 			}
-			const { execResult } = await resolveExecHandler(
+			const { execResult, toolResult } = await resolveExecHandler(
 				mcpCall,
 				execHandlers?.mcp?.bind(execHandlers),
 				onToolResult,
@@ -1962,6 +1962,14 @@ async function handleExecServerMessage(
 				error => buildMcpErrorResult(error),
 				execHandlers?.mcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
 			);
+			if (toolResult && !toolResult.isError) {
+				const block = output.content.find(
+					(b): b is ToolCallState => b.type === "toolCall" && b.id === mcpCall.toolCallId,
+				);
+				if (block && block.name !== toolResult.toolName) {
+					block.name = toolResult.toolName;
+				}
+			}
 			sendExecClientMessage(h2Request, execMsg, "mcpResult", execResult);
 			return;
 		}

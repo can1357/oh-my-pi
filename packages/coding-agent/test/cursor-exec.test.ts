@@ -26,6 +26,7 @@ import {
 	createBridgeGrepFactory,
 	cursorMcpPrefersReplaceEdit,
 	getCursorTaskResumeId,
+	getCursorTaskUnsupportedModel,
 	normalizeCursorReplaceArgs,
 	normalizeCursorTaskArgs,
 } from "@oh-my-pi/pi-coding-agent/cursor-bridge-tools";
@@ -970,6 +971,64 @@ describe("Cursor MCP task tool adapter", () => {
 			args: {
 				prompt: "Continue the previous investigation",
 				resume: "subagent-alpha-99",
+			},
+			rawArgs: {},
+		});
+
+		expect(approved).toBe(false);
+	});
+
+	it("detects explicit unsupported model overrides from top-level and batch task payloads", () => {
+		expect(getCursorTaskUnsupportedModel({ prompt: "work", model: "claude-3.5-sonnet" })).toBe("claude-3.5-sonnet");
+		expect(
+			getCursorTaskUnsupportedModel({
+				tasks: [{ prompt: "part 1" }, { prompt: "part 2", model: "gpt-4o" }],
+			}),
+		).toBe("gpt-4o");
+		expect(getCursorTaskUnsupportedModel({ prompt: "work", model: "inherit" })).toBeUndefined();
+		expect(getCursorTaskUnsupportedModel({ prompt: "work", model: "" })).toBeUndefined();
+		expect(getCursorTaskUnsupportedModel({ prompt: "work" })).toBeUndefined();
+	});
+
+	it("rejects explicit task.model override with an actionable error rather than silently running default model", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const result = await handlers.mcp({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "t-model",
+			args: {
+				prompt: "Run benchmarks",
+				model: "claude-3.5-sonnet",
+			},
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.content[0].type === "text" && result.content[0].text).toContain(
+			'Explicit subagent model override via task.model ("claude-3.5-sonnet") is not supported.',
+		);
+		expect(executedCalls.length).toBe(0);
+	});
+
+	it("refuses mcpApprovalPreflight when explicit task.model override is present", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const approved = await handlers.mcpApprovalPreflight({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "pre-model",
+			args: {
+				prompt: "Run benchmarks",
+				model: "claude-3.5-sonnet",
 			},
 			rawArgs: {},
 		});

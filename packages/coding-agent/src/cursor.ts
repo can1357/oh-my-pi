@@ -31,6 +31,7 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import {
 	cursorMcpPrefersReplaceEdit,
 	getCursorTaskResumeId,
+	getCursorTaskUnsupportedModel,
 	isCursorTaskMcpName,
 	normalizeCursorReplaceArgs,
 	normalizeCursorTaskArgs,
@@ -957,6 +958,11 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 					const message = `Resuming subagents via task.resume ("${resumeId}") is not supported. Use the \`hub\` tool to message and resume existing subagents.`;
 					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
 				}
+				const unsupportedModel = getCursorTaskUnsupportedModel(args);
+				if (unsupportedModel) {
+					const message = `Explicit subagent model override via task.model ("${unsupportedModel}") is not supported. Subagents use the model configured for their agent role.`;
+					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+				}
 				const targetToolName = "task";
 				const tool = this.options.getExecutableTool?.(targetToolName) ?? this.options.tools.get(targetToolName);
 				if (!tool) {
@@ -997,7 +1003,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			? (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName))
 			: undefined;
 		const routeToTask = isTask && !exactAliasTool;
-		if (routeToTask && getCursorTaskResumeId(args)) {
+		if (routeToTask && (getCursorTaskResumeId(args) || getCursorTaskUnsupportedModel(args))) {
 			return false;
 		}
 

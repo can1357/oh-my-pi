@@ -202,6 +202,40 @@ export function getCursorTaskResumeId(args: Record<string, unknown>): string | u
 }
 
 /**
+ * Return the requested model override if this Cursor task call specifies one
+ * that cannot be honored by OMP's subagent configuration.
+ *
+ * Cursor's native `TaskArgs` defines `model?: string`. A model value of
+ * `"inherit"`, `""`, or `undefined` delegates to the agent's default model,
+ * which matches OMP's behavior. An explicit model string (e.g. `"gpt-4o"`)
+ * would be silently stripped by the task schema (`+delete`) and run under the
+ * default model instead; this helper detects that override so callers can
+ * reject it rather than silently running the wrong model.
+ */
+export function getCursorTaskUnsupportedModel(args: Record<string, unknown>): string | undefined {
+	const check = (val: unknown): string | undefined => {
+		if (typeof val !== "string") return undefined;
+		const trimmed = val.trim();
+		if (trimmed.length > 0 && trimmed.toLowerCase() !== "inherit") {
+			return trimmed;
+		}
+		return undefined;
+	};
+
+	const topLevel = check(args.model);
+	if (topLevel !== undefined) return topLevel;
+	if (Array.isArray(args.tasks)) {
+		for (const item of args.tasks) {
+			if (item && typeof item === "object") {
+				const itemModel = check((item as Record<string, unknown>).model);
+				if (itemModel !== undefined) return itemModel;
+			}
+		}
+	}
+	return undefined;
+}
+
+/**
  * Extract an OMP agent identifier from Cursor's `subagent_type` field.
  *
  * Cursor defines subagent types as `explore` (read-only codebase search),
