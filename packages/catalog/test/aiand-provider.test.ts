@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { aiandModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 const ORIGINAL_ENV = {
 	AIAND_API_KEY: Bun.env.AIAND_API_KEY,
@@ -208,5 +212,59 @@ describe("ai& provider support", () => {
 		expect(qwen?.thinking?.effortMap).toEqual({ [Effort.Minimal]: "none" });
 		expect(qwen?.thinking?.defaultLevel).toBe(Effort.Medium);
 		expect(qwen?.input).toEqual(["text", "image"]);
+	});
+
+	test("keeps a live vision removal authoritative through the production manager merge", async () => {
+		// The CLI resolves models through the manager, which merges the
+		// discovered row over the bundled reference. `mergeDynamicModel` ORs
+		// image support when both sides share a base URL — and every ai& row
+		// does — so without the provider override a model that dropped
+		// `vision` would keep advertising image input and the agent would send
+		// images to a now text-only route.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-aiand-refresh-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const bundledVisionModel: ModelSpec<"openai-completions"> = {
+			id: "qwen/qwen3.6-27b",
+			name: "Qwen3.6 27B",
+			api: "openai-completions",
+			provider: "aiand",
+			baseUrl: "https://api.aiand.com/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.32, output: 3.2, cacheRead: 0.2, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: null,
+		};
+		const fetchMock = async (): Promise<Response> =>
+			aiandModelsResponse([
+				{
+					id: "qwen/qwen3.6-27b",
+					context_window: 262144,
+					// Live org-scoped catalog no longer lists this model as vision-capable.
+					capabilities: ["reasoning", "tool_calling"],
+					reasoning_efforts: ["none", "high"],
+					reasoning_effort_default: "high",
+					currency: "usd",
+					input_per_1m: "0.320000",
+					output_per_1m: "3.200000",
+					cached_input_per_1m: "0.200000",
+				},
+			]);
+
+		try {
+			const { models } = await resolveProviderModels<"openai-completions">(
+				{
+					...aiandModelManagerOptions({ apiKey: "aiand-key", fetch: fetchMock as unknown as FetchImpl }),
+					staticModels: [bundledVisionModel],
+					cacheDbPath: dbPath,
+				},
+				"online",
+			);
+
+			const model = models.find(item => item.id === "qwen/qwen3.6-27b");
+			expect(model?.input).toEqual(["text"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });

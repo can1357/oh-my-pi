@@ -552,11 +552,18 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	// there: without this carve-out a model that dropped those tags would keep
 	// the bundled reference's image support and the agent would go on sending
 	// images to a now text-only route.
+	// ai&'s discovery is authoritative (`dynamicModelsAuthoritative`) and its
+	// org-scoped `capabilities` are the route's whole truth for modality.
+	// Every row shares the single ai& endpoint, so `endpointChanged` never
+	// fires there: without this carve-out a model that dropped `vision` would
+	// keep the bundled reference's image support and the agent would go on
+	// sending images to a now text-only route.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
 	const dynamicInputAuthoritative =
 		endpointChanged ||
 		(existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot") ||
-		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra");
+		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra") ||
+		(existingModel.provider === "aiand" && dynamicModel.provider === "aiand");
 	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
