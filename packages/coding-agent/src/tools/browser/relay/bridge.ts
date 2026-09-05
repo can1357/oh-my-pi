@@ -964,7 +964,10 @@ export class RelayBridge {
 		}
 		const loaderId =
 			msg.params?.runImmediately === true
-				? await this.#mainFrameLoaderId(ref.tabId).catch(() => undefined)
+				? await this.#mainFrameLoaderId(ref.tabId).catch(err => {
+						if (isExtensionTransportInterrupted(err)) throw err;
+						return undefined;
+					})
 				: undefined;
 		let result: Record<string, unknown> | undefined;
 		try {

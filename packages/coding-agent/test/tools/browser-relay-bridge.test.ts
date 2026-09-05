@@ -7287,6 +7287,34 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it("does not register an immediate preload on a replacement before recovery completes", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+
+		const replacement = new FakeExtSocket();
+		bridge.extConnected(replacement);
+		await flush();
+
+		expect(replacement.rpcs("send")).toHaveLength(0);
+		expect(cdp.messages.find(message => message.id === addId)?.result).toBeUndefined();
+	});
+
 	it("re-cycles Runtime for a preserved session that re-enables before the reconnect hello", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
