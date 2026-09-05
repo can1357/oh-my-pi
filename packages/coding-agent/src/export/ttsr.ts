@@ -568,9 +568,32 @@ export class TtsrManager {
 		return this.#rules.size > 0;
 	}
 
-	/** Whether a rule with this name is already registered for monitoring. */
-	hasRule(name: string): boolean {
-		return this.#rules.has(name);
+	/**
+	 * Atomically replace monitored rules while retaining injection state for names
+	 * that remain registered.
+	 *
+	 * Returns the names accepted for TTSR monitoring so the caller can bucket
+	 * rejected conditional rules through its normal fallback path.
+	 */
+	replaceRules(rules: readonly Rule[]): Set<string> {
+		const replacement = new TtsrManager(this.#settings);
+		for (const rule of rules) {
+			replacement.addRule(rule);
+		}
+
+		const registered = new Set(replacement.#rules.keys());
+		this.#rules.clear();
+		for (const [name, entry] of replacement.#rules) {
+			this.#rules.set(name, entry);
+		}
+		this.#canMatchText = replacement.#canMatchText;
+		this.#canMatchThinking = replacement.#canMatchThinking;
+		this.resetBuffer();
+
+		for (const name of this.#injectionRecords.keys()) {
+			if (!registered.has(name)) this.#injectionRecords.delete(name);
+		}
+		return registered;
 	}
 
 	/** All rules currently registered for TTSR monitoring, in registration order. */

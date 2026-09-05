@@ -32,6 +32,8 @@ export interface BucketRulesOptions {
 	 * from every bucket. Omit to disable agent scoping (CLI inventory listings).
 	 */
 	agentName?: string;
+	/** Replace existing TTSR registrations before bucketing this complete rule snapshot. */
+	replaceTtsrRules?: boolean;
 }
 
 /**
@@ -51,20 +53,22 @@ export function bucketRules(
 		if (name.length > 0) disabled.add(name);
 	}
 
-	const rulebookRules: Rule[] = [];
-	const alwaysApplyRules: Rule[] = [];
-
+	const includedRules: Rule[] = [];
 	for (const rule of rules) {
 		if (disabled.has(rule.name)) continue;
 		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) continue;
 		if (!ruleAppliesToAgent(rule, options.agentName)) continue;
+		includedRules.push(rule);
+	}
 
+	const replacedTtsrNames = options.replaceTtsrRules ? ttsrManager.replaceRules(includedRules) : undefined;
+	const rulebookRules: Rule[] = [];
+	const alwaysApplyRules: Rule[] = [];
+
+	for (const rule of includedRules) {
 		const hasTtsrCondition =
 			(rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
-		// `hasRule` first so re-bucketing against an already-populated manager (the
-		// mid-session rule re-discovery on /clear and /new) recognizes a rule it
-		// registered earlier as TTSR instead of leaking it into the rulebook bucket.
-		const isTtsrRule = hasTtsrCondition ? ttsrManager.hasRule(rule.name) || ttsrManager.addRule(rule) : false;
+		const isTtsrRule = hasTtsrCondition ? (replacedTtsrNames?.has(rule.name) ?? ttsrManager.addRule(rule)) : false;
 		if (isTtsrRule) continue;
 		if (rule.alwaysApply === true) {
 			alwaysApplyRules.push(rule);

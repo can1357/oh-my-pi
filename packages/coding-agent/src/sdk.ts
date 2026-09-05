@@ -3103,8 +3103,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// session creation, so a `RULES.md` (or any rule) created or edited while omp
 			// runs never reaches the prompt on /clear or /new until restart (issue #10940).
 			// resetCapabilities() clears the fs cache at those boundaries, so this observes
-			// the current file; reusing `ttsrManager` (bucketRules is idempotent on it)
-			// preserves TTSR registration and injection state across the rebuild.
+			// the current file. TTSR registrations are replaced from the new snapshot while
+			// injection state is retained only for rule names that remain registered.
 			if (hasSession && options.rules === undefined) {
 				const ttsrSettings = settings.getGroup("ttsr");
 				const rulesResult = await logger.time("rediscoverRules", () =>
@@ -3114,6 +3114,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					builtinRules: ttsrSettings.builtinRules,
 					disabledRules: ttsrSettings.disabledRules,
 					agentName: resolvedAgentName,
+					replaceTtsrRules: true,
 				});
 				rulebookRules = buckets.rulebookRules;
 				alwaysApplyRules = buckets.alwaysApplyRules;
