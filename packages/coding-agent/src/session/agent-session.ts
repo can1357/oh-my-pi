@@ -1241,6 +1241,15 @@ export class AgentSession {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			prewalkWillHandoff: () => this.#prewalk.willHandoff,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
+			forceTodoToolChoice: () => {
+				if (!this.getActiveToolNames().includes("todo")) return false;
+				const forced = buildNamedToolChoice("todo", this.model);
+				if (!forced || typeof forced === "string") return false;
+				this.#toolChoiceQueue.removeByLabel("todo-escape");
+				this.#toolChoiceQueue.pushOnce(forced, { label: "todo-escape" });
+				return true;
+			},
+			clearForcedTodoToolChoice: () => this.#toolChoiceQueue.removeByLabel("todo-escape"),
 		};
 		this.#todo = new TodoTracker(todoHost);
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
@@ -5407,6 +5416,7 @@ export class AgentSession {
 			// Drop any unconsumed forced decision so a post-plan execution turn
 			// does not inherit a stale `required` tool choice.
 			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+			this.#toolChoiceQueue.removeByLabel("todo-escape");
 		}
 	}
 
@@ -5972,6 +5982,7 @@ export class AgentSession {
 			// A user turn owns the next decision; drop a queued forced choice from
 			// a reminder continuation this prompt just preempted.
 			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+			this.#toolChoiceQueue.removeByLabel("todo-escape");
 		}
 
 		// If streaming, queue via steer()/followUp()/aside based on option
