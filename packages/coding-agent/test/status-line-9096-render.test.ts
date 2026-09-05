@@ -496,9 +496,11 @@ test("preserves the last ordinary segment when compact context cannot fit by its
 		},
 	});
 
-	const rendered = stripVTControlCharacters(component.getTopBorder(5).content);
+	const border = component.getTopBorder(5);
+	const rendered = stripVTControlCharacters(border.content);
 	expect(rendered).toContain("M");
 	expect(rendered).not.toContain("ctx:8%");
+	expect(border.width).toBe(5);
 });
 
 test("preserves the last ordinary segment when non-compact context labels cannot fit", () => {

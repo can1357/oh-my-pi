@@ -10,10 +10,18 @@ import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
-import { getActiveProfile, getProjectDir, setProfile, setProjectDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getProjectDir, setProfile, setProjectDir } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const originalProjectDir = getProjectDir();
-const originalProfile = getActiveProfile();
+const originalOmpProfile = process.env.OMP_PROFILE;
+const originalPiProfile = process.env.PI_PROFILE;
+
+function restoreProfileEnvironment(): void {
+	restoreEnvValue("OMP_PROFILE", originalOmpProfile);
+	restoreEnvValue("PI_PROFILE", originalPiProfile);
+	__resetDirsFromEnvForTests();
+}
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -25,12 +33,12 @@ afterEach(() => {
 	// Profile is process-wide; restore it after every test so a mutation (or an
 	// assertion failure before a manual reset) can't leak into sibling tests or
 	// concurrently executing files. AGENTS.md: tests must isolate global state.
-	setProfile(originalProfile);
+	restoreProfileEnvironment();
 });
 
 afterAll(() => {
 	resetSettingsForTest();
-	setProfile(originalProfile);
+	restoreProfileEnvironment();
 	setProjectDir(originalProjectDir);
 });
 

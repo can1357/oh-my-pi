@@ -2270,7 +2270,7 @@ export class StatusLineComponent implements Component {
 			return leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
 		}
 
-		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
+		const gapWidth = Math.max(0, topFillWidth - leftWidth - rightWidth);
 		if (plain) {
 			// Standalone composers: no gauge line between the groups, just air.
 			return leftGroup + padding(gapWidth) + rightGroup;
