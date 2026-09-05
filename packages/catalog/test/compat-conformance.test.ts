@@ -17,6 +17,7 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"synthetic-search",
 	"llama.cpp",
 	"lm-studio",
+	"litellm",
 	"vllm",
 	"openai-codex-device",
 ]);
@@ -52,6 +53,7 @@ function collectReferencedProviders(): Map<string, string> {
 		behavior.hostedDefaults,
 		behavior.apiRoutes,
 		behavior.modelLimits,
+		behavior.excludeDiscoveryModes,
 		behavior.excludeModels,
 		behavior.planRequirements,
 		behavior.pricingPeers,

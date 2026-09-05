@@ -2,8 +2,8 @@
  * Typed accessors over the compiled runtime-behavior vocabulary
  * (`rules/runtime/behavior.kdl`): provider/model heuristics that run before
  * or outside exact bundled-model lookup — responses routing, API routing,
- * quota tiers, plan requirements, model limits, roster exclusions, hosted
- * defaults, and pricing peers.
+ * quota tiers, plan requirements, model limits, roster and discovery-mode
+ * exclusions, hosted defaults, and pricing peers.
  */
 import { globMatch } from "./cascade";
 import rules from "./rules.json";
@@ -174,6 +174,11 @@ export function modelLimitsFor(provider: string, model: string): { context?: num
 export function isExcludedModel(provider: string, model: string): boolean {
 	const lower = model.toLowerCase();
 	return behavior.excludeModels.some(rule => rule.provider === provider && matchesList(rule.match, lower, lower));
+}
+
+/** Whether an exact upstream discovery mode is excluded from a provider's coding-model roster. */
+export function isExcludedDiscoveryMode(provider: string, mode: string): boolean {
+	return behavior.excludeDiscoveryModes.some(rule => rule.provider === provider && rule.modes.includes(mode));
 }
 
 /**

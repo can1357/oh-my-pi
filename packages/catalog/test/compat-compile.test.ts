@@ -81,6 +81,14 @@ describe("compat compiler grammar", () => {
 		).toThrow(/malformed value/);
 	});
 
+	test("exclude-discovery-modes compiles exact provider mode exclusions", () => {
+		const compiled = compileBehavior({
+			file: "runtime/behavior.kdl",
+			text: 'behavior {\n\texclude-discovery-modes "embedding" "moderation" provider="litellm"\n}',
+		});
+		expect(compiled.excludeDiscoveryModes).toEqual([{ provider: "litellm", modes: ["embedding", "moderation"] }]);
+	});
+
 	test("duplicate axis in one block is rejected", () => {
 		expect(() =>
 			compileCascade([

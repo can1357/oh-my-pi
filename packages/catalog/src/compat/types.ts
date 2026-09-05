@@ -291,6 +291,12 @@ export interface CompiledExcludeModels {
 	match: CompiledMatchList;
 }
 
+/** Exact upstream discovery modes excluded from one provider's coding-model roster. */
+export interface CompiledExcludeDiscoveryModes {
+	provider: string;
+	modes: string[];
+}
+
 /** Provider plan-requirement tiers keyed by matcher token lists. */
 export interface CompiledPlanRequirement {
 	provider: string;
@@ -314,6 +320,7 @@ export interface CompiledBehavior {
 	hostedDefaults: CompiledHostedDefault[];
 	apiRoutes: CompiledApiRoutes[];
 	modelLimits: CompiledModelLimits[];
+	excludeDiscoveryModes: CompiledExcludeDiscoveryModes[];
 	excludeModels: CompiledExcludeModels[];
 	planRequirements: CompiledPlanRequirement[];
 	pricingPeers: CompiledPricingPeer[];

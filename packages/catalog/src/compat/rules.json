@@ -14608,6 +14608,26 @@
 				]
 			}
 		],
+		"excludeDiscoveryModes": [
+			{
+				"provider": "litellm",
+				"modes": [
+					"audio_speech",
+					"audio_transcription",
+					"batch",
+					"embedding",
+					"guardrail",
+					"image_edit",
+					"image_generation",
+					"moderation",
+					"ocr",
+					"rerank",
+					"search",
+					"vector_store",
+					"video_generation"
+				]
+			}
+		],
 		"excludeModels": [
 			{
 				"provider": "amazon-bedrock",

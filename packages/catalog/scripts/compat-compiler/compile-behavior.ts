@@ -4,12 +4,13 @@
  * Ports the o2 runtime-behavior grammar (openai-responses-heuristic,
  * model-operations, cursor-effort, cursor-model-parameter, quota-tiers,
  * hosted-default) and adds the pi-only nodes: api-routes, model-limits,
- * exclude-models, plan-requirement, pricing-peer. Every node kind is
- * optional; per-node shapes are strict.
+ * exclude-discovery-modes, exclude-models, plan-requirement, pricing-peer.
+ * Every node kind is optional; per-node shapes are strict.
  */
 import type {
 	CompiledApiRoutes,
 	CompiledBehavior,
+	CompiledExcludeDiscoveryModes,
 	CompiledExcludeModels,
 	CompiledMatchList,
 	CompiledModelLimits,
@@ -229,6 +230,15 @@ function parseExcludeModels(node: KdlNodeView): CompiledExcludeModels {
 	return { provider, match };
 }
 
+function parseExcludeDiscoveryModes(node: KdlNodeView): CompiledExcludeDiscoveryModes {
+	ensureLeaf(node, ["provider"]);
+	if (node.props.filter(prop => prop.name === "provider").length !== 1) malformed(node);
+	const provider = requiredProp(node, "provider");
+	const modes = positionalStrings(node);
+	if (!provider || modes.length === 0 || new Set(modes).size !== modes.length) malformed(node);
+	return { provider, modes };
+}
+
 function parsePlanRequirement(node: KdlNodeView): CompiledPlanRequirement {
 	const children = ensureContainer(node, ["provider"]);
 	const provider = requiredProp(node, "provider");
@@ -275,6 +285,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		hostedDefaults: [],
 		apiRoutes: [],
 		modelLimits: [],
+		excludeDiscoveryModes: [],
 		excludeModels: [],
 		retiredProviders: [],
 		planRequirements: [],
@@ -334,6 +345,9 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				break;
 			case "model-limits":
 				behavior.modelLimits.push(parseModelLimits(node));
+				break;
+			case "exclude-discovery-modes":
+				behavior.excludeDiscoveryModes.push(parseExcludeDiscoveryModes(node));
 				break;
 			case "exclude-models":
 				behavior.excludeModels.push(parseExcludeModels(node));
