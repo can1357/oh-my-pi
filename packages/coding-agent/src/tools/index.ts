@@ -53,9 +53,13 @@ import { HubTool, isIrcEnabled } from "./hub";
 import { LearnTool } from "./learn";
 import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
+import { MemoryForgetTool } from "./memory-forget";
+import { MemoryLinkTool } from "./memory-link";
 import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
+import { MemoryRelatedTool } from "./memory-related";
 import { MemoryRetainTool } from "./memory-retain";
+
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
@@ -93,9 +97,13 @@ export * from "./image-gen";
 export * from "./learn";
 export * from "./manage-skill";
 export * from "./memory-edit";
+export * from "./memory-forget";
+export * from "./memory-link";
 export * from "./memory-recall";
 export * from "./memory-reflect";
+export * from "./memory-related";
 export * from "./memory-retain";
+
 export * from "./read";
 export * from "./report-tool-issue";
 export * from "./resolve";
@@ -477,7 +485,11 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	memory_edit: MemoryEditTool.createIf,
 	retain: MemoryRetainTool.createIf,
 	recall: MemoryRecallTool.createIf,
+	link: MemoryLinkTool.createIf,
+	related: MemoryRelatedTool.createIf,
+	forget: MemoryForgetTool.createIf,
 	reflect: MemoryReflectTool.createIf,
+
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
 };
@@ -577,11 +589,17 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		) {
 			requestedTools.push("ast_edit");
 		}
-		if (["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "")) {
-			for (const name of ["recall", "retain", "reflect"]) {
+		if (["hindsight", "mnemopi", "mnemon"].includes(session.settings.get("memory.backend") ?? "")) {
+			const names =
+				session.settings.get("memory.backend") === "mnemon"
+					? ["recall", "retain", "link", "related", "forget"]
+					: ["recall", "retain", "reflect"];
+
+			for (const name of names) {
 				if (!requestedTools.includes(name)) requestedTools.push(name);
 			}
 		}
+
 		if (session.settings.get("memory.backend") === "mnemopi" && !requestedTools.includes("memory_edit")) {
 			requestedTools.push("memory_edit");
 		}
@@ -597,7 +615,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0) {
 			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
 			if (
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "") &&
+				["hindsight", "mnemopi", "mnemon", "local"].includes(session.settings.get("memory.backend") ?? "") &&
 				!requestedTools.includes("learn")
 			) {
 				requestedTools.push("learn");
@@ -641,7 +659,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
 			);
 		}
-		if (name === "retain" || name === "recall" || name === "reflect") {
+		if (name === "retain" || name === "recall") {
+			return ["hindsight", "mnemopi", "mnemon"].includes(session.settings.get("memory.backend") ?? "");
+		}
+		if (name === "link" || name === "related" || name === "forget") {
+			return session.settings.get("memory.backend") === "mnemon";
+		}
+
+		if (name === "reflect") {
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
 		}
 		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
@@ -654,9 +679,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return (
 				session.settings.get("autolearn.enabled") &&
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined) &&
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
+				["hindsight", "mnemopi", "mnemon", "local"].includes(session.settings.get("memory.backend") ?? "")
 			);
 		}
+
 		if (name === "task") {
 			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
 		}

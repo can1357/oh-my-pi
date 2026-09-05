@@ -757,7 +757,7 @@ export class CommandController {
 		}
 
 		if (action === "stats" || action === "diagnose") {
-			const hook = action === "stats" ? backend.stats : backend.diagnose;
+			const hook = action === "stats" ? backend.stats?.bind(backend) : backend.diagnose?.bind(backend);
 			try {
 				const payload = await hook?.(agentDir, this.ctx.sessionManager.getCwd(), this.ctx.session);
 				if (!payload) {

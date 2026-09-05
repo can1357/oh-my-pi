@@ -606,7 +606,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				}
 				case "stats":
 				case "diagnose": {
-					const hook = verb === "stats" ? backend.stats : backend.diagnose;
+					const hook = verb === "stats" ? backend.stats?.bind(backend) : backend.diagnose?.bind(backend);
 					const payload = await hook?.(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
 					await runtime.output(payload ?? memoryStatsUnavailableMessage(backend.id, verb));
 					return commandConsumed();

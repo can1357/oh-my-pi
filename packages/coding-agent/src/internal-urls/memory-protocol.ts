@@ -305,20 +305,23 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		// `memory_edit update` and lets agents inspect the full content of a
 		// clipped recall preview before overwriting it (issue #4443).
 		if (namespace !== MEMORY_NAMESPACE) {
+			if (backend === "mnemon") {
+				throw new Error(
+					"Native Mnemon memories are not addressable via memory://. Use `recall` for ids, then `related` / `forget`. The CLI is an alternative. `read memory://<id>` is only available with memory.backend=mnemopi.",
+				);
+			}
+			if (backend === "hindsight") {
+				throw new Error(
+					"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.",
+				);
+			}
 			const mnemopiStates = mnemopiSessionStatesFromRegistry();
 			const hindsightActive =
-				backend === "hindsight" ||
-				(mnemopiStates.length === 0 &&
-					AgentRegistry.global()
-						.list()
-						.some(ref => ref.session?.getHindsightSessionState?.()));
+				mnemopiStates.length === 0 &&
+				AgentRegistry.global()
+					.list()
+					.some(ref => ref.session?.getHindsightSessionState?.());
 			if (hindsightActive) {
-				// Hindsight keeps memories server-side and exposes no
-				// `memory://<id>` addressing, yet the shared `recall` tool
-				// description still steers a follow-up `read memory://<id>`.
-				// Return a corrective pointer so that stray read self-corrects in
-				// one turn instead of derailing on the generic namespace error
-				// (issue #7587).
 				throw new Error(
 					"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.",
 				);

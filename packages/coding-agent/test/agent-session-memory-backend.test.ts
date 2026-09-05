@@ -109,6 +109,25 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(current.getAllToolNames()).toEqual(["read"]);
 		expect(current.systemPrompt).toEqual(["backend:off;tools:read"]);
 	});
+
+	it("mounts and unmounts mnemon graph tools on backend switch", async () => {
+		const current = createSession(async () =>
+			settings.get("memory.backend") === "mnemon"
+				? [createTool("link"), createTool("related"), createTool("forget")]
+				: [],
+		);
+
+		settings.override("memory.backend", "mnemon");
+		await current.applyMemoryBackend();
+
+		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "link", "related", "forget"]));
+
+		settings.override("memory.backend", "off");
+		await current.applyMemoryBackend();
+
+		expect(current.getActiveToolNames()).toEqual(["read"]);
+		expect(current.getAllToolNames()).toEqual(["read"]);
+	});
 	it("cancels a displaced local startup generation", async () => {
 		const current = createSession(async () => []);
 		const localStartup = current.beginLocalMemoryStartup();

@@ -119,6 +119,14 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	mnemonActive: () => {
+		try {
+			return Settings.instance.get("memory.backend") === "mnemon";
+		} catch {
+			return false;
+		}
+	},
+
 	autolearnActive: () => {
 		try {
 			return Settings.instance.get("autolearn.enabled") === true;
