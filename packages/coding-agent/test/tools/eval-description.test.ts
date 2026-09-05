@@ -10,14 +10,18 @@ function makeSession(opts: {
 	spawns?: string | null;
 	backends?: Record<string, boolean>;
 	preludes?: () => readonly EvalPreludeDefinition[];
+	taskDepth?: number;
+	maxRecursionDepth?: number;
 }): ToolSession {
 	const settings = Settings.isolated();
 	for (const [key, value] of Object.entries(opts.backends ?? {})) settings.set(key as never, value);
+	if (opts.maxRecursionDepth !== undefined) settings.set("task.maxRecursionDepth", opts.maxRecursionDepth);
 	return {
 		cwd: "/tmp/eval-test",
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => opts.spawns ?? "*",
+		taskDepth: opts.taskDepth,
 		...(opts.preludes ? { getEvalPreludes: opts.preludes } : {}),
 		settings,
 	} as unknown as ToolSession;
@@ -67,6 +71,16 @@ describe("eval tool description", () => {
 		const denied = new EvalTool(makeSession({ spawns: "" })).description;
 		expect(wildcard).toContain("agent(prompt");
 		expect(denied).not.toContain("agent(prompt");
+	});
+
+	it("omits agent() when recursion depth is exhausted", () => {
+		const belowCap = new EvalTool(makeSession({ taskDepth: 1, maxRecursionDepth: 2 })).description;
+		const atCap = new EvalTool(makeSession({ taskDepth: 2, maxRecursionDepth: 2 })).description;
+		const spawningDisabled = new EvalTool(makeSession({ taskDepth: 0, maxRecursionDepth: 0 })).description;
+
+		expect(belowCap).toContain("agent(prompt");
+		expect(atCap).not.toContain("agent(prompt");
+		expect(spawningDisabled).not.toContain("agent(prompt");
 	});
 
 	it("hides eval-defined tool guidance when eval.tools.enabled is off", () => {
