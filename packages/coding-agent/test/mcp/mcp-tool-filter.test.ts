@@ -43,10 +43,13 @@ test("denylist subtracts from allowlist when both are set", () => {
 	expect(result.allowed).toEqual(["search", "read_channel"]);
 });
 
-test("denied entry that matches nothing is still reported as unmatched", () => {
+test("a denylist entry matching nothing is harmless and stays out of unmatched", () => {
+	// Deny subtracts, so an unmatched deny entry fails open: harmless, and a
+	// defensive denylist kept across servers/versions legitimately matches
+	// nothing — it must not produce recurring unmatched-warn noise.
 	const result = run(NAMES, undefined, ["zzz_typo"]);
 	expect(result.allowed).toEqual(NAMES);
-	expect(result.unmatched).toEqual(["zzz_typo"]);
+	expect(result.unmatched).toEqual([]);
 });
 
 test("glob metacharacters: star, question, brace alternation", () => {
@@ -128,7 +131,10 @@ test("leading ! and extglob prefixes are literals (matcher surface pinned to doc
 	// `!foo*` must NOT invert into a picomatch negation — otherwise a denylist
 	// entry `["!admin*"]` would silently exclude everything EXCEPT admin*.
 	expect(run(NAMES, ["!search*"]).allowed).toEqual([]);
-	expect(run(NAMES, undefined, ["!search*"]).unmatched).toEqual(["!search*"]);
+	// Deny side: the pinned literal `!search*` matches nothing, subtracts
+	// nothing (deny fails open), and stays out of unmatched.
+	expect(run(NAMES, undefined, ["!search*"]).allowed).toEqual(NAMES);
+	expect(run(NAMES, undefined, ["!search*"]).unmatched).toEqual([]);
 	expect(run(NAMES, ["+(a|b)"]).unmatched).toEqual(["+(a|b)"]);
 });
 

@@ -60,11 +60,25 @@ const MATCH_OPTIONS = { dot: true, nonegate: true, noextglob: true } as const;
 const SLASH_SENTINEL = "\0";
 
 /**
- * A compiled pattern: a literal fast path plus a picomatch matcher built once
- * per filter application (not per name), so filtering a large tool catalog is
- * O(tools × patterns) matcher lookups instead of O(tools × patterns) regex
- * compilations.
+ * Whether any `/` appears inside a character class. A single forward scan:
+ * `[` opens a class, `]` closes it (a leading `!`/`^` negation is part of the
+ * class body), and a `/` seen while a class is open flags the pattern.
+ * A `/` between classes is an ordinary literal and does not flag.
  */
+function hasSlashInsideClass(pattern: string): boolean {
+	let inClass = false;
+	for (const ch of pattern) {
+		if (ch === "[") {
+			inClass = true;
+		} else if (ch === "]") {
+			inClass = false;
+		} else if (ch === "/" && inClass) {
+			return true;
+		}
+	}
+	return false;
+}
+
 class CompiledPattern {
 	readonly #raw: string;
 	readonly #isMatch: ((name: string) => boolean) | undefined;
@@ -75,8 +89,10 @@ class CompiledPattern {
 		// transliteration the class contains NUL, which breaks picomatch class
 		// semantics (mixed classes like `[a/]` would silently half-match).
 		// Route such entries to the never-match path so they surface loudly as
-		// `unmatched` instead of silently dropping the slash member.
-		if (/[[\]]/.test(pattern) && /\[.*\/.*\]/.test(pattern)) {
+		// `unmatched` instead of silently dropping the slash member. Detects a
+		// slash inside a SINGLE unclosed class only — a literal `/` between
+		// classes (`[a]/[b]`) is a valid documented glob and stays routable.
+		if (hasSlashInsideClass(pattern)) {
 			return;
 		}
 		if (/[*?[\]{}]/.test(pattern)) {
@@ -116,6 +132,11 @@ export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
 
 	if (enabled) {
 		allowed = toolNames.filter(name => enabled.some(matcher => matcher.matches(name)));
+		// Only unmatched allowlist entries warn: silence there means
+		// over-permission (the opposite of the allowlist intent). An unmatched
+		// denylist entry is harmless — deny subtracts, so a defensive entry
+		// kept across servers/versions legitimately matches nothing and must
+		// not produce recurring log noise.
 		unmatched = enabledTools!.filter((_, i) => !toolNames.some(name => enabled[i].matches(name)));
 	} else {
 		allowed = [...toolNames];
@@ -124,10 +145,6 @@ export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
 
 	if (disabled) {
 		allowed = allowed.filter(name => !disabled.some(matcher => matcher.matches(name)));
-		unmatched = [
-			...unmatched,
-			...disabledTools!.filter((_, i) => !toolNames.some(name => disabled[i].matches(name))),
-		];
 	}
 
 	return { allowed, unmatched, filterEmpty: allowed.length === 0 && toolNames.length > 0 };
