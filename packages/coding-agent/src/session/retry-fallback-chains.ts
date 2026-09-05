@@ -31,6 +31,49 @@ export interface RetryFallbackModelLookup {
 }
 
 /**
+ * Deduplicates simultaneous in-flight resolution operations for the same
+ * fallback selector key within a session or task tree.
+ *
+ * Concurrent callers sharing the same coordinator join the active in-flight
+ * promise and receive the settled result once complete. Settled entries
+ * are cleared immediately so future requests can retry after catalog or
+ * configuration state changes.
+ */
+export class FallbackSelectorResolutionCoordinator<TResult = unknown> {
+	readonly #inFlight = new Map<string, Promise<TResult>>();
+
+	/**
+	 * Resolves `key` by calling `resolver` if no in-flight promise exists.
+	 * Concurrent callers with the same `key` join the active promise.
+	 */
+	resolve(key: string, resolver: () => Promise<TResult>): Promise<TResult> {
+		const existing = this.#inFlight.get(key);
+		if (existing) {
+			return existing;
+		}
+
+		const pending = resolver().finally(() => {
+			if (this.#inFlight.get(key) === pending) {
+				this.#inFlight.delete(key);
+			}
+		});
+
+		this.#inFlight.set(key, pending);
+		return pending;
+	}
+
+	/** Count of active in-flight resolutions. */
+	get activeCount(): number {
+		return this.#inFlight.size;
+	}
+
+	/** Clears all pending in-flight entries. */
+	clear(): void {
+		this.#inFlight.clear();
+	}
+}
+
+/**
  * Inputs shared by startup (sdk) and runtime (turn-recovery) fallback-chain
  * resolution. `chains` is pre-expanded so callers can apply the default chain
  * to roles beyond the configured model roles (e.g. a subagent fallback role).
@@ -39,8 +82,8 @@ export interface RetryFallbackResolutionContext {
 	chains: RetryFallbackChains;
 	getModelRole(role: string): string | undefined;
 	modelLookup: RetryFallbackModelLookup;
+	coordinator?: FallbackSelectorResolutionCoordinator;
 }
-
 /** Active retry fallback state retained until the primary can be restored. */
 export interface ActiveRetryFallbackState {
 	/** Chain key that produced this fallback: a model-role name or a model-selector key. */

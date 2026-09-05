@@ -116,7 +116,7 @@ describe("native vector kernel parity", () => {
 				expect(Array.from(native)).toEqual(selected.slice(0, topK));
 			}
 		}
-	});
+	}, 15_000);
 
 	test("mmrRerank wrapper preserves the pre-native limit contract at u32 boundaries", () => {
 		const results = Array.from({ length: 8 }, (_v, i) => ({

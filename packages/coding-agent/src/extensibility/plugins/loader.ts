@@ -22,8 +22,9 @@ installLegacyPiSpecifierShim();
 
 const enabledPluginsCache = new Map<string, Promise<ScopedInstalledPlugin[]>>();
 
-function enabledPluginsCacheKey(cwd: string, home?: string): string {
-	return `${path.resolve(cwd)}\0${home === undefined ? "" : path.resolve(home)}`;
+function enabledPluginsCacheKey(cwd?: string, home?: string): string {
+	const safeCwd = typeof cwd === "string" && cwd.trim().length > 0 ? cwd : process.cwd();
+	return `${path.resolve(safeCwd)}\0${home === undefined ? "" : path.resolve(home)}`;
 }
 
 function clearEnabledPluginsCache(): void {
@@ -530,15 +531,23 @@ export async function getAllPluginCommandPaths(cwd: string): Promise<string[]> {
 /**
  * Get all extension module paths from all enabled plugins.
  */
-export async function getAllPluginExtensionPaths(cwd: string): Promise<string[]> {
-	const plugins = await getEnabledPlugins(cwd);
-	const paths: string[] = [];
+export async function getAllPluginExtensionPaths(cwd?: string): Promise<string[]> {
+	try {
+		const effectiveCwd = typeof cwd === "string" && cwd.trim().length > 0 ? cwd : process.cwd();
+		const plugins = await getEnabledPlugins(effectiveCwd);
+		const paths: string[] = [];
 
-	for (const plugin of plugins) {
-		paths.push(...resolvePluginExtensionPaths(plugin));
+		if (Array.isArray(plugins)) {
+			for (const plugin of plugins) {
+				paths.push(...resolvePluginExtensionPaths(plugin));
+			}
+		}
+
+		return paths;
+	} catch (error) {
+		logger.warn("Failed to resolve plugin extension paths", { cwd, error: String(error) });
+		return [];
 	}
-
-	return paths;
 }
 
 /**
