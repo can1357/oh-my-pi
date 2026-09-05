@@ -82,6 +82,13 @@ export function isPowerShell(shell: string): boolean {
 	return basename === "powershell.exe" || basename === "powershell" || basename === "pwsh.exe" || basename === "pwsh";
 }
 
+const POSIX_SHELL_PATTERN = /(?:^|[\\/])(?:sh|bash|dash|ash|ksh|zsh)(?:\.exe)?$/i;
+
+/** Whether the executable is a known shell whose command language uses POSIX quoting. */
+export function isPosixShell(shell: string): boolean {
+	return POSIX_SHELL_PATTERN.test(shell);
+}
+
 /**
  * Get shell prefix for wrapping commands (profilers, strace, etc.).
  */
