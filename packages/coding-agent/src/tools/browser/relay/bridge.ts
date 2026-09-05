@@ -3069,15 +3069,22 @@ export class RelayBridge {
 				(recoveryLoaderId !== undefined && currentLoaderId !== undefined
 					? recoveryLoaderId !== currentLoaderId
 					: runImmediatePreloads);
+			const applicationMarker =
+				script.params?.runImmediately === true && !runImmediately && typeof script.params.source === "string"
+					? `__ompRelayPreload${tab.tabId}_${++this.#sessionSeq}`
+					: undefined;
 			const replayParams =
 				script.params && typeof script.params === "object" && "runImmediately" in script.params
 					? {
 							...script.params,
 							runImmediately,
+							...(applicationMarker
+								? {
+										source: `${script.params.source}\n;Object.defineProperty(globalThis, ${JSON.stringify(applicationMarker)}, { value: true, configurable: true });`,
+									}
+								: {}),
 						}
 					: script.params;
-			const contextGenerationBeforeRegistration = tab.contextGeneration;
-			const navigationGenerationBeforeRegistration = tab.mainFrameNavigationGeneration;
 			let result: Record<string, unknown> | undefined;
 			try {
 				result = (await this.#rpc({
@@ -3114,35 +3121,40 @@ export class RelayBridge {
 				if (
 					currentLoaderId !== undefined &&
 					loaderAfterRegistration !== undefined &&
-					loaderAfterRegistration !== currentLoaderId &&
-					// A context created after Chrome acknowledged the registration is
-					// already covered by that registration. Only retry when the loader
-					// changed before acknowledgement; otherwise runImmediately would
-					// execute non-idempotent preload code twice in the new document.
-					tab.contextGeneration === contextGenerationBeforeRegistration &&
-					tab.mainFrameNavigationGeneration === navigationGenerationBeforeRegistration
+					loaderAfterRegistration !== currentLoaderId
 				) {
-					let retry: Record<string, unknown> | undefined;
-					try {
-						await this.#rpc({
-							op: "send",
-							tabId: tab.tabId,
-							method: "Page.removeScriptToEvaluateOnNewDocument",
-							params: { identifier: rootIdentifier },
-						});
-						retry = (await this.#rpc({
-							op: "send",
-							tabId: tab.tabId,
-							method: "Page.addScriptToEvaluateOnNewDocument",
-							params: { ...script.params, runImmediately: true },
-						})) as Record<string, unknown> | undefined;
-					} catch (err) {
-						if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
-						throw err;
+					// Command replies and Page events travel through separate queues, so
+					// their relay-side order is not application evidence. The probe was
+					// registered after the real script: seeing it in this document proves
+					// the real registration covered the navigation. Otherwise replace the
+					// ambiguous registration with an immediate one for the missed document.
+					const appliedToCurrentDocument =
+						applicationMarker !== undefined &&
+						(await this.#preloadApplicationMarker(tab.tabId, applicationMarker, script.params.worldName));
+					if (!appliedToCurrentDocument) {
+						let retry: Record<string, unknown> | undefined;
+						try {
+							await this.#rpc({
+								op: "send",
+								tabId: tab.tabId,
+								method: "Page.removeScriptToEvaluateOnNewDocument",
+								params: { identifier: rootIdentifier },
+							});
+							retry = (await this.#rpc({
+								op: "send",
+								tabId: tab.tabId,
+								method: "Page.addScriptToEvaluateOnNewDocument",
+								params: { ...script.params, runImmediately: true },
+							})) as Record<string, unknown> | undefined;
+						} catch (err) {
+							if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
+							throw err;
+						}
+						if (typeof retry?.identifier !== "string") {
+							throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
+						}
+						rootIdentifier = retry.identifier;
 					}
-					if (typeof retry?.identifier !== "string")
-						throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
-					rootIdentifier = retry.identifier;
 				}
 			}
 			const current = this.#preloadScript(tab, script.ownerSessionId, script.clientIdentifier);
@@ -3170,6 +3182,36 @@ export class RelayBridge {
 			}
 		}
 		this.#scheduleLivePreloadScriptCleanup(tab);
+	}
+
+	async #preloadApplicationMarker(tabId: number, marker: string, worldName: unknown): Promise<boolean> {
+		let contextId: number | undefined;
+		if (typeof worldName === "string") {
+			const frame = (await this.#rpc({ op: "send", tabId, method: "Page.getFrameTree" })) as
+				| { frameTree?: { frame?: { id?: unknown } } }
+				| undefined;
+			const frameId = frame?.frameTree?.frame?.id;
+			if (typeof frameId !== "string") return false;
+			const isolatedWorld = (await this.#rpc({
+				op: "send",
+				tabId,
+				method: "Page.createIsolatedWorld",
+				params: { frameId, worldName },
+			})) as { executionContextId?: unknown } | undefined;
+			if (typeof isolatedWorld?.executionContextId !== "number") return false;
+			contextId = isolatedWorld.executionContextId;
+		}
+		const evaluated = (await this.#rpc({
+			op: "send",
+			tabId,
+			method: "Runtime.evaluate",
+			params: {
+				expression: `delete globalThis[${JSON.stringify(marker)}]`,
+				returnByValue: true,
+				...(contextId !== undefined ? { contextId } : {}),
+			},
+		})) as { result?: { value?: unknown } } | undefined;
+		return evaluated?.result?.value === true;
 	}
 
 	async #mainFrameLoaderId(tabId: number): Promise<string | undefined> {
