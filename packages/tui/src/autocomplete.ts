@@ -738,14 +738,16 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				beforePrefix = currentLine.slice(0, cursorCol - liveAtPrefix.length);
 			}
 			// This is a file attachment completion
-			const newLine = `${beforePrefix + item.value} ${afterCursor}`;
+			const isDirectory = /[\\/]["']?$/.test(item.value);
+			const suffix = isDirectory ? "" : " ";
+			const newLine = `${beforePrefix + item.value}${suffix}${afterCursor}`;
 			const newLines = [...lines];
 			newLines[cursorLine] = newLine;
 
 			return {
 				lines: newLines,
 				cursorLine,
-				cursorCol: beforePrefix.length + item.value.length + 1, // +1 for space
+				cursorCol: beforePrefix.length + item.value.length + suffix.length,
 			};
 		}
 
