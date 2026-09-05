@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
+
+## [18.1.11] - 2026-09-05
+
 ### Added
 
 - Added `task.isolation.allowNested` to reject nested isolated subagent spawns by default, with an opt-in for large-swarm users; isolated subagents no longer advertise the `isolated` field unless enabled. The isolation marker propagates through non-isolated children of isolated parents and into security scan sessions, the nested-isolation preflight and the batch wire schema reject a mis-typed or stray `isolated` instead of silently downgrading the spawn, and plan mode only rejects affirmative isolation controls (an explicit `isolated: false` no longer fails the call) ([#3760](https://github.com/can1357/oh-my-pi/issues/3760)).
