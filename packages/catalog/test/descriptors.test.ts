@@ -19,6 +19,7 @@ describe("catalog provider descriptors", () => {
 		expect(DEFAULT_MODEL_PER_PROVIDER.xiaomi).toBe("mimo-v2.5");
 		// Login-only tools have no default model.
 		expect(DEFAULT_MODEL_PER_PROVIDER).not.toHaveProperty("kagi");
+		expect(DEFAULT_MODEL_PER_PROVIDER).not.toHaveProperty("brave");
 	});
 
 	test("anthropic descriptor opts into first-party catalog discovery", () => {
