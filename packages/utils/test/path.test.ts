@@ -32,6 +32,7 @@ describe("isFullyQualifiedPath", () => {
 		expect(isFullyQualifiedPath("C:\\omp\\bin\\omp.exe", "win32")).toBe(true);
 		expect(isFullyQualifiedPath("c:/omp/bin/omp.exe", "win32")).toBe(true);
 		expect(isFullyQualifiedPath("\\\\server\\share\\omp.exe", "win32")).toBe(true);
+		expect(isFullyQualifiedPath("//server/share/omp.exe", "win32")).toBe(true);
 		expect(isFullyQualifiedPath("C:omp", "win32")).toBe(false);
 		expect(isFullyQualifiedPath(".\\omp", "win32")).toBe(false);
 		expect(isFullyQualifiedPath("\\bin\\omp", "win32")).toBe(false);

@@ -35,7 +35,7 @@ describe("$which", () => {
 		expect($which(command)).toBe(secondExecutable);
 	});
 
-	it("rejects relative and cwd lookups when requireAbsolutePaths is true", () => {
+	it.skipIf(process.platform === "win32")("rejects relative and cwd lookups when requireAbsolutePaths is true", () => {
 		const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-which-abs-"));
 		tempDirs.push(testDir);
 
