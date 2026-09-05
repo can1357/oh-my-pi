@@ -25,6 +25,7 @@ import {
 	createBridgeEditTool,
 	createBridgeGrepFactory,
 	cursorMcpPrefersReplaceEdit,
+	getCursorTaskResumeId,
 	normalizeCursorReplaceArgs,
 	normalizeCursorTaskArgs,
 } from "@oh-my-pi/pi-coding-agent/cursor-bridge-tools";
@@ -918,6 +919,62 @@ describe("Cursor MCP task tool adapter", () => {
 
 		expect(result.isError).toBe(true);
 		expect(result.content[0].type === "text" && result.content[0].text).toContain("not found");
+	});
+
+	it("detects resume subagent IDs from top-level and batch task payloads", () => {
+		expect(getCursorTaskResumeId({ prompt: "continue", resume: "agent-123" })).toBe("agent-123");
+		expect(
+			getCursorTaskResumeId({
+				tasks: [{ prompt: "part 1" }, { prompt: "part 2", resume: "agent-456" }],
+			}),
+		).toBe("agent-456");
+		expect(getCursorTaskResumeId({ prompt: "fresh task" })).toBeUndefined();
+	});
+
+	it("rejects task.resume with an actionable error rather than launching a fresh subagent", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const result = await handlers.mcp({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "t-resume",
+			args: {
+				prompt: "Continue the previous investigation",
+				resume: "subagent-alpha-99",
+			},
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.content[0].type === "text" && result.content[0].text).toContain(
+			'Resuming subagents via task.resume ("subagent-alpha-99") is not supported. Use the `hub` tool',
+		);
+		expect(executedCalls.length).toBe(0);
+	});
+
+	it("refuses mcpApprovalPreflight when task.resume is present", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const approved = await handlers.mcpApprovalPreflight({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "pre-resume",
+			args: {
+				prompt: "Continue the previous investigation",
+				resume: "subagent-alpha-99",
+			},
+			rawArgs: {},
+		});
+
+		expect(approved).toBe(false);
 	});
 
 	it("preserves canonical task, name, and agent fields over Cursor aliases", () => {

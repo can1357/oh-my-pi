@@ -181,6 +181,27 @@ export function isCursorTaskMcpName(name: string): boolean {
 }
 
 /**
+ * Return the target subagent ID if this Cursor task call requests a resume.
+ *
+ * Cursor's native `TaskArgs` defines `resume?: string` to continue an existing
+ * subagent. When present at top-level or on any batch item, the bridge must
+ * not silently spawn a fresh subagent without its prior context.
+ */
+export function getCursorTaskResumeId(args: Record<string, unknown>): string | undefined {
+	const topLevel = nonEmptyStringArg(args, "resume");
+	if (topLevel !== undefined) return topLevel;
+	if (Array.isArray(args.tasks)) {
+		for (const item of args.tasks) {
+			if (item && typeof item === "object") {
+				const itemResume = nonEmptyStringArg(item as Record<string, unknown>, "resume");
+				if (itemResume !== undefined) return itemResume;
+			}
+		}
+	}
+	return undefined;
+}
+
+/**
  * Extract an OMP agent identifier from Cursor's `subagent_type` field.
  *
  * Cursor defines subagent types as `explore` (read-only codebase search),
