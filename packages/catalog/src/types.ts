@@ -811,6 +811,13 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		 * discovery is the whole truth for modality.
 		 */
 		discoveryInputAuthoritative: boolean;
+		/**
+		 * Discovery pricing is confirmed, including explicit zeros: the served
+		 * cost row wins verbatim instead of falling back to bundled rates for
+		 * zero fields. Set by catalog rules where discovery quotes every model
+		 * (e.g. ai&, whose non-USD orgs map to zero rather than USD figures).
+		 */
+		discoveryCostAuthoritative: boolean;
 		/** Complete alternate view for thinking-engaged requests; swap pointers, never spread. */
 		whenThinking?: ResolvedOpenAICompat;
 	};

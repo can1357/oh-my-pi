@@ -549,6 +549,16 @@ function hasDiscoveryInputAuthority(model: Model<Api>): boolean {
 	return model.compat !== undefined && Reflect.get(model.compat, "discoveryInputAuthoritative") === true;
 }
 
+/**
+ * Whether catalog rules grant this model's discovery cost authority
+ * (`discovery-cost-authoritative`). Read off the resolved compat record —
+ * the same shape `resolve.ts` uses for dynamic compat lookups — so the
+ * policy lives in KDL rather than a provider branch here.
+ */
+function hasDiscoveryCostAuthority(model: Model<Api>): boolean {
+	return model.compat !== undefined && Reflect.get(model.compat, "discoveryCostAuthoritative") === true;
+}
+
 function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamicModel: Model<TApi>): Model<TApi> {
 	// When discovery resolves the same model id to a different endpoint (e.g.
 	// a GitHub Copilot business/enterprise host), the bundled reference's
@@ -588,6 +598,12 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		? dynamicModel.reasoning
 		: existingModel.reasoning || dynamicModel.reasoning;
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
+	// Cost authority is declarative too: when rules confirm the served row
+	// (including explicit zeros, e.g. ai& non-USD orgs), it wins verbatim
+	// instead of falling back to bundled rates for zero fields.
+	const dynamicCostAuthoritative = hasDiscoveryCostAuthority(existingModel) && hasDiscoveryCostAuthority(dynamicModel);
+	const preferCost = (discoveryCost: number, fallbackCost: number): number =>
+		dynamicCostAuthoritative ? discoveryCost : preferDiscoveryCost(discoveryCost, fallbackCost);
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
 	// verbatim override vocabulary), never the resolved `compat` record.
 	return buildModel({
@@ -597,10 +613,10 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		reasoning,
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
-			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),
-			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output),
-			cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead),
-			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
+			input: preferCost(dynamicModel.cost.input, existingModel.cost.input),
+			output: preferCost(dynamicModel.cost.output, existingModel.cost.output),
+			cacheRead: preferCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead),
+			cacheWrite: preferCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
 			...(longContextCost ? { longContext: longContextCost } : {}),
 		},
 		contextWindow: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),

@@ -327,4 +327,44 @@ describe("ai& provider support", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	test("preserves confirmed JPY zero pricing through the manager merge", async () => {
+		// A JPY-billed org maps every rate to zero rather than USD figures.
+		// The merge treats zero as missing by default, so without cost
+		// authority the bundled USD seed rates would win and the resolved
+		// model would charge USD despite the JPY guard.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-aiand-jpy-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "qwen/qwen3.6-27b",
+					context_window: 262144,
+					capabilities: ["reasoning", "tool_calling", "vision"],
+					reasoning_efforts: ["none", "high"],
+					reasoning_effort_default: "high",
+					currency: "jpy",
+					input_per_1m: "48.000000",
+					output_per_1m: "480.000000",
+					cached_input_per_1m: "30.000000",
+				},
+			]),
+		) as unknown as FetchImpl;
+
+		try {
+			const { models } = await resolveProviderModels<"openai-completions">(
+				{
+					...aiandModelManagerOptions({ apiKey: "aiand-key", fetch: fetchMock }),
+					staticModels: [...AIAND_STATIC_MODELS],
+					cacheDbPath: dbPath,
+				},
+				"online",
+			);
+
+			const model = models.find(item => item.id === "qwen/qwen3.6-27b");
+			expect(model?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 });

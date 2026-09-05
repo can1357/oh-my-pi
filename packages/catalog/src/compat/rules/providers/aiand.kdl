@@ -11,6 +11,10 @@ provider "aiand" {
 	// that drops `vision` wins over bundled references in the manager merge
 	// instead of OR-merging image support back.
 	discovery-input-authoritative #true
+	// Discovery quotes every model, including explicit zeros for non-USD
+	// orgs: the served cost row wins verbatim instead of falling back to
+	// bundled USD rates for zero fields.
+	discovery-cost-authoritative #true
 	// Exact deployment ladders from the live USD-org /v1/models census
 	// (2026-09-05) where ai& serving differs from class lineage truth.
 	// Wire `none` is ai&'s thinking-off tier: it backs the `minimal` selector

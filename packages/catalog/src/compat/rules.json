@@ -6670,7 +6670,7 @@
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:19",
+				"source": "providers/aiand.kdl:23",
 				"providers": [
 					"aiand"
 				],
@@ -6696,7 +6696,7 @@
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:27",
+				"source": "providers/aiand.kdl:31",
 				"providers": [
 					"aiand"
 				],
@@ -6725,7 +6725,7 @@
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:36",
+				"source": "providers/aiand.kdl:40",
 				"providers": [
 					"aiand"
 				],
@@ -6750,7 +6750,7 @@
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:44",
+				"source": "providers/aiand.kdl:48",
 				"providers": [
 					"aiand"
 				],
@@ -6771,7 +6771,7 @@
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:49",
+				"source": "providers/aiand.kdl:53",
 				"providers": [
 					"aiand"
 				],
@@ -6796,7 +6796,7 @@
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:57",
+				"source": "providers/aiand.kdl:61",
 				"providers": [
 					"aiand"
 				],
@@ -6821,7 +6821,7 @@
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:65",
+				"source": "providers/aiand.kdl:69",
 				"providers": [
 					"aiand"
 				],
@@ -6848,7 +6848,7 @@
 				}
 			},
 			{
-				"source": "providers/aiand.kdl:73",
+				"source": "providers/aiand.kdl:77",
 				"providers": [
 					"aiand"
 				],
@@ -6879,7 +6879,8 @@
 					"aiand"
 				],
 				"wire": {
-					"discoveryInputAuthoritative": true
+					"discoveryInputAuthoritative": true,
+					"discoveryCostAuthoritative": true
 				},
 				"thinking": {
 					"mode": "effort"

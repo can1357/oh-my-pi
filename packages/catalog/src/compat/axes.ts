@@ -94,6 +94,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"disable-reasoning-on-forced-tool-choice": wire("disableReasoningOnForcedToolChoice", OAI),
 	"disable-reasoning-on-tool-choice": wire("disableReasoningOnToolChoice", OAI),
 	"discovery-input-authoritative": wire("discoveryInputAuthoritative", ["openai"]),
+	"discovery-cost-authoritative": wire("discoveryCostAuthoritative", ["openai"]),
 	"drop-thinking-when-reasoning-effort": wire("dropThinkingWhenReasoningEffort", ["openai"]),
 	"empty-length-finish-is-context-error": wire("emptyLengthFinishIsContextError", OAI),
 	"extra-body": { ...wire("extraBody", ["openai"], "object"), verbatimKeys: true },
