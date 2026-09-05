@@ -2133,7 +2133,13 @@ export class StatusLineComponent implements Component {
 						showEmbeddedContextWindow,
 					)
 			: 0;
-		const minimumGapWidth = () => embeddedContextWidth || (left.length > 0 && right.length > 0 ? 1 : 0);
+		// A default (non-compact) gauge may fall back to its short percentage-only
+		// label when the whole bar cannot hold both context labels. In that case,
+		// do not sacrifice the last ordinary segment to an impossible reservation.
+		// Compact mode is explicit and keeps its configured total reservation.
+		const reservedEmbeddedContextWidth =
+			!embedCompactContext && embeddedContextWidth > topFillWidth ? 0 : embeddedContextWidth;
+		const minimumGapWidth = () => reservedEmbeddedContextWidth || (left.length > 0 && right.length > 0 ? 1 : 0);
 		const totalWidth = () => leftWidth + rightWidth + minimumGapWidth();
 
 		if (topFillWidth > 0) {
