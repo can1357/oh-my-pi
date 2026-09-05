@@ -6068,6 +6068,8 @@ export interface GithubCopilotModelManagerConfig {
 }
 
 const COPILOT_CACHE_INVALIDATED_MODEL_IDS = [
+	"gpt-6-astra",
+	"gpt-6-astra-1m",
 	"grok-4.5",
 	"grok-4.5-1m",
 	"grok-4.6",
