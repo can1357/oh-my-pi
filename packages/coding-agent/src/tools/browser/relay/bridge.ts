@@ -3080,7 +3080,7 @@ export class RelayBridge {
 							runImmediately,
 							...(applicationMarker
 								? {
-										source: `${script.params.source}\n;Object.defineProperty(globalThis, ${JSON.stringify(applicationMarker)}, { value: true, configurable: true });`,
+										source: `Object.defineProperty(globalThis, ${JSON.stringify(applicationMarker)}, { value: true, configurable: true });\n;${script.params.source}`,
 									}
 								: {}),
 						}
@@ -3206,7 +3206,7 @@ export class RelayBridge {
 			tabId,
 			method: "Runtime.evaluate",
 			params: {
-				expression: `delete globalThis[${JSON.stringify(marker)}]`,
+				expression: `(() => { const present = Object.hasOwn(globalThis, ${JSON.stringify(marker)}); delete globalThis[${JSON.stringify(marker)}]; return present; })()`,
 				returnByValue: true,
 				...(contextId !== undefined ? { contextId } : {}),
 			},
