@@ -190,6 +190,7 @@ import {
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
+import { toolReadsSkillUris } from "../system-prompt";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -7887,9 +7888,8 @@ export class AgentSession {
 		if (this.agent.state.messages.length === 0) {
 			await this.refreshBaseSystemPrompt();
 		} else if (enabled) {
-			const renderedSkills = this.getActiveToolNames().includes("read")
-				? this.skills.filter(skill => skill.hide !== true)
-				: [];
+			const hasSkillReader = this.getActiveToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)));
+			const renderedSkills = hasSkillReader ? this.skills.filter(skill => skill.hide !== true) : [];
 			const alreadyAnnounced = this.agent.state.messages.some(
 				message => message.role === "custom" && message.customType === "skillful-notice",
 			);

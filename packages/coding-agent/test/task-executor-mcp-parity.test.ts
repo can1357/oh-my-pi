@@ -10,6 +10,8 @@ import type { MCPServerConnection, MCPToolDefinition } from "../src/mcp/types";
 import { customToolToDefinition } from "../src/sdk";
 import { createMCPProxyTools } from "../src/task/executor";
 import { createMockConnection, createMockTransport } from "./mcp-test-utils";
+import type { CustomTool } from "../src/extensibility/custom-tools/types";
+import { toolReadsSkillUris } from "../src/system-prompt";
 
 type CapturedRequest = { method: string; params: Record<string, unknown> | undefined };
 
@@ -72,6 +74,29 @@ describe("MCP tool strict declaration", () => {
 			{ createContext: () => ({}) } as unknown as ExtensionRunner,
 		);
 		expect(adapter.strict).toBe(false);
+	});
+});
+
+describe("Skill URI reader capability", () => {
+	const SKILL_READER: CustomTool = {
+		name: "skill-reader",
+		label: "Skill Reader",
+		description: "Reads skill instruction files",
+		parameters: { type: "object", properties: {} },
+		readsSkillUris: true,
+		async execute() {
+			return { content: [{ type: "text", text: "ok" }] };
+		},
+	};
+
+	it("survives the custom-tool → definition bridge into the registered session tool", () => {
+		const definition = customToolToDefinition(SKILL_READER);
+		expect(definition.readsSkillUris).toBe(true);
+		const adapter = wrapRegisteredTool(
+			{ definition, extensionPath: "<sdk>" } as RegisteredTool,
+			{ createContext: () => ({}) } as unknown as ExtensionRunner,
+		);
+		expect(toolReadsSkillUris(adapter)).toBe(true);
 	});
 });
 

@@ -175,21 +175,59 @@ describe("system prompt tool inventory", () => {
 		});
 	});
 
-	it("lets metadata overrides suppress a built-in skill URI reader", () => {
-		const metadata = buildSystemPromptToolMetadata(
+	it("omits skill URL guidance when an override suppresses the skill URI reader", async () => {
+		const tools = buildSystemPromptToolMetadata(
 			new Map([["read", { ...SDK_TOOL, name: "read", readsSkillUris: true }]]),
 			{ read: { readsSkillUris: false } },
 		);
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "overridden-skill",
+					description: "Unreadable after override",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [],
+			toolNames: ["read"],
+			tools,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
 
-		expect(metadata.get("read")?.readsSkillUris).toBeUndefined();
+		expect(text).toContain("# Internal URLs");
+		expect(text).not.toContain("`skill://<name>`");
 	});
 
-	it("lets metadata overrides declare a skill URI reader", () => {
-		const metadata = buildSystemPromptToolMetadata(new Map([["custom-read", { ...SDK_TOOL, name: "custom-read" }]]), {
+	it("renders skill URL guidance when an override declares a skill URI reader", async () => {
+		const tools = buildSystemPromptToolMetadata(new Map([["custom-read", { ...SDK_TOOL, name: "custom-read" }]]), {
 			"custom-read": { readsSkillUris: true },
 		});
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "override-skill",
+					description: "Readable after override",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [],
+			toolNames: ["custom-read"],
+			tools,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
 
-		expect(metadata.get("custom-read")?.readsSkillUris).toBe(true);
+		expect(text).toContain("override-skill");
+		expect(text).toContain("`skill://<name>`");
 	});
 
 	it("snapshots every full metadata getter once per rebuild and keeps fresh values", async () => {

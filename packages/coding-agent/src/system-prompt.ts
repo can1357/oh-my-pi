@@ -537,6 +537,21 @@ export function buildSystemPromptToolMetadata(
 	return projectSystemPromptToolMetadata(tools, { mode: "full", overrides });
 }
 
+/** Whether a tool can read `skill://` instruction content.
+ *
+ * Shared by initial prompt construction and mid-session skill notices so both
+ * consult declared capability instead of the tool name. Accepts live tools
+ * (`AgentTool`, capability carried as an optional extra property) and
+ * projected metadata (`SystemPromptToolMetadata`). */
+export function toolReadsSkillUris(tool: unknown): boolean {
+	return (
+		typeof tool === "object" &&
+		tool !== null &&
+		"readsSkillUris" in tool &&
+		(tool as { readsSkillUris?: unknown }).readsSkillUris === true
+	);
+}
+
 /** Builds a mode-specific metadata snapshot for internal prompt assembly. */
 export function projectSystemPromptToolMetadata(
 	tools: Map<string, AgentTool>,
@@ -559,8 +574,7 @@ export function projectSystemPromptToolMetadata(
 			metadataEntry.parameters = tool.parameters;
 			metadataEntry.examples = tool.examples;
 		}
-		const toolReadsSkillUris = "readsSkillUris" in tool && tool.readsSkillUris === true;
-		if ((override?.readsSkillUris ?? toolReadsSkillUris) === true) metadataEntry.readsSkillUris = true;
+		if ((override?.readsSkillUris ?? toolReadsSkillUris(tool)) === true) metadataEntry.readsSkillUris = true;
 
 		metadata.set(name, metadataEntry);
 	};
@@ -972,9 +986,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	//   name, not just `read`, so custom resolvers count once projected);
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasSkillReader =
-		tools === undefined
-			? toolNames.includes("read")
-			: toolNames.some(name => tools.get(name)?.readsSkillUris === true);
+		tools === undefined ? toolNames.includes("read") : toolNames.some(name => toolReadsSkillUris(tools.get(name)));
 	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
 	const filteredSkills = hasSkillReader ? skills.filter(skill => skill.hide !== true) : [];
 
