@@ -4,6 +4,7 @@
 
 ### Added
 
+- Expose native job status and child agent identity alongside the job ID in structured `async-result` metadata for extensions, without changing rendering or cancellation delivery policy.
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 
 ### Fixed

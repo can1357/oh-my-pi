@@ -18,6 +18,7 @@ import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/lau
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
 	buildAsyncResultBatchMessage,
+	type AsyncResultDetails,
 	type AsyncResultEntry,
 } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -181,36 +182,41 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(message?.content).not.toContain("agent://Foo-t1-2");
 	});
 
-	it.each(["completed", "failed", "cancelled"] as const)(
-		"exposes native %s status and agent identity separately from the job id",
-		status => {
-			const job: AsyncJob = {
-				id: "delivery-job-2",
-				agentId: "WorkerAgent",
-				type: "task",
-				status,
-				startTime: Date.now(),
-				label: "worker task",
-				abortController: new AbortController(),
-				promise: Promise.resolve(),
-			};
-			const message = buildAsyncResultBatchMessage([
-				{
-					jobId: "delivery-job-2",
-					result: "native result",
-					job,
-					durationMs: 1000,
-					epoch: 0,
-				},
-			]);
-
-			expect(message?.details?.jobs[0]).toMatchObject({
-				jobId: "delivery-job-2",
-				status,
-				agentId: "WorkerAgent",
+	it("delivers completed and failed manager states with distinct native identities", async () => {
+		const messages: AsyncResultDetails[] = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: (jobId, result, job) => {
+				const message = buildAsyncResultBatchMessage([{ jobId, result, job, durationMs: 0, epoch: 0 }]);
+				if (message?.details) messages.push(message.details);
+			},
+		});
+		try {
+			manager.register("task", "successful task", async () => "done", {
+				id: "delivery-job",
+				agentId: "CompletedWorker",
 			});
-		},
-	);
+			manager.register(
+				"task",
+				"failed task",
+				async () => {
+					throw new Error("actual task failure");
+				},
+				{ id: "delivery-job", agentId: "FailedWorker" },
+			);
+			await manager.waitForAll();
+			await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+			expect(messages).toHaveLength(2);
+			expect(messages.map(message => message.jobs[0])).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ jobId: "delivery-job", status: "completed", agentId: "CompletedWorker" }),
+					expect.objectContaining({ jobId: "delivery-job-2", status: "failed", agentId: "FailedWorker" }),
+				]),
+			);
+		} finally {
+			await manager.dispose({ timeoutMs: 1_000 });
+		}
+	});
 
 	it("does not derive status or agent identity from task-result markup", () => {
 		const job: AsyncJob = {
