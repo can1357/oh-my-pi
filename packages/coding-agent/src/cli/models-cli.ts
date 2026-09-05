@@ -12,6 +12,7 @@
  * forces the network (`online`).
  */
 import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
+import { catalogMetricsOf } from "@oh-my-pi/pi-catalog/identity/metrics";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -63,7 +64,7 @@ export function resolveModelsArgs(
 	return { action: "ls", pattern: first };
 }
 
-interface ModelJson {
+export interface ModelJson {
 	provider: string;
 	id: string;
 	selector: string;
@@ -75,6 +76,10 @@ interface ModelJson {
 	thinking: readonly Effort[] | null;
 	input: ("text" | "image")[];
 	cost: Model<Api>["cost"];
+	/** Catalog intelligence score, as shown in the model browser; null when the catalog has not scored the model. */
+	int: number | null;
+	/** Catalog-estimated output speed in tokens per second; null when unmeasured (a zero speed is not a score). */
+	tps: number | null;
 }
 
 interface ModelsJson {
@@ -103,7 +108,8 @@ function byProviderThenId(left: Model<Api>, right: Model<Api>): number {
 	return left.id.localeCompare(right.id);
 }
 
-function toModelJson(model: Model<Api>): ModelJson {
+export function toModelJson(model: Model<Api>): ModelJson {
+	const metrics = catalogMetricsOf(model);
 	return {
 		provider: model.provider,
 		id: model.id,
@@ -115,6 +121,8 @@ function toModelJson(model: Model<Api>): ModelJson {
 		thinking: model.thinking ? getSupportedEfforts(model) : null,
 		input: model.input,
 		cost: model.cost,
+		int: metrics?.int ?? null,
+		tps: metrics?.tps ?? null,
 	};
 }
 
