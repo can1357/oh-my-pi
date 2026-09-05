@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed a shared collab session being destroyed with "a host is already connected for this room" after the host's relay connection dropped: the host now treats that conflict as its own stale registration for up to two minutes and keeps retrying, so the room and its invite link survive and guests can reconnect with the same link; the reconnect notice waits until the new connection has stayed up long enough for a rejection to have arrived.
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.

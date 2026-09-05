@@ -245,12 +245,26 @@ export class CollabHost {
 				return;
 			}
 			if (willReconnect) {
+				// The relay frees the room as soon as it observes our close, so every guest
+				// was dropped with 4001 and has to rejoin under a fresh peer id. No peer-left
+				// arrives for the old ids, so drop them now — before a rejoining guest can
+				// register — or they linger in the participant list and keep
+				// #hasWritablePeers() routing UI requests to peers that cannot answer.
+				// Pending UI requests stay: #handleHello replays them to the rejoining guest.
+				this.#peers.clear();
+				this.#updateStatusSegment();
 				this.#ctx.showStatus(`Collab relay connection lost (${reason}), reconnecting…`, { dim: true });
 			} else {
 				void this.#teardown();
 				this.#ctx.session.emitNotice("warning", `Collab ended: ${reason}`, "collab");
 			}
 		};
+		socket.onReconnect = () =>
+			this.#ctx.session.emitNotice(
+				"info",
+				"Collab relay reconnected — guests must rejoin with the same link",
+				"collab",
+			);
 		socket.connect();
 
 		const timeout = setTimeout(

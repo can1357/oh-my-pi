@@ -9,6 +9,10 @@ import type { CollabFrame } from "./protocol";
 
 const AES_ALGORITHM = "AES-GCM";
 const IV_LENGTH = 12;
+/** GCM authentication tag appended by {@link seal}. */
+const GCM_TAG_BYTES = 16;
+/** Shortest payload {@link open} can authenticate: an IV and a tag, with or without text. */
+export const MIN_SEALED_BYTES = IV_LENGTH + GCM_TAG_BYTES;
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
 
@@ -44,7 +48,7 @@ export async function seal(key: CryptoKey, frame: CollabFrame): Promise<Uint8Arr
 
 /** Inverse of {@link seal}. Throws on auth failure or malformed input. */
 export async function open(key: CryptoKey, data: Uint8Array): Promise<CollabFrame> {
-	if (data.byteLength <= IV_LENGTH) {
+	if (data.byteLength < MIN_SEALED_BYTES) {
 		throw new Error("Sealed frame too short");
 	}
 	const iv = asStrict(data.subarray(0, IV_LENGTH));
