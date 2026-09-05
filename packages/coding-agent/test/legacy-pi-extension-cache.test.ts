@@ -75,6 +75,28 @@ test("legacy extension parse cache opens in WAL mode (#9549)", async () => {
 	}
 });
 
+test("contended legacy extension parse cache fails fast instead of blocking startup", async () => {
+	const tempDir = TempDir.createSync("@legacy-pi-extension-cache-contended-");
+	tempDirs.push(tempDir);
+	const cacheRoot = tempDir.path();
+	const cachePath = path.join(cacheRoot, "omp", "cache", "legacy-pi-extension-cache.db");
+	await fs.mkdir(path.dirname(cachePath), { recursive: true });
+
+	const lockHolder = new Database(cachePath, { create: true });
+	try {
+		lockHolder.run(
+			"CREATE TABLE extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_named_exports TEXT NOT NULL, commonjs_reexport_specifiers TEXT NOT NULL)",
+		);
+		lockHolder.run("BEGIN EXCLUSIVE");
+		const startedAt = performance.now();
+		expect((await runProbe(cacheRoot, healthProbePath)).trim()).toBe("UNAVAILABLE");
+		expect(performance.now() - startedAt).toBeLessThan(2_000);
+	} finally {
+		lockHolder.run("ROLLBACK");
+		lockHolder.close();
+	}
+});
+
 test("oversized-cache eviction keeps the parse cache usable when a concurrent process holds the WAL (#9549)", async () => {
 	const tempDir = TempDir.createSync("@legacy-pi-extension-cache-evict-");
 	tempDirs.push(tempDir);

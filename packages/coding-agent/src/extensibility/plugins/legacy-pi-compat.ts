@@ -9,7 +9,6 @@ import * as url from "node:url";
 import type { ParseResult, ParserPlugin } from "@babel/parser";
 import { parse as parseBabel } from "@babel/parser";
 import {
-	getDbBusyTimeoutMs,
 	getLegacyPiExtensionCacheDbPath,
 	isCompiledBinary,
 	logger,
@@ -548,6 +547,7 @@ function collectExtensionSpecifierReferences(
 const EXTENSION_PARSE_CACHE_SCHEMA_VERSION = 1;
 const EXTENSION_PARSE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const EXTENSION_PARSE_CACHE_MAX_ENTRIES = 10_000;
+const EXTENSION_PARSE_CACHE_BUSY_TIMEOUT_MS = 25;
 
 interface ExtensionSourceAnalysis {
 	readonly sourceType: "script" | "module";
@@ -592,13 +592,12 @@ function getExtensionParseCacheDb(): Database | null {
 		}
 		fs.mkdirSync(path.dirname(cachePath), { recursive: true });
 		const db = new Database(cachePath, { create: true });
-		// Install the busy handler BEFORE any lock-taking statement (incl.
-		// `PRAGMA journal_mode=WAL`, which takes an exclusive lock during WAL
-		// recovery). See #2421. WAL + synchronous=NORMAL avoids the per-entry
-		// journal create/delete + fsync churn that serialized this cache behind
-		// concurrent omp startups and blocked the event loop for ~20s (#9549).
-		db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
-		db.run("PRAGMA journal_mode=WAL");
+		// This cache is optional. Never inherit session-database lock waits here:
+		// a contended parse cache must fail fast and fall back to parsing instead
+		// of freezing every interactive frame during extension startup.
+		db.run(`PRAGMA busy_timeout = ${EXTENSION_PARSE_CACHE_BUSY_TIMEOUT_MS}`);
+		const journalMode = db.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()?.journal_mode;
+		if (journalMode?.toLowerCase() !== "wal") db.run("PRAGMA journal_mode=WAL");
 		db.run("PRAGMA synchronous=NORMAL");
 		db.run(
 			"CREATE TABLE IF NOT EXISTS extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_named_exports TEXT NOT NULL, commonjs_reexport_specifiers TEXT NOT NULL)",
