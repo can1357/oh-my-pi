@@ -5041,6 +5041,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.inheritApprovalMode": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Inherit Approval Mode",
+			description:
+				"Propagate the parent session's tool approval mode to subagents instead of running them in yolo mode. Off by default so unattended delegation keeps working; when on, a subagent tool call that needs confirmation fails closed because subagents have no interactive UI to prompt against.",
+		},
+	},
+
 	"task.maxRecursionDepth": {
 		type: "number",
 		default: 2,

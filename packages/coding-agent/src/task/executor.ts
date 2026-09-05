@@ -973,9 +973,15 @@ export function createSubagentSettings(
 			// race-free (previously both were force-disabled here).
 
 			// Subagents run headless — there is no UI to confirm prompts against, so
-			// the parent task approval is the authorization boundary. Use yolo mode
-			// to preserve unattended subagent execution. User `tools.approval` policies still apply.
-			"tools.approvalMode": "yolo",
+			// the parent task approval is the authorization boundary. By default they
+			// run in yolo mode to preserve unattended subagent execution.
+			// Opt in to `task.inheritApprovalMode` to keep the parent's mode instead:
+			// the snapshot above already carries it, so we simply skip the override,
+			// and any subagent call that would prompt fails closed for want of a UI.
+			// User `tools.approval` policies still apply in both cases.
+			...(baseSettings.get("task.inheritApprovalMode") === true
+				? undefined
+				: { "tools.approvalMode": "yolo" as const }),
 			// Subagents run unadvised by default; runSubprocess opts a spawn back in
 			// per agent (frontmatter `advisor` / `task.agentAdvisor`) via overrides.
 			"advisor.enabled": false,

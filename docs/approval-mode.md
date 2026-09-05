@@ -154,3 +154,25 @@ When ACP approval is required, OMP routes it through the ACP client instead of t
 ## Subagents
 
 Subagents run headless with `tools.approvalMode: yolo` so ordinary tier-based prompts do not stall them. The parent `task` approval is the authorization boundary. User `tools.approval.<tool>` settings remain authoritative: `deny` blocks the tool, `allow` permits it, and `prompt` cannot be satisfied in a headless subagent and rejects the call.
+
+### Inheriting the parent mode
+
+Set `task.inheritApprovalMode: true` to propagate the parent session's `tools.approvalMode` to
+subagents instead of forcing `yolo`:
+
+```yaml
+task:
+  inheritApprovalMode: true
+tools:
+  approvalMode: write
+```
+
+This is off by default because it changes subagents from "never blocked" to "blocked whenever the
+inherited mode would prompt". A subagent is headless, so there is nothing to prompt against: a call
+above the inherited mode's auto-approve tier fails closed with `requires approval but no interactive
+UI available` rather than pausing for input. With `write`, for example, a subagent may still read and
+edit, but an `exec` tool call such as `bash` is rejected.
+
+Use it when a subagent must not exceed the tier the user granted the parent session, and prefer
+per-tool `tools.approval.<tool>` policies when you only need to fence off specific tools. A per-spawn
+`tools.approvalMode` override passed by the `task` tool still wins over both.
