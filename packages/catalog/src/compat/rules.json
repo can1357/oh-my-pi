@@ -14352,6 +14352,48 @@
 			{
 				"provider": "synthetic-search",
 				"model": "auto"
+			},
+			{
+				"provider": "meta-image",
+				"model": "muse-image-1.0"
+			}
+		],
+		"imageProviders": [
+			{
+				"provider": "openai",
+				"backend": "openai"
+			},
+			{
+				"provider": "openai-codex",
+				"backend": "openai"
+			},
+			{
+				"provider": "google-antigravity",
+				"backend": "antigravity"
+			},
+			{
+				"provider": "xai",
+				"backend": "xai"
+			},
+			{
+				"provider": "xai-oauth",
+				"backend": "xai"
+			},
+			{
+				"provider": "openrouter",
+				"backend": "openrouter"
+			},
+			{
+				"provider": "deepinfra",
+				"backend": "deepinfra"
+			},
+			{
+				"provider": "meta",
+				"backend": "meta"
+			},
+			{
+				"provider": "google",
+				"backend": "gemini"
 			}
 		],
 		"apiRoutes": [

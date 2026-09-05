@@ -792,22 +792,25 @@ describe("agent() through eval runtimes", () => {
 
 		expect(result.exitCode).toBe(0);
 
+		// wait() emits an initial snapshot when one is already available and
+		// always emits the final snapshot; scheduling determines the count.
 		const agentEvents = events.filter(event => event.op === "agent");
-		expect(agentEvents).toHaveLength(1);
-
-		const completed = agentEvents[0];
-		expect(completed.status).toBe("completed");
-		expect(completed.toolCount).toBe(7);
-		expect(completed.cost).toBeCloseTo(0.06);
-		expect(completed.contextTokens).toBe(8000);
-		expect(completed.taskPreview).toBe("investigate");
-		expect(typeof completed.id).toBe("string");
+		const completed = agentEvents.at(-1);
+		expect(completed).toMatchObject({
+			status: "completed",
+			toolCount: 7,
+			cost: 0.06,
+			contextTokens: 8000,
+			taskPreview: "investigate",
+			id: expect.any(String),
+		});
 
 		// The same final snapshot is retained in the executor's display outputs.
 		const displayAgentEvents = result.displayOutputs.filter(
-			(output): output is Extract<typeof output, { type: "status" }> => output.type === "status",
+			(output): output is Extract<typeof output, { type: "status" }> =>
+				output.type === "status" && output.event.op === "agent",
 		);
-		expect(displayAgentEvents).toHaveLength(1);
+		expect(displayAgentEvents.at(-1)?.event).toEqual(completed);
 	});
 
 	it("pauses the idle watchdog while a quiet agent() runs past the budget", async () => {

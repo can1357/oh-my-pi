@@ -264,6 +264,7 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 | `OPENAI_BASE_URL`                   | Base URL fallback for OpenAI-compatible requests when the model/provider supplies a default |
 | `MOONSHOT_BASE_URL`                 | Moonshot chat and model-discovery endpoint override                                         |
 | `XAI_BASE_URL`                      | xAI HTTP endpoint override                                                                  |
+| `META_BASE_URL`                     | Meta image endpoint override (`images/generations`, `images/edits`)                         |
 | `SAKANA_BASE_URL` / `FUGU_BASE_URL` | Sakana/Fugu endpoint override (`SAKANA_BASE_URL` wins)                                      |
 | `PI_OPENROUTER_RESPONSES`           | Responses API is enabled unless set to `0`; `0` selects the OpenAI Completions route        |
 | `UMANS_WEBSEARCH_PROVIDER`          | Default Umans Anthropic web-search provider selection when not supplied explicitly          |

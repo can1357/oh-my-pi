@@ -180,7 +180,7 @@ Ownership strata (see `src/compat/rules/README.md`):
 - `taxonomy/*.kdl` — identity: class membership, families, revision extraction, reviewed overrides, suffix collapse.
 - `classes/*.kdl` — model-lineage truths (behavior inherent to a model line, on any host).
 - `providers/*.kdl` — deployment contracts (behavior a host imposes), plus documented exact-id residue.
-- `runtime/behavior.kdl` — heuristics that run before/outside exact model lookup (`api-routes`, `model-limits`, `exclude-models`, `pricing-peer`, hosted defaults).
+- `runtime/behavior.kdl` — heuristics that run before/outside exact model lookup (`api-routes`, `model-limits`, `exclude-models`, `pricing-peer`, hosted defaults, image-provider).
 
 Rules for TS code:
 

@@ -19,6 +19,8 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"lm-studio",
 	"vllm",
 	"openai-codex-device",
+	// Hosted image-generation default for Meta Model API (packages/coding-agent/src/tools/image-gen.ts)
+	"meta-image",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {
@@ -50,6 +52,7 @@ function collectReferencedProviders(): Map<string, string> {
 		behavior.modelOperations,
 		behavior.quotaTiers,
 		behavior.hostedDefaults,
+		behavior.imageProviders,
 		behavior.apiRoutes,
 		behavior.modelLimits,
 		behavior.excludeModels,

@@ -1,6 +1,6 @@
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth, type ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { ReadonlySessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
@@ -56,6 +56,54 @@ function createAntigravityXAIContext(model: Model | undefined, fetchMock: typeof
 		hasQueuedMessages: () => false,
 		abort: () => {},
 	};
+}
+
+function createMetaXaiContext(model: Model | undefined, fetchMock: typeof fetch): CustomToolContext {
+	return {
+		fetch: fetchMock,
+		sessionManager: {
+			getCwd: () => "/tmp",
+			getSessionId: () => "test-session",
+		} as unknown as ReadonlySessionManager,
+		modelRegistry: {
+			getApiKeyForProvider: async (provider: string) => {
+				if (provider === "meta") return "test-meta-key";
+				if (provider === "xai-oauth") return "test-xai-token";
+				return undefined;
+			},
+			getProviderBaseUrl: () => undefined,
+			getAll: () => [],
+			authStorage: {
+				hasNonEnvCredential: (provider: string) => provider === "xai-oauth",
+				rotateSessionCredential: async () => false,
+			},
+			resolver: (provider: string) => async () => (provider === "meta" ? "test-meta-key" : "test-xai-token"),
+		} as unknown as ModelRegistry,
+		model,
+		isIdle: () => true,
+		hasQueuedMessages: () => false,
+		abort: () => {},
+	};
+}
+
+function competingMetaXaiFetch(requestUrls: string[]): typeof fetch {
+	return (async (input: string | URL | Request) => {
+		const url = input.toString();
+		requestUrls.push(url);
+		if (url.startsWith("https://api.meta.ai/")) {
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("active-meta-image").toString("base64") }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}
+		if (url.startsWith("https://api.x.ai/")) {
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("active-xai-image").toString("base64") }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}
+		throw new Error(`Unexpected provider request: ${url}`);
+	}) as unknown as typeof fetch;
 }
 
 describe("imageGenTool", () => {
@@ -940,5 +988,421 @@ describe("imageGenTool", () => {
 		).rejects.toThrow("deepinfra image generation is text-to-image only and cannot edit input images");
 		// DeepInfra was credentialed but must not receive the edit request.
 		expect(requestUrls).toEqual([]);
+	});
+
+	it("routes Meta image generation through the images/generations endpoint with KDL default model and auth", async () => {
+		let requestUrl: string | undefined;
+		let requestBody: Record<string, unknown> | undefined;
+		const captured: { authorization: string | null } = { authorization: null };
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			requestUrl = input.toString();
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			captured.authorization = new Headers(init?.headers).get("authorization");
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("fake-meta-image").toString("base64"), url: null }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "meta" ? "test-meta-key" : undefined),
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-meta-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute(
+			"call-meta",
+			{ subject: "a cat", aspect_ratio: "16:9", provider: "meta" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrl).toBe("https://api.meta.ai/v1/images/generations");
+		expect(captured.authorization).toBe("Bearer test-meta-key");
+		expect(requestBody).toMatchObject({
+			model: "muse-image-1.0",
+			prompt: "a cat.",
+			n: 1,
+			response_format: "b64_json",
+			size: "1536x1024",
+		});
+		expect(result.details?.provider).toBe("meta");
+		expect(result.details?.model).toBe("muse-image-1.0");
+		expect(result.details?.imageCount).toBe(1);
+		const savedPath = result.details?.imagePaths[0];
+		if (!savedPath) throw new Error("Expected generated image path");
+		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("fake-meta-image"));
+	});
+
+	it("routes Meta image editing through the images/edits endpoint with reference images", async () => {
+		let requestUrl: string | undefined;
+		let requestBody: Record<string, unknown> | undefined;
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			requestUrl = input.toString();
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(
+				JSON.stringify({
+					data: [{ b64_json: Buffer.from("fake-meta-edited-image").toString("base64"), url: null }],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "meta" ? "test-meta-key" : undefined),
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-meta-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const referenceData = Buffer.from("reference-image").toString("base64");
+		const result = await imageGenTool.execute(
+			"call-meta-edit",
+			{
+				subject: "a cat",
+				changes: ["add a red hat"],
+				input: [{ data: referenceData, mime_type: "image/png" }],
+				provider: "meta",
+			},
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrl).toBe("https://api.meta.ai/v1/images/edits");
+		expect(requestBody).toMatchObject({
+			model: "muse-image-1.0",
+			prompt: "a cat.\n\nChanges:\n- add a red hat",
+			images: [{ image_url: `data:image/png;base64,${referenceData}` }],
+			n: 1,
+			response_format: "b64_json",
+		});
+		expect(result.details?.provider).toBe("meta");
+		expect(result.details?.imageCount).toBe(1);
+	});
+
+	it("respects getProviderBaseUrl override for Meta image endpoints", async () => {
+		let requestUrl: string | undefined;
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+			requestUrl = input.toString();
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("fake-meta-image").toString("base64"), url: null }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "meta" ? "test-meta-key" : undefined),
+				getProviderBaseUrl: (provider: string) =>
+					provider === "meta" ? "https://custom-proxy.meta.internal/v1/" : undefined,
+				getAll: () => [],
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-meta-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		await imageGenTool.execute("call-meta-proxy", { subject: "a cat", provider: "meta" }, undefined, ctx);
+
+		expect(requestUrl).toBe("https://custom-proxy.meta.internal/v1/images/generations");
+	});
+
+	it("prefers META_BASE_URL when the registry reports the default Meta base URL", async () => {
+		const originalMetaBaseUrl = Bun.env.META_BASE_URL;
+		Bun.env.META_BASE_URL = "https://env-proxy.meta.internal/v1/";
+		try {
+			let requestUrl: string | undefined;
+
+			const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+				requestUrl = input.toString();
+				return new Response(
+					JSON.stringify({ data: [{ b64_json: Buffer.from("fake-meta-image").toString("base64"), url: null }] }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}) as unknown as typeof fetch;
+
+			const ctx: CustomToolContext = {
+				fetch: fetchMock,
+				sessionManager: {
+					getCwd: () => "/tmp",
+					getSessionId: () => "test-session",
+				} as unknown as ReadonlySessionManager,
+				modelRegistry: {
+					getApiKeyForProvider: async (provider: string) => (provider === "meta" ? "test-meta-key" : undefined),
+					getProviderBaseUrl: (provider: string) => (provider === "meta" ? "https://api.meta.ai/v1" : undefined),
+					getProviderHeaders: () => undefined,
+					getAll: () => [],
+					authStorage: { rotateSessionCredential: async () => false },
+					resolver: () => async () => "test-meta-key",
+				} as unknown as ModelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+			};
+
+			const result = await imageGenTool.execute(
+				"call-meta-env-proxy",
+				{ subject: "a cat", provider: "meta" },
+				undefined,
+				ctx,
+			);
+			generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+			expect(requestUrl).toBe("https://env-proxy.meta.internal/v1/images/generations");
+		} finally {
+			if (originalMetaBaseUrl === undefined) {
+				delete Bun.env.META_BASE_URL;
+			} else {
+				Bun.env.META_BASE_URL = originalMetaBaseUrl;
+			}
+		}
+	});
+
+	it("forwards configured Meta provider headers to the image endpoint", async () => {
+		let requestHeaders: Headers | undefined;
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			requestHeaders = new Headers(init?.headers);
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("fake-meta-image").toString("base64"), url: null }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "meta" ? "test-meta-key" : undefined),
+				getProviderBaseUrl: () => undefined,
+				getProviderHeaders: (provider: string) =>
+					provider === "meta" ? { "x-proxy-token": "proxy-123" } : undefined,
+				getAll: () => [],
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-meta-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute(
+			"call-meta-headers",
+			{ subject: "a cat", provider: "meta" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestHeaders?.get("x-proxy-token")).toBe("proxy-123");
+		expect(requestHeaders?.get("authorization")?.startsWith("Bearer ")).toBe(true);
+		expect(result.details?.provider).toBe("meta");
+	});
+
+	it.each([
+		{
+			name: "preserves configured Meta authorization",
+			key: "test-meta-key",
+			authorization: "Bearer proxy-credential",
+		},
+		{ name: "omits generated authorization for keyless Meta proxies", key: kNoAuth, authorization: undefined },
+		{
+			name: "preserves explicit authorization for keyless Meta proxies",
+			key: kNoAuth,
+			authorization: "Bearer proxy-credential",
+		},
+	])("$name", async ({ key, authorization }) => {
+		let requestHeaders: Headers | undefined;
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			requestHeaders = new Headers(init?.headers);
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("fake-meta-image").toString("base64"), url: null }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "meta" ? key : undefined),
+				getProviderBaseUrl: () => undefined,
+				getProviderHeaders: (provider: string) =>
+					provider === "meta" && authorization ? { Authorization: authorization } : undefined,
+				getAll: () => [],
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => key,
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute(
+			"call-meta-auth-precedence",
+			{ subject: "a cat", provider: "meta" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestHeaders?.get("authorization")).toBe(authorization ?? null);
+		expect(result.details?.provider).toBe("meta");
+	});
+
+	it("lets lowercase Meta headers win over generated defaults without duplication", async () => {
+		let requestHeaders: Headers | undefined;
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			requestHeaders = new Headers(init?.headers);
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("fake-meta-image").toString("base64"), url: null }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) => (provider === "meta" ? "test-meta-key" : undefined),
+				getProviderBaseUrl: () => undefined,
+				getProviderHeaders: (provider: string) =>
+					provider === "meta"
+						? {
+								authorization: "Bearer proxy-credential",
+								"User-Agent": "proxy-agent/1.0",
+								"content-type": "application/json",
+							}
+						: undefined,
+				getAll: () => [],
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-meta-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute(
+			"call-meta-auth-casing",
+			{ subject: "a cat", provider: "meta" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestHeaders?.get("authorization")).toBe("Bearer proxy-credential");
+		expect(requestHeaders?.get("user-agent")).toBe("proxy-agent/1.0");
+		// A forced default key would coalesce with the lowercase caller field
+		// into "application/json, application/json".
+		expect(requestHeaders?.get("content-type")).toBe("application/json");
+		expect(result.details?.provider).toBe("meta");
+	});
+
+	it("prefers the active Meta provider over unrelated credentialed providers", async () => {
+		const requestUrls: string[] = [];
+		const model = {
+			api: "openai-responses",
+			provider: "meta",
+			id: "muse-spark-1.3",
+			name: "Muse Spark",
+			baseUrl: "https://api.meta.ai/v1",
+		} as Model;
+		const ctx = createMetaXaiContext(model, competingMetaXaiFetch(requestUrls));
+
+		const result = await imageGenTool.execute("call-active-meta", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual(["https://api.meta.ai/v1/images/generations"]);
+		expect(result.details?.provider).toBe("meta");
+	});
+
+	it("honors configured imageOrder over the active Meta provider", async () => {
+		setImageProviderOrder(["xai"]);
+		const requestUrls: string[] = [];
+		const model = {
+			api: "openai-responses",
+			provider: "meta",
+			id: "muse-spark-1.3",
+			name: "Muse Spark",
+			baseUrl: "https://api.meta.ai/v1",
+		} as Model;
+		const ctx = createMetaXaiContext(model, competingMetaXaiFetch(requestUrls));
+
+		const result = await imageGenTool.execute("call-order-over-meta", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual(["https://api.x.ai/v1/images/generations"]);
+		expect(result.details?.provider).toBe("xai");
+	});
+
+	it("does not select Meta for an unknown active chat provider", async () => {
+		const requestUrls: string[] = [];
+		const model = {
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-opus-4",
+			name: "Claude",
+		} as Model;
+		const ctx = createMetaXaiContext(model, competingMetaXaiFetch(requestUrls));
+
+		const result = await imageGenTool.execute("call-unknown-active", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual(["https://api.x.ai/v1/images/generations"]);
+		expect(result.details?.provider).toBe("xai");
 	});
 });

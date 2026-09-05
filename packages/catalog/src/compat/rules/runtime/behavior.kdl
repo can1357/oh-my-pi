@@ -252,4 +252,20 @@ behavior {
 	}
 	hosted-default provider="zai-search" model="glm-4.7"
 	hosted-default provider="synthetic-search" model="auto"
+	// The `generate_image` tool is a model-less hosted operation, like the
+	// search facade providers above: its `meta-image` provider id keys this
+	// default and is not a chat provider roster.
+	hosted-default provider="meta-image" model="muse-image-1.0"
+	// Chat-provider → generate_image backend. Unlisted providers do not
+	// bias auto order. openai-codex maps onto the openai backend so a
+	// Codex session still prefers OPENAI_API_KEY, then the subscription.
+	image-provider provider="openai" backend="openai"
+	image-provider provider="openai-codex" backend="openai"
+	image-provider provider="google-antigravity" backend="antigravity"
+	image-provider provider="xai" backend="xai"
+	image-provider provider="xai-oauth" backend="xai"
+	image-provider provider="openrouter" backend="openrouter"
+	image-provider provider="deepinfra" backend="deepinfra"
+	image-provider provider="meta" backend="meta"
+	image-provider provider="google" backend="gemini"
 }
