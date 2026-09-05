@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed C++ language inference excluding CUDA header (`.cuh`) files.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

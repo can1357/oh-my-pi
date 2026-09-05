@@ -44,6 +44,11 @@
 - Fixed Codex V2 remote compaction rebuilding the request prefix differently from normal turns, restoring prompt-cache reuse ([#10786](https://github.com/can1357/oh-my-pi/issues/10786)).
 - Restored mouse clicks, hover, and wheel scrolling in Plan Review.
 
+### Fixed
+
+- Fixed the built-in clangd registration omitting CUDA source and header files (`.cu` and `.cuh`).
+- Fixed `ast_grep` skipping CUDA headers and ignoring an explicit `lang` override for ambiguous file extensions.
+
 ## [18.1.9] - 2026-09-04
 
 ### Breaking Changes

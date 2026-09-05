@@ -5023,6 +5023,16 @@ describe("lsp regressions", () => {
 	});
 });
 
+describe("clangd CUDA defaults", () => {
+	it("registers CUDA sources and headers", () => {
+		const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+		for (const file of ["kernel.cu", "kernel.cuh"]) {
+			const names = getServersForFile(config, file).map(([name]) => name);
+			expect(names).toContain("clangd");
+		}
+	});
+});
+
 describe("expert elixir lsp", () => {
 	it("registers expert for .ex while keeping elixirls primary", () => {
 		const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };

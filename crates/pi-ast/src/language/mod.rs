@@ -554,7 +554,7 @@ const fn extensions(lang: SupportLang) -> &'static [&'static str] {
 		},
 		C => &["c", "h"],
 		Cmake => &["cmake"],
-		Cpp => &["cc", "hpp", "cpp", "c++", "hh", "cxx", "cu", "ino"],
+		Cpp => &["cc", "hpp", "cpp", "c++", "hh", "cxx", "cu", "cuh", "ino"],
 		CSharp => &["cs"],
 		Dart => &["dart"],
 		Clojure => &["clj", "cljs", "cljc", "edn"],
