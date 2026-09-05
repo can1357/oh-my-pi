@@ -259,6 +259,7 @@ describe("ACP lazy startup", () => {
 			"advisor.enabled": true,
 			"advisor.syncBacklog": "5",
 			"advisor.immuneTurns": 7,
+			"advisor.lateConcern": "steer",
 			"todo.enabled": false,
 			"todo.reminders": false,
 			"todo.eager": "always",

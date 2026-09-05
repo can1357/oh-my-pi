@@ -6033,6 +6033,48 @@ describe("advisor", () => {
 			).toBe("preserve");
 		});
 
+		it("steers an opted-in late concern during interrupt immunity", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					lateConcern: "steer",
+					interruptImmuneTurnActive: true,
+				}),
+			).toBe("steer");
+		});
+
+		it("still preserves a late concern when lateConcern is 'preserve' (the default)", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					lateConcern: "preserve",
+				}),
+			).toBe("preserve");
+		});
+
+		it("keeps preserving a late concern under user-interrupt suppression even when lateConcern is 'steer'", () => {
+			// The autoResumeSuppressed guard runs before the terminal-answer branch,
+			// so opting late concerns into steer must not resurrect a stopped run.
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: true,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					lateConcern: "steer",
+				}),
+			).toBe("preserve");
+		});
+
 		it("steers a late blocker after a terminal answer so the primary continues and acknowledges it (#5628)", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({

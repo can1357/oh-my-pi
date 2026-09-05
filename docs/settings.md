@@ -383,12 +383,13 @@ The advisor is a second model that reviews each completed turn and can inject ad
 
 See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATCHDOG.md` discovery, and bounded catch-up semantics.
 
-| Key                   | Type    | Default | Notes                                                                                                                                                |
-| --------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `advisor.enabled`     | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                 |
-| `task.agentAdvisor`   | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub. |
-| `advisor.syncBacklog` | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
-| `advisor.immuneTurns` | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.            |
+| Key                   | Type    | Default    | Notes                                                                                                                                                         |
+| --------------------- | ------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `advisor.enabled`     | boolean | `false`    | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                          |
+| `task.agentAdvisor`   | record  | `{}`       | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub.  |
+| `advisor.syncBacklog` | enum    | `off`      | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold.          |
+| `advisor.immuneTurns` | number  | `3`        | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.                     |
+| `advisor.lateConcern` | enum    | `preserve` | Delivery for a `concern` raised after the agent's final answer: `preserve` keeps it as a passive card, `steer` wakes the agent to act on it like a `blocker`. |
 
 ### Thinking
 
