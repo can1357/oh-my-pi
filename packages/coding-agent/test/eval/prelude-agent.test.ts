@@ -27,12 +27,12 @@ function loadPrelude(callTool: (name: string, args: unknown) => Promise<unknown>
 type AgentHelper = (prompt: string, opts?: Record<string, unknown>) => Promise<unknown>;
 
 describe("eval js agent() handle", () => {
-	it("returns an AgentHandle carrying the bridge id, agent name, and agent:// uri", async () => {
+	it("returns a handle and exposes served identity only after settlement", async () => {
 		let seenName: string | undefined;
 		let seenArgs: Record<string, unknown> | undefined;
 		const sandbox = loadPrelude(async (name, args) => {
 			if (name === "__wait__") {
-				return { items: [{ status: "completed", text: "done", model: "m", family: "openai" }] };
+				return { items: [{ status: "completed", text: "done", model: "openai/gpt-served", family: "openai" }] };
 			}
 			seenName = name;
 			seenArgs = args as Record<string, unknown>;
@@ -50,7 +50,7 @@ describe("eval js agent() handle", () => {
 		expect(handle.model).toBeUndefined();
 		expect(handle.family).toBeUndefined();
 		expect(await (handle.wait as () => Promise<unknown>)()).toBe("done");
-		expect(handle.model).toBe("m");
+		expect(handle.model).toBe("openai/gpt-served");
 		expect(handle.family).toBe("openai");
 	});
 

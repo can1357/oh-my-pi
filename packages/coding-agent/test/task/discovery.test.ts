@@ -18,6 +18,7 @@ const OMP_AGENT_MD = [
 	"name: omp-test-agent",
 	"description: OMP-native test agent.",
 	"restrictTools: true",
+	"tools: read",
 	"---",
 	"You are an OMP task agent.",
 ].join("\n");

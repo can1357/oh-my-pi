@@ -46,10 +46,10 @@ async function runEvalAgentAndWait(args: unknown, options: EvalAgentBridgeOption
 	if (snapshot.status === "failed" || snapshot.status === "cancelled") {
 		throw new Error(snapshot.error || `Agent handle ${handle.id} failed`);
 	}
-	expect(snapshot.model).toEqual(manager.getJob(handle.id)?.latestDetails?.evalResult?.details?.model);
-	expect(snapshot.family).toEqual(manager.getJob(handle.id)?.latestDetails?.evalResult?.details?.family);
 	const result = manager.getJob(handle.id)?.latestDetails?.evalResult;
 	if (!isEvalAgentResult(result)) throw new Error(`Agent handle ${handle.id} returned no eval result`);
+	expect(snapshot.model).toEqual(result.details.model);
+	expect(snapshot.family).toEqual(result.details.family);
 	return result;
 }
 
@@ -142,8 +142,13 @@ describe("runEvalAgent", () => {
 			data: { status: "ok" },
 		};
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
-		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(
-			createResult({ output: "not JSON", structuredOutput, resolvedModel: "openai/gpt-served@upstream:high" }),
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			createResult({
+				id: options.id,
+				output: "not JSON",
+				structuredOutput,
+				resolvedModel: "openai/gpt-served@upstream:high",
+			}),
 		);
 		const session = {
 			cwd: "/tmp",
@@ -170,6 +175,12 @@ describe("runEvalAgent", () => {
 			structured: true,
 			schemaSource: "agent",
 			schemaMode: "strict",
+		});
+		const snapshot = await runEvalWait({ items: [{ kind: "agent", id: result.details.id }] }, { session });
+		expect(snapshot.items[0]).toMatchObject({
+			status: "completed",
+			model: "openai/gpt-served@upstream:high",
+			family: "openai",
 		});
 	});
 
