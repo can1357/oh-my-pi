@@ -371,9 +371,23 @@ describe("runIsolatedSubprocess", () => {
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("retains a kept-alive isolated worktree until the agent is released", async () => {
+	it("captures follow-up changes before releasing a kept-alive isolated worktree", async () => {
 		const isolationDir = "/repo/isolated";
-		const rootPatch = "diff --git a/task.txt b/task.txt\n";
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-retained-"));
+		tempRoots.push(artifactsDir);
+		const initialPatch = "diff --git a/task.txt b/task.txt\n+initial\n";
+		const finalPatch = "diff --git a/task.txt b/task.txt\n+initial\n+follow-up\n";
+		const baseline = {
+			root: {
+				repoRoot: "/repo",
+				headCommit: "base",
+				staged: "",
+				unstaged: "",
+				untracked: [],
+				untrackedPatch: "",
+			},
+			nested: [],
+		};
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: isolationDir,
 			backend: natives.IsoBackendKind.Rcopy,
@@ -406,8 +420,13 @@ describe("runIsolatedSubprocess", () => {
 			});
 			return result({ id: options.id, exitCode: 0 });
 		});
-		vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({
-			rootPatch,
+		const captureSpy = vi
+			.spyOn(worktreeModule, "captureDeltaPatch")
+			.mockResolvedValueOnce({ rootPatch: initialPatch, nestedPatches: [] })
+			.mockResolvedValueOnce({ rootPatch: finalPatch, nestedPatches: [] });
+		const commitSpy = vi.spyOn(worktreeModule, "commitToBranch").mockResolvedValue({
+			branchName: "omp/task/RetainedIsolation",
+			baseSha: "base",
 			nestedPatches: [],
 		});
 		const cleanupSpy = vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
@@ -420,33 +439,25 @@ describe("runIsolatedSubprocess", () => {
 				index: 0,
 				id: "RetainedIsolation",
 			},
-			context: {
-				repoRoot: "/repo",
-				baseline: {
-					root: {
-						repoRoot: "/repo",
-						headCommit: "base",
-						staged: "",
-						unstaged: "",
-						untracked: [],
-						untrackedPatch: "",
-					},
-					nested: [],
-				},
-			},
+			context: { repoRoot: "/repo", baseline },
 			preferredBackend: undefined,
 			agentId: "RetainedIsolation",
 			mergeMode: "patch",
-			artifactsDir: "/artifacts",
+			artifactsDir,
 			buildFailureResult: error => result({ exitCode: 1, error: String(error) }),
 		});
 
+		const patchPath = path.join(artifactsDir, "RetainedIsolation.patch");
 		expect(outcome.exitCode).toBe(0);
+		expect(await Bun.file(patchPath).text()).toBe(initialPatch);
 		expect(AgentRegistry.global().get("RetainedIsolation")?.status).toBe("idle");
 		expect(cleanupSpy).not.toHaveBeenCalled();
 
 		await AgentLifecycleManager.global().release("RetainedIsolation");
 
+		expect(captureSpy).toHaveBeenCalledTimes(2);
+		expect(await Bun.file(patchPath).text()).toBe(finalPatch);
+		expect(commitSpy).toHaveBeenCalledWith(isolationDir, baseline, "RetainedIsolation", undefined, undefined);
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
 	});
 

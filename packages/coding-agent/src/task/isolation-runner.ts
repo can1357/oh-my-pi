@@ -193,24 +193,47 @@ async function writeIsolationPatch(
  * the caller can still surface the subagent's output; only isolation setup
  * itself routes through {@link IsolatedRunOptions.buildFailureResult}.
  *
- * A kept-alive subagent retains the isolation handle until its agent lifecycle
- * is released; one-shot and failed startup paths tear it down in `finally`.
+ * On release it captures the final patch and transfers commits to a parent-repo
+ * task branch before cleanup. One-shot and failed startup paths clean up in `finally`.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
+	const taskBaseline = structuredClone(opts.context.baseline);
 	let handle: IsolationHandle | undefined;
 	let deferredCleanup: Promise<void> | undefined;
-	let released = false;
-	const releaseIsolation = async (): Promise<void> => {
-		if (released || !handle) return;
-		released = true;
-		try {
-			await opts.baseOptions.onRelease?.();
-		} finally {
-			await cleanupIsolation(handle);
-		}
+	let baseReleasePromise: Promise<void> | undefined;
+	let cleanupPromise: Promise<void> | undefined;
+	let releasePromise: Promise<void> | undefined;
+	const releaseBase = (): Promise<void> => {
+		baseReleasePromise ??= opts.baseOptions.onRelease?.() ?? Promise.resolve();
+		return baseReleasePromise;
+	};
+	const cleanupHandle = (): Promise<void> => {
+		cleanupPromise ??= (async () => {
+			await releaseBase();
+			if (handle) await cleanupIsolation(handle);
+		})();
+		return cleanupPromise;
+	};
+	const releaseIsolation = (): Promise<void> => {
+		releasePromise ??= (async () => {
+			if (!handle) return;
+			const patchResult = await writeIsolationPatch(handle.mergedDir, taskBaseline, opts.artifactsDir, opts.agentId);
+			const commitResult = await commitToBranch(
+				handle.mergedDir,
+				taskBaseline,
+				opts.agentId,
+				opts.description,
+				undefined,
+			);
+			AgentRegistry.global().setHistory(opts.agentId, {
+				patchPath: patchResult.patchPath,
+				branchName: commitResult?.branchName,
+			});
+			await cleanupHandle();
+		})();
+		return releasePromise;
 	};
 	try {
-		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const result = await runSubprocess({
@@ -223,7 +246,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				deferredCleanup = completion;
 				opts.baseOptions.onCleanupDeferred?.(completion);
 			},
-			onRelease: releaseIsolation,
+			onRelease: opts.baseOptions.keepAlive === false ? releaseBase : releaseIsolation,
 		});
 		opts.onSubprocessResult?.(result);
 		// A successful result cannot be captured while deferred owner jobs or
@@ -304,14 +327,18 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} catch (err) {
 		return rememberAgentArtifacts(opts.buildFailureResult(err));
 	} finally {
-		if (handle && !(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))) {
+		if (
+			handle &&
+			!releasePromise &&
+			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
+		) {
 			if (deferredCleanup) {
-				trackLateCleanup(deferredCleanup.then(releaseIsolation), {
+				trackLateCleanup(deferredCleanup.then(cleanupHandle), {
 					agentId: opts.agentId,
 					resource: "isolation",
 				});
 			} else {
-				await releaseIsolation();
+				await cleanupHandle();
 			}
 		}
 	}
