@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Traces search inputs and checkbox using unthemed browser defaults, and iOS viewport zoom on search focus.
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed
