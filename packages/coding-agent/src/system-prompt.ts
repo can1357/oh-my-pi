@@ -559,7 +559,8 @@ export function projectSystemPromptToolMetadata(
 			metadataEntry.parameters = tool.parameters;
 			metadataEntry.examples = tool.examples;
 		}
-		if ("readsSkillUris" in tool && tool.readsSkillUris === true) metadataEntry.readsSkillUris = true;
+		const toolReadsSkillUris = "readsSkillUris" in tool && tool.readsSkillUris === true;
+		if ((override?.readsSkillUris ?? toolReadsSkillUris) === true) metadataEntry.readsSkillUris = true;
 
 		metadata.set(name, metadataEntry);
 	};

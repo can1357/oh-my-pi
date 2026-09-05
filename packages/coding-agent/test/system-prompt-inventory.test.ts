@@ -175,6 +175,23 @@ describe("system prompt tool inventory", () => {
 		});
 	});
 
+	it("lets metadata overrides suppress a built-in skill URI reader", () => {
+		const metadata = buildSystemPromptToolMetadata(
+			new Map([["read", { ...SDK_TOOL, name: "read", readsSkillUris: true }]]),
+			{ read: { readsSkillUris: false } },
+		);
+
+		expect(metadata.get("read")?.readsSkillUris).toBeUndefined();
+	});
+
+	it("lets metadata overrides declare a skill URI reader", () => {
+		const metadata = buildSystemPromptToolMetadata(new Map([["custom-read", { ...SDK_TOOL, name: "custom-read" }]]), {
+			"custom-read": { readsSkillUris: true },
+		});
+
+		expect(metadata.get("custom-read")?.readsSkillUris).toBe(true);
+	});
+
 	it("snapshots every full metadata getter once per rebuild and keeps fresh values", async () => {
 		let revision = 1;
 		const reads = new Map<string, MetadataGetterCounts>();
