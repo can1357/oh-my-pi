@@ -8,6 +8,10 @@
 - Muse Code subscriptions now resolve a compact edit-prompt variant, cutting recurring per-request tool bytes without touching other providers.
 - Added Meta's new `max` reasoning effort tier to Muse Spark 1.3 (standard) on the Meta Model API and Muse Code.
 
+### Fixed
+
+- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10872](https://github.com/can1357/oh-my-pi/pull/10872) by [@fzlzjerry](https://github.com/fzlzjerry)).
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

@@ -118,4 +118,10 @@ provider "openai-codex" {
 	models "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra" {
 		context-window-floor 1000000
 	}
+	// Residue: Astra's Codex registry advertises a 272000 default prompt window
+	// and max_context_window=872000 (client 0.153.1, 2026-09-04). Older bundled
+	// and cached catalogs omit the maximum; live discovery takes precedence.
+	models "gpt-6-astra" {
+		max-context-window 872000
+	}
 }

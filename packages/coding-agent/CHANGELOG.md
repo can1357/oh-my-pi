@@ -6,6 +6,10 @@
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
 
+### Fixed
+
+- Fixed `/extended-context` leaving GPT-6 Astra at 272K instead of enabling its 872K prompt window ([#10872](https://github.com/can1357/oh-my-pi/pull/10872) by [@fzlzjerry](https://github.com/fzlzjerry)).
+
 ## [18.1.11] - 2026-09-05
 
 ### Added

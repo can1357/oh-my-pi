@@ -14,6 +14,24 @@ import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { resolveProviderModelReference } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
 describe("Codex model discovery", () => {
+	it("normalizes optional maximum context windows separately from the default window", async () => {
+		const result = await fetchCodexModels({
+			accessToken: "test-token",
+			fetchFn: async () =>
+				Response.json({
+					models: [
+						{ slug: "gpt-6-astra", context_window: 272_000, max_context_window: 872_000 },
+						{ slug: "gpt-5.5", context_window: 272_000 },
+						{ slug: "invalid-maximum", context_window: 64_000, max_context_window: -1 },
+					],
+				}),
+		});
+		const astra = result?.models.find(model => model.id === "gpt-6-astra");
+		expect(astra).toMatchObject({ contextWindow: 272_000, maxContextWindow: 872_000 });
+		expect(result?.models.find(model => model.id === "gpt-5.5")).not.toHaveProperty("maxContextWindow");
+		expect(result?.models.find(model => model.id === "invalid-maximum")).not.toHaveProperty("maxContextWindow");
+	});
+
 	it("marks discovered models for provider-native V2 compaction", async () => {
 		let capturedHeaders: Headers | undefined;
 		const fetchFn: typeof fetch = Object.assign(
