@@ -196,6 +196,7 @@ import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
 import type { StructuredSubagentSchemaMode } from "./task/types";
+import type { WorkPoolYieldItem } from "./task/workpool-yield";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -568,6 +569,8 @@ export interface CreateAgentSessionOptions {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
+	/** Active workpool item labels accepted by this subagent's yield tool. */
+	workPoolYieldItems?: readonly WorkPoolYieldItem[];
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
 	/** Parent Hindsight state to alias for subagent memory tools. */
@@ -1784,6 +1787,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				activeToolNames.add(name);
 			}
 		};
+		let workPoolYieldItems = options.workPoolYieldItems ? [...options.workPoolYieldItems] : [];
 		const toolSession: ToolSession = {
 			get cwd() {
 				return sessionManager.getCwd();
@@ -1877,8 +1881,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getFileMutationVersion: path => fileMutationVersions.get(path) ?? 0,
 			getTodoPhases: () => session?.getTodoPhases() ?? [],
 			setTodoPhases: phases => session?.setTodoPhases(phases),
-			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
-			setWorkPoolYieldItems: items => session?.setWorkPoolYieldItems(items),
+			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? workPoolYieldItems,
+			setWorkPoolYieldItems: items => {
+				workPoolYieldItems = [...items];
+				session?.setWorkPoolYieldItems(items);
+			},
 			getCheckpointState: () => session?.getCheckpointState(),
 			setCheckpointState: state => session?.setCheckpointState(state ?? undefined),
 			getLastCompletedRewind: () => session?.getLastCompletedRewind(),
@@ -3736,6 +3743,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionPaths,
 			disableExtensionDiscovery: options.disableExtensionDiscovery,
 			autoApprove: options.autoApprove,
+			workPoolYieldItems: options.workPoolYieldItems,
 			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, options.spawns ?? "*"),
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).

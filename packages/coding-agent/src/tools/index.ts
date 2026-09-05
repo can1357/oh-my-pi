@@ -381,7 +381,7 @@ export interface ToolSession {
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/** Replace the active workpool item contract before a pooled turn starts. */
-	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => void;
+	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => Promise<void> | void;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */
 	getToolChoiceQueue?(): ToolChoiceQueue;
 	/** Build a model-provider-specific ToolChoice that targets the named tool, or undefined if unsupported. */

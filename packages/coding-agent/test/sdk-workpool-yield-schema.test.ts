@@ -67,7 +67,7 @@ describe("SDK workpool yield schema", () => {
 		expect(Reflect.get(tool.parameters, "properties")).toHaveProperty("type");
 		expect(Reflect.get(tool.parameters, "properties")).not.toHaveProperty("key");
 
-		session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
+		await session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
 		expect(Reflect.get(tool.parameters, "required")).toEqual(["key"]);
 		const properties = Reflect.get(tool.parameters, "properties");
 		expect(properties).toHaveProperty("key");
@@ -75,11 +75,12 @@ describe("SDK workpool yield schema", () => {
 		const activeTool = session.agent.state.tools.find(candidate => candidate.name === "yield");
 		if (!activeTool) throw new Error("Missing active yield tool");
 		expect(Reflect.get(activeTool.parameters, "required")).toEqual(["key"]);
+		expect(session.agent.state.systemPrompt.join("\n\n")).toContain("Submit ONE workpool item at a time");
 		const result = await tool.execute("yield-pool-1", { key: 1, data: { answer: 42 } });
 		expect(result.details).toMatchObject({ type: ["pool#1"], complete: true });
 	});
 
-	it("initializes a subagent session with requireYieldTool when inlineToolDescriptors is enabled", async () => {
+	it("seeds workpool metadata into initial inline prompt when workPoolYieldItems is provided at creation", async () => {
 		const { session } = await createAgentSession({
 			cwd: registryDir,
 			agentDir: registryDir,
@@ -97,8 +98,12 @@ describe("SDK workpool yield schema", () => {
 			skipPythonPreflight: true,
 			requireYieldTool: true,
 			toolNames: ["yield"],
+			workPoolYieldItems: [{ id: "pool#1", index: 1 }],
 		});
 		sessions.push(session);
-		expect(session.getToolByName("yield")).toBeDefined();
+		const tool = session.getToolByName("yield");
+		if (!tool) throw new Error("Missing yield tool");
+		expect(Reflect.get(tool.parameters, "required")).toEqual(["key"]);
+		expect(session.agent.state.systemPrompt.join("\n\n")).toContain("Submit ONE workpool item at a time");
 	});
 });

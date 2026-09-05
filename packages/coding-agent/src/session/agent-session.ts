@@ -1164,6 +1164,9 @@ export class AgentSession {
 		this.#preparedExtensions = config.preparedExtensions;
 		this.#extensionPaths = config.extensionPaths;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
+		if (config.workPoolYieldItems) {
+			this.#workPoolYieldItems = config.workPoolYieldItems.map(item => ({ ...item }));
+		}
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -7297,8 +7300,9 @@ export class AgentSession {
 	}
 
 	/** Replace the item labels before starting a pooled turn. */
-	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): void {
+	async setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void> {
 		this.#workPoolYieldItems = items.map(item => ({ ...item }));
+		await this.refreshBaseSystemPrompt();
 	}
 
 	#buildReplanTitleContext(): string {

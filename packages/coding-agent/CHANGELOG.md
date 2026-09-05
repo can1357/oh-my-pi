@@ -11,7 +11,7 @@
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
-- Guard early `toolSession` access during worker startup so evaluating tool descriptions and schemas safely defaults before session instantiation completes.
+- Guard early `toolSession` access during worker startup and seed workpool metadata in the initial inline prompt so `yield` tool contracts reflect active workpool items.
 
 ## [18.1.10] - 2026-09-04
 

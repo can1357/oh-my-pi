@@ -39,6 +39,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { SessionManager } from "./session-manager";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
@@ -323,6 +324,8 @@ export interface AgentSessionConfig {
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
+	/** Initial workpool items accepted by the incremental yield tool. */
+	workPoolYieldItems?: readonly WorkPoolYieldItem[];
 }
 
 /** Options for AgentSession.prompt(). */
