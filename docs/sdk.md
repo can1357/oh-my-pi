@@ -355,10 +355,13 @@ For SDK consumers building orchestrators (similar to task executor flow):
 - `outputSchema`: passes structured output expectation into tool context
 - `outputSchemaMode`: selects permissive or strict structured-output enforcement
 - `requireYieldTool`: forces `yield` tool inclusion
+- `workPoolYieldItems`: initial `{ id, index }` items for a pooled turn, available before tool metadata and the system prompt are built
 - `taskDepth`: recursion-depth context for nested task sessions
 - `parentTaskPrefix`: artifact naming prefix for nested task outputs
 
 These are optional for normal single-agent embedding.
+
+Before a reused session starts a different pooled turn, call `session.setWorkPoolYieldItems(items)` and await `session.refreshBaseSystemPrompt()` to rebuild tool descriptions and rerun any system-prompt callback. Use an empty array to restore ordinary yield behavior. The task executor performs both steps for managed follow-up turns while holding the session out of idle-TTL parking. A fixed system-prompt override cannot adapt its own text to a changed batch.
 
 ## `createAgentSession()` return value
 

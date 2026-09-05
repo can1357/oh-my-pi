@@ -196,6 +196,7 @@ import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
 import type { StructuredSubagentSchemaMode } from "./task/types";
+import type { WorkPoolYieldItem } from "./task/workpool-yield";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -566,6 +567,7 @@ export interface CreateAgentSessionOptions {
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
 	outputSchemaMode?: StructuredSubagentSchemaMode;
+	workPoolYieldItems?: readonly WorkPoolYieldItem[];
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
@@ -1877,7 +1879,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getFileMutationVersion: path => fileMutationVersions.get(path) ?? 0,
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
-			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
+			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? options.workPoolYieldItems ?? [],
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),
@@ -3725,6 +3727,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
+			workPoolYieldItems: options.workPoolYieldItems,
 			prewalk: options.prewalk,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,

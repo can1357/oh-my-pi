@@ -1150,6 +1150,7 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.#codeModeState = config.codeModeState ?? {};
+		this.setWorkPoolYieldItems(config.workPoolYieldItems ?? []);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#modelRegistry = config.modelRegistry;

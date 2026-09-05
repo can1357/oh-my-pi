@@ -2826,10 +2826,23 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
+	const registry = AgentRegistry.global();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
-	session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
-	const ref = AgentRegistry.global().get(id);
+	const ref = registry.get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
+	if (ref?.session !== session || ref.status !== "idle" || !registry.setStatus(id, "running", session)) {
+		throw new Error(`Agent "${id}" is not available for a follow-up turn.`);
+	}
+	try {
+		session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
+		await session.refreshBaseSystemPrompt();
+	} catch (error) {
+		const current = registry.get(id);
+		if (!session.isStreaming && current?.session === session && current.status === "running") {
+			registry.setStatus(id, "idle", session);
+		}
+		throw error;
+	}
 
 	const monitor = createSubagentRunMonitor({
 		index,
@@ -2878,6 +2891,10 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		const active = monitor.takeActiveSession();
 		if (active) monitor.captureSalvage(active);
 		monitor.finish();
+		const current = registry.get(id);
+		if (!session.isStreaming && current?.session === session && current.status === "running") {
+			registry.setStatus(id, "idle", session);
+		}
 	}
 
 	return finalizeRunResult({
@@ -3320,13 +3337,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// live peer rows scoped to it, so a session switch hides stale parked trees.
 			let ircRootSessionFile: string | undefined;
 
-			// Captured by the lifecycle reviver: rebuilding an equivalent session from
-			// the same JSONL file re-invokes createAgentSession with the exact options
-			// of the original run (same agent id, tools, model, system prompt,
-			// artifacts dir) — only the SessionManager differs.
 			const buildSubagentSessionOptions = (
 				sessionManagerForRun: SessionManager,
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
+				workPoolYieldItems: readonly WorkPoolYieldItem[] = [],
 			): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
@@ -3347,6 +3361,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				toolNames,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
+				workPoolYieldItems,
 				restrictToolNames: options.restrictToolNames,
 				requireYieldTool: true,
 				contextFiles: options.contextFiles,
@@ -3370,7 +3385,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						workPoolYieldItems: options.workPoolYieldItems ?? [],
+						workPoolYieldItems:
+							AgentRegistry.global().get(id)?.session?.getWorkPoolYieldItems() ?? workPoolYieldItems,
 						ircPeers: ircRoster?.peers ?? [],
 						ircParkedCount: ircRoster?.parkedCount ?? 0,
 						ircOmittedCount: ircRoster?.omittedCount ?? 0,
@@ -3426,7 +3442,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				);
 			}
 
-			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
+			const sessionPromise = createAgentSession(
+				buildSubagentSessionOptions(sessionManager, null, options.workPoolYieldItems),
+			);
 			let session: AgentSession;
 			try {
 				({ session } = await awaitAbortable(sessionPromise));
@@ -3506,7 +3524,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
 			}
-			if (options.workPoolYieldItems) session.setWorkPoolYieldItems(options.workPoolYieldItems);
 			const enabledSubagentTools = session.getEnabledToolNames();
 			// The enabled set includes the synthetic write transport injected for
 			// explicit tool lists that omitted write. `session_init.tools` is later
