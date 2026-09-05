@@ -48,4 +48,36 @@ describe("ModelRegistry provider API key cycling", () => {
 		expect(registry.cycleProviderApiKey("custom-proxy")).toBe(true);
 		expect(await registry.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-two");
 	});
+
+	test("cycle reports failure when no configured key is usable: with keys [bad-cmd, missing-env] (both unresolvable), cycle returns false and the resolved key stays undefined", async () => {
+		const missingEnv = "OMP_KEY_CYCLE_TEST_MISSING_9Z7Q";
+		const savedEnv = process.env[missingEnv];
+		delete process.env[missingEnv];
+		try {
+			const failCmd = `!${JSON.stringify(process.execPath)} -e ${JSON.stringify("process.exit(1)")}`;
+			const envCmd = `!${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.exit(process.env.${missingEnv} ? 0 : 1)`)}`;
+			fs.writeFileSync(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						"custom-proxy": {
+							baseUrl: "https://custom-proxy.example.com/v1",
+							api: "openai-completions",
+							apiKey: [failCmd, envCmd],
+							models: [{ id: "custom-model", name: "Custom Model" }],
+						},
+					},
+				}),
+			);
+
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			expect(await registry.getApiKeyForProvider("custom-proxy", "sess-1")).toBeUndefined();
+			expect(registry.cycleProviderApiKey("custom-proxy")).toBe(false);
+			expect(await registry.getApiKeyForProvider("custom-proxy", "sess-1")).toBeUndefined();
+			expect(registry.getProviderApiKeyPosition("custom-proxy")).toEqual({ index: 0, total: 2 });
+		} finally {
+			if (savedEnv === undefined) delete process.env[missingEnv];
+			else process.env[missingEnv] = savedEnv;
+		}
+	});
 });

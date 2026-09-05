@@ -2401,14 +2401,17 @@ export class ModelRegistry {
 	cycleProviderApiKey(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);
 		if (!Array.isArray(keyConfig) || keyConfig.length < 2) return false;
-		const next = ((this.#providerApiKeyIndex.get(provider) ?? 0) + 1) % keyConfig.length;
+		const prev = this.#providerApiKeyIndex.get(provider) ?? 0;
+		const next = (prev + 1) % keyConfig.length;
 		this.#providerApiKeyIndex.set(provider, next);
 		const resolved = this.#resolveActiveApiKeyElement(provider, keyConfig);
-		if (resolved) {
-			this.authStorage.setConfigApiKey(provider, resolved);
-		} else {
-			this.authStorage.removeConfigApiKey(provider);
+		if (resolved === undefined) {
+			// No usable key at the new position: stay where we were and report
+			// failure instead of printing success with no usable key.
+			this.#providerApiKeyIndex.set(provider, prev);
+			return false;
 		}
+		this.authStorage.setConfigApiKey(provider, resolved);
 		const override = this.#providerOverrides.get(provider);
 		if (override) {
 			this.#providerOverrides.set(provider, { ...override, apiKey: keyConfig[next] });
