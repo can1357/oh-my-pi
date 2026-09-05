@@ -185,6 +185,55 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 	}
 
+	// Immediate-return wrapper for the async `completion()`/`agent()` factories.
+	// JS cannot hand back a handle synchronously — the bridge allocates the id
+	// over an async round-trip — so the factory returns this thenable instead:
+	// `await` it to get the resolved handle (for dag wiring via `.id`/`.handle`),
+	// or call the handle methods directly (`h.wait()`, `h.status()`, …) and they
+	// await resolution internally. This matches the documented immediate-handle
+	// contract that Python satisfies natively via its synchronous bridge.
+	class PendingHandle {
+		constructor(promise) {
+			this._promise = promise;
+		}
+
+		then(onFulfilled, onRejected) {
+			return this._promise.then(onFulfilled, onRejected);
+		}
+
+		catch(onRejected) {
+			return this._promise.catch(onRejected);
+		}
+
+		finally(onFinally) {
+			return this._promise.finally(onFinally);
+		}
+
+		async status() {
+			return (await this._promise).status();
+		}
+
+		async done() {
+			return (await this._promise).done();
+		}
+
+		async wait(options) {
+			return (await this._promise).wait(options);
+		}
+
+		async cancel() {
+			return (await this._promise).cancel();
+		}
+
+		async send(message) {
+			return (await this._promise).send(message);
+		}
+
+		async output(options) {
+			return (await this._promise).output(options);
+		}
+	}
+
 	const resolveHandleSnapshot = (handle, snapshot) => {
 		const status = snapshot?.status ?? "failed";
 		if (status === "running") throw timeoutError(`${handle.kind} handle ${handle.id} is still running`);
@@ -201,7 +250,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	};
 
 	const wait = async (handles, { timeout, raiseErrors = true } = {}) => {
-		const raw = handles instanceof EvalHandle ? [handles] : Array.from(handles ?? []);
+		const isHandleLike = value => value instanceof EvalHandle || value instanceof PendingHandle;
+		const raw = isHandleLike(handles) ? [handles] : Array.from(handles ?? []);
 		const items = await Promise.all(raw);
 		for (const handle of items) {
 			if (!(handle instanceof EvalHandle)) throw new TypeError("wait() expects agent or completion handles");
@@ -241,24 +291,30 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return results;
 	};
 
-	const completion = async (prompt, opts, ...rest) => {
-		const options = optionsArg("completion", opts, rest, ["model", "system", "schema"], "{ model, system, schema }");
-		const result = await globalThis.__omp_call_tool__("__completion__", { prompt, ...options });
-		if (!result || typeof result.id !== "string") throw new Error("completion() did not return a handle");
-		return new CompletionHandle(result.id, options.schema);
+	const completion = (prompt, opts, ...rest) => {
+		const promise = (async () => {
+			const options = optionsArg("completion", opts, rest, ["model", "system", "schema"], "{ model, system, schema }");
+			const result = await globalThis.__omp_call_tool__("__completion__", { prompt, ...options });
+			if (!result || typeof result.id !== "string") throw new Error("completion() did not return a handle");
+			return new CompletionHandle(result.id, options.schema);
+		})();
+		return new PendingHandle(promise);
 	};
 
-	const agent = async (prompt, opts, ...rest) => {
-		const options = optionsArg(
-			"agent",
-			opts,
-			rest,
-			["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
-			"{ agent, label, schema, schemaMode, isolated, apply, merge, tools }",
-		);
-		const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
-		if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
-		return new AgentHandle(result.id, result.agent, options.schema);
+	const agent = (prompt, opts, ...rest) => {
+		const promise = (async () => {
+			const options = optionsArg(
+				"agent",
+				opts,
+				rest,
+				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
+				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools }",
+			);
+			const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
+			if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
+			return new AgentHandle(result.id, result.agent, options.schema);
+		})();
+		return new PendingHandle(promise);
 	};
 
 	class WorkPool {
