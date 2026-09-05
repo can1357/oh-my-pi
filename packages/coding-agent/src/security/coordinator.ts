@@ -273,6 +273,11 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		// either way the nested-isolation gate must keep applying to it (its
 		// `task` spawns would otherwise re-expose `isolated`).
 		isIsolated: input.host.isIsolated === true || input.isIsolated === true,
+		// Distinct registry id: reusing the host's "Main" would make
+		// `AgentRegistry.register` replace the live parent's entry, and the
+		// scan session's disposal would unregister it — leaving the
+		// still-running parent absent from hub/IRC routing.
+		agentId: `Security-${input.scanId.slice(-12)}`,
 		agentDisplayName: "security",
 	});
 	return session;
