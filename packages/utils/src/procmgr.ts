@@ -4,7 +4,7 @@ import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Subprocess } from "bun";
 import { getAgentDir, MAIN_CONFIG_FILENAMES } from "./dirs";
 import { $env, filterChildShellEnv } from "./env";
-import { isExecutable } from "./path";
+import { isExecutable } from "./executable";
 import { $which } from "./which";
 
 export { isExecutable };

@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 
 const WINDOWS_DRIVE_PATH = /^([A-Za-z]):[\\/](.*)$/;
@@ -54,20 +53,4 @@ export function isFullyQualifiedPath(filePath: string, platform: NodeJS.Platform
 		return /^[a-zA-Z]:[/\\]/.test(filePath) || filePath.startsWith("\\\\");
 	}
 	return true;
-}
-
-/**
- * Check if a file path exists, is a regular file, and has effective execute permission.
- */
-export function isExecutable(filePath: string): boolean {
-	try {
-		const stat = fs.statSync(filePath);
-		if (!stat.isFile()) return false;
-		if (process.platform !== "win32") {
-			fs.accessSync(filePath, fs.constants.X_OK);
-		}
-		return true;
-	} catch {
-		return false;
-	}
 }
