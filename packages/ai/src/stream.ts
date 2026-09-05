@@ -40,8 +40,9 @@ import { streamPiNative } from "./providers/pi-native-client";
 // which wraps each provider module in a dynamic import. This keeps the
 // AWS SDK, google-auth-library, @google/genai, and
 // other provider SDKs out of the CLI startup parse graph. The
-// gitlab-duo / kimi / synthetic providers stay eager because their modules
-// export routing predicates (isGitLabDuoModel, isKimiModel, isSyntheticModel)
+// gitlab-duo / kimi / synthetic / nebius providers stay eager because their
+// modules export routing predicates (isGitLabDuoModel, isKimiModel,
+// isSyntheticModel, isNebiusModel)
 // that must be callable synchronously before streaming begins, and their
 // modules are thin wrappers with no heavy SDK dependencies.
 import {
@@ -58,6 +59,7 @@ import {
 	streamOpenAICompletions,
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
+import { isNebiusModel, streamNebius } from "./providers/nebius";
 import { isSyntheticModel, streamSynthetic } from "./providers/synthetic";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "./registry";
 import type {
@@ -1721,6 +1723,21 @@ function streamSimpleRequest<TApi extends Api>(
 					...opts,
 					apiKey,
 					format: opts?.syntheticApiFormat ?? "openai",
+				}),
+			),
+		);
+	}
+	// Nebius Token Factory - single-protocol OpenAI-compatible endpoint
+	if (isNebiusModel(model)) {
+		// Mandatory-reasoning clamp is a request-shaping concern owned here:
+		// requiresEffort routes (e.g. Kimi K3) reject omitted thinking, so
+		// clamp unset requests to the lowest supported effort (mirrors Kimi).
+		const nebiusOptions = normalizeMandatoryReasoningOptions(model, requestOptions);
+		return withThinkingLoopGuard(model, nebiusOptions, opts =>
+			withProviderInFlightLimit(model, opts, () =>
+				streamNebius(model as Model<"openai-completions">, context, {
+					...opts,
+					apiKey,
 				}),
 			),
 		);

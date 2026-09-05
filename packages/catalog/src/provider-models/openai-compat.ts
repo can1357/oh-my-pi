@@ -7194,3 +7194,221 @@ export function modelsDevCatalogFallback(
 		map: payload => (isRecord(payload) ? filterModelsDevCatalogRows(mapModelsDevToModels(payload, descriptors)) : []),
 	};
 }
+// ---------------------------------------------------------------------------
+// 25. Nebius Token Factory (api.tokenfactory.nebius.com)
+// ---------------------------------------------------------------------------
+
+const NEBIUS_DEFAULT_BASE_URL = "https://api.tokenfactory.nebius.com/v1";
+
+export function normalizeNebiusBaseUrl(baseUrl: string | undefined): string {
+	const value = baseUrl?.trim() || NEBIUS_DEFAULT_BASE_URL;
+	const normalized = value.replace(/\/+$/, "");
+	return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
+}
+
+/**
+ * Nebius Token Factory's verbose `/v1/models` entry shape (verified live).
+ * Capabilities arrive in `supported_features` (including "reasoning",
+ * "tools", "json_mode", "structured_outputs"), the input modality in
+ * `architecture.modality` ("text->text", "text+image->text",
+ * "text->embedding"), the context window in `context_length`, and per-token
+ * prices in `pricing` as plain decimal strings. The wire carries no
+ * per-model reasoning-effort vocabulary — the effort ladder lives in
+ * `rules/providers/nebius.kdl`.
+ */
+interface NebiusModelRecord extends OpenAICompatibleModelRecord {
+	architecture?: unknown;
+	pricing?: unknown;
+}
+
+function toNebiusStringList(value: unknown): readonly string[] {
+	return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+/** Nebius quotes per-token USD as `"0.00000013"`; catalog cost is per-million. */
+function toNebiusCostPerMillion(value: unknown): number | undefined {
+	const parsed = toNumber(value);
+	if (parsed === undefined || parsed < 0) {
+		return undefined;
+	}
+	// Same float-drift guard as the Synthetic equivalent: settle on a
+	// millionth of a dollar per million tokens — finer than any real tier.
+	return Math.round(parsed * 1e12) / 1e6;
+}
+
+function resolveNebiusCost(
+	pricing: unknown,
+	fallback: ModelSpec<"openai-completions">["cost"],
+): ModelSpec<"openai-completions">["cost"] {
+	if (!isRecord(pricing)) {
+		return fallback;
+	}
+	const input = toNebiusCostPerMillion(pricing.prompt);
+	const output = toNebiusCostPerMillion(pricing.completion);
+	if (input === undefined || output === undefined) {
+		return fallback;
+	}
+	return {
+		input,
+		output,
+		cacheRead: fallback.cacheRead,
+		cacheWrite: fallback.cacheWrite,
+	};
+}
+
+function mapNebiusModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> | null {
+	const record = entry as NebiusModelRecord;
+	// Token Factory's `/v1/models` mixes chat and embedding models; only rows
+	// whose modality targets text are usable here. `mapModel` returning null
+	// skips the entry so embedding-only models never reach the chat roster.
+	if (!isNebiusChatModel(record)) {
+		return null;
+	}
+	const features = toNebiusStringList(record.supported_features);
+	const modality = nebiusModality(record);
+	return {
+		...defaults,
+		name: toModelName(entry.name, defaults.name),
+		reasoning: features.includes("reasoning"),
+		input: modality.includes("image") ? ["text", "image"] : ["text"],
+		// A present `supported_features` list (even empty) is the route's
+		// whole advertised surface: no `tools` entry means no tool support.
+		...(record.supported_features !== undefined && !features.includes("tools") ? { supportsTools: false } : {}),
+		cost: resolveNebiusCost(record.pricing, defaults.cost),
+		contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+	};
+}
+
+function nebiusModality(record: NebiusModelRecord): string {
+	return isRecord(record.architecture) && typeof record.architecture.modality === "string"
+		? record.architecture.modality
+		: "";
+}
+
+/** Token Factory modalities look like "text->text" or "text+image->text". */
+function isNebiusChatModel(record: NebiusModelRecord): boolean {
+	const modality = nebiusModality(record);
+	return modality === "" || modality.split("->")[1] === "text";
+}
+
+function createNebiusStaticModel(
+	id: string,
+	name: string,
+	cost: { input: number; output: number },
+	contextWindow: number,
+	input: ModelSpec<"openai-completions">["input"],
+	reasoning: boolean,
+): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name,
+		api: "openai-completions",
+		provider: "nebius",
+		baseUrl: NEBIUS_DEFAULT_BASE_URL,
+		reasoning,
+		input: [...input],
+		cost: { input: cost.input, output: cost.output, cacheRead: 0, cacheWrite: 0 },
+		contextWindow,
+		maxTokens: null,
+	};
+}
+
+/**
+ * Nebius Token Factory catalog snapshot (live `/v1/models?verbose=true`
+ * census, 2026-09-05) bundled so the provider is usable when generation and
+ * first boot have no live key. A live discovery snapshot is authoritative
+ * and replaces the seed. Costs are per-million tokens in USD.
+ */
+export const NEBIUS_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	createNebiusStaticModel(
+		"moonshotai/Kimi-K2.7-Code",
+		"Kimi K2.7 Code",
+		{ input: 0.95, output: 4 },
+		262_144,
+		["text"],
+		true,
+	),
+	createNebiusStaticModel(
+		"zai-org/GLM-5.3-Flash",
+		"GLM 5.3 Flash",
+		{ input: 0.15, output: 0.5 },
+		1_024_000,
+		["text", "image"],
+		true,
+	),
+	createNebiusStaticModel(
+		"deepseek-ai/DeepSeek-V4-Pro",
+		"DeepSeek V4 Pro",
+		{ input: 1.75, output: 3.5 },
+		1_048_576,
+		["text"],
+		true,
+	),
+	createNebiusStaticModel(
+		"Qwen/Qwen3-235B-A22B-Instruct-2507",
+		"Qwen3 235B A22B Instruct",
+		{ input: 0.2, output: 0.6 },
+		262_144,
+		["text"],
+		false,
+	),
+	createNebiusStaticModel(
+		"moonshotai/Kimi-K3",
+		"Kimi K3",
+		{ input: 3, output: 15 },
+		1_024_000,
+		["text", "image"],
+		true,
+	),
+	createNebiusStaticModel(
+		"meta-llama/Llama-3.3-70B-Instruct",
+		"Llama 3.3 70B Instruct",
+		{ input: 0.13, output: 0.4 },
+		131_072,
+		["text"],
+		false,
+	),
+];
+
+const NEBIUS_STATIC_MODEL_IDS = NEBIUS_STATIC_MODELS.map(model => model.id);
+
+export interface NebiusModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Nebius Token Factory model manager: OpenAI-compatible chat completions
+ * with a verbose `/v1/models` catalog carrying context, capability, and
+ * pricing metadata, so discovery defines the roster.
+ */
+export function nebiusModelManagerOptions(
+	config?: NebiusModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	// `NEBIUS_BASE_URL` wins over the configured URL because the registry
+	// injects the bundled global endpoint as `config.baseUrl` (snapshot
+	// default), which would otherwise mask the environment override forever.
+	// An explicitly configured URL still applies when no env override is set.
+	const baseUrl = normalizeNebiusBaseUrl(Bun.env.NEBIUS_BASE_URL ?? config?.baseUrl ?? NEBIUS_DEFAULT_BASE_URL);
+	return {
+		providerId: "nebius",
+		dynamicModelsAuthoritative: true,
+		dropCachedModelIdsOnStaticMismatch: NEBIUS_STATIC_MODEL_IDS,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "nebius",
+					baseUrl,
+					apiKey,
+					mapModel: mapNebiusModel,
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}

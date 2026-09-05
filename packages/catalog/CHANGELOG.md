@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Nebius Token Factory model catalog and `/login` support (`NEBIUS_API_KEY`).
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

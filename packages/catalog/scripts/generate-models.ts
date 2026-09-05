@@ -50,6 +50,7 @@ import {
 	kimiCodeMaxTokens,
 	META_MUSE_STATIC_MODELS,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
+	NEBIUS_STATIC_MODELS,
 	mapModelsDevToModels,
 	OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS,
 	projectOpenAIProReasoningAliases,
@@ -642,6 +643,12 @@ async function generateModels() {
 	// authoritative and replaces the seed.
 	if (!authoritativeCatalogProviders.has("aiand")) {
 		allModels.push(...AIAND_STATIC_MODELS);
+	}
+	// Seed Nebius Token Factory's documented catalog so the provider is usable
+	// when generation has no NEBIUS_API_KEY. A live `/v1/models` snapshot is
+	// authoritative and replaces the seed.
+	if (!authoritativeCatalogProviders.has("nebius")) {
+		allModels.push(...NEBIUS_STATIC_MODELS);
 	}
 	// Seed Abliteration's documented catalog so the provider is usable when
 	// generation has no ABLITERATION_API_KEY. A live `/v1/models` snapshot is

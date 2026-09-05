@@ -1,0 +1,9 @@
+auth "nebius" {
+	name "Nebius"
+	login "api-key" {
+		auth-url "https://tokenfactory.nebius.com/project/api-keys"
+		instructions "Copy your API key from the Token Factory console"
+		prompt "Paste your Nebius API key" placeholder="v1...."
+		validate "models-endpoint" label="Nebius" url="https://api.tokenfactory.nebius.com/v1/models"
+	}
+}

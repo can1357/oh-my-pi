@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Nebius Token Factory streaming provider (`NEBIUS_API_KEY`), honoring per-model base URLs for region-pinned endpoints.
+
 ### Fixed
 
 - GitHub Copilot sign-in now requests only basic profile access, restoring login for Enterprise organizations that reject repository, gist, and Codespaces permissions ([#10656](https://github.com/can1357/oh-my-pi/issues/10656)).

@@ -9,6 +9,7 @@
  */
 
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import * as AIError from "../error";
 import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
 import type { Context, Model, ModelSpec, SimpleStreamOptions, ThinkingControlMode } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -23,8 +24,12 @@ export interface OpenAIAnthropicShimOptions extends SimpleStreamOptions {
 }
 
 export interface OpenAIAnthropicShimConfig {
-	/** Base URL for the Anthropic-compatible endpoint (without trailing /v1/messages). */
-	anthropicBaseUrl: string;
+	/**
+	 * Base URL for the Anthropic-compatible endpoint (without trailing /v1/messages).
+	 * Required only for providers that expose an Anthropic surface; single-protocol
+	 * OpenAI providers (e.g. Nebius) omit it and pin `defaultFormat: "openai"`.
+	 */
+	anthropicBaseUrl?: string;
 	/** Optional override for the OpenAI-compatible base URL. If omitted, `model.baseUrl` is used as-is. */
 	openaiBaseUrl?: string;
 	/** Default API format when caller does not specify one. */
@@ -47,8 +52,13 @@ export function streamOpenAIAnthropicShim(
 	options: OpenAIAnthropicShimOptions | undefined,
 	config: OpenAIAnthropicShimConfig,
 ): AssistantMessageEventStream {
-	const stream = new AssistantMessageEventStream();
 	const format = options?.format ?? config.defaultFormat;
+	if (format === "anthropic" && !config.anthropicBaseUrl) {
+		throw new AIError.ConfigurationError(
+			`Provider ${model.provider} does not expose an Anthropic-compatible endpoint`,
+		);
+	}
+	const stream = new AssistantMessageEventStream();
 	// The resolver form of `apiKey` is resolved upstream in `streamSimple`;
 	// this shim only ever receives a static bearer string.
 	const apiKey = typeof options?.apiKey === "string" ? options.apiKey : undefined;
@@ -143,6 +153,8 @@ export function streamOpenAIAnthropicShim(
 					onResponse: options?.onResponse,
 					onSseEvent: options?.onSseEvent,
 					fetch: options?.fetch,
+					streamFirstEventTimeoutMs: options?.streamFirstEventTimeoutMs,
+					streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 					reasoning: reasoningEffort,
 					toolChoice: options?.toolChoice,
 					serviceTier: options?.serviceTier,

@@ -23,6 +23,7 @@ export * from "./providers/ollama";
 export * from "./providers/openai-codex-responses";
 export * from "./providers/openai-completions";
 export * from "./providers/openai-responses";
+export * from "./providers/nebius";
 export * from "./providers/synthetic";
 export * from "./registry";
 export * from "./stream";
