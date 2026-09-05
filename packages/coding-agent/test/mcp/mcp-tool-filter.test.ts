@@ -156,6 +156,17 @@ test("positive classes with slash members match (admin[/]delete matches admin/de
 	expect(run(["file_1", "file/1"], ["file[/_]1"]).allowed).toEqual(["file_1", "file/1"]);
 });
 
+test("slash-to-sentinel encoding is injective (sentinel-carrying names cannot collide)", () => {
+	// A tool name containing the sentinel character (\uD800) is reachable via
+	// JSON "\ud800" escapes; the encoding escapes sentinels before mapping
+	// slashes, so `admin/*` must NOT admit `admin\uD800delete`.
+	const sentinel = "\uD800";
+	expect(run(["admin/delete", `admin${sentinel}delete`], ["admin/*"]).allowed).toEqual(["admin/delete"]);
+	// And a literal pattern matching a sentinel-carrying name still works.
+	expect(run([`admin${sentinel}delete`], ["admin/delete"]).allowed).toEqual([]);
+	expect(run([`admin${sentinel}delete`], [`admin${sentinel}delete`]).allowed).toEqual([`admin${sentinel}delete`]);
+});
+
 test("valid classes still match after the slash-class guard", () => {
 	expect(run(["file_1", "file_a"], ["file_[0-9]"]).allowed).toEqual(["file_1"]);
 	expect(run(NAMES, ["admin/*"]).allowed).toEqual(["admin/delete"]);

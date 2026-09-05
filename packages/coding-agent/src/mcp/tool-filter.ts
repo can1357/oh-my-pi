@@ -38,23 +38,29 @@ export interface MCPToolFilterResult {
 
 /**
  * Picomatch treats `/` as a path separator: `*` and `?` never cross it and
- * `[^/]` classes stop at it. MCP tool names are opaque strings — a denylist
+ * negated classes always exclude it (picomatch's compiler appends `/` to
+ * negated-class output). MCP tool names are opaque strings — a denylist
  * entry `*` must match a tool named `admin/delete` — so both the pattern and
  * the name are matched in a slash-free domain: every `/` is transliterated
- * to `\x01` (SOH, a control character that is not a glob metacharacter, cannot
- * appear in a JSON config string, and compiles through the matcher cleanly on
- * both sides). NUL was the first choice but miscompiles when the pattern has
- * an escaped open bracket (`foo\[/bar*`) — `\` + `\0` desynchronizes the
- * emitted regex from the transliterated name. The transliteration collides
- * only for names containing a literal `\x01` (`a/b` ≡ `a\x01b`) — pathological,
- * since `\x01` cannot appear in a JSON config string either.
- * Negated character classes containing `/` (`[^/]`, `[^a/]`): picomatch's
- * compiler hardcodes `/` into negated-class output, so a negated class can
- * never exclude the slash character — `[^/]` matches slash-containing names
- * (the transliterated sentinel is not `/`). This is inherent picomatch
- * behavior, not a defect; documented so config authors are not surprised.
- * Positive classes with slash members (`admin[/]delete`) transliterate
- * cleanly and match slash names as expected.
+ * to the lone surrogate `\uD800`.
+ *
+ * Injectivity: a tool name may itself contain `\uD800` (Bun/V8 JSON.parse
+ * accepts unpaired surrogates in `"\ud800"` escapes), which would collide
+ * with the transliterated slash — `admin/*` would admit a tool named
+ * `admin\uD800delete`. The encoding therefore escapes sentinel occurrences
+ * first (`\uD800` → `\\uD800`) and maps `/` → `\uD800` second. The escape is
+ * prefix-free: in the encoded string every lone `\uD800` decodes to exactly
+ * one `/`, and no other unit can produce it, so encoded names collide only
+ * when the originals are identical.
+ *
+ * Known limitation (documented, not guarded): picomatch hardcodes `/` into
+ * NEGATED character classes during compilation (`[^a]` → `[^a/]`), so a
+ * negated class can never exclude the slash character — `[^/]` matches
+ * slash-containing names. This is inherent picomatch behavior, not a defect;
+ * documented so config authors are not surprised. Positive classes with
+ * slash members (`admin[/]delete`) transliterate cleanly and match slash
+ * names as expected.
+ *
  * `nonegate`/`noextglob` pin the applied surface to the documented globs
  * (`*`, `?`, `[...]`, `{a,b}`) — a leading `!` or extglob prefix (`+(a|b)`)
  * is treated as a literal by picomatch, keeping every entry's semantics
@@ -63,7 +69,16 @@ export interface MCPToolFilterResult {
 const MATCH_OPTIONS = { dot: true, nonegate: true, noextglob: true } as const;
 
 /** Slash transliteration sentinel (see rationale above). */
-const SLASH_SENTINEL = "\x01";
+const SLASH_SENTINEL = "\uD800";
+
+/**
+ * Transliterate a pattern or name into the slash-free matching domain:
+ * escape sentinel occurrences first so the subsequent `/` → sentinel map is
+ * injective even for names containing the sentinel character.
+ */
+function toSlashFreeDomain(text: string): string {
+	return text.replaceAll(SLASH_SENTINEL, `\\${SLASH_SENTINEL}`).replaceAll("/", SLASH_SENTINEL);
+}
 
 class CompiledPattern {
 	readonly #raw: string;
@@ -72,14 +87,14 @@ class CompiledPattern {
 	constructor(pattern: string) {
 		this.#raw = pattern;
 		if (/[*?[\]{}]/.test(pattern)) {
-			this.#isMatch = picomatch(pattern.replaceAll("/", SLASH_SENTINEL), MATCH_OPTIONS);
+			this.#isMatch = picomatch(toSlashFreeDomain(pattern), MATCH_OPTIONS);
 		}
 	}
 
 	matches(name: string): boolean {
 		if (this.#raw === name) return true;
 		if (!this.#isMatch) return false;
-		return this.#isMatch(name.replaceAll("/", SLASH_SENTINEL));
+		return this.#isMatch(toSlashFreeDomain(name));
 	}
 }
 
