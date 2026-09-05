@@ -3,10 +3,16 @@ import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { getActiveProfile, setProfile } from "@oh-my-pi/pi-utils";
-import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { __resetDirsFromEnvForTests, setProfile } from "@oh-my-pi/pi-utils";
+import {
+	beginSettingsTest,
+	restoreEnvValue,
+	restoreSettingsTestState,
+	type SettingsTestState,
+} from "./helpers/settings-test-state";
 
-const originalProfile = getActiveProfile();
+const originalOmpProfile = process.env.OMP_PROFILE;
+const originalPiProfile = process.env.PI_PROFILE;
 let settingsState: SettingsTestState | undefined;
 
 beforeEach(async () => {
@@ -18,9 +24,11 @@ beforeEach(async () => {
 afterEach(() => {
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
-	// Profile is process-wide; restore it after settings-state cleanup because
-	// restoring the captured agent dir resets the active profile.
-	setProfile(originalProfile);
+	// Profile is process-wide; restore the raw environment after settings-state
+	// cleanup so an explicit `OMP_PROFILE=default` is not collapsed to absence.
+	restoreEnvValue("OMP_PROFILE", originalOmpProfile);
+	restoreEnvValue("PI_PROFILE", originalPiProfile);
+	__resetDirsFromEnvForTests();
 });
 
 test("renders profile plus compact metric status line", () => {
