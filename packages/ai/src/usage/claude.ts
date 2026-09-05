@@ -748,11 +748,7 @@ function isConfirmedExhaustedTierRow(limit: UsageLimit, nowMs: number): boolean 
  * while unconfirmed rows remain ranking pressure and opt-in reserve health via
  * scopeClaudeLimitsForModel.
  */
-function scopeClaudeLimitsForModelHardBlock(
-	report: UsageReport,
-	context: CredentialRankingContext | undefined,
-): UsageLimit[] {
-	const kind = getClaudeModelKind(context);
+function scopeClaudeLimitsForKindHardBlock(report: UsageReport, kind: ClaudeModelKind | undefined): UsageLimit[] {
 	const requireConfirmedTierRow = kind === "fable" || kind === "mythos";
 	const nowMs = Date.now();
 	return report.limits.filter(limit => {
@@ -760,6 +756,13 @@ function scopeClaudeLimitsForModelHardBlock(
 		if (kind === undefined || limit.scope.tier !== kind) return false;
 		return !requireConfirmedTierRow || isConfirmedExhaustedTierRow(limit, nowMs);
 	});
+}
+
+function scopeClaudeLimitsForModelHardBlock(
+	report: UsageReport,
+	context: CredentialRankingContext | undefined,
+): UsageLimit[] {
+	return scopeClaudeLimitsForKindHardBlock(report, getClaudeModelKind(context));
 }
 
 function rankingUsedFraction(limit: UsageLimit): number {
@@ -806,6 +809,29 @@ function findClaudeSecondaryLimit(
 		.reduce<UsageLimit | undefined>((selected, limit) => morePressuredLimit(selected, limit, nowMs), undefined);
 }
 
+/**
+ * Backoff scopes a fresh usage report can vouch for. A Fable/Mythos usage-limit
+ * error writes a reactive `tier:` block whose deadline follows the 429
+ * retry-after (the advertised weekly reset); when a later report no longer
+ * confirms that tier's exhaustion, the block is stale and must clear instead
+ * of idling the account until the clock runs out. Each tier is judged with the
+ * same hard-block predicate as selection, including shared limits, so a missing
+ * or elapsed tier reset authorizes a probe while an account-wide exhaustion
+ * still preserves the block. Only Fable/Mythos are returned because
+ * {@link blockScope} scopes backoff for exactly those tiers.
+ */
+function healableClaudeTierBlockScopes(report: UsageReport): { blockScope: string; limits: UsageLimit[] }[] {
+	const scopes: { blockScope: string; limits: UsageLimit[] }[] = [];
+	for (const tier of ["fable", "mythos"] as const) {
+		if (!report.limits.some(limit => limit.scope.tier === tier)) continue;
+		scopes.push({
+			blockScope: `tier:${tier}`,
+			limits: scopeClaudeLimitsForKindHardBlock(report, tier),
+		});
+	}
+	return scopes;
+}
+
 export const claudeRankingStrategy: CredentialRankingStrategy = {
 	findWindowLimits(report, context) {
 		const primary = report.limits.find(limit => limit.id === "anthropic:5h");
@@ -827,5 +853,10 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 		const kind = getClaudeModelKind(context);
 		return kind === "fable" || kind === "mythos" ? `tier:${kind}` : undefined;
 	},
+	// A Fable/Mythos 429 backoff follows the advertised weekly reset, which can
+	// sit days past the tier's real recovery. Let a fresh healthy usage report
+	// clear the stale scoped block instead of pinning the account to a fallback
+	// model until the clock runs out (issue #10978).
+	healableBlockScopes: healableClaudeTierBlockScopes,
 	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 };
