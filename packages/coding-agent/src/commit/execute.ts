@@ -5,6 +5,7 @@
  */
 
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import type { ChangelogApplyResult } from "./changelog";
 
 /**
  * A commit or push failure that has already been reported to the user with a
@@ -38,6 +39,31 @@ export function abortOnGitFailure(context: string, error: vcs.VcsError, note?: s
 	process.stderr.write(`✗ ${context}:\n${body}\n`);
 	if (note) process.stderr.write(`  ${note}\n`);
 	throw new CommitAbortedError();
+}
+
+/**
+ * Report a failed commit step and abort, after reverting generated changelog
+ * writes so a refusing hook leaves the index and worktree exactly as found.
+ * Non-git errors are rethrown after the same rollback.
+ */
+export async function abortOnCommitFailure(
+	context: string,
+	error: unknown,
+	changelog: ChangelogApplyResult | undefined,
+): Promise<never> {
+	let note: string | undefined;
+	if (changelog && changelog.updated.length > 0) {
+		try {
+			await changelog.rollback();
+			note = "Generated changelog entries were reverted.";
+		} catch (rollbackError) {
+			const message = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+			note = `Failed to revert generated changelog entries: ${message}`;
+		}
+	}
+	if (vcs.isVcsError(error)) abortOnGitFailure(context, error, note);
+	if (note) process.stderr.write(`  ${note}\n`);
+	throw error;
 }
 
 /**

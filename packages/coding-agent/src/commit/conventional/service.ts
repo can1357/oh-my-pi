@@ -29,11 +29,13 @@ export interface GenerateGitCommitOptions {
 	signal?: AbortSignal;
 }
 
+/** Conventional commit form values plus staging and validation metadata. */
 export interface GeneratedGitCommit {
 	commit: ConventionalCommit;
 	validationError: string | null;
 	stagedAll: boolean;
 }
+
 function renderNumstat(entries: VcsNumstatEntry[]): string {
 	return entries
 		.map(entry => `${entry.added ?? "-"}\t${entry.removed ?? "-"}\t${entry.path}`)

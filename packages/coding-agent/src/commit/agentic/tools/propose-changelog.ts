@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { CommitAgentState } from "../../../commit/agentic/state";
 import { CHANGELOG_CATEGORIES, type ChangelogCategory } from "../../../commit/types";
@@ -35,10 +36,13 @@ interface ChangelogResponse {
 
 const allowedCategories = new Set<ChangelogCategory>(CHANGELOG_CATEGORIES);
 
+/** Proposal paths are absolute like the detected targets; a repo-relative echo from the agent is resolved against `cwd`. */
 export function createProposeChangelogTool(
+	cwd: string,
 	state: CommitAgentState,
 	changelogTargets: string[],
 ): CustomTool<typeof proposeChangelogSchema> {
+	const targets = new Set(changelogTargets.map(target => path.resolve(cwd, target)));
 	return {
 		name: "propose_changelog",
 		label: "Propose Changelog",
@@ -47,7 +51,6 @@ export function createProposeChangelogTool(
 		async execute(_toolCallId, params) {
 			const errors: string[] = [];
 			const warnings: string[] = [];
-			const targets = new Set(changelogTargets);
 			const seen = new Set<string>();
 
 			const normalized = params.entries.map(entry => {
@@ -95,7 +98,7 @@ export function createProposeChangelogTool(
 					warnings.push(`No changelog entries provided for ${entry.path}.`);
 				}
 				return {
-					path: entry.path,
+					path: path.resolve(cwd, entry.path),
 					entries: cleaned,
 					deletions: cleanedDeletions,
 				};

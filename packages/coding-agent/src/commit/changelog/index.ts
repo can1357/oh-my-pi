@@ -47,6 +47,29 @@ interface ChangelogProposalInput {
 	onProgress?: (message: string) => void;
 }
 
+/** Outcome of applying generated changelog entries to the index and worktree. */
+export interface ChangelogApplyResult {
+	/** Absolute paths of changelogs that received entries (index and worktree, unless dry-run). */
+	updated: string[];
+	/**
+	 * Undo the writes so a later commit failure leaves the changelogs exactly as
+	 * found. Each file's index blob and worktree bytes are reverted only if they
+	 * still hold what `apply` wrote; anything else (hook edits, user edits) is kept.
+	 */
+	rollback(): Promise<void>;
+}
+
+interface ChangelogWrite {
+	path: string;
+	relPath: string;
+	indexBefore: string | null;
+	indexAfter: string;
+	worktreeBefore: string;
+	worktreeAfter: string;
+}
+
+const NO_CHANGELOG_WRITES: ChangelogApplyResult = { updated: [], rollback: async () => {} };
+
 /**
  * Update CHANGELOG.md entries for staged changes.
  */
@@ -58,12 +81,12 @@ export async function runChangelogFlow({
 	stagedFiles,
 	maxDiffChars,
 	onProgress,
-}: ChangelogFlowInput): Promise<string[]> {
-	if (stagedFiles.length === 0) return [];
+}: ChangelogFlowInput): Promise<ChangelogApplyResult> {
+	if (stagedFiles.length === 0) return NO_CHANGELOG_WRITES;
 	const repo = vcs.requireGit(cwd);
 	onProgress?.("Detecting changelog boundaries...");
 	const boundaries = await detectChangelogBoundaries(cwd, stagedFiles);
-	if (boundaries.length === 0) return [];
+	if (boundaries.length === 0) return NO_CHANGELOG_WRITES;
 
 	const sessionId = Bun.randomUUIDv7();
 	const proposals: ChangelogProposalInput["proposals"] = [];
@@ -101,7 +124,7 @@ export async function runChangelogFlow({
 		});
 	}
 
-	if (proposals.length === 0) return [];
+	if (proposals.length === 0) return NO_CHANGELOG_WRITES;
 	return applyChangelogProposals({
 		cwd,
 		proposals,
@@ -118,9 +141,10 @@ export async function applyChangelogProposals({
 	proposals,
 	dryRun,
 	onProgress,
-}: ChangelogProposalInput): Promise<string[]> {
+}: ChangelogProposalInput): Promise<ChangelogApplyResult> {
 	const repo = vcs.requireGit(cwd);
 	const updated: string[] = [];
+	const writes: ChangelogWrite[] = [];
 	for (const proposal of proposals) {
 		if (
 			Object.keys(proposal.entries).length === 0 &&
@@ -179,10 +203,31 @@ export async function applyChangelogProposals({
 
 			// 3. Update the worktree on disk with changes applied to current disk content
 			await Bun.write(proposal.path, updatedContent);
+			writes.push({
+				path: proposal.path,
+				relPath,
+				indexBefore: stagedContent,
+				indexAfter: updatedStagedContent,
+				worktreeBefore: changelogContent,
+				worktreeAfter: updatedContent,
+			});
 		}
 		updated.push(proposal.path);
 	}
-	return updated;
+	return {
+		updated,
+		rollback: async () => {
+			for (const write of writes.reverse()) {
+				if ((await readIndexBlob(repo, write.relPath)) === write.indexAfter) {
+					if (write.indexBefore === null) await repo.unstage([write.relPath]);
+					else await repo.stageContent(write.relPath, write.indexBefore);
+				}
+				if ((await Bun.file(write.path).text()) === write.worktreeAfter) {
+					await Bun.write(write.path, write.worktreeBefore);
+				}
+			}
+		},
+	};
 }
 
 /** Content of `relPath` in the index, or null if missing. */

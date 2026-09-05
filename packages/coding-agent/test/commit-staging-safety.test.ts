@@ -1,9 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import { runCommitCommand } from "@oh-my-pi/pi-coding-agent/commit";
 import * as agentModule from "@oh-my-pi/pi-coding-agent/commit/agentic/agent";
-import type { ChangelogProposal, SplitCommitPlan } from "@oh-my-pi/pi-coding-agent/commit/agentic/state";
+import type {
+	ChangelogProposal,
+	CommitAgentState,
+	SplitCommitPlan,
+} from "@oh-my-pi/pi-coding-agent/commit/agentic/state";
+import { createSplitCommitTool } from "@oh-my-pi/pi-coding-agent/commit/agentic/tools/split-commit";
 import * as changelogModule from "@oh-my-pi/pi-coding-agent/commit/changelog/generate";
 import * as generateModule from "@oh-my-pi/pi-coding-agent/commit/conventional/generate";
+import { CommitAbortedError } from "@oh-my-pi/pi-coding-agent/commit/execute";
 import * as modelSelection from "@oh-my-pi/pi-coding-agent/commit/model-selection";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
@@ -229,30 +236,26 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		expect((await $`git status --porcelain`.cwd(tmp.path()).text()).trim()).toBe("");
 	});
 
-	// One owner with partial hunks: without the upgrade to `all`, commitSplit rejects the plan as not
-	// covering the staged tree after the changelog was already written. Two owners: rejected up front,
-	// before anything is written.
-	it.each([
-		["upgrades the owning commit to all", [1]],
-		["is rejected before writing when split across commits", [1, 2]],
-	])("changelog in the split plan %s", async (_label, parts) => {
-		// 12 filler entries keep the staged note and the generated entry in separate hunks.
-		const changelog = (added: string[]) =>
-			[
-				"# Changelog",
-				"",
-				"## [Unreleased]",
-				"",
-				"### Added",
-				"",
-				...added,
-				...Array.from({ length: 12 }, (_, i) => `- Existing ${i + 1}`),
-				"",
-				"### Changed",
-				"",
-				"- Existing change",
-				"",
-			].join("\n");
+	// 12 filler entries keep the staged note and the generated entry in separate hunks.
+	const changelog = (added: string[]) =>
+		[
+			"# Changelog",
+			"",
+			"## [Unreleased]",
+			"",
+			"### Added",
+			"",
+			...added,
+			...Array.from({ length: 12 }, (_, i) => `- Existing ${i + 1}`),
+			"",
+			"### Changed",
+			"",
+			"- Existing change",
+			"",
+		].join("\n");
+
+	/** Committed baseline changelog; then `feature.txt` and a changelog note staged on top. */
+	async function seedStagedChangelog(): Promise<{ stagedChangelog: string; countBefore: number }> {
 		await Bun.write(tmp.join("CHANGELOG.md"), changelog([]));
 		await $`git add CHANGELOG.md`.cwd(tmp.path()).quiet();
 		await $`git commit -m "commit baseline changelog"`.cwd(tmp.path()).quiet();
@@ -262,6 +265,21 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 		await Bun.write(tmp.join("CHANGELOG.md"), stagedChangelog);
 		await $`git add feature.txt CHANGELOG.md`.cwd(tmp.path()).quiet();
 		const countBefore = Number.parseInt((await $`git rev-list --count HEAD`.cwd(tmp.path()).text()).trim(), 10);
+		return { stagedChangelog, countBefore };
+	}
+
+	const generatedEntry = (): ChangelogProposal => ({
+		entries: [{ path: tmp.join("CHANGELOG.md"), entries: { Fixed: ["Generated entry"] } }],
+	});
+
+	// One owner with partial hunks: without the upgrade to `all`, commitSplit rejects the plan as not
+	// covering the staged tree after the changelog was already written. Two owners: rejected up front,
+	// before anything is written.
+	it.each([
+		["upgrades the owning commit to all", [1]],
+		["is rejected before writing when split across commits", [1, 2]],
+	])("changelog in the split plan %s", async (_label, parts) => {
+		const { stagedChangelog, countBefore } = await seedStagedChangelog();
 
 		const changelogCommits = parts.map((hunk, position) =>
 			commitSpec(
@@ -275,16 +293,7 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 			commits: [commitSpec("add feature", [{ path: "feature.txt", kind: "all" }]), ...changelogCommits],
 			warnings: [],
 		};
-		const changelogProposal: ChangelogProposal = {
-			entries: [
-				{
-					path: tmp.join("CHANGELOG.md"),
-					entries: {
-						Fixed: ["Generated entry"],
-					},
-				},
-			],
-		};
+		const changelogProposal = generatedEntry();
 		vi.spyOn(agentModule, "runCommitAgentSession").mockImplementation((async (input: never) => {
 			const { onComplete } = input as { onComplete: (state: never) => Promise<void> };
 			await onComplete({ splitProposal, changelogProposal } as never);
@@ -321,5 +330,66 @@ describe.serial("commit staging safety and non-mutating dry-run", () => {
 
 		expect((await $`git show --stat --format= HEAD~1`.cwd(tmp.path()).text()).trim()).not.toContain("CHANGELOG.md");
 		expect((await $`git status --porcelain`.cwd(tmp.path()).text()).trim()).toBe("");
+	});
+
+	/** Drive the real `split_commit` tool the way the agent does, echoing the absolute changelog target. */
+	async function planViaSplitCommitTool(): Promise<SplitCommitPlan> {
+		const state: CommitAgentState = {};
+		const tool = createSplitCommitTool(tmp.path(), state, [tmp.join("CHANGELOG.md")]);
+		const result = await tool.execute(
+			"split-commit",
+			{
+				commits: [
+					{
+						changes: [{ path: "feature.txt", kind: "all" }],
+						type: "feat",
+						scope: null,
+						summary: "Added feature",
+					},
+					{
+						changes: [{ path: tmp.join("CHANGELOG.md"), kind: "all" }],
+						type: "docs",
+						scope: null,
+						summary: "Updated changelog",
+						dependencies: [0],
+					},
+				],
+			},
+			undefined,
+			{} as never,
+		);
+		expect(result.details.errors).toEqual([]);
+		if (!state.splitProposal) throw new Error("split_commit produced no plan");
+		return state.splitProposal;
+	}
+
+	it("reverts generated changelog entries when a pre-commit hook rejects the split", async () => {
+		const { stagedChangelog, countBefore } = await seedStagedChangelog();
+		// An unstaged user edit must survive the rollback untouched.
+		const dirtyChangelog = `${stagedChangelog}- Unstaged scratch note\n`;
+		await Bun.write(tmp.join("CHANGELOG.md"), dirtyChangelog);
+		const statusBefore = (await $`git status --porcelain`.cwd(tmp.path()).text()).trim();
+		const indexBefore = await $`git show :CHANGELOG.md`.cwd(tmp.path()).text();
+
+		const hookPath = tmp.join(".git/hooks/pre-commit");
+		await Bun.write(hookPath, "#!/bin/sh\necho 'hook says no' >&2\nexit 1\n");
+		await fs.chmod(hookPath, 0o755);
+
+		const splitProposal = await planViaSplitCommitTool();
+		vi.spyOn(agentModule, "runCommitAgentSession").mockImplementation((async (input: never) => {
+			const { onComplete } = input as { onComplete: (state: never) => Promise<void> };
+			await onComplete({ splitProposal, changelogProposal: generatedEntry() } as never);
+		}) as never);
+
+		const error = await runCommitCommand({ push: false, dryRun: false, noChangelog: false }).then(
+			() => null,
+			(cause: unknown) => cause,
+		);
+		expect(error).toBeInstanceOf(CommitAbortedError);
+
+		expect((await $`git rev-list --count HEAD`.cwd(tmp.path()).text()).trim()).toBe(String(countBefore));
+		expect(await $`git show :CHANGELOG.md`.cwd(tmp.path()).text()).toBe(indexBefore);
+		expect(await Bun.file(tmp.join("CHANGELOG.md")).text()).toBe(dirtyChangelog);
+		expect((await $`git status --porcelain`.cwd(tmp.path()).text()).trim()).toBe(statusBefore);
 	});
 });

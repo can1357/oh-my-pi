@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { $env, getProjectDir, isEnoent, prompt } from "@oh-my-pi/pi-utils";
-import { applyChangelogProposals } from "../../commit/changelog";
+import { applyChangelogProposals, type ChangelogApplyResult } from "../../commit/changelog";
 import { detectChangelogBoundaries } from "../../commit/changelog/detect";
 import { parseUnreleasedSection } from "../../commit/changelog/parse";
 import { formatCommitMessage } from "../../commit/message";
@@ -11,7 +11,7 @@ import type { CommitCommandArgs, ConventionalAnalysis, NumstatEntry } from "../.
 import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import { discoverAuthStorage, discoverContextFiles, loadCliExtensionProviders } from "../../sdk";
-import { abortOnGitFailure, pushOrAbort } from "../execute";
+import { abortOnCommitFailure, pushOrAbort } from "../execute";
 import { type ExistingChangelogEntries, runCommitAgentSession } from "./agent";
 import { generateFallbackProposal } from "./fallback";
 import { assignLockFilesToPlan } from "./lock-files";
@@ -183,9 +183,13 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	}
 }
 
-async function applyChangelog(cwd: string, proposal: ChangelogProposal, dryRun: boolean): Promise<string[]> {
+async function applyChangelog(
+	cwd: string,
+	proposal: ChangelogProposal,
+	dryRun: boolean,
+): Promise<ChangelogApplyResult> {
 	process.stdout.write("● Applying changelog entries...\n");
-	const updated = await applyChangelogProposals({
+	const result = await applyChangelogProposals({
 		cwd,
 		proposals: proposal.entries,
 		dryRun,
@@ -193,14 +197,14 @@ async function applyChangelog(cwd: string, proposal: ChangelogProposal, dryRun: 
 			process.stdout.write(`  ├─ ${message}\n`);
 		},
 	});
-	if (updated.length > 0) {
-		for (const filePath of updated) {
+	if (result.updated.length > 0) {
+		for (const filePath of result.updated) {
 			process.stdout.write(`  └─ ${filePath}\n`);
 		}
-		return updated.map(filePath => path.relative(cwd, filePath));
+	} else {
+		process.stdout.write("  └─ (no changes)\n");
 	}
-	process.stdout.write("  └─ (no changes)\n");
-	return [];
+	return result;
 }
 
 async function completeAgentCommitState(
@@ -227,10 +231,8 @@ async function completeAgentCommitState(
 	const changelogProposal = wantChangelog ? commitState.changelogProposal : undefined;
 
 	if (commitState.proposal) {
-		if (changelogProposal) {
-			await applyChangelog(ctx.cwd, changelogProposal, ctx.dryRun);
-		}
-		await runSingleCommit(commitState.proposal, ctx);
+		const changelog = changelogProposal ? await applyChangelog(ctx.cwd, changelogProposal, ctx.dryRun) : undefined;
+		await runSingleCommit(commitState.proposal, ctx, changelog);
 		return usedFallback;
 	}
 
@@ -247,7 +249,11 @@ async function completeAgentCommitState(
 	throw new Error("Commit agent did not provide a proposal.");
 }
 
-async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionContext): Promise<void> {
+async function runSingleCommit(
+	proposal: CommitProposal,
+	ctx: CommitExecutionContext,
+	changelog?: ChangelogApplyResult,
+): Promise<void> {
 	const repo = vcs.requireGit(ctx.cwd);
 	if (proposal.warnings.length > 0) {
 		process.stdout.write(formatWarnings(proposal.warnings));
@@ -262,8 +268,7 @@ async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionCon
 	try {
 		await repo.commitCreate(commitMessage, {});
 	} catch (error) {
-		if (vcs.isVcsError(error)) abortOnGitFailure("Commit failed", error);
-		throw error;
+		await abortOnCommitFailure("Commit failed", error, changelog);
 	}
 	process.stdout.write("Commit created.\n");
 	if (ctx.push) await pushOrAbort(ctx.cwd);
@@ -303,8 +308,14 @@ async function runSplitCommit(
 		return;
 	}
 
+	let changelog: ChangelogApplyResult | undefined;
 	if (ctx.changelogProposal) {
-		routeChangelogFiles(plan, await applyChangelog(ctx.cwd, ctx.changelogProposal, ctx.dryRun), order);
+		changelog = await applyChangelog(ctx.cwd, ctx.changelogProposal, ctx.dryRun);
+		routeChangelogFiles(
+			plan,
+			changelog.updated.map(filePath => path.relative(ctx.cwd, filePath)),
+			order,
+		);
 	}
 
 	if (ctx.dryRun) {
@@ -342,10 +353,7 @@ async function runSplitCommit(
 	try {
 		await repo.commitSplit({ commits, stagedDiff });
 	} catch (error) {
-		if (vcs.isVcsError(error)) {
-			abortOnGitFailure("Split commit failed", error);
-		}
-		throw error;
+		await abortOnCommitFailure("Split commit failed", error, changelog);
 	}
 	process.stdout.write("Split commits created.\n");
 	if (ctx.push) await pushOrAbort(ctx.cwd);

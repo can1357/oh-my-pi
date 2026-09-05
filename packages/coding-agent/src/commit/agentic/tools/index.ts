@@ -45,7 +45,7 @@ export function createCommitTools(options: CommitToolOptions): Array<CustomTool<
 	}
 
 	tools.push(
-		createProposeChangelogTool(options.state, options.changelogTargets),
+		createProposeChangelogTool(options.cwd, options.state, options.changelogTargets),
 		createProposeCommitTool(options.cwd, options.state),
 		createSplitCommitTool(options.cwd, options.state, options.changelogTargets),
 	);

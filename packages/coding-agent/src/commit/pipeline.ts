@@ -1,14 +1,13 @@
-import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { runAgenticCommit } from "./agentic";
-import { runChangelogFlow } from "./changelog";
+import { type ChangelogApplyResult, runChangelogFlow } from "./changelog";
 import { formatConventionalCommit } from "./conventional/normalization";
 import { type GeneratedGitCommit, generateGitCommit } from "./conventional/service";
-import { abortOnGitFailure, pushOrAbort } from "./execute";
+import { abortOnCommitFailure, abortOnGitFailure, pushOrAbort } from "./execute";
 import { resolvePrimaryModel } from "./model-selection";
 import type { CommitCommandArgs } from "./types";
 
@@ -59,6 +58,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 		throw new Error(`Generated commit message failed validation: ${generated.validationError}`);
 	}
 
+	let changelog: ChangelogApplyResult | undefined;
 	if (!args.noChangelog) {
 		try {
 			const settings = await Settings.init({ cwd });
@@ -68,7 +68,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 			await loadCliExtensionProviders(registry, settings, cwd);
 			const primary = await resolvePrimaryModel(args.model, settings, registry);
 			const commitSettings = settings.getGroup("commit");
-			await runChangelogFlow({
+			changelog = await runChangelogFlow({
 				cwd,
 				model: primary.model,
 				apiKey: primary.apiKey,
@@ -85,8 +85,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 	try {
 		await repo.commitCreate(commitMessage, {});
 	} catch (error) {
-		if (vcs.isVcsError(error)) abortOnGitFailure("Commit failed", error);
-		throw error;
+		await abortOnCommitFailure("Commit failed", error, changelog);
 	}
 	process.stdout.write("Commit created.\n");
 	if (args.push) await pushOrAbort(cwd);

@@ -10,6 +10,8 @@
 - Split commits are created atomically from the staged tree without rewriting the index or worktree; rejecting the plan at the confirmation prompt leaves everything untouched.
 - `omp commit` no longer sweeps pre-existing unstaged changelog edits into the commit when it appends generated changelog entries.
 - Routed generated changelog entries to their owning commit during split commits
+- A commit rejected by a `pre-commit`/`commit-msg` hook reverts the generated changelog entries from the index and worktree, in both single and split commits.
+
 ## [18.1.10] - 2026-09-04
 
 ### Changed

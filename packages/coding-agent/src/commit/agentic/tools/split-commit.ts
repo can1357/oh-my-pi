@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { CommitAgentState, SplitCommitGroup, SplitCommitPlan } from "../../../commit/agentic/state";
@@ -42,12 +43,15 @@ interface SplitCommitResponse {
 	proposal?: SplitCommitPlan;
 }
 
+/** Plan paths are repo-relative like the staged diff; changelog targets arrive absolute, so both forms are normalized here. */
 export function createSplitCommitTool(
 	cwd: string,
 	state: CommitAgentState,
 	changelogTargets: string[],
 ): CustomTool<typeof splitCommitSchema> {
 	const repo = vcs.requireGit(cwd);
+	const toRepoPath = (file: string): string => path.relative(cwd, path.resolve(cwd, file));
+	const changelogSet = new Set(changelogTargets.map(toRepoPath));
 	return {
 		name: "split_commit",
 		label: "Split Commit",
@@ -57,7 +61,6 @@ export function createSplitCommitTool(
 			const allStagedFiles = await repo.changedFiles({ cached: true });
 			const stagedFiles = allStagedFiles.filter(file => !isLockFile(file));
 			const stagedSet = new Set(allStagedFiles);
-			const changelogSet = new Set(changelogTargets);
 			const usedFiles = new Set<string>();
 			const errors: string[] = [];
 			const warnings: string[] = [];
@@ -72,7 +75,7 @@ export function createSplitCommitTool(
 				const issueRefs = commit.issue_refs ?? [];
 				const dependencies = (commit.dependencies ?? []).map(dep => Math.floor(dep));
 				const changes = commit.changes.map(change => ({
-					path: change.path,
+					path: toRepoPath(change.path),
 					kind: change.kind,
 					indices: change.kind === "indices" ? change.indices : undefined,
 					start: change.kind === "lines" ? change.start : undefined,
