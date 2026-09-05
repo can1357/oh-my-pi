@@ -2650,7 +2650,7 @@ providers:
 				discovery: { type: "litellm", timeoutMs: 50 },
 			},
 		});
-		const richHang = new Promise<Response>(() => {}); // never resolves
+		const { promise: richHang } = Promise.withResolvers<Response>(); // never resolves
 		const richEndpoints = ["/model_group/info", "/v2/model/info", "/model/info", "/v1/model/info"];
 		let v1ModelsHits = 0;
 		const fetchMock: FetchImpl = async input => {
