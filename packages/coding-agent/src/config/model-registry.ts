@@ -394,6 +394,14 @@ export class ModelRegistry {
 			this.authStorage.setConfigApiKeyPosition(provider, undefined);
 			return;
 		}
+		// Re-seed the in-memory cursor from the persisted cycle position (if
+		// any) so a fresh registry — e.g. the next `omp key-cycle` process —
+		// resumes where the last cycle left off. Clamped: the persisted index
+		// may outlive a list edit that shrank it.
+		const persisted = this.authStorage.getConfigApiKeyIndex(provider);
+		if (persisted !== undefined && keyConfig.length > 0) {
+			this.#providerApiKeyIndex.set(provider, persisted % keyConfig.length);
+		}
 		const resolved = this.#resolveActiveApiKeyElement(provider, keyConfig);
 		if (resolved) {
 			this.#providerApiKeyIndex.set(provider, resolved.index);
@@ -2407,9 +2415,9 @@ export class ModelRegistry {
 	 * around. The next `getApiKeyForProvider` (and every resolver-built
 	 * request) uses the new key. Returns false when there is no list to
 	 * advance (unknown provider, single string, or single-element list) or
-	 * when no element resolves. Process-local: the index lives in this
-	 * registry, so sibling processes and separate CLI invocations each track
-	 * their own active key.
+	 * when no element resolves. The cursor persists in the credential store,
+	 * so separate CLI invocations (e.g. repeated `omp key-cycle`) keep
+	 * advancing instead of each restarting at the first key.
 	 */
 	cycleProviderApiKey(provider: string): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(provider);

@@ -456,6 +456,14 @@ export interface AuthCredentialStore {
 	/** Read recorded usage-limit snapshots, oldest first. */
 	listUsageHistory?(query?: UsageHistoryQuery): UsageHistoryEntry[];
 	/**
+	 * Persisted cursor for a list-form config apiKey (`providers.<name>.apiKey`):
+	 * which element is active. Only the integer index is stored — never key
+	 * material. Optional: stores without durable local storage (e.g. the
+	 * broker remote store) omit these and the cursor stays process-local.
+	 */
+	getConfigApiKeyIndex?(provider: string): number | undefined;
+	setConfigApiKeyIndex?(provider: string, index: number): void;
+	/**
 	 * Client hook: forward locally observed request usage. Remote broker stores
 	 * batch these to the broker so it can attribute token burn per install;
 	 * local stores omit it and observation is skipped.
@@ -1614,13 +1622,33 @@ export class AuthStorage {
 	/**
 	 * Record which element of a list-form config apiKey is active, for masked
 	 * operator display. Pass undefined for single-string keys (no suffix).
+	 *
+	 * The index is also written through to the credential store so `omp
+	 * key-cycle` advances across processes: each CLI invocation builds a fresh
+	 * registry, which re-seeds its in-memory cursor from the persisted index
+	 * (see `getConfigApiKeyIndex`). Only the integer index persists — never
+	 * key material. Clearing is in-memory only: reload drops and repopulates
+	 * these maps, and the persisted cursor is what restores the position.
+	 * Stores without durable storage (broker remote) skip persistence and the
+	 * cursor stays process-local.
 	 */
 	setConfigApiKeyPosition(provider: string, position: { index: number; total: number } | undefined): void {
 		if (position === undefined) {
 			this.#configKeyPositions.delete(provider);
 		} else {
 			this.#configKeyPositions.set(provider, position);
+			this.#store.setConfigApiKeyIndex?.(provider, position.index);
 		}
+	}
+
+	/**
+	 * Active list-form config apiKey index for `provider`: the in-memory
+	 * position first, else the persisted cycle cursor (if any). Callers clamp
+	 * to the live list length — a persisted index may outlive the list edit
+	 * that shrank it.
+	 */
+	getConfigApiKeyIndex(provider: string): number | undefined {
+		return this.#configKeyPositions.get(provider)?.index ?? this.#store.getConfigApiKeyIndex?.(provider);
 	}
 
 	/**

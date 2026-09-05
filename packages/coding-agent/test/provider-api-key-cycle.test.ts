@@ -110,5 +110,67 @@ describe("ModelRegistry provider API key cycling", () => {
 		expect(await registry.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-one");
 		expect(registry.getProviderApiKeyPosition("custom-proxy")).toEqual({ index: 0, total: 3 });
 	});
+
+	test("cycle cursor survives a fresh ModelRegistry on the same storage: two sequential registries continue the rotation", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: ["key-one", "key-two", "key-three"],
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const first = new ModelRegistry(authStorage, modelsPath);
+		expect(await first.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-one");
+		expect(first.cycleProviderApiKey("custom-proxy")).toBe(true);
+		expect(await first.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-two");
+
+		const second = new ModelRegistry(authStorage, modelsPath);
+		expect(await second.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-two");
+		expect(second.cycleProviderApiKey("custom-proxy")).toBe(true);
+		expect(await second.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-three");
+	});
+
+	test("cycle cursor persists across processes: a new AuthStorage on the same database continues the rotation (omp key-cycle)", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: ["key-one", "key-two", "key-three"],
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const dbPath = path.join(tempDir, "auth-cycle.db");
+		const firstStorage = await AuthStorage.create(dbPath);
+		try {
+			const first = new ModelRegistry(firstStorage, modelsPath);
+			expect(first.cycleProviderApiKey("custom-proxy")).toBe(true);
+			expect(await first.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-two");
+		} finally {
+			firstStorage.close();
+		}
+
+		const secondStorage = await AuthStorage.create(dbPath);
+		try {
+			const second = new ModelRegistry(secondStorage, modelsPath);
+			expect(await second.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-two");
+			expect(second.cycleProviderApiKey("custom-proxy")).toBe(true);
+			expect(await second.getApiKeyForProvider("custom-proxy", "sess-1")).toBe("key-three");
+		} finally {
+			secondStorage.close();
+		}
+	});
 });
 
