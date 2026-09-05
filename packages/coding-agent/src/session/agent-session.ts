@@ -1506,6 +1506,8 @@ export class AgentSession {
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
 			localProtocolOptions: () => this.#localProtocolOptions(),
+			setSessionLspReadOnly: config.setSessionLspReadOnly,
+			getSessionLspReadOnly: config.getSessionLspReadOnly,
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -2111,10 +2113,10 @@ export class AgentSession {
 	 * post-clear prompt refresh rejects, so a failed refresh leaves the
 	 * session either fully on the persona or fully off it (never an installed
 	 * prompt describing a persona the session state no longer has). The LSP
-	 * read-only lift inside `restoreBaselineTools` is not reverted: it is a
-	 * host-side live value (a durable CLI restriction ignores lifts anyway),
-	 * and the LSP tool only relaxes toward the restored persona's pre-clear
-	 * presentation on the next reconcile.
+	 * read-only lift inside `restoreBaselineTools` is reverted too: the
+	 * pre-clear value is captured before the restore and re-applied in the
+	 * rollback (a durable CLI restriction ignores the host setter), so a
+	 * rolled-back persona keeps the LSP exactly as restricted as it was.
 	 */
 	async clearPersonaOwnedState(): Promise<void> {
 		// A persona is "currently active" when its mutable session state is
@@ -2142,15 +2144,20 @@ export class AgentSession {
 		const snapshotPersonaToolRestriction = this.getPersonaToolRestriction();
 		const snapshotPersonaDroppedMutation = this.getLastPersonaDroppedMutation();
 		const snapshotPersonaDroppedEdit = this.getLastPersonaDroppedEdit();
+		// The baseline restore lifts the LSP read-only restriction via the
+		// host hook; capture the CURRENT value first so the rollback below
+		// can re-apply it when the post-clear prompt refresh rejects (the
+		// LSP value is not part of the prompt, so restoring it after the
+		// fields revert is safe). Durable CLI restrictions ignore the
+		// host setter, so a re-applied value is a no-op there.
+		const previousLspReadOnly = this.#tools.getSessionLspReadOnly?.();
 		// Restore the pre-persona tool set (launch baseline or first-switch
 		// capture) so a restricted persona's `tools:` list does not leak into
 		// the unrelated mode. Runs BEFORE the spawns/prompt clear: if it fails,
 		// the persona state stays intact and the caller's error path (or the
 		// next reconcile) can retry instead of leaving a half-cleared persona.
-		// `restoreBaselineTools` also lifts the LSP read-only restriction; that
-		// lift is not reverted in the rollback below — it is a host-side live
-		// value that the LSP tool reads through `session.lspReadOnly`, and no
-		// public AgentSession getter/setter exists to restore it precisely.
+		// `restoreBaselineTools` also lifts the LSP read-only restriction via
+		// the host hook; the rollback below re-applies the captured value.
 		await this.restoreBaselineTools();
 		this.setSessionSpawns(null);
 		this.setPersonaAppendPrompt(undefined);
@@ -2172,12 +2179,21 @@ export class AgentSession {
 		} catch (error) {
 			// Prompt build failed after the clears committed (e.g. a memory
 			// backend's instruction build rejects once the persona restriction
-			// is lifted). Restore the FULL persona presentation (same ordering
-			// and arguments as `rollbackPersonaSwitch` in session/persona-apply,
-			// minus model/thinking which a clear never changed) so the installed
-			// base prompt (which still describes the persona) and the session
-			// state don't desync; the caller's error path or the next
-			// reconcile can retry the clear.
+			// is lifted). Restore the FULL persona presentation (same arguments
+			// as `rollbackPersonaSwitch` in session/persona-apply, minus
+			// model/thinking which a clear never changed). The spawn policy and
+			// persona append restore FIRST: `setActiveToolPresentation` rebuilds
+			// the prompt internally, and a rebuild entered while the fields were
+			// still cleared would either re-throw from the same failing prompt
+			// component (leaving the persona fields cleared) or install a prompt
+			// built without them — which the setters never refresh. Restored
+			// first, the rebuilt prompt describes the coherent persona, and a
+			// failure INSIDE the presentation apply leaves the fields restored
+			// (the original installed prompt was never swapped on that path); the
+			// caller's error path or the next reconcile can retry the clear.
+			this.setPersonaToolRestriction(snapshotPersonaToolRestriction);
+			this.setSessionSpawns(previousSpawns);
+			this.setPersonaAppendPrompt(previousAppendPrompt);
 			await this.setActiveToolPresentation(
 				snapshotTools,
 				snapshotMountedToolNames,
@@ -2186,9 +2202,13 @@ export class AgentSession {
 				snapshotPersonaDroppedMutation,
 				snapshotPersonaDroppedEdit,
 			);
-			this.setPersonaToolRestriction(snapshotPersonaToolRestriction);
-			this.setSessionSpawns(previousSpawns);
-			this.setPersonaAppendPrompt(previousAppendPrompt);
+			// The LSP value is not part of the prompt: re-apply the captured
+			// pre-clear value after the fields revert so a rolled-back persona
+			// keeps the LSP exactly as restricted as it was (a durable CLI
+			// restriction ignores the host setter — see the capture above).
+			if (previousLspReadOnly !== undefined) {
+				this.#tools.setSessionLspReadOnly(previousLspReadOnly);
+			}
 			throw error;
 		}
 	}

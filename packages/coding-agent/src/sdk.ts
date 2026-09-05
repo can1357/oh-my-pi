@@ -4286,15 +4286,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			personaAppendPrompt: options.personaAppendPrompt,
 			spawns: options.spawns,
 			personaName: options.personaName,
-			// Seed the launch persona's exact `tools:` grant so a late extension
-			// registration cannot widen the active set past it (the creation-time
-			// `restrictToolNames` flag no longer disables extension loading for
-			// personas — codex #3821198710). `explicitlyRequestedToolNames` is
-			personaToolRestriction: options.personaName
-				? explicitlyRequestedToolNames
+			// Seed the launch persona's exact `tools:` grant — or, for a
+			// personaSwitchable session with no persona, the plain CLI grant —
+			// so a late extension registration cannot widen the active set past
+			// it (the creation-time `restrictToolNames` flag no longer disables
+			// extension loading for personas — codex #3821198710;
+			// PRRT_kwDOQxs0bc6fmuwt). `explicitlyRequestedToolNames` is
+			personaToolRestriction:
+				(options.personaName || options.personaSwitchable === true) && explicitlyRequestedToolNames
 					? new Set(explicitlyRequestedToolNames)
-					: undefined
-				: undefined,
+					: undefined,
 			// undefined for a persona without `tools:` (no restriction).
 			// Residual CLI restriction for when the persona is LEFT: with an
 			// explicit `--tools`/`--no-tools` the baseline IS the CLI list (the
@@ -4308,9 +4309,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// rejecting every late registration is precisely the grant's
 			// meaning, and `undefined` would let the next MCP/RPC refresh
 			// auto-activate tools the explicit `--no-tools` denied.
+			// A personaSwitchable session with NO persona (`--tools`/`--no-tools`
+			// under interactive/rpc-ui/ACP) is the same CLI grant with no
+			// liftable persona layer — the restriction is durable for the whole
+			// session (PRRT_kwDOQxs0bc6fmuwt), and the CLI baseline lets a later
+			// `/agent` switch's leave path pin the restored set to the grant.
 			residualCliToolRestriction:
-				options.personaName && options.personaCliToolOverride ? new Set(personaBaselineToolNames) : undefined,
-			baselineToolNames: options.personaName ? personaBaselineToolNames : undefined,
+				(options.personaName || options.personaSwitchable === true) && options.personaCliToolOverride
+					? new Set(personaBaselineToolNames)
+					: undefined,
+			baselineToolNames:
+				options.personaName || (options.personaSwitchable === true && options.personaCliToolOverride === true)
+					? personaBaselineToolNames
+					: undefined,
 			baselineMountedToolNames: options.personaName ? baselineMountedToolNames : undefined,
 			baselineLspEnabled: options.personaName ? baselineLspEnabled : undefined,
 			baselineHubEnabled: options.personaName ? baselineHubEnabled : undefined,
@@ -4372,6 +4383,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			setSessionLspReadOnly: value => {
 				if (!lspReadOnlyExplicit) lspReadOnlyLive = value;
 			},
+			getSessionLspReadOnly: () => lspReadOnlyLive,
 			ensureWriteRegistered,
 			isDeviceOnlyWrite: () => toolSession.deviceOnlyWrite === true,
 			setDeviceOnlyWrite: enabled => {

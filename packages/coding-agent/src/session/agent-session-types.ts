@@ -257,11 +257,20 @@ export interface AgentSessionConfig {
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
 	createThinkTool?: () => Promise<AgentTool | null>;
 	/**
-	 * Lifts the session's LSP read-only restriction (leaving a persona whose
-	 * `tools:` list had forced it on via `restrictToolNames`). Ignored by the
-	 * host when the restriction was set explicitly (durable CLI restriction).
+	 * Lifts (or re-applies) the session's LSP read-only restriction (leaving a
+	 * persona whose `tools:` list had forced it on via `restrictToolNames`).
+	 * Ignored by the host when the restriction was set explicitly (durable CLI
+	 * restriction).
 	 */
 	setSessionLspReadOnly?: (value: boolean) => void;
+	/**
+	 * Reads the session's CURRENT LSP read-only restriction. The clear-rollback
+	 * in `clearPersonaOwnedState` captures it before `restoreBaselineTools`
+	 * lifts it, and re-applies the captured value when the post-clear prompt
+	 * refresh rejects, so a rolled-back persona keeps the LSP exactly as
+	 * restricted as it was before the failed clear.
+	 */
+	getSessionLspReadOnly?: () => boolean;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
 	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */

@@ -63,10 +63,14 @@ export interface SessionToolsHost {
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
-	setCodeModeNamespacesInfo?(
-		info: unknown,
-	): void /** Lifts (or re-applies) the session's LSP read-only restriction; the host ignores it when the restriction is a durable CLI restriction. */;
+	setCodeModeNamespacesInfo?(info: unknown): void;
+	/**
+	 * Lifts (or re-applies) the session's LSP read-only restriction; the host
+	 * ignores it when the restriction is a durable CLI restriction.
+	 */
 	setSessionLspReadOnly?(value: boolean): void;
+	/** Reads the session's current LSP read-only restriction (clear-rollback capture). */
+	getSessionLspReadOnly?(): boolean;
 }
 
 interface SessionToolsOptions {
@@ -1586,6 +1590,16 @@ export class SessionTools {
 	 */
 	getResidualCliToolRestriction(): Set<string> | undefined {
 		return this.#residualCliToolRestriction;
+	}
+
+	/** Reads the session's current LSP read-only restriction (live host value). */
+	getSessionLspReadOnly(): boolean | undefined {
+		return this.#host.getSessionLspReadOnly?.();
+	}
+
+	/** Re-applies the session's LSP read-only restriction (clear-rollback restore). */
+	setSessionLspReadOnly(value: boolean): void {
+		this.#host.setSessionLspReadOnly?.(value);
 	}
 
 	/**

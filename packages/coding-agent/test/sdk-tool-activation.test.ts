@@ -281,6 +281,92 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("keeps a personaSwitchable CLI grant durable across deferred MCP refresh and late extensions", async () => {
+		// PRRT_kwDOQxs0bc6fmuwt: interactive/rpc-ui/ACP sessions launched with
+		// plain `--tools`/`--no-tools` (personaSwitchable, NO `--agent`) load
+		// extensions and MCP for a later `/agent` switch, but nothing seeded the
+		// CLI grant as a restriction — a deferred MCP refresh auto-activated
+		// every connected tool and a late extension registration passed the
+		// missing-restriction check, widening the active set past the explicit
+		// CLI grant. The CLI grant now seeds the same durable live restriction
+		// and residual a `--agent` + `--tools` launch gets, and the CLI baseline
+		// lets a switch's leave path pin the restored set to the grant.
+		const tempDir = makeTempDir();
+		const lateWideningExtension: ExtensionFactory = pi => {
+			pi.on("session_start", async () => {
+				await Promise.resolve();
+				pi.registerTool({
+					name: "late_widening_tool",
+					label: "Late Widening Tool",
+					description: "Registered during session_start to try to widen the grant.",
+					parameters: type({}),
+					async execute() {
+						return { content: [{ type: "text", text: "late" }] };
+					},
+				});
+			});
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [toolActivationExtension, lateWideningExtension],
+			toolNames: ["read"],
+			personaSwitchable: true,
+			personaCliToolOverride: true,
+		});
+		const mcpTool: CustomTool = {
+			name: "mcp__fixture_lookup",
+			label: "fixture/lookup",
+			description: "Lookup from the fixture MCP server.",
+			parameters: type({}),
+			mcpServerName: "fixture",
+			mcpToolName: "lookup",
+			async execute() {
+				return { content: [{ type: "text", text: "mcp" }] };
+			},
+		} satisfies CustomTool;
+
+		try {
+			// The extension tool registers (persona-switchable keeps discovery)…
+			expect(session.getToolByName("default_active_tool")).toBeDefined();
+			// …but stays OUT of the active set: the CLI grant named only `read`.
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+
+			// A deferred MCP refresh cannot auto-activate past the CLI grant:
+			// the tool registers but stays inactive.
+			await session.refreshMCPTools([mcpTool]);
+			expect(session.getToolByName("mcp__fixture_lookup")).toBeDefined();
+			expect(session.getEnabledToolNames()).not.toContain("mcp__fixture_lookup");
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+
+			// A late extension registration (the session_start handler fires the
+			// same live registration path a background registration uses) cannot
+			// widen past the grant either: the missing-restriction check sees the
+			// seeded durable CLI restriction.
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("expected extension runner");
+			await initializeExtensions(session, {
+				reportSendError: vi.fn(),
+				reportRuntimeError: vi.fn(),
+			});
+			await runner.emit({ type: "session_start" });
+			expect(session.getToolByName("late_widening_tool")).toBeDefined();
+			expect(session.getEnabledToolNames()).not.toContain("late_widening_tool");
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+
+			// A live `/agent` switch can still grant past the CLI list: the
+			// persona's grant supersedes the durable restriction while active.
+			await session.applyPersonaTools(["read", "default_active_tool"]);
+			expect(session.getActiveToolNames()).toContain("default_active_tool");
+			// …and leaving the persona restores the CLI grant exactly.
+			await session.restoreBaselineTools();
+			expect(session.getPersonaToolRestriction()).toBeDefined();
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("preserves a deferrable-only write transport across enabled-set reapplication", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({
