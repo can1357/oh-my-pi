@@ -223,6 +223,35 @@ describe("Editor slash autocomplete acceptance", () => {
 			fs.rmSync(baseDir, { recursive: true, force: true });
 		}
 	});
+
+	it("keeps autocomplete open after accepting an @ directory with Enter", async () => {
+		const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "editor-at-directory-enter-"));
+		try {
+			fs.mkdirSync(path.join(baseDir, "packages", "tui"), { recursive: true });
+			fs.mkdirSync(path.join(baseDir, "packages", "utils"), { recursive: true });
+			const editor = new Editor(defaultEditorTheme);
+			editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], baseDir));
+			let submitted = "";
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.setText("@pack");
+
+			const autocompleteOpened = untilAutocompleteShown(editor);
+			editor.handleInput("\t");
+			await autocompleteOpened;
+
+			editor.handleInput("\r");
+			await untilAutocompleteShown(editor);
+
+			expect(editor.getText()).toBe("@packages/");
+			expect(editor.isShowingAutocomplete()).toBe(true);
+			expect(submitted).toBe("");
+		} finally {
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
 	it("shows a sole forced file suggestion before applying it", async () => {
 		const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "editor-single-file-tab-"));
 		try {

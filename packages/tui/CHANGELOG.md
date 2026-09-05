@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Avoid inserting a trailing space when auto-completing directory paths with `@`.
+- Avoid inserting a trailing space when auto-completing directory paths with `@`, and keep autocomplete open when accepting a directory with Tab or Enter.
 
 ## [18.1.9] - 2026-09-04
 

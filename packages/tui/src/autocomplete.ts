@@ -111,6 +111,16 @@ function parsePathPrefix(prefix: string): { rawPrefix: string; isAtPrefix: boole
 	return { rawPrefix: prefix, isAtPrefix: false, isQuotedPrefix: false };
 }
 
+/**
+ * Whether an autocomplete value represents a directory: trailing slash or
+ * backslash, optionally followed by a closing quote for quoted paths.
+ * Shared by the provider suffix logic and the editor chain-on-accept
+ * behavior so Tab and Enter acceptance stay in sync.
+ */
+export function isDirectoryCompletionValue(value: string): boolean {
+	return /[\\/]["']?$/.test(value);
+}
+
 function buildCompletionValue(
 	path: string,
 	options: { isDirectory: boolean; isAtPrefix: boolean; isQuotedPrefix: boolean },
@@ -738,7 +748,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				beforePrefix = currentLine.slice(0, cursorCol - liveAtPrefix.length);
 			}
 			// This is a file attachment completion
-			const isDirectory = /[\\/]["']?$/.test(item.value);
+			const isDirectory = isDirectoryCompletionValue(item.value);
 			const suffix = isDirectory ? "" : " ";
 			const newLine = `${beforePrefix + item.value}${suffix}${afterCursor}`;
 			const newLines = [...lines];
