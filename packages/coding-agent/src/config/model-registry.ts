@@ -683,11 +683,30 @@ export class ModelRegistry {
 		await this.#refreshRuntimeDiscoveries(strategy, new Set(this.#runtimeModelManagers.keys()));
 	}
 
-	#reloadStaticModels(): void {
+	#reloadStaticModels(options?: { preserveRuntimeDiscovery?: boolean }): void {
 		const currentMtime = this.#modelsConfigFile.getMtimeMs();
 		if (currentMtime !== null && currentMtime === this.#lastStaticLoadMtime) {
 			// Models config unchanged since last load; reloading would be redundant.
 			return;
+		}
+		let preservedRuntimeState:
+			| {
+					models: Model<Api>[];
+					authoritativeProviders: Set<string>;
+					discoveryStates: Map<string, ProviderDiscoveryState>;
+			  }
+			| undefined;
+		if (options?.preserveRuntimeDiscovery) {
+			const providerIds = new Set(this.#runtimeDiscoveredModels.map(model => model.provider));
+			for (const providerId of this.#runtimeAuthoritativeProviders) providerIds.add(providerId);
+			for (const providerId of this.#runtimeModelManagers.keys()) providerIds.add(providerId);
+			preservedRuntimeState = {
+				models: this.#runtimeDiscoveredModels,
+				authoritativeProviders: new Set(this.#runtimeAuthoritativeProviders),
+				discoveryStates: new Map(
+					[...this.#providerDiscoveryStates].filter(([providerId]) => providerIds.has(providerId)),
+				),
+			};
 		}
 		this.#modelsConfigFile.invalidate();
 		this.#customProviderApiKeys.clear();
@@ -707,6 +726,13 @@ export class ModelRegistry {
 		this.#configError = undefined;
 		this.#providerDiscoveryStates.clear();
 		this.#loadModels();
+		if (preservedRuntimeState) {
+			this.#runtimeDiscoveredModels = preservedRuntimeState.models;
+			this.#runtimeAuthoritativeProviders = preservedRuntimeState.authoritativeProviders;
+			for (const [providerId, state] of preservedRuntimeState.discoveryStates) {
+				this.#providerDiscoveryStates.set(providerId, state);
+			}
+		}
 	}
 
 	/**
@@ -2491,6 +2517,10 @@ export class ModelRegistry {
 		this.#runtimeModelManagers.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);
 		this.#lastModelModifierWarnings.delete(providerName);
+		this.#runtimeDiscoveredModels = this.#runtimeDiscoveredModels.filter(model => model.provider !== providerName);
+		this.#runtimeAuthoritativeProviders.delete(providerName);
+		this.#providerDiscoveryStates.delete(providerName);
+		this.#invalidateProviderModelCache(providerName);
 		this.authStorage.removeConfigApiKey(providerName);
 		this.authStorage.removeRuntimeUsageProvider(providerName);
 	}
@@ -2515,7 +2545,7 @@ export class ModelRegistry {
 			this.#clearRuntimeProviderState(providerName);
 		}
 		this.#lastStaticLoadMtime = null;
-		this.#reloadStaticModels();
+		this.#reloadStaticModels({ preserveRuntimeDiscovery: true });
 	}
 
 	/**
@@ -2535,7 +2565,7 @@ export class ModelRegistry {
 		this.#ensureFullSnapshot();
 		this.#clearRuntimeProviderState(providerName);
 		this.#lastStaticLoadMtime = null;
-		this.#reloadStaticModels();
+		this.#reloadStaticModels({ preserveRuntimeDiscovery: true });
 	}
 
 	/**
@@ -2613,7 +2643,7 @@ export class ModelRegistry {
 		}
 		if (sourceHandoff) {
 			this.#lastStaticLoadMtime = null;
-			this.#reloadStaticModels();
+			this.#reloadStaticModels({ preserveRuntimeDiscovery: true });
 		}
 
 		// Extension usage providers override built-ins/configured resolvers for the
