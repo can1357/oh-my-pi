@@ -3,11 +3,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	$env,
+	$which,
 	isBunTestRuntime,
 	isCompiledBinary,
+	isExecutable,
+	isFullyQualifiedPath,
 	logger,
 	postmortem,
 	stripWindowsExtendedLengthPathPrefix,
+	WhichCachePolicy,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
@@ -107,49 +111,6 @@ export interface WorkerSpawnCommand {
 export const SMOKE_TEST_TIMEOUT_MS = 30_000;
 
 /**
- * Verify that a path exists, is a regular file, and (on POSIX) has execute permission.
- */
-function isExecutableFile(filePath: string): boolean {
-	try {
-		const stat = fs.statSync(filePath);
-		if (!stat.isFile()) return false;
-		if (process.platform !== "win32") {
-			return (stat.mode & 0o111) !== 0;
-		}
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Test whether a path is fully qualified and drive-independent.
- */
-function isFullyQualifiedPath(p: string): boolean {
-	if (!path.isAbsolute(p)) return false;
-	if (process.platform === "win32") {
-		return /^[a-zA-Z]:[/\\]/.test(p) || p.startsWith("\\\\");
-	}
-	return true;
-}
-
-/**
- * Find an executable on PATH, strictly ignoring relative directory entries (such
- * as `.` or `./bin`) and empty components so lookups can never resolve against
- * an untrusted working tree.
- */
-function whichInAbsolutePaths(cmd: string): string | null {
-	const rawPath = process.env.PATH ?? "";
-	const safePath = rawPath
-		.split(path.delimiter)
-		.filter(dir => dir.length > 0 && isFullyQualifiedPath(dir))
-		.join(path.delimiter);
-	if (!safePath) return null;
-	const found = Bun.which(cmd, { PATH: safePath });
-	return found && isFullyQualifiedPath(found) ? found : null;
-}
-
-/**
  * Resolve the current executable path, falling back to finding the binary on
  * PATH if the original physical path was unlinked on disk (e.g. Homebrew or a
  * package manager pruned the prior version directory during an in-flight
@@ -157,19 +118,19 @@ function whichInAbsolutePaths(cmd: string): string | null {
  */
 export function resolveExecutablePath(): string {
 	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
-	if (isCompiledBinary() && !isExecutableFile(executable)) {
+	if (isCompiledBinary() && !isExecutable(executable)) {
 		const argv0 = process.argv0;
 		const isPath = argv0.includes("/") || argv0.includes("\\") || argv0.includes(":");
 		const candidates = [
 			// Prefer the original launcher when invoked with an absolute path
 			isFullyQualifiedPath(argv0) ? argv0 : null,
 			// Search PATH for the launcher name only if it is a bare command name
-			!isPath ? whichInAbsolutePaths(argv0) : null,
+			!isPath ? $which(argv0, { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass }) : null,
 			// Generic fallback to finding "omp" on PATH
-			whichInAbsolutePaths("omp"),
+			$which("omp", { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass }),
 		];
 		for (const candidate of candidates) {
-			if (candidate && isExecutableFile(candidate)) {
+			if (candidate && isExecutable(candidate)) {
 				return candidate;
 			}
 		}

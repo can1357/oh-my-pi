@@ -11,6 +11,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isFullyQualifiedPath } from "./path";
 
 type CacheKey = string | bigint | number;
 
@@ -179,6 +180,12 @@ export interface WhichOptions extends Bun.WhichOptions {
 	 * Defaults to `WhichCachePolicy.Fresh`.
 	 */
 	cache?: WhichCachePolicy;
+	/**
+	 * Only search absolute directory entries in PATH, ignoring relative entries
+	 * (e.g. `.` or `./bin`) and empty components to prevent resolving against
+	 * an untrusted working directory.
+	 */
+	requireAbsolutePaths?: boolean;
 }
 
 // Darwin-specific "which" shim: consult Xcode/CLT toolchain directories after $PATH.
@@ -190,6 +197,15 @@ function darwinWhich(command: string, options?: Bun.WhichOptions): string | null
 		return getMacosToolPaths().get(command) ?? null;
 	}
 	return null;
+}
+
+function filterAbsoluteSearchPath(rawPath: string | undefined): string | null {
+	if (!rawPath) return null;
+	const safePath = rawPath
+		.split(path.delimiter)
+		.filter(dir => dir.length > 0 && isFullyQualifiedPath(dir))
+		.join(path.delimiter);
+	return safePath || null;
 }
 
 // Which function that incorporates Darwin Xcode logic if platform reports as 'darwin'
@@ -214,8 +230,15 @@ function cacheKey(command: string, options?: Bun.WhichOptions): CacheKey {
  */
 export function $which(command: string, options?: WhichOptions): string | null {
 	const cachePolicy = options?.cache ?? WhichCachePolicy.Cached;
-	const lookupOptions =
+	let lookupOptions =
 		options?.PATH !== undefined || process.env.PATH === undefined ? options : { ...options, PATH: process.env.PATH };
+
+	if (options?.requireAbsolutePaths) {
+		const safePath = filterAbsoluteSearchPath(lookupOptions?.PATH);
+		if (!safePath) return null;
+		lookupOptions = { ...lookupOptions, PATH: safePath };
+	}
+
 	let key: CacheKey | undefined;
 
 	if (cachePolicy !== WhichCachePolicy.Bypass) {
@@ -227,6 +250,9 @@ export function $which(command: string, options?: WhichOptions): string | null {
 	}
 
 	const result = whichFresh(command, lookupOptions);
+	if (result && options?.requireAbsolutePaths && !isFullyQualifiedPath(result)) {
+		return null;
+	}
 	if (key != null && cachePolicy !== WhichCachePolicy.ReadOnly) {
 		toolCache.set(key, result);
 	}

@@ -34,4 +34,22 @@ describe("$which", () => {
 		process.env.PATH = secondDir;
 		expect($which(command)).toBe(secondExecutable);
 	});
+
+	it("rejects relative and cwd lookups when requireAbsolutePaths is true", () => {
+		const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-which-abs-"));
+		tempDirs.push(testDir);
+
+		const command = `omp-test-cmd-${process.pid}`;
+		const executable = path.join(testDir, command);
+		fs.writeFileSync(executable, "#!/bin/sh\n");
+		fs.chmodSync(executable, 0o755);
+
+		// 1. PATH contains only relative entries: must return null
+		process.env.PATH = [".", "./bin", ""].join(path.delimiter);
+		expect($which(command, { requireAbsolutePaths: true })).toBeNull();
+
+		// 2. PATH contains relative entries mixed with an absolute directory: finds binary in absolute dir
+		process.env.PATH = [".", "./bin", "", testDir].join(path.delimiter);
+		expect($which(command, { requireAbsolutePaths: true })).toBe(executable);
+	});
 });

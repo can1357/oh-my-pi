@@ -21,11 +21,15 @@ export interface ShellConfigOptions {
 let cachedShellConfig: ShellConfig | null = null;
 
 /**
- * Check if a shell binary is executable.
+ * Check if a file path exists, is a regular file, and has effective execute permission.
  */
-export function isExecutable(path: string): boolean {
+export function isExecutable(filePath: string): boolean {
 	try {
-		fs.accessSync(path, fs.constants.X_OK);
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile()) return false;
+		if (process.platform !== "win32") {
+			fs.accessSync(filePath, fs.constants.X_OK);
+		}
 		return true;
 	} catch {
 		return false;
