@@ -76,9 +76,16 @@ export function createApiKeyResolver(
 				const status = AIError.status(error);
 				const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 				// No sibling for an account-quota failure: stop so the outer
-				// whole-turn retry layer can honor the recorded backoff. A hard
+				// whole-turn retry layer can honor the recorded backoff — unless
+				// a config key list has a usable sibling, which takes over
+				// immediately instead of waiting out the blocked key. A hard
 				// auth decline can instead mean a peer refreshed the bearer.
-				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
+				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
+					if (registry.cycleProviderApiKey?.(provider) ?? false) {
+						return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+					}
+					return undefined;
+				}
 			}
 			// A pinned config key list shadows the stored pool, so rotating
 			// stored rows alone never changes the effective key — advance the
