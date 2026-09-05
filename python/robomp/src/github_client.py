@@ -12,6 +12,8 @@ from urllib.parse import quote
 
 import httpx
 
+from robomp.search_query import parse_search_query
+
 log = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
@@ -19,6 +21,8 @@ ACCEPT = "application/vnd.github+json"
 API_VERSION = "2022-11-28"
 _DEFAULT_AUTO_LABEL_COLOR = "#cccccc"
 _MAX_LABEL_PAGES = 100
+# Forgejo ListIssues clamps `limit` to 50 per page regardless of the value sent.
+_FORGEJO_SEARCH_PAGE_SIZE = 50
 
 
 class GitHubError(RuntimeError):
@@ -573,22 +577,42 @@ class GitHubClient:
             # Map GitHub `is:pr`-style intent to Gitea's `type` param (pulls/
             # issues); omit it so plain queries return both. `limit` replaces
             # GitHub's `per_page`.
+            parsed = parse_search_query(query)
+            keywords = parsed.keywords
             type_param = None
             low = query.lower()
             if "is:pr" in low or "is:pull" in low or "type:pr" in low:
                 type_param = "pulls"
             elif "is:issue" in low or "type:issue" in low:
                 type_param = "issues"
+            # The API's `q` is only reliable for a single word (multi-word is an
+            # unranked OR-union), so send the first keyword verbatim and AND the
+            # remaining keywords client-side against title+body.
             params: dict[str, Any] = {
-                "q": query,
                 "state": "all",
-                "limit": per_page,
+                "limit": _FORGEJO_SEARCH_PAGE_SIZE,
             }
+            if keywords:
+                params["q"] = keywords[0]
             if type_param:
                 params["type"] = type_param
-            data = await self.request("GET", f"/repos/{repo}/issues", params=params)
-            items = data if isinstance(data, list) else []
-            return [_summary_from_item(repo, item) for item in items]
+            items: list[Any] = []
+            first_page = await self.request("GET", f"/repos/{repo}/issues", params=params)
+            items.extend(first_page if isinstance(first_page, list) else [])
+            # Fetch one extra page of headroom only when the first came back
+            # full and the caller wants more than a half page of matches
+            # (limit > 25): with limit <= 25 a single full page (50 candidates)
+            # can already supply every result we'd return, so page 2 is wasted.
+            if len(items) == _FORGEJO_SEARCH_PAGE_SIZE and limit > _FORGEJO_SEARCH_PAGE_SIZE // 2:
+                second_page = await self.request("GET", f"/repos/{repo}/issues", params={**params, "page": 2})
+                items.extend(second_page if isinstance(second_page, list) else [])
+            wanted = {k.lower() for k in keywords}
+
+            def _matches(item: Any) -> bool:
+                text = (str(item.get("title") or "") + "\n" + str(item.get("body") or "")).lower()
+                return all(k in text for k in wanted)
+
+            return [_summary_from_item(repo, item) for item in items if _matches(item)][:limit]
         params = {"q": f"repo:{repo} {query}".strip(), "per_page": per_page}
         data = await self.request("GET", "/search/issues", params=params)
         items = (data or {}).get("items") or []
