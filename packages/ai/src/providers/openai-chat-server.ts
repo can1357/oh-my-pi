@@ -30,6 +30,7 @@ import {
 	openaiChatRequestSchema,
 } from "./openai-chat-server-schema";
 import { decodeDataUri } from "./openai-data-uri";
+import { coerceNullMessageContentInPlace } from "./openai-shared";
 
 export type { ParsedRequest };
 
@@ -79,27 +80,6 @@ function rejectUnsupportedExplicitPromptCacheFields(body: unknown): void {
 	}
 }
 
-/**
- * Normalize `content: null` to `[]` in place for the roles whose content the
- * schema models as `string | array`.
- *
- * Codex (and other OpenAI clients) emit `content: null` on empty message turns.
- * OpenAI tolerates it; coercing to `[]` before validation lets the message take
- * the same path as an explicit empty content array instead of 400ing. The
- * legacy `function` role is excluded — its content is `string | null`, so `[]`
- * would be invalid there (and the walker already maps its null to ""). See #10956.
- */
-function coerceNullMessageContent(body: unknown): void {
-	if (typeof body !== "object" || body === null || Array.isArray(body)) return;
-	const request = body as Record<string, unknown>;
-	if (!Array.isArray(request.messages)) return;
-	for (const message of request.messages) {
-		if (typeof message !== "object" || message === null || Array.isArray(message)) continue;
-		const wireMessage = message as Record<string, unknown>;
-		if (wireMessage.content === null && wireMessage.role !== "function") wireMessage.content = [];
-	}
-}
-
 // ---------------------------------------------------------------------------
 // parseRequest
 // ---------------------------------------------------------------------------
@@ -111,7 +91,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	// for `resolvePromptCacheKey` to pull a cache identity out of inbound
 	// vendor-neutral headers when the body doesn't carry one.
 	rejectUnsupportedExplicitPromptCacheFields(body);
-	coerceNullMessageContent(body);
+	const request =
+		typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>) : undefined;
+	coerceNullMessageContentInPlace(request?.messages, message => message.role !== "function");
 	const parsed = openaiChatRequestSchema(body);
 	if (parsed instanceof type.errors) {
 		throw new AIError.ValidationError(`openai-chat: ${parsed.summary}`);
