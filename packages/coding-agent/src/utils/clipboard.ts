@@ -8,7 +8,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
 import MAC_FILE_URL_SCRIPT from "./mac-file-urls.applescript" with { type: "text" };
 
-type SpawnCaptureOptions = { input?: string; timeoutMs?: number };
+type SpawnCaptureOptions = { input?: string; timeoutMs?: number; env?: Record<string, string | undefined> };
 
 /**
  * Run a subprocess and capture its stdout without blocking the event loop.
@@ -36,6 +36,7 @@ async function spawnCapture(
 		stdout: "pipe",
 		stderr: "ignore",
 		stdin: options.input !== undefined ? Buffer.from(options.input) : "ignore",
+		...(options.env ? { env: options.env } : {}),
 	});
 	let timedOut = false;
 	const timer = setTimeout(() => {
@@ -61,6 +62,17 @@ async function spawnCapture(
 
 function hasDisplay(): boolean {
 	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+}
+
+/**
+ * True when `pbcopy(1)` would type this text as a document instead of as text:
+ * it sniffs the leading bytes and puts input opening with a PDF (`%PDF-`) or
+ * EPS (`%!PS`) header on the pasteboard as that data type. A code block or diff
+ * whose first line is such a header must not go through it, or a plain-text
+ * paste target receives document data — or nothing.
+ */
+function isPasteboardTypedByHeader(text: string): boolean {
+	return text.startsWith("%PDF-") || text.startsWith("%!PS");
 }
 
 /**
@@ -132,6 +144,34 @@ export async function copyToClipboard(text: string): Promise<void> {
 				return;
 			} catch {
 				// Fall through to native
+			}
+		}
+		// macOS: prefer `pbcopy` over the in-process AppKit write, mirroring the
+		// read path which already shells out to `pbpaste`. An in-process
+		// NSPasteboard write logs
+		// `-[NSPasteboard _setData:forType:index:usesPboardTypes:] returns false`
+		// straight to stderr whenever it loses pasteboard ownership — during
+		// process teardown, or to another app that writes at the same moment. The
+		// copy itself is best-effort and the failure is swallowed here, but the
+		// AppKit line still lands in the user's terminal. A child process cannot
+		// emit it, and `pbcopy` ships with every macOS.
+		//
+		// Two `pbcopy(1)` behaviours are worked around. It types input by sniffing
+		// the leading bytes: text opening with a PDF or EPS header lands on the
+		// pasteboard as that document type instead of as text, so such text keeps
+		// the in-process write. And it decodes stdin per `LANG`, defaulting to
+		// ASCII when unset, which mangles non-ASCII input under `LANG=C` or a bare
+		// launchd/SSH environment — so the child gets an explicit UTF-8 locale.
+		if (process.platform === "darwin" && !isPasteboardTypedByHeader(text)) {
+			try {
+				await spawnCapture(["pbcopy"], {
+					input: text,
+					timeoutMs: 5000,
+					env: { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" },
+				});
+				return;
+			} catch {
+				// Fall through to native.
 			}
 		}
 

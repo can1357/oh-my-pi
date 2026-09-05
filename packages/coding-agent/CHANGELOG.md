@@ -656,6 +656,10 @@
 - Fixed subagent advisors abandoning reviews on the final yield turn during session teardown.
 - Fixed `/todo` expand/collapse commands and corrected `/shake thinking` reporting.
 
+### Fixed
+
+- Fixed a stray `NSPasteboard ... returns false` line appearing in the terminal after a copy on macOS, and non-ASCII text being mangled when copying under an ASCII locale (`LANG=C`, bare launchd/SSH environments). Copying now goes through `pbcopy`; text opening with a PDF or EPS header keeps the previous path, so it stays on the pasteboard as text rather than as a document.
+
 ## [18.0.3] - 2026-08-23
 
 ### Added
