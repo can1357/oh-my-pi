@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added collapsible `/tree` branches: `Space` folds one visible subtree and `Shift+Tab` focuses the active thread while preserving existing paging keys.
+
 ### Changed
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
