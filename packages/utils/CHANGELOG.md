@@ -154,6 +154,9 @@
 ### Fixed
 
 - Fixed the Markdown renderer incorrectly breaking into a raw code block when a 4-space-indented line (such as a box-drawing tree child under a └── branch) directly followed paragraph text; it now correctly stays part of the paragraph, matching standard Markdown behavior.
+### Added
+
+- `Flags.string({ optionalValue })` for CLI flags that mean something sensible on their own: a bare `--flag` takes the stated value, while `--flag value` and `--flag=value` still win. `node:util.parseArgs` requires a value for string options, and a plain `default:` cannot express this because it also fires when the flag is absent.
 
 ## [17.3.2] - 2026-08-13
 
