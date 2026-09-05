@@ -360,7 +360,7 @@ function appendGlobalBindingPublish(source: string, names: readonly string[]): s
  * When the source must run inside the async wrapper (top-level `await`), demoted `var`s —
  * and the user's own top-level `var` and `function` declarations — would be scoped to the
  * wrapper function and die with the cell. In that mode we publish every top-level binding
- * back to the wrapper's lexical `this`, which is the worker global object.
+ * after its declaration and again after successful completion so later assignments persist.
  *
  * Nested declarations (inside functions, blocks, classes) are left alone — they're
  * scoped to their enclosing function/block regardless of `var` vs `let`/`const`.
@@ -390,6 +390,9 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 		}
 	}
 	if (targets.length === 0) return code;
+	const finalPublishNames = publishGlobals
+		? [...new Set(targets.flatMap(({ node }) => getLexicalBindingNames(node)))]
+		: [];
 
 	targets.sort((a, b) => b.node.start - a.node.start);
 	let result = code;
@@ -412,7 +415,7 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 		result =
 			result.slice(0, node.start) + appendGlobalBindingPublish(replacement, bindingNames) + result.slice(node.end);
 	}
-	return result;
+	return appendGlobalBindingPublish(result, finalPublishNames);
 }
 
 async function returnFinalExpression(code: string): Promise<{ source: string; returned: boolean }> {
