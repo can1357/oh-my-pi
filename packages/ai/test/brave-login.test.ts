@@ -35,7 +35,7 @@ describe("brave login", () => {
 			},
 		});
 
-		expect(authUrl).toBe("https://api-dashboard.search.brave.com");
+		expect(authUrl).toBe("https://api-dashboard.search.brave.com/app/keys");
 		expect(authInstructions).toBe("Create or copy your API key from the Brave Search API dashboard.");
 		expect(promptMessage).toBe("Paste your Brave API key");
 		expect(promptPlaceholder).toBe("API key");

@@ -2,7 +2,7 @@ auth "brave" {
 	name "Brave"
 	env "BRAVE_API_KEY"
 	login "api-key" {
-		auth-url "https://api-dashboard.search.brave.com"
+		auth-url "https://api-dashboard.search.brave.com/app/keys"
 		instructions "Create or copy your API key from the Brave Search API dashboard."
 		prompt "Paste your Brave API key" placeholder="API key"
 	}

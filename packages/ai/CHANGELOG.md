@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added interactive Brave API-key login through `/login brave`.
 - Added Muse Code subscription sign-in, credential refresh, inference, and quota reporting in `/usage`, with durable rate-limit backoff so quota refresh recovers instead of repeatedly retrying.
 
 ## [18.1.11] - 2026-09-05
