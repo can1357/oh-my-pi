@@ -41,15 +41,18 @@ export interface MCPToolFilterResult {
  * `[^/]` classes stop at it. MCP tool names are opaque strings — a denylist
  * entry `*` must match a tool named `admin/delete` — so both the pattern and
  * the name are matched in a slash-free domain: every `/` is transliterated
- * to NUL (a character no glob metacharacter treats specially, and one that
- * cannot appear in a JSON config string). The transliteration collides only
- * for names containing a literal NUL (`a/b` ≡ `a\0b`) — pathological, since
- * NUL cannot appear in a JSON config string either.
+ * to `\x01` (SOH, a control character that is not a glob metacharacter, cannot
+ * appear in a JSON config string, and compiles through the matcher cleanly on
+ * both sides). NUL was the first choice but miscompiles when the pattern has
+ * an escaped open bracket (`foo\[/bar*`) — `\` + `\0` desynchronizes the
+ * emitted regex from the transliterated name. The transliteration collides
+ * only for names containing a literal `\x01` (`a/b` ≡ `a\x01b`) — pathological,
+ * since `\x01` cannot appear in a JSON config string either.
  * Character classes containing `/` (`[/]`, `[^/]`, mixed `[a/]`) are not
- * supported: after transliteration the class contains NUL, which breaks
- * picomatch class semantics. Such entries are routed to the unmatched-warn
- * path by the metacharacter check below, so they degrade loudly to
- * never-match instead of silently half-matching.
+ * supported: after transliteration the class contains `\x01`, which breaks
+ * picomatch class semantics. Such entries are routed to the never-match
+ * path via `hasSlashInsideClass` (below) so they degrade loudly to
+ * `unmatched` instead of silently half-matching.
  * `nonegate`/`noextglob` pin the applied surface to the documented globs
  * (`*`, `?`, `[...]`, `{a,b}`) — a leading `!` or extglob prefix (`+(a|b)`)
  * is treated as a literal by picomatch, keeping every entry's semantics
@@ -57,26 +60,21 @@ export interface MCPToolFilterResult {
  */
 const MATCH_OPTIONS = { dot: true, nonegate: true, noextglob: true } as const;
 
-const SLASH_SENTINEL = "\0";
+/** Slash transliteration sentinel (see rationale above). */
+const SLASH_SENTINEL = "\x01";
 
 /**
- * Whether any `/` appears inside a character class. A single forward scan:
- * `[` opens a class, `]` closes it (a leading `!`/`^` negation is part of the
- * class body), and a `/` seen while a class is open flags the pattern.
- * A `/` between classes is an ordinary literal and does not flag.
+ * Whether any `/` appears inside a character class. Resolved from picomatch's
+ * own token stream so escapes are already handled: an escaped `\[` is a
+ * literal `text` token, never a class opener, so `foo\[/bar*` (slash outside
+ * any class) and `[a]/[b]` (slash between classes) are NOT flagged, while
+ * `[a/b]`, `[^/]`, and `[/_]` ARE.
  */
 function hasSlashInsideClass(pattern: string): boolean {
-	let inClass = false;
-	for (const ch of pattern) {
-		if (ch === "[") {
-			inClass = true;
-		} else if (ch === "]") {
-			inClass = false;
-		} else if (ch === "/" && inClass) {
-			return true;
-		}
-	}
-	return false;
+	// Class-token classification does not depend on dot/nonegate/noextglob, so
+	// parse() can run with defaults; we only read the resulting token stream.
+	const tokens = picomatch.parse(pattern).tokens;
+	return tokens.some(token => token.type === "bracket" && (token.value as string).includes("/"));
 }
 
 class CompiledPattern {

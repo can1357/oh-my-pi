@@ -158,3 +158,16 @@ test("valid classes still match after the slash-class guard", () => {
 	expect(run(["file_1", "file_a"], ["file_[0-9]"]).allowed).toEqual(["file_1"]);
 	expect(run(NAMES, ["admin/*"]).allowed).toEqual(["admin/delete"]);
 });
+
+test("a literal slash BETWEEN classes is not over-rejected (multi-class pattern stays routable)", () => {
+	// `[a]/[b]` is a valid documented glob: class, literal `/`, class. The guard
+	// must detect a slash INSIDE one class only, not across the `[`…`]` span.
+	expect(run(["a/1", "a/b"], ["a/[12]"]).allowed).toEqual(["a/1"]);
+	expect(run(["x/y"], ["[a-z]/[a-z]"]).allowed).toEqual(["x/y"]);
+});
+
+test("an escaped open bracket is a literal, so a slash after it is outside any class", () => {
+	// `foo\[/bar*` must match `foo[/bar1` — \[ is a literal char, the slash is
+	// outside any class, so the pattern is routable and NOT flagged unsupported.
+	expect(run(["foo[/bar1", "foo[/bar2"], ["foo\\[/bar*"]).allowed).toEqual(["foo[/bar1", "foo[/bar2"]);
+});
