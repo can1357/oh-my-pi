@@ -97,6 +97,33 @@ describe("task wire schema", () => {
 		expect("role" in item).toBe(false);
 		expect(item.task).toBe("x");
 	});
+
+	it("strips model from items on the fast path (modelEnabled unset)", () => {
+		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
+		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x", model: "@smol" }] }));
+		expect("model" in items[0]!).toBe(false);
+	});
+
+	it("accepts model as string or pattern array when modelEnabled", () => {
+		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true, modelEnabled: true });
+		const items = parsedItems(
+			batch({
+				context: "ctx",
+				tasks: [
+					{ task: "x", model: "@smol" },
+					{ task: "y", model: ["openai/gpt-5.6", "anthropic/claude-opus-4.7"] },
+				],
+			}),
+		);
+		expect(items[0]?.model).toBe("@smol");
+		expect(items[1]?.model).toEqual(["openai/gpt-5.6", "anthropic/claude-opus-4.7"]);
+	});
+
+	it("rejects a non-string model value when modelEnabled", () => {
+		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true, modelEnabled: true });
+		const parsed = batch({ context: "ctx", tasks: [{ task: "x", model: 42 }] });
+		expect(parsed instanceof type.errors).toBe(true);
+	});
 });
 
 // Contract: `agent` and `name` shape the spawned subagent's identity and the

@@ -139,6 +139,8 @@ export interface TaskItem {
 	task?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: TaskEffort;
+	/** Per-spawn model override: a role alias (`@smol`, `smol`) or model pattern (`provider/model-id`). */
+	model?: string | string[];
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -197,9 +199,11 @@ function createTaskSchema(options: {
 	batchEnabled: boolean;
 	defaultAgent: string;
 	effortEnabled: boolean;
+	modelEnabled: boolean;
 }): BaseType {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
+	const modelField = options.modelEnabled ? { "model?": "string | string[]" } : {};
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -207,6 +211,7 @@ function createTaskSchema(options: {
 				agent,
 				task: "string",
 				...effortField,
+				...modelField,
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
 				"isolated?": "boolean",
@@ -223,6 +228,7 @@ function createTaskSchema(options: {
 			agent,
 			task: "string",
 			...effortField,
+			...modelField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			"+": "delete",
@@ -239,6 +245,7 @@ function createTaskSchema(options: {
 			agent,
 			task: "string",
 			...effortField,
+			...modelField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			"isolated?": "boolean",
@@ -250,6 +257,7 @@ function createTaskSchema(options: {
 		agent,
 		task: "string",
 		...effortField,
+		...modelField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		"+": "delete",
@@ -261,18 +269,20 @@ export function getTaskSchema(options: {
 	isolationEnabled: boolean;
 	batchEnabled: boolean;
 	effortEnabled?: boolean;
+	modelEnabled?: boolean;
 	defaultAgent?: string;
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
-	if (defaultAgent === "task" && !effortEnabled) {
+	const modelEnabled = options.modelEnabled ?? false;
+	if (defaultAgent === "task" && !effortEnabled && !modelEnabled) {
 		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${defaultAgent}`;
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${modelEnabled ? "model" : "nomodel"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
-	const schema = createTaskSchema({ ...options, effortEnabled, defaultAgent });
+	const schema = createTaskSchema({ ...options, effortEnabled, modelEnabled, defaultAgent });
 	taskSchemaCache.set(key, schema);
 	return schema;
 }
@@ -294,6 +304,8 @@ export interface TaskParams {
 	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
+	/** Per-spawn model override (flat form): a role alias (`@smol`, `smol`) or model pattern (`provider/model-id`). */
+	model?: string | string[];
 	/** Validation behavior for a caller-provided or inherited output schema. */
 	schemaMode?: "permissive" | "strict";
 	/** Batch form (`task.batch`): one subagent per item. */

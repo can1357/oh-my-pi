@@ -4952,6 +4952,17 @@ export const SETTINGS_SCHEMA = {
 				"Expose the optional effort parameter on task spawns, allowing callers to override each subagent's thinking level",
 		},
 	},
+	"task.enableModel": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Per-Task Model",
+			description:
+				"Expose the optional model parameter on task spawns, allowing callers to override each subagent's model with a role alias (@smol, @slow, …) or a model pattern (provider/model-id)",
+		},
+	},
 
 	"task.maxConcurrency": {
 		type: "number",

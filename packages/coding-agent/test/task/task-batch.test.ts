@@ -184,6 +184,28 @@ describe("task.batch schema gating", () => {
 		expect(batch.description).toContain("`effort`");
 	});
 
+	it("hides model by default and exposes it when task.enableModel is enabled", async () => {
+		mockDiscovery();
+
+		const flatSession = createSession({ settings: { "task.batch": false } });
+		const flat = await TaskTool.create(flatSession);
+		expect(getSchemaProperties(flat).model).toBeUndefined();
+		expect(flat.description).not.toContain("`model`");
+
+		flatSession.settings.override("task.enableModel", true);
+		expect(getSchemaProperties(flat).model).toBeDefined();
+		expect(flat.description).toContain("`model`");
+
+		const batchSession = createSession({ settings: { "task.batch": true } });
+		const batch = await TaskTool.create(batchSession);
+		expect(getBatchItemProperties(batch).model).toBeUndefined();
+		expect(batch.description).not.toContain("`model`");
+
+		batchSession.settings.override("task.enableModel", true);
+		expect(getBatchItemProperties(batch).model).toBeDefined();
+		expect(batch.description).toContain("`model`");
+	});
+
 	it("keeps isolation boolean-only in the batch item schema", async () => {
 		mockDiscovery();
 

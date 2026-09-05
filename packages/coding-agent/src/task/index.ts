@@ -140,6 +140,7 @@ interface TaskDescriptionOptions {
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
+	modelEnabled: boolean;
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
 	parentSpawns: string;
@@ -175,6 +176,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
+		modelEnabled: options.modelEnabled,
 		asyncEnabled: options.asyncEnabled,
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		ircEnabled: options.ircEnabled,
@@ -279,6 +281,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("effort" in params) item.effort = params.effort;
+	if ("model" in params) item.model = params.model;
 	if ("isolated" in params) item.isolated = params.isolated;
 	return [item];
 }
@@ -300,6 +303,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("effort" in item) spawn.effort = item.effort;
+	if ("model" in item) spawn.model = item.model;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
@@ -594,6 +598,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: this.session.settings.get("task.enableEffort"),
+			modelEnabled: this.session.settings.get("task.enableModel"),
 			defaultAgent,
 		});
 	}
@@ -616,6 +621,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: this.session.settings.get("task.enableEffort"),
+			modelEnabled: this.session.settings.get("task.enableModel"),
 			asyncEnabled: this.session.settings.get("async.enabled"),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
@@ -663,6 +669,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
+			...(Object.hasOwn(params, "model") ? { model: params.model } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
@@ -1432,6 +1439,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				...(Object.hasOwn(params, "model") ? { model: params.model } : {}),
 				// `name` is the spawn handle: keep it for id allocation when this
 				// path did not pre-reserve one. Do not treat it as a HUD description.
 				identity: { id: preAllocatedId, label: params.name },

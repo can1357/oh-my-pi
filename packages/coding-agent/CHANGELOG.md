@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Task spawns can now override their model with the new `model` parameter (role alias like `@smol`/`@slow` or a model pattern, optionally a fallback array). Exposed to callers via the `task.enableModel` setting (off by default); agent overrides, settings overrides, and role identities are respected per the existing model-resolution precedence.
+
 ## [18.0.9] - 2026-08-28
 
 ### Breaking Changes

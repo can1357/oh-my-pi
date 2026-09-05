@@ -148,6 +148,42 @@ describe("task spawn routing", () => {
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
 	});
 
+	it("routes a caller-requested model role into the executor's model override", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => makeResult(options.id ?? "?"));
+
+		const manager = createManager();
+		// The agent's own model must be strictly lower priority than the
+		// caller's `model` param: the caller-requested role alias wins and is
+		// recorded as the spawn's role identity.
+		const tool = await TaskTool.create(
+			createSession({
+				manager,
+				settings: { modelRoles: { slow: "anthropic/claude-opus-4.7", task: "openai/gpt-4.1-mini" } },
+			}),
+		);
+
+		const result = await tool.execute("tc-model", {
+			agent: "task",
+			name: "Modeled",
+			task: "Do the thing.",
+			model: "@slow",
+		} as TaskParams);
+
+		const jobId = result.details?.async?.jobId;
+		expect(jobId).toBeTruthy();
+		const job = manager.getJob(jobId!);
+		await job!.promise;
+
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["anthropic/claude-opus-4.7"]);
+		expect(runSpy.mock.calls[0]?.[0].modelRole).toBe("slow");
+	});
+
 	it("bounds concurrent job bodies with the session spawn semaphore", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [taskAgent],

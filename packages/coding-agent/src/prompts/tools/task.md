@@ -29,6 +29,8 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
   - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
+{{#if modelEnabled}}  - `model`: Override the spawn's model with a role alias (`@smol`, `@slow`, …) or a model pattern (`provider/model-id`); string or array of fallback patterns. Omit to keep the agent's model.
+{{/if}}
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
   - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}
@@ -45,6 +47,8 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
   NEVER pass the spawn-policy default explicitly. Only omit it after checking the available agents below.
 - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
+{{/if}}
+{{#if modelEnabled}}- `model`: Override the spawn's model with a role alias (`@smol`, `@slow`, …) or a model pattern (`provider/model-id`); string or array of fallback patterns. Omit to keep the agent's model.
 {{/if}}
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
 - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
