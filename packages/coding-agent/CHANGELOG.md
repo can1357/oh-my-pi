@@ -6,6 +6,10 @@
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
 
+### Fixed
+
+- Cursor sessions now preserve interrupted headless turns when SIGINT or SIGTERM stops print mode ([#10965](https://github.com/can1357/oh-my-pi/issues/10965)).
+
 ## [18.1.11] - 2026-09-05
 
 ### Added
