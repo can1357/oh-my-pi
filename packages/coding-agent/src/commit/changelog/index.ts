@@ -1,13 +1,14 @@
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
-import type { VcsNumstatEntry } from "@oh-my-pi/pi-natives";
+import type { VcsGitRepo, VcsNumstatEntry } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger } from "@oh-my-pi/pi-utils";
-import { CHANGELOG_CATEGORIES } from "../../commit/types";
+import { CHANGELOG_CATEGORIES, type UnreleasedSection } from "../../commit/types";
 import { detectChangelogBoundaries } from "./detect";
 import { generateChangelogEntries } from "./generate";
 import { parseUnreleasedSection } from "./parse";
+import type { ChangelogProposal } from "../agentic/state";
 
 const CHANGELOG_SECTIONS = CHANGELOG_CATEGORIES;
 
@@ -35,21 +36,39 @@ export interface ChangelogFlowInput {
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
 	stagedFiles: string[];
-	dryRun: boolean;
 	maxDiffChars?: number;
 	onProgress?: (message: string) => void;
 }
 
-export interface ChangelogProposalInput {
+interface ChangelogProposalInput {
 	cwd: string;
-	proposals: Array<{
-		path: string;
-		entries: Record<string, string[]>;
-		deletions?: Record<string, string[]>;
-	}>;
+	proposals: ChangelogProposal["entries"];
 	dryRun: boolean;
 	onProgress?: (message: string) => void;
 }
+
+/** Outcome of applying generated changelog entries to the index and worktree. */
+export interface ChangelogApplyResult {
+	/** Absolute paths of changelogs that received entries (index and worktree, unless dry-run). */
+	updated: string[];
+	/**
+	 * Undo the writes so a later commit failure leaves the changelogs exactly as
+	 * found. Each file's index blob and worktree bytes are reverted only if they
+	 * still hold what `apply` wrote; anything else (hook edits, user edits) is kept.
+	 */
+	rollback(): Promise<void>;
+}
+
+interface ChangelogWrite {
+	path: string;
+	relPath: string;
+	indexBefore: string | null;
+	indexAfter: string;
+	worktreeBefore: string;
+	worktreeAfter: string;
+}
+
+const NO_CHANGELOG_WRITES: ChangelogApplyResult = { updated: [], rollback: async () => {} };
 
 /**
  * Update CHANGELOG.md entries for staged changes.
@@ -60,18 +79,17 @@ export async function runChangelogFlow({
 	apiKey,
 	thinkingLevel,
 	stagedFiles,
-	dryRun,
 	maxDiffChars,
 	onProgress,
-}: ChangelogFlowInput): Promise<string[]> {
-	if (stagedFiles.length === 0) return [];
+}: ChangelogFlowInput): Promise<ChangelogApplyResult> {
+	if (stagedFiles.length === 0) return NO_CHANGELOG_WRITES;
 	const repo = vcs.requireGit(cwd);
 	onProgress?.("Detecting changelog boundaries...");
 	const boundaries = await detectChangelogBoundaries(cwd, stagedFiles);
-	if (boundaries.length === 0) return [];
+	if (boundaries.length === 0) return NO_CHANGELOG_WRITES;
 
 	const sessionId = Bun.randomUUIDv7();
-	const updated: string[] = [];
+	const proposals: ChangelogProposalInput["proposals"] = [];
 	for (const boundary of boundaries) {
 		onProgress?.(`Generating entries for ${boundary.changelogPath}…`);
 		const diff = await repo.diffText({ cached: true, files: boundary.files });
@@ -79,7 +97,7 @@ export async function runChangelogFlow({
 		const stat = renderStat(await repo.numstat({ cached: true, files: boundary.files }));
 		const diffForPrompt = truncateDiff(diff, maxDiffChars ?? DEFAULT_MAX_DIFF_CHARS);
 		const changelogContent = await Bun.file(boundary.changelogPath).text();
-		let unreleased: { startLine: number; endLine: number; entries: Record<string, string[]> };
+		let unreleased: UnreleasedSection;
 		try {
 			unreleased = parseUnreleasedSection(changelogContent);
 		} catch (error) {
@@ -100,16 +118,19 @@ export async function runChangelogFlow({
 			diff: diffForPrompt,
 		});
 		if (Object.keys(generated.entries).length === 0) continue;
-
-		const updatedContent = applyChangelogEntries(changelogContent, unreleased, generated.entries);
-		if (!dryRun) {
-			await Bun.write(boundary.changelogPath, updatedContent);
-			await repo.stageFiles([path.relative(cwd, boundary.changelogPath)]);
-		}
-		updated.push(boundary.changelogPath);
+		proposals.push({
+			path: boundary.changelogPath,
+			entries: generated.entries,
+		});
 	}
 
-	return updated;
+	if (proposals.length === 0) return NO_CHANGELOG_WRITES;
+	return applyChangelogProposals({
+		cwd,
+		proposals,
+		dryRun: false,
+		onProgress,
+	});
 }
 
 /**
@@ -120,9 +141,10 @@ export async function applyChangelogProposals({
 	proposals,
 	dryRun,
 	onProgress,
-}: ChangelogProposalInput): Promise<string[]> {
+}: ChangelogProposalInput): Promise<ChangelogApplyResult> {
 	const repo = vcs.requireGit(cwd);
 	const updated: string[] = [];
+	const writes: ChangelogWrite[] = [];
 	for (const proposal of proposals) {
 		if (
 			Object.keys(proposal.entries).length === 0 &&
@@ -136,7 +158,7 @@ export async function applyChangelogProposals({
 			continue;
 		}
 		const changelogContent = await Bun.file(proposal.path).text();
-		let unreleased: { startLine: number; endLine: number; entries: Record<string, string[]> };
+		let unreleased: UnreleasedSection;
 		try {
 			unreleased = parseUnreleasedSection(changelogContent);
 		} catch (error) {
@@ -148,13 +170,74 @@ export async function applyChangelogProposals({
 		if (Object.keys(normalized).length === 0 && !normalizedDeletions) continue;
 		const updatedContent = applyChangelogEntries(changelogContent, unreleased, normalized, normalizedDeletions);
 		if (!dryRun) {
+			const relPath = path.relative(cwd, proposal.path);
+
+			// 1. Staged baseline: index blob, or untracked
+			const stagedContent = await readIndexBlob(repo, relPath);
+
+			let updatedStagedContent: string;
+			if (stagedContent !== null) {
+				let stagedUnreleased: UnreleasedSection;
+				try {
+					stagedUnreleased = parseUnreleasedSection(stagedContent);
+				} catch (error) {
+					onProgress?.(`Skipped ${proposal.path}: staged baseline has no [Unreleased] section`);
+					logger.warn(
+						"commit changelog staged baseline lacks parseable [Unreleased] section; skipping to prevent collateral staging of unstaged worktree edits",
+						{ path: proposal.path, error: String(error) },
+					);
+					continue;
+				}
+				updatedStagedContent = applyChangelogEntries(
+					stagedContent,
+					stagedUnreleased,
+					normalized,
+					normalizedDeletions,
+				);
+			} else {
+				updatedStagedContent = updatedContent;
+			}
+
+			// 2. Stage the exact index content
+			await repo.stageContent(relPath, updatedStagedContent);
+
+			// 3. Update the worktree on disk with changes applied to current disk content
 			await Bun.write(proposal.path, updatedContent);
-			await repo.stageFiles([path.relative(cwd, proposal.path)]);
+			writes.push({
+				path: proposal.path,
+				relPath,
+				indexBefore: stagedContent,
+				indexAfter: updatedStagedContent,
+				worktreeBefore: changelogContent,
+				worktreeAfter: updatedContent,
+			});
 		}
 		updated.push(proposal.path);
 	}
+	return {
+		updated,
+		rollback: async () => {
+			for (const write of writes.reverse()) {
+				if ((await readIndexBlob(repo, write.relPath)) === write.indexAfter) {
+					if (write.indexBefore === null) await repo.unstage([write.relPath]);
+					else await repo.stageContent(write.relPath, write.indexBefore);
+				}
+				if ((await Bun.file(write.path).text()) === write.worktreeAfter) {
+					await Bun.write(write.path, write.worktreeBefore);
+				}
+			}
+		},
+	};
+}
 
-	return updated;
+/** Content of `relPath` in the index, or null if missing. */
+async function readIndexBlob(repo: VcsGitRepo, relPath: string): Promise<string | null> {
+	try {
+		return (await repo.showBlob(`:${relPath}`)).data.toString("utf8");
+	} catch (error) {
+		if (!vcs.isVcsError(error) || error.code !== "ObjectNotFound") throw error;
+		return null;
+	}
 }
 
 function truncateDiff(diff: string, maxChars: number): string {
@@ -177,7 +260,7 @@ function formatExistingEntries(entries: Record<string, string[]>): string {
 
 function applyChangelogEntries(
 	content: string,
-	unreleased: { startLine: number; endLine: number; entries: Record<string, string[]> },
+	unreleased: UnreleasedSection,
 	entries: Record<string, string[]>,
 	deletions?: Record<string, string[]>,
 ): string {

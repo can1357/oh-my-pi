@@ -251,6 +251,20 @@ pub struct VcsHunkSelectionError {
 	pub path:    String,
 	pub message: String,
 }
+/// One commit in an atomic split: its final message and the staged hunks it
+/// takes.
+#[napi(object)]
+pub struct VcsSplitCommitSpec {
+	pub message:    String,
+	pub selections: Vec<VcsHunkSelection>,
+}
+
+/// Options for an atomic split commit.
+#[napi(object)]
+pub struct VcsSplitCommitOptions {
+	pub commits:     Vec<VcsSplitCommitSpec>,
+	pub staged_diff: String,
+}
 
 impl From<core::GitRepoInfo> for VcsGitRepoInfo {
 	fn from(v: core::GitRepoInfo) -> Self {
@@ -425,6 +439,30 @@ impl TryFrom<VcsHunkSelection> for core::HunkSelection {
 			x => return Err(napi::Error::from_reason(format!("invalid hunk selection kind: {x}"))),
 		};
 		Ok(Self { path: v.path, hunks })
+	}
+}
+impl TryFrom<VcsSplitCommitSpec> for core::SplitCommitSpec {
+	type Error = napi::Error;
+
+	fn try_from(v: VcsSplitCommitSpec) -> Result<Self> {
+		let selections: Vec<_> = v
+			.selections
+			.into_iter()
+			.map(TryInto::try_into)
+			.collect::<Result<_>>()?;
+		Ok(Self { message: v.message, selections })
+	}
+}
+impl TryFrom<VcsSplitCommitOptions> for core::SplitCommitOptions {
+	type Error = napi::Error;
+
+	fn try_from(v: VcsSplitCommitOptions) -> Result<Self> {
+		let commits: Vec<_> = v
+			.commits
+			.into_iter()
+			.map(TryInto::try_into)
+			.collect::<Result<_>>()?;
+		Ok(Self { commits, staged_diff: v.staged_diff })
 	}
 }
 
@@ -1133,6 +1171,24 @@ impl VcsGitRepo {
 		})
 	}
 
+	/// Stage exact content directly into the index for a path without touching
+	/// the worktree.
+	#[napi]
+	pub fn stage_content(
+		&self,
+		path: String,
+		content: Either<String, Buffer>,
+		signal: Option<Unknown>,
+	) -> Promise<()> {
+		let bytes = match content {
+			Either::A(s) => s.into_bytes(),
+			Either::B(b) => b.to_vec(),
+		};
+		blocking("vcs.stageContent", self.inner.clone(), signal, move |r| {
+			r.stage_content(&path, &bytes)
+		})
+	}
+
 	/// Create commit.
 	#[napi]
 	pub fn commit_create(
@@ -1144,6 +1200,22 @@ impl VcsGitRepo {
 		let options = options.into();
 		blocking("vcs.commitCreate", self.inner.clone(), signal, move |r| {
 			r.commit_create(&message, &options)
+		})
+	}
+
+	/// Atomic split commit from staged hunks; never writes index/worktree.
+	#[napi]
+	pub fn commit_split(
+		&self,
+		options: VcsSplitCommitOptions,
+		signal: Option<Unknown>,
+	) -> Promise<Vec<String>> {
+		let options: Result<core::SplitCommitOptions> = options.try_into();
+		blocking("vcs.commitSplit", self.inner.clone(), signal, move |r| {
+			r.commit_split(&options.map_err(|error| pi_vcs::Error::Backend {
+				context: "git commit split",
+				message: error.to_string(),
+			})?)
 		})
 	}
 

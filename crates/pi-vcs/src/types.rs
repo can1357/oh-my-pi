@@ -265,6 +265,22 @@ pub struct HunkSelectionError {
 	pub message: String,
 }
 
+/// One commit in an atomic split: its final message and the staged hunks it
+/// takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitCommitSpec {
+	pub message:    String,
+	pub selections: Vec<HunkSelection>,
+}
+
+/// Options for `GitRepo::commit_split`.
+#[derive(Debug, Clone, Default)]
+pub struct SplitCommitOptions {
+	pub commits:     Vec<SplitCommitSpec>,
+	/// `git diff --cached --binary` text the selections were validated against.
+	pub staged_diff: String,
+}
+
 /// Options for patch application (`git apply` semantics).
 #[derive(Debug, Clone, Default)]
 pub struct ApplyOptions {

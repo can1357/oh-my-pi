@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { CommitAgentState, SplitCommitGroup, SplitCommitPlan } from "../../../commit/agentic/state";
@@ -14,6 +15,7 @@ import { validateScope } from "../../../commit/analysis/validation";
 import { normalizeDetails } from "../../../commit/utils";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
 import { commitTypeSchema, detailSchema } from "./schemas.js";
+import { isLockFile } from "../lock-files";
 
 const fileChangeSchema = type({ path: "string", kind: "'all'" })
 	.or({ path: "string", kind: "'indices'", indices: "number[]" })
@@ -41,21 +43,24 @@ interface SplitCommitResponse {
 	proposal?: SplitCommitPlan;
 }
 
+/** Plan paths are repo-relative like the staged diff; changelog targets arrive absolute, so both forms are normalized here. */
 export function createSplitCommitTool(
 	cwd: string,
 	state: CommitAgentState,
 	changelogTargets: string[],
 ): CustomTool<typeof splitCommitSchema> {
 	const repo = vcs.requireGit(cwd);
+	const toRepoPath = (file: string): string => path.relative(cwd, path.resolve(cwd, file));
+	const changelogSet = new Set(changelogTargets.map(toRepoPath));
 	return {
 		name: "split_commit",
 		label: "Split Commit",
 		description: "Propose multiple atomic commits for unrelated changes.",
 		parameters: splitCommitSchema,
 		async execute(_toolCallId, params) {
-			const stagedFiles = state.overview?.files ?? (await repo.changedFiles({ cached: true }));
-			const stagedSet = new Set(stagedFiles);
-			const changelogSet = new Set(changelogTargets);
+			const allStagedFiles = await repo.changedFiles({ cached: true });
+			const stagedFiles = allStagedFiles.filter(file => !isLockFile(file));
+			const stagedSet = new Set(allStagedFiles);
 			const usedFiles = new Set<string>();
 			const errors: string[] = [];
 			const warnings: string[] = [];
@@ -70,7 +75,7 @@ export function createSplitCommitTool(
 				const issueRefs = commit.issue_refs ?? [];
 				const dependencies = (commit.dependencies ?? []).map(dep => Math.floor(dep));
 				const changes = commit.changes.map(change => ({
-					path: change.path,
+					path: toRepoPath(change.path),
 					kind: change.kind,
 					indices: change.kind === "indices" ? change.indices : undefined,
 					start: change.kind === "lines" ? change.start : undefined,

@@ -35,6 +35,7 @@ export interface GeneratedGitCommit {
 	validationError: string | null;
 	stagedAll: boolean;
 }
+
 function renderNumstat(entries: VcsNumstatEntry[]): string {
 	return entries
 		.map(entry => `${entry.added ?? "-"}\t${entry.removed ?? "-"}\t${entry.path}`)

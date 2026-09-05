@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { $env, getProjectDir, isEnoent, prompt } from "@oh-my-pi/pi-utils";
-import { applyChangelogProposals } from "../../commit/changelog";
+import { applyChangelogProposals, type ChangelogApplyResult } from "../../commit/changelog";
 import { detectChangelogBoundaries } from "../../commit/changelog/detect";
 import { parseUnreleasedSection } from "../../commit/changelog/parse";
 import { formatCommitMessage } from "../../commit/message";
@@ -11,12 +11,12 @@ import type { CommitCommandArgs, ConventionalAnalysis, NumstatEntry } from "../.
 import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import { discoverAuthStorage, discoverContextFiles, loadCliExtensionProviders } from "../../sdk";
-import { abortOnGitFailure, pushOrAbort } from "../execute";
+import { abortOnCommitFailure, pushOrAbort } from "../execute";
 import { type ExistingChangelogEntries, runCommitAgentSession } from "./agent";
 import { generateFallbackProposal } from "./fallback";
 import { assignLockFilesToPlan } from "./lock-files";
 import splitConfirmPrompt from "./prompts/split-confirm.md" with { type: "text" };
-import type { CommitAgentState, CommitProposal, FileChange, SplitCommitPlan } from "./state";
+import type { ChangelogProposal, CommitAgentState, CommitProposal, FileChange, SplitCommitPlan } from "./state";
 import { computeDependencyOrder } from "./topo-sort";
 import { detectTrivialChange } from "./trivial";
 
@@ -37,7 +37,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	await loadCliExtensionProviders(modelRegistry, settings, cwd);
 	const stagedFilesPromise = (async () => {
 		let stagedFiles = await repo.changedFiles({ cached: true });
-		if (stagedFiles.length === 0) {
+		if (stagedFiles.length === 0 && !args.dryRun) {
 			process.stdout.write("No staged changes detected, staging all changes...\n");
 			await repo.stageFiles([]);
 			stagedFiles = await repo.changedFiles({ cached: true });
@@ -58,12 +58,12 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	);
 
 	if (stagedFiles.length === 0) {
-		if (args.push) {
+		if (args.push && !args.dryRun) {
 			process.stdout.write("No changes to commit; pushing existing commits...\n");
 			await pushOrAbort(cwd);
 			return { usedFallback: false };
 		}
-		process.stderr.write("No changes to commit.\n");
+		process.stderr.write(args.dryRun ? "No staged changes; --dry-run does not stage.\n" : "No changes to commit.\n");
 		return { usedFallback: false };
 	}
 
@@ -183,6 +183,30 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	}
 }
 
+async function applyChangelog(
+	cwd: string,
+	proposal: ChangelogProposal,
+	dryRun: boolean,
+): Promise<ChangelogApplyResult> {
+	process.stdout.write("● Applying changelog entries...\n");
+	const result = await applyChangelogProposals({
+		cwd,
+		proposals: proposal.entries,
+		dryRun,
+		onProgress: message => {
+			process.stdout.write(`  ├─ ${message}\n`);
+		},
+	});
+	if (result.updated.length > 0) {
+		for (const filePath of result.updated) {
+			process.stdout.write(`  └─ ${filePath}\n`);
+		}
+	} else {
+		process.stdout.write("  └─ (no changes)\n");
+	}
+	return result;
+}
+
 async function completeAgentCommitState(
 	commitState: CommitAgentState,
 	ctx: CommitExecutionContext & {
@@ -200,32 +224,15 @@ async function completeAgentCommitState(
 		}
 	}
 
-	let updatedChangelogFiles: string[] = [];
-	if (!ctx.noChangelog && ctx.changelogTargets.length > 0 && !usedFallback) {
-		if (!commitState.changelogProposal) {
-			throw new Error("Commit agent did not provide changelog entries.");
-		}
-		process.stdout.write("● Applying changelog entries...\n");
-		const updated = await applyChangelogProposals({
-			cwd: ctx.cwd,
-			proposals: commitState.changelogProposal.entries,
-			dryRun: ctx.dryRun,
-			onProgress: message => {
-				process.stdout.write(`  ├─ ${message}\n`);
-			},
-		});
-		updatedChangelogFiles = updated.map(filePath => path.relative(ctx.cwd, filePath));
-		if (updated.length > 0) {
-			for (const filePath of updated) {
-				process.stdout.write(`  └─ ${filePath}\n`);
-			}
-		} else {
-			process.stdout.write("  └─ (no changes)\n");
-		}
+	const wantChangelog = !ctx.noChangelog && ctx.changelogTargets.length > 0 && !usedFallback;
+	if (wantChangelog && !commitState.changelogProposal) {
+		throw new Error("Commit agent did not provide changelog entries.");
 	}
+	const changelogProposal = wantChangelog ? commitState.changelogProposal : undefined;
 
 	if (commitState.proposal) {
-		await runSingleCommit(commitState.proposal, ctx);
+		const changelog = changelogProposal ? await applyChangelog(ctx.cwd, changelogProposal, ctx.dryRun) : undefined;
+		await runSingleCommit(commitState.proposal, ctx, changelog);
 		return usedFallback;
 	}
 
@@ -234,7 +241,7 @@ async function completeAgentCommitState(
 			cwd: ctx.cwd,
 			dryRun: ctx.dryRun,
 			push: ctx.push,
-			additionalFiles: updatedChangelogFiles,
+			changelogProposal,
 		});
 		return usedFallback;
 	}
@@ -242,7 +249,11 @@ async function completeAgentCommitState(
 	throw new Error("Commit agent did not provide a proposal.");
 }
 
-async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionContext): Promise<void> {
+async function runSingleCommit(
+	proposal: CommitProposal,
+	ctx: CommitExecutionContext,
+	changelog?: ChangelogApplyResult,
+): Promise<void> {
 	const repo = vcs.requireGit(ctx.cwd);
 	if (proposal.warnings.length > 0) {
 		process.stdout.write(formatWarnings(proposal.warnings));
@@ -257,8 +268,7 @@ async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionCon
 	try {
 		await repo.commitCreate(commitMessage, {});
 	} catch (error) {
-		if (vcs.isVcsError(error)) abortOnGitFailure("Commit failed", error);
-		throw error;
+		await abortOnCommitFailure("Commit failed", error, changelog);
 	}
 	process.stdout.write("Commit created.\n");
 	if (ctx.push) await pushOrAbort(ctx.cwd);
@@ -266,14 +276,11 @@ async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionCon
 
 async function runSplitCommit(
 	plan: SplitCommitPlan,
-	ctx: CommitExecutionContext & { additionalFiles?: string[] },
+	ctx: CommitExecutionContext & { changelogProposal?: ChangelogProposal },
 ): Promise<void> {
 	const repo = vcs.requireGit(ctx.cwd);
 	if (plan.warnings.length > 0) {
 		process.stdout.write(formatWarnings(plan.warnings));
-	}
-	if (ctx.additionalFiles && ctx.additionalFiles.length > 0) {
-		appendFilesToLastCommit(plan, ctx.additionalFiles);
 	}
 	const stagedFiles = await repo.changedFiles({ cached: true });
 	assignLockFilesToPlan(plan, stagedFiles);
@@ -281,6 +288,34 @@ async function runSplitCommit(
 	const missingFiles = stagedFiles.filter(file => !plannedFiles.has(file));
 	if (missingFiles.length > 0) {
 		throw new Error(`Split commit plan missing staged files: ${missingFiles.join(", ")}`);
+	}
+
+	const order = computeDependencyOrder(plan.commits);
+	if ("error" in order) {
+		throw new Error(order.error);
+	}
+
+	for (const entry of ctx.changelogProposal?.entries ?? []) {
+		const file = path.relative(ctx.cwd, entry.path);
+		const owners = plan.commits.filter(commit => commit.changes.some(change => change.path === file)).length;
+		if (owners > 1) {
+			throw new Error(`Changelog ${file} is split across ${owners} commits; generated entries need a single owner`);
+		}
+	}
+
+	if (!ctx.dryRun && !(await confirmSplitCommitPlan(plan, ctx.changelogProposal !== undefined))) {
+		process.stdout.write("Split commit aborted by user.\n");
+		return;
+	}
+
+	let changelog: ChangelogApplyResult | undefined;
+	if (ctx.changelogProposal) {
+		changelog = await applyChangelog(ctx.cwd, ctx.changelogProposal, ctx.dryRun);
+		routeChangelogFiles(
+			plan,
+			changelog.updated.map(filePath => path.relative(ctx.cwd, filePath)),
+			order,
+		);
 	}
 
 	if (ctx.dryRun) {
@@ -300,66 +335,49 @@ async function runSplitCommit(
 		return;
 	}
 
-	if (!(await confirmSplitCommitPlan(plan))) {
-		process.stdout.write("Split commit aborted by user.\n");
-		return;
-	}
-
-	const order = computeDependencyOrder(plan.commits);
-	if ("error" in order) {
-		throw new Error(order.error);
-	}
-
 	process.stdout.write("● Creating split commits...\n");
 	const stagedDiff = await repo.diffText({ cached: true, binary: true });
-	await repo.unstage([]);
-	for (const [position, commitIndex] of order.entries()) {
+	const commits = order.map(commitIndex => {
 		const commit = plan.commits[commitIndex];
-		await repo.stageHunks(commit.changes, stagedDiff);
 		const analysis: ConventionalAnalysis = {
 			type: commit.type,
 			scope: commit.scope,
 			details: commit.details,
 			issueRefs: commit.issueRefs,
 		};
-		const message = formatCommitMessage(analysis, commit.summary);
-		try {
-			await repo.commitCreate(message, {});
-		} catch (error) {
-			if (vcs.isVcsError(error)) {
-				const stagedNow = await repo.changedFiles({ cached: true });
-				abortOnGitFailure(
-					`Commit ${position + 1} of ${order.length} failed`,
-					error,
-					`${position} of ${order.length} commits created; ${stagedNow.length} file(s) remain staged. No changes were lost.`,
-				);
-			}
-			throw error;
-		}
-		await repo.unstage([]);
+		return {
+			message: formatCommitMessage(analysis, commit.summary),
+			selections: commit.changes,
+		};
+	});
+	try {
+		await repo.commitSplit({ commits, stagedDiff });
+	} catch (error) {
+		await abortOnCommitFailure("Split commit failed", error, changelog);
 	}
 	process.stdout.write("Split commits created.\n");
 	if (ctx.push) await pushOrAbort(ctx.cwd);
 }
 
-function appendFilesToLastCommit(plan: SplitCommitPlan, files: string[]): void {
-	if (plan.commits.length === 0) return;
-	const planned = new Set(plan.commits.flatMap(commit => commit.changes.map(change => change.path)));
-	const targetCommit = plan.commits[plan.commits.length - 1];
+/** Generated changelog files ride whole in the commit that already owns them, else in the last commit. */
+function routeChangelogFiles(plan: SplitCommitPlan, files: string[], order: number[]): void {
+	const lastCommit = plan.commits[order[order.length - 1]];
 	for (const file of files) {
-		if (planned.has(file)) continue;
-		targetCommit.changes.push({ path: file, kind: "all" });
-		planned.add(file);
+		const owner = plan.commits.find(commit => commit.changes.some(change => change.path === file)) ?? lastCommit;
+		owner.changes = [...owner.changes.filter(change => change.path !== file), { path: file, kind: "all" }];
 	}
 }
 
-async function confirmSplitCommitPlan(plan: SplitCommitPlan): Promise<boolean> {
+async function confirmSplitCommitPlan(plan: SplitCommitPlan, changelogPending: boolean): Promise<boolean> {
 	if (!process.stdin.isTTY || !process.stdout.isTTY) {
 		return true;
 	}
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	try {
-		const splitConfirmQuestion = prompt.render(splitConfirmPrompt, { count: plan.commits.length });
+		const splitConfirmQuestion = prompt.render(splitConfirmPrompt, {
+			count: plan.commits.length,
+			changelog_pending: changelogPending,
+		});
 		const answer = await rl.question(splitConfirmQuestion);
 		return ["y", "yes"].includes(answer.trim().toLowerCase());
 	} finally {

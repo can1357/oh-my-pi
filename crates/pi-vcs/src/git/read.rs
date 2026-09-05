@@ -5,7 +5,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use gix::bstr::ByteSlice;
+use gix::bstr::{BString, ByteSlice};
 
 use super::{
 	GitRepo,
@@ -758,11 +758,7 @@ impl GitRepo {
 			});
 		}
 		let iter = platform
-			.into_index_worktree_iter(
-				paths
-					.iter()
-					.map(|path| literal_pathspec(path).into_bytes().into()),
-			)
+			.into_index_worktree_iter(literal_pathspecs(paths))
 			.map_err(|e| Error::backend("git ls-files", e))?;
 		let mut out = Vec::new();
 		for item in iter {
@@ -853,12 +849,7 @@ impl GitRepo {
 			return Ok(cap_bytes(text.into_bytes(), max_bytes));
 		}
 		let repo = self.gix()?;
-		let id = repo
-			.rev_parse_single(spec)
-			.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-		let object = id
-			.object()
-			.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
+		let object = resolve_object(&repo, spec)?;
 		Ok(cap_bytes(
 			{
 				let mut blob = object
@@ -966,6 +957,17 @@ impl GitRepo {
 			})
 			.collect()
 	}
+}
+
+pub(crate) fn resolve_object<'repo>(
+	repo: &'repo gix::Repository,
+	spec: &str,
+) -> Result<gix::Object<'repo>> {
+	let id = repo
+		.rev_parse_single(spec)
+		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
+	id.object()
+		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })
 }
 
 fn nonempty(value: &str) -> Option<String> {
@@ -1194,7 +1196,14 @@ pub(crate) fn literal_pathspec(path: &str) -> String {
 	format!(":(literal){path}")
 }
 
-fn path_matches(path: &str, wanted: &str) -> bool {
+pub(crate) fn literal_pathspecs<'a>(paths: impl IntoIterator<Item = &'a String>) -> Vec<BString> {
+	paths
+		.into_iter()
+		.map(|p| literal_pathspec(p).into_bytes().into())
+		.collect()
+}
+
+pub(crate) fn path_matches(path: &str, wanted: &str) -> bool {
 	let wanted = wanted.trim_end_matches('/');
 	path == wanted
 		|| path

@@ -460,18 +460,12 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 		let mut new_mode = None;
 		match status {
 			EntryStatus::Change(Change::Removed) => {},
-			EntryStatus::Change(Change::Type { .. } | Change::Modification { .. }) => {
-				if let Some((id, kind, _)) = filter
-					.worktree_file_to_object(path.as_ref(), &filter_index)
-					.map_err(|err| Error::backend("git diff filter", err))?
-				{
-					new_id = id;
-					new_mode = Some(kind.into());
+			EntryStatus::Change(Change::Type { .. } | Change::Modification { .. })
+			| EntryStatus::IntentToAdd => {
+				if matches!(status, EntryStatus::IntentToAdd) {
+					old_id = null;
+					old_mode = None;
 				}
-			},
-			EntryStatus::IntentToAdd => {
-				old_id = null;
-				old_mode = None;
 				if let Some((id, kind, _)) = filter
 					.worktree_file_to_object(path.as_ref(), &filter_index)
 					.map_err(|err| Error::backend("git diff filter", err))?
@@ -1066,10 +1060,8 @@ fn read_no_index_file(root: &Path, path: &Path) -> Result<Option<NoIndexFile>> {
 	} else {
 		root.join(path)
 	};
-	let metadata = match std::fs::symlink_metadata(&resolved) {
-		Ok(metadata) => metadata,
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-		Err(err) => return Err(err.into()),
+	let Some(metadata) = symlink_metadata_opt(&resolved)? else {
+		return Ok(None);
 	};
 	let file_type = metadata.file_type();
 	let (data, kind) = if file_type.is_symlink() {
@@ -1119,25 +1111,33 @@ fn is_null_device(path: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn is_executable(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn is_executable(metadata: &std::fs::Metadata) -> bool {
 	use std::os::unix::fs::PermissionsExt;
 	metadata.permissions().mode() & 0o111 != 0
 }
 
 #[cfg(not(unix))]
-fn is_executable(_metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn is_executable(_metadata: &std::fs::Metadata) -> bool {
 	false
 }
 
 #[cfg(unix)]
-fn os_path_bytes(path: &Path) -> Vec<u8> {
+pub(crate) fn os_path_bytes(path: &Path) -> Vec<u8> {
 	use std::os::unix::ffi::OsStrExt;
 	path.as_os_str().as_bytes().to_vec()
 }
 
 #[cfg(not(unix))]
-fn os_path_bytes(path: &Path) -> Vec<u8> {
+pub(crate) fn os_path_bytes(path: &Path) -> Vec<u8> {
 	path.to_string_lossy().into_owned().into_bytes()
+}
+
+pub(crate) fn symlink_metadata_opt(path: &Path) -> Result<Option<std::fs::Metadata>> {
+	match std::fs::symlink_metadata(path) {
+		Ok(metadata) => Ok(Some(metadata)),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+		Err(err) => Err(err.into()),
+	}
 }
 
 fn make_pathspec<'repo>(
@@ -1257,41 +1257,26 @@ fn sort_changes(changes: &mut [FileChange]) {
 }
 #[cfg(test)]
 mod tests {
-	use std::{fs, path::Path, process::Command};
+	use std::{fs, path::Path};
 
 	use tempfile::TempDir;
 
 	use super::*;
+	use crate::test_support::{git, git_expecting, init_repo};
 
-	fn git(dir: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.args(args)
-			.current_dir(dir)
-			.output()
-			.unwrap_or_else(|err| panic!("run git {args:?}: {err}"));
-		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-		String::from_utf8(output.stdout).expect("git output is UTF-8")
+	fn open(dir: &Path) -> GitRepo {
+		GitRepo::discover(dir)
+			.expect("discover")
+			.expect("repository")
 	}
-	fn git_diff(dir: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.args(args)
-			.current_dir(dir)
-			.output()
-			.unwrap_or_else(|err| panic!("run git {args:?}: {err}"));
-		assert_eq!(
-			output.status.code(),
-			Some(1),
-			"git {args:?}: {}",
-			String::from_utf8_lossy(&output.stderr)
-		);
-		String::from_utf8(output.stdout).expect("git output is UTF-8")
+
+	fn assert_worktree_diff_matches_git(repo: &GitRepo, dir: &Path) {
+		assert_eq!(repo.diff_text(&DiffOptions::default()).expect("diff"), git(dir, &["diff"]));
 	}
 
 	fn fixture() -> TempDir {
 		let dir = tempfile::tempdir().expect("tempdir");
-		git(dir.path(), &["init", "-q"]);
-		git(dir.path(), &["config", "user.name", "Diff Test"]);
-		git(dir.path(), &["config", "user.email", "diff@example.com"]);
+		init_repo(dir.path());
 		fs::write(dir.path().join("file.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\n")
 			.expect("write");
 		fs::write(dir.path().join("delete.txt"), "delete\n").expect("write");
@@ -1305,12 +1290,8 @@ mod tests {
 		let dir = fixture();
 		fs::write(dir.path().join("file.txt"), "one\nchanged\nthree\n").expect("write");
 		fs::remove_file(dir.path().join("delete.txt")).expect("delete");
-		let repo = GitRepo::discover(dir.path())
-			.expect("discover")
-			.expect("repository");
-		let actual = repo.diff_text(&DiffOptions::default()).expect("diff");
-		let expected = git(dir.path(), &["diff"]);
-		assert_eq!(actual, expected);
+		let repo = open(dir.path());
+		assert_worktree_diff_matches_git(&repo, dir.path());
 		assert_eq!(
 			repo.changed_files(&DiffOptions::default()).expect("names"),
 			git(dir.path(), &["diff", "--name-only"])
@@ -1345,9 +1326,7 @@ mod tests {
 		let dir = fixture();
 		fs::write(dir.path().join("file.txt"), "changed\n").expect("edit tracked");
 		fs::write(dir.path().join("new.txt"), "new\n").expect("write untracked");
-		let repo = GitRepo::discover(dir.path())
-			.expect("discover")
-			.expect("repository");
+		let repo = open(dir.path());
 
 		// Populate gix's shared index snapshot through status-backed diff before
 		// staging, then force the write back onto the same mtime tick.
@@ -1402,9 +1381,7 @@ mod tests {
 			.expect("modify rename");
 		fs::write(dir.path().join("added.txt"), "new\n").expect("write");
 		git(dir.path(), &["add", "."]);
-		let repo = GitRepo::discover(dir.path())
-			.expect("discover")
-			.expect("repository");
+		let repo = open(dir.path());
 		let options = DiffOptions { cached: true, ..DiffOptions::default() };
 		assert_eq!(repo.diff_text(&options).expect("diff"), git(dir.path(), &["diff", "--cached"]));
 		let filtered = DiffOptions { files: vec!["added.txt".into()], ..options };
@@ -1423,9 +1400,7 @@ mod tests {
 		fs::write(dir.path().join("src/new.py"), "nested\n").expect("write nested file");
 		git(dir.path(), &["add", "."]);
 		git(dir.path(), &["commit", "-qm", "second"]);
-		let repo = GitRepo::discover(dir.path())
-			.expect("discover")
-			.expect("repository");
+		let repo = open(dir.path());
 		let options = DiffOptions {
 			base: Some("HEAD^".into()),
 			head: Some("HEAD".into()),
@@ -1472,13 +1447,8 @@ mod tests {
 		large[4000..4010].fill(42);
 		fs::write(dir.path().join("large.dat"), &large).expect("modify large binary");
 		fs::write(dir.path().join("nonewline.txt"), "new").expect("modify text");
-		let repo = GitRepo::discover(dir.path())
-			.expect("discover")
-			.expect("repository");
-		assert_eq!(
-			repo.diff_text(&DiffOptions::default()).expect("diff"),
-			git(dir.path(), &["diff"])
-		);
+		let repo = open(dir.path());
+		assert_worktree_diff_matches_git(&repo, dir.path());
 		let binary = DiffOptions { binary: true, ..DiffOptions::default() };
 		assert_eq!(
 			repo.diff_text(&binary).expect("binary diff"),
@@ -1513,15 +1483,13 @@ mod tests {
 		permissions.set_mode(0o755);
 		fs::set_permissions(dir.path().join("executable"), permissions).expect("chmod");
 		symlink("untracked.txt", dir.path().join("link")).expect("symlink");
-		let repo = GitRepo::discover(dir.path())
-			.expect("discover")
-			.expect("repository");
+		let repo = open(dir.path());
 		for path in ["untracked.txt", "untracked.dat", "executable", "link"] {
 			assert_eq!(
 				repo
 					.diff_no_index(Path::new("/dev/null"), Path::new(path), true)
 					.expect("no-index diff"),
-				git_diff(dir.path(), &["diff", "--no-index", "--binary", "/dev/null", path])
+				git_expecting(dir.path(), &["diff", "--no-index", "--binary", "/dev/null", path], 1)
 			);
 		}
 	}
@@ -1540,12 +1508,7 @@ mod tests {
 		let mut permissions = fs::metadata(&path).expect("metadata").permissions();
 		permissions.set_mode(0o755);
 		fs::set_permissions(path, permissions).expect("chmod");
-		let repo = GitRepo::discover(dir.path())
-			.expect("discover")
-			.expect("repository");
-		assert_eq!(
-			repo.diff_text(&DiffOptions::default()).expect("diff"),
-			git(dir.path(), &["diff"])
-		);
+		let repo = open(dir.path());
+		assert_worktree_diff_matches_git(&repo, dir.path());
 	}
 }

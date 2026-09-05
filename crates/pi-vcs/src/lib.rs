@@ -18,6 +18,8 @@
 pub mod error;
 pub mod git;
 pub mod jj;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod types;
 
 use std::{
@@ -298,30 +300,14 @@ fn is_strict_descendant(child: &Path, ancestor: &Path) -> bool {
 }
 #[cfg(test)]
 mod tests {
-	use std::{fs, path::Path, process::Command};
+	use std::fs;
 
 	use super::*;
-
-	fn run_git(root: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.current_dir(root)
-			.args(args)
-			.output()
-			.unwrap();
-		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-		String::from_utf8(output.stdout).unwrap()
-	}
-
-	fn init_git(root: &Path) {
-		run_git(root, &["init", "-q"]);
-		run_git(root, &["config", "user.name", "VCS Test"]);
-		run_git(root, &["config", "user.email", "vcs@example.com"]);
-	}
-
+	use crate::test_support::{git, init_repo};
 	#[test]
 	fn repo_reports_backend_capabilities() {
 		let git_dir = tempfile::tempdir().unwrap();
-		init_git(git_dir.path());
+		init_repo(git_dir.path());
 		let git = detect(git_dir.path()).unwrap().unwrap();
 		assert!(git.supports(Feature::StagedDiff));
 		assert!(git.supports(Feature::RevDiff));
@@ -361,16 +347,15 @@ mod tests {
 	#[test]
 	fn git_uncommitted_diff_matches_head_with_staged_and_unstaged_changes() {
 		let temp = tempfile::tempdir().unwrap();
-		init_git(temp.path());
+		init_repo(temp.path());
 		fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
-		run_git(temp.path(), &["add", "tracked.txt"]);
-		run_git(temp.path(), &["commit", "-q", "-m", "base"]);
-
+		git(temp.path(), &["add", "tracked.txt"]);
+		git(temp.path(), &["commit", "-q", "-m", "base"]);
 		fs::write(temp.path().join("tracked.txt"), "base\nunstaged\n").unwrap();
 		fs::write(temp.path().join("staged.txt"), "staged\n").unwrap();
-		run_git(temp.path(), &["add", "staged.txt"]);
+		git(temp.path(), &["add", "staged.txt"]);
 
-		let expected = run_git(temp.path(), &["diff", "HEAD"]);
+		let expected = git(temp.path(), &["diff", "HEAD"]);
 		let actual = detect(temp.path())
 			.unwrap()
 			.unwrap()
@@ -382,15 +367,13 @@ mod tests {
 	#[test]
 	fn git_uncommitted_diff_matches_both_unborn_head_comparisons() {
 		let temp = tempfile::tempdir().unwrap();
-		init_git(temp.path());
+		init_repo(temp.path());
 		fs::write(temp.path().join("new.txt"), "staged\n").unwrap();
-		run_git(temp.path(), &["add", "new.txt"]);
+		git(temp.path(), &["add", "new.txt"]);
 		fs::write(temp.path().join("new.txt"), "staged\nunstaged\n").unwrap();
 
-		let expected = git::join_patches(&[
-			run_git(temp.path(), &["diff"]),
-			run_git(temp.path(), &["diff", "--cached"]),
-		]);
+		let expected =
+			git::join_patches(&[git(temp.path(), &["diff"]), git(temp.path(), &["diff", "--cached"])]);
 		let actual = detect(temp.path())
 			.unwrap()
 			.unwrap()

@@ -13,7 +13,7 @@ use gix::bstr::{BString, ByteSlice};
 use super::{
 	GitRepo, normalize_path,
 	open::{load_index_or_empty, load_index_or_head, status_with_fresh_index, status_with_index},
-	read::literal_pathspec,
+	read::{literal_pathspecs, path_matches},
 };
 use crate::{
 	error::{Error, Result},
@@ -23,10 +23,17 @@ use crate::{
 	},
 };
 
-const INDEX_WRITE: gix::index::write::Options = gix::index::write::Options {
+pub(crate) const INDEX_WRITE: gix::index::write::Options = gix::index::write::Options {
 	extensions: gix::index::write::Extensions::None,
 	skip_hash:  false,
 };
+
+/// Acquire `.git/index.lock` (or the lock for `path`) failing immediately if
+/// held.
+pub(crate) fn lock_index(path: &Path, context: &'static str) -> Result<gix::lock::File> {
+	gix::lock::File::acquire_to_update_resource(path, gix::lock::acquire::Fail::Immediately, None)
+		.map_err(|err| Error::backend(context, err))
+}
 /// Apply a ref update, synthesizing a committer for the reflog entry when no
 /// identity is configured. Reflog lines require a signature, but git never
 /// fails branch/reset/stash ref updates over missing identity — only
@@ -92,60 +99,140 @@ impl GitRepo {
 	/// and distinct NFC/NFD files when precompose is off stay separate.
 	pub fn stage_files(&self, files: &[String]) -> Result<()> {
 		let repo = self.gix()?;
+		let mut lock = lock_index(&repo.index_path(), "git add")?;
 		let mut index = load_index_or_head(&repo, "git add")?;
-		let all = files.is_empty();
+		let (mut filter, filter_index) = repo
+			.filter_pipeline(None)
+			.map_err(|err| Error::backend("git add filter", err))?;
 		let mut requested: BTreeSet<String> = files
 			.iter()
 			.map(|path| normalize_stage_path(path))
 			.collect();
+		let all = files.is_empty() || requested.contains("");
 		if precompose_unicode_enabled(&repo) {
 			requested = remap_composed_index_paths(self.root(), &index, requested);
 		}
-		let mut selected = collect_stage_paths(self, &requested, all)?;
-		for entry in index.entries() {
-			let path = entry.path(&index).to_str_lossy().into_owned();
-			if (all
-				|| requested
-					.iter()
-					.any(|wanted| stage_path_matches(&path, wanted)))
-				&& fs::symlink_metadata(self.root().join(&path)).is_ok()
-			{
-				selected.insert(path);
+		let untracked = collect_stage_paths(self, &requested, all)?;
+
+		let patterns: Vec<BString> = if all {
+			Vec::new()
+		} else {
+			literal_pathspecs(&requested)
+		};
+
+		let mut iter = status_with_fresh_index(&repo, "git add")?
+			.untracked_files(gix::status::UntrackedFiles::None)
+			.index_worktree_options_mut(|options| options.dirwalk_options = None)
+			.into_index_worktree_iter(patterns)
+			.map_err(|err| Error::backend("git add", err))?;
+
+		let mut removed = BTreeSet::new();
+		let mut modified = Vec::new();
+		for item in &mut iter {
+			let item = item.map_err(|err| Error::backend("git add", err))?;
+			if let gix::status::index_worktree::Item::Modification { rela_path, status, .. } = item {
+				use gix::status::plumbing::index_as_worktree::{Change, EntryStatus};
+				let raw_path = rela_path.clone();
+				match status {
+					EntryStatus::Change(Change::Removed) => {
+						removed.insert(raw_path);
+					},
+					EntryStatus::Change(
+						Change::Modification { .. }
+						| Change::Type { .. }
+						| Change::SubmoduleModification(_),
+					)
+					| EntryStatus::Conflict { .. }
+					| EntryStatus::IntentToAdd => {
+						modified.push(raw_path);
+					},
+					_ => {},
+				}
 			}
 		}
-		index.remove_entries(|_, path, _| {
-			let path = path.to_str_lossy();
-			(all
-				|| requested
-					.iter()
-					.any(|wanted| stage_path_matches(&path, wanted)))
-				&& !selected.contains(path.as_ref())
-		});
-		for path in selected {
-			stage_one(&repo, self.root(), &mut index, &path)?;
+		if !removed.is_empty() {
+			index.remove_entries(|_, p, _| removed.contains(p));
 		}
+		for path in untracked.into_iter().map(BString::from).chain(modified) {
+			stage_one(&repo, self.root(), &mut index, &mut filter, &filter_index, path.as_bstr())?;
+		}
+
 		index.sort_entries();
 		index
-			.write(INDEX_WRITE)
-			.map_err(|err| Error::backend("git add", err))
+			.write_to(&mut lock, INDEX_WRITE)
+			.map_err(|err| Error::backend("git add", err))?;
+		lock
+			.commit()
+			.map_err(|err| Error::backend("git add", err))?;
+		Ok(())
+	}
+
+	/// Stage exact in-memory content directly into the index for a path without
+	/// touching the worktree.
+	///
+	/// Note: this bypasses the filter pipeline / attributes and resets entry
+	/// flags. It is intended for generated files (such as changelogs), not as
+	/// a general `git add`.
+	pub fn stage_content(&self, path: &str, content: &[u8]) -> Result<()> {
+		let repo = self.gix()?;
+		let normalized = normalize_stage_path(path);
+		if normalized.is_empty()
+			|| normalized.starts_with('/')
+			|| Path::new(&normalized).components().any(|c| {
+				matches!(
+					c,
+					std::path::Component::ParentDir
+						| std::path::Component::RootDir
+						| std::path::Component::Prefix(_)
+				)
+			}) {
+			return Err(Error::backend(
+				"git stage content",
+				format!("invalid repository-relative path: {path}"),
+			));
+		}
+		let bpath = BString::from(normalized.as_bytes());
+		let id = repo
+			.write_blob(content)
+			.map_err(|e| Error::backend("git stage content", e))?
+			.detach();
+		let mut lock = lock_index(&repo.index_path(), "git stage content")?;
+		let mut index = load_index_or_head(&repo, "git stage content")?;
+
+		let mode = index
+			.entry_by_path(bpath.as_bstr())
+			.map_or(gix::index::entry::Mode::FILE, |e| e.mode);
+		index.remove_entries(|_, p, _| p == bpath.as_bstr());
+		index.dangerously_push_entry(
+			Default::default(),
+			id,
+			gix::index::entry::Flags::empty(),
+			mode,
+			bpath.as_bstr(),
+		);
+		index.sort_entries();
+		index
+			.write_to(&mut lock, INDEX_WRITE)
+			.map_err(|err| Error::backend("git stage content", err))?;
+		lock
+			.commit()
+			.map_err(|err| Error::backend("git stage content", err))?;
+		Ok(())
 	}
 
 	/// Reset selected index entries to HEAD while preserving the worktree.
 	pub fn unstage(&self, files: &[String]) -> Result<()> {
-		let repo = self.gix()?;
-		let head = head_tree(&repo)?;
-		let head_index = index_for_tree(&repo, head.as_ref())?;
-		let mut current = load_index_or_head(&repo, "git reset")?;
-		copy_index_paths(&mut current, &head_index, files);
-		current
-			.write(INDEX_WRITE)
-			.map_err(|err| Error::backend("git reset", err))
+		self.restore(&RestoreOptions {
+			source:   None,
+			staged:   true,
+			worktree: false,
+			files:    files.to_vec(),
+		})
 	}
 
 	/// Create a commit and return its object id.
 	pub fn commit_create(&self, message: &str, options: &CommitOptions) -> Result<String> {
 		let repo = self.gix()?;
-		run_commit_hook(self, &repo, "pre-commit", &[])?;
 		let mut head = repo
 			.head()
 			.map_err(|err| Error::backend("git commit", err))?;
@@ -153,22 +240,8 @@ impl GitRepo {
 			.try_peel_to_id()
 			.map_err(|err| Error::backend("git commit", err))?
 			.map(|id| id.detach());
-		let index = load_index_or_head(&repo, "git commit")?;
-		let tree = if options.files.is_empty() {
-			write_index_tree(&repo, &index)?
-		} else {
-			let base = index_for_tree(
-				&repo,
-				old_commit
-					.as_ref()
-					.map(|id| commit_tree(&repo, id))
-					.transpose()?
-					.as_ref(),
-			)?;
-			let mut partial = base;
-			copy_index_paths(&mut partial, &index, &options.files);
-			write_index_tree(&repo, &partial)?
-		};
+		run_commit_hook(self, &repo, "pre-commit", &[])?;
+		let tree = compute_commit_tree(&repo, old_commit.as_ref(), &options.files)?;
 		let (parents, inherited_author) = if options.amend {
 			let id = old_commit
 				.ok_or_else(|| Error::backend("git commit", "cannot amend an unborn HEAD"))?;
@@ -188,17 +261,14 @@ impl GitRepo {
 		};
 		if !options.allow_empty {
 			if let Some(parent) = parents.first() {
-				if commit_tree(&repo, parent)? == tree {
+				if commit_tree(&repo, "git commit", parent)? == tree {
 					return Err(Error::backend("git commit", "nothing to commit, working tree clean"));
 				}
 			} else if tree == repo.empty_tree().id {
 				return Err(Error::backend("git commit", "nothing to commit, working tree clean"));
 			}
 		}
-		let committer = repo
-			.committer()
-			.ok_or_else(|| Error::backend("git commit", "committer identity is not configured"))?
-			.map_err(|err| Error::backend("git commit", err))?;
+		let (committer, default_author) = repo_identity(&repo, "git commit")?;
 		let override_author;
 		let mut author_time = gix::date::parse::TimeBuf::default();
 		let author = if let Some(author) = &options.author {
@@ -217,46 +287,16 @@ impl GitRepo {
 		} else if let Some(author) = inherited_author.as_ref() {
 			author.to_ref(&mut author_time)
 		} else {
-			repo
-				.author()
-				.ok_or_else(|| Error::backend("git commit", "author identity is not configured"))?
-				.map_err(|err| Error::backend("git commit", err))?
+			default_author
 		};
-		let message_path = self.info().git_dir.join("COMMIT_EDITMSG");
-		fs::write(&message_path, message)?;
-		run_commit_hook(self, &repo, "commit-msg", &[message_path.as_os_str()])?;
-		let message = fs::read_to_string(&message_path)
-			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
-		let commit = repo
-			.new_commit_as(committer, author, message, tree, parents)
-			.map_err(|err| Error::backend("git commit", err))?;
-		let id = commit.id;
-		let expected = old_commit
-			.map_or(gix::refs::transaction::PreviousValue::MustNotExist, |old| {
-				gix::refs::transaction::PreviousValue::MustExistAndMatch(old.into())
-			});
-		repo
-			.edit_reference(gix::refs::transaction::RefEdit {
-				change: gix::refs::transaction::Change::Update {
-					log: gix::refs::transaction::LogChange {
-						mode:                gix::refs::transaction::RefLog::AndReference,
-						force_create_reflog: false,
-						message:             if options.amend {
-							"commit (amend)"
-						} else {
-							"commit"
-						}
-						.into(),
-					},
-					expected,
-					new: gix::refs::Target::Object(id),
-				},
-				name:   "HEAD"
-					.try_into()
-					.map_err(|err| Error::backend("git commit", err))?,
-				deref:  true,
-			})
-			.map_err(|err| Error::backend("git commit", err))?;
+		let id =
+			write_commit_object(self, &repo, "git commit", message, tree, parents, author, committer)?;
+		let reflog_message = if options.amend {
+			"commit (amend)"
+		} else {
+			"commit"
+		};
+		advance_head(&repo, "git commit", old_commit, id, reflog_message)?;
 		let _ = run_commit_hook(self, &repo, "post-commit", &[]);
 		Ok(id.to_hex().to_string())
 	}
@@ -352,13 +392,30 @@ impl GitRepo {
 	pub fn restore(&self, options: &RestoreOptions) -> Result<()> {
 		let repo = self.gix()?;
 		let restore_worktree = options.worktree || !options.staged;
+		let lock = if options.staged {
+			Some(lock_index(&repo.index_path(), "git restore")?)
+		} else {
+			None
+		};
 		let mut index = load_index_or_head(&repo, "git restore")?;
-		if options.staged {
-			let source = resolve_tree(&repo, options.source.as_deref().unwrap_or("HEAD"))?;
-			let source_index = index_for_tree(&repo, Some(&source))?;
+		if let Some(mut lock) = lock {
+			let source_tree = match options.source.as_deref() {
+				Some(source) => Some(resolve_tree(&repo, source)?),
+				None => repo
+					.head()
+					.map_err(|err| Error::backend("git restore", err))?
+					.try_peel_to_id()
+					.map_err(|err| Error::backend("git restore", err))?
+					.map(|id| commit_tree(&repo, "git restore", &id.detach()))
+					.transpose()?,
+			};
+			let source_index = index_for_tree(&repo, source_tree.as_ref())?;
 			copy_index_paths(&mut index, &source_index, &options.files);
 			index
-				.write(INDEX_WRITE)
+				.write_to(&mut lock, INDEX_WRITE)
+				.map_err(|e| Error::backend("git restore", e))?;
+			lock
+				.commit()
 				.map_err(|e| Error::backend("git restore", e))?;
 		}
 		if restore_worktree {
@@ -426,11 +483,7 @@ impl GitRepo {
 		});
 
 		let iter = platform
-			.into_index_worktree_iter(
-				paths
-					.iter()
-					.map(|path| literal_pathspec(path).into_bytes().into()),
-			)
+			.into_index_worktree_iter(literal_pathspecs(&paths))
 			.map_err(|e| Error::backend("git clean", e))?;
 
 		for item in iter {
@@ -462,6 +515,8 @@ impl GitRepo {
 	/// Replace an index file with the entries from `treeish`.
 	pub fn read_tree(&self, treeish: &str, index_path: Option<&Path>) -> Result<()> {
 		let repo = self.gix()?;
+		let path = index_path.map_or_else(|| repo.index_path(), Path::to_owned);
+		let mut lock = lock_index(&path, "git read-tree")?;
 		let tree = resolve_tree(&repo, treeish)?;
 		let mut index = repo
 			.index_from_tree(&tree)
@@ -470,8 +525,12 @@ impl GitRepo {
 			index.set_path(path);
 		}
 		index
-			.write(INDEX_WRITE)
-			.map_err(|e| Error::backend("git read-tree", e))
+			.write_to(&mut lock, INDEX_WRITE)
+			.map_err(|e| Error::backend("git read-tree", e))?;
+		lock
+			.commit()
+			.map_err(|e| Error::backend("git read-tree", e))?;
+		Ok(())
 	}
 
 	/// Write an index as a tree object and return its object id.
@@ -692,7 +751,7 @@ impl GitRepo {
 				.write(INDEX_WRITE)
 				.map_err(|err| Error::backend("git worktree add", err));
 		}
-		let tree = commit_tree(&linked_repo, &id)?;
+		let tree = commit_tree(&linked_repo, "git worktree add", &id)?;
 		let mut target = linked_repo
 			.index_from_tree(&tree)
 			.map_err(|err| Error::backend("git worktree add", err))?;
@@ -828,7 +887,7 @@ impl GitRepo {
 	}
 }
 
-fn run_commit_hook(
+pub(crate) fn run_commit_hook(
 	repository: &GitRepo,
 	repo: &gix::Repository,
 	name: &str,
@@ -897,6 +956,69 @@ fn hook_is_executable(path: &Path) -> Result<bool> {
 	}
 }
 
+pub(crate) fn write_commit_object(
+	repository: &GitRepo,
+	repo: &gix::Repository,
+	op: &'static str,
+	message: &str,
+	tree: gix::hash::ObjectId,
+	parents: Vec<gix::hash::ObjectId>,
+	author: gix::actor::SignatureRef<'_>,
+	committer: gix::actor::SignatureRef<'_>,
+) -> Result<gix::hash::ObjectId> {
+	let message_path = repository.info().git_dir.join("COMMIT_EDITMSG");
+	fs::write(&message_path, message)?;
+	run_commit_hook(repository, repo, "commit-msg", &[message_path.as_os_str()])?;
+	let message = fs::read_to_string(&message_path).map_err(|err| Error::backend(op, err))?;
+	let commit = repo
+		.new_commit_as(committer, author, message, tree, parents)
+		.map_err(|err| Error::backend(op, err))?;
+	Ok(commit.id)
+}
+
+pub(crate) fn advance_head(
+	repo: &gix::Repository,
+	op: &'static str,
+	old_commit: Option<gix::hash::ObjectId>,
+	new_commit: gix::hash::ObjectId,
+	reflog_message: &str,
+) -> Result<()> {
+	let expected = old_commit.map_or(gix::refs::transaction::PreviousValue::MustNotExist, |old| {
+		gix::refs::transaction::PreviousValue::MustExistAndMatch(old.into())
+	});
+	repo
+		.edit_reference(gix::refs::transaction::RefEdit {
+			change: gix::refs::transaction::Change::Update {
+				log: gix::refs::transaction::LogChange {
+					mode:                gix::refs::transaction::RefLog::AndReference,
+					force_create_reflog: false,
+					message:             reflog_message.into(),
+				},
+				expected,
+				new: gix::refs::Target::Object(new_commit),
+			},
+			name:   "HEAD".try_into().map_err(|err| Error::backend(op, err))?,
+			deref:  true,
+		})
+		.map_err(|err| Error::backend(op, err))?;
+	Ok(())
+}
+
+pub(crate) fn repo_identity<'a>(
+	repo: &'a gix::Repository,
+	op: &'static str,
+) -> Result<(gix::actor::SignatureRef<'a>, gix::actor::SignatureRef<'a>)> {
+	let committer = repo
+		.committer()
+		.ok_or_else(|| Error::backend(op, "committer identity is not configured"))?
+		.map_err(|err| Error::backend(op, err))?;
+	let author = repo
+		.author()
+		.ok_or_else(|| Error::backend(op, "author identity is not configured"))?
+		.map_err(|err| Error::backend(op, err))?;
+	Ok((committer, author))
+}
+
 fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
 	match fs::read(path) {
 		Ok(bytes) => Ok(Some(bytes)),
@@ -912,10 +1034,8 @@ pub fn detach_git_dir(
 	source_common_dir: &Path,
 ) -> Result<DetachGitDirResult> {
 	let git_entry = worktree_root.join(".git");
-	let meta = match fs::symlink_metadata(&git_entry) {
-		Ok(meta) => meta,
-		Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(DetachGitDirResult::NoGit),
-		Err(e) => return Err(e.into()),
+	let Some(meta) = super::diff::symlink_metadata_opt(&git_entry)? else {
+		return Ok(DetachGitDirResult::NoGit);
 	};
 	let source_common =
 		fs::canonicalize(source_common_dir).unwrap_or_else(|_| normalize_path(source_common_dir));
@@ -1016,59 +1136,30 @@ pub fn detach_git_dir(
 }
 
 fn resolve_commit(repo: &gix::Repository, spec: &str) -> Result<gix::hash::ObjectId> {
-	let id = repo
-		.rev_parse_single(spec)
-		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-	let object = id
-		.object()
-		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-	object
+	super::read::resolve_object(repo, spec)?
 		.peel_to_commit()
 		.map(|commit| commit.id)
 		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })
 }
 
 fn resolve_tree(repo: &gix::Repository, spec: &str) -> Result<gix::hash::ObjectId> {
-	let id = repo
-		.rev_parse_single(spec)
-		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-	let object = id
-		.object()
-		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })?;
-	object
+	super::read::resolve_object(repo, spec)?
 		.peel_to_tree()
 		.map(|tree| tree.id)
 		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })
 }
 
-fn commit_tree(repo: &gix::Repository, id: &gix::hash::ObjectId) -> Result<gix::hash::ObjectId> {
-	let commit = repo
+fn commit_tree(
+	repo: &gix::Repository,
+	op: &'static str,
+	id: &gix::hash::ObjectId,
+) -> Result<gix::hash::ObjectId> {
+	repo
 		.find_commit(*id)
-		.map_err(|e| Error::backend("git commit", e))?;
-	commit
+		.map_err(|e| Error::backend(op, e))?
 		.tree_id()
 		.map(|id| id.detach())
-		.map_err(|e| Error::backend("git commit", e))
-}
-
-fn head_tree(repo: &gix::Repository) -> Result<Option<gix::hash::ObjectId>> {
-	match repo
-		.head()
-		.map_err(|e| Error::backend("git reset", e))?
-		.try_peel_to_id()
-		.map_err(|e| Error::backend("git reset", e))?
-	{
-		Some(id) => Ok(Some(
-			id.object()
-				.map_err(|e| Error::backend("git reset", e))?
-				.peel_to_commit()
-				.map_err(|e| Error::backend("git reset", e))?
-				.tree_id()
-				.map_err(|e| Error::backend("git reset", e))?
-				.detach(),
-		)),
-		None => Ok(None),
-	}
+		.map_err(|e| Error::backend(op, e))
 }
 
 fn index_for_tree(
@@ -1111,11 +1202,6 @@ fn normalize_stage_path(path: &str) -> String {
 		relative.trim_end_matches('/').to_owned()
 	}
 }
-
-fn stage_path_matches(path: &str, wanted: &str) -> bool {
-	wanted.is_empty() || path_matches(path, wanted)
-}
-
 fn remap_composed_index_paths(
 	root: &Path,
 	index: &gix::index::File,
@@ -1207,49 +1293,73 @@ fn stage_one(
 	repo: &gix::Repository,
 	root: &Path,
 	index: &mut gix::index::File,
-	path: &str,
+	filter: &mut gix::filter::Pipeline,
+	filter_index: &gix::index::State,
+	path: &gix::bstr::BStr,
 ) -> Result<()> {
-	let full = root.join(path);
-	let metadata = fs::symlink_metadata(&full)?;
-	let (data, mode) = if metadata.file_type().is_symlink() {
-		(
-			fs::read_link(&full)?
-				.to_string_lossy()
-				.into_owned()
-				.into_bytes(),
-			gix::index::entry::Mode::SYMLINK,
-		)
-	} else {
-		let mode = if is_executable(&metadata) {
-			gix::index::entry::Mode::FILE_EXECUTABLE
-		} else {
-			gix::index::entry::Mode::FILE
-		};
-		(fs::read(&full)?, mode)
+	let full = root.join(gix::path::from_bstr(path));
+	let Some(metadata) = super::diff::symlink_metadata_opt(&full)? else {
+		index.remove_entries(|_, p, _| p == path);
+		return Ok(());
 	};
-	let id = repo
-		.write_blob(&data)
-		.map_err(|e| Error::backend("git add", e))?
-		.detach();
-	index.remove_entries(|_, p, _| p == path.as_bytes().as_bstr());
+	if metadata.file_type().is_symlink() {
+		let target = fs::read_link(&full)?
+			.to_string_lossy()
+			.into_owned()
+			.into_bytes();
+		let id = repo
+			.write_blob(&target)
+			.map_err(|e| Error::backend("git add", e))?
+			.detach();
+		index.remove_entries(|_, p, _| p == path);
+		index.dangerously_push_entry(
+			Default::default(),
+			id,
+			gix::index::entry::Flags::empty(),
+			gix::index::entry::Mode::SYMLINK,
+			path,
+		);
+		return Ok(());
+	}
+	if metadata.is_dir() {
+		if full.join(".git").exists() {
+			let sub_repo = gix::open(&full).map_err(|e| Error::backend("git add submodule", e))?;
+			let head_id = sub_repo
+				.head_id()
+				.map_err(|e| Error::backend("git add submodule HEAD", e))?;
+			index.remove_entries(|_, p, _| p == path);
+			index.dangerously_push_entry(
+				Default::default(),
+				head_id.detach(),
+				gix::index::entry::Flags::empty(),
+				gix::index::entry::Mode::COMMIT,
+				path,
+			);
+			return Ok(());
+		}
+		index.remove_entries(|_, p, _| p == path);
+		return Ok(());
+	}
+	let Some((id, ..)) = filter
+		.worktree_file_to_object(path, filter_index)
+		.map_err(|e| Error::backend("git add filter", e))?
+	else {
+		return Ok(());
+	};
+	let mode = if super::diff::is_executable(&metadata) {
+		gix::index::entry::Mode::FILE_EXECUTABLE
+	} else {
+		gix::index::entry::Mode::FILE
+	};
+	index.remove_entries(|_, p, _| p == path);
 	index.dangerously_push_entry(
 		Default::default(),
 		id,
 		gix::index::entry::Flags::empty(),
 		mode,
-		path.as_bytes().as_bstr(),
+		path,
 	);
 	Ok(())
-}
-
-#[cfg(unix)]
-fn is_executable(meta: &fs::Metadata) -> bool {
-	use std::os::unix::fs::PermissionsExt;
-	meta.permissions().mode() & 0o111 != 0
-}
-#[cfg(not(unix))]
-fn is_executable(_: &fs::Metadata) -> bool {
-	false
 }
 
 fn copy_index_paths(dest: &mut gix::index::File, source: &gix::index::File, files: &[String]) {
@@ -1271,6 +1381,27 @@ fn copy_index_paths(dest: &mut gix::index::File, source: &gix::index::File, file
 	}
 	dest.sort_entries();
 }
+fn compute_commit_tree(
+	repo: &gix::Repository,
+	old_commit: Option<&gix::hash::ObjectId>,
+	files: &[String],
+) -> Result<gix::hash::ObjectId> {
+	let index = load_index_or_head(repo, "git commit")?;
+	if files.is_empty() {
+		write_index_tree(repo, &index)
+	} else {
+		let base = index_for_tree(
+			repo,
+			old_commit
+				.map(|id| commit_tree(repo, "git commit", id))
+				.transpose()?
+				.as_ref(),
+		)?;
+		let mut partial = base;
+		copy_index_paths(&mut partial, &index, files);
+		write_index_tree(repo, &partial)
+	}
+}
 
 #[derive(Default)]
 struct TreeNode {
@@ -1278,15 +1409,20 @@ struct TreeNode {
 	dirs:  BTreeMap<BString, Self>,
 }
 
-fn write_index_tree(
+/// Write the unconflicted index entries as a tree, like `git write-tree`.
+/// Intent-to-add entries (`git add -N`) hold a placeholder blob and are not
+/// part of the staged tree; git skips them and so does the staged diff.
+pub(crate) fn write_index_tree(
 	repo: &gix::Repository,
 	index: &gix::index::File,
 ) -> Result<gix::hash::ObjectId> {
+	use gix::index::entry::{Flags, Stage};
+
 	let mut root = TreeNode::default();
 	for entry in index
 		.entries()
 		.iter()
-		.filter(|e| e.stage() == gix::index::entry::Stage::Unconflicted)
+		.filter(|e| e.stage() == Stage::Unconflicted && !e.flags.contains(Flags::INTENT_TO_ADD))
 	{
 		let parts: Vec<&[u8]> = entry.path(index).split(|b| *b == b'/').collect();
 		let mut node = &mut root;
@@ -1345,7 +1481,7 @@ fn checkout_tree(
 	commit: gix::hash::ObjectId,
 	overwrite: bool,
 ) -> Result<()> {
-	let tree = commit_tree(repo, &commit)?;
+	let tree = commit_tree(repo, "git checkout", &commit)?;
 	let mut target = repo
 		.index_from_tree(&tree)
 		.map_err(|e| Error::backend("git checkout", e))?;
@@ -1498,14 +1634,6 @@ fn restore_index_paths(
 		}
 	}
 	Ok(())
-}
-
-fn path_matches(path: &str, wanted: &str) -> bool {
-	let wanted = wanted.trim_end_matches('/');
-	path == wanted
-		|| path
-			.strip_prefix(wanted)
-			.is_some_and(|r| r.starts_with('/'))
 }
 
 fn set_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
@@ -1764,32 +1892,17 @@ fn write_loose_ref(git_dir: &Path, name: &str, id: gix::hash::ObjectId) -> Resul
 }
 #[cfg(test)]
 mod tests {
-	use std::process::Command;
-
 	use tempfile::TempDir;
 
 	use super::*;
-	use crate::types::CommitAuthor;
-
-	fn git(dir: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.arg("-C")
-			.arg(dir)
-			.args(args)
-			.output()
-			.unwrap();
-		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-		String::from_utf8(output.stdout)
-			.unwrap()
-			.trim_end()
-			.to_owned()
-	}
+	use crate::{
+		test_support::{git, init_repo},
+		types::CommitAuthor,
+	};
 
 	fn fixture() -> (TempDir, GitRepo) {
 		let temp = tempfile::tempdir().unwrap();
-		git(temp.path(), &["init", "-q", "-b", "main"]);
-		git(temp.path(), &["config", "user.name", "Test"]);
-		git(temp.path(), &["config", "user.email", "test@example.com"]);
+		init_repo(temp.path());
 		fs::write(temp.path().join("a"), "one\n").unwrap();
 		fs::write(temp.path().join("b"), "two\n").unwrap();
 		git(temp.path(), &["add", "."]);
@@ -1798,13 +1911,34 @@ mod tests {
 		(temp, repo)
 	}
 
+	fn fixture_ignoring_build() -> (TempDir, GitRepo) {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join(".gitignore"), "build/\n").unwrap();
+		git(temp.path(), &["add", ".gitignore"]);
+		git(temp.path(), &["commit", "-qm", "ignore build"]);
+		(temp, repo)
+	}
+
+	fn add_detached_worktree(repo: &GitRepo, temp: &Path, name: &str) -> (PathBuf, PathBuf) {
+		let linked = temp.join(format!("../{name}"));
+		let _ = fs::remove_dir_all(&linked);
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();
+		(linked, common)
+	}
 	#[test]
 	fn mutate_stage_commit_amend_and_empty() {
 		let (temp, repo) = fixture();
 		fs::write(temp.path().join("a"), "changed\n").unwrap();
 		fs::write(temp.path().join("new"), "new\n").unwrap();
 		repo.stage_files(&["a".into()]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "M  a\n?? new");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "M  a\n?? new");
 		let first = repo
 			.commit_create("change", &CommitOptions {
 				author: Some(CommitAuthor {
@@ -1815,9 +1949,9 @@ mod tests {
 				..Default::default()
 			})
 			.unwrap();
-		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), first);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).trim(), first);
 		assert_eq!(
-			git(temp.path(), &["show", "-s", "--format=%an <%ae>", "HEAD"]),
+			git(temp.path(), &["show", "-s", "--format=%an <%ae>", "HEAD"]).trim(),
 			"Other <other@example.com>"
 		);
 		assert!(
@@ -1831,11 +1965,22 @@ mod tests {
 			.commit_create("amended", &CommitOptions { amend: true, ..Default::default() })
 			.unwrap();
 		assert_ne!(first, amended);
-		assert_eq!(git(temp.path(), &["rev-list", "--count", "HEAD"]), "2");
+		assert_eq!(git(temp.path(), &["rev-list", "--count", "HEAD"]).trim(), "2");
 		repo.stage_files(&[]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "A  new");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "A  new");
 		repo.unstage(&[]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "?? new");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "?? new");
+	}
+
+	#[test]
+	fn unstage_on_unborn_head_empties_index() {
+		let temp = tempfile::tempdir().unwrap();
+		init_repo(temp.path());
+		fs::write(temp.path().join("a"), "hello\n").unwrap();
+		git(temp.path(), &["add", "a"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		repo.unstage(&[]).unwrap();
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "?? a");
 	}
 
 	#[test]
@@ -1947,13 +2092,13 @@ mod tests {
 		assert!(!before.contains('\u{301}'), "git add should store NFC, got {before:?}");
 
 		repo.stage_files(&[]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "");
 		let after = git(temp.path(), &["ls-files", "-z"]);
 		let cafe: Vec<_> = after.split('\0').filter(|p| p.contains("caf")).collect();
 		assert_eq!(cafe, [nfc], "native add created a unicode duplicate: {after:?}");
 
 		repo.stage_files(&[nfd.to_owned()]).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "");
 		let after_explicit = git(temp.path(), &["ls-files", "-z"]);
 		let cafe: Vec<_> = after_explicit
 			.split('\0')
@@ -1979,9 +2124,7 @@ mod tests {
 	#[test]
 	fn stage_keeps_distinct_nfc_and_nfd_when_precompose_is_off() {
 		let temp = tempfile::tempdir().unwrap();
-		git(temp.path(), &["init", "-q", "-b", "main"]);
-		git(temp.path(), &["config", "user.name", "Test"]);
-		git(temp.path(), &["config", "user.email", "test@example.com"]);
+		init_repo(temp.path());
 		git(temp.path(), &["config", "core.precomposeunicode", "false"]);
 		fs::write(temp.path().join("tracked"), "base\n").unwrap();
 		git(temp.path(), &["add", "."]);
@@ -2006,6 +2149,40 @@ mod tests {
 		assert_eq!(cafe.len(), 2, "NFC and NFD must stay distinct when precompose is off: {files:?}");
 		assert!(cafe.contains(&nfc), "{cafe:?}");
 		assert!(cafe.contains(&nfd), "{cafe:?}");
+	}
+
+	#[test]
+	fn stage_normalizes_crlf_via_gitattributes_like_git_add() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join(".gitattributes"), "*.cmd text eol=crlf\n").unwrap();
+		git(temp.path(), &["add", ".gitattributes"]);
+		git(temp.path(), &["commit", "-qm", "add gitattributes"]);
+		let crlf_content = "echo hello\r\necho world\r\n";
+		fs::write(temp.path().join("fixture.cmd"), crlf_content).unwrap();
+		repo.stage_files(&["fixture.cmd".into()]).unwrap();
+		// Worktree keeps CRLF; the blob is normalized to LF so `git diff` is empty.
+		assert_eq!(fs::read(temp.path().join("fixture.cmd")).unwrap(), crlf_content.as_bytes());
+		assert_eq!(git(temp.path(), &["cat-file", "-p", ":fixture.cmd"]), "echo hello\necho world\n");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "A  fixture.cmd");
+		assert_eq!(git(temp.path(), &["diff"]), "");
+	}
+
+	#[test]
+	fn stage_content_writes_index_only_and_rejects_escaping_paths() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join("CHANGELOG.md"), "worktree dirty content\n").unwrap();
+		repo
+			.stage_content("CHANGELOG.md", b"staged exact content\n")
+			.unwrap();
+		assert_eq!(
+			fs::read_to_string(temp.path().join("CHANGELOG.md")).unwrap(),
+			"worktree dirty content\n"
+		);
+		assert_eq!(git(temp.path(), &["show", ":CHANGELOG.md"]), "staged exact content\n");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "AM CHANGELOG.md");
+		for path in ["", "/etc/passwd", "../outside", "a/../../b"] {
+			assert!(repo.stage_content(path, b"test").is_err(), "{path:?} must be rejected");
+		}
 	}
 
 	#[cfg(unix)]
@@ -2036,9 +2213,9 @@ mod tests {
 		let sha = repo
 			.commit_create("change", &CommitOptions::default())
 			.unwrap();
-		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), sha);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).trim(), sha);
 		// The commit must carry the staged content, not the stale base index.
-		assert_eq!(git(temp.path(), &["show", "HEAD:a"]), "changed");
+		assert_eq!(git(temp.path(), &["show", "HEAD:a"]).trim(), "changed");
 	}
 
 	#[cfg(unix)]
@@ -2050,7 +2227,7 @@ mod tests {
 		write_hook(&pre_commit, "echo 'policy says no' >&2\nexit 1", true);
 		fs::write(temp.path().join("a"), "blocked\n").unwrap();
 		repo.stage_files(&["a".into()]).unwrap();
-		let before = git(temp.path(), &["rev-parse", "HEAD"]);
+		let before = git(temp.path(), &["rev-parse", "HEAD"]).trim().to_owned();
 		let error = repo
 			.commit_create("blocked", &CommitOptions::default())
 			.unwrap_err();
@@ -2058,9 +2235,10 @@ mod tests {
 			&error,
 			Error::Cli { stderr, .. } if stderr.contains("policy says no")
 		));
-		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), before);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).trim(), before);
 
-		fs::remove_file(&pre_commit).unwrap();
+		// A pre-commit hook may rewrite the index; the commit carries its result.
+		write_hook(&pre_commit, "echo 'rewritten by hook' > a\ngit add a", true);
 		write_hook(
 			&hooks.join("commit-msg"),
 			"printf 'rewritten subject\\n\\nrewritten body\\n' > \"$1\"",
@@ -2070,9 +2248,11 @@ mod tests {
 			.commit_create("original", &CommitOptions::default())
 			.unwrap();
 		assert_eq!(
-			git(temp.path(), &["log", "-1", "--pretty=%B"]),
+			git(temp.path(), &["log", "-1", "--pretty=%B"]).trim(),
 			"rewritten subject\n\nrewritten body"
 		);
+		assert_eq!(git(temp.path(), &["show", "HEAD:a"]).trim(), "rewritten by hook");
+		fs::remove_file(&pre_commit).unwrap();
 
 		fs::write(temp.path().join("b"), "changed again\n").unwrap();
 		repo.stage_files(&["b".into()]).unwrap();
@@ -2110,16 +2290,16 @@ mod tests {
 		assert!(matches!(repo.checkout("other"), Err(Error::Conflict { .. })));
 		fs::write(temp.path().join("a"), "main\n").unwrap();
 		repo.checkout("other").unwrap();
-		assert_eq!(git(temp.path(), &["symbolic-ref", "--short", "HEAD"]), "other");
+		assert_eq!(git(temp.path(), &["symbolic-ref", "--short", "HEAD"]).trim(), "other");
 		repo.checkout("main").unwrap();
 		repo.reset(ResetMode::Soft, Some("HEAD^")).unwrap();
 		assert!(git(temp.path(), &["status", "--porcelain"]).starts_with("M  a"));
 		repo.reset(ResetMode::Hard, Some(&main)).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim(), "");
 		fs::write(temp.path().join("a"), "mixed\n").unwrap();
 		repo.stage_files(&["a".into()]).unwrap();
 		repo.reset(ResetMode::Mixed, Some("HEAD^")).unwrap();
-		assert_eq!(git(temp.path(), &["status", "--porcelain"]), " M a");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]).trim_end(), " M a");
 		repo.reset(ResetMode::Hard, Some(&main)).unwrap();
 		assert!(repo.delete_branch("other", true).unwrap());
 		assert!(!repo.delete_branch("missing", true).unwrap());
@@ -2153,7 +2333,7 @@ mod tests {
 		repo.read_tree("HEAD", Some(&alternate)).unwrap();
 		assert_eq!(
 			repo.write_tree(Some(&alternate)).unwrap(),
-			git(temp.path(), &["rev-parse", "HEAD^{tree}"])
+			git(temp.path(), &["rev-parse", "HEAD^{tree}"]).trim()
 		);
 	}
 
@@ -2360,16 +2540,7 @@ mod tests {
 		use std::os::unix::fs::PermissionsExt;
 
 		let (temp, repo) = fixture();
-		let linked = temp.path().join("../linked-unreadable-index");
-		let _ = fs::remove_dir_all(&linked);
-		repo
-			.worktree_add(&linked, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
-			})
-			.unwrap();
-		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();
+		let (linked, common) = add_detached_worktree(&repo, temp.path(), "linked-unreadable-index");
 		let linked_repo = GitRepo::require(&linked).unwrap();
 		let index_path = linked_repo.info().git_dir.join("index");
 		let original_mode = fs::metadata(&index_path).unwrap().permissions().mode();
@@ -2389,10 +2560,7 @@ mod tests {
 
 	#[test]
 	fn clone_first_worktree_reconciles_source_state_to_target_tree() {
-		let (temp, repo) = fixture();
-		fs::write(temp.path().join(".gitignore"), "build/\n").unwrap();
-		git(temp.path(), &["add", ".gitignore"]);
-		git(temp.path(), &["commit", "-qm", "ignore build"]);
+		let (temp, repo) = fixture_ignoring_build();
 		git(temp.path(), &["checkout", "-qb", "target"]);
 		fs::write(temp.path().join("a"), "target\n").unwrap();
 		fs::remove_file(temp.path().join("b")).unwrap();
@@ -2496,17 +2664,14 @@ mod tests {
 			);
 		}
 		assert_eq!(git(&linked, &["rev-parse", "HEAD"]), git(temp.path(), &["rev-parse", "HEAD"]));
-		assert_eq!(git(&linked, &["status", "--porcelain"]), "");
+		assert_eq!(git(&linked, &["status", "--porcelain"]).trim(), "");
 		let _ = repo.worktree_remove(&linked, true);
 	}
 
 	#[test]
 	fn worktree_add_keep_changes_carries_dirty_state_on_both_paths() {
 		for clone in [WorktreeClone::Auto, WorktreeClone::Off] {
-			let (temp, repo) = fixture();
-			fs::write(temp.path().join(".gitignore"), "build/\n").unwrap();
-			git(temp.path(), &["add", ".gitignore"]);
-			git(temp.path(), &["commit", "-qm", "ignore build"]);
+			let (temp, repo) = fixture_ignoring_build();
 			fs::write(temp.path().join("a"), "staged\n").unwrap();
 			git(temp.path(), &["add", "a"]);
 			fs::write(temp.path().join("a"), "staged then edited\n").unwrap();
@@ -2544,7 +2709,7 @@ mod tests {
 				"linked worktree must report the same staged/unstaged/untracked set"
 			);
 			assert_eq!(git(&linked, &["rev-parse", "HEAD"]), git(temp.path(), &["rev-parse", "HEAD"]));
-			assert_eq!(git(&linked, &["symbolic-ref", "HEAD"]), "refs/heads/kept");
+			assert_eq!(git(&linked, &["symbolic-ref", "HEAD"]).trim(), "refs/heads/kept");
 			// The source keeps its own dirty state untouched.
 			assert_eq!(fs::read_to_string(temp.path().join("a")).unwrap(), "staged then edited\n");
 
@@ -2561,31 +2726,14 @@ mod tests {
 	#[test]
 	fn mutate_worktree_and_detach() {
 		let (temp, repo) = fixture();
-		let linked = temp.path().join("../linked-mut");
-		let _ = fs::remove_dir_all(&linked);
-		repo
-			.worktree_add(&linked, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
-			})
-			.unwrap();
+		let (linked, _) = add_detached_worktree(&repo, temp.path(), "linked-mut");
 		assert!(
 			git(temp.path(), &["worktree", "list", "--porcelain"])
 				.contains(linked.to_string_lossy().as_ref())
 		);
 		assert!(repo.worktree_remove(&linked, true).unwrap());
 
-		let linked = temp.path().join("../linked-detach");
-		let _ = fs::remove_dir_all(&linked);
-		repo
-			.worktree_add(&linked, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
-			})
-			.unwrap();
-		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();
+		let (linked, common) = add_detached_worktree(&repo, temp.path(), "linked-detach");
 		let source_head = git(temp.path(), &["rev-parse", "HEAD"]);
 		assert_eq!(detach_git_dir(&linked, &common).unwrap(), DetachGitDirResult::Detached);
 		let alternates = fs::read_to_string(linked.join(".git/objects/info/alternates")).unwrap();

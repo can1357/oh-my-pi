@@ -503,8 +503,15 @@ export declare class VcsGitRepo {
   unstage(files: Array<string>, signal?: unknown | undefined | null): Promise<undefined>
   /** Stage selected hunks. */
   stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /**
+   * Stage exact content directly into the index for a path without touching
+   * the worktree.
+   */
+  stageContent(path: string, content: string | Buffer, signal?: unknown | undefined | null): Promise<undefined>
   /** Create commit. */
   commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Atomic split commit from staged hunks; never writes index/worktree. */
+  commitSplit(options: VcsSplitCommitOptions, signal?: unknown | undefined | null): Promise<Array<string>>
   /** Checkout revision. */
   checkout(rev: string, signal?: unknown | undefined | null): Promise<undefined>
   /** Create branch. */
@@ -2861,6 +2868,21 @@ export interface VcsRestoreOptions {
 export interface VcsShowResult {
   data: Buffer
   truncated: boolean
+}
+
+/** Options for an atomic split commit. */
+export interface VcsSplitCommitOptions {
+  commits: Array<VcsSplitCommitSpec>
+  stagedDiff: string
+}
+
+/**
+ * One commit in an atomic split: its final message and the staged hunks it
+ * takes.
+ */
+export interface VcsSplitCommitSpec {
+  message: string
+  selections: Array<VcsHunkSelection>
 }
 
 /** Status query options. */

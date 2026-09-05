@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+- Added `commitSplit`: builds a chain of commits from staged hunk selections and advances HEAD once; the index and worktree are never rewritten. `pre-commit`/`post-commit` run once for the chain, `commit-msg` runs per commit, and a `pre-commit` hook that modifies the index aborts the split.
+- Added `stageContent`: stage exact bytes for a path without touching the worktree.
+
+### Changed
+- `applyPatch`/`canApplyPatch`/`stageHunks` locate hunks like `git apply`: a hunk still applies after earlier hunks shifted line numbers, a hunk with no trailing context must match at end of file, a hunk starting at line 1 must match at the start, and a hunk may not overlap lines a previous hunk wrote. Zero-context (`-U0`) patches behave as with `git apply` without `--unidiff-zero`.
+
+### Fixed
+- `stageFiles` now runs the filter pipeline, so `.gitattributes`/`autocrlf` normalization matches `git add`.
+- Concurrent `git` invocations no longer clobber staged changes while native staging or patch application writes the index.
+- `commitCreate`/`commitSplit`/`writeTree` skip intent-to-add (`git add -N`) index entries like `git write-tree`, so an unrelated promised path no longer rejects every split plan as not covering the staged tree.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

@@ -20,10 +20,19 @@ use gix::{
 	refs::transaction::PreviousValue,
 };
 
-use super::{GitRepo, mutate::update_reference, open::load_index_or_head};
+use super::{
+	GitRepo,
+	mutate::{
+		INDEX_WRITE, advance_head, lock_index, repo_identity, run_commit_hook, update_reference,
+		write_commit_object, write_index_tree,
+	},
+	open::load_index_or_head,
+};
 use crate::{
 	error::{Error, Result},
-	types::{ApplyOptions, DiffOptions, HunkSelection, HunkSelectionError, HunkSpec},
+	types::{
+		ApplyOptions, DiffOptions, HunkSelection, HunkSelectionError, HunkSpec, SplitCommitOptions,
+	},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +59,6 @@ struct FilePatch {
 	new_oid:  Option<String>,
 	hunks:    Vec<Hunk>,
 	binary:   Vec<BinaryBlock>,
-	raw:      String,
 }
 
 #[derive(Clone, Debug)]
@@ -60,7 +68,6 @@ struct Hunk {
 	new_start: usize,
 	new_count: usize,
 	lines:     Vec<HunkLine>,
-	raw:       String,
 }
 
 #[derive(Clone, Debug)]
@@ -106,21 +113,22 @@ impl GitRepo {
 		}
 		let patches = parse_patch(patch_text).map_err(ApplyFailure::into_error)?;
 		let repo = self.gix()?;
-		let mut state = if options.cached {
-			index_map_at(&repo, options.index_path.as_deref())?
-		} else {
-			worktree_map(self, &repo)?
-		};
-		if !options.cached {
-			augment_patch_sources(self, &repo, &mut state, &patches, options.reverse)?;
+		let lock = options
+			.cached
+			.then(|| {
+				let path = options
+					.index_path
+					.as_deref()
+					.map_or_else(|| repo.index_path(), Path::to_owned);
+				lock_index(&path, "git write index lock")
+			})
+			.transpose()?;
+		let mut state = patch_target_map(self, &repo, &patches, options)?;
+		apply_patches_to_map(&repo, &mut state, &patches, options.reverse, options.three_way)?;
+		match lock {
+			Some(lock) => write_index_map_locked(&repo, &state, lock),
+			None => write_patch_worktree(self, &patches, options.reverse, &state),
 		}
-		apply_patches_to_map(&repo, &mut state, &patches, options)?;
-		if options.cached {
-			write_index_map_at(&repo, &state, options.index_path.as_deref())?;
-		} else {
-			write_patch_worktree(self, &patches, options.reverse, &state)?;
-		}
-		Ok(())
 	}
 
 	/// Check whether a patch applies without changing the index or worktree.
@@ -132,15 +140,8 @@ impl GitRepo {
 			return Ok(false);
 		};
 		let repo = self.gix()?.with_object_memory();
-		let mut state = if options.cached {
-			index_map_at(&repo, options.index_path.as_deref())?
-		} else {
-			worktree_map(self, &repo)?
-		};
-		if !options.cached {
-			augment_patch_sources(self, &repo, &mut state, &patches, options.reverse)?;
-		}
-		match apply_patches_to_map(&repo, &mut state, &patches, options) {
+		let mut state = patch_target_map(self, &repo, &patches, options)?;
+		match apply_patches_to_map(&repo, &mut state, &patches, options.reverse, options.three_way) {
 			Ok(()) => Ok(true),
 			Err(Error::PatchFailed { .. } | Error::Conflict { .. }) => Ok(false),
 			Err(err) => Err(err),
@@ -152,6 +153,7 @@ impl GitRepo {
 		if selections.is_empty() {
 			return Ok(());
 		}
+		let repo = self.gix()?;
 		let owned;
 		let raw_diff = if let Some(raw_diff) = raw_diff {
 			raw_diff
@@ -159,56 +161,123 @@ impl GitRepo {
 			owned = self.diff_text(&DiffOptions::default())?;
 			&owned
 		};
-		let files = parse_patch(raw_diff).map_err(ApplyFailure::into_error)?;
-		let mut by_path = BTreeMap::new();
-		for file in &files {
-			if let Some(path) = file.new_path.as_ref().or(file.old_path.as_ref()) {
-				by_path.insert(path.as_str(), file);
+		let parsed_patches = parse_patch(raw_diff).map_err(ApplyFailure::into_error)?;
+		let patches = select_file_patches(&parsed_patches, selections)?;
+		let lock = lock_index(&repo.index_path(), "git write index lock")?;
+		let mut state = index_map_at(&repo, None)?;
+		apply_patches_to_map(&repo, &mut state, &patches, false, false)?;
+		write_index_map_locked(&repo, &state, lock)
+	}
+
+	/// Creates an atomic sequence of commits without writing the index or
+	/// worktree. HEAD advances once or not at all. Hooks `pre-commit` and
+	/// `post-commit` run once for the chain, while `commit-msg` runs per
+	/// commit. If `pre-commit` modifies the index, the split fails.
+	pub fn commit_split(&self, options: &SplitCommitOptions) -> Result<Vec<String>> {
+		let repo = self.gix()?;
+
+		// Index lock is held only as a mutex during planning and dropped before hooks.
+		let lock = lock_index(&repo.index_path(), "git commit split lock")?;
+		let index = load_index_or_head(&repo, "git commit split")?;
+		let index_tree = write_index_tree(&repo, &index)?;
+
+		let mut head = repo
+			.head()
+			.map_err(|err| Error::backend("git commit split", err))?;
+		let old_commit = head
+			.try_peel_to_id()
+			.map_err(|err| Error::backend("git commit split", err))?
+			.map(|id| id.detach());
+
+		let (head_tree_id, mut map) = match old_commit {
+			Some(commit_id) => {
+				let commit = repo
+					.find_object(commit_id)
+					.map_err(|err| Error::backend("git commit split", err))?
+					.peel_to_commit()
+					.map_err(|err| Error::backend("git commit split", err))?;
+				let tree_id = commit
+					.tree_id()
+					.map_err(|err| Error::backend("git commit split", err))?
+					.detach();
+				let map = tree_map(&repo, tree_id)?;
+				(tree_id, map)
+			},
+			None => (repo.empty_tree().id().detach(), BTreeMap::new()),
+		};
+
+		let parsed_patches = parse_patch(&options.staged_diff).map_err(ApplyFailure::into_error)?;
+		let mut trees = Vec::with_capacity(options.commits.len());
+		let mut prev_tree = head_tree_id;
+		for (i, spec) in options.commits.iter().enumerate() {
+			if !spec.selections.is_empty() {
+				let patches = select_file_patches(&parsed_patches, &spec.selections)?;
+				apply_patches_to_map(&repo, &mut map, &patches, false, false)?;
 			}
+			let tree_i = write_tree_map(&repo, &map)?;
+			if tree_i == prev_tree {
+				return Err(Error::backend(
+					"git commit split",
+					format!("commit {} would be empty", i + 1),
+				));
+			}
+			prev_tree = tree_i;
+			trees.push(tree_i);
 		}
-		let mut parts = Vec::with_capacity(selections.len());
-		for selection in selections {
-			let Some(file) = by_path.get(selection.path.as_str()) else {
-				return Err(Error::PatchFailed {
-					message: format!("No diff found for {}", selection.path),
-				});
-			};
-			if !file.binary.is_empty() {
-				if !matches!(selection.hunks, HunkSpec::All) {
-					return Err(Error::PatchFailed {
-						message: format!("Cannot select hunks for binary file {}", selection.path),
-					});
-				}
-				parts.push(file.raw.clone());
-				continue;
-			}
-			if matches!(selection.hunks, HunkSpec::All) {
-				parts.push(file.raw.clone());
-				continue;
-			}
-			let selected = select_hunks(file, &selection.hunks);
-			if selected.is_empty() {
-				return Err(Error::PatchFailed {
-					message: format!("No hunks selected for {}", selection.path),
-				});
-			}
-			let header = extract_file_header(&file.raw);
-			let mut part = header.to_owned();
-			for hunk in selected {
-				if !part.ends_with('\n') {
-					part.push('\n');
-				}
-				part.push_str(&hunk.raw);
-			}
-			parts.push(part);
+
+		let last_tree = trees
+			.last()
+			.copied()
+			.ok_or_else(|| Error::backend("git commit split", "split plan is empty"))?;
+		if last_tree != index_tree {
+			return Err(Error::backend(
+				"git commit split",
+				format!(
+					"split plan does not cover the staged tree (planned {last_tree}, staged \
+					 {index_tree})"
+				),
+			));
 		}
-		let patch = join_patches(&parts);
-		self.apply_patch(&patch, &ApplyOptions {
-			cached:     true,
-			index_path: None,
-			reverse:    false,
-			three_way:  false,
-		})
+
+		drop(lock);
+
+		run_commit_hook(self, &repo, "pre-commit", &[])?;
+
+		// Commits were built from the pre-hook tree.
+		let post_hook_index = load_index_or_head(&repo, "git commit split")?;
+		let post_hook_tree = write_index_tree(&repo, &post_hook_index)?;
+		if post_hook_tree != index_tree {
+			return Err(Error::backend(
+				"git commit split",
+				"pre-commit hook modified the index; split commits are built from the pre-hook staged \
+				 tree and cannot honor hook edits — commit without splitting or disable the hook",
+			));
+		}
+
+		let (committer, author) = repo_identity(&repo, "git commit split")?;
+		let mut prev_commit = old_commit;
+		let mut commit_ids = Vec::with_capacity(trees.len());
+		for (spec, tree_i) in options.commits.iter().zip(trees) {
+			let parents: Vec<gix::hash::ObjectId> = prev_commit.into_iter().collect();
+			let id = write_commit_object(
+				self,
+				&repo,
+				"git commit split",
+				&spec.message,
+				tree_i,
+				parents,
+				author,
+				committer,
+			)?;
+			prev_commit = Some(id);
+			commit_ids.push(id.to_hex().to_string());
+		}
+
+		let last_commit_id = prev_commit.expect("at least one commit in split");
+		advance_head(&repo, "git commit split", old_commit, last_commit_id, "commit (split)")?;
+		let _ = run_commit_hook(self, &repo, "post-commit", &[]);
+
+		Ok(commit_ids)
 	}
 
 	/// Cherry-pick one commit with a fail-clean three-way tree merge.
@@ -515,7 +584,6 @@ fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
 		new_oid:  None,
 		hunks:    Vec::new(),
 		binary:   Vec::new(),
-		raw:      raw.to_owned(),
 	};
 	let mut index = 1;
 	while index < lines.len() {
@@ -626,7 +694,6 @@ fn parse_hunk(lines: &[&str], start: usize) -> std::result::Result<(Hunk, usize)
 	let header = lines[start].trim_end_matches('\n');
 	let (old_start, old_count, new_start, new_count) = parse_hunk_header(header)?;
 	let mut body: Vec<HunkLine> = Vec::new();
-	let mut raw = String::from(lines[start]);
 	let mut index = start + 1;
 	while index < lines.len() {
 		let line = lines[index];
@@ -640,14 +707,12 @@ fn parse_hunk(lines: &[&str], start: usize) -> std::result::Result<(Hunk, usize)
 					return Err(ApplyFailure::Invalid("orphan no-newline marker".into()));
 				};
 				previous.no_newline = true;
-				raw.push_str(line);
 				index += 1;
 				continue;
 			}
 			break;
 		};
 		body.push(HunkLine { kind, data: bare.as_bytes()[1..].to_vec(), no_newline: false });
-		raw.push_str(line);
 		index += 1;
 	}
 	let actual_old = body.iter().filter(|line| line.kind != b'+').count();
@@ -655,7 +720,7 @@ fn parse_hunk(lines: &[&str], start: usize) -> std::result::Result<(Hunk, usize)
 	if actual_old != old_count || actual_new != new_count {
 		return Err(ApplyFailure::Invalid(format!("hunk count mismatch in {header}")));
 	}
-	Ok((Hunk { old_start, old_count, new_start, new_count, lines: body, raw }, index))
+	Ok((Hunk { old_start, old_count, new_start, new_count, lines: body }, index))
 }
 
 fn parse_hunk_header(
@@ -719,19 +784,61 @@ fn select_hunks<'a>(file: &'a FilePatch, spec: &HunkSpec) -> Vec<&'a Hunk> {
 	}
 }
 
-fn extract_file_header(raw: &str) -> &str {
-	raw.find("\n@@").map_or(raw, |position| &raw[..=position])
+fn select_file_patches(
+	files: &[FilePatch],
+	selections: &[HunkSelection],
+) -> Result<Vec<FilePatch>> {
+	let mut by_path = BTreeMap::new();
+	for file in files {
+		if let Some(path) = file.new_path.as_ref().or(file.old_path.as_ref()) {
+			by_path.insert(path.as_str(), file);
+		}
+	}
+	let mut patches = Vec::with_capacity(selections.len());
+	for selection in selections {
+		let Some(file) = by_path.get(selection.path.as_str()) else {
+			return Err(Error::PatchFailed {
+				message: format!("No diff found for {}", selection.path),
+			});
+		};
+		if matches!(selection.hunks, HunkSpec::All) {
+			patches.push((*file).clone());
+			continue;
+		}
+		if !file.binary.is_empty() {
+			return Err(Error::PatchFailed {
+				message: format!("Cannot select hunks for binary file {}", selection.path),
+			});
+		}
+		let selected = select_hunks(file, &selection.hunks);
+		if selected.is_empty() {
+			return Err(Error::PatchFailed {
+				message: format!("No hunks selected for {}", selection.path),
+			});
+		}
+		patches.push(FilePatch {
+			old_path: file.old_path.clone(),
+			new_path: file.new_path.clone(),
+			old_mode: file.old_mode,
+			new_mode: file.new_mode,
+			old_oid:  file.old_oid.clone(),
+			new_oid:  file.new_oid.clone(),
+			hunks:    selected.into_iter().cloned().collect(),
+			binary:   file.binary.clone(),
+		});
+	}
+	Ok(patches)
 }
 
 fn apply_patches_to_map(
 	repo: &gix::Repository,
 	state: &mut BTreeMap<String, FileEntry>,
 	patches: &[FilePatch],
-	options: &ApplyOptions,
+	reverse: bool,
+	three_way: bool,
 ) -> Result<()> {
 	for patch in patches {
-		let (source_path, target_path, source_mode, target_mode) =
-			patch_sides(patch, options.reverse);
+		let (source_path, target_path, source_mode, target_mode) = patch_sides(patch, reverse);
 		// A create patch may land on an intent-to-add entry: git treats the
 		// promised path as absent and stages the real content over it.
 		if source_path.is_none()
@@ -758,11 +865,11 @@ fn apply_patches_to_map(
 			Some(entry) => blob_bytes(repo, entry.id)?,
 			None => Vec::new(),
 		};
-		let direct = apply_file_bytes(patch, &source_bytes, options.reverse);
+		let direct = apply_file_bytes(patch, &source_bytes, reverse);
 		let bytes = match direct {
 			Ok(bytes) => bytes,
-			Err(ApplyFailure::Context(_)) if options.three_way => {
-				merge_patch_bytes(repo, patch, source.as_ref(), options.reverse)?
+			Err(ApplyFailure::Context(_)) if three_way => {
+				merge_patch_bytes(repo, patch, source.as_ref(), reverse)?
 			},
 			Err(err) => return Err(err.into_error()),
 		};
@@ -816,29 +923,76 @@ fn apply_file_bytes(
 		return Ok(source.to_vec());
 	}
 	let mut lines = split_lines(source);
-	let mut offset: isize = 0;
+	// No hunk may match into lines a previous hunk wrote (git without
+	// --allow-overlap).
+	let mut floor: usize = 0;
 	for hunk in &patch.hunks {
-		let (start, count, replacement, expected) = hunk_sides(hunk, reverse);
-		let position = if count == 0 {
-			start as isize
-		} else {
-			start.saturating_sub(1) as isize
-		} + offset;
-		if position < 0 {
-			return Err(ApplyFailure::Context("hunk position precedes file".into()));
-		}
-		let position = position as usize;
-		if position.saturating_add(expected.len()) > lines.len()
-			|| lines[position..position + expected.len()] != expected
-		{
+		let (start, anchor, replacement, expected) = hunk_sides(hunk, reverse);
+		let position = locate_hunk(
+			&lines,
+			&expected,
+			floor,
+			anchor,
+			start <= 1,
+			!matches!(hunk.lines.last(), Some(line) if line.kind == b' '),
+		);
+		let Some(position) = position else {
 			return Err(ApplyFailure::Context(format!("hunk at line {start} does not apply")));
-		}
-		lines.splice(position..position + expected.len(), replacement.clone());
-		offset += replacement.len() as isize - expected.len() as isize;
+		};
+		floor = position + replacement.len();
+		lines.splice(position..position + expected.len(), replacement);
 	}
 	Ok(lines.concat())
 }
 
+/// Find where `expected` occurs in `lines` at or after `floor`, trying
+/// `preferred` first then fanning out forward before backward, mirroring `git
+/// apply`'s `find_pos`.
+fn locate_hunk(
+	lines: &[Vec<u8>],
+	expected: &[Vec<u8>],
+	floor: usize,
+	preferred: usize,
+	match_beginning: bool,
+	match_end: bool,
+) -> Option<usize> {
+	let last = lines.len().checked_sub(expected.len())?;
+	if last < floor {
+		return None;
+	}
+	let matches_at = |position: usize| {
+		position >= floor && lines[position..position + expected.len()] == *expected
+	};
+	if match_beginning || match_end {
+		let pinned = match (match_beginning, match_end) {
+			(true, true) if last != 0 => return None,
+			(true, _) => 0,
+			(false, _) => last,
+		};
+		return matches_at(pinned).then_some(pinned);
+	}
+	let preferred = preferred.clamp(floor, last);
+	if matches_at(preferred) {
+		return Some(preferred);
+	}
+	for distance in 1..=last - floor {
+		let after = preferred + distance;
+		if after <= last && matches_at(after) {
+			return Some(after);
+		}
+		if let Some(before) = preferred.checked_sub(distance)
+			&& matches_at(before)
+		{
+			return Some(before);
+		}
+	}
+	None
+}
+
+/// Oriented hunk sides for application: returns `(start, anchor, replacement,
+/// expected)`. `start` is the 1-based preimage line (`oldpos` in git), `anchor`
+/// the 0-based search start, `replacement` the postimage to splice in, and
+/// `expected` the preimage to find.
 fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Vec<u8>>, Vec<Vec<u8>>) {
 	let mut old = Vec::new();
 	let mut new = Vec::new();
@@ -854,10 +1008,19 @@ fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Vec<u8>>, Vec<Ve
 			new.push(content);
 		}
 	}
+	// A zero-count range names the line before the hunk, so it is already the
+	// 0-based index.
+	let anchor = |start: usize, count: usize| {
+		if count == 0 {
+			start
+		} else {
+			start.saturating_sub(1)
+		}
+	};
 	if reverse {
-		(hunk.new_start, hunk.new_count, old, new)
+		(hunk.new_start, anchor(hunk.old_start, hunk.old_count), old, new)
 	} else {
-		(hunk.old_start, hunk.old_count, new, old)
+		(hunk.old_start, anchor(hunk.new_start, hunk.new_count), new, old)
 	}
 }
 
@@ -1244,10 +1407,6 @@ fn tree_map(repo: &gix::Repository, tree: gix::ObjectId) -> Result<BTreeMap<Stri
 	Ok(map)
 }
 
-fn worktree_map(repo: &GitRepo, gix_repo: &gix::Repository) -> Result<BTreeMap<String, FileEntry>> {
-	let index = index_map(gix_repo)?;
-	tracked_worktree_map(repo, gix_repo, &index)
-}
 fn augment_patch_sources(
 	repo: &GitRepo,
 	gix_repo: &gix::Repository,
@@ -1278,6 +1437,23 @@ fn augment_patch_sources(
 		}
 	}
 	Ok(())
+}
+
+fn patch_target_map(
+	repo_handle: &GitRepo,
+	repo: &gix::Repository,
+	patches: &[FilePatch],
+	options: &ApplyOptions,
+) -> Result<BTreeMap<String, FileEntry>> {
+	let mut state = if options.cached {
+		index_map_at(repo, options.index_path.as_deref())?
+	} else {
+		tracked_worktree_map(repo_handle, repo, &index_map(repo)?)?
+	};
+	if !options.cached {
+		augment_patch_sources(repo_handle, repo, &mut state, patches, options.reverse)?;
+	}
+	Ok(state)
 }
 
 fn tracked_worktree_map(
@@ -1346,20 +1522,12 @@ fn untracked_worktree_map(
 }
 
 fn read_worktree_entry(path: &Path, index_mode: Mode) -> Result<Option<(Vec<u8>, Mode)>> {
-	let metadata = match fs::symlink_metadata(path) {
-		Ok(metadata) => metadata,
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-		Err(err) => return Err(err.into()),
+	let Some(metadata) = super::diff::symlink_metadata_opt(path)? else {
+		return Ok(None);
 	};
 	if metadata.file_type().is_symlink() {
 		let target = fs::read_link(path)?;
-		#[cfg(unix)]
-		let bytes = {
-			use std::os::unix::ffi::OsStrExt;
-			target.as_os_str().as_bytes().to_vec()
-		};
-		#[cfg(not(unix))]
-		let bytes = target.to_string_lossy().as_bytes().to_vec();
+		let bytes = super::diff::os_path_bytes(&target);
 		return Ok(Some((bytes, Mode::SYMLINK)));
 	}
 	if !metadata.is_file() {
@@ -1385,19 +1553,18 @@ fn worktree_file_mode(_metadata: &fs::Metadata, index_mode: Mode) -> Mode {
 }
 
 fn write_index_map(repo: &gix::Repository, map: &BTreeMap<String, FileEntry>) -> Result<()> {
-	write_index_map_at(repo, map, None)
+	write_index_map_locked(repo, map, lock_index(&repo.index_path(), "git write index lock")?)
 }
 
-fn write_index_map_at(
+/// Write `map` as the index file guarded by `lock`, then commit the lock.
+fn write_index_map_locked(
 	repo: &gix::Repository,
 	map: &BTreeMap<String, FileEntry>,
-	index_path: Option<&Path>,
+	mut lock: gix::lock::File,
 ) -> Result<()> {
 	let mut state = gix::index::State::new(repo.object_hash());
-	for (path, entry) in map {
-		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-		// INTENT_TO_ADD lives in the extended flag word; losing it here would
-		// silently stage promised paths as empty files.
+	for (p, entry) in map {
+		validate_repo_path(p).map_err(ApplyFailure::into_error)?;
 		let flags = if entry.intent_to_add {
 			Flags::EXTENDED | Flags::INTENT_TO_ADD
 		} else {
@@ -1408,18 +1575,19 @@ fn write_index_map_at(
 			entry.id,
 			flags,
 			entry.mode,
-			BStr::new(path.as_bytes()),
+			BStr::new(p.as_bytes()),
 		);
 	}
 	state.sort_entries();
-	let mut index = gix::index::File::from_state(
-		state,
-		index_path.map_or_else(|| repo.index_path(), Path::to_owned),
-	);
+	let mut index = gix::index::File::from_state(state, lock.resource_path());
 	index.remove_tree();
 	index
-		.write(gix::index::write::Options::default())
-		.map_err(|err| Error::backend("git write index", err))
+		.write_to(&mut lock, INDEX_WRITE)
+		.map_err(|err| Error::backend("git write index", err))?;
+	lock
+		.commit()
+		.map_err(|err| Error::backend("git write index", err))?;
+	Ok(())
 }
 
 fn write_tree_map(
@@ -1567,47 +1735,17 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 }
 #[cfg(test)]
 mod tests {
-	use std::process::Command;
-
 	use tempfile::TempDir;
 
 	use super::*;
-
-	fn git(cwd: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.current_dir(cwd)
-			.args(args)
-			.output()
-			.expect("run git");
-		assert!(
-			output.status.success(),
-			"git {} failed: {}",
-			args.join(" "),
-			String::from_utf8_lossy(&output.stderr)
-		);
-		String::from_utf8(output.stdout).expect("git output is UTF-8")
-	}
-	fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.current_dir(cwd)
-			.env("GIT_INDEX_FILE", index)
-			.args(args)
-			.output()
-			.expect("run git with alternate index");
-		assert!(
-			output.status.success(),
-			"git {} failed: {}",
-			args.join(" "),
-			String::from_utf8_lossy(&output.stderr)
-		);
-		String::from_utf8(output.stdout).expect("git output is UTF-8")
-	}
+	use crate::{
+		test_support::{git, git_expecting, git_with_index, init_repo},
+		types::SplitCommitSpec,
+	};
 
 	fn init(files: &[(&str, &[u8])]) -> TempDir {
 		let temp = tempfile::tempdir().expect("tempdir");
-		git(temp.path(), &["init", "-q"]);
-		git(temp.path(), &["config", "user.name", "Patch Test"]);
-		git(temp.path(), &["config", "user.email", "patch@example.com"]);
+		init_repo(temp.path());
 		for (path, bytes) in files {
 			let absolute = temp.path().join(path);
 			if let Some(parent) = absolute.parent() {
@@ -1813,17 +1951,18 @@ mod tests {
 	}
 
 	#[test]
-	fn patch_stage_hunks_selects_indices_and_lines() {
+	fn patch_stage_hunks_selects_indices_and_applies_stale_diff() {
 		let original = (1..=20).fold(String::new(), |mut out, line| {
 			use std::fmt::Write as _;
 			let _ = writeln!(out, "line {line}");
 			out
 		});
 		let temp = init(&[("file.txt", original.as_bytes())]);
+		// Hunk 1 grows the file by two lines; hunk 2 keeps its HEAD numbering.
 		let changed = original
-			.replace("line 2\n", "LINE TWO\n")
+			.replace("line 2\n", "LINE TWO\nLINE TWO B\nLINE TWO C\n")
 			.replace("line 18\n", "LINE EIGHTEEN\n");
-		fs::write(temp.path().join("file.txt"), changed).expect("edit");
+		fs::write(temp.path().join("file.txt"), &changed).expect("edit");
 		let diff = git(temp.path(), &["diff", "--unified=1"]);
 		let repository = repo(temp.path());
 		repository
@@ -1833,10 +1972,290 @@ mod tests {
 			)
 			.expect("stage first hunk");
 		let staged = git(temp.path(), &["show", ":file.txt"]);
-		assert!(staged.contains("LINE TWO"));
+		assert!(staged.contains("LINE TWO C"));
 		assert!(staged.contains("line 18"));
 		assert!(!staged.contains("LINE EIGHTEEN"));
+
+		// Same diff, second hunk: the index already carries hunk 1, so hunk 2's
+		// context sits two lines below where the diff says. git apply tolerates
+		// this drift; so must we.
+		repository
+			.stage_hunks(
+				&[HunkSelection { path: "file.txt".into(), hunks: HunkSpec::Indices(vec![2]) }],
+				Some(&diff),
+			)
+			.expect("stage second hunk from stale diff");
+		assert_eq!(git(temp.path(), &["show", ":file.txt"]), changed);
+
+		// Repeated blocks: hunk 2 targets the SECOND `X Y W`. Once hunk 1 is in
+		// the index, the first block sits exactly where hunk 2's HEAD numbering
+		// points. Anchoring on the postimage line (as git does) lands on the
+		// right block; searching from the preimage line would patch the wrong one.
+		let temp = init(&[("dup.txt", b"a\nb\nX\nY\nW\nc\nX\nY\nW\nd\n")]);
+		let wanted = "a\np\nq\nr\nb\nX\nY\nW\nc\nX\nZ\nW\nd\n";
+		fs::write(temp.path().join("dup.txt"), wanted).expect("edit");
+		let diff = git(temp.path(), &["diff", "--unified=1"]);
+		let repository = repo(temp.path());
+		for hunk in 1..=2 {
+			repository
+				.stage_hunks(
+					&[HunkSelection { path: "dup.txt".into(), hunks: HunkSpec::Indices(vec![hunk]) }],
+					Some(&diff),
+				)
+				.expect("stage hunk from stale diff");
+		}
+		assert_eq!(git(temp.path(), &["show", ":dup.txt"]), wanted);
 	}
+
+	#[test]
+	fn patch_apply_rejects_overlap_and_eof_pinned_drift() {
+		// A later hunk may not match into lines an earlier hunk just wrote
+		// (git rejects this without `--allow-overlap`): hunk 2's context would
+		// only be found inside hunk 1's replacement.
+		let overlap = concat!(
+			"--- a/o.txt\n",
+			"+++ b/o.txt\n",
+			"@@ -1,2 +1,4 @@\n",
+			" k\n",
+			"-v\n",
+			"+m\n",
+			"+n\n",
+			"+v\n",
+			"@@ -4,3 +6,3 @@\n",
+			" n\n",
+			"-v\n",
+			"+w\n",
+			" q\n",
+		);
+		let temp = init(&[("o.txt", b"k\nv\nq\nr\ns\n")]);
+		let patch_file = temp.path().join("o.patch");
+		fs::write(&patch_file, overlap).expect("write patch");
+		git_expecting(temp.path(), &["apply", "--check", patch_file.to_str().unwrap()], 1);
+		let ours = repo(temp.path())
+			.can_apply_patch(overlap, &ApplyOptions::default())
+			.expect("check");
+		assert!(!ours, "hunk must not match inside a previous hunk's replacement");
+
+		// Drift search must not rescue a hunk git rejects: one with no trailing
+		// context is pinned to EOF, even when its context still matches mid-file.
+		let temp = init(&[("tail.txt", b"a\nb\nc\nd\ne\n")]);
+		fs::write(temp.path().join("tail.txt"), b"a\nb\nc\nd\ne\nf\n").expect("append");
+		let tail_diff = git(temp.path(), &["diff"]);
+		fs::write(temp.path().join("tail.txt"), b"a\nb\nc\nd\ne\nx\ny\nz\n").expect("grow");
+		git(temp.path(), &["add", "tail.txt"]);
+		let patch_file = temp.path().join("tail.patch");
+		fs::write(&patch_file, &tail_diff).expect("write patch");
+		git_expecting(
+			temp.path(),
+			&["apply", "--check", "--cached", patch_file.to_str().unwrap()],
+			1,
+		);
+		let repository = repo(temp.path());
+		let ours = repository
+			.can_apply_patch(&tail_diff, &ApplyOptions { cached: true, ..ApplyOptions::default() })
+			.expect("check");
+		assert!(!ours, "EOF-pinned hunk must not apply once the file grew");
+
+		// Zero-context insertions follow git without `--unidiff-zero`: into an
+		// empty file they apply; at the top of a nonempty file both pins
+		// (beginning and end) conflict and git rejects them.
+		let temp = init(&[("empty.txt", b""), ("full.txt", b"a\nb\n")]);
+		fs::write(temp.path().join("empty.txt"), b"x\n").expect("fill");
+		fs::write(temp.path().join("full.txt"), b"x\na\nb\n").expect("prepend");
+		let empty_diff = git(temp.path(), &["diff", "-U0", "--", "empty.txt"]);
+		let full_diff = git(temp.path(), &["diff", "-U0", "--", "full.txt"]);
+		git(temp.path(), &["checkout", "--", "."]);
+		let repository = repo(temp.path());
+		repository
+			.apply_patch(&empty_diff, &ApplyOptions::default())
+			.expect("insert into empty file");
+		assert_eq!(fs::read(temp.path().join("empty.txt")).expect("read"), b"x\n");
+		let patch_file = temp.path().join("full.patch");
+		fs::write(&patch_file, &full_diff).expect("write patch");
+		git_expecting(temp.path(), &["apply", "--check", patch_file.to_str().unwrap()], 1);
+		assert!(
+			!repository
+				.can_apply_patch(&full_diff, &ApplyOptions::default())
+				.expect("check"),
+			"zero-context insertion at the top of a nonempty file must be rejected like git"
+		);
+	}
+
+	#[test]
+	fn commit_split_creates_chained_commits_without_touching_index() {
+		let temp = init(&[("a.txt", b"a1\n"), ("b.txt", b"b1\n")]);
+		fs::write(temp.path().join("a.txt"), b"a2\n").unwrap();
+		fs::write(temp.path().join("b.txt"), b"b2\n").unwrap();
+		git(temp.path(), &["add", "a.txt", "b.txt"]);
+		let staged_diff = git(temp.path(), &["diff", "--cached", "--binary"]);
+
+		let repo = repo(temp.path());
+		let index_path = temp.path().join(".git/index");
+		let index_bytes_before = fs::read(&index_path).unwrap();
+		let mtime_before = fs::metadata(&index_path).unwrap().modified().unwrap();
+
+		let commits = repo
+			.commit_split(&SplitCommitOptions {
+				commits: vec![
+					SplitCommitSpec {
+						message:    "feat: update a".into(),
+						selections: vec![HunkSelection { path: "a.txt".into(), hunks: HunkSpec::All }],
+					},
+					SplitCommitSpec {
+						message:    "fix: update b".into(),
+						selections: vec![HunkSelection { path: "b.txt".into(), hunks: HunkSpec::All }],
+					},
+				],
+				staged_diff,
+			})
+			.unwrap();
+
+		// Assert before any git CLI call: `write-tree` below refreshes the index's
+		// cache-tree extension.
+		assert_eq!(fs::read(&index_path).unwrap(), index_bytes_before);
+		assert_eq!(fs::metadata(&index_path).unwrap().modified().unwrap(), mtime_before);
+
+		assert_eq!(commits.len(), 2);
+		assert_eq!(git(temp.path(), &["rev-list", "--count", "HEAD"]).trim(), "3");
+
+		assert_eq!(git(temp.path(), &["show", &format!("{}:a.txt", commits[0])]), "a2\n");
+		assert_eq!(git(temp.path(), &["show", &format!("{}:b.txt", commits[0])]), "b1\n");
+		assert_eq!(git(temp.path(), &["show", &format!("{}:a.txt", commits[1])]), "a2\n");
+		assert_eq!(git(temp.path(), &["show", &format!("{}:b.txt", commits[1])]), "b2\n");
+
+		assert_eq!(
+			git(temp.path(), &["rev-parse", "HEAD^{tree}"]).trim(),
+			git(temp.path(), &["write-tree"]).trim()
+		);
+
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+	}
+
+	struct StagedFixture {
+		temp:         TempDir,
+		repo:         GitRepo,
+		staged_diff:  String,
+		count_before: String,
+	}
+
+	fn staged_fixture() -> StagedFixture {
+		let temp = init(&[("a.txt", b"v1\n"), ("b.txt", b"v1\n")]);
+		let repo = repo(temp.path());
+		fs::write(temp.path().join("a.txt"), b"v2\n").unwrap();
+		fs::write(temp.path().join("b.txt"), b"v2\n").unwrap();
+		git(temp.path(), &["add", "a.txt", "b.txt"]);
+		let staged_diff = git(temp.path(), &["diff", "--cached", "--binary"]);
+		let count_before = git(temp.path(), &["rev-list", "--count", "HEAD"]);
+		StagedFixture { temp, repo, staged_diff, count_before }
+	}
+
+	#[cfg(unix)]
+	fn install_pre_commit_hook(temp: &Path, script: &str) {
+		use std::os::unix::fs::PermissionsExt;
+
+		let hooks_dir = temp.join(".git/hooks");
+		fs::create_dir_all(&hooks_dir).unwrap();
+		let hook_path = hooks_dir.join("pre-commit");
+		fs::write(&hook_path, script).unwrap();
+		fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
+	}
+
+	fn single_spec(message: &str, paths: &[&str]) -> SplitCommitSpec {
+		SplitCommitSpec {
+			message:    message.into(),
+			selections: paths
+				.iter()
+				.map(|path| HunkSelection { path: (*path).into(), hunks: HunkSpec::All })
+				.collect(),
+		}
+	}
+
+	#[test]
+	fn commit_split_rejects_invalid_plans_without_committing() {
+		let fixture = staged_fixture();
+		let partial = fixture
+			.repo
+			.commit_split(&SplitCommitOptions {
+				commits:     vec![single_spec("feat: only a", &["a.txt"])],
+				staged_diff: fixture.staged_diff.clone(),
+			})
+			.unwrap_err();
+		assert!(partial.to_string().contains("does not cover"), "{partial}");
+		let empty = fixture
+			.repo
+			.commit_split(&SplitCommitOptions {
+				commits:     vec![
+					SplitCommitSpec { message: "empty commit".into(), selections: vec![] },
+					single_spec("real commit", &["a.txt", "b.txt"]),
+				],
+				staged_diff: fixture.staged_diff,
+			})
+			.unwrap_err();
+		assert!(empty.to_string().contains("would be empty"), "{empty}");
+		assert_eq!(git(fixture.temp.path(), &["rev-list", "--count", "HEAD"]), fixture.count_before);
+	}
+
+	#[test]
+	fn commit_split_ignores_intent_to_add_entries() {
+		// `git add -N` leaves a placeholder index entry that neither the staged
+		// diff nor `git write-tree` include; the split must compare against the
+		// same view or every plan is rejected as not covering the staged tree.
+		let temp = init(&[("a.txt", b"v1\n")]);
+		fs::write(temp.path().join("a.txt"), b"v2\n").unwrap();
+		fs::write(temp.path().join("promised.txt"), b"later\n").unwrap();
+		git(temp.path(), &["add", "a.txt"]);
+		git(temp.path(), &["add", "-N", "promised.txt"]);
+		let staged_diff = git(temp.path(), &["diff", "--cached", "--binary"]);
+		assert!(!staged_diff.contains("promised.txt"), "{staged_diff}");
+
+		let commits = repo(temp.path())
+			.commit_split(&SplitCommitOptions {
+				commits: vec![single_spec("feat: update a", &["a.txt"])],
+				staged_diff,
+			})
+			.unwrap();
+		assert_eq!(commits.len(), 1);
+		assert_eq!(git(temp.path(), &["show", "HEAD:a.txt"]), "v2\n");
+		git_expecting(temp.path(), &["cat-file", "-e", "HEAD:promised.txt"], 128);
+		assert_eq!(
+			git(temp.path(), &["rev-parse", "HEAD^{tree}"]).trim(),
+			git(temp.path(), &["write-tree"]).trim()
+		);
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), " A promised.txt\n");
+	}
+
+	#[test]
+	#[cfg(unix)]
+	fn commit_split_pre_commit_hook_may_read_but_not_modify_index() {
+		let fixture = staged_fixture();
+		let options = SplitCommitOptions {
+			commits:     vec![single_spec("feat: all", &["a.txt", "b.txt"])],
+			staged_diff: fixture.staged_diff,
+		};
+		install_pre_commit_hook(
+			fixture.temp.path(),
+			"#!/bin/sh\necho 'hook-rewrite' > a.txt\ngit add a.txt\n",
+		);
+		let err = fixture.repo.commit_split(&options).unwrap_err();
+		assert!(
+			err.to_string()
+				.contains("pre-commit hook modified the index"),
+			"{err}"
+		);
+		assert_eq!(git(fixture.temp.path(), &["rev-list", "--count", "HEAD"]), fixture.count_before);
+
+		// Undo the hook's rewrite, then retry under a read-only hook: refreshing
+		// index stat data must not count as a modification.
+		fs::write(fixture.temp.path().join("a.txt"), b"v2\n").unwrap();
+		git(fixture.temp.path(), &["add", "a.txt"]);
+		install_pre_commit_hook(fixture.temp.path(), "#!/bin/sh\ngit status --porcelain\n");
+		assert_eq!(fixture.repo.commit_split(&options).unwrap().len(), 1);
+		assert_eq!(
+			git(fixture.temp.path(), &["rev-list", "--count", "HEAD"]).trim(),
+			(fixture.count_before.trim().parse::<usize>().unwrap() + 1).to_string()
+		);
+	}
+
 	#[test]
 	fn patch_cached_mixed_creation_uses_dev_null_with_alternate_index() {
 		let temp = init(&[("tracked.txt", b"base\n")]);

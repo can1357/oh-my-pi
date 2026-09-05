@@ -32,6 +32,7 @@ describe("split_commit hunk selector validation", () => {
 	it("rejects hunk index selectors that match no parsed hunk", async () => {
 		vi.spyOn(vcs, "requireGit").mockReturnValue({
 			diffText: async () => STAGED_DIFF,
+			changedFiles: async () => ["src/a.ts", "src/b.ts"],
 		} as unknown as VcsGitRepo);
 		const state: CommitAgentState = {
 			overview: { files: ["src/a.ts", "src/b.ts"], stat: "", numstat: [], scopeCandidates: "", isWideScope: false },
@@ -68,6 +69,7 @@ describe("split_commit hunk selector validation", () => {
 	it("rejects line selectors that overlap no parsed hunk", async () => {
 		vi.spyOn(vcs, "requireGit").mockReturnValue({
 			diffText: async () => STAGED_DIFF,
+			changedFiles: async () => ["src/a.ts", "src/b.ts"],
 		} as unknown as VcsGitRepo);
 		const state: CommitAgentState = {
 			overview: { files: ["src/a.ts", "src/b.ts"], stat: "", numstat: [], scopeCandidates: "", isWideScope: false },
@@ -101,14 +103,17 @@ describe("split_commit hunk selector validation", () => {
 		expect(state.splitProposal).toBeUndefined();
 	});
 
-	it("allows deferred changelog targets that are not in the staged diff yet", async () => {
+	it("accepts the absolute changelog target the agent is shown and stores it repo-relative", async () => {
+		// Detection hands the agent absolute changelog paths while the staged diff
+		// and native commitSplit are repo-relative; the tool owns that conversion.
 		vi.spyOn(vcs, "requireGit").mockReturnValue({
 			diffText: async () => STAGED_DIFF,
+			changedFiles: async () => ["src/a.ts", "src/b.ts"],
 		} as unknown as VcsGitRepo);
 		const state: CommitAgentState = {
 			overview: { files: ["src/a.ts", "src/b.ts"], stat: "", numstat: [], scopeCandidates: "", isWideScope: false },
 		};
-		const tool = createSplitCommitTool("/repo", state, ["packages/coding-agent/CHANGELOG.md"]);
+		const tool = createSplitCommitTool("/repo", state, ["/repo/packages/coding-agent/CHANGELOG.md"]);
 
 		const result = await tool.execute(
 			"split-commit",
@@ -117,8 +122,8 @@ describe("split_commit hunk selector validation", () => {
 					{
 						changes: [
 							{ path: "src/a.ts", kind: "all" },
-							{ path: "src/b.ts", kind: "all" },
-							{ path: "packages/coding-agent/CHANGELOG.md", kind: "all" },
+							{ path: "/repo/src/b.ts", kind: "all" },
+							{ path: "/repo/packages/coding-agent/CHANGELOG.md", kind: "all" },
 						],
 						type: "fix",
 						scope: null,
@@ -131,9 +136,11 @@ describe("split_commit hunk selector validation", () => {
 		);
 
 		expect(result.details.valid).toBe(true);
-		expect(result.details.errors).not.toContain("Commit 1: No diff found for packages/coding-agent/CHANGELOG.md");
-		expect(state.splitProposal?.commits[0]?.changes.map(change => change.path)).toContain(
+		expect(result.details.errors).toEqual([]);
+		expect(state.splitProposal?.commits[0]?.changes.map(change => change.path)).toEqual([
+			"src/a.ts",
+			"src/b.ts",
 			"packages/coding-agent/CHANGELOG.md",
-		);
+		]);
 	});
 });

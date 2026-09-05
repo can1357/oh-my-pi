@@ -7,10 +7,14 @@
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 
 ### Fixed
-
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
+- `omp commit --dry-run` is strictly read-only: it never stages, never pushes, and never touches changelogs.
+- Split commits are created atomically from the staged tree without rewriting the index or worktree; rejecting the plan at the confirmation prompt leaves everything untouched.
+- `omp commit` no longer sweeps pre-existing unstaged changelog edits into the commit when it appends generated changelog entries.
+- Routed generated changelog entries to their owning commit during split commits
+- A commit rejected by a `pre-commit`/`commit-msg` hook reverts the generated changelog entries from the index and worktree, in both single and split commits.
 
 ## [18.1.10] - 2026-09-04
 

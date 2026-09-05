@@ -1,1 +1,1 @@
-Split commit plan has {{count}} commits. Proceed? (y/N):
+Split commit plan has {{count}} commits.{{#if changelog_pending}} Generated changelog entries will be attached to the split commit that owns them after confirmation.{{/if}} Proceed? (y/N): 
