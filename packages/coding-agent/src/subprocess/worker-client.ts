@@ -116,9 +116,13 @@ export function resolveExecutablePath(): string {
 	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
 	if (isCompiledBinary() && !fs.existsSync(executable)) {
 		const argv0 = process.argv0;
+		const isPath = argv0.includes("/") || argv0.includes("\\");
 		const candidates = [
-			argv0.includes("/") || argv0.includes("\\") ? path.resolve(argv0) : null,
-			Bun.which(argv0),
+			// Prefer the original launcher when invoked with an absolute path
+			path.isAbsolute(argv0) ? argv0 : null,
+			// Search PATH for the launcher name only if it is a bare command name (no slashes)
+			!isPath ? Bun.which(argv0) : null,
+			// Generic fallback to finding "omp" on PATH
 			Bun.which("omp"),
 		];
 		for (const candidate of candidates) {

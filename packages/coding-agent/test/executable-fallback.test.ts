@@ -5,28 +5,41 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { resolveCliEntryCmd, resolveExecutablePath, resolveWorkerSpawnCmd } from "../src/subprocess/worker-client";
 
 describe("executable fallback on unlinked binary", () => {
-	const originalExecPath = process.execPath;
-	const originalArgv0 = process.argv0;
+	const originalExecPathDesc = Object.getOwnPropertyDescriptor(process, "execPath");
+	const originalArgv0Desc = Object.getOwnPropertyDescriptor(process, "argv0");
 
 	afterEach(() => {
 		vi.restoreAllMocks();
-		Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
-		Object.defineProperty(process, "argv0", { value: originalArgv0, configurable: true });
+		if (originalExecPathDesc) {
+			Object.defineProperty(process, "execPath", originalExecPathDesc);
+		}
+		if (originalArgv0Desc) {
+			Object.defineProperty(process, "argv0", originalArgv0Desc);
+		}
 	});
+
+	function setProcessProp(prop: "execPath" | "argv0", value: string) {
+		Object.defineProperty(process, prop, {
+			value,
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
+	}
 
 	it("returns process.execPath when the file exists", () => {
 		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
-		expect(resolveExecutablePath()).toBe(originalExecPath);
+		expect(resolveExecutablePath()).toBe(process.execPath);
 	});
 
-	it("prefers original launcher path with path separator over generic PATH match", () => {
+	it("prefers original absolute launcher path over generic PATH match", () => {
 		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
 		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
 		const originalLauncher = "/opt/homebrew/bin/omp";
 		const otherOmpInPath = "/usr/local/bin/omp";
 
-		Object.defineProperty(process, "execPath", { value: missingPath, configurable: true });
-		Object.defineProperty(process, "argv0", { value: originalLauncher, configurable: true });
+		setProcessProp("execPath", missingPath);
+		setProcessProp("argv0", originalLauncher);
 
 		vi.spyOn(Bun, "which").mockImplementation((cmd: string) => {
 			if (cmd === "omp") return otherOmpInPath;
@@ -43,20 +56,24 @@ describe("executable fallback on unlinked binary", () => {
 		expect(resolved).toBe(originalLauncher);
 	});
 
-	it("does not resolve bare argv0 against the working tree", () => {
+	it("does not resolve relative argv0 against the working tree", () => {
 		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
 		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
-		Object.defineProperty(process, "execPath", { value: missingPath, configurable: true });
-		Object.defineProperty(process, "argv0", { value: "omp", configurable: true });
+		setProcessProp("execPath", missingPath);
+		setProcessProp("argv0", "./omp");
 
-		const cwdRogueBinary = path.resolve("omp");
-		vi.spyOn(Bun, "which").mockReturnValue(null);
+		const cwdRogueBinary = path.resolve("./omp");
+		// Simulate Bun.which's native behavior of resolving relative paths against cwd:
+		vi.spyOn(Bun, "which").mockImplementation((cmd: string) => {
+			if (cmd === "./omp") return cwdRogueBinary;
+			return null;
+		});
 		vi.spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
 			if (p === cwdRogueBinary) return true; // untrusted file exists in repo cwd
 			return false;
 		});
 
-		// Must not pick up cwdRogueBinary; falls back to missingPath gracefully
+		// Relative argv0 must not resolve against cwd; falls back to missingPath gracefully
 		const resolved = resolveExecutablePath();
 		expect(resolved).toBe(missingPath);
 	});
@@ -64,8 +81,8 @@ describe("executable fallback on unlinked binary", () => {
 	it("falls back to Bun.which('omp') when original execPath was unlinked and argv0 has no path", () => {
 		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
 		const missingPath = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
-		Object.defineProperty(process, "execPath", { value: missingPath, configurable: true });
-		Object.defineProperty(process, "argv0", { value: "omp", configurable: true });
+		setProcessProp("execPath", missingPath);
+		setProcessProp("argv0", "omp");
 
 		const mockUpgradedPath = "/opt/homebrew/bin/omp";
 		vi.spyOn(Bun, "which").mockImplementation((cmd: string) => {
@@ -89,8 +106,8 @@ describe("executable fallback on unlinked binary", () => {
 	it("falls back to process.argv0 when Bun.which('omp') is unavailable", () => {
 		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
 		const missingPath = "/custom/install/bin/omp";
-		Object.defineProperty(process, "execPath", { value: missingPath, configurable: true });
-		Object.defineProperty(process, "argv0", { value: "my-omp", configurable: true });
+		setProcessProp("execPath", missingPath);
+		setProcessProp("argv0", "my-omp");
 
 		const mockCustomPath = "/usr/local/bin/my-omp";
 		vi.spyOn(Bun, "which").mockImplementation((cmd: string) => {
@@ -109,7 +126,7 @@ describe("executable fallback on unlinked binary", () => {
 	it("returns original execPath gracefully if no fallback candidate exists", () => {
 		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
 		const missingPath = "/nonexistent/omp";
-		Object.defineProperty(process, "execPath", { value: missingPath, configurable: true });
+		setProcessProp("execPath", missingPath);
 		vi.spyOn(Bun, "which").mockReturnValue(null);
 		vi.spyOn(fs, "existsSync").mockReturnValue(false);
 
