@@ -29,6 +29,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-zen": true,
 	"github-copilot": true,
 	grokbot: true,
+	"muse-code": true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -38,6 +39,9 @@ export function isCredentialScopedModelCacheProvider(providerId: string): boolea
 
 export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | undefined {
 	switch (providerId) {
+		case "meta":
+		case "muse-code":
+			return "https://api.meta.ai/v1";
 		case "ollama":
 			return "http://127.0.0.1:11434";
 		case "litellm":
@@ -78,6 +82,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// carry `requestModelId: *-low`, which the Start plan refuses; refetch
 			// so the collapsed default is re-pointed to `-medium` (issue #9478).
 			return "cursor:default-effort-v4";
+		case "muse-code": {
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `muse-code:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			// rich-v8 invalidates rows whose `compatConfig` retained a colliding
