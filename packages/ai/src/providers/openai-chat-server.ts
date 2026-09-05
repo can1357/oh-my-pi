@@ -30,6 +30,7 @@ import {
 	openaiChatRequestSchema,
 } from "./openai-chat-server-schema";
 import { decodeDataUri } from "./openai-data-uri";
+import { coerceNullMessageContentInPlace } from "./openai-shared";
 
 export type { ParsedRequest };
 
@@ -90,6 +91,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	// for `resolvePromptCacheKey` to pull a cache identity out of inbound
 	// vendor-neutral headers when the body doesn't carry one.
 	rejectUnsupportedExplicitPromptCacheFields(body);
+	const request =
+		typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>) : undefined;
+	coerceNullMessageContentInPlace(request?.messages, message => message.role !== "function");
 	const parsed = openaiChatRequestSchema(body);
 	if (parsed instanceof type.errors) {
 		throw new AIError.ValidationError(`openai-chat: ${parsed.summary}`);

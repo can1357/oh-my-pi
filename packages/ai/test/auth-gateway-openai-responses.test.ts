@@ -177,6 +177,27 @@ describe("openai-responses parseRequest", () => {
 		expect(parsed.options.extra).toBeUndefined();
 	});
 
+	it("coerces a message item with content:null to an empty content array (Codex #10956)", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.3-codex-spark",
+			input: [
+				{ type: "message", role: "user", content: [{ type: "input_text", text: "again" }] },
+				{ type: "message", role: "user", content: null },
+			],
+			max_output_tokens: 16,
+		});
+
+		const msgs = parsed.context.messages;
+		expect(msgs).toHaveLength(2);
+		const empty = msgs[1]!;
+		if (empty.role !== "user") throw new Error("expected user");
+		expect(empty.content).toEqual([]);
+		// The null must not survive into the native history-replay clone — it
+		// carries `[]` so downstream providers see the same shape as content:[].
+		const replay = empty.providerPayload as { items: Array<{ content?: unknown }> };
+		expect(replay.items[0]!.content).toEqual([]);
+	});
+
 	it("preserves canonical multimodal order and nullable fallback sources", () => {
 		const imageData = Buffer.from("tool image").toString("base64");
 		const parsed = parseRequest({
