@@ -2404,11 +2404,10 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Cap on snapcompact frames the post-compaction context can carry without
-	 * busting the model window. Mirrors the per-frame token charge used by the
-	 * projection ({@link snapcompact.FRAME_TOKEN_ESTIMATE}, the conservative
-	 * high-res Anthropic ceiling), so picking `maxFrames` from this helper makes
-	 * {@link #projectSnapcompactContextTokens} succeed by construction.
+	 * Cap on snapcompact frames the post-compaction context can carry within its
+	 * target budget. Normal/manual maintenance targets the model window; threshold
+	 * maintenance targets the stricter recovery band so the first archive creates
+	 * enough headroom to avoid an immediate local rescue.
 	 *
 	 * Skip vs. cap use different reserves on purpose. The **skip** decision
 	 * (return `0`) trips only when kept-recent plus non-message tokens already
@@ -2435,7 +2434,11 @@ export class SessionMaintenance {
 	 * ~402k frame-token projection always overflows any sub-1M-token window
 	 * (issue #3247).
 	 */
-	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: EngineCompactionSettings): number {
+	#computeSnapcompactMaxFrames(
+		preparation: CompactionPreparation,
+		settings: EngineCompactionSettings,
+		targetRecoveryBand = false,
+	): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
 		if (ctxWindow <= 0) {
 			return Math.min(
@@ -2447,11 +2450,19 @@ export class SessionMaintenance {
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
 		let baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
 		baseTokens += this.#tokenizer.countMessages(preparation.recentMessages);
-		const totalBudget = ctxWindow - reserve;
-		// Skip iff there is no headroom whatsoever; a text-only archive costs
-		// far less than the cap reserve below, so any positive residual is
+		const windowBudget = ctxWindow - reserve;
+		// Threshold compaction must leave enough headroom to avoid immediately
+		// re-entering maintenance. Other callers deliberately retain the looser
+		// window-fit target: overflow/incomplete retries only need a request that
+		// fits, idle maintenance has no threshold continuation, and manual
+		// compaction must honor the full user-available window.
+		const totalBudget = targetRecoveryBand
+			? Math.min(windowBudget, Math.floor(resolveThresholdTokens(ctxWindow, settings) * COMPACTION_RECOVERY_BAND))
+			: windowBudget;
+		// Skip iff there is no window headroom whatsoever; a text-only archive
+		// costs far less than the cap reserve below, so any positive residual is
 		// worth attempting and the projection guard catches actual overflow.
-		if (baseTokens >= totalBudget) return 0;
+		if (baseTokens >= windowBudget) return 0;
 		// Cap reserve mirrors what `countMessage(summaryMessage)` will charge
 		// when frames > 0: `countTokens(summaryTemplate ‖ textHead ‖ textTail)`
 		// plus `numFrames × FRAME_TOKEN_ESTIMATE`. Resolve the shape this
@@ -2753,10 +2764,10 @@ export class SessionMaintenance {
 	/**
 	 * Frame budget for {@link #rescueSnapcompactFrameOverflow}: targets
 	 * `COMPACTION_RECOVERY_BAND × threshold` (the same band
-	 * {@link #compactionCreatedHeadroom} re-tests), not the window-fit budget
-	 * {@link #computeSnapcompactMaxFrames} sizes against — a rebuilt archive
-	 * must land back under the maintenance trigger, or the next settle
-	 * re-enters the same dead-end. Cap reserve mirrors
+	 * {@link #compactionCreatedHeadroom} re-tests), matching the threshold target
+	 * in {@link #computeSnapcompactMaxFrames}. A rebuilt archive must land back
+	 * under the maintenance trigger, or the next settle re-enters the same
+	 * dead-end. Cap reserve mirrors
 	 * #computeSnapcompactMaxFrames (text edges + summary template), and
 	 * `keptTailTokens` charges the kept entries AFTER the archive so the
 	 * budget mirrors what #compactionCreatedHeadroom will actually measure.
@@ -3389,9 +3400,9 @@ export class SessionMaintenance {
 
 			// Snapcompact runs locally first. The post-compaction context = kept-recent
 			// + a summary message carrying the imaged archive at FRAME_TOKEN_ESTIMATE
-			// per frame; #computeSnapcompactMaxFrames sizes the frame cap from the
-			// live window so we don't run snapcompact just to overflow every threshold
-			// tick. Any local blocker (unsupported snapcompact glyphs, kept-history too
+			// per frame; threshold passes size their first archive for recovery-band
+			// headroom, while non-threshold passes retain window-fit semantics. Any local
+			// blocker (unsupported snapcompact glyphs, kept-history too
 			// large, post-render overflow) advances automatic maintenance to the next
 			// configured preference instead of wedging the session (#3659). Manual
 			// `/compact snapcompact` remains local-only because its one-method override
@@ -3423,7 +3434,11 @@ export class SessionMaintenance {
 					});
 					snapcompactBlocker = `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%); trying the next preferred compaction method.`;
 				} else {
-					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
+					const maxFrames = this.#computeSnapcompactMaxFrames(
+						preparation,
+						effectiveSettings,
+						reason === "threshold",
+					);
 					if (maxFrames < 1) {
 						logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
 							model: this.#model?.id,
