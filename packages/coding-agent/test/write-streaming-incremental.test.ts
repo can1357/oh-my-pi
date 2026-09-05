@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
 
@@ -20,6 +20,10 @@ function referenceWindow(content: string): { total: number; start: number; visib
 
 describe("write streaming preview incremental line tracking", () => {
 	let initialized = false;
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
 
 	async function getUiTheme() {
 		if (!initialized) {
@@ -78,6 +82,30 @@ describe("write streaming preview incremental line tracking", () => {
 			}
 			if (start > 0) expect(rendered).toContain(`… (${start} earlier line${start === 1 ? "" : "s"})`);
 		}
+	});
+
+	it("does not re-tokenize the whole markdown window as streamed content grows", async () => {
+		const uiTheme = await getUiTheme();
+		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		const highlightSpy = vi.spyOn(themeModule, "highlightCode");
+		const lines = Array.from(
+			{ length: 40 },
+			(_, index) => `- Step ${index + 1}: update \`src/example-${index + 1}.ts\` and verify the result`,
+		);
+
+		let rendered: readonly string[] = [];
+		for (let count = 1; count <= lines.length; count++) {
+			const component = writeToolRenderer.renderCall(
+				{ path: "/tmp/plan.md", content: lines.slice(0, count).join("\n") },
+				options,
+				uiTheme,
+			);
+			if (!component) throw new Error("expected a rendered component for a non-xdev write path");
+			rendered = component.render(120);
+		}
+
+		expect(stripAnsi(rendered.join("\n"))).toContain("Step 40");
+		expect(highlightSpy).not.toHaveBeenCalled();
 	});
 
 	it("does not compare the full accumulated payload when validating append-only growth", async () => {
