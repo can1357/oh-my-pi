@@ -39,9 +39,9 @@ export class AttachmentGuard<H> {
 	constructor(private readonly options: AttachmentGuardOptions<H>) {}
 
 	/** Record a tab the extension just attached. */
-	track(tabId: number): void {
+	track(tabId: number, preserveRetry = false): void {
 		this.#attached.add(tabId);
-		this.#cancelRetry(tabId);
+		if (!preserveRetry) this.#cancelRetry(tabId);
 		this.#scheduleSweep();
 	}
 

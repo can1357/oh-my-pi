@@ -525,6 +525,7 @@ async function trackAttachments(
 	tabIds: number[],
 	isFresh: () => boolean = () => true,
 	attachmentState = snapshotAttachmentState(attachmentStateEpochs, tabIds),
+	preserveRetry = false,
 ): Promise<void> {
 	if (tabIds.length === 0) return;
 	const freshTabIds = (): number[] =>
@@ -536,7 +537,7 @@ async function trackAttachments(
 				)
 			: [];
 	await rememberRecoverable(freshTabIds);
-	for (const tabId of freshTabIds()) attachmentGuard.track(tabId);
+	for (const tabId of freshTabIds()) attachmentGuard.track(tabId, preserveRetry);
 }
 
 interface RelaySettings {
@@ -1086,7 +1087,7 @@ async function reconcileOrphans(): Promise<void> {
 	// only re-seed attachments already known to this extension; otherwise a
 	// takeover becomes relay-authorized again before buildHello can filter it.
 	const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
-	await trackAttachments(attachedTabIds, () => true, attachmentState);
+	await trackAttachments(attachedTabIds, () => true, attachmentState, true);
 	// Only a socket that has actually delivered a hello owns reconciliation. A
 	// merely OPEN (or CONNECTING) socket may still stall/fail in `buildHello()`
 	// before any hello reaches the relay, so the persisted deadline must stay
