@@ -35,6 +35,11 @@ export function createBundledReferenceMap<TApi extends Api>(
 
 type ProviderReferenceSource<TApi extends Api> = Map<string, ModelSpec<TApi>> | (() => Map<string, ModelSpec<TApi>>);
 
+/** Whether a provider's rows may enrich proxy models through bare model ids. */
+export function isBareIdReferenceProvider(provider: string): boolean {
+	return provider !== "cline-pass";
+}
+
 let globalReferences: Map<string, Model<Api>> | undefined;
 
 function getGlobalReferences(): Map<string, Model<Api>> {
@@ -45,9 +50,9 @@ function getGlobalReferences(): Map<string, Model<Api>> {
 	for (const provider of getBundledProviders()) {
 		for (const model of getBundledModels(provider as Parameters<typeof getBundledModels>[0])) {
 			const candidate = model as Model<Api>;
-			// ClinePass limits, pricing, and reasoning controls are gateway-specific;
-			// matching them by bare id would contaminate unrelated proxy models.
-			if (candidate.provider === "cline-pass" || isZeroCostXaiOAuthReference(candidate)) {
+			// Gateway-specific metadata must remain provider-local when proxy
+			// discovery resolves references by bare model id.
+			if (!isBareIdReferenceProvider(candidate.provider) || isZeroCostXaiOAuthReference(candidate)) {
 				continue;
 			}
 			const existing = references.get(candidate.id);

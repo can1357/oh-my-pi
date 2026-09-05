@@ -40,7 +40,12 @@ import {
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
-import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
+import {
+	createBundledReferenceMap,
+	createReferenceResolver,
+	isBareIdReferenceProvider,
+	toModelSpec,
+} from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
 import type { ModelManagerConfig } from "./descriptor-types";
@@ -2377,6 +2382,9 @@ function createModelsDevReferenceMap<TApi extends Api>(
 	const references = new Map<string, ModelSpec<TApi>>();
 	for (const model of models) {
 		const candidate = model as ModelSpec<TApi>;
+		if (!isBareIdReferenceProvider(candidate.provider)) {
+			continue;
+		}
 		const existing = references.get(candidate.id);
 		if (!existing) {
 			references.set(candidate.id, candidate);
@@ -5866,14 +5874,14 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
-		// bundled model's provider-specific transport (e.g. Fireworks
-		// `wireModelIdMode`) before that leak was fixed. Earlier versions added
-		// bundled reference fallback, moved OpenAI models to Responses, continued
-		// past incomplete vision/API metadata and endpoints omitting cache
-		// pricing, stripped reseller usage suffixes, filtered placeholder rows,
-		// and mapped rich pricing. Bump the version whenever these mappers change,
-		// or warm authoritative caches keep serving pre-change rows for the full TTL.
+		// rich-v9 invalidates rows that inherited ClinePass gateway metadata
+		// through generic models.dev bare-id enrichment. Earlier versions fixed
+		// provider-specific transport leakage, added bundled reference fallback,
+		// moved OpenAI models to Responses, continued past incomplete vision/API
+		// metadata and endpoints omitting cache pricing, stripped reseller usage
+		// suffixes, filtered placeholder rows, and mapped rich pricing.
+		// Bump the version whenever these mappers change, or warm authoritative
+		// caches keep serving pre-change rows for the full TTL.
 		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer
@@ -6878,6 +6886,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 			return {
 				...model,
 				id,
+				name: id,
 				thinking: model.reasoning ? buildClinePassThinking(raw, model) : undefined,
 			};
 		},

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed LiteLLM model discovery leaking ClinePass display names and pricing into models with colliding ids ([#10932](https://github.com/can1357/oh-my-pi/issues/10932)).
+
 ## [18.1.9] - 2026-09-04
 
 ### Added
