@@ -235,8 +235,7 @@ export class EventController {
 				? new SpeechEnhancer({
 						settings: session.settings,
 						registry: session.modelRegistry,
-						sessionId: session.sessionId,
-						metadataResolver: provider => session.agent.metadataForProvider(provider),
+						getSessionId: () => session.sessionId,
 					})
 				: null,
 		);

@@ -37,6 +37,7 @@ export interface ClassifyUnexpectedStopDeps {
 	registry: ModelRegistry;
 	sessionId: string;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
+	prepareProvider?: (provider: string) => void;
 	signal?: AbortSignal;
 }
 
@@ -90,11 +91,11 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 	if (!model) {
 		throw new Error("unexpected-stop: no tiny/smol model available for classification");
 	}
+	deps.prepareProvider?.(model.provider);
 	const apiKey = await deps.registry.getApiKey(model, deps.sessionId);
 	if (!apiKey) {
 		throw new Error(`unexpected-stop: no API key for ${model.provider}/${model.id}`);
 	}
-	const metadata = deps.metadataResolver?.(model.provider);
 	const maxTokens = ONLINE_REASONING_SAFE_MAX_TOKENS;
 
 	const response = await retryTransientCompletion(
@@ -110,7 +111,7 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 					sessionId: deps.sessionId,
 					maxTokens,
 					disableReasoning: true,
-					metadata,
+					metadataResolver: deps.metadataResolver,
 					signal: deps.signal,
 				},
 			),

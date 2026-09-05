@@ -82,6 +82,8 @@ export interface GenerateBranchSummaryOptions {
 	reserveTokens?: number;
 	/** Optional metadata forwarded to the underlying API request (e.g. user_id for session attribution). */
 	metadata?: Record<string, unknown>;
+	/** Resolve credential-dependent metadata after each API-key selection or retry. */
+	metadataResolver?: SimpleStreamOptions["metadataResolver"];
 	/** Convert app-specific messages before serializing the branch summary prompt. */
 	convertToLlm?: ConvertToLlm;
 	/**
@@ -310,7 +312,7 @@ export async function generateBranchSummary(
 	entries: SessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
-	const { model, apiKey, signal, customInstructions, reserveTokens = 16384, metadata } = options;
+	const { model, apiKey, signal, customInstructions, reserveTokens = 16384, metadata, metadataResolver } = options;
 
 	// Token budget = context window minus reserved space for prompt + response
 	const contextWindow = model.contextWindow || 128000;
@@ -346,7 +348,7 @@ export async function generateBranchSummary(
 		response = await instrumentedCompleteSimple(
 			model,
 			{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
-			{ apiKey, signal, maxTokens: 2048, metadata },
+			{ apiKey, signal, maxTokens: 2048, metadata, metadataResolver },
 			{ telemetry: options.telemetry, oneshotKind: "branch_summary", completeImpl: options.completeImpl, retry: {} },
 		);
 	} catch (error) {

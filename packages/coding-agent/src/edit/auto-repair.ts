@@ -18,6 +18,7 @@ import { diffLineRuns, editDiffString, summarizeCode } from "@oh-my-pi/pi-native
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { WritethroughCallback } from "../lsp";
+import { sideRequestIdentity } from "../session/side-request-identity";
 import type { ToolSession } from "../tools";
 import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import repairPromptSource from "./auto-repair.md" with { type: "text" };
@@ -294,11 +295,15 @@ export async function attemptEditAutoRepair(options: {
 	const model = resolveRoleSelection(["smol"], session.settings, registry.getAvailable())?.model;
 	if (!model) return undefined;
 	const sessionId = session.getSessionId?.() ?? undefined;
-	// Resolve the key eagerly so the session-sticky credential is recorded and
-	// an unauthenticated smol role bails before any region work.
-	const apiKey = await registry.getApiKey(model, sessionId);
+	// Auto-repair runs after a foreground tool call and before the next
+	// continuation; give it an isolated provider session so its completion does
+	// not insert unrelated provider state into the foreground turn (#10865).
+	using identity = sideRequestIdentity(registry.authStorage, sessionId ?? "", model.provider);
+	// Resolve the initial isolated key eagerly so an unauthenticated smol role
+	// bails before any region work. The request-time metadata resolver below
+	// follows this pin and any later auth-retry rotation (#10869).
+	const apiKey = await registry.getApiKey(model, identity.sessionId);
 	if (!apiKey) return undefined;
-
 	// Repair against the bytes on disk, not the snapshot: a later operation in
 	// the same call or a format-on-write pass may have moved the file since the
 	// observation — and may even have restored the parse.
@@ -319,8 +324,9 @@ export async function attemptEditAutoRepair(options: {
 					model,
 					{ messages: [{ role: "user", content: builtPrompt, timestamp: Date.now() }] },
 					{
-						apiKey: registry.resolver(model, sessionId),
-						sessionId,
+						apiKey: registry.resolver(model, identity.sessionId),
+						sessionId: identity.sessionId,
+						metadataResolver: identity.metadata,
 						maxTokens: COMPLETION_MAX_TOKENS,
 						disableReasoning: true,
 						signal,

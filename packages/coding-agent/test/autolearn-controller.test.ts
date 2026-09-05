@@ -379,7 +379,11 @@ describe("isolated auto-learn capture", () => {
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
 			captureTools: [manageSkillTool],
-			createSessionId: () => "0193c8f2-7b1a-7c4d-9e2f-123456789abc",
+			createIdentity: () => ({
+				sessionId: "0193c8f2-7b1a-7c4d-9e2f-123456789abc",
+				metadataResolver: () => undefined,
+				[Symbol.dispose]: () => {},
+			}),
 			createAgent: options => {
 				captureMessages = options.initialState?.messages ?? [];
 				captureProviderState = options.providerSessionState;
@@ -483,38 +487,44 @@ describe("isolated auto-learn capture", () => {
 		expect(captureMock.calls).toHaveLength(1);
 	});
 
-	it("keeps source credentials and account metadata while using a fresh transport session", async () => {
+	it("snapshots matching credentials and metadata for each capture after a session switch", async () => {
 		const captureMock = createMockModel({
 			provider: "anthropic",
-			responses: [{ content: ["Captured."] }],
+			responses: [{ content: ["Captured first."] }, { content: ["Captured second."] }],
 		});
 		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
-		const credentialsBySession = new Map([
-			["primary-affinity", "primary-key"],
-			["capture-transport", "other-key"],
-		]);
-		const accountsBySession = new Map([
-			["primary-affinity", "account-primary"],
-			["capture-transport", "account-other"],
-		]);
+		const credentialsBySession: Record<string, string> = {
+			"primary-a": "key-a",
+			"primary-b": "key-b",
+		};
+		const accountsBySession: Record<string, string> = {
+			"primary-a": "account-a",
+			"primary-b": "account-b",
+		};
 		const resolvedAffinities: string[] = [];
 		const sourceAgent = new Agent({
-			sessionId: "primary-affinity",
-			getApiKey: () => async () => {
-				const affinity = sourceAgent.sessionId ?? "";
-				resolvedAffinities.push(affinity);
-				return credentialsBySession.get(affinity);
+			sessionId: "primary-a",
+			getApiKey: () => {
+				throw new Error("capture must use its identity-scoped credential resolver");
 			},
 			initialState: { model: captureMock, systemPrompt: ["Test"], tools: [manageSkillTool] },
-		});
-		sourceAgent.setMetadataResolver(() => {
-			const account = accountsBySession.get(sourceAgent.sessionId ?? "");
-			return account ? { user_id: account } : undefined;
 		});
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
 			captureTools: [manageSkillTool],
-			createSessionId: () => "capture-transport",
+			createIdentity: () => {
+				const foregroundSessionId = sourceAgent.sessionId;
+				if (!foregroundSessionId) throw new Error("expected active foreground session");
+				return {
+					sessionId: `capture-${foregroundSessionId}`,
+					metadataResolver: () => ({ user_id: accountsBySession[foregroundSessionId] }),
+					getApiKey: () => async () => {
+						resolvedAffinities.push(foregroundSessionId);
+						return credentialsBySession[foregroundSessionId];
+					},
+					[Symbol.dispose]: () => {},
+				};
+			},
 			createAgent: options =>
 				new Agent({
 					...options,
@@ -523,11 +533,19 @@ describe("isolated auto-learn capture", () => {
 				}),
 		});
 
-		await runCapture("Capture with source affinity");
+		await runCapture("Capture before switch");
+		sourceAgent.sessionId = "primary-b";
+		await runCapture("Capture after switch");
 
-		expect(captureMock.calls[0]?.options?.sessionId).toBe("capture-transport");
-		expect(resolvedAffinities).toEqual(["primary-affinity"]);
-		expect(captureMock.calls[0]?.options?.metadata).toEqual({ user_id: "account-primary" });
+		expect(captureMock.calls.map(call => call.options?.sessionId)).toEqual([
+			"capture-primary-a",
+			"capture-primary-b",
+		]);
+		expect(captureMock.calls.map(call => call.options?.metadata)).toEqual([
+			{ user_id: "account-a" },
+			{ user_id: "account-b" },
+		]);
+		expect(resolvedAffinities).toEqual(["primary-a", "primary-b"]);
 	});
 
 	it("aborts a blocked detached capture and closes its provider state", async () => {

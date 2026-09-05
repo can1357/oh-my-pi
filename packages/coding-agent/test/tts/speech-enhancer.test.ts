@@ -33,7 +33,7 @@ describe("SpeechEnhancer rewriting", () => {
 			content: [{ type: "text", text: "Spoken text" }],
 		} as never);
 
-		const rewritten = await new SpeechEnhancer({ settings, registry, sessionId: "session-1" }).rewrite(
+		const rewritten = await new SpeechEnhancer({ settings, registry, getSessionId: () => "session-1" }).rewrite(
 			"**Spoken text**",
 		);
 		const options = completeSimpleMock.mock.calls[0]?.[2] as

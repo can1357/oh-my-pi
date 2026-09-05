@@ -10,6 +10,7 @@ import type { Settings } from "../config/settings";
 import { truncateApproxTokens } from "../mnemopi/config";
 import consolidateInputTemplate from "../prompts/memories/sharpshooter-consolidate-input.md" with { type: "text" };
 import consolidateSystemTemplate from "../prompts/memories/sharpshooter-consolidate-system.md" with { type: "text" };
+import { sideRequestIdentity } from "../session/side-request-identity";
 import { resolveSharpshooterModel } from "./extract";
 import {
 	readSharpshooterState,
@@ -83,7 +84,7 @@ export async function runSharpshooterConsolidation(options: {
 	cwd: string;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
-	sessionId: string;
+	getSessionId: () => string;
 	force?: boolean;
 }): Promise<SharpshooterConsolidationResult> {
 	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
@@ -115,7 +116,7 @@ async function consolidateLocked(
 		cwd: string;
 		settings: Settings;
 		modelRegistry: ModelRegistry;
-		sessionId: string;
+		getSessionId: () => string;
 		force?: boolean;
 	},
 	bankDir: string,
@@ -153,6 +154,10 @@ async function consolidateLocked(
 			maxFileLines: SHARPSHOOTER_MAX_FILE_LINES,
 		});
 
+		// Scheduled consolidation can start during any foreground turn: derive a
+		// fresh isolated provider session from the CURRENT foreground session so it
+		// cannot advance the foreground turn or a concurrent side request (#10865).
+		using identity = sideRequestIdentity(options.modelRegistry.authStorage, options.getSessionId(), model.provider);
 		const response = await retryTransientCompletion(() =>
 			completeSimple(
 				model,
@@ -162,8 +167,9 @@ async function consolidateLocked(
 					tools: [replaceMemoryFilesTool],
 				},
 				{
-					apiKey: options.modelRegistry.resolver(model, options.sessionId),
-					sessionId: options.sessionId,
+					apiKey: options.modelRegistry.resolver(model, identity.sessionId),
+					sessionId: identity.sessionId,
+					metadataResolver: identity.metadata,
 					maxTokens: 8192,
 					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 					toolChoice: "required",

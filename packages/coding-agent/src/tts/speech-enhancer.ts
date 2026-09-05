@@ -20,6 +20,7 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { sideRequestIdentity } from "../session/side-request-identity";
 import speechRewritePrompt from "../prompts/system/speech-rewrite.md" with { type: "text" };
 
 const SYSTEM_PROMPT = prompt.render(speechRewritePrompt);
@@ -38,8 +39,9 @@ const MAX_BLOCK_CHARS = 4000;
 export interface SpeechEnhancerDeps {
 	settings: Settings;
 	registry: ModelRegistry;
-	sessionId: string;
-	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
+	/** Current foreground session id, read per rewrite so a session switch is
+	 *  reflected in credential affinity rather than pinned at construction. */
+	getSessionId: () => string;
 }
 
 function extractText(content: AssistantMessage["content"]): string {
@@ -69,7 +71,7 @@ export class SpeechEnhancer {
 	 */
 	async rewrite(block: string, signal?: AbortSignal): Promise<string | null> {
 		try {
-			const { settings, registry, sessionId } = this.#deps;
+			const { settings, registry } = this.#deps;
 			// `@tiny` expands a configured `modelRoles.tiny` and otherwise falls
 			// through tiny's alias to the smol priority chain — unlike bare role
 			// lookup, this resolves even with no roles configured.
@@ -78,10 +80,12 @@ export class SpeechEnhancer {
 				matchPreferences: getModelMatchPreferences(settings),
 			}).model;
 			if (!model) return null;
-			const apiKey = await registry.getApiKey(model, sessionId);
+			// Each rewrite can overlap the still-streaming foreground answer, so it
+			// runs under a fresh isolated provider session derived from the CURRENT
+			// foreground session; it never advances the foreground turn (#10865).
+			using identity = sideRequestIdentity(registry.authStorage, this.#deps.getSessionId(), model.provider);
+			const apiKey = await registry.getApiKey(model, identity.sessionId);
 			if (!apiKey) return null;
-			// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
-			const metadata = this.#deps.metadataResolver?.(model.provider);
 			const response = await retryTransientCompletion(
 				() => {
 					const timeout = AbortSignal.timeout(REWRITE_TIMEOUT_MS);
@@ -92,11 +96,11 @@ export class SpeechEnhancer {
 							messages: [{ role: "user", content: boundBlock(block), timestamp: Date.now() }],
 						},
 						{
-							apiKey: registry.resolver(model, sessionId),
-							sessionId,
+							apiKey: registry.resolver(model, identity.sessionId),
+							sessionId: identity.sessionId,
 							maxTokens: ANSWER_MAX_TOKENS,
 							disableReasoning: true,
-							metadata,
+							metadataResolver: identity.metadata,
 							signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 						},
 					);

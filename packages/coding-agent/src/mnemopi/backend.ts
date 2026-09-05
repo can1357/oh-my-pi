@@ -19,6 +19,7 @@ import type {
 import memoryConsolidationPrompt from "../prompts/system/memory-consolidation-system.md" with { type: "text" };
 import memoryExtractionPrompt from "../prompts/system/memory-extraction-system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { sideRequestIdentity } from "../session/side-request-identity";
 import { isTinyMemoryLocalModelKey, ONLINE_MEMORY_MODEL_KEY } from "../tiny/models";
 import { tinyModelClient } from "../tiny/title-client";
 import { shortenPath } from "../tools/render-utils";
@@ -127,7 +128,13 @@ export const mnemopiBackend: MemoryBackend = {
 		}
 
 		try {
-			const config = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, sessionId);
+			const config = await loadMnemopiConfigWithProviders(
+				settings,
+				agentDir,
+				modelRegistry,
+				sessionId,
+				() => session.sessionId || sessionId,
+			);
 			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 			await installMnemopiState(session, config);
 		} catch (error) {
@@ -183,6 +190,7 @@ export const mnemopiBackend: MemoryBackend = {
 					agentDir,
 					session.modelRegistry,
 					session.sessionId,
+					() => session.sessionId || "",
 				);
 				await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 				state = await installMnemopiState(session, config);
@@ -479,9 +487,16 @@ async function loadMnemopiConfigWithProviders(
 	agentDir: string,
 	modelRegistry: ModelRegistry,
 	sessionId: string,
+	getForegroundSessionId: () => string,
 ): Promise<MnemopiBackendConfig> {
 	const config = loadMnemopiConfig(settings, agentDir);
-	config.providerOptions = await resolveMnemopiProviderOptions(config, settings, modelRegistry, sessionId);
+	config.providerOptions = await resolveMnemopiProviderOptions(
+		config,
+		settings,
+		modelRegistry,
+		sessionId,
+		getForegroundSessionId,
+	);
 	return config;
 }
 
@@ -509,6 +524,7 @@ async function resolveMnemopiProviderOptions(
 	settings: MemoryBackendStartOptions["settings"],
 	modelRegistry: ModelRegistry,
 	sessionId: string,
+	getForegroundSessionId: () => string,
 ): Promise<MnemopiProviderOptions> {
 	const base: MnemopiProviderOptions = {
 		noEmbeddings: config.providerOptions.noEmbeddings,
@@ -571,7 +587,14 @@ async function resolveMnemopiProviderOptions(
 			...base,
 			llm: async (prompt, opts) => {
 				const request = resolveMemoryCompletionInput(prompt, opts);
-				const hasApiKey = await modelRegistry.getApiKey(model, sessionId);
+				// Extraction/consolidation can overlap the next foreground prompt and
+				// can run concurrently with each other; derive a fresh isolated
+				// provider session per call, from the CURRENT foreground session, so
+				// a completion cannot advance the foreground turn or another memory
+				// request, and never authenticates a switched session against the
+				// account captured at startup (#10865).
+				using identity = sideRequestIdentity(modelRegistry.authStorage, getForegroundSessionId(), model.provider);
+				const hasApiKey = await modelRegistry.getApiKey(model, identity.sessionId);
 				if (!hasApiKey) {
 					logger.warn("Mnemopi: smol completion requested but no current API key is available.", {
 						provider: model.provider,
@@ -587,8 +610,9 @@ async function resolveMnemopiProviderOptions(
 							messages: [{ role: "user", content: request.prompt, timestamp: Date.now() }],
 						},
 						{
-							apiKey: modelRegistry.resolver(model, sessionId),
-							sessionId,
+							apiKey: modelRegistry.resolver(model, identity.sessionId),
+							sessionId: identity.sessionId,
+							metadataResolver: identity.metadata,
 							maxTokens: opts?.maxTokens,
 							temperature: opts?.temperature,
 						},

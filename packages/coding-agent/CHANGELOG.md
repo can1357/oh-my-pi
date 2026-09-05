@@ -11,6 +11,7 @@
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
+- Automatic background model requests (memory extraction/consolidation, sharpshooter extraction/consolidation, enhanced speech rewriting, learn capture, auto-thinking and unexpected-stop classification, branch summaries, edit auto-repair) now run under a fresh provider session identity isolated per request from the foreground turn — like automatic titles since #10621 — so an overlapping or concurrent side request no longer advances the foreground provider session and rejects the waiting prompt with `This session advanced while the request was waiting`. The isolated identity keeps the foreground account's credentials while allowing failover rotation, and is derived from the current session so it survives session switches ([#10865](https://github.com/can1357/oh-my-pi/issues/10865)).
 
 ## [18.1.10] - 2026-09-04
 

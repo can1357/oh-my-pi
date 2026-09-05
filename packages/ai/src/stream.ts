@@ -1480,6 +1480,22 @@ function forwardBedrockUserAgent(
 	return modelUserAgent === undefined ? callerHeaders : { ...callerHeaders, "User-Agent": modelUserAgent };
 }
 
+/**
+ * Resolve credential-dependent metadata for one concrete provider attempt.
+ *
+ * The API-key resolver records the selected session credential before this
+ * runs. Removing the callback from the returned options prevents providers
+ * and recursive dispatch from observing an internal function.
+ */
+function resolveSimpleStreamMetadata<TApi extends Api>(
+	model: Model<TApi>,
+	options: SimpleStreamOptions,
+): SimpleStreamOptions {
+	const { metadataResolver, ...resolved } = options;
+	if (!metadataResolver) return resolved;
+	return { ...resolved, metadata: metadataResolver(model.provider) };
+}
+
 function streamSimpleRequest<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -1503,7 +1519,7 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey };
+				const attemptOptions = resolveSimpleStreamMetadata(model, { ...requestOptions, apiKey });
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
@@ -1599,6 +1615,10 @@ function streamSimpleRequest<TApi extends Api>(
 			emitFailure(failure);
 		})();
 		return outer;
+	}
+
+	if (requestOptions.metadataResolver) {
+		return streamSimpleRequest(model, context, resolveSimpleStreamMetadata(model, requestOptions));
 	}
 
 	// Pi-native transport short-circuits the per-provider dispatch entirely:

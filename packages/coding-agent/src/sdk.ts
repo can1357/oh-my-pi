@@ -180,6 +180,7 @@ import {
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./session/session-tools";
+import { sideRequestIdentity } from "./session/side-request-identity";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
@@ -1189,6 +1190,14 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 	}
 	return commands;
 }
+/** Provider identity and credentials captured atomically for one auto-learn run. */
+interface AutoLearnCaptureIdentity {
+	sessionId: string;
+	metadataResolver: (provider: string) => Record<string, unknown> | undefined;
+	getApiKey?: AgentOptions["getApiKey"];
+	/** Release this capture's ephemeral credential affinity. */
+	[Symbol.dispose](): void;
+}
 
 /** Dependencies used to construct an isolated auto-learn capture agent. */
 export interface AutoLearnCaptureRunnerOptions {
@@ -1197,7 +1206,13 @@ export interface AutoLearnCaptureRunnerOptions {
 	createAgent: (options: AgentOptions) => Agent;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
-	createSessionId?: () => string;
+	/**
+	 * Snapshot an isolated provider identity for one capture. Invoked at capture
+	 * start because the controller survives `newSession`/`switchSession`; the
+	 * returned session id, metadata resolver, and credential resolver must all
+	 * describe that same foreground session.
+	 */
+	createIdentity?: (model: Model) => AutoLearnCaptureIdentity;
 }
 
 /** Build a private capture runner over a detached message snapshot and provider session. */
@@ -1209,7 +1224,8 @@ export function createAutoLearnCaptureRunner(
 		const captureModel = options.sourceAgent.state.model;
 		if (!captureModel) return;
 
-		const captureSessionId = options.createSessionId?.() ?? Bun.randomUUIDv7();
+		using identity = options.createIdentity?.(captureModel);
+		const captureSessionId = identity?.sessionId ?? Bun.randomUUIDv7();
 		const captureProviderSessionState = new Map<string, ProviderSessionState>();
 		const captureMessages = options.sourceAgent.state.messages.map((message): AgentMessage => {
 			if (message.role === "assistant") {
@@ -1232,11 +1248,13 @@ export function createAutoLearnCaptureRunner(
 			sessionId: captureSessionId,
 			promptCacheKey: captureSessionId,
 			providerSessionState: captureProviderSessionState,
-			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
+			getApiKey: identity?.getApiKey ?? (requestModel => options.sourceAgent.getApiKey?.(requestModel)),
 			onPayload: options.onPayload,
 			onResponse: options.onResponse,
 		});
-		captureAgent.setMetadataResolver(provider => options.sourceAgent.metadataForProvider(provider));
+		captureAgent.setMetadataResolver(
+			identity?.metadataResolver ?? (provider => options.sourceAgent.metadataForProvider(provider)),
+		);
 		const captureMessage: CustomMessage = {
 			role: "custom",
 			customType: "autolearn-nudge",
@@ -4133,6 +4151,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
 			captureTools: autoLearnCaptureTools,
+			createIdentity: captureModel => {
+				const identity = sideRequestIdentity(modelRegistry.authStorage, session.sessionId, captureModel.provider);
+				return {
+					sessionId: identity.sessionId,
+					metadataResolver: identity.metadata,
+					getApiKey: requestModel => modelRegistry.resolver(requestModel, identity.sessionId),
+					[Symbol.dispose]: () => identity[Symbol.dispose](),
+				};
+			},
 			onPayload,
 			onResponse,
 			createAgent: captureOptions => {

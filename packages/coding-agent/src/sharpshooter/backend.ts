@@ -85,7 +85,7 @@ export const sharpshooterBackend: MemoryBackend = {
 				cwd: settings.getCwd(),
 				settings,
 				modelRegistry,
-				sessionId: session.sessionId,
+				getSessionId: () => session.sessionId,
 			});
 			try {
 				const unsubscribe = session.subscribe(event => {
@@ -139,7 +139,7 @@ export const sharpshooterBackend: MemoryBackend = {
 			cwd,
 			settings: session.settings,
 			modelRegistry: session.modelRegistry,
-			sessionId: session.sessionId,
+			getSessionId: () => session.sessionId,
 			force: true,
 		});
 	},

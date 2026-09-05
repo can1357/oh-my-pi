@@ -3,7 +3,14 @@ import type * as fsNode from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type ApiKey, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import {
+	type ApiKey,
+	completeSimple,
+	Effort,
+	type Model,
+	retryTransientCompletion,
+	type SimpleStreamOptions,
+} from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getAgentDbPath, getMemoriesDir, isEnoent, logger, parseJsonlLenient, prompt } from "@oh-my-pi/pi-utils";
 
@@ -17,6 +24,7 @@ import readPathTemplate from "../prompts/memories/read-path.md" with { type: "te
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
 import stageOneSystemTemplate from "../prompts/memories/stage_one_system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { sideRequestIdentity } from "../session/side-request-identity";
 import {
 	claimStage1Jobs,
 	clearMemoryData as clearMemoryDataInDb,
@@ -399,14 +407,19 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 
 		await runWithConcurrency(claims, config.stage1Concurrency, async claim => {
 			if (!isMemoryStartupActive(options)) return;
+			// Rollout-memory analysis is independent background work that can overlap
+			// the next foreground turn, and several jobs run concurrently: give each
+			// its own isolated provider session so they cannot advance the foreground
+			// turn or one another (#10865).
+			using identity = sideRequestIdentity(modelRegistry.authStorage, session.sessionId, phase1Model.provider);
 			const result = await runStage1Job({
 				claim,
 				model: phase1Model,
-				apiKey: modelRegistry.resolver(phase1Model, session.sessionId),
-				sessionId: session.sessionId,
+				apiKey: modelRegistry.resolver(phase1Model, identity.sessionId),
+				sessionId: identity.sessionId,
 				modelMaxTokens: computeModelTokenBudget(phase1Model, config),
 				config,
-				metadata: session.agent?.metadataForProvider(phase1Model.provider),
+				metadataResolver: identity.metadata,
 			});
 			if (!isMemoryStartupActive(options)) return;
 
@@ -529,7 +542,10 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 			});
 			return;
 		}
-		const phase2ApiKey = await modelRegistry.getApiKey(phase2Model, session.sessionId);
+		using identity = sideRequestIdentity(modelRegistry.authStorage, session.sessionId, phase2Model.provider);
+		// Resolve the initial credential on the isolated session (not the
+		// foreground); request-time metadata follows this pin and retry rotation.
+		const phase2ApiKey = await modelRegistry.getApiKey(phase2Model, identity.sessionId);
 		if (!phase2ApiKey) {
 			markPhase2FailureWithFallback(db, {
 				claim,
@@ -565,9 +581,9 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 			const consolidated = await runConsolidationModel({
 				memoryRoot,
 				model: phase2Model,
-				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
-				sessionId: session.sessionId,
-				metadata: session.agent?.metadataForProvider(phase2Model.provider),
+				apiKey: modelRegistry.resolver(phase2Model, identity.sessionId),
+				sessionId: identity.sessionId,
+				metadataResolver: identity.metadata,
 			});
 			if (!isMemoryStartupActive(options)) return;
 			await applyConsolidation(memoryRoot, consolidated);
@@ -728,7 +744,7 @@ async function runStage1Job(options: {
 	sessionId: string;
 	modelMaxTokens: number;
 	config: MemoryRuntimeConfig;
-	metadata?: Record<string, unknown>;
+	metadataResolver?: SimpleStreamOptions["metadataResolver"];
 }): Promise<
 	| {
 			kind: "output";
@@ -763,7 +779,7 @@ async function runStage1Job(options: {
 				{
 					apiKey,
 					sessionId: options.sessionId,
-					metadata: options.metadata,
+					metadataResolver: options.metadataResolver,
 					maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
 					reasoning: clampThinkingLevelForModel(model, Effort.Low),
 				},
@@ -874,7 +890,7 @@ async function runConsolidationModel(options: {
 	model: Model;
 	apiKey: ApiKey;
 	sessionId: string;
-	metadata?: Record<string, unknown>;
+	metadataResolver?: SimpleStreamOptions["metadataResolver"];
 }): Promise<{
 	memoryMd: string;
 	memorySummary: string;
@@ -904,7 +920,7 @@ async function runConsolidationModel(options: {
 			{
 				apiKey,
 				sessionId: options.sessionId,
-				metadata: options.metadata,
+				metadataResolver: options.metadataResolver,
 				maxTokens: 8192,
 				reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 			},

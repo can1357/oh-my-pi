@@ -269,10 +269,6 @@ export async function generateTitleOnline(
 			logger.warn("title-generator: no API key", { ...modelContext, reason: "missing-api-key" });
 			return null;
 		}
-		// Resolve metadata after getApiKey so the session-sticky credential for this
-		// request is already recorded; metadataResolver can then return the correct
-		// account_uuid rather than the snapshot-at-call-site value.
-		const metadata = metadataResolver?.(model.provider);
 
 		// Title generation is a 3-7 word task, but the ceiling has to survive
 		// backends that ignore `disableReasoning` (see TITLE_MAX_TOKENS above).
@@ -297,7 +293,7 @@ export async function generateTitleOnline(
 						// from the message ("hashline" → "HasHroshi"). Providers whose models
 						// reject sampling params drop this via `supportsSamplingParams`.
 						temperature: 0,
-						metadata,
+						metadataResolver,
 						signal,
 					},
 				),

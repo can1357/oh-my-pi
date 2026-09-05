@@ -27,7 +27,7 @@ interface Harness {
 	cwd: string;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
-	sessionId: string;
+	getSessionId: () => string;
 }
 
 function createHarness(root: string): Harness {
@@ -47,7 +47,7 @@ function createHarness(root: string): Harness {
 			"sharpshooter.intervalMinutes": 5,
 		}),
 		modelRegistry,
-		sessionId: "01900000-0000-7000-8000-000000000001",
+		getSessionId: () => "01900000-0000-7000-8000-000000000001",
 	};
 }
 
@@ -125,6 +125,34 @@ describe("runSharpshooterConsolidation", () => {
 		const forced = await runSharpshooterConsolidation({ ...harness, force: true });
 		expect(forced).toEqual({ ran: true, sessions: 1, deltas: 1 });
 		expect(completeSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("sends an isolated provider identity distinct from the foreground session (#10865)", async () => {
+		using temp = TempDir.createSync("@pi-sharpshooter-isolated-");
+		const harness = createHarness(temp.path());
+		await appendSharpshooterDelta(harness.agentDir, harness.cwd, delta("session-a", 1, "Keep one boundary."));
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(completion(completeFiles));
+
+		const result = await runSharpshooterConsolidation({ ...harness, force: true });
+		expect(result).toEqual({ ran: true, sessions: 1, deltas: 1 });
+
+		const options = completeSpy.mock.calls[0]?.[2];
+		const sentSessionId = options?.sessionId;
+		const foregroundSessionId = harness.getSessionId();
+		// The session id becomes the X-Claude-Code-Session-Id header; it must not
+		// be the foreground turn's id, or the provider advances the shared session.
+		if (typeof sentSessionId !== "string") throw new Error("expected an isolated sessionId on the request");
+		expect(sentSessionId).not.toBe(foregroundSessionId);
+		// The metadata ordering identity must match that isolated session id, not
+		// the foreground one.
+		const rawUserId = options?.metadataResolver?.("anthropic")?.user_id;
+		if (typeof rawUserId !== "string") throw new Error("expected metadata.user_id string");
+		const userId: unknown = JSON.parse(rawUserId);
+		if (!userId || typeof userId !== "object" || !("session_id" in userId) || typeof userId.session_id !== "string") {
+			throw new Error("expected user_id.session_id");
+		}
+		expect(userId.session_id).toBe(sentSessionId);
+		expect(userId.session_id).not.toBe(foregroundSessionId);
 	});
 
 	it("stamps an empty queue without calling the model", async () => {

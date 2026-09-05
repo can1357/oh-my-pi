@@ -139,6 +139,43 @@ describe("streamSimple resolver auth retry", () => {
 		expect((contexts[1]!.error as { status?: number }).status).toBe(401);
 	});
 
+	it("resolves credential metadata after each auth-retry key selection", async () => {
+		const attempts: Array<{ apiKey: unknown; account: unknown; leakedResolver: unknown }> = [];
+		let selectedAccount = "unresolved";
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				attempts.push({
+					apiKey: options?.apiKey,
+					account: options?.metadata?.account,
+					leakedResolver: options?.metadataResolver,
+				});
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => (attempts.length === 1 ? stream.fail(authError()) : ok(stream)));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: ctx => {
+				selectedAccount = ctx.error === undefined ? "account-a" : "account-b";
+				return ctx.error === undefined ? "key-a" : "key-b";
+			},
+			metadata: { account: "stale-account" },
+			metadataResolver: () => ({ account: selectedAccount }),
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(attempts).toEqual([
+			{ apiKey: "key-a", account: "account-a", leakedResolver: undefined },
+			{ apiKey: "key-b", account: "account-b", leakedResolver: undefined },
+		]);
+	});
+
 	it("replays exactly once after a provider requests token refresh, then succeeds", async () => {
 		const keys: unknown[] = [];
 		const contexts: ApiKeyResolveContext[] = [];

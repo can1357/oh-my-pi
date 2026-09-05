@@ -606,6 +606,16 @@ export interface StreamOptions {
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	/**
+	 * Resolve request metadata after each {@link apiKey} resolver attempt.
+	 * Use when metadata identifies the selected credential (for example
+	 * Anthropic `account_uuid`): auth retry can rotate credentials, so a static
+	 * snapshot may disagree with the bearer sent on a later attempt.
+	 *
+	 * When present, this is authoritative over inherited {@link metadata}.
+	 * Providers receive only the resolved `metadata` object, never this callback.
+	 */
+	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
+	/**
 	 * API key for the request: either a static bearer string, or an
 	 * {@link ApiKeyResolver} that mints/rotates the key across the central
 	 * a/b/c auth-retry policy. `streamSimple`/`completeSimple` resolve a
