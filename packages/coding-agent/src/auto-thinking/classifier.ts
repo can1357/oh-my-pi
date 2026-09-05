@@ -26,7 +26,7 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
-import { resolveRoleSelection } from "../config/model-resolver";
+import { collectOnlineTinyCandidates } from "../tiny/online-candidates";
 import type { Settings } from "../config/settings";
 import difficultySystemPrompt from "../prompts/system/auto-thinking-difficulty.md" with { type: "text" };
 import difficultyLocalPrompt from "../prompts/system/auto-thinking-difficulty-local.md" with { type: "text" };
@@ -130,59 +130,65 @@ export async function classifyDifficulty(
 }
 
 async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceiling: Effort): Promise<Effort> {
-	const resolved = resolveRoleSelection(["tiny", "smol"], deps.settings, deps.registry.getAvailable());
-	const model = resolved?.model;
-	if (!model) {
+	const candidates = collectOnlineTinyCandidates(["tiny", "smol"], deps.settings, deps.registry.getAvailable());
+	if (candidates.length === 0) {
 		throw new Error("auto-thinking: no tiny/smol model available for classification");
 	}
-	const apiKey = await deps.registry.getApiKey(model, deps.sessionId);
-	if (!apiKey) {
-		throw new Error(`auto-thinking: no API key for ${model.provider}/${model.id}`);
-	}
-	// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
-	const metadata = deps.metadataResolver?.(model.provider);
 	const maxTokens = ONLINE_REASONING_SAFE_MAX_TOKENS;
+	let lastError: string | undefined;
+	for (const resolved of candidates) {
+		const model = resolved.model;
+		const apiKey = await deps.registry.getApiKey(model, deps.sessionId);
+		if (!apiKey) {
+			lastError = `no API key for ${model.provider}/${model.id}`;
+			continue;
+		}
+		// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
+		const metadata = deps.metadataResolver?.(model.provider);
+		const response = await retryTransientCompletion(
+			() =>
+				completeSimple(
+					model,
+					{
+						systemPrompt: [difficultySystemPromptFor(ceiling)],
+						messages: [{ role: "user", content: input, timestamp: Date.now() }],
+					},
+					{
+						apiKey: deps.registry.resolver(model, deps.sessionId),
+						sessionId: deps.sessionId,
+						maxTokens,
+						disableReasoning: true,
+						metadata,
+						signal: deps.signal,
+						onAttempt: attempt =>
+							deps.onUsage?.({
+								role: resolved.role,
+								api: attempt.api,
+								provider: attempt.provider,
+								model: attempt.model,
+								usage: attempt.usage,
+								stopReason: attempt.stopReason,
+								errorMessage: attempt.errorMessage,
+							}),
+					},
+				),
+			{ signal: deps.signal },
+		);
 
-	const response = await retryTransientCompletion(
-		() =>
-			completeSimple(
-				model,
-				{
-					systemPrompt: [difficultySystemPromptFor(ceiling)],
-					messages: [{ role: "user", content: input, timestamp: Date.now() }],
-				},
-				{
-					apiKey: deps.registry.resolver(model, deps.sessionId),
-					sessionId: deps.sessionId,
-					maxTokens,
-					disableReasoning: true,
-					metadata,
-					signal: deps.signal,
-					onAttempt: attempt =>
-						deps.onUsage?.({
-							role: resolved.role,
-							api: attempt.api,
-							provider: attempt.provider,
-							model: attempt.model,
-							usage: attempt.usage,
-							stopReason: attempt.stopReason,
-							errorMessage: attempt.errorMessage,
-						}),
-				},
-			),
-		{ signal: deps.signal },
-	);
+		if (response.stopReason === "error") {
+			lastError = response.errorMessage ?? "unknown error";
+			continue;
+		}
 
-	if (response.stopReason === "error") {
-		throw new Error(`auto-thinking: online classification failed: ${response.errorMessage ?? "unknown error"}`);
+		const text = extractText(response.content);
+		const effort = parseDifficultyLevel(text);
+		if (!effort) {
+			lastError = `unparseable online classification: ${JSON.stringify(text)}`;
+			continue;
+		}
+		return effort;
 	}
-
-	const text = extractText(response.content);
-	const effort = parseDifficultyLevel(text);
-	if (!effort) {
-		throw new Error(`auto-thinking: unparseable online classification: ${JSON.stringify(text)}`);
-	}
-	return effort;
+	throw new Error(`auto-thinking: online classification failed: ${lastError ?? "unknown error"}`);
 }
 
 async function classifyLocal(input: string, modelKey: string, deps: ClassifyDifficultyDeps): Promise<Effort> {
