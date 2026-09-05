@@ -3076,6 +3076,8 @@ export class RelayBridge {
 							runImmediately,
 						}
 					: script.params;
+			const contextGenerationBeforeRegistration = tab.contextGeneration;
+			const navigationGenerationBeforeRegistration = tab.mainFrameNavigationGeneration;
 			let result: Record<string, unknown> | undefined;
 			try {
 				result = (await this.#rpc({
@@ -3101,8 +3103,6 @@ export class RelayBridge {
 				throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
 			}
 			let rootIdentifier = identifier;
-			const contextGenerationAfterRegistration = tab.contextGeneration;
-			const navigationGenerationAfterRegistration = tab.mainFrameNavigationGeneration;
 			if (script.params?.runImmediately === true && !runImmediately) {
 				const loaderAfterRegistration = await this.#mainFrameLoaderId(tab.tabId).catch(err => {
 					if (isExtensionTransportInterrupted(err)) {
@@ -3119,8 +3119,8 @@ export class RelayBridge {
 					// already covered by that registration. Only retry when the loader
 					// changed before acknowledgement; otherwise runImmediately would
 					// execute non-idempotent preload code twice in the new document.
-					tab.contextGeneration === contextGenerationAfterRegistration &&
-					tab.mainFrameNavigationGeneration === navigationGenerationAfterRegistration
+					tab.contextGeneration === contextGenerationBeforeRegistration &&
+					tab.mainFrameNavigationGeneration === navigationGenerationBeforeRegistration
 				) {
 					let retry: Record<string, unknown> | undefined;
 					try {
