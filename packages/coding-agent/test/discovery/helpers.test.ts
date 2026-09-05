@@ -226,6 +226,18 @@ describe("parseMCPToolFilterEntry", () => {
 		}
 	});
 
+	test("warns when a non-empty array has no valid members (same fail-open as non-array)", () => {
+		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			expect(parseMCPToolFilterEntry("srv", [false])).toBeUndefined();
+			expect(parseMCPToolFilterEntry("srv", [""])).toBeUndefined();
+			expect(warnSpy).toHaveBeenCalledTimes(2);
+			expect(String(warnSpy.mock.calls[0]?.[0])).toContain("no valid entries");
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
 	test("dropping empty string members does not warn (valid array with filtered members)", () => {
 		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
 		try {

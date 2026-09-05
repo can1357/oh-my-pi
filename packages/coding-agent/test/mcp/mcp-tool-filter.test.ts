@@ -138,14 +138,23 @@ test("leading ! and extglob prefixes are literals (matcher surface pinned to doc
 	expect(run(NAMES, ["+(a|b)"]).unmatched).toEqual(["+(a|b)"]);
 });
 
-test("negated classes containing / are not rejected (documented picomatch behavior)", () => {
-	// picomatch's compiler hardcodes `/` into negated-class output, so a
-	// negated class can never exclude the slash character: `[^/]` matches
-	// slash-containing names too. This is inherent picomatch behavior and is
-	// documented in tool-filter.ts — the pattern stays routable, no guard.
-	const negated = run(NAMES, ["[^/]*"]);
-	expect(negated.allowed).toEqual(NAMES);
-	expect(negated.unmatched).toEqual([]);
+test("negated class with the encoded sentinel excludes the slash (documented picomatch behavior)", () => {
+	// `[^/]` encodes to `[^§]`, and picomatch excludes a class's own members:
+	// `admin[^/]delete` does NOT match `admin/delete`. A negated class WITHOUT
+	// the sentinel (`[^a]`) still matches slash-containing names. Documented
+	// in tool-filter.ts — the pattern stays routable, no guard.
+	expect(run(["admin/delete", "adminXdelete"], ["admin[^/]*"]).allowed).toEqual(["adminXdelete"]);
+	expect(run(["admin/delete", "adminXdelete"], ["admin[^a]*"]).allowed).toEqual(["admin/delete", "adminXdelete"]);
+	expect(run(NAMES, ["[^/]*"]).allowed).toEqual(NAMES);
+});
+
+test("single-char wildcard crosses a slash but not a raw sentinel (cardinality caveat)", () => {
+	// `/` encodes to ONE char (`§`), so `?` spans a slash position:
+	expect(run(NAMES, ["a?min/delete"]).allowed).toEqual(["admin/delete"]);
+	// A raw `§` expands to two encoded chars, so `?` cannot match it —
+	// `admin??delete` is the two-encoded-char spelling:
+	expect(run(["admin§delete"], ["admin?delete"]).allowed).toEqual([]);
+	expect(run(["admin§delete"], ["admin??delete"]).allowed).toEqual(["admin§delete"]);
 });
 
 test("positive classes with slash members match (admin[/]delete matches admin/delete)", () => {

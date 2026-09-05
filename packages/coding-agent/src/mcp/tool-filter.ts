@@ -51,15 +51,24 @@ export interface MCPToolFilterResult {
  *
  * Known limitations (documented, not guarded — the matching domain is
  * character-substituted, so picomatch sees encoded text):
- * - picomatch hardcodes `/` into NEGATED character classes (`[^a]` →
- *   `[^a/]`), so a negated class can never exclude the slash character —
- *   `[^/]` matches slash-containing names;
- * - `?` and class *ranges* resolve against encoded text, so they cannot span
- *   a slash position (`admin??delete` matches one-char `admin§delete`, and
- *   `[.-0]` does not span it) — use `*`, `**`, or an explicit `/` class
- *   member instead.
+ * - Wildcards and class ranges resolve against ENCODED text, so a raw `§` or
+ *   `¤` in a tool name expands to two encoded characters: `admin?delete`
+ *   matches one-char `admin§delete`? NO — `?` matches one ENCODED char, so
+ *   `admin?delete` does NOT match a name with a raw `§` between (the name
+ *   encodes to `admin¤§delete`), while `admin??delete` DOES. Slash positions
+ *   are unaffected (`/` → single `§`, so `admin?delete` matches
+ *   `admin/delete`) — the cardinality limitation applies only to raw
+ *   sentinel characters. Use `*`/`**` to span them.
+ * - A negated class containing the encoded sentinel excludes it: `[^/]`
+ *   encodes to `[^§]`, so `admin[^/]delete` does NOT match
+ *   `admin/delete` (and non-ASCII class members are reliably excluded).
+ *   An explicit positive class member (`[/]`) is the supported spelling.
+ * - Class ranges compare encoded code points: an implicit slash range
+ *   (`[.-0]`, where `/` lies between `.` and `0`) does not span the encoded
+ *   `§` (U+00A7) — spell the slash member explicitly.
  * The common patterns (`*`, `**`, explicit `/` class members, braces,
- * literals) are unaffected and match as documented.
+ * literals, `?` over slash-free names) are unaffected and match as
+ * documented.
  *
  * `nonegate`/`noextglob` pin the applied surface to the documented globs
  * (`*`, `?`, `[...]`, `{a,b}`) — a leading `!` or extglob prefix (`+(a|b)`)

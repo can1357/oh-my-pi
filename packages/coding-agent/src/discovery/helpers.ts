@@ -199,6 +199,15 @@ export function parseMCPToolFilterEntry(serverName: string, value: unknown): str
 		return undefined;
 	}
 	const filtered = value.filter((item): item is string => typeof item === "string" && item.length > 0);
+	if (filtered.length === 0 && value.length > 0) {
+		// A non-empty array with no valid members degrades to "filter off"
+		// exactly like a non-array value: the server contributes EVERY tool —
+		// the allowlist's fail-open direction, so warn like the non-array case.
+		logger.warn(`MCP server "${serverName}": tool filter array has no valid entries, ignoring`, {
+			value,
+		});
+		return undefined;
+	}
 	return filtered.length > 0 ? filtered : undefined;
 }
 
