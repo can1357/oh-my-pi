@@ -65,12 +65,15 @@ describe("attachment-state", () => {
 				await detach.promise;
 			},
 			async () => {
-				calls.push("fresh-root");
+				calls.push("fresh-root-required");
+			},
+			async () => {
+				calls.push("fresh-root-cleared");
 			},
 		);
 
 		while (!calls.includes("detach")) await Promise.resolve();
-		expect(calls).toEqual(["Page.enable", "Page.getFrameTree", "detach"]);
+		expect(calls).toEqual(["Page.enable", "fresh-root-required", "Page.getFrameTree", "detach"]);
 		expect(loaderIds.get(1)).toBe("loader-snapshot");
 
 		captureRecoveryLoaderNavigation(loaderIds, generations, 1, "Page.frameNavigated", {
@@ -80,7 +83,7 @@ describe("attachment-state", () => {
 		await pending;
 
 		expect(loaderIds.get(1)).toBe("loader-during-detach");
-		expect(calls).not.toContain("fresh-root");
+		expect(calls).toContain("fresh-root-cleared");
 	});
 
 	it("requires a fresh root when observed orphan detach fails", async () => {
@@ -98,12 +101,15 @@ describe("attachment-state", () => {
 				throw new Error("detach failed");
 			},
 			async () => {
-				calls.push("fresh-root");
+				calls.push("fresh-root-required");
+			},
+			async () => {
+				calls.push("fresh-root-cleared");
 			},
 		);
 
 		await expect(pending).rejects.toThrow("detach failed");
-		expect(calls).toEqual(["Page.enable", "detach", "fresh-root"]);
+		expect(calls).toEqual(["Page.enable", "fresh-root-required", "detach"]);
 	});
 
 	it("does not require a fresh root when Page observation never started", async () => {
@@ -121,6 +127,9 @@ describe("attachment-state", () => {
 			},
 			async () => {
 				freshRootRequired = true;
+			},
+			async () => {
+				freshRootRequired = false;
 			},
 		);
 

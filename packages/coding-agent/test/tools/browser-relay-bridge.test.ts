@@ -520,12 +520,9 @@ describe("RelayBridge tab grouping", () => {
 		nack(bridge, ext, "detach", "detach failed");
 		await flush();
 
-		connect(bridge, ext, [tab({ tabId: 1 })], {
-			attachedTabIds: [1],
-			recoverableTabIds: [1],
-		});
-		await flush();
-		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1, 1]);
+		// Cleanup reconnects immediately so the extension guard can retry the
+		// surviving orphan instead of waiting indefinitely for another hello.
+		expect(ext.closeCount).toBe(1);
 	});
 
 	it("retracts the recovery target when the guard-authorized reattach fails", async () => {
@@ -3540,6 +3537,58 @@ describe("RelayBridge tab grouping", () => {
 		});
 		ack(bridge, replacement, "send");
 		await flush();
+	});
+
+	it("forces a fresh root when a replacement interrupts the post-registration loader probe", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await flush();
+
+		bridge.extClosed(ext);
+		const recovering = new FakeExtSocket();
+		connect(bridge, recovering, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+			recoveryLoaderIds: { "1": "loader-before" },
+		});
+		await waitFor(() => recovering.pending("attach").length === 1);
+		ack(bridge, recovering, "attach");
+		await waitFor(() => recovering.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, recovering, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() =>
+			recovering.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+		);
+		ack(bridge, recovering, "send", { identifier: "root-script-replayed" });
+		await waitFor(
+			() => recovering.pending("send").filter(rpc => rpc.method === "Page.getFrameTree").length === 1,
+			"post-registration loader probe",
+		);
+
+		const replacement = new FakeExtSocket();
+		bridge.extConnected(replacement);
+		await flush();
+		connect(bridge, replacement, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => replacement.rpcs("detach").length === 1, "fresh-root detach after loader probe loss");
 	});
 
 	it("replays preserved preload scripts on a fresh root after an ordinary disconnect loses the replay result", async () => {

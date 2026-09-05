@@ -33,7 +33,8 @@ export async function detachWithRecoveryLoaderObservation(
 	enablePage: () => Promise<unknown>,
 	readMainFrameLoaderId: () => Promise<string | undefined>,
 	detach: () => Promise<void>,
-	onObservedDetachFailure: () => Promise<void>,
+	onObservationStarted: () => Promise<void>,
+	onObservedDetachSuccess: () => Promise<void>,
 ): Promise<void> {
 	const loaderGeneration = loaderGenerations.get(tabId) ?? 0;
 	// Page events may have been disabled after recovery. Observe them for the
@@ -45,18 +46,18 @@ export async function detachWithRecoveryLoaderObservation(
 		await enablePage();
 		observingPage = true;
 	} catch {}
+	// Page.enable mutates the surviving debugger root. Persist that fact before
+	// any later await so an MV3 worker termination cannot expose the root as
+	// reusable while the loader snapshot or detach is still pending.
+	if (observingPage) await onObservationStarted();
 	const loaderId = await readMainFrameLoaderId().catch(() => undefined);
 	if (
 		loaderGeneration === loaderGenerations.get(tabId) &&
 		typeof loaderId === "string"
 	)
 		loaderIds.set(tabId, loaderId);
-	try {
-		await detach();
-	} catch (error) {
-		if (observingPage) await onObservedDetachFailure();
-		throw error;
-	}
+	await detach();
+	if (observingPage) await onObservedDetachSuccess();
 }
 
 export function isAttachmentStateCurrent(

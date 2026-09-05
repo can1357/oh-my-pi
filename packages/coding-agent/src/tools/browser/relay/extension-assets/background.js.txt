@@ -98,25 +98,23 @@ function captureRecoveryLoaderNavigation(loaderIds, loaderGenerations, tabId, me
   loaderIds.set(tabId, loaderId);
   return true;
 }
-async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations, tabId, enablePage, readMainFrameLoaderId, detach, onObservedDetachFailure) {
+async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations, tabId, enablePage, readMainFrameLoaderId, detach, onObservationStarted, onObservedDetachSuccess) {
   const loaderGeneration = loaderGenerations.get(tabId) ?? 0;
   let observingPage = false;
   try {
     await enablePage();
     observingPage = true;
   } catch {}
+  if (observingPage)
+    await onObservationStarted();
   const loaderId = await readMainFrameLoaderId().catch(() => {
     return;
   });
   if (loaderGeneration === loaderGenerations.get(tabId) && typeof loaderId === "string")
     loaderIds.set(tabId, loaderId);
-  try {
-    await detach();
-  } catch (error) {
-    if (observingPage)
-      await onObservedDetachFailure();
-    throw error;
-  }
+  await detach();
+  if (observingPage)
+    await onObservedDetachSuccess();
 }
 function isAttachmentStateCurrent(epochs, tabId, epoch) {
   return (epochs.get(tabId) ?? 0) === epoch;
@@ -225,6 +223,10 @@ function serializeOrphanSweepDeadlineUpdate(previousUpdate, alarmUpdate, isCurre
 }
 
 // extension/pending-ops.ts
+async function afterPendingOperationsSettle(operations, callback) {
+  await Promise.allSettled(operations);
+  return callback();
+}
 async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOperations, takeSnapshot) {
   for (;; ) {
     const generation = getGeneration();
@@ -411,6 +413,11 @@ function requireFreshRoot(tabId) {
     freshRootRequiredTabIds.add(tabId);
   });
 }
+function clearFreshRootRequirement(tabId) {
+  return updateRecoverable(() => [tabId], () => {
+    freshRootRequiredTabIds.delete(tabId);
+  });
+}
 function forgetLiveOwnership(tabId) {
   return updateRecoverable(() => [tabId], () => {
     liveOwnedTabIds.delete(tabId);
@@ -512,7 +519,7 @@ var attachmentGuard = new AttachmentGuard({
         const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree");
         const loaderId = frameTree?.frameTree?.frame?.loaderId;
         return typeof loaderId === "string" ? loaderId : undefined;
-      }, () => chrome.debugger.detach({ tabId }), () => requireFreshRoot(tabId)).catch(async () => {
+      }, () => chrome.debugger.detach({ tabId }), () => requireFreshRoot(tabId), () => clearFreshRootRequirement(tabId)).catch(async () => {
         guardDetachments.delete(tabId);
         const targets = await chrome.debugger.getTargets().catch(() => null);
         if ((attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch && shouldRetrackAfterDetachFailure(targets, tabId)) {
@@ -532,9 +539,7 @@ var attachmentGuard = new AttachmentGuard({
         }
       }));
     }
-    Promise.all([...pendingDetaches]).then(async () => {
-      await persistRecoveryLoaderIds();
-    });
+    afterPendingOperationsSettle([...pendingDetaches], persistRecoveryLoaderIds);
   }
 });
 async function trackAttachments(tabIds, isFresh = () => true, attachmentState = snapshotAttachmentState(attachmentStateEpochs, tabIds)) {

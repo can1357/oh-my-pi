@@ -281,6 +281,15 @@ function requireFreshRoot(tabId: number): Promise<void> {
 	);
 }
 
+function clearFreshRootRequirement(tabId: number): Promise<void> {
+	return updateRecoverable(
+		() => [tabId],
+		() => {
+			freshRootRequiredTabIds.delete(tabId);
+		},
+	);
+}
+
 function forgetLiveOwnership(tabId: number): Promise<void> {
 	return updateRecoverable(
 		() => [tabId],
@@ -466,6 +475,7 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 					},
 					() => chrome.debugger.detach({ tabId }),
 					() => requireFreshRoot(tabId),
+					() => clearFreshRootRequirement(tabId),
 				).catch(async () => {
 					guardDetachments.delete(tabId);
 					// The detach rejected. If Chrome still reports the tab attached, the

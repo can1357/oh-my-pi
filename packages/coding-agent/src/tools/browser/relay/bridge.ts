@@ -709,7 +709,7 @@ export class RelayBridge {
 				}
 				this.#scheduleLivePreloadScriptCleanup(tab);
 				if (holders.length === 0 && (!hasRecoveryMetadata || recoverableNow.has(tab.tabId))) {
-					this.#detachIfUnheld(tab.tabId);
+					this.#detachIfUnheld(tab.tabId, true);
 					continue;
 				}
 				if (needsRecoveryReplay) {
@@ -3100,7 +3100,13 @@ export class RelayBridge {
 			const contextGenerationAfterRegistration = tab.contextGeneration;
 			const navigationGenerationAfterRegistration = tab.mainFrameNavigationGeneration;
 			if (script.params?.runImmediately === true && !runImmediately) {
-				const loaderAfterRegistration = await this.#mainFrameLoaderId(tab.tabId).catch(() => undefined);
+				const loaderAfterRegistration = await this.#mainFrameLoaderId(tab.tabId).catch(err => {
+					if (isExtensionTransportInterrupted(err)) {
+						tab.forceFreshRootBeforeReplay = true;
+						throw err;
+					}
+					return undefined;
+				});
 				if (
 					currentLoaderId !== undefined &&
 					loaderAfterRegistration !== undefined &&
