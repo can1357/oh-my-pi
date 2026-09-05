@@ -18,6 +18,7 @@ import type {
 import {
 	captureRecoveryLoaderNavigation,
 	consumeRelayInitiatedDetach,
+	noteRelayDetachOutcome,
 	createRetryableLoader,
 	detachWithRecoveryLoaderObservation,
 	extensionOwnedAttachedTabIds,
@@ -81,6 +82,11 @@ const attachmentStateEpochs = new Map<number, number>();
 // Tabs the relay explicitly asked us to detach. onDetach reports these as
 // relay-initiated so the bridge doesn't misclassify them as user cancellations.
 const relayInitiatedDetachTabs = new Set<number>();
+// Completed relay detaches survive a socket replacement long enough for the
+// next hello to distinguish them from a user Cancel / DevTools takeover whose
+// detached event was lost with the old socket. A successful attach consumes the
+// marker.
+const relayDetachedTabIds = new Set<number>();
 
 const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 const LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
@@ -835,6 +841,7 @@ async function buildHello(): Promise<
 		tabs: snapshots,
 		attachedTabIds,
 		recoverableTabIds: [...recoverableTabIds],
+		relayDetachedTabIds: [...relayDetachedTabIds],
 		recoveryLoaderIds: Object.fromEntries(
 			[...recoveryLoaderIds].map(([tabId, loaderId]) => [
 				String(tabId),
@@ -951,6 +958,7 @@ async function attachTabOperation(
 		}
 		throw new Error("debugger attachment detached before attach completed");
 	}
+	relayDetachedTabIds.delete(tabId);
 }
 
 async function runRpc(
@@ -1253,6 +1261,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 		source.tabId,
 		reason,
 	);
+	noteRelayDetachOutcome(relayDetachedTabIds, source.tabId, relayInitiated);
 	if (!relayInitiated && pendingAttachOperations.has(source.tabId)) {
 		pendingAttachOperations.cancel(
 			source.tabId,

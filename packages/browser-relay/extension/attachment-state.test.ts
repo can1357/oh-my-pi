@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	captureRecoveryLoaderNavigation,
 	consumeRelayInitiatedDetach,
+	noteRelayDetachOutcome,
 	createRetryableLoader,
 	detachWithRecoveryLoaderObservation,
 	extensionOwnedAttachedTabIds,
@@ -206,6 +207,16 @@ describe("attachment-state", () => {
 			true,
 		);
 		expect(markedTabs.has(1)).toBe(false);
+	});
+
+	it("records only completed relay detaches for reconnect reconciliation", () => {
+		const completedTabs = new Set<number>();
+		noteRelayDetachOutcome(completedTabs, 1, true);
+		expect(completedTabs.has(1)).toBe(true);
+
+		// A later user cancellation must revoke the stale relay authorization.
+		noteRelayDetachOutcome(completedTabs, 1, false);
+		expect(completedTabs.has(1)).toBe(false);
 	});
 
 	it("preserves detach retry state when target discovery fails", () => {

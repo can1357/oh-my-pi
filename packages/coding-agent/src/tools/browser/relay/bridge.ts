@@ -667,6 +667,8 @@ export class RelayBridge {
 		// distinguish a real user detach from a guard detach.
 		const hasRecoveryMetadata = msg.recoverableTabIds !== undefined;
 		const recoverableNow = new Set(msg.recoverableTabIds ?? []);
+		const hasRelayDetachMetadata = msg.relayDetachedTabIds !== undefined;
+		const relayDetachedNow = new Set(msg.relayDetachedTabIds ?? []);
 		const freshRootRequiredNow = new Set(msg.freshRootRequiredTabIds ?? []);
 		for (const snap of msg.tabs) {
 			seen.add(snap.tabId);
@@ -772,7 +774,9 @@ export class RelayBridge {
 				// A bare `forceFreshRootBeforeReplay` (armed the instant an ambiguous
 				// RPC was interrupted, before any refresh detach ran) does NOT, so a
 				// user Cancel / DevTools takeover during that window is still honored.
-				if (!tab.refreshDetachInFlight) {
+				const relayRefreshDetachConfirmed =
+					tab.refreshDetachInFlight && (!hasRelayDetachMetadata || relayDetachedNow.has(tab.tabId));
+				if (!relayRefreshDetachConfirmed) {
 					// The user detached while the extension socket was down. Invalidate
 					// the relay's stale sessions without fighting the explicit opt-out.
 					tab.forceFreshRootBeforeReplay = false;

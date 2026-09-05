@@ -125,6 +125,12 @@ function consumeRelayInitiatedDetach(markedTabs, tabId, reason) {
   const userDetach = reason === "canceled_by_user" || reason === "replaced_with_devtools";
   return relayMarked && !userDetach;
 }
+function noteRelayDetachOutcome(completedTabs, tabId, relayInitiated) {
+  if (relayInitiated)
+    completedTabs.add(tabId);
+  else
+    completedTabs.delete(tabId);
+}
 function shouldRetrackAfterDetachFailure(targets, tabId) {
   return targets === null || targets.some((target) => target.tabId === tabId && target.attached);
 }
@@ -289,6 +295,7 @@ var pendingAttachOperations = new PendingAttaches;
 var guardDetachments = new Set;
 var attachmentStateEpochs = new Map;
 var relayInitiatedDetachTabs = new Set;
+var relayDetachedTabIds = new Set;
 var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 var LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
 var RECOVERY_LOADER_IDS_KEY = "ompRecoveryLoaderIds";
@@ -721,6 +728,7 @@ async function buildHello() {
     tabs: snapshots,
     attachedTabIds,
     recoverableTabIds: [...recoverableTabIds],
+    relayDetachedTabIds: [...relayDetachedTabIds],
     recoveryLoaderIds: Object.fromEntries([...recoveryLoaderIds].map(([tabId, loaderId]) => [
       String(tabId),
       loaderId
@@ -783,6 +791,7 @@ async function attachTabOperation(tabId, socket, operation) {
     }
     throw new Error("debugger attachment detached before attach completed");
   }
+  relayDetachedTabIds.delete(tabId);
 }
 async function runRpc(msg, socket) {
   switch (msg.op) {
@@ -970,6 +979,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     return;
   }
   const relayInitiated = consumeRelayInitiatedDetach(relayInitiatedDetachTabs, source.tabId, reason);
+  noteRelayDetachOutcome(relayDetachedTabIds, source.tabId, relayInitiated);
   if (!relayInitiated && pendingAttachOperations.has(source.tabId)) {
     pendingAttachOperations.cancel(source.tabId, attachmentStateEpochs.get(source.tabId) ?? 0);
   }

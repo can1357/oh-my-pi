@@ -79,6 +79,7 @@ function connect(
 	options: {
 		attachedTabIds?: number[];
 		recoverableTabIds?: number[];
+		relayDetachedTabIds?: number[];
 		recoveryLoaderIds?: Record<string, string>;
 		freshRootRequiredTabIds?: number[];
 		hardwareConcurrency?: number;
@@ -95,6 +96,7 @@ function connect(
 			tabs,
 			attachedTabIds: options.attachedTabIds ?? [],
 			recoverableTabIds: options.recoverableTabIds ?? [],
+			relayDetachedTabIds: options.relayDetachedTabIds,
 			recoveryLoaderIds: options.recoveryLoaderIds,
 			freshRootRequiredTabIds: options.freshRootRequiredTabIds,
 		}),
@@ -4256,6 +4258,7 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], {
 			attachedTabIds: [],
 			recoverableTabIds: [],
+			relayDetachedTabIds: [1],
 		});
 		await waitFor(
 			() => ext3.rpcs("attach").length === 1,
@@ -4280,6 +4283,54 @@ describe("RelayBridge tab grouping", () => {
 		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeUndefined();
 		expect(ext3.rpcs("send").some(rpc => rpc.tabId === 1)).toBe(true);
+	});
+
+	it("honors a user revocation that interrupts a forced-root detach before reconnect", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").length === 1, "interrupted preload registration");
+		bridge.extClosed(ext);
+		await flush();
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => ext2.pending("detach").length === 1, "forced-root detach");
+		bridge.extClosed(ext2);
+		await flush();
+
+		// The extension observed a user Cancel / DevTools takeover, so its hello
+		// explicitly omits a completed relay detach despite the bridge still having
+		// an interrupted refresh RPC. User intent wins and the stale session dies.
+		const ext3 = new FakeExtSocket();
+		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [],
+			recoverableTabIds: [],
+			relayDetachedTabIds: [],
+		});
+		await flush();
+
+		expect(ext3.rpcs("attach")).toHaveLength(0);
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: cmdId, sessionId: pageSession, method: "Runtime.evaluate" }));
+		await flush();
+		expect(cdp.messages.find(message => message.id === cmdId)?.error).toBeDefined();
 	});
 
 	it("drops spent fresh-root recovery after the last holder disconnects", async () => {

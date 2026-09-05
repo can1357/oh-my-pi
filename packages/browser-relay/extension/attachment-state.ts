@@ -79,6 +79,15 @@ export function consumeRelayInitiatedDetach(
 	return relayMarked && !userDetach;
 }
 
+export function noteRelayDetachOutcome(
+	completedTabs: Set<number>,
+	tabId: number,
+	relayInitiated: boolean,
+): void {
+	if (relayInitiated) completedTabs.add(tabId);
+	else completedTabs.delete(tabId);
+}
+
 export function shouldRetrackAfterDetachFailure(
 	targets: ReadonlyArray<{ tabId?: number; attached: boolean }> | null,
 	tabId: number,

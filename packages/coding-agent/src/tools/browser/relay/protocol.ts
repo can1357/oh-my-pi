@@ -55,6 +55,8 @@ export type ExtToRelayMessage =
 			attachedTabIds: number[];
 			/** Tabs detached by the extension's orphan guard and therefore safe to restore for surviving sessions. */
 			recoverableTabIds?: number[];
+			/** Tabs whose latest detach was explicitly requested by the relay, rather than revoked by the user. */
+			relayDetachedTabIds?: number[];
 			/** Main-frame loader observed when recovery began, keyed by tab id. */
 			recoveryLoaderIds?: Record<string, string>;
 			/** Attached roots dirtied by guard-only CDP state and requiring detach + replay before reuse. */
