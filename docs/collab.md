@@ -40,6 +40,11 @@ The guest's previous session is restored on `/leave` (or when the host stops).
 | `/join <link>`    | Join a shared session as a guest                                                    |
 | `/leave`          | Leave (guest) or stop sharing (host)                                                |
 
+
+### Programmatic hosting
+
+Extensions can start, read, and stop hosting without typing a command: `pi.startCollab({ relayUrl })` (returns `{ link, viewLink, webLink, webViewLink }`, or the existing links when that relay already has a room), `pi.getCollabLinks()`, and `pi.stopCollab()`. Same rules as `/collab` (one room per session, guest sessions refuse), but nothing is printed: the links are credentials and the caller owns keeping them out of logs and transcripts. Interactive TUI only.
+
 ## Link format
 
 Accepted by `/join <link>` and `omp join "<link>"`:

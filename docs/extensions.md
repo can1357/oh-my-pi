@@ -123,9 +123,12 @@ Core methods:
 - `getSessionName`, `setSessionName`
 - `setModel`, `getThinkingLevel`, `setThinkingLevel`
 - `getServiceTiers`, `setServiceTier`
+- `startCollab`, `getCollabLinks`, `stopCollab`
 - `registerProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `events` (shared event bus)
+
+`pi.startCollab({ relayUrl })` starts hosting this session's collab room, or returns the links of the room already hosted on that relay. Interactive TUI only; other extension hosts throw. The returned `{ link, viewLink, webLink, webViewLink }` are credentials (the full link can steer the session): unlike `/collab`, nothing is printed, so the extension owns where the links go. `pi.getCollabLinks()` reads the current links without starting anything, and `pi.stopCollab()` stops hosting, disconnecting every guest.
 
 `getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
 

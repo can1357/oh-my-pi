@@ -1486,6 +1486,30 @@ export interface ExtensionAPI {
 	setSessionName(name: string): Promise<void>;
 
 	// =========================================================================
+	// Collab Hosting
+	// =========================================================================
+
+	/**
+	 * Start hosting this session's collab room, or return the links of the
+	 * room already hosted on the same relay. Throws when the session is in
+	 * someone else's room as a guest, when a room is already hosted on a
+	 * different relay (stop it first), when no relay is configured, or when
+	 * the relay cannot be reached. Available only in the interactive TUI;
+	 * other extension hosts throw.
+	 *
+	 * The returned links are credentials. Nothing prints them: unlike the
+	 * /collab slash command, this path writes no status line and no QR code,
+	 * so the caller alone decides where the links go.
+	 */
+	startCollab(options?: StartCollabOptions): Promise<CollabHostLinks>;
+
+	/** Links of the room this session currently hosts, or undefined when not hosting. */
+	getCollabLinks(): CollabHostLinks | undefined;
+
+	/** Stop hosting, disconnecting every guest. No-op when not hosting. */
+	stopCollab(): Promise<void>;
+
+	// =========================================================================
 	// Provider Registration
 	// =========================================================================
 
@@ -1682,6 +1706,39 @@ export type GetServiceTiersHandler = () => ServiceTierByFamily;
 
 export type SetServiceTierHandler = (family: ServiceTierFamily, tier: ServiceTier | undefined) => void;
 
+/**
+ * The links of a hosted collab room, in both strengths and both renderings.
+ * Every form is a credential: `link` grants prompting and interrupting,
+ * `viewLink` grants live read access. The API never prints them; the caller
+ * owns keeping them out of logs and transcripts.
+ */
+export interface CollabHostLinks {
+	/** Full-control terminal link: read the session, prompt and interrupt the agent. */
+	link: string;
+	/** View-only terminal link: live read access, no writes. */
+	viewLink: string;
+	/** Browser deep link for the full link (usable only when the relay serves a web client). */
+	webLink: string;
+	/** Browser deep link for the view-only link. */
+	webViewLink: string;
+}
+
+/** Options for {@link ExtensionAPI.startCollab}. */
+export interface StartCollabOptions {
+	/**
+	 * Relay to host through, as a URL or a scheme-less host. Falls back to the
+	 * collab.relayUrl setting. Plain ws:// is accepted for localhost relays,
+	 * which is what a same-machine daemon hands down.
+	 */
+	relayUrl?: string;
+}
+
+export type StartCollabHandler = (options?: StartCollabOptions) => Promise<CollabHostLinks>;
+
+export type GetCollabLinksHandler = () => CollabHostLinks | undefined;
+
+export type StopCollabHandler = () => Promise<void>;
+
 /** Shared state created by loader, used during registration and runtime. */
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
@@ -1710,6 +1767,14 @@ export interface ExtensionActions {
 	setServiceTier?: SetServiceTierHandler;
 	getSessionName: () => string | undefined;
 	setSessionName: (name: string) => Promise<void>;
+	/**
+	 * Collab hosting exists only where a CollabHost can run: the interactive
+	 * TUI. Optional so print, RPC, ACP, and subagent hosts keep compiling
+	 * without one; the runner substitutes a throwing fallback.
+	 */
+	startCollab?: StartCollabHandler;
+	getCollabLinks?: GetCollabLinksHandler;
+	stopCollab?: StopCollabHandler;
 }
 
 /** Actions for ExtensionContext (ctx.* in event handlers). */
@@ -1739,10 +1804,13 @@ export interface ExtensionCommandContextActions {
 	reload: () => Promise<void>;
 }
 
-/** Full runtime = state + actions, including host-compatible service-tier fallbacks. */
+/** Full runtime = state + actions, including host-compatible fallbacks. */
 export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {
 	getServiceTiers: GetServiceTiersHandler;
 	setServiceTier: SetServiceTierHandler;
+	startCollab: StartCollabHandler;
+	getCollabLinks: GetCollabLinksHandler;
+	stopCollab: StopCollabHandler;
 }
 
 /** Loaded extension with all registered items. */
