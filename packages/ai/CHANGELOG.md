@@ -6,6 +6,10 @@
 
 - Added Muse Code subscription sign-in, credential refresh, inference, and quota reporting in `/usage`, with durable rate-limit backoff so quota refresh recovers instead of repeatedly retrying.
 
+### Fixed
+
+- Anthropic Fable/Mythos tier credential blocks now clear when a later live usage report shows the tier back under its cap, instead of forcing a model fallback until the advertised weekly reset ([#10978](https://github.com/can1357/oh-my-pi/issues/10978)).
+
 ## [18.1.11] - 2026-09-05
 
 ### Fixed

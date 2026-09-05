@@ -806,6 +806,27 @@ function findClaudeSecondaryLimit(
 		.reduce<UsageLimit | undefined>((selected, limit) => morePressuredLimit(selected, limit, nowMs), undefined);
 }
 
+/**
+ * Backoff scopes a fresh usage report can vouch for. A Fable/Mythos usage-limit
+ * error writes a reactive `tier:` block whose deadline follows the 429
+ * retry-after (the advertised weekly reset); when a later live counter for that
+ * tier is below the cap, the block is stale and must clear instead of idling the
+ * account until the clock runs out. Each tier is judged only by its own weekly
+ * row so an exhausted Fable cap never keeps a recovered Mythos block alive, and
+ * vice versa. Only Fable/Mythos are returned because {@link blockScope} scopes
+ * backoff for exactly those tiers; every other Anthropic exhaustion blocks the
+ * whole credential and expires by clock. Mirrors the per-counter healing in
+ * packages/ai/src/usage/google-antigravity.ts.
+ */
+function healableClaudeTierBlockScopes(report: UsageReport): { blockScope: string; limits: UsageLimit[] }[] {
+	const scopes: { blockScope: string; limits: UsageLimit[] }[] = [];
+	for (const tier of ["fable", "mythos"] as const) {
+		const limits = report.limits.filter(limit => limit.scope.tier === tier);
+		if (limits.length > 0) scopes.push({ blockScope: `tier:${tier}`, limits });
+	}
+	return scopes;
+}
+
 export const claudeRankingStrategy: CredentialRankingStrategy = {
 	findWindowLimits(report, context) {
 		const primary = report.limits.find(limit => limit.id === "anthropic:5h");
@@ -827,5 +848,10 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 		const kind = getClaudeModelKind(context);
 		return kind === "fable" || kind === "mythos" ? `tier:${kind}` : undefined;
 	},
+	// A Fable/Mythos 429 backoff follows the advertised weekly reset, which can
+	// sit days past the tier's real recovery. Let a fresh healthy usage report
+	// clear the stale scoped block instead of pinning the account to a fallback
+	// model until the clock runs out (issue #10978).
+	healableBlockScopes: healableClaudeTierBlockScopes,
 	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 };
