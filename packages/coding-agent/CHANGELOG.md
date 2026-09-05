@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Added Model Hub controls for editing thinking levels on concrete retry fallback rows.
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
 ### Changed
