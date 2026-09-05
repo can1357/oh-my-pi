@@ -45,6 +45,32 @@ describe("ExecutableUpdateMonitor", () => {
 		expect(monitor.updatePending).toBe(false);
 	});
 
+	it("waits through a missing executable until its replacement lands", async () => {
+		const snapshots = ["old", undefined, undefined, "new", "new"];
+		let index = 0;
+		let restarts = 0;
+		const monitor = new ExecutableUpdateMonitor({
+			paths: ["/opt/omp"],
+			isEnabled: () => true,
+			snapshot: async () => snapshots[Math.min(index++, snapshots.length - 1)],
+			onUpdate: () => {
+				restarts++;
+			},
+		});
+
+		await monitor.prime();
+		await monitor.poll();
+		await monitor.poll();
+		expect(restarts).toBe(0);
+		expect(monitor.updatePending).toBe(false);
+
+		await monitor.poll();
+		expect(restarts).toBe(0);
+		await monitor.poll();
+		expect(restarts).toBe(1);
+		expect(monitor.updatePending).toBe(true);
+	});
+
 	it("waits for the setting to be enabled before establishing its baseline", async () => {
 		let enabled = false;
 		const snapshots = ["old", "new", "new"];
