@@ -2416,6 +2416,17 @@ export class ModelRegistry {
 		return true;
 	}
 
+	/**
+	 * Active position of a list-form `providers.<name>.apiKey` as a 0-based
+	 * index plus list length, for masked operator display (`key i/N`).
+	 * Undefined for single-string or unconfigured providers.
+	 */
+	getProviderApiKeyPosition(provider: string): { index: number; total: number } | undefined {
+		const keyConfig = this.#customProviderApiKeys.get(provider);
+		if (!Array.isArray(keyConfig) || keyConfig.length === 0) return undefined;
+		return { index: (this.#providerApiKeyIndex.get(provider) ?? 0) % keyConfig.length, total: keyConfig.length };
+	}
+
 	getDiscoverableProviders(): string[] {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		return this.#discoverableProviders

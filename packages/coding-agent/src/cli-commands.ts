@@ -133,6 +133,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.joinHelp,
 	},
 	{
+		name: "key-cycle",
+		load: () => import("./commands/key-cycle").then(m => m.default),
+		help: commandHelp.keyCycleHelp,
+	},
+	{
 		name: "models",
 		load: () => import("./commands/models").then(m => m.default),
 		help: commandHelp.modelsHelp,
