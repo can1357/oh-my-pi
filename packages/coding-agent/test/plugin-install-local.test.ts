@@ -142,6 +142,21 @@ describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 			enabled: true,
 		});
 	});
+
+	test("links over a real directory left by a git install", async () => {
+		// A git-sourced install leaves a directory, not a symlink, under the
+		// plugin's name. Relinking must replace it rather than fail on unlink.
+		const localPlugin = await createLocalPlugin(tmpRoot);
+		const linkTarget = path.join(tmpRoot, "plugins", "node_modules", "kimi-datasource");
+		await fs.mkdir(linkTarget, { recursive: true });
+		await Bun.write(path.join(linkTarget, "package.json"), JSON.stringify({ name: "kimi-datasource" }));
+
+		await new PluginManager(tmpRoot).link(localPlugin);
+
+		expect((await fs.lstat(linkTarget)).isSymbolicLink()).toBe(true);
+		expect(await fs.readlink(linkTarget)).toBe(localPlugin);
+	});
+
 	test("list --json includes linked local plugin without package dependencies", async () => {
 		const localPlugin = await createLocalPlugin(tmpRoot);
 		const output: string[] = [];
