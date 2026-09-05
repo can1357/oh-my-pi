@@ -29,6 +29,23 @@ provider "openai-codex" {
 			cache-write 15.625
 		}
 	}
+	// Codex discovery currently reports Astra's legacy 272K window and no
+	// pricing. Attribute subscription usage at the documented credit-equivalent
+	// rates, with free cache writes and without the API's >272K multiplier,
+	// while exposing the 1.05M window.
+	models "gpt-6-astra" "gpt-6-astra-wm" {
+		cost-patch {
+			input 10.0
+			output 50.0
+			cache-read 1.0
+			cache-write 0
+		}
+		service-tier-cost {
+			flex 0.5
+			priority 2.5
+		}
+		context-window-floor 1050000
+	}
 	class "openai" {
 		revision ">=5.3 <5.7" {
 			thinking-mode "effort"

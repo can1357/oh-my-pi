@@ -198,6 +198,51 @@ describe("Codex model discovery", () => {
 		expect(buildModel(red).cost).toEqual({ input: 12.5, output: 75, cacheRead: 1.25, cacheWrite: 15.625 });
 	});
 
+	it("normalizes plain and worker Codex GPT-6 Astra metadata", async () => {
+		const fetchFn: typeof fetch = Object.assign(
+			async () =>
+				Response.json({
+					models: [
+						{
+							slug: "gpt-6-astra-wm",
+							display_name: "GPT-6-Astra",
+							context_window: 272_000,
+							default_reasoning_level: "medium",
+							supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"],
+							input_modalities: ["text", "image"],
+							supported_in_api: true,
+						},
+					],
+				}),
+			{ preconnect() {} },
+		);
+		const result = await fetchCodexModels({
+			accessToken: "test-token",
+			baseUrl: "https://codex.example/backend-api",
+			clientVersion: "0.153.0",
+			fetchFn,
+		});
+		const astra = result?.models.find(model => model.id === "gpt-6-astra");
+		const workerAstra = result?.models.find(model => model.id === "gpt-6-astra-wm");
+		if (!astra || !workerAstra) throw new Error("Expected plain and worker GPT-6 Astra routes");
+
+		for (const model of [astra, workerAstra]) {
+			// `/models` omits prices, so discovery stays neutral and the KDL
+			// catalog rule remains the single authority for billed metadata.
+			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+			expect(model.contextWindow).toBe(272_000);
+			const builtModel = buildModel(model);
+			// Codex credits keep this base rate above 272K and do not charge for
+			// cache writes; unlike the API card, there is no long-context tier.
+			expect(builtModel.cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 0 });
+			expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5 });
+			expect(builtModel).toMatchObject({
+				contextWindow: 1_050_000,
+				maxTokens: 128_000,
+			});
+		}
+	});
+
 	it("floors stale reported windows for GPT-5.6 luna/sol/terra and honors reports above the floor", async () => {
 		const fetchFn: typeof fetch = Object.assign(
 			async () =>
