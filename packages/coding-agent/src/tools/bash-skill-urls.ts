@@ -45,6 +45,8 @@ export interface InternalUrlExpansionOptions {
 	cwd?: string;
 	sessionFile?: string;
 	ensureLocalParentDirs?: boolean;
+	/** Resolve bare skill:// URIs to the skill base directory instead of the instruction file. */
+	skillUrlForDirectory?: boolean;
 	/** Calling session's agent-scoped applicable rules — lets rule:// resolve without process-global state. */
 	rules?: readonly Rule[];
 }
@@ -52,8 +54,14 @@ export interface InternalUrlExpansionOptions {
 /**
  * Resolve a single skill:// URL to its absolute filesystem path.
  * Does NOT read file content or verify existence.
+ * A bare URI addresses the skill's configured instruction file, or its base
+ * directory when `forDirectory` is set (e.g. a bash working directory).
  */
-export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): string {
+export function resolveSkillUrlToPath(
+	url: string,
+	skills: readonly Skill[],
+	options: { forDirectory?: boolean } = {},
+): string {
 	const parsed = /^skill:\/\/([^/?#]+)(\/[^?#]*)?(?:[?#].*)?$/.exec(url);
 	if (!parsed) {
 		throw new ToolError(`Invalid skill:// URL: ${url}`);
@@ -85,11 +93,11 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 	const hasRelativePath = rawPath !== "" && rawPath !== "/";
 
 	if (!hasRelativePath) {
-		// A bare URI addresses the skill's configured instruction file directly.
-		// Contained skills still fail closed when it escapes or is missing.
-		const instructionPath = path.resolve(skill.filePath);
+		// A bare URI addresses the skill's configured instruction file, or its
+		// base directory for directory-oriented callers (bash cwd).
+		const bareTarget = path.resolve(options.forDirectory === true ? skill.baseDir : skill.filePath);
 		if (skill.containRoot) {
-			const contained = resolveContainedPathSync(skill.containRoot, instructionPath);
+			const contained = resolveContainedPathSync(skill.containRoot, bareTarget);
 			if (contained.status === "outside") {
 				throw new ToolError(`skill:// path resolves outside the plugin root: ${url}`);
 			}
@@ -98,9 +106,8 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 			}
 			return contained.realPath;
 		}
-		return instructionPath;
+		return bareTarget;
 	}
-
 	let relativePath: string;
 	try {
 		relativePath = decodeURIComponent(rawPath.slice(1));
@@ -277,6 +284,7 @@ async function resolveInternalUrlToPath(
 	cwd?: string,
 	sessionFile?: string,
 	rules?: readonly Rule[],
+	skillUrlForDirectory?: boolean,
 ): Promise<string> {
 	const url = normalizeLocalScheme(rawUrl);
 	const scheme = extractScheme(url);
@@ -285,7 +293,7 @@ async function resolveInternalUrlToPath(
 	}
 
 	if (scheme === "skill") {
-		return resolveSkillUrlToPath(url, skills);
+		return resolveSkillUrlToPath(url, skills, { forDirectory: skillUrlForDirectory });
 	}
 
 	if (scheme === "attachment") {
@@ -382,6 +390,7 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 				options.cwd,
 				options.sessionFile,
 				options.rules,
+				options.skillUrlForDirectory,
 			);
 		} catch {
 			continue;

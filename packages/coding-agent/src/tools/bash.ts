@@ -1083,8 +1083,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			: undefined;
 
 		// Resolve protocol URLs (skill://, agent://, etc.) in extracted cwd.
+		// Bare skill:// URIs resolve to the skill directory here: the result must
+		// pass the isDirectory check below.
 		if (cwd?.includes("://") || cwd?.includes("local:/")) {
-			cwd = await expandInternalUrls(cwd, { ...internalUrlOptions, noEscape: true });
+			cwd = await expandInternalUrls(cwd, { ...internalUrlOptions, noEscape: true, skillUrlForDirectory: true });
 		}
 
 		// Best-effort cache invalidation: drop github-cache rows for any issue/PR

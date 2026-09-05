@@ -638,6 +638,37 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("`skill://<name>`");
 	});
 
+	it("keeps skill URL guidance for a custom declared skill URI reader", async () => {
+		const tools = new Map(TOOLS);
+		tools.set("fetch", {
+			label: "Fetch",
+			description: "Fetches URLs.",
+			parameters: { type: "object", properties: { url: { type: "string" } } },
+			readsSkillUris: true,
+		});
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "fetch-skill",
+					description: "Readable through fetch",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [],
+			toolNames: ["fetch"],
+			tools,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("fetch-skill");
+		expect(text).toContain("`skill://<name>`");
+	});
+
 	it("omits skill URL guidance when no skills are loaded", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,

@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { Shell } from "@oh-my-pi/pi-natives";
@@ -110,6 +114,54 @@ describe("BashTool execution results", () => {
 
 			expect(result.isError).toBeUndefined();
 			expect(stdout).toBe(scenario.expected);
+		}
+	});
+});
+
+describe("BashTool skill:// working directory", () => {
+	async function skillFixture(): Promise<{ dir: string; skillDir: string; skill: Skill }> {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-cwd-")));
+		const skillDir = path.join(dir, "skill");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(path.join(skillDir, "SKILL.md"), "body\n");
+		return {
+			dir,
+			skillDir,
+			skill: {
+				name: "docs",
+				description: "d",
+				filePath: path.join(skillDir, "SKILL.md"),
+				baseDir: skillDir,
+				source: "test",
+			},
+		};
+	}
+
+	it("runs a command with a bare skill URI as cwd", async () => {
+		const { dir, skillDir, skill } = await skillFixture();
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-cwd", { command: "pwd", cwd: "skill://docs" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+			expect(result.isError).toBeUndefined();
+			expect(text).toContain(skillDir);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("runs a leading cd into a bare skill URI", async () => {
+		const { dir, skillDir, skill } = await skillFixture();
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+			const result = await tool.execute("call-skill-cd", { command: "cd skill://docs && pwd" });
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+
+			expect(result.isError).toBeUndefined();
+			expect(text).toContain(skillDir);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 });

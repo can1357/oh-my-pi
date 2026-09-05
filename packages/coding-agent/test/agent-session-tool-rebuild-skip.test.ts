@@ -1433,4 +1433,27 @@ These tools became available:
 		expect(session.getMountedXdevToolNames()).toContain("CaseAdd");
 		expect(session.getToolByName("CaseAdd")).toBeDefined();
 	});
+
+	it("rebuilds when an RPC host read tool gains skill URI capability", async () => {
+		// `readsSkillUris` drives skill catalog/URI guidance, so a same-name
+		// replacement that flips it must change the rebuild signature even when
+		// name, label, description, and wire name are identical.
+		let rebuildCount = 0;
+		const xdevState = createTestXdevState();
+		const { session } = newSession(
+			async toolNames => {
+				rebuildCount++;
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: xdevState },
+		);
+		const plainRead = createBasicTool("rpc_read", "RPC Read");
+		const capableRead = { ...createBasicTool("rpc_read", "RPC Read"), readsSkillUris: true } as AgentTool;
+
+		await session.refreshRpcHostTools([plainRead]);
+		expect(rebuildCount).toBe(1);
+
+		await session.refreshRpcHostTools([capableRead]);
+		expect(rebuildCount).toBe(2);
+	});
 });

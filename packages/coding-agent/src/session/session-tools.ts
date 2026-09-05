@@ -1531,12 +1531,15 @@ export class SessionTools {
 	 *
 	 * The signature covers:
 	 *   1. Active tool names in order (the prompt renders them in this order).
-	 *   2. Active tool labels, descriptions, and wire-visible names — all are
-	 *      rendered into the prompt body (see `system-prompt.md` `{{label}}: \`{{name}}\``
-	 *      and `toolPromptNames` in `buildSystemPrompt`). The wire name comes from
-	 *      `tool.customWireName` and overrides the internal name on the model wire
-	 *      (e.g. `edit` exposes itself as `apply_patch` to GPT-5 in apply_patch mode);
-	 *      a stale wire name would desync prompt guidance from actual tool routing.
+	 *   2. Active tool labels, descriptions, wire-visible names, and `skill://`
+	 *      read capability — all are rendered into the prompt body (see
+	 *      `system-prompt.md` `{{label}}: \`{{name}}\`` and `toolPromptNames` in
+	 *      `buildSystemPrompt`). The wire name comes from `tool.customWireName` and
+	 *      overrides the internal name on the model wire (e.g. `edit` exposes itself
+	 *      as `apply_patch` to GPT-5 in apply_patch mode); a stale wire name would
+	 *      desync prompt guidance from actual tool routing. Likewise a flipped
+	 *      `readsSkillUris` changes skill catalog/URI guidance with identical
+	 *      names and descriptions, so it must rebuild too.
 	 *   3. The bounded mounted-MCP projection: escaped original-name labels,
 	 *      actual `xd://` paths, and the omission flag in catalog order. These are
 	 *      the exact values rendered by the global transport guidance; catalog
@@ -1568,8 +1571,10 @@ export class SessionTools {
 		// Order-preserving join: any reorder must produce a different signature so
 		// the rebuild fires and the new tool list reaches the API.
 		const nameSegment = toolNames.join("\u0001");
-		const describeTool = (tool: AgentTool): string =>
-			`${tool.name}=${tool.label ?? ""}|${tool.description ?? ""}|${tool.customWireName ?? ""}`;
+		const describeTool = (tool: AgentTool): string => {
+			const readsSkillUris = "readsSkillUris" in tool && tool.readsSkillUris === true;
+			return `${tool.name}=${tool.label ?? ""}|${tool.description ?? ""}|${tool.customWireName ?? ""}|${readsSkillUris}`;
+		};
 		const descriptionSegment = tools.map(describeTool).join("\u0002");
 		const mountedMCPProjection = projectMountedMCPXdevGuidance(
 			collectMountedMCPToolRoutes(this.#xdev ? listXdevTools(this.#xdev) : []),

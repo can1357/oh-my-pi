@@ -968,11 +968,15 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			);
 
 	// Filter skills for the rendered system prompt:
-	// - require an active tool that declares `skill://` read capability;
+	// - require an active tool that declares `skill://` read capability (any tool
+	//   name, not just `read`, so custom resolvers count once projected);
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
-	const hasRead = toolNames.includes("read") && (tools === undefined || tools.get("read")?.readsSkillUris === true);
-	const hasSkillUriAccess = hasRead && skills.length > 0;
-	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const hasSkillReader =
+		tools === undefined
+			? toolNames.includes("read")
+			: toolNames.some(name => tools.get(name)?.readsSkillUris === true);
+	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
+	const filteredSkills = hasSkillReader ? skills.filter(skill => skill.hide !== true) : [];
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
