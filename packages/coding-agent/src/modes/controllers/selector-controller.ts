@@ -85,6 +85,7 @@ import { applyHyperlinkSetting } from "../../tui/hyperlink";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { filterUsageReportsForDisplay } from "../../utils/usage-display";
 import { getAssistantMessageLinkTargets } from "../utils/interactive-context-helpers";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
@@ -287,17 +288,20 @@ export class SelectorController {
 					this.ctx.session.sessionId,
 				)
 			: undefined;
-		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(reports);
+		const displayReports = filterUsageReportsForDisplay(reports, {
+			showZeroUsageMeters: this.ctx.settings.get("display.showZeroUsageMeters"),
+		});
+		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(displayReports);
 		const done = () => {
 			overlayHandle?.hide();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
 		const dashboard = new UsageDashboardComponent({
-			reports,
+			reports: displayReports,
 			renderDetail: width =>
 				renderUsageReports(
-					reports,
+					displayReports,
 					theme,
 					Date.now(),
 					width,
