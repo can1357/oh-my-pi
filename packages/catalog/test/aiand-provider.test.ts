@@ -180,4 +180,33 @@ describe("ai& provider support", () => {
 		expect(flash?.thinking?.defaultLevel).toBe(Effort.Minimal);
 		expect(flash?.cost).toEqual({ input: 0.15, output: 0.25, cacheRead: 0.08, cacheWrite: 0 });
 	});
+
+	test("maps qwen3.8-27b census row: none-backed minimal plus low/medium/xhigh", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "qwen/qwen3.8-27b",
+					description: "Qwen3.8-27B",
+					context_window: 262144,
+					capabilities: ["reasoning", "tool_calling", "vision", "video", "document"],
+					reasoning_efforts: ["none", "low", "medium", "xhigh"],
+					reasoning_effort_default: "medium",
+					currency: "usd",
+					input_per_1m: "0.400000",
+					output_per_1m: "3.000000",
+					cached_input_per_1m: "0.200000",
+				},
+			]),
+		) as unknown as FetchImpl;
+
+		const options = aiandModelManagerOptions({ apiKey: "aiand-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+		const qwen = models?.find(model => model.id === "qwen/qwen3.8-27b");
+		// First wire tier is `none`, so minimal selects thinking-off; the
+		// remaining tiers map verbatim and the server default is medium.
+		expect(qwen?.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.XHigh]);
+		expect(qwen?.thinking?.effortMap).toEqual({ [Effort.Minimal]: "none" });
+		expect(qwen?.thinking?.defaultLevel).toBe(Effort.Medium);
+		expect(qwen?.input).toEqual(["text", "image"]);
+	});
 });
