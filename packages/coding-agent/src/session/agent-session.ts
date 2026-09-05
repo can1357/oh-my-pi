@@ -2101,10 +2101,14 @@ export class AgentSession {
 	 * prompt/spawn policy or restricted tools. No-op unless a persona is
 	 * currently active.
 	 *
-	 * Atomic: the spawns/prompt fields are cleared only AFTER the baseline
-	 * restoration succeeds, so a failed restore (e.g. a system-prompt rebuild
-	 * error) leaves the persona fully intact instead of a partially cleared
-	 * state (codex #3821198710).
+	 * Atomic in both directions: the spawns/prompt fields are cleared only
+	 * AFTER the baseline restoration succeeds, so a failed restore leaves the
+	 * persona fully intact instead of a partially cleared state (codex
+	 * #3821198710); conversely, the persona-owned fields are snapshotted
+	 * before the clears commit and restored if the post-clear prompt refresh
+	 * rejects, so a failed refresh leaves the session either fully on the
+	 * persona or fully off it (never an installed prompt describing a persona
+	 * the session state no longer has).
 	 */
 	async clearPersonaOwnedState(): Promise<void> {
 		// A persona is "currently active" when its mutable session state is
@@ -2118,6 +2122,8 @@ export class AgentSession {
 		// normal session.
 		const hadPersona = this.getPersonaAppendPrompt() !== undefined || this.getSessionSpawns() !== null;
 		if (!hadPersona) return;
+		const previousSpawns = this.getSessionSpawns();
+		const previousAppendPrompt = this.getPersonaAppendPrompt();
 		// Restore the pre-persona tool set (launch baseline or first-switch
 		// capture) so a restricted persona's `tools:` list does not leak into
 		// the unrelated mode. Runs BEFORE the spawns/prompt clear: if it fails,
@@ -2133,7 +2139,25 @@ export class AgentSession {
 		// unchanged and the mode would keep the persona's system prompt and
 		// scout policy. Force a refresh now that every persona field is cleared
 		// (codex #3845551582 / P2 prompt-after-clear).
-		await this.refreshBaseSystemPrompt();
+		if (previousSpawns === null && previousAppendPrompt === undefined) {
+			// First-switch baseline capture: nothing persona-specific was
+			// installed yet, so nothing to roll back when the refresh rejects.
+			await this.refreshBaseSystemPrompt();
+			return;
+		}
+		try {
+			await this.refreshBaseSystemPrompt();
+		} catch (error) {
+			// Prompt build failed after the clears committed (e.g. a memory
+			// backend's instruction build rejects once the persona restriction
+			// is lifted). Restore the persona-owned fields so the installed
+			// base prompt (which still describes the persona) and the session
+			// state don't desync; the caller's error path or the next
+			// reconcile can retry the clear.
+			this.setSessionSpawns(previousSpawns);
+			this.setPersonaAppendPrompt(previousAppendPrompt);
+			throw error;
+		}
 	}
 
 	/**
