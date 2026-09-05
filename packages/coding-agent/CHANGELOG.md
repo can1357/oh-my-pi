@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
+- Daemon project presence records now carry the live session's id and name, and follow it across session transitions such as `/new`, so an external supervisor can correlate a running `omp` process with the session file it is driving.
 
 ### Fixed
 
