@@ -6,6 +6,10 @@
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
 
+### Fixed
+
+- Model Hub now waits for default-role assignment to finish before accepting more input, preventing stale UI state and duplicate model changes that made a selection appear to require a second attempt.
+
 ## [18.1.11] - 2026-09-05
 
 ### Added
