@@ -6681,10 +6681,10 @@ export class AgentSession {
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
 	): Promise<void> {
-		// Captured before any await below so the aside branch can detect a
+		// Captured before any await below so queued branches can detect a
 		// newSession()/switchSession() that completed while normalization/vision
-		// description was in flight and drop a record that would otherwise land in a
-		// different session's queue.
+		// description was in flight: aside delivery drops the stale record, while
+		// acknowledged noninterrupting delivery rejects it.
 		const sessionGeneration = this.#sessionGeneration;
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
@@ -6698,7 +6698,11 @@ export class AgentSession {
 		// vision description already done — reuse them instead of paying a second
 		// vision-model request for the same attachment.
 		const videoAttachmentNotices = this.#createVideoAttachmentNotices(images, timestamp ?? Date.now());
-		const normalizedImages = preprocessed ? preprocessed.images : await this.#normalizeImagesForModel(images);
+		const normalizedImages = preprocessed
+			? preprocessed.images
+			: images
+				? await this.#normalizeImagesForModel(images)
+				: undefined;
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
@@ -6723,8 +6727,12 @@ export class AgentSession {
 			this.#resumeStrandedIrcAsides();
 			return;
 		}
-		if (mode === "nonInterrupting" && this.#isDisposed) {
-			throw new Error("Session disposed before message delivery");
+		if (mode === "nonInterrupting") {
+			if (this.#isDisposed) throw new Error("Session disposed before message delivery");
+			if ((await this.#sessionGenerationChanged(sessionGeneration)) || !this.#unsubscribeAgent) {
+				throw new Error("Session changed before message delivery");
+			}
+			if (this.#isDisposed) throw new Error("Session disposed before message delivery");
 		}
 		const queueMode = mode === "nonInterrupting" ? (this.isStreaming ? "followUp" : "steer") : mode;
 		this.#allowQueuedMessageDrainRetry();

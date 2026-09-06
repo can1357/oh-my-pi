@@ -1,6 +1,5 @@
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
-import * as os from "node:os";
 import * as path from "node:path";
 import { getGlobalDaemonRuntimeDir } from "@oh-my-pi/pi-utils/dirs";
 import { isEexist, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
@@ -19,7 +18,6 @@ import {
 	type DaemonOperation,
 	type DaemonRpcResult,
 	type DaemonWireMessage,
-	LIVE_SESSION_PROTOCOL_VERSION,
 	type LiveSessionMessageNotification,
 	type LiveSessionRegistration,
 	parseDaemonRpcResult,
@@ -68,11 +66,15 @@ export interface DaemonBrokerClient {
 	close(): void;
 }
 
+/** Owns one broker-hosted session registration until {@link close} unregisters it. */
 export interface LiveSessionHost {
+	/** Republish mutable session metadata without changing the endpoint identity. */
 	update(registration: LiveSessionRegistration): Promise<void>;
+	/** Remove the registration and close its independent broker connection. */
 	close(): Promise<void>;
 }
 
+/** Handles one inbound message; successful settlement is the broker's delivery acknowledgement. */
 export type LiveSessionMessageSink = (message: string) => Promise<void> | void;
 
 /** A request reached the broker and the broker rejected the operation. */
@@ -625,64 +627,4 @@ export async function closeDaemonClients(): Promise<void> {
 	for (const client of await Promise.all(pending)) client.close();
 	cancelExitCleanup?.();
 	cancelExitCleanup = undefined;
-}
-
-/** Exercise worker-host broker startup and authenticated RPC for distribution smoke tests. */
-export async function smokeTestDaemonBroker(): Promise<void> {
-	const smokeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-"));
-	const projectDir = path.join(smokeRoot, "project");
-	const runtimeDir = path.join(smokeRoot, "run");
-	await fs.mkdir(projectDir, { recursive: true });
-	const options = { runtimeDir, idleGraceMs: 5_000 };
-	const client = await createDaemonBrokerClient(projectDir, options);
-	let host: LiveSessionHost | undefined;
-	let deliveredMessage: string | undefined;
-	try {
-		const ping = await client.request({ op: "ping" });
-		if (
-			ping.op !== "ping" ||
-			ping.projectDir !== client.projectDir ||
-			!ping.capabilities?.includes(DAEMON_CAPABILITY_LIVE_SESSIONS)
-		) {
-			throw new Error("daemon broker ping mismatch");
-		}
-		host = await createLiveSessionHost(
-			projectDir,
-			{
-				version: LIVE_SESSION_PROTOCOL_VERSION,
-				endpointId: "smoke-endpoint",
-				sessionId: "smoke-session",
-				title: "Broker smoke",
-				startedAt: new Date().toISOString(),
-			},
-			message => {
-				deliveredMessage = message;
-			},
-			options,
-		);
-		const listed = await client.request({ op: "session-list" });
-		if (listed.op !== "session-list" || listed.sessions[0]?.sessionId !== "smoke-session") {
-			throw new Error("live session registration was not listed");
-		}
-		const sent = await client.request({
-			op: "session-send",
-			endpointId: "smoke-endpoint",
-			sessionId: "smoke-session",
-			message: "smoke message",
-		});
-		if (sent.op !== "session-send" || deliveredMessage !== "smoke message") {
-			throw new Error("live session message was not delivered");
-		}
-		await host.close();
-		host = undefined;
-		const afterClose = await client.request({ op: "session-list" });
-		if (afterClose.op !== "session-list" || afterClose.sessions.length !== 0) {
-			throw new Error("closed live session remained registered");
-		}
-		await client.request({ op: "shutdown" });
-	} finally {
-		await host?.close().catch(() => undefined);
-		client.close();
-		await fs.rm(smokeRoot, { recursive: true, force: true });
-	}
 }
