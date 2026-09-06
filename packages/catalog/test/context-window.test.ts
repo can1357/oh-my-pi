@@ -14,6 +14,13 @@ function bundledAstra() {
 	return astra;
 }
 
+test("prefers a live maximum over a previously resolved rule fallback", () => {
+	const astra = bundledAstra();
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: undefined })).toBe(872_000);
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: 640_000 })).toBe(640_000);
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: undefined })).toBe(872_000);
+});
+
 test("uses the policy fallback when a model maximum is not finite", () => {
 	const astra = bundledAstra();
 	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: Number.NaN })).toBe(872_000);
