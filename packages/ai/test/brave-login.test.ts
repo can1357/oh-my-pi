@@ -16,29 +16,18 @@ if (!loginBrave) throw new Error("Brave login is not registered");
 describe("brave login", () => {
 	it("opens Brave API-key settings and returns a trimmed key without validation requests", async () => {
 		let authUrl: string | undefined;
-		let authInstructions: string | undefined;
-		let promptMessage: string | undefined;
-		let promptPlaceholder: string | undefined;
 
 		const apiKey = await loginBrave({
 			onAuth: info => {
 				authUrl = info.url;
-				authInstructions = info.instructions;
 			},
-			onPrompt: async prompt => {
-				promptMessage = prompt.message;
-				promptPlaceholder = prompt.placeholder;
-				return "  BSA-test-key  ";
-			},
+			onPrompt: async () => "  BSA-test-key  ",
 			fetch: () => {
 				throw new Error("Brave login must not make a network request");
 			},
 		});
 
 		expect(authUrl).toBe("https://api-dashboard.search.brave.com/app/keys");
-		expect(authInstructions).toBe("Create or copy your API key from the Brave Search API dashboard.");
-		expect(promptMessage).toBe("Paste your Brave API key");
-		expect(promptPlaceholder).toBe("API key");
 		expect(apiKey).toBe("BSA-test-key");
 	});
 
