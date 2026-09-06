@@ -4,6 +4,7 @@
  * This file handles CLI argument parsing and translates them into
  * createAgentSession() options. The SDK does the heavy lifting.
  */
+import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -38,6 +39,7 @@ import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
 	formatModelSelectorValue,
+	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveModelRoleValue,
@@ -56,10 +58,12 @@ import {
 	resolveActiveProjectRegistryPath,
 } from "./discovery/helpers";
 import { buildEffectiveExtensionRoots, injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
+import type { EffectiveExtensionRoots } from "./capability/types";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
 import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
+import { resolvePath } from "./extensibility/utils";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import { discoverStartupLspServers } from "./lsp/servers";
@@ -383,8 +387,10 @@ export interface AcpSessionFactoryOptions {
 	sessionDir?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools">;
+	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools" | "agent">;
 	rawArgs: string[];
+	/** Per-workspace async re-derivation of persona discovery roots (relative extension spellings). */
+	rederivePersonaExtensionRoots?: (sessionCwd: string, sessionSettings?: Settings) => Promise<EffectiveExtensionRoots>;
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
 
@@ -431,6 +437,29 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
 		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
 		const eventBus = new EventBus();
+		// Per-client-cwd roots: the launch workspace's definitions must not
+		// leak into a different workspace. Derived for EVERY session (not only
+		// when a launch persona was requested) — a later live `/agent` on
+		// workspace B discovers through the session's roots provider, which
+		// must carry B's relative-extension package roots.
+		let pendingPersonaAgent = undefined;
+		let sessionRoots: EffectiveExtensionRoots | undefined;
+		{
+			// fw2QD: consume the TARGET workspace's settings (nextSettings), not
+			// the launch workspace's — B's configured extensions belong to B.
+			const roots = args.rederivePersonaExtensionRoots
+				? await args.rederivePersonaExtensionRoots(cwd, nextSettings)
+				: args.baseOptions.extensionRoots?.(cwd);
+			if (args.parsedArgs.agent) {
+				const { agents } = await discoverAgents(cwd, undefined, roots);
+				pendingPersonaAgent = getAgent(agents, args.parsedArgs.agent) ?? undefined;
+			}
+			// fwdEb/fwu7x: pin the workspace-scoped view on the CREATED session
+			// too — baseOptions.extensionRoots is a sync closure serving the
+			// launch view, so later /agent or persisted-persona discovery on
+			// workspace B would scan A's roots without this override.
+			sessionRoots = roots;
+		}
 		const trustedExtensions =
 			args.parsedArgs.trustedExtensions && args.parsedArgs.trustedExtensions.length > 0
 				? await loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus)
@@ -442,6 +471,8 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		}
 		const { session: nextSession, setToolUIContext } = await args.createSession({
 			...args.baseOptions,
+			extensionRoots: sessionRoots ? () => sessionRoots : args.baseOptions.extensionRoots,
+			pendingPersonaAgent,
 			cwd,
 			sessionManager: nextSessionManager,
 			settings: nextSettings,
@@ -1095,7 +1126,9 @@ function personaExplicitModelPattern(parsed: Args, resolved: ResolveCliModelResu
 	// re-resolves the persisted pattern, so dropping the suffix silently
 	// re-classifies the thinking effort. `resolved.thinkingLevel` is set exactly
 	// when the resolver stripped a valid suffix — append it back.
-	const qualified = `${resolved.model.provider}/${resolved.model.id}`;
+	// fw_sK: preserve `@upstream` routing (`openrouter/z-ai/glm-4.7@cerebras`)
+	// — provider/id alone would strip the route and re-resolve elsewhere.
+	const qualified = formatModelStringWithRouting(resolved.model);
 	return resolved.thinkingLevel ? `${qualified}:${resolved.thinkingLevel}` : qualified;
 }
 
@@ -1426,48 +1459,90 @@ export async function buildSessionOptions(
 		trustedExtensionCount > 0
 			? (options.additionalExtensionPaths ?? [])
 			: [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
-	const packageRoots: string[] = [];
-	for (const extensionPath of agentExtensionRoots) {
-		try {
-			if (!fsSync.statSync(extensionPath).isFile()) continue;
-		} catch {
-			continue;
-		}
-		let dir = path.dirname(path.resolve(extensionPath));
-		while (true) {
-			if (fsSync.existsSync(path.join(dir, "package.json"))) {
-				packageRoots.push(dir);
-				break;
-			}
-			const parent = path.dirname(dir);
-			if (parent === dir) break;
-			dir = parent;
-		}
-	}
+	const options_cwd = parsed.cwd ?? getProjectDir();
+	// Package roots are derived lazily per session cwd below
+	// (derivePackageRoots) — the pre-pass is gone.
 	// The package root rides ONLY the discovery roots: the trusted loader
 	// validates that every explicit path is a module FILE (loadTrustedSessionExtensions),
 	// while agent discovery needs the package directory (the `agents/` subtree
-	// lives at the package root, not beside the module). `options.extensionRoots`
-	// carries the merged view for rediscovery/subagent inheritance; the module
-	// file stays the sole `additionalExtensionPaths` entry the loader loads.
-	const explicitRootsWithPackages = [...agentExtensionRoots, ...packageRoots];
-	if (packageRoots.length > 0) {
-		options.extensionRoots = () =>
-			buildEffectiveExtensionRoots({
-				additionalExtensionPaths: explicitRootsWithPackages,
-				disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
-				configured: activeSettings.get("extensions") ?? [],
-				configuredLevel: activeSettings.extensionsSourceLevel(),
-			});
-	}
-	const agentResolutionRoots = options.extensionRoots
-		? options.extensionRoots()
-		: buildEffectiveExtensionRoots({
-				additionalExtensionPaths: agentExtensionRoots,
-				disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
-				configured: activeSettings.get("extensions") ?? [],
-				configuredLevel: activeSettings.extensionsSourceLevel(),
-			});
+	// lives at the package root, not beside the module). The roots closure
+	// re-derives the nearest package.json ancestor against the REQUESTING
+	// session's cwd — an ACP host invokes it per client workspace, and a
+	// relative `--extension ./pkg/index.ts` must resolve to project B's package
+	// directory for B's sessions, not the launch workspace's absolute root.
+	const derivePackageRoots = async (sessionCwd: string): Promise<string[]> => {
+		const roots: string[] = [];
+		for (const extensionPath of agentExtensionRoots) {
+			// Absolute spellings are workspace-independent; resolvePath is a
+			// no-op for them, so both forms derive through the same walk.
+			try {
+				const resolved = resolvePath(extensionPath, sessionCwd);
+				const stat = await fs.stat(resolved);
+				if (!stat.isFile()) continue;
+				let dir = path.dirname(resolved);
+				while (true) {
+					if (await Bun.file(path.join(dir, "package.json")).exists()) {
+						roots.push(dir);
+						break;
+					}
+					const parent = path.dirname(dir);
+					if (parent === dir) break;
+					dir = parent;
+				}
+			} catch {
+				continue;
+			}
+		}
+		return roots;
+	};
+	const packageRootsByCwd = new Map<string, string[]>();
+	const packageRootsFor = async (sessionCwd?: string): Promise<string[]> => {
+		const effectiveCwd = sessionCwd ?? options_cwd;
+		let roots = packageRootsByCwd.get(effectiveCwd);
+		if (!roots) {
+			roots = await derivePackageRoots(effectiveCwd);
+			packageRootsByCwd.set(effectiveCwd, roots);
+		}
+		return roots;
+	};
+	const buildPersonaExtensionRoots = async (
+		sessionCwd?: string,
+		sessionSettings?: Settings,
+	): Promise<EffectiveExtensionRoots> => {
+		const sessionPackageRoots = await packageRootsFor(sessionCwd);
+		const settingsFor = sessionSettings ?? activeSettings;
+		return buildEffectiveExtensionRoots({
+			additionalExtensionPaths: [...agentExtensionRoots, ...sessionPackageRoots],
+			disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
+			configured: settingsFor.get("extensions") ?? [],
+			configuredLevel: settingsFor.extensionsSourceLevel(),
+		});
+	};
+	const launchRootsView = await buildPersonaExtensionRoots();
+	// `options.extensionRoots` is a SYNC provider (subagent discovery reads it
+	// synchronously). The as-derivable parts recompute per call: settings
+	// reloads change `extensions`, and a TUI/RPC session switch changes the
+	// live cwd — recomputing keeps `/agent`, task-agent, and skill discovery
+	// tied to the CURRENT workspace. The package-root portion is the only
+	// async part; it is cached per cwd (fs walks are not callable sync).
+	// fw_sE: the cache must be the SAME map the async derivation populates
+	// (a snapshot copy would never see later cwds), and the default cwd must
+	// be the LIVE session cwd — after a TUI/RPC switchSession the session's
+	// manager cwd is authoritative, not the launch cwd.
+	options.extensionRoots = (sessionCwd?: string): EffectiveExtensionRoots => {
+		const liveCwd = sessionCwd ?? options_cwd;
+		const cachedRoots = packageRootsByCwd.get(liveCwd) ?? [];
+		if (cachedRoots.length === 0 && agentExtensionRoots.length > 0 && packageRootsByCwd.size > 0) {
+			return launchRootsView;
+		}
+		return buildEffectiveExtensionRoots({
+			additionalExtensionPaths: [...agentExtensionRoots, ...cachedRoots],
+			disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
+			configured: activeSettings.get("extensions") ?? [],
+			configuredLevel: activeSettings.extensionsSourceLevel(),
+		});
+	};
+	const agentResolutionRoots = launchRootsView;
 
 	// `--agent <name>`: resolve the persona BEFORE the session is built so its
 	// definition can enter through the PersonaRuntime seam (CreateAgentSessionOptions
@@ -1477,7 +1552,11 @@ export async function buildSessionOptions(
 		const options_cwd = parsed.cwd ?? getProjectDir();
 		const { agents } = await discoverAgents(options_cwd, undefined, agentResolutionRoots);
 		const agent = getAgent(agents, parsed.agent);
-		if (!agent) {
+		// ACP defers persona validation to the per-client workspace: the server
+		// runs across client-supplied cwds, and the requested name may exist only
+		// in a target workspace. The factory re-discovers against each session/new
+		// cwd; a miss there simply leaves the session persona-less.
+		if (!agent && parsed.mode !== "acp") {
 			throw new Error(`Unknown --agent "${parsed.agent}". Run "omp agents" to list discovered agents.`);
 		}
 		options.pendingPersonaAgent = agent;
@@ -1497,10 +1576,11 @@ export async function buildSessionOptions(
 			options.pendingPersonaExplicit = explicit;
 		}
 	}
-
+	// Per-workspace re-derivation hook for ACP (relative extension spellings):
+	// the factory re-derives package roots against each client cwd.
+	options.rederivePersonaExtensionRoots = buildPersonaExtensionRoots;
 	return options;
 }
-
 interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
 	discoverAuthStorage?: typeof discoverAuthStorage;
@@ -1989,6 +2069,7 @@ export async function runRootCommand(
 				modelRegistry,
 				parsedArgs,
 				rawArgs,
+				rederivePersonaExtensionRoots: sessionOptions.rederivePersonaExtensionRoots,
 				createSession,
 			});
 			// Branch-only protocol runner: keep ACP server code out of normal interactive startup.

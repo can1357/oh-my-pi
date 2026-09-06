@@ -1,4 +1,4 @@
-import { expandExecToolShorthand } from "../tools/builtin-names";
+import { expandExecToolShorthand, normalizeToolNames } from "../tools/builtin-names";
 
 import type { AgentDefinition } from "../task/types";
 
@@ -88,7 +88,10 @@ export class SessionToolPolicy {
 		registry: () => ReadonlySet<string>; // ToolSession registry getter
 		isDefaultActive: (name: string) => boolean; // registry tool defaultActive metadata
 	}) {
-		this.cliGrant = options.toolNames ? new Set(options.toolNames) : null;
+		// Legacy aliases (`search` → `grep`, `find` → `glob`) normalize here: the
+		// grant drives effective() and the persona explicit.tools intersect, so
+		// a raw alias would silently strip the canonical name.
+		this.cliGrant = options.toolNames ? new Set(normalizeToolNames(options.toolNames)) : null;
 		this.cliLspReadOnly = options.lspReadOnly ?? options.restrictToolNames ?? false;
 		this.#globalRegistry = options.registry;
 		this.#isDefaultActive = options.isDefaultActive;
@@ -257,8 +260,13 @@ export class SessionToolPolicy {
 		// than intersecting an unrestricted set down to nothing. `exec` expands
 		// through the shared shorthand rule (fr-vW) BEFORE the grant is stored so
 		// effective()/granted() only ever see concrete tool names.
+		// fw_sH: a raw persisted alias (`--tools search`) must normalize before
+		// becoming the grant — the initial launch worked through the
+		// normalized cliGrant; the resume path must not regress.
 		const declaredOrInherited =
-			declared !== undefined ? expandExecToolShorthand(declared) : [...(this.cliGrant ?? explicit.tools ?? [])];
+			declared !== undefined
+				? expandExecToolShorthand(declared)
+				: normalizeToolNames(this.cliGrant ?? explicit.tools ?? []);
 		const grant = new Set(declaredOrInherited);
 
 		// fo80e: a persona that declares a usable spawns list needs `task` to
@@ -280,8 +288,11 @@ export class SessionToolPolicy {
 		}
 		if (spawnsBroken) grant.delete("task");
 		if (explicit.tools && declared !== undefined) {
-			// Both layers present: intersect (never widen).
-			const explicitSet = new Set(explicit.tools);
+			// Both layers present: intersect (never widen). The persisted
+			// explicit.tools can carry legacy aliases (raw `--tools search`
+			// persists verbatim); normalize before intersecting so the canonical
+			// name survives.
+			const explicitSet = new Set(normalizeToolNames(explicit.tools));
 			for (const name of grant) {
 				if (!explicitSet.has(name)) grant.delete(name);
 			}

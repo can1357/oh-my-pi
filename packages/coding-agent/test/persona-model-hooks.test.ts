@@ -206,9 +206,9 @@ describe("PersonaModelApplyHooks", () => {
 });
 
 // j2v: a pattern with an explicit `:level` suffix carries a thinking level
-// through resolveModelOverride — apply() must adopt it when the persona's
-// own frontmatter declared none.
-test("apply adopts the pattern's thinking suffix when frontmatter declares none", async () => {
+// through resolveModelOverride — apply() must adopt it when neither an
+// explicit CLI override nor the persona's frontmatter declared one.
+test("apply adopts the agent pattern's thinking suffix when frontmatter declares none", async () => {
 	const stub = makeStubSession({
 		model: BASELINE_MODEL,
 		thinkingLevel: ThinkingLevel.Medium,

@@ -148,7 +148,12 @@ export function createAcpPersonaModelHooks(
 			void emitNotice(PERSONA_DEFERRED_NOTICE_TEMPLATE.replace("{name}", agent.name));
 		},
 		deferModelRestoreWhileStreaming: baseline => {
+			// fw_sA: unlike the TUI there is no shared pending-model queue in
+			// ACP — queue the restore on the SESSION and flush it at
+			// `agent_end` (#handlePromptEvent), so the advertised turn-end
+			// restore actually lands.
 			if (!baseline.model) return;
+			session.queueDeferredModelRestore?.(baseline.model, baseline.thinkingLevel);
 			void emitNotice(PERSONA_RESTORE_DEFERRED_NOTICE_TEMPLATE);
 		},
 	};
@@ -1384,6 +1389,12 @@ export class AcpAgent implements Agent {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
 		);
+		const forkNotices: string[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "notice") {
+				forkNotices.push(event.message);
+			}
+		});
 		try {
 			const success = await session.switchSession(sourcePath);
 			if (!success) {
@@ -1394,17 +1405,14 @@ export class AcpAgent implements Agent {
 				throw new Error(`ACP session fork failed: ${params.sessionId}`);
 			}
 		} catch (error) {
+			unsubscribe();
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		// Fork of a persona session re-activates the persona on the new journal.
-		// Reconcile runs BEFORE registration so the fork response carries the
-		// persona's toolset/modes; notice text is buffered and flushed after
-		// registration (see #registerPreparedSession).
-		const forkNotices: string[] = [];
 		await reconcileAcpSessionPersona(session, text => {
 			forkNotices.push(text);
 		});
+		unsubscribe();
 		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext, forkNotices);
 	}
 
@@ -1419,22 +1427,26 @@ export class AcpAgent implements Agent {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
 		);
+		const openNotices: string[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "notice") {
+				openNotices.push(event.message);
+			}
+		});
 		try {
 			const success = await session.switchSession(sessionPath);
 			if (!success) {
 				throw new Error(`ACP session load was cancelled: ${sessionId}`);
 			}
 		} catch (error) {
+			unsubscribe();
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		// Session load/resume: re-activate the persisted persona before
-		// registration so the load response reflects it; notice text is buffered
-		// and flushed after registration (see #registerPreparedSession).
-		const openNotices: string[] = [];
 		await reconcileAcpSessionPersona(session, text => {
 			openNotices.push(text);
 		});
+		unsubscribe();
 		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, openNotices);
 	}
 
@@ -1622,6 +1634,16 @@ export class AcpAgent implements Agent {
 		this.#clearLiveAssistantMessageAfterEvent(record, event);
 
 		if (event.type === "agent_end") {
+			// fw_sA: apply a deferred persona model restore queued by a mid-turn
+			// exit before the turn's trailing updates flush.
+			try {
+				await record.session.flushDeferredModelRestore();
+			} catch (error) {
+				logger.warn("Failed to apply deferred persona model restore at turn end", {
+					sessionId: record.session.sessionId,
+					error: String(error),
+				});
+			}
 			await this.#flushMissedFinalAssistantText(record, event);
 			await this.#flushUnreportedTurnError(record, event);
 			await this.#emitEndOfTurnUpdates(record);
@@ -1634,7 +1656,6 @@ export class AcpAgent implements Agent {
 			});
 		}
 	}
-
 	/**
 	 * Deliver the final visible answer when the assistant `message_end` never
 	 * reached this prompt turn's subscription. Session event handlers are

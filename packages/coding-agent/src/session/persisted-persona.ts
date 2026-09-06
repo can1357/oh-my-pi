@@ -176,7 +176,17 @@ export async function reconcileSessionPersona(
 		session as AgentSession & Partial<Record<"getPersonaRuntime", () => PersonaRuntime | undefined>>
 	).getPersonaRuntime?.();
 	const desired = readPersistedAgentPersona(session.sessionManager.getEntries());
-	if (!runtime || !desired) {
+	if (!runtime) {
+		return { entered: false };
+	}
+	if (!desired) {
+		// Branching (RPC/ACP/SDK #reconcileModeAfterBranch) can land on an
+		// entry from BEFORE the persona's `mode_change agent` marker while the
+		// live session still runs the persona — the live branch must match its
+		// persisted mode state, so reconcile the runtime to NO persona.
+		if (runtime.policy.isPersonaActive()) {
+			await runtime.reconcile(undefined, hooks.buildHooks(session));
+		}
 		return { entered: false };
 	}
 	try {
@@ -190,9 +200,14 @@ export async function reconcileSessionPersona(
 			// Surface the degrade BEFORE the journal clear marker (the ACP path
 			// emitted its notice first; ordering is unobservable to the journal).
 			await hooks.onGone?.(session, desired.name);
-			// Journal clear marker (plan §3, P3): without it the stale `agent`
-			// entry stays LAST and every future resume re-notices the
-			// gone-persona degrade. Same shape the persona exit paths use.
+			// fwULz/fwkeP: the live persona must not survive a journal that no
+			// longer records it. Teardown FIRST — a failure rolls back to the
+			// active persona, in which case the journal must KEEP the persona
+			// entry (the live session still runs it; the next resume restores
+			// it). The clear marker lands only after teardown succeeds.
+			if (runtime.policy.isPersonaActive()) {
+				await runtime.reconcile(undefined, hooks.buildHooks(session));
+			}
 			session.sessionManager.appendModeChange("none");
 			logger.warn(`Session persona "${desired.name}" is no longer available; resuming without it`, {
 				sessionId: session.sessionId,
@@ -209,9 +224,23 @@ export async function reconcileSessionPersona(
 		// same explicit overrides and the journal's baseline — a second
 		// reconcile would exit (restoring the pre-persona state) and re-enter,
 		// pointlessly replaying the switch and re-noticing nothing. Skip when
-		// the live persona already IS the desired one.
+		// the live persona already IS the desired one — name AND explicit
+		// overrides (fwULy: branching to an earlier same-name entry with
+		// different persisted overrides must re-apply them, not skip).
 		const active = runtime.policy.snapshot().persona;
-		if (active && active.agent.name === desired.name) {
+		if (
+			active &&
+			active.agent.name === desired.name &&
+			JSON.stringify(active.explicit) === JSON.stringify(desired.explicit ?? {})
+		) {
+			// fwdEX: identical name/overrides but a DIFFERENT persisted
+			// pre-persona baseline (branching between two activations of the
+			// same persona) must still adopt the target branch's baseline —
+			// the later activation's `activeBaseline` would otherwise restore
+			// the wrong model on exit.
+			if (baselineOverride) {
+				runtime.adoptBaselineOverride(baselineOverride);
+			}
 			return { entered: true };
 		}
 		await runtime.reconcile({ agent, explicit: desired.explicit, baselineOverride }, hooks.buildHooks(session));
