@@ -81,16 +81,6 @@ interface PreservedPreloadScript {
 	sequence: number;
 }
 
-function markPreloadApplication(source: unknown, marker: string): string {
-	if (typeof source !== "string") throw new Error("preload source must be a string");
-	const markerStatement = `Object.defineProperty(globalThis, ${JSON.stringify(marker)}, { value: true, configurable: true });`;
-	const prologue = source.match(
-		/^(?:#![^\r\n]*(?:\r?\n|$))?(?:(?:(?:[ \t\r\n]+|\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/))*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*(?:;[ \t]*(?:\r?\n)?|\r?\n|$))*/,
-	);
-	const offset = prologue?.[0].length ?? 0;
-	return `${source.slice(0, offset)}${markerStatement}\n${source.slice(offset)}`;
-}
-
 function subscriptionKey(method: string): string {
 	switch (method) {
 		case "Emulation.setTouchEmulationEnabled":
@@ -3088,21 +3078,38 @@ export class RelayBridge {
 					? {
 							...script.params,
 							runImmediately,
-							...(applicationMarker
-								? {
-										source: markPreloadApplication(script.params.source, applicationMarker),
-									}
-								: {}),
 						}
 					: script.params;
 			let result: Record<string, unknown> | undefined;
+			let markerResult: Record<string, unknown> | undefined;
 			try {
-				result = (await this.#rpc({
+				const registration = this.#rpc({
 					op: "send",
 					tabId: tab.tabId,
 					method: "Page.addScriptToEvaluateOnNewDocument",
 					params: replayParams,
-				})) as Record<string, unknown> | undefined;
+				});
+				// Keep the application probe in its own disposable registration. Mutating
+				// the client's source would persist the probe into later documents and
+				// can break valid scripts whose top-level bindings shadow globals used by
+				// the probe. RPCs are delivered in issue order, so this marker follows the
+				// real registration while both results can be awaited together.
+				const markerRegistration = applicationMarker
+					? this.#rpc({
+							op: "send",
+							tabId: tab.tabId,
+							method: "Page.addScriptToEvaluateOnNewDocument",
+							params: {
+								source: `this[${JSON.stringify(applicationMarker)}] = true;`,
+								runImmediately: false,
+								...(typeof script.params?.worldName === "string" ? { worldName: script.params.worldName } : {}),
+							},
+						})
+					: Promise.resolve(undefined);
+				[result, markerResult] = (await Promise.all([registration, markerRegistration])) as [
+					Record<string, unknown> | undefined,
+					Record<string, unknown> | undefined,
+				];
 			} catch (err) {
 				// Chrome may have accepted this additive registration before the
 				// socket dropped and the result never reached us. An ordinary
@@ -3120,6 +3127,10 @@ export class RelayBridge {
 				throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
 			}
 			let rootIdentifier = identifier;
+			const applicationMarkerIdentifier = markerResult?.identifier;
+			if (applicationMarker !== undefined && typeof applicationMarkerIdentifier !== "string") {
+				throw new Error("preload application marker did not return an identifier");
+			}
 			if (script.params?.runImmediately === true && !runImmediately) {
 				const loaderAfterRegistration = await this.#mainFrameLoaderId(tab.tabId).catch(err => {
 					if (isExtensionTransportInterrupted(err)) {
@@ -3176,6 +3187,16 @@ export class RelayBridge {
 						rootIdentifier = retry.identifier;
 					}
 				}
+				if (applicationMarkerIdentifier !== undefined) {
+					void this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						method: "Page.removeScriptToEvaluateOnNewDocument",
+						params: { identifier: applicationMarkerIdentifier },
+					}).catch(err => {
+						if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
+					});
+				}
 			}
 			const current = this.#preloadScript(tab, script.ownerSessionId, script.clientIdentifier);
 			if (!current) {
@@ -3226,7 +3247,7 @@ export class RelayBridge {
 			tabId,
 			method: "Runtime.evaluate",
 			params: {
-				expression: `(() => { const present = Object.hasOwn(globalThis, ${JSON.stringify(marker)}); delete globalThis[${JSON.stringify(marker)}]; return present; })()`,
+				expression: `(this[${JSON.stringify(marker)}] === true && delete this[${JSON.stringify(marker)}])`,
 				returnByValue: true,
 				...(contextId !== undefined ? { contextId } : {}),
 			},
