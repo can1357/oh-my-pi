@@ -1322,10 +1322,15 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		if (autoRequested && !autoBgManager) {
 			throw new ToolError("Background job manager unavailable for this session.");
 		}
+		// Explicit `async: "auto"` reads the deadline as wall-clock: a timeout
+		// that cannot outlive the grace runs inline instead of dying as a job.
+		// Settings-driven auto-backgrounding keeps its clamp contract: a
+		// deadline shorter than the threshold backgrounds at once so the
+		// timeout is reported as a job outcome rather than blocking the turn.
 		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(
 			autoRequested ? this.#asyncAutoInlineGraceMs : this.#autoBackgroundThresholdMs,
 			timeoutMs,
-			"wall-clock",
+			autoRequested ? "wall-clock" : "runtime",
 		);
 		if (autoRequested && autoBgManager?.atCapacity) {
 			// One shape at the running-job cap: auto runs inline to completion
