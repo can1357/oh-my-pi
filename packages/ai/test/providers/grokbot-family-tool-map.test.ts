@@ -1,0 +1,178 @@
+import { describe, expect, test } from "bun:test";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { applyAnthropicSandToolWire } from "../../src/providers/grokbot/anthropic-sand-wire";
+import { resolveGrokbotRequestedModel } from "../../src/providers/grokbot/model-request";
+import {
+	advertisedSandToolNames,
+	applyGrokbotSandToolPolicy,
+	GROKBOT_MATRIX_REPRESENTATIVE_IDS,
+	grokbotToolsSkipReason,
+	resolveGrokbotSandToolPolicy,
+	selectGrokbotMatrixIds,
+} from "../../src/providers/grokbot/tool-policy";
+
+const OMP_CORE = [
+	{
+		name: "bash",
+		description: "run shell",
+		parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+	},
+	{
+		name: "read",
+		description: "read file",
+		parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+	},
+	{
+		name: "write",
+		description: "write file",
+		parameters: {
+			type: "object",
+			properties: { path: { type: "string" }, content: { type: "string" } },
+			required: ["path", "content"],
+		},
+	},
+	{
+		name: "edit",
+		description: "patch file",
+		parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+	},
+];
+
+function requested(id: string, sandParameterIds: string[] = []) {
+	return resolveGrokbotRequestedModel(id, { sandParameterIds, sandMaxMode: false });
+}
+
+function wireFor(
+	id: string,
+	opts: {
+		sandToolsWire?: "parent-chat" | "automation" | "keep-model";
+		supportsTools?: boolean;
+		envWire?: string;
+	} = {},
+) {
+	const policy = resolveGrokbotSandToolPolicy({
+		modelId: id,
+		toolCount: OMP_CORE.length,
+		sandToolsWire: opts.sandToolsWire,
+		supportsTools: opts.supportsTools,
+		envWire: opts.envWire,
+	});
+	const applied = applyGrokbotSandToolPolicy(
+		{
+			requestedModel: requested(id),
+			tools: OMP_CORE,
+			modelId: id,
+			ompTools: OMP_CORE,
+			sandToolsWire: opts.sandToolsWire,
+		},
+		policy,
+	);
+	return { policy, applied, names: (applied.tools as Array<{ name: string }>).map(t => t.name) };
+}
+
+describe("grokbot family tool mapping", () => {
+	test("Anthropic class + auto advertises product Shell/Read/Write on the original requestedModel", () => {
+		for (const id of ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "claude-fable-5"]) {
+			expect(classifyModel("grokbot", id, { lenient: true }).class).toBe("anthropic");
+			const { policy, applied, names } = wireFor(id);
+			expect(policy.kind).toBe("product");
+			expect(policy.wire).toBe("keep-model");
+			expect(applied.requestedModel.modelId).toBe(id);
+			expect(applied.wireMode).toBe("keep-model");
+			expect(names).toEqual(["Shell", "Read", "Write"]);
+			for (const tool of applied.tools as Array<{ parameters: Record<string, unknown> }>) {
+				expect(tool.parameters).toHaveProperty("jsonSchema");
+			}
+			expect(advertisedSandToolNames(["bash", "read", "write", "edit"], policy)).toEqual(["Shell", "Read", "Write"]);
+		}
+	});
+
+	test("non-Anthropic families keep native omp bash/read/write (sand accepts those names)", () => {
+		const rows = [
+			{ id: "grok-4.6", class: "xai" },
+			{ id: "gpt-5.6-sol", class: "openai" },
+			{ id: "gemini-3.7-flash", class: "gemini" },
+			{ id: "kimi-k3", class: "kimi" },
+			{ id: "glm-5.2", class: "glm" },
+			{ id: "composer-2.5", class: "unknown" },
+		];
+		for (const row of rows) {
+			expect(classifyModel("grokbot", row.id, { lenient: true }).class).toBe(row.class);
+			const { policy, applied, names } = wireFor(row.id);
+			expect(policy.kind).toBe("native");
+			expect(applied.requestedModel.modelId).toBe(row.id);
+			expect(applied.wireMode).toBeUndefined();
+			expect(names).toEqual(["bash", "read", "write", "edit"]);
+			expect(advertisedSandToolNames(["bash", "read", "write"], policy)).toEqual(["bash", "read", "write"]);
+		}
+	});
+
+	test("catalog parent-chat on sand-default and sand-cua advertises product tools without rewriting the router id", () => {
+		for (const id of ["sand-default", "sand-cua"]) {
+			const { policy, applied, names } = wireFor(id, { sandToolsWire: "parent-chat" });
+			expect(policy.kind).toBe("product");
+			expect(policy.wire).toBe("parent-chat");
+			expect(applied.requestedModel.modelId).toBe(id);
+			expect(applied.subagentType).toBeUndefined();
+			expect(names[0]).toBe("SendToUser");
+			expect(names).toContain("Shell");
+			expect(names).toContain("Read");
+			expect(names).toContain("Write");
+		}
+	});
+
+	test("catalog automation on sand-automation advertises product tools and keeps the router id", () => {
+		const { policy, applied, names } = wireFor("sand-automation", { sandToolsWire: "automation" });
+		expect(policy.kind).toBe("product");
+		expect(policy.wire).toBe("automation");
+		expect(applied.requestedModel.modelId).toBe("sand-automation");
+		expect(applied.subagentType).toBe("generalPurpose");
+		expect(typeof applied.automationId).toBe("string");
+		expect(names).toEqual(["Shell", "Read", "Write"]);
+	});
+
+	test("supports-tools=false disables tools (grok-4.5 HTTP 422 ceiling)", () => {
+		const skip = grokbotToolsSkipReason({ id: "grok-4.5", supportsTools: false });
+		expect(skip).toMatch(/supports-tools=false/);
+		const policy = resolveGrokbotSandToolPolicy({
+			modelId: "grok-4.5",
+			toolCount: 3,
+			supportsTools: false,
+		});
+		expect(policy.kind).toBe("disabled");
+		expect(policy.reason).toBe(skip);
+	});
+
+	test("explicit keep-model on a non-Anthropic id stays native (no product rewrite)", () => {
+		const requestedModel = requested("grok-4.6", ["effort", "fast"]);
+		const tools = [{ name: "bash" }, { name: "read" }];
+		const wired = applyAnthropicSandToolWire({ requestedModel, tools, modelId: "grok-4.6" }, "keep-model");
+		expect(wired.tools).toBe(tools);
+		expect(wired.requestedModel).toBe(requestedModel);
+		expect(wired.wireMode).toBeUndefined();
+	});
+
+	test("representative slice picks listed live ids plus one luna/terra openai row", () => {
+		const live = [
+			"claude-opus-5",
+			"grok-4.6",
+			"gpt-5.6-sol",
+			"gpt-5.4-luna",
+			"gpt-5.3-terra",
+			"composer-2.5",
+			"sand-default",
+			"unrelated-other",
+		];
+		const picked = selectGrokbotMatrixIds(live, "representative");
+		expect(picked).toContain("claude-opus-5");
+		expect(picked).toContain("grok-4.6");
+		expect(picked).toContain("gpt-5.6-sol");
+		expect(picked).toContain("composer-2.5");
+		expect(picked).toContain("sand-default");
+		expect(picked).toContain("gpt-5.4-luna");
+		expect(picked).toContain("gpt-5.3-terra");
+		expect(picked).not.toContain("unrelated-other");
+		expect(selectGrokbotMatrixIds(live, "all")).toEqual(live);
+		expect(GROKBOT_MATRIX_REPRESENTATIVE_IDS).toContain("sand-cua");
+	});
+});

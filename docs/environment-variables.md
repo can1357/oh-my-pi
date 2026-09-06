@@ -193,7 +193,7 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
 
 ### Grok Bot (`grokbot`)
 
-Sand InferenceService — not Cursor AgentService, not xAI. One-shot commands: [Grok Bot](./grokbot.md).
+Sand InferenceService — not Cursor AgentService, not xAI. One-shot commands and the live catalog matrix: [Grok Bot](./grokbot.md).
 
 | Variable                         | Default / behavior                                                                                          |
 | -------------------------------- | ----------------------------------------------------------------------------------------------------------- |
@@ -201,7 +201,7 @@ Sand InferenceService — not Cursor AgentService, not xAI. One-shot commands: [
 | `GROKBOT_MACHINE_ID`             | Required for `x-cursor-checksum` on discovery and stream.                                                   |
 | `GROKBOT_NAMESPACE`              | `prod` (default), `dev`, or `lab`. Selects the sand client-version suffix.                                  |
 | `GROKBOT_CLIENT_VERSION`         | Override for `x-cursor-client-version` (sent as-is).                                                        |
-| `GROKBOT_ANTHROPIC_TOOLS_WIRE`   | Anthropic+tools policy: `auto` (default, keep-model), `keep-model`, `automation`, `sand-default-fallback`, `error`. |
+| `GROKBOT_ANTHROPIC_TOOLS_WIRE`   | Anthropic+tools policy: `auto` (default, keep-model), `keep-model`, `automation`, `parent-chat`, `sand-default-fallback`, `error`. |
 
 ### Amazon Bedrock
 

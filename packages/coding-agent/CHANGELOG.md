@@ -5,6 +5,7 @@
 ### Added
 
 - Documented Grok Bot one-shot text and tools probes from this checkout (`docs/grokbot.md`). Published `omp` 18.0.1 does not include this provider.
+- Documented Grok Bot one-shot text and tools probes, per-family tool wire, and the live AvailableModels matrix (`docs/grokbot.md`, `scripts/grokbot-catalog-matrix.ts`).
 
 ## [18.1.12] - 2026-09-06
 

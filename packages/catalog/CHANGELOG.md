@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Grok Bot `sand-cua` now has catalog `sand-tools-wire=parent-chat` so router tools use the product field-2 wire.
+
 ### Fixed
 - Fixed Grok Bot file-backed model caches to scope by the real renewer instead of the shared `<authenticated>` sentinel.
 - Fixed Grok Bot file-only auth so the authenticated sentinel is never used as a renewal credential override, and added `sand-tools-wire` for router tool-wire policy.
+
 ## [18.1.12] - 2026-09-06
 
 ### Added
