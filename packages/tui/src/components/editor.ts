@@ -2271,6 +2271,10 @@ export class Editor implements Component, Focusable {
 			else if (char === "#") {
 				this.#tryTriggerAutocomplete();
 			}
+			// Argument providers may expose candidates only after a separator.
+			else if (char === " " && this.#isInSubmittedSlashCommandContext()) {
+				this.#tryTriggerAutocomplete();
+			}
 			// Also auto-trigger when typing letters/path chars in a completable context
 			else if (/[a-zA-Z0-9.\-_/]/.test(char)) {
 				const currentLine = this.#state.lines[this.#state.cursorLine] || "";

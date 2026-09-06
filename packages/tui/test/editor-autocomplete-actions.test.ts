@@ -72,6 +72,41 @@ describe("Editor async autocomplete scheduling", () => {
 	});
 });
 
+describe("Editor slash argument autocomplete", () => {
+	it("re-evaluates a closed popup after typing an argument separator", async () => {
+		const argumentPrefixes: string[] = [];
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(
+				[
+					{
+						name: "probe",
+						getArgumentCompletions(argumentPrefix) {
+							argumentPrefixes.push(argumentPrefix);
+							return /^\S+\s/.test(argumentPrefix) ? [{ value: "scope", label: "scope" }] : null;
+						},
+					},
+				],
+				"/tmp",
+			),
+		);
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+		const popupClosed = onceAutocompleteUpdate(editor);
+		for (const char of "probe a") editor.handleInput(char);
+		await popupClosed;
+		expect(editor.isShowingAutocomplete()).toBeFalse();
+		expect(argumentPrefixes).toEqual(["a"]);
+
+		const popupOpened = onceAutocompleteUpdate(editor);
+		editor.handleInput(" ");
+		await popupOpened;
+		expect(argumentPrefixes).toEqual(["a", "a "]);
+		expect(editor.isShowingAutocomplete()).toBeTrue();
+	});
+});
+
 class HashActionProvider implements AutocompleteProvider {
 	async getSuggestions(
 		lines: string[],
