@@ -44,11 +44,11 @@ Scope: Multiple grokbot models complete inference via ompa/sand for text and too
       EXPECT: MATRIX_TOOLS_PASS
       EVIDENCE: 2026-08-31 — MATRIX_TOOLS_PASS after automation wire merge
 
-- [ ] G6: Live AvailableModels catalog matrix (text + bash/Shell round-trip) for every non-skipped id
+- [ ] G6: Live AvailableModels catalog matrix (text + bash/read/write) for every non-skipped id
       CHECK: bun scripts/grokbot-catalog-matrix.ts --slice all --mode all --json /tmp/grokbot-matrix.json
-      ALT: bun scripts/grokbot-catalog-matrix.ts --slice representative --mode all
+      ALT: bun scripts/grokbot-catalog-matrix.ts --ids default,default[],gemini-3-flash,gemini-3-flash[],gpt-5-mini,gpt-5.2-fast --mode all
       EXPECT: GROKBOT_CATALOG_MATRIX_PASS (exit 0); exit 1 if any non-skipped id fails tools; exit 2 if creds missing
-      EVIDENCE: pending live renewer on the run host. `--allow-missing-creds` is the no-secrets CI path.
+      EVIDENCE: pending live renewer on the run host. `--allow-missing-creds` is the no-secrets CI path. Matrix retries HTTP 502/504.
 
 ABANDON: G2-claude-raw-tools Explicit `claude-opus-5` + unmapped omp field-2 tools → HTTP 400 / ERROR_PROVIDER_ERROR. Default workaround: product-shaped tools on original Anthropic requestedModel (`GROKBOT_ANTHROPIC_TOOLS_WIRE=auto` → keep-model). Explicit `GROKBOT_ANTHROPIC_TOOLS_WIRE=automation` is grok-worker opt-in (`sand-automation` + `generalPurpose` + PascalCase tools + `{ jsonSchema: … }` envelope). Optional `sand-default-fallback` (non-Opus backend). Field-3 CUA never observed in mitm.
 

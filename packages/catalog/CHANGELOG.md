@@ -5,6 +5,7 @@
 ### Added
 
 - Grok Bot `sand-cua` now has catalog `sand-tools-wire=parent-chat` so router tools use the product field-2 wire.
+- Grok Bot Auto routers (`default`, `default[]`, `auto`) now use catalog `sand-tools-wire=parent-chat` so tools stay off the grok-4.5 native 422 path.
 
 ### Fixed
 - Fixed Grok Bot file-backed model caches to scope by the real renewer instead of the shared `<authenticated>` sentinel.

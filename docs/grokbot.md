@@ -37,7 +37,7 @@ omp tools are named `bash` / `read` / `write` (and `edit` / `grep` / `glob`). Sa
 | --- | --- | --- | --- |
 | Anthropic (`claude-*`, fable/opus/sonnet/haiku) | **keep-model** | Product PascalCase `Shell` / `Read` / `Write` with `{ jsonSchema: … }` | Original Anthropic id (backend stays Claude/Fable) |
 | Grok / GPT / Gemini / Kimi / GLM / Composer | **native** (matrix `wire`, not `error`) | omp `bash` / `read` / `write` | Original id |
-| `sand-default`, `sand-cua` | catalog `sand-tools-wire=parent-chat` | Product tools + `SendToUser` | Router id (often routes to grok) |
+| `sand-default`, `sand-cua`, `default`, `default[]`, `auto` | catalog `sand-tools-wire=parent-chat` | Product tools + `SendToUser` | Router id (often routes to grok; native tools on `default` hit grok-4.5 HTTP 422) |
 | `sand-automation` | catalog `sand-tools-wire=automation` | Product `Shell` / `Read` / `Write` | `sand-automation` (often routes to grok) |
 | `grok-4.5*` | **disabled** | none | Text-only. Any tools payload is upstream HTTP 422; catalog `supports-tools: false` |
 
@@ -117,8 +117,11 @@ Expect a `bash` (or wire `Shell`) tool call whose stdout is `tools-pong42`, then
 The ship-bar harness loads **live** AvailableModels ids (not hardcoded seeds) and records PASS/FAIL with HTTP status / error class / routed upstream model.
 
 ```sh
-# Every live id: text smoke + bash/Shell round-trip
+# Every live id: text smoke + bash/read/write round-trips (502/504 retried)
 bun scripts/grokbot-catalog-matrix.ts --slice all --mode all --json /tmp/grokbot-matrix.json
+
+# Previously-failed ids
+bun scripts/grokbot-catalog-matrix.ts --ids default,default[],gemini-3-flash,gemini-3-flash[],gpt-5-mini,gpt-5.2-fast --mode all
 
 # Representative slice (Anthropic keep-model, grok-4.6, gemini, gpt-sol/luna/terra, composer, kimi, glm, sand routers)
 bun scripts/grokbot-catalog-matrix.ts --slice representative --mode all
@@ -159,7 +162,8 @@ Wire to capture: `POST https://api2.cursor.sh/aiserver.v1.InferenceService/Strea
 | Explicit Anthropic id + raw omp field-2 tools | Upstream HTTP 400 / `ERROR_PROVIDER_ERROR`. |
 | Anthropic + tools (default) | `GROKBOT_ANTHROPIC_TOOLS_WIRE=auto` → **keep-model**: product PascalCase tools on the original Anthropic `requestedModel`. Backend stays Claude/Fable. |
 | `GROKBOT_ANTHROPIC_TOOLS_WIRE=automation` | Rewrites to `sand-automation` + `generalPurpose`. Often routes to `cursor-grok-*`, **not** a verified Anthropic worker. |
-| `sand-default` / `sand-cua` / `sand-automation` + tools | Routers; with tools they typically land on the **grok** family. Product field-2 tools still complete bash/read/write round-trips. `sand-automation` often routes to `cursor-grok-4.5-high`, which may dump a fenced `{"name":"Shell",…}` object — the stream promotes that into a real `toolCall` so bash/Shell still execute. |
+| `sand-default` / `sand-cua` / `default` / `default[]` / `sand-automation` + tools | Routers; with tools they typically land on the **grok** family. Product field-2 tools still complete bash/read/write round-trips. Native omp tools on `default`/`default[]` were HTTP 422 (`cursor-grok-4.5-high`) — they now use parent-chat like `sand-default`. `sand-automation` often routes to `cursor-grok-4.5-high`, which may dump a fenced `{"name":"Shell",…}` object — the stream promotes that into a real `toolCall` so bash/Shell still execute. |
+| Gemini / GPT-mini empty tool turn | Native schemas are family-normalized (Google keywords stripped; OpenAI `additionalProperties: false`). Thought-only JSON in thinking is promoted. One empty-body retry runs with thinking off and a larger maxTokens. |
 | AgentService/Run on a grokbot sand JWT | Not supported (zero mitm hits). InferenceService/Stream only. |
 
 ## Related
