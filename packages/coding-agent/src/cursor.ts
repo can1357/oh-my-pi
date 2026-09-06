@@ -238,6 +238,26 @@ function buildToolErrorResult(message: string): AgentToolResult<unknown> {
 	};
 }
 
+interface CursorTaskMcpRoute {
+	toolName: string;
+	tool: CursorBridgeTool | undefined;
+	normalizeArgs: boolean;
+}
+
+function resolveCursorTaskMcpRoute(options: CursorExecBridgeOptions, toolName: string): CursorTaskMcpRoute {
+	const exactTool = options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
+	if (exactTool && (toolName !== "task" || options.isBuiltInTool?.(toolName) === false)) {
+		return { toolName, tool: exactTool, normalizeArgs: false };
+	}
+
+	const canonicalTaskTool = options.getExecutableTool?.("task") ?? options.tools.get("task");
+	if (toolName !== "task" && canonicalTaskTool && options.isBuiltInTool?.("task") === false) {
+		return { toolName: "task", tool: canonicalTaskTool, normalizeArgs: false };
+	}
+
+	return { toolName: "task", tool: canonicalTaskTool, normalizeArgs: true };
+}
+
 async function executeTool(
 	options: CursorExecBridgeOptions,
 	toolName: string,
@@ -968,36 +988,34 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			return await executeTool(this.options, "edit", toolCallId, normalizedArgs, replaceTool);
 		}
 		if (isCursorTaskMcpName(toolName)) {
-			const exactTaskTool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
-			const preserveExactTaskTool =
-				exactTaskTool !== undefined && (toolName !== "task" || this.options.isBuiltInTool?.(toolName) === false);
-			if (!preserveExactTaskTool) {
-				const resumeId = getCursorTaskResumeId(args);
-				if (resumeId) {
-					const message = `Resuming subagents via task.resume ("${resumeId}") is not supported. Use the \`hub\` tool to message and resume existing subagents.`;
-					return rejectToolCall(this.options, toolName, toolCallId, message);
-				}
-				const unsupportedModel = getCursorTaskUnsupportedModel(args);
-				if (unsupportedModel) {
-					const message = `Explicit subagent model override via task.model ("${unsupportedModel}") is not supported. Subagents use the model configured for their agent role.`;
-					return rejectToolCall(this.options, toolName, toolCallId, message);
-				}
-				const unsupportedSubagentType = getCursorTaskUnsupportedSubagentType(args);
-				if (unsupportedSubagentType) {
-					const message = `Cursor subagent type "${unsupportedSubagentType}" is not supported by OMP task delegation.`;
-					return rejectToolCall(this.options, toolName, toolCallId, message);
-				}
-				const targetToolName = "task";
-				const tool = this.options.getExecutableTool?.(targetToolName) ?? this.options.tools.get(targetToolName);
-				if (!tool) {
-					const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
-					const message = formatMcpToolErrorMessage(toolName, availableTools);
-					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
-				}
-				const normalizedArgs = normalizeCursorTaskArgs(args);
-				call.args = normalizedArgs;
-				return await executeTool(this.options, targetToolName, toolCallId, normalizedArgs);
+			const route = resolveCursorTaskMcpRoute(this.options, toolName);
+			if (!route.normalizeArgs && route.tool) {
+				return await executeTool(this.options, route.toolName, toolCallId, args, route.tool);
 			}
+
+			const resumeId = getCursorTaskResumeId(args);
+			if (resumeId) {
+				const message = `Resuming subagents via task.resume ("${resumeId}") is not supported. Use the \`hub\` tool to message and resume existing subagents.`;
+				return rejectToolCall(this.options, toolName, toolCallId, message);
+			}
+			const unsupportedModel = getCursorTaskUnsupportedModel(args);
+			if (unsupportedModel) {
+				const message = `Explicit subagent model override via task.model ("${unsupportedModel}") is not supported. Subagents use the model configured for their agent role.`;
+				return rejectToolCall(this.options, toolName, toolCallId, message);
+			}
+			const unsupportedSubagentType = getCursorTaskUnsupportedSubagentType(args);
+			if (unsupportedSubagentType) {
+				const message = `Cursor subagent type "${unsupportedSubagentType}" is not supported by OMP task delegation.`;
+				return rejectToolCall(this.options, toolName, toolCallId, message);
+			}
+			if (!route.tool) {
+				const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
+				const message = formatMcpToolErrorMessage(toolName, availableTools);
+				return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+			}
+			const normalizedArgs = normalizeCursorTaskArgs(args);
+			call.args = normalizedArgs;
+			return await executeTool(this.options, route.toolName, toolCallId, normalizedArgs, route.tool);
 		}
 		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
 		if (!tool) {
@@ -1023,15 +1041,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const toolName = call.toolName || call.name;
 		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
 		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
-		const isTask = isCursorTaskMcpName(toolName);
-		const exactTaskTool = isTask
-			? (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName))
-			: undefined;
-		const preserveExactTaskTool =
-			exactTaskTool !== undefined && (toolName !== "task" || this.options.isBuiltInTool?.(toolName) === false);
-		const routeToTask = isTask && !preserveExactTaskTool;
+		const taskRoute = isCursorTaskMcpName(toolName) ? resolveCursorTaskMcpRoute(this.options, toolName) : undefined;
 		if (
-			routeToTask &&
+			taskRoute?.normalizeArgs === true &&
 			(getCursorTaskResumeId(args) ||
 				getCursorTaskUnsupportedModel(args) ||
 				getCursorTaskUnsupportedSubagentType(args))
@@ -1041,8 +1053,8 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 		const tool = preferReplace
 			? this.options.getEditReplaceTool?.()
-			: routeToTask
-				? (this.options.getExecutableTool?.("task") ?? this.options.tools.get("task"))
+			: taskRoute
+				? taskRoute.tool
 				: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
 		if (!tool) return false;
 		const context = this.options.getToolContext?.();
@@ -1051,7 +1063,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
 		const normalizedArgs = preferReplace
 			? normalizeCursorReplaceArgs(args)
-			: routeToTask
+			: taskRoute?.normalizeArgs
 				? normalizeCursorTaskArgs(args)
 				: args;
 		const approval = resolveApproval(

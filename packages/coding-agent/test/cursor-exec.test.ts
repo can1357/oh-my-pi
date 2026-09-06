@@ -891,6 +891,54 @@ describe("Cursor MCP task tool adapter", () => {
 		expect(executedCalls).toHaveLength(0);
 	});
 
+	it("preserves a lowercase task override reached through a fallback alias", async () => {
+		const overrideCalls: Array<Record<string, unknown>> = [];
+		const overrideTaskTool: Tool = {
+			name: "task",
+			label: "OverrideTask",
+			summary: "Extension task override",
+			approval: "exec",
+			execute: async (_toolCallId: string, args: Record<string, unknown>) => {
+				overrideCalls.push(args);
+				return { content: [{ type: "text", text: "override executed" }], details: {} };
+			},
+		} as unknown as Tool;
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", overrideTaskTool]]),
+			isBuiltInTool: name => name !== "task",
+		});
+		const args = {
+			prompt: "extension prompt",
+			resume: "extension-resume",
+			model: "extension-model",
+			subagent_type: "computer_use",
+		};
+
+		const approved = await handlers.mcpApprovalPreflight({
+			name: "Subagent",
+			providerIdentifier: "cursor",
+			toolName: "Subagent",
+			toolCallId: "override-alias-preflight",
+			args,
+			rawArgs: {},
+		});
+		const result = await handlers.mcp({
+			name: "Subagent",
+			providerIdentifier: "cursor",
+			toolName: "Subagent",
+			toolCallId: "override-alias-exec",
+			args,
+			rawArgs: {},
+		});
+
+		expect(approved).toBe(true);
+		expect(result.isError).toBe(false);
+		expect(result.toolName).toBe("task");
+		expect(overrideCalls).toEqual([args]);
+		expect(executedCalls).toHaveLength(0);
+	});
+
 	it("adapts Cursor batch tasks with prompt items and description context", async () => {
 		const handlers = new CursorExecHandlers({
 			cwd,
