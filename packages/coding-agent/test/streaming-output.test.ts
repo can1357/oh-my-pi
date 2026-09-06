@@ -353,6 +353,31 @@ describe("OutputSink", () => {
 		expect(await Bun.file(artifactPath).text()).toBe("persisted despite preview failure");
 	});
 
+	test("finalizes the capped artifact when a mirror preview delivery fails", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "preview-failure-capped.log");
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "artifact-preview-failure-capped",
+			artifactWriteMode: "mirror",
+			spillThreshold: 16,
+			artifactMaxBytes: 32,
+			artifactHeadBytes: 16,
+			onChunk: () => {
+				throw new Error("preview unavailable");
+			},
+		});
+
+		// 64 raw bytes against a 32-byte cap: the tail and its elision notice are
+		// written only by finalization, which a rejected preview must not skip.
+		sink.push("0123456789ABCDEF".repeat(4));
+		await expect(sink.dump()).rejects.toThrow("preview unavailable");
+
+		const artifactText = await Bun.file(artifactPath).text();
+		expect(artifactText).toContain("[ARTIFACT TRUNCATED:");
+		expect(artifactText.endsWith("0123456789ABCDEF")).toBe(true);
+	});
+
 	test("continues mirror delivery after a rejected preview callback and surfaces the failure at dump", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "continued-mirror.log");
