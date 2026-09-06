@@ -56,6 +56,11 @@ interface BuiltMessage {
 	entries: StoredEntry[];
 }
 
+/** Delay before an idle flush whose injection was rejected is retried. */
+const IDLE_DISCARD_RETRY_MS = 1_000;
+/** Consecutive rejected idle injections retried on a timer before restored entries wait for the next enqueue or step boundary. */
+const IDLE_DISCARD_RETRY_LIMIT = 3;
+
 function formatError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -67,8 +72,11 @@ export class YieldQueue {
 	#idleFlushPending = false;
 	#idleFlushRunning = false;
 	#clearGeneration = 0;
-	/** Retry timer for an idle flush a kind's turn budget held back. */
+	/** Retry timer for an idle flush a kind's turn budget held back or whose injection was rejected. */
 	#deferredIdleFlushTimer: NodeJS.Timeout | undefined;
+	#deferredIdleFlushDue = 0;
+	/** Consecutive idle injections rejected since the last one that was accepted. */
+	#idleDiscardRetries = 0;
 	#idleFlushSettledWaiters: Array<() => void> = [];
 
 	constructor(options: YieldQueueOptions) {
@@ -204,6 +212,9 @@ export class YieldQueue {
 			await this.#flushIdle();
 		} finally {
 			this.#idleFlushRunning = false;
+			// A turn started by another kind drains budgeted entries for free;
+			// the retry their budget armed has nothing left to carry.
+			this.#settleDeferredIdleFlush();
 			this.#settleIdleFlushWaiters();
 		}
 	}
@@ -224,6 +235,7 @@ export class YieldQueue {
 				logger.warn("Yield queue streaming dispatch failed", { kind, error: formatError(error) });
 			}
 		}
+		this.#settleDeferredIdleFlush();
 	}
 
 	async #flushIdle(): Promise<void> {
@@ -261,6 +273,7 @@ export class YieldQueue {
 		for (const item of idleMessages) this.#attachEntrySettlement(item);
 		try {
 			await this.#options.injectIdle(idleMessages.map(item => item.message));
+			this.#idleDiscardRetries = 0;
 			for (const item of idleMessages) {
 				(item.message as AgentMessage & { [ASIDE_MESSAGE_COMMIT]?: () => void })[ASIDE_MESSAGE_COMMIT]?.();
 			}
@@ -309,6 +322,7 @@ export class YieldQueue {
 				return built.message;
 			});
 		}
+		this.#settleDeferredIdleFlush();
 		return thunks;
 	}
 
@@ -327,6 +341,7 @@ export class YieldQueue {
 		for (const entries of this.#entries.values()) this.#rejectEntries(entries, error);
 		this.#entries.clear();
 		this.#idleFlushPending = false;
+		this.#idleDiscardRetries = 0;
 		this.#clearDeferredIdleFlush();
 		this.#settleIdleFlushWaiters();
 	}
@@ -357,9 +372,14 @@ export class YieldQueue {
 		}
 	}
 
-	/** Retry the idle flush once a turn budget expects to have a permit again. One timer; the earliest wins. */
+	/** Retry the idle flush later — once a turn budget expects a permit again, or after a rejected injection. One timer; the earliest wins. */
 	#deferIdleFlush(delayMs: number): void {
-		if (this.#deferredIdleFlushTimer) return;
+		const due = Date.now() + delayMs;
+		if (this.#deferredIdleFlushTimer) {
+			if (due >= this.#deferredIdleFlushDue) return;
+			clearTimeout(this.#deferredIdleFlushTimer);
+		}
+		this.#deferredIdleFlushDue = due;
 		this.#deferredIdleFlushTimer = setTimeout(() => {
 			this.#deferredIdleFlushTimer = undefined;
 			if (this.#options.isStreaming()) {
@@ -377,11 +397,11 @@ export class YieldQueue {
 		this.#deferredIdleFlushTimer = undefined;
 	}
 
-	/** Drop the deferred retry once no budgeted kind has anything left to flush. */
+	/** Drop the deferred retry once no kind that takes part in the idle flush has anything left to carry. */
 	#settleDeferredIdleFlush(): void {
 		if (!this.#deferredIdleFlushTimer) return;
 		for (const [kind, dispatcher] of this.#dispatchers) {
-			if (dispatcher.idleTurnBudget && this.has(kind)) return;
+			if (!dispatcher.skipIdleFlush && this.has(kind)) return;
 		}
 		this.#clearDeferredIdleFlush();
 		this.#settleIdleFlushWaiters();
@@ -400,7 +420,9 @@ export class YieldQueue {
 	 * next flush carries them again. A turn budget holding the batch keeps
 	 * every entry (nothing failed, delivery is merely later); a failed dispatch
 	 * keeps only receipt-less ones — a receipted entry's owner observes the
-	 * rejection and retries itself.
+	 * rejection and retries itself. Nothing else re-arms an idle flush for
+	 * restored receipt-less entries, so a discard while idle schedules a bounded
+	 * timed retry; while streaming the next step boundary carries them.
 	 */
 	#restoreEntries(built: BuiltMessage, mode: "deferred" | "discarded"): void {
 		if (!this.#dispatchers.has(built.kind)) return;
@@ -411,6 +433,16 @@ export class YieldQueue {
 		if (retained.length === 0) return;
 		const queued = this.#entries.get(built.kind);
 		this.#entries.set(built.kind, queued ? retained.concat(queued) : retained);
+		if (mode !== "discarded" || this.#options.isStreaming()) return;
+		if (this.#idleDiscardRetries >= IDLE_DISCARD_RETRY_LIMIT) {
+			logger.warn("Yield queue idle retry limit reached; restored entries wait for the next flush", {
+				kind: built.kind,
+				retained: retained.length,
+			});
+			return;
+		}
+		this.#idleDiscardRetries += 1;
+		this.#deferIdleFlush(IDLE_DISCARD_RETRY_MS);
 	}
 
 	#drain(kind: string): StoredEntry[] {
