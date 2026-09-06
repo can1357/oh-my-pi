@@ -17,7 +17,6 @@ import {
 	STRING_VALUE_FLAGS,
 	VALUELESS_FLAGS,
 } from "./cli/flag-tables";
-import Attach from "./commands/attach";
 import { launchHelp } from "./commands/launch-help";
 
 export const commands: CommandEntry[] = [
@@ -27,9 +26,11 @@ export const commands: CommandEntry[] = [
 		load: () => import("./commands/acp").then(m => m.default),
 		help: commandHelp.acpHelp,
 	},
+	// Keep this lazy: live session discovery loads native VCS bindings, while
+	// CLI profile and worker-host bootstrap must finish before command modules load.
 	{
 		name: "attach",
-		load: () => Promise.resolve(Attach),
+		load: () => import("./commands/attach").then(m => m.default),
 		help: commandHelp.attachHelp,
 	},
 	{
