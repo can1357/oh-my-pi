@@ -256,128 +256,127 @@ export class CollabGuestLink {
 	async join(link: string): Promise<void> {
 		const parsed = parseCollabLink(link);
 		if ("error" in parsed) throw new Error(parsed.error);
-		this.#roomId = parsed.roomId;
-		this.#writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
-		const key = await importRoomKey(parsed.key);
-
-		this.#returnSessionFile = this.#ctx.sessionManager.getSessionFile() ?? null;
-
-		// Mark the join in flight so the input controller holds locally-typed
-		// prompts until `collabGuest` is installed below. Without this, a prompt
-		// submitted during the snapshot sync runs on the guest's own local
-		// session and model, failing with a "No API key" error for the guest's
-		// default provider (issue #11067). Cleared in the `finally` — on both
-		// success (collabGuest takes over) and failure.
+		// Arm before the first asynchronous step: Editor does not await
+		// onSubmit, so another prompt can arrive while the room key imports.
+		// The outer finally covers key-import and all later setup failures.
 		this.#ctx.collabJoining = true;
-
-		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
-		this.#socket = socket;
-
-		const firstWelcome = Promise.withResolvers<void>();
-		let joined = false;
-		this.#joinReject = err => firstWelcome.reject(err);
-
-		const finishJoin = (): void => {
-			if (joined) return;
-			joined = true;
-			firstWelcome.resolve();
-		};
-
-		socket.onOpen = () => {
-			// (Re)connect: re-introduce ourselves; the host answers with a fresh
-			// welcome which (re)syncs the replica. Discard any partially-streamed
-			// snapshot from a prior connection: the host will resend the full
-			// chunk train.
-			this.#welcomed = false;
-			this.#pendingSnapshot = null;
-			this.#clearSnapshotProgressTimer();
-			this.#armWelcomeTimer();
-			socket.send({
-				t: "hello",
-				proto: COLLAB_PROTO,
-				name: collabDisplayName(this.#ctx),
-				writeToken: this.#writeToken,
-			});
-		};
-		socket.onFrame = frame => {
-			this.#applyChain = this.#applyChain
-				.then(async () => {
-					if (frame.t === "welcome") {
-						this.#clearWelcomeTimer();
-						this.#beginWelcome(frame, joined);
-						if (frame.entryCount === 0) {
-							await this.#finalizeSnapshot();
-							finishJoin();
-						}
-						return;
-					}
-					if (frame.t === "snapshot-chunk") {
-						const ready = this.#accumulateSnapshotChunk(frame);
-						if (ready) {
-							await this.#finalizeSnapshot();
-							finishJoin();
-						}
-						return;
-					}
-					if (frame.t === "error" && !this.#welcomed && !this.#left) {
-						// Pre-welcome errors are the host's targeted reply to our
-						// hello (e.g. protocol mismatch): no welcome will follow.
-						// Fail the join with the host's message instead of hanging
-						// until the welcome timeout.
-						this.#clearWelcomeTimer();
-						if (joined) this.#ctx.showError(`Collab host: ${frame.message}`);
-						else firstWelcome.reject(new Error(frame.message));
-						return;
-					}
-					if (!this.#welcomed || this.#left) return;
-					this.#applyFrame(frame);
-				})
-				.catch(err => {
-					logger.warn("collab guest frame apply failed", { type: frame.t, error: String(err) });
-					if (!joined && (frame.t === "welcome" || frame.t === "snapshot-chunk")) {
-						firstWelcome.reject(err instanceof Error ? err : new Error(String(err)));
-					}
-				});
-		};
-		socket.onClose = (reason, willReconnect) => {
-			this.#clearWelcomeTimer();
-			this.#clearSnapshotProgressTimer();
-			this.#flushPendingTranscripts();
-			if (this.#left) return;
-			if (!joined) {
-				firstWelcome.reject(new Error(reason));
-				return;
-			}
-			if (willReconnect) {
-				this.#ctx.showStatus(`Collab connection lost (${reason}), reconnecting…`, { dim: true });
-				return;
-			}
-			this.#ctx.showStatus(`Collab session ended (${reason})`);
-			void this.#restoreLocalSession();
-		};
-		socket.connect();
-		// Cover the connect phase too: if the relay blackholes the WebSocket
-		// handshake (no onOpen, no onClose), onOpen never arms the welcome timer,
-		// so without this the join would hang forever. onOpen re-arms (resetting
-		// the budget) once the socket actually opens.
-		this.#armWelcomeTimer();
-
 		try {
-			await firstWelcome.promise;
-		} catch (err) {
-			this.#left = true;
-			socket.close();
-			this.#socket = null;
-			throw err;
+			this.#roomId = parsed.roomId;
+			this.#writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+			const key = await importRoomKey(parsed.key);
+
+			this.#returnSessionFile = this.#ctx.sessionManager.getSessionFile() ?? null;
+
+			const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+			this.#socket = socket;
+
+			const firstWelcome = Promise.withResolvers<void>();
+			let joined = false;
+			this.#joinReject = err => firstWelcome.reject(err);
+
+			const finishJoin = (): void => {
+				if (joined) return;
+				joined = true;
+				firstWelcome.resolve();
+			};
+
+			socket.onOpen = () => {
+				// (Re)connect: re-introduce ourselves; the host answers with a fresh
+				// welcome which (re)syncs the replica. Discard any partially-streamed
+				// snapshot from a prior connection: the host will resend the full
+				// chunk train.
+				this.#welcomed = false;
+				this.#pendingSnapshot = null;
+				this.#clearSnapshotProgressTimer();
+				this.#armWelcomeTimer();
+				socket.send({
+					t: "hello",
+					proto: COLLAB_PROTO,
+					name: collabDisplayName(this.#ctx),
+					writeToken: this.#writeToken,
+				});
+			};
+			socket.onFrame = frame => {
+				this.#applyChain = this.#applyChain
+					.then(async () => {
+						if (frame.t === "welcome") {
+							this.#clearWelcomeTimer();
+							this.#beginWelcome(frame, joined);
+							if (frame.entryCount === 0) {
+								await this.#finalizeSnapshot();
+								finishJoin();
+							}
+							return;
+						}
+						if (frame.t === "snapshot-chunk") {
+							const ready = this.#accumulateSnapshotChunk(frame);
+							if (ready) {
+								await this.#finalizeSnapshot();
+								finishJoin();
+							}
+							return;
+						}
+						if (frame.t === "error" && !this.#welcomed && !this.#left) {
+							// Pre-welcome errors are the host's targeted reply to our
+							// hello (e.g. protocol mismatch): no welcome will follow.
+							// Fail the join with the host's message instead of hanging
+							// until the welcome timeout.
+							this.#clearWelcomeTimer();
+							if (joined) this.#ctx.showError(`Collab host: ${frame.message}`);
+							else firstWelcome.reject(new Error(frame.message));
+							return;
+						}
+						if (!this.#welcomed || this.#left) return;
+						this.#applyFrame(frame);
+					})
+					.catch(err => {
+						logger.warn("collab guest frame apply failed", { type: frame.t, error: String(err) });
+						if (!joined && (frame.t === "welcome" || frame.t === "snapshot-chunk")) {
+							firstWelcome.reject(err instanceof Error ? err : new Error(String(err)));
+						}
+					});
+			};
+			socket.onClose = (reason, willReconnect) => {
+				this.#clearWelcomeTimer();
+				this.#clearSnapshotProgressTimer();
+				this.#flushPendingTranscripts();
+				if (this.#left) return;
+				if (!joined) {
+					firstWelcome.reject(new Error(reason));
+					return;
+				}
+				if (willReconnect) {
+					this.#ctx.showStatus(`Collab connection lost (${reason}), reconnecting…`, { dim: true });
+					return;
+				}
+				this.#ctx.showStatus(`Collab session ended (${reason})`);
+				void this.#restoreLocalSession();
+			};
+			socket.connect();
+			// Cover the connect phase too: if the relay blackholes the WebSocket
+			// handshake (no onOpen, no onClose), onOpen never arms the welcome timer,
+			// so without this the join would hang forever. onOpen re-arms (resetting
+			// the budget) once the socket actually opens.
+			this.#armWelcomeTimer();
+
+			try {
+				await firstWelcome.promise;
+			} catch (err) {
+				this.#left = true;
+				socket.close();
+				this.#socket = null;
+				throw err;
+			} finally {
+				this.#joinReject = null;
+				this.#clearWelcomeTimer();
+				this.#clearSnapshotProgressTimer();
+			}
+
+			this.#ctx.collabGuest = this;
+			this.#ctx.syncRunningSubagentBadge();
 		} finally {
 			this.#ctx.collabJoining = false;
-			this.#joinReject = null;
-			this.#clearWelcomeTimer();
-			this.#clearSnapshotProgressTimer();
 		}
-
-		this.#ctx.collabGuest = this;
-		this.#ctx.syncRunningSubagentBadge();
 	}
 
 	/** User-initiated leave (or post-disconnect cleanup): restore the previous session. */

@@ -1,8 +1,15 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
+import { generateRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
+import { formatCollabLink, generateRoomId } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 /**
  * Regression (issue #11067): `omp join` boots a full local session and only
@@ -235,5 +242,22 @@ describe("InputController collab join window", () => {
 			images: undefined,
 		});
 		expect(spies.showStatus).not.toHaveBeenCalled();
+	});
+});
+
+describe("CollabGuestLink join guard", () => {
+	it("arms before room-key import and clears when the import fails", async () => {
+		const keyImport = Promise.withResolvers<CryptoKey>();
+		vi.spyOn(crypto.subtle, "importKey").mockReturnValueOnce(keyImport.promise);
+		const ctx = { collabJoining: false } as unknown as InteractiveModeContext;
+		const guest = new CollabGuestLink(ctx);
+		const link = formatCollabLink("https://relay.omp.test", generateRoomId(), generateRoomKey());
+
+		const join = guest.join(link);
+
+		expect(ctx.collabJoining).toBe(true);
+		keyImport.reject(new Error("room-key import failed"));
+		await expect(join).rejects.toThrow("room-key import failed");
+		expect(ctx.collabJoining).toBe(false);
 	});
 });
