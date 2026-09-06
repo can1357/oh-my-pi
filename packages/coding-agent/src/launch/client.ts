@@ -90,6 +90,8 @@ export interface DaemonCompletionUnregisterOptions {
 export interface DaemonOutputUnregister {
 	(): void;
 	readonly ready: Promise<void>;
+	/** Re-advertise the subscription after its metadata (e.g. delivery mode) changed; no-op once replaced. */
+	readonly republish: () => void;
 }
 
 /** Persistent per-process connection to one project or global daemon broker. */
@@ -384,7 +386,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			}
 			void this.#publishSubscriptions();
 		};
-		return Object.defineProperty(unregister, "ready", { value: ready }) as DaemonOutputUnregister;
+		const republish = (): void => {
+			if (this.#outputSinks.get(subscription.id) === registration) this.#publishSubscriptions();
+		};
+		return Object.defineProperties(unregister, {
+			ready: { value: ready },
+			republish: { value: republish },
+		}) as DaemonOutputUnregister;
 	}
 
 	/**

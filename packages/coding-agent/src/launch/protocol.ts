@@ -99,11 +99,34 @@ export type DaemonOperation =
 	| { op: "describe"; name: string }
 	| { op: "shutdown" };
 
+/** Model-facing delivery mode a client attached to one output subscription. */
+export type DaemonMonitorDelivery = "wake" | "ambient";
+
+/** One live output monitor as the broker sees it; listed by `list` and `describe` so watchers are debuggable. */
+export interface DaemonMonitorWatcher {
+	/** Process name the monitor targets. */
+	name: string;
+	/** Client-scoped subscription id. */
+	id: string;
+	/** Session that registered the monitor. */
+	owner: string;
+	/** Delivery mode advertised by the client; absent for clients that predate the field. */
+	delivery?: DaemonMonitorDelivery;
+	/** Epoch milliseconds when the client registered the monitor; absent for older clients. */
+	since?: number;
+	/** Session artifact id receiving the raw capture; absent for older clients. */
+	artifactId?: string;
+	/** Daemon incarnation the monitor is bound to; absent while it waits for a start. */
+	daemonId?: string;
+	/** False while the registering client is disconnected inside the reconnect grace. */
+	connected: boolean;
+}
+
 /** Typed broker result decoded before it reaches tool code. */
 export type DaemonRpcResult =
 	| { op: "ping"; projectDir: string; capabilities?: string[] }
 	| { op: "start"; daemon: DaemonSnapshot; readyTimedOut: boolean }
-	| { op: "list"; daemons: DaemonSnapshot[] }
+	| { op: "list"; daemons: DaemonSnapshot[]; monitors?: DaemonMonitorWatcher[] }
 	| {
 			op: "logs";
 			name: string;
@@ -120,7 +143,7 @@ export type DaemonRpcResult =
 	| { op: "send"; daemon: DaemonSnapshot }
 	| { op: "stop"; daemon: DaemonSnapshot }
 	| { op: "restart"; daemon: DaemonSnapshot }
-	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
+	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec; monitors?: DaemonMonitorWatcher[] }
 	| { op: "shutdown" };
 
 /** Authenticated request envelope used by socket clients. */
@@ -169,6 +192,12 @@ export interface DaemonOutputSubscription {
 	 * record to it.
 	 */
 	startPending?: boolean;
+	/** Delivery mode the client attached; reported by `list`/`describe` watcher rows. */
+	delivery?: DaemonMonitorDelivery;
+	/** Epoch milliseconds when the client registered this subscription. */
+	since?: number;
+	/** Session artifact id the client allocated for the raw capture at {@link artifactPath}. */
+	artifactId?: string;
 }
 
 /** Wire form of a subscription, tagged by the exact client registration that advertised it. */
@@ -361,6 +390,38 @@ function outputSubscriptions(value: unknown): DaemonOutputWireSubscription[] {
 				source.startPending === undefined
 					? undefined
 					: booleanValue(source.startPending, `request.outputSubscriptions[${index}].startPending`),
+			delivery: optionalMonitorDelivery(source.delivery, `request.outputSubscriptions[${index}].delivery`),
+			since:
+				source.since === undefined
+					? undefined
+					: nonNegativeInteger(source.since, `request.outputSubscriptions[${index}].since`),
+			artifactId: optionalString(source.artifactId, `request.outputSubscriptions[${index}].artifactId`),
+		};
+	});
+}
+
+function optionalMonitorDelivery(value: unknown, label: string): DaemonMonitorDelivery | undefined {
+	if (value === undefined) return undefined;
+	const delivery = stringValue(value, label);
+	if (delivery === "wake" || delivery === "ambient") return delivery;
+	throw new Error(`Unknown monitor delivery: ${delivery}`);
+}
+
+function optionalMonitorWatchers(value: unknown): DaemonMonitorWatcher[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) throw new Error("result.monitors must be an array");
+	return value.map((item, index) => {
+		const label = `result.monitors[${index}]`;
+		const source = record(item, label);
+		return {
+			name: stringValue(source.name, `${label}.name`),
+			id: stringValue(source.id, `${label}.id`),
+			owner: stringValue(source.owner, `${label}.owner`),
+			delivery: optionalMonitorDelivery(source.delivery, `${label}.delivery`),
+			since: source.since === undefined ? undefined : nonNegativeInteger(source.since, `${label}.since`),
+			artifactId: optionalString(source.artifactId, `${label}.artifactId`),
+			daemonId: optionalString(source.daemonId, `${label}.daemonId`),
+			connected: booleanValue(source.connected, `${label}.connected`),
 		};
 	});
 }
@@ -630,7 +691,11 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 			};
 		case "list": {
 			if (!Array.isArray(source.daemons)) throw new Error("result.daemons must be an array");
-			return { op: "list", daemons: source.daemons.map(parseDaemonSnapshot) };
+			return {
+				op: "list",
+				daemons: source.daemons.map(parseDaemonSnapshot),
+				monitors: optionalMonitorWatchers(source.monitors),
+			};
 		}
 		case "logs":
 			return {
@@ -663,6 +728,7 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 				op: "describe",
 				daemon: parseDaemonSnapshot(source.daemon),
 				spec: parseDaemonSpec(source.spec),
+				monitors: optionalMonitorWatchers(source.monitors),
 			};
 		case "shutdown":
 			return { op: "shutdown" };

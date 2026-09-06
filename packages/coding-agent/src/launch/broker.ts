@@ -34,6 +34,7 @@ import {
 	DAEMON_PTY_ROWS,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
+	type DaemonMonitorWatcher,
 	type DaemonMonitorWireNotification,
 	type DaemonOperation,
 	type DaemonOutputSubscription,
@@ -788,6 +789,7 @@ class DaemonBroker {
 				return {
 					op: "list",
 					daemons: orderDaemonsForListing([...this.#records.values()].map(record => record.snapshot)),
+					monitors: this.#monitorWatchers(),
 				};
 			}
 			case "logs":
@@ -806,11 +808,36 @@ class DaemonBroker {
 			case "describe": {
 				const record = this.#record(operation.name);
 				await this.#refreshDetached(record);
-				return { op: "describe", daemon: record.snapshot, spec: record.spec };
+				return {
+					op: "describe",
+					daemon: record.snapshot,
+					spec: record.spec,
+					monitors: this.#monitorWatchers(operation.name),
+				};
 			}
 			case "shutdown":
 				return { op: "shutdown" };
 		}
+	}
+
+	/** Live output monitors, so `ps`/`describe` can show who is watching a process and how. */
+	#monitorWatchers(name?: string): DaemonMonitorWatcher[] {
+		const watchers: DaemonMonitorWatcher[] = [];
+		for (const registration of this.#outputRegistrations.values()) {
+			if (registration.disabled) continue;
+			if (name !== undefined && registration.name !== name) continue;
+			watchers.push({
+				name: registration.name,
+				id: registration.id,
+				owner: registration.owner,
+				delivery: registration.delivery,
+				since: registration.since,
+				artifactId: registration.artifactId,
+				daemonId: registration.daemonId,
+				connected: registration.socket !== undefined && !registration.socket.destroyed,
+			});
+		}
+		return watchers;
 	}
 
 	async #start(spec: DaemonSpec, owner?: string): Promise<DaemonRpcResult> {
@@ -1230,6 +1257,7 @@ class DaemonBroker {
 						clearTimeout(existing.offlineTimer);
 						existing.offlineTimer = undefined;
 						existing.owner = subscription.owner;
+						existing.delivery = subscription.delivery;
 						existing.startPending = subscription.startPending;
 						const reconnected = existing.socket !== socket;
 						existing.startPending = subscription.startPending;
