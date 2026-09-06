@@ -992,7 +992,16 @@ export class SessionTools {
 						})
 					: appliedTools;
 				const directToolNames = codeMode.active ? appliedNames : undefined;
-				const signature = this.#computeAppliedToolSignature(promptToolNames, promptTools, directToolNames);
+				const mountedSignatureTools = [...mountNames].flatMap(name => {
+					const tool = this.#toolRegistry.get(name);
+					return tool ? [tool] : [];
+				});
+				const signature = this.#computeAppliedToolSignature(
+					promptToolNames,
+					promptTools,
+					directToolNames,
+					mountedSignatureTools,
+				);
 				const freezeImplicitPromptRefresh =
 					!forcePromptRefresh &&
 					signature !== this.#lastAppliedToolSignature &&
@@ -1481,7 +1490,16 @@ export class SessionTools {
 		const promptTools = promptToolNames
 			.map(name => this.#toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool != null);
-		this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(promptToolNames, promptTools, directToolNames);
+		const mountedSignatureTools = [...(this.#xdev?.mountedNames ?? [])].flatMap(name => {
+			const tool = this.#toolRegistry.get(name);
+			return tool ? [tool] : [];
+		});
+		this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(
+			promptToolNames,
+			promptTools,
+			directToolNames,
+			mountedSignatureTools,
+		);
 	}
 
 	/** Applies one-turn memory prompt injection before an agent run. */
@@ -1547,6 +1565,10 @@ export class SessionTools {
 	 *   4. MCP server instructions text (per server), since `rebuildSystemPrompt`
 	 *      embeds these in the appended prompt under "## MCP Server Instructions".
 	 *      A server upgrade can change instructions while keeping tools identical.
+	 *   5. Sorted names of mounted xd:// skill readers: mounting, unmounting,
+	 *      or flipping such a reader changes skill catalog/URI guidance without
+	 *      touching the direct inventory, so it must rebuild. Mount churn of
+	 *      capability-less tools leaves this segment empty and the prompt stable.
 	 *
 	 * Settings-driven tool metadata is covered automatically: built-in tools that
 	 * depend on settings expose `description`/`label` via getters (see `TaskTool`,
@@ -1567,7 +1589,12 @@ export class SessionTools {
 	 * so a session spanning midnight must NOT rebuild a prompt that no longer
 	 * embeds the date — the reminder picks up the new day on its own.
 	 */
-	#computeAppliedToolSignature(toolNames: string[], tools: AgentTool[], directToolNames?: readonly string[]): string {
+	#computeAppliedToolSignature(
+		toolNames: string[],
+		tools: AgentTool[],
+		directToolNames?: readonly string[],
+		mountedTools: readonly AgentTool[] = [],
+	): string {
 		// Order-preserving join: any reorder must produce a different signature so
 		// the rebuild fires and the new tool list reaches the API.
 		const nameSegment = toolNames.join("\u0001");
@@ -1605,7 +1632,16 @@ export class SessionTools {
 		// `codeModeDirectTools` change must rebuild even when the enabled set is
 		// unchanged.
 		const directSegment = directToolNames === undefined ? "" : `\u0004${directToolNames.join("\u0001")}`;
-		return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${mountedMCPRouteSegment}${directSegment}`;
+		// Mounted xd:// readers stay out of the direct inventory, but a mounted
+		// skill reader still drives catalog/URI guidance: hash only the sorted
+		// names of mounted readers so their mount/unmount/flip rebuilds, while
+		// mount churn of capability-less tools keeps the prompt byte-stable.
+		const mountedReaderSegment = mountedTools
+			.filter(tool => "readsSkillUris" in tool && tool.readsSkillUris === true)
+			.map(tool => tool.name)
+			.sort()
+			.join("\u0002");
+		return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${mountedMCPRouteSegment}${directSegment}\u0009${mountedReaderSegment}`;
 	}
 
 	/**

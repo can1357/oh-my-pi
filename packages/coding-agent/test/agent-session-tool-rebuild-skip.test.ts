@@ -1456,4 +1456,28 @@ These tools became available:
 		await session.refreshRpcHostTools([capableRead]);
 		expect(rebuildCount).toBe(2);
 	});
+
+	it("rebuilds when a mounted RPC reader gains skill URI capability", async () => {
+		// Discoverable non-builtins mount under xd:// instead of staying direct:
+		// the same-name capability flip must still change the rebuild signature.
+		let rebuildCount = 0;
+		const xdevState = createTestXdevState();
+		const { session } = newSession(
+			async toolNames => {
+				rebuildCount++;
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: xdevState },
+		);
+		const plainReader = { ...createBasicTool("rpc_reader", "RPC Reader"), loadMode: "discoverable" as const };
+		const capableReader = { ...plainReader, readsSkillUris: true } as AgentTool;
+
+		await session.refreshRpcHostTools([plainReader]);
+		expect(session.getMountedXdevToolNames()).toContain("rpc_reader");
+		const mountedRebuilds = rebuildCount;
+
+		await session.refreshRpcHostTools([capableReader]);
+		expect(session.getMountedXdevToolNames()).toContain("rpc_reader");
+		expect(rebuildCount).toBeGreaterThan(mountedRebuilds);
+	});
 });
