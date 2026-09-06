@@ -2026,6 +2026,49 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		expect(blocks[0].name).toBe("task");
 		expect(blocks[0].arguments).toMatchObject({ task: "Inspect auth", name: "AuthExplorer", agent: "scout" });
 	});
+
+	it("canonicalizes adapted alias calls even when the handler returns a tool error", async () => {
+		const handlers: CursorExecHandlers = {
+			async mcp(call) {
+				call.args = {
+					...call.args,
+					task: call.args.prompt,
+					name: call.args.description,
+					agent: "scout",
+				};
+				return {
+					role: "toolResult",
+					toolCallId: call.toolCallId ?? "c4",
+					toolName: "task",
+					content: [{ type: "text", text: "approval denied" }],
+					isError: true,
+					timestamp: Date.now(),
+				};
+			},
+		};
+
+		const { output } = await dispatchExec(
+			buildExecMessage({
+				case: "mcpArgs",
+				value: create(McpArgsSchema, {
+					name: "Subagent",
+					toolName: "Subagent",
+					toolCallId: "c4",
+					providerIdentifier: "cursor",
+					args: {
+						prompt: new TextEncoder().encode(JSON.stringify("Inspect auth")),
+						description: new TextEncoder().encode(JSON.stringify("AuthExplorer")),
+					},
+				}),
+			}),
+			{ execHandlers: handlers },
+		);
+
+		const blocks = output.content.filter(block => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0].name).toBe("task");
+		expect(blocks[0].arguments).toMatchObject({ task: "Inspect auth", name: "AuthExplorer", agent: "scout" });
+	});
 });
 
 describe("Cursor MCP frame: external executor handoff", () => {

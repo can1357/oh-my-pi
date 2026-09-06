@@ -6,6 +6,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
+import { isCursorTaskMcpName } from "../../cursor-bridge-tools";
 import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { createBackgroundTanDispatchBlock } from "../../modes/components/background-tan-message";
@@ -537,7 +538,10 @@ export class UiHelpers {
 						appendAssistantSegment(afterToolSegment);
 						continue;
 					}
-					const tool = this.ctx.viewSession.getToolByName(content.name);
+					const exactTool = this.ctx.viewSession.getToolByName(content.name);
+					const tool =
+						exactTool ??
+						(isCursorTaskMcpName(content.name) ? this.ctx.viewSession.getToolByName("task") : undefined);
 					const renderToolName = toolRenderName(content.name, tool);
 					resolveWaitingPoll(renderToolName);
 

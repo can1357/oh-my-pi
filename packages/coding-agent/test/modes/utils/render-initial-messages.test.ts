@@ -12,7 +12,7 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -241,6 +241,25 @@ describe("UiHelpers.renderInitialMessages — transcript source", () => {
 		expect(renderSessionContextSpy).toHaveBeenCalledWith(transcript, {
 			updateFooter: true,
 		});
+	});
+});
+
+describe("UiHelpers.renderInitialMessages — task alias rebuild", () => {
+	it("uses the canonical task renderer for an alias when no exact tool is registered", async () => {
+		const message = assistantToolCall("cursor-task-alias", "Subagent", {
+			task: "Inspect auth",
+			name: "AuthExplorer",
+		});
+		const { ctx, chatContainer } = makeRenderCtx(transcriptWith([message]));
+		const taskTool = { name: "task", label: "Task" } as unknown as AgentTool;
+		ctx.viewSession.getToolByName = vi.fn(name => (name === "task" ? taskTool : undefined));
+		ctx.viewSession.hasBuiltInTool = vi.fn(name => name === "task");
+
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		const rendered = Bun.stripANSI(chatContainer.render(100).join("\n"));
+		expect(rendered).toContain("Inspect auth");
+		expect(rendered).not.toContain("Subagent");
 	});
 });
 

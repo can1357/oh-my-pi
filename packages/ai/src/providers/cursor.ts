@@ -1963,7 +1963,7 @@ async function handleExecServerMessage(
 				error => buildMcpErrorResult(error),
 				execHandlers?.mcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
 			);
-			if (toolResult && !toolResult.isError) {
+			if (toolResult) {
 				const block = output.content.find(
 					(b): b is ToolCallState => b.type === "toolCall" && b.id === mcpCall.toolCallId,
 				);
