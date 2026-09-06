@@ -752,7 +752,12 @@ process.stdin.once("data", () => {
 				artifactPath: path.join(tempDir.path(), "ordinary-terminal.log"),
 			};
 			raw.socket.write(envelope("attach-terminal", "ordinary-client", [ordinarySubscription]));
-			await raw.waitFor(message => message.id === "attach-terminal");
+			// The terminal completion is written by the subscription mutation, which
+			// the broker sequences independently of the ping response; wait for the
+			// event rather than the response so a fast reply cannot race it.
+			await raw.waitFor(
+				message => message.event === "daemon-monitor-completed" && message.monitorId === ordinarySubscription.id,
+			);
 			const ordinaryCompletions = raw.messages.filter(
 				message => message.event === "daemon-monitor-completed" && message.monitorId === ordinarySubscription.id,
 			);
