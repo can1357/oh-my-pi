@@ -1,7 +1,7 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
-import { collabHostLinks, startCollabHosting } from "../../collab/start-hosting";
+import { collabHostLinks, startCollabHosting, stopCollabHosting } from "../../collab/start-hosting";
 import { KeybindingsManager } from "../../config/keybindings";
 import type {
 	CompactOptions,
@@ -203,8 +203,7 @@ export class ExtensionUiController {
 			startCollab: async options => collabHostLinks(await startCollabHosting(this.ctx, options)),
 			getCollabLinks: () => (this.ctx.collabHost ? collabHostLinks(this.ctx.collabHost) : undefined),
 			stopCollab: async () => {
-				// stop() runs the teardown that clears ctx.collabHost itself.
-				await this.ctx.collabHost?.stop("host stopped");
+				await stopCollabHosting(this.ctx);
 			},
 		};
 		const contextActions: ExtensionContextActions = {
@@ -442,8 +441,7 @@ export class ExtensionUiController {
 			startCollab: async options => collabHostLinks(await startCollabHosting(this.ctx, options)),
 			getCollabLinks: () => (this.ctx.collabHost ? collabHostLinks(this.ctx.collabHost) : undefined),
 			stopCollab: async () => {
-				// stop() runs the teardown that clears ctx.collabHost itself.
-				await this.ctx.collabHost?.stop("host stopped");
+				await stopCollabHosting(this.ctx);
 			},
 		};
 		const contextActions: ExtensionContextActions = {

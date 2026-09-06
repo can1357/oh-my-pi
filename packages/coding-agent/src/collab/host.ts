@@ -142,7 +142,7 @@ export class CollabHost {
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
-
+	#firstOpen?: PromiseWithResolvers<void>;
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
 	}
@@ -169,6 +169,11 @@ export class CollabHost {
 	/** Read-only variant of {@link webLink}. */
 	get webViewLink(): string {
 		return this.#webViewLink;
+	}
+
+	/** Session id this room is bound to; broadcasts tear down if the session switches. */
+	get sessionId(): string {
+		return this.#sessionId;
 	}
 
 	get participants(): CollabParticipant[] {
@@ -237,10 +242,12 @@ export class CollabHost {
 		this.#sessionId = this.#ctx.sessionManager.getSessionId();
 
 		const firstOpen = Promise.withResolvers<void>();
+		this.#firstOpen = firstOpen;
 		let opened = false;
 		socket.onOpen = () => {
 			if (!opened) {
 				opened = true;
+				this.#firstOpen = undefined;
 				firstOpen.resolve();
 			}
 		};
@@ -251,6 +258,7 @@ export class CollabHost {
 		socket.onClose = (reason, willReconnect) => {
 			if (this.#stopped) return;
 			if (!opened) {
+				this.#firstOpen = undefined;
 				firstOpen.reject(new Error(reason));
 				return;
 			}
@@ -314,6 +322,10 @@ export class CollabHost {
 	async #teardown(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
+		if (this.#firstOpen) {
+			this.#firstOpen.reject(new Error("Collab stopped"));
+			this.#firstOpen = undefined;
+		}
 		this.#ctx.sessionManager.onEntryAppended = undefined;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;

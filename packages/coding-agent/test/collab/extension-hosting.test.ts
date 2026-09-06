@@ -16,7 +16,12 @@ import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
-import { collabHostLinks, startCollabHosting } from "@oh-my-pi/pi-coding-agent/collab/start-hosting";
+import {
+	collabHostLinks,
+	hasInFlightCollabHosting,
+	startCollabHosting,
+	stopCollabHosting,
+} from "@oh-my-pi/pi-coding-agent/collab/start-hosting";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import {
 	ExtensionRuntime,
@@ -287,10 +292,10 @@ describe("startCollabHosting", () => {
 
 		expect(secondResult.status).toBe("rejected");
 		if (secondResult.status !== "rejected") throw new Error("second start should have rejected");
-		expect((secondResult.reason as Error).message).toMatch(
+		if (!(secondResult.reason instanceof Error)) throw new Error("second start reason must be an Error");
+		expect(secondResult.reason.message).toMatch(
 			/Already hosting a collab session on relay ws:\/\/localhost:7475 \(stop it first\)/,
 		);
-
 		expect(ctx.collabHost).toBe(host);
 		expect(host.relayOrigin).toBe("ws://localhost:7475");
 		const welcome = await expectGuestWelcome(host.link);
@@ -308,6 +313,43 @@ describe("startCollabHosting", () => {
 		expect(ctx.collabHost?.relayOrigin).toBe("ws://localhost:7475");
 
 		const welcome = await expectGuestWelcome(liveHost.link);
+		expect(welcome.t).toBe("welcome");
+	});
+
+	it("cancels an in-flight start when stopped, preventing the room from becoming active", async () => {
+		const { ctx } = makeCtx();
+		const startPromise = startCollabHosting(ctx, { relayUrl: "ws://localhost:7475" });
+		expect(hasInFlightCollabHosting(ctx)).toBe(true);
+
+		await stopCollabHosting(ctx);
+		expect(hasInFlightCollabHosting(ctx)).toBe(false);
+		expect(ctx.collabHost).toBeUndefined();
+
+		await expect(startPromise).rejects.toThrow();
+		expect(ctx.collabHost).toBeUndefined();
+	});
+
+	it("restarts hosting with a fresh room when the active session changes", async () => {
+		let currentSessionId = "sess-1";
+		const { ctx } = makeCtx();
+		ctx.sessionManager.getSessionId = () => currentSessionId;
+
+		const firstHost = await startHosting(ctx, "ws://localhost:7475");
+		expect(firstHost.sessionId).toBe("sess-1");
+		expect(ctx.collabHost).toBe(firstHost);
+		const firstLink = firstHost.link;
+
+		// Switch session: getSessionId now returns sess-2 while firstHost is still ctx.collabHost
+		currentSessionId = "sess-2";
+
+		const secondHost = await startHosting(ctx, "ws://localhost:7475");
+		expect(secondHost.sessionId).toBe("sess-2");
+		expect(ctx.collabHost).toBe(secondHost);
+		expect(secondHost).not.toBe(firstHost);
+		expect(secondHost.link).not.toBe(firstLink);
+
+		// Second room is live and usable by guests
+		const welcome = await expectGuestWelcome(secondHost.link);
 		expect(welcome.t).toBe("welcome");
 	});
 });

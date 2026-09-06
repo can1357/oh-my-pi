@@ -15,7 +15,19 @@ import type { InteractiveModeContext } from "../modes/types";
 import { CollabHost } from "./host";
 import { normalizeRelayOrigin } from "./protocol";
 
-const inFlightStarts = new WeakMap<InteractiveModeContext, Promise<CollabHost>>();
+interface InFlightStart {
+	readonly host: CollabHost;
+	readonly relayOrigin: string;
+	readonly sessionId: string;
+	cancelled: boolean;
+	promise: Promise<CollabHost>;
+}
+
+const inFlightStarts = new WeakMap<InteractiveModeContext, InFlightStart>();
+
+export function hasInFlightCollabHosting(ctx: InteractiveModeContext): boolean {
+	return inFlightStarts.has(ctx);
+}
 
 /** The links of a hosted room, in both strengths and both renderings. */
 export function collabHostLinks(host: CollabHost): CollabHostLinks {
@@ -53,27 +65,93 @@ export async function startCollabHosting(
 	const relayUrl = relayInput.includes("://") ? relayInput : `wss://${relayInput}`;
 	const normalized = normalizeRelayOrigin(relayUrl);
 	if ("error" in normalized) throw new Error(normalized.error);
+	const currentSessionId = ctx.sessionManager.getSessionId();
+
 	const existing = ctx.collabHost;
 	if (existing) {
-		if (existing.relayOrigin === normalized.origin) return existing;
-		throw new Error(`Already hosting a collab session on relay ${existing.relayOrigin} (stop it first)`);
+		if (existing.sessionId && existing.sessionId !== currentSessionId) {
+			await existing.stop("session switched");
+		} else if (existing.relayOrigin === normalized.origin) {
+			return existing;
+		} else {
+			throw new Error(`Already hosting a collab session on relay ${existing.relayOrigin} (stop it first)`);
+		}
 	}
+
 	const pending = inFlightStarts.get(ctx);
 	if (pending) {
-		const host = await pending;
-		if (host.relayOrigin === normalized.origin) return host;
-		throw new Error(`Already hosting a collab session on relay ${host.relayOrigin} (stop it first)`);
+		if (pending.sessionId && pending.sessionId !== currentSessionId) {
+			pending.cancelled = true;
+			inFlightStarts.delete(ctx);
+			await pending.host.stop("session switched");
+			try {
+				await pending.promise;
+			} catch {
+				// Ignore previous start failure
+			}
+		} else if (pending.relayOrigin === normalized.origin) {
+			return await pending.promise;
+		} else {
+			throw new Error(`Already hosting a collab session on relay ${pending.relayOrigin} (stop it first)`);
+		}
 	}
+
 	const host = new CollabHost(ctx);
+	const inFlight: InFlightStart = {
+		host,
+		relayOrigin: normalized.origin,
+		sessionId: currentSessionId,
+		cancelled: false,
+		promise: Promise.resolve(host),
+	};
+
 	const startPromise = (async () => {
 		try {
 			await host.start(relayUrl, ctx.settings.get("collab.webUrl") || "");
+			if (inFlight.cancelled) {
+				await host.stop("host stopped");
+				throw new Error("Collab hosting was stopped");
+			}
 			ctx.collabHost = host;
 			return host;
+		} catch (err) {
+			if (inFlight.cancelled) {
+				await host.stop("host stopped");
+			}
+			throw err;
 		} finally {
-			inFlightStarts.delete(ctx);
+			if (inFlightStarts.get(ctx) === inFlight) {
+				inFlightStarts.delete(ctx);
+			}
 		}
 	})();
-	inFlightStarts.set(ctx, startPromise);
+
+	inFlight.promise = startPromise;
+	inFlightStarts.set(ctx, inFlight);
 	return startPromise;
+}
+
+/**
+ * Stop hosting this session's collab room, or cancel an in-flight start.
+ *
+ * If a room is currently active, it is stopped and disconnected. If a start
+ * is in-flight awaiting relay handshake, it is cancelled so it cannot publish
+ * an active room after this call completes.
+ */
+export async function stopCollabHosting(ctx: InteractiveModeContext, reason = "host stopped"): Promise<void> {
+	const inFlight = inFlightStarts.get(ctx);
+	if (inFlight) {
+		inFlight.cancelled = true;
+		inFlightStarts.delete(ctx);
+		await inFlight.host.stop(reason);
+		try {
+			await inFlight.promise;
+		} catch {
+			// Expected rejection from cancelled start
+		}
+	}
+	const host = ctx.collabHost;
+	if (host) {
+		await host.stop(reason);
+	}
 }

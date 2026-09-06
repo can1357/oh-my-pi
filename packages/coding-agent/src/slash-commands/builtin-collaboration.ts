@@ -2,7 +2,7 @@ import { Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
-import { startCollabHosting } from "../collab/start-hosting";
+import { hasInFlightCollabHosting, startCollabHosting, stopCollabHosting } from "../collab/start-hosting";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import { parseExportArgs } from "../export/html/args";
@@ -304,11 +304,11 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			const args = command.args.trim();
 			const { verb, rest } = parseSubcommand(args);
 			if (verb === "stop") {
-				if (!ctx.collabHost) {
+				if (!ctx.collabHost && !hasInFlightCollabHosting(ctx)) {
 					ctx.showStatus("Not hosting a collab session");
 					return;
 				}
-				await ctx.collabHost.stop("host stopped");
+				await stopCollabHosting(ctx);
 				ctx.showStatus("Collab stopped");
 				return;
 			}
@@ -406,8 +406,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				await ctx.collabGuest.leave("left");
 				return;
 			}
-			if (ctx.collabHost) {
-				await ctx.collabHost.stop("host stopped");
+			if (ctx.collabHost || hasInFlightCollabHosting(ctx)) {
+				await stopCollabHosting(ctx);
 				ctx.showStatus("Collab stopped");
 				return;
 			}
