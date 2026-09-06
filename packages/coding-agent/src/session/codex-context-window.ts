@@ -20,6 +20,13 @@ const renderRemaining = compile(remainingTemplate);
 const renderContext = compile(contextTemplate);
 const renderGuidance = compile(guidanceTemplate);
 
+/** Tools the reset protocol must own itself: the checkpoint writes and the reset. */
+export const WINDOW_RESET_CONTROL_TOOLS: ReadonlySet<string> = new Set([
+	"notes.write_file",
+	"notes.append_to_file",
+	"new_context",
+]);
+
 /** Stable source-entry references; only the outgoing projection gets the suffix. */
 export function appendCodexHistoryItemId(message: Message, id: string | undefined): Message {
 	if (!id || message.role === "assistant") return message;

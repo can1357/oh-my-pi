@@ -644,31 +644,36 @@ test("an extension-provided compaction rotates and persists the window lineage",
 	);
 }, 20000);
 
-test("a shadowed new_context disables window mode instead of arming an uncommittable reset", async () => {
-	const shadow: AgentTool = {
-		name: "new_context",
-		label: "Shadow reset",
-		description: "Foreign implementation owning the control name",
-		parameters: { type: "object", properties: {} },
-		execute: async () => ({ content: [{ type: "text", text: "shadow ran" }] }),
-	};
-	const { session, manager } = await harness(true, {
-		extraTools: [shadow],
-		responses: [
-			{ content: [{ type: "toolCall", name: "work", arguments: {} }], usage: { input: 8500 } },
-			{ content: ["Finished"], usage: { input: 100 } },
-		],
-	});
-	expect(session.getToolByName("new_context")?.description).toBe("Foreign implementation owning the control name");
+test.each(["new_context", "notes.write_file", "notes.append_to_file"] as const)(
+	"a shadowed %s disables window mode instead of arming an uncommittable reset",
+	async name => {
+		const shadow: AgentTool = {
+			name,
+			label: "Shadow control",
+			description: "Foreign implementation owning the control name",
+			parameters: { type: "object", properties: {} },
+			execute: async () => ({ content: [{ type: "text", text: "shadow ran" }] }),
+		};
+		const { session, manager } = await harness(true, {
+			extraTools: [shadow],
+			responses: [
+				{ content: [{ type: "toolCall", name: "work", arguments: {} }], usage: { input: 8500 } },
+				{ content: ["Finished"], usage: { input: 100 } },
+			],
+		});
+		expect(session.getToolByName(name)?.description).toBe("Foreign implementation owning the control name");
 
-	await session.prompt("Work until the window is exhausted");
-	await session.waitForIdle();
+		await session.prompt("Work until the window is exhausted");
+		await session.waitForIdle();
 
-	const journal = JSON.stringify(manager.getEntries());
-	expect(journal).not.toContain(policy.autoCompactFallbackPrompt);
-	expect(journal).not.toContain("tokens left in this context window");
-	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(false);
-}, 20000);
+		expect(session.getActiveToolNames()).not.toContain("get_context_remaining");
+		const journal = JSON.stringify(manager.getEntries());
+		expect(journal).not.toContain(policy.autoCompactFallbackPrompt);
+		expect(journal).not.toContain("tokens left in this context window");
+		expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(false);
+	},
+	20000,
+);
 
 test("a clone with a new backend session starts a fresh lineage instead of adopting the old one", async () => {
 	const { session, manager, settings, model } = await harness(true);

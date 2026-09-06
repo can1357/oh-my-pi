@@ -36,6 +36,7 @@ import {
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
 import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } from "./code-mode";
+import { WINDOW_RESET_CONTROL_TOOLS } from "./codex-context-window";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
@@ -610,8 +611,17 @@ export class SessionTools {
 	}
 
 	async #syncContextWindowTools(signal?: AbortSignal): Promise<string[]> {
+		const first = await this.#reconcileContextWindowTools(signal);
+		if (!first.shadowed) return first.desired;
+		// The shadow just disabled window mode, so the host now offers a smaller
+		// set: resolve once more or the disabled window's own tools stay live.
+		return (await this.#reconcileContextWindowTools(signal)).desired;
+	}
+
+	async #reconcileContextWindowTools(signal?: AbortSignal): Promise<{ desired: string[]; shadowed: boolean }> {
 		const tools = this.#host.contextWindowTools ? await untilAborted(signal, this.#host.contextWindowTools()) : [];
 		const desired = new Set(tools.map(tool => tool.name));
+		let shadowed = false;
 		for (const name of this.#contextWindowToolNames) {
 			if (desired.has(name)) continue;
 			this.#toolRegistry.delete(name);
@@ -622,14 +632,20 @@ export class SessionTools {
 			if (this.#contextWindowToolNames.has(tool.name)) continue;
 			if (this.#toolRegistry.has(tool.name)) {
 				desired.delete(tool.name);
-				if (tool.name === "new_context") this.#host.disableContextWindowMode?.(`tool "${tool.name}" is shadowed`);
+				// A foreign `new_context` cannot commit a reset, and a foreign notes
+				// write satisfies the checkpoint by name while storing nothing the
+				// backend can replay — either one makes the protocol unusable.
+				if (WINDOW_RESET_CONTROL_TOOLS.has(tool.name)) {
+					shadowed = true;
+					this.#host.disableContextWindowMode?.(`tool "${tool.name}" is shadowed`);
+				}
 				continue;
 			}
 			this.#toolRegistry.set(tool.name, this.#wrapRuntimeTool(tool));
 			this.#builtInToolNames.add(tool.name);
 			this.#contextWindowToolNames.add(tool.name);
 		}
-		return [...desired];
+		return { desired: [...desired], shadowed };
 	}
 
 	#getEditModeSession() {
