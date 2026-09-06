@@ -58646,7 +58646,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 200000,
+			"contextWindow": 256000,
 			"maxTokens": 64000,
 			"cursorMaxMode": false,
 			"requiresGlyphTokenization": false,

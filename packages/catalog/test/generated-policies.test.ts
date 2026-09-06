@@ -458,6 +458,7 @@ describe("generated model policies", () => {
 		const windows: Array<[string, number]> = [
 			["cursor-grok-4.5", 256_000],
 			["cursor-grok-4.6", 256_000],
+			["default", 256_000],
 			["kimi-k2.7-code", 262_000],
 			["claude-opus-5-preview", 300_000],
 			["claude-fable-5-preview", 300_000],
@@ -489,6 +490,7 @@ describe("generated model policies", () => {
 		const windows: Array<[string, number]> = [
 			["cursor-grok-4.5", 256_000],
 			["cursor-grok-4.6", 256_000],
+			["default", 256_000],
 			["kimi-k2.7-code", 262_000],
 			["gpt-5.6-sol-fast", 272_000],
 		];
@@ -501,6 +503,7 @@ describe("generated model policies", () => {
 		const windows: Array<[string, number]> = [
 			["cursor-grok-4.5", 256_000],
 			["cursor-grok-4.6", 256_000],
+			["default", 256_000],
 			["kimi-k2.7-code", 262_000],
 			["gpt-5.6-sol-fast", 272_000],
 		];
