@@ -198,6 +198,33 @@ describe("EventController + Cursor todo bridge", () => {
 		expect(rendered).not.toContain("Subagent");
 	});
 
+	it("retargets an unresolved streamed task alias when canonical rejection completes", async () => {
+		const taskTool = { name: "task", label: "Task" } as unknown as AgentTool;
+		const f = createFixture();
+		f.ctx.viewSession.getToolByName = vi.fn(name => (name === "task" ? taskTool : undefined));
+		f.ctx.viewSession.hasBuiltInTool = vi.fn(name => name === "task");
+
+		await f.controller.handleEvent(
+			streamedToolBlock("cursor-task-rejected", "Subagent", { prompt: "Inspect auth", resume: "old-agent" }),
+		);
+		const pending = f.ctx.pendingTools.get("cursor-task-rejected");
+		expect(pending).toBeDefined();
+		expect(Bun.stripANSI(pending!.render(100).join("\n"))).toContain("Subagent");
+
+		await f.controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "cursor-task-rejected",
+			toolName: "task",
+			isError: true,
+			result: { content: [{ type: "text", text: "resume unsupported" }] },
+		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+
+		const rendered = Bun.stripANSI(pending!.render(100).join("\n"));
+		expect(rendered).toContain("Inspect auth");
+		expect(rendered).not.toContain("Subagent");
+		expect(f.ctx.pendingTools.has("cursor-task-rejected")).toBe(false);
+	});
+
 	it("settles a card whose completion arrived before the streamed block created it", async () => {
 		// The Cursor bridge's `tool_execution_end` is a synchronous callback fired
 		// mid-parse, while the `toolcall_start` for the same call is queued on

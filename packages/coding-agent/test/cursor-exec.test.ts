@@ -966,7 +966,7 @@ describe("Cursor MCP task tool adapter", () => {
 		const tasks = executedCalls[0].args.tasks as Array<Record<string, unknown>>;
 		expect(tasks.length).toBe(2);
 		expect(tasks[0].task).toBe("Search auth files");
-		expect(tasks[0].name).toBe("Search");
+		expect(tasks[0].name).toBeUndefined();
 		expect(tasks[0].agent).toBe("scout");
 		expect(tasks[1].task).toBe("Run auth tests");
 		expect(tasks[1].name).toBe("Test");
@@ -1250,6 +1250,20 @@ describe("Cursor MCP task tool adapter", () => {
 		expect(items[0].task).toBe("canonical item task");
 		expect(items[0].name).toBe("ItemCanonical");
 		expect(items[0].agent).toBe("reviewer");
+	});
+
+	it("does not promote Cursor descriptions to task artifact IDs", () => {
+		const single = normalizeCursorTaskArgs({ prompt: "inspect", description: "../../session/transcript" });
+		expect(single.task).toBe("inspect");
+		expect(single.name).toBeUndefined();
+
+		const batch = normalizeCursorTaskArgs({
+			description: "shared context",
+			tasks: [{ prompt: "inspect", description: "../../session/transcript" }],
+		});
+		expect(batch.context).toBe("shared context");
+		const tasks = batch.tasks as Array<Record<string, unknown>>;
+		expect(tasks[0].name).toBeUndefined();
 	});
 
 	it("leaves batch context undefined when neither context nor description is provided", () => {

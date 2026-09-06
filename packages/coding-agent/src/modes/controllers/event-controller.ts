@@ -1793,6 +1793,10 @@ export class EventController {
 		} else {
 			const component = this.ctx.pendingTools.get(event.toolCallId);
 			if (component) {
+				if (component instanceof ToolExecutionComponent && event.toolName === "task") {
+					const tool = this.ctx.viewSession.getToolByName("task");
+					component.retargetTool("task", tool, this.ctx.viewSession.hasBuiltInTool("task"));
+				}
 				const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
 				const isBackgroundTask = event.toolName === "task" && asyncState === "running";
 				component.updateResult({ ...event.result, isError: event.isError }, isBackgroundTask, event.toolCallId);

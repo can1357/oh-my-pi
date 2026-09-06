@@ -315,8 +315,9 @@ function resolveSubagentTypeToAgent(typeVal: unknown): string | undefined {
  * Cursor's models are fine-tuned to emit `{ description, prompt, subagent_type }`
  * rather than OMP's `{ task, agent, name }` or `{ context, tasks: [...] }`.
  * This adapts single-task calls and per-item batch prompts so models can invoke
- * subagents reliably without schema rejection. Canonical fields (`task`, `name`,
- * `agent`) take precedence over Cursor aliases when both are present.
+ * subagents reliably without schema rejection. Cursor `description` is prose,
+ * so it is used only as shared batch `context`, never as OMP's artifact `name`.
+ * Canonical fields (`task`, `name`, `agent`) are preserved when present.
  */
 export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<string, unknown> {
 	if (Array.isArray(args.tasks) && args.tasks.length > 0) {
@@ -327,7 +328,7 @@ export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<s
 				nonBlankProseArg(itemRecord, "task") ??
 				nonBlankProseArg(itemRecord, "prompt") ??
 				nonBlankProseArg(itemRecord, "instruction");
-			const itemName = nonEmptyStringArg(itemRecord, "name") ?? nonEmptyStringArg(itemRecord, "description");
+			const itemName = nonEmptyStringArg(itemRecord, "name");
 			const itemAgent =
 				nonEmptyStringArg(itemRecord, "agent") ?? resolveSubagentTypeToAgent(itemRecord.subagent_type);
 			return {
@@ -347,7 +348,7 @@ export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<s
 
 	const task =
 		nonBlankProseArg(args, "task") ?? nonBlankProseArg(args, "prompt") ?? nonBlankProseArg(args, "instruction");
-	const name = nonEmptyStringArg(args, "name") ?? nonEmptyStringArg(args, "description");
+	const name = nonEmptyStringArg(args, "name");
 	const agent = nonEmptyStringArg(args, "agent") ?? resolveSubagentTypeToAgent(args.subagent_type);
 
 	if (task === undefined && name === undefined && agent === undefined) {
