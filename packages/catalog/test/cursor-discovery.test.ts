@@ -304,6 +304,7 @@ describe("fetchCursorUsableModels", () => {
 			models: [
 				create(ModelDetailsSchema, { modelId: "cursor-grok-4.6" }),
 				create(ModelDetailsSchema, { modelId: "cursor-grok-4.5" }),
+				create(ModelDetailsSchema, { modelId: "default" }),
 				create(ModelDetailsSchema, { modelId: "kimi-k2.7-code" }),
 				create(ModelDetailsSchema, { modelId: "gpt-5.6-sol-fast" }),
 				create(ModelDetailsSchema, { modelId: "claude-opus-5-preview" }),
@@ -320,6 +321,7 @@ describe("fetchCursorUsableModels", () => {
 			expect.objectContaining({ id: "claude-opus-5-preview", contextWindow: 200_000 }),
 			expect.objectContaining({ id: "cursor-grok-4.5", contextWindow: 256_000 }),
 			expect.objectContaining({ id: "cursor-grok-4.6", contextWindow: 256_000 }),
+			expect.objectContaining({ id: "default", contextWindow: 256_000 }),
 			expect.objectContaining({ id: "gpt-5.6-sol-fast", contextWindow: 272_000 }),
 			expect.objectContaining({ id: "gpt-5.6-sol-medium", contextWindow: 1_000_000 }),
 			expect.objectContaining({ id: "kimi-k2.7-code", contextWindow: 262_000 }),
@@ -331,6 +333,7 @@ describe("fetchCursorUsableModels", () => {
 			expect.objectContaining({ id: "claude-opus-5-preview", contextWindow: 300_000 }),
 			expect.objectContaining({ id: "cursor-grok-4.5", contextWindow: 256_000 }),
 			expect.objectContaining({ id: "cursor-grok-4.6", contextWindow: 256_000 }),
+			expect.objectContaining({ id: "default", contextWindow: 256_000 }),
 			expect.objectContaining({ id: "gpt-5.6-sol-fast", contextWindow: 272_000 }),
 			expect.objectContaining({ id: "gpt-5.6-sol-medium", contextWindow: 1_000_000 }),
 			expect.objectContaining({ id: "kimi-k2.7-code", contextWindow: 262_000 }),

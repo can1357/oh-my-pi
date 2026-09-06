@@ -7822,7 +7822,22 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:54",
+				"source": "providers/cursor.kdl:52",
+				"providers": [
+					"cursor"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "default"
+					}
+				],
+				"catalog": {
+					"contextWindowFloor": 256000
+				}
+			},
+			{
+				"source": "providers/cursor.kdl:57",
 				"providers": [
 					"cursor"
 				],
@@ -7856,7 +7871,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:57",
+				"source": "providers/cursor.kdl:60",
 				"providers": [
 					"cursor"
 				],
@@ -7890,7 +7905,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:61",
+				"source": "providers/cursor.kdl:64",
 				"providers": [
 					"cursor"
 				],
@@ -7908,7 +7923,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:65",
+				"source": "providers/cursor.kdl:68",
 				"providers": [
 					"cursor"
 				],
@@ -7941,7 +7956,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:69",
+				"source": "providers/cursor.kdl:72",
 				"providers": [
 					"cursor"
 				],
@@ -7981,7 +7996,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:74",
+				"source": "providers/cursor.kdl:77",
 				"providers": [
 					"cursor"
 				],
@@ -8000,7 +8015,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:78",
+				"source": "providers/cursor.kdl:81",
 				"providers": [
 					"cursor"
 				],
