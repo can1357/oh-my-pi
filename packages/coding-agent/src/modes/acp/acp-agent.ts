@@ -192,11 +192,35 @@ export async function reconcileAcpSessionPersona(
 			session.sessionManager.appendModeChange("none");
 			return;
 		}
-		await runtime.reconcile({ agent, explicit: desired.explicit }, createAcpPersonaModelHooks(session, emitNotice));
-		session.sessionManager.appendModeChange(
-			"agent",
-			desired.explicit ? { name: desired.name, explicit: desired.explicit } : { name: desired.name },
+		await runtime.reconcile(
+			{
+				agent,
+				explicit: desired.explicit,
+				// j2g: the entry's baseline (the ORIGINAL enter's pre-persona state)
+				// stays authoritative — the live model is persona-produced.
+				baselineOverride: desired.baseline
+					? {
+							model: desired.baseline.model
+								? session.modelRegistry
+										.getAvailable()
+										.find(candidate => `${candidate.provider}/${candidate.id}` === desired.baseline?.model)
+								: undefined,
+							thinkingLevel: desired.baseline.thinkingLevel
+								? parseConfiguredThinkingLevel(desired.baseline.thinkingLevel)
+								: undefined,
+						}
+					: undefined,
+			},
+			createAcpPersonaModelHooks(session, emitNotice),
 		);
+		// Re-append carries the (unchanged) baseline forward so the contract key
+		// survives across load/resume cycles.
+		const baseline = desired.baseline;
+		session.sessionManager.appendModeChange("agent", {
+			name: desired.name,
+			...(desired.explicit ? { explicit: desired.explicit } : {}),
+			...(baseline ? { baseline } : {}),
+		});
 	} catch (error) {
 		// No journal write and no client notice on an internal failure: the
 		// session simply resumes without the persona rather than failing load.

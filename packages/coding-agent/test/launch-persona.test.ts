@@ -220,6 +220,55 @@ describe("--agent launch-as-switch", () => {
 		expect(options.pendingPersonaExplicit?.model).toBe("anthropic/claude-opus-4-1");
 	});
 
+	// P1 (PRRT_kwDOQxs0bc6fsoeX): with `--provider azure --model gpt-4.1` the CLI
+	// resolver selects azure's copy, but persisting the BARE pattern lets resume
+	// reconcile re-resolve it against any provider carrying that id. The journal
+	// must carry the provider-qualified selector the resolver actually honored.
+	it("persists the provider-qualified model when --provider qualifies --model", async () => {
+		await writeFixtureAgents({ name: "fixture-modeled.md", content: MODELED_AGENT_MD });
+		const parsed = parseArgs([
+			"--cwd",
+			workspace.path(),
+			"--agent",
+			"fixture-modeled",
+			"--provider",
+			"anthropic",
+			"--model",
+			"claude-opus-4-1",
+		]);
+		const options = await buildSessionOptions(
+			parsed,
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			Settings.isolated(),
+		);
+
+		expect(options.pendingPersonaExplicit?.model).toBe("anthropic/claude-opus-4-1");
+
+		// The qualified selector survives the journal round-trip a resume reads.
+		const launched = await launch({
+			args: ["--agent", "fixture-modeled", "--provider", "anthropic", "--model", "claude-opus-4-1"],
+			extraOptions: {
+				sessionManager: SessionManager.create(workspace.path(), path.join(workspace.path(), "sessions")),
+			},
+		});
+		await launched.sessionManager.ensureOnDisk();
+		await launched.sessionManager.flush();
+		const sessionFile = launched.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file for a persona launch");
+		const lines = (await fs.readFile(sessionFile, "utf-8")).split("\n").filter(line => line.trim() !== "");
+		const desired = readPersistedAgentPersona(
+			lines.map(line => JSON.parse(line) as { type: unknown; mode?: unknown; data?: unknown }),
+		);
+		expect(desired?.explicit?.model).toBe("anthropic/claude-opus-4-1");
+
+		// And resume reconcile resolves it to the requested provider, not a
+		// same-id copy from another provider.
+		expect(launched.model?.provider).toBe("anthropic");
+		expect(launched.model?.id).toBe("claude-opus-4-1");
+	});
+
 	it("launch appends an agent mode_change journal entry for future resume reconcile", async () => {
 		await writeFixtureAgents({ name: "fixture-reader.md", content: READER_AGENT_MD });
 		const launched = await launch({ args: ["--agent", "fixture-reader"] });

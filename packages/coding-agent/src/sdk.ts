@@ -92,6 +92,7 @@ import {
 	setInvocationConfiguredExtensions,
 	withOmpExtensionRootScope,
 } from "./discovery/omp-extension-roots";
+import { serializePersonaBaseline } from "./session/persisted-persona";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
@@ -4048,9 +4049,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					options.pendingPersonaExplicit ?? {},
 					createDefaultPersonaModelHooks(session),
 				);
+				// j2g: the pre-persona baseline rides the journal entry so a resume
+				// re-enter uses it as the authoritative exit baseline.
+				const baseline = serializePersonaBaseline(
+					personaRuntime.getActiveBaseline() ?? {
+						model: undefined,
+						thinkingLevel: undefined,
+					},
+				);
 				session.sessionManager.appendModeChange("agent", {
 					name: options.pendingPersonaAgent.name,
 					...(options.pendingPersonaExplicit ? { explicit: options.pendingPersonaExplicit } : {}),
+					...(baseline ? { baseline } : {}),
 				});
 			}
 		}

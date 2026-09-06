@@ -8834,6 +8834,23 @@ export class AgentSession {
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
+		// Persona teardown runs before the surface reconciler and before any
+		// target-state restore: the runtime's exit re-applies the SOURCE
+		// persona's baseline, which must land while the source session still
+		// owns the state — a later exit would clobber the restored target
+		// model and journal over it. Surface-agnostic (TUI, ACP, RPC) since
+		// the reconciler slot is single-tenant.
+		const runtime = this.getPersonaRuntime();
+		if (runtime && this.toolPolicy?.isPersonaActive()) {
+			try {
+				await runtime.exit(createDefaultPersonaModelHooks(this));
+			} catch (error) {
+				logger.warn("Failed to exit the active persona before switching sessions", {
+					sessionFile: this.sessionFile,
+					error: String(error),
+				});
+			}
+		}
 		await this.#sessionBeforeSwitchReconciler?.();
 
 		await this.#bash.flushPending();

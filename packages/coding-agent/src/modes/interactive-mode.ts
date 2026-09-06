@@ -111,7 +111,7 @@ import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { readPersistedAgentPersona } from "../session/persisted-persona";
+import { readPersistedAgentPersona, serializePersonaBaseline } from "../session/persisted-persona";
 import { createDefaultPersonaModelHooks, type PersonaModelApplyHooks } from "../session/persona-model-hooks";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
@@ -125,7 +125,7 @@ import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-pro
 import { type AgentDefinition, discoverAgents, getAgent } from "../task";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "../task/render";
-import type { ConfiguredThinkingLevel } from "../thinking";
+import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
 import { isMCPToolName } from "../tools/builtin-names";
@@ -1330,6 +1330,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session.setSessionBeforeSwitchReconciler?.(async () => {
 			await this.#liveCommandController.stop();
 			await this.#quiesceVibeForSessionSwitch();
+			// j2d: tear the SOURCE persona down BEFORE switchSession restores the
+			// target's model/thinking. The post-switch reconciler runs AFTER that
+			// restore, so a runtime.exit() there re-applies the source persona's
+			// baseline via setModel — clobbering the target's restored model (and
+			// journaling the clobber as a model_change). The pre-switch hook runs
+			// before switchSession captures/restores any model state; the
+			// reconcile path below still ENTERS the target persona after the
+			// restore, which is the correct ordering for entry.
+			await this.#exitSourcePersonaForSwitch();
 		});
 		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
 		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
@@ -3262,16 +3271,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const desired = readPersistedAgentPersona(this.sessionManager.getEntries());
 		const runtime = this.session.getPersonaRuntime();
 		if (!desired) {
-			if (runtime?.policy.isPersonaActive()) {
-				try {
-					await runtime.exit(this.#createPersonaModelHooks());
-				} catch (error) {
-					logger.warn("Failed to exit source persona on switch to a non-persona session", {
-						sessionFile: this.sessionManager.getSessionFile(),
-						error: error instanceof Error ? error.message : String(error),
-					});
-				}
-			}
+			await this.#exitSourcePersonaForSwitch("on switch to a non-persona session");
 			return;
 		}
 		if (!runtime) return;
@@ -3288,16 +3288,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// persona may still be attached here: exiting (not just skipping)
 				// clears its grant, identity prompt, and narrowed presentation
 				// before the target session lands.
-				if (runtime.policy.isPersonaActive()) {
-					try {
-						await runtime.exit(this.#createPersonaModelHooks());
-					} catch (error) {
-						logger.warn("Failed to exit source persona on switch to a persona-less target", {
-							sessionFile: this.sessionManager.getSessionFile(),
-							error: error instanceof Error ? error.message : String(error),
-						});
-					}
-				}
+				await this.#exitSourcePersonaForSwitch("on switch to a persona-less target");
 				this.showStatus(`Agent persona "${desired.name}" is no longer available; session resumed without it.`, {
 					dim: true,
 				});
@@ -3307,7 +3298,26 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.sessionManager.appendModeChange("none");
 				return;
 			}
-			await runtime.reconcile({ agent, explicit: desired.explicit }, this.#createPersonaModelHooks());
+			// j2g: the journal's baseline (captured at the ORIGINAL enter, before any
+			// persona model apply) is the authoritative pre-persona state on resume —
+			// the live model/thinking are persona-produced, so re-capturing them
+			// would make a later exit restore the persona model.
+			const baselineOverride = desired.baseline
+				? {
+						model: desired.baseline.model
+							? this.session.modelRegistry
+									.getAvailable()
+									.find(candidate => `${candidate.provider}/${candidate.id}` === desired.baseline?.model)
+							: undefined,
+						thinkingLevel: desired.baseline.thinkingLevel
+							? parseConfiguredThinkingLevel(desired.baseline.thinkingLevel)
+							: undefined,
+					}
+				: undefined;
+			await runtime.reconcile(
+				{ agent, explicit: desired.explicit, baselineOverride },
+				this.#createPersonaModelHooks(),
+			);
 		} catch (error) {
 			logger.warn("Failed to reconcile persisted persona on resume", {
 				sessionFile: this.sessionManager.getSessionFile(),
@@ -3315,6 +3325,27 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 			this.showStatus(`Failed to restore agent persona "${desired.name}"; session resumed without it.`, {
 				dim: true,
+			});
+		}
+	}
+
+	/**
+	 * j2d: shared source-persona teardown for session switches. Called from the
+	 * BEFORE-switch hook so it runs before `switchSession` restores the target's
+	 * model/thinking (a post-restore exit would re-apply the source persona's
+	 * baseline over the target's restored model). Also still safe from the
+	 * post-switch reconciler path: by then the before-hook already exited the
+	 * persona, so this is a no-op.
+	 */
+	async #exitSourcePersonaForSwitch(reasonSuffix = ""): Promise<void> {
+		const runtime = this.session.getPersonaRuntime();
+		if (!runtime?.policy.isPersonaActive()) return;
+		try {
+			await runtime.exit(this.#createPersonaModelHooks());
+		} catch (error) {
+			logger.warn(`Failed to exit source persona ${reasonSuffix}`.trim(), {
+				sessionFile: this.sessionManager.getSessionFile(),
+				error: error instanceof Error ? error.message : String(error),
 			});
 		}
 	}
@@ -5962,7 +5993,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		await this.#applyPersonaSwitch(agent);
 		// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
-		this.sessionManager.appendModeChange("agent", { name: agent.name });
+		// j2g: the runtime's captured pre-persona baseline rides the entry so a
+		// resume can re-enter with it as the authoritative exit baseline.
+		const baseline = serializePersonaBaseline(
+			runtime.getActiveBaseline() ?? { model: undefined, thinkingLevel: undefined },
+		);
+		this.sessionManager.appendModeChange("agent", {
+			name: agent.name,
+			...(baseline ? { baseline } : {}),
+		});
 		this.showStatus(`Agent persona: ${agent.name}`);
 	}
 

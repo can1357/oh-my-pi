@@ -11,6 +11,7 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
 import { createDefaultPersonaModelHooks } from "../session/persona-model-hooks";
+import { serializePersonaBaseline } from "../session/persisted-persona";
 import { discoverAgents, getAgent } from "../task";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
@@ -712,7 +713,17 @@ async function handleAgentCommandSwitch(name: string, runtime: SlashCommandRunti
 		return usage(`Persona switch failed: ${errorMessage(error)}`, runtime);
 	}
 	// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
-	session.sessionManager.appendModeChange("agent", { name: agent.name });
+	// j2g: the pre-persona baseline rides the entry for the resume reconcile.
+	const baseline = serializePersonaBaseline(
+		personaRuntime.getActiveBaseline() ?? {
+			model: undefined,
+			thinkingLevel: undefined,
+		},
+	);
+	session.sessionManager.appendModeChange("agent", {
+		name: agent.name,
+		...(baseline ? { baseline } : {}),
+	});
 	await runtime.output(`Agent persona: ${agent.name}`);
 	await runtime.notifyConfigChanged?.();
 	return commandConsumed();

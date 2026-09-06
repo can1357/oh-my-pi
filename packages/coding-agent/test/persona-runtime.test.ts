@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-ai";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { PersonaModelApplyHooks } from "@oh-my-pi/pi-coding-agent/session/persona-model-hooks";
+import {
+	readPersistedAgentPersona,
+	serializePersonaBaseline,
+} from "@oh-my-pi/pi-coding-agent/session/persisted-persona";
 import {
 	PersonaRuntime,
 	PersonaSwitchError,
@@ -26,6 +31,8 @@ interface SessionStub {
 	activeToolNames: string[];
 	model: { provider: string; id: string } | undefined;
 	thinkingLevel: string | undefined;
+	// j2g: reconcile's baselineOverride carries a Model-shaped object; the stub
+	// stores whatever the test assigns and compares structurally.
 	spawnsOverride: string[] | "*" | null;
 	appendPrompt: string | undefined;
 	setModelCalls: string[];
@@ -129,9 +136,9 @@ function makeHooks(overrides: Partial<PersonaModelApplyHooks> = {}): PersonaMode
 	};
 }
 
-function makeRuntime(session: AgentSession): PersonaRuntime {
+function makeRuntime(session: AgentSession, registryOverride?: ReadonlySet<string>): PersonaRuntime {
 	const policy = new SessionToolPolicy({
-		registry: () => ALL_TOOLS,
+		registry: registryOverride ? () => registryOverride : () => ALL_TOOLS,
 		isDefaultActive: () => true,
 	});
 	return new PersonaRuntime(policy, session);
@@ -157,6 +164,7 @@ describe("PersonaRuntime", () => {
 		expect(snap.activeBaseline).toBeUndefined(); // enterPersona bypasses runtime baseline capture
 		expect(Object.keys(snap).sort()).toEqual([
 			"activeBaseline",
+			"activePresentationSnapshot",
 			"appendPrompt",
 			"baseModelOverride",
 			"mountedToolNames",
@@ -164,6 +172,7 @@ describe("PersonaRuntime", () => {
 			"spawns",
 			"tools",
 		]);
+		expect(snap.activePresentationSnapshot).toBeUndefined();
 	});
 
 	it("restore round-trips a snapshot (policy persona + presentation)", async () => {
@@ -316,7 +325,7 @@ describe("PersonaRuntime", () => {
 		const hooks = makeHooks({
 			apply: async () => {
 				stub.model = { provider: "stub", id: "persona-model" };
-				stub.thinkingLevel = "high";
+				stub.thinkingLevel = Effort.High;
 			},
 			// hooks.restore MUST NOT be the rollback's model channel: the hook
 			// instance that ran apply does not survive to the rollback site in
@@ -372,7 +381,7 @@ describe("PersonaRuntime", () => {
 			makeHooks({
 				apply: async () => {
 					stub.model = { provider: "stub", id: "a-model" };
-					stub.thinkingLevel = "high";
+					stub.thinkingLevel = Effort.High;
 				},
 			}),
 		);
@@ -431,7 +440,7 @@ describe("PersonaRuntime", () => {
 			makeHooks({
 				apply: async () => {
 					stub.model = { provider: "stub", id: "persona-model" };
-					stub.thinkingLevel = "high";
+					stub.thinkingLevel = Effort.High;
 				},
 			}),
 		);
@@ -468,7 +477,7 @@ describe("PersonaRuntime", () => {
 			makeHooks({
 				apply: async () => {
 					stub.model = { provider: "stub", id: "persona-model" };
-					stub.thinkingLevel = "high";
+					stub.thinkingLevel = Effort.High;
 				},
 			}),
 		);
@@ -590,7 +599,7 @@ describe("PersonaRuntime", () => {
 		// user deliberately picks a different model before B's next enter.
 		runtime.onPendingModelRestoreFlushed();
 		stub.model = { provider: "stub", id: "user-model" };
-		stub.thinkingLevel = "high";
+		stub.thinkingLevel = Effort.High;
 		stub.isStreaming = true;
 
 		// B enters MID-TURN (deferred): the spent root cannot baseline from
@@ -600,7 +609,141 @@ describe("PersonaRuntime", () => {
 		await runtime.exit(makeHooks());
 
 		expect(stub.model).toEqual({ provider: "stub", id: "user-model" });
-		expect(stub.thinkingLevel).toBe("high");
+		expect(stub.thinkingLevel).toBe(Effort.High);
+	});
+
+	it("baseline serialization round-trips through the journal contract", () => {
+		expect(serializePersonaBaseline({ model: { provider: "stub", id: "m" }, thinkingLevel: "high" })).toEqual({
+			model: "stub/m",
+			thinkingLevel: Effort.High,
+		});
+		// No captured state: omitted entirely (the writer drops the key).
+		expect(serializePersonaBaseline({ model: undefined, thinkingLevel: undefined })).toBeUndefined();
+	});
+
+	it("persisted persona reader parses and rejects the baseline contract", () => {
+		expect(
+			readPersistedAgentPersona([
+				{
+					type: "mode_change",
+					mode: "agent",
+					data: { name: "a", baseline: { model: "p/m", thinkingLevel: "high" } },
+				},
+			]),
+		).toEqual({ name: "a", baseline: { model: "p/m", thinkingLevel: "high" } });
+		expect(
+			readPersistedAgentPersona([{ type: "mode_change", mode: "agent", data: { name: "a", baseline: "junk" } }]),
+		).toEqual({ name: "a" });
+		expect(
+			readPersistedAgentPersona([
+				{ type: "mode_change", mode: "agent", data: { name: "a", baseline: { model: 42 } } },
+			]),
+		).toEqual({ name: "a" });
+	});
+
+	it("enter keeps mounted xd:// devices presented (j2i)", async () => {
+		// j2i regression: enter's presentation filter must source from the FULL
+		// enabled set (incl. mounted xd:// names). getActiveToolNames() excludes
+		// mounted names, so a mounted device vanished from the live presentation
+		// the moment a persona entered.
+		const { stub, session } = makeSessionStub({
+			enabledToolNames: ["read", "grep", "glob", "write", "xd://alpha"],
+			mountedToolNames: ["xd://alpha"],
+			activeToolNames: ["read", "grep", "glob", "write"], // provider-facing: mount excluded
+		});
+		// The mount name must be registry-visible (production: xd:// aliases live
+		// in the canonical registry) or the policy filter would deny it.
+		const runtime = makeRuntime(session, new Set([...ALL_TOOLS, "xd://alpha"]));
+		await runtime.enter(makeAgent(), {}, makeHooks()); // unrestricted persona: everything stays granted
+
+		const last = stub.presentationCalls.at(-1);
+		expect(last?.toolNames).toContain("xd://alpha");
+		expect(last?.mountedToolNames).toContain("xd://alpha");
+	});
+
+	// j2l regression: exit restored the POST-exit policy derivation (the
+	// unrestricted default set), erasing user/extension deactivations made
+	// before the persona entered. Exit must restore the PRE-ENTER presentation.
+	it("exit restores the pre-enter presentation, not the unrestricted default (j2l)", async () => {
+		const { stub, session } = makeSessionStub();
+		const runtime = makeRuntime(session);
+		// Pre-enter: the user deactivated `glob` (and never re-enabled it).
+		stub.enabledToolNames = ["read", "grep", "write"];
+		await runtime.enter(makeAgent({ tools: ["read", "grep", "glob"] }), {}, makeHooks());
+
+		await runtime.exit(makeHooks());
+
+		const last = stub.presentationCalls.at(-1);
+		expect(last?.toolNames).toEqual(["read", "grep", "write"]); // glob stays OUT
+		expect(last?.mountedToolNames).toEqual(["xd://alpha"]);
+	});
+
+	// j2o regression: the truthiness guard skipped restoring an UNDEFINED
+	// baseline field, leaking the persona's thinking (or model slot) into the
+	// post-exit session.
+	it("exit restores an undefined thinking baseline (j2o)", async () => {
+		const { stub, session } = makeSessionStub();
+		const runtime = makeRuntime(session);
+		// Pre-persona: nothing configured (the stub default).
+		await runtime.enter(
+			makeAgent({ tools: ["read"] }),
+			{},
+			makeHooks({
+				apply: async () => {
+					stub.thinkingLevel = Effort.High;
+				},
+			}),
+		);
+		expect(stub.thinkingLevel).toBe(Effort.High);
+
+		await runtime.exit(makeHooks());
+		expect(stub.thinkingLevel).toBeUndefined();
+		expect(stub.setThinkingCalls.at(-1)).toBeUndefined(); // explicit restore call, not a skip
+	});
+
+	// oeb regression: restore() ended without a prompt refresh, so restored
+	// appendPrompt/model state could leave a stale cached system prompt when
+	// the presentation signature did not change.
+	it("restore refreshes the base system prompt (oeb)", async () => {
+		const { stub, session } = makeSessionStub({ refreshBaseSystemPromptCalls: 0 });
+		const runtime = makeRuntime(session);
+		runtime.policy.enterPersona(makeAgent({ tools: ["read"] }), {});
+		const snap = await runtime.snapshot();
+
+		await runtime.restore(snap);
+
+		expect(stub.refreshBaseSystemPromptCalls).toBe(1);
+	});
+
+	// j2g: reconcile's baselineOverride replaces the live capture as the enter
+	// baseline, so exiting after a resume restores the PRE-persona state.
+	it("reconcile adopts the persisted baseline override (j2g)", async () => {
+		const { stub, session } = makeSessionStub();
+		const runtime = makeRuntime(session);
+		await runtime.reconcile(
+			{
+				agent: makeAgent({ name: "resumed", tools: ["read"] }),
+				baselineOverride: {
+					model: undefined,
+					thinkingLevel: Effort.High,
+				},
+			},
+			makeHooks({
+				apply: async () => {
+					stub.model = { provider: "stub", id: "persona-model" };
+					stub.thinkingLevel = Effort.Max;
+				},
+			}),
+		);
+
+		await runtime.exit(makeHooks());
+		// The PERSISTED baseline ("high") is the exit restore target — not the
+		// persona-applied level ("max", which a live re-capture would restore).
+		// The undefined MODEL field is a no-op (the session has no "clear model"
+		// API — `setModel` requires a Model — so it can only be skipped).
+		expect(stub.thinkingLevel).toBe(Effort.High);
+		expect(stub.setThinkingCalls.at(-1)).toBe(Effort.High); // explicit restore ran
+		expect(stub.model).toEqual({ provider: "stub", id: "persona-model" });
 	});
 });
 describe("PersonaSwitchTransaction", () => {

@@ -1078,6 +1078,21 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
+/**
+ * Selector persisted as the persona's explicit model override. The CLI resolver
+ * honors `--provider <name> --model <pattern>` together, but the bare pattern
+ * alone can match the same id on another provider; persisting the resolved
+ * `provider/model` form keeps resume reconcile pinned to the requested provider.
+ */
+function personaExplicitModelPattern(
+	parsed: Args,
+	resolved: ReturnType<typeof resolveCliModel> | undefined,
+): string | undefined {
+	if (!parsed.model) return undefined;
+	if (!parsed.provider) return parsed.model;
+	return resolved?.model ? `${resolved.model.provider}/${resolved.model.id}` : `${parsed.provider}/${parsed.model}`;
+}
+
 /** Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage. */
 export async function buildSessionOptions(
 	parsed: Args,
@@ -1146,8 +1161,9 @@ export async function buildSessionOptions(
 	// createAgentSession's post-extension re-resolution (issue #6694); the
 	// scoped thinking-level seed below must be deferred along with the model.
 	let deferredDefaultRole = false;
+	let resolvedCliModel: ReturnType<typeof resolveCliModel> | undefined;
 	if (parsed.model) {
-		const resolved = resolveCliModel({
+		resolvedCliModel = resolveCliModel({
 			cliProvider: parsed.provider,
 			cliModel: parsed.model,
 			modelRegistry,
@@ -1155,35 +1171,38 @@ export async function buildSessionOptions(
 			settings: activeSettings,
 			preferences: modelMatchPreferences,
 		});
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
+		if (resolvedCliModel.warning) {
+			process.stderr.write(`${chalk.yellow(`Warning: ${resolvedCliModel.warning}`)}\n`);
 		}
-		const matchedAfterMissingRolePattern = (resolved.configuredPatternIndex ?? 0) > 0;
+		const matchedAfterMissingRolePattern = (resolvedCliModel.configuredPatternIndex ?? 0) > 0;
 		if (matchedAfterMissingRolePattern) {
 			// Extensions may register an earlier configured role candidate.
 			options.modelPattern = parsed.model;
-		} else if (resolved.error) {
-			if (!parsed.provider && ((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))) {
+		} else if (resolvedCliModel.error) {
+			if (
+				!parsed.provider &&
+				((resolvedCliModel.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))
+			) {
 				// Model not found in built-in registry — defer resolution to after extensions load
 				// (extensions may register additional providers/models via registerProvider)
 				options.modelPattern = parsed.model;
 			} else {
-				process.stderr.write(`${chalk.red(resolved.error)}\n`);
+				process.stderr.write(`${chalk.red(resolvedCliModel.error)}\n`);
 				process.exit(1);
 			}
-		} else if (resolved.model) {
-			options.model = resolved.model;
+		} else if (resolvedCliModel.model) {
+			options.model = resolvedCliModel.model;
 			options.rebindModelAfterDiscovery = true;
 			// The recorded role must carry the effort the session actually starts
 			// at, or the first cycle back into `default` overrides it.
 			activeSettings.overrideModelRoles({
 				default: formatModelSelectorValue(
-					resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
-					parsed.thinking ?? resolved.thinkingLevel,
+					resolvedCliModel.selector ?? `${resolvedCliModel.model.provider}/${resolvedCliModel.model.id}`,
+					parsed.thinking ?? resolvedCliModel.thinkingLevel,
 				),
 			});
-			if (!parsed.thinking && resolved.thinkingLevel) {
-				options.thinkingLevel = resolved.thinkingLevel;
+			if (!parsed.thinking && resolvedCliModel.thinkingLevel) {
+				options.thinkingLevel = resolvedCliModel.thinkingLevel;
 			}
 		}
 	} else if (scopedModels.length > 0 && !restoringSession) {
@@ -1417,7 +1436,7 @@ export async function buildSessionOptions(
 		// PersonaModelApplyHooks defaults handle precedence), so threading the CLI
 		// values as explicit overrides keeps `--model`/`--thinking` authoritative.
 		const explicit: PersonaExplicitOverrides = {};
-		if (parsed.model) explicit.model = parsed.model;
+		if (parsed.model) explicit.model = personaExplicitModelPattern(parsed, resolvedCliModel);
 		if (parsed.thinking) explicit.thinking = parsed.thinking;
 		// fr-vU: `--no-tools` is a launch-time grant of NOTHING — on resume there
 		// is no flag, so the empty list must persist as the durable explicit grant

@@ -359,6 +359,73 @@ describe("InteractiveMode persona resume reconcile", () => {
 		expect(liveSession.getPersonaAppendPrompt()).toBeUndefined();
 	});
 
+	it("switch exits the source persona BEFORE the target model is restored (j2d)", async () => {
+		// j2d regression: the persona teardown used to run in the POST-switch
+		// reconciler — after switchSession had already restored the target's
+		// model/thinking. The exit then re-applied the SOURCE persona's baseline
+		// via setModel, clobbering the target's restored model (and journaling
+		// the clobber as a model_change). The teardown must run BEFORE the
+		// switch restores anything.
+		const personaTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		personaTarget.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+		personaTarget.appendModeChange("agent", { name: "fixture-reader" });
+		await personaTarget.ensureOnDisk();
+		await personaTarget.flush();
+		const personaFile = personaTarget.getSessionFile();
+		if (!personaFile) throw new Error("Expected session file");
+		await personaTarget.close();
+
+		// The TARGET session has its OWN distinct model recorded, so a correct
+		// switch ends on the target model — not the source persona's baseline.
+		const otherModel = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!otherModel) throw new Error("Expected built-in anthropic haiku model to exist");
+		const plainTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		plainTarget.appendMessage({ role: "user", content: "plain", timestamp: Date.now() });
+		plainTarget.appendModelChange(`${otherModel.provider}/${otherModel.id}`, "default");
+		await plainTarget.ensureOnDisk();
+		await plainTarget.flush();
+		const plainFile = plainTarget.getSessionFile();
+		if (!plainFile) throw new Error("Expected session file");
+		await plainTarget.close();
+
+		// The persona DECLARES a model distinct from both, so its exit baseline
+		// (the pre-enter model) differs from the target's recorded model.
+		await writeFixtureAgent(`---
+name: fixture-reader
+description: Read-only fixture persona
+model: ["claude-sonnet-4-5"]
+tools:
+  - read
+---
+
+You are the fixture reader persona.`);
+
+		const sourceManager = await SessionManager.open(personaFile, path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(sourceManager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		await created.switchAgentPersona("fixture-reader");
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+		// The persona's model applied (sonnet). Its exit baseline is sonnet too
+		// (the session had no earlier model_change), while the TARGET recorded
+		// haiku: if the exit runs post-restore, sonnet clobbers haiku.
+		expect(liveSession.model?.id).toBe("claude-sonnet-4-5");
+
+		const switched = await liveSession.switchSession(plainFile);
+		expect(switched).toBe(true);
+
+		// Persona gone AND the target's own model survived the switch.
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+		expect(liveSession.model?.id).toBe("claude-haiku-4-5");
+		// No spurious model_change from the persona-exit clobber: the journal
+		// must not record sonnet after the switch.
+		const modelChanges = liveSession.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "model_change")
+			.map(entry => (entry as { model: string }).model);
+		expect(modelChanges.includes("anthropic/claude-sonnet-4-5")).toBe(false);
+	});
+
 	it("switch to a session whose persona no longer exists exits the source persona", async () => {
 		// Regression: the target journal names an agent, but discovery can no
 		// longer resolve it (the definition was deleted after the entry was

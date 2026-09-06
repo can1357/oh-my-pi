@@ -46,12 +46,21 @@ export interface PersonaSwitchSnapshot {
 	spawns: string[] | "*" | null;
 	/** Runtime model baseline owned by the active persona; `undefined` when none captured. */
 	activeBaseline: ModelOverrideState | undefined;
+	/** Pre-enter presentation captured by the active persona's enter (j2l). */
+	activePresentationSnapshot: { tools: readonly string[]; mountedToolNames: readonly string[] } | undefined;
 }
 
 /** The persona a `reconcile()` call wants active. */
 export interface PersonaSwitchTarget {
 	agent: DiscoveredAgent;
 	explicit?: PersonaExplicitOverrides;
+	/**
+	 * Authoritative pre-persona baseline (j2g): carried through resume from the
+	 * persona's journal entry. When present it REPLACES the live capture as the
+	 * enter baseline — a resumed session's live model/thinking are the
+	 * persona-produced state, not the pre-persona state.
+	 */
+	baselineOverride?: ModelOverrideState;
 }
 
 /**
@@ -79,6 +88,16 @@ export class PersonaRuntime {
 	 * enter (re-enter recaptures).
 	 */
 	#activeBaseline: ModelOverrideState | undefined;
+	/**
+	 * Presentation snapshot captured when the CURRENT persona's enter partitioned
+	 * the live tools (j2l). Exit restores from here — the pre-enter presentation,
+	 * including user/extension deactivations made before the persona entered —
+	 * instead of the post-exit policy derivation, which collapses to the
+	 * unrestricted default set. Cleared on exit and recaptured per enter;
+	 * round-trips through `snapshot()`/`restore()` so rollback reinstates the
+	 * surviving persona's own entry snapshot.
+	 */
+	#activePresentationSnapshot: { tools: readonly string[]; mountedToolNames: readonly string[] } | undefined;
 
 	/**
 	 * Pre-chain baseline (fr-vV): the pre-persona model/thinking carried across
@@ -200,11 +219,19 @@ export class PersonaRuntime {
 			if (this.policy.isPersonaActive()) {
 				await this.#exitInner(hooks, deferModel);
 			}
-			await this.#enterInner(desired.agent, desired.explicit ?? {}, hooks, deferModel);
+			await this.#enterInner(desired.agent, desired.explicit ?? {}, hooks, deferModel, desired.baselineOverride);
 		} catch (err) {
 			await this.restore(guard.snapshot);
 			throw err;
 		}
+	}
+
+	// j2g: capture the baseline the CALLER must journal (runtime stays pure):
+	// the pre-persona model/thinking this enter just recorded, so a resume can
+	// re-enter with it as the authoritative baseline instead of re-capturing the
+	// persona-produced live state.
+	getActiveBaseline(): ModelOverrideState | undefined {
+		return this.#activeBaseline;
 	}
 
 	/**
@@ -226,6 +253,7 @@ export class PersonaRuntime {
 			// config value, which `restore` re-pins via setSessionSpawns.
 			spawns: this.session.getSessionSpawns(),
 			activeBaseline: this.#activeBaseline,
+			activePresentationSnapshot: this.#activePresentationSnapshot,
 		};
 	}
 
@@ -247,18 +275,29 @@ export class PersonaRuntime {
 		this.session.setSessionSpawns(snap.spawns);
 		this.session.applyPersonaAppendPrompt(snap.appendPrompt);
 		this.#activeBaseline = snap.activeBaseline;
+		this.#activePresentationSnapshot = snap.activePresentationSnapshot
+			? {
+					tools: [...snap.activePresentationSnapshot.tools],
+					mountedToolNames: [...snap.activePresentationSnapshot.mountedToolNames],
+				}
+			: undefined;
 		const { model, thinkingLevel } = snap.baseModelOverride;
-		// P2-5: revert whenever the baseline CAPTURED a field — the baseline is the
-		// pre-switch state, so `model: undefined` there means "the session had no
-		// model before the switch" and must be restored to that, not skipped.
-		// Skipping on undefined leaked the persona's model/thinking into the
-		// restored session whenever the persona never declared them.
+		// j2o: revert whenever the baseline CAPTURED a field — `undefined` there
+		// means "the session had no model / no configured thinking before the
+		// switch" and must be restored to that, not skipped (a truthiness guard
+		// leaks the persona's model/thinking into the restored session).
 		if (model !== undefined && this.session.model !== model) {
 			await this.session.setModel(model);
 		}
-		if (thinkingLevel !== undefined && this.session.configuredThinkingLevel() !== thinkingLevel) {
+		if (this.session.configuredThinkingLevel() !== thinkingLevel) {
 			this.session.setThinkingLevel(thinkingLevel);
 		}
+		// oeb: setActiveToolPresentation only rebuilds the system prompt when the
+		// tool SIGNATURE changed; the append prompt / model / thinking restores
+		// above change what the prompt shows without touching that signature. A
+		// trailing refresh lands the rebuilt prompt unconditionally (idempotent —
+		// signature-identical rebuilds are skipped inside the session).
+		await this.session.refreshBaseSystemPrompt();
 	}
 
 	/**
@@ -270,6 +309,7 @@ export class PersonaRuntime {
 		explicit: PersonaExplicitOverrides,
 		hooks: PersonaModelApplyHooks,
 		deferModel: boolean,
+		baselineOverride?: ModelOverrideState,
 	): Promise<void> {
 		// Plan-mode parity (plan §9): the persona append prompt changes the system
 		// prompt, which predictably invalidates the provider cache.
@@ -297,19 +337,32 @@ export class PersonaRuntime {
 		// dropped here regardless.
 		const root = this.#rootBaseline;
 		this.#rootBaseline = undefined;
-		this.#activeBaseline = (deferModel ? root : undefined) ?? {
-			model: this.session.model,
-			thinkingLevel: this.session.configuredThinkingLevel(),
-		};
+		// j2g: a resume reconcile passes the PRE-persona baseline captured at the
+		// original enter (persisted in the journal); it is authoritative — the
+		// live session state is persona-produced, not pre-persona.
+		this.#activeBaseline = baselineOverride ??
+			(deferModel ? root : undefined) ?? {
+				model: this.session.model,
+				thinkingLevel: this.session.configuredThinkingLevel(),
+			};
 		this.policy.enterPersona(agent, explicit);
-		// Live presentation partition: keep only the currently-active tools the
+		// j2l: capture the PRE-ENTER presentation (the full enabled set incl.
+		// mounted, before the persona narrows it) so exit can restore exactly it,
+		// preserving user/extension deactivations made before the persona.
+		this.#activePresentationSnapshot = {
+			tools: this.session.getEnabledToolNames(),
+			mountedToolNames: this.session.getMountedXdevToolNames(),
+		};
+		// Live presentation partition: keep only the currently-ENABLED tools the
 		// persona grant still covers (plan §5 — the cursor bridge reads the live
-		// partition, not a policy recomputation).
-		const activeToolNames = this.session.getActiveToolNames();
-		const activeMountedToolNames = this.session.getMountedXdevToolNames();
+		// partition, not a policy recomputation). The SOURCE set must be the full
+		// enabled set (j2i): `getActiveToolNames()` is provider-facing only — it
+		// excludes mounted `xd://` names, so filtering it would silently unmount
+		// every mounted device on enter. `setActiveToolPresentation` re-derives
+		// the top-level vs mounted split from the mounted subset passed below.
 		await this.session.setActiveToolPresentation(
-			activeToolNames.filter(name => this.policy.effective(name)),
-			activeMountedToolNames.filter(name => this.policy.effective(name)),
+			this.session.getEnabledToolNames().filter(name => this.policy.effective(name)),
+			this.session.getMountedXdevToolNames().filter(name => this.policy.effective(name)),
 		);
 		this.session.setSessionSpawns(agent.spawns ?? null);
 		this.session.applyPersonaAppendPrompt(agent.systemPrompt);
@@ -350,18 +403,23 @@ export class PersonaRuntime {
 		this.policy.exitPersona();
 		this.session.setSessionSpawns(null);
 		this.session.applyPersonaAppendPrompt(undefined);
-		// Restore presentation from the post-exit policy derivation, NOT the live
-		// narrowed set: after `exitPersona` the grant is flipped, so `effectiveSet()`
-		// is the unrestricted baseline — reading `getEnabledToolNames()` here would
-		// re-present the persona's narrowed tools forever. `effectiveSet()` (unlike
-		// the transaction snapshot) also respects sessionToggles the user flipped
-		// mid-persona. Mounted presentation: the live mounted names intersected with
-		// that baseline (mounted tools are session-mounted, not persona-owned).
-		const baseline = this.policy.effectiveSet();
-		await this.session.setActiveToolPresentation(
-			[...baseline],
-			[...this.session.getMountedXdevToolNames()].filter(name => baseline.has(name)),
-		);
+		// j2l: restore the PRE-ENTER presentation captured by this persona's
+		// enter — the exact top-level vs mounted partition the session had before
+		// the persona narrowed it, including any user/extension deactivations the
+		// post-exit policy derivation would collapse to the unrestricted default.
+		// Fallback to the post-exit derivation only when no entry captured a
+		// snapshot (defensive: every exit path follows an enter).
+		const snapshot = this.#activePresentationSnapshot;
+		this.#activePresentationSnapshot = undefined;
+		if (snapshot) {
+			await this.session.setActiveToolPresentation([...snapshot.tools], [...snapshot.mountedToolNames]);
+		} else {
+			const baseline = this.policy.effectiveSet();
+			await this.session.setActiveToolPresentation(
+				[...baseline],
+				[...this.session.getMountedXdevToolNames()].filter(name => baseline.has(name)),
+			);
+		}
 		const { model, thinkingLevel } = this.#activeBaseline ?? {};
 		this.#activeBaseline = undefined;
 		if (deferModel) {
@@ -376,10 +434,12 @@ export class PersonaRuntime {
 			// survive exit); the surface channel receives it directly.
 			hooks.deferModelRestoreWhileStreaming?.({ model, thinkingLevel });
 		} else {
-			if (model && this.session.model !== model) {
+			// j2o: restore even when the baseline field is `undefined` — that is
+			// the state the session was in before the persona applied its model.
+			if (model !== undefined && this.session.model !== model) {
 				await this.session.setModel(model);
 			}
-			if (thinkingLevel && this.session.configuredThinkingLevel() !== thinkingLevel) {
+			if (this.session.configuredThinkingLevel() !== thinkingLevel) {
 				this.session.setThinkingLevel(thinkingLevel);
 			}
 		}
