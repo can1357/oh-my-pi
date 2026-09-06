@@ -89,7 +89,13 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
-	contract?: { tools?: string[]; readOnly?: boolean; agent?: string },
+	contract?: {
+		tools?: string[];
+		readOnly?: boolean;
+		agent?: string;
+		parentAgentId?: string;
+		requestedModelPatterns?: string[];
+	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -104,6 +110,8 @@ async function createPersistedSession(
 		advisor,
 		readOnly: contract?.readOnly,
 		agent: contract?.agent,
+		parentAgentId: contract?.parentAgentId,
+		requestedModelPatterns: contract?.requestedModelPatterns,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -126,7 +134,7 @@ async function createPersistedSession(
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus) {
+function createFactory(cwd: string, eventBus?: EventBus, settings: Settings = Settings.isolated()) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
@@ -140,7 +148,7 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 		session: parentSession,
 		authStorage: {} as never,
 		modelRegistry: { authStorage: {} } as ModelRegistry,
-		settings: Settings.isolated(),
+		settings,
 		enableLsp: true,
 		eventBus,
 	});
@@ -252,6 +260,24 @@ describe("persisted subagent revival", () => {
 
 		expect(capturedOptions?.toolNames).toEqual(["read", "write", "yield"]);
 		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
+	});
+
+	it("does not restore a parent auth fallback when fallback is disabled", async () => {
+		const cwd = makeTempDir("@pi-revive-no-auth-fallback-");
+		const sessionFile = await createPersistedSession(cwd, undefined, "muse");
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, Settings.isolated({ "retry.modelFallback": false }))(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.modelPattern).toEqual(["@muse", "anthropic/claude-sonnet-4-5"]);
+		expect(capturedOptions?.modelPatternAuthFallback).toBeUndefined();
 	});
 
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {
@@ -419,6 +445,92 @@ describe("persisted subagent revival", () => {
 
 		expect(capturedOptions?.modelPattern).toBe("anthropic/claude-sonnet-4-5");
 		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
+	});
+
+	it("restores persisted parentAgentId and requestedModelPatterns on cold revival", async () => {
+		const cwd = makeTempDir("@pi-revive-route-evidence-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			parentAgentId: "EstateDeliverySol",
+			requestedModelPatterns: ["opencode-go-cornell/muse-spark-1.3-contributor"],
+		});
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = { ...createRef(sessionFile), parentId: "Main" };
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.parentAgentId).toBe("EstateDeliverySol");
+		expect(capturedOptions?.modelPattern).toEqual(["opencode-go-cornell/muse-spark-1.3-contributor"]);
+	});
+
+	it("emits cold-revive lifecycle frames with persisted requestedModelPatterns", async () => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-route-frames-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			parentAgentId: "EstateDeliverySol",
+			requestedModelPatterns: ["@slow", "opencode-go-cornell/muse"],
+		});
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		let handle: RevivedSessionHandle | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			handle = createRevivedSession([]);
+			return { session: handle.session } as CreateAgentSessionResult;
+		});
+		const eventBus = new EventBus();
+		const frames: RpcSubagentFrame[] = [];
+		const terminal = Promise.withResolvers<void>();
+		const rpcRegistry = new RpcSubagentRegistry(eventBus, frame => {
+			frames.push(frame);
+			if (frame.type === "subagent_lifecycle" && frame.payload.status !== "started") terminal.resolve();
+		});
+		rpcRegistry.setSubscriptionLevel("progress");
+		const ref = { ...createRef(sessionFile), parentId: "Main" };
+		AgentRegistry.global().register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const reviver = await createFactory(cwd, eventBus)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		const observer = handle?.observer();
+		expect(observer).toBeDefined();
+		const record: CustomMessage = {
+			role: "custom",
+			customType: "irc:incoming",
+			content: "resume with route evidence",
+			display: true,
+			details: { id: "irc-route", from: "Main", message: "resume with route evidence" },
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		const finish = observer?.([record]);
+		await finish?.();
+		await terminal.promise;
+
+		expect(frames[0]).toMatchObject({
+			type: "subagent_lifecycle",
+			payload: {
+				id: ref.id,
+				status: "started",
+				parentAgentId: "EstateDeliverySol",
+				requestedModelPatterns: ["@slow", "opencode-go-cornell/muse"],
+			},
+		});
+		rpcRegistry.dispose();
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
 	});
 
 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {

@@ -99,10 +99,14 @@ export function createPersistedSubagentReviverFactory(
 					}
 				: undefined),
 		});
+		const requestedModelPatterns = init.requestedModelPatterns;
+		const parentAgentId = init.parentAgentId ?? ref.parentId;
 		const persistedModelPattern =
-			init.modelRole && init.modelRole !== "default"
-				? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
-				: init.resolvedModel;
+			requestedModelPatterns && requestedModelPatterns.length > 0
+				? requestedModelPatterns
+				: init.modelRole && init.modelRole !== "default"
+					? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
+					: init.resolvedModel;
 		// Older session files persisted the synthetic xd:// write transport in the
 		// enabled set. A read-only agent definition could never grant full write,
 		// so remove that transport name before replaying tools as explicit grants.
@@ -131,7 +135,9 @@ export function createPersistedSubagentReviverFactory(
 				subagentEventBus: ctx.subagentEventBus,
 				modelRegistry: ctx.modelRegistry,
 				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
-				modelPatternAuthFallback: init.resolvedModel,
+				...(subagentSettings.get("retry.modelFallback") !== false && init.resolvedModel
+					? { modelPatternAuthFallback: init.resolvedModel }
+					: undefined),
 				settings: subagentSettings,
 				sessionManager: reopened,
 				agentId: ref.id,
@@ -155,7 +161,7 @@ export function createPersistedSubagentReviverFactory(
 						? init.agent
 						: ref.displayName,
 				parentTaskPrefix: ref.id,
-				parentAgentId: ref.parentId,
+				parentAgentId,
 				expectedAgentRef: expectedRef,
 				taskDepth,
 				toolNames: revivedToolNames,
@@ -216,6 +222,9 @@ export function createPersistedSubagentReviverFactory(
 				agent: wakeAgent,
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
+				parentAgentId,
+				requestedModelPatterns,
+				modelOverride: requestedModelPatterns,
 				sessionFile,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,

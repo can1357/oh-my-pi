@@ -269,6 +269,49 @@ export class AgentRegistry {
 	list(): AgentRef[] {
 		return [...this.#refs.values()];
 	}
+	/**
+	 * True when `agentId` is a strict descendant of `ancestorId` in the
+	 * parentId chain. Advisors and Main are never descendants. Cycles are
+	 * treated as non-descendant to fail closed.
+	 */
+	isDescendantOf(agentId: string, ancestorId: string): boolean {
+		if (agentId === ancestorId) return false;
+		let current = this.#refs.get(agentId);
+		const seen = new Set<string>();
+		while (current?.parentId) {
+			if (current.parentId === ancestorId) return true;
+			if (seen.has(current.parentId)) return false;
+			seen.add(current.parentId);
+			current = this.#refs.get(current.parentId);
+		}
+		return false;
+	}
+
+	/** Descendant sub-agent ids under `ancestorId`, deepest first for safe teardown. */
+	listDescendantSubIds(ancestorId: string): string[] {
+		const descendants: Array<{ id: string; depth: number }> = [];
+		for (const ref of this.#refs.values()) {
+			if (ref.kind !== "sub" || ref.id === ancestorId) continue;
+			if (!this.isDescendantOf(ref.id, ancestorId)) continue;
+			descendants.push({ id: ref.id, depth: this.#descendantDepth(ref.id, ancestorId) });
+		}
+		descendants.sort((a, b) => b.depth - a.depth);
+		return descendants.map(entry => entry.id);
+	}
+
+	#descendantDepth(agentId: string, ancestorId: string): number {
+		let depth = 0;
+		let current = this.#refs.get(agentId);
+		const seen = new Set<string>();
+		while (current?.parentId) {
+			depth++;
+			if (current.parentId === ancestorId) return depth;
+			if (seen.has(current.parentId)) return depth;
+			seen.add(current.parentId);
+			current = this.#refs.get(current.parentId);
+		}
+		return depth;
+	}
 
 	/**
 	 * Returns every alive agent (running | idle) except the caller. Advisor refs

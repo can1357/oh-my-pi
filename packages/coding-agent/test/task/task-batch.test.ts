@@ -704,4 +704,31 @@ describe("task.batch spawning", () => {
 		expect(last?.progress?.find(p => p.id === "Second")?.status).toBe("aborted");
 		expect(last?.progress?.find(p => p.id === "First")?.status).toBe("completed");
 	});
+
+	it("blocking agents execute inline and propagate failure to the parent", async () => {
+		const blockingAgent: AgentDefinition = {
+			...taskAgent,
+			name: "estate-luna",
+			blocking: true,
+		};
+		mockDiscovery(blockingAgent);
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(
+			makeResult("BlockingChild", { exitCode: 1, output: "", stderr: "child failed" }),
+		);
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({ manager, settings: { "async.enabled": true, "task.batch": false } }),
+		);
+		const result = await tool.execute("tc-blocking-fail", {
+			name: "BlockingChild",
+			agent: "estate-luna",
+			task: "Fail.",
+		} as TaskParams);
+
+		expect(manager.getJob("BlockingChild")).toBeUndefined();
+		expect(result.details?.async).toBeUndefined();
+		expect(result.details?.results?.[0]?.exitCode).toBe(1);
+		expect(result.details?.results?.[0]?.stderr).toContain("child failed");
+	});
 });

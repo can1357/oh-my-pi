@@ -470,6 +470,7 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 ];
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
+const DEFAULT_AGENT_BLOCKING: Record<string, boolean> = {};
 
 export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
@@ -5154,6 +5155,10 @@ export const SETTINGS_SCHEMA = {
 	"task.agentModelOverrides": {
 		type: "record",
 		default: DEFAULT_AGENT_MODEL_OVERRIDES,
+	},
+	"task.agentBlocking": {
+		type: "record",
+		default: DEFAULT_AGENT_BLOCKING,
 	},
 	"task.agentPrewalk": {
 		type: "record",
