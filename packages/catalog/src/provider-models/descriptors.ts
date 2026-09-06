@@ -192,6 +192,9 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "qwen3.8-27b-exl3",
 		envVars: ["EXLLAMAV3_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => exllamav3ModelManagerOptions(config),
+		// The loaded TabbyAPI model is the entire catalog; refreshes replace
+		// rather than merge so reloaded-away models disappear.
+		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "ExLlamaV3 (TabbyAPI)", allowUnauthenticated: true },
 	},
 	{

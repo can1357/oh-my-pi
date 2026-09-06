@@ -6077,6 +6077,11 @@ export function exllamav3ModelManagerOptions(
 	return {
 		providerId: "exllamav3",
 		cacheProviderId: resolveModelCacheProviderId("exllamav3", { baseUrl }),
+		// TabbyAPI serves exactly the one loaded model; a successful fetch IS the
+		// whole catalog. Without this, a reload from model A to B merges B into
+		// the cached snapshot and leaves stale A selectable — silently served by
+		// B under A's id.
+		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: async () => {
 			const loadedCard = await fetchExllamav3LoadedModelCard(baseUrl, apiKey, discoveryFetch(config?.fetch));
 			return fetchOpenAICompatibleModels({

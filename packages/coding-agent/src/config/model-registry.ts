@@ -1866,12 +1866,14 @@ export class ModelRegistry {
 			const apiKey = standardProviderKeys[i];
 			// Local engines with opt-in discovery: an explicit settings override or
 			// `auth: none` stands in for a key so discovery still probes the
-			// configured endpoint.
+			// configured endpoint. For exllamav3, pointing EXLLAMAV3_BASE_URL at a
+			// keyless TabbyAPI (disable_auth: true) is that explicit opt-in.
 			const hasExplicitLocalEngineConfig =
 				(descriptor.providerId === "vllm" || descriptor.providerId === "exllamav3") &&
 				(this.#runtimeProviderOverrides.has(descriptor.providerId) ||
 					this.#providerOverrides.has(descriptor.providerId) ||
-					this.#keylessProviders.has(descriptor.providerId));
+					this.#keylessProviders.has(descriptor.providerId) ||
+					(descriptor.providerId === "exllamav3" && Boolean(Bun.env.EXLLAMAV3_BASE_URL?.trim())));
 			const supportsSharedCatalog = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[descriptor.providerId] === true;
 			const canUseSharedCatalogWithoutAuth = supportsSharedCatalog && !descriptor.dynamicModelsAuthoritative;
 			if (
