@@ -1141,6 +1141,22 @@ export function gmiCloudModelManagerOptions(
 const DIGITALOCEAN_BASE_URL = "https://inference.do-ai.run/v1";
 
 /**
+ * Wire routing ids (e.g. Cursor's `effortRouting`) must carry DO's own vendor
+ * prefix — `anthropic-claude-…-thinking` resolves on DO only if the
+ * `anthropic-` segment is present.
+ */
+function reRouteDigitalOceanThinking(id: string, thinking: ThinkingConfig | undefined): ThinkingConfig | undefined {
+	const prefix = id.match(DIGITALOCEAN_VENDOR_PREFIX)?.[0];
+	if (!prefix || !thinking?.effortRouting) return thinking;
+	return {
+		...thinking,
+		effortRouting: Object.fromEntries(
+			Object.entries(thinking.effortRouting).map(([effort, wireId]) => [effort, `${prefix}${wireId}`]),
+		) as ThinkingConfig["effortRouting"],
+	};
+}
+
+/**
  * Bundled seed for DigitalOcean Serverless Inference. Generation has no
  * `DIGITALOCEAN_API_KEY`, so a regen without credentials would leave the
  * provider slice empty and the declared `defaultModel` unresolvable on a
@@ -1332,7 +1348,9 @@ function mapDigitalOceanModel(
 ): ModelSpec<"openai-completions"> {
 	const entryMaxTokens = entry.max_output_tokens ?? entry.max_completion_tokens;
 	if (reference) {
-		return mapWithBundledReference({ ...entry, max_completion_tokens: entryMaxTokens }, defaults, reference);
+		const merged = mapWithBundledReference({ ...entry, max_completion_tokens: entryMaxTokens }, defaults, reference);
+		const rerouted = reRouteDigitalOceanThinking(defaults.id, merged.thinking);
+		return rerouted === merged.thinking ? merged : { ...merged, thinking: rerouted };
 	}
 	// DO prefixes passthrough ids with the upstream vendor (`openai-gpt-…`,
 	// `anthropic-claude-…`) but the canonical index keys upstream families, so
@@ -1366,7 +1384,7 @@ function mapDigitalOceanModel(
 		name: toModelName(entry.name, canonical.name ?? defaults.name),
 		reasoning: canonical.reasoning,
 		input: canonical.input,
-		...(canonical.thinking && { thinking: canonical.thinking }),
+		...(canonical.thinking && { thinking: reRouteDigitalOceanThinking(defaults.id, canonical.thinking) }),
 		contextWindow,
 		maxTokens,
 	};

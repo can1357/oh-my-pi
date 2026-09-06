@@ -67,7 +67,17 @@ describe("DigitalOcean Serverless Inference provider", () => {
 						max_output_tokens: 23_456,
 					},
 					// Vendor-prefixed o-series — canonical metadata resolves
-					// after prefix stripping.
+					// after prefix stripping; `effortRouting` must keep the prefix
+					// on every routed wire id.
+					{
+						id: "anthropic-claude-4.5-sonnet",
+						object: "model",
+						created: 0,
+						owned_by: "digitalocean",
+						context_length: 200_000,
+						max_output_tokens: 64_000,
+					},
+					// Vendor-prefixed o-series.
 					{
 						id: "openai-o3",
 						object: "model",
@@ -161,6 +171,16 @@ describe("DigitalOcean Serverless Inference provider", () => {
 		expect(opus?.contextWindow).toBe(123_456);
 		expect(opus?.maxTokens).toBe(23_456);
 		expect(opus?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+
+		// Routed wire ids keep the vendor prefix that DO's wire requires —
+		// e.g. `anthropic-claude-…-thinking` resolves on DO only with the
+		// `anthropic-` segment present.
+		const sonnet45 = models.find(model => model.id === "anthropic-claude-4.5-sonnet");
+		const routeEntries = Object.entries(sonnet45?.thinking?.effortRouting ?? {});
+		expect(routeEntries.length).toBeGreaterThan(0);
+		for (const [effort, wireId] of routeEntries) {
+			expect(wireId, `effort "${effort}"`).toMatch(/^anthropic-/);
+		}
 
 		expect(seen.urls).toContain("https://inference.do-ai.run/v1/models");
 		expect(seen.authorization).toBe("Bearer doo_v1_test");
