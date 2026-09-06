@@ -12,6 +12,7 @@
 		"auth/azure.kdl",
 		"auth/baseten.kdl",
 		"auth/bedrock-mantle.kdl",
+		"auth/brave.kdl",
 		"auth/cerebras.kdl",
 		"auth/cline-pass.kdl",
 		"auth/cloudflare-ai-gateway.kdl",
@@ -17007,6 +17008,23 @@
 					"instructions": "Copy your Parallel API key from the Parallel settings page.",
 					"prompt": "Paste your Parallel API key",
 					"placeholder": "sk_..."
+				}
+			},
+			{
+				"id": "brave",
+				"apiKeyFormat": "bearer",
+				"name": "Brave",
+				"env": {
+					"vars": [
+						"BRAVE_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://api-dashboard.search.brave.com/app/keys",
+					"instructions": "Create or copy your API key from the Brave Search API dashboard.",
+					"prompt": "Paste your Brave API key",
+					"placeholder": "API key"
 				}
 			},
 			{
