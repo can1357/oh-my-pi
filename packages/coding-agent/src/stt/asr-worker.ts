@@ -1,14 +1,15 @@
 import * as fs from "node:fs/promises";
-import { createRequire } from "node:module";
-import * as os from "node:os";
-import * as path from "node:path";
 import type {
 	AutomaticSpeechRecognitionOutput,
 	AutomaticSpeechRecognitionPipeline,
 	ProgressInfo,
 } from "@huggingface/transformers";
+import { createRequire } from "node:module";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	ensureRuntimeInstalled,
+	getGlobalDaemonRuntimeDir,
 	getTinyModelsCacheDir,
 	isCompiledBinary,
 	resolveRuntimeModule,
@@ -27,6 +28,8 @@ import {
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "../tiny/device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
 import type { SttTransport, SttWorkerInbound } from "./asr-protocol";
+import { STT_CUDA_LEASE_ENV } from "./worker-config";
+import { CudaSttLease } from "./cuda-lease";
 import { type EndpointerEvent, StreamEndpointer } from "./endpointer";
 import {
 	getSttModelSpec,
@@ -54,6 +57,7 @@ const PROGRESS_EMIT_BYTES = 4_000_000;
 
 const sttModelDevicePreference = resolveTinyModelDevicePreference();
 const sttModelDtypeOverride = resolveTinyModelDtypeOverride();
+const sttCudaLeaseEnabled = process.env[STT_CUDA_LEASE_ENV] === "1";
 
 /**
  * Subset of the transformers.js ASR call options we set. The index signature
@@ -96,12 +100,40 @@ type LoadedModel =
 	| { engine: "sherpa"; recognizer: SherpaOfflineRecognizer };
 
 const models = new Map<SttModelKey, Promise<LoadedModel>>();
+
+/** Active CUDA lease for this worker, set as soon as ownership is claimed. */
+let activeCudaLease: CudaSttLease | undefined;
+let cudaLeaseActivityCount = 0;
+
+async function beginCudaLeaseActivity(): Promise<void> {
+	cudaLeaseActivityCount += 1;
+	if (cudaLeaseActivityCount === 1) await activeCudaLease?.markBusy();
+}
+
+async function endCudaLeaseActivity(): Promise<void> {
+	cudaLeaseActivityCount -= 1;
+	if (cudaLeaseActivityCount === 0) await activeCudaLease?.markIdle();
+}
+
+async function runWithCudaLeaseActivity<T>(work: () => Promise<T>): Promise<T> {
+	await beginCudaLeaseActivity();
+	try {
+		return await work();
+	} finally {
+		await endCudaLeaseActivity();
+	}
+}
+
 // Serialize all model inference on a single chain: the recognizers are not
 // guaranteed reentrant and there is one CPU-bound model per tier. Batch
 // transcribes and live-stream segment/partial decodes share this lock.
 let modelLock = Promise.resolve();
+// Different model keys may begin loading concurrently; serialize their pipeline
+// creation so they share one worker-level CUDA lease.
+let modelLoadLock = Promise.resolve();
 function runOnModel<T>(work: () => Promise<T>): Promise<T> {
-	const run = modelLock.then(work, work);
+	const wrappedWork = () => runWithCudaLeaseActivity(work);
+	const run = modelLock.then(wrappedWork, wrappedWork);
 	modelLock = run.then(
 		() => undefined,
 		() => undefined,
@@ -199,14 +231,39 @@ async function loadPipelineWithDeviceFallback(
 	}
 	for (let i = 0; i < devices.length; i += 1) {
 		const device = devices[i]!;
+		const fallbackDevice = devices[i + 1];
+		const usesCudaLease =
+			sttCudaLeaseEnabled &&
+			process.platform === "linux" &&
+			process.arch === "x64" &&
+			(device === "cuda" || device === "gpu" || device === "auto");
+		const existingCudaLease = activeCudaLease;
+		const cudaLease = usesCudaLease
+			? (existingCudaLease ?? new CudaSttLease(getGlobalDaemonRuntimeDir("stt-cuda")))
+			: undefined;
+		const acquiredCudaLease = cudaLease !== undefined && existingCudaLease === undefined;
 		try {
-			return {
-				pipeline: await loadPipelineOnDevice(transformers, spec, modelKey, transport, requestId, device),
-				device,
-			};
+			if (acquiredCudaLease) {
+				if (!(await cudaLease.claim(cudaLeaseActivityCount > 0))) {
+					if (!fallbackDevice) throw new Error("Unable to evict the current CUDA STT worker");
+					sendLog(transport, "warn", "stt: CUDA model is still owned by another instance; falling back", {
+						modelKey,
+						repo: spec.repo,
+						device,
+						fallbackDevice,
+					});
+					continue;
+				}
+				activeCudaLease = cudaLease;
+			}
+			const pipeline = await loadPipelineOnDevice(transformers, spec, modelKey, transport, requestId, device);
+			return { pipeline, device };
 		} catch (error) {
-			if (i === devices.length - 1) throw error;
-			const fallbackDevice = devices[i + 1]!;
+			if (acquiredCudaLease) {
+				if (activeCudaLease === cudaLease) activeCudaLease = undefined;
+				await cudaLease.release().catch(() => {});
+			}
+			if (!fallbackDevice) throw error;
 			sendLog(transport, "warn", "stt: accelerated device failed; falling back", {
 				modelKey,
 				repo: spec.repo,
@@ -225,31 +282,40 @@ async function loadTransformersModel(
 	transport: SttTransport,
 	requestId: string,
 ): Promise<LoadedModel> {
-	const transformers = await loadTransformersRuntime(
-		transformersRuntime,
-		transport,
-		requestId,
-		modelKey,
-		getSttRuntimeDir,
+	const loading = modelLoadLock.then(() =>
+		runWithCudaLeaseActivity(async (): Promise<LoadedModel> => {
+			const transformers = await loadTransformersRuntime(
+				transformersRuntime,
+				transport,
+				requestId,
+				modelKey,
+				getSttRuntimeDir,
+			);
+			const startedAt = performance.now();
+			const { pipeline, device } = await loadPipelineWithDeviceFallback(
+				transformers,
+				spec,
+				modelKey,
+				transport,
+				requestId,
+			);
+			sendLog(transport, "debug", "stt: local model loaded", {
+				modelKey,
+				repo: spec.repo,
+				engine: "transformers",
+				device,
+				requestedDevice: sttModelDevicePreference.device,
+				dtype: sttModelDtypeOverride ?? spec.dtype,
+				elapsedMs: Math.round(performance.now() - startedAt),
+			});
+			return { engine: "transformers", pipeline };
+		}),
 	);
-	const startedAt = performance.now();
-	const { pipeline, device } = await loadPipelineWithDeviceFallback(
-		transformers,
-		spec,
-		modelKey,
-		transport,
-		requestId,
+	modelLoadLock = loading.then(
+		() => undefined,
+		() => undefined,
 	);
-	sendLog(transport, "debug", "stt: local model loaded", {
-		modelKey,
-		repo: spec.repo,
-		engine: "transformers",
-		device,
-		requestedDevice: sttModelDevicePreference.device,
-		dtype: sttModelDtypeOverride ?? spec.dtype,
-		elapsedMs: Math.round(performance.now() - startedAt),
-	});
-	return { engine: "transformers", pipeline };
+	return loading;
 }
 
 /**
@@ -430,28 +496,32 @@ async function transcribeAudio(
 	modelKey: SttModelKey,
 	audio: Float32Array,
 	language: string | undefined,
-): Promise<string> {
+): Promise<void> {
 	const spec = getSttModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown stt model: ${modelKey}`);
 	const model = await loadModel(modelKey, transport, requestId);
-	return runOnModel(() => decodeSegment(model, spec, audio, language));
+	await runOnModel(async () => {
+		const text = await decodeSegment(model, spec, audio, language);
+		await transport.sendAndFlush({ type: "transcription", id: requestId, text });
+	});
 }
 
 async function handleBatchRequest(
 	transport: SttTransport,
 	request: Extract<SttWorkerInbound, { type: "transcribe" | "download" }>,
 ): Promise<void> {
-	try {
-		if (request.type === "download") {
-			await loadModel(request.modelKey, transport, request.id);
-			transport.send({ type: "downloaded", id: request.id });
-			return;
+	await runWithCudaLeaseActivity(async () => {
+		try {
+			if (request.type === "download") {
+				await loadModel(request.modelKey, transport, request.id);
+				await transport.sendAndFlush({ type: "downloaded", id: request.id });
+				return;
+			}
+			await transcribeAudio(transport, request.id, request.modelKey, request.audio, request.language);
+		} catch (error) {
+			await transport.sendAndFlush({ type: "error", id: request.id, error: errorText(error) });
 		}
-		const text = await transcribeAudio(transport, request.id, request.modelKey, request.audio, request.language);
-		transport.send({ type: "transcription", id: request.id, text });
-	} catch (error) {
-		transport.send({ type: "error", id: request.id, error: errorText(error) });
-	}
+	});
 }
 
 // ── Live streaming sessions ─────────────────────────────────────────
@@ -477,10 +547,10 @@ interface StreamingSession {
 
 const sessions = new Map<string, StreamingSession>();
 
-function startStreamingSession(
+async function startStreamingSession(
 	transport: SttTransport,
 	request: Extract<SttWorkerInbound, { type: "stream_start" }>,
-): void {
+): Promise<void> {
 	const spec = getSttModelSpec(request.modelKey);
 	if (!spec) {
 		transport.send({ type: "error", id: request.id, error: `Unknown stt model: ${request.modelKey}` });
@@ -500,6 +570,7 @@ function startStreamingSession(
 		cancelled: false,
 		ended: false,
 	});
+	await beginCudaLeaseActivity();
 }
 
 function ingestStreamEvents(session: StreamingSession, events: EndpointerEvent[]): void {
@@ -507,6 +578,14 @@ function ingestStreamEvents(session: StreamingSession, events: EndpointerEvent[]
 		if (event.kind === "segment") session.segmentQueue.push(event.audio);
 		else session.pendingPartial = event.audio;
 	}
+}
+
+async function finishStreamingSession(session: StreamingSession, transport: SttTransport): Promise<boolean> {
+	if (!session.ended || session.cancelled || session.segmentQueue.length > 0 || session.pendingPartial) return false;
+	await transport.sendAndFlush({ type: "stream_done", id: session.id, text: session.committed.join(" ") });
+	sessions.delete(session.id);
+	await endCudaLeaseActivity();
+	return true;
 }
 
 /**
@@ -524,45 +603,55 @@ async function pumpSession(session: StreamingSession, transport: SttTransport): 
 				const audio = session.segmentQueue.shift()!;
 				// A fresh segment supersedes any queued preview for the prior one.
 				session.pendingPartial = null;
-				const text = await runOnModel(() => decodeSegment(model, session.spec, audio, session.language));
-				if (session.cancelled) return;
-				if (text.length > 0) {
-					session.committed.push(text);
-					transport.send({ type: "segment", id: session.id, index: session.segmentIndex++, text });
-				}
+				const finished = await runOnModel(async () => {
+					const text = await decodeSegment(model, session.spec, audio, session.language);
+					if (session.cancelled) return false;
+					if (text.length > 0) {
+						session.committed.push(text);
+						await transport.sendAndFlush({ type: "segment", id: session.id, index: session.segmentIndex++, text });
+					}
+					return finishStreamingSession(session, transport);
+				});
+				if (finished || session.cancelled) return;
 				continue;
 			}
 			if (session.pendingPartial) {
 				const audio = session.pendingPartial;
 				session.pendingPartial = null;
-				const text = await runOnModel(() => decodeSegment(model, session.spec, audio, session.language));
-				if (session.cancelled) return;
-				// Skip a now-stale preview if a segment finalized mid-decode.
-				if (text.length > 0 && session.segmentQueue.length === 0) {
-					transport.send({ type: "partial", id: session.id, text });
-				}
+				const finished = await runOnModel(async () => {
+					const text = await decodeSegment(model, session.spec, audio, session.language);
+					if (session.cancelled) return false;
+					// Skip a now-stale preview if a segment finalized mid-decode.
+					if (text.length > 0 && session.segmentQueue.length === 0) {
+						await transport.sendAndFlush({ type: "partial", id: session.id, text });
+					}
+					return finishStreamingSession(session, transport);
+				});
+				if (finished || session.cancelled) return;
 				continue;
 			}
 			break;
 		}
-		if (session.ended && !session.cancelled && session.segmentQueue.length === 0 && !session.pendingPartial) {
-			transport.send({ type: "stream_done", id: session.id, text: session.committed.join(" ") });
-			sessions.delete(session.id);
+		if (session.ended && !session.cancelled) {
+			await runOnModel(async () => finishStreamingSession(session, transport));
 		}
 	} catch (error) {
-		if (!session.cancelled) transport.send({ type: "error", id: session.id, error: errorText(error) });
-		sessions.delete(session.id);
+		if (!session.cancelled) {
+			await transport.sendAndFlush({ type: "error", id: session.id, error: errorText(error) });
+			sessions.delete(session.id);
+			await endCudaLeaseActivity();
+		}
 	} finally {
 		session.pumping = false;
 	}
 }
 
-function handleStreamMessage(
+async function handleStreamMessage(
 	transport: SttTransport,
 	message: Extract<SttWorkerInbound, { type: "stream_start" | "stream_audio" | "stream_stop" | "stream_cancel" }>,
-): void {
+): Promise<void> {
 	if (message.type === "stream_start") {
-		startStreamingSession(transport, message);
+		await startStreamingSession(transport, message);
 		return;
 	}
 	const session = sessions.get(message.id);
@@ -581,6 +670,7 @@ function handleStreamMessage(
 		case "stream_cancel":
 			session.cancelled = true;
 			sessions.delete(message.id);
+			await endCudaLeaseActivity();
 			return;
 	}
 }
@@ -596,7 +686,7 @@ export function startSttWorker(transport: SttTransport): void {
 				void handleBatchRequest(transport, message);
 				return;
 			default:
-				handleStreamMessage(transport, message);
+				void handleStreamMessage(transport, message);
 				return;
 		}
 	});

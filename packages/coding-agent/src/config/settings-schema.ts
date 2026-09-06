@@ -2465,6 +2465,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"stt.cudaLease": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Speech",
+			label: "Share STT CUDA Device",
+			description:
+				"Let the active Linux OMP session evict an idle STT worker from CUDA; waits up to 15 seconds for active transcription before falling back to CPU",
+		},
+	},
+
 	"stt.language": {
 		type: "string",
 		default: "en",
@@ -6301,6 +6313,7 @@ export interface ThinkingBudgetsSettings {
 
 export interface SttSettings {
 	enabled: boolean;
+	cudaLease: boolean;
 	language: string | undefined;
 	modelName: string;
 	streaming: boolean;

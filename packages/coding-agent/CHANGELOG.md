@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `stt.cudaLease` coordination so Linux OMP sessions and named profiles can safely transfer CUDA STT ownership without interrupting active transcription ([#11059](https://github.com/can1357/oh-my-pi/pull/11059) by [@Roden69](https://github.com/Roden69)).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
@@ -9,6 +13,7 @@
 ### Changed
 
 - Ranged reads of text without bracket characters skip unnecessary lexical context scanning.
+
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
 
 ### Fixed

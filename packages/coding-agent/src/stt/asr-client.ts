@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { onSttCudaLeaseChanged, settings } from "../config/settings";
 import {
 	createUnavailableWorker,
 	createWorkerHandle,
@@ -15,6 +16,8 @@ import { tinyWorkerEnv } from "../tiny/title-client";
 import { safeSend } from "../utils/ipc";
 import type { SttProgressEvent, SttWorkerInbound, SttWorkerOutbound } from "./asr-protocol";
 import type { SttModelKey } from "./models";
+import { STT_CUDA_LEASE_ENV, STT_WORKER_ARG } from "./worker-config";
+export * from "./worker-config";
 
 type PendingRequest =
 	| { kind: "transcribe"; modelKey: SttModelKey; resolve: (text: string) => void; reject: (error: Error) => void }
@@ -65,19 +68,21 @@ interface StreamState {
 }
 
 /**
- * Hidden subcommand on the main CLI that boots the speech-recognition worker in
- * the spawned subprocess. Kept in sync with the dispatch in `cli.ts`.
- */
-export const STT_WORKER_ARG = "__omp_worker_stt";
-
-/**
  * Spawn the speech worker as a subprocess. Exported for tests and the smoke
  * probe; production callers go through {@link spawnSttWorker}.
  */
 export function createSttSubprocess(): SpawnedSubprocess<SttWorkerOutbound> {
+	const env = tinyWorkerEnv();
+	if (env[STT_CUDA_LEASE_ENV] === undefined) {
+		try {
+			if (settings.get("stt.cudaLease")) env[STT_CUDA_LEASE_ENV] = "1";
+		} catch {
+			// Settings may be uninitialized during the compiled smoke test.
+		}
+	}
 	return createWorkerSubprocess<SttWorkerOutbound>({
 		spawnCommand: resolveWorkerSpawnCmd(STT_WORKER_ARG),
-		env: tinyWorkerEnv(),
+		env,
 		exitLabel: "stt subprocess",
 	});
 }
@@ -131,9 +136,27 @@ export class SttClient {
 	#nextRequestId = 0;
 	#refed = false;
 	#spawnWorker: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound>;
+	#cudaLeaseSettingDirty = false;
 
 	constructor(spawnWorker: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> = spawnSttWorker) {
 		this.#spawnWorker = spawnWorker;
+		onSttCudaLeaseChanged(() => this.#handleCudaLeaseSettingChanged());
+	}
+
+	/**
+	 * `stt.cudaLease` is only sampled when the worker subprocess spawns (via
+	 * env var, since the worker has no direct settings access). Recreate an
+	 * idle worker immediately so the new value takes effect; a worker with
+	 * in-flight work is left alone until it goes idle to avoid interrupting
+	 * active transcription.
+	 */
+	#handleCudaLeaseSettingChanged(): void {
+		if (!this.#worker) return;
+		if (this.#pending.size > 0 || this.#streams.size > 0) {
+			this.#cudaLeaseSettingDirty = true;
+			return;
+		}
+		void this.terminate();
 	}
 
 	onProgress(listener: (event: SttProgressEvent) => void): () => void {
@@ -313,7 +336,10 @@ export class SttClient {
 		if (shouldRef === this.#refed) return;
 		this.#refed = shouldRef;
 		if (shouldRef) worker.ref();
-		else worker.unref();
+		else if (this.#cudaLeaseSettingDirty) {
+			this.#cudaLeaseSettingDirty = false;
+			void this.terminate();
+		} else worker.unref();
 	}
 
 	#handleMessage(message: SttWorkerOutbound): void {
