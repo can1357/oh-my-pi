@@ -100,8 +100,9 @@ describe("grokbot family tool mapping", () => {
 			expect(classifyModel("grokbot", row.id, { lenient: true }).class).toBe(row.class);
 			const { policy, applied, names } = wireFor(row.id);
 			expect(policy.kind).toBe("native");
+			expect(policy.wire).toBe("native");
 			expect(applied.requestedModel.modelId).toBe(row.id);
-			expect(applied.wireMode).toBeUndefined();
+			expect(applied.wireMode).toBe("native");
 			expect(names).toEqual(["bash", "read", "write", "edit"]);
 			expect(advertisedSandToolNames(["bash", "read", "write"], policy)).toEqual(["bash", "read", "write"]);
 		}
@@ -126,9 +127,28 @@ describe("grokbot family tool mapping", () => {
 		expect(policy.kind).toBe("product");
 		expect(policy.wire).toBe("automation");
 		expect(applied.requestedModel.modelId).toBe("sand-automation");
+		expect(applied.requestedModel.parameters).toBeUndefined();
 		expect(applied.subagentType).toBe("generalPurpose");
 		expect(typeof applied.automationId).toBe("string");
 		expect(names).toEqual(["Shell", "Read", "Write"]);
+	});
+
+	test("automation wire strips thinking/effort/fast from a parameterized sand-automation request", () => {
+		const requestedModel = requested("sand-automation", ["thinking", "context", "effort", "fast"]);
+		expect(requestedModel.parameters?.length).toBeGreaterThan(0);
+		const wired = applyAnthropicSandToolWire(
+			{
+				requestedModel,
+				tools: OMP_CORE,
+				modelId: "sand-automation",
+				ompTools: OMP_CORE,
+				sandToolsWire: "automation",
+			},
+			"automation",
+		);
+		expect(wired.requestedModel).toEqual({ modelId: "sand-automation" });
+		expect(wired.subagentType).toBe("generalPurpose");
+		expect((wired.tools as Array<{ name: string }>).map(t => t.name)).toEqual(["Shell", "Read", "Write"]);
 	});
 
 	test("supports-tools=false disables tools (grok-4.5 HTTP 422 ceiling)", () => {

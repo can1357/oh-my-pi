@@ -36,7 +36,7 @@ omp tools are named `bash` / `read` / `write` (and `edit` / `grep` / `glob`). Sa
 | Family (catalog class) | Default wire (`GROKBOT_ANTHROPIC_TOOLS_WIRE=auto`) | Advertised tools | `requestedModel` |
 | --- | --- | --- | --- |
 | Anthropic (`claude-*`, fable/opus/sonnet/haiku) | **keep-model** | Product PascalCase `Shell` / `Read` / `Write` with `{ jsonSchema: … }` | Original Anthropic id (backend stays Claude/Fable) |
-| Grok / GPT / Gemini / Kimi / GLM / Composer | **native** | omp `bash` / `read` / `write` | Original id |
+| Grok / GPT / Gemini / Kimi / GLM / Composer | **native** (matrix `wire`, not `error`) | omp `bash` / `read` / `write` | Original id |
 | `sand-default`, `sand-cua` | catalog `sand-tools-wire=parent-chat` | Product tools + `SendToUser` | Router id (often routes to grok) |
 | `sand-automation` | catalog `sand-tools-wire=automation` | Product `Shell` / `Read` / `Write` | `sand-automation` (often routes to grok) |
 | `grok-4.5*` | **disabled** | none | Text-only. Any tools payload is upstream HTTP 422; catalog `supports-tools: false` |
@@ -54,6 +54,7 @@ Identity comes from `classifyModel()` (taxonomy class), not `id.includes("claude
 | | `automation` / `product` | Rewrite Anthropic ids to `sand-automation` + `generalPurpose` (often `cursor-grok-*`, **not** a verified Anthropic worker) |
 | | `parent-chat` / `parent` | Product parent-chat tools; Anthropic ids rewrite to `sand-default` |
 | | `sand-default-fallback` | Keep raw tools; rewrite Anthropic `requestedModel` to `sand-default` (model not guaranteed) |
+| | `native` | Raw omp `bash` / `read` / `write` (default for grok/gpt/gemini/…) |
 | | `error` | No rewrite. Explicit Anthropic id + raw omp field-2 tools → HTTP 400 |
 
 ## Run from this checkout
@@ -158,7 +159,7 @@ Wire to capture: `POST https://api2.cursor.sh/aiserver.v1.InferenceService/Strea
 | Explicit Anthropic id + raw omp field-2 tools | Upstream HTTP 400 / `ERROR_PROVIDER_ERROR`. |
 | Anthropic + tools (default) | `GROKBOT_ANTHROPIC_TOOLS_WIRE=auto` → **keep-model**: product PascalCase tools on the original Anthropic `requestedModel`. Backend stays Claude/Fable. |
 | `GROKBOT_ANTHROPIC_TOOLS_WIRE=automation` | Rewrites to `sand-automation` + `generalPurpose`. Often routes to `cursor-grok-*`, **not** a verified Anthropic worker. |
-| `sand-default` / `sand-cua` / `sand-automation` + tools | Routers; with tools they typically land on the **grok** family. Product field-2 tools still complete bash/read/write round-trips. |
+| `sand-default` / `sand-cua` / `sand-automation` + tools | Routers; with tools they typically land on the **grok** family. Product field-2 tools still complete bash/read/write round-trips. `sand-automation` often routes to `cursor-grok-4.5-high`, which may dump a fenced `{"name":"Shell",…}` object — the stream promotes that into a real `toolCall` so bash/Shell still execute. |
 | AgentService/Run on a grokbot sand JWT | Not supported (zero mitm hits). InferenceService/Stream only. |
 
 ## Related
