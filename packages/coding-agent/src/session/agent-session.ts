@@ -3993,7 +3993,7 @@ export class AgentSession {
 		}
 		const generation = this.#promptGeneration;
 		const result = await this.#extensionRunner.emitSessionStop({
-			messages,
+			messages: messages.map(publicAgentMessage),
 			turn_id: Math.max(0, this.#turnIndex - 1),
 			last_assistant_message: lastAssistantMessage,
 			session_id: this.sessionId,

@@ -19,6 +19,7 @@ import { CodexContextWindowRuntime } from "../src/session/codex-context-window-r
 import { convertToLlm } from "../src/session/messages";
 import { SessionManager } from "../src/session/session-manager";
 import { buildShareSnapshot } from "../src/export/share";
+import type { ExtensionRunner } from "../src/extensibility/extensions/runner";
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
@@ -47,7 +48,13 @@ function fixtureModel(): Model<"openai-codex-responses"> {
 }
 async function harness(
 	reset: boolean,
-	options: { enabled?: boolean; notes?: boolean; responses?: MockResponse[]; windowOnly?: boolean } = {},
+	options: {
+		enabled?: boolean;
+		notes?: boolean;
+		responses?: MockResponse[];
+		windowOnly?: boolean;
+		extensionRunner?: ExtensionRunner;
+	} = {},
 ) {
 	const dir = TempDir.createSync("codex-window-");
 	cleanups.push(() => dir.removeSync());
@@ -116,6 +123,7 @@ async function harness(
 		sessionManager: manager,
 		settings,
 		modelRegistry,
+		extensionRunner: options.extensionRunner,
 		toolRegistry: new Map([[work.name, work]]),
 	});
 	cleanups.push(() => session.dispose());
@@ -282,3 +290,34 @@ test("window mode preserves recovery from an empty length stop", async () => {
 	);
 	expect(JSON.stringify(session.messages)).toContain("Recovered answer");
 }, 20000);
+
+test("session_stop hooks receive public results without changing the journal or replay", async () => {
+	const stops: string[] = [];
+	const extensionRunner = {
+		emit: async () => undefined,
+		consumeToolCallEmitted: () => false,
+		runScoped: <T>(run: () => T): T => run(),
+		emitBeforeAgentStart: async () => undefined,
+		hasHandlers: (event: string) => event === "session_stop",
+		emitSessionStop: async (event: unknown) => {
+			stops.push(JSON.stringify(event));
+		},
+	} as unknown as ExtensionRunner;
+	const { session, manager, frames } = await harness(true, {
+		extensionRunner,
+		responses: [
+			{
+				content: [{ type: "toolCall", name: "notes.read_file", arguments: { path: "checkpoint" } }],
+				usage: { input: 100 },
+			},
+			{ content: ["Finished"], usage: { input: 100 } },
+		],
+	});
+	await session.prompt("Recover saved work");
+	await session.waitForIdle();
+	expect(stops).toHaveLength(1);
+	expect(stops[0]).not.toContain("opaque-result");
+	expect(stops[0]).toContain("[private model-only result]");
+	expect(JSON.stringify(manager.getEntries())).toContain("opaque-result");
+	expect(JSON.stringify(frames[1].messages)).toContain("opaque-result");
+});
