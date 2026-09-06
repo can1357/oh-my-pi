@@ -4,6 +4,8 @@ import type { TUI } from "@oh-my-pi/pi-tui";
 import { resetSettingsForTest, Settings } from "../../../src/config/settings";
 import type { DaemonSnapshot } from "../../../src/launch/protocol";
 import { ChatTranscriptBuilder } from "../../../src/modes/components/chat-transcript-builder";
+import { CustomMessageComponent } from "../../../src/modes/components/custom-message";
+import { ToolActivityContainer } from "../../../src/modes/components/tool-activity";
 import { TranscriptContainer } from "../../../src/modes/components/transcript-container";
 import { initTheme } from "../../../src/modes/theme/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
@@ -55,6 +57,48 @@ function progressMessage(text = RAW_PROGRESS): CustomMessage<AsyncProgressDetail
 	if (!message) throw new Error("Expected async progress message");
 	return message;
 }
+
+describe("async progress transcript routing", () => {
+	// The live path is `UiHelpers.addMessageToChat`, which the event controller
+	// calls for every custom `message_start`; the rebuilt path is
+	// `ChatTranscriptBuilder.rebuild` over persisted entries. Both must present
+	// the compact progress block: a "Background … progress" status row that hides
+	// with the rest of tool activity — never the generic bordered custom-message
+	// card, which would print the model-facing `<system-notice>` payload.
+	it("presents live and rebuilt async-progress messages as the compact progress block", () => {
+		const message = progressMessage("line one\nline two");
+		if (typeof message.content !== "string" || !message.content.includes("<system-notice>")) {
+			throw new Error("Expected the model payload to carry the system-notice wrapper");
+		}
+		const chatContainer = new TranscriptContainer();
+		const ctx = {
+			chatContainer,
+			toolOutputExpanded: false,
+			viewSession: { extensionRunner: undefined },
+		} as unknown as InteractiveModeContext;
+		new UiHelpers(ctx).addMessageToChat(message);
+
+		const builder = new ChatTranscriptBuilder({ ui: {} as TUI, cwd: "/workspace", requestRender: vi.fn() });
+		builder.rebuild([
+			{ type: "message", id: "entry-1", parentId: null, timestamp: "2026-08-22T00:00:00.000Z", message },
+		]);
+
+		for (const container of [chatContainer, builder.container]) {
+			expect(container.children).toHaveLength(1);
+			const [block] = container.children;
+			expect(block).toBeInstanceOf(ToolActivityContainer);
+			expect(block).not.toBeInstanceOf(CustomMessageComponent);
+			const rendered = Bun.stripANSI(container.render(160).join("\n"));
+			expect(rendered).toContain("Background job progress build (1.0s)");
+			expect(rendered).toContain("line two");
+			expect(rendered).not.toContain("<system-notice>");
+			expect(rendered).not.toContain("<job-progress");
+			expect(rendered).not.toContain("async-progress");
+			(block as ToolActivityContainer).setToolActivityVisible(false);
+			expect(Bun.stripANSI(container.render(160).join("\n")).trim()).toBe("");
+		}
+	});
+});
 
 describe("async progress transcript display sanitization", () => {
 	it("sanitizes tabs and home paths in the live transcript without changing the model payload", () => {
