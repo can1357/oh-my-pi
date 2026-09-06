@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import type { DaemonBrokerClient } from "../../../src/launch/client";
+import type { DaemonBrokerClient, DaemonCompletionUnregisterOptions } from "../../../src/launch/client";
 import * as daemonClient from "../../../src/launch/client";
 import type {
 	DaemonCompletionNotification,
@@ -12,7 +12,7 @@ import type {
 	DaemonSpec,
 } from "../../../src/launch/protocol";
 import { DAEMON_OUTPUT_MONITOR_CAPABILITY } from "../../../src/launch/protocol";
-import type { ToolSession } from "../../../src/tools";
+import type { LaunchContextBoundary, ToolSession } from "../../../src/tools";
 import { executeLaunch } from "../../../src/tools/hub/launch";
 import { PROGRESS_LIMITS } from "../../../src/async/progress-limits";
 
@@ -55,9 +55,12 @@ interface MonitorHarness {
 	}>;
 	completions: DaemonCompletionNotification[];
 	active: Array<{ monitorId: string; delivery: string; active: boolean }>;
+	completionPreservePending: boolean[];
 	epochs: number[];
 	disposeCallbacks: Array<() => void>;
+	contextBoundaryCallbacks: Set<(boundary: LaunchContextBoundary) => void>;
 	getOutputSink(): ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
+	getCompletionSink(): ((notification: DaemonCompletionNotification) => void | Promise<void>) | undefined;
 	getSubscription(): DaemonOutputSubscription | undefined;
 	unregisterCount(): number;
 	republishCount(): number;
@@ -78,16 +81,25 @@ function createHarness(
 	const progress: MonitorHarness["progress"] = [];
 	const completions: DaemonCompletionNotification[] = [];
 	const active: MonitorHarness["active"] = [];
+	const completionPreservePending: boolean[] = [];
 	const epochs: number[] = [];
 	const disposeCallbacks: Array<() => void> = [];
+	const contextBoundaryCallbacks = new Set<(boundary: LaunchContextBoundary) => void>();
 	let outputSink: ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
+	let completionSink: ((notification: DaemonCompletionNotification) => void | Promise<void>) | undefined;
 	let subscription: DaemonOutputSubscription | undefined;
 	let unregisters = 0;
 	let republishes = 0;
 	const registrations = new Set<string>();
 	const client = {
 		projectDir: process.cwd(),
-		onCompletion: () => () => {},
+		onCompletion: (_owner: string, sink: (notification: DaemonCompletionNotification) => void | Promise<void>) => {
+			completionSink = sink;
+			return (options?: DaemonCompletionUnregisterOptions) => {
+				completionPreservePending.push(options?.preservePending === true);
+				if (completionSink === sink) completionSink = undefined;
+			};
+		},
 		onOutput: (
 			registered: DaemonOutputSubscription,
 			sink: (notification: DaemonMonitorNotification) => void | Promise<void>,
@@ -150,7 +162,10 @@ function createHarness(
 		registerDisposeCallback: (callback: () => void) => {
 			disposeCallbacks.push(callback);
 		},
-		registerSessionChangeCallback: () => {},
+		registerContextBoundaryCallback: (callback: (boundary: LaunchContextBoundary) => void) => {
+			contextBoundaryCallbacks.add(callback);
+			return () => contextBoundaryCallbacks.delete(callback);
+		},
 	} as unknown as ToolSession;
 	return {
 		client,
@@ -159,9 +174,12 @@ function createHarness(
 		progress,
 		completions,
 		active,
+		completionPreservePending,
 		disposeCallbacks,
+		contextBoundaryCallbacks,
 		epochs,
 		getOutputSink: () => outputSink,
+		getCompletionSink: () => completionSink,
 		getSubscription: () => subscription,
 		unregisterCount: () => unregisters,
 		republishCount: () => republishes,
@@ -1029,6 +1047,68 @@ describe("hub process output monitoring", () => {
 		for (const dispose of harness.disposeCallbacks) dispose();
 
 		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
+		// The process outlives the CLI and its owner can reconnect: completions
+		// stay retained for that replay.
+		expect(harness.completionPreservePending).toEqual([true]);
+	});
+
+	it("a same-ID context reset disposes the monitor and discards its pending completions", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+		const subscription = harness.getSubscription();
+		const cleanups = [...harness.contextBoundaryCallbacks];
+		if (!subscription || cleanups.length === 0) throw new Error("Expected context-bound output registration");
+		await harness.getOutputSink()?.({
+			event: "daemon-output",
+			monitorId: subscription.id,
+			name: daemon.name,
+			daemonId: daemon.id,
+			seq: 1,
+			text: "before reset",
+			batchKind: "progress",
+			suppressedEvents: 0,
+		});
+		expect(harness.progress.map(item => item.notification.text)).toEqual(["before reset"]);
+
+		for (const cleanup of cleanups) cleanup("reset");
+		// Idempotent: a second boundary cannot release anything twice.
+		for (const cleanup of cleanups) cleanup("reset");
+
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.getOutputSink()).toBeUndefined();
+		expect(harness.getCompletionSink()).toBeUndefined();
+		// The conversation that started the process is gone under the same id: a
+		// retained completion would replay into the emptied context the next
+		// time a Hub call re-registers this owner, so it is discarded instead.
+		expect(harness.completionPreservePending).toEqual([false]);
+		expect(harness.contextBoundaryCallbacks.size).toBe(0);
+		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
+		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
+	});
+
+	it("a committed session switch disposes the monitor but keeps its completions replayable", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" });
+		const subscription = harness.getSubscription();
+		if (!subscription) throw new Error("Expected output subscription");
+
+		// Each cleanup deletes itself from the set; removing the current entry
+		// during Set iteration is well-defined.
+		for (const cleanup of harness.contextBoundaryCallbacks) cleanup("switch");
+
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.getCompletionSink()).toBeUndefined();
+		// The outgoing session stays resumable, so the broker keeps the
+		// completion for the owner's next registration.
+		expect(harness.completionPreservePending).toEqual([true]);
+		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "ambient", active: false });
 		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
 	});
 

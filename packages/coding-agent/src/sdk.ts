@@ -1873,7 +1873,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				disposeCallbacks.add(callback);
 				return () => disposeCallbacks.delete(callback);
 			},
-			registerSessionChangeCallback: callback => session?.registerSessionChangeCallback(callback),
+			registerContextBoundaryCallback: callback => session?.registerContextBoundaryCallback(callback),
 			bumpFileMutationVersion: path => {
 				const next = (fileMutationVersions.get(path) ?? 0) + 1;
 				fileMutationVersions.set(path, next);

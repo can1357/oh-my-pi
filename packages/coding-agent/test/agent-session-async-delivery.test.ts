@@ -15,7 +15,19 @@ import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { DaemonCompletionNotification, DaemonOutputNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
+import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
+import type { DaemonBrokerClient, DaemonCompletionUnregisterOptions } from "@oh-my-pi/pi-coding-agent/launch/client";
+import type {
+	DaemonCompletionNotification,
+	DaemonMonitorNotification,
+	DaemonOperation,
+	DaemonOutputNotification,
+	DaemonOutputSubscription,
+	DaemonRpcResult,
+	DaemonSnapshot,
+	DaemonSpec,
+} from "@oh-my-pi/pi-coding-agent/launch/protocol";
+import { DAEMON_OUTPUT_MONITOR_CAPABILITY } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
 	ASYNC_PROGRESS_WAKE_QUEUE_KIND,
@@ -26,6 +38,8 @@ import {
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { LaunchContextBoundary, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { executeLaunch } from "@oh-my-pi/pi-coding-agent/tools/hub/launch";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
@@ -777,6 +791,373 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(observedText).not.toContain("old-reset-process");
 		expect(observedText).toContain("FRESH RESET PROCESS EVENT");
 		expect(observedText).toContain("fresh-reset-process");
+	});
+
+	it("tears down a live Hub monitor and discards its completion at a same-ID context reset", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		const owner = sessionManager.getSessionId();
+		const daemon: DaemonSnapshot = {
+			name: "web",
+			id: "daemon-id",
+			state: "running",
+			pid: 123,
+			createdAt: 1,
+			startedAt: 2,
+			restartCount: 0,
+			outputBytes: 0,
+			owner,
+			persist: true,
+			detached: false,
+		};
+		const spec: DaemonSpec = {
+			name: daemon.name,
+			application: process.execPath,
+			args: [],
+			env: {},
+			cwd: process.cwd(),
+			pty: false,
+			restart: "no",
+			persist: true,
+			detached: false,
+		};
+
+		// A broker client stub that records what the session does to its
+		// subscriptions; the real broker drops the watcher from ps/describe as
+		// soon as the output subscription is unregistered (see
+		// test/launch/broker-monitor-progress.test.ts).
+		const requests: DaemonOperation[] = [];
+		const completionUnregisters: DaemonCompletionUnregisterOptions[] = [];
+		let completionRegistrations = 0;
+		let outputSink: ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
+		let subscription: DaemonOutputSubscription | undefined;
+		let outputUnregisters = 0;
+		const client = {
+			projectDir: process.cwd(),
+			onCompletion: () => {
+				completionRegistrations++;
+				return (options?: DaemonCompletionUnregisterOptions) => {
+					completionUnregisters.push(options ?? {});
+				};
+			},
+			onOutput: (
+				registered: DaemonOutputSubscription,
+				sink: (notification: DaemonMonitorNotification) => void | Promise<void>,
+			) => {
+				subscription = registered;
+				outputSink = sink;
+				return Object.assign(
+					() => {
+						outputUnregisters++;
+						if (subscription === registered) subscription = undefined;
+						if (outputSink === sink) outputSink = undefined;
+					},
+					{ ready: Promise.resolve(), republish: () => {} },
+				);
+			},
+			request: async (operation: DaemonOperation): Promise<DaemonRpcResult> => {
+				requests.push(operation);
+				if (operation.op === "ping") {
+					return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+				}
+				if (operation.op === "describe") return { op: "describe", daemon, spec };
+				throw new Error(`Unexpected operation: ${operation.op}`);
+			},
+			close() {},
+		} as unknown as DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		// The same adapter the SDK installs between the hub tool and the session.
+		const live = session;
+		const toolSession = {
+			cwd: process.cwd(),
+			settings: { get: () => undefined },
+			allocateOutputArtifact: async () => ({ id: "hub-progress-reset", path: "/dev/null" }),
+			getSessionId: () => live.sessionManager.getSessionId(),
+			isDisposed: () => live.isDisposed,
+			captureLaunchProgressEpoch: () => live.captureLaunchProgressEpoch(),
+			queueLaunchProgress: (
+				notification: DaemonOutputNotification,
+				delivery: "wake" | "ambient",
+				startedAt: number,
+				epoch: number,
+				artifactId?: string,
+			) => live.queueLaunchProgress(notification, delivery, startedAt, epoch, artifactId),
+			queueLaunchCompletion: (notification: DaemonCompletionNotification) =>
+				live.queueLaunchCompletion(notification),
+			setLaunchMonitorActive: (monitorId: string, delivery: "wake" | "ambient", active: boolean, epoch: number) =>
+				live.setLaunchMonitorActive(monitorId, delivery, active, epoch),
+			registerDisposeCallback: () => () => {},
+			registerContextBoundaryCallback: (callback: (boundary: LaunchContextBoundary) => void) =>
+				live.registerContextBoundaryCallback(callback),
+		} as unknown as ToolSession;
+
+		await executeLaunch(toolSession, { op: "monitor", name: daemon.name, progress: "ambient" });
+		if (!subscription || !outputSink) throw new Error("Expected a live output subscription");
+		const monitorId = subscription.id;
+		expect(completionRegistrations).toBe(1);
+		expect(session.hasPendingAsyncWork()).toBe(true);
+		await outputSink({
+			event: "daemon-output",
+			monitorId,
+			name: daemon.name,
+			daemonId: daemon.id,
+			seq: 1,
+			text: "OUTPUT BEFORE RESET",
+			batchKind: "progress",
+			suppressedEvents: 0,
+		});
+		expect(session.yieldQueue.has("async-progress")).toBe(true);
+
+		// /clear keeps the session id, so no session-change hook can fire: the
+		// boundary itself must release the broker subscription, the owner's
+		// completion sink, and the quiescence bookkeeping.
+		await expect(session.resetSessionContext()).resolves.toEqual({ droppedCount: 0 });
+		expect(sessionManager.getSessionId()).toBe(owner);
+		expect(outputUnregisters).toBe(1);
+		expect(subscription).toBeUndefined();
+		expect(outputSink).toBeUndefined();
+		expect(completionUnregisters).toEqual([{ preservePending: false }]);
+		expect(session.hasPendingAsyncWork()).toBe(false);
+		expect(requests.some(operation => operation.op === "stop")).toBe(false);
+
+		// Output queued before the boundary never reaches the emptied context.
+		await session.sendUserMessage("after reset");
+		const observedText = mock.calls
+			.flatMap(call =>
+				call.context.messages.flatMap(message =>
+					typeof message.content === "string"
+						? [message.content]
+						: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+				),
+			)
+			.join("\n");
+		expect(observedText).not.toContain("OUTPUT BEFORE RESET");
+
+		// A fresh monitor after the reset registers cleanly under the same owner.
+		await executeLaunch(toolSession, { op: "monitor", name: daemon.name, progress: "ambient" });
+		expect(completionRegistrations).toBe(2);
+		expect(subscription).toBeDefined();
+		expect(session.hasPendingAsyncWork()).toBe(true);
+	});
+
+	it("reports the boundary kind to launch cleanups and skips reversible transitions", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-boundary-kinds-");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionManager.appendMessage({ role: "user", content: "old session", timestamp: 1 });
+		await sessionManager.flush();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		const boundaries: LaunchContextBoundary[] = [];
+		const cleanup = vi.fn((boundary: LaunchContextBoundary) => {
+			boundaries.push(boundary);
+		});
+		session.registerContextBoundaryCallback(cleanup);
+
+		// A fork that produces nothing keeps the conversation live.
+		const originalId = sessionManager.getSessionId();
+		const fork = vi.spyOn(sessionManager, "fork").mockResolvedValue(undefined);
+		await expect(session.fork()).resolves.toBe(false);
+		fork.mockRestore();
+		expect(sessionManager.getSessionId()).toBe(originalId);
+		expect(cleanup).not.toHaveBeenCalled();
+
+		// Same id, wiped transcript.
+		await expect(session.resetSessionContext()).resolves.toEqual({ droppedCount: 0 });
+		expect(sessionManager.getSessionId()).toBe(originalId);
+		expect(boundaries).toEqual(["reset"]);
+		// Fired once and forgotten: the next boundary does not call it again.
+		await expect(session.resetSessionContext()).resolves.toEqual({ droppedCount: 0 });
+		expect(cleanup).toHaveBeenCalledTimes(1);
+
+		session.registerContextBoundaryCallback(cleanup);
+		await expect(session.newSession()).resolves.toBe(true);
+		expect(sessionManager.getSessionId()).not.toBe(originalId);
+		expect(boundaries).toEqual(["reset", "new"]);
+
+		session.registerContextBoundaryCallback(cleanup);
+		await expect(session.fork()).resolves.toBe(true);
+		expect(boundaries).toEqual(["reset", "new", "new"]);
+	});
+
+	it("keeps launch subscriptions across a switch rollback and releases them on the committed retry", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-progress-switch-rollback-");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionManager.appendMessage({ role: "user", content: "old session", timestamp: 1 });
+		await sessionManager.flush();
+		const previousSessionFile = sessionManager.getSessionFile();
+		if (!previousSessionFile) throw new Error("Expected previous session file");
+		const previousOwner = sessionManager.getSessionId();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+
+		const targetManager = SessionManager.create(tempDir.path(), tempDir.path());
+		targetManager.appendMessage({ role: "user", content: "target session", timestamp: 2 });
+		await targetManager.flush();
+		const targetFile = targetManager.getSessionFile();
+		if (!targetFile) throw new Error("Expected target session file");
+		await targetManager.close();
+
+		const boundaries: LaunchContextBoundary[] = [];
+		session.registerContextBoundaryCallback(boundary => boundaries.push(boundary));
+		const previousEpoch = session.captureLaunchProgressEpoch();
+		const completionDaemon = {
+			state: "exited",
+			createdAt: 1,
+			startedAt: 1,
+			exitedAt: 2,
+			exitCode: 0,
+			restartCount: 0,
+			outputBytes: 0,
+			owner: previousOwner,
+			persist: false,
+			detached: false,
+		} as const;
+		let rollbackCompletion: Promise<void> | undefined;
+		const failure = new Error("synthetic target load failure");
+		vi.spyOn(sessionManager, "setSessionFile").mockImplementationOnce(async () => {
+			// Events observed while the switch is still reversible stay queued.
+			session.queueLaunchProgress(
+				{
+					event: "daemon-output",
+					monitorId: "rollback-monitor",
+					name: "rollback-process",
+					daemonId: "rollback-daemon",
+					seq: 1,
+					text: "ROLLBACK PROCESS EVENT",
+					batchKind: "progress",
+					suppressedEvents: 0,
+				},
+				"ambient",
+				Date.now(),
+				previousEpoch,
+			);
+			rollbackCompletion = session.queueLaunchCompletion({
+				event: "daemon-completed",
+				completionId: "rollback-completion",
+				owner: previousOwner,
+				daemon: { ...completionDaemon, name: "rollback-process", id: "rollback-daemon" },
+			});
+			throw failure;
+		});
+
+		await expect(session.switchSession(targetFile)).rejects.toBe(failure);
+		expect(session.sessionFile).toBe(previousSessionFile);
+		expect(session.captureLaunchProgressEpoch()).toBe(previousEpoch);
+		expect(boundaries).toEqual([]);
+		if (!rollbackCompletion) throw new Error("Expected rollback completion receipt");
+		await rollbackCompletion;
+		await session.sendUserMessage("inspect rollback");
+
+		let successfulOldCompletion: Promise<void> | undefined;
+		session.setSessionBeforeSwitchReconciler(async () => {
+			session.queueLaunchProgress(
+				{
+					event: "daemon-output",
+					monitorId: "successful-old-monitor",
+					name: "successful-old-process",
+					daemonId: "successful-old-daemon",
+					seq: 1,
+					text: "SUCCESSFUL SWITCH OLD EVENT",
+					batchKind: "progress",
+					suppressedEvents: 0,
+				},
+				"ambient",
+				Date.now(),
+				previousEpoch,
+			);
+			successfulOldCompletion = session.queueLaunchCompletion({
+				event: "daemon-completed",
+				completionId: "successful-old-completion",
+				owner: previousOwner,
+				daemon: { ...completionDaemon, name: "successful-old-process", id: "successful-old-daemon" },
+			});
+		});
+
+		await expect(session.switchSession(targetFile)).resolves.toBe(true);
+		expect(session.sessionFile).toBe(targetFile);
+		expect(boundaries).toEqual(["switch"]);
+		expect(session.captureLaunchProgressEpoch()).toBe(previousEpoch + 1);
+		if (!successfulOldCompletion) throw new Error("Expected successful-switch completion receipt");
+		await successfulOldCompletion;
+
+		const freshEpoch = session.captureLaunchProgressEpoch();
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "fresh-monitor",
+				name: "fresh-process",
+				daemonId: "fresh-daemon",
+				seq: 1,
+				text: "FRESH SWITCH EVENT",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+			freshEpoch,
+		);
+		await session.sendUserMessage("inspect successful switch");
+
+		const observedText = mock.calls
+			.flatMap(call =>
+				call.context.messages.flatMap(message =>
+					typeof message.content === "string"
+						? [message.content]
+						: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+				),
+			)
+			.join("\n");
+		expect(observedText).toContain("ROLLBACK PROCESS EVENT");
+		expect(observedText).toContain("rollback-process");
+		expect(observedText).not.toContain("SUCCESSFUL SWITCH OLD EVENT");
+		expect(observedText).not.toContain("successful-old-process");
+		expect(observedText).toContain("FRESH SWITCH EVENT");
 	});
 
 	it("purges finished owned jobs when starting a new session", async () => {

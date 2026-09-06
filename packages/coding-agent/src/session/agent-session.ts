@@ -207,7 +207,7 @@ import {
 } from "../thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import type { ImageAttachmentEntry } from "../tools";
+import type { ImageAttachmentEntry, LaunchContextBoundary } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
@@ -618,6 +618,8 @@ export class AgentSession {
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
+	/** Launch subscriptions torn down at the next conversation boundary; each fires once and is forgotten. */
+	#contextBoundaryCallbacks = new Set<(boundary: LaunchContextBoundary) => void>();
 	#observedSessionId: string | undefined;
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
@@ -693,6 +695,8 @@ export class AgentSession {
 	#launchMonitorStateChanged = Promise.withResolvers<void>();
 	/** Conversation-boundary fence shared by monitored process progress and completions. */
 	#launchProgressBoundaryDepth = 0;
+	/** Defers queued launch delivery while a different-session switch is still reversible. */
+	#launchProgressTransitionDepth = 0;
 	#launchProgressEpoch = 0;
 	/**
 	 * Async-delivery generation, bumped on every session transition that evicts
@@ -1465,7 +1469,7 @@ export class AgentSession {
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
-			isStreaming: () => this.isStreaming,
+			isStreaming: () => this.isStreaming || this.#launchProgressTransitionDepth > 0,
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
@@ -4350,6 +4354,16 @@ export class AgentSession {
 		return () => this.#sessionChangeCallbacks.delete(callback);
 	}
 
+	/**
+	 * Register cleanup that runs when this AgentSession replaces its conversation
+	 * beneath live launch subscriptions (context reset, new session, fork/branch,
+	 * committed switch). Fires once with the boundary kind and is then forgotten.
+	 */
+	registerContextBoundaryCallback(callback: (boundary: LaunchContextBoundary) => void): () => void {
+		this.#contextBoundaryCallbacks.add(callback);
+		return () => this.#contextBoundaryCallbacks.delete(callback);
+	}
+
 	subscribeCommandMetadataChanged(listener: CommandMetadataChangedListener): () => void {
 		this.#commandMetadataChangedListeners.push(listener);
 		return () => {
@@ -4459,6 +4473,18 @@ export class AgentSession {
 				callback();
 			} catch (error) {
 				logger.warn("Session change callback failed", { error: String(error) });
+			}
+		}
+	}
+
+	#notifyContextBoundaryCallbacks(boundary: LaunchContextBoundary): void {
+		const callbacks = [...this.#contextBoundaryCallbacks];
+		this.#contextBoundaryCallbacks.clear();
+		for (const callback of callbacks) {
+			try {
+				callback(boundary);
+			} catch (error) {
+				logger.warn("Context boundary cleanup failed", { boundary, error: String(error) });
 			}
 		}
 	}
@@ -4737,6 +4763,7 @@ export class AgentSession {
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#sessionChangeCallbacks.clear();
+		this.#contextBoundaryCallbacks.clear();
 
 		// A dispose triggered mid-turn (Ctrl-C / timeout / hard-killed subagent)
 		// only *signals* the agent loop via the earlier abort(); the loop and the
@@ -4870,7 +4897,7 @@ export class AgentSession {
 		if (this.isStreaming || this.isBashRunning || this.isEvalRunning) return undefined;
 		const droppedCount = this.agent.state.messages.length;
 
-		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary("reset");
 		// Tear down the same per-turn runtime state that newSession() resets across
 		// a conversation boundary, so work scheduled from the pre-reset turn cannot
 		// re-enter the cleared context:
@@ -7050,9 +7077,19 @@ export class AgentSession {
 		changed.resolve();
 	}
 
-	#beginLaunchProgressBoundary(): Disposable {
+	/**
+	 * Cross a conversation boundary beneath live launch subscriptions: stale the
+	 * progress epoch and tear the subscriptions down. Registrations own broker
+	 * subscriptions and artifact resources beyond the active-monitor bookkeeping
+	 * cleared here; a same-ID reset never changes the session id, so their
+	 * teardown cannot ride on session-change callbacks and runs from this
+	 * boundary instead. Cleanup callbacks are idempotent and are forgotten once
+	 * invoked.
+	 */
+	#beginLaunchProgressBoundary(boundary: LaunchContextBoundary): Disposable {
 		this.#launchProgressBoundaryDepth += 1;
 		this.#launchProgressEpoch += 1;
+		this.#notifyContextBoundaryCallbacks(boundary);
 		if (this.#activeLaunchMonitors.size > 0) {
 			this.#activeLaunchMonitors.clear();
 			this.#signalLaunchMonitorChanged();
@@ -7063,6 +7100,25 @@ export class AgentSession {
 				if (!active) return;
 				active = false;
 				this.#launchProgressBoundaryDepth -= 1;
+			},
+		};
+	}
+
+	/**
+	 * Hold queued launch delivery while a different-session switch can still
+	 * roll back. Rollback releases the queue into the restored context; a
+	 * committed switch crosses {@link #beginLaunchProgressBoundary} first, so
+	 * the old epoch is stale before this flush can run.
+	 */
+	#beginLaunchProgressTransition(): Disposable {
+		this.#launchProgressTransitionDepth += 1;
+		let active = true;
+		return {
+			[Symbol.dispose]: () => {
+				if (!active) return;
+				active = false;
+				this.#launchProgressTransitionDepth -= 1;
+				if (this.#launchProgressTransitionDepth === 0) this.yieldQueue.requestIdleFlush();
 			},
 		};
 	}
@@ -7839,7 +7895,7 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
-		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary("new");
 		let advisorRecordersDetached = false;
 		await this.abort();
 		this.#cancelOwnAsyncJobs();
@@ -7968,7 +8024,6 @@ export class AgentSession {
 				return false;
 			}
 		}
-		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
@@ -7993,6 +8048,10 @@ export class AgentSession {
 				this.#bash.finishSessionTransition(bashTransition, false);
 				return false;
 			}
+			// The fork is committed from here: a rejected or empty fork above keeps
+			// the current conversation live, so its launch subscriptions must
+			// survive until this point.
+			using _launchProgressBoundary = this.#beginLaunchProgressBoundary("new");
 			this.#bash.markSessionTransition(bashTransition);
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// The fork clones the transcript and keeps this recovery state running
@@ -8991,11 +9050,10 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
-		// The boundary advances the launch-progress epoch so monitors bound to
-		// the outgoing transcript go stale; a rolled-back switch keeps that
-		// transcript live, so the epoch must roll back with it (below).
-		const previousLaunchProgressEpoch = this.#launchProgressEpoch;
-		using _launchProgressBoundary = switchingToDifferentSession ? this.#beginLaunchProgressBoundary() : undefined;
+		// A different-session switch stays reversible until the target has loaded:
+		// hold queued launch delivery meanwhile instead of crossing the boundary
+		// now, so a rollback still owns its monitors and their queued output.
+		using _launchProgressTransition = switchingToDifferentSession ? this.#beginLaunchProgressTransition() : undefined;
 		await this.abort({ goalReason: "internal" });
 		await this.#sessionBeforeSwitchReconciler?.();
 
@@ -9204,6 +9262,20 @@ export class AgentSession {
 			if (switchingToDifferentSession || didReloadConversationChange) {
 				this.#clearSessionScopedToolState();
 			}
+			// Load the target ledger before committing: this read can reject, in
+			// which case the outgoing launch subscriptions and epoch must survive
+			// for the rollback context.
+			const providersBySlug = new Map<string, Set<string>>();
+			const restoredAdvisorCosts = switchingToDifferentSession
+				? await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug })
+				: undefined;
+			// Commit after the last awaited step whose failure rolls the session
+			// back, and before reconnecting target-context activity: the provisional
+			// transition above kept old launch deliveries queued; advancing the epoch
+			// now stales them and unregisters their old-context broker subscriptions.
+			using _launchProgressBoundary = switchingToDifferentSession
+				? this.#beginLaunchProgressBoundary("switch")
+				: undefined;
 			this.#reconnectToAgent();
 			try {
 				await this.#sessionSwitchReconciler?.();
@@ -9229,10 +9301,8 @@ export class AgentSession {
 			// rolled it back. The target's own advisor transcripts are the record of what
 			// it already spent, so a session with history resumes with its total instead
 			// of restarting at zero.
-			if (switchingToDifferentSession) {
-				const providersBySlug = new Map<string, Set<string>>();
-				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
-				this.#advisors.restoreCost(costs, providersBySlug);
+			if (restoredAdvisorCosts) {
+				this.#advisors.restoreCost(restoredAdvisorCosts, providersBySlug);
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
@@ -9254,7 +9324,6 @@ export class AgentSession {
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#irc.restorePending(previousIrcPending);
 			this.#sessionGeneration = previousSessionGeneration;
-			this.#launchProgressEpoch = previousLaunchProgressEpoch;
 			transitionSettled.resolve();
 			this.#sessionTransitionSettled = previousSessionTransitionSettled;
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
@@ -9364,7 +9433,7 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
-		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary("new");
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
@@ -9479,7 +9548,7 @@ export class AgentSession {
 		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 			throw new Error("Cannot branch /btw: session changed since /btw started");
 		}
-		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary("new");
 
 		await withTimeout(
 			this.#cancelPostPromptTasks(),
