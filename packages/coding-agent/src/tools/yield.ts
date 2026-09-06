@@ -121,10 +121,12 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Read the optional `error` argument. Strict-mode providers (OpenAI/Codex) send
- * omitted optionals as `null`, so null and undefined both mean "no error".
+ * omitted optionals as `null`; non-strict OpenAI-compatible backends routinely
+ * fill the optional string with `""` next to a valid `data` payload. Both mean
+ * "no error" — an empty string is never a usable failure reason.
  */
 function parseYieldError(value: unknown): string | undefined {
-	if (value === undefined || value === null) return undefined;
+	if (value === undefined || value === null || value === "") return undefined;
 	if (typeof value === "string") return value;
 	throw new Error("error must be a string");
 }
