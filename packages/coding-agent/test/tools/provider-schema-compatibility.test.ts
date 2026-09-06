@@ -150,7 +150,8 @@ describe("builtin tool schemas provider compatibility", () => {
 		const typeSchema = asSchemaObject(properties?.type);
 
 		expect(normalized?.type).toBe("object");
-		expect(properties?.result).toBeDefined();
+		expect(properties?.data).toBeDefined();
+		expect(asSchemaObject(properties?.error)?.type).toBe("string");
 		expect(typeSchema?.type).toBe("string");
 		expect(typeSchema?.anyOf).toBeUndefined();
 	});

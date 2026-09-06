@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, type Mock, mock, spyOn } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamPiNative } from "@oh-my-pi/pi-ai/providers/pi-native-client";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
@@ -494,9 +495,7 @@ describe("streamPiNative event flow", () => {
 		expect(result.content).toEqual([{ type: "text", text: "hello world" }]);
 	});
 
-	it("synthesizes a terminal `done` when the SSE stream closes silently", async () => {
-		// Models the gateway dropping mid-stream — without this synthetic terminator,
-		// `.result()` would hang forever.
+	it("rejects when the SSE stream closes before a terminal event", async () => {
 		const halfEvents: AssistantMessageEvent[] = [{ type: "start", partial: baseAssistant() }];
 		const encoder = new TextEncoder();
 		const body = new ReadableStream<Uint8Array>({
@@ -509,13 +508,19 @@ describe("streamPiNative event flow", () => {
 			new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } })) as FetchImpl;
 
 		const stream = streamPiNative(fakeModel(), baseContext, { apiKey: "k", fetch: fetchImpl });
-		const seen = await collectEvents(stream);
-		expect(seen.length).toBeGreaterThanOrEqual(2);
-		expect(seen[seen.length - 1].type).toBe("done");
-
-		const result = await stream.result();
-		expect(result.role).toBe("assistant");
-		expect(result.stopReason).toBe("stop");
+		const error = await stream.result().then(
+			() => null,
+			(error: unknown) => error,
+		);
+		expect(error).toBeInstanceOf(AIError.ProviderResponseError);
+		expect(error).toMatchObject({
+			message: "pi-native stream read error: stream closed before a terminal response event",
+			provider: "anthropic",
+			kind: "incomplete-stream",
+		});
+		const errorId = AIError.classify(error);
+		expect(AIError.is(errorId, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(errorId)).toBe(true);
 	});
 
 	it("fails fast when the caller's signal is already aborted before fetch fires", async () => {

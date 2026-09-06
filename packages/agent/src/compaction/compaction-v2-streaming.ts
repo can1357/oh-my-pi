@@ -71,15 +71,11 @@ export interface CompactionV2Usage {
 	reasoningOutputTokens?: number;
 }
 
-/** Request body fields needed for Responses-stream V2 compaction. */
+/** Provider-ready Responses body and local state needed for V2 compaction. */
 export interface CompactionV2Request {
-	model: string;
+	body: OpenAICodexCompactionBody;
 	input: unknown[];
-	instructions: string;
 	retainedMessageBudget: number;
-	tools?: unknown[];
-	/** Responses reasoning param (effort + summary), matching a normal turn; omitted for non-reasoning models. */
-	reasoning?: { effort: string; summary: string };
 	sessionId?: string;
 	promptCacheKey?: string;
 }
@@ -205,13 +201,44 @@ export function buildCompactionV2Request(
 		retainedMessageBudget?: number;
 	},
 ): CompactionV2Request {
-	return {
+	const cacheOptions = { sessionId: options?.sessionId, promptCacheKey: options?.promptCacheKey };
+	const promptCacheKey = getOpenAIPromptCacheKey(cacheOptions);
+	const body: OpenAICodexCompactionBody = {
 		model: resolveCompactionV2Model(model),
 		input,
 		instructions,
+		stream: true,
+		store: false,
+		...(options?.reasoning || model.useResponsesLite
+			? {
+					reasoning: model.useResponsesLite ? { ...options?.reasoning, context: "all_turns" } : options?.reasoning,
+					include: ["reasoning.encrypted_content"],
+				}
+			: {}),
+		...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
+		...(options?.tools && options.tools.length > 0 ? { tools: options.tools, tool_choice: "auto" } : {}),
+	};
+	if (model.useResponsesLite) {
+		applyCodexResponsesLiteShape(body);
+	}
+	return buildCompactionV2RequestFromBody(model, body, options);
+}
+
+/** Wrap a body built by the normal Codex serializer for V2 compaction transport. */
+export function buildCompactionV2RequestFromBody(
+	model: Model,
+	body: OpenAICodexCompactionBody,
+	options?: {
+		sessionId?: string;
+		promptCacheKey?: string;
+		retainedMessageBudget?: number;
+	},
+): CompactionV2Request {
+	const input = Array.isArray(body.input) ? body.input : [];
+	return {
+		body: { ...body, model: resolveCompactionV2Model(model), input },
+		input,
 		retainedMessageBudget: resolveCompactionV2RetainedMessageBudget(options?.retainedMessageBudget),
-		reasoning: options?.reasoning,
-		tools: options?.tools,
 		sessionId: options?.sessionId,
 		promptCacheKey: options?.promptCacheKey,
 	};
@@ -312,34 +339,16 @@ async function attemptCompactionV2Streaming(
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item
-	// of an otherwise-normal Responses request, then stream the result. `store`
-	// stays false — compaction must never persist a server-side response object.
-	const cacheOptions = { sessionId: request.sessionId, promptCacheKey: request.promptCacheKey };
-	const promptCacheKey = getOpenAIPromptCacheKey(cacheOptions);
+	// of an otherwise-normal Responses request. `store` remains false —
+	// compaction must never persist a server-side response object.
 	const body: OpenAICodexCompactionBody = {
-		model: request.model,
+		...request.body,
 		input: [...request.input, COMPACTION_TRIGGER_ITEM],
-		instructions: request.instructions,
-		stream: true,
 		store: false,
-		...(request.reasoning || model.useResponsesLite
-			? {
-					// Lite implies gpt-5.4+, where codex-rs sends `all_turns` replay.
-					reasoning: model.useResponsesLite ? { ...request.reasoning, context: "all_turns" } : request.reasoning,
-					include: ["reasoning.encrypted_content"],
-				}
-			: {}),
-		...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
-		...(request.tools && request.tools.length > 0 ? { tools: request.tools, tool_choice: "auto" } : {}),
+		stream: true,
 	};
 	if (options.codexMetadata) {
 		body.client_metadata = options.codexMetadata.clientMetadata;
-	}
-	// Responses Lite models take the same rewrite on the compaction stream:
-	// instructions/tools ride as input items (codex-rs `compact_remote_v2`
-	// builds through `build_responses_request`).
-	if (model.useResponsesLite) {
-		applyCodexResponsesLiteShape(body);
 	}
 
 	if (shouldUseCodexProviderTransport(model)) {
@@ -425,7 +434,7 @@ function buildCompactionV2Headers(
 		headers[OPENAI_HEADERS.BETA] = OPENAI_HEADER_VALUES.BETA_RESPONSES;
 		headers[OPENAI_HEADERS.ORIGINATOR] = OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
 		headers[OPENAI_HEADERS.CODEX_BETA_FEATURES] = OPENAI_HEADER_VALUES.REMOTE_COMPACTION_V2;
-		headers[OPENAI_HEADERS.ROUTING_HINT] = codexRoutingHint(request.model, undefined);
+		headers[OPENAI_HEADERS.ROUTING_HINT] = codexRoutingHint(request.body.model, undefined);
 		if (model.useResponsesLite) {
 			headers[OPENAI_HEADERS.RESPONSES_LITE] = "true";
 		}

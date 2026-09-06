@@ -31,13 +31,13 @@ describe("SDK workpool yield schema", () => {
 		if (fs.existsSync(registryDir)) removeSyncWithRetries(registryDir);
 	});
 
-	it("switches the constructed yield tool before a pooled turn starts", async () => {
+	it("reads the dynamic yield schema during construction and switches it before a pooled turn", async () => {
 		const { session } = await createAgentSession({
 			cwd: registryDir,
 			agentDir: registryDir,
 			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({}),
+			settings: Settings.isolated({ inlineToolDescriptors: "on" }),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -49,17 +49,29 @@ describe("SDK workpool yield schema", () => {
 			skipPythonPreflight: true,
 			requireYieldTool: true,
 			toolNames: ["yield"],
+			outputSchema: {
+				type: "object",
+				properties: { "pool#1": {} },
+				required: ["pool#1"],
+				additionalProperties: false,
+			},
+			parentTaskPrefix: "workpool-worker",
+			agentId: "workpool-worker",
+			agentName: "scout",
+			agentDisplayName: "scout",
+			taskDepth: 1,
 		});
 		sessions.push(session);
 		const tool = session.getToolByName("yield");
 		if (!tool) throw new Error("Missing yield tool");
-		expect(Reflect.get(tool.parameters, "required")).toEqual(["result"]);
+		expect(Reflect.get(tool.parameters, "properties")).toHaveProperty("type");
+		expect(Reflect.get(tool.parameters, "properties")).not.toHaveProperty("key");
 
 		session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
 		expect(Reflect.get(tool.parameters, "required")).toEqual(["key"]);
 		const properties = Reflect.get(tool.parameters, "properties");
 		expect(properties).toHaveProperty("key");
-		expect(properties).not.toHaveProperty("result");
+		expect(properties).not.toHaveProperty("type");
 		const activeTool = session.agent.state.tools.find(candidate => candidate.name === "yield");
 		if (!activeTool) throw new Error("Missing active yield tool");
 		expect(Reflect.get(activeTool.parameters, "required")).toEqual(["key"]);
