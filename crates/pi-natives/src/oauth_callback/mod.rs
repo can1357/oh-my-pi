@@ -794,8 +794,7 @@ fn session_supported(env: &BTreeMap<String, String>) -> bool {
 			|| env
 				.get("WSL_INTEROP")
 				.is_some_and(|value| !value.is_empty())
-			|| fs::read_to_string("/proc/sys/kernel/osrelease")
-				.is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"))
+			|| wsl_kernel_detected()
 		{
 			return false;
 		}
@@ -814,6 +813,22 @@ fn session_supported(env: &BTreeMap<String, String>) -> bool {
 		return false;
 	}
 	true
+}
+
+/// Detects a WSL kernel by inspecting `/proc/sys/kernel/osrelease`.
+///
+/// This is a host probe that the hermetic unit tests cannot control, so it is
+/// stubbed to `false` under `#[cfg(test)]`; tests exercise WSL rejection through
+/// the `WSL_DISTRO_NAME` / `WSL_INTEROP` env keys they own instead.
+#[cfg(all(target_os = "linux", not(test)))]
+fn wsl_kernel_detected() -> bool {
+	fs::read_to_string("/proc/sys/kernel/osrelease")
+		.is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"))
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn wsl_kernel_detected() -> bool {
+	false
 }
 
 fn napi_error(error: impl std::fmt::Display) -> Error {
