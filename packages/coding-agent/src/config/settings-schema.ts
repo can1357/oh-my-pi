@@ -50,7 +50,6 @@ import { EDIT_MODES } from "../utils/edit-mode";
 import {
 	DEFAULT_WEB_SEARCH_FANOUT,
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
-	MAX_WEB_SEARCH_FANOUT,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
 	SEARCH_PROVIDER_CHOICES,
 	type SearchProviderId,
@@ -5335,11 +5334,13 @@ export const SETTINGS_SCHEMA = {
 			tab: "providers",
 			group: "Services",
 			label: "Web Search Fan-out",
-			description: `Number of eligible web-search providers queried concurrently (maximum ${MAX_WEB_SEARCH_FANOUT})`,
+			description:
+				"Number of eligible web-search providers queried concurrently from the effective provider order. Any value from 1 up; the provider list is the only ceiling",
 			options: [
 				{ value: "1", label: "1 provider" },
 				{ value: "2", label: "2 providers" },
 				{ value: "3", label: "3 providers" },
+				{ value: "5", label: "5 providers" },
 			],
 		},
 	},

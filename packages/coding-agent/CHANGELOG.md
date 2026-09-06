@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `providers.webSearchFanout` to query up to three ordered web search providers concurrently with separate results and graceful partial failures ([#11087](https://github.com/can1357/oh-my-pi/pull/11087) by [@mustafaabidali](https://github.com/mustafaabidali)).
+- Added `providers.webSearchFanout` to query the first N eligible web search providers concurrently with separate results and graceful partial failures ([#11087](https://github.com/can1357/oh-my-pi/pull/11087) by [@mustafaabidali](https://github.com/mustafaabidali)).
 
 ## [18.1.12] - 2026-09-06
 

@@ -33,7 +33,6 @@ import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "
 import {
 	DEFAULT_WEB_SEARCH_FANOUT,
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
-	MAX_WEB_SEARCH_FANOUT,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
 	SearchProviderError,
 	type SearchProviderId,
@@ -311,7 +310,9 @@ function getWebSearchFanout(): number {
 		return DEFAULT_WEB_SEARCH_FANOUT;
 	}
 	if (!Number.isFinite(configured)) return DEFAULT_WEB_SEARCH_FANOUT;
-	return Math.max(DEFAULT_WEB_SEARCH_FANOUT, Math.min(MAX_WEB_SEARCH_FANOUT, Math.trunc(configured)));
+	// No upper bound: the effective provider order is the only ceiling, and
+	// selectFanoutCandidates stops when the candidates run out.
+	return Math.max(DEFAULT_WEB_SEARCH_FANOUT, Math.trunc(configured));
 }
 
 /** Fill up to `limit` fan-out slots from the ordered candidates, skipping unavailable implicit providers. */

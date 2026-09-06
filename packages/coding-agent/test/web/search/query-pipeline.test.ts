@@ -287,7 +287,7 @@ describe("web search fanout", () => {
 		expect(result.content[0]?.text).toBe("Gemini only");
 	});
 
-	it("clamps oversized fanout before dispatching provider requests", async () => {
+	it("bounds an oversized fanout by the eligible provider list", async () => {
 		await initializeFanout(99);
 		const requested = stubProviders([
 			{
@@ -310,9 +310,9 @@ describe("web search fanout", () => {
 
 		const result = await runSearchQuery({ query: "bounded fanout" }, { authStorage: {} as AuthStorage });
 
-		expect(requested).toEqual(["brave", "tavily", "kagi"]);
+		expect(requested).toEqual(["brave", "tavily", "kagi", "jina"]);
 		expect(result.content[0]?.text).toBe(
-			"## brave\nBrave answer\n\n## tavily\nTavily answer\n\n## kagi\nKagi answer",
+			"## brave\nBrave answer\n\n## tavily\nTavily answer\n\n## kagi\nKagi answer\n\n## jina\nJina answer",
 		);
 	});
 });
