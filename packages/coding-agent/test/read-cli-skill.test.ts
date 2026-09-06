@@ -11,7 +11,6 @@ describe("omp read skill resources", () => {
 	let root: string;
 	let projectDir: string;
 	let agentDir: string;
-	let probePath: string;
 
 	beforeEach(async () => {
 		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-read-skill-"));
@@ -23,21 +22,21 @@ describe("omp read skill resources", () => {
 			path.join(skillDir, "SKILL.md"),
 			"---\nname: standalone-skill\ndescription: Readable from the standalone CLI.\n---\n\n# Standalone Skill\n",
 		);
-		probePath = path.join(root, "probe.ts");
-		await Bun.write(
-			probePath,
-			[
-				`import { runCli } from ${JSON.stringify(url.pathToFileURL(CLI_ENTRY).href)};`,
-				'await runCli(["read", "skill://standalone-skill"]);',
-			].join("\n"),
-		);
 	});
 
 	afterEach(async () => {
 		await removeWithRetries(root);
 	});
 
-	it("reads a discovered project skill through the standalone CLI", async () => {
+	async function runReadProbe(skillUrl: string): Promise<{ exitCode: number; output: string; error: string }> {
+		const probePath = path.join(root, "probe.ts");
+		await Bun.write(
+			probePath,
+			[
+				`import { runCli } from ${JSON.stringify(url.pathToFileURL(CLI_ENTRY).href)};`,
+				`await runCli(["read", ${JSON.stringify(skillUrl)}]);`,
+			].join("\n"),
+		);
 		const proc = Bun.spawn([process.execPath, probePath], {
 			cwd: projectDir,
 			stdout: "pipe",
@@ -52,9 +51,30 @@ describe("omp read skill resources", () => {
 		const stdout = new Response(proc.stdout).text();
 		const stderr = new Response(proc.stderr).text();
 		const [exitCode, output, error] = await Promise.all([proc.exited, stdout, stderr]);
+		return { exitCode, output, error };
+	}
+
+	it("reads a discovered project skill through the standalone CLI", async () => {
+		const { exitCode, output, error } = await runReadProbe("skill://standalone-skill");
 
 		expect(exitCode).toBe(0);
 		expect(output).toContain("# Standalone Skill");
+		expect(error).toBe("");
+	}, 60_000);
+
+	it("honors the codex opt-in when reading a user skill through the standalone CLI", async () => {
+		const skillDir = path.join(root, ".codex", "skills", "codex-user-skill");
+		await fs.mkdir(skillDir, { recursive: true });
+		await Bun.write(
+			path.join(skillDir, "SKILL.md"),
+			"---\nname: codex-user-skill\ndescription: Opted-in user skill.\n---\n\n# Codex User Skill\n",
+		);
+		await Bun.write(path.join(agentDir, "config.yml"), 'enabledProviders:\n  - codex\n');
+
+		const { exitCode, output, error } = await runReadProbe("skill://codex-user-skill");
+
+		expect(exitCode).toBe(0);
+		expect(output).toContain("# Codex User Skill");
 		expect(error).toBe("");
 	}, 60_000);
 });

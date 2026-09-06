@@ -8,6 +8,7 @@
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
+import { initializeWithSettings } from "../discovery";
 import { loadSkills } from "../extensibility/skills";
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
@@ -59,6 +60,7 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 
 	try {
 		if (extractUriScheme(cmd.path) === "skill") {
+			initializeWithSettings(settings);
 			const discovered = await loadSkills({
 				...settings.getGroup("skills"),
 				cwd,
