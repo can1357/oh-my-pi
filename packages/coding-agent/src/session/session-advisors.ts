@@ -365,9 +365,9 @@ export class SessionAdvisors {
 		this.#advisorPrimaryTurnsCompleted++;
 		for (const advisor of this.#advisors) {
 			if (advisor.runtime.disposed) continue;
-			// Primary completion owns the deferred flush. The advisor loop may be
-			// quota-paused or fail before its next dispatch boundary.
-			advisor.adviseTool.beginUpdate(false);
+			// Only the terminal primary boundary owns the deferred flush. Continuing
+			// tool turns must keep partial-work critiques withheld.
+			if (willContinue !== true) advisor.adviseTool.beginUpdate(false);
 			try {
 				advisor.runtime.onTurnEnd(messages, { willContinue });
 			} catch (error) {

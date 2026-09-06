@@ -972,7 +972,14 @@ describe("AgentSession advisor toggle", () => {
 	});
 	it("marks structurally classified advisor usage limits", async () => {
 		const mock = createMockModel({
-			responses: [{ content: ["primary complete"] }, { content: ["primary still complete"] }],
+			responses: [
+				{ content: ["primary complete"] },
+				{
+					content: [{ type: "toolCall", id: "continuing-turn", name: "missing-tool", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{ content: ["primary still complete"] },
+			],
 		});
 		const primaryAgent = new Agent({
 			initialState: {
@@ -1034,10 +1041,18 @@ describe("AgentSession advisor toggle", () => {
 			});
 			expect(JSON.stringify(deferred.content)).toContain("Deferred");
 
-			// The quota latch prevents another advisor dispatch. Primary turn
-			// completion must still release the note into its delivery queue.
+			// The quota latch prevents another advisor dispatch. The tool boundary
+			// must keep the note out of the continuing model request; terminal
+			// completion may then release it into the primary transcript.
 			await quotaSession.prompt("Complete another primary turn");
 			await quotaSession.waitForIdle();
+			const continuingCall = mock.calls[2];
+			if (!continuingCall) throw new Error("Expected primary continuation call");
+			expect(
+				continuingCall.context.messages.some(message =>
+					JSON.stringify(message).includes("The final result still needs a regression test."),
+				),
+			).toBe(false);
 			expect(
 				quotaSession.messages.some(
 					message =>
