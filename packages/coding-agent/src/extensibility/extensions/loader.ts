@@ -32,6 +32,7 @@ import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
+import { installLegacyPiShimLoopGuard } from "../plugins/legacy-pi-shim-loop-guard";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
@@ -52,6 +53,10 @@ import type {
 	ToolInfo,
 } from "./types";
 
+// Guard first: Bun runs onResolve hooks in registration order, and the loop
+// guard must see shim-originated resolutions before the compat resolver's
+// override map does (issue #8900).
+installLegacyPiShimLoopGuard();
 installLegacyPiSpecifierShim();
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
