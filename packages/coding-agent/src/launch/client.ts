@@ -69,6 +69,8 @@ interface OutputSinkRegistration {
 	lastEpoch?: string;
 	/** Highest seq delivered for {@link lastEpoch}; advertised as a cumulative replay ack. */
 	lastSeq?: number;
+	/** Artifact size behind the last delivered batch; a fresh broker registration appends past it. */
+	lastArtifactBytes?: number;
 }
 
 /** Broker location and lifecycle overrides used by smoke tests and isolated consumers. */
@@ -386,13 +388,16 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	/**
 	 * Advertised subscriptions carry the cumulative delivery ack so a
-	 * reconnecting envelope replays only retained batches the sink never saw.
+	 * reconnecting envelope replays only retained batches the sink never saw,
+	 * plus the artifact size that ack covers so a re-created registration
+	 * continues the capture instead of truncating it.
 	 */
 	#outputSubscriptionPayloads(): DaemonOutputWireSubscription[] {
 		return [...this.#outputSinks.values()].map(entry => ({
 			...entry.subscription,
 			registrationId: entry.registrationId,
 			...(entry.lastEpoch === undefined ? {} : { lastEpoch: entry.lastEpoch, lastSeq: entry.lastSeq ?? 0 }),
+			...(entry.lastArtifactBytes === undefined ? {} : { artifactBytes: entry.lastArtifactBytes }),
 		}));
 	}
 
@@ -650,6 +655,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				// cumulative ack identifies the ones this sink already consumed.
 				if (message.epoch === entry.lastEpoch && message.seq <= (entry.lastSeq ?? 0)) return;
 				await entry.sink(notification);
+				if (message.artifactBytes !== undefined) entry.lastArtifactBytes = message.artifactBytes;
 				if (message.epoch === entry.lastEpoch) entry.lastSeq = Math.max(entry.lastSeq ?? 0, message.seq);
 				else {
 					entry.lastEpoch = message.epoch;

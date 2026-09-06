@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	type DaemonOperation,
+	type DaemonWireMessage,
 	parseDaemonRpcResult,
 	parseDaemonSnapshot,
 	parseDaemonWireMessage,
@@ -115,6 +116,38 @@ describe("launch logs compatibility", () => {
 		expect(request.outputSubscriptionId).toBe("output-subscription-1");
 	});
 
+	it("preserves the acknowledged artifact size on output subscriptions and rejects a negative one", () => {
+		const subscription = {
+			id: "monitor-1",
+			registrationId: "registration-1",
+			name: "web",
+			owner: "session-owner",
+			artifactPath: "/tmp/monitor.log",
+		};
+		const request = parseDaemonWireRequest({
+			id: "request-1",
+			token: "token-1",
+			outputSubscriptions: [{ ...subscription, lastEpoch: "epoch-1", lastSeq: 4, artifactBytes: 1_024 }],
+			outputSubscriptionId: "output-subscription-1",
+			operation: { op: "ping" },
+		});
+		expect(request.outputSubscriptions?.[0]).toMatchObject({
+			lastEpoch: "epoch-1",
+			lastSeq: 4,
+			artifactBytes: 1_024,
+		});
+
+		expect(() =>
+			parseDaemonWireRequest({
+				id: "request-1",
+				token: "token-1",
+				outputSubscriptions: [{ ...subscription, artifactBytes: -1 }],
+				outputSubscriptionId: "output-subscription-1",
+				operation: { op: "ping" },
+			}),
+		).toThrow("request.outputSubscriptions[0].artifactBytes must be a non-negative integer");
+	});
+
 	it("preserves the next-start target on output subscriptions", () => {
 		const request = parseDaemonWireRequest({
 			id: "request-1",
@@ -215,6 +248,31 @@ describe("launch monitor notifications", () => {
 			batchKind: "suppression-summary",
 			suppressedEvents: 1,
 		});
+	});
+
+	it("decodes a replay-gap batch with the artifact size it is backed by", () => {
+		const gap: DaemonWireMessage = {
+			event: "daemon-output" as const,
+			monitorId: "monitor-1",
+			registrationId: "registration-1",
+			name: "web",
+			daemonId: "daemon-1",
+			epoch: "epoch-1",
+			seq: 7,
+			text: "",
+			batchKind: "progress" as const,
+			suppressedEvents: 3,
+			truncated: true,
+			artifactBytes: 4_096,
+			replayGap: 3,
+		};
+		expect(parseDaemonWireMessage(gap)).toEqual(gap);
+		expect(() => parseDaemonWireMessage({ ...gap, replayGap: 1.5 })).toThrow(
+			"output.replayGap must be a non-negative integer",
+		);
+		expect(() => parseDaemonWireMessage({ ...gap, artifactBytes: "many" })).toThrow(
+			"output.artifactBytes must be a finite number",
+		);
 	});
 
 	it("decodes terminal state separately from output", () => {
