@@ -353,3 +353,27 @@ test("intentional new_context before exhaustion does not require a checkpoint", 
 	await session.waitForIdle();
 	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(true);
 });
+
+test("aborting after new_context cancels the reset before a later prompt", async () => {
+	const { session, manager, frames } = await harness(true, {
+		responses: [
+			{ content: [{ type: "toolCall", name: "new_context", arguments: {} }], usage: { input: 100 } },
+			{ content: ["Aborted provider attempt"], usage: { input: 100 } },
+			{ content: [{ type: "toolCall", name: "work", arguments: {} }], usage: { input: 100 } },
+			{ content: ["Later task finished"], usage: { input: 100 } },
+		],
+	});
+	let abort: Promise<void> | undefined;
+	const unsubscribe = session.agent.subscribe(event => {
+		if (event.type === "tool_execution_end" && event.toolName === "new_context") abort = session.abort();
+	});
+	await session.prompt("An interrupted reset");
+	await abort;
+	await session.waitForIdle();
+	unsubscribe();
+	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(false);
+	await session.prompt("Keep this later task");
+	await session.waitForIdle();
+	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(false);
+	expect(JSON.stringify(frames.at(-1)?.messages)).toContain("Keep this later task");
+});

@@ -575,6 +575,7 @@ export class SessionMaintenance {
 	/** Clears per-prompt recovery counters when a new user prompt starts. */
 	resetForNewPrompt(): void {
 		this.#incompleteRecoveryAttempts = 0;
+		this.#contextWindowResetRequested = undefined;
 	}
 
 	/** Whether manual or automatic context maintenance is active. */
@@ -1901,14 +1902,11 @@ export class SessionMaintenance {
 		signal: AbortSignal | undefined,
 		context: AgentTurnEndContext | undefined,
 	): Promise<void> {
-		if (
-			signal?.aborted ||
-			this.#host.isDisposed() ||
-			this.isCompacting ||
-			this.#host.isGeneratingHandoff() ||
-			!context?.willContinue
-		)
+		if (signal?.aborted || !context?.willContinue) {
+			this.#contextWindowResetRequested = undefined;
 			return;
+		}
+		if (this.#host.isDisposed() || this.isCompacting || this.#host.isGeneratingHandoff()) return;
 
 		if (this.contextWindows.windowActive) {
 			if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
