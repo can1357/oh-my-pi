@@ -947,10 +947,10 @@ describe("advisor", () => {
 
 		it("renders max_notes_per_update into the advisor system prompt", () => {
 			const renderedDefault = prompt.render(advisorSystemPrompt, { max_notes_per_update: 4 });
-			expect(renderedDefault).toContain("max 4/update");
+			expect(renderedDefault).toContain("max 4 non-blockers/update (`blocker` exempt)");
 
 			const renderedStrict = prompt.render(advisorSystemPrompt, { max_notes_per_update: 1 });
-			expect(renderedStrict).toContain("max 1/update");
+			expect(renderedStrict).toContain("max 1 non-blockers/update (`blocker` exempt)");
 		});
 
 		it("delivers a blocker escalation of a reserved note live instead of dropping it as already seen", async () => {
