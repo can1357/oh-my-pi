@@ -455,4 +455,47 @@ describe("InteractiveMode persona resume reconcile", () => {
 		await created.handlePlanModeCommand();
 		expect(created.planModeEnabled).toBe(true);
 	});
+	it("thinking-only persona mid-turn queues the thinking level instead of dropping it (fo80k)", async () => {
+		// A persona with `thinkingLevel` but NO model: the mid-turn defer hook
+		// used to return early on the missing model, silently losing the
+		// thinking change. The pending-switch channel carries thinkingLevel
+		// alongside model, and flushPendingModelSwitch forwards both to
+		// setModelTemporary — which applies a thinking-only change without
+		// touching the model.
+		await writeFixtureAgent(
+			`---
+name: fixture-thinker
+description: Thinking-only persona
+tools:
+  - read
+thinkingLevel: high
+---
+
+You are the fixture thinker persona.`,
+			"fixture-thinker.md",
+		);
+
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+
+		// Mid-turn: the persona's tools/prompt apply immediately, the thinking
+		// switch defers to the pending queue.
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => true });
+		const setModelSpy = vi.spyOn(liveSession, "setModelTemporary").mockResolvedValue(undefined);
+		await created.switchAgentPersona("fixture-thinker");
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+		expect(setModelSpy).not.toHaveBeenCalled(); // nothing applied into the live turn
+
+		// Turn ends → event-controller flushes the queued switch.
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => false });
+		await created.flushPendingModelSwitch();
+
+		expect(setModelSpy).toHaveBeenCalledTimes(1);
+		const [switchModel, switchThinking] = setModelSpy.mock.calls[0] ?? [];
+		expect(switchThinking).toBe(Effort.High); // thinking rides the queue
+		// The model is untouched: the queue forwarded the session's own model.
+		expect(switchModel).toBe(liveSession.model as Model);
+	});
 });

@@ -513,10 +513,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
 	// LIVE flag derivation: the session tool policy (persona/cli layers) owns
-	// hub availability. Policy-less sessions fall back to the session-start
-	// booleans the host supplies. (LSP read-only is enforced by the tool itself.)
+	// hub availability — consulted LAZILY in the gate below. (LSP read-only is
+	// enforced by the tool itself.)
 	const toolPolicy = session.getToolPolicy?.();
-	const hubEnabled = toolPolicy ? toolPolicy.hubEnabled() : undefined;
 	const requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
 		: toolNames
@@ -660,10 +659,15 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
 			);
 		if (name === "hub") {
-			// A policy present: `hubEnabled` IS the availability answer (persona
-			// grant, CLI grant, and toggles already intersected). Without one,
-			// fall back to the classic unrestricted-session gate.
-			if (hubEnabled !== undefined) return hubEnabled;
+			// The policy is the live answer ONLY once the session registry holds
+			// `hub`: `effective()` intersects the registry, which is still EMPTY
+			// during this first createTools pass (it populates it below) — asking
+			// now would always deny and drop hub/IRC from ordinary unrestricted
+			// sessions. So the initial build falls back to the classic
+			// unrestricted-session gate; later rebuilds (persona enter/exit,
+			// toggles) see the populated registry and the policy layers decide
+			// (persona grant, CLI grant, toggles already intersected).
+			if (toolPolicy && session.toolRegistry?.has("hub")) return toolPolicy.hubEnabled();
 			return (
 				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
 			);

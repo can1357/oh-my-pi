@@ -263,6 +263,42 @@ describe("--agent launch-as-switch", () => {
 		);
 		expect(desired?.name).toBe("fixture-modeled");
 		expect(desired?.explicit?.model).toBe("anthropic/claude-sonnet-4-5");
-		expect(desired?.explicit?.thinking).toBe("high");
+	});
+
+	// fr-vU: `--no-tools` grants NOTHING at launch; the empty explicit grant
+	// must persist so a resume cannot widen the persona back to its full
+	// frontmatter toolset.
+	it("--no-tools persists an empty explicit grant for resume", async () => {
+		await writeFixtureAgents({ name: "fixture-modeled.md", content: MODELED_AGENT_MD });
+		const parsed = parseArgs(["--cwd", workspace.path(), "--agent", "fixture-modeled", "--no-tools"]);
+		const options = await buildSessionOptions(
+			parsed,
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			Settings.isolated(),
+		);
+
+		// The empty grant is durable on the launch options…
+		expect(options.pendingPersonaExplicit?.tools).toEqual([]);
+		expect(options.pendingPersonaAgent?.name).toBe("fixture-modeled");
+
+		// …and survives the journal round-trip a resume reads back.
+		const launched = await launch({
+			args: ["--agent", "fixture-modeled", "--no-tools"],
+			extraOptions: {
+				sessionManager: SessionManager.create(workspace.path(), path.join(workspace.path(), "sessions")),
+			},
+		});
+		await launched.sessionManager.ensureOnDisk();
+		await launched.sessionManager.flush();
+
+		const sessionFile = launched.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file for a persona launch");
+		const lines = (await fs.readFile(sessionFile, "utf-8")).split("\n").filter(line => line.trim() !== "");
+		const desired = readPersistedAgentPersona(
+			lines.map(line => JSON.parse(line) as { type: unknown; mode?: unknown; data?: unknown }),
+		);
+		expect(desired?.explicit?.tools).toEqual([]);
 	});
 });

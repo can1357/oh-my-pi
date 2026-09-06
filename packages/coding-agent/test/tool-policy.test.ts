@@ -14,7 +14,7 @@ function makeAgent(overrides: Partial<DiscoveredAgent> = {}): DiscoveredAgent {
 
 const NO_EXPLICIT: PersonaExplicitOverrides = {};
 
-const ALL_TOOLS = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "hub", "lsp"]);
+const ALL_TOOLS = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "hub", "lsp", "eval"]);
 const defaultActive = (name: string): boolean => name !== "lsp"; // lsp tools are defaultInactive
 
 function makePolicy(
@@ -181,5 +181,48 @@ describe("SessionToolPolicy", () => {
 		expect(policy.effective("read")).toBe(false);
 		expect(policy.effective("bash")).toBe(false);
 		expect(policy.effective("edit")).toBe(false);
+	});
+
+	// fr-vW: `exec` is a supported TOOLS SHORTHAND — the persona grant must
+	// expand it to concrete tool names BEFORE the grant is stored, so
+	// effective()/granted() only ever see bash (and eval when backends allow).
+	it("persona tools:[exec] expands to bash/eval in the grant", () => {
+		const policy = makePolicy();
+		policy.enterPersona(makeAgent({ tools: ["exec"] }), NO_EXPLICIT);
+		expect(policy.effective("bash")).toBe(true);
+		expect(policy.effective("eval")).toBe(true);
+		expect(policy.effective("exec")).toBe(false); // shorthand never surfaces as a tool
+		expect(policy.effective("write")).toBe(false);
+	});
+
+	it("persona exec grant intersects with explicit.tools on the EXPANDED names", () => {
+		const policy = makePolicy();
+		policy.enterPersona(makeAgent({ tools: ["exec", "read"] }), { tools: ["bash"] });
+		// explicit [bash] intersects the expanded [bash, eval, read]: only bash survives.
+		expect(policy.effective("bash")).toBe(true);
+		expect(policy.effective("eval")).toBe(false);
+		expect(policy.effective("read")).toBe(false);
+	});
+
+	// fo80e: a persona declaring a usable spawns list needs `task` for the
+	// policy to be usable — mirror the executor's child auto-add rule.
+	it("persona tools:[read] + spawns:[scout] auto-adds task", () => {
+		const policy = makePolicy();
+		policy.enterPersona(makeAgent({ tools: ["read"], spawns: ["scout"] }), NO_EXPLICIT);
+		expect(policy.effective("read")).toBe(true);
+		expect(policy.effective("task")).toBe(true);
+		expect(policy.effective("write")).toBe(false);
+	});
+
+	it("persona spawns:'*' auto-adds task under a null (registry-wide) grant", () => {
+		const policy = makePolicy();
+		policy.enterPersona(makeAgent({ spawns: "*" }), NO_EXPLICIT);
+		expect(policy.effective("task")).toBe(true);
+	});
+
+	it("declared-empty spawns still strips task (auto-add does not resurrect it)", () => {
+		const policy = makePolicy();
+		policy.enterPersona(makeAgent({ spawns: [] }), NO_EXPLICIT);
+		expect(policy.effective("task")).toBe(false);
 	});
 });

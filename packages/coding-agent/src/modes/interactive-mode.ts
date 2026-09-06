@@ -3073,6 +3073,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingModelSwitch = undefined;
 		this.#pendingPlanModelSwitch = false;
 		if (!pending) return;
+		// A deferred persona model-restore has now landed: the persona
+		// runtime's bridged root baseline is spent — a later deferred enter
+		// must baseline from the live session, not this flushed snapshot.
+		this.session.getPersonaRuntime()?.onPendingModelRestoreFlushed();
 		try {
 			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
 		} catch (error) {
@@ -6034,7 +6038,21 @@ export class InteractiveMode implements InteractiveModeContext {
 			...createDefaultPersonaModelHooks(this.session),
 			shouldDeferModelSwitch: () => this.session.isStreaming,
 			deferModelSwitchWhileStreaming: agent => {
-				if (!agent.model || agent.model.length === 0) return;
+				// A thinking-only persona (thinking set, no model) still queues:
+				// `#pendingModelSwitch` carries `thinkingLevel` alongside `model`
+				// and `flushPendingModelSwitch` forwards both to
+				// `setModelTemporary`, which applies a thinking-only change
+				// without touching the model (fo80k).
+				if (!agent.model || agent.model.length === 0) {
+					if (agent.thinkingLevel !== undefined) {
+						this.#pendingModelSwitch = {
+							model: this.session.model as Model,
+							thinkingLevel: agent.thinkingLevel,
+						};
+						this.#pendingPlanModelSwitch = false;
+					}
+					return;
+				}
 				const resolved = resolveModelOverride(agent.model, this.session.modelRegistry, this.session.settings);
 				if (!resolved.model) return;
 				this.#pendingModelSwitch = {

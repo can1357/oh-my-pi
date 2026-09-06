@@ -57,6 +57,7 @@ import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { type EvalBackendsAllowance, resolveEvalBackends } from "../tools/eval-backends";
+import { expandExecToolShorthand } from "../tools/builtin-names";
 import { isIrcEnabled } from "../tools/hub";
 import { LIST_STATUS_ORDER } from "../tools/hub/messaging";
 import { DEFAULT_HUB_LIST_LIMIT } from "../tools/hub/types";
@@ -2932,7 +2933,12 @@ export function deriveChildToolNames(agent: AgentDefinition, options: ChildToolN
 	const parentGrant = options.parentEffectiveGrant ?? null;
 	let toolNames: string[] | undefined;
 	if (agent.tools) {
-		toolNames = parentGrant ? agent.tools.filter(name => parentGrant.has(name)) : [...agent.tools];
+		// fr-vW: expand the `exec` shorthand on the CHILD side BEFORE the parent
+		// intersect — the parent grant only ever holds concrete tool names, so a
+		// child declaring `tools: [exec]` under a [bash]-granting parent must
+		// keep bash here, not vanish in the intersect.
+		const expanded = expandExecToolShorthand(agent.tools, options.evalBackends);
+		toolNames = parentGrant ? expanded.filter(name => parentGrant.has(name)) : expanded;
 		// Auto-include task tool if spawns defined but task not in tools. The
 		// intersection may have dropped it — re-add only if the parent can run it.
 		if (
@@ -2956,13 +2962,6 @@ export function deriveChildToolNames(agent: AgentDefinition, options: ChildToolN
 	// for a restricted parent, hub is either already in the grant or out by policy.
 	if (toolNames && !options.restrictToolNames && !parentGrant && !toolNames.includes("hub")) {
 		toolNames = [...toolNames, "hub"];
-	}
-	if (toolNames?.includes("exec")) {
-		const backends = options.evalBackends;
-		const expanded = toolNames.filter(name => name !== "exec");
-		if (backends && (backends.python || backends.js)) expanded.push("eval");
-		expanded.push("bash");
-		toolNames = Array.from(new Set(expanded));
 	}
 	return toolNames;
 }

@@ -1419,7 +1419,11 @@ export async function buildSessionOptions(
 		const explicit: PersonaExplicitOverrides = {};
 		if (parsed.model) explicit.model = parsed.model;
 		if (parsed.thinking) explicit.thinking = parsed.thinking;
+		// fr-vU: `--no-tools` is a launch-time grant of NOTHING — on resume there
+		// is no flag, so the empty list must persist as the durable explicit grant
+		// or the persona would widen back to its full frontmatter toolset.
 		if (parsed.tools) explicit.tools = parsed.tools;
+		else if (parsed.noTools) explicit.tools = [];
 		if (Object.keys(explicit).length > 0) {
 			options.pendingPersonaExplicit = explicit;
 		}

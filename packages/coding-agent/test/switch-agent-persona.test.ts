@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
@@ -154,7 +154,7 @@ function makePersonaHooks(): PersonaModelApplyHooks {
 	return { apply: async () => {}, restore: async () => {} };
 }
 
-const discoverySpies: Array<ReturnType<typeof vi.spyOn>> = [];
+const discoverySpies: Array<Mock<typeof taskDiscovery.discoverAgents>> = [];
 afterEach(() => {
 	for (const spy of discoverySpies) spy.mockRestore();
 	discoverySpies.length = 0;

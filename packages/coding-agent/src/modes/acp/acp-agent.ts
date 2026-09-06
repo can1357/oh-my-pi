@@ -137,7 +137,10 @@ export function createAcpPersonaModelHooks(
 		...defaultHooks,
 		shouldDeferModelSwitch: () => session.isStreaming,
 		deferModelSwitchWhileStreaming: agent => {
-			if (!agent.model || agent.model.length === 0) return;
+			// A thinking-only persona (thinking set, no model) still notices:
+			// its tools/prompt apply now, and the thinking change rides the
+			// same deferred-model retry at turn end (fo80k).
+			if ((!agent.model || agent.model.length === 0) && agent.thinkingLevel === undefined) return;
 			void emitNotice(PERSONA_DEFERRED_NOTICE_TEMPLATE.replace("{name}", agent.name));
 		},
 		deferModelRestoreWhileStreaming: baseline => {

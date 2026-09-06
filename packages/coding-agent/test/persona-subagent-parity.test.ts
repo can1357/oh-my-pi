@@ -383,6 +383,41 @@ describe("subagent spawn inheritance parity", () => {
 		expect(new Set(child)).toEqual(new Set(["read", "task"]));
 	});
 
+	// fr-vW: the `exec` shorthand expands on the CHILD side BEFORE the parent
+	// intersect — a [bash]-granting parent must not vanish a child's exec.
+	it("child exec shorthand under a [bash]-granting parent keeps bash (fo80l)", () => {
+		const policy = new SessionToolPolicy({
+			toolNames: ["bash"],
+			restrictToolNames: true,
+			registry: () => ALL_TOOLS,
+			isDefaultActive: () => true,
+		});
+		policy.enterPersona(makePersona(), {});
+		const child = deriveChildToolNames(
+			{ ...CHILD_AGENT, tools: ["exec"], spawns: undefined },
+			{
+				parentEffectiveGrant: policy.baselineEffectiveSet(),
+				restrictToolNames: policy.isBaselineRestricted(),
+				atMaxDepth: false,
+			},
+		);
+		// exec → [bash, eval]; intersect with baseline [bash] keeps bash, drops eval.
+		expect(child).toEqual(["bash"]);
+	});
+
+	it("child exec shorthand with backends expands to bash+eval before the intersect", () => {
+		const grant = new Set(["bash", "eval"]);
+		const child = deriveChildToolNames(
+			{ ...CHILD_AGENT, tools: ["exec"], spawns: undefined },
+			{
+				parentEffectiveGrant: grant,
+				restrictToolNames: true,
+				atMaxDepth: false,
+				evalBackends: { python: true, js: false },
+			},
+		);
+		expect(new Set(child)).toEqual(new Set(["bash", "eval"]));
+	});
 	it("executor dispatch carries the parent's baseline grant end to end", async () => {
 		const persona = makePersona();
 		mockDiscovery();

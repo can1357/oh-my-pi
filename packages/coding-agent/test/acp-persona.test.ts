@@ -20,7 +20,7 @@ import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
+import { AcpAgent, createAcpPersonaModelHooks } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { PersonaRuntime } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -502,7 +502,6 @@ describe("ACP persona reconciliation", () => {
 
 	it("emits an ACP text notice instead of a mid-turn model switch (defer channel)", async () => {
 		const harness = await createPersonaHarness();
-		const { createAcpPersonaModelHooks } = await import("@oh-my-pi/pi-coding-agent/modes/acp/acp-agent");
 		const session = new PersonaStubSession(harness.cwd);
 		session.stub.isStreaming = true;
 		const notices: string[] = [];
@@ -526,7 +525,6 @@ describe("ACP persona reconciliation", () => {
 
 	it("emits an ACP text notice for a mid-turn model restore (defer-restore channel)", async () => {
 		const harness = await createPersonaHarness();
-		const { createAcpPersonaModelHooks } = await import("@oh-my-pi/pi-coding-agent/modes/acp/acp-agent");
 		const session = new PersonaStubSession(harness.cwd);
 		session.stub.isStreaming = true;
 		const notices: string[] = [];
@@ -547,6 +545,30 @@ describe("ACP persona reconciliation", () => {
 		});
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("model restore deferred");
+	});
+
+	it("emits the defer notice for a thinking-only persona mid-turn (fo80k)", async () => {
+		// A persona with `thinkingLevel` but NO model used to skip the notice
+		// entirely, silently dropping the thinking change. The thinking-only
+		// persona still defers (its tools/prompt apply now; the thinking rides
+		// the same turn-end retry), so the client must be told.
+		const harness = await createPersonaHarness();
+		const session = new PersonaStubSession(harness.cwd);
+		session.stub.isStreaming = true;
+		const notices: string[] = [];
+		const hooks = createAcpPersonaModelHooks(session as unknown as AgentSession, async text => {
+			notices.push(text);
+		});
+
+		hooks.deferModelSwitchWhileStreaming?.({
+			name: "acp-thinker",
+			description: "",
+			systemPrompt: "prompt",
+			source: "bundled",
+			thinkingLevel: "high",
+		} as DiscoveredAgent);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain('Agent "acp-thinker" model switch deferred');
 	});
 
 	it("resume (session/resume) reconciles like load", async () => {

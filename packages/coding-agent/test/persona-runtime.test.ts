@@ -41,6 +41,7 @@ interface SessionStub {
 function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 	stub: SessionStub;
 	session: AgentSession;
+	eventListeners: Array<(event: { type: string }) => void>;
 } {
 	const stub: SessionStub = {
 		isStreaming: false,
@@ -61,6 +62,7 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 		presentationCalls: [],
 		...overrides,
 	};
+	const eventListeners: Array<(event: { type: string }) => void> = [];
 	const session = {
 		get isStreaming() {
 			return stub.isStreaming;
@@ -102,6 +104,13 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 			stub.appendPromptCalls.push(text);
 		},
 		getPersonaAppendPrompt: () => stub.appendPrompt,
+		subscribe: (listener: (event: { type: string }) => void) => {
+			eventListeners.push(listener);
+			return () => {
+				const index = eventListeners.indexOf(listener);
+				if (index >= 0) eventListeners.splice(index, 1);
+			};
+		},
 		sessionManager: {
 			appendModeChange: (mode: string, data?: Record<string, unknown>) => {
 				stub.modeChangeCalls.push({ mode, data });
@@ -109,7 +118,7 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 			},
 		},
 	} as unknown as AgentSession;
-	return { stub, session };
+	return { stub, session, eventListeners };
 }
 
 function makeHooks(overrides: Partial<PersonaModelApplyHooks> = {}): PersonaModelApplyHooks {
@@ -504,8 +513,96 @@ describe("PersonaRuntime", () => {
 		expect(exits).toBe(0);
 		expect(runtime.policy.isPersonaActive()).toBe(true);
 	});
-});
+	it("mid-turn A→B switch keeps the TRUE pre-A baseline for B's exit (fr-vV)", async () => {
+		// Persona A is active, the turn is streaming, and A is exited mid-turn:
+		// the exit QUEUES A's baseline restore (flushed only at turn end). Enter
+		// B while still streaming — the live model is still A's persona model,
+		// so B's baseline must come from the pre-chain root, not the live model.
+		// B's exit must restore the true pre-A model, not A's persona model.
+		const { stub, session } = makeSessionStub({ isStreaming: false });
+		const runtime = makeRuntime(session);
+		stub.model = { provider: "stub", id: "pre-a-model" };
+		stub.thinkingLevel = "low";
+		const queuedRestores: Array<{ model: unknown; thinkingLevel: unknown }> = [];
+		// `applyModel` mutates the session like a real hooks apply; the empty
+		// string skips the mutation (a persona with no model of its own).
+		const hooksFor = (applyModel?: string): PersonaModelApplyHooks =>
+			makeHooks({
+				apply: async () => {
+					if (applyModel) stub.model = { provider: "stub", id: applyModel };
+				},
+				shouldDeferModelSwitch: () => true,
+				deferModelSwitchWhileStreaming: () => {},
+				deferModelRestoreWhileStreaming: baseline => queuedRestores.push(baseline),
+			});
 
+		// Persona A entered BETWEEN turns: its model apply ran, the live session
+		// is on A's persona model.
+		await runtime.enter(makeAgent({ name: "a", tools: ["read"] }), {}, hooksFor("a-model"));
+		expect(stub.model).toEqual({ provider: "stub", id: "a-model" });
+
+		// A turn starts and A is exited MID-TURN: the exit QUEUES its baseline
+		// restore (flushed only at turn end).
+		stub.isStreaming = true;
+		await runtime.exit(hooksFor());
+		expect(queuedRestores).toHaveLength(1);
+		expect(queuedRestores[0]?.model).toEqual({ provider: "stub", id: "pre-a-model" });
+
+		// Enter B mid-turn, BEFORE the queued restore flushes: the live model is
+		// still A's persona model. B's baseline must be the pre-chain root.
+		await runtime.enter(makeAgent({ name: "b", tools: ["write"] }), {}, hooksFor("b-model"));
+		expect(stub.model).toEqual({ provider: "stub", id: "a-model" }); // B's switch also deferred
+
+		// Turn ends; the surface flushes A's queued restore; B exits.
+		stub.isStreaming = false;
+		stub.model = { provider: "stub", id: "pre-a-model" };
+		stub.thinkingLevel = "low";
+		await runtime.exit(makeHooks());
+
+		// Regression guard: pre-fix, B's baseline captured the live A model, so
+		// the exit restored A's persona model here instead of the true pre-A
+		// baseline.
+		expect(stub.model).toEqual({ provider: "stub", id: "pre-a-model" });
+		expect(stub.thinkingLevel).toBe("low");
+	});
+
+	it("a user model change between mid-turn switches re-roots the baseline (fr-vV)", async () => {
+		// The queued restore flushed, then the user deliberately picked a
+		// different model — all before B's mid-turn enter. The root only bridges
+		// ONE queued-restore gap: B's enter must baseline from the session as it
+		// now stands (the user's model), not from the pre-A snapshot.
+		const { stub, session } = makeSessionStub({ isStreaming: false });
+		const runtime = makeRuntime(session);
+		stub.model = { provider: "stub", id: "pre-a-model" };
+		stub.thinkingLevel = "low";
+		const hooksFor = (): PersonaModelApplyHooks =>
+			makeHooks({
+				shouldDeferModelSwitch: () => true,
+				deferModelSwitchWhileStreaming: () => {},
+			});
+
+		await runtime.enter(makeAgent({ name: "a", tools: ["read"] }), {}, hooksFor());
+		stub.isStreaming = true;
+		await runtime.exit(hooksFor()); // A's restore queued; root = pre-a-model
+
+		// Turn end: the queued restore flushes (InteractiveMode's queue calls
+		// onPendingModelRestoreFlushed, which spends the root), and then the
+		// user deliberately picks a different model before B's next enter.
+		runtime.onPendingModelRestoreFlushed();
+		stub.model = { provider: "stub", id: "user-model" };
+		stub.thinkingLevel = "high";
+		stub.isStreaming = true;
+
+		// B enters MID-TURN (deferred): the spent root cannot baseline from
+		// pre-a-model; the user's deliberate /model pick is now authoritative.
+		await runtime.enter(makeAgent({ name: "b", tools: ["write"] }), {}, hooksFor());
+		stub.isStreaming = false; // turn ends: B's restore is applied live
+		await runtime.exit(makeHooks());
+
+		expect(stub.model).toEqual({ provider: "stub", id: "user-model" });
+		expect(stub.thinkingLevel).toBe("high");
+	});
+});
 describe("PersonaSwitchTransaction", () => {
 	it("rollback restores the runtime state captured at begin", async () => {
 		const { stub, session } = makeSessionStub();

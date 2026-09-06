@@ -1,3 +1,5 @@
+import { expandExecToolShorthand } from "../tools/builtin-names";
+
 import type { AgentDefinition } from "../task/types";
 
 /**
@@ -219,9 +221,11 @@ export class SessionToolPolicy {
 		return (this.cliGrant === null || this.cliGrant.has(name)) && this.#toggledOnOrDefault(name);
 	}
 	/**
-	 * Persona grant: declared `agent.tools` (with `task` stripped when the persona
-	 * declares a spawns policy that cannot spawn — an explicit `tools:[...,task]`
-	 * with `spawns: []` still cannot spawn, so advertising `task` would promise a
+	 * Persona grant: declared `agent.tools` (with `exec` expanded to its
+	 * concrete tools — fr-vW — and `task` added when the persona declares a
+	 * usable spawns list, fo80e; `task` is stripped again when the
+	 * spawns policy cannot spawn — an explicit `tools:[...,task]` with
+	 * `spawns: []` still cannot spawn, so advertising `task` would promise a
 	 * tool that fails every invocation). When `tools:` is omitted the grant is
 	 * `null` = "every registered tool", evaluated live so tools registered after
 	 * the persona activated remain grantable.
@@ -241,8 +245,30 @@ export class SessionToolPolicy {
 		// frontmatter omits `tools:` — the CLI grant. On RESUME there is no CLI
 		// flag (cliGrant null), so `explicit.tools` (the persisted launch grant)
 		// is the ONLY remaining narrowing: it becomes the grant directly rather
-		// than intersecting an unrestricted set down to nothing.
-		const grant = new Set(declared ?? [...(this.cliGrant ?? explicit.tools ?? [])]);
+		// than intersecting an unrestricted set down to nothing. `exec` expands
+		// through the shared shorthand rule (fr-vW) BEFORE the grant is stored so
+		// effective()/granted() only ever see concrete tool names.
+		const declaredOrInherited =
+			declared !== undefined ? expandExecToolShorthand(declared) : [...(this.cliGrant ?? explicit.tools ?? [])];
+		const grant = new Set(declaredOrInherited);
+
+		// fo80e: a persona that declares a usable spawns list needs `task` to
+		// make that policy usable — mirror the executor's child derivation
+		// (deriveChildToolNames): auto-add `task` for declared-and-non-empty
+		// (or "*") spawns unless already present. The add is bounded by the
+		// inherited base below: when `explicit.tools` (the persisted launch
+		// grant on resume) never included `task`, resurrecting it through the
+		// auto-add would widen the session past its original CLI grant.
+		// spawnsBroken (declared-empty) strips it after; unknown spawn names
+		// still auto-add (upstream don't-validate convention).
+		const inheritedBase = declared === undefined ? (this.cliGrant ?? new Set(explicit.tools ?? [])) : undefined;
+		const baseGrantsTask = inheritedBase === undefined || inheritedBase.has("task");
+		if (agent.spawns !== undefined && spawnsUsable(agent.spawns) && !grant.has("task")) {
+			// Bounded by the inherited base: when the launch grant (CLI or the
+			// persisted explicit.tools on resume) never included `task`, the
+			// auto-add must not resurrect it past the session's original ceiling.
+			if (baseGrantsTask) grant.add("task");
+		}
 		if (spawnsBroken) grant.delete("task");
 		if (explicit.tools && declared !== undefined) {
 			// Both layers present: intersect (never widen).
