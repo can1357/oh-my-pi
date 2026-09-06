@@ -59,6 +59,18 @@ function emptyStartupSelection(persistCurrentVersion: boolean): StartupChangelog
 	};
 }
 
+/** Bucket for release bullets written above any `###` category heading, so the breakdown never loses them. */
+const UNCATEGORIZED_CHANGELOG_CATEGORY = "Other";
+
+/** Indent columns of a Markdown list bullet, or undefined when the line opens no list item. Tabs advance to the next 4-column stop. */
+function changelogBulletIndent(line: string): number | undefined {
+	const match = line.match(/^([ \t]*)[-+*][ \t]+\S/);
+	if (!match) return undefined;
+	let indent = 0;
+	for (const char of match[1] ?? "") indent = char === "\t" ? indent + 4 - (indent % 4) : indent + 1;
+	return indent;
+}
+
 function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 	changeCount: number;
 	categoryCounts: Record<string, number>;
@@ -67,14 +79,28 @@ function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 	let changeCount = 0;
 
 	for (const entry of entries) {
-		let category: string | undefined;
+		let category = UNCATEGORIZED_CHANGELOG_CATEGORY;
+		// Indent of the open top-level list, so deeper bullets are attributed to the change above them.
+		let listIndent: number | undefined;
 		for (const line of entry.content.split("\n")) {
 			const heading = line.match(/^###\s+(.+?)\s*$/);
 			if (heading) {
-				category = heading[1];
+				category = heading[1] ?? UNCATEGORIZED_CHANGELOG_CATEGORY;
+				listIndent = undefined;
 				continue;
 			}
-			if (!category || !/^-\s+\S/.test(line)) continue;
+			const indent = changelogBulletIndent(line);
+			if (indent === undefined) continue;
+			if (listIndent === undefined) {
+				// With no list open, four columns of indent is an indented code block, not a list item.
+				if (indent >= 4) continue;
+				listIndent = indent;
+			} else if (indent >= listIndent + 2) {
+				// At or past the content column of the item above: a sub-item, not a separate change.
+				continue;
+			} else if (indent < listIndent) {
+				listIndent = indent;
+			}
 			categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
 			changeCount++;
 		}
