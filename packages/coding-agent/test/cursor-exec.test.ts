@@ -1266,6 +1266,19 @@ describe("Cursor MCP task tool adapter", () => {
 		expect(normalized.task).toBeUndefined();
 	});
 
+	it("preserves task and context prose whitespace while rejecting blank aliases", () => {
+		const single = normalizeCursorTaskArgs({ prompt: "  Inspect auth\n\n```ts\n  const x = 1;\n```\n" });
+		expect(single.task).toBe("  Inspect auth\n\n```ts\n  const x = 1;\n```\n");
+
+		const batch = normalizeCursorTaskArgs({
+			context: "  Shared constraints\n",
+			tasks: [{ instruction: "\n  Preserve indentation\n" }],
+		});
+		expect(batch.context).toBe("  Shared constraints\n");
+		const tasks = batch.tasks as Array<Record<string, unknown>>;
+		expect(tasks[0].task).toBe("\n  Preserve indentation\n");
+	});
+
 	it("does not shadow an explicitly registered third-party tool named subagent", async () => {
 		const customSubagentExecuted: Array<{ toolCallId: string; args: Record<string, unknown> }> = [];
 		const customSubagentTool: Tool = {

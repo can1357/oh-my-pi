@@ -108,6 +108,12 @@ function nonEmptyStringArg(args: Record<string, unknown>, key: string): string |
 	return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function nonBlankProseArg(args: Record<string, unknown>, key: string): string | undefined {
+	const value = args[key];
+	if (typeof value !== "string") return undefined;
+	return value.trim().length > 0 ? value : undefined;
+}
+
 export function isCursorStrReplaceMcpName(name: string): boolean {
 	return CURSOR_STRREPLACE_MCP_NAMES.has(name);
 }
@@ -318,9 +324,9 @@ export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<s
 			if (!item || typeof item !== "object") return item;
 			const itemRecord = item as Record<string, unknown>;
 			const itemTask =
-				nonEmptyStringArg(itemRecord, "task") ??
-				nonEmptyStringArg(itemRecord, "prompt") ??
-				nonEmptyStringArg(itemRecord, "instruction");
+				nonBlankProseArg(itemRecord, "task") ??
+				nonBlankProseArg(itemRecord, "prompt") ??
+				nonBlankProseArg(itemRecord, "instruction");
 			const itemName = nonEmptyStringArg(itemRecord, "name") ?? nonEmptyStringArg(itemRecord, "description");
 			const itemAgent =
 				nonEmptyStringArg(itemRecord, "agent") ?? resolveSubagentTypeToAgent(itemRecord.subagent_type);
@@ -331,7 +337,7 @@ export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<s
 				...(itemAgent !== undefined ? { agent: itemAgent } : {}),
 			};
 		});
-		const context = nonEmptyStringArg(args, "context") ?? nonEmptyStringArg(args, "description");
+		const context = nonBlankProseArg(args, "context") ?? nonBlankProseArg(args, "description");
 		return {
 			...args,
 			...(context !== undefined ? { context } : {}),
@@ -340,7 +346,7 @@ export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<s
 	}
 
 	const task =
-		nonEmptyStringArg(args, "task") ?? nonEmptyStringArg(args, "prompt") ?? nonEmptyStringArg(args, "instruction");
+		nonBlankProseArg(args, "task") ?? nonBlankProseArg(args, "prompt") ?? nonBlankProseArg(args, "instruction");
 	const name = nonEmptyStringArg(args, "name") ?? nonEmptyStringArg(args, "description");
 	const agent = nonEmptyStringArg(args, "agent") ?? resolveSubagentTypeToAgent(args.subagent_type);
 
