@@ -7,8 +7,8 @@ import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
+import { physicalTargetSegments } from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
 import {
-	__physicalTargetSegmentsForTesting,
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
 	onModelRolesChanged,
@@ -315,6 +315,24 @@ describe("Settings", () => {
 
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 2 });
+		});
+
+		it("migrates legacy settings through a dangling config.yml symlink, preserving the link", async () => {
+			// First run with config.yml symlinked into a dotfiles checkout that
+			// has not been created yet, plus legacy settings.json to migrate.
+			// The migration's atomic rename must land on the referent — staging
+			// it at the logical path would replace the user's link with a
+			// regular file and leave the referent missing.
+			const managedDir = tempDir.join("managed");
+			const managedConfigPath = path.join(managedDir, "config.yml");
+			await fs.promises.symlink(managedConfigPath, getConfigPath(), "file");
+			await Bun.write(path.join(agentDir, "settings.json"), JSON.stringify({ setupVersion: 7 }));
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 7 });
+			expect(settings.get("setupVersion")).toBe(7);
 		});
 
 		it("writes through a dangling symlink chain to the final target, preserving every link", async () => {
@@ -805,20 +823,19 @@ describe("Settings", () => {
 			// `C:\C:\managed\final.yml`, so flushing through a dangling absolute link
 			// fails. Drive the splitter with the win32 engine so the bug reproduces
 			// on this POSIX host.
-			const segments = __physicalTargetSegmentsForTesting("C:\\managed\\final.yml", path.win32).filter(
+			const segments = physicalTargetSegments("C:\\managed\\final.yml", path.win32).filter(
 				segment => segment !== "" && segment !== ".",
 			);
 			expect(segments).toEqual(["managed", "final.yml"]);
 			// A UNC target seeds at the `\\server\share\` root, which must likewise
 			// be stripped rather than re-walked as `server` / `share` segments.
-			const uncSegments = __physicalTargetSegmentsForTesting(
-				"\\\\server\\share\\managed\\final.yml",
-				path.win32,
-			).filter(segment => segment !== "" && segment !== ".");
+			const uncSegments = physicalTargetSegments("\\\\server\\share\\managed\\final.yml", path.win32).filter(
+				segment => segment !== "" && segment !== ".",
+			);
 			expect(uncSegments).toEqual(["managed", "final.yml"]);
 			// A relative Windows target seeds at the link's real parent, so every
 			// segment is preserved unchanged.
-			expect(__physicalTargetSegmentsForTesting("managed\\final.yml", path.win32)).toEqual(["managed", "final.yml"]);
+			expect(physicalTargetSegments("managed\\final.yml", path.win32)).toEqual(["managed", "final.yml"]);
 		});
 
 		it("treats a backslash as a filename character on POSIX, not a separator", async () => {
@@ -827,10 +844,10 @@ describe("Settings", () => {
 			// `managed`/`config.yml` makes flush either fail on the missing dir or
 			// write an unrelated file while the real link stays dangling. Drive the
 			// splitter with the posix engine so the bug reproduces on any host.
-			expect(__physicalTargetSegmentsForTesting("managed\\config.yml", path.posix)).toEqual(["managed\\config.yml"]);
+			expect(physicalTargetSegments("managed\\config.yml", path.posix)).toEqual(["managed\\config.yml"]);
 			// Forward slashes still split, and the leading `/` of an absolute POSIX
 			// target strips to no extra segment (root seeded separately).
-			const absSegments = __physicalTargetSegmentsForTesting("/managed/final.yml", path.posix).filter(
+			const absSegments = physicalTargetSegments("/managed/final.yml", path.posix).filter(
 				segment => segment !== "" && segment !== ".",
 			);
 			expect(absSegments).toEqual(["managed", "final.yml"]);

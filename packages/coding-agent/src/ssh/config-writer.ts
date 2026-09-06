@@ -4,8 +4,8 @@
  * Utilities for reading/writing ssh.json files at user or project level.
  */
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { publishSerializedConfig, resolveSymlinkWriteTarget, withConfigFileLock } from "../utils/atomic-file";
 
 export interface SSHHostConfig {
 	host: string;
@@ -46,17 +46,8 @@ export async function readSSHConfigFile(filePath: string): Promise<SSHConfigFile
  * Creates parent directories if they don't exist.
  */
 export async function writeSSHConfigFile(filePath: string, config: SSHConfigFile): Promise<void> {
-	// Ensure parent directory exists
-	const dir = path.dirname(filePath);
-	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
-
-	// Write to temp file first (atomic write)
-	const tmpPath = `${filePath}.tmp`;
-	const content = JSON.stringify(config, null, 2);
-	await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
-
-	// Rename to final path (atomic on most systems)
-	await fs.promises.rename(tmpPath, filePath);
+	const writePath = await resolveSymlinkWriteTarget(filePath);
+	await publishSerializedConfig(writePath, JSON.stringify(config, null, 2));
 }
 
 /**
@@ -94,25 +85,28 @@ export async function addSSHHost(filePath: string, name: string, hostConfig: SSH
 		throw new Error("Host address cannot be empty");
 	}
 
-	// Read existing config
-	const existing = await readSSHConfigFile(filePath);
+	// Read, duplicate-check, and write under the resolved-target lock so
+	// concurrent mutations (including paths aliasing one referent) serialize.
+	await withConfigFileLock(filePath, async writePath => {
+		const existing = await readSSHConfigFile(writePath);
 
-	// Check for duplicate name
-	if (existing.hosts?.[name]) {
-		throw new Error(`Host "${name}" already exists in ${filePath}`);
-	}
+		// Check for duplicate name
+		if (existing.hosts?.[name]) {
+			throw new Error(`Host "${name}" already exists in ${filePath}`);
+		}
 
-	// Add host
-	const updated: SSHConfigFile = {
-		...existing,
-		hosts: {
-			...existing.hosts,
-			[name]: hostConfig,
-		},
-	};
+		// Add host
+		const updated: SSHConfigFile = {
+			...existing,
+			hosts: {
+				...existing.hosts,
+				[name]: hostConfig,
+			},
+		};
 
-	// Write back
-	await writeSSHConfigFile(filePath, updated);
+		// Write back (against the pinned, already-resolved target)
+		await publishSerializedConfig(writePath, JSON.stringify(updated, null, 2));
+	});
 }
 
 /**
@@ -133,20 +127,22 @@ export async function updateSSHHost(filePath: string, name: string, hostConfig: 
 		throw new Error("Host address cannot be empty");
 	}
 
-	// Read existing config
-	const existing = await readSSHConfigFile(filePath);
+	await withConfigFileLock(filePath, async writePath => {
+		// Read existing config
+		const existing = await readSSHConfigFile(writePath);
 
-	// Update host
-	const updated: SSHConfigFile = {
-		...existing,
-		hosts: {
-			...existing.hosts,
-			[name]: hostConfig,
-		},
-	};
+		// Update host
+		const updated: SSHConfigFile = {
+			...existing,
+			hosts: {
+				...existing.hosts,
+				[name]: hostConfig,
+			},
+		};
 
-	// Write back
-	await writeSSHConfigFile(filePath, updated);
+		// Write back (against the pinned, already-resolved target)
+		await publishSerializedConfig(writePath, JSON.stringify(updated, null, 2));
+	});
 }
 
 /**
@@ -155,23 +151,25 @@ export async function updateSSHHost(filePath: string, name: string, hostConfig: 
  * @throws Error if host doesn't exist
  */
 export async function removeSSHHost(filePath: string, name: string): Promise<void> {
-	// Read existing config
-	const existing = await readSSHConfigFile(filePath);
+	await withConfigFileLock(filePath, async writePath => {
+		// Read existing config
+		const existing = await readSSHConfigFile(writePath);
 
-	// Check if host exists
-	if (!existing.hosts?.[name]) {
-		throw new Error(`Host "${name}" not found in ${filePath}`);
-	}
+		// Check if host exists
+		if (!existing.hosts?.[name]) {
+			throw new Error(`Host "${name}" not found in ${filePath}`);
+		}
 
-	// Remove host
-	const { [name]: _removed, ...remaining } = existing.hosts;
-	const updated: SSHConfigFile = {
-		...existing,
-		hosts: remaining,
-	};
+		// Remove host
+		const { [name]: _removed, ...remaining } = existing.hosts;
+		const updated: SSHConfigFile = {
+			...existing,
+			hosts: remaining,
+		};
 
-	// Write back
-	await writeSSHConfigFile(filePath, updated);
+		// Write back (against the pinned, already-resolved target)
+		await publishSerializedConfig(writePath, JSON.stringify(updated, null, 2));
+	});
 }
 
 /**
