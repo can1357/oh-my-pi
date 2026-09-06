@@ -87,7 +87,10 @@ const HERDR_PANE_ID_PATTERN = /^[0-9A-Za-z:_-]{1,64}$/u;
  * fallback is preserved when the pane id is absent or the binary is missing.
  */
 function sendHerdrNotification(message: string | TerminalNotification, env: NodeJS.ProcessEnv = Bun.env): boolean {
-	if (env.HERDR_ENV?.trim() !== "1") return false;
+	// Pane-only detection, like `isInsideHerdr`: an env-sanitizing launcher can
+	// drop HERDR_ENV and keep the pane identity, and that pane can still be
+	// backgrounded. The pane id itself is what the CLI needs, so it stays required.
+	if (!isInsideHerdr(env)) return false;
 	const paneId = env.HERDR_PANE_ID?.trim();
 	if (!paneId || !HERDR_PANE_ID_PATTERN.test(paneId)) return false;
 

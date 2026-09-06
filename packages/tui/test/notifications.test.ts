@@ -255,6 +255,18 @@ describe("terminal notifications", () => {
 		expect(stdout).not.toHaveBeenCalled();
 	});
 
+	it("routes through the CLI when a launcher dropped HERDR_ENV but kept the pane id", () => {
+		delete Bun.env.HERDR_ENV;
+		Bun.env.HERDR_PANE_ID = "w6:p1";
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+
+		TERMINAL.sendNotification({ title: "session", body: "Waiting for input", type: "ask" });
+
+		expect(spawn).toHaveBeenCalledTimes(1);
+		expect(stdout).not.toHaveBeenCalled();
+	});
+
 	it("rings Herdr's completion sound for a settled turn and stays silent otherwise", () => {
 		Bun.env.HERDR_ENV = "1";
 		Bun.env.HERDR_PANE_ID = "w6:p1";
