@@ -1027,6 +1027,9 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		strict: tool.strict,
 		mcpServerName: tool.mcpServerName,
 		mcpToolName: tool.mcpToolName,
+		// Forwarded so MCP tools renamed by the digit-keeping mint keep honoring
+		// legacy `deny`/`prompt` policies; RegisteredToolAdapter re-exposes it.
+		legacyName: tool.legacyName,
 		sourcePath,
 		execute: (toolCallId, params, signal, onUpdate, ctx) =>
 			tool.execute(toolCallId, params, onUpdate, createCustomToolContext(ctx), signal),

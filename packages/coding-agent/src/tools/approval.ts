@@ -13,7 +13,15 @@ export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-
 export type ApprovalPolicy = "allow" | "deny" | "prompt";
 export type ApprovalMode = "always-ask" | "write" | "yolo";
 
-type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
+type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails"> & {
+	/**
+	 * Previous public name of this tool, when a rename changed how it mints.
+	 * MCP tools minted before digits were kept carry their digit-stripped name
+	 * here so user `deny`/`prompt` policies written against it still apply
+	 * (`allow` is deliberately not inherited — see resolveApproval).
+	 */
+	readonly legacyName?: string;
+};
 
 export interface ResolvedApproval {
 	policy: ApprovalPolicy;
@@ -133,6 +141,22 @@ export function resolveApproval(
 	const effectiveUserPolicy = userPolicy ?? fallbackPolicy;
 	const userPolicyKey = userPolicy !== undefined ? policyKey : tool.name;
 
+	// Legacy-name fallback for renamed tools (e.g. MCP mints that gained digits).
+	// Fail-closed: only `deny`/`prompt` carry over from the old key, so a
+	// forgotten restrictive policy keeps protecting the renamed tool, while a
+	// stale `allow` cannot mask a `deny` another user sets under the new name.
+	const legacyPolicy =
+		effectiveUserPolicy === undefined &&
+		typeof tool.legacyName === "string" &&
+		tool.legacyName !== tool.name &&
+		Object.hasOwn(userConfig, tool.legacyName)
+			? normalizePolicy(userConfig[tool.legacyName])
+			: undefined;
+	const inheritedPolicy = legacyPolicy === "deny" || legacyPolicy === "prompt" ? legacyPolicy : undefined;
+	const inheritedPolicyKey = inheritedPolicy !== undefined ? tool.legacyName : undefined;
+	const combinedUserPolicy = effectiveUserPolicy ?? inheritedPolicy;
+	const combinedUserPolicyKey = effectiveUserPolicy !== undefined ? userPolicyKey : inheritedPolicyKey;
+
 	if (decision.policy === "deny") {
 		return {
 			policy: "deny",
@@ -143,13 +167,13 @@ export function resolveApproval(
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
-	if (effectiveUserPolicy === "deny") {
+	if (combinedUserPolicy === "deny") {
 		return {
 			policy: "deny",
 			tier: decision.tier,
 			override: decision.override,
 			source: "user",
-			policyKey: userPolicyKey,
+			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
 		};
 	}
 
@@ -165,11 +189,11 @@ export function resolveApproval(
 			};
 		}
 		return {
-			policy: effectiveUserPolicy ?? "allow",
+			policy: combinedUserPolicy ?? "allow",
 			tier: decision.tier,
 			override: false,
-			source: effectiveUserPolicy ? "user" : "mode",
-			...(effectiveUserPolicy ? { policyKey: userPolicyKey } : {}),
+			source: combinedUserPolicy ? "user" : "mode",
+			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
 		};
 	}
 
@@ -195,13 +219,13 @@ export function resolveApproval(
 		};
 	}
 
-	if (effectiveUserPolicy) {
+	if (combinedUserPolicy) {
 		return {
-			policy: effectiveUserPolicy,
+			policy: combinedUserPolicy,
 			tier: decision.tier,
 			override: false,
 			source: "user",
-			policyKey: userPolicyKey,
+			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
 		};
 	}
 

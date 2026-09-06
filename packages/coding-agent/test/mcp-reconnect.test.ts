@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import { createMCPJsonRpcError, MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import type { MCPReconnect } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import {
+	createLegacyMCPToolName,
 	createMCPToolName,
 	DeferredMCPTool,
 	deduplicateMCPToolsByName,
@@ -90,6 +91,34 @@ describe("createMCPToolName", () => {
 
 	it("leaves names within the limit untouched", () => {
 		expect(createMCPToolName("puppeteer", "puppeteer_screenshot")).toBe("mcp__puppeteer_screenshot");
+	});
+
+	it("keeps digits, so servers differing only by a digit stay distinct", () => {
+		// The sanitizer used to strip 0-9, minting mcp__context_query_docs for
+		// server "context7" and collapsing "foo1"/"foo2" onto one name, which
+		// then cost one of them a tool via deduplicateMCPToolsByName().
+		expect(createMCPToolName("context7", "query-docs")).toBe("mcp__context7_query_docs");
+		expect(createMCPToolName("s3-storage", "get_object")).toBe("mcp__s3_storage_get_object");
+		expect(createMCPToolName("foo1", "run")).not.toBe(createMCPToolName("foo2", "run"));
+	});
+
+	it("mints the pre-rename legacy name only for digit-bearing servers/tools", () => {
+		expect(createLegacyMCPToolName("context7", "query-docs")).toBe("mcp__context_query_docs");
+		expect(createLegacyMCPToolName("s3-storage", "get_object")).toBe("mcp__s_storage_get_object");
+		expect(createLegacyMCPToolName("puppeteer", "puppeteer_screenshot")).toBeUndefined();
+		expect(createLegacyMCPToolName("plain", "tool")).toBeUndefined();
+	});
+
+	it("exposes the legacy alias on both live and deferred tools", () => {
+		// Slow-startup servers register DeferredMCPTool instead of MCPTool;
+		// approval fallback must not depend on connection timing (#10810 review).
+		const digitTool = { name: "query-docs", inputSchema: { type: "object" as const } };
+		const live = new MCPTool(makeConnection(mockTransport(async () => ({})), "context7"), digitTool);
+		const deferred = new DeferredMCPTool("context7", digitTool, async () => {
+			throw new Error("unneeded");
+		});
+		expect(live.legacyName).toBe("mcp__context_query_docs");
+		expect(deferred.legacyName).toBe("mcp__context_query_docs");
 	});
 
 	it("is deterministic and keeps distinct overlong names distinct", () => {
