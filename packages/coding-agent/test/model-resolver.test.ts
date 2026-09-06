@@ -1040,6 +1040,24 @@ describe("resolveAgentModelPatterns", () => {
 		).toEqual({ patterns: ["openai/gpt-4o"], role: undefined });
 	});
 
+	test('honors a bare role name as the request model (task `model: "smol"`)', () => {
+		const settings = Settings.isolated({
+			modelRoles: { smol: "openai/gpt-4o-mini" },
+		});
+
+		// The task `model` override documents bare role aliases (`smol`), which
+		// must expand to the configured role's model AND retain the role identity
+		// so the child's inherited retry-fallback chain is keyed off `smol`
+		// rather than `default`. Previously this fell through as a literal/fuzzy
+		// pattern and used the parent session model.
+		expect(
+			resolveAgentModelSelection({
+				requestModel: "smol",
+				settings,
+			}),
+		).toEqual({ patterns: ["openai/gpt-4o-mini"], role: "smol" });
+	});
+
 	test("falls back to the active session model when @task is unset", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
@@ -1937,6 +1955,17 @@ describe("resolveExplicitModelRole", () => {
 		expect(resolveExplicitModelRole("pi/reviewer:high", settings)).toBe("reviewer");
 		expect(resolveExplicitModelRole("@reviewer:xhigh", settings)).toBe("reviewer");
 		expect(resolveExplicitModelRole("*:low", settings)).toBe("default");
+	});
+
+	test('recognizes a bare role name (task `model: "smol"`) beside prefixed aliases', () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "openai/gpt-4o-mini" } });
+
+		expect(resolveExplicitModelRole("smol", settings)).toBe("smol");
+		expect(resolveExplicitModelRole("smol:high", settings)).toBe("smol");
+		// bare `default` stays "inherit the session model", not the default role,
+		// and explicit provider/model selectors are never roles.
+		expect(resolveExplicitModelRole("default", settings)).toBeUndefined();
+		expect(resolveExplicitModelRole("openai/gpt-4o", settings)).toBeUndefined();
 	});
 
 	test("does not infer a role from an explicit model selector", () => {

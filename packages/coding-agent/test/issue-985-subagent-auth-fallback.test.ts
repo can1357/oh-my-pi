@@ -151,6 +151,40 @@ describe("issue #985: subagent dispatch auth fallback", () => {
 		expect(result.model?.id).toBe("shared-id");
 	});
 
+	test("uses a later authenticated caller pattern before falling back to the parent", async () => {
+		// A requested fallback array must be exhausted in caller order before the
+		// parent session model is substituted: provider-a has no auth but
+		// provider-b does, so provider-b is selected and no parent fallback
+		// occurs (see feat/task-model-param review comment on honoring an
+		// advertised model fallback array).
+		const authedSecondModel: Model<Api> = buildModel({
+			id: "claude-sonnet-4-5",
+			name: "Claude Sonnet 4.5",
+			api: "openai-completions",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		});
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel, authedSecondModel],
+			authedProviders: new Set(["deepseek", "anthropic"]), // opencode-zen unauthed
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["qwen3.6-plus-free", "anthropic/claude-sonnet-4-5"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+		);
+
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("anthropic");
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+	});
+
 	test("treats keyless providers (kNoAuth marker) as authenticated", async () => {
 		// Keyless-by-design providers (Ollama, llama.cpp, lm-studio) advertise the
 		// kNoAuth sentinel from getApiKey to signal that they do not require

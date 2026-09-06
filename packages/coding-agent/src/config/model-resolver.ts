@@ -991,7 +991,20 @@ function modelRoleAliasPrefixLength(value: string): number | undefined {
 function getModelRoleAlias(value: string, settings?: ModelRoleLookup): string | undefined {
 	const normalized = value.trim();
 	const prefixLength = modelRoleAliasPrefixLength(normalized);
-	if (prefixLength === undefined) return undefined;
+	if (prefixLength === undefined) {
+		// Bare role names (task `model: "smol"`) are valid alongside the
+		// prefixed forms `@smol`, `pi/smol`, and `*`. Keep bare `default`
+		// special: it means "inherit the session's active model", not the
+		// `default` role chain. Explicit `provider/id` selectors are never
+		// roles; they are matched as concrete model patterns.
+		if (
+			normalized !== DEFAULT_MODEL_ROLE &&
+			(isModelRole(normalized) || settings?.getModelRole(normalized) !== undefined)
+		) {
+			return normalized;
+		}
+		return undefined;
+	}
 
 	const candidate = normalized === DEFAULT_MODEL_ROLE_ALIAS ? DEFAULT_MODEL_ROLE : normalized.slice(prefixLength);
 	if (isModelRole(candidate) || settings?.getModelRole(candidate) !== undefined) return candidate;
@@ -1009,9 +1022,10 @@ export function normalizeModelPatternList(value: string | string[] | undefined):
  * Extract the first explicit model-role alias from a raw model selection.
  *
  * This intentionally runs before role expansion so callers can retain the
- * source identity (`@smol`, `pi/slow`, or `*`) even when it resolves to a
- * concrete provider/model or inherited fallback. Bare role names and explicit
- * provider/model selectors are not role aliases.
+ * source identity (`@smol`, `pi/slow`, `*`, or the bare `smol` documented by
+ * the task `model` override) even when it resolves to a concrete
+ * provider/model or inherited fallback. Explicit provider/model selectors
+ * (`provider/id`) are not role aliases.
  */
 export function resolveExplicitModelRole(
 	value: string | string[] | undefined,
@@ -1019,8 +1033,16 @@ export function resolveExplicitModelRole(
 ): string | undefined {
 	for (const pattern of normalizeModelPatternList(value)) {
 		const prefixLength = modelRoleAliasPrefixLength(pattern);
-		if (prefixLength === undefined) continue;
-		const { base } = splitThinkingSuffix(pattern, prefixLength, MAX_THINKING_SUFFIX_OPTIONS);
+		if (prefixLength !== undefined) {
+			const { base } = splitThinkingSuffix(pattern, prefixLength, MAX_THINKING_SUFFIX_OPTIONS);
+			const role = getModelRoleAlias(base, settings);
+			if (role) return role;
+			continue;
+		}
+		// Bare role names carry no alias prefix. getModelRoleAlias recognizes a
+		// bare built-in role or configured custom role (but neither bare
+		// `default` nor an explicit `provider/id` selectors).
+		const { base } = splitThinkingSuffix(pattern, LEGACY_MODEL_ROLE_ALIAS_PREFIX.length, MAX_THINKING_SUFFIX_OPTIONS);
 		const role = getModelRoleAlias(base, settings);
 		if (role) return role;
 	}
@@ -1486,10 +1508,13 @@ export function resolveModelOverride(
  * Resolve a list of override patterns to the first matching model, with an
  * auth-aware fallback to the parent session's active model.
  *
- * If the resolved subagent model has no working credentials (provider has no
- * usable auth), and the parent's active model resolves with working auth,
- * use the parent's model instead. This prevents subagent dispatch from
- * silently routing to a provider the user can't actually call (e.g.
+ * The caller-supplied patterns are exhausted in order against their own
+ * credentials before the parent is considered, so an advertised fallback array
+ * such as `["provider-a/model", "provider-b/model"]` is honored when the first
+ * pattern matches a model whose provider lacks credentials but a later pattern
+ * is authenticated. Only when no caller pattern has working credentials does
+ * this fall back to the parent's active model. This prevents subagent dispatch
+ * from silently routing to a provider the user can't actually call (e.g.
  * `modelRoles.task` pointing at an unqualified id whose only available
  * provider variant has no configured credentials — see #985).
  *
@@ -1521,29 +1546,64 @@ export async function resolveModelOverrideWithAuthFallback(
 	authFallbackUsed: boolean;
 	warning?: string;
 }> {
-	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
-	if (!primary.model || !parentActiveModelPattern) {
-		return { ...primary, authFallbackUsed: false };
+	if (modelPatterns.length === 0) {
+		return { explicitThinkingLevel: false, authFallbackUsed: false };
 	}
 
-	const primaryKey = await modelRegistry.getApiKey(primary.model, sessionId);
-	if (primaryKey === kNoAuth || isAuthenticated(primaryKey)) {
-		return { ...primary, authFallbackUsed: false };
+	const availableModels = modelRegistry.getAvailable();
+	const matchPreferences = getModelMatchPreferences(settings);
+
+	// Exhaust the caller-supplied patterns in order before falling back to the
+	// parent session model. A requested fallback array such as
+	// ["provider-a/model", "provider-b/model"] must have each of its patterns
+	// tried against its own credentials, so a later authenticated pattern is
+	// used instead of jumping straight to the parent (see the task `model`
+	// override, whose patterns are ordered by caller preference).
+	let primary: ResolvedModelRoleValue | undefined;
+	let primaryWarning: string | undefined;
+	for (const pattern of modelPatterns) {
+		const result = resolveModelRoleValue(pattern, availableModels, { settings, matchPreferences });
+		if (!result.model) {
+			if (!primaryWarning && result.warning) primaryWarning = result.warning;
+			continue;
+		}
+		if (!primary) {
+			primary = result;
+			primaryWarning = result.warning;
+		}
+		if (!parentActiveModelPattern) {
+			// No parent to fall back to: take the first matching pattern unchanged,
+			// exactly as before.
+			break;
+		}
+		const key = await modelRegistry.getApiKey(result.model, sessionId);
+		if (key === kNoAuth || isAuthenticated(key)) {
+			return { ...result, authFallbackUsed: false };
+		}
 	}
 
+	if (!primary) {
+		return { explicitThinkingLevel: false, warning: primaryWarning, authFallbackUsed: false };
+	}
+	if (!parentActiveModelPattern) {
+		return { ...primary, authFallbackUsed: false, warning: primaryWarning };
+	}
+
+	// No caller pattern had working credentials: fall back to the parent's
+	// active model, which by definition has working auth.
 	const fallback = resolveModelOverride([parentActiveModelPattern], modelRegistry, settings);
 	if (!fallback.model) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, warning: primaryWarning ?? fallback.warning };
 	}
 	if (modelsAreEqual(fallback.model, primary.model)) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, warning: primaryWarning ?? fallback.warning };
 	}
 	const fallbackKey = await modelRegistry.getApiKey(fallback.model, sessionId);
 	if (!isAuthenticated(fallbackKey)) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, warning: primaryWarning ?? fallback.warning };
 	}
 
-	return { ...fallback, authFallbackUsed: true, warning: primary.warning ?? fallback.warning };
+	return { ...fallback, authFallbackUsed: true, warning: primaryWarning ?? fallback.warning };
 }
 
 /**
