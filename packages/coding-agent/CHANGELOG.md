@@ -2,13 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues under one session-wide wake-turn budget, and completion notices that lead with the full-output artifact and carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
+
 ### Fixed
 
 - Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load; a socket that never authenticates is now closed after the client authentication timeout so it cannot keep the broker alive.
 - Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check, and gave each tunnel child a private temporary log directory so concurrent tunnels cannot share a log path.
-### Added
-
-- Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues under one session-wide wake-turn budget, and completion notices that lead with the full-output artifact and carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
 
 ## [18.1.12] - 2026-09-06
 
@@ -636,11 +637,6 @@
 - Fixed completed assistant replies disappearing from the live transcript under viewport pressure.
 - Accelerated SHA-2 and SHA-3 checksums on supported ARM64 hardware.
 - Fixed large MCP tool payloads being stored redundantly on disk.
-
-### Fixed
-
-- Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load.
-- Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check.
 
 ## [18.0.4] - 2026-08-24
 
