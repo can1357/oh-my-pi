@@ -21,7 +21,7 @@ import * as path from "node:path";
 import { getAgentDir, isEnoent, logger, MAIN_CONFIG_FILENAMES, tryParseJson } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { readDirEntries, readFile } from "../capability/fs";
-import type { ExtensionRootMode, LoadContext } from "../capability/types";
+import type { EffectiveExtensionRoots, ExtensionRootMode, LoadContext } from "../capability/types";
 import { getEnabledPlugins } from "../extensibility/plugins/loader";
 import { expandTilde } from "../tools/path-utils";
 import { listClaudePluginRoots } from "./helpers";
@@ -150,6 +150,28 @@ export function clearOmpExtensionCliRoots(): void {
 /** Inspect currently-injected CLI roots (read-only). Exposed for diagnostics + tests. */
 export function getInjectedOmpExtensionCliRoots(): readonly OmpExtensionRoot[] {
 	return injectedCliRoots.map(({ path: p, level }) => ({ path: p, level, name: path.basename(p) }));
+}
+
+/**
+ * Compute the `EffectiveExtensionRoots` struct a session will use for
+ * sub-discovery. Single source of truth for the four lanes so every caller —
+ * the SDK session factory (post-options) and the CLI `--agent` resolution
+ * (pre-session, before `createAgentSession` runs) — derives an identical
+ * struct from the same inputs (`additionalExtensionPaths`,
+ * `disableExtensionDiscovery`, the `extensions:` setting and its provenance).
+ */
+export function buildEffectiveExtensionRoots(inputs: {
+	additionalExtensionPaths?: readonly string[];
+	disableExtensionDiscovery?: boolean;
+	configured?: readonly string[];
+	configuredLevel?: "user" | "project";
+}): EffectiveExtensionRoots {
+	return {
+		explicit: inputs.additionalExtensionPaths ?? [],
+		mode: inputs.disableExtensionDiscovery ? "explicit-only" : "merge",
+		configured: inputs.configured ?? [],
+		configuredLevel: inputs.configuredLevel ?? "user",
+	};
 }
 
 interface ScopeDirs {

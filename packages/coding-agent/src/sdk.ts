@@ -87,7 +87,11 @@ import "./discovery";
 import { createImageUrlServiceFromSettings } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
-import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
+import {
+	buildEffectiveExtensionRoots,
+	setInvocationConfiguredExtensions,
+	withOmpExtensionRootScope,
+} from "./discovery/omp-extension-roots";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
@@ -1792,20 +1796,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const fileMutationVersions = new Map<string, number>();
 		const disposeCallbacks = new Set<() => void>();
 		const activeToolNames = new Set<string>();
-		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
+		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive" | "hidden">>();
 		// Session-wide tool policy owns effective tool-set derivation. Stage 1:
 		// constructed here (registry closure available), passed through the
-		// AgentSessionConfig seam, and otherwise inert — no live behavior reads
-		// it yet; later stages replace the shadow tool-state machinery.
-		// The registry has no defaultActive metadata yet (`defaultInactive` is
-		// consulted downstream when the active set is built), so the predicate
-		// is permissive: every registered tool defaults to active.
+		// AgentSessionConfig seam, and consumed by the presentation funnel
+		// (SessionTools `isToolEffective`) plus PersonaRuntime.
+		// `isDefaultActive` mirrors the defaultActive derivation used when the
+		// initial active set is built (sdk.ts `defaultInactiveToolNames`): a tool
+		// defaults to active unless its registry definition marks it
+		// `defaultInactive` or `hidden` (hidden tools are registered but never
+		// default-active).
 		const toolPolicy = new SessionToolPolicy({
 			toolNames: options.toolNames,
 			restrictToolNames: options.restrictToolNames,
 			lspReadOnly: options.lspReadOnly,
 			registry: () => new Set(toolRegistry.keys()),
-			isDefaultActive: () => true,
+			isDefaultActive: name => {
+				const def = toolRegistry.get(name);
+				return def === undefined ? true : def.defaultInactive !== true && def.hidden !== true;
+			},
 		});
 		const setActiveToolNames = (names: Iterable<string>): void => {
 			activeToolNames.clear();
@@ -1827,7 +1836,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return sessionManager.getAdditionalDirectories();
 			},
 			enableLsp,
-			lspReadOnly,
+			// LIVE read-only flag: the session tool policy derives it (a persona
+			// dropping write/edit forces it on; exit restores). Policy-less
+			// tool-session consumers (tests, direct createTools callers) fall
+			// back to the session-start derivation.
+			get lspReadOnly() {
+				return toolPolicy ? toolPolicy.lspReadOnly() : lspReadOnly;
+			},
 			enableIrc: restrictToolNames ? false : options.enableIrc,
 			restrictToolNames,
 			get hasEditTool() {
@@ -1875,7 +1890,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// unrelated global ref. With no lifecycle, hub cancel falls back to
 			// dispose + unregister on the session's own registry.
 			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
-			getSessionSpawns: () => options.spawns ?? "*",
+			// Effective spawn policy (persona `spawns` override first, CLI `--spawns`
+			// fallback): read through AgentSession so task preflight sees persona
+			// narrowing live. Before construction falls back to the launch config.
+			getSessionSpawns: () => session?.getSessionSpawns() ?? (options.spawns ? options.spawns : "*"),
 			getToolPolicy: () => toolPolicy,
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
@@ -2028,12 +2046,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// settings on every discovery call.
 		const buildSessionExtensionRoots =
 			options.extensionRoots ??
-			((): EffectiveExtensionRoots => ({
-				explicit: options.additionalExtensionPaths ?? [],
-				mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
-				configured: settings.get("extensions") ?? [],
-				configuredLevel: settings.extensionsSourceLevel(),
-			}));
+			((): EffectiveExtensionRoots =>
+				buildEffectiveExtensionRoots({
+					additionalExtensionPaths: options.additionalExtensionPaths,
+					disableExtensionDiscovery: options.disableExtensionDiscovery,
+					configured: settings.get("extensions") ?? [],
+					configuredLevel: settings.extensionsSourceLevel(),
+				}));
 		const mcpDiscoverOptions = {
 			onStatus: onMCPStatus,
 			enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
@@ -3227,12 +3246,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				eagerTasksAlways,
 				taskBatch: settings.get("task.batch"),
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
-				scoutAvailable: isScoutSpawnable(
-					settings.get("task.disabledAgents") as string[] | undefined,
-					options.spawns ?? "*",
-				),
+				scoutAvailable: session ? session.isScoutSpawnable() : isScoutSpawnable(undefined, options.spawns ?? "*"),
 				delegationBias: sessionDelegationBias(toolSession),
-				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
+				// Hub/IRC affordance guidance follows the LIVE policy: a persona
+				// without `hub` (or a disabled toggle) suppresses it; persona exit
+				// restores it on the next rebuild. Policy-less sessions keep the
+				// creation-time derivation.
+				taskIrcEnabled:
+					(toolPolicy ? toolPolicy.hubEnabled() : !restrictToolNames) &&
+					isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
@@ -3772,7 +3794,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionPaths,
 			disableExtensionDiscovery: options.disableExtensionDiscovery,
 			autoApprove: options.autoApprove,
-			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, options.spawns ?? "*"),
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global
@@ -3859,7 +3880,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agentKind,
 			providerSessionId: options.providerSessionId,
 			// Host spawn-policy fallback for AgentSession.getSessionSpawns (persona
-			// override wins when set); `null` = unrestricted per the ToolSession contract.
+			// override wins when set). String = CLI `--spawns`; `null` = unrestricted
+			// per the ToolSession contract.
 			getSessionSpawns: () => (options.spawns ? options.spawns : null),
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
@@ -3943,11 +3965,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						);
 						return;
 					}
-					// Re-registration refreshes the implementation, but it must not reverse an
-					// explicit setActiveTools() decision that disabled the previous definition.
+					// Policy gate for late registration (review foy5b/fo0dM): a
+					// default-active tool registered after persona activation must not
+					// bypass the persona grant. Route the presentation apply through
+					// the session funnel; the funnel's policy filter drops the name
+					// when the policy does not grant it, keeping it
+					// registered-but-dormant. Non-granting paths (existing tool not
+					// enabled, default-inactive/hidden without explicit request) are
+					// unchanged above.
 					if (existingTool && !alreadyEnabled) return;
+					const policyGrants = toolPolicy.granted(name);
 					const shouldMount =
 						!explicitlyRequested &&
+						policyGrants &&
 						toolSession.xdev !== undefined &&
 						builtInRegistryToolNames.has("read") &&
 						builtInRegistryToolNames.has("write") &&

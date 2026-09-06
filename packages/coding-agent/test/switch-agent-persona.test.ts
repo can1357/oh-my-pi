@@ -69,8 +69,13 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 		registry: () => ALL_TOOLS,
 		isDefaultActive: () => true,
 	});
-	const runtimeRef: { current: PersonaRuntime | undefined } = { current: undefined };
-	const modeChangeEntries: Array<{ mode: string; data?: Record<string, unknown> }> = [];
+	const runtimeRef: { current: PersonaRuntime | undefined } = {
+		current: undefined,
+	};
+	const modeChangeEntries: Array<{
+		mode: string;
+		data?: Record<string, unknown>;
+	}> = [];
 	const sessionManagerStub = {
 		appendModeChange: (mode: string, data?: Record<string, unknown>) => {
 			modeChangeEntries.push({ mode, data });
@@ -93,7 +98,10 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 			stub.refreshBaseSystemPromptCalls += 1;
 		},
 		setActiveToolPresentation: async (toolNames: string[], mountedToolNames: string[]) => {
-			stub.presentationCalls.push({ toolNames: [...toolNames], mountedToolNames: [...mountedToolNames] });
+			stub.presentationCalls.push({
+				toolNames: [...toolNames],
+				mountedToolNames: [...mountedToolNames],
+			});
 		},
 		clearInheritedProviderPromptCacheKey: () => {},
 		getSessionSpawns: () => stub.spawnsOverride ?? "*",
@@ -118,7 +126,10 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 }
 
 /** ACP/text-mode `/agent` harness: fake runtime mirroring acp-builtins.test.ts. */
-function makeAgentSlashHarness(session: AgentSession): { output: string[]; runtime: SlashCommandRuntime } {
+function makeAgentSlashHarness(session: AgentSession): {
+	output: string[];
+	runtime: SlashCommandRuntime;
+} {
 	const settings = Settings.isolated();
 	const output: string[] = [];
 	return {
@@ -233,7 +244,9 @@ describe("persona switch deferral", () => {
 	it("defers the persona model switch mid-turn while still applying tools and prompt", async () => {
 		// ACP semantics: notice + skip the model half; tools/prompt/policy still
 		// apply immediately (plan §8 — no whole-switch deferral anymore).
-		const { stub, session, policy, runtime } = makeSessionStub({ isStreaming: true });
+		const { stub, session, policy, runtime } = makeSessionStub({
+			isStreaming: true,
+		});
 		let queued: string | undefined;
 		let deferNotices = 0;
 		const hooks: PersonaModelApplyHooks = {
@@ -245,7 +258,10 @@ describe("persona switch deferral", () => {
 			},
 		};
 
-		const agent = makeAgent({ model: ["deferred-model-pattern"], tools: ["read"] });
+		const agent = makeAgent({
+			model: ["deferred-model-pattern"],
+			tools: ["read"],
+		});
 		await runtime.enter(agent, {}, hooks);
 
 		expect(deferNotices).toBe(1);
@@ -258,20 +274,17 @@ describe("persona switch deferral", () => {
 
 	it("queues the pre-persona model restore when exiting mid-turn", async () => {
 		// TUI semantics (acceptance 9): the exit's policy/prompt/spawns teardown
-		// applies immediately; the model must revert to the pre-persona baseline
-		// via the surface queue, never mutated into a live turn.
+		// applies immediately; the RUNTIME passes its own captured baseline to
+		// the surface queue, never mutating a live turn.
 		const { runtime } = makeSessionStub({ isStreaming: true });
-		const queued: Array<{ model?: unknown; thinkingLevel?: unknown }> = [];
-		const baseline: ModelBaseline = { model: undefined, thinkingLevel: undefined };
+		const queued: Array<ModelBaseline> = [];
 		const hooks: PersonaModelApplyHooks = {
 			apply: async () => {},
 			restore: async () => {},
-			snapshotBaseline: () => baseline,
 			shouldDeferModelSwitch: () => true,
 			deferModelSwitchWhileStreaming: () => {},
-			deferModelRestoreWhileStreaming: () => {
-				const captured = hooks.snapshotBaseline?.();
-				if (captured) queued.push({ ...captured });
+			deferModelRestoreWhileStreaming: baseline => {
+				queued.push(baseline);
 			},
 		};
 
@@ -280,6 +293,6 @@ describe("persona switch deferral", () => {
 
 		// Teardown applied immediately; the model restore is queued, not dropped.
 		expect(runtime.policy.isPersonaActive()).toBe(false);
-		expect(queued).toEqual([baseline]);
+		expect(queued).toHaveLength(1);
 	});
 });

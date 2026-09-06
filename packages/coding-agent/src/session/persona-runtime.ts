@@ -10,11 +10,7 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSession } from "./agent-session";
-import {
-	applyPersonaModelAndThinking,
-	type PersonaExplicitOverrides,
-	type PersonaModelApplyHooks,
-} from "./persona-model-hooks";
+import type { PersonaExplicitOverrides, PersonaModelApplyHooks } from "./persona-model-hooks";
 import type { DiscoveredAgent, PolicySnapshot, SessionToolPolicy } from "./tool-policy";
 
 /** A persona switch attempted while the session is mid-turn. */
@@ -48,8 +44,8 @@ export interface PersonaSwitchSnapshot {
 	appendPrompt: string | undefined;
 	/** Session spawn policy; `null` when unrestricted/unset. */
 	spawns: string[] | "*" | null;
-	/** Whether the UI cache-miss marker (`lastAssistantUsage`) was cleared at switch time. */
-	lastAssistantUsageCleared: boolean;
+	/** Runtime model baseline owned by the active persona; `undefined` when none captured. */
+	activeBaseline: ModelOverrideState | undefined;
 }
 
 /** The persona a `reconcile()` call wants active. */
@@ -71,6 +67,18 @@ export class PersonaRuntime {
 		this.policy = policy;
 		this.session = session;
 	}
+
+	/**
+	 * The runtime-owned pre-enter model baseline (model + thinking), captured
+	 * immediately before the FIRST successful model apply of the active
+	 * persona (or after a successful apply when no baseline exists — a deferred
+	 * enter never captured one). Runtime-owned because the hook instance that
+	 * ran `apply` does not survive to exit: `exitAgentPersona` builds a fresh
+	 * hooks object whose `restore()` would be a no-op, leaving the persona's
+	 * model/thinking applied. Cleared on exit, on rollback, and before each
+	 * enter (re-enter recaptures).
+	 */
+	#activeBaseline: ModelOverrideState | undefined;
 
 	/**
 	 * Activates a persona atomically: snapshot → apply → rollback on failure.
@@ -106,12 +114,21 @@ export class PersonaRuntime {
 			}
 			await this.#enterInner(agent, explicit, hooks, deferModel);
 		} catch (err) {
-			await this.restore(tx.snapshot, hooks);
+			await this.restore(tx.snapshot);
 			throw err;
 		}
 	}
 
 	/**
+	 *
+	 * Model baseline ownership lives HERE, not in the hooks instance: exit
+	 * builds a fresh hooks object (its `restore()` would be a no-op), so the
+	 * runtime captures the pre-apply model/thinking itself and restores from
+	 * `#activeBaseline` in `#exitInner` and `restore()`. A deferred enter never
+	 * captured a baseline (the model stays until the surface flushes), so the
+	 * runtime baseline is simply absent for that persona — a later exit restores
+	 * nothing and the surface queue owns the pending persona model.
+	 *
 	 * Symmetric teardown of `enter`: snapshot the persona-active state, tear down,
 	 * rollback on failure. Mid-turn semantics mirror `enter`: policy/prompt/
 	 * spawns/presentation teardown applies immediately; the model restore defers
@@ -129,7 +146,7 @@ export class PersonaRuntime {
 		try {
 			await this.#exitInner(hooks, deferModel);
 		} catch (err) {
-			await this.restore(tx.snapshot, hooks);
+			await this.restore(tx.snapshot);
 			throw err;
 		}
 	}
@@ -157,7 +174,7 @@ export class PersonaRuntime {
 			}
 			await this.#enterInner(desired.agent, desired.explicit ?? {}, hooks, deferModel);
 		} catch (err) {
-			await this.restore(guard.snapshot, hooks);
+			await this.restore(guard.snapshot);
 			throw err;
 		}
 	}
@@ -180,37 +197,40 @@ export class PersonaRuntime {
 			// is the persona-owned override; with no persona active it is the host
 			// config value, which `restore` re-pins via setSessionSpawns.
 			spawns: this.session.getSessionSpawns(),
-			// TODO(stage-2): UI marker state is mode-layer-owned (plan §9 — the runtime
-			// never reaches the UI); captured as `false` until call-site wiring lands.
-			lastAssistantUsageCleared: false,
+			activeBaseline: this.#activeBaseline,
 		};
 	}
 
 	/**
 	 * Symmetric restore of `snapshot()` — the single rollback mechanism.
-	 * With hooks, model/thinking flow through `hooks.restore()` (the session-bound
-	 * baseline channel). Without, the captured `baseModelOverride` reverts the
-	 * model/thinking directly so a rollback never leaves a half-applied switch.
-	 * The prompt rebuild last: the restored append prompt/policy shape what the
-	 * next render shows, so a rollback never serves a stale cached prompt.
+	 * Model/thinking revert from the captured `baseModelOverride` directly, NOT
+	 * through `hooks.restore()`: the hook instance that ran `apply` does not
+	 * survive to the rollback site (exit/reconcile callers build fresh hooks),
+	 * so a hooks-only rollback would leave a half-applied switch. The runtime
+	 * baseline round-trips through the snapshot: a persona→persona switch whose
+	 * new enter fails rolls the surviving persona back WITH its baseline, so a
+	 * later exit still restores the pre-switch model. Prompt rebuild last: the
+	 * restored append prompt/policy shape what the next render shows, so a
+	 * rollback never serves a stale cached prompt.
 	 */
-	async restore(snap: PersonaSwitchSnapshot, hooks?: PersonaModelApplyHooks): Promise<void> {
+	async restore(snap: PersonaSwitchSnapshot): Promise<void> {
 		this.policy.restore(snap.policy);
 		await this.session.setActiveToolPresentation([...snap.tools], [...snap.mountedToolNames]);
 		this.session.setSessionSpawns(snap.spawns);
 		this.session.applyPersonaAppendPrompt(snap.appendPrompt);
-		if (hooks) {
-			await hooks.restore();
-		} else {
-			const { model, thinkingLevel } = snap.baseModelOverride;
-			if (model && this.session.model !== model) {
-				await this.session.setModel(model);
-			}
-			if (thinkingLevel && this.session.configuredThinkingLevel() !== thinkingLevel) {
-				this.session.setThinkingLevel(thinkingLevel);
-			}
+		this.#activeBaseline = snap.activeBaseline;
+		const { model, thinkingLevel } = snap.baseModelOverride;
+		// P2-5: revert whenever the baseline CAPTURED a field — the baseline is the
+		// pre-switch state, so `model: undefined` there means "the session had no
+		// model before the switch" and must be restored to that, not skipped.
+		// Skipping on undefined leaked the persona's model/thinking into the
+		// restored session whenever the persona never declared them.
+		if (model !== undefined && this.session.model !== model) {
+			await this.session.setModel(model);
 		}
-		await this.session.refreshBaseSystemPrompt();
+		if (thinkingLevel !== undefined && this.session.configuredThinkingLevel() !== thinkingLevel) {
+			this.session.setThinkingLevel(thinkingLevel);
+		}
 	}
 
 	/**
@@ -226,6 +246,16 @@ export class PersonaRuntime {
 		// Plan-mode parity (plan §9): the persona append prompt changes the system
 		// prompt, which predictably invalidates the provider cache.
 		this.session.clearInheritedProviderPromptCacheKey();
+		// Baseline BEFORE any flip — unconditional, including deferred enters
+		// (P2-6): the persona may be mid-turn at enter time, but a LATER exit still
+		// needs the pre-enter model/thinking to restore. The deferred enter's model
+		// half (the persona's own switch) is queued on the surface; the baseline
+		// answers a different question — what the session looked like BEFORE this
+		// persona — and is only knowable here, before `enterPersona` runs.
+		this.#activeBaseline = {
+			model: this.session.model,
+			thinkingLevel: this.session.configuredThinkingLevel(),
+		};
 		this.policy.enterPersona(agent, explicit);
 		// Live presentation partition: keep only the currently-active tools the
 		// persona grant still covers (plan §5 — the cursor bridge reads the live
@@ -238,13 +268,25 @@ export class PersonaRuntime {
 		);
 		this.session.setSessionSpawns(agent.spawns ?? null);
 		this.session.applyPersonaAppendPrompt(agent.systemPrompt);
-		await applyPersonaModelAndThinking(agent, explicit, hooks, deferModel);
+		if (deferModel) {
+			hooks.deferModelSwitchWhileStreaming?.(agent);
+		} else {
+			await hooks.apply(agent, explicit);
+		}
 		await this.session.refreshBaseSystemPrompt();
 	}
 
 	/**
 	 * Teardown body shared by `exit` and `reconcile`. `deferModel` is the
 	 * caller's pre-computed mid-turn deferral decision.
+	 *
+	 * Model/thinking restore reads the RUNTIME-owned `#activeBaseline` (captured
+	 * by `#enterInner`), not `hooks.restore()`: the hook instance that ran
+	 * `apply` does not survive to exit — `exitAgentPersona` and the ACP/text
+	 * `/agent` path build fresh hooks whose per-instance baseline is empty, so a
+	 * hooks-only restore would silently leave the persona's model/thinking
+	 * applied. `hooks.restore()` is kept as a no-op-compatible surface channel
+	 * (a surface hooks impl may still queue/skip there).
 	 */
 	async #exitInner(hooks: PersonaModelApplyHooks, deferModel: boolean): Promise<void> {
 		this.session.clearInheritedProviderPromptCacheKey();
@@ -263,10 +305,20 @@ export class PersonaRuntime {
 			[...baseline],
 			[...this.session.getMountedXdevToolNames()].filter(name => baseline.has(name)),
 		);
+		const { model, thinkingLevel } = this.#activeBaseline ?? {};
+		this.#activeBaseline = undefined;
 		if (deferModel) {
-			hooks.deferModelRestoreWhileStreaming?.();
+			// Mid-turn exit: the baseline must reach the surface queue, not a live
+			// turn. The RUNTIME baseline is authoritative (hooks instances do not
+			// survive exit); the surface channel receives it directly.
+			hooks.deferModelRestoreWhileStreaming?.({ model, thinkingLevel });
 		} else {
-			await hooks.restore();
+			if (model && this.session.model !== model) {
+				await this.session.setModel(model);
+			}
+			if (thinkingLevel && this.session.configuredThinkingLevel() !== thinkingLevel) {
+				this.session.setThinkingLevel(thinkingLevel);
+			}
 		}
 		await this.session.refreshBaseSystemPrompt();
 	}

@@ -180,6 +180,23 @@ describe("--agent launch-as-switch", () => {
 		expect(enabled.has("write")).toBe(false);
 	});
 
+	it("resolves --agent inside a CLI --extension package (root pre-resolution)", async () => {
+		// fo0dP: the --agent resolution site must derive the SAME extension roots
+		// the session will use; an agent shipped in a CLI --extension package is
+		// sub-discovered through <root>/agents and must resolve at launch.
+		const ext = path.join(workspace.path(), "ext-pkg");
+		const agentsDir = path.join(ext, "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(agentsDir, "extension-fixture.md"),
+			"---\nname: extension-fixture\ndescription: Agent shipped in a CLI extension package\n---\n\nYou are the extension fixture persona.",
+		);
+		const launched = await launch({ args: ["--agent", "extension-fixture", "--extension", ext] });
+
+		expect(launched.getPersonaRuntime()?.policy.isPersonaActive()).toBe(true);
+		expect(launched.getPersonaAppendPrompt()).toContain("extension fixture persona");
+	});
+
 	it("buildSessionOptions threads pendingPersonaAgent with explicit CLI overrides", async () => {
 		await writeFixtureAgents({ name: "fixture-modeled.md", content: MODELED_AGENT_MD });
 		const parsed = parseArgs([

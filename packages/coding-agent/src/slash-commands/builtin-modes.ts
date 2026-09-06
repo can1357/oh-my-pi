@@ -677,6 +677,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 async function handleAgentCommandNoName(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const session = runtime.session;
 	if (session.getToolPolicy()?.isPersonaActive()) {
+		// No mode guard: exiting the persona is the recovery path out of the
+		// mode-entry refusal — a guard here would deadlock the user inside the
+		// persona (TUI exitAgentPersona mirrors this).
 		await session.getPersonaRuntime()?.exit(createDefaultPersonaModelHooks(session));
 		session.sessionManager.appendModeChange("none");
 		await runtime.output("Agent persona cleared.");
@@ -689,6 +692,10 @@ async function handleAgentCommandNoName(runtime: SlashCommandRuntime): Promise<S
 /** `/agent <name>`: discover the agent and enter its persona through the session runtime. */
 async function handleAgentCommandSwitch(name: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const session = runtime.session;
+	const modeState = typeof session.getPlanModeState === "function" ? session.getPlanModeState() : undefined;
+	if (modeState?.enabled) {
+		return usage("Plan mode is active. Exit plan mode before switching agent personas.", runtime);
+	}
 	const personaRuntime = session.getPersonaRuntime();
 	if (!personaRuntime) {
 		return usage("Persona switching is unavailable: this session has no persona runtime.", runtime);

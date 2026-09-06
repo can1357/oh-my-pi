@@ -326,11 +326,17 @@ export async function resolveEffectiveSubagentPolicy(
 	const toolPolicy = request.session.getToolPolicy?.();
 	// Persona/restriction state lives on the policy, not the legacy shadow
 	// field: launch (--agent) and live /agent switch both mutate the policy,
-	// so this derivation is identical for both paths.
+	// so this derivation is identical for both paths. Spawn inheritance reads
+	// the BASELINE (registry ∩ cliGrant ∩ sessionToggles): the persona layer
+	// scopes the main agent's own behavior; it does not cage spawned
+	// descendants — children are bounded by the ORIGINAL main's restriction
+	// state (CLI grant/session toggles) plus their own frontmatter. The
+	// persona's spawns whitelist (getSessionSpawns) still gates WHICH agents
+	// may spawn.
 	const restrictToolNames =
-		planMode || request.session.restrictToolNames === true || (toolPolicy?.isRestricted() ?? false);
+		planMode || request.session.restrictToolNames === true || (toolPolicy?.isBaselineRestricted() ?? false);
 	const parentEffectiveGrant: ReadonlySet<string> | null =
-		restrictToolNames && toolPolicy ? toolPolicy.effectiveSet() : null;
+		restrictToolNames && toolPolicy ? toolPolicy.baselineEffectiveSet() : null;
 	return {
 		discovery,
 		agentName,

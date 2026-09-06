@@ -21,6 +21,7 @@ export interface PolicySnapshot {
 	persona: {
 		agent: DiscoveredAgent;
 		explicit: PersonaExplicitOverrides;
+		/** `null` = registry-wide (frontmatter omits `tools:`); an EMPTY set = deny-all — never collapsed to `null`. */
 		grant: ReadonlySet<string> | null;
 		spawnsBroken: boolean;
 	} | null;
@@ -62,7 +63,9 @@ export class SessionToolPolicy {
 		 * `agent.tools` when declared (with `task` stripped if the persona cannot
 		 * spawn), or `null` when frontmatter omits `tools:` — meaning "every
 		 * registered tool", evaluated live so MCP/extension tools registered after
-		 * the persona activated remain grantable. Never a frozen registry copy.
+		 * the persona activated remain grantable. NEVER a frozen registry copy —
+		 * and never the empty-grant→null collapse: a declared-but-empty (or
+		 * fully-intersected-away) grant is an EMPTY set = deny-all, not `null`.
 		 */
 		grant: ReadonlySet<string> | null;
 		/** Declared spawns that cannot spawn (e.g. `spawns: []`) — `task` stays off even under a null (registry-wide) grant. */
@@ -96,31 +99,27 @@ export class SessionToolPolicy {
 			!(this.#persona?.spawnsBroken === true && name === "task")
 		);
 	}
+	/**
+	 * The PERMISSION question for presentation/toggle funnels — personaGrant when
+	 * a persona is active, else everything. The CLI whitelist deliberately does
+	 * NOT narrow this gate: `toolNames`-only sessions keep the legacy presentation
+	 * behavior (a runtime caller may still surface `write` for the xd:// transport
+	 * upgrade — the transport write is a presentation-level feature ON the
+	 * whitelist, not a filesystem grant), while a persona's declared `tools:` is
+	 * a real restriction the funnel must respect. `/mcp` toggles and RPC
+	 * activations pass through freely so a `defaultInactive` tool can be turned
+	 * ON (the toggles layer answers "on by default", not "may it run").
+	 */
+	granted(name: string): boolean {
+		if (this.#persona === null) return true;
+		return (
+			(this.#persona.grant === null || this.#persona.grant.has(name)) &&
+			!(this.#persona.spawnsBroken === true && name === "task")
+		);
+	}
 
 	isPersonaActive(): boolean {
 		return this.#persona !== null;
-	}
-
-	/** Persona with a declared-but-unusable `spawns` frontmatter is NEVER spawnable, regardless of its `tools:` field. */
-	spawnable(): boolean {
-		const spawns = this.#persona?.agent.spawns;
-		if (spawns !== undefined && !spawnsUsable(spawns)) {
-			return false;
-		}
-		return this.effective("task");
-	}
-
-	/** True when any layer narrows the default capability envelope. */
-	isRestricted(): boolean {
-		// Size-comparison against the registry is unsound: a cliGrant with unknown
-		// names (size >= registry) can still omit default-active tools, and a
-		// sessionToggle that only ADDS a tool is not a restriction. Restriction =
-		// some default-active registered tool is not effective.
-		if (this.#persona !== null) return true;
-		for (const name of this.#globalRegistry()) {
-			if (this.#isDefaultActive(name) && !this.effective(name)) return true;
-		}
-		return false;
 	}
 
 	/** cliLspReadOnly is durable; the derivation covers persona-narrowed sessions. */
@@ -130,10 +129,6 @@ export class SessionToolPolicy {
 
 	hubEnabled(): boolean {
 		return this.effective("hub");
-	}
-
-	mutating(): boolean {
-		return this.effective("write") || this.effective("edit") || this.effective("bash");
 	}
 
 	/**
@@ -148,23 +143,50 @@ export class SessionToolPolicy {
 		}
 		return grant;
 	}
+	/**
+	 * The effective set computed IGNORING the persona layer: registry ∩
+	 * cliGrant ∩ sessionToggles. Spawn inheritance uses this baseline instead
+	 * of {@link effectiveSet}: the persona layer scopes the main agent's own
+	 * behavior; it does not cage spawned descendants. Children are bounded by
+	 * the ORIGINAL main's restriction state (CLI grant ∩ session toggles)
+	 * plus their own frontmatter.
+	 */
+	baselineEffectiveSet(): ReadonlySet<string> {
+		const grant = new Set<string>();
+		for (const name of this.#globalRegistry()) {
+			if (this.#baselineEffective(name)) grant.add(name);
+		}
+		return grant;
+	}
+
+	/**
+	 * True when cliGrant or sessionToggles narrow the default capability
+	 * envelope — the persona layer is deliberately excluded, so a persona-active
+	 * session with an unrestricted baseline is NOT baseline-restricted.
+	 */
+	isBaselineRestricted(): boolean {
+		// Restriction = some default-active registered tool is not
+		// baseline-effective (a size-comparison against the registry is unsound:
+		// a cliGrant with unknown names can still omit default-active tools, and
+		// a sessionToggle that only ADDS a tool is not a restriction).
+		for (const name of this.#globalRegistry()) {
+			if (this.#isDefaultActive(name) && !this.#baselineEffective(name)) return true;
+		}
+		return false;
+	}
 
 	// Mutators (PersonaRuntime + session toggles ONLY)
 	enterPersona(agent: DiscoveredAgent, explicit: PersonaExplicitOverrides): void {
 		this.#persona = {
 			agent,
 			explicit,
-			grant: this.#computePersonaGrant(agent),
+			grant: this.#computePersonaGrant(agent, explicit),
 			spawnsBroken: agent.spawns !== undefined && !spawnsUsable(agent.spawns),
 		};
 	}
 
 	exitPersona(): void {
 		this.#persona = null;
-	}
-
-	setSessionToolEnabled(name: string, on: boolean): void {
-		this.#sessionToggles.set(name, on);
 	}
 
 	snapshot(): PolicySnapshot {
@@ -192,20 +214,47 @@ export class SessionToolPolicy {
 	#toggledOnOrDefault(name: string): boolean {
 		return this.#sessionToggles.get(name) ?? this.#isDefaultActive(name);
 	}
+	/** Baseline layer of {@link effective}: registry ∩ cliGrant ∩ sessionToggles — persona grant/spawnsBroken conjuncts removed. */
+	#baselineEffective(name: string): boolean {
+		return (this.cliGrant === null || this.cliGrant.has(name)) && this.#toggledOnOrDefault(name);
+	}
 	/**
 	 * Persona grant: declared `agent.tools` (with `task` stripped when the persona
 	 * declares a spawns policy that cannot spawn — an explicit `tools:[...,task]`
 	 * with `spawns: []` still cannot spawn, so advertising `task` would promise a
 	 * tool that fails every invocation). When `tools:` is omitted the grant is
 	 * `null` = "every registered tool", evaluated live so tools registered after
-	 * activation remain grantable.
+	 * the persona activated remain grantable.
+	 *
+	 * `explicit.tools` intersects on top when present. It is the CLI `--tools`
+	 * grant at launch, and — critically — the DURABLE grant carried through
+	 * resume: on resume there is no CLI flag, so the persisted explicit list is
+	 * the only remaining launch-time narrowing and the persona must not widen
+	 * past it (foy5e: without this, tools outside the explicit grant became
+	 * effective after a resume).
 	 */
-	#computePersonaGrant(agent: DiscoveredAgent): ReadonlySet<string> | null {
+	#computePersonaGrant(agent: DiscoveredAgent, explicit: PersonaExplicitOverrides): ReadonlySet<string> | null {
 		const declared = agent.tools;
 		const spawnsBroken = agent.spawns !== undefined && !spawnsUsable(agent.spawns);
-		if (declared === undefined) return null;
-		const grant = new Set(declared);
+		if (declared === undefined && explicit.tools === undefined) return null;
+		// The intersect target: the persona's declared tools, or — when the
+		// frontmatter omits `tools:` — the CLI grant. On RESUME there is no CLI
+		// flag (cliGrant null), so `explicit.tools` (the persisted launch grant)
+		// is the ONLY remaining narrowing: it becomes the grant directly rather
+		// than intersecting an unrestricted set down to nothing.
+		const grant = new Set(declared ?? [...(this.cliGrant ?? explicit.tools ?? [])]);
 		if (spawnsBroken) grant.delete("task");
+		if (explicit.tools && declared !== undefined) {
+			// Both layers present: intersect (never widen).
+			const explicitSet = new Set(explicit.tools);
+			for (const name of grant) {
+				if (!explicitSet.has(name)) grant.delete(name);
+			}
+		}
+		// An empty grant stays an EMPTY SET (deny-all): collapsing it to `null`
+		// would widen it back to "every registered tool" and silently grant
+		// everything. Only an OMITTED `tools:` frontmatter (with no other
+		// narrowing source) is registry-wide.
 		return grant;
 	}
 }

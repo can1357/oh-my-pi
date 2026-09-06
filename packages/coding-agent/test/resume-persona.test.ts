@@ -189,7 +189,7 @@ describe("InteractiveMode persona resume reconcile", () => {
 		expect(active.has("write")).toBe(false);
 	});
 
-	it("falls back gracefully with a notice when the persona definition is gone", async () => {
+	it("falls back gracefully with a notice, journals the degrade, and does not re-notice on second resume", async () => {
 		const sourceManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
 		sourceManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
 		sourceManager.appendModeChange("agent", { name: "evaporated-persona" });
@@ -211,6 +211,22 @@ describe("InteractiveMode persona resume reconcile", () => {
 		// Unrestricted: the default tool set survives.
 		expect(createdSession.getActiveToolNames()).toContain("write");
 		expect(statusMessages.some(message => message.includes("evaporated-persona"))).toBe(true);
+		const goneNoticeCount = statusMessages.filter(message => message.includes("evaporated-persona")).length;
+
+		// Journal clear marker: the stale `agent` entry no longer stays LAST.
+		const entry = await lastAgentModeChange(createdSession.sessionManager);
+		expect(entry?.mode).toBe("none");
+
+		// Second resume: the `none` marker means no re-notice for the dead persona.
+		created.stop();
+		await createdSession.dispose();
+		statusMessages.length = 0;
+		const secondSession = createSession(await SessionManager.open(sourceFile, path.join(tempDir.path(), "sessions")));
+		const second = spyStatus(createMode(secondSession));
+		await second.init({ suppressWelcomeIntro: true });
+		expect(secondSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+		expect(statusMessages.some(message => message.includes("evaporated-persona"))).toBe(false);
+		expect(goneNoticeCount).toBe(1);
 	});
 
 	it("CLI --agent override wins: the launch seam's entry is last, so the journal reconcile is a no-op", async () => {
@@ -250,5 +266,193 @@ describe("InteractiveMode persona resume reconcile", () => {
 		const entry = await lastAgentModeChange(resumedManager);
 		expect(entry?.data.name).toBe("fixture-reader");
 		expect(statusMessages.some(message => message.includes("stale-persona"))).toBe(false);
+	});
+
+	it("retains the persona across a plan-mode journal interleave on resume", async () => {
+		// fo0dT regression: persona entered, then plan mode opened. The journal's
+		// `plan` entry no longer hides the preceding `agent` entry on resume —
+		// the persona identity survives the temporary mode partition.
+		const sourceManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		sourceManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+		sourceManager.appendModeChange("agent", { name: "fixture-reader" });
+		sourceManager.appendModeChange("plan", { planFilePath: "local://PLAN.md" });
+		sourceManager.appendModeChange("plan_paused");
+		await sourceManager.ensureOnDisk();
+		await sourceManager.flush();
+		const sourceFile = sourceManager.getSessionFile();
+		if (!sourceFile) throw new Error("Expected session file");
+		await sourceManager.close();
+
+		await writeFixtureAgent(READER_AGENT_MD);
+
+		const resumedManager = await SessionManager.open(sourceFile, path.join(tempDir.path(), "sessions"));
+		const createdSession = createSession(resumedManager);
+		const created = createMode(createdSession);
+		await created.init({ suppressWelcomeIntro: true });
+
+		const policy = createdSession.getPersonaRuntime()!.policy;
+		expect(policy.isPersonaActive()).toBe(true);
+		expect(createdSession.getPersonaAppendPrompt()).toContain("fixture reader persona");
+		const active = new Set(createdSession.getActiveToolNames());
+		expect(active.has("read")).toBe(true);
+	});
+
+	it("clears the persona on resume after an explicit none mode_change", async () => {
+		const sourceManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		sourceManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+		sourceManager.appendModeChange("agent", { name: "fixture-reader" });
+		sourceManager.appendModeChange("none");
+		await sourceManager.ensureOnDisk();
+		await sourceManager.flush();
+		const sourceFile = sourceManager.getSessionFile();
+		if (!sourceFile) throw new Error("Expected session file");
+		await sourceManager.close();
+
+		await writeFixtureAgent(READER_AGENT_MD);
+
+		const resumedManager = await SessionManager.open(sourceFile, path.join(tempDir.path(), "sessions"));
+		const createdSession = createSession(resumedManager);
+		const created = createMode(createdSession);
+		await created.init({ suppressWelcomeIntro: true });
+
+		expect(createdSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+		expect(createdSession.getPersonaAppendPrompt()).toBeUndefined();
+	});
+
+	it("switch to a stored session without a persona exits the source persona", async () => {
+		// foxlv/foy5j regression: the PersonaRuntime survives an in-process
+		// switchSession, so a persona-active source switching to an ordinary
+		// target must exit the persona during reconcile instead of leaking the
+		// grant/identity/presentation into the target.
+		const personaTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		personaTarget.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+		personaTarget.appendModeChange("agent", { name: "fixture-reader" });
+		await personaTarget.ensureOnDisk();
+		await personaTarget.flush();
+		const personaFile = personaTarget.getSessionFile();
+		if (!personaFile) throw new Error("Expected session file");
+		await personaTarget.close();
+
+		const plainTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		plainTarget.appendMessage({ role: "user", content: "plain", timestamp: Date.now() });
+		await plainTarget.ensureOnDisk();
+		await plainTarget.flush();
+		const plainFile = plainTarget.getSessionFile();
+		if (!plainFile) throw new Error("Expected session file");
+		await plainTarget.close();
+
+		await writeFixtureAgent(READER_AGENT_MD);
+
+		const sourceManager = await SessionManager.open(personaFile, path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(sourceManager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+
+		const switched = await liveSession.switchSession(plainFile);
+		expect(switched).toBe(true);
+		// Target has no persona entry: the source persona must be gone, and the
+		// narrowed persona partition restored to the unrestricted set.
+		const policy = liveSession.getPersonaRuntime()!.policy;
+		expect(policy.isPersonaActive()).toBe(false);
+		expect(policy.effective("write")).toBe(true);
+		expect(liveSession.getPersonaAppendPrompt()).toBeUndefined();
+	});
+
+	it("switch to a session whose persona no longer exists exits the source persona", async () => {
+		// Regression: the target journal names an agent, but discovery can no
+		// longer resolve it (the definition was deleted after the entry was
+		// written). The reused runtime must exit the SOURCE persona before
+		// landing in the target, not keep it attached with the target's
+		// unresolved name reported.
+		const personaTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		personaTarget.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+		personaTarget.appendModeChange("agent", { name: "evaporated-persona" });
+		await personaTarget.ensureOnDisk();
+		await personaTarget.flush();
+		const personaFile = personaTarget.getSessionFile();
+		if (!personaFile) throw new Error("Expected session file");
+		await personaTarget.close();
+
+		// The SOURCE session's persona resolves (fixture written); the TARGET's
+		// does not. Only fixture-reader is defined, never evaporated-persona.
+		await writeFixtureAgent(READER_AGENT_MD);
+
+		const sourceManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		sourceManager.appendMessage({ role: "user", content: "source turn", timestamp: Date.now() });
+		sourceManager.appendModeChange("agent", { name: "fixture-reader" });
+		await sourceManager.ensureOnDisk();
+		await sourceManager.flush();
+		const sourceFile = sourceManager.getSessionFile();
+		if (!sourceFile) throw new Error("Expected session file");
+		await sourceManager.close();
+
+		const liveManager = await SessionManager.open(sourceFile, path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(liveManager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+
+		const switched = await liveSession.switchSession(personaFile);
+		expect(switched).toBe(true);
+
+		// Source persona cleared despite the target naming an unknown agent.
+		const policy = liveSession.getPersonaRuntime()!.policy;
+		expect(policy.isPersonaActive()).toBe(false);
+		expect(liveSession.getPersonaAppendPrompt()).toBeUndefined();
+		// Unrestricted presentation restored.
+		expect(liveSession.getActiveToolNames()).toContain("write");
+		expect(statusMessages.some(message => message.includes("evaporated-persona"))).toBe(true);
+	});
+
+	it("refuses /agent <name> while plan mode is active", async () => {
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+
+		await created.handlePlanModeCommand();
+		expect(created.planModeEnabled).toBe(true);
+
+		const warningSpy = vi.spyOn(created, "showWarning").mockImplementation(() => {});
+		await created.switchAgentPersona("fixture-reader");
+
+		expect(warningSpy.mock.calls.some(call => call[0].includes("Exit plan mode"))).toBe(true);
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+		expect(liveSession.getPersonaAppendPrompt()).toBeUndefined();
+		const lastEntry = await lastAgentModeChange(manager);
+		// The plan entry (or none) is last; no agent entry was appended.
+		expect(lastEntry?.mode === "agent").toBe(false);
+		warningSpy.mockRestore();
+	});
+
+	it("refuses plan mode while a persona is active, and exiting the persona recovers", async () => {
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		await writeFixtureAgent(READER_AGENT_MD);
+
+		await created.switchAgentPersona("fixture-reader");
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+
+		// Mode entry refuses while the persona is active — the persona owns the
+		// tool grant and the mode's partition would fight it.
+		const warningSpy = vi.spyOn(created, "showWarning").mockImplementation(() => {});
+		await created.handlePlanModeCommand();
+		expect(warningSpy.mock.calls.some(call => call[0].includes("Exit the agent persona"))).toBe(true);
+		expect(created.planModeEnabled).toBe(false);
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+		warningSpy.mockRestore();
+
+		// Exiting the persona is always available — it is the recovery path
+		// out of the refusal above (no deadlock).
+		await created.exitAgentPersona();
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+		expect(liveSession.getPersonaAppendPrompt()).toBeUndefined();
+
+		// With the persona gone, the mode enters.
+		await created.handlePlanModeCommand();
+		expect(created.planModeEnabled).toBe(true);
 	});
 });

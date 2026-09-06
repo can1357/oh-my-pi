@@ -53,7 +53,7 @@ import {
 	preloadPluginRoots,
 	resolveActiveProjectRegistryPath,
 } from "./discovery/helpers";
-import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
+import { buildEffectiveExtensionRoots, injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
 import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
@@ -1138,31 +1138,6 @@ export async function buildSessionOptions(
 			options.providerPromptCacheKeySource = "fork";
 		}
 	}
-	// `--agent <name>`: resolve the persona BEFORE the session is built so its
-	// definition can enter through the PersonaRuntime seam (CreateAgentSessionOptions
-	// → sdk.ts constructs the runtime + enter() after the session exists but before
-	// the first user turn). Unresolvable names are a hard launch error.
-	if (parsed.agent) {
-		const options_cwd = parsed.cwd ?? getProjectDir();
-		const { agents } = await discoverAgents(options_cwd);
-		const agent = getAgent(agents, parsed.agent);
-		if (!agent) {
-			throw new Error(`Unknown --agent "${parsed.agent}". Run "omp agents" to list discovered agents.`);
-		}
-		options.pendingPersonaAgent = agent;
-		// Explicit CLI flags win over the persona's frontmatter: the persona model
-		// apply only uses agent.model when no explicit pattern was resolved (the
-		// PersonaModelApplyHooks defaults handle precedence), so threading the CLI
-		// values as explicit overrides keeps `--model`/`--thinking` authoritative.
-		const explicit: PersonaExplicitOverrides = {};
-		if (parsed.model) explicit.model = parsed.model;
-		if (parsed.thinking) explicit.thinking = parsed.thinking;
-		if (parsed.tools) explicit.tools = parsed.tools;
-		if (Object.keys(explicit).length > 0) {
-			options.pendingPersonaExplicit = explicit;
-		}
-	}
-
 	// Model from CLI
 	// - supports --provider <name> --model <pattern>
 	// - supports --model <provider>/<pattern>
@@ -1377,6 +1352,15 @@ export async function buildSessionOptions(
 		options.rules = [];
 	}
 
+	// Extension-root inputs MUST be resolved BEFORE `--agent` discovery: the CLI
+	// `--extension`/`--hook`/`--trusted-extension` roots the session WILL use are
+	// also where extension-package agents live, and `discoverAgents` sub-discovers
+	// `<root>/agents/*.md` through the same `EffectiveExtensionRoots` struct the
+	// SDK session factory later derives (buildEffectiveExtensionRoots). Resolving
+	// the persona first — without the roots — made `--agent <ext-agent>` fail with
+	// "Unknown --agent" whenever the definition shipped in a CLI extension.
+	const trustedExtensionCount = parsed.trustedExtensions?.length ?? 0;
+
 	// Trusted extension paths are an exact allowlist for extension modules.
 	if (parsed.trustedExtensions && parsed.trustedExtensions.length > 0) {
 		const trustedPaths = parsed.trustedExtensions.map(trustedPath => {
@@ -1404,6 +1388,40 @@ export async function buildSessionOptions(
 
 		if (parsed.noExtensions) {
 			options.disableExtensionDiscovery = true;
+		}
+	}
+	const agentResolutionRoots = buildEffectiveExtensionRoots({
+		additionalExtensionPaths:
+			trustedExtensionCount > 0
+				? options.additionalExtensionPaths
+				: [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])],
+		disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
+		configured: activeSettings.get("extensions") ?? [],
+		configuredLevel: activeSettings.extensionsSourceLevel(),
+	});
+
+	// `--agent <name>`: resolve the persona BEFORE the session is built so its
+	// definition can enter through the PersonaRuntime seam (CreateAgentSessionOptions
+	// → sdk.ts constructs the runtime + enter() after the session exists but before
+	// the first user turn). Unresolvable names are a hard launch error.
+	if (parsed.agent) {
+		const options_cwd = parsed.cwd ?? getProjectDir();
+		const { agents } = await discoverAgents(options_cwd, undefined, agentResolutionRoots);
+		const agent = getAgent(agents, parsed.agent);
+		if (!agent) {
+			throw new Error(`Unknown --agent "${parsed.agent}". Run "omp agents" to list discovered agents.`);
+		}
+		options.pendingPersonaAgent = agent;
+		// Explicit CLI flags win over the persona's frontmatter: the persona model
+		// apply only uses agent.model when no explicit pattern was resolved (the
+		// PersonaModelApplyHooks defaults handle precedence), so threading the CLI
+		// values as explicit overrides keeps `--model`/`--thinking` authoritative.
+		const explicit: PersonaExplicitOverrides = {};
+		if (parsed.model) explicit.model = parsed.model;
+		if (parsed.thinking) explicit.thinking = parsed.thinking;
+		if (parsed.tools) explicit.tools = parsed.tools;
+		if (Object.keys(explicit).length > 0) {
+			options.pendingPersonaExplicit = explicit;
 		}
 	}
 

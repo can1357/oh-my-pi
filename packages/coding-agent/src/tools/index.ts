@@ -222,7 +222,13 @@ export interface ToolSession {
 	customToolPaths?: ToolPathWithSource[];
 	/** Whether LSP integrations are enabled */
 	enableLsp?: boolean;
-	/** Whether LSP is limited to navigation and diagnostics. */
+	/**
+	 * Whether LSP is limited to navigation and diagnostics. When the session
+	 * exposes `getToolPolicy`, this derives LIVE from the policy
+	 * (`SessionToolPolicy.lspReadOnly()` — a persona dropping write/edit forces
+	 * it on; exit restores it); without a policy it falls back to the
+	 * session-start value the host supplies.
+	 */
 	lspReadOnly?: boolean;
 	/** Whether this invocation may expose IRC. `false` removes it even for subagents. */
 	enableIrc?: boolean;
@@ -322,8 +328,14 @@ export interface ToolSession {
 	getArtifactManager?: () => ArtifactManager | null;
 	/** Allocate a new artifact path and ID for session-scoped truncated output. */
 	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
-	/** Get session spawns */
-	getSessionSpawns: () => string | null;
+	/**
+	 * Effective session spawn policy. Session-owned overrides (persona `spawns`
+	 * frontmatter) win when set; the string form is the host CLI `--spawns`
+	 * fallback (comma-separated agent names), `null` = unrestricted.
+	 */
+	getSessionSpawns: () => string | string[] | "*" | null;
+	/** Live scout availability (task.disabledAgents ∩ persona-aware spawn policy). Optional: stub sessions fall back to the local derivation. */
+	isScoutSpawnable?: () => boolean;
 	/** Session-wide tool policy (launch/persona state). Absent on minimal test/tool-session stubs. */
 	getToolPolicy?: () => SessionToolPolicy | undefined;
 	/** Get resolved model string if explicitly set for this session */
@@ -500,6 +512,11 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const restrictToolNames = session.restrictToolNames === true;
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
+	// LIVE flag derivation: the session tool policy (persona/cli layers) owns
+	// hub availability. Policy-less sessions fall back to the session-start
+	// booleans the host supplies. (LSP read-only is enforced by the tool itself.)
+	const toolPolicy = session.getToolPolicy?.();
+	const hubEnabled = toolPolicy ? toolPolicy.hubEnabled() : undefined;
 	const requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
 		: toolNames
@@ -619,6 +636,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			const goalState = session.getGoalModeState?.();
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
+		// lspReadOnly does NOT drop lsp: the tool self-restricts to
+		// navigation/diagnostics actions (see LspTool's lspReadOnly check), so it
+		// stays registered read-only even in restricted sessions.
 		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
 		if (name === "bash") return session.settings.get("bash.enabled");
 		if (name === "eval") return allowEval;
@@ -640,6 +660,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
 			);
 		if (name === "hub") {
+			// A policy present: `hubEnabled` IS the availability answer (persona
+			// grant, CLI grant, and toggles already intersected). Without one,
+			// fall back to the classic unrestricted-session gate.
+			if (hubEnabled !== undefined) return hubEnabled;
 			return (
 				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
 			);

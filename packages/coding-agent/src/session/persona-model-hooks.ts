@@ -15,26 +15,27 @@ import { parseConfiguredThinkingLevel } from "../thinking";
  * (docs/plans/2026-09-05-persona-runtime-rearchitect.md §2): the runtime calls
  * these hooks instead of touching `AgentSession` model APIs directly, so each
  * host surface (TUI queues, ACP notices) can override the mid-turn channels.
+ *
+ * Baseline OWNERSHIP note: the runtime captures the pre-apply model/thinking
+ * itself and restores it on exit/rollback — a hooks instance's internal
+ * baseline does NOT survive exit (callers build fresh hooks objects). The
+ * instance's `restore` exists for direct rollback callers that hold the hooks
+ * instance that applied, never across a persona lifecycle.
  */
 export interface PersonaModelApplyHooks {
 	/**
-	 * Apply the agent's model + thinking preference to the session.
-	 * Implementations capture the pre-apply baseline (model + thinking) so a
-	 * later {@link restore} can revert exactly what was applied.
+	 * Apply the agent's model + thinking preference to the session. The runtime
+	 * owns the lifecycle baseline and never reads it back through
+	 * {@link restore}.
 	 */
 	apply(agent: DiscoveredAgent, explicit?: PersonaExplicitOverrides): Promise<void>;
 
 	/**
-	 * Revert to the baseline captured by the last {@link apply}. A no-op when
-	 * nothing has been applied yet.
+	 * Surface-specific restore channel. The runtime does NOT call this on the
+	 * persona exit path anymore (it restores its own captured baseline); kept
+	 * for direct rollback callers that hold the hooks instance that applied.
 	 */
 	restore(): Promise<void>;
-
-	/**
-	 * Queue a mid-turn model switch for later flush (TUI semantics: flushed on
-	 * agent_end). Absent on the default hooks; per-surface hosts override.
-	 */
-	queueModelSwitch?(modelPattern: string): void;
 
 	/**
 	 * Defer a mid-turn persona model switch (ACP semantics: notice + skip,
@@ -46,21 +47,13 @@ export interface PersonaModelApplyHooks {
 	 * Defer a mid-turn persona model RESTORE (exit path): the persona teardown
 	 * (policy/prompt/spawns/presentation) applies immediately, but reverting the
 	 * session model/thinking to the pre-persona baseline must not mutate a live
-	 * turn. Surfaces queue the baseline flush (TUI: `#pendingModelSwitch` on
-	 * agent_end) or notice (ACP). Absent on the default hooks — without it a
-	 * deferred mid-turn exit skips the model restore rather than mutating the
-	 * streaming session.
+	 * turn. The RUNTIME passes its own captured baseline (the hook instance that
+	 * ran `apply` does not survive to exit); surfaces queue the baseline flush
+	 * (TUI: `#pendingModelSwitch` on agent_end) or notice (ACP). Absent on the
+	 * default hooks — without it a deferred mid-turn exit skips the model
+	 * restore rather than mutating the streaming session.
 	 */
-	deferModelRestoreWhileStreaming?(): void;
-
-	/**
-	 * The pre-apply baseline captured by the last {@link apply} (model +
-	 * thinking), for surfaces that need it outside the restore path (e.g. the
-	 * TUI queues it through its own pending-model-switch channel). Undefined
-	 * before the first apply.
-	 */
-	snapshotBaseline?(): ModelBaseline | undefined;
-
+	deferModelRestoreWhileStreaming?(baseline: ModelBaseline): void;
 	/**
 	 * Whether a persona model switch should be deferred right now (e.g. the
 	 * session is streaming). Absent on the default hooks.
@@ -124,27 +117,5 @@ export function createDefaultPersonaModelHooks(session: AgentSession): PersonaMo
 				session.setThinkingLevel(thinkingLevel);
 			}
 		},
-		snapshotBaseline(): ModelBaseline | undefined {
-			return baseline;
-		},
 	};
-}
-
-/**
- * Standalone apply helper matching plan §2's enter sequence: the runtime calls
- * this (not `hooks.apply` directly) so the deferral channels compose with the
- * apply path in one place. Hooks are session-bound at
- * {@link createDefaultPersonaModelHooks} construction time.
- */
-export async function applyPersonaModelAndThinking(
-	agent: DiscoveredAgent,
-	explicit: PersonaExplicitOverrides,
-	hooks: PersonaModelApplyHooks,
-	deferModel: boolean,
-): Promise<void> {
-	if (deferModel) {
-		hooks.deferModelSwitchWhileStreaming?.(agent);
-		return;
-	}
-	await hooks.apply(agent, explicit);
 }

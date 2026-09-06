@@ -154,8 +154,6 @@ export interface AgentSessionConfig {
 	additionalExtensionPaths?: readonly string[];
 	/** Mirror of `disableExtensionDiscovery`; used when no inherited root provider exists. */
 	disableExtensionDiscovery?: boolean;
-	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
-	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag). */
@@ -343,11 +341,11 @@ export interface AgentSessionConfig {
 	/** System prompt used by automatic session-title generation. */
 	/**
 	 * Host spawn-policy fallback consulted by the persona-owned
-	 * `AgentSession.setSessionSpawns` override. Returns the CLI `--spawns` value
-	 * (`null` = unrestricted) per the ToolSession contract; sdk.ts wires
-	 * `options.spawns ?? "*"`. Absent = unrestricted.
+	 * `AgentSession.setSessionSpawns` override. A string is CLI `--spawns`
+	 * (comma-separated names, `*` = unrestricted); `null` = unrestricted.
+	 * Absent = unrestricted.
 	 */
-	getSessionSpawns?: () => string | null;
+	getSessionSpawns?: () => string | string[] | "*" | null;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
 }

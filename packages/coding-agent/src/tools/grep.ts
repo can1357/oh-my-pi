@@ -930,10 +930,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			IS_HL_MODE: displayMode.hashLines,
 			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
-			scoutAvailable: isScoutSpawnable(
-				this.session.settings.get("task.disabledAgents") as string[] | undefined,
-				this.session.getSessionSpawns?.() ?? "*",
-			),
+			scoutAvailable:
+				this.session.isScoutSpawnable?.() ??
+				isScoutSpawnable(
+					this.session.settings.get("task.disabledAgents") as string[] | undefined,
+					this.session.getSessionSpawns?.() ?? "*",
+				),
 		});
 	}
 	readonly parameters = searchSchema;

@@ -156,10 +156,12 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 	get description(): string {
 		return prompt.render(astGrepDescription, {
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
-			scoutAvailable: isScoutSpawnable(
-				this.session.settings.get("task.disabledAgents") as string[] | undefined,
-				this.session.getSessionSpawns?.() ?? "*",
-			),
+			scoutAvailable:
+				this.session.isScoutSpawnable?.() ??
+				isScoutSpawnable(
+					this.session.settings.get("task.disabledAgents") as string[] | undefined,
+					this.session.getSessionSpawns?.() ?? "*",
+				),
 		});
 	}
 	readonly parameters = astGrepSchema;

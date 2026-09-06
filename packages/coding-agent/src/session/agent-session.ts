@@ -118,6 +118,7 @@ import { releaseCompletionHandles } from "../eval/completion-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { WorkPoolRegistry } from "../task/workpool";
+import { isScoutSpawnable } from "../task/spawn-policy";
 import type { BashPtyOptions, BashResult } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -684,7 +685,6 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
-	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
@@ -1519,6 +1519,10 @@ export class AgentSession {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			// Host spawn-policy fallback (CLI `--spawns` / ToolSession contract); `null` = unrestricted.
 			getSessionSpawns: () => config.getSessionSpawns?.() ?? null,
+			// Policy seam: every presentation mutation consults the session tool
+			// policy. `this.toolPolicy` is assigned before this host (constructor
+			// line ordering), so the arrow reads the live field.
+			isToolGranted: name => this.toolPolicy?.granted(name) ?? true,
 		};
 		// Captured so the persona spawn override can fall back to the host config getter.
 		this.#toolsHost = sessionToolsHost;
@@ -1590,7 +1594,6 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
-		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
 			config.providerPromptCacheKeySource === "fork" ? this.agent.promptCacheKey : undefined;
@@ -1905,12 +1908,26 @@ export class AgentSession {
 	getSessionSpawns(): string[] | "*" | null {
 		if (this.#sessionSpawns !== null) return this.#sessionSpawns;
 		const hostSpawns = this.#toolsHost.getSessionSpawns();
-		return hostSpawns === null
-			? "*"
-			: (hostSpawns
-					.split(",")
-					.map(s => s.trim())
-					.filter(Boolean) as string[]);
+		if (hostSpawns === null || hostSpawns === "*") return hostSpawns ?? "*";
+		if (Array.isArray(hostSpawns)) return hostSpawns;
+		return hostSpawns
+			.split(",")
+			.map(s => s.trim())
+			.filter(Boolean);
+	}
+
+	/**
+	 * Single source of truth for scout availability: `task.disabledAgents`
+	 * ∩ the LIVE persona-aware spawn policy ({@link getSessionSpawns} — the
+	 * persona-owned override wins when set, else the host CLI `--spawns`).
+	 * Every prompt/advisory surface reads THIS, never a construction-time
+	 * `options.spawns` snapshot.
+	 */
+	isScoutSpawnable(): boolean {
+		return isScoutSpawnable(
+			this.settings.get("task.disabledAgents") as string[] | undefined,
+			this.getSessionSpawns(),
+		);
 	}
 
 	/** Sets the persona-owned spawn policy override (`null` clears it back to the host config). */
@@ -5767,8 +5784,7 @@ export class AgentSession {
 	}
 
 	#isScoutAvailable(): boolean {
-		const disabledAgents = this.settings.get("task.disabledAgents") as string[] | undefined;
-		return this.#scoutAllowedBySpawnPolicy && !disabledAgents?.includes("scout");
+		return this.isScoutSpawnable();
 	}
 
 	async #buildPlanModeMessage(): Promise<CustomMessage | null> {
@@ -7639,13 +7655,12 @@ export class AgentSession {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
-		// Persona teardown runs before the transcript/context clear so the outgoing
-		// session's journal records the persona exit while the state still belongs
-		// to it. Default hooks: teardown cannot defer (no streaming is possible here).
-		const personaRuntime = this.getPersonaRuntime();
-		if (personaRuntime && this.toolPolicy?.isPersonaActive()) {
-			await personaRuntime.exit(createDefaultPersonaModelHooks(this));
-		}
+		// Persona teardown is deliberately AFTER the session_before_switch veto
+		// check below: a cancelled switch must leave the outgoing session exactly
+		// as it was — persona metadata included. The teardown still runs before
+		// the transcript/context clear so the outgoing session's journal records
+		// the persona exit while the state still belongs to it. Default hooks:
+		// teardown cannot defer (no streaming is possible here).
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
@@ -7663,6 +7678,13 @@ export class AgentSession {
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
 		await this.abort();
+		// Persona teardown, after the veto check above and before the
+		// transcript/context clear so the outgoing session's journal still records
+		// the persona exit while the state belongs to it.
+		const personaRuntime = this.getPersonaRuntime();
+		if (personaRuntime && this.toolPolicy?.isPersonaActive()) {
+			await personaRuntime.exit(createDefaultPersonaModelHooks(this));
+		}
 		this.#cancelOwnAsyncJobs();
 		this.#closeAllProviderSessions("new session");
 		await this.#bash.flushPending();

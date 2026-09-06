@@ -17,13 +17,14 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { PersonaRuntime } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { SessionToolPolicy, type DiscoveredAgent } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
+import { type DiscoveredAgent, SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
 import { __resetDirsFromEnvForTests, getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, SessionNotification } from "@oh-my-pi/pi-utils/acp";
 
@@ -138,7 +139,10 @@ class PersonaStubSession {
 	}
 
 	async setActiveToolPresentation(toolNames: string[], mountedToolNames: string[]): Promise<void> {
-		this.stub.presentationCalls.push({ toolNames: [...toolNames], mountedToolNames: [...mountedToolNames] });
+		this.stub.presentationCalls.push({
+			toolNames: [...toolNames],
+			mountedToolNames: [...mountedToolNames],
+		});
 		this.stub.activeToolNames = [...toolNames];
 		this.stub.enabledToolNames = [...toolNames];
 		this.stub.mountedToolNames = [...mountedToolNames];
@@ -179,7 +183,12 @@ class PersonaStubSession {
 	}
 
 	get effectiveExtensionRoots(): EffectiveExtensionRoots {
-		return { explicit: [], mode: "merge", configured: [], configuredLevel: "user" };
+		return {
+			explicit: [],
+			mode: "merge",
+			configured: [],
+			configuredLevel: "user",
+		};
 	}
 
 	setClientBridge(_bridge: unknown): void {}
@@ -200,7 +209,13 @@ class PersonaStubSession {
 
 	skillsSettings = { enableSkillCommands: true };
 
-	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
+	skills: Array<{
+		name: string;
+		description: string;
+		filePath: string;
+		baseDir: string;
+		source: string;
+	}> = [];
 
 	async refreshSkills(): Promise<void> {}
 
@@ -330,7 +345,10 @@ async function createPersonaHarness(): Promise<AcpPersonaHarness> {
 	};
 
 	const agent = new AcpAgent(connection, factory);
-	await agent.initialize({ protocolVersion: 1, clientCapabilities: {} } as Parameters<typeof agent.initialize>[0]);
+	await agent.initialize({
+		protocolVersion: 1,
+		clientCapabilities: {},
+	} as Parameters<typeof agent.initialize>[0]);
 	return { agent, updates, sessions, cwd, home };
 }
 
@@ -354,12 +372,20 @@ describe("ACP persona reconciliation", () => {
 		harness.sessions.push(source);
 		// Simulate a persona session stored by a previous host: agent mode_change
 		// on the journal plus conversation content so resume has context.
-		source.sessionManager.appendMessage({ role: "user", content: "hi", timestamp: Date.now() });
+		source.sessionManager.appendMessage({
+			role: "user",
+			content: "hi",
+			timestamp: Date.now(),
+		});
 		source.sessionManager.appendModeChange("agent", { name: "acp-testa" });
 		await source.sessionManager.ensureOnDisk();
 		await source.sessionManager.flush();
 
-		await harness.agent.loadSession({ sessionId: source.sessionId, cwd: harness.cwd, mcpServers: [] });
+		await harness.agent.loadSession({
+			sessionId: source.sessionId,
+			cwd: harness.cwd,
+			mcpServers: [],
+		});
 
 		const stored = harness.sessions.at(-1)!;
 		const policy = stored.getPersonaRuntime()!.policy;
@@ -379,30 +405,65 @@ describe("ACP persona reconciliation", () => {
 		const harness = await createPersonaHarness();
 		const source = new PersonaStubSession(harness.cwd);
 		harness.sessions.push(source);
-		source.sessionManager.appendMessage({ role: "user", content: "plain session", timestamp: Date.now() });
+		source.sessionManager.appendMessage({
+			role: "user",
+			content: "plain session",
+			timestamp: Date.now(),
+		});
 		await source.sessionManager.ensureOnDisk();
 		await source.sessionManager.flush();
 
-		await harness.agent.loadSession({ sessionId: source.sessionId, cwd: harness.cwd, mcpServers: [] });
+		await harness.agent.loadSession({
+			sessionId: source.sessionId,
+			cwd: harness.cwd,
+			mcpServers: [],
+		});
 		const stored = harness.sessions.at(-1)!;
 		expect(stored.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
 		expect(await lastAgentModeChange(stored)).toBeUndefined();
 	});
 
-	it("skips reconcile without writing when the persona definition is gone", async () => {
+	it("degrades with a notice and appends a `none` journal entry when the persona definition is gone", async () => {
 		const harness = await createPersonaHarness();
 		const source = new PersonaStubSession(harness.cwd);
 		harness.sessions.push(source);
-		source.sessionManager.appendModeChange("agent", { name: "deleted-persona" });
+		source.sessionManager.appendModeChange("agent", {
+			name: "deleted-persona",
+		});
 		await source.sessionManager.ensureOnDisk();
 		await source.sessionManager.flush();
 
-		const entryCountBefore = source.sessionManager.getEntries().length;
-		await harness.agent.loadSession({ sessionId: source.sessionId, cwd: harness.cwd, mcpServers: [] });
+		// Persona-gone notices surface as agent_message_chunk text (the only
+		// update kind #emitPersonaNotices produces).
+		const noticeChunks = (): number =>
+			harness.updates.filter(
+				notification =>
+					notification.update.sessionUpdate === "agent_message_chunk" &&
+					String((notification.update.content as { text?: string }).text ?? "").includes("deleted-persona"),
+			).length;
+
+		await harness.agent.loadSession({
+			sessionId: source.sessionId,
+			cwd: harness.cwd,
+			mcpServers: [],
+		});
 		const stored = harness.sessions.at(-1)!;
 		expect(stored.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
-		// No drift entry for a persona that cannot resolve.
-		expect(stored.sessionManager.getEntries().length).toBe(entryCountBefore);
+		expect(noticeChunks()).toBe(1);
+		// Journal clear marker: the stale `agent` entry no longer stays LAST,
+		// so a second resume does not re-notice the degrade.
+		const entry = await lastAgentModeChange(stored);
+		expect(entry?.mode).toBe("none");
+
+		// Second resume: no re-notice for the cleared persona.
+		await harness.agent.loadSession({
+			sessionId: stored.sessionId,
+			cwd: harness.cwd,
+			mcpServers: [],
+		});
+		const reopened = harness.sessions.at(-1)!;
+		expect(reopened.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+		expect(noticeChunks()).toBe(1);
 	});
 
 	it("resolves the persona from the session cwd's project agents dir", async () => {
@@ -427,7 +488,11 @@ describe("ACP persona reconciliation", () => {
 		await source.sessionManager.ensureOnDisk();
 		await source.sessionManager.flush();
 
-		await harness.agent.loadSession({ sessionId: source.sessionId, cwd: harness.cwd, mcpServers: [] });
+		await harness.agent.loadSession({
+			sessionId: source.sessionId,
+			cwd: harness.cwd,
+			mcpServers: [],
+		});
 		const stored = harness.sessions.at(-1)!;
 		const policy = stored.getPersonaRuntime()!.policy;
 		expect(policy.isPersonaActive()).toBe(true);
@@ -459,16 +524,52 @@ describe("ACP persona reconciliation", () => {
 		expect(notices[0]).toContain("mid-turn");
 	});
 
+	it("emits an ACP text notice for a mid-turn model restore (defer-restore channel)", async () => {
+		const harness = await createPersonaHarness();
+		const { createAcpPersonaModelHooks } = await import("@oh-my-pi/pi-coding-agent/modes/acp/acp-agent");
+		const session = new PersonaStubSession(harness.cwd);
+		session.stub.isStreaming = true;
+		const notices: string[] = [];
+		const hooks = createAcpPersonaModelHooks(session as unknown as AgentSession, async text => {
+			notices.push(text);
+		});
+
+		// A baseline without a model restores nothing — no notice.
+		hooks.deferModelRestoreWhileStreaming?.({
+			model: undefined,
+			thinkingLevel: undefined,
+		});
+		expect(notices).toHaveLength(0);
+
+		hooks.deferModelRestoreWhileStreaming?.({
+			model: {} as Model,
+			thinkingLevel: undefined,
+		});
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("model restore deferred");
+	});
+
 	it("resume (session/resume) reconciles like load", async () => {
 		const harness = await createPersonaHarness();
 		const source = new PersonaStubSession(harness.cwd);
 		harness.sessions.push(source);
-		source.sessionManager.appendMessage({ role: "user", content: "resume me", timestamp: Date.now() });
-		source.sessionManager.appendModeChange("agent", { name: "acp-testa", explicit: { thinking: "high" } });
+		source.sessionManager.appendMessage({
+			role: "user",
+			content: "resume me",
+			timestamp: Date.now(),
+		});
+		source.sessionManager.appendModeChange("agent", {
+			name: "acp-testa",
+			explicit: { thinking: "high" },
+		});
 		await source.sessionManager.ensureOnDisk();
 		await source.sessionManager.flush();
 
-		await harness.agent.resumeSession({ sessionId: source.sessionId, cwd: harness.cwd, mcpServers: [] });
+		await harness.agent.resumeSession({
+			sessionId: source.sessionId,
+			cwd: harness.cwd,
+			mcpServers: [],
+		});
 		const stored = harness.sessions.at(-1)!;
 		expect(stored.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
 		const entry = await lastAgentModeChange(stored);
@@ -480,12 +581,20 @@ describe("ACP persona reconciliation", () => {
 		const harness = await createPersonaHarness();
 		const source = new PersonaStubSession(harness.cwd);
 		harness.sessions.push(source);
-		source.sessionManager.appendMessage({ role: "user", content: "fork me", timestamp: Date.now() });
+		source.sessionManager.appendMessage({
+			role: "user",
+			content: "fork me",
+			timestamp: Date.now(),
+		});
 		source.sessionManager.appendModeChange("agent", { name: "acp-testa" });
 		await source.sessionManager.ensureOnDisk();
 		await source.sessionManager.flush();
 
-		await harness.agent.unstable_forkSession({ sessionId: source.sessionId, cwd: harness.cwd, mcpServers: [] });
+		await harness.agent.unstable_forkSession({
+			sessionId: source.sessionId,
+			cwd: harness.cwd,
+			mcpServers: [],
+		});
 		const forkSession = harness.sessions.at(-1)!;
 		const policy = forkSession.getPersonaRuntime()!.policy;
 		expect(policy.effective("read")).toBe(true);

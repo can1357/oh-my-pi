@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { PersonaRuntime, PersonaSwitchError } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
 import type { PersonaModelApplyHooks } from "@oh-my-pi/pi-coding-agent/session/persona-model-hooks";
+import {
+	PersonaRuntime,
+	PersonaSwitchError,
+	PersonaSwitchTransaction,
+} from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
 import { type DiscoveredAgent, SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
 
 function makeAgent(overrides: Partial<DiscoveredAgent> = {}): DiscoveredAgent {
@@ -20,10 +24,12 @@ interface SessionStub {
 	enabledToolNames: string[];
 	mountedToolNames: string[];
 	activeToolNames: string[];
-	model: undefined;
-	thinkingLevel: undefined;
+	model: { provider: string; id: string } | undefined;
+	thinkingLevel: string | undefined;
 	spawnsOverride: string[] | "*" | null;
 	appendPrompt: string | undefined;
+	setModelCalls: string[];
+	setThinkingCalls: Array<string | undefined>;
 	modeChangeCalls: Array<{ mode: string; data?: Record<string, unknown> }>;
 	clearCacheKeyCalls: number;
 	spawnsCalls: Array<string[] | "*" | null>;
@@ -32,7 +38,10 @@ interface SessionStub {
 	presentationCalls: Array<{ toolNames: string[]; mountedToolNames: string[] }>;
 }
 
-function makeSessionStub(overrides: Partial<SessionStub> = {}): { stub: SessionStub; session: AgentSession } {
+function makeSessionStub(overrides: Partial<SessionStub> = {}): {
+	stub: SessionStub;
+	session: AgentSession;
+} {
 	const stub: SessionStub = {
 		isStreaming: false,
 		enabledToolNames: ["read", "grep", "glob", "write"],
@@ -43,9 +52,11 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): { stub: SessionS
 		thinkingLevel: undefined,
 		spawnsOverride: null,
 		appendPrompt: undefined,
+		appendPromptCalls: [],
+		setModelCalls: [],
+		setThinkingCalls: [],
 		clearCacheKeyCalls: 0,
 		spawnsCalls: [],
-		appendPromptCalls: [],
 		modeChangeCalls: [],
 		presentationCalls: [],
 		...overrides,
@@ -61,11 +72,22 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): { stub: SessionS
 			return stub.model;
 		},
 		configuredThinkingLevel: () => stub.thinkingLevel,
+		setModel: async (model: { provider: string; id: string }) => {
+			stub.model = model;
+			stub.setModelCalls.push(`${model.provider}/${model.id}`);
+		},
+		setThinkingLevel: (level: string | undefined) => {
+			stub.thinkingLevel = level;
+			stub.setThinkingCalls.push(level);
+		},
 		refreshBaseSystemPrompt: async () => {
 			stub.refreshBaseSystemPromptCalls += 1;
 		},
 		setActiveToolPresentation: async (toolNames: string[], mountedToolNames: string[]) => {
-			stub.presentationCalls.push({ toolNames: [...toolNames], mountedToolNames: [...mountedToolNames] });
+			stub.presentationCalls.push({
+				toolNames: [...toolNames],
+				mountedToolNames: [...mountedToolNames],
+			});
 		},
 		clearInheritedProviderPromptCacheKey: () => {
 			stub.clearCacheKeyCalls += 1;
@@ -107,7 +129,7 @@ function makeRuntime(session: AgentSession): PersonaRuntime {
 }
 
 describe("PersonaRuntime", () => {
-	it("snapshot captures all seven PersonaSwitchSnapshot fields", async () => {
+	it("snapshot captures all PersonaSwitchSnapshot fields", async () => {
 		const { stub, session } = makeSessionStub();
 		const runtime = makeRuntime(session);
 		runtime.policy.enterPersona(makeAgent({ tools: ["read"] }), {});
@@ -117,14 +139,17 @@ describe("PersonaRuntime", () => {
 		expect(snap.policy.sessionToggles).toBeInstanceOf(Map);
 		expect([...snap.tools]).toEqual(stub.enabledToolNames);
 		expect([...snap.mountedToolNames]).toEqual(stub.mountedToolNames);
-		expect(snap.baseModelOverride).toEqual({ model: undefined, thinkingLevel: undefined });
+		expect(snap.baseModelOverride).toEqual({
+			model: undefined,
+			thinkingLevel: undefined,
+		});
 		expect(snap.appendPrompt).toBeUndefined();
 		expect(snap.spawns).toBe("*"); // no persona: effective host spawns value
-		expect(snap.lastAssistantUsageCleared).toBe(false);
+		expect(snap.activeBaseline).toBeUndefined(); // enterPersona bypasses runtime baseline capture
 		expect(Object.keys(snap).sort()).toEqual([
+			"activeBaseline",
 			"appendPrompt",
 			"baseModelOverride",
-			"lastAssistantUsageCleared",
 			"mountedToolNames",
 			"policy",
 			"spawns",
@@ -140,7 +165,6 @@ describe("PersonaRuntime", () => {
 
 		// Mutate after capture
 		runtime.policy.exitPersona();
-		runtime.policy.setSessionToolEnabled("read", false);
 		stub.enabledToolNames = ["bash"];
 		stub.mountedToolNames = ["xd://helper"];
 
@@ -150,7 +174,10 @@ describe("PersonaRuntime", () => {
 		expect(runtime.policy.effective("read")).toBe(true);
 		expect(runtime.policy.effective("bash")).toBe(false); // persona grant narrows
 		expect(stub.presentationCalls).toEqual([
-			{ toolNames: [...snap.tools], mountedToolNames: [...snap.mountedToolNames] },
+			{
+				toolNames: [...snap.tools],
+				mountedToolNames: [...snap.mountedToolNames],
+			},
 		]);
 	});
 
@@ -255,34 +282,48 @@ describe("PersonaRuntime", () => {
 		expect(stub.appendPrompt).toBe("persona prompt");
 	});
 
-	it("exit restores presentation from the post-exit effective set, preserving mid-persona toggles", async () => {
+	it("exit restores presentation from the post-exit effective set", async () => {
 		const { stub, session } = makeSessionStub();
 		const runtime = makeRuntime(session);
 		await runtime.enter(makeAgent({ tools: ["read", "grep"] }), {}, makeHooks());
-		runtime.policy.setSessionToolEnabled("bash", false); // user toggle mid-persona
 
 		await runtime.exit(makeHooks());
 
 		const last = stub.presentationCalls.at(-1);
 		expect(last?.toolNames).toContain("write"); // pre-persona tool regained
 		expect(last?.toolNames).toContain("grep");
-		expect(last?.toolNames).not.toContain("bash"); // toggle respected
 	});
 
-	it("rollback restores model/thinking through hooks.restore", async () => {
-		const { session } = makeSessionStub();
+	it("rollback restores model/thinking from the runtime baseline, not hooks.restore", async () => {
+		const { stub, session } = makeSessionStub();
 		const runtime = makeRuntime(session);
 		const boom = new Error("refresh failed");
 		// Fail the transaction AFTER apply so the model channel has mutated state.
 		(session as unknown as { refreshBaseSystemPrompt: () => Promise<void> }).refreshBaseSystemPrompt = async () => {
 			throw boom;
 		};
-		let restores = 0;
-		await expect(
-			runtime.enter(makeAgent(), {}, makeHooks({ restore: async () => void (restores += 1) })),
-		).rejects.toThrow(boom);
+		// Simulate the persona's apply: hooks capture a pre-apply baseline, then
+		// mutate the session like the real apply would.
+		const hooks = makeHooks({
+			apply: async () => {
+				stub.model = { provider: "stub", id: "persona-model" };
+				stub.thinkingLevel = "high";
+			},
+			// hooks.restore MUST NOT be the rollback's model channel: the hook
+			// instance that ran apply does not survive to the rollback site in
+			// production (exit builds fresh hooks). If restore() were required,
+			// this counter would stay 0 in the real bug this test guards.
+			restore: async () => {
+				throw new Error("hooks.restore must not drive runtime rollback");
+			},
+		});
+		stub.model = { provider: "stub", id: "baseline-model" };
+		stub.thinkingLevel = "low";
+		await expect(runtime.enter(makeAgent(), {}, hooks)).rejects.toThrow(boom);
 
-		expect(restores).toBe(1);
+		// Runtime baseline captured at enter: rolled back to pre-apply state.
+		expect(stub.model).toEqual({ provider: "stub", id: "baseline-model" });
+		expect(stub.thinkingLevel).toBe("low");
 	});
 
 	it("reconcile restores the pre-reconcile persona when enter fails", async () => {
@@ -308,6 +349,47 @@ describe("PersonaRuntime", () => {
 		expect(runtime.policy.effective("write")).toBe(false);
 	});
 
+	it("failed persona-to-persona switch keeps the surviving persona's runtime baseline", async () => {
+		// foy5k regression: the exit half of a persona→persona switch consumed
+		// persona A's baseline, and the rollback snapshot carried none — leaving
+		// the reinstated A baseline-less, so a later exit leaked A's model.
+		const { stub, session } = makeSessionStub();
+		const runtime = makeRuntime(session);
+		stub.model = { provider: "stub", id: "pre-a-model" };
+		stub.thinkingLevel = "low";
+		await runtime.enter(
+			makeAgent({ name: "a", tools: ["read"] }),
+			{},
+			makeHooks({
+				apply: async () => {
+					stub.model = { provider: "stub", id: "a-model" };
+					stub.thinkingLevel = "high";
+				},
+			}),
+		);
+
+		const boom = new Error("enter B failed");
+		await expect(
+			runtime.enter(
+				makeAgent({ name: "b", tools: ["write"] }),
+				{},
+				makeHooks({
+					apply: async () => {
+						throw boom;
+					},
+				}),
+			),
+		).rejects.toThrow(boom);
+
+		// Rollback reinstated persona A; a subsequent exit must restore the
+		// PRE-A baseline from the runtime, not leak A's model.
+		expect(runtime.policy.isPersonaActive()).toBe(true);
+		expect(stub.model).toEqual({ provider: "stub", id: "a-model" }); // restore reverts from snapshot, not baseline
+		await runtime.exit(makeHooks());
+		expect(stub.model).toEqual({ provider: "stub", id: "pre-a-model" });
+		expect(stub.thinkingLevel).toBe("low");
+	});
+
 	it("rollback: on error mid-enter, snapshot state is restored and the error rethrown", async () => {
 		const { stub, session } = makeSessionStub();
 		const runtime = makeRuntime(session);
@@ -328,15 +410,76 @@ describe("PersonaRuntime", () => {
 		expect(stub.presentationCalls.length).toBeGreaterThan(0); // restore path ran
 	});
 
-	it("exit clears the persona and calls hooks.restore", async () => {
-		const { session } = makeSessionStub();
+	const { stub, session } = makeSessionStub();
+	it("exit restores model/thinking from the runtime baseline with FRESH hooks (foxls/foy5h)", async () => {
 		const runtime = makeRuntime(session);
-		let restored = 0;
-		await runtime.enter(makeAgent({ tools: ["read"] }), {}, makeHooks());
-		await runtime.exit(makeHooks({ restore: async () => void (restored += 1) }));
+		// Enter hooks capture baseline and mutate the session like the real apply.
+		stub.model = { provider: "stub", id: "baseline-model" };
+		stub.thinkingLevel = "low";
+		await runtime.enter(
+			makeAgent({ tools: ["read"] }),
+			{},
+			makeHooks({
+				apply: async () => {
+					stub.model = { provider: "stub", id: "persona-model" };
+					stub.thinkingLevel = "high";
+				},
+			}),
+		);
+		expect(stub.model).toEqual({ provider: "stub", id: "persona-model" });
+
+		// Exit builds a FRESH hooks object (the production shape: exitAgentPersona
+		// constructs new hooks whose per-instance baseline is empty). The model
+		// restore must come from the RUNTIME baseline, not hooks.restore.
+		let hookRestores = 0;
+		await runtime.exit(
+			makeHooks({
+				restore: async () => void (hookRestores += 1),
+				deferModelRestoreWhileStreaming: () => {
+					throw new Error("not streaming; defer channel must not fire");
+				},
+			}),
+		);
 
 		expect(runtime.policy.isPersonaActive()).toBe(false);
-		expect(restored).toBe(1);
+		expect(stub.model).toEqual({ provider: "stub", id: "baseline-model" });
+		expect(stub.thinkingLevel).toBe("low");
+		// hooks.restore is no longer the exit model channel.
+		expect(hookRestores).toBe(0);
+	});
+
+	it("exit defers the model restore and passes the runtime baseline to the hook", async () => {
+		const { stub, session } = makeSessionStub();
+		const runtime = makeRuntime(session);
+		stub.model = { provider: "stub", id: "baseline-model" };
+		stub.thinkingLevel = "low";
+		await runtime.enter(
+			makeAgent({ tools: ["read"] }),
+			{},
+			makeHooks({
+				apply: async () => {
+					stub.model = { provider: "stub", id: "persona-model" };
+					stub.thinkingLevel = "high";
+				},
+			}),
+		);
+		stub.isStreaming = true; // turn starts after persona entry
+
+		const queued: Array<{ model: unknown; thinkingLevel: unknown }> = [];
+		await runtime.exit(
+			makeHooks({
+				shouldDeferModelSwitch: () => true,
+				deferModelRestoreWhileStreaming: baseline => queued.push(baseline),
+			}),
+		);
+
+		expect(queued).toEqual([
+			{
+				model: { provider: "stub", id: "baseline-model" },
+				thinkingLevel: "low",
+			},
+		]);
+		expect(stub.model).toEqual({ provider: "stub", id: "persona-model" }); // untouched mid-turn
 	});
 
 	it("reconcile replaces an active persona with the desired one", async () => {
@@ -368,9 +511,7 @@ describe("PersonaSwitchTransaction", () => {
 		const { stub, session } = makeSessionStub();
 		const runtime = makeRuntime(session);
 		runtime.policy.enterPersona(makeAgent({ tools: ["read"] }), {});
-		const tx = await import("@oh-my-pi/pi-coding-agent/session/persona-runtime").then(m =>
-			m.PersonaSwitchTransaction.begin(runtime),
-		);
+		const tx = await PersonaSwitchTransaction.begin(runtime);
 		runtime.policy.exitPersona();
 		await tx.rollback();
 

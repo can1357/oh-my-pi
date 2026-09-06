@@ -37,7 +37,10 @@ describe("persona state teardown for /new sessions", () => {
 		for (const authStorage of authStorages.splice(0)) authStorage.close();
 	});
 
-	async function makePersonaSession(persona?: DiscoveredAgent): Promise<AgentSession> {
+	async function makePersonaSession(
+		persona?: DiscoveredAgent,
+		options?: { cancelBeforeSwitch?: boolean },
+	): Promise<AgentSession> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
 		const agent = new Agent({
@@ -53,6 +56,13 @@ describe("persona state teardown for /new sessions", () => {
 			registry: () => new Set(["read", "grep", "bash", "edit", "write", "task"]),
 			isDefaultActive: () => true,
 		});
+		const extensionRunner =
+			options?.cancelBeforeSwitch === true
+				? ({
+						hasHandlers: (eventType: string) => eventType === "session_before_switch",
+						emit: async () => ({ cancel: true }),
+					} as never)
+				: undefined;
 		const s = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -60,6 +70,7 @@ describe("persona state teardown for /new sessions", () => {
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "Main",
 			toolPolicy: policy,
+			extensionRunner,
 		});
 		s.setPersonaRuntime(new PersonaRuntime(policy, s));
 		if (persona) await s.getPersonaRuntime()!.enter(persona, {}, { apply: async () => {}, restore: async () => {} });
@@ -89,5 +100,21 @@ describe("persona state teardown for /new sessions", () => {
 
 		expect(policy.isPersonaActive()).toBe(false);
 		expect(session.getPersonaAppendPrompt()).toBeUndefined();
+	});
+
+	it("session_before_switch veto preserves the active persona", async () => {
+		session = await makePersonaSession(makePersona(), { cancelBeforeSwitch: true });
+		const policy = session.getToolPolicy()!;
+		expect(policy.isPersonaActive()).toBe(true);
+
+		const cancelled = await session.newSession();
+
+		expect(cancelled).toBe(false);
+		// The vetoed /new must leave the persona metadata intact: grant, identity
+		// prompt, and persona spawn override all still in place.
+		expect(policy.isPersonaActive()).toBe(true);
+		expect(policy.effective("bash")).toBe(false);
+		expect(session.getPersonaAppendPrompt()).toBe("persona-a identity prompt");
+		expect(session.getSessionSpawns()).toBe("*"); // persona tools lack a spawns field → persona-owned null → host fallback `*`
 	});
 });
