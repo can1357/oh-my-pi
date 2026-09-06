@@ -187,6 +187,7 @@
 ### Fixed
 
 - Fixed GPT-6 Astra requiring `/extended-context` for its full context window: it now keeps the documented 1.05M-token window with the setting on or off, and explicit per-model `contextWindow` overrides still win.
+- Startup against an auth broker that rejects the bearer token (401/403) now says the broker is reachable but rejected the token and points at `omp auth-broker token`, `OMP_AUTH_BROKER_TOKEN`, `auth.broker.token`, or the token file, instead of the generic "unreachable, start it with `omp auth-broker serve`" guidance.
 
 ## [18.1.12] - 2026-09-06
 

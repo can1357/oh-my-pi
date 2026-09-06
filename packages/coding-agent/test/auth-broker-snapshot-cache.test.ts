@@ -6,11 +6,12 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
 	type AuthBrokerServerHandle,
 	readAuthBrokerSnapshotCache,
+	SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS,
 	type SnapshotResponse,
 	startAuthBroker,
 	writeAuthBrokerSnapshotCache,
 } from "@oh-my-pi/pi-ai/auth-broker";
-import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
+import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const ENV_KEYS = [
@@ -21,7 +22,21 @@ const ENV_KEYS = [
 ] as const;
 const PROVIDER = "unit-auth-broker-cache";
 const TOKEN = "coding-agent-cache-token";
-const nativeFetch = globalThis.fetch;
+
+type FetchInput = string | URL | Request;
+
+/** Typed like the global so `DiscoverAuthStorageOptions.fetch` accepts it without touching `globalThis.fetch`. */
+function fakeFetch(handler: (input: FetchInput, init?: RequestInit) => Promise<Response>): typeof fetch {
+	return Object.assign(handler, { preconnect: fetch.preconnect });
+}
+
+/** Rejects with the signal's reason once it aborts, like a stalled proxy that never answers. */
+function stallUntilAbort(signal: AbortSignal | null | undefined): Promise<Response> {
+	const { promise, reject } = Promise.withResolvers<Response>();
+	if (signal?.aborted) reject(signal.reason);
+	else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+	return promise;
+}
 
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 
@@ -66,7 +81,6 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 	});
 
 	afterEach(async () => {
-		globalThis.fetch = nativeFetch;
 		for (const key of ENV_KEYS) {
 			if (savedEnv[key] === undefined) delete process.env[key];
 			else process.env[key] = savedEnv[key];
@@ -190,7 +204,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 				snapshot: makeSnapshot(Date.now()),
 			});
 
-			await expect(discoverAuthStorage(tempDir)).rejects.toMatchObject({ status: 401 });
+			await expect(discoverAuthStorage(tempDir)).rejects.toMatchObject({ status: 401, kind: "unauthorized" });
 		} finally {
 			server.stop(true);
 		}
@@ -237,14 +251,14 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 		const brokerUrl = "https://broker.proxy-only.invalid";
 		const requests: string[] = [];
 		let storage: AuthStorage | undefined;
-		globalThis.fetch = (async (input: string | URL | Request) => {
+		const transport = fakeFetch(async input => {
 			const requestedUrl = input instanceof Request ? input.url : String(input);
 			requests.push(requestedUrl);
 			const pathname = new URL(requestedUrl).pathname;
 			if (pathname === "/v1/healthz") return Response.json({ ok: true });
 			if (pathname === "/v1/snapshot") return Response.json(makeSnapshot(Date.now(), "broker-api-key"));
 			return new Response("not found", { status: 404 });
-		}) as typeof globalThis.fetch;
+		});
 
 		try {
 			process.env.OMP_AUTH_BROKER_URL = brokerUrl;
@@ -258,7 +272,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 				snapshot: makeSnapshot(Date.now()),
 			});
 
-			storage = await discoverAuthStorage(tempDir);
+			storage = await discoverAuthStorage(tempDir, { fetch: transport });
 			expect(await storage.getApiKey(PROVIDER)).toBe("broker-api-key");
 			expect(requests.slice(0, 2)).toEqual([`${brokerUrl}/v1/healthz`, `${brokerUrl}/v1/snapshot`]);
 		} finally {
@@ -266,22 +280,40 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 		}
 	});
 
-	test("starts from a fresh cache when the reachable broker stalls the snapshot fetch", async () => {
+	test("revalidation defaults to a 500 ms startup budget", () => {
+		expect(SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS).toBe(500);
+	});
+
+	test("healthz and the snapshot fetch share one revalidation budget", async () => {
 		const cachePath = path.join(tempDir, "snapshot.enc");
 		const brokerUrl = "https://broker.stalled-snapshot.invalid";
+		// A budget the client's own 10 s timeout (plus one retry) can never fit
+		// in; healthz eats most of it so the snapshot fetch must inherit only the
+		// remainder instead of a fresh budget of its own. Real delays: the budget
+		// is an `AbortSignal.timeout` on the platform clock, which fake timers do
+		// not drive.
+		const budgetMs = 400;
+		const healthzMs = 350;
+		let snapshotStartedAt = 0;
+		let snapshotAbortedAt = 0;
 		let storage: AuthStorage | undefined;
-		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+		const transport = fakeFetch(async (input, init) => {
 			const requestedUrl = input instanceof Request ? input.url : String(input);
 			const pathname = new URL(requestedUrl).pathname;
-			if (pathname === "/v1/healthz") return Response.json({ ok: true });
-			// Stall until the caller's signal aborts, like a proxy that never
-			// answers the authenticated route.
-			const { promise, reject } = Promise.withResolvers<Response>();
-			const signal = init?.signal;
-			if (signal?.aborted) reject(signal.reason);
-			else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
-			return promise;
-		}) as typeof globalThis.fetch;
+			if (pathname === "/v1/healthz") {
+				await Bun.sleep(healthzMs);
+				return Response.json({ ok: true });
+			}
+			// The store's background `/v1/snapshot/stream` also lands here and
+			// stalls until close; only the startup `/v1/snapshot` is timed.
+			if (pathname !== "/v1/snapshot") return stallUntilAbort(init?.signal);
+			snapshotStartedAt = performance.now();
+			try {
+				return await stallUntilAbort(init?.signal);
+			} finally {
+				snapshotAbortedAt = performance.now();
+			}
+		});
 
 		try {
 			process.env.OMP_AUTH_BROKER_URL = brokerUrl;
@@ -296,11 +328,15 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 			});
 
 			const startedAt = performance.now();
-			storage = await discoverAuthStorage(tempDir);
-			// The client's normal 10 s timeout plus one retry would take ~20 s; the
-			// cached path must give up within the startup budget instead.
-			expect(performance.now() - startedAt).toBeLessThan(5_000);
+			storage = await discoverAuthStorage(tempDir, { fetch: transport, revalidationTimeoutMs: budgetMs });
+			const elapsedMs = performance.now() - startedAt;
 			expect(await storage.getApiKey(PROVIDER)).toBe("cached-api-key");
+			expect(snapshotStartedAt).toBeGreaterThan(0);
+			// Shared budget: the stalled snapshot is cut off ~50 ms after it starts.
+			// A per-request budget would let it run the full 400 ms; timers never
+			// fire early, so the 250 ms ceiling cannot pass by accident.
+			expect(snapshotAbortedAt - snapshotStartedAt).toBeLessThan(250);
+			expect(elapsedMs).toBeLessThan(1_000);
 		} finally {
 			storage?.close();
 		}
