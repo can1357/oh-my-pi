@@ -19,6 +19,7 @@ import type { Api, Model, ModelSpec } from "../src/types";
 
 /** Fields introduced by the compat engine — absent from pre-engine baked rows. */
 const NEW_COMPAT_FIELDS = new Set([
+	"contextWindows",
 	"injectClaudeCodeInstruction",
 	"stripImageInput",
 	"thinkingLoopGuard",

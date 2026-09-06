@@ -2,9 +2,10 @@ import { type } from "@oh-my-pi/omptype";
 import { compareRevision, parseRevision } from "../compat/revision";
 import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
-import type { FetchImpl, ModelSpec } from "../types";
+import type { CodexContextWindows, FetchImpl, ModelSpec } from "../types";
 import { discoveryFetch } from "../utils";
 import { CODEX_BASE_URL, CODEX_CLIENT_VERSION, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
+import { parseCodexContextWindows } from "./codex-context-windows";
 
 const DEFAULT_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
 const DEFAULT_CONTEXT_WINDOW = 272_000;
@@ -70,6 +71,7 @@ const codexModelEntrySchema = type({
 	"prefer_websockets?": "unknown",
 	"use_responses_lite?": "unknown",
 	"tool_mode?": "unknown",
+	"model_messages?": "unknown",
 });
 
 const codexModelsResponseSchema = type({
@@ -297,6 +299,7 @@ interface ParsedCodexModelEntry {
 	useResponsesLite: boolean;
 	toolMode: boolean;
 	priority: number;
+	contextWindows?: CodexContextWindows;
 }
 
 function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
@@ -327,6 +330,7 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		useResponsesLite: toBoolean(payload.use_responses_lite) === true,
 		toolMode: payload.tool_mode === "code_mode_only",
 		priority: toFiniteNumber(payload.priority) ?? Number.MAX_SAFE_INTEGER,
+		contextWindows: parseCodexContextWindows(payload.model_messages, slug),
 	};
 }
 
@@ -380,6 +384,7 @@ function buildNormalizedCodexModel(
 			contextWindow,
 			...(parsed.maxContextWindow !== null ? { maxContextWindow: parsed.maxContextWindow } : {}),
 			maxTokens,
+			...(parsed.contextWindows ? { compat: { contextWindows: parsed.contextWindows } } : {}),
 			...(parsed.preferWebsockets ? { preferWebsockets: true } : {}),
 			...(parsed.useResponsesLite ? { useResponsesLite: true } : {}),
 			...(parsed.toolMode ? { toolMode: "code_mode_only" as const } : {}),
