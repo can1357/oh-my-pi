@@ -828,6 +828,11 @@ export class InputController {
 				}
 			}
 
+			// Collab guest join still syncing: hold local prompts until the guest
+			// is installed (issue #11067). Covers the plain-Enter path; the queue
+			// shorthand and Ctrl+Enter follow-up paths gate at their own entrypoints.
+			if (this.#holdDuringCollabJoin(text, inputImages, inputImageLinks)) return;
+
 			// Collab guest: prompts execute on the host; local slash/skill/bash/
 			// python execution is host-only (builtins are gated inside
 			// executeBuiltinSlashCommand, which already consumed allowed ones).
@@ -1320,6 +1325,30 @@ export class InputController {
 		await this.#queueForYield(text, { images, imageLinks });
 	}
 
+	/**
+	 * Hold a locally-typed prompt while a collab-guest join is still syncing.
+	 *
+	 * Between the start of `/join` and `collabGuest` being installed the session
+	 * is still the guest's own local replica, so every local prompt entrypoint
+	 * (plain Enter, `-> `/`=> ` queue shorthand, Ctrl+Enter follow-up) would run
+	 * inference against the guest's own model and credentials — failing with
+	 * "No API key found" for the guest's default provider (issue #11067). The
+	 * real editor clears its buffer before dispatch, so this restores the
+	 * submitted text and image chips and shows a hint. Returns `true` when the
+	 * caller must stop (join in flight); `false` otherwise.
+	 */
+	#holdDuringCollabJoin(text: string, images?: ImageContent[], imageLinks?: (string | undefined)[]): boolean {
+		if (!this.ctx.collabJoining || this.ctx.collabGuest) return false;
+		this.ctx.editor.pendingImages = images ? [...images] : [];
+		this.ctx.editor.pendingImageLinks = images ? (imageLinks ? [...imageLinks] : images.map(() => undefined)) : [];
+		this.ctx.editor.imageLinks =
+			this.ctx.editor.pendingImageLinks.length > 0 ? this.ctx.editor.pendingImageLinks : undefined;
+		this.ctx.editor.setCollapsedText(text);
+		this.ctx.showStatus("Joining collab session — wait for the sync to finish, then resend.");
+		this.ctx.ui.requestRender();
+		return true;
+	}
+
 	async #queueForYield(
 		text: string,
 		options: {
@@ -1328,6 +1357,9 @@ export class InputController {
 			imageLinks?: (string | undefined)[];
 		},
 	): Promise<void> {
+		// Queue shorthand (`-> `/`=> `) and `/queue` both land here before any
+		// local dispatch; hold them while a collab-guest join is still syncing.
+		if (this.#holdDuringCollabJoin(options.historyText ?? text, options.images, options.imageLinks)) return;
 		const splitMessages = splitQueuedMessages(text);
 		if (splitMessages.length === 0 && !options.images?.length) {
 			this.ctx.editor.clearDraft();
@@ -1439,6 +1471,10 @@ export class InputController {
 		const imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 		if (!text && !images) return;
+
+		// Ctrl+Enter/Ctrl+Q follow-up bypasses the Enter submit handler entirely;
+		// hold it too while a collab-guest join is still syncing (issue #11067).
+		if (this.#holdDuringCollabJoin(text, images, imageLinks)) return;
 
 		// Focused subagent session: follow-ups go to it; non-chat input is gated.
 		if (this.ctx.focusedAgentId) {
