@@ -42,6 +42,14 @@ import { formatOutputNotice } from "../tools/output-meta";
 import { markJournaled, sessionEntryIdOf } from "./session-entries";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
 
+/** Preserve the private journal identity when projecting a message for another consumer. */
+export function cloneJournaled<T extends AgentMessage>(message: T, patch: Partial<T>): T {
+	const cloned = { ...message, ...patch };
+	const entryId = sessionEntryIdOf(message);
+	if (entryId) markJournaled(cloned, entryId);
+	return cloned;
+}
+
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
 export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
@@ -82,7 +90,7 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 		}
 		content.push(block);
 	}
-	return { ...message, content, providerPayload: undefined };
+	return cloneJournaled(message, { content, providerPayload: undefined });
 }
 
 /**
@@ -424,7 +432,7 @@ function followedByInterruptedThinking(messages: AgentMessage[], index: number):
 /** Drop an incomplete trailing thinking run from an interrupted assistant in the LLM view. */
 function stripDemotedThinkingForLlm(message: AssistantMessage): AssistantMessage {
 	const demoted = demoteInterruptedThinking(message);
-	return demoted ? { ...message, content: demoted.strippedContent } : message;
+	return demoted ? cloneJournaled(message, { content: demoted.strippedContent }) : message;
 }
 
 /** Details persisted on a `/tan` background-dispatch breadcrumb. */
@@ -758,16 +766,18 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 					attribution: "user",
 					timestamp: message.timestamp,
 				};
+	const entryId = sessionEntryIdOf(message);
+	if (entryId) markJournaled(userMessage, entryId);
 	if (typeof message.content === "string") {
 		if (message.content.length === 0) return message.role === "user" ? message : userMessage;
-		return { ...userMessage, content: renderSteeringEnvelope(message.content) };
+		return cloneJournaled(userMessage, { content: renderSteeringEnvelope(message.content) });
 	}
 
 	const text = getArrayContentText(message.content);
 	if (text.length === 0) return message.role === "user" ? message : userMessage;
 	const content: (TextContent | ImageContent)[] = [{ type: "text", text: renderSteeringEnvelope(text) }];
 	content.push(...getArrayContentImages(message.content));
-	return { ...userMessage, content };
+	return cloneJournaled(userMessage, { content });
 }
 
 export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
@@ -930,7 +940,7 @@ export function replaceLlmImagesWithText(messages: Message[], placeholder: strin
 			replaced.push({ type: "text", text: placeholder });
 		}
 		if (out === undefined) out = messages.slice();
-		out[i] = { ...msg, content: replaced } as Message;
+		out[i] = cloneJournaled(msg, { content: replaced }) as Message;
 	}
 	return out ?? messages;
 }
@@ -1100,11 +1110,10 @@ export function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: Assis
 	// it belongs to a previous live Copilot connection and replaying it on a
 	// warmed session causes 401 rejections. User/developer payloads are preserved
 	// separately by the caller.
-	return {
-		...message,
+	return cloneJournaled(message, {
 		...(didSanitizeContent ? { content: sanitizedContent } : {}),
 		providerPayload: undefined,
-	};
+	});
 }
 
 function customMessageContentToLlmContent(content: CustomMessage["content"]): (TextContent | ImageContent)[] {

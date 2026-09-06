@@ -17,6 +17,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "../utils/image-loading";
+import { cloneJournaled } from "./messages";
 
 const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
 	type: "text",
@@ -54,20 +55,20 @@ function clampContent<T extends TextContent | ImageContent | EncryptedContent>(
 function clampUserMessage(message: UserMessage, state: { remainingDrops: number }): UserMessage {
 	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content, providerPayload: undefined } : message;
+	return content ? cloneJournaled(message, { content, providerPayload: undefined }) : message;
 }
 
 function clampDeveloperMessage(message: DeveloperMessage, state: { remainingDrops: number }): DeveloperMessage {
 	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content, providerPayload: undefined } : message;
+	return content ? cloneJournaled(message, { content, providerPayload: undefined }) : message;
 }
 
 function clampToolResultMessage(message: ToolResultMessage, state: { remainingDrops: number }): ToolResultMessage {
 	if (state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
 	if (!content) return message;
-	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
+	return cloneJournaled(message, { content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] });
 }
 
 /** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap. */
@@ -295,7 +296,10 @@ async function dropUnreadableFromMessage(message: Message, model: Model): Promis
 				: undefined;
 			const providerPayload = await replaceUnreadableNativePayload(message.providerPayload);
 			if (!content && !providerPayload) return undefined;
-			return { ...message, ...(content ? { content } : {}), ...(providerPayload ? { providerPayload } : {}) };
+			return cloneJournaled(message, {
+				...(content ? { content } : {}),
+				...(providerPayload ? { providerPayload } : {}),
+			});
 		}
 		case "toolResult": {
 			const content = await replaceUnreadableContent(message.content, model);
@@ -306,11 +310,10 @@ async function dropUnreadableFromMessage(message: Message, model: Model): Promis
 			// assistant note built from this result's generic `content`, so the model
 			// still learns the call ran and what it reported — the screenshot bytes
 			// were the only thing lost, and they were unreadable anyway.
-			return {
-				...message,
+			return cloneJournaled(message, {
 				...(content ? { content } : {}),
 				...(screenshotReason === null ? {} : { providerMetadata: undefined }),
-			};
+			});
 		}
 		case "assistant":
 			// Assistant payloads replay model OUTPUT items (reasoning, tool calls,

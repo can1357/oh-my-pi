@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Context, EncryptedContent, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import type { SessionContext } from "../session/session-context";
+import { cloneJournaled } from "../session/messages";
 import type { JsonValue, SecretObfuscator } from "./obfuscator";
 import { collectJsonRegexSecretValues, mapJsonStrings } from "./placeholder-scan";
 
@@ -33,13 +34,13 @@ export function deobfuscateAgentMessages(obfuscator: SecretObfuscator, messages:
 				const content = deobfuscateAssistantContent(obfuscator, message.content);
 				if (content === message.content) return message;
 				changed = true;
-				return { ...message, content };
+				return cloneJournaled(message, { content });
 			}
 			case "branchSummary": {
 				const summary = deob(message.summary);
 				if (summary === message.summary) return message;
 				changed = true;
-				return { ...message, summary };
+				return cloneJournaled(message, { summary });
 			}
 			case "compactionSummary": {
 				const summary = deob(message.summary);
@@ -49,7 +50,7 @@ export function deobfuscateAgentMessages(obfuscator: SecretObfuscator, messages:
 					return message;
 				}
 				changed = true;
-				return { ...message, summary, shortSummary, blocks };
+				return cloneJournaled(message, { summary, shortSummary, blocks });
 			}
 			default:
 				return message;
@@ -259,19 +260,19 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 			const content = obfuscateAssistantContentForReplay(obfuscator, message.content, sharedRegexSecretValues);
 			if (content === message.content) return message;
 			changed = true;
-			return { ...message, content };
+			return cloneJournaled(message, { content });
 		}
 		const target = message as UserFacingMessage;
 		if (typeof target.content === "string") {
 			const content = obfuscator.obfuscate(target.content, sharedRegexSecretValues);
 			if (content === target.content) return message;
 			changed = true;
-			return { ...target, content } as Message;
+			return cloneJournaled(target, { content }) as Message;
 		}
 		const content = obfuscateTextBlocks(obfuscator, target.content, sharedRegexSecretValues);
 		if (content === target.content) return message;
 		changed = true;
-		return { ...target, content } as Message;
+		return cloneJournaled(target, { content }) as Message;
 	});
 	return changed ? result : messages;
 }

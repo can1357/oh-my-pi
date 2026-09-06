@@ -9,6 +9,8 @@ import { createAgentSession } from "../src/sdk";
 import { AuthStorage } from "../src/session/auth-storage";
 import { SessionManager } from "../src/session/session-manager";
 import { toolRenderers } from "../src/tools/renderers";
+import type { UserMessage } from "@oh-my-pi/pi-ai";
+import { markJournaled } from "../src/session/session-entries";
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
@@ -132,4 +134,16 @@ test("context-window tools resolve through the registry, survive selection chang
 	expect(session.getToolByName("notes.write_file")).toBeUndefined();
 	expect(session.hasBuiltInTool("notes.write_file")).toBe(false);
 	expect(session.agent.state.tools.some(tool => tool.name.startsWith("notes."))).toBe(false);
+});
+
+test("SDK provider transforms retain the first user message's journal marker through the date/cwd reminder", async () => {
+	const { session } = await start("notes");
+	const message: UserMessage = { role: "user", content: "Checkpoint this request", timestamp: 1 };
+	markJournaled(message, "request-entry");
+	const context = await session.agent.buildSideRequestContext([message], ["Stable system prompt"]);
+	const user = context.messages.find(item => item.role === "user");
+	expect(JSON.stringify(user?.content)).toContain("current working directory");
+	expect(JSON.stringify(user?.content)).toContain("[id: request-entry]");
+	expect(message.content).toBe("Checkpoint this request");
+	expect(JSON.stringify(message)).not.toContain("request-entry");
 });

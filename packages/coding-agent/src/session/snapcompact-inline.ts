@@ -23,6 +23,7 @@ import contextStub from "../prompts/system/snapcompact-context-stub.md" with { t
 import systemFramesNote from "../prompts/system/snapcompact-system-frames-note.md" with { type: "text" };
 import systemStub from "../prompts/system/snapcompact-system-stub.md" with { type: "text" };
 import toolResultNote from "../prompts/system/snapcompact-toolresult-note.md" with { type: "text" };
+import { cloneJournaled } from "./messages";
 
 export type SnapcompactSystemPromptMode = "none" | "agents-md" | "all";
 
@@ -509,7 +510,7 @@ export class SnapcompactInlineTransformer {
 				});
 				content.push(block);
 			}
-			messages[target.index] = { ...target.message, content };
+			messages[target.index] = cloneJournaled(target.message, { content });
 			changed = true;
 			savings.push({
 				toolCallId: swap.id,
@@ -545,10 +546,9 @@ export class SnapcompactInlineTransformer {
 			const original = messages[userIndex] as UserMessage;
 			const originalContent: (TextContent | ImageContent)[] =
 				typeof original.content === "string" ? [{ type: "text", text: original.content }] : original.content;
-			messages[userIndex] = {
-				...original,
+			messages[userIndex] = cloneJournaled(original, {
 				content: [{ type: "text", text: systemPromptTarget.userNote }, ...frames, ...originalContent],
-			};
+			});
 			systemPrompt = systemPromptTarget.replacement;
 			changed = true;
 		}

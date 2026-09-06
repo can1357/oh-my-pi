@@ -10,6 +10,7 @@
 
 import type { Context, EncryptedContent, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
+import { cloneJournaled } from "../session/messages";
 
 /** Responses/Chat APIs whose `image_url` accepts arbitrary https URLs. */
 const URL_CAPABLE_OPENAI_APIS: Record<string, true> = {
@@ -63,7 +64,7 @@ function mapContextImages(context: Context, mapBlock: (block: ImageContent) => I
 		});
 		if (!contentChanged) return message;
 		messagesChanged = true;
-		return { ...message, content } as Message;
+		return cloneJournaled(message, { content }) as Message;
 	});
 	return messagesChanged ? { ...context, messages } : context;
 }
@@ -132,7 +133,7 @@ export async function inlineContextImages(
 			);
 			if (!contentChanged) return message;
 			messagesChanged = true;
-			return { ...message, content } as Message;
+			return cloneJournaled(message, { content }) as Message;
 		}),
 	);
 	return messagesChanged ? { ...context, messages } : context;
