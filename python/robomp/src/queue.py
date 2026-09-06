@@ -6,18 +6,34 @@ import asyncio
 import logging
 import os
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
+from typing import Any
 
 from robomp import tasks
 from robomp.cancellation import clear_current_event, set_current_event
 from robomp.config import Settings
 from robomp.db import Database, EventRow
 from robomp.github_backend import GitHubBackend
+from robomp.github_events import payload_has_reviewer_bot_directive
 from robomp.sandbox import GitTransport, SandboxManager, _reap_slot
 from robomp.slot_pool import SlotPool
 
 log = logging.getLogger(__name__)
+
+_COALESCED_ERROR = "coalesced: superseded by newer review event"
+
+
+def _review_task_for_payload(event_type: str, payload: Mapping[str, Any]) -> str | None:
+    """Task from the review family this queued event dispatches to, or None."""
+    action = str(payload.get("action") or "")
+    if event_type == "issue_comment" and action == "created":
+        issue = payload.get("issue") or {}
+        if isinstance(issue, Mapping) and "pull_request" in issue:
+            return "handle_pr_conversation"
+    elif event_type == "pull_request_review_comment" and action == "created":
+        return "handle_review"
+    return None
 
 
 class WorkerPool:
@@ -213,23 +229,45 @@ class WorkerPool:
         except Exception:
             log.exception("dispatch loop crashed")
 
+    def _coalesce_review_event(self, row: EventRow) -> bool:
+        """Whether `row` is a reviewer-bot review event superseded by a newer queued same-key sibling."""
+        if _review_task_for_payload(row.event_type, row.payload) is None or not row.issue_key:
+            return False
+        reviewer_bots = self.settings.reviewer_bots
+        if not payload_has_reviewer_bot_directive(row.payload, reviewer_bots):
+            return False
+        siblings = self.db.list_newer_queued_events(
+            issue_key=row.issue_key, exclude_delivery=row.delivery_id, after_received_at=row.received_at
+        )
+        return any(
+            _review_task_for_payload(s.event_type, s.payload) is not None
+            and payload_has_reviewer_bot_directive(s.payload, reviewer_bots)
+            for s in siblings
+        )
+
     async def _claim_next_unique(self) -> EventRow | None:
-        """Claim the next event whose issue isn't already inflight."""
+        """Claim the next event whose issue isn't already inflight, coalescing superseded review events."""
         # The DB layer doesn't filter by issue_key; we peek then guard with a set.
         async with self._inflight_lock:
-            # Naive but fine for v1 (small queue).
-            row = await asyncio.to_thread(self.db.claim_next_event)
-            if row is None:
-                return None
-            key = row.issue_key or row.delivery_id
-            if key in self._inflight:
-                # Put it back; another in-flight task is touching the same issue.
-                await asyncio.to_thread(self.db.requeue_event, row.delivery_id, from_states=("running",))
-                # Sleep briefly so we don't spin.
-                await asyncio.sleep(0.5)
-                return None
-            self._inflight.add(key)
-        return row
+            while True:
+                row = await asyncio.to_thread(self.db.claim_next_event)
+                if row is None:
+                    return None
+                key = row.issue_key or row.delivery_id
+                if key in self._inflight:
+                    # Put it back; another in-flight task is touching the same issue.
+                    await asyncio.to_thread(self.db.requeue_event, row.delivery_id, from_states=("running",))
+                    # Sleep briefly so we don't spin.
+                    await asyncio.sleep(0.5)
+                    return None
+                if await asyncio.to_thread(self._coalesce_review_event, row):
+                    await asyncio.to_thread(self.db.mark_event, row.delivery_id, "skipped", error=_COALESCED_ERROR)
+                    log.info("review event coalesced", extra={"delivery": row.delivery_id, "key": key})
+                    # Claim the newer sibling immediately: the loop below must not
+                    # lose the wakeup that produced this claim.
+                    continue
+                self._inflight.add(key)
+                return row
 
     async def _release(self, row: EventRow) -> None:
         key = row.issue_key or row.delivery_id

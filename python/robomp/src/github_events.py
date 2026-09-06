@@ -70,6 +70,17 @@ def _login_matches_bot(login: str | None, bot_login: str) -> bool:
     return bool(normalized_login) and normalized_login == _normalize_bot_login(bot_login)
 
 
+def payload_has_reviewer_bot_directive(payload: Mapping[str, Any], reviewer_bots: frozenset[str]) -> bool:
+    """Whether a stored webhook payload carries a directive authored by a configured reviewer bot."""
+    if not reviewer_bots:
+        return False
+    raw = payload.get("_robomp_directive")
+    if not isinstance(raw, Mapping):
+        return False
+    author = _normalize_bot_login(str(raw.get("author") or ""))
+    return author in reviewer_bots
+
+
 def _login_matches_personal_repo_owner(
     login: str | None,
     repository: Mapping[str, Any] | None,
@@ -463,6 +474,7 @@ __all__ = [
     "extract_mention",
     "is_maintainer",
     "is_implementation_authorizer",
+    "payload_has_reviewer_bot_directive",
     "rate_limit_cap",
     "route",
     "verify_signature",

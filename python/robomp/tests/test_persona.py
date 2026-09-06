@@ -133,6 +133,38 @@ def test_followup_comment_prompt_embeds_thread_context() -> None:
     assert "current request" in out
 
 
+def test_followup_review_prompt_embeds_thread_context() -> None:
+    thread = (
+        ThreadMessage(kind="pr_body", author="roboomp", body="PR body", created_at=""),
+        ThreadMessage(
+            kind="comment", author="coderabbit", body="Walkthrough was not generated", created_at="2026-05-01T10:00:00Z"
+        ),
+        ThreadMessage(
+            kind="review_comment",
+            author="coderabbit",
+            body="leak at 42",
+            created_at="2026-05-02T10:00:00Z",
+            path="src/foo.py",
+            line=42,
+        ),
+    )
+    out = persona.followup_review(
+        repo=_Repo(),
+        workspace=_Workspace(),
+        pr_number=1080,
+        comment_author="coderabbit",
+        comment_body="use a generator here",
+        comment_path="src/foo.py",
+        comment_line_range=":L42",
+        thread=thread,
+    )
+    assert "Prior conversation" in out
+    assert "PR body" in out
+    assert "Walkthrough was not generated" in out
+    assert "leak at 42" in out
+    assert "use a generator here" in out
+
+
 def test_kickoff_directive_prompt_embeds_thread_and_classify_instruction() -> None:
     thread = (ThreadMessage(kind="issue_body", author="alice", body="failing on macos", created_at=""),)
     out = persona.kickoff_directive(
