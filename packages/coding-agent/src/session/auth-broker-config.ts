@@ -104,6 +104,11 @@ export function discoverAuthStorage(
  * the underlying `AuthBrokerError` (or missing-token `MissingApiKeyError`)
  * propagates as a raw uncaught exception and the CLI dies with a stack dump
  * instead of recovery guidance (issue #8096).
+ *
+ * A broker that answered 401/403 is reachable but rejected the bearer token
+ * (rotated with `omp auth-broker token --regenerate`, or a stale
+ * `auth.broker.token`), so that case points at replacing the token rather
+ * than at starting the broker.
  */
 export async function describeAuthBrokerStartupError(error: unknown): Promise<string | null> {
 	if (error instanceof MissingApiKeyError) {
@@ -120,11 +125,20 @@ export async function describeAuthBrokerStartupError(error: unknown): Promise<st
 		// URL-less message rather than masking the original broker failure.
 	}
 	const target = url ? ` at ${url}` : "";
+	const disable =
+		"disable it with `omp config reset auth.broker.url` and `omp config reset auth.broker.token` " +
+		"(or unset OMP_AUTH_BROKER_URL / OMP_AUTH_BROKER_TOKEN).";
+	if (error.kind === "unauthorized") {
+		return (
+			`Auth broker${target} is reachable but rejected the configured bearer token (${error.message}). ` +
+			"omp is configured to use this broker for credentials and will not fall back to local credentials automatically.\n" +
+			"Print the broker's current token with `omp auth-broker token` on the broker host and set it via " +
+			`OMP_AUTH_BROKER_TOKEN, the \`auth.broker.token\` config entry, or ${getAuthBrokerTokenFilePath()}; or ${disable}`
+		);
+	}
 	return (
 		`Auth broker${target} is unreachable (${error.message}). ` +
 		"omp is configured to use this broker for credentials and will not fall back to local credentials automatically.\n" +
-		"Start the broker with `omp auth-broker serve`, or disable it with " +
-		"`omp config reset auth.broker.url` and `omp config reset auth.broker.token` " +
-		"(or unset OMP_AUTH_BROKER_URL / OMP_AUTH_BROKER_TOKEN)."
+		`Start the broker with \`omp auth-broker serve\`, or ${disable}`
 	);
 }

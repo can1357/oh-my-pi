@@ -78,14 +78,42 @@ export interface AuthBrokerClientOptions {
 	fetchImpl?: typeof fetch;
 }
 
+/**
+ * What an {@link AuthBrokerError} says about the broker. Derived from the
+ * HTTP status unless given explicitly, so every construction site classifies
+ * the same way:
+ * - `transport`: no HTTP response (connection failure, timeout, abort).
+ * - `unauthorized`: the broker answered 401/403 — it is reachable but
+ *   rejected the bearer token.
+ * - `response`: the broker answered (any other status, including 200) but the
+ *   response was unusable (other 4xx/5xx, malformed body, schema mismatch).
+ */
+export type AuthBrokerErrorKind = "transport" | "unauthorized" | "response";
+
+export interface AuthBrokerErrorOptions {
+	status?: number;
+	body?: string;
+	cause?: unknown;
+	/** Override the status-derived classification. */
+	kind?: AuthBrokerErrorKind;
+}
+
 export class AuthBrokerError extends Error {
 	readonly status: number | undefined;
 	readonly body: string | undefined;
-	constructor(message: string, opts: { status?: number; body?: string; cause?: unknown } = {}) {
+	readonly kind: AuthBrokerErrorKind;
+	constructor(message: string, opts: AuthBrokerErrorOptions = {}) {
 		super(message, { cause: opts.cause });
 		this.name = "AuthBrokerError";
 		this.status = opts.status;
 		this.body = opts.body;
+		this.kind =
+			opts.kind ??
+			(opts.status === undefined
+				? "transport"
+				: opts.status === 401 || opts.status === 403
+					? "unauthorized"
+					: "response");
 	}
 }
 
@@ -239,6 +267,7 @@ export class AuthBrokerClient {
 				parsed = JSON.parse(sse.data);
 			} catch (err) {
 				throw new AuthBrokerError("Auth broker stream returned malformed JSON", {
+					status: response.status,
 					body: sse.data,
 					cause: err,
 				});
@@ -246,6 +275,7 @@ export class AuthBrokerClient {
 			const validated = snapshotStreamEventSchema(parsed);
 			if (validated instanceof type.errors) {
 				throw new AuthBrokerError("Auth broker stream event failed schema validation", {
+					status: response.status,
 					body: validated.summary,
 				});
 			}
@@ -253,7 +283,10 @@ export class AuthBrokerClient {
 			if (!sawFirstEvent) {
 				sawFirstEvent = true;
 				if (event.kind !== "snapshot") {
-					throw new AuthBrokerError("Auth broker stream did not start with snapshot", { body: sse.data });
+					throw new AuthBrokerError("Auth broker stream did not start with snapshot", {
+						status: response.status,
+						body: sse.data,
+					});
 				}
 			}
 			yield event;
