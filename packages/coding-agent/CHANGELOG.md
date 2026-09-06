@@ -6,6 +6,7 @@
 ### Added
 
 - Added `omp sessions list` for listing saved sessions in the current project or all projects.
+- Added `omp sessions roots` and `omp sessions list --cwd <path>` for browsing session work directories.
 
 ### Changed
 

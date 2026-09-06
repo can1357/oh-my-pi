@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
-import { runSessionsCommand } from "@oh-my-pi/pi-coding-agent/cli/sessions-cli";
+import { runSessionRootsCommand, runSessionsCommand } from "@oh-my-pi/pi-coding-agent/cli/sessions-cli";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as sessionPins from "@oh-my-pi/pi-coding-agent/session/session-pins";
@@ -61,6 +61,17 @@ describe("sessions list CLI", () => {
 		]);
 	});
 
+	it("lists sessions from the requested working directory", async () => {
+		const output = captureOutput();
+		const list = spyOn(SessionManager, "list").mockResolvedValue([session({ cwd: "/other-project" })]);
+		spyOn(sessionPins, "loadPinnedSessionIds").mockResolvedValue(new Set());
+
+		await runSessionsCommand({ flags: { all: false, cwd: "/other-project", json: true } });
+
+		expect(list).toHaveBeenCalledWith("/other-project");
+		expect(JSON.parse(output.join("\n"))[0].cwd).toBe("/other-project");
+	});
+
 	it("includes sessions from every project only when --all is selected", async () => {
 		const output = captureOutput();
 		const local = spyOn(SessionManager, "list").mockResolvedValue([]);
@@ -105,6 +116,64 @@ describe("sessions list CLI", () => {
 		spyOn(sessionPins, "loadPinnedSessionIds").mockResolvedValue(new Set());
 
 		await runSessionsCommand({ flags: { all: false, json: true } });
+
+		expect(output).toEqual(["[]\n"]);
+	});
+});
+
+describe("session roots CLI", () => {
+	it("aggregates session roots with pinned counts and recency ordering", async () => {
+		const output = captureOutput();
+		spyOn(SessionManager, "listAll").mockResolvedValue([
+			session(),
+			session({
+				id: "newer",
+				cwd: "/project",
+				modified: new Date("2026-09-06T12:00:00.000Z"),
+			}),
+			session({
+				id: "other",
+				cwd: "/other-project",
+				modified: new Date("2026-09-06T09:00:00.000Z"),
+			}),
+			session({
+				id: "unknown",
+				cwd: "",
+				modified: new Date("2026-09-06T08:00:00.000Z"),
+			}),
+		]);
+		spyOn(sessionPins, "loadPinnedSessionIds").mockResolvedValue(new Set(["local", "newer"]));
+
+		await runSessionRootsCommand(true);
+
+		expect(JSON.parse(output.join("\n"))).toEqual([
+			{
+				cwd: "/project",
+				sessionCount: 2,
+				pinnedCount: 2,
+				latestModifiedAt: "2026-09-06T12:00:00.000Z",
+			},
+			{
+				cwd: "/other-project",
+				sessionCount: 1,
+				pinnedCount: 0,
+				latestModifiedAt: "2026-09-06T09:00:00.000Z",
+			},
+			{
+				cwd: "(unknown cwd)",
+				sessionCount: 1,
+				pinnedCount: 0,
+				latestModifiedAt: "2026-09-06T08:00:00.000Z",
+			},
+		]);
+	});
+
+	it("renders an empty JSON array when no session roots exist", async () => {
+		const output = captureOutput();
+		spyOn(SessionManager, "listAll").mockResolvedValue([]);
+		spyOn(sessionPins, "loadPinnedSessionIds").mockResolvedValue(new Set());
+
+		await runSessionRootsCommand(true);
 
 		expect(output).toEqual(["[]\n"]);
 	});
