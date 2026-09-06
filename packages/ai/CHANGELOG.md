@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed auth-broker startup keeping a fresh snapshot cache without consulting a reachable broker: the cache is now revalidated through the client transport within a 500 ms budget, so a credential imported, rotated, or revoked since the cache was written is visible immediately while an unreachable or slow broker still starts from the cache.
+- Fixed auth-broker startup keeping a fresh snapshot cache without consulting a reachable broker: the cache is now revalidated through the client transport within a 500 ms budget (`SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS`, overridable per call via `DiscoverAuthStorageOptions.revalidationTimeoutMs`), so a credential imported, rotated, or revoked since the cache was written is visible immediately while an unreachable or slow broker still starts from the cache. `DiscoverAuthStorageOptions.fetch` injects the broker transport, and `AuthBrokerError.kind` (`transport` / `unauthorized` / `response`) classifies broker failures without status-code matching.
 
 ## [18.1.12] - 2026-09-06
 

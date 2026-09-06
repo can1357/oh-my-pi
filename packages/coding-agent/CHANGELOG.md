@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Startup against an auth broker that rejects the bearer token (401/403) now says the broker is reachable but rejected the token and points at `omp auth-broker token`, `OMP_AUTH_BROKER_TOKEN`, `auth.broker.token`, or the token file, instead of the generic "unreachable, start it with `omp auth-broker serve`" guidance.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

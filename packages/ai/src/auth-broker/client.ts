@@ -78,14 +78,32 @@ export interface AuthBrokerClientOptions {
 	fetchImpl?: typeof fetch;
 }
 
+/**
+ * What an {@link AuthBrokerError} says about the broker, derived from the
+ * HTTP status so every construction site classifies the same way:
+ * - `transport`: no HTTP response (connection failure, timeout, abort).
+ * - `unauthorized`: the broker answered 401/403 — it is reachable but
+ *   rejected the bearer token.
+ * - `response`: the broker answered with any other status but the response
+ *   was unusable (other 4xx/5xx, malformed body, schema mismatch).
+ */
+export type AuthBrokerErrorKind = "transport" | "unauthorized" | "response";
+
 export class AuthBrokerError extends Error {
 	readonly status: number | undefined;
 	readonly body: string | undefined;
+	readonly kind: AuthBrokerErrorKind;
 	constructor(message: string, opts: { status?: number; body?: string; cause?: unknown } = {}) {
 		super(message, { cause: opts.cause });
 		this.name = "AuthBrokerError";
 		this.status = opts.status;
 		this.body = opts.body;
+		this.kind =
+			opts.status === undefined
+				? "transport"
+				: opts.status === 401 || opts.status === 403
+					? "unauthorized"
+					: "response";
 	}
 }
 
