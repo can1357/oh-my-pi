@@ -49,6 +49,21 @@ describe("isInsideTerminalMultiplexer", () => {
 	it("is true for HERDR_PANE_ID without HERDR_ENV", () => {
 		expect(isInsideTerminalMultiplexer({ HERDR_PANE_ID: "p1" })).toBe(true);
 	});
+
+	it("is true for a wmux pane (WMUX=1 and native WMUX_SURFACE_ID)", () => {
+		expect(isInsideTerminalMultiplexer({ WMUX: "1" })).toBe(true);
+		expect(isInsideTerminalMultiplexer({ WMUX_SURFACE_ID: "3f2a" })).toBe(true);
+	});
+
+	it("is false for WMUX=0 or an empty surface id", () => {
+		expect(isInsideTerminalMultiplexer({ WMUX: "0" })).toBe(false);
+		expect(isInsideTerminalMultiplexer({ WMUX_SURFACE_ID: "" })).toBe(false);
+	});
+
+	it("is false for client-only wmux CLI vars", () => {
+		expect(isInsideTerminalMultiplexer({ WMUX_CLI: "C:/wmux/wmux.exe" })).toBe(false);
+		expect(isInsideTerminalMultiplexer({ WMUX_PIPE: "\\\\.\\pipe\\wmux" })).toBe(false);
+	});
 });
 
 describe("detectTerminalId", () => {

@@ -5,7 +5,7 @@ import { afterEach, beforeEach } from "bun:test";
  *
  * `isInsideTerminalMultiplexer()` treats `TMUX`, `STY`, `ZELLIJ`,
  * `HERDR_ENV=1` / `HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`,
- * the `CMUX_*` markers and a `tmux`/`screen` `TERM` as
+ * the `CMUX_*` markers, `WMUX=1` / `WMUX_SURFACE_ID` and a `tmux`/`screen` `TERM` as
  * authoritative, and `isMultiplexerSession()` then routes rendering down the
  * path that cannot rebuild scrollback. Tests that assert the destructive
  * full-paint behavior otherwise fail for anyone running the suite inside tmux,
@@ -23,6 +23,8 @@ export function withoutTerminalMultiplexer(): void {
 		"CMUX_WORKSPACE_ID",
 		"CMUX_SURFACE_ID",
 		"CMUX_REMOTE_TRANSPORT",
+		"WMUX",
+		"WMUX_SURFACE_ID",
 		"TERM",
 	] as const;
 	const previous = new Map<string, string | undefined>();

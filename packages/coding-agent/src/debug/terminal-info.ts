@@ -61,6 +61,7 @@ function detectMultiplexer(env: NodeJS.ProcessEnv): string | null {
 	if (env.STY) return "screen";
 	if (env.ZELLIJ) return "zellij";
 	if (env.CMUX_WORKSPACE_ID || env.CMUX_SURFACE_ID || env.CMUX_REMOTE_TRANSPORT) return "cmux";
+	if (env.WMUX === "1" || env.WMUX_SURFACE_ID) return "wmux";
 	const term = env.TERM?.toLowerCase() ?? "";
 	if (term.startsWith("tmux")) return "tmux";
 	if (term.startsWith("screen")) return "screen";
