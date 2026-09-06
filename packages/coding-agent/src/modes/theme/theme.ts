@@ -151,6 +151,11 @@ export function initThemeSync(
 	}
 }
 
+/** Ensure the module-local theme is initialized before synchronous component work. */
+export function ensureThemeSync(): void {
+	if (typeof theme === "undefined") initThemeSync();
+}
+
 /** Initialize the default theme only when no earlier prepaint initialized one. */
 export async function ensureTheme(): Promise<void> {
 	if (typeof theme !== "undefined") return;

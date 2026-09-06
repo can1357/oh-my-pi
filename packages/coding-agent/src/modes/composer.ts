@@ -19,7 +19,7 @@ import {
 import { CustomEditor } from "./components/custom-editor";
 import { type AnimationFrame, TranscriptContainer } from "./components/transcript-container";
 import { type LspServerInfo, type RecentSession, WelcomeComponent } from "./components/welcome";
-import { getEditorTheme, initThemeSync, theme } from "./theme/theme";
+import { ensureThemeSync, getEditorTheme } from "./theme/theme";
 
 const DOUBLE_INTERRUPT_MS = 500;
 
@@ -200,7 +200,7 @@ export class Composer implements TerminalFrameProvider {
 	#transferred = false;
 
 	constructor(options: ComposerOptions = {}) {
-		if (typeof theme === "undefined") initThemeSync();
+		ensureThemeSync();
 		this.#exit = options.exit ?? (code => process.exit(code));
 		this.#now = options.now ?? Date.now;
 		this.#preferences = { ...COMPOSER_DEFAULTS, ...options.preferences };

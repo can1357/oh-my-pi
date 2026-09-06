@@ -11,7 +11,7 @@ import { type Component, matchesKey, routeSgrMouseInput, truncateToWidth, visibl
 import { colorLuma, formatDuration, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
 import { formatProviderName } from "../../slash-commands/helpers/format";
 import { colorToAnsi } from "../theme/color";
-import { theme } from "../theme/theme";
+import { ensureThemeSync, theme } from "../theme/theme";
 import {
 	matchesSelectCancel,
 	matchesSelectDown,
@@ -323,6 +323,7 @@ export class UsageDashboardComponent implements Component {
 	readonly #closeController = new AbortController();
 
 	constructor(options: UsageDashboardOptions) {
+		ensureThemeSync();
 		this.#options = options;
 		this.#nowMs = Date.now();
 		this.#cards = buildProviderCards(options.reports, this.#nowMs);

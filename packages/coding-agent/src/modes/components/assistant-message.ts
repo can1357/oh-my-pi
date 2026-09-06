@@ -14,7 +14,7 @@ import {
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
-import { getMarkdownTheme, theme } from "../../modes/theme/theme";
+import { ensureThemeSync, getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { resolveImageOptions } from "../../tools/render-utils";
 import { WidthAwareText } from "../../tui";
 import { convertImageToPng } from "../../utils/image-loading";
@@ -371,6 +371,7 @@ export class AssistantMessageComponent extends Container {
 		linkTargets?: ReadonlyMap<string, string>,
 	) {
 		super();
+		ensureThemeSync();
 		this.#transcriptBlockFinalized = message !== undefined;
 		if (linkTargets?.size) this.#linkTargets = linkTargets;
 
