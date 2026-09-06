@@ -7457,6 +7457,11 @@ export class AgentSession {
 		this.#titleGenerationStart = handler;
 	}
 
+	/** Notify the host before a user-requested title generation. */
+	notifyTitleGenerationStart(): void {
+		this.#titleGenerationStart?.();
+	}
+
 	/** Install the host hook that receives a typed user prompt dropped before
 	 *  dispatch (an Esc abort or usage preflight denial raced turn setup). The
 	 *  prompt never reached the agent or the session file, so without this hook
