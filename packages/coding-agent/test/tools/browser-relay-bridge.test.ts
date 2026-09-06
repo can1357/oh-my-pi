@@ -3325,14 +3325,17 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { identifier: "root-script-with-marker" });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		ack(bridge, ext2, "send", { result: { value: true } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		const lasting = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(lasting?.params).toMatchObject({ source, runImmediately: false });
 		expect((lasting?.params as { source?: string } | undefined)?.source).not.toContain("__ompRelayPreload");
+		ack(bridge, ext2, "send", { identifier: "root-script-clean" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
+		ack(bridge, ext2, "send", { result: { value: false } });
 	});
 
 	it.each(["remove", "retry"] as const)(
@@ -3537,8 +3540,6 @@ describe("RelayBridge tab grouping", () => {
 		});
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		ack(bridge, ext2, "send", { result: { value: true } });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		ack(bridge, ext2, "send", { result: { value: false } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
@@ -3548,6 +3549,10 @@ describe("RelayBridge tab grouping", () => {
 			runImmediately: false,
 		});
 		ack(bridge, ext2, "send", { identifier: "root-script-clean" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
+		ack(bridge, ext2, "send", { result: { value: false } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.disable"));
 		ack(bridge, ext2, "send");
 		await flush();
@@ -3691,8 +3696,6 @@ describe("RelayBridge tab grouping", () => {
 		});
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		ack(bridge, ext2, "send", { result: { value: true } });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		ack(bridge, ext2, "send", { result: { value: false } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
@@ -3702,6 +3705,10 @@ describe("RelayBridge tab grouping", () => {
 			runImmediately: false,
 		});
 		ack(bridge, ext2, "send", { identifier: "root-script-clean" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
+		ack(bridge, ext2, "send", { result: { value: false } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.disable"));
 		ack(bridge, ext2, "send");
 		await flush();

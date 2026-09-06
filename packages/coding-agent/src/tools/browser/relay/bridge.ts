@@ -3218,22 +3218,15 @@ export class RelayBridge {
 				const originalParams = script.params;
 				if (!originalParams) throw new Error("preload replay parameters are missing");
 				try {
-					await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						method: "Page.removeScriptToEvaluateOnNewDocument",
-						params: { identifier: rootIdentifier },
-					});
-					// The marker is recovery-only. Probe once more after removal both to
-					// observe a navigation that raced the first check and to delete the
-					// temporary property from the current document. The replacement is
-					// always registered from the caller's original source.
-					const appliedAfterRemoval = await this.#preloadApplicationMarker(
+					// Probe before swapping registrations. The marker-bearing registration
+					// remains installed until the clean replacement is acknowledged, so a
+					// navigation cannot cross an uncovered remove/add gap.
+					const appliedBeforeReplacement = await this.#preloadApplicationMarker(
 						tab.tabId,
 						applicationMarker,
 						originalParams.worldName,
 					);
-					appliedToCurrentDocument = appliedToCurrentDocument || appliedAfterRemoval;
+					appliedToCurrentDocument = appliedToCurrentDocument || appliedBeforeReplacement;
 					const navigationNeedsInvocation =
 						navigationDuringRegistration ||
 						tab.mainFrameNavigationGeneration !== navigationGenerationBeforeRegistration;
@@ -3250,6 +3243,15 @@ export class RelayBridge {
 						throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
 					}
 					rootIdentifier = clean.identifier;
+					await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						method: "Page.removeScriptToEvaluateOnNewDocument",
+						params: { identifier },
+					});
+					// A navigation during the brief overlap can leave the temporary marker
+					// in its new document. Delete it after the marker registration is gone.
+					await this.#preloadApplicationMarker(tab.tabId, applicationMarker, originalParams.worldName);
 				} catch (err) {
 					if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
 					throw err;
