@@ -791,7 +791,7 @@ export class AgentsHubComponent implements Component {
 			}
 		});
 		try {
-			await session.prompt(userPrompt, { expandPromptTemplates: false });
+			await session.prompt(userPrompt, { attribution: "agent", expandPromptTemplates: false });
 			const raw = extractAssistantText(session.state.messages);
 			if (!raw) {
 				throw new Error("No response returned by agent creation architect.");
