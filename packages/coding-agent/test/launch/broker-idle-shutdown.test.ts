@@ -218,11 +218,16 @@ describe("daemon broker idle shutdown", () => {
 			clientAuthTimeoutMs: SILENT_AUTH_TIMEOUT_MS,
 		});
 		await broker.ready;
+		const connectedAt = performance.now();
 		const socket = await connect(daemonBrokerEndpoint(projectDir, runtimeDir));
 
-		const { promise: closed, resolve: resolveClosed } = Promise.withResolvers<void>();
-		socket.once("close", resolveClosed);
-		await closed;
+		const { promise: closed, resolve: resolveClosed } = Promise.withResolvers<number>();
+		socket.once("close", () => resolveClosed(performance.now() - connectedAt));
+		// The socket must outlive the idle grace (it is not idle shutdown closing
+		// it) and be destroyed by the authentication timeout instead.
+		const openForMs = await closed;
+		expect(openForMs).toBeGreaterThanOrEqual(SILENT_AUTH_TIMEOUT_MS - 20);
+		// With no socket left, idle shutdown re-arms and the broker exits on its own.
 		await broker.finished;
 	}, 30_000);
 });
