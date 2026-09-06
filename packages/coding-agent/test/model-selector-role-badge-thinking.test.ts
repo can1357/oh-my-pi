@@ -1,24 +1,42 @@
-import { beforeAll, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { Model } from "@pk-nerdsaver-ai/pi-ai";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
-import type { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
+import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { ModelSelectorComponent } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/model-selector";
 import { getThemeByName, setThemeInstance } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
+import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import type { TUI } from "@pk-nerdsaver-ai/pi-tui";
+import { TempDir } from "@pk-nerdsaver-ai/pi-utils";
+
+let testRegistry: ModelRegistry;
+let testAuthStorage: AuthStorage;
+let testTempDir: TempDir;
+
+beforeEach(async () => {
+	testTempDir = TempDir.createSync("@pi-model-selector-roles-");
+	testAuthStorage = await AuthStorage.create(testTempDir.join("auth.db"));
+	testRegistry = new ModelRegistry(testAuthStorage);
+});
+
+afterEach(() => {
+	vi.restoreAllMocks();
+	testAuthStorage.close();
+	testTempDir.removeSync();
+});
 
 function normalizeRenderedText(text: string): string {
 	return stripVTControlCharacters(text).replace(/\s+/g, " ").trim();
 }
 
 function createSelector(model: Model, settings: Settings): ModelSelectorComponent {
-	const modelRegistry = {
+	const modelRegistry = Object.assign(testRegistry, {
 		getAll: () => [model],
 		getDiscoverableProviders: () => [],
 		getCanonicalModelSelections: () => [],
-	} as unknown as ModelRegistry;
+	});
 	const ui = {
 		requestRender: vi.fn(),
 	} as unknown as TUI;
@@ -69,11 +87,11 @@ function createScopedSelector(
 	onSelect: (model: Model) => void,
 	options?: { temporaryOnly?: boolean; currentContextTokens?: number },
 ): ModelSelectorComponent {
-	const modelRegistry = {
+	const modelRegistry = Object.assign(testRegistry, {
 		getAll: () => models,
 		getDiscoverableProviders: () => [],
 		getCanonicalModelSelections: () => [],
-	} as unknown as ModelRegistry;
+	});
 	const ui = {
 		requestRender: vi.fn(),
 	} as unknown as TUI;
@@ -239,7 +257,7 @@ describe("ModelSelector role badge thinking display", () => {
 		const cachedModel = createContextTestModel("cached-fast", 128_000);
 		const refreshGate = Promise.withResolvers<void>();
 		const onSelect = vi.fn();
-		const modelRegistry = {
+		const modelRegistry = Object.assign(testRegistry, {
 			getAll: () => [cachedModel],
 			refresh: vi.fn(() => refreshGate.promise),
 			refreshProvider: vi.fn(async () => {}),
@@ -247,7 +265,7 @@ describe("ModelSelector role badge thinking display", () => {
 			getAvailable: () => [cachedModel],
 			getDiscoverableProviders: () => [],
 			getCanonicalModelSelections: () => [],
-		} as unknown as ModelRegistry;
+		});
 		const ui = {
 			requestRender: vi.fn(),
 		} as unknown as TUI;
@@ -278,7 +296,7 @@ describe("ModelSelector role badge thinking display", () => {
 		let availableModels: Model[] = [modelBb, modelCc];
 		const refreshGate = Promise.withResolvers<void>();
 		const onSelect = vi.fn();
-		const modelRegistry = {
+		const modelRegistry = Object.assign(testRegistry, {
 			getAll: () => availableModels,
 			refresh: vi.fn(() => refreshGate.promise),
 			refreshProvider: vi.fn(async () => {}),
@@ -286,7 +304,7 @@ describe("ModelSelector role badge thinking display", () => {
 			getAvailable: () => availableModels,
 			getDiscoverableProviders: () => [],
 			getCanonicalModelSelections: () => [],
-		} as unknown as ModelRegistry;
+		});
 		const ui = {
 			requestRender: vi.fn(),
 		} as unknown as TUI;
@@ -323,7 +341,7 @@ describe("ModelSelector role badge thinking display", () => {
 				availableModels = [discoveredModel];
 			}
 		});
-		const modelRegistry = {
+		const modelRegistry = Object.assign(testRegistry, {
 			getAll: () => availableModels,
 			refresh: vi.fn(async () => {}),
 			refreshProvider,
@@ -338,7 +356,7 @@ describe("ModelSelector role badge thinking display", () => {
 				stale: false,
 				models: [],
 			}),
-		} as unknown as ModelRegistry;
+		});
 		const ui = {
 			requestRender: vi.fn(),
 		} as unknown as TUI;
@@ -385,7 +403,7 @@ describe("ModelSelector role badge thinking display", () => {
 					};
 				}),
 		);
-		const modelRegistry = {
+		const modelRegistry = Object.assign(testRegistry, {
 			getAll: () => availableModels,
 			refresh: vi.fn(async () => {}),
 			refreshProvider,
@@ -400,7 +418,7 @@ describe("ModelSelector role badge thinking display", () => {
 				stale: false,
 				models: [],
 			}),
-		} as unknown as ModelRegistry;
+		});
 		const ui = {
 			requestRender: vi.fn(),
 		} as unknown as TUI;

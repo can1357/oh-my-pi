@@ -320,9 +320,8 @@ async function cmdRelease(version: string): Promise<void> {
 	}
 	console.log(`  sentinel: ${sentinelName}\n`);
 
-	// 4. Regenerate lockfiles
-	console.log("Regenerating lockfiles...");
-	await $`rm -f bun.lock`;
+	// 4. Refresh workspace versions without upgrading the tested dependency graph.
+	console.log("Refreshing lockfile workspace versions...");
 	await $`bun install`;
 	await $`cargo check --offline`;
 	console.log();
