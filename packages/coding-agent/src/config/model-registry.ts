@@ -738,16 +738,20 @@ export class ModelRegistry {
 		this.#modelOverrides = modelOverrides;
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);
-		// A bare EXLLAMAV3_BASE_URL points at a keyless TabbyAPI (disable_auth)
-		// the way models.yml `auth: none` does: beyond opting built-in discovery
-		// in, it marks the provider available without stored credentials.
-		// getApiKey still prefers a real stored key over kNoAuth.
-		if (
-			!configuredProviders.has("exllamav3") &&
-			Bun.env.EXLLAMAV3_BASE_URL?.trim() &&
-			!this.authStorage.hasAuth("exllamav3")
-		) {
-			this.#keylessProviders.add("exllamav3");
+		// Local engines whose base-URL env var points at a keyless server: the
+		// env opt-in marks the provider available without stored credentials,
+		// exactly like models.yml `auth: none`. getApiKey still prefers a real
+		// stored key over kNoAuth.
+		for (const descriptor of PROVIDER_DESCRIPTORS) {
+			const keylessBaseUrlEnv = descriptor.keylessBaseUrlEnv;
+			if (
+				keylessBaseUrlEnv &&
+				!configuredProviders.has(descriptor.providerId) &&
+				Bun.env[keylessBaseUrlEnv]?.trim() &&
+				!this.authStorage.hasAuth(descriptor.providerId)
+			) {
+				this.#keylessProviders.add(descriptor.providerId);
+			}
 		}
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
 		this.#pendingStandardCacheProviders = new Set(
@@ -1875,12 +1879,12 @@ export class ModelRegistry {
 		for (let i = 0; i < standardProviderDescriptors.length; i++) {
 			const descriptor = standardProviderDescriptors[i];
 			const apiKey = standardProviderKeys[i];
-			// Local engines with opt-in discovery: an explicit settings override or
-			// `auth: none` stands in for a key so discovery still probes the
-			// configured endpoint. EXLLAMAV3_BASE_URL lands here too — #loadModels
-			// marks a keyless exllamav3 (no stored key) as keyless.
+			// Local engines with opt-in discovery (descriptor flag): an explicit
+			// settings override, models.yml `auth: none`, or a keyless base-URL
+			// env var stands in for a key so discovery still probes the
+			// configured endpoint.
 			const hasExplicitLocalEngineConfig =
-				(descriptor.providerId === "vllm" || descriptor.providerId === "exllamav3") &&
+				descriptor.localDiscoveryWithoutKey === true &&
 				(this.#runtimeProviderOverrides.has(descriptor.providerId) ||
 					this.#providerOverrides.has(descriptor.providerId) ||
 					this.#keylessProviders.has(descriptor.providerId));

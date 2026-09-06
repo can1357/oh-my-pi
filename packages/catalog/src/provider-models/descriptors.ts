@@ -195,6 +195,8 @@ export const CATALOG_PROVIDERS = [
 		// The loaded TabbyAPI model is the entire catalog; refreshes replace
 		// rather than merge so reloaded-away models disappear.
 		dynamicModelsAuthoritative: true,
+		localDiscoveryWithoutKey: true,
+		keylessBaseUrlEnv: "EXLLAMAV3_BASE_URL",
 		catalogDiscovery: { label: "ExLlamaV3 (TabbyAPI)", allowUnauthenticated: true },
 	},
 	{
@@ -503,6 +505,7 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "gpt-oss-20b",
 		envVars: ["VLLM_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => vllmModelManagerOptions(config),
+		localDiscoveryWithoutKey: true,
 		catalogDiscovery: { label: "vLLM", allowUnauthenticated: true },
 	},
 	{
@@ -621,6 +624,8 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = CATALOG_ENTRY
 			defaultModel: provider.defaultModel,
 			createModelManagerOptions: provider.createModelManagerOptions,
 			allowUnauthenticated: provider.allowUnauthenticated,
+			localDiscoveryWithoutKey: provider.localDiscoveryWithoutKey,
+			keylessBaseUrlEnv: provider.keylessBaseUrlEnv,
 			dynamicModelsAuthoritative: provider.dynamicModelsAuthoritative,
 			catalogDiscovery: provider.catalogDiscovery
 				? { ...provider.catalogDiscovery, envVars: provider.catalogDiscovery.envVars ?? provider.envVars ?? [] }

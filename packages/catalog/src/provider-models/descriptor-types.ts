@@ -33,6 +33,18 @@ export interface ProviderDescriptor {
 	defaultModel: string;
 	/** When true, the runtime creates a model manager even without a valid API key (e.g. ollama). */
 	allowUnauthenticated?: boolean;
+	/**
+	 * True for local engines whose built-in discovery runs without a stored key
+	 * once explicitly configured (settings/models.yml override, `auth: none`,
+	 * or a nonempty {@link keylessBaseUrlEnv}).
+	 */
+	localDiscoveryWithoutKey?: boolean;
+	/**
+	 * Environment variable whose nonempty value marks this local engine
+	 * keyless for availability and request auth when no credential is stored
+	 * (and opts built-in discovery in). A stored key always wins for requests.
+	 */
+	keylessBaseUrlEnv?: string;
 	/** When true, successful runtime discovery replaces bundled provider models instead of merging fallback-only IDs. */
 	dynamicModelsAuthoritative?: boolean;
 	/** Catalog discovery configuration. Only providers with this field participate in generate-models.ts. */
@@ -73,6 +85,10 @@ export interface ProviderCatalogEntry {
 	readonly createModelManagerOptions?: (config: ModelManagerConfig) => ModelManagerOptions<Api>;
 	/** When true, the runtime creates a model manager even without a valid API key. */
 	readonly allowUnauthenticated?: boolean;
+	/** Local engine whose built-in discovery runs without a key once explicitly configured. */
+	readonly localDiscoveryWithoutKey?: boolean;
+	/** Env var whose nonempty value marks this local engine keyless (no stored credential). */
+	readonly keylessBaseUrlEnv?: string;
 	/** When true, successful runtime discovery replaces bundled provider models. */
 	readonly dynamicModelsAuthoritative?: boolean;
 	/** Catalog discovery configuration for generate-models.ts. */

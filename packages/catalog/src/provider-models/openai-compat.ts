@@ -6062,7 +6062,12 @@ async function fetchExllamav3ModelCardProbe(
 				signal,
 			});
 			if (response.status === 503) {
-				return { card: null, noModelLoaded: true };
+				// Only TabbyAPI's own "no models loaded" answer is the no-model
+				// signal; an unrelated 503 (transient failure, reverse proxy) is a
+				// probe failure and falls back to the raw-list path.
+				const body: unknown = await response.json().catch(() => null);
+				const detail = isRecord(body) && typeof body.detail === "string" ? body.detail.toLowerCase() : "";
+				return { card: null, noModelLoaded: detail.includes("no models are currently loaded") };
 			}
 			if (!response.ok) {
 				return { card: null, noModelLoaded: false };
@@ -6139,9 +6144,11 @@ export function exllamav3ModelManagerOptions(
 			if (revalidated !== null && (revalidated.length > 0 || revalidationProbe.card === null)) {
 				return revalidated;
 			}
-			// Persistent mismatch (reload storm, admin-key directory churn): keep
-			// the advertised list rather than an authoritative empty catalog.
-			return discover(null);
+			// Persistent mismatch (reload storm, admin-key directory churn): report
+			// failed discovery. The manager keeps the last cached catalog; mapping
+			// the admin-key list here would publish unservable directory/dummy ids
+			// as an authoritative catalog.
+			return null;
 		},
 	};
 }
