@@ -83,6 +83,7 @@ import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { Goal, GoalModeState } from "../goals/state";
+import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { copyLocalArtifacts, resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
@@ -1594,6 +1595,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// up the destination project's configuration.
 			if (isSettingsInitialized()) {
 				await settings.reloadForCwd(newCwd);
+				// The reload fired the memory scope hooks; complete the rebind
+				// before the move commits so the next prompt cannot recall or
+				// retain against the source project's memory.
+				await rebindMemoryBackendForCwd(this.session);
 				// Reapply provider preferences from the newly-loaded settings so the
 				// module-level search/image provider state reflects the destination
 				// project's configuration. Without this, the previous project's
@@ -1617,6 +1622,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				setProjectDir(previousCwd);
 				if (isSettingsInitialized()) {
 					await settings.reloadForCwd(previousCwd);
+					await rebindMemoryBackendForCwd(this.session);
 					applyProviderGlobalsFromSettings(settings);
 				}
 				clearClaudePluginRootsCache();
@@ -1630,6 +1636,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					setProjectDir(actual);
 					if (isSettingsInitialized()) {
 						await settings.reloadForCwd(actual);
+						await rebindMemoryBackendForCwd(this.session);
 						applyProviderGlobalsFromSettings(settings);
 					}
 					clearClaudePluginRootsCache();

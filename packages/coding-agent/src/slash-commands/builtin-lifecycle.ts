@@ -6,6 +6,7 @@ import { reset as resetCapabilities } from "../capability";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { loadSlashCommands } from "../extensibility/slash-commands";
+import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
@@ -806,6 +807,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
 	setProjectDir(cwd);
 	await runtime.settings.reloadForCwd(cwd);
+	await rebindMemoryBackendForCwd(runtime.session);
 	applyProviderGlobalsFromSettings(runtime.settings);
 	clearClaudePluginRootsCache();
 	const src = discoverTitleSystemPromptFile(cwd);
