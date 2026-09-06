@@ -44,6 +44,8 @@ export interface InternalUrlExpansionOptions {
 	localOptions?: LocalProtocolOptions;
 	cwd?: string;
 	sessionFile?: string;
+	sessionId?: string;
+	agentRegistry?: ResolveContext["agentRegistry"];
 	ensureLocalParentDirs?: boolean;
 	/** Resolve bare skill:// URIs to the skill base directory instead of the instruction file. */
 	skillUrlForDirectory?: boolean;
@@ -283,6 +285,8 @@ async function resolveInternalUrlToPath(
 	ensureLocalParentDirs?: boolean,
 	cwd?: string,
 	sessionFile?: string,
+	sessionId?: string,
+	agentRegistry?: ResolveContext["agentRegistry"],
 	rules?: readonly Rule[],
 	skillUrlForDirectory?: boolean,
 ): Promise<string> {
@@ -326,7 +330,14 @@ async function resolveInternalUrlToPath(
 
 	let resource: InternalResource;
 	try {
-		resource = await internalRouter.resolve(url, { cwd, pathOnly: true, sessionFile, rules });
+		resource = await internalRouter.resolve(url, {
+			cwd,
+			pathOnly: true,
+			sessionFile,
+			sessionId,
+			agentRegistry,
+			rules,
+		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		throw new ToolError(`Failed to resolve ${scheme}:// URL in bash command: ${url}\n${message}`);
@@ -389,6 +400,8 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 				options.ensureLocalParentDirs,
 				options.cwd,
 				options.sessionFile,
+				options.sessionId,
+				options.agentRegistry,
 				options.rules,
 				options.skillUrlForDirectory,
 			);

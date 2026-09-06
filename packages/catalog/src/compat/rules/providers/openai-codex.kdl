@@ -29,6 +29,24 @@ provider "openai-codex" {
 			cache-write 15.625
 		}
 	}
+	// Codex discovery currently reports Astra's legacy 272K window and no
+	// pricing. Attribute subscription usage at the documented credit-equivalent
+	// rates, with free cache writes and without the API's >272K multiplier.
+	// The wire's 872K `max_context_window` (client 0.153.1, 2026-09-04) is the
+	// `/extended-context` maximum (see the `max-context-window` fallback
+	// below); the default stays at 272K so compaction fires first.
+	models "gpt-6-astra" "gpt-6-astra-wm" {
+		cost-patch {
+			input 10.0
+			output 50.0
+			cache-read 1.0
+			cache-write 0
+		}
+		service-tier-cost {
+			flex 0.5
+			priority 2.5
+		}
+	}
 	class "openai" {
 		revision ">=5.3 <5.7" {
 			thinking-mode "effort"
@@ -117,5 +135,14 @@ provider "openai-codex" {
 	// the Codex model registry still reports the stale 272000 figure.
 	models "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra" {
 		context-window-floor 1000000
+	}
+	// Residue: the Codex registry advertises Astra's 272000 default prompt
+	// window with max_context_window=872000 (client 0.153.1, 2026-09-04).
+	// Older bundled and cached catalogs omit the maximum; live discovery
+	// takes precedence. The fallback stays at the deployment-advertised
+	// maximum so offline extended context never advertises a window the
+	// deployment rejects.
+	models "gpt-6-astra" "gpt-6-astra-wm" {
+		max-context-window 872000
 	}
 }

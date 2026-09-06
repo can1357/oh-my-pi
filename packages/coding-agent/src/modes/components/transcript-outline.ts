@@ -59,9 +59,11 @@ export function stripPromptZones(rows: readonly string[]): readonly string[] {
 
 /**
  * Append `entries` to `builder`, returning the selectable targets they
- * produce. Entries that render nothing are folded (tool results, so a turn's
- * rewind keeps its output) or skipped (notices, hidden messages); usage rows
- * flushed at the head of an append are attributed to the turn above.
+ * produce. Tool results fold into the previous target (so a turn's rewind
+ * and `/copy` keep its output, including lazily created children such as
+ * the grouped-read card); notices and hidden messages that render nothing
+ * are skipped. Usage rows flushed at the head of an append are attributed
+ * to the turn above.
  */
 export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: SessionMessageEntry[]): OutlineTarget[] {
 	const targets: OutlineTarget[] = [];
@@ -76,14 +78,14 @@ export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: Se
 			if (previous && previous.end === start) previous.end = start + 1;
 			start++;
 		}
-		if (start >= after) {
-			const previous = targets.at(-1);
-			if (entry.message.role === "toolResult" && previous) {
-				previous.entryId = entry.id;
-				previous.entries.push(entry);
-			}
+		const previous = targets.at(-1);
+		if (entry.message.role === "toolResult" && previous) {
+			previous.entryId = entry.id;
+			previous.entries.push(entry);
+			if (after > previous.end) previous.end = after;
 			continue;
 		}
+		if (start >= after) continue;
 		targets.push({
 			entryId: entry.id,
 			turnId: entry.id,

@@ -7,7 +7,6 @@ if "__omp_prelude_loaded__" not in globals():
     import asyncio, collections.abc, inspect, os, json, math, re, types, typing
     from urllib.parse import unquote
 
-    INTENT_FIELD = "i"
 
     # __omp_display is injected by runner.py before the prelude executes; it
     # mirrors IPython's display() semantics with the same MIME bundle output.
@@ -473,8 +472,6 @@ if "__omp_prelude_loaded__" not in globals():
                     f"tool.{self._name}(...) expects a dict of arguments (got {type(args).__name__})"
                 )
             merged.update(kwargs)
-            if INTENT_FIELD not in merged:
-                merged[INTENT_FIELD] = "py prelude"
             value = await asyncio.to_thread(_bridge_call, self._name, merged)
             return _surface_bridged_tool_images(value)
 

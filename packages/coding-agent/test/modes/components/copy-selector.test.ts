@@ -63,12 +63,73 @@ function makeEntries(): SessionMessageEntry[] {
 	];
 }
 
+const GROUPED_READ_YIELD = "The write landed; here is the yield.";
+
+/** user → assistant(yield + write + two filesystem reads) → write result → two read results. */
+function makeGroupedReadEntries(): SessionMessageEntry[] {
+	return [
+		entry("u-gr", null, { role: "user", content: "write then read", timestamp: 1 } as AgentMessage),
+		entry("a-gr", "u-gr", {
+			role: "assistant",
+			content: [
+				{ type: "text", text: GROUPED_READ_YIELD },
+				{
+					type: "toolCall",
+					id: "write-1",
+					name: "write",
+					arguments: { path: "/tmp/out.ts", content: "export const x = 1;\n" },
+				},
+				{ type: "toolCall", id: "read-a", name: "read", arguments: { path: "/tmp/a.ts" } },
+				{ type: "toolCall", id: "read-b", name: "read", arguments: { path: "/tmp/b.ts" } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 2,
+		} as unknown as AgentMessage),
+		entry("t-write", "a-gr", {
+			role: "toolResult",
+			toolCallId: "write-1",
+			toolName: "write",
+			content: [{ type: "text", text: "Wrote /tmp/out.ts" }],
+			isError: false,
+			timestamp: 3,
+		} as unknown as AgentMessage),
+		entry("t-read-a", "a-gr", {
+			role: "toolResult",
+			toolCallId: "read-a",
+			toolName: "read",
+			content: [{ type: "text", text: "export const a = 1;" }],
+			isError: false,
+			timestamp: 4,
+		} as unknown as AgentMessage),
+		entry("t-read-b", "a-gr", {
+			role: "toolResult",
+			toolCallId: "read-b",
+			toolName: "read",
+			content: [{ type: "text", text: "export const b = 2;" }],
+			isError: false,
+			timestamp: 5,
+		} as unknown as AgentMessage),
+	];
+}
+
 function makeSelector(
 	picks: Array<{ content: string; label: string }>,
 	onCancel = () => {},
 	opens?: Array<{ href: string; label: string }>,
+	entries: SessionMessageEntry[] = makeEntries(),
 ): CopySelectorComponent {
-	return new CopySelectorComponent(makeEntries(), {
+	return new CopySelectorComponent(entries, {
 		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
 		cwd: "/tmp",
 		requestRender: () => {},
@@ -102,6 +163,24 @@ describe("CopySelectorComponent", () => {
 		// The newest item is the assistant turn (bash result folded into it);
 		// its item-level copy is the assistant prose, not tool noise.
 		expect(picks).toEqual([{ content: ASSISTANT_TEXT, label: "assistant message" }]);
+	});
+
+	it("folds lazily created grouped reads into the assistant turn so Enter copies the yield", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks, () => {}, undefined, makeGroupedReadEntries());
+		const lines = selector.render(100).map(line => Bun.stripANSI(line));
+
+		// The newest target must span the yield AND the lazily created Read group.
+		// A fold that keeps previous.end unchanged can still copy yield while
+		// leaving the Read card below the outline.
+		const boxed = lines.filter(line => line.startsWith("┆")).join("\n");
+		expect(boxed).toContain(GROUPED_READ_YIELD);
+		expect(boxed).toContain("Read (2)");
+
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		expect(picks).toEqual([{ content: GROUPED_READ_YIELD, label: "assistant message" }]);
 	});
 
 	it("descends into inner blocks with Right and copies the block verbatim", () => {
