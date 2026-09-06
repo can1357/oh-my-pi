@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
@@ -46,13 +48,22 @@ function streamedToolBlock(
 	toolCallId: string,
 	toolName: string,
 	args: Record<string, unknown>,
+	cursorExecResolved = false,
 ): Extract<AgentSessionEvent, { type: "message_update" }> {
+	const block = { type: "toolCall", id: toolCallId, name: toolName, arguments: args } as {
+		type: "toolCall";
+		id: string;
+		name: string;
+		arguments: Record<string, unknown>;
+		[kCursorExecResolved]?: true;
+	};
+	if (cursorExecResolved) block[kCursorExecResolved] = true;
 	return {
 		type: "message_update",
 		assistantMessageEvent: { type: "toolcall_start" },
 		message: {
 			role: "assistant",
-			content: [{ type: "toolCall", id: toolCallId, name: toolName, arguments: args }],
+			content: [block],
 		},
 	} as unknown as Extract<AgentSessionEvent, { type: "message_update" }>;
 }
@@ -138,6 +149,22 @@ describe("EventController + Cursor todo bridge", () => {
 		expect(f.showWarning).toHaveBeenCalledWith("Todo update failed. Progress may be stale until todo succeeds.", {
 			hideWithToolActivity: true,
 		});
+	});
+
+	it("renders a Cursor-resolved task alias with the canonical task renderer while live", async () => {
+		const taskTool = { name: "task", label: "Task" } as unknown as AgentTool;
+		const f = createFixture();
+		f.ctx.viewSession.getToolByName = vi.fn(name => (name === "task" ? taskTool : undefined));
+		f.ctx.viewSession.hasBuiltInTool = vi.fn(name => name === "task");
+
+		await f.controller.handleEvent(
+			streamedToolBlock("cursor-task-alias", "Subagent", { prompt: "Inspect auth", description: "Auth" }, true),
+		);
+
+		expect(f.blocks).toHaveLength(1);
+		const rendered = Bun.stripANSI(f.blocks[0]!.render(100).join("\n"));
+		expect(rendered).toContain("Inspect auth");
+		expect(rendered).not.toContain("Subagent");
 	});
 
 	it("settles a card whose completion arrived before the streamed block created it", async () => {

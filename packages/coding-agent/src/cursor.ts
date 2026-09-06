@@ -72,6 +72,8 @@ interface CursorExecBridgeOptions {
 	tools: Map<string, AgentTool>;
 	/** Resolves execution overrides (mounted-device permission wrappers) before the canonical map. */
 	getExecutableTool?: (name: string) => AgentTool | undefined;
+	/** Reports whether the active exact registry entry still comes from a built-in factory. */
+	isBuiltInTool?: (name: string) => boolean;
 	/**
 	 * The `replace`-mode `edit` instance `pi_edit` must run, when the session
 	 * granted `edit` at all.
@@ -948,11 +950,10 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
 		}
 		if (isCursorTaskMcpName(toolName)) {
-			const isExplicitAlias = toolName !== "task";
-			const exactAliasTool = isExplicitAlias
-				? (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName))
-				: undefined;
-			if (!exactAliasTool) {
+			const exactTaskTool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
+			const preserveExactTaskTool =
+				exactTaskTool !== undefined && (toolName !== "task" || this.options.isBuiltInTool?.(toolName) === false);
+			if (!preserveExactTaskTool) {
 				const resumeId = getCursorTaskResumeId(args);
 				if (resumeId) {
 					const message = `Resuming subagents via task.resume ("${resumeId}") is not supported. Use the \`hub\` tool to message and resume existing subagents.`;
@@ -1000,11 +1001,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
 		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
 		const isTask = isCursorTaskMcpName(toolName);
-		const isExplicitAlias = isTask && toolName !== "task";
-		const exactAliasTool = isExplicitAlias
+		const exactTaskTool = isTask
 			? (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName))
 			: undefined;
-		const routeToTask = isTask && !exactAliasTool;
+		const preserveExactTaskTool =
+			exactTaskTool !== undefined && (toolName !== "task" || this.options.isBuiltInTool?.(toolName) === false);
+		const routeToTask = isTask && !preserveExactTaskTool;
 		if (routeToTask && (getCursorTaskResumeId(args) || getCursorTaskUnsupportedModel(args))) {
 			return false;
 		}

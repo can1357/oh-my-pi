@@ -457,13 +457,15 @@ export class ChatTranscriptBuilder {
 			this.#readGroup?.seal();
 			this.#readGroup = null;
 			const isTaskAlias = isCursorTaskMcpName(content.name);
-			const resolvedTool =
-				this.deps.getTool?.(content.name) ?? (isTaskAlias ? this.deps.getTool?.("task") : undefined);
+			const exactTool = this.deps.getTool?.(content.name);
+			const resolvedTool = exactTool ?? (isTaskAlias ? this.deps.getTool?.("task") : undefined);
+			const usesTaskAliasFallback = exactTool === undefined && isTaskAlias && resolvedTool?.name === "task";
 			const component = new ToolExecutionComponent(
 				content.name,
 				content.arguments,
 				{
-					useBuiltInRenderer: isTaskAlias || (this.deps.isBuiltInTool?.(content.name) ?? true),
+					useBuiltInRenderer:
+						usesTaskAliasFallback || (this.deps.isBuiltInTool?.(content.name) ?? exactTool === undefined),
 					// Stable ids and Kitty placeholder cells keep images anchored
 					// while the transcript viewport scrolls and reflows.
 					showImages: settings.get("terminal.showImages"),

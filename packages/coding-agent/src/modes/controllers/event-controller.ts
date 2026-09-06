@@ -1,10 +1,11 @@
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { getStreamingPartialJson, isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
+import { isCursorTaskMcpName } from "../../cursor-bridge-tools";
 import { settings } from "../../config/settings";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
@@ -1237,7 +1238,12 @@ export class EventController {
 					this.#migrateStreamedToolCallId(priorId, content.id);
 				}
 				this.#streamedToolCallIdByIndex.set(contentIndex, content.id);
-				const tool = this.ctx.viewSession.getToolByName(content.name);
+				const exactTool = this.ctx.viewSession.getToolByName(content.name);
+				const tool =
+					exactTool ??
+					(isCursorExecResolved(content) && isCursorTaskMcpName(content.name)
+						? this.ctx.viewSession.getToolByName("task")
+						: undefined);
 				const renderToolName = toolRenderName(content.name, tool);
 				if (renderToolName === "read") {
 					if (!readArgsHaveTarget(content.arguments)) {

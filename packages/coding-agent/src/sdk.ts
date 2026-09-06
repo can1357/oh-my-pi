@@ -3038,6 +3038,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getCwd: () => sessionManager.getCwd(),
 			tools: toolRegistry,
 			getExecutableTool: resolveDeviceTool,
+			isBuiltInTool: name => builtInRegistryToolNames.has(name),
 			// `pi_edit` needs the `replace`-mode instance specifically, and the
 			// registry may still hold the session's own `edit` (any mode) when
 			// this session did not start on Cursor.
