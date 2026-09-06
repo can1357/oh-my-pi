@@ -439,6 +439,10 @@ async function registerOutputSink(
 				delivery: replaceable.delivery,
 				epoch: replaceable.epoch,
 				daemonId: replaceable.daemonId,
+				// A replaced start-pending registration has no incarnation yet;
+				// restoring it as attached would bind it to whatever terminal
+				// record the name currently describes.
+				startPending: replaceable.binding === "start-pending",
 			}
 		: undefined;
 	if (replaceable) {
@@ -654,11 +658,15 @@ async function registerOutputSink(
 			name,
 			previous.owner,
 			previous.delivery,
-			false,
+			previous.startPending,
 			previous.epoch,
 			previous.daemonId,
 			fence,
 		);
+		// Retaining a start-pending lease means "the start was accepted"; a
+		// restored pending registration must instead wait for the in-flight
+		// start, whose lease adopts it when the start resolves.
+		if (previous.startPending) return;
 		await restored?.retain();
 	};
 	try {
@@ -697,9 +705,13 @@ async function registerOutputSink(
 		registration.acquirePendingStart = requestedDelivery => {
 			pendingLeases++;
 			let settled = false;
+			let leaseDaemonId: string | undefined;
 			return {
 				registration,
-				bindDaemon,
+				bindDaemon: boundDaemonId => {
+					leaseDaemonId = boundDaemonId;
+					bindDaemon(boundDaemonId);
+				},
 				retain: async () => {
 					if (settled) return;
 					await registration.ready;
@@ -709,7 +721,28 @@ async function registerOutputSink(
 						await registration.cleanup();
 						return;
 					}
-					if (!registration.active) return;
+					if (!registration.active) {
+						// A failed same-name replacement may have restored the
+						// start-pending slot under a fresh registration while this
+						// start was still in flight; hand the accepted start to it so
+						// the replacement's output is not stranded awaiting a start.
+						// The restore may have rebuilt the per-client map, so resolve the
+						// live slot instead of the map this registration was created in.
+						const successor = outputRegistrations.get(session)?.get(client)?.get(name);
+						if (
+							successor &&
+							successor !== registration &&
+							successor.active &&
+							successor.binding === "start-pending" &&
+							successor.epoch === registration.epoch &&
+							successor.acquirePendingStart
+						) {
+							const lease = successor.acquirePendingStart(requestedDelivery);
+							if (leaseDaemonId !== undefined) lease.bindDaemon(leaseDaemonId);
+							await lease.retain();
+						}
+						return;
+					}
 					registration.retune(requestedDelivery);
 					if (startAccepted) return;
 					startAccepted = true;
