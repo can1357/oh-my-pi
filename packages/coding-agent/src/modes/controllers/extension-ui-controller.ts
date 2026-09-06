@@ -30,7 +30,7 @@ import { HookEditorComponent } from "../../modes/components/hook-editor";
 import { HookInputComponent } from "../../modes/components/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/components/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
-import type { AwaitedDialogOptions, InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
+import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "../../tools/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
@@ -589,7 +589,7 @@ export class ExtensionUiController {
 	async showCollabAwareSelector(
 		title: string,
 		options: ExtensionUISelectItem[],
-		dialogOptions?: InteractiveSelectorDialogOptions & AwaitedDialogOptions,
+		dialogOptions?: InteractiveSelectorDialogOptions,
 		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
 		const request: CollabUiRequestDraft = {
@@ -610,7 +610,7 @@ export class ExtensionUiController {
 	async showCollabAwareEditor(
 		title: string,
 		prefill?: string,
-		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
+		dialogOptions?: ExtensionUIDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined> {
 		const request: CollabUiRequestDraft = { kind: "editor", title, prefill };
@@ -621,7 +621,7 @@ export class ExtensionUiController {
 
 	async showAskDialog(
 		questions: ExtensionAskDialogQuestion[],
-		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
+		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
 		// Normalize the public extension input once for both race participants:
 		// malformed entries (missing/non-string fields) coerce to empty
@@ -649,7 +649,7 @@ export class ExtensionUiController {
 
 	#showLocalAskDialog(
 		questions: ExtensionAskDialogQuestion[],
-		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
+		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
 		const announced = dialogOptions?.announce ? (questions[0]?.question ?? "Waiting for input") : undefined;
 		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, announced, settle => {
@@ -976,7 +976,7 @@ export class ExtensionUiController {
 	showHookSelector(
 		title: string,
 		options: ExtensionUISelectItem[],
-		dialogOptions?: InteractiveSelectorDialogOptions & AwaitedDialogOptions,
+		dialogOptions?: InteractiveSelectorDialogOptions,
 		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
 		return this.#presentDialog(dialogOptions?.signal, dialogOptions?.announce ? title : undefined, settle => {
@@ -1038,11 +1038,7 @@ export class ExtensionUiController {
 	/**
 	 * Show a confirmation dialog for hooks.
 	 */
-	async showHookConfirm(
-		title: string,
-		message: string,
-		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
-	): Promise<boolean> {
+	async showHookConfirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
 		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"], dialogOptions);
 		return result === "Yes";
 	}
@@ -1053,7 +1049,7 @@ export class ExtensionUiController {
 	showHookInput(
 		title: string,
 		placeholder?: string,
-		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
+		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
 		return this.#presentDialog(dialogOptions?.signal, dialogOptions?.announce ? title : undefined, settle => {
 			this.ctx.hookInput = new HookInputComponent(
@@ -1093,7 +1089,7 @@ export class ExtensionUiController {
 	showHookEditor(
 		title: string,
 		prefill?: string,
-		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
+		dialogOptions?: ExtensionUIDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined> {
 		return this.#presentDialog(dialogOptions?.signal, dialogOptions?.announce ? title : undefined, settle => {
