@@ -1,13 +1,18 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { KeybindingsManager } from "@pk-nerdsaver-ai/pi-coding-agent/config/keybindings";
-import type { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
+import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { ModelSelectorComponent } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/model-selector";
 import { SessionSelectorComponent } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/session-selector";
 import { initTheme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
+import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import type { SessionInfo } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-listing";
 import { setKeybindings, type TUI } from "@pk-nerdsaver-ai/pi-tui";
+import { TempDir } from "@pk-nerdsaver-ai/pi-utils";
+
+let authStorage: AuthStorage | undefined;
+let tempDir: TempDir | undefined;
 
 beforeAll(() => {
 	initTheme();
@@ -16,6 +21,10 @@ beforeAll(() => {
 afterEach(() => {
 	setKeybindings(KeybindingsManager.inMemory());
 	vi.restoreAllMocks();
+	authStorage?.close();
+	authStorage = undefined;
+	tempDir?.removeSync();
+	tempDir = undefined;
 });
 
 function createSession(id: string, title: string): SessionInfo {
@@ -75,11 +84,9 @@ describe("component escape bindings", () => {
 				default: `${model.provider}/${model.id}`,
 			},
 		});
-		const modelRegistry = {
-			getAll: () => [model],
-			getDiscoverableProviders: () => [],
-			getCanonicalModelSelections: () => [],
-		} as unknown as ModelRegistry;
+		tempDir = TempDir.createSync("@pi-model-selector-escape-");
+		authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
 		const ui = {
 			requestRender: vi.fn(),
 		} as unknown as TUI;

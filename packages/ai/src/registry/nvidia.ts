@@ -57,5 +57,6 @@ export async function loginNvidia(options: OAuthController): Promise<string> {
 export const nvidiaProvider = {
 	id: "nvidia",
 	name: "NVIDIA",
+	apiKeyLoginMode: "append",
 	login: (cb: OAuthLoginCallbacks) => loginNvidia(cb),
 } as const satisfies ProviderDefinition;

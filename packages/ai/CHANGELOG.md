@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added distinct `max` reasoning and capability-driven Astra reasoning mappings for OpenAI and Codex requests, including local OpenAI-compatible gateways.
+
+### Fixed
+
+- Preserved NVIDIA and MiniMax rotation keys during login while retaining authoritative replacement for single-key services such as Kagi, Hugging Face, and Meta.
+
 ## [16.4.13] - 2026-09-06
 
 ### Added
