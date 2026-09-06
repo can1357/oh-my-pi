@@ -4,7 +4,7 @@
  * assistant turns retain a standalone row below their visible content/tools.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
@@ -135,6 +135,58 @@ describe("UiHelpers.renderSessionContext token-usage row placement", () => {
 		expect(children.some(c => c.render(120).join("\n").includes(USAGE_LABEL))).toBe(false);
 		// Last block is the read group, not a usage row.
 		expect(children[children.length - 1]).toBeInstanceOf(ReadToolGroupComponent);
+	});
+});
+
+describe("ChatTranscriptBuilder Cursor task aliases", () => {
+	beforeEach(async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+	});
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	it("passes the canonical task name to the built-in transcript renderer", () => {
+		const taskTool = { name: "task", label: "Task" } as unknown as AgentTool;
+		const builder = new ChatTranscriptBuilder({
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: process.cwd(),
+			requestRender: () => {},
+			getTool: name => (name === "task" ? taskTool : undefined),
+			isBuiltInTool: name => name === "task",
+		});
+		const message = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "cursor-task-alias",
+					name: "Subagent",
+					arguments: { task: "Inspect auth", name: "AuthExplorer", agent: "scout" },
+				},
+			],
+			api: "openai-responses",
+			provider: "cursor",
+			model: "cursor-model",
+			stopReason: "toolUse",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 1_000,
+		} as unknown as AgentMessage;
+
+		builder.rebuild([
+			{ type: "message", id: "cursor-task-entry", parentId: null, timestamp: new Date(0).toISOString(), message },
+		]);
+
+		const rendered = Bun.stripANSI(builder.container.render(120).join("\n"));
+		expect(rendered).toContain("AuthExplorer: Inspect auth");
+		expect(rendered).not.toContain("task=Inspect auth");
 	});
 });
 

@@ -104,6 +104,15 @@ function evalStart(toolCallId: string): Extract<AgentSessionEvent, { type: "tool
 	} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>;
 }
 
+function taskStart(toolCallId: string): Extract<AgentSessionEvent, { type: "tool_execution_start" }> {
+	return {
+		type: "tool_execution_start",
+		toolCallId,
+		toolName: "task",
+		args: { task: "Inspect auth", name: "AuthExplorer", agent: "scout" },
+	} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>;
+}
+
 function todoFailure(text: string): Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
 	return {
 		type: "tool_execution_end",
@@ -163,6 +172,28 @@ describe("EventController + Cursor todo bridge", () => {
 
 		expect(f.blocks).toHaveLength(1);
 		const rendered = Bun.stripANSI(f.blocks[0]!.render(100).join("\n"));
+		expect(rendered).toContain("Inspect auth");
+		expect(rendered).not.toContain("Subagent");
+	});
+
+	it("retargets an unresolved streamed task alias when canonical execution starts", async () => {
+		const taskTool = { name: "task", label: "Task" } as unknown as AgentTool;
+		const f = createFixture();
+		f.ctx.viewSession.getToolByName = vi.fn(name => (name === "task" ? taskTool : undefined));
+		f.ctx.viewSession.hasBuiltInTool = vi.fn(name => name === "task");
+
+		await f.controller.handleEvent(
+			streamedToolBlock("cursor-task-late-resolve", "Subagent", { prompt: "Inspect auth", description: "Auth" }),
+		);
+		const pending = f.ctx.pendingTools.get("cursor-task-late-resolve");
+		expect(pending).toBeDefined();
+		expect(Bun.stripANSI(pending!.render(100).join("\n"))).toContain("Subagent");
+
+		await f.controller.handleEvent(taskStart("cursor-task-late-resolve"));
+
+		const retargeted = f.ctx.pendingTools.get("cursor-task-late-resolve");
+		expect(retargeted).toBe(pending);
+		const rendered = Bun.stripANSI(retargeted!.render(100).join("\n"));
 		expect(rendered).toContain("Inspect auth");
 		expect(rendered).not.toContain("Subagent");
 	});

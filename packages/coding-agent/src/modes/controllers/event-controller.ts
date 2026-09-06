@@ -1611,6 +1611,9 @@ export class EventController {
 			this.#toolArgsReveal.finish(event.toolCallId);
 			const component = this.ctx.pendingTools.get(event.toolCallId);
 			if (component && typeof component.updateArgs === "function") {
+				if (component instanceof ToolExecutionComponent && event.toolName === "task") {
+					component.retargetTool(renderToolName, tool, this.ctx.viewSession.hasBuiltInTool(renderToolName));
+				}
 				component.updateArgs(event.args, event.toolCallId);
 				if (typeof component.setArgsComplete === "function") {
 					component.setArgsComplete(event.toolCallId);

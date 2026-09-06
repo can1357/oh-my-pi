@@ -57,7 +57,7 @@ import { EvalExecutionComponent } from "./eval-execution";
 import { type LateDiagnosticsFile, LateDiagnosticsMessageComponent } from "./late-diagnostics-message";
 import { groupedReadUsageCallIds, ReadToolGroupComponent, readArgsCollapseIntoGroup } from "./read-tool-group";
 import { SkillMessageComponent } from "./skill-message";
-import { ToolExecutionComponent } from "./tool-execution";
+import { ToolExecutionComponent, toolRenderName } from "./tool-execution";
 import { TranscriptContainer } from "./transcript-container";
 import { createUsageRowBlock, turnElapsedMs } from "./usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
@@ -460,8 +460,9 @@ export class ChatTranscriptBuilder {
 			const exactTool = this.deps.getTool?.(content.name);
 			const resolvedTool = exactTool ?? (isTaskAlias ? this.deps.getTool?.("task") : undefined);
 			const usesTaskAliasFallback = exactTool === undefined && isTaskAlias && resolvedTool?.name === "task";
+			const renderToolName = toolRenderName(content.name, resolvedTool);
 			const component = new ToolExecutionComponent(
-				content.name,
+				renderToolName,
 				content.arguments,
 				{
 					useBuiltInRenderer:

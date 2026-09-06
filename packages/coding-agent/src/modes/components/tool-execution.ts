@@ -399,6 +399,35 @@ export class ToolExecutionComponent extends Container {
 		this.#updateDisplay();
 	}
 
+	/** Retarget a streamed placeholder to the canonical tool selected at execution start. */
+	retargetTool(toolName: string, tool: AgentTool | undefined, useBuiltInRenderer: boolean): void {
+		const renderer = useBuiltInRenderer ? toolRenderers[toolName] : undefined;
+		if (toolName === this.#toolName && tool === this.#tool && renderer === this.#renderer) return;
+
+		this.#toolName = toolName;
+		this.#toolLabel = tool?.label ?? toolName;
+		this.#tool = tool;
+		this.#renderer = renderer;
+		this.#editMode = resolveEditModeForTool(toolName, tool);
+		if (this.#editMode && this.#previewReady === undefined) {
+			this.#previewReady = Promise.withResolvers<void>();
+		} else if (!this.#editMode) {
+			this.#editDiffPreview = undefined;
+			this.#previewReady = undefined;
+		}
+
+		const usesContentBox = !!(tool?.renderCall || tool?.renderResult) || renderer !== undefined;
+		if (usesContentBox !== this.#usesContentBox) {
+			this.clear();
+			this.#usesContentBox = usesContentBox;
+			this.addChild(usesContentBox ? this.#contentBox : this.#contentText);
+		}
+
+		this.#displayInputVersion++;
+		this.#updateSpinnerAnimation();
+		this.#updateDisplay();
+	}
+
 	updateArgs(args: any, _toolCallId?: string): void {
 		// Reference-equality short-circuit before any further work. Callers
 		// always allocate a new arg object on each streamed delta (see
