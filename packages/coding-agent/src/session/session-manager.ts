@@ -2195,7 +2195,7 @@ export class SessionManager {
 		return this.#titleSource;
 	}
 
-	/** Changes synchronously when generation starts or a rename is accepted. */
+	/** Tracks user rename requests; background title updates do not invalidate them. */
 	get titleRevision(): number {
 		return this.#titleRevision;
 	}
@@ -2240,7 +2240,7 @@ export class SessionManager {
 		const timestamp = nowIso();
 		this.#sessionName = title;
 		this.#titleSource = source;
-		this.#titleRevision++;
+		if (source === "user") this.#titleRevision++;
 		this.#titleUpdatedAt = timestamp;
 		this.#header.title = title;
 		this.#header.titleSource = source;

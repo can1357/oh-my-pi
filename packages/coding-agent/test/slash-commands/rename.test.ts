@@ -246,3 +246,40 @@ it.each([true, false])("keeps the latest RPC rename request when older finishes 
 		await Promise.all(pending);
 	}
 });
+
+it.each(["TUI", "headless"] as const)(
+	"keeps a manual %s rename after an older automatic title completes",
+	async mode => {
+		const { session, sessionManager, execute } = createRuntime(mode);
+		const previousNoTitle = Bun.env.PI_NO_TITLE;
+		delete Bun.env.PI_NO_TITLE;
+		const automatic = Promise.withResolvers<string | null>();
+		const manual = Promise.withResolvers<string | null>();
+		const applied = Promise.withResolvers<void>();
+		const unsubscribe = sessionManager.onSessionNameChanged(() => applied.resolve());
+		const generate = vi
+			.spyOn(tinyTitleClient, "generate")
+			.mockImplementationOnce(() => automatic.promise)
+			.mockImplementationOnce(() => manual.promise);
+		let pending: Promise<unknown> | undefined;
+		try {
+			session.maybeStartTitleGeneration("Repair cache invalidation after writes");
+			pending = execute("/rename");
+			expect(generate).toHaveBeenCalledTimes(2);
+			automatic.resolve("Initial automatic title");
+			await applied.promise;
+			manual.resolve("Requested manual title");
+			await pending;
+			expect(session.sessionName).toBe("Requested manual title");
+			await sessionManager.setSessionName("Later automatic title", "auto");
+			expect(session.sessionName).toBe("Requested manual title");
+		} finally {
+			automatic.resolve(null);
+			manual.resolve(null);
+			await pending;
+			unsubscribe();
+			if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
+			else Bun.env.PI_NO_TITLE = previousNoTitle;
+		}
+	},
+);
