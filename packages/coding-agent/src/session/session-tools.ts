@@ -65,6 +65,7 @@ export interface SessionToolsHost {
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
 	setCodeModeNamespacesInfo?(info: unknown): void;
 	contextWindowTools?(): Promise<AgentTool[]>;
+	disableContextWindowMode?(reason: string): void;
 }
 
 interface SessionToolsOptions {
@@ -622,6 +623,8 @@ export class SessionTools {
 			// A user tool that already owns the name wins, as with vibe tools.
 			if (this.#toolRegistry.has(tool.name)) {
 				desired.delete(tool.name);
+				// Window mode cannot commit a reset through a foreign implementation.
+				if (tool.name === "new_context") this.#host.disableContextWindowMode?.(`tool "${tool.name}" is shadowed`);
 				continue;
 			}
 			this.#toolRegistry.set(tool.name, this.#wrapRuntimeTool(tool));

@@ -1504,6 +1504,7 @@ export class AgentSession {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			model: () => this.model,
 			contextWindowTools: () => this.#maintenance.refreshContextWindowTools(),
+			disableContextWindowMode: reason => this.#maintenance.contextWindows.disableWindowMode(reason),
 			setCodeModeNamespacesInfo: info => {
 				this.#codeModeState.namespacesInfo = info;
 			},

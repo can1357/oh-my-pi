@@ -56,6 +56,7 @@ export class CodexContextWindowRuntime {
 	#threadHint?: string;
 	#policy?: CodexContextWindows;
 	#notesTools?: AgentTool[];
+	#windowDisabledReason?: string;
 	#initialized = false;
 	#lastIdentity?: CodexContextWindowIdentity;
 
@@ -75,11 +76,23 @@ export class CodexContextWindowRuntime {
 
 	get windowActive(): boolean {
 		return (
+			this.#windowDisabledReason === undefined &&
 			this.#host.settings.get("compaction.enabled") &&
 			this.#available &&
 			this.#windowRequested &&
 			this.#policy !== undefined
 		);
+	}
+
+	/**
+	 * Turn window mode off for the rest of the session. Used when the reset tool
+	 * cannot be installed: the checkpoint protocol would otherwise demand a
+	 * `new_context` call that never reaches this runtime.
+	 */
+	disableWindowMode(reason: string): void {
+		if (this.#windowDisabledReason !== undefined) return;
+		this.#windowDisabledReason = reason;
+		logger.warn("Codex context-window mode disabled", { reason });
 	}
 	get notesActive(): boolean {
 		return this.#available && this.#notesRequested === true;

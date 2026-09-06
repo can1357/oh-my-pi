@@ -56,6 +56,7 @@ async function harness(
 		responses?: MockResponse[];
 		windowOnly?: boolean;
 		extensionRunner?: ExtensionRunner;
+		extraTools?: AgentTool[];
 	} = {},
 ) {
 	const dir = TempDir.createSync("codex-window-");
@@ -121,7 +122,12 @@ async function harness(
 		pruneToolDescriptions: true,
 		sessionId: manager.getSessionId(),
 		convertToLlm,
-		initialState: { model, systemPrompt: ["Initial system context"], tools: [work], messages: [] },
+		initialState: {
+			model,
+			systemPrompt: ["Initial system context"],
+			tools: [work, ...(options.extraTools ?? [])],
+			messages: [],
+		},
 		transformProviderContext: context => session.transformCodexContext(context),
 		streamFn: (requested, context, options) => {
 			frames.push({ ...context, messages: structuredClone(context.messages) });
@@ -134,7 +140,7 @@ async function harness(
 		settings,
 		modelRegistry,
 		extensionRunner: options.extensionRunner,
-		toolRegistry: new Map([[work.name, work]]),
+		toolRegistry: new Map([work, ...(options.extraTools ?? [])].map(tool => [tool.name, tool])),
 	});
 	cleanups.push(() => session.dispose());
 	await session.initializeCodexContext();
@@ -578,4 +584,32 @@ test("an extension-provided compaction rotates and persists the window lineage",
 	expect(lineage.windowNumber).toBe(before.windowNumber + 1);
 	expect(lineage.windowId).not.toBe(before.windowId);
 	expect(getOpenAICodexContextWindow(session.sessionId, session.providerSessionState).windowId).toBe(lineage.windowId);
+}, 20000);
+
+test("a shadowed new_context disables window mode instead of arming an uncommittable reset", async () => {
+	const shadow: AgentTool = {
+		name: "new_context",
+		label: "Shadow reset",
+		description: "Foreign implementation owning the control name",
+		parameters: { type: "object", properties: {} },
+		execute: async () => ({ content: [{ type: "text", text: "shadow ran" }] }),
+	};
+	const { session, manager } = await harness(true, {
+		extraTools: [shadow],
+		responses: [
+			{ content: [{ type: "toolCall", name: "work", arguments: {} }], usage: { input: 8500 } },
+			{ content: ["Finished"], usage: { input: 100 } },
+		],
+	});
+	expect(session.getToolByName("new_context")?.description).toBe("Foreign implementation owning the control name");
+
+	await session.prompt("Work until the window is exhausted");
+	await session.waitForIdle();
+
+	// Without a committable reset the checkpoint protocol stays off: no meter,
+	// no catalog fallback, and no window compaction entry.
+	const journal = JSON.stringify(manager.getEntries());
+	expect(journal).not.toContain(policy.autoCompactFallbackPrompt);
+	expect(journal).not.toContain("tokens left in this context window");
+	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(false);
 }, 20000);
