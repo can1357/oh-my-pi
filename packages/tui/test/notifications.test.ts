@@ -27,6 +27,8 @@ const originalPiNotifications = Bun.env.PI_NOTIFICATIONS;
 const originalCmuxSurfaceId = Bun.env.CMUX_SURFACE_ID;
 const originalCmuxWorkspaceId = Bun.env.CMUX_WORKSPACE_ID;
 const originalCmuxSocketPath = Bun.env.CMUX_SOCKET_PATH;
+const originalWmux = Bun.env.WMUX;
+const originalWmuxSurfaceId = Bun.env.WMUX_SURFACE_ID;
 const mutableTerminal = TERMINAL as unknown as { notifyProtocol: NotifyProtocol };
 const originalNotifyProtocol = mutableTerminal.notifyProtocol;
 
@@ -77,8 +79,8 @@ describe("terminal notifications", () => {
 	beforeEach(() => {
 		setOsc99Supported(false);
 		previousHeadless = setTerminalHeadless(false);
-		// Default the suite to the "outside tmux" baseline so probe/format
-		// assertions never see a stray inherited TMUX leaking the DCS wrap in.
+		// Default the suite to a direct-terminal baseline so probe/format
+		// assertions never see inherited multiplexer markers.
 		delete Bun.env.TMUX;
 		delete Bun.env.ZELLIJ;
 		delete Bun.env.HERDR_ENV;
@@ -88,6 +90,8 @@ describe("terminal notifications", () => {
 		delete Bun.env.CMUX_SURFACE_ID;
 		delete Bun.env.CMUX_WORKSPACE_ID;
 		delete Bun.env.CMUX_SOCKET_PATH;
+		delete Bun.env.WMUX;
+		delete Bun.env.WMUX_SURFACE_ID;
 		// `PI_NOTIFICATIONS=off` is set in this workspace's CI env, which would
 		// short-circuit `sendNotification` before it writes anything. Clear it
 		// so the delivery-path assertions actually observe stdout writes.
@@ -110,6 +114,8 @@ describe("terminal notifications", () => {
 		restoreEnv("CMUX_SURFACE_ID", originalCmuxSurfaceId);
 		restoreEnv("CMUX_WORKSPACE_ID", originalCmuxWorkspaceId);
 		restoreEnv("CMUX_SOCKET_PATH", originalCmuxSocketPath);
+		restoreEnv("WMUX", originalWmux);
+		restoreEnv("WMUX_SURFACE_ID", originalWmuxSurfaceId);
 		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
 		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
 		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
