@@ -13,9 +13,9 @@
 - Grok Bot Gemini/OpenAI native tool schemas are family-normalized, thought-only JSON in thinking is promoted, and an empty tool turn retries once with thinking off.
 - Grok Bot `gemini-3-flash` / `gemini-3-flash[]` now send a bare `gemini-3.8-flash` requestedModel (`sand-wire-model-id`) so native bash/read/write use the working peer.
 - Grok Bot Write follow-ups that empty-stop after a tool result no longer fail the turn; Write accepts a `contents` alias.
-- Grok Bot empty follow-up acceptance is limited to Gemini turns whose last message is the current `toolResult` (older results no longer silence a new user question).
+- Grok Bot empty follow-up acceptance is limited to Gemini turns whose last message is the current Write `toolResult` (older or non-Write results no longer silence a new user question).
 - Grok Bot product Write advertises a cloned `contents` alias so native-wire schemas are not mutated.
-- Grok Bot thinking-only first attempts are buffered until text/tool appears so empty retries do not leak `thinking_delta` to ACP/speech.
+- Grok Bot thinking-only / incomplete-tool first attempts stay buffered until accepted; discarded retries re-emit `start` and do not publish abandoned `toolcall_start` events.
 - Grok Bot automation/parent-chat product wire for non-Anthropic routers requires catalog `sand-tools-wire` (no raw `sand-automation` / `sand-default` id exceptions).
 - Grok Bot keep-model probes share checksum/JWT/auth helpers via `scripts/grokbot-probe-config.mjs`.
 - Grok Bot `sand-automation` now promotes grok-4.5-high fenced `{"name":"Shell",…}` text into a real Shell/bash tool call, and native-family matrix rows report `wire: native` instead of the internal `error` sentinel.

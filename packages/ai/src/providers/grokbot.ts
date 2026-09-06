@@ -591,13 +591,15 @@ type GrokbotToolState = {
 	isGrammar: boolean;
 };
 
-/** True when the immediately preceding message is a toolResult (current tool turn). */
-function contextEndsWithToolResult(context: Context): boolean {
+/** True when the immediately preceding message is a Write toolResult (current tool turn). */
+function contextEndsWithWriteToolResult(context: Context): boolean {
 	const messages = context.messages ?? [];
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (!msg || typeof msg !== "object") continue;
-		return msg.role === "toolResult";
+		if (msg.role !== "toolResult") return false;
+		const name = typeof msg.toolName === "string" ? msg.toolName : "";
+		return /^(write|Write)$/i.test(name);
 	}
 	return false;
 }
@@ -763,6 +765,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			const discardAttemptEvents = () => {
 				attemptEventBuffer = [];
 				attemptStreamingLive = false;
+				// Buffered `start` was never published — re-arm so the retry emits it.
+				started = false;
 			};
 
 			attempt: while (true) {
@@ -1039,7 +1043,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						toolStates.set(key, state);
 						if (id) toolStates.set(id, state);
 						if (idxKey) toolStates.set(idxKey, state);
-						flushAttemptEvents();
+						// Keep buffering until toolcall_end — incomplete calls may still
+						// be discarded by the empty/incomplete retry path.
 						emitAttemptEvent({ type: "toolcall_start", contentIndex: index, partial: output });
 					} else {
 						if (id) toolStates.set(id, state);
@@ -1352,12 +1357,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						});
 						continue attempt;
 					}
-					// Some Gemini turns empty-stop after Write (bash/read already
-					// succeeded). Only accept when this request is the immediate
-					// follow-up to a toolResult — not when an older result sits
-					// earlier in an otherwise unanswered user turn.
-					if (identity.class === "gemini" && contextEndsWithToolResult(context)) {
-						logger.info("grokbot: accepting empty follow-up after tool result", {
+					// Some Gemini turns empty-stop after Write. Only accept that
+					// documented workaround — not empty stops after bash/read/etc.
+					if (identity.class === "gemini" && contextEndsWithWriteToolResult(context)) {
+						logger.info("grokbot: accepting empty follow-up after Write tool result", {
 							modelId: model.id,
 							class: identity.class,
 							wireMode: anthropicWire.wireMode,
