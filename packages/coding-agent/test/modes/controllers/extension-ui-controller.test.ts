@@ -394,6 +394,25 @@ describe("prompts that block a turn announce themselves", () => {
 		expect(notify.mock.calls[0]?.[0]).toMatchObject({ title: "my-session", type: "ask", actions: "focus" });
 	});
 
+	it("strips control bytes from the announced headline and title", async () => {
+		// Extension and model text ends up inside an OSC payload; a BEL or ESC-ST
+		// in it would terminate the notification and inject what follows.
+		const ui = await makeHarness({ sessionName: "my\x07-session\x1b]0;x\x07", streaming: true }).init();
+		const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+
+		const dismiss = new AbortController();
+		void ui.select("run \x1b\\\x1b]9;pwned\x07 bash", ["Approve", "Deny"], {
+			signal: dismiss.signal,
+			announce: true,
+		});
+		dismiss.abort();
+		await Promise.resolve();
+
+		const sent = notify.mock.calls[0]?.[0] as { title: string; body: string };
+		expect(sent).toMatchObject({ title: "my-session", body: "run  bash" });
+		expect(`${sent.title}${sent.body}`).not.toMatch(/[\x00-\x1f\x7f-\x9f]/u);
+	});
+
 	it("announces a queued prompt when it reaches the screen, and never one aborted while queued", async () => {
 		const ui = await makeHarness({ sessionName: "my-session", streaming: true }).init();
 		const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});

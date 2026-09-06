@@ -1,6 +1,7 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { KeybindingsManager } from "../../config/keybindings";
 import type {
 	CompactOptions,
@@ -910,10 +911,12 @@ export class ExtensionUiController {
 		// Headline only. The body of an approval prompt carries the command line,
 		// eval source, or file paths, and a desktop notification is retained in
 		// notification history and shown on a locked screen — not a place for a
-		// token that happened to sit in an argument.
-		const [head = ""] = prompt.split("\n");
+		// token that happened to sit in an argument. Both fields come from
+		// extension or model text and end up inside an OSC payload, so control
+		// bytes (BEL, ESC-ST) are stripped before they can terminate it.
+		const [head = ""] = sanitizeText(prompt).split("\n");
 		TERMINAL.sendNotification({
-			title: this.ctx.sessionManager.getSessionName() || "Oh My Pi",
+			title: sanitizeText(this.ctx.sessionManager.getSessionName() ?? "").trim() || "Oh My Pi",
 			body: head.trim().slice(0, 140) || "Waiting for input",
 			type: "ask",
 			urgency: "normal",
