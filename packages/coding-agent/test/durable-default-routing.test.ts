@@ -14,11 +14,7 @@ import {
 	resolveSpawnExecutionBlocking,
 } from "../src/config/estate-role-runtime";
 import { ESTATE_ROLE_COORDINATION_SCHEMA } from "../src/config/estate-role-coordination";
-import {
-	ESTATE_IMPLEMENTATION_DEFAULTS,
-	resolveDefaultSpawnAgent,
-	resolveSpawnPolicy,
-} from "../src/task/spawn-policy";
+import { ESTATE_IMPLEMENTATION_DEFAULTS, resolveDefaultSpawnAgent, resolveSpawnPolicy } from "../src/task/spawn-policy";
 import type { AgentDefinition } from "../src/task/types";
 
 function agent(name: string, blocking?: boolean): AgentDefinition {
@@ -45,10 +41,7 @@ describe("estate-role-runtime routing", () => {
 	});
 
 	test("partitionSpawnFanIn classifies reviewer branches", () => {
-		const itemBlocking = resolveSpawnExecutionBlocking(
-			["estate-luna", "reviewer"],
-			[true, true],
-		);
+		const itemBlocking = resolveSpawnExecutionBlocking(["estate-luna", "reviewer"], [true, true]);
 		const partition = partitionSpawnFanIn(["estate-luna", "reviewer"], itemBlocking);
 		expect(partition.reviewIndices).toEqual([1]);
 		expect(partition.blockingIndices).toEqual([0]);

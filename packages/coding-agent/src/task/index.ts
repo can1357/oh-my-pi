@@ -523,7 +523,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		const tasks: unknown[] = Array.isArray(params.tasks) ? params.tasks : [];
 		if (tasks.length > 0) {
-			const defaultAgent = resolveDefaultSpawnAgent(this.session.getSessionSpawns?.() ?? "*", this.session.getAgentId?.());
+			const defaultAgent = resolveDefaultSpawnAgent(
+				this.session.getSessionSpawns?.() ?? "*",
+				this.session.getAgentId?.(),
+			);
 			const effectiveAgent = (item: unknown): string => {
 				if (item && typeof item === "object" && "agent" in item) {
 					const agent = item.agent;
@@ -691,7 +694,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
 		// item's agent type against the session's actual default agent.
-		const defaultAgent = resolveDefaultSpawnAgent(this.session.getSessionSpawns?.() ?? "*", this.session.getAgentId?.());
+		const defaultAgent = resolveDefaultSpawnAgent(
+			this.session.getSessionSpawns?.() ?? "*",
+			this.session.getAgentId?.(),
+		);
 		const batchEnabled = this.#isBatchEnabled();
 		const validationError = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
 		if (validationError) {
@@ -799,8 +805,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				signal,
 				onUpdate,
 			);
-			const combined =
-				[advisory].filter(Boolean).join("\n\n") || undefined;
+			const combined = [advisory].filter(Boolean).join("\n\n") || undefined;
 			if (!combined) return result;
 			let appended = false;
 			const content = result.content.map(part => {
@@ -834,8 +839,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// than mutating the caller's — task results are short-lived here, but an
 		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
 		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
-			const combined =
-				[advisory].filter(Boolean).join("\n\n") || undefined;
+			const combined = [advisory].filter(Boolean).join("\n\n") || undefined;
 			if (!combined) return result;
 			let appended = false;
 			const content = result.content.map(part => {

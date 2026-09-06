@@ -2597,8 +2597,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			agent: agent.name,
 			parentToolCallId: options.parentToolCallId,
 			parentAgentId: options.parentAgentId,
-			requestedModelPatterns:
-				options.requestedModelPatterns ?? turnMonitor.progress.requestedModelPatterns,
+			requestedModelPatterns: options.requestedModelPatterns ?? turnMonitor.progress.requestedModelPatterns,
 			detached: true,
 			agentSource: agent.source,
 			description: options.description,

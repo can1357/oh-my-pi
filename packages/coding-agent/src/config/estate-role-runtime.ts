@@ -63,13 +63,8 @@ export function partitionSpawnFanIn(agents: readonly string[], itemBlocking: rea
 }
 
 /** Apply fan-in routing: reviewers always run async alongside implementers. */
-export function resolveSpawnExecutionBlocking(
-	agents: readonly string[],
-	itemBlocking: readonly boolean[],
-): boolean[] {
-	return agents.map((agentName, index) =>
-		isReviewAgent(agentName) ? false : (itemBlocking[index] ?? false),
-	);
+export function resolveSpawnExecutionBlocking(agents: readonly string[], itemBlocking: readonly boolean[]): boolean[] {
+	return agents.map((agentName, index) => (isReviewAgent(agentName) ? false : (itemBlocking[index] ?? false)));
 }
 
 export interface CoordinationSpawnRoute {

@@ -1,7 +1,11 @@
-import { isReviewAgent } from "../config/estate-role-runtime";
-
 /** Default agent used when a session has unrestricted spawning. */
 export const DEFAULT_SPAWN_AGENT = "task";
+
+const REVIEW_AGENT_NAMES = new Set(["reviewer", "security-reviewer"]);
+
+function isReviewAgent(agentName: string): boolean {
+	return REVIEW_AGENT_NAMES.has(agentName);
+}
 
 /**
  * Estate DEFAULT spine: when the parent omits `agent`, route to the first
@@ -31,7 +35,6 @@ export function resolveDefaultSpawnAgent(
 	}
 	return policy.defaultAgent;
 }
-
 
 /** Spawn policy derived from a parent agent's `spawns` frontmatter. */
 export interface ResolvedSpawnPolicy {

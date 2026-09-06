@@ -313,7 +313,6 @@ export class AgentRegistry {
 		return depth;
 	}
 
-
 	/**
 	 * Returns every alive agent (running | idle) except the caller. Advisor refs
 	 * are observability-only transcripts, never peers, so they are excluded.

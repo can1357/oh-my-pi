@@ -19,10 +19,12 @@ const blockingLuna: AgentDefinition = {
 	blocking: true,
 };
 
-function createSession(options: {
-	manager?: AsyncJobManager;
-	settings?: Record<string, unknown>;
-} = {}): ToolSession {
+function createSession(
+	options: {
+		manager?: AsyncJobManager;
+		settings?: Record<string, unknown>;
+	} = {},
+): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
