@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in agent-callable `compact` tool (`compact.enabled`, default off) that lets the agent compact its own context at a turn boundary ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
