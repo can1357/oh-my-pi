@@ -1,6 +1,6 @@
 {
   "name": "@pk-nerdsaver-ai/pi-natives",
-  "version": "16.4.12",
+  "version": "16.4.13",
   "description": "Native Rust bindings for grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
   "type": "module",
   "homepage": "https://github.com/kingkillery/oh-my-pk",

@@ -1,6 +1,6 @@
 {
 	"name": "@pk-nerdsaver-ai/clips-extension",
-	"version": "16.4.12",
+	"version": "16.4.13",
 	"description": "Oh My Pi extension: feed Clips (gopk.xyz) screen recordings to agents",
 	"type": "module",
 	"main": "src/index.ts",

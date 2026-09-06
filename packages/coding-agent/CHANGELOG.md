@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.13] - 2026-09-06
+
 ### Added
 
 - Taught `/btw` prompt-btw and `promptbtw-handoff` to auto-select Claude Fable 5.1 quirk patches (effort, progress updates, tool batching, writing density, task completion, scope/tests, targeted edits, and related harness notes) instead of dumping the full guide.

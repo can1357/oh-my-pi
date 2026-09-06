@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@pk-nerdsaver-ai/pi-wire",
-	"version": "16.4.12",
+	"version": "16.4.13",
 	"description": "Shared wire protocol types for Oh My Pi packages",
 	"homepage": "https://github.com/kingkillery/oh-my-pk",
 	"author": "Can Boluk",

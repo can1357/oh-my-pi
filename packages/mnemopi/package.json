@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@pk-nerdsaver-ai/pi-mnemopi",
-	"version": "16.4.12",
+	"version": "16.4.13",
 	"description": "Local SQLite memory engine for Oh My Pi agents",
 	"homepage": "https://github.com/kingkillery/oh-my-pk",
 	"author": "Can Boluk",

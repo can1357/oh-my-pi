@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.13] - 2026-09-06
+
 ### Added
 
 - Added the native QwenCloud Token Plan provider (`alibaba-token-plan`, `/login alibaba-token-plan`) with region-aware login (International Singapore / China Beijing / custom), `ALIBABA_TOKEN_PLAN_API_KEY` / `BAILIAN_TOKEN_PLAN_API_KEY` env support, dedicated `sk-sp-…` credential parsing that never falls back to the generic `OPENAI_API_KEY`, optional console-cookie quota reporting, and region-aware inference/discovery routing.

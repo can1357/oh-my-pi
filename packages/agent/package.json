@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@pk-nerdsaver-ai/pi-agent-core",
-	"version": "16.4.12",
+	"version": "16.4.13",
 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
 	"homepage": "https://github.com/kingkillery/oh-my-pk",
 	"author": "Can Boluk",

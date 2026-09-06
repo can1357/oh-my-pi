@@ -1,6 +1,6 @@
 {
 	"name": "@pk-nerdsaver-ai/verifier-extension",
-	"version": "16.4.12",
+	"version": "16.4.13",
 	"description": "LLM-as-verifier extension for structured candidate evaluation",
 	"type": "module",
 	"main": "src/index.ts",
