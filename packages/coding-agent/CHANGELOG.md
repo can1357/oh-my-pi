@@ -9,6 +9,8 @@
 
 ### Fixed
 
+- Concurrent first bash commands now share shell snapshot initialization when their environment and startup timeout match.
+
 	- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
 
 ### Fixed
