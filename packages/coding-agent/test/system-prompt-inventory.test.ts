@@ -101,6 +101,31 @@ describe("system prompt tool inventory", () => {
 		return systemPrompt.join("\n\n");
 	}
 
+	async function renderPrompt(opts: {
+		toolNames: string[];
+		tools: Map<string, SystemPromptToolMetadata>;
+	}): Promise<string> {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "mounted-skill",
+					description: "Readable through mounted fetch",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [],
+			toolNames: opts.toolNames,
+			tools: opts.tools,
+			xdevTools: [{ name: "fetch", summary: "Fetches URLs." }],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		return systemPrompt.join("\n\n");
+	}
+
 	function inventoryFrom(text: string): string {
 		// Isolate the tool list across prompt layouts by stopping at the next
 		// top-level or regular section heading.
@@ -709,35 +734,28 @@ describe("system prompt tool inventory", () => {
 	});
 
 	it("keeps skill URL guidance for a mounted skill URI reader", async () => {
-		const tools = new Map(TOOLS);
-		tools.set("fetch", {
-			label: "Fetch",
-			description: "Fetches URLs.",
-			parameters: { type: "object", properties: { url: { type: "string" } } },
-			readsSkillUris: true,
+		const registry = new Map([["fetch", { ...SDK_TOOL, name: "fetch", readsSkillUris: true }]]);
+		const directNames: string[] = [];
+		// Production compact projection (sdk.ts) joins mounted names into the
+		// direct names; the inventory stays driven by `toolNames` below.
+		const tools = projectSystemPromptToolMetadata(registry, {
+			mode: "compact",
+			toolNames: [...directNames, "fetch"],
 		});
-		const { systemPrompt } = await buildSystemPrompt({
-			cwd: tempDir,
-			contextFiles: [],
-			skills: [
-				{
-					name: "mounted-skill",
-					description: "Readable through mounted fetch",
-					filePath: path.join(tempDir, "SKILL.md"),
-					baseDir: tempDir,
-					source: "test",
-				},
-			],
-			rules: [],
-			toolNames: [],
-			tools,
-			xdevTools: [{ name: "fetch", summary: "Fetches URLs." }],
-			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
-		});
-		const text = systemPrompt.join("\n\n");
+		const text = await renderPrompt({ toolNames: directNames, tools });
 
 		expect(text).toContain("mounted-skill");
 		expect(text).toContain("`skill://<name>`");
+	});
+
+	it("omits skill URL guidance when compact projection drops the mounted reader", async () => {
+		const registry = new Map([["fetch", { ...SDK_TOOL, name: "fetch", readsSkillUris: true }]]);
+		// Pre-fix production boundary: compact over direct names only.
+		const tools = projectSystemPromptToolMetadata(registry, { mode: "compact", toolNames: [] });
+		const text = await renderPrompt({ toolNames: [], tools });
+
+		expect(text).toContain("# Internal URLs");
+		expect(text).not.toContain("`skill://<name>`");
 	});
 
 	it("omits skill URL guidance when no skills are loaded", async () => {
