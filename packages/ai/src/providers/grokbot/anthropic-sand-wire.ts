@@ -143,8 +143,7 @@ export function applyAnthropicSandToolWire(
 		const anthropic = isAnthropicSandModelId(modelId);
 		const catalogOwns = input.sandToolsWire === "keep-model";
 		// Anthropic keep-model is identity-owned. Catalog can also opt a
-		// non-Anthropic row (gemini-3-flash) onto product tools without
-		// rewriting the requestedModel id.
+		// non-Anthropic row onto product tools without rewriting requestedModel.
 		if (!anthropic && !catalogOwns) return input;
 		return applyProductWire(input, "automation", "keep-model", {
 			requestedModel: anthropic ? input.requestedModel : { modelId: input.requestedModel.modelId },

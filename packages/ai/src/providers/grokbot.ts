@@ -753,6 +753,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					sandMaxMode: model.sandMaxMode,
 					canonicalModelId: model.requestModelId,
 					sandVariantStringRepresentation: model.sandVariantStringRepresentation,
+					sandWireModelId: model.sandWireModelId,
 				});
 				body = {
 					messages,
@@ -1317,8 +1318,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						});
 						continue attempt;
 					}
-					// gemini-3-flash keep-model often empty-stops after Write (bash/read
-					// already succeeded). The tool loop already completed; do not fail the turn.
+					// Some Gemini turns empty-stop after Write (bash/read already
+					// succeeded). The tool loop already completed; do not fail the turn.
 					if (contextHasToolResult(context)) {
 						logger.info("grokbot: accepting empty follow-up after tool result", {
 							modelId: model.id,

@@ -136,32 +136,20 @@ describe("grokbot family tool mapping", () => {
 		}
 	});
 
-	test("catalog keep-model on gemini-3-flash advertises product tools on a bare requestedModel", () => {
+	test("gemini-3-flash catalog ids stay listed but rewrite requestedModel to bare gemini-3.8-flash", () => {
 		for (const id of ["gemini-3-flash", "gemini-3-flash[]"]) {
-			const { policy, applied, names } = wireFor(id, { sandToolsWire: "keep-model" });
-			expect(policy.kind).toBe("product");
-			expect(policy.wire).toBe("keep-model");
-			expect(applied.requestedModel).toEqual({ modelId: id });
-			expect(applied.subagentType).toBeUndefined();
-			expect(names).toEqual(["Shell", "Read", "Write"]);
-			for (const tool of applied.tools as Array<{ parameters: Record<string, unknown> }>) {
-				expect(tool.parameters).toHaveProperty("jsonSchema");
-			}
+			const { policy, names } = wireFor(id);
+			expect(policy.kind).toBe("native");
+			expect(policy.wire).toBe("native");
+			expect(names).toEqual(["bash", "read", "write", "edit"]);
+			const parameterized = resolveGrokbotRequestedModel(id, {
+				effort: "low",
+				sandParameterIds: ["effort", "fast"],
+				sandVariantStringRepresentation: id.endsWith("[]"),
+				sandWireModelId: "gemini-3.8-flash",
+			});
+			expect(parameterized).toEqual({ modelId: "gemini-3.8-flash" });
 		}
-		const parameterized = requested("gemini-3-flash", ["effort", "fast"]);
-		expect(parameterized.parameters?.length).toBeGreaterThan(0);
-		const stripped = applyAnthropicSandToolWire(
-			{
-				requestedModel: parameterized,
-				tools: OMP_CORE,
-				modelId: "gemini-3-flash",
-				ompTools: OMP_CORE,
-				sandToolsWire: "keep-model",
-			},
-			"keep-model",
-		);
-		expect(stripped.requestedModel).toEqual({ modelId: "gemini-3-flash" });
-		expect(stripped.wireMode).toBe("keep-model");
 	});
 
 	test("catalog automation on sand-automation advertises product tools and keeps the router id", () => {

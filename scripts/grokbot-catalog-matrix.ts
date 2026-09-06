@@ -364,8 +364,8 @@ async function runOneTool(
 	const body = textOf(turn2);
 	const pass = body.includes(ping) || body.includes("tools-pong");
 	if (!pass) {
-		// gemini-3-flash keep-model empty-stops after Write; turn 1 already
-		// invoked the tool. Count the round-trip as pass.
+		// Gemini flash often empty-stops after Write; turn 1 already invoked
+		// the tool. Count the round-trip as pass.
 		return {
 			pass: true,
 			routedModel: turn2.upstreamModel ?? turn1.upstreamModel,
