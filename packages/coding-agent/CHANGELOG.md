@@ -9,6 +9,10 @@
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
 
+### Added
+
+- Load Claude Code rules from `.claude/rules/*.md` and `*.mdc` (project and opted-in `~/.claude`), sharing the same Markdown frontmatter as OMP rules.
+
 ### Fixed
 
 	- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).

@@ -14,7 +14,11 @@ export class RuleProtocolHandler implements ProtocolHandler {
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const rules = context?.rules ?? getActiveRules();
 
-		const ruleName = url.rawHost || url.hostname;
+		// Reconstruct host + path so nested rule names (whose directory separators
+		// surface as URL path segments) resolve — e.g. rule://frontend/style.
+		const host = url.rawHost || url.hostname;
+		const pathname = url.rawPathname ?? url.pathname;
+		const ruleName = host && pathname && pathname !== "/" ? `${host}${pathname}` : host;
 		if (!ruleName) {
 			throw new Error("rule:// URL requires a rule name: rule://<name>");
 		}
