@@ -52,6 +52,10 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (applyPatchToolType === "freeform" || applyPatchToolType === "function") {
 		model.applyPatchToolType = applyPatchToolType;
 	}
+	const editPromptVariant = catalog.editPromptVariant;
+	if (editPromptVariant === "full" || editPromptVariant === "compact") {
+		model.editPromptVariant = editPromptVariant;
+	}
 	const requiresCursorToolSchemaProjection = catalog.requiresCursorToolSchemaProjection;
 	if (requiresCursorToolSchemaProjection === true) {
 		model.requiresCursorToolSchemaProjection = true;
