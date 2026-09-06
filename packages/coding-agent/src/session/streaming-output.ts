@@ -803,7 +803,10 @@ export class OutputSink {
 	/** `chunkStamp()` captured when the first held-back byte entered the sink. */
 	#pendingChunkStamp: number | undefined;
 	#pendingChunkTimer: Timer | undefined;
+	/** Settled-in-order mirror deliveries; never rejects — failures land in {@link #chunkDeliveryError}. */
 	#chunkDeliveryTail: Promise<void> | undefined;
+	/** First mirror delivery failure since the last dump()/dispose() settlement. */
+	#chunkDeliveryError: Error | undefined;
 
 	// Per-line column cap streaming state (persists across `push` calls so a
 	// long line split across chunks still trips the same trigger).
@@ -1298,11 +1301,17 @@ export class OutputSink {
 				await Promise.resolve();
 				await this.flushArtifact();
 				this.#onChunk?.(merged, stamp);
+			} catch (error) {
+				// The tail is awaited only by dump()/dispose(); a rejection left on
+				// it while the command still runs would be unhandled and fatal.
+				// Record the first failure for settlement instead; later chunks
+				// keep delivering.
+				this.#chunkDeliveryError ??= error instanceof Error ? error : new Error(String(error));
 			} finally {
 				this.#onChunkSettled?.(stamp);
 			}
 		};
-		this.#chunkDeliveryTail = this.#chunkDeliveryTail?.then(deliver, deliver) ?? deliver();
+		this.#chunkDeliveryTail = this.#chunkDeliveryTail?.then(deliver) ?? deliver();
 	}
 
 	#flushPendingChunk(): void {
@@ -1316,9 +1325,14 @@ export class OutputSink {
 	async #settleChunkDelivery(): Promise<void> {
 		// A caller may finish before the throttle window expires. Deliver that
 		// accepted tail, then wait for every serialized mirror flush/callback
-		// before closing the artifact they observe.
+		// before closing the artifact they observe. A delivery that failed
+		// meanwhile surfaces here, once.
 		this.#flushPendingChunk();
 		await this.#chunkDeliveryTail;
+		const error = this.#chunkDeliveryError;
+		if (!error) return;
+		this.#chunkDeliveryError = undefined;
+		throw error;
 	}
 
 	#schedulePendingChunkFlush(): void {

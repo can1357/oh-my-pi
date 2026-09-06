@@ -353,12 +353,17 @@ describe("OutputSink", () => {
 		expect(await Bun.file(artifactPath).text()).toBe("persisted despite preview failure");
 	});
 
-	test("continues mirror delivery after a rejected preview callback", async () => {
+	test("continues mirror delivery after a rejected preview callback and surfaces the failure at dump", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "continued-mirror.log");
 		let stamp = 0;
 		let rejectNext = true;
 		const deliveries: Array<{ chunk: string; stamp: number }> = [];
 		const settled: number[] = [];
+		const firstSettled = Promise.withResolvers<void>();
 		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "continued-mirror",
 			artifactWriteMode: "mirror",
 			chunkStamp: () => stamp,
 			onChunk: (chunk, chunkStamp) => {
@@ -367,20 +372,36 @@ describe("OutputSink", () => {
 				rejectNext = false;
 				throw new Error("preview unavailable");
 			},
-			onChunkSettled: chunkStamp => settled.push(chunkStamp),
+			onChunkSettled: chunkStamp => {
+				settled.push(chunkStamp);
+				if (chunkStamp === 0) firstSettled.resolve();
+			},
 		});
 
 		sink.push("first");
+		await firstSettled.promise;
+		// The command keeps running after the failed delivery: reading the
+		// mirrored artifact turns the event loop over, and an unhandled rejection
+		// left on the delivery tail fails this test under bun (its default
+		// unhandled-rejection handling is fatal outside the runner).
+		expect(await Bun.file(artifactPath).text()).toBe("first");
 		stamp = 1;
 		sink.push("second");
-		const dumped = await sink.dump();
+		stamp = 2;
+		sink.push("third");
 
-		expect(dumped.output).toBe("firstsecond");
+		// The first failure wins and surfaces once dump() settles the tail; the
+		// later chunks were still delivered and the artifact finalized.
+		await expect(sink.dump()).rejects.toThrow("preview unavailable");
 		expect(deliveries).toEqual([
 			{ chunk: "first", stamp: 0 },
 			{ chunk: "second", stamp: 1 },
+			{ chunk: "third", stamp: 2 },
 		]);
-		expect(settled).toEqual([0, 1]);
+		expect(settled).toEqual([0, 1, 2]);
+		expect(await Bun.file(artifactPath).text()).toBe("firstsecondthird");
+		// Surfaced once: the follow-up dispose() from a caller's finally is quiet.
+		await sink.dispose();
 	});
 
 	test("mirror mode delivers and settles chunks with their entry stamps", async () => {
