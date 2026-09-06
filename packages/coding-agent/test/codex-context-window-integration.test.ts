@@ -416,10 +416,19 @@ test.each(["tree", "branch", "switch"] as const)(
 		}
 		const projected = session.transformCodexContext({ messages: [] });
 		const actual = getOpenAICodexContextWindow(session.sessionId, session.providerSessionState);
-		expect(actual.threadId).toBe(expected.threadId);
-		expect(actual.windowId).toBe(expected.windowId);
+		const stale = getOpenAICodexContextWindow(expected.sessionId, session.providerSessionState);
+		if (actual.sessionId === expected.sessionId) {
+			// Same backend store: the branch's own lineage is restored verbatim.
+			expect(actual.threadId).toBe(expected.threadId);
+			expect(actual.windowId).toBe(expected.windowId);
+		} else {
+			// A boundary that mints a new backend session cannot adopt a window whose
+			// checkpoints live in the old store, so it starts a fresh lineage.
+			expect(actual.threadId).not.toBe(stale.threadId);
+			expect(actual.windowId).not.toBe(stale.windowId);
+		}
 		expect(actual.windowNumber).toBe(1);
-		expect(JSON.stringify(projected.messages)).toContain(expected.windowId);
+		expect(JSON.stringify(projected.messages)).toContain(actual.windowId);
 	},
 	20000,
 );
@@ -612,4 +621,45 @@ test("a shadowed new_context disables window mode instead of arming an uncommitt
 	expect(journal).not.toContain(policy.autoCompactFallbackPrompt);
 	expect(journal).not.toContain("tokens left in this context window");
 	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(false);
+}, 20000);
+
+test("a clone with a new backend session starts a fresh lineage instead of adopting the old one", async () => {
+	const { session, manager, settings, model } = await harness(true);
+	await session.prompt("Original task must be checkpointed");
+	await session.waitForIdle();
+	const reset = manager.getBranch().find(entry => entry.type === "compaction" && entry.method === "window");
+	if (reset?.type !== "compaction") throw new Error("Window reset was not persisted");
+	const lineage = reset.preserveData?.codexContextWindow;
+	if (!isRecord(lineage)) throw new Error("Missing durable window identity");
+
+	// A fork / `/branch` / `/tree` copies the entries but mints a new session id,
+	// so the copied lineage points at a store holding none of its checkpoints.
+	const clone = SessionManager.inMemory(manager.getCwd());
+	cleanups.push(() => clone.close());
+	clone.appendCustomEntry("codex.context-window", lineage);
+	const runtime = new CodexContextWindowRuntime({
+		settings,
+		sessionManager: clone,
+		providerSessionState: new Map(),
+		providerSessionId: () => clone.getSessionId(),
+		model: () => model,
+		resolveAuth: async () => ({
+			provider: model.provider,
+			accessToken: token,
+			accountId: "account",
+			baseUrl: model.baseUrl,
+		}),
+		agentIdentity: { kind: "main", id: "Main" },
+	});
+	await runtime.refresh();
+
+	expect(runtime.identity.windowNumber).toBe(1);
+	expect(runtime.identity.windowId).not.toBe(lineage.windowId);
+	expect(runtime.identity.threadId).not.toBe(lineage.threadId);
+	const persisted = clone
+		.getBranch()
+		.findLast(entry => entry.type === "custom" && entry.customType === "codex.context-window");
+	if (persisted?.type !== "custom" || !isRecord(persisted.data)) throw new Error("Fresh lineage was not persisted");
+	expect(persisted.data.windowId).toBe(runtime.identity.windowId);
+	expect(persisted.data.sessionId).toBe(runtime.identity.sessionId);
 }, 20000);

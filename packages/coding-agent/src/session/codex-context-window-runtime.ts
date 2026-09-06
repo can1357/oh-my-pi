@@ -32,6 +32,7 @@ const identitySchema = type({
 	"previousWindowId?": "string | undefined",
 	windowId: "string",
 	windowNumber: "number.integer > 0",
+	"sessionId?": "string",
 	"agentPath?": "string",
 });
 
@@ -162,6 +163,7 @@ export class CodexContextWindowRuntime {
 		this.#initialized = false;
 		this.#sessionId = sessionId;
 		const branch = this.#host.sessionManager.getBranch();
+		const liveStoreId = getOpenAICodexContextWindow(sessionId, this.#host.providerSessionState).sessionId;
 		let restored = false;
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
@@ -177,6 +179,10 @@ export class CodexContextWindowRuntime {
 			const identity = identitySchema(candidate);
 			if (identity instanceof type.errors) continue;
 			if (this.#host.agentIdentity.kind === "sub" && identity.agentPath !== this.protocol.agentName) continue;
+			// A clone (fork, `/branch`, `/tree`) copies entries but mints a new backend
+			// session, so the copied window would point at a store holding none of its
+			// checkpoints: start a fresh lineage instead of mixing the two.
+			if (identity.sessionId !== undefined && identity.sessionId !== liveStoreId) continue;
 			restoreOpenAICodexContextWindow(sessionId, this.#host.providerSessionState, identity);
 			restored = true;
 			break;
