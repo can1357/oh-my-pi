@@ -203,9 +203,9 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
 
-		// Reset two hours out, formatted like the provider timestamp (parsed
-		// as UTC, so toISOString stays exact); bounds below absorb test time.
-		const resetStamp = new Date(Date.now() + 7_200_000).toISOString().slice(0, 19).replace("T", " ");
+		// Reset two hours out, formatted as the Beijing wall clock the Zhipu
+		// timestamp reports (parsed as UTC+8); bounds below absorb test time.
+		const resetStamp = new Date(Date.now() + 7_200_000 + 8 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
 		const usageLimitError = `429 已达到 5 小时的使用上限。您的限额将在 ${resetStamp} 重置。`;
 
 		const mock = createMockModel({
