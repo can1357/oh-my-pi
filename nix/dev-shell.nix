@@ -19,6 +19,7 @@ pkgs.mkShell (
       (with pkgs; [
         bun
         bun2nix
+        lychee
         rustToolchain
         cargo-nextest
         rustPlatform.bindgenHook
