@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Orchestration notice no longer hardcodes Bun commands as the verification gate; verification is described generically ("project checks, tests") so non-Bun projects get appropriate wording.
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
 ### Changed
