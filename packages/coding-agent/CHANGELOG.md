@@ -5,6 +5,8 @@
 
 ### Changed
 
+- Ranged reads of text without bracket characters skip unnecessary lexical context scanning.
+
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
 
 ### Fixed
