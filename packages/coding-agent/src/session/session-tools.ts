@@ -672,7 +672,7 @@ export class SessionTools {
 
 	/** Rebuilds model-dependent tool prompts after a model change. */
 	async syncAfterModelChange(previousEditMode: EditMode): Promise<void> {
-		await this.reconcileCodeMode();
+		await this.reconcileContextWindowTools();
 		const currentEditMode = this.resolveActiveEditMode();
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt selects model-specific policy even when it does not display the model id.
@@ -680,6 +680,21 @@ export class SessionTools {
 		if (editModeChanged || modelChanged) {
 			await this.refreshBaseSystemPrompt();
 		}
+	}
+
+	/**
+	 * Reapplies the enabled set only when the model's or settings' context-window
+	 * tools actually changed. An unconditional apply would re-commit the live
+	 * slate (dropping registrations still in flight) and rebuild the system
+	 * prompt on every model switch.
+	 */
+	async reconcileContextWindowTools(): Promise<void> {
+		const changed = await this.runToolRegistryMutation(async () => {
+			const before = [...this.#contextWindowToolNames].sort().join(",");
+			await this.#syncContextWindowTools();
+			return before !== [...this.#contextWindowToolNames].sort().join(",");
+		});
+		if (changed) await this.reconcileCodeMode();
 	}
 
 	/** Whether a model transition crosses a Code Mode presentation boundary. */

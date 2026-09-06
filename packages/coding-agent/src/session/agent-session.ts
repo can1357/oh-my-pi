@@ -1858,7 +1858,7 @@ export class AgentSession {
 		});
 		this.#unsubscribeContextWindowSettings = this.settings.onEffectiveChange(path => {
 			if (path !== "compaction.methodOrder" && path !== "compaction.enabled") return;
-			void this.initializeCodexContext().catch(error => {
+			void this.#tools.reconcileContextWindowTools().catch(error => {
 				logger.warn("Codex context-window reconcile after setting change failed", { error: String(error) });
 			});
 		});
