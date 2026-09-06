@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -640,7 +641,7 @@ describe("subagent runtime model resolution", () => {
 			systemPrompt: "test",
 			source: "project",
 			model: ["opencode-go-cornell/muse-spark-1.3-contributor"],
-			thinkingLevel: "low",
+			thinkingLevel: ThinkingLevel.Low,
 		};
 		const result = await runSubprocess({
 			cwd: "/tmp",
@@ -649,13 +650,14 @@ describe("subagent runtime model resolution", () => {
 			index: 0,
 			id: "explicit-muse-preserved",
 			modelOverride: "opencode-go-cornell/muse-spark-1.3-contributor",
-			thinkingLevel: "low",
+			thinkingLevel: ThinkingLevel.Low,
 			parentActiveModelPattern: "openai-codex/gpt-6-astra",
 			settings: Settings.isolated({ "retry.modelFallback": false }),
 			modelRegistry: {
 				refresh: async () => {},
 				getAvailable: () => [cornell, parent],
-				getApiKey: async candidate => (candidate.provider === "openai-codex" ? "test-key" : undefined),
+				getApiKey: async (candidate: Model<Api>) =>
+					candidate.provider === "openai-codex" ? "test-key" : undefined,
 			} as never,
 			enableLsp: false,
 		});

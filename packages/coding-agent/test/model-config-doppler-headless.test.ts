@@ -31,13 +31,13 @@ describe("doppler-secret headless resolver", () => {
 				config: "dev",
 			},
 			"token",
-			async () =>
+			(async () =>
 				new Response(
 					JSON.stringify({
 						LANE_DISPATCH_OPENCODE_GO_CORNELL_API_KEY: { computed: "cornell-api-key" },
 					}),
 					{ status: 200 },
-				),
+				)) as unknown as typeof fetch,
 		);
 		expect(value).toBe("cornell-api-key");
 	});
@@ -63,7 +63,7 @@ describe("doppler-secret headless resolver", () => {
 		const value = await resolveDopplerSecretsGetCommand(
 			CORNELL_COMMAND,
 			root,
-			async (_url, init) => {
+			(async (_url: string | URL | Request, init?: RequestInit) => {
 				expect(init?.headers).toEqual({ Authorization: "Bearer scoped-token" });
 				return new Response(
 					JSON.stringify({
@@ -71,7 +71,7 @@ describe("doppler-secret headless resolver", () => {
 					}),
 					{ status: 200 },
 				);
-			},
+			}) as unknown as typeof fetch,
 			configDir,
 		);
 		expect(value).toBe("headless-cornell-key");
@@ -104,7 +104,7 @@ describe("model-config-values doppler fallback", () => {
 		dopplerRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-doppler-sync-"));
 
 		Bun.spawnSync = ((options: Parameters<typeof Bun.spawnSync>[0]) => {
-			const cmd = options?.cmd ?? [];
+			const cmd = (options as { cmd?: string[] }).cmd ?? [];
 			const script = typeof cmd[2] === "string" ? cmd[2] : "";
 			if (script.includes("api.doppler.com")) {
 				return {

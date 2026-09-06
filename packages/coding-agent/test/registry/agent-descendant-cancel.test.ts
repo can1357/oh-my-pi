@@ -106,7 +106,7 @@ describe("agent descendant cancel and retirement", () => {
 		const tool = new HubTool(makeToolSession(registry, lifecycle, manager, "Main"));
 		const result = await tool.execute("call-1", { op: "cancel", ids: [grandchild.id] });
 
-		expect(result.details?.cancelled?.[0]?.status).toBe("cancelled");
+		expect((result.details as { cancelled?: Array<{ status: string }> }).cancelled?.[0]?.status).toBe("cancelled");
 		expect(registry.get(grandchild.id)).toBeUndefined();
 		expect(registry.get(roleParent.id)).toBe(roleParent);
 	});
@@ -134,7 +134,7 @@ describe("agent descendant cancel and retirement", () => {
 		const tool = new HubTool(makeToolSession(registry, lifecycle, manager, "EstateDeliverySol"));
 		const result = await tool.execute("call-2", { op: "cancel", ids: [roleParent.id] });
 
-		expect(result.details?.cancelled?.[0]?.status).toBe("cancelled");
+		expect((result.details as { cancelled?: Array<{ status: string }> }).cancelled?.[0]?.status).toBe("cancelled");
 		expect(registry.get(roleParent.id)).toBeUndefined();
 		expect(registry.get(grandchild.id)).toBeUndefined();
 	});
@@ -166,7 +166,7 @@ describe("agent descendant cancel and retirement", () => {
 		const tool = new HubTool(makeToolSession(registry, lifecycle, manager, "Alice"));
 		const result = await tool.execute("call-3", { op: "cancel", ids: [bobChild.id] });
 
-		expect(result.details?.cancelled?.[0]?.status).toBe("not_found");
+		expect((result.details as { cancelled?: Array<{ status: string }> }).cancelled?.[0]?.status).toBe("not_found");
 		expect(registry.get(bobChild.id)).toBe(bobChild);
 	});
 });
