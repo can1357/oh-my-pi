@@ -1,11 +1,6 @@
 // Model-lineage compat for "qwen"; regenerated from the frozen census using class taxonomy selectors.
 
 class "qwen" {
-	on "aiand" "aimlapi" "alibaba-coding-plan" "alibaba-token-plan" "amazon-bedrock" "cerebras" \
-		"coreweave" "groq" "huggingface" "kilo" "nanogpt" "novita" "ollama-cloud" \
-		"opencode-go" "opencode-zen" "synthetic" "together" "umans" "vercel-ai-gateway" "wafer-serverless" "zenmux" {
-		thinking-format "qwen"
-	}
 	on "aiand" "aimlapi" "alibaba-coding-plan" "amazon-bedrock" "coreweave" "groq" "huggingface" \
 		"kilo" "nanogpt" "novita" "nvidia" "ollama-cloud" "openrouter" "synthetic" \
 		"together" "venice" "wafer-serverless" "zenmux" {

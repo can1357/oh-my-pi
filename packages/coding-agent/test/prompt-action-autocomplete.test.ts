@@ -4,7 +4,8 @@ import {
 	setKeyHintPlatform,
 } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/modes/prompt-action-autocomplete";
-import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui";
+import { getSelectListTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { KeybindingsManager, SelectList, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui";
 
 describe("prompt action autocomplete", () => {
 	beforeEach(() => {
@@ -47,19 +48,21 @@ describe("prompt action autocomplete", () => {
 			"Copy current line",
 			"Copy whole prompt",
 			"Undo",
-			"Move cursor to end of message",
-			"Move cursor to beginning of message",
-			"Move cursor to beginning of line",
-			"Move cursor to end of line",
+			"Move cursor to message end",
+			"Move cursor to message start",
+			"Move cursor to line start",
+			"Move cursor to line end",
 		]);
+		const rendered = new SelectList(suggestions?.items ?? [], 10, getSelectListTheme()).render(80).join("\n");
+		for (const item of suggestions?.items ?? []) {
+			expect(rendered).toContain(item.label);
+		}
 		expect(suggestions?.items.find(item => item.label === "Copy current line")?.description).toBe("Ctrl+Shift+L");
 		expect(suggestions?.items.find(item => item.label === "Copy whole prompt")?.description).toBe(
 			"Alt+Shift+C/Ctrl+Shift+C",
 		);
-		expect(suggestions?.items.find(item => item.label === "Move cursor to beginning of line")?.description).toBe(
-			"Home/F6",
-		);
-		expect(suggestions?.items.find(item => item.label === "Move cursor to end of line")?.description).toBe("F7");
+		expect(suggestions?.items.find(item => item.label === "Move cursor to line start")?.description).toBe("Home/F6");
+		expect(suggestions?.items.find(item => item.label === "Move cursor to line end")?.description).toBe("F7");
 		expect(suggestions?.items.find(item => item.label === "Undo")?.description).toBe("F8");
 	});
 

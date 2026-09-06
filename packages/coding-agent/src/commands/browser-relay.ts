@@ -10,7 +10,7 @@ import {
 } from "../cli/browser-relay-cli";
 
 export default class BrowserRelay extends Command {
-	static description = "Run the local CDP relay that lets the browser tool drive your own Chrome tabs";
+	static description = "Run the local CDP relay that lets the browser prelude drive your own Chrome tabs";
 
 	static args = {
 		action: Args.string({

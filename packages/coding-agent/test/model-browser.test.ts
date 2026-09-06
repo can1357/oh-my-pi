@@ -1,16 +1,18 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildBrowserItems,
 	ModelBrowser,
+	type RoleAssignments,
 	sortModelItems,
 } from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
-/** Optional upstream presentation metadata a discovery source may attach. */
-type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended">;
+/** Optional presentation metadata a catalog or discovery source may attach. */
+type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps">;
 
 function makeModel(provider: string, id: string, metadata?: NativeMetadata): Model {
 	return buildModel({
@@ -29,10 +31,15 @@ function makeModel(provider: string, id: string, metadata?: NativeMetadata): Mod
 }
 
 /** Browser preloaded with `models`, MRU-sorted like the hub does on sync. */
-function makeBrowser(models: Model[], mruOrder: string[]): ModelBrowser {
-	const browser = new ModelBrowser(Settings.isolated({}));
+function makeBrowser(
+	models: Model[],
+	mruOrder: string[],
+	options: { roles?: RoleAssignments; providerOrder?: string[] } = {},
+): ModelBrowser {
+	const browser = new ModelBrowser(Settings.isolated({ modelProviderOrder: options.providerOrder ?? [] }));
 	const items = buildBrowserItems(models);
 	sortModelItems(items, { mruOrder });
+	browser.setRoles(options.roles ?? {});
 	browser.setMruOrder(mruOrder);
 	browser.setItems(items);
 	return browser;
@@ -65,6 +72,75 @@ describe("ModelBrowser search ranking", () => {
 		browser.setQuery("gpt-5.5");
 
 		expect(browser.getSelected()?.selector).toBe("zenmux/gpt-5.5");
+	});
+
+	test("a configured role provider outranks punctuation-biased fuzzy scores", () => {
+		const kilo = makeModel("kilo", "liquid/lfm-2.5-2.6b:free");
+		const ollama = makeModel("ollama", "lfm2:2.6b");
+		const browser = makeBrowser([kilo, ollama], [], {
+			roles: {
+				slow: {
+					model: ollama,
+					thinkingLevel: ThinkingLevel.Inherit,
+					autoSelected: false,
+				},
+			},
+		});
+
+		browser.setQuery("lfm");
+
+		expect(browser.getSelected()?.selector).toBe("ollama/lfm2:2.6b");
+	});
+
+	test("recent use establishes provider affinity across models", () => {
+		const browser = makeBrowser(
+			[makeModel("kilo", "liquid/lfm-2.5-2.6b:free"), makeModel("ollama", "lfm2:2.6b")],
+			["ollama/qwen2.5:7b"],
+		);
+
+		browser.setQuery("lfm");
+
+		expect(browser.getSelected()?.selector).toBe("ollama/lfm2:2.6b");
+	});
+
+	test("explicit provider order takes precedence over inferred affinity", () => {
+		const browser = makeBrowser(
+			[makeModel("kilo", "liquid/lfm-2.5-2.6b:free"), makeModel("ollama", "lfm2:2.6b")],
+			["kilo/qwen2.5:7b"],
+			{ providerOrder: ["ollama"] },
+		);
+
+		browser.setQuery("lfm");
+
+		expect(browser.getSelected()?.selector).toBe("ollama/lfm2:2.6b");
+	});
+
+	test("a recently used model outranks a peer from a role-assigned provider", () => {
+		// Regression: with a `glm` role on fireworks, typing "muse" selected
+		// fireworks/muse-glimmer-30b over the muse-spark model actually used.
+		const glm = makeModel("fireworks", "glm-5.2");
+		const browser = makeBrowser(
+			[glm, makeModel("fireworks", "muse-glimmer-30b"), makeModel("meta", "muse-spark-1.3-contributor")],
+			["meta/muse-spark-1.3-contributor"],
+			{ roles: { glm: { model: glm, thinkingLevel: ThinkingLevel.Inherit, autoSelected: false } } },
+		);
+
+		browser.setQuery("muse");
+
+		expect(browser.getSelected()?.selector).toBe("meta/muse-spark-1.3-contributor");
+	});
+
+	test("a role-assigned model outranks a recently used model", () => {
+		const assigned = makeModel("fireworks", "muse-glimmer-30b");
+		const browser = makeBrowser(
+			[assigned, makeModel("meta", "muse-spark-1.3-contributor")],
+			["meta/muse-spark-1.3-contributor"],
+			{ roles: { fast: { model: assigned, thinkingLevel: ThinkingLevel.Inherit, autoSelected: false } } },
+		);
+
+		browser.setQuery("muse");
+
+		expect(browser.getSelected()?.selector).toBe("fireworks/muse-glimmer-30b");
 	});
 });
 
@@ -101,11 +177,33 @@ describe("ModelBrowser perf display", () => {
 		expect(lines[lines.length - 2]).toContain("~118t/s · 0.9s ttft");
 	});
 
-	test("models without measurements render no perf cell", () => {
+	test("catalog metrics render an intelligence tab and estimated TPS when unmeasured", () => {
+		const browser = new ModelBrowser(Settings.isolated({}));
+		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5", { int: 45.2, tps: 82.5 })]));
+
+		const lines = renderPlain(browser, 120);
+		expect(lines[2]).toContain(`${theme.symbol("icon.intelligence")} 45`);
+		expect(lines[2]).toContain("~83t/s");
+		expect(lines[lines.length - 2]).toContain(`${theme.symbol("icon.intelligence")} 45 · ~83t/s`);
+	});
+
+	test("measured TPS takes precedence over the catalog estimate", () => {
+		const browser = new ModelBrowser(Settings.isolated({}));
+		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5", { int: 45.2, tps: 82.5 })]));
+		browser.setPerfStats(new Map([["openai/gpt-5", { samples: 12, tps: 118.4, ttftMs: 930 }]]));
+
+		const row = renderPlain(browser, 120)[2];
+		expect(row).toContain("118t/s");
+		expect(row).not.toContain("~83t/s");
+	});
+
+	test("models without measurements or catalog metrics render no metric cells", () => {
 		const browser = new ModelBrowser(Settings.isolated({}));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 
-		expect(renderPlain(browser, 120)[2]).not.toContain("t/s");
+		const row = renderPlain(browser, 120)[2];
+		expect(row).not.toContain("t/s");
+		expect(row).not.toContain(theme.symbol("icon.intelligence"));
 	});
 });
 

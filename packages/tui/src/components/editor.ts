@@ -4,6 +4,7 @@ import {
 	type AutocompleteProvider,
 	findLeadingSlashCommandStart,
 	findTrailingSlashCommandStart,
+	isDirectoryCompletionValue,
 	midPromptSkillTokenMatches,
 	SKILL_NAMESPACE,
 } from "../autocomplete";
@@ -467,6 +468,12 @@ export interface EditorTextAssistProvider {
 type HistoryCursorAnchor = "start" | "end";
 type AutocompleteRequest = { kind: "regular"; explicitTab: boolean } | { kind: "force" };
 
+/** What the paste transport knew about the input burst before the editor inserts the payload. */
+export interface PasteOptions {
+	/** A submit keypress arrived in the same input burst and will be dispatched right after the paste. */
+	submitAfterPaste?: boolean;
+}
+
 export class Editor implements Component, Focusable {
 	#state: EditorState = {
 		lines: [""],
@@ -581,8 +588,9 @@ export class Editor implements Component, Focusable {
 	 *  the editor inserts nothing and records no undo state, leaving insertion to the host (e.g. a
 	 *  "wrap in a code block / XML / attach as file" menu for very large pastes), which re-inserts
 	 *  via {@link insertPaste} or {@link insertText}. Return `false` (or leave unset) for the
-	 *  default collapse-to-marker behavior. `lineCount` is the sanitized paste's line count. */
-	onLargePaste?: (text: string, lineCount: number) => boolean;
+	 *  default collapse-to-marker behavior. `lineCount` is the sanitized paste's line count;
+	 *  `options` carries what the paste transport knew about the burst. */
+	onLargePaste?: (text: string, lineCount: number, options: PasteOptions) => boolean;
 	onAutocompleteCancel?: () => void;
 	disableSubmit: boolean = false;
 
@@ -1460,7 +1468,8 @@ export class Editor implements Component, Focusable {
 						return;
 					}
 					if (selected && this.#autocompleteProvider) {
-						const shouldChainSlashCommandAutocomplete = this.#isSlashCommandNameAutocompleteSelection();
+						const shouldChainAutocomplete =
+							this.#isSlashCommandNameAutocompleteSelection() || isDirectoryCompletionValue(selected.value);
 						const result = this.#autocompleteProvider.applyCompletion(
 							this.#state.lines,
 							this.#state.cursorLine,
@@ -1482,8 +1491,8 @@ export class Editor implements Component, Focusable {
 
 						result.onApplied?.();
 
-						if (shouldChainSlashCommandAutocomplete && this.#isCompletedSlashCommandAtCursor()) {
-							void this.#tryTriggerAutocomplete();
+						if (shouldChainAutocomplete) {
+							queueMicrotask(() => void this.#tryTriggerAutocomplete());
 						}
 					}
 					return;
@@ -1536,6 +1545,7 @@ export class Editor implements Component, Focusable {
 					} else {
 						if (selected && this.#autocompleteProvider) {
 							const shouldChainSlashCommandAutocomplete = this.#isSlashCommandNameAutocompleteSelection();
+							const shouldChainDirectoryCompletion = isDirectoryCompletionValue(selected.value);
 							const result = this.#autocompleteProvider.applyCompletion(
 								this.#state.lines,
 								this.#state.cursorLine,
@@ -1556,7 +1566,9 @@ export class Editor implements Component, Focusable {
 							}
 
 							result.onApplied?.();
-							if (shouldChainSlashCommandAutocomplete && this.#isCompletedSlashCommandAtCursor()) {
+							if (shouldChainDirectoryCompletion) {
+								queueMicrotask(() => void this.#tryTriggerAutocomplete());
+							} else if (shouldChainSlashCommandAutocomplete && this.#isCompletedSlashCommandAtCursor()) {
 								void this.#tryTriggerAutocomplete();
 							}
 						}
@@ -2148,8 +2160,8 @@ export class Editor implements Component, Focusable {
 	}
 
 	/** Apply terminal paste semantics to text from non-bracketed paste transports. */
-	pasteText(text: string): void {
-		this.#handlePaste(text);
+	pasteText(text: string, options: PasteOptions = {}): void {
+		this.#handlePaste(text, options);
 	}
 
 	/** Insert `content` as a collapsed `[Paste #N]` marker (stored for expansion on submit via
@@ -2289,7 +2301,7 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	#handlePaste(pastedText: string): void {
+	#handlePaste(pastedText: string, options: PasteOptions = {}): void {
 		let filteredText = this.#sanitizePastedText(pastedText);
 
 		// If pasting a file path (starts with /, ~, or .) and the character before
@@ -2311,7 +2323,7 @@ export class Editor implements Component, Focusable {
 		// Let the host intercept marker-sized pastes (e.g. the large-paste menu). When it takes
 		// over, the editor inserts nothing and records no undo state — the host re-inserts via
 		// `insertPaste`/`insertText` once the user chooses.
-		if (isMarkerSized && this.onLargePaste?.(filteredText, pastedLines.length)) {
+		if (isMarkerSized && this.onLargePaste?.(filteredText, pastedLines.length, options)) {
 			return;
 		}
 

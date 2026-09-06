@@ -103,7 +103,6 @@ export class LiveCommandController {
 		});
 		this.#mountVisualizer(visualizer);
 
-		let session: LiveSessionController;
 		const options: LiveSessionControllerOptions = {
 			session: this.#ctx.session,
 			extractAssistantText: message => this.#ctx.extractAssistantText(message),
@@ -134,7 +133,7 @@ export class LiveCommandController {
 				onTerminal: error => this.#finish(session, error),
 			},
 		};
-		session = this.#createSession ? this.#createSession(options) : new LiveSessionController(options);
+		const session = this.#createSession ? this.#createSession(options) : new LiveSessionController(options);
 		this.#session = session;
 
 		try {

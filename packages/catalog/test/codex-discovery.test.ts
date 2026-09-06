@@ -14,6 +14,24 @@ import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { resolveProviderModelReference } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
 describe("Codex model discovery", () => {
+	it("normalizes optional maximum context windows separately from the default window", async () => {
+		const result = await fetchCodexModels({
+			accessToken: "test-token",
+			fetchFn: async () =>
+				Response.json({
+					models: [
+						{ slug: "gpt-6-astra", context_window: 272_000, max_context_window: 872_000 },
+						{ slug: "gpt-5.5", context_window: 272_000 },
+						{ slug: "invalid-maximum", context_window: 64_000, max_context_window: -1 },
+					],
+				}),
+		});
+		const astra = result?.models.find(model => model.id === "gpt-6-astra");
+		expect(astra).toMatchObject({ contextWindow: 272_000, maxContextWindow: 872_000 });
+		expect(result?.models.find(model => model.id === "gpt-5.5")).not.toHaveProperty("maxContextWindow");
+		expect(result?.models.find(model => model.id === "invalid-maximum")).not.toHaveProperty("maxContextWindow");
+	});
+
 	it("marks discovered models for provider-native V2 compaction", async () => {
 		let capturedHeaders: Headers | undefined;
 		const fetchFn: typeof fetch = Object.assign(
@@ -196,6 +214,53 @@ describe("Codex model discovery", () => {
 		expect(buildModel(blue).cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 });
 		expect(red.contextWindow).toBe(400_000);
 		expect(buildModel(red).cost).toEqual({ input: 12.5, output: 75, cacheRead: 1.25, cacheWrite: 15.625 });
+	});
+
+	it("normalizes plain and worker Codex GPT-6 Astra metadata", async () => {
+		const fetchFn: typeof fetch = Object.assign(
+			async () =>
+				Response.json({
+					models: [
+						{
+							slug: "gpt-6-astra-wm",
+							display_name: "GPT-6-Astra",
+							context_window: 272_000,
+							default_reasoning_level: "medium",
+							supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"],
+							input_modalities: ["text", "image"],
+							supported_in_api: true,
+						},
+					],
+				}),
+			{ preconnect() {} },
+		);
+		const result = await fetchCodexModels({
+			accessToken: "test-token",
+			baseUrl: "https://codex.example/backend-api",
+			clientVersion: "0.153.0",
+			fetchFn,
+		});
+		const astra = result?.models.find(model => model.id === "gpt-6-astra");
+		const workerAstra = result?.models.find(model => model.id === "gpt-6-astra-wm");
+		if (!astra || !workerAstra) throw new Error("Expected plain and worker GPT-6 Astra routes");
+
+		for (const model of [astra, workerAstra]) {
+			// `/models` omits prices, so discovery stays neutral and the KDL
+			// catalog rule remains the single authority for billed metadata.
+			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+			expect(model.contextWindow).toBe(272_000);
+			const builtModel = buildModel(model);
+			// Codex credits keep this base rate and do not charge for cache
+			// writes; unlike the API card, there is no long-context tier. The
+			// default window stays at the deployment-advertised 272K; the
+			// 1.05M documented window is the `/extended-context` maximum.
+			expect(builtModel.cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 0 });
+			expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5 });
+			expect(builtModel).toMatchObject({
+				contextWindow: 272_000,
+				maxTokens: 128_000,
+			});
+		}
 	});
 
 	it("floors stale reported windows for GPT-5.6 luna/sol/terra and honors reports above the floor", async () => {
@@ -414,6 +479,96 @@ describe("Codex model discovery", () => {
 					{ accessToken: "token-1", accountId: "account-1" },
 					{ accessToken: "token-2", accountId: "account-2" },
 				],
+				fetch: fetchFn,
+			});
+			const result = await resolveProviderModels(
+				{ ...options, staticModels: [bundled], cacheDbPath: path.join(tempDir, "models.db") },
+				"online",
+			);
+
+			expect(result.models.map(model => model.id)).toEqual(["gpt-5.6-terra"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("skips an account whose credential the backend rejects and unions the rest", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-union-revoked-"));
+		const bundled: ModelSpec<"openai-codex-responses"> = {
+			id: "gpt-5.6-terra",
+			name: "GPT-5.6 Terra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 372_000,
+			maxTokens: 128_000,
+		};
+		const fetchFn: typeof fetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const accountId = new Headers(init?.headers).get("chatgpt-account-id");
+				if (accountId === "revoked") {
+					return Response.json(
+						{ error: { message: "Encountered invalidated oauth token for user", code: "token_revoked" } },
+						{ status: 401 },
+					);
+				}
+				return Response.json({
+					models: [
+						{
+							slug: "gpt-6-astra",
+							display_name: "GPT-6-Astra",
+							default_reasoning_level: "medium",
+							supported_reasoning_levels: [{ effort: "low" }, { effort: "max" }, { effort: "ultra" }],
+							input_modalities: ["text", "image"],
+							supported_in_api: true,
+						},
+					],
+				});
+			},
+			{ preconnect() {} },
+		);
+		try {
+			const options = openaiCodexModelManagerOptions({
+				resolveAccounts: async () => [
+					{ accessToken: "token-revoked", accountId: "revoked" },
+					{ accessToken: "token-live", accountId: "live" },
+				],
+				fetch: fetchFn,
+			});
+			const result = await resolveProviderModels(
+				{ ...options, staticModels: [bundled], cacheDbPath: path.join(tempDir, "models.db") },
+				"online",
+			);
+
+			expect(result.models.map(model => model.id)).toEqual(["gpt-6-astra"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps bundled Codex models when every account credential is rejected", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-union-all-revoked-"));
+		const bundled: ModelSpec<"openai-codex-responses"> = {
+			id: "gpt-5.6-terra",
+			name: "GPT-5.6 Terra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 372_000,
+			maxTokens: 128_000,
+		};
+		const fetchFn: typeof fetch = Object.assign(async () => new Response("forbidden", { status: 403 }), {
+			preconnect() {},
+		});
+		try {
+			const options = openaiCodexModelManagerOptions({
+				resolveAccounts: async () => [{ accessToken: "token-1", accountId: "account-1" }],
 				fetch: fetchFn,
 			});
 			const result = await resolveProviderModels(

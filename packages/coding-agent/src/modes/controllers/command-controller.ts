@@ -44,8 +44,16 @@ import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
+import {
+	cleanSourceCheckoutIfConfigured,
+	createSessionWorktree,
+	defaultSessionWorktreeBranch,
+	formatSessionWorktreeSummary,
+	type SessionWorktree,
+} from "../../session/session-worktree";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
+import { formatProviderName } from "../../slash-commands/helpers/format";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
@@ -143,6 +151,24 @@ export class CommandController {
 			this.openInBrowser(filePath);
 		} catch (error: unknown) {
 			this.ctx.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
+		}
+	}
+	async handleTraceCommand(): Promise<void> {
+		const sessionFile = this.ctx.session.sessionFile;
+		if (!sessionFile) {
+			this.ctx.showWarning("No session file yet — send a message first.");
+			return;
+		}
+		try {
+			// Lazy: the stats dashboard (server + sqlite) loads on demand only,
+			// matching src/cli/stats-cli.ts, to keep CLI startup fast.
+			const { formatStatsDashboardUrl, startServer } = await import("@oh-my-pi/omp-stats");
+			const { hostname, port } = await startServer();
+			const url = `${formatStatsDashboardUrl(hostname, port)}/#/traces?s=${encodeURIComponent(sessionFile)}`;
+			this.openInBrowser(url);
+			this.ctx.showStatus(`Trace: ${url}`);
+		} catch (error: unknown) {
+			this.ctx.showError(`Failed to open trace: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
 	}
 
@@ -608,24 +634,7 @@ export class CommandController {
 			return;
 		}
 
-		const availableWidth = Math.max(40, (this.ctx.ui.terminal.columns ?? 100) - 2);
-		const currentProvider = this.ctx.session.model?.provider;
-		const activeAccount = currentProvider
-			? this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(
-					currentProvider,
-					this.ctx.session.sessionId,
-				)
-			: undefined;
-		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(usageReports);
-		const output = renderUsageReports(
-			usageReports,
-			theme,
-			Date.now(),
-			availableWidth,
-			provider => (provider === currentProvider ? activeAccount : undefined),
-			usageModelSelectors,
-		);
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(output, 1, 0)]);
+		this.ctx.showUsageDashboard(usageReports);
 	}
 
 	async handleChangelogCommand(showFull = false): Promise<void> {
@@ -1025,6 +1034,12 @@ export class CommandController {
 			}
 		}
 		if (!(await this.ctx.session.newSession(options))) return;
+		// A focused subagent view keeps its own history: return to the main session
+		// first so the transcript below cannot rebuild from the subagent's surviving
+		// conversation, then drop any turn-scoped anchors (coalescing timers,
+		// in-flight dispatches) the session boundary orphaned.
+		if (this.ctx.focusedAgentId) await this.ctx.unfocusSession();
+		this.ctx.eventController.resetTranscriptAnchors();
 		this.ctx.resetObserverRegistry();
 		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
@@ -1190,11 +1205,75 @@ export class CommandController {
 				return;
 			}
 		}
+		if (await this.#relocateSession(resolvedPath)) {
+			this.ctx.present([
+				new Spacer(1),
+				new Text(`${theme.fg("accent", `${theme.status.success} Moved to ${resolvedPath}`)}`, 1, 1),
+			]);
+		}
+	}
+
+	/**
+	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
+	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along,
+	 * then relocate the session there like `/move`.
+	 */
+	async handleWorktreeCommand(branch?: string): Promise<void> {
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showWarning("Wait for the current response to finish or abort it before creating a worktree.");
+			return;
+		}
+		const branchName = branch?.trim() || defaultSessionWorktreeBranch();
+		const cwd = this.ctx.sessionManager.getCwd();
+		this.ctx.statusContainer.disposeChildren();
+		const loader = new Loader(
+			this.ctx.ui,
+			spinner => theme.fg("accent", spinner),
+			text => theme.fg("muted", text),
+			`Creating worktree on ${branchName}…`,
+			getSymbolTheme().spinnerFrames,
+		);
+		this.ctx.statusContainer.addChild(loader);
+		this.ctx.ui.requestRender();
+		let worktree: SessionWorktree;
+		try {
+			worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName);
+		} catch (err) {
+			this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
+			return;
+		} finally {
+			loader.stop();
+			this.ctx.statusContainer.disposeChildren();
+		}
+		if (worktree.cloneError) {
+			logger.warn("worktree clone fell back to plain checkout", { path: worktree.path, error: worktree.cloneError });
+		}
+		if (await this.#relocateSession(worktree.path)) {
+			const cleanup = await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings);
+			if (cleanup.errorMessage !== undefined) {
+				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
+			}
+			this.ctx.present([
+				new Spacer(1),
+				new Text(
+					`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree, cleanup.cleaned)}`)}`,
+					1,
+					1,
+				),
+			]);
+		}
+	}
+
+	/**
+	 * Move the session and process cwd to an existing directory, rolling back
+	 * on failure. Returns true when the session now lives at `resolvedPath`.
+	 */
+	async #relocateSession(resolvedPath: string): Promise<boolean> {
 		try {
 			await this.ctx.settings.flush();
 		} catch (err) {
 			this.ctx.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
-			return;
+			return false;
 		}
 
 		const previousState = this.ctx.sessionManager.captureState();
@@ -1202,28 +1281,24 @@ export class CommandController {
 			await this.ctx.session.moveSession(resolvedPath);
 		} catch (err) {
 			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
-			return;
+			return false;
 		}
 		let applied = false;
 		try {
 			applied = await this.ctx.applyCwdChange(resolvedPath);
 		} catch (error) {
 			await this.#restoreAfterMoveFailure(previousState, error);
-			return;
+			return false;
 		}
 		if (!applied) {
 			await this.#restoreAfterMoveFailure(previousState);
-			return;
+			return false;
 		}
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
 		this.ctx.ui.requestRender();
-
-		this.ctx.present([
-			new Spacer(1),
-			new Text(`${theme.fg("accent", `${theme.status.success} Moved to ${resolvedPath}`)}`, 1, 1),
-		]);
+		return true;
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {
@@ -1282,6 +1357,8 @@ export class CommandController {
 				this.ctx.bashComponent.setComplete(result.exitCode, result.cancelled, {
 					output: result.output,
 					truncation: meta?.truncation,
+					images: result.images,
+					showImages: this.ctx.settings.get("terminal.showImages"),
 				});
 			}
 			try {
@@ -1619,13 +1696,6 @@ function truncateJobLabel(label: string, maxWidth: number): string {
 	}
 
 	return `${out}…`;
-}
-
-function formatProviderName(provider: string): string {
-	return provider
-		.split(/[-_]/g)
-		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
-		.join(" ");
 }
 
 function formatNumber(value: number, maxFractionDigits = 1): string {

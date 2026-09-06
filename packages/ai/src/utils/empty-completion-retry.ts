@@ -153,7 +153,6 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
 				AIError.isProviderRetryableError(
 					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
-					{ provider: failedMessage.provider },
 				);
 
 			let delayMs: number | undefined;

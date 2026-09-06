@@ -405,7 +405,9 @@ describe("anthropic first-event timeout retries", () => {
 
 		expect(attempt).toBe(11);
 		expect(providerRetryWait).toHaveBeenCalledTimes(10);
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		expect(requestTimeouts).toEqual(new Array(11).fill(1));
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		expect(requestMaxRetries).toEqual(new Array(11).fill(0));
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("Anthropic stream timed out while waiting for the first event");

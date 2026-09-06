@@ -549,7 +549,7 @@ export function compile<T = unknown>(source: string, options: CompileOptions = {
 	const nodes = parseTemplate(stripStandalone(source));
 	return (context, runtime = {}) => {
 		const root = context ?? {};
-		const frame: Frame = { context: root, parents: [], root, data: { root, ...(runtime.data ?? {}) } };
+		const frame: Frame = { context: root, parents: [], root, data: { root, ...runtime.data } };
 		return renderNodes(nodes, frame, { helpers, partials, options, runtime });
 	};
 }
@@ -579,7 +579,7 @@ export class TemplateEngine {
 		const nodes = parseTemplate(stripStandalone(source));
 		return (context, runtime = {}) => {
 			const root = context ?? {};
-			const frame: Frame = { context: root, parents: [], root, data: { root, ...(runtime.data ?? {}) } };
+			const frame: Frame = { context: root, parents: [], root, data: { root, ...runtime.data } };
 			return renderNodes(nodes, frame, { helpers: this.#helpers, partials: this.#partials, options, runtime });
 		};
 	}

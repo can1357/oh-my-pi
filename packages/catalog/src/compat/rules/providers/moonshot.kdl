@@ -2,6 +2,11 @@
 
 provider "moonshot" {
 	class "kimi" {
+		// Replaces the Moonshot Kimi thinking-format branch.
+		thinking-format "zai"
+		family "k3" {
+			thinking-format "openai"
+		}
 		thinking-mode "effort"
 	}
 	// Bundled census: the dotted K2.5+ generations and K3 are multimodal;

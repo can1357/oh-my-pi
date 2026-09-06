@@ -122,6 +122,20 @@ describe("resolveCascade over committed rules", () => {
 		expect(resolved.thinking.mode).toBeDefined();
 	});
 
+	test("glm-5.2 on a blanket-glm provider resolves without overlapping the class ladder", () => {
+		// Regression: providers/alibaba-coding-plan.kdl has a direct `class "glm"`
+		// efforts block and no exact glm-5.2 residue, so it used to tie with the
+		// classes/glm.kdl revision >=5.2 ladder and throw AmbiguousOverlapError.
+		const resolved = resolveCascade({
+			provider: "alibaba-coding-plan",
+			class: "glm",
+			model: "glm-5.2",
+			revision: "5.2",
+			reasoning: true,
+		});
+		expect(resolved.thinking.efforts).toEqual(["minimal", "low", "medium", "high", "max"]);
+	});
+
 	test("glob matching is anchored and case-insensitive", () => {
 		expect(globMatch("gpt-*-codex", "gpt-5.2-codex")).toBe(true);
 		expect(globMatch("gpt-*-codex", "xgpt-5.2-codex")).toBe(false);

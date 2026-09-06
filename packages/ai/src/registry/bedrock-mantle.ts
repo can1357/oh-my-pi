@@ -5,14 +5,11 @@ import {
 } from "../providers/bedrock-mantle";
 import type { Model } from "../types";
 import { resolveAwsRegion } from "../utils/aws-profile";
-import { resolveAwsBearerToken, resolveAwsRegistryApiKey } from "./aws";
-import type { ProviderDefinition } from "./types";
+import { resolveAwsBearerToken } from "./aws";
+import type { ProviderTransport } from "./build";
 
-export const bedrockMantleProvider = {
-	id: "bedrock-mantle",
-	name: "Amazon Bedrock Mantle",
-	envKeys: resolveAwsRegistryApiKey,
-	allowsMissingApiKey: true,
+/** Bedrock Mantle request/discovery shaping; auth policy lives in `rules/auth/bedrock-mantle.kdl`. */
+export const bedrockMantleTransport: ProviderTransport = {
 	prepareRequest: (model, options) =>
 		prepareBedrockMantleRequest(model as Model<"openai-responses">, options as BedrockMantleOptions),
 	mapSimpleOptions: options => ({ providerOptions: options.providerOptions }),
@@ -31,4 +28,4 @@ export const bedrockMantleProvider = {
 			}),
 		};
 	},
-} as const satisfies ProviderDefinition;
+};

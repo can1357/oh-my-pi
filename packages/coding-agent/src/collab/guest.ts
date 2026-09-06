@@ -44,6 +44,8 @@ export const COLLAB_GUEST_ALLOWED_COMMANDS: Record<string, true> = {
 	dump: true,
 	export: true,
 	copy: true,
+	// Opens a link in the guest's own browser; nothing reaches the host.
+	open: true,
 	help: true,
 	hotkeys: true,
 	theme: true,

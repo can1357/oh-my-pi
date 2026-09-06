@@ -1,6 +1,7 @@
 import {
 	type Component,
 	Container,
+	type EditorTopBorder,
 	isInsideTerminalMultiplexer,
 	ProcessTerminal,
 	type ResizeScrollbackMode,
@@ -9,6 +10,7 @@ import {
 	type Terminal,
 	type TerminalFramePlan,
 	type TerminalFrameProvider,
+	truncateToWidth,
 	TUI,
 	type TUIOptions,
 	type ViewportSize,
@@ -58,6 +60,27 @@ export interface ComposerWelcomeUpdate {
 	readonly lspServers?: readonly LspServerInfo[];
 }
 
+/**
+ * Placeholder-only status chrome replayed on the next first frame so the
+ * status band/border exists before the session-aware status line attaches.
+ * Bound to the composer shape it was rendered for; a different shape drops it.
+ */
+export interface ComposerStatusSnapshot {
+	readonly shape: string;
+	/** ANSI wrapper of the editor border at snapshot time (session accent or thinking color). */
+	readonly borderColor?: {
+		readonly prefix: string;
+		readonly suffix: string;
+	};
+	/** Status content embedded in the editor's top chrome (`top-border`, `top-band`, `top-rule-chip`). */
+	readonly topBorder?: {
+		readonly content: string;
+		readonly width: number;
+	};
+	/** Standalone bottom-bar rows (`pi`/`claude` shapes), gap row included. */
+	readonly bottomLines: readonly string[];
+}
+
 /** Optional dependencies and initial state for a standalone composer. */
 export interface ComposerOptions {
 	readonly terminal?: Terminal;
@@ -65,6 +88,7 @@ export interface ComposerOptions {
 	readonly tuiOptions?: TUIOptions;
 	readonly preferences?: Partial<ComposerPreferences>;
 	readonly welcome?: ComposerWelcomeUpdate;
+	readonly status?: ComposerStatusSnapshot;
 	readonly exit?: (code: number) => void;
 	readonly now?: () => number;
 }
@@ -82,16 +106,30 @@ export interface ComposerStartOptions {
 	readonly deferInput?: boolean;
 }
 
-/** Mount slot for the session-aware status component below the editor. */
+/**
+ * Mount slot for the session-aware status component below the editor. Shows
+ * placeholder rows during startup until the real component mounts.
+ */
 class StatusHost implements Component {
+	#lines: readonly string[] = [];
 	#component: Component | undefined;
+
+	get mounted(): boolean {
+		return this.#component !== undefined;
+	}
+
+	setLines(lines: readonly string[]): void {
+		this.#lines = lines;
+	}
 
 	setComponent(component: Component): void {
 		this.#component = component;
+		this.#lines = [];
 	}
 
 	render(width: number): readonly string[] {
-		return this.#component?.render(width) ?? [];
+		if (this.#component) return this.#component.render(width);
+		return this.#lines.map(line => truncateToWidth(line, width));
 	}
 }
 /**
@@ -118,6 +156,7 @@ export class Composer implements TerminalFrameProvider {
 	#headerBefore: readonly Component[] = [];
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
+	#statusSnapshot: ComposerStatusSnapshot | undefined;
 	#runtimeMounted = false;
 	// Composer-owned history id space. Transcript batch ids restart across
 	// container clears/swaps; the composer translates them into one monotonic
@@ -165,6 +204,7 @@ export class Composer implements TerminalFrameProvider {
 		this.#exit = options.exit ?? (code => process.exit(code));
 		this.#now = options.now ?? Date.now;
 		this.#preferences = { ...COMPOSER_DEFAULTS, ...options.preferences };
+		this.#statusSnapshot = options.status;
 		this.#applyWelcomeUpdate(options.welcome ?? {});
 
 		this.ui = new TUI(
@@ -191,6 +231,7 @@ export class Composer implements TerminalFrameProvider {
 		} catch {
 			// Extension-defined styles arrive with the session; InteractiveMode reapplies them.
 		}
+		this.#applyStatusSnapshot();
 		// Emergency controls stay active until InteractiveMode installs configured bindings.
 		this.editor.setActionKeys("app.clear", ["ctrl+c"]);
 		this.editor.setActionKeys("app.exit", ["ctrl+d"]);
@@ -329,6 +370,7 @@ export class Composer implements TerminalFrameProvider {
 		chromeRows: number,
 	): { id: number; rows: readonly string[]; kind: "append" | "replay" } | undefined {
 		if (this.#offeredHistory !== undefined) {
+			this.#rerenderOfferedHistory(width);
 			return {
 				id: this.#offeredHistory.id,
 				rows: this.#offeredHistory.rows,
@@ -401,6 +443,25 @@ export class Composer implements TerminalFrameProvider {
 		};
 	}
 
+	#rerenderOfferedHistory(width: number): void {
+		const offered = this.#offeredHistory;
+		if (offered === undefined) return;
+		if (offered.source === "header") {
+			const rows = this.#header.render(width);
+			offered.rows = rows.length > 0 ? [...rows, ""] : [];
+			return;
+		}
+		const transcript = offered.source.transcript.rerenderOfferedBatch(width);
+		if (offered.source.header === "none") {
+			if (transcript !== undefined) offered.rows = transcript.rows;
+			return;
+		}
+		const recomposed = this.#header.render(width);
+		const headerRows = recomposed.length > 0 ? [...recomposed, ""] : this.#reflowRetiredHeader(width, 0);
+		offered.source.headerRows = headerRows;
+		offered.rows = [...headerRows, ...(transcript?.rows ?? [])];
+	}
+
 	#renderRoots(roots: readonly Component[], width: number): string[] {
 		const rows: string[] = [];
 		for (const root of roots) rows.push(...root.render(width));
@@ -438,7 +499,7 @@ export class Composer implements TerminalFrameProvider {
 				reflowed.push("");
 				continue;
 			}
-			for (let column = 0; column < lineWidth; ) {
+			for (let column = 0; column < lineWidth;) {
 				let slice = sliceWithWidth(line, column, columns, true);
 				if (slice.width === 0) slice = sliceWithWidth(line, column, columns);
 				reflowed.push(slice.text);
@@ -498,6 +559,7 @@ export class Composer implements TerminalFrameProvider {
 			autocomplete: this.#preferences.spellingAutocomplete,
 			autocorrect: this.#preferences.spellingAutocorrect,
 		});
+		this.#applyStatusSnapshot();
 		if (this.#preferences.quiet) {
 			this.#welcome?.stopIntro();
 			this.#welcome = undefined;
@@ -541,9 +603,43 @@ export class Composer implements TerminalFrameProvider {
 		this.#editor = editor;
 	}
 
-	/** Mount the session-aware status component into the slot below the editor. */
+	/**
+	 * Mount the session-aware status component into the slot below the editor.
+	 * Drops the speculative snapshot; the caller installs the real top-border
+	 * provider through its composer-shape sync.
+	 */
 	setStatusComponent(component: Component): void {
 		this.#statusHost.setComponent(component);
+		this.#statusSnapshot = undefined;
+		this.editor.setTopBorderProvider(undefined);
+	}
+
+	/** Cached placeholder top-border content fitted to the current editor width. */
+	#speculativeTopBorder(availableWidth: number): EditorTopBorder | undefined {
+		const border = this.#statusSnapshot?.topBorder;
+		if (!border) return undefined;
+		if (border.width <= availableWidth) return { content: border.content, width: border.width };
+		const content = truncateToWidth(border.content, availableWidth);
+		return { content, width: visibleWidth(content) };
+	}
+
+	/** Install the cached chrome for the current shape; a shape mismatch clears it. */
+	#applyStatusSnapshot(): void {
+		if (this.#statusHost.mounted) return;
+		const snapshot = this.#statusSnapshot;
+		if (!snapshot || snapshot.shape !== this.#preferences.composerShape) {
+			this.editor.setTopBorderProvider(undefined);
+			this.#statusHost.setLines([]);
+			return;
+		}
+		if (snapshot.borderColor) {
+			const { prefix, suffix } = snapshot.borderColor;
+			this.editor.borderColor = text => `${prefix}${text}${suffix}`;
+		}
+		this.editor.setTopBorderProvider(
+			snapshot.topBorder ? availableWidth => this.#speculativeTopBorder(availableWidth) : undefined,
+		);
+		this.#statusHost.setLines(snapshot.bottomLines);
 	}
 
 	/** Mount or replace session-aware root children while preserving the header and status hosts. */

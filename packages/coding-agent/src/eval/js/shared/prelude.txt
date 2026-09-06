@@ -65,15 +65,35 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	const write = async (path, data) => callHelper("writeFile", path, data);
 	const env = (key, value) => callHelper("env", key, value);
 
-	const tool = new Proxy(
-		{},
-		{
-			get(_target, prop) {
-				if (typeof prop !== "string") return undefined;
-				return async args => globalThis.__omp_call_tool__(prop, args ?? {});
-			},
+	const __tools = new Map();
+	globalThis.__omp_tools__ = __tools;
+	const registerTool = (fn, opts = {}) => {
+		if (typeof fn !== "function") throw new TypeError("tool() expects a function");
+		if (!isPlainObject(opts)) throw new TypeError("tool() options must be a plain object");
+		const name = opts.name ?? fn.name;
+		if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(name)) {
+			throw new TypeError(`invalid tool name ${JSON.stringify(name)}`);
+		}
+		const description = opts.description ?? `JS tool ${name}`;
+		const parameters = opts.parameters ?? { type: "object", properties: {}, additionalProperties: true };
+		__tools.set(name, { name, fn, description, parameters });
+		globalThis.__omp_emit_status__("tool_define", {
+			name,
+			params: Object.keys(parameters.properties ?? {}),
+		});
+		return fn;
+	};
+	const tool = new Proxy(registerTool, {
+		apply(_target, _thisArg, args) {
+			return registerTool(args[0], args[1]);
 		},
-	);
+		get(_target, prop) {
+			if (prop === "defined") return () => [...__tools.keys()];
+			if (prop === "undefine") return name => __tools.delete(name);
+			if (typeof prop !== "string") return undefined;
+			return async args => globalThis.__omp_call_tool__(prop, args ?? {});
+		},
+	});
 
 	const output = async (...args) => {
 		let opts = {};
@@ -91,94 +111,220 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	};
 
 	const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
-
-	const completion = async (prompt, opts, ...rest) => {
-		const o = optionsArg("completion", opts, rest, ["model", "system", "schema"], "{ model, system, schema }");
-		const res = await globalThis.__omp_call_tool__("__completion__", { prompt, ...o });
-		const text = res && typeof res === "object" ? res.text : res;
-		return hasOwn(o, "schema") ? JSON.parse(text) : text;
+	const HANDLE_UNSET = Symbol("handle-unset");
+	const timeoutError = message => {
+		const error = new Error(message);
+		error.name = "TimeoutError";
+		return error;
 	};
 
-	const agent = async (prompt, opts, ...rest) => {
-		const o = optionsArg(
-			"agent",
-			opts,
-			rest,
-			["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode"],
-			"{ agent, label, schema, isolated, apply, merge, schemaMode, handle }",
-		);
-		const { handle, ...callArgs } = o;
-		const res = await globalThis.__omp_call_tool__("__agent__", { prompt, ...callArgs, handle: Boolean(handle) });
-		const text = res && typeof res === "object" ? res.text : res;
-		const hasData = res && typeof res === "object" && hasOwn(res, "data");
-		const parsed = hasData ? res.data : hasOwn(callArgs, "schema") ? JSON.parse(text) : text;
-		if (!handle) return parsed;
-		const details = res && typeof res === "object" ? res.details : undefined;
-		if (!details || typeof details !== "object" || details.id == null) {
-			return { text, output: text, handle: null, id: null, agent: null };
+	class EvalHandle {
+		constructor(kind, id, schema) {
+			this.kind = kind;
+			this.id = id;
+			this._schema = schema;
+			this._result = HANDLE_UNSET;
 		}
-		const node = { text, output: text, handle: `agent://${details.id}`, id: details.id, agent: details.agent ?? null };
-		if (hasData || hasOwn(callArgs, "schema")) node.data = parsed;
-		for (const key of ["isolated", "patchPath", "branchName", "nestedPatches", "changesApplied", "isolationSummary"]) {
-			if (details[key] !== undefined) node[key] = details[key];
+
+		async status() {
+			const snapshot = await globalThis.__omp_call_tool__("__status__", {
+				item: { kind: this.kind, id: this.id },
+			});
+			return snapshot?.status ?? "failed";
 		}
-		return node;
+
+		async done() {
+			return (await this.status()) !== "running";
+		}
+
+		async wait({ timeout } = {}) {
+			if (this._result !== HANDLE_UNSET) return this._result;
+			return (await wait([this], { timeout }))[0];
+		}
+
+		async cancel() {
+			const result = await globalThis.__omp_call_tool__("__cancel__", {
+				item: { kind: this.kind, id: this.id },
+			});
+			return Boolean(result?.cancelled);
+		}
+	}
+
+	class AgentHandle extends EvalHandle {
+		constructor(id, agentName, schema) {
+			super("agent", id, schema);
+			this.agent = agentName;
+			this.handle = `agent://${id}`;
+		}
+
+		toString() {
+			return `<agent ${this.id} (${this.agent})>`;
+		}
+
+		async send(message) {
+			return await globalThis.__omp_call_tool__("hub", {
+				op: "send",
+				to: this.id,
+				message: String(message),
+				i: "agent handle",
+			});
+		}
+
+		async output(opts = {}) {
+			return await output(this.id, opts);
+		}
+	}
+
+	class CompletionHandle extends EvalHandle {
+		constructor(id, schema) {
+			super("completion", id, schema);
+		}
+
+		toString() {
+			return `<completion ${this.id}>`;
+		}
+	}
+
+	const resolveHandleSnapshot = (handle, snapshot) => {
+		const status = snapshot?.status ?? "failed";
+		if (status === "running") throw timeoutError(`${handle.kind} handle ${handle.id} is still running`);
+		if (status === "failed" || status === "cancelled") {
+			throw new Error(snapshot?.error || `${handle.kind} handle ${handle.id} failed`);
+		}
+		const value = hasOwn(snapshot ?? {}, "data")
+			? snapshot.data
+			: handle._schema !== undefined
+				? JSON.parse(snapshot?.text ?? "")
+				: (snapshot?.text ?? "");
+		handle._result = value;
+		return value;
 	};
 
-	// Pool ceiling mirrors the task tool's `task.maxConcurrency` setting so an
-	// eval fan-out runs as wide as a `task` batch would. 0 (and any non-finite
-	// reply) means unbounded — run every item at once.
-	const __concurrencyLimit = async () => {
-		try {
-			const r = await globalThis.__omp_call_tool__("__concurrency__", {});
-			const n = Math.trunc(Number(r && typeof r === "object" ? r.limit : r));
-			return Number.isFinite(n) && n > 0 ? n : 0;
-		} catch {
-			return 0;
+	const wait = async (handles, { timeout, raiseErrors = true } = {}) => {
+		const raw = handles instanceof EvalHandle ? [handles] : Array.from(handles ?? []);
+		const items = await Promise.all(raw);
+		for (const handle of items) {
+			if (!(handle instanceof EvalHandle)) throw new TypeError("wait() expects agent or completion handles");
 		}
-	};
-
-	const __pool = async (items, fn) => {
-		const list = Array.from(items ?? []);
-		if (list.length === 0) return [];
-		const limit = await __concurrencyLimit();
-		const concurrency = limit > 0 ? Math.min(limit, list.length) : list.length;
-		const results = new Array(list.length);
-		// Barrier semantics (mirrors the Python _pool_map): every item settles
-		// before we return or throw, then the lowest-index error propagates.
-		// Early-rejecting would orphan in-flight thunks (e.g. live agent()
-		// subagents) whose worker-side promises would never be observed.
-		const errors = new Map();
-		let next = 0;
-		const worker = async () => {
-			while (true) {
-				const index = next++;
-				if (index >= list.length) return;
+		const results = new Array(items.length);
+		const pending = [];
+		const pendingIndexes = [];
+		for (let index = 0; index < items.length; index++) {
+			const handle = items[index];
+			if (handle._result === HANDLE_UNSET) {
+				pending.push({ kind: handle.kind, id: handle.id });
+				pendingIndexes.push(index);
+			} else {
+				results[index] = handle._result;
+			}
+		}
+		if (pending.length > 0) {
+			const args = { items: pending };
+			if (timeout !== undefined) args.timeoutMs = Math.max(0, Number(timeout) * 1000);
+			const response = await globalThis.__omp_call_tool__("__wait__", args);
+			const snapshots = Array.isArray(response?.items) ? response.items : [];
+			if (snapshots.length !== pending.length) throw new Error("wait() returned an incomplete handle result");
+			for (let offset = 0; offset < pendingIndexes.length; offset++) {
+				const index = pendingIndexes[offset];
 				try {
-					results[index] = await fn(list[index], index);
+					results[index] = resolveHandleSnapshot(items[index], snapshots[offset]);
 				} catch (error) {
-					errors.set(index, error);
+					if (error?.name === "TimeoutError") throw error;
+					results[index] = error instanceof Error ? error : new Error(String(error));
 				}
 			}
-		};
-		await Promise.all(Array.from({ length: concurrency }, () => worker()));
-		if (errors.size > 0) throw errors.get(Math.min(...errors.keys()));
+		}
+		if (raiseErrors) {
+			const failure = results.find(value => value instanceof Error);
+			if (failure) throw failure;
+		}
 		return results;
 	};
 
-	const parallel = async thunks =>
-		__pool(thunks, (thunk, index) => {
-			if (typeof thunk !== "function") throw new TypeError("parallel() expects an iterable of functions");
-			return thunk(index);
-		});
+	const completion = async (prompt, opts, ...rest) => {
+		const options = optionsArg("completion", opts, rest, ["model", "system", "schema"], "{ model, system, schema }");
+		const result = await globalThis.__omp_call_tool__("__completion__", { prompt, ...options });
+		if (!result || typeof result.id !== "string") throw new Error("completion() did not return a handle");
+		return new CompletionHandle(result.id, options.schema);
+	};
 
-	const pipeline = async (items, ...stages) => {
-		let current = Array.from(items ?? []);
-		for (const stage of stages) {
-			if (typeof stage !== "function") throw new TypeError("pipeline() stages must be functions");
-			current = await __pool(current, stage);
+	const agent = async (prompt, opts, ...rest) => {
+		const options = optionsArg(
+			"agent",
+			opts,
+			rest,
+			["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
+			"{ agent, label, schema, schemaMode, isolated, apply, merge, tools }",
+		);
+		const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
+		if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
+		return new AgentHandle(result.id, result.agent, options.schema);
+	};
+
+	class WorkPool {
+		constructor(name, agentName, limit) {
+			this.name = name;
+			this.agent = agentName;
+			this.limit = limit;
 		}
-		return current;
+
+		async push(...items) {
+			if (!items.every(item => typeof item === "string")) {
+				throw new TypeError("WorkPool.push() expects string items");
+			}
+			const result = await globalThis.__omp_call_tool__("__workpool__", {
+				op: "push",
+				name: this.name,
+				items,
+			});
+			return result?.ids ?? [];
+		}
+
+		async status() {
+			return await globalThis.__omp_call_tool__("__workpool__", {
+				op: "status",
+				name: this.name,
+			});
+		}
+
+		async peek() {
+			return await globalThis.__omp_call_tool__("__workpool__", {
+				op: "peek",
+				name: this.name,
+			});
+		}
+
+		async close() {
+			return await globalThis.__omp_call_tool__("__workpool__", {
+				op: "close",
+				name: this.name,
+			});
+		}
+
+		toString() {
+			return `<workpool ${this.name} (${this.agent}) ${this.limit} agents>`;
+		}
+	}
+
+	const workpool = async (agentName, opts, ...rest) => {
+		if (isPlainObject(agentName) && isNil(opts) && rest.every(isNil)) {
+			opts = agentName;
+			agentName = undefined;
+		}
+		const options = optionsArg(
+			"workpool",
+			opts,
+			rest,
+			["name", "context", "tools"],
+			"{ name, context, tools }",
+		);
+		const result = await globalThis.__omp_call_tool__("__workpool__", {
+			op: "create",
+			...(agentName === undefined ? {} : { agent: agentName }),
+			...options,
+		});
+		if (!result || typeof result.name !== "string") throw new Error("workpool() did not return a pool");
+		return new WorkPool(result.name, result.agent, result.limit);
 	};
 
 	const log = message => globalThis.__omp_emit_status__("log", { message: String(message) });
@@ -282,12 +428,14 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.completion = completion;
 	globalThis.output = output;
 	globalThis.agent = agent;
-	globalThis.parallel = parallel;
-	globalThis.pipeline = pipeline;
+	globalThis.wait = wait;
+	globalThis.AgentHandle = AgentHandle;
+	globalThis.CompletionHandle = CompletionHandle;
+	globalThis.workpool = workpool;
+	globalThis.WorkPool = WorkPool;
 	globalThis.log = log;
 	globalThis.phase = phase;
 	globalThis.budget = budget;
-	globalThis.__pool = __pool;
 	globalThis.read = read;
 	globalThis.write = write;
 	globalThis.env = env;

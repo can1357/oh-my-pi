@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+## [18.1.11] - 2026-09-05
+
+### Fixed
+
+- Fixed `extractRetryHint` dropping the longer timing signal when an error body carries both an account reset and an appended retry hint: competing signals now merge by longest window instead of first match, so retries honor the provider's full backoff.
+
+## [18.1.7] - 2026-09-03
+
+### Added
+
+- Added the public `getTinyWorkerRuntimeDir()` utility, which returns the standard `~/.omp/run/tiny` directory for tiny-worker runtime data.
+
+### Fixed
+
+- Fixed retry classification for Bun's bare `Socket is closed` transport error.
+
+## [18.1.6] - 2026-09-03
+
+### Added
+
+- Added `IncomingDoc` (`@oh-my-pi/pi-utils/incoming-json`) for incrementally reading path-addressed JSON data as text arrives, including string chunks and lines, array elements, and keyed object values, with structured errors for missing, incomplete, aborted, malformed, or mismatched data.
+- Added `Serial` for running asynchronous operations sequentially in call order.
+
+### Fixed
+
+- Fixed relaxed JSON parsing for single-quoted strings followed by line or block comments.
+
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added `TerminalQueryResponder` to `@oh-my-pi/pi-utils/vterm`, enabling headless PTY consumers to answer common terminal queries for cursor position, device status and attributes, and foreground/background colors without maintaining a screen buffer.
+
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- Fixed retry-hint extraction for body-level millisecond hints and absolute quota-reset timestamps ([#10325](https://github.com/can1357/oh-my-pi/pull/10325) by [@usr-bin-roygbiv](https://github.com/usr-bin-roygbiv)).
+
+## [18.1.0] - 2026-09-01
+
+### Added
+
+- Added `postmortem.fatal` for terminal-safe top-level failure reporting.
+
+### Fixed
+
+- Fixed sub-second duration formatting so it no longer exposes floating-point precision noise.
+- Managed Chrome-for-Testing downloads now reject unsupported Linux ARM64 hosts instead of installing an incompatible x86_64 browser.
+- Fixed Markdown reference-link labels that match built-in `Object.prototype` names, such as `constructor` and `__proto__`, so they are no longer misidentified as definitions or emitted with an undefined URL ([#10283](https://github.com/can1357/oh-my-pi/issues/10283)).
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed
