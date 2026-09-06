@@ -144,6 +144,13 @@ interface OutputRegistration {
 	/** Switch the delivery mode in place and re-advertise it so `ps`/`describe` watcher rows stay accurate. */
 	retune: (delivery: AsyncJobProgressDelivery) => void;
 	acquirePendingStart?: (delivery: AsyncJobProgressDelivery) => OutputLease;
+	/**
+	 * Pending-start lease a failed replacement's restore acquired on behalf of
+	 * the still in-flight start that owned the replaced registration. That
+	 * start's own lease adopts it, so an accepted start attaches this
+	 * registration and a failed start releases it.
+	 */
+	restoredLease?: OutputLease;
 }
 
 const outputRegistrations = new WeakMap<ToolSession, Map<DaemonBrokerClient, Map<string, OutputRegistration>>>();
@@ -663,11 +670,16 @@ async function registerOutputSink(
 			previous.daemonId,
 			fence,
 		);
+		if (!restored) return;
 		// Retaining a start-pending lease means "the start was accepted"; a
 		// restored pending registration must instead wait for the in-flight
-		// start, whose lease adopts it when the start resolves.
-		if (previous.startPending) return;
-		await restored?.retain();
+		// start. Park the lease on the restored registration so that start's
+		// own lease settles it: retain attaches, reject releases the slot.
+		if (previous.startPending) {
+			restored.registration.restoredLease = restored;
+			return;
+		}
+		await restored.retain();
 	};
 	try {
 		outputUnregister = client.onOutput(subscription, sink);
@@ -702,6 +714,29 @@ async function registerOutputSink(
 	if (startPending) {
 		let pendingLeases = 0;
 		let startAccepted = false;
+		// A failed same-name replacement may have restored the start-pending
+		// slot under a fresh registration while this start was still in flight.
+		// The restore parked its lease there on this start's behalf; take it so
+		// the start's outcome settles the restored slot exactly once. The
+		// restore may have rebuilt the per-client map, so resolve the live slot
+		// instead of the map this registration was created in.
+		const adoptRestoredLease = (leaseDaemonId: string | undefined): OutputLease | undefined => {
+			const successor = outputRegistrations.get(session)?.get(client)?.get(name);
+			if (
+				!successor ||
+				successor === registration ||
+				!successor.active ||
+				successor.binding !== "start-pending" ||
+				successor.epoch !== registration.epoch
+			) {
+				return undefined;
+			}
+			const lease = successor.restoredLease;
+			if (!lease) return undefined;
+			successor.restoredLease = undefined;
+			if (leaseDaemonId !== undefined) lease.bindDaemon(leaseDaemonId);
+			return lease;
+		};
 		registration.acquirePendingStart = requestedDelivery => {
 			pendingLeases++;
 			let settled = false;
@@ -722,25 +757,15 @@ async function registerOutputSink(
 						return;
 					}
 					if (!registration.active) {
-						// A failed same-name replacement may have restored the
-						// start-pending slot under a fresh registration while this
-						// start was still in flight; hand the accepted start to it so
+						// Hand the accepted start to the restored registration so
 						// the replacement's output is not stranded awaiting a start.
-						// The restore may have rebuilt the per-client map, so resolve the
-						// live slot instead of the map this registration was created in.
-						const successor = outputRegistrations.get(session)?.get(client)?.get(name);
-						if (
-							successor &&
-							successor !== registration &&
-							successor.active &&
-							successor.binding === "start-pending" &&
-							successor.epoch === registration.epoch &&
-							successor.acquirePendingStart
-						) {
-							const lease = successor.acquirePendingStart(requestedDelivery);
-							if (leaseDaemonId !== undefined) lease.bindDaemon(leaseDaemonId);
-							await lease.retain();
-						}
+						const lease = adoptRestoredLease(leaseDaemonId);
+						if (!lease) return;
+						startAccepted = true;
+						await lease.retain();
+						// The restore re-used the replaced registration's mode; the
+						// accepted start decides the delivery mode.
+						if (lease.registration.active) lease.registration.retune(requestedDelivery);
 						return;
 					}
 					registration.retune(requestedDelivery);
@@ -761,9 +786,15 @@ async function registerOutputSink(
 					if (settled) return;
 					settled = true;
 					pendingLeases--;
-					if (startAccepted || pendingLeases > 0 || !registration.active || monitors.get(name) !== registration) {
+					if (startAccepted || pendingLeases > 0) return;
+					if (!registration.active) {
+						// The restored registration exists only for this start; a
+						// failed start has nothing to monitor, so release it instead
+						// of leaving it active and start-pending forever.
+						await adoptRestoredLease(leaseDaemonId)?.reject();
 						return;
 					}
+					if (monitors.get(name) !== registration) return;
 					speculative = undefined;
 					await registration.cleanup();
 					await restorePrevious();
