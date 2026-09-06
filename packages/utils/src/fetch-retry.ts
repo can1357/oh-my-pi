@@ -16,6 +16,10 @@ const WILL_RESET_IN_PATTERN = /(?:will\s+)?reset in\s+~?\s*([0-9.]+)\s*(ms|sec|s
 const WILL_RESET_AT_PATTERN =
 	/(?:will\s+)?reset at\s+([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)/i;
 const CN_RESET_AT_PATTERN = /将在\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})\s*重置/;
+const RESET_AT_PATTERNS: readonly { pattern: RegExp; assumedOffset: string }[] = [
+	{ pattern: WILL_RESET_AT_PATTERN, assumedOffset: "Z" },
+	{ pattern: CN_RESET_AT_PATTERN, assumedOffset: "+08:00" },
+];
 // "retry-after-ms=98497000" / "retry-after-ms: 7200000" / "retry-after-ms = 7200000"
 const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
 
@@ -117,13 +121,14 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 			consider(totalMs > 0 ? totalMs : undefined);
 		}
 	}
-	for (const pattern of [WILL_RESET_AT_PATTERN, CN_RESET_AT_PATTERN]) {
+	for (const { pattern, assumedOffset } of RESET_AT_PATTERNS) {
 		const match = pattern.exec(body);
 		if (match?.[1]) {
-			// Provider timestamps without an explicit offset are interpreted as UTC.
+			// English providers historically report naive UTC stamps; Zhipu's
+			// Chinese response reports its naive stamp in Beijing time.
 			const normalized = match[1].replace(" ", "T");
 			const hasOffset = /(?:Z|[+-][0-9]{2}:?[0-9]{2})$/i.test(normalized);
-			const parsed = Date.parse(hasOffset ? normalized : `${normalized}Z`);
+			const parsed = Date.parse(hasOffset ? normalized : `${normalized}${assumedOffset}`);
 			if (!Number.isNaN(parsed) && parsed > Date.now()) {
 				consider(parsed - Date.now());
 			}

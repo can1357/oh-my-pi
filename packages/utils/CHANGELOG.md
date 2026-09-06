@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Zhipu usage-limit reset timestamps being treated as UTC instead of UTC+8, preventing `waitForUsageReset` sessions from resuming eight hours late ([#11014](https://github.com/can1357/oh-my-pi/issues/11014)).
+
 ## [18.1.11] - 2026-09-05
 
 ### Fixed
