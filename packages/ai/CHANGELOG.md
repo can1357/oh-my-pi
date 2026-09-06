@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Grok Bot family tool-wire policy: Anthropic keep-model product Shell/Read/Write, catalog `sand-tools-wire` for sand routers (including `sand-cua` parent-chat), native bash/read/write for other families, and a live AvailableModels catalog matrix.
+
 ## [18.1.12] - 2026-09-06
 
 ### Added

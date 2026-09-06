@@ -8852,6 +8852,21 @@
 				"models": [
 					{
 						"kind": "exact",
+						"value": "sand-cua"
+					}
+				],
+				"catalog": {
+					"sandToolsWire": "parent-chat"
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:23",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
 						"value": "sand-automation"
 					}
 				],
@@ -8860,7 +8875,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:23",
+				"source": "providers/grokbot.kdl:26",
 				"providers": [
 					"grokbot"
 				],
@@ -8891,7 +8906,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:28",
+				"source": "providers/grokbot.kdl:31",
 				"providers": [
 					"grokbot"
 				],
@@ -8919,7 +8934,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:35",
+				"source": "providers/grokbot.kdl:38",
 				"providers": [
 					"grokbot"
 				],

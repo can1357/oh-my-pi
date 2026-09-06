@@ -17,6 +17,9 @@ provider "grokbot" {
 		reasoning #true
 		sand-tools-wire "parent-chat"
 	}
+	models "sand-cua" {
+		sand-tools-wire "parent-chat"
+	}
 	models "sand-automation" {
 		sand-tools-wire "automation"
 	}

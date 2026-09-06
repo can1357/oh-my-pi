@@ -81,6 +81,11 @@ export type AnthropicSandToolWireInput = {
 	modelId?: string;
 	/** Raw omp tools for product mapping. */
 	ompTools?: unknown[];
+	/**
+	 * Catalog `sand-tools-wire` for this row. Lets router ids (sand-cua, …)
+	 * take the product profile without TypeScript id compares.
+	 */
+	sandToolsWire?: AnthropicSandWireResolveContext["sandToolsWire"];
 };
 
 export type AnthropicSandToolWireResult = AnthropicSandToolWireInput & {
@@ -140,10 +145,12 @@ export function applyAnthropicSandToolWire(
 
 	const profile = productProfileForWire(wire);
 	if (profile) {
-		if (profile === "automation" && !isAnthropicSandModelId(modelId) && modelId !== "sand-automation") {
+		const anthropic = isAnthropicSandModelId(modelId);
+		const catalogOwns = input.sandToolsWire === wire;
+		if (profile === "automation" && !anthropic && !catalogOwns && modelId !== "sand-automation") {
 			return input;
 		}
-		if (profile === "parent-chat" && !isAnthropicSandModelId(modelId) && modelId !== "sand-default") {
+		if (profile === "parent-chat" && !anthropic && !catalogOwns && modelId !== "sand-default") {
 			return input;
 		}
 		const automationModel = resolveGrokbotRequestedModel("sand-automation", {
@@ -155,16 +162,19 @@ export function applyAnthropicSandToolWire(
 			sandMaxMode: false,
 		});
 		if (profile === "automation") {
+			// Routers already on this catalog wire keep their requestedModel.
+			const keepRouter = !anthropic && (catalogOwns || modelId === "sand-automation");
 			return applyProductWire(input, profile, wire, {
-				requestedModel: modelId === "sand-automation" ? input.requestedModel : automationModel,
+				requestedModel: keepRouter ? input.requestedModel : automationModel,
 				subagentType: "generalPurpose",
 				automationId: crypto.randomUUID(),
-				originalModelId: isAnthropicSandModelId(modelId) ? modelId : undefined,
+				originalModelId: anthropic ? modelId : undefined,
 			});
 		}
+		const keepRouter = !anthropic && (catalogOwns || modelId === "sand-default");
 		return applyProductWire(input, profile, wire, {
-			requestedModel: modelId === "sand-default" ? input.requestedModel : parentModel,
-			originalModelId: isAnthropicSandModelId(modelId) ? modelId : undefined,
+			requestedModel: keepRouter ? input.requestedModel : parentModel,
+			originalModelId: anthropic ? modelId : undefined,
 		});
 	}
 
