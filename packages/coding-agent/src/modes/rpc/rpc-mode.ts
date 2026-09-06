@@ -1456,10 +1456,68 @@ export async function runRpcMode(
 				}
 				const result = await session.handoff(command.customInstructions);
 				return success(id, "handoff", result ? { savedPath: result.savedPath } : null);
+
+			}
+
+			// =================================================================
+			// Git (read-only) — see #10162.
+			// Thin wrapper over @oh-my-pi/pi-natives/vcs; lazy-imported so
+			// the binding only loads when a git_* command is actually issued.
+			// =================================================================
+
+			case "git_status":
+			case "git_changed_files":
+			case "git_diff": {
+				let vcs: typeof import("@oh-my-pi/pi-natives/vcs");
+				try {
+					vcs = await import("@oh-my-pi/pi-natives/vcs");
+				} catch (err) {
+					return error(id, command.type, `native vcs module unavailable: ${(err as Error).message}`);
+				}
+				const cwd = session.sessionManager.getCwd();
+				let repo;
+				try {
+					repo = vcs.requireGit(cwd);
+				} catch (err) {
+					return error(id, command.type, `not a git repository: ${(err as Error).message}`);
+				}
+				if (command.type === "git_status") {
+					const porcelain = await repo.statusPorcelain({
+						untracked: command.untracked ?? "all",
+						pathspecs: command.pathspecs,
+						nulTerminated: false,
+					});
+					const summary = await repo.statusSummary();
+					return success(id, "git_status", { porcelain, summary, cwd });
+				}
+				if (command.type === "git_changed_files") {
+					const files = await repo.changedFiles({
+						cached: command.staged ?? false,
+						files: command.pathspecs,
+					});
+					return success(id, "git_changed_files", { files, cwd });
+				}
+				// git_diff
+				const diffText = await repo.diffText({
+					cached: command.staged ?? false,
+					files: command.pathspecs,
+				});
+				const maxBytes = command.maxBytes ?? 51_000;
+				if (diffText.length <= maxBytes) {
+					return success(id, "git_diff", { diff: diffText, truncated: false, cwd });
+				}
+				const head = diffText.slice(0, maxBytes);
+				return success(id, "git_diff", {
+					diff: head,
+					truncated: true,
+					totalBytes: diffText.length,
+					cwd,
+				});
 			}
 
 			// =================================================================
 			// Messages
+
 			// =================================================================
 
 			case "get_messages": {
