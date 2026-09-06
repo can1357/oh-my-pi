@@ -413,6 +413,20 @@ describe("skills", () => {
 			expect(skills.every(s => !s.name.startsWith("valid-"))).toBe(true);
 		});
 
+		it("should keep hideSkills loaded but hide them from the model catalog", async () => {
+			const { skills } = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [fixturesDir],
+				hideSkills: ["valid-*"],
+			});
+			const hidden = skills.find(s => s.name === "valid-skill");
+			const visible = skills.find(s => s.name === "unknown-field");
+
+			expect(hidden).toBeDefined();
+			expect(hidden?.hide).toBe(true);
+			expect(visible?.hide).not.toBe(true);
+		});
+
 		it("should skip skills disabled via frontmatter", async () => {
 			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-disabled-skill-"));
 			const skillDir = path.join(tempDir, "disabled-skill");
