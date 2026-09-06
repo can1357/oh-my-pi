@@ -262,8 +262,23 @@
 - Improved chat history stability in long-running sessions by avoiding unnecessary updates when date or directory context changes.
 - Fixed the trace CLI hanging during proxy connections and added support for forward HTTP proxies.
 - Fixed newly started sessions using stale model context-window limits after background model discovery completes; the active model now refreshes automatically so context usage and compaction thresholds match the model catalog.
+### Added
+
+- Added the `tool_approval_review` extension event, a full approval-resolution seam: `approve` resolves an eligible mode-derived prompt positively, `deny` vetoes the call at the extension layer, and `escalate` defers to the native approval path. Handlers review a deeply immutable snapshot of the final tool input, and optional frozen `pi.supportedEvents` enables capability detection ([#10410](https://github.com/can1357/oh-my-pi/pull/10410) by [@th3akii](https://github.com/th3akii)).
 
 ## [18.1.1] - 2026-09-01
+### Added
+
+- Added `injectV1: false` option to `openai-models-list` discovery to fetch the model list from `{baseUrl}/models` without injecting `/v1`, for gateways that root their OpenAI-compatible surface at a versioned URL (e.g. `https://api.opper.ai/v3/compat`) where the `/v1`-injected endpoint returns only a small subset.
+- Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Standalone `CLAUDE.md` files in the project root (and ancestor directories) are now loaded as context, mirroring `AGENTS.md` discovery; config-directory context files still take precedence per scope.
+
+### Changed
+
+- Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
 
 ### Fixed
 
@@ -332,6 +347,9 @@
 - Prevented browser `app.path` from terminating existing same-executable applications when no reusable CDP endpoint is available.
 - Fixed top-level errors overwriting the active composer before terminal restoration.
 - Fixed Enter being ignored during the first turn when omp starts with an initial prompt.
+- Fixed an issue where custom model overrides were lost during configuration updates
+- Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
+- Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
 
 ## [18.0.11] - 2026-08-29
 

@@ -53,6 +53,18 @@ Resolution per tool call:
 
 Policy strings are trimmed and case-normalized. Invalid user values are ignored.
 
+## Extension approval review
+
+OMP native policy decisions (`allow | prompt | deny`) remain distinct from `tool_approval_review` extension decisions (`approve | deny | escalate`).
+
+Review runs only after all tool-input transformations and native policy resolution produce a mode-derived prompt. It does not run for native denies or allows, explicit user prompts, tool-specific prompt overrides, pending provider safety checks, or xdev-approved execution.
+
+For an eligible prompt, unanimous valid `approve` suppresses the native selector, `deny` rejects as an extension-review veto, and `escalate` preserves the ordinary native selector. Any uncertainty fails to `escalate`: no handlers, disagreement, malformed output, handler failure, timeout, or cancellation cannot approve. A valid deny takes precedence over other handler results.
+
+Handlers receive a deeply immutable snapshot of the final input that execution will use. A handler cannot rewrite the invocation, and cancellation before execution is committed prevents execution after review.
+
+See [Approval review](./extensions.md#approval-review) for the event API, consensus rule, and older-host capability detection.
+
 ## Safety overrides
 
 A tool can force a prompt with object-form approval:
