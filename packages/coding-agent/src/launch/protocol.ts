@@ -1,6 +1,8 @@
 /**
  * Cross-process daemon broker protocol shared by the tool, client, and broker.
  */
+import type { ProgressBatchKind, ProgressReminder } from "../async/progress-batcher";
+
 /** Hidden CLI selector used to re-enter the daemon broker worker. */
 export const DAEMON_BROKER_WORKER_ARG = "__omp_worker_daemon_broker";
 
@@ -16,6 +18,9 @@ export const DAEMON_RUNTIME_DIR_ENV = "OMP_DAEMON_RUNTIME_DIR";
 
 /** Optional environment key overriding last-client shutdown grace. */
 export const DAEMON_IDLE_GRACE_ENV = "OMP_DAEMON_IDLE_GRACE_MS";
+
+/** Broker support for live output previews plus their recoverable raw capture. */
+export const DAEMON_OUTPUT_MONITOR_CAPABILITY = "output-monitor-v4";
 
 /** Stable lifecycle states exposed by the launch tool. */
 export type DaemonState = "starting" | "running" | "ready" | "restarting" | "stopping" | "exited" | "failed";
@@ -96,7 +101,7 @@ export type DaemonOperation =
 
 /** Typed broker result decoded before it reaches tool code. */
 export type DaemonRpcResult =
-	| { op: "ping"; projectDir: string }
+	| { op: "ping"; projectDir: string; capabilities?: string[] }
 	| { op: "start"; daemon: DaemonSnapshot; readyTimedOut: boolean }
 	| { op: "list"; daemons: DaemonSnapshot[] }
 	| {
@@ -129,7 +134,40 @@ export interface DaemonWireRequest {
 	completionUnsubscribes?: string[];
 	completionReplays?: string[];
 	completionSubscriptionId?: string;
+	outputSubscriptions?: DaemonOutputWireSubscription[];
+	outputSubscriptionId?: string;
 	operation: DaemonOperation;
+}
+
+/** One live process-output subscription advertised by a connected client. */
+export interface DaemonOutputSubscription {
+	id: string;
+	name: string;
+	owner: string;
+	/** Session artifact written directly by the broker while the subscription is active. */
+	artifactPath: string;
+	/** Client-managed cumulative ack: broker registration epoch of the last delivered output batch. */
+	lastEpoch?: string;
+	/** Client-managed cumulative ack: highest `seq` delivered for {@link lastEpoch}. */
+	lastSeq?: number;
+	/**
+	 * Artifact size (bytes) behind the last output batch the client delivered.
+	 * A fresh broker registration continues that capture by appending past it;
+	 * without it the registration starts a new capture at `artifactPath`.
+	 */
+	artifactBytes?: number;
+	/**
+	 * True while this registration targets the next daemon started with
+	 * {@link name}, rather than the current incarnation. The broker leaves it
+	 * unbound until that new record exists and never replays a prior terminal
+	 * record to it.
+	 */
+	startPending?: boolean;
+}
+
+/** Wire form of a subscription, tagged by the exact client registration that advertised it. */
+export interface DaemonOutputWireSubscription extends DaemonOutputSubscription {
+	registrationId: string;
 }
 
 /** Response envelope kept raw until matched with its pending operation. */
@@ -143,7 +181,71 @@ export interface DaemonCompletionNotification {
 	daemon: DaemonSnapshot;
 }
 
-export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification;
+/** A live output batch for one monitored process. */
+export interface DaemonOutputNotification {
+	event: "daemon-output";
+	monitorId: string;
+	name: string;
+	daemonId: string;
+	/** Broker registration epoch; `seq` ordering and replay acks are scoped to it. */
+	epoch?: string;
+	seq: number;
+	text: string;
+	batchKind: ProgressBatchKind;
+	suppressedEvents: number;
+	reminder?: ProgressReminder;
+	/** True when at least one model-facing line preview was clipped. */
+	truncated?: boolean;
+	/** Bytes readable in the registration's artifact once this batch is delivered. */
+	artifactBytes?: number;
+	/**
+	 * Output batches the broker evicted from its bounded replay buffer before
+	 * this client acknowledged them. Their raw text survives only in the
+	 * artifact; a batch carrying this is also `truncated` and counts the
+	 * evictions in {@link suppressedEvents}.
+	 */
+	replayGap?: number;
+}
+
+/** Socket form of monitored output, scoped to the exact advertised registration. */
+export interface DaemonOutputWireNotification extends DaemonOutputNotification {
+	registrationId: string;
+}
+
+/** Terminal process state for a monitor whose owner is not the process owner. */
+export interface DaemonMonitorCompletionNotification {
+	event: "daemon-monitor-completed";
+	monitorId: string;
+	daemon: DaemonSnapshot;
+}
+
+/** Socket form of monitor completion, scoped to the exact advertised registration. */
+export interface DaemonMonitorCompletionWireNotification extends DaemonMonitorCompletionNotification {
+	registrationId: string;
+}
+
+/** Terminal signal when a monitor is disabled and can no longer deliver output. */
+export interface DaemonMonitorExpiredNotification {
+	event: "daemon-monitor-expired";
+	monitorId: string;
+	name: string;
+	daemonId: string;
+}
+
+/** Socket form of monitor expiry, scoped to the exact advertised registration. */
+export interface DaemonMonitorExpiredWireNotification extends DaemonMonitorExpiredNotification {
+	registrationId: string;
+}
+
+export type DaemonMonitorNotification =
+	| DaemonOutputNotification
+	| DaemonMonitorCompletionNotification
+	| DaemonMonitorExpiredNotification;
+export type DaemonMonitorWireNotification =
+	| DaemonOutputWireNotification
+	| DaemonMonitorCompletionWireNotification
+	| DaemonMonitorExpiredWireNotification;
+export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification | DaemonMonitorWireNotification;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -178,9 +280,28 @@ function booleanValue(value: unknown, label: string): boolean {
 	return value;
 }
 
+function progressBatchKind(value: unknown): ProgressBatchKind {
+	const kind = stringValue(value, "output.batchKind");
+	if (kind === "progress" || kind === "artifact-only" || kind === "suppression-summary") return kind;
+	throw new Error(`Unknown progress batch kind: ${kind}`);
+}
+
+function progressReminder(value: unknown): ProgressReminder | undefined {
+	if (value === undefined) return undefined;
+	const reminder = stringValue(value, "output.reminder");
+	if (reminder === "chatty-monitor") return reminder;
+	throw new Error(`Unknown progress reminder: ${reminder}`);
+}
+
 function numberValue(value: unknown, label: string): number {
 	if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${label} must be a finite number`);
 	return value;
+}
+
+function nonNegativeInteger(value: unknown, label: string): number {
+	const parsed = numberValue(value, label);
+	if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${label} must be a non-negative integer`);
+	return parsed;
 }
 
 function optionalNumber(value: unknown, label: string): number | undefined {
@@ -200,6 +321,33 @@ function stringRecord(value: unknown, label: string): Record<string, string> {
 	const result: Record<string, string> = {};
 	for (const key in source) result[key] = rawString(source[key], `${label}.${key}`);
 	return result;
+}
+
+function outputSubscriptions(value: unknown): DaemonOutputWireSubscription[] {
+	if (!Array.isArray(value)) throw new Error("request.outputSubscriptions must be an array");
+	return value.map((item, index) => {
+		const source = record(item, `request.outputSubscriptions[${index}]`);
+		return {
+			id: stringValue(source.id, `request.outputSubscriptions[${index}].id`),
+			name: stringValue(source.name, `request.outputSubscriptions[${index}].name`),
+			owner: stringValue(source.owner, `request.outputSubscriptions[${index}].owner`),
+			artifactPath: stringValue(source.artifactPath, `request.outputSubscriptions[${index}].artifactPath`),
+			registrationId: stringValue(source.registrationId, `request.outputSubscriptions[${index}].registrationId`),
+			lastEpoch: optionalString(source.lastEpoch, `request.outputSubscriptions[${index}].lastEpoch`),
+			lastSeq:
+				source.lastSeq === undefined
+					? undefined
+					: nonNegativeInteger(source.lastSeq, `request.outputSubscriptions[${index}].lastSeq`),
+			artifactBytes:
+				source.artifactBytes === undefined
+					? undefined
+					: nonNegativeInteger(source.artifactBytes, `request.outputSubscriptions[${index}].artifactBytes`),
+			startPending:
+				source.startPending === undefined
+					? undefined
+					: booleanValue(source.startPending, `request.outputSubscriptions[${index}].startPending`),
+		};
+	});
 }
 
 function daemonState(value: unknown): DaemonState {
@@ -311,6 +459,12 @@ export function parseDaemonWireRequest(value: unknown): DaemonWireRequest {
 			source.completionSubscriptionId === undefined
 				? undefined
 				: stringValue(source.completionSubscriptionId, "request.completionSubscriptionId"),
+		outputSubscriptions:
+			source.outputSubscriptions === undefined ? undefined : outputSubscriptions(source.outputSubscriptions),
+		outputSubscriptionId:
+			source.outputSubscriptionId === undefined
+				? undefined
+				: stringValue(source.outputSubscriptionId, "request.outputSubscriptionId"),
 		operation: parseDaemonOperation(source.operation),
 	};
 }
@@ -333,6 +487,45 @@ export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 			completionId: stringValue(source.completionId, "completion.id"),
 			owner: stringValue(source.owner, "completion.owner"),
 			daemon: parseDaemonSnapshot(source.daemon),
+		};
+	}
+	if (source.event === "daemon-output") {
+		return {
+			event: "daemon-output",
+			monitorId: stringValue(source.monitorId, "output.monitorId"),
+			registrationId: stringValue(source.registrationId, "output.registrationId"),
+			name: stringValue(source.name, "output.name"),
+			daemonId: stringValue(source.daemonId, "output.daemonId"),
+			epoch: optionalString(source.epoch, "output.epoch"),
+			seq: nonNegativeInteger(source.seq, "output.seq"),
+			text: rawString(source.text, "output.text"),
+			batchKind: progressBatchKind(source.batchKind),
+			suppressedEvents: nonNegativeInteger(source.suppressedEvents, "output.suppressedEvents"),
+			reminder: progressReminder(source.reminder),
+			truncated: source.truncated === undefined ? undefined : booleanValue(source.truncated, "output.truncated"),
+			artifactBytes:
+				source.artifactBytes === undefined
+					? undefined
+					: nonNegativeInteger(source.artifactBytes, "output.artifactBytes"),
+			replayGap:
+				source.replayGap === undefined ? undefined : nonNegativeInteger(source.replayGap, "output.replayGap"),
+		};
+	}
+	if (source.event === "daemon-monitor-completed") {
+		return {
+			event: "daemon-monitor-completed",
+			monitorId: stringValue(source.monitorId, "monitor completion.monitorId"),
+			registrationId: stringValue(source.registrationId, "monitor completion.registrationId"),
+			daemon: parseDaemonSnapshot(source.daemon),
+		};
+	}
+	if (source.event === "daemon-monitor-expired") {
+		return {
+			event: "daemon-monitor-expired",
+			monitorId: stringValue(source.monitorId, "monitor expiry.monitorId"),
+			registrationId: stringValue(source.registrationId, "monitor expiry.registrationId"),
+			name: stringValue(source.name, "monitor expiry.name"),
+			daemonId: stringValue(source.daemonId, "monitor expiry.daemonId"),
 		};
 	}
 	return parseDaemonWireResponse(value);
@@ -404,7 +597,12 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 	const source = record(value, `${operation.op} result`);
 	switch (operation.op) {
 		case "ping":
-			return { op: "ping", projectDir: stringValue(source.projectDir, "result.projectDir") };
+			return {
+				op: "ping",
+				projectDir: stringValue(source.projectDir, "result.projectDir"),
+				capabilities:
+					source.capabilities === undefined ? undefined : stringArray(source.capabilities, "result.capabilities"),
+			};
 		case "start":
 			return {
 				op: "start",
