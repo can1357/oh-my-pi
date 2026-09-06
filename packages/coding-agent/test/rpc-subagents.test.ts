@@ -343,6 +343,39 @@ describe("readRpcSubagentTranscript", () => {
 		expect(result.reset).toBe(false);
 	});
 
+	test("redacts a subagent's private results in both entries and messages", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-transcript-private-"));
+		tempPaths.push(dir);
+		const sessionFile = path.join(dir, "session.jsonl");
+		const privateLine = `${JSON.stringify({
+			type: "message",
+			id: "m1",
+			parentId: null,
+			timestamp: "2026-06-09T00:00:00.000Z",
+			message: {
+				role: "toolResult",
+				toolCallId: "call_notes",
+				toolName: "notes.read_file",
+				modelOnly: true,
+				content: [{ type: "encrypted", encryptedContent: "subagent-ciphertext" }],
+				details: { secret: "subagent-details" },
+				isError: false,
+				timestamp: 1,
+			},
+		})}\n`;
+		await Bun.write(sessionFile, privateLine);
+
+		const result = await readRpcSubagentTranscript(sessionFile);
+
+		const serialized = JSON.stringify(result);
+		expect(serialized).not.toContain("subagent-ciphertext");
+		expect(serialized).not.toContain("subagent-details");
+		expect(serialized).toContain("[private model-only result]");
+		expect(result.messages).toHaveLength(1);
+		// The on-disk transcript keeps the replayable ciphertext.
+		expect(await Bun.file(sessionFile).text()).toContain("subagent-ciphertext");
+	});
+
 	test("returns empty cursor result for missing transcript files", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-transcript-missing-"));
 		tempPaths.push(dir);

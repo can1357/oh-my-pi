@@ -3,13 +3,13 @@ import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessageEvent } from "@oh-my-pi/pi-ai";
 import { publicMessage } from "@oh-my-pi/pi-ai/utils/private-content";
 import type { AgentSessionEvent } from "./agent-session-events";
-import type { SessionEntry } from "./session-entries";
+import type { FileEntry } from "./session-entries";
 
 export function publicAgentMessage(message: AgentMessage): AgentMessage {
 	return message.role === "assistant" || message.role === "toolResult" ? publicMessage(message) : message;
 }
 
-export function publicSessionEntry(entry: SessionEntry): SessionEntry {
+export function publicSessionEntry<T extends FileEntry>(entry: T): T {
 	if (entry.type !== "message") return entry;
 	const message = publicAgentMessage(entry.message);
 	return message === entry.message ? entry : { ...entry, message };
@@ -24,8 +24,8 @@ export function publicAgentMessages(messages: AgentMessage[]): AgentMessage[] {
 	return projected ?? messages;
 }
 
-export function publicSessionEntries(entries: SessionEntry[]): SessionEntry[] {
-	let projected: SessionEntry[] | undefined;
+export function publicSessionEntries<T extends FileEntry>(entries: T[]): T[] {
+	let projected: T[] | undefined;
 	for (let index = 0; index < entries.length; index++) {
 		const entry = publicSessionEntry(entries[index]);
 		if (entry !== entries[index]) (projected ??= entries.slice())[index] = entry;
