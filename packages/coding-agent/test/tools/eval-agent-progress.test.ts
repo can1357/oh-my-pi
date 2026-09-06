@@ -25,7 +25,11 @@ describe("eval renderer: agent() progress below the cell box", () => {
 		resetSettingsForTest();
 	});
 
-	function render(statusEvents: EvalStatusEvent[], status: "running" | "complete" = "running"): string[] {
+	function render(
+		statusEvents: EvalStatusEvent[],
+		status: "running" | "complete" = "running",
+		expanded = false,
+	): string[] {
 		const details: EvalToolDetails = {
 			language: "python",
 			languages: ["python"],
@@ -43,7 +47,7 @@ describe("eval renderer: agent() progress below the cell box", () => {
 		};
 		const component = evalToolRenderer.renderResult(
 			{ content: [{ type: "text", text: "" }], details },
-			{ expanded: false, isPartial: status === "running", spinnerFrame: 0 },
+			{ expanded, isPartial: status === "running", spinnerFrame: 0 },
 			theme,
 		);
 		return Bun.stripANSI(component.render(120).join("\n")).split("\n");
@@ -114,7 +118,7 @@ describe("eval renderer: agent() progress below the cell box", () => {
 		expect(below).toContain("$0.06");
 	});
 
-	it("renders one line per subagent for a parallel fan-out", () => {
+	it("focuses the live preview on unfinished eval subagents", () => {
 		const events: EvalStatusEvent[] = [
 			{ op: "agent", id: "0-Alpha", agent: "task", status: "running", lastIntent: "scanning" },
 			{ op: "agent", id: "1-Beta", agent: "task", status: "completed", toolCount: 3, durationMs: 900 },
@@ -124,8 +128,23 @@ describe("eval renderer: agent() progress below the cell box", () => {
 		const lines = render(events);
 		const below = lines.slice(boxBottomIndex(lines) + 1).join("\n");
 		expect(below).toContain("0-Alpha");
-		expect(below).toContain("1-Beta");
+		expect(below).not.toContain("1-Beta");
 		expect(below).toContain("2-Gamma");
+		expect(below).toContain("1 done");
+	});
+
+	it("shows settled eval subagents when expanded", () => {
+		const events: EvalStatusEvent[] = [
+			{ op: "agent", id: "0-Alpha", agent: "task", status: "running", lastIntent: "scanning" },
+			{ op: "agent", id: "1-Beta", agent: "task", status: "completed", toolCount: 3, durationMs: 900 },
+			{ op: "agent", id: "2-Gamma", agent: "task", status: "running", currentTool: "search" },
+		];
+
+		const lines = render(events, "running", true);
+		const below = lines.slice(boxBottomIndex(lines) + 1).join("\n");
+		for (const id of ["0-Alpha", "1-Beta", "2-Gamma"]) {
+			expect(below).toContain(id);
+		}
 	});
 
 	it("still folds non-agent status events into the box Status section", () => {

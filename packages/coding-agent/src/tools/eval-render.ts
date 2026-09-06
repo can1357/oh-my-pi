@@ -33,6 +33,8 @@ import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta"
 import {
 	formatBadge,
 	formatDuration,
+	formatExpandHint,
+	formatMoreItems,
 	formatStatusIcon,
 	formatTitle,
 	previewWindowRows,
@@ -137,6 +139,51 @@ function agentEventStatus(value: unknown): AgentEventStatus {
 			return "running";
 	}
 }
+const EVAL_COLLAPSED_AGENT_LIMIT = 4;
+
+function selectCollapsedAgentEvents(events: readonly EvalStatusEvent[]): {
+	visible: readonly EvalStatusEvent[];
+	hidden: readonly EvalStatusEvent[];
+} {
+	const live = events.filter(event => {
+		const status = agentEventStatus(event.status);
+		return status === "pending" || status === "running";
+	});
+	if (live.length === 0) return { visible: events, hidden: [] };
+
+	const visible = live.slice(Math.max(0, live.length - EVAL_COLLAPSED_AGENT_LIMIT));
+	if (visible.length === events.length) return { visible, hidden: [] };
+
+	const visibleSet = new Set(visible);
+	return {
+		visible,
+		hidden: events.filter(event => !visibleSet.has(event)),
+	};
+}
+
+function formatHiddenAgentEvents(hidden: readonly EvalStatusEvent[], theme: Theme): string {
+	const counts: Record<AgentEventStatus, number> = {
+		pending: 0,
+		running: 0,
+		completed: 0,
+		failed: 0,
+		aborted: 0,
+	};
+	for (const event of hidden) counts[agentEventStatus(event.status)]++;
+
+	const parts: string[] = [];
+	if (counts.completed > 0) parts.push(theme.fg("dim", `${counts.completed} done`));
+	if (counts.running > 0) parts.push(theme.fg("dim", `${counts.running} running`));
+	if (counts.pending > 0) parts.push(theme.fg("dim", `${counts.pending} pending`));
+	if (counts.failed > 0) parts.push(theme.fg("error", `${counts.failed} failed`));
+	if (counts.aborted > 0) parts.push(theme.fg("error", `${counts.aborted} aborted`));
+	const breakdown =
+		parts.length > 0
+			? `${theme.fg("dim", " (")}${parts.join(theme.fg("dim", theme.sep.dot))}${theme.fg("dim", ")")}`
+			: "";
+	const hint = formatExpandHint(theme, false, true);
+	return `${theme.fg("dim", formatMoreItems(hidden.length, "agent"))}${breakdown}${hint ? ` ${hint}` : ""}`;
+}
 
 /** Append the toolCount · context · cost · model stat run, mirroring the task tool. */
 function formatAgentStats(event: EvalStatusEvent, theme: Theme): string {
@@ -170,11 +217,20 @@ function formatAgentStats(event: EvalStatusEvent, theme: Theme): string {
  * subagent: a status line (icon · id · stats) plus, while running, the current
  * tool/intent. Drawn below the cell box so progress streams live.
  */
-function renderAgentProgressEvents(events: EvalStatusEvent[], theme: Theme, spinnerFrame?: number): string[] {
+function renderAgentProgressEvents(
+	events: EvalStatusEvent[],
+	theme: Theme,
+	spinnerFrame?: number,
+	expanded = false,
+): string[] {
+	const display = expanded ? { visible: events, hidden: [] as EvalStatusEvent[] } : selectCollapsedAgentEvents(events);
 	const lines: string[] = [];
-	for (let i = 0; i < events.length; i++) {
-		const event = events[i];
-		const isLast = i === events.length - 1;
+	if (display.hidden.length > 0) {
+		lines.push(formatHiddenAgentEvents(display.hidden, theme));
+	}
+	for (let i = 0; i < display.visible.length; i++) {
+		const event = display.visible[i];
+		const isLast = i === display.visible.length - 1;
 		const prefix = theme.fg("dim", isLast ? theme.tree.last : theme.tree.branch);
 		const cont = isLast ? "   " : `${theme.fg("dim", theme.tree.vertical)}  `;
 
@@ -663,7 +719,7 @@ export const evalToolRenderer = {
 						);
 						lines.push(...cellLines);
 						if (agentEvents.length > 0) {
-							lines.push(...renderAgentProgressEvents(agentEvents, uiTheme, options.spinnerFrame));
+							lines.push(...renderAgentProgressEvents(agentEvents, uiTheme, options.spinnerFrame, expanded));
 						}
 						if (i < cellResults.length - 1) {
 							lines.push("");

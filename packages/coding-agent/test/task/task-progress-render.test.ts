@@ -303,9 +303,9 @@ describe("task progress rendering", () => {
 		expect(rendered).toContain("Combine the winning patches.");
 	});
 
-	it("pins unfinished tasks below finished ones, finished sorted by runtime asc", async () => {
+	it("orders finished progress before unfinished rows when expanded", async () => {
 		const theme = (await getThemeByName("dark"))!;
-		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		const options: RenderResultOptions = { expanded: true, isPartial: true, spinnerFrame: 0 };
 		const details: TaskToolDetails = {
 			projectAgentsDir: null,
 			results: [],
@@ -402,6 +402,51 @@ describe("task progress rendering", () => {
 			expect(expanded).toContain(id);
 		}
 		expect(expanded).not.toContain("more agents");
+	});
+
+	it("folds settled rows even when the live edge fits the collapsed cap", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [],
+			totalDurationMs: 0,
+			progress: [
+				runningProgress({ index: 0, id: "DoneOne", status: "completed", durationMs: 1000 }),
+				runningProgress({ index: 1, id: "FailedOne", status: "failed", durationMs: 2000 }),
+				runningProgress({ index: 2, id: "StillLive", status: "running" }),
+			],
+		};
+
+		const collapsed = Bun.stripANSI(
+			taskToolRenderer
+				.renderResult(
+					{ content: [{ type: "text", text: "" }], details },
+					{ expanded: false, isPartial: true, spinnerFrame: 0 },
+					theme,
+				)
+				.render(120)
+				.join("\n"),
+		);
+		expect(collapsed).toContain("StillLive");
+		expect(collapsed).not.toContain("DoneOne");
+		expect(collapsed).not.toContain("FailedOne");
+		expect(collapsed).toContain("… 2 more agents");
+		expect(collapsed).toContain("1 done");
+		expect(collapsed).toContain("1 failed");
+
+		const expanded = Bun.stripANSI(
+			taskToolRenderer
+				.renderResult(
+					{ content: [{ type: "text", text: "" }], details },
+					{ expanded: true, isPartial: true, spinnerFrame: 0 },
+					theme,
+				)
+				.render(120)
+				.join("\n"),
+		);
+		for (const id of ["DoneOne", "FailedOne", "StillLive"]) {
+			expect(expanded).toContain(id);
+		}
 	});
 
 	it("keeps problem rows visible when the collapsed result list folds", async () => {
