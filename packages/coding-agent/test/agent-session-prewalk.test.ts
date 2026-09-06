@@ -110,6 +110,7 @@ describe("AgentSession prewalk", () => {
 	const evalToolSchema = type({});
 	function makeEvalTool(
 		statusEvents: Array<Record<string, unknown>>,
+		options?: { isError?: boolean },
 	): AgentTool<typeof evalToolSchema, { statusEvents: Array<Record<string, unknown>> }> {
 		return {
 			name: "eval",
@@ -117,7 +118,11 @@ describe("AgentSession prewalk", () => {
 			description: "Run an eval cell",
 			parameters: evalToolSchema,
 			async execute() {
-				return { content: [{ type: "text", text: "ran cell" }], details: { statusEvents } };
+				return {
+					content: [{ type: "text", text: "ran cell" }],
+					details: { statusEvents },
+					isError: options?.isError,
+				};
 			},
 		};
 	}
@@ -516,56 +521,62 @@ describe("AgentSession prewalk", () => {
 		expect(session.model?.id).toBe(target.id);
 	});
 
-	it("prewalks on an edit/write dispatched through an eval cell under Code Mode (issue #11018)", async () => {
-		const primary = modelOrThrow("claude-sonnet-4-5");
-		const target = modelOrThrow("claude-sonnet-4-6");
+	for (const evalIsError of [false, true]) {
+		const outcome = evalIsError ? "later fails" : "completes";
+		it(`prewalks when an eval cell writes and then ${outcome} (issue #11018)`, async () => {
+			const primary = modelOrThrow("claude-sonnet-4-5");
+			const target = modelOrThrow("claude-sonnet-4-6");
 
-		// Code Mode removes edit/write from the direct surface and runs them
-		// through the eval bridge, so the turn-level result is named `eval`. The
-		// bridge flags the nested write; prewalk must hand off exactly as it would
-		// for a direct write. Turn 1 (todo) opens the gate; turn 2 (eval write)
-		// switches, so turn 3 runs on the target.
-		const evalWrite = makeEvalTool([{ op: "write", path: "example.txt", chars: 7, implementationAction: true }]);
-		const mock = createMockModel({
-			responses: [toolCall("t1", "todo"), toolCall("t2", "eval"), { content: ["done"] }],
-		});
-		const requested: string[] = [];
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: {
-				model: primary,
-				systemPrompt: ["Test"],
-				tools: [todoTool as AgentTool, evalWrite as AgentTool],
-				messages: [],
-				thinkingLevel: Effort.Medium,
-			},
-			convertToLlm,
-			streamFn: (model, context, options) => {
-				requested.push(`${model.provider}/${model.id}`);
-				return mock.stream(model, context, options);
-			},
-		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry: new Map([
-				[todoTool.name, todoTool as AgentTool],
-				[evalWrite.name, evalWrite as AgentTool],
-			]),
-			prewalk: { target },
-		});
+			// Code Mode removes edit/write from the direct surface and runs them
+			// through the eval bridge, so the turn-level result is named `eval`.
+			// The successful nested write must hand off even if a later statement
+			// makes the enclosing cell fail; failed nested calls never receive the
+			// implementation-action marker. Turn 1 (todo) opens the gate, turn 2
+			// mutates through eval, and turn 3 runs on the target.
+			const evalWrite = makeEvalTool([{ op: "write", path: "example.txt", chars: 7, implementationAction: true }], {
+				isError: evalIsError,
+			});
+			const mock = createMockModel({
+				responses: [toolCall("t1", "todo"), toolCall("t2", "eval"), { content: ["done"] }],
+			});
+			const requested: string[] = [];
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: primary,
+					systemPrompt: ["Test"],
+					tools: [todoTool as AgentTool, evalWrite as AgentTool],
+					messages: [],
+					thinkingLevel: Effort.Medium,
+				},
+				convertToLlm,
+				streamFn: (model, context, options) => {
+					requested.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map([
+					[todoTool.name, todoTool as AgentTool],
+					[evalWrite.name, evalWrite as AgentTool],
+				]),
+				prewalk: { target },
+			});
 
-		await session.prompt("implement via eval");
+			await session.prompt("implement via eval");
 
-		expect(requested).toEqual([
-			`${primary.provider}/${primary.id}`,
-			`${primary.provider}/${primary.id}`,
-			`${target.provider}/${target.id}`,
-		]);
-		expect(session.model?.id).toBe(target.id);
-	});
+			expect(requested).toEqual([
+				`${primary.provider}/${primary.id}`,
+				`${primary.provider}/${primary.id}`,
+				`${target.provider}/${target.id}`,
+			]);
+			expect(session.model?.id).toBe(target.id);
+		});
+	}
 
 	it("does not switch on a read-only eval cell (issue #11018 keeps the #7312 exclusion)", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");

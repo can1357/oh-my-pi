@@ -7,7 +7,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
  */
 export interface ImplementationActionResult {
 	toolName: string;
-	details: unknown;
+	details?: unknown;
 }
 
 /** Tool names whose successful completion mutates the workspace. */

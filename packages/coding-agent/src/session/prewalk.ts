@@ -41,7 +41,7 @@ const PLAN_YOLO_HANDOFF_MESSAGE_TYPE = "plan-yolo-handoff";
  */
 function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
 	if (isImplementationActionResult(result)) return true;
-	if (result.toolName !== "eval" || result.isError === true) return false;
+	if (result.toolName !== "eval") return false;
 	const details = result.details;
 	if (!isRecord(details) || !Array.isArray(details.statusEvents)) return false;
 	return details.statusEvents.some(event => isRecord(event) && event[EVAL_IMPLEMENTATION_ACTION_MARKER] === true);
