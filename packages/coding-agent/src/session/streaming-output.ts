@@ -1302,16 +1302,27 @@ export class OutputSink {
 				await this.flushArtifact();
 				this.#onChunk?.(merged, stamp);
 			} catch (error) {
-				// The tail is awaited only by dump()/dispose(); a rejection left on
-				// it while the command still runs would be unhandled and fatal.
-				// Record the first failure for settlement instead; later chunks
-				// keep delivering.
-				this.#chunkDeliveryError ??= error instanceof Error ? error : new Error(String(error));
+				this.#recordChunkDeliveryError(error);
 			} finally {
-				this.#onChunkSettled?.(stamp);
+				// The settlement callback is a consumer hook too (bash's promotion
+				// barrier); a throw here must not escape the tail either.
+				try {
+					this.#onChunkSettled?.(stamp);
+				} catch (error) {
+					this.#recordChunkDeliveryError(error);
+				}
 			}
 		};
 		this.#chunkDeliveryTail = this.#chunkDeliveryTail?.then(deliver) ?? deliver();
+	}
+
+	/**
+	 * The delivery tail is awaited only by dump()/dispose(); a rejection left on
+	 * it while the command still runs would be unhandled and fatal. Record the
+	 * first failure for settlement instead so later chunks keep delivering.
+	 */
+	#recordChunkDeliveryError(error: unknown): void {
+		this.#chunkDeliveryError ??= error instanceof Error ? error : new Error(String(error));
 	}
 
 	#flushPendingChunk(): void {

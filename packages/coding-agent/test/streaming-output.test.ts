@@ -404,6 +404,47 @@ describe("OutputSink", () => {
 		await sink.dispose();
 	});
 
+	test("keeps the mirror tail alive when a settlement callback throws", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "settle-failure.log");
+		let stamp = 0;
+		const deliveries: Array<{ chunk: string; stamp: number }> = [];
+		const settled: number[] = [];
+		const firstSettled = Promise.withResolvers<void>();
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "settle-failure",
+			artifactWriteMode: "mirror",
+			chunkStamp: () => stamp,
+			onChunk: (chunk, chunkStamp) => {
+				deliveries.push({ chunk, stamp: chunkStamp });
+			},
+			onChunkSettled: chunkStamp => {
+				settled.push(chunkStamp);
+				if (chunkStamp !== 0) return;
+				firstSettled.resolve();
+				throw new Error("barrier resolver failed");
+			},
+		});
+
+		sink.push("first");
+		await firstSettled.promise;
+		// The producer keeps running: a rejection escaping the settlement hook
+		// would leave the tail rejected (fatal under bun) and block later chunks.
+		expect(await Bun.file(artifactPath).text()).toBe("first");
+		stamp = 1;
+		sink.push("second");
+
+		await expect(sink.dump()).rejects.toThrow("barrier resolver failed");
+		expect(deliveries).toEqual([
+			{ chunk: "first", stamp: 0 },
+			{ chunk: "second", stamp: 1 },
+		]);
+		expect(settled).toEqual([0, 1]);
+		expect(await Bun.file(artifactPath).text()).toBe("firstsecond");
+		await sink.dispose();
+	});
+
 	test("mirror mode delivers and settles chunks with their entry stamps", async () => {
 		let stamp = 0;
 		const deliveries: Array<{ chunk: string; stamp: number }> = [];
