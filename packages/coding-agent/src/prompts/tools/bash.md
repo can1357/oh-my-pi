@@ -9,7 +9,7 @@ Use ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort
 - Order-dependent commands use `&&` in one call; independent calls may run concurrently.
 - Internal URIs (`skill://`, `agent://`, …) auto-resolve to paths.
 {{#if hasShellBuiltins}}- aux utils available: mkdir, wc, sort, comm, diff, uniq, base64, cmp, md5sum, sha{1,224,256,384,512}sum, b2sum, basename, dirname, readlink, realpath, touch, stat, date, mktemp, seq, yes, printenv, truncate, tac, nproc, uname, whoami, hostname, which, ps, pgrep, pkill, pidwait, top, cut, tee, tr, paste, sed, xargs, jq, rm, mv, ln, ts, sponge, ifne, isutf8, combine{{#unless isWindows}}, errno{{/unless}}{{/if}}
-{{#if asyncEnabled}}- `async: true` defers a finite command's result; it does not extend `timeout`.{{/if}}
+{{#if asyncEnabled}}- `async: true` for a command whose length you already know (build, install, migration, suite): the call returns a job id at once and the result is delivered on completion. It does not extend `timeout`.{{/if}}
 </instruction>
 
 <critical>
@@ -19,6 +19,6 @@ Use ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort
 {{#if hasLaunch}}- Services, watchers, debuggers, and REPLs MUST use `hub` (`op:"start"`).{{/if}}
 </critical>
 
-{{#if autoBackgroundEnabled}}Long foreground calls may auto-background by the configured threshold and deliver later.
+{{#if autoBackgroundEnabled}}A long foreground call may auto-background at the configured threshold and deliver later, after spending that whole threshold waiting.{{#if asyncEnabled}} Use `async: true` up front for known-long commands to avoid that wait.{{/if}}
 `timeout: 0` disables the job deadline; otherwise `timeout` sets it without extending foreground waiting.{{/if}}
 No truncation footer means the displayed output is complete.
