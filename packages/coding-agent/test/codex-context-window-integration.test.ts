@@ -45,7 +45,7 @@ function fixtureModel(): Model<"openai-codex-responses"> {
 		compat: { contextWindows: policy },
 	});
 }
-async function harness(reset: boolean) {
+async function harness(reset: boolean, options: { enabled?: boolean; notes?: boolean } = {}) {
 	const dir = TempDir.createSync("codex-window-");
 	cleanups.push(() => dir.removeSync());
 	const auth = await AuthStorage.create(":memory:");
@@ -55,7 +55,7 @@ async function harness(reset: boolean) {
 	const model = fixtureModel();
 	const settings = Settings.isolated({
 		"compaction.methodOrder": ["window", "soft"],
-		"compaction.enabled": true,
+		"compaction.enabled": options.enabled ?? true,
 		"compaction.thresholdTokens": 10000,
 		"compaction.thresholdPercent": -1,
 		"compaction.keepRecentTokens": 256,
@@ -63,7 +63,7 @@ async function harness(reset: boolean) {
 		"compaction.autoContinue": false,
 		"compaction.asyncEnabled": false,
 		"contextPromotion.enabled": false,
-		"providers.openai-codex.historyNotes": "on",
+		"providers.openai-codex.historyNotes": options.notes === false ? "off" : "on",
 		"todo.enabled": false,
 		"todo.reminders": false,
 	});
@@ -119,6 +119,16 @@ async function harness(reset: boolean) {
 	await session.initializeCodexContext();
 	return { session, manager, frames, settings, model, backendCalls };
 }
+
+test("disabled compaction exposes no reset protocol and cannot clear history", async () => {
+	const { session, manager, frames } = await harness(true, { enabled: false, notes: false });
+	expect(session.getActiveToolNames()).not.toContain("new_context");
+	expect(session.transformCodexContext({ messages: [] }).messages).toEqual([]);
+	await session.prompt("Keep this task");
+	await session.waitForIdle();
+	expect(manager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
+	expect(JSON.stringify(frames.at(-1)?.messages)).toContain("Keep this task");
+});
 
 test("checkpoint then new_context cuts history at a paired-tool boundary and survives resume", async () => {
 	const { session, manager, frames, settings, model, backendCalls } = await harness(true);

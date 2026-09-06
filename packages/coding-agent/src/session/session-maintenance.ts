@@ -455,7 +455,8 @@ export class SessionMaintenance {
 
 	async #commitContextWindowReset(): Promise<void> {
 		const model = this.#model;
-		if (!model || this.isCompacting) throw new Error("Context-window reset is unavailable");
+		if (!model || !this.contextWindows.windowActive || this.isCompacting)
+			throw new Error("Context-window reset is unavailable");
 		this.cancelSpeculation();
 		const controller = new AbortController();
 		this.#autoCompactionAbortController = controller;

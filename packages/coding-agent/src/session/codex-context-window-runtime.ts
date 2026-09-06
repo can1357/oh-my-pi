@@ -75,7 +75,12 @@ export class CodexContextWindowRuntime {
 	}
 
 	get windowActive(): boolean {
-		return this.#available && this.#windowRequested && this.#policy !== undefined;
+		return (
+			this.#host.settings.get("compaction.enabled") &&
+			this.#available &&
+			this.#windowRequested &&
+			this.#policy !== undefined
+		);
 	}
 	get notesActive(): boolean {
 		return this.#available && this.#notesRequested;
