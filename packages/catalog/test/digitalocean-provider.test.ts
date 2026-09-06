@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import {
-	DIGITALOCEAN_STATIC_MODELS,
-	digitalOceanModelManagerOptions,
-} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { digitalOceanModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 describe("DigitalOcean Serverless Inference provider", () => {
@@ -25,25 +22,13 @@ describe("DigitalOcean Serverless Inference provider", () => {
 		const bundled = getBundledModels("digitalocean");
 		expect(bundled.length).toBeGreaterThan(0);
 		expect(bundled.some(model => model.id === descriptor?.defaultModel)).toBe(true);
-		// The seed mirrors DigitalOcean's ten hosted chat models ordered by the
-		// public Artificial Analysis Intelligence Index (passthrough Anthropic /
-		// OpenAI catalog entries excluded).
-		const seedIds = DIGITALOCEAN_STATIC_MODELS.map(model => model.id);
-		for (const expected of [
-			"kimi-k3",
-			"glm-5.3",
-			"qwen3.8-max",
-			"glm-5.3-flash",
-			"deepseek-v4-pro-0813",
-			"glm-5.2",
-			"deepseek-v4-flash-0731",
-			"kimi-k2.6",
-			"deepseek-v4-pro",
-			"mimo-v2.5-pro",
-		]) {
-			expect(seedIds).toContain(expected);
-		}
-		expect(DIGITALOCEAN_STATIC_MODELS).toHaveLength(10);
+		// Observable consumer contract on the generated bundle: seeded rows
+		// resolve reasoning flags, live limits, and DO's per-million-token
+		// pricing through the runtime accessor (not the TS seed constant).
+		const glm = bundled.find(model => model.id === "glm-5.2");
+		expect(glm?.reasoning).toBe(true);
+		expect(glm?.contextWindow).toBe(262_144);
+		expect(glm?.cost).toEqual({ input: 0.7, output: 2.2, cacheRead: 0.105, cacheWrite: 0 });
 	});
 
 	// DigitalOcean's `/v1/models` lists non-chat SKUs (embeddings, rerankers,
