@@ -3080,7 +3080,7 @@ export class RelayBridge {
 							runImmediately,
 							...(applicationMarker
 								? {
-										source: `Object.defineProperty(globalThis, ${JSON.stringify(applicationMarker)}, { value: true, configurable: true });\n;${script.params.source}`,
+										source: `${script.params.source}\n;Object.defineProperty(globalThis, ${JSON.stringify(applicationMarker)}, { value: true, configurable: true });`,
 									}
 								: {}),
 						}
@@ -3128,9 +3128,19 @@ export class RelayBridge {
 					// registered after the real script: seeing it in this document proves
 					// the real registration covered the navigation. Otherwise replace the
 					// ambiguous registration with an immediate one for the missed document.
-					const appliedToCurrentDocument =
-						applicationMarker !== undefined &&
-						(await this.#preloadApplicationMarker(tab.tabId, applicationMarker, script.params.worldName));
+					let appliedToCurrentDocument = false;
+					if (applicationMarker !== undefined) {
+						try {
+							appliedToCurrentDocument = await this.#preloadApplicationMarker(
+								tab.tabId,
+								applicationMarker,
+								script.params.worldName,
+							);
+						} catch (err) {
+							if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
+							throw err;
+						}
+					}
 					if (!appliedToCurrentDocument) {
 						let retry: Record<string, unknown> | undefined;
 						try {
