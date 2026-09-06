@@ -419,12 +419,28 @@ FROM model_usage_legacy
 		);
 	}
 
-	/** Flushes deferred writes, closes every process-wide database, and permits reopening them. */
+	/**
+	 * Flushes deferred writes, closes every process-wide database, and permits
+	 * reopening them.
+	 *
+	 * One instance that cannot close must not orphan the registry: leaving a
+	 * closed handle in `instances` makes every later `close()` fail the same way,
+	 * so a single bad teardown poisons the rest of the process.
+	 */
 	static close(): void {
-		for (const storage of instances.values()) storage.#close();
-		instances.clear();
-		cancelExitCleanup?.();
-		cancelExitCleanup = undefined;
+		try {
+			for (const storage of instances.values()) {
+				try {
+					storage.#close();
+				} catch (err) {
+					logger.warn("agent storage close failed", { error: err });
+				}
+			}
+		} finally {
+			instances.clear();
+			cancelExitCleanup?.();
+			cancelExitCleanup = undefined;
+		}
 	}
 
 	#close(): void {

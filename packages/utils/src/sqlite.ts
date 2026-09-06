@@ -9,9 +9,29 @@
  */
 import type { Database } from "bun:sqlite";
 
-/** Checkpoints committed WAL frames without waiting for concurrent readers. */
+/**
+ * Checkpoints committed WAL frames without waiting for concurrent readers.
+ *
+ * A closed handle is a no-op, not an error: SQLite checkpoints on close, so
+ * there is nothing left to flush. `bun:sqlite` ≥ 1.4 throws
+ * `Database has closed` here where earlier versions tolerated it, and every
+ * caller runs this from a `close()` path — one that throws leaves the caller's
+ * own teardown half-done.
+ */
 export function checkpointWal(db: Database): void {
-	db.run("PRAGMA wal_checkpoint(PASSIVE)");
+	try {
+		db.run("PRAGMA wal_checkpoint(PASSIVE)");
+	} catch (err) {
+		if (!isClosedDatabaseError(err)) throw err;
+	}
+}
+
+/**
+ * `bun:sqlite`'s "already closed" guard. It carries no result code — the handle
+ * never reached SQLite — so this matches the message rather than a `code`.
+ */
+export function isClosedDatabaseError(err: unknown): boolean {
+	return err instanceof Error && err.message.includes("Database has closed");
 }
 
 /**

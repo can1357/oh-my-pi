@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `checkpointWal` throwing on an already-closed database handle. Every caller runs it from a `close()` path, where a closed handle has nothing left to flush — SQLite checkpoints on close — but Bun >=1.4 raises `Database has closed` from `db.run()` after `close()` where earlier versions tolerated it. Added `isClosedDatabaseError` beside the existing busy and corruption classifiers; real statement errors still propagate.
+
 ## [18.1.13] - 2026-09-07
 
 ### Fixed
