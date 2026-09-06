@@ -245,8 +245,28 @@ describe("UiHelpers.renderInitialMessages — transcript source", () => {
 });
 
 describe("UiHelpers.renderInitialMessages — task alias rebuild", () => {
-	it("uses the canonical task renderer for an alias when no exact tool is registered", async () => {
-		const message = assistantToolCall("cursor-task-alias", "Subagent", {
+	it("uses the canonical task renderer for a Cursor alias when no exact tool is registered", async () => {
+		const message: AssistantMessage = {
+			...assistantToolCall("cursor-task-alias", "Subagent", {
+				task: "Inspect auth",
+				name: "AuthExplorer",
+			}),
+			provider: "cursor",
+		};
+		const { ctx, chatContainer } = makeRenderCtx(transcriptWith([message]));
+		const taskTool = { name: "task", label: "Task" } as unknown as AgentTool;
+		ctx.viewSession.getToolByName = vi.fn(name => (name === "task" ? taskTool : undefined));
+		ctx.viewSession.hasBuiltInTool = vi.fn(name => name === "task");
+
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		const rendered = Bun.stripANSI(chatContainer.render(100).join("\n"));
+		expect(rendered).toContain("Inspect auth");
+		expect(rendered).not.toContain("Subagent");
+	});
+
+	it("does not reinterpret the same alias from a non-Cursor provider", async () => {
+		const message = assistantToolCall("anthropic-subagent", "Subagent", {
 			task: "Inspect auth",
 			name: "AuthExplorer",
 		});
@@ -258,8 +278,7 @@ describe("UiHelpers.renderInitialMessages — task alias rebuild", () => {
 		await new UiHelpers(ctx).renderInitialMessages();
 
 		const rendered = Bun.stripANSI(chatContainer.render(100).join("\n"));
-		expect(rendered).toContain("Inspect auth");
-		expect(rendered).not.toContain("Subagent");
+		expect(rendered).toContain("Subagent");
 	});
 });
 

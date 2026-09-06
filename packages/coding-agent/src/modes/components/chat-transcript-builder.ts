@@ -456,7 +456,7 @@ export class ChatTranscriptBuilder {
 
 			this.#readGroup?.seal();
 			this.#readGroup = null;
-			const isTaskAlias = isCursorTaskMcpName(content.name);
+			const isTaskAlias = message.provider === "cursor" && isCursorTaskMcpName(content.name);
 			const exactTool = this.deps.getTool?.(content.name);
 			const resolvedTool = exactTool ?? (isTaskAlias ? this.deps.getTool?.("task") : undefined);
 			const usesTaskAliasFallback = exactTool === undefined && isTaskAlias && resolvedTool?.name === "task";

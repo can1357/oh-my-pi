@@ -235,6 +235,42 @@ export function getCursorTaskUnsupportedModel(args: Record<string, unknown>): st
 	return undefined;
 }
 
+/** Return a Cursor subagent type that OMP cannot faithfully execute. */
+export function getCursorTaskUnsupportedSubagentType(args: Record<string, unknown>): string | undefined {
+	const check = (value: unknown): string | undefined => {
+		if (typeof value === "string") {
+			const normalized = value
+				.trim()
+				.toLowerCase()
+				.replace(/[\s-]+/g, "_");
+			return normalized === "computer_use" ? "computer_use" : undefined;
+		}
+		if (!value || typeof value !== "object") return undefined;
+		const record = value as Record<string, unknown>;
+		if (record.computer_use !== undefined || record.computerUse !== undefined) return "computer_use";
+		if (typeof record.case === "string") {
+			const normalizedCase = record.case
+				.trim()
+				.toLowerCase()
+				.replace(/[\s-]+/g, "_");
+			if (normalizedCase === "computer_use" || normalizedCase === "computeruse") return "computer_use";
+		}
+		return undefined;
+	};
+
+	const topLevel = check(args.subagent_type);
+	if (topLevel !== undefined) return topLevel;
+	if (Array.isArray(args.tasks)) {
+		for (const item of args.tasks) {
+			if (item && typeof item === "object") {
+				const itemType = check((item as Record<string, unknown>).subagent_type);
+				if (itemType !== undefined) return itemType;
+			}
+		}
+	}
+	return undefined;
+}
+
 /**
  * Extract an OMP agent identifier from Cursor's `subagent_type` field.
  *

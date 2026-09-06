@@ -27,6 +27,7 @@ import {
 	cursorMcpPrefersReplaceEdit,
 	getCursorTaskResumeId,
 	getCursorTaskUnsupportedModel,
+	getCursorTaskUnsupportedSubagentType,
 	normalizeCursorReplaceArgs,
 	normalizeCursorTaskArgs,
 } from "@oh-my-pi/pi-coding-agent/cursor-bridge-tools";
@@ -632,15 +633,17 @@ describe("Cursor MCP StrReplace fallback", () => {
 			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
 		});
 
-		const result = await handlers.mcp({
+		const call = {
 			name: "StrReplace",
 			providerIdentifier: "cursor",
 			toolName: "StrReplace",
 			toolCallId: "sr1",
-			args: { path: target, old_string: "beta", new_string: "gamma" },
+			args: { path: target, old_text: "beta", new_text: "gamma" } as Record<string, unknown>,
 			rawArgs: {},
-		});
+		};
+		const result = await handlers.mcp(call);
 
+		expect(call.args).toEqual({ path: target, old_string: "beta", new_string: "gamma" });
 		expect(await Bun.file(target).text()).toBe("alpha\ngamma\n");
 		expect(result.content.map(part => (part.type === "text" ? part.text : "")).join("")).not.toMatch(
 			/not found|not available/i,
@@ -1033,6 +1036,58 @@ describe("Cursor MCP task tool adapter", () => {
 		expect(getCursorTaskUnsupportedModel({ prompt: "work", model: "inherit" })).toBeUndefined();
 		expect(getCursorTaskUnsupportedModel({ prompt: "work", model: "" })).toBeUndefined();
 		expect(getCursorTaskUnsupportedModel({ prompt: "work" })).toBeUndefined();
+	});
+
+	it("detects unsupported computer-use subagent types from top-level and batch task payloads", () => {
+		expect(getCursorTaskUnsupportedSubagentType({ prompt: "browse", subagent_type: "computer_use" })).toBe(
+			"computer_use",
+		);
+		expect(
+			getCursorTaskUnsupportedSubagentType({
+				tasks: [{ prompt: "part 1" }, { prompt: "part 2", subagent_type: { case: "computer_use", value: {} } }],
+			}),
+		).toBe("computer_use");
+		expect(getCursorTaskUnsupportedSubagentType({ prompt: "search", subagent_type: "explore" })).toBeUndefined();
+	});
+
+	it("rejects computer-use task delegation rather than silently running the default agent", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const result = await handlers.mcp({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "t-computer-use",
+			args: { prompt: "Use the browser", subagent_type: "computer_use" },
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.content[0].type === "text" && result.content[0].text).toContain(
+			'Cursor subagent type "computer_use" is not supported by OMP task delegation.',
+		);
+		expect(executedCalls.length).toBe(0);
+	});
+
+	it("refuses mcpApprovalPreflight for computer-use task delegation", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		const approved = await handlers.mcpApprovalPreflight({
+			name: "task",
+			providerIdentifier: "pi-agent",
+			toolName: "task",
+			toolCallId: "pre-computer-use",
+			args: { prompt: "Use the browser", subagent_type: { computer_use: {} } },
+			rawArgs: {},
+		});
+
+		expect(approved).toBe(false);
 	});
 
 	it("rejects explicit task.model override with an actionable error rather than silently running default model", async () => {

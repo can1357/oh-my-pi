@@ -541,7 +541,9 @@ export class UiHelpers {
 					const exactTool = this.ctx.viewSession.getToolByName(content.name);
 					const tool =
 						exactTool ??
-						(isCursorTaskMcpName(content.name) ? this.ctx.viewSession.getToolByName("task") : undefined);
+						(message.provider === "cursor" && isCursorTaskMcpName(content.name)
+							? this.ctx.viewSession.getToolByName("task")
+							: undefined);
 					const renderToolName = toolRenderName(content.name, tool);
 					resolveWaitingPoll(renderToolName);
 

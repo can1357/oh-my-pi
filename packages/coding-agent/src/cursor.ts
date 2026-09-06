@@ -32,6 +32,7 @@ import {
 	cursorMcpPrefersReplaceEdit,
 	getCursorTaskResumeId,
 	getCursorTaskUnsupportedModel,
+	getCursorTaskUnsupportedSubagentType,
 	isCursorTaskMcpName,
 	normalizeCursorReplaceArgs,
 	normalizeCursorTaskArgs,
@@ -947,7 +948,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				const message = formatMcpToolErrorMessage(toolName, availableTools);
 				return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
 			}
-			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
+			const normalizedArgs = normalizeCursorReplaceArgs(args);
+			call.args = normalizedArgs;
+			return await executeTool(this.options, "edit", toolCallId, normalizedArgs, replaceTool);
 		}
 		if (isCursorTaskMcpName(toolName)) {
 			const exactTaskTool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
@@ -962,6 +965,11 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				const unsupportedModel = getCursorTaskUnsupportedModel(args);
 				if (unsupportedModel) {
 					const message = `Explicit subagent model override via task.model ("${unsupportedModel}") is not supported. Subagents use the model configured for their agent role.`;
+					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+				}
+				const unsupportedSubagentType = getCursorTaskUnsupportedSubagentType(args);
+				if (unsupportedSubagentType) {
+					const message = `Cursor subagent type "${unsupportedSubagentType}" is not supported by OMP task delegation.`;
 					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
 				}
 				const targetToolName = "task";
@@ -1007,7 +1015,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const preserveExactTaskTool =
 			exactTaskTool !== undefined && (toolName !== "task" || this.options.isBuiltInTool?.(toolName) === false);
 		const routeToTask = isTask && !preserveExactTaskTool;
-		if (routeToTask && (getCursorTaskResumeId(args) || getCursorTaskUnsupportedModel(args))) {
+		if (
+			routeToTask &&
+			(getCursorTaskResumeId(args) ||
+				getCursorTaskUnsupportedModel(args) ||
+				getCursorTaskUnsupportedSubagentType(args))
+		) {
 			return false;
 		}
 
