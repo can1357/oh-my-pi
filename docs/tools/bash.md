@@ -31,11 +31,11 @@
 
 ## Agent-facing guidance
 
-When async execution is enabled, the Bash tool description recommends `async: "auto"` for finite commands: quick work still returns inline, while slow work crosses the turn boundary without restarting the process. `async: true` remains the immediate-background mode. `progress: "wake"` is waking, permitted events produced while the model is busy arrive together in order, ambient progress never wakes, oversized lines and batches retain bounded head/tail previews, and completion is a separate notification. Persistent services and watchers are routed to `hub` instead.
+When async execution is enabled, the Bash tool description recommends `async: "auto"` for finite commands: quick work still returns inline, while slow work crosses the turn boundary without restarting the process. `async: true` remains the immediate-background mode and is the right choice when the agent already knows the command is long-running. `progress: "wake"` is waking, permitted events produced while the model is busy arrive together in order, ambient progress never wakes, oversized lines and batches retain bounded head/tail previews, and completion is a separate notification. Persistent services and watchers are routed to `hub` instead.
 
 A command that finishes within `bash.asyncAuto.inlineGraceMs` returns one ordinary Bash result. It does not emit separate progress or completion notifications. If the command outlives the grace, the same process is promoted without a restart. Settings-driven auto-backgrounding of an unmarked call can still deliver completion, but it does not enable progress; progress requires explicit `async: "auto"` or `async: true`.
 
-`wake` is a harness push, not a reason to hold the current turn open. Agents must not call `hub wait`, follow logs, or block to receive progress or keep the turn alive; they should use async progress and end the turn instead. If output arrives while the model is busy, the harness buffers every rate-limit-permitted event and places them together in the next follow-up turn. Progress is a lossy preview selected by timing; use the artifact to determine whether omitted output contained an error or state transition. A one-job wake message rendered for the model has this form:
+`wake` is a harness push, not a reason to hold the current turn open. Agents should not poll (`hub logs`/`ps`, short `wait` loops), follow logs, or block to receive progress; they end the turn and the push starts the next one. A `hub wait` with `name` plus `pattern`/`for`/`timeout` remains a legitimate readiness or exit wait. If output arrives while the model is busy, the harness buffers every rate-limit-permitted event and places them together in the next follow-up turn. Progress is a lossy preview selected by timing; use the artifact to determine whether omitted output contained an error or state transition. A one-job wake message rendered for the model has this form:
 
 ```xml
 <system-notice>
@@ -52,20 +52,20 @@ When either async Bash or Hub process monitoring is available, the system prompt
 
 ```text
 <async-progress>
-Finite commands → `bash` with `async: "auto"`, `progress: "wake"` (quick stays inline). NEVER use `async: true` unless the user explicitly requests immediate background.
-Actionable process output → `hub`, `progress: "wake"` (`op: "start"` new; `op: "monitor"` existing).
+Finite commands: SHOULD use `bash` with `async: "auto"`, `progress: "wake"` — quick returns inline, slow promotes to a background job. Known long-running? `async: true` MAY background immediately.
+Process output that may need action: `hub` with `progress: "wake"` (`op: "start"` new; `op: "monitor"` existing). `wait` with `name` + `pattern`/`for`/`timeout` MAY block for readiness or exit.
 Verbose producer? Capture full logs unmonitored; filter one async Bash monitor.
-Existing condition? One sleeping async `until` loop; NEVER repeat tool polls.
-Progress uses 200 ms batches and a 10-event burst, then regains one rate-limit permit every 2 seconds. Suppressed inline events remain in the full artifact.
-Chatty progress → lower source verbosity (quiet or warning-only) or filter to actionable lines. If safe to retry, stop/cancel and relaunch with less output.
-Hub: retune the monitor to `ambient` or `off` without stopping the process.
-Bash: progress cannot be retuned; if retry is unsafe, let it finish.
-Truncated progress shows bounded `<head>`/`<tail>` previews and links its complete capture as `artifact://<id>`.
-NEVER call `hub wait`, follow logs, or block to receive progress or keep the turn alive; use async progress and end the turn instead.
+Waiting on a condition? One sleeping async `until` loop; AVOID repeated tool polls.
+Progress: 200 ms batches, 10-event burst, then 1 permit/2 s; suppressed events stay in the full artifact. Truncated batches show bounded `<head>`/`<tail>` and link `artifact://<id>`.
+Chatty progress: lower source verbosity (quiet or warning-only) or filter to actionable lines; safe to retry → stop and relaunch quieter.
+Hub: retune a chatty process without stopping it — `op: "monitor"` with `progress: "ambient"` or `"off"`.
+Bash: a job's `progress` is fixed at launch; retry unsafe → let it finish.
+Suppression reports repeat this guidance a few times with increasing spacing, then stop.
+Progress is pushed while you are idle. NEVER hold the turn open to receive it — no polling (`logs`, `ps`, short `wait` loops), no tailing files; end the turn.
 </async-progress>
 ```
 
-Each delivered progress batch is a harness-injected `async-progress` message in the model's conversation. Rate limiting suppresses whole post-batch events by timing, not severity. A suppression count names events, not lines. When delivery resumes—or a terminal suppression summary is emitted—the batch retains bounded previews from the first and last suppressed events while omitting text from the events between them; delivered progress therefore cannot prove that an error or state transition did not occur. The artifact is authoritative. The resumed event or terminal summary includes `<suppressed events="N" reason="rate-limit" full-output="artifact://<id>" />`. Every fifth suppression-bearing progress message appends a `<system-reminder>` containing the same chatty-progress instructions from the system prompt.
+Each delivered progress batch is a harness-injected `async-progress` message in the model's conversation. Rate limiting suppresses whole post-batch events by timing, not severity. A suppression count names events, not lines. When delivery resumes—or a terminal suppression summary is emitted—the batch retains bounded previews from the first and last suppressed events while omitting text from the events between them; delivered progress therefore cannot prove that an error or state transition did not occur. The artifact is authoritative. The resumed event or terminal summary includes `<suppressed events="N" reason="rate-limit" full-output="artifact://<id>" />`. A `<system-reminder>` carrying the same chatty-progress instructions as the system prompt is appended to a few suppression-bearing progress messages with increasing spacing, then never again for that job.
 
 When a batch was rate-limited or its preview exceeded the size bound, `<output>` instead carries a structured split: a `<head>` block, a `<suppressed reason="rate-limit|preview-limit" [events="N"] [full-output="artifact://<id>"] />` marker, and a `<tail>` block. The `<output>` element itself never carries attributes. Bash uses the same artifact as its final command output, so the URI stays stable for the job.
 
@@ -135,7 +135,7 @@ OMP Hub monitoring is the persistent-process counterpart to Claude Code Monitor'
 
 ## Live model behavioral eval
 
-The opt-in eval runs a real authenticated model through the normal `AgentSession`. Its Bash wake scenario requires `async: "auto"` with `progress: "wake"`; its Hub scenario requires a persistent `start` with `progress: "wake"`. In both cases the harness must inject the marker before completion, a later assistant message must acknowledge the pushed event, and the model must avoid blocking/polling calls. The quick-command case requires one Bash call that finishes inline, no async notification, and a reported result. The user prompts do not mention these selection rules, so the criteria measure agent-facing policy rather than parroting eval instructions.
+The opt-in eval runs a real authenticated model through the normal `AgentSession`. Its Bash wake scenario requires `async: "auto"` with `progress: "wake"`; its Hub scenario requires a persistent `start` with `progress: "wake"`. In both cases the harness must inject the marker before completion, a later assistant message must acknowledge the pushed event, and the model must avoid blocking/polling calls. The quick-command case requires one Bash call made with `async: "auto"` and `progress: "wake"` that still finishes inline, no async notification, and a reported result. The user prompts do not mention these selection rules, so the criteria measure agent-facing policy rather than parroting eval instructions.
 
 ```bash
 bun --cwd=packages/coding-agent run eval:async-progress --model <provider/model> --runs 3

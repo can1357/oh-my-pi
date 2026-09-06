@@ -268,8 +268,8 @@ describe("async progress chatty guidance", () => {
 
 		expect(message).not.toBeNull();
 		expect(message!.content).toContain("<system-reminder>");
-		expect(message!.content).toContain("Bash:");
-		expect(message!.content).not.toContain("Hub:");
+		expect(message!.content).toContain("\nBash:");
+		expect(message!.content).not.toContain("\nHub:");
 	});
 
 	test("renders process reminder metadata with monitor controls", () => {
@@ -288,8 +288,8 @@ describe("async progress chatty guidance", () => {
 
 		expect(message).not.toBeNull();
 		expect(message!.content).toContain("<system-reminder>");
-		expect(message!.content).toContain("Hub:");
-		expect(message!.content).not.toContain("Bash:");
+		expect(message!.content).toContain("\nHub:");
+		expect(message!.content).not.toContain("\nBash:");
 	});
 
 	test("omits the reminder element for unsupported sources", () => {
