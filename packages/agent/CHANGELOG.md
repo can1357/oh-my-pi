@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exposed `Agent.deadline` so session recovery can bound retries and stream watchdogs to `--max-time`.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed

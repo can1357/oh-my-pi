@@ -723,6 +723,12 @@ export class Agent {
 	set maxRetryDelayMs(value: number | undefined) {
 		this.#maxRetryDelayMs = value;
 	}
+
+	/** Absolute wall-clock deadline from `--max-time`, if set. */
+	get deadline(): number | undefined {
+		return this.#deadline;
+	}
+
 	get state(): AgentState {
 		return this.#state;
 	}

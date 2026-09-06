@@ -105,6 +105,66 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(calls[2]?.options?.textVerbosity).toBe("medium");
 	});
 
+	it("does not reserve a hop slice when modelFallback is on but fallbackChains is empty", () => {
+		const settings = Settings.isolated({
+			"providers.streamFirstEventTimeoutSeconds": 600,
+			"providers.streamIdleTimeoutSeconds": 300,
+			"retry.modelFallback": true,
+		});
+		const { fn: base, calls } = captureBase();
+		const deadline = Date.now() + 90_000;
+		const wrapped = createSettingsAwareStreamFn(settings, base, { getDeadline: () => deadline });
+
+		wrapped(stubModel, stubContext, undefined);
+
+		const first = calls[0]?.options?.streamFirstEventTimeoutMs;
+		const idle = calls[0]?.options?.streamIdleTimeoutMs;
+		expect(first).toBeGreaterThanOrEqual(88_000);
+		expect(first).toBeLessThanOrEqual(89_000);
+		expect(idle).toBe(first);
+	});
+
+	it("caps stream watchdogs to remaining --max-time when a fallback chain hop exists", () => {
+		const settings = Settings.isolated({
+			"providers.streamFirstEventTimeoutSeconds": 600,
+			"providers.streamIdleTimeoutSeconds": 300,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: ["openai/gpt-4o-mini"] },
+		});
+		const { fn: base, calls } = captureBase();
+		const deadline = Date.now() + 90_000;
+		const wrapped = createSettingsAwareStreamFn(settings, base, { getDeadline: () => deadline });
+
+		wrapped(stubModel, stubContext, undefined);
+
+		const first = calls[0]?.options?.streamFirstEventTimeoutMs;
+		const idle = calls[0]?.options?.streamIdleTimeoutMs;
+		expect(first).toBeGreaterThanOrEqual(74_000);
+		expect(first).toBeLessThanOrEqual(75_000);
+		expect(idle).toBe(first);
+	});
+
+	it("re-caps an explicit caller watchdog when a session deadline exists", () => {
+		const settings = Settings.isolated({
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: ["openai/gpt-4o-mini"] },
+		});
+		const { fn: base, calls } = captureBase();
+		const deadline = Date.now() + 90_000;
+		const wrapped = createSettingsAwareStreamFn(settings, base, { getDeadline: () => deadline });
+
+		wrapped(stubModel, stubContext, {
+			streamFirstEventTimeoutMs: 300_000,
+			streamIdleTimeoutMs: 0,
+		});
+
+		const first = calls[0]?.options?.streamFirstEventTimeoutMs;
+		const idle = calls[0]?.options?.streamIdleTimeoutMs;
+		expect(first).toBeGreaterThanOrEqual(74_000);
+		expect(first).toBeLessThanOrEqual(75_000);
+		expect(idle).toBe(first);
+	});
+
 	it("forwards configured stream watchdog budgets while preserving caller overrides", () => {
 		const settings = Settings.isolated({
 			"providers.streamFirstEventTimeoutSeconds": 600,

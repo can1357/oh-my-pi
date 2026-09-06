@@ -3511,7 +3511,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// each LLM HTTP request — not the whole subagent lifecycle — holds the
 		// slot, preventing the nested-spawn deadlock from issue #3749.
 		const settingsAwareStreamFn = wrapStreamFnWithBlobUrlFallback(
-			wrapStreamFnWithProviderConcurrency(settings, createSettingsAwareStreamFn(settings)),
+			wrapStreamFnWithProviderConcurrency(
+				settings,
+				createSettingsAwareStreamFn(settings, undefined, { getDeadline: () => options.deadline }),
+			),
 			blobBroker,
 		);
 		const codeModeState: { namespacesInfo?: unknown } = {};

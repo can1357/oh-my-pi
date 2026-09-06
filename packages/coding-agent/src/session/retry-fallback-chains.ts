@@ -75,6 +75,42 @@ export function calculateRetryBackoffDelayMs(baseDelayMs: number, attempt: numbe
 	return cappedDelayMs * jitter;
 }
 
+export { capDurationToSessionDeadline, remainingSessionDeadlineMs } from "./session-deadline";
+
+function isNonEmptyFallbackSelector(value: unknown): boolean {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * Whether this request can hop to a configured fallback before `--max-time`
+ * expires. `retry.modelFallback` defaults to true while `retry.fallbackChains`
+ * defaults to `{}`, so a bare modelFallback flag is not enough to reserve hop
+ * budget.
+ */
+export function hasEligibleRetryFallbackHop(
+	settings: Settings,
+	model?: Model | null,
+	currentSelector?: string,
+): boolean {
+	if (!settings.get("retry.modelFallback")) return false;
+	const chains = getRetryFallbackChains(settings);
+	if (!model?.provider || !model.id) {
+		return Object.values(chains).some(chain => Array.isArray(chain) && chain.some(isNonEmptyFallbackSelector));
+	}
+	const context: RetryFallbackResolutionContext = {
+		chains,
+		getModelRole: role => settings.getModelRole(role),
+		modelLookup: {
+			find: () => undefined,
+			hasProvider: () => true,
+		},
+	};
+	const selector = currentSelector ?? `${model.provider}/${model.id}`;
+	const chainKey = resolveRetryFallbackChainKey(context, selector, model);
+	if (!chainKey) return false;
+	return findRetryFallbackCandidates(context, chainKey, selector, model).length > 0;
+}
+
 /** Parses a configured retry fallback selector. */
 export function parseRetryFallbackSelector(
 	selector: string,

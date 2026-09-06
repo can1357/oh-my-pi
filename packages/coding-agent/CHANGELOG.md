@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `--max-time` now reserves fallback-hop budget only when a configured `retry.fallbackChains` candidate exists, and caps the final retry wait so a hung primary can still fail over before the deadline.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
