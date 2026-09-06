@@ -9889,10 +9889,16 @@ export class AgentSession {
 	 * Ask before the first auto-spend (`codexResets.autoRedeem === "unset"`).
 	 * The answer is persisted, so this fires at most once per install. Headless
 	 * hosts get a one-shot notice per episode instead of a prompt.
+	 *
+	 * `announce` is the caller's claim that a request is parked on the answer.
+	 * Only the blocked-retry path can make it: the salvage sweep runs
+	 * fire-and-forget beside a finished usage fetch, so announcing there would
+	 * tell the user a turn is waiting when none is.
 	 */
 	async #confirmCodexAutoRedeem(
 		actions: CodexResetAction[],
 		coordinator: CodexAutoRedeemCoordinator,
+		announce: boolean,
 	): Promise<boolean> {
 		const first = actions[0];
 		if (!first) return false;
@@ -9919,16 +9925,20 @@ export class AgentSession {
 				? `Spend a saved Codex rate-limit reset?\n${lines[0]}`
 				: `Spend ${actions.length} saved Codex rate-limit resets?\n${lines.join("\n")}`;
 		try {
-			const choice = await runner.getUIContext().select(question, [
-				{
-					label: "Yes",
-					description: "Redeem now and remember yes for future eligible Codex resets.",
-				},
-				{
-					label: "No",
-					description: "Do not auto-redeem saved Codex resets.",
-				},
-			]);
+			const choice = await runner.getUIContext().select(
+				question,
+				[
+					{
+						label: "Yes",
+						description: "Redeem now and remember yes for future eligible Codex resets.",
+					},
+					{
+						label: "No",
+						description: "Do not auto-redeem saved Codex resets.",
+					},
+				],
+				{ announce },
+			);
 			if (choice === "Yes") {
 				this.settings.set("codexResets.autoRedeem", "yes");
 				return true;
@@ -10136,7 +10146,8 @@ export class AgentSession {
 			if (plan.actions.length === 0) return false;
 			if (
 				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
-				!(await this.#confirmCodexAutoRedeem(plan.actions, coordinator))
+				// A retry is parked on this answer, so a backgrounded pane has to hear it.
+				!(await this.#confirmCodexAutoRedeem(plan.actions, coordinator, true))
 			) {
 				return false;
 			}
@@ -10178,7 +10189,8 @@ export class AgentSession {
 			if (plan.actions.length === 0) return;
 			if (
 				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
-				!(await this.#confirmCodexAutoRedeem(plan.actions, coordinator))
+				// Fire-and-forget beside a finished fetch: nothing is waiting, stay silent.
+				!(await this.#confirmCodexAutoRedeem(plan.actions, coordinator, false))
 			) {
 				return;
 			}

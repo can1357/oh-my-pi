@@ -1,5 +1,5 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
-import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { Container, Spacer, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import { KeybindingsManager } from "../../config/keybindings";
 import type {
@@ -29,7 +29,7 @@ import { HookEditorComponent } from "../../modes/components/hook-editor";
 import { HookInputComponent } from "../../modes/components/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/components/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
-import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
+import type { AwaitedDialogOptions, InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 
@@ -153,7 +153,7 @@ export class ExtensionUiController {
 			return this.showHookConfirm(
 				"Coding-plan reserve reached",
 				`${confirmation.from} has ${reserve}. Switch to ${confirmation.to}? Choose No to keep using the current plan.`,
-				{ signal },
+				{ signal, announce: true },
 			);
 		});
 
@@ -581,7 +581,7 @@ export class ExtensionUiController {
 	async showCollabAwareSelector(
 		title: string,
 		options: ExtensionUISelectItem[],
-		dialogOptions?: InteractiveSelectorDialogOptions,
+		dialogOptions?: InteractiveSelectorDialogOptions & AwaitedDialogOptions,
 		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
 		const request: CollabUiRequestDraft = {
@@ -602,7 +602,7 @@ export class ExtensionUiController {
 	async showCollabAwareEditor(
 		title: string,
 		prefill?: string,
-		dialogOptions?: ExtensionUIDialogOptions,
+		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined> {
 		const request: CollabUiRequestDraft = { kind: "editor", title, prefill };
@@ -613,7 +613,7 @@ export class ExtensionUiController {
 
 	async showAskDialog(
 		questions: ExtensionAskDialogQuestion[],
-		dialogOptions?: ExtensionUIDialogOptions,
+		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
 		const host = this.ctx.collabHost;
 		if (!host) return this.#showLocalAskDialog(questions, dialogOptions);
@@ -636,9 +636,10 @@ export class ExtensionUiController {
 
 	#showLocalAskDialog(
 		questions: ExtensionAskDialogQuestion[],
-		dialogOptions?: ExtensionUIDialogOptions,
+		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
-		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, settle => {
+		const announced = dialogOptions?.announce ? (questions[0]?.question ?? "Waiting for input") : undefined;
+		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, announced, settle => {
 			let promptEditor: HookEditorComponent | undefined;
 			let promptResolve: ((value: string | undefined) => void) | undefined;
 			let closed = false;
@@ -893,15 +894,43 @@ export class ExtensionUiController {
 	}
 
 	/**
+	 * Announce a prompt the agent is waiting on, so one raised while the pane is
+	 * backgrounded is discoverable at all — the turn otherwise just stops.
+	 *
+	 * Callers opt in: a turn being in flight does not mean the turn is blocked on
+	 * this dialog. The large-paste menu, slash-command pickers, user-run extension
+	 * commands and fire-and-forget `message_end` handlers all open dialogs mid-turn
+	 * without blocking it, so only the sites that genuinely wait ask for this —
+	 * tool approvals, the coding-plan reserve question, and collab guest requests
+	 * relayed from a blocked host. `ask.notify` still governs it, the same way it
+	 * governs the `ask` tool.
+	 */
+	#announceAwaitedPrompt(prompt: string): void {
+		if (this.ctx.settings.get("ask.notify") === "off") return;
+		// Headline only. The body of an approval prompt carries the command line,
+		// eval source, or file paths, and a desktop notification is retained in
+		// notification history and shown on a locked screen — not a place for a
+		// token that happened to sit in an argument.
+		const [head = ""] = prompt.split("\n");
+		TERMINAL.sendNotification({
+			title: this.ctx.sessionManager.getSessionName() || "Oh My Pi",
+			body: head.trim().slice(0, 140) || "Waiting for input",
+			type: "ask",
+			urgency: "normal",
+			actions: "focus",
+		});
+	}
+
+	/**
 	 * Show a selector for hooks.
 	 */
 	showHookSelector(
 		title: string,
 		options: ExtensionUISelectItem[],
-		dialogOptions?: InteractiveSelectorDialogOptions,
+		dialogOptions?: InteractiveSelectorDialogOptions & AwaitedDialogOptions,
 		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
-		return this.#presentDialog(dialogOptions?.signal, settle => {
+		return this.#presentDialog(dialogOptions?.signal, dialogOptions?.announce ? title : undefined, settle => {
 			const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
 			this.ctx.hookSelector = new HookSelectorComponent(
 				title,
@@ -960,7 +989,11 @@ export class ExtensionUiController {
 	/**
 	 * Show a confirmation dialog for hooks.
 	 */
-	async showHookConfirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
+	async showHookConfirm(
+		title: string,
+		message: string,
+		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
+	): Promise<boolean> {
 		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"], dialogOptions);
 		return result === "Yes";
 	}
@@ -971,9 +1004,9 @@ export class ExtensionUiController {
 	showHookInput(
 		title: string,
 		placeholder?: string,
-		dialogOptions?: ExtensionUIDialogOptions,
+		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
 	): Promise<string | undefined> {
-		return this.#presentDialog(dialogOptions?.signal, settle => {
+		return this.#presentDialog(dialogOptions?.signal, dialogOptions?.announce ? title : undefined, settle => {
 			this.ctx.hookInput = new HookInputComponent(
 				title,
 				placeholder,
@@ -1011,10 +1044,10 @@ export class ExtensionUiController {
 	showHookEditor(
 		title: string,
 		prefill?: string,
-		dialogOptions?: ExtensionUIDialogOptions,
+		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined> {
-		return this.#presentDialog(dialogOptions?.signal, settle => {
+		return this.#presentDialog(dialogOptions?.signal, dialogOptions?.announce ? title : undefined, settle => {
 			this.ctx.hookEditor = new HookEditorComponent(
 				this.ctx.ui,
 				title,
@@ -1225,6 +1258,14 @@ export class ExtensionUiController {
 	 */
 	#presentDialog<T = string>(
 		signal: AbortSignal | undefined,
+		/**
+		 * Prompt to announce once this dialog is actually on screen, or undefined
+		 * for a dialog that announces itself elsewhere. Announcing here rather
+		 * than at the call site matters because a request can sit in
+		 * `#dialogQueue` behind an active dialog, or abort before its turn ever
+		 * arrives: the notification has to follow the presentation, not the ask.
+		 */
+		prompt: string | undefined,
 		present: (settle: (value: T | undefined) => void) => () => void,
 	): Promise<T | undefined> {
 		const { promise, resolve, reject } = Promise.withResolvers<T | undefined>();
@@ -1258,6 +1299,7 @@ export class ExtensionUiController {
 			this.#dialogActive = true;
 			try {
 				hide = present(settle);
+				if (prompt !== undefined) this.#announceAwaitedPrompt(prompt);
 			} catch (error) {
 				settled = true;
 				signal?.removeEventListener("abort", onAbort);

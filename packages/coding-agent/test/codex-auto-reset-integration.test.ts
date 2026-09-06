@@ -140,12 +140,16 @@ describe("codex saved-reset trigger integration", () => {
 		report: UsageReport;
 		liveCredits: ResetCreditAccountStatus[];
 		streamErrorFirst?: boolean;
+		/** Answer the consent prompt through a fake UI instead of running headless. */
+		promptAnswer?: string;
 	}
 
 	interface Harness {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
 		redeemTargets: ResetCreditTarget[];
+		/** Options passed to every consent `select`, in call order. */
+		promptOptions: Array<Record<string, unknown> | undefined>;
 	}
 
 	function buildSession(opts: HarnessOpts): Harness {
@@ -189,15 +193,29 @@ describe("codex saved-reset trigger integration", () => {
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
 		const coordinator = createCodexAutoRedeemCoordinator();
+		const promptOptions: Array<Record<string, unknown> | undefined> = [];
+		const extensionRunner =
+			opts.promptAnswer === undefined
+				? undefined
+				: ({
+						hasUI: () => true,
+						getUIContext: () => ({
+							select: (_question: string, _choices: unknown, options?: Record<string, unknown>) => {
+								promptOptions.push(options);
+								return Promise.resolve(opts.promptAnswer);
+							},
+						}),
+					} as unknown as ConstructorParameters<typeof AgentSession>[0]["extensionRunner"]);
 		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
 			modelRegistry,
 			codexResetCoordinator: coordinator,
+			extensionRunner,
 		});
 		sessions.push(session);
-		return { session, coordinator, redeemTargets };
+		return { session, coordinator, redeemTargets, promptOptions };
 	}
 
 	it("spends a saved reset on a live 429 even when the report is a pre-block snapshot, then retries", async () => {
@@ -297,5 +315,29 @@ describe("codex saved-reset trigger integration", () => {
 		// and the episode is NOT burned, so a UI session could still redeem it.
 		expect(redeemTargets).toHaveLength(0);
 		expect(coordinator.attemptedKeys.size).toBe(0);
+	});
+
+	it("asks silently from the salvage sweep: no request is parked on the answer", async () => {
+		const { session, coordinator, redeemTargets, promptOptions } = buildSession({
+			settings: { "codexResets.autoRedeem": "unset", "codexResets.salvageHorizonHours": 12 },
+			report: codexReport({
+				primaryUsed: 1.0,
+				weeklyUsed: 0.2,
+				limitReached: false,
+				credits: 1,
+				creditExpiresInMs: 2 * HOUR,
+			}),
+			liveCredits: [liveCreditStatus(1, 2 * HOUR)],
+			promptAnswer: "Yes",
+		});
+
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+
+		// The sweep runs fire-and-forget beside a finished usage fetch, so the
+		// prompt must not claim a turn is waiting on it.
+		expect(promptOptions).toHaveLength(1);
+		expect(promptOptions[0]?.announce).toBe(false);
+		expect(redeemTargets).toHaveLength(1);
 	});
 });
