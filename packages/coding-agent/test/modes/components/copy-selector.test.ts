@@ -29,13 +29,13 @@ function entry(id: string, parentId: string | null, message: AgentMessage): Sess
 }
 
 /** user → assistant(text + code fence + bash call) → bash result. */
-function makeEntries(): SessionMessageEntry[] {
+function makeEntries(assistantText = ASSISTANT_TEXT): SessionMessageEntry[] {
 	return [
 		entry("u1", null, { role: "user", content: "fix the logging", timestamp: 1 } as AgentMessage),
 		entry("a1", "u1", {
 			role: "assistant",
 			content: [
-				{ type: "text", text: ASSISTANT_TEXT },
+				{ type: "text", text: assistantText },
 				{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "bun test" } },
 			],
 			api: "anthropic-messages",
@@ -316,6 +316,22 @@ describe("CopySelectorComponent", () => {
 
 		expect(opens).toEqual([{ href: LINK, label: `link${theme.sep.dot}the PR` }]);
 		expect(picks).toEqual([]);
+	});
+
+	it("keeps later caption click targets aligned after a multiline link label", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks, () => {}, undefined, makeEntries(`[line one\nline two](${LINK})`));
+		selector.render(100);
+		selector.handleInput(RIGHT);
+		// Split embedded newlines exactly as the terminal does before reporting an SGR mouse row.
+		const physicalFrame = selector.render(100).join("\n").split("\n");
+		const { row } = locate(physicalFrame, `2/3${theme.sep.dot}bash command`);
+		const copyCol = Bun.stripANSI(physicalFrame[row]!).indexOf(`${theme.cmd.copy} copy`);
+		expect(copyCol).toBeGreaterThan(0);
+		selector.handleInput(click(row, copyCol + 1));
+		selector.dispose();
+
+		expect(picks).toEqual([{ content: "bun test", label: "bash command" }]);
 	});
 
 	it("click positions follow the scroll offset", () => {

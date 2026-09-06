@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `extractMarkdownLinks()` now returns one-row visible labels for formatted and multiline links ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).
+
 ## [18.1.12] - 2026-09-06
 
 ### Fixed
