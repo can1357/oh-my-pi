@@ -68,6 +68,7 @@ import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import type * as SetupWizardModule from "./modes/setup-wizard";
 import type { SetupScene } from "./modes/setup-wizard";
+import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-command";
 import {
 	applyStartupComposerPreferences,
 	type ComposerLease,
@@ -305,7 +306,14 @@ export function buildModelScopeNotification(
 export async function submitInteractiveInput(
 	mode: Pick<
 		InteractiveMode,
-		"markPendingSubmissionStarted" | "finishPendingSubmission" | "showError" | "checkShutdownRequested"
+		| "markPendingSubmissionStarted"
+		| "finishPendingSubmission"
+		| "showError"
+		| "checkShutdownRequested"
+		| "skillCommands"
+		| "renderOptimisticSkillMessage"
+		| "clearOptimisticSkillMessage"
+		| "optimisticSkillMessagePending"
 	>,
 	session: Pick<AgentSession, "prompt" | "promptCustomMessage" | "isStreaming">,
 	input: SubmittedUserInput,
@@ -334,6 +342,16 @@ export async function submitInteractiveInput(
 		if (!input.started && !mode.markPendingSubmissionStarted(input)) {
 			return;
 		}
+		const skillHost = {
+			skillCommands: mode.skillCommands,
+			session,
+			showError: mode.showError.bind(mode),
+			renderOptimisticSkillMessage: mode.renderOptimisticSkillMessage.bind(mode),
+			clearOptimisticSkillMessage: mode.clearOptimisticSkillMessage.bind(mode),
+			get optimisticSkillMessagePending() {
+				return mode.optimisticSkillMessagePending;
+			},
+		};
 		if (input.customType) {
 			const message = {
 				customType: input.customType,
@@ -353,6 +371,15 @@ export async function submitInteractiveInput(
 				synthetic: true,
 				expandPromptTemplates: false,
 				userInitiated: input.userInitiated,
+			});
+		} else if (isKnownSkillCommand(skillHost, input.text)) {
+			// Resubmitted skill text must dispatch through the skill path, or the
+			// model receives a literal `/skill:` token.
+			await invokeSkillCommandFromText(skillHost, input.text, streamingBehavior, {
+				images: input.images,
+				imageLinks: input.imageLinks,
+				optimistic: true,
+				propagateErrors: true,
 			});
 		} else {
 			await session.prompt(input.text, { images: input.images, streamingBehavior });

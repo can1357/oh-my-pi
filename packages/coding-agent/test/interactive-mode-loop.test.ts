@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -205,5 +206,90 @@ describe("InteractiveMode loop auto-submit", () => {
 
 		mode.disableLoopMode();
 		expect(setLoopModeStatus).toHaveBeenLastCalledWith(undefined);
+	});
+
+	it("resubmits a /skill: prompt dispatched inline by the submit handler", async () => {
+		vi.useFakeTimers();
+		const skillPath = path.join(tempDir.path(), "recap.md");
+		await Bun.write(skillPath, "---\nname: recap\n---\nSummarize recent changes.\n");
+		mode.skillCommands.set("skill:recap", {
+			name: "recap",
+			description: "",
+			filePath: skillPath,
+			baseDir: tempDir.path(),
+			source: "test",
+		});
+		new InputController(mode).setupEditorSubmitHandler();
+		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(true);
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+
+		mode.disableLoopMode();
+		mode.loopModeEnabled = true;
+		const resolved: SubmittedUserInput[] = [];
+		pendingInput = mode.getUserInput();
+		void pendingInput.then(input => resolved.push(input));
+
+		await mode.editor.onSubmit?.("/skill:recap go");
+
+		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+		expect(mode.loopPrompt).toBe("/skill:recap go");
+		expect(resolved).toHaveLength(0);
+
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+
+		expect(resolved).toHaveLength(1);
+		expect(resolved[0].text).toBe("/skill:recap go");
+		mode.skillCommands.delete("skill:recap");
+	});
+
+	it("paints no optimistic user row for a resubmitted /skill: loop prompt", async () => {
+		vi.useFakeTimers();
+		const skillPath = path.join(tempDir.path(), "recap.md");
+		await Bun.write(skillPath, "---\nname: recap\n---\nSummarize recent changes.\n");
+		mode.skillCommands.set("skill:recap", {
+			name: "recap",
+			description: "",
+			filePath: skillPath,
+			baseDir: tempDir.path(),
+			source: "test",
+		});
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+
+		mode.loopModeEnabled = true;
+		mode.loopPrompt = "/skill:recap go";
+		const resolved: SubmittedUserInput[] = [];
+		pendingInput = mode.getUserInput();
+		void pendingInput.then(input => resolved.push(input));
+
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+
+		expect(resolved).toHaveLength(1);
+		expect(resolved[0].text).toBe("/skill:recap go");
+		// A plain loop prompt paints one; the skill row comes from the dispatched
+		// custom message instead.
+		expect(mode.addMessageToChat).not.toHaveBeenCalled();
+		mode.skillCommands.delete("skill:recap");
+	});
+
+	it("paints an optimistic user row for a resubmitted plain loop prompt", async () => {
+		vi.useFakeTimers();
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+
+		mode.loopModeEnabled = true;
+		mode.loopPrompt = "repeat this";
+		const resolved: SubmittedUserInput[] = [];
+		pendingInput = mode.getUserInput();
+		void pendingInput.then(input => resolved.push(input));
+
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+
+		expect(resolved).toHaveLength(1);
+		expect(mode.addMessageToChat).toHaveBeenCalledTimes(1);
 	});
 });
