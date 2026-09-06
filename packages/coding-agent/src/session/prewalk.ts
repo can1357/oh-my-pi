@@ -1,7 +1,7 @@
 import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
@@ -15,6 +15,7 @@ import { isMCPToolName } from "../tools/builtin-names";
 import type { PlanProposalHandler } from "../tools/resolve";
 import { ToolError } from "../tools/tool-errors";
 import type { PlanYolo, Prewalk } from "./agent-session-types";
+import { isImplementationActionResult } from "./implementation-action";
 import { PREWALK_PLAN_MESSAGE_TYPE } from "./messages";
 import type { SessionManager } from "./session-manager";
 
@@ -25,32 +26,25 @@ const PREWALK_CHECKLIST_MESSAGE_TYPE = "prewalk-checklist";
 export function isPrewalkPlanNudge(message: AgentMessage): boolean {
 	return message.role === "custom" && message.customType === PREWALK_PLAN_MESSAGE_TYPE;
 }
-const PREWALK_ACTION_TOOLS: Record<string, true> = {
-	edit: true,
-	write: true,
-};
+/** Marker set on an eval status event whose nested tool call was a workspace-mutating implementation action. */
+const EVAL_IMPLEMENTATION_ACTION_MARKER = "implementationAction";
 const PLAN_YOLO_HANDOFF_MESSAGE_TYPE = "plan-yolo-handoff";
 
 /**
  * Whether a completed tool result is the first workspace-mutating action that
- * arms the prewalk hand-off. A direct `edit`/`write` call always counts; a
- * `write` that dispatched an `xd://` device (e.g. `lsp`, `ast_edit`, `debug`)
- * counts only when the wrapped tool resolved to a `write`/`exec` approval tier.
- * Read-only device calls — LSP navigation, `debug` inspection, `ast_edit` on
- * internal URLs, help lookups — leave the tier `read` (or absent) and must not
- * switch the model mid-investigation (issue #7312).
+ * arms the prewalk hand-off. A direct `edit`/`write` counts via
+ * {@link isImplementationActionResult}; under Code Mode those tools leave the
+ * direct surface and run through the eval bridge, so the turn-level result is
+ * named `eval` and the nested action is recognized from the bridge's marker
+ * (issue #11018). Read-only eval cells and read-tier `xd://` device ops carry
+ * no marker, preserving the mid-investigation exclusion (issue #7312).
  */
 function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
-	if (!PREWALK_ACTION_TOOLS[result.toolName]) return false;
+	if (isImplementationActionResult(result)) return true;
+	if (result.toolName !== "eval" || result.isError === true) return false;
 	const details = result.details;
-	// A direct filesystem edit/write carries no `xd://` dispatch metadata.
-	if (!details || typeof details !== "object" || !("xdev" in details) || !details.xdev) return true;
-	const xdev = details.xdev;
-	// Device dispatch: switch only on a genuine mutation tier. An absent tier
-	// (help lookup, unresolved approval) declines the switch, matching the
-	// reporter's "stay on the large model a couple turns longer" preference.
-	if (typeof xdev !== "object" || !("tier" in xdev)) return false;
-	return xdev.tier === "write" || xdev.tier === "exec";
+	if (!isRecord(details) || !Array.isArray(details.statusEvents)) return false;
+	return details.statusEvents.some(event => isRecord(event) && event[EVAL_IMPLEMENTATION_ACTION_MARKER] === true);
 }
 
 /** Capabilities the prewalk coordinator borrows from its owning session. */

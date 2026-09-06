@@ -18,6 +18,7 @@
 ### Fixed
 
 - Fixed fullscreen `/copy` outlining only a lazily created grouped Read card, so Enter copies the assistant yield instead of tool output.
+- Fixed prewalk not handing off after an `edit`/`write` dispatched through Eval under Codex Code Mode; the eval bridge now flags nested workspace-mutating actions so the switch fires while read-only cells and read-tier `xd://` device ops still don't ([#11018](https://github.com/can1357/oh-my-pi/issues/11018)).
 
 ## [18.1.11] - 2026-09-05
 

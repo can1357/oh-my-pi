@@ -107,6 +107,21 @@ describe("AgentSession prewalk", () => {
 		return { content: [{ type: "toolCall", id, name, arguments: {} }], stopReason: "toolUse" };
 	}
 
+	const evalToolSchema = type({});
+	function makeEvalTool(
+		statusEvents: Array<Record<string, unknown>>,
+	): AgentTool<typeof evalToolSchema, { statusEvents: Array<Record<string, unknown>> }> {
+		return {
+			name: "eval",
+			label: "Eval",
+			description: "Run an eval cell",
+			parameters: evalToolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "ran cell" }], details: { statusEvents } };
+			},
+		};
+	}
+
 	it("prewalks at the first edit/write after the todo gate opens; bash and todo don't trigger", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
@@ -499,6 +514,108 @@ describe("AgentSession prewalk", () => {
 			`${target.provider}/${target.id}`,
 		]);
 		expect(session.model?.id).toBe(target.id);
+	});
+
+	it("prewalks on an edit/write dispatched through an eval cell under Code Mode (issue #11018)", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+
+		// Code Mode removes edit/write from the direct surface and runs them
+		// through the eval bridge, so the turn-level result is named `eval`. The
+		// bridge flags the nested write; prewalk must hand off exactly as it would
+		// for a direct write. Turn 1 (todo) opens the gate; turn 2 (eval write)
+		// switches, so turn 3 runs on the target.
+		const evalWrite = makeEvalTool([{ op: "write", path: "example.txt", chars: 7, implementationAction: true }]);
+		const mock = createMockModel({
+			responses: [toolCall("t1", "todo"), toolCall("t2", "eval"), { content: ["done"] }],
+		});
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [todoTool as AgentTool, evalWrite as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map([
+				[todoTool.name, todoTool as AgentTool],
+				[evalWrite.name, evalWrite as AgentTool],
+			]),
+			prewalk: { target },
+		});
+
+		await session.prompt("implement via eval");
+
+		expect(requested).toEqual([
+			`${primary.provider}/${primary.id}`,
+			`${primary.provider}/${primary.id}`,
+			`${target.provider}/${target.id}`,
+		]);
+		expect(session.model?.id).toBe(target.id);
+	});
+
+	it("does not switch on a read-only eval cell (issue #11018 keeps the #7312 exclusion)", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+
+		// A read-only eval cell (or a read-tier `xd://` device op) carries no
+		// implementation-action marker, so the model keeps reasoning on the strong
+		// model. Mirrors the #7312 read-only device flow: one continuation, four
+		// turns, all primary, then a clean stop.
+		const evalRead = makeEvalTool([{ op: "read", path: "example.txt", chars: 10 }]);
+		const mock = createMockModel({
+			responses: [
+				toolCall("t1", "record"),
+				toolCall("t2", "eval"),
+				{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
+				{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
+			],
+		});
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [recordTool as AgentTool, evalRead as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map([
+				[recordTool.name, recordTool as AgentTool],
+				[evalRead.name, evalRead as AgentTool],
+			]),
+			prewalk: { target },
+		});
+
+		await session.prompt("investigate via eval");
+
+		expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
+		expect(session.model?.id).toBe(primary.id);
 	});
 
 	it("re-arms continuation after tool progress between prose turns", async () => {
