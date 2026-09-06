@@ -62,6 +62,62 @@ export function partitionSpawnFanIn(agents: readonly string[], itemBlocking: rea
 	return { blockingIndices, asyncIndices, reviewIndices };
 }
 
+/** Apply fan-in routing: reviewers always run async alongside implementers. */
+export function resolveSpawnExecutionBlocking(
+	agents: readonly string[],
+	itemBlocking: readonly boolean[],
+): boolean[] {
+	return agents.map((agentName, index) =>
+		isReviewAgent(agentName) ? false : (itemBlocking[index] ?? false),
+	);
+}
+
+export interface CoordinationSpawnRoute {
+	agentName: string;
+	role: string;
+	thread?: string;
+	cmux?: string;
+	owner?: string;
+}
+
+/** Resolve registry-backed ownership routes for spawned agents (routing, not advisory). */
+export function resolveCoordinationSpawnRoutes(
+	registry: EstateRoleCoordinationRegistry | undefined,
+	agents: readonly string[],
+): CoordinationSpawnRoute[] {
+	if (!registry) return [];
+	const routes: CoordinationSpawnRoute[] = [];
+	for (const agentName of agents) {
+		const entry = lookupCoordinationForAgent(registry, agentName);
+		if (!entry) continue;
+		routes.push({
+			agentName,
+			role: entry.role,
+			thread: entry.thread,
+			cmux: entry.cmux,
+			owner: entry.owner,
+		});
+	}
+	return routes;
+}
+
+/** Build shared context block injected into task batch context for registry ownership. */
+export function buildCoordinationSpawnContext(
+	registry: EstateRoleCoordinationRegistry | undefined,
+	agents: readonly string[],
+): string | undefined {
+	const routes = resolveCoordinationSpawnRoutes(registry, agents);
+	if (routes.length === 0) return undefined;
+	const lines = routes.map(route => {
+		const parts = [`role=${route.role}`];
+		if (route.thread) parts.push(`thread=${route.thread}`);
+		if (route.cmux) parts.push(`cmux=${route.cmux}`);
+		if (route.owner) parts.push(`owner=${route.owner}`);
+		return `- \`${route.agentName}\`: ${parts.join(", ")}`;
+	});
+	return `# Coordination routing\n${lines.join("\n")}`;
+}
+
 /**
  * Advisory for mixed implementation + reviewer batches: review runs alongside
  * delivery and fans findings back to the owning lead via hub, not serial relay.
