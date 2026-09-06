@@ -581,6 +581,7 @@ export class AgentSession {
 	#unsubscribeModelRoles?: () => void;
 	#unsubscribeExtendedContext?: () => void;
 	#unsubscribeCodeMode?: () => void;
+	#unsubscribeContextWindowSettings?: () => void;
 	#unsubscribeEvalPreludeSettings?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
@@ -1853,6 +1854,12 @@ export class AgentSession {
 		this.#unsubscribeCodeMode = onCodeModeChanged(() => {
 			void this.#tools.reconcileCodeMode().catch(error => {
 				logger.warn("Code Mode reconcile after setting change failed", { error: String(error) });
+			});
+		});
+		this.#unsubscribeContextWindowSettings = this.settings.onEffectiveChange(path => {
+			if (path !== "compaction.methodOrder" && path !== "compaction.enabled") return;
+			void this.initializeCodexContext().catch(error => {
+				logger.warn("Codex context-window reconcile after setting change failed", { error: String(error) });
 			});
 		});
 
@@ -4605,6 +4612,10 @@ export class AgentSession {
 		if (this.#unsubscribeCodeMode) {
 			this.#unsubscribeCodeMode();
 			this.#unsubscribeCodeMode = undefined;
+		}
+		if (this.#unsubscribeContextWindowSettings) {
+			this.#unsubscribeContextWindowSettings();
+			this.#unsubscribeContextWindowSettings = undefined;
 		}
 		if (this.#unsubscribeEvalPreludeSettings) {
 			this.#unsubscribeEvalPreludeSettings();

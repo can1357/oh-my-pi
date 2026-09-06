@@ -50,7 +50,6 @@ export class CodexContextWindowRuntime {
 	readonly protocol: CodexContextWindowProtocol;
 	readonly backend: CodexHistoryNotesBackend;
 	readonly #host: RuntimeHost;
-	readonly #windowRequested: boolean;
 	#notesRequested: boolean | undefined;
 	#sessionId?: string;
 	#available = false;
@@ -63,7 +62,6 @@ export class CodexContextWindowRuntime {
 
 	constructor(host: RuntimeHost) {
 		this.#host = host;
-		this.#windowRequested = host.settings.get("compaction.methodOrder").includes("window");
 		const notesMode = host.settings.get("providers.openai-codex.historyNotes");
 		this.#notesRequested =
 			notesMode === "auto" ? getCodexContextWindowPolicy(host.model())?.useHistoryNotes : notesMode === "on";
@@ -75,13 +73,18 @@ export class CodexContextWindowRuntime {
 		});
 	}
 
+	/** Re-read per access: `compaction.methodOrder` changes at runtime. */
+	get #windowRequested(): boolean {
+		return this.#host.settings.get("compaction.methodOrder").includes("window");
+	}
+
 	get windowActive(): boolean {
 		return (
 			this.#windowDisabledReason === undefined &&
 			this.#host.settings.get("compaction.enabled") &&
 			this.#available &&
 			this.#windowRequested &&
-			this.#policy?.enabled === true
+			this.#policy !== undefined
 		);
 	}
 
@@ -140,7 +143,9 @@ export class CodexContextWindowRuntime {
 			return;
 		}
 		this.#available = true;
-		this.#policy = getCodexContextWindowPolicy(model);
+		// The catalog's own `enabled: false` disables the whole protocol, tools and meter included.
+		const discovered = getCodexContextWindowPolicy(model);
+		this.#policy = discovered?.enabled === true ? discovered : undefined;
 		const sessionId = this.#host.providerSessionId();
 		if (this.notesActive) {
 			setOpenAICodexHistoryIngestion(sessionId, this.#host.providerSessionState, this.protocol.agentName);

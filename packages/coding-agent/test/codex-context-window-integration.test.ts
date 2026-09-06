@@ -173,6 +173,37 @@ test("a catalog flag of enabled:false keeps window mode off even when configured
 	expect(JSON.stringify(frames.at(-1)?.messages)).toContain("Original task must survive");
 }, 20000);
 
+async function untilTools(session: AgentSession, predicate: (names: string[]) => boolean): Promise<string[]> {
+	for (let attempt = 0; attempt < 200; attempt++) {
+		const names = session.getActiveToolNames();
+		if (predicate(names)) return names;
+		await Bun.sleep(10);
+	}
+	throw new Error(`Context-window tools never reconciled: ${session.getActiveToolNames().join(", ")}`);
+}
+
+test("changing compaction.methodOrder at runtime reconciles the window controls", async () => {
+	const { session, settings, manager } = await harness(true, {
+		windowOnly: true,
+		responses: [
+			{ content: [{ type: "toolCall", name: "work", arguments: {} }], usage: { input: 8500 } },
+			{ content: ["Finished"], usage: { input: 100 } },
+		],
+	});
+	expect(session.getActiveToolNames()).toContain("new_context");
+
+	settings.override("compaction.methodOrder", ["soft"]);
+	const without = await untilTools(session, names => !names.includes("new_context"));
+	expect(without).not.toContain("get_context_remaining");
+	await session.prompt("Work while window mode is off");
+	await session.waitForIdle();
+	expect(JSON.stringify(manager.getEntries())).not.toContain("tokens left in this context window");
+
+	settings.override("compaction.methodOrder", ["window"]);
+	const restored = await untilTools(session, names => names.includes("new_context"));
+	expect(restored).toContain("get_context_remaining");
+}, 20000);
+
 test("checkpoint then new_context cuts history at a paired-tool boundary and survives resume", async () => {
 	const { session, manager, frames, settings, model, backendCalls } = await harness(true);
 	const events: string[] = [];
