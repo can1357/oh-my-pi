@@ -452,6 +452,16 @@ const gitSegment: StatusLineSegment = {
 		// Add status indicators
 		if (gitStatus) {
 			const indicators: string[] = [];
+			if (opts.showAheadBehind !== false && gitStatus.ahead !== undefined && gitStatus.ahead > 0) {
+				indicators.push(
+					theme.fg("statusLineStaged", `${theme.icon.ahead}${statusValue(ctx, `${gitStatus.ahead}`)}`),
+				);
+			}
+			if (opts.showAheadBehind !== false && gitStatus.behind !== undefined && gitStatus.behind > 0) {
+				indicators.push(
+					theme.fg("statusLineDirty", `${theme.icon.behind}${statusValue(ctx, `${gitStatus.behind}`)}`),
+				);
+			}
 			if (opts.showUnstaged !== false && gitStatus.unstaged > 0) {
 				indicators.push(theme.fg("statusLineDirty", `*${statusValue(ctx, `${gitStatus.unstaged}`)}`));
 			}

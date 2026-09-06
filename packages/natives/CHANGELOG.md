@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ahead/behind upstream commit counts to `VcsStatusSummary` (`statusSummary`); absent for jj workspaces and branches without an upstream.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

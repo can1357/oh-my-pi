@@ -1377,9 +1377,10 @@ mod tests {
 			git(dir.path(), &["status", "--porcelain"])
 		);
 		assert_eq!(repo.status_summary().expect("summary"), crate::types::StatusSummary {
-			staged:    2,
-			unstaged:  0,
+			staged: 2,
+			unstaged: 0,
 			untracked: 0,
+			..Default::default()
 		});
 		assert_eq!(repo.ls_files(true, true).expect("untracked files"), Vec::<String>::new());
 

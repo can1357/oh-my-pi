@@ -90,6 +90,8 @@ export type SymbolKey =
 	| "icon.git"
 	| "icon.branch"
 	| "icon.pr"
+	| "icon.ahead"
+	| "icon.behind"
 	| "icon.pin"
 	| "icon.tokens"
 	| "icon.context"
@@ -443,6 +445,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.git": "⎇",
 	"icon.branch": "⑂",
 	"icon.pr": "⤴",
+	"icon.ahead": "⇡",
+	"icon.behind": "⇣",
 	"icon.pin": "📌",
 	"icon.tokens": "🪙",
 	"icon.context": "◫",
@@ -784,6 +788,10 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.branch": "\uf126",
 	// pick:  (nf-cod-git_pull_request) | alt:  (nf-oct-git_pull_request)
 	"icon.pr": "\uea64",
+	// pick:  (nf-cod-arrow_up) | alt:  (nf-fa-arrow_up)
+	"icon.ahead": "\uea5b",
+	// pick:  (nf-cod-arrow_down) | alt:  (nf-fa-arrow_down)
+	"icon.behind": "\uea5a",
 	// pick:  (nf-fa-thumb_tack) | alt:  󰐃
 	"icon.pin": "\uf08d",
 	// pick:  | alt: ⊛ ◍ 
@@ -1151,6 +1159,8 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.git": "git:",
 	"icon.branch": "@",
 	"icon.pr": "PR",
+	"icon.ahead": "^",
+	"icon.behind": "v",
 	"icon.pin": "*",
 	"icon.tokens": "tok:",
 	"icon.context": "ctx:",
