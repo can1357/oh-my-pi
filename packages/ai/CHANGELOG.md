@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed auth-broker startup keeping a fresh snapshot cache without consulting a reachable broker: the cache is now revalidated through the client transport within a 500 ms budget, so a credential imported, rotated, or revoked since the cache was written is visible immediately while an unreachable or slow broker still starts from the cache.
+
 ## [18.1.12] - 2026-09-06
 
 ### Added
