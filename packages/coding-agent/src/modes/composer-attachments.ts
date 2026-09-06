@@ -163,3 +163,25 @@ export function renderPlaceholders(text: string, renderers: PlaceholderRenderers
 	if (last < text.length) result += renderers.renderText(text.slice(last));
 	return result;
 }
+
+/**
+ * Collects the attachment indices referenced in `text`, grouped by kind. Uses
+ * the same token boundaries as {@link renderPlaceholders} (the number matches
+ * `#[1-9]\d*` in full), so `#1` never matches inside `#11`.
+ */
+export function referencedAttachments(text: string): Record<ChipKind, Set<number>> {
+	const refs: Record<ChipKind, Set<number>> = { image: new Set(), video: new Set(), paste: new Set() };
+	COMPOSER_TOKEN_REGEX.lastIndex = 0;
+	for (;;) {
+		const match = COMPOSER_TOKEN_REGEX.exec(text);
+		if (match === null) break;
+		const label = match[0];
+		if (label.startsWith("[")) {
+			const kind: ChipKind = match[1] === "Paste" ? "paste" : match[1] === "Video" ? "video" : "image";
+			refs[kind].add(Number(match[2]));
+		} else {
+			refs[chipLabelKind(label)].add(Number(label.slice(label.lastIndexOf("#") + 1)));
+		}
+	}
+	return refs;
+}

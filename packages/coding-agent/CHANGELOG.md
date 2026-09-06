@@ -10,6 +10,7 @@
 ### Fixed
 
 	- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
+- Fixed the composer attachment band highlighting chip `#1` alongside `#11` (and other prefix-overlapping numbers) when more than ten attachments are staged ([#11028](https://github.com/can1357/oh-my-pi/issues/11028)).
 
 ### Fixed
 

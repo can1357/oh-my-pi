@@ -231,6 +231,19 @@ describe("CustomEditor bracketed path paste", () => {
 		expect(editor.composerChips()).toMatchObject([{ kind: "video", n: 1 }]);
 	});
 
+	it("does not surface chip #1 when only #11 is referenced (issue #11028)", () => {
+		const { editor } = makeEditor();
+		editor.pendingImages = Array.from({ length: 11 }, () => ({
+			type: "image" as const,
+			data: "aW1hZ2U=",
+			mimeType: "image/png",
+		}));
+		// The compact token `<icon> #1` is a substring of `<icon> #11`; the chip
+		// scan must key on the full number, not a prefix.
+		editor.setText(chipLabel("image", 11));
+		expect(editor.composerChips().map(c => c.n)).toEqual([11]);
+	});
+
 	it("strips `file://` URLs to the local filesystem path before loading the image", () => {
 		// macOS / Ghostty / iTerm2 sometimes forward the pasteboard's
 		// `public.file-url` representation when the user does Finder→Copy
