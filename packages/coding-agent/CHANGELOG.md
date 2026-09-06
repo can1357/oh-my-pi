@@ -271,6 +271,7 @@
 
 ### Added
 
+- Added keyless Parallel web search when the provider is explicitly selected ([#9770](https://github.com/can1357/oh-my-pi/pull/9770) by [@georgeatparallel](https://github.com/georgeatparallel)).
 - Added the `/trace` slash command to display session trace URLs in the stats dashboard.
 - Added support for OpenAI-compatible gateways whose model-list endpoint is rooted at a versioned URL, with an `injectV1: false` discovery option to request `{baseUrl}/models` directly.
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics.
