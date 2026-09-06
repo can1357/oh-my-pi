@@ -17,6 +17,7 @@ import type {
 } from "../../coding-agent/src/tools/browser/relay/protocol";
 import {
 	captureRecoveryLoaderNavigation,
+	consumeGuardInitiatedDetach,
 	consumeRelayInitiatedDetach,
 	createRetryableLoader,
 	detachWithRecoveryLoaderObservation,
@@ -1269,10 +1270,14 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	// over the in-memory marker — "canceled_by_user" is the user revoking the
 	// attachment, so clear any stale guard/recovery bit and report it as a real
 	// user detach (which bans the tab) instead of silently reattaching it.
-	const guardMarked = guardDetachments.delete(source.tabId);
-	const userDetach =
-		reason === "canceled_by_user" || reason === "replaced_with_devtools";
-	if (guardMarked && !userDetach) {
+	if (
+		consumeGuardInitiatedDetach(
+			guardDetachments,
+			relayInitiatedDetachTabs,
+			source.tabId,
+			reason,
+		)
+	) {
 		// A reconnect can win the race with the asynchronous guard detach. Do not
 		// report it as a user detach (which bans the tab); refresh hello so the
 		// relay can restore only this guard-authorized attachment. Coalesce with

@@ -90,6 +90,22 @@ export function consumeRelayInitiatedDetach(
 	return relayMarked && !userDetach;
 }
 
+export function consumeGuardInitiatedDetach(
+	guardMarkedTabs: Set<number>,
+	relayMarkedTabs: Set<number>,
+	tabId: number,
+	reason: string,
+): boolean {
+	const guardMarked = guardMarkedTabs.delete(tabId);
+	const userDetach =
+		reason === "canceled_by_user" || reason === "replaced_with_devtools";
+	if (!guardMarked || userDetach) return false;
+	// A relay detach can settle while a guard retry for the same tab is pending.
+	// The guard owns this event, but the overlapping relay marker is spent too.
+	relayMarkedTabs.delete(tabId);
+	return true;
+}
+
 export function noteRelayDetachOutcome(
 	completedTabs: Set<number>,
 	tabId: number,

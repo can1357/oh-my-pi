@@ -3137,7 +3137,7 @@ describe("RelayBridge tab grouping", () => {
 				sessionId: pageSession,
 				method: "Page.addScriptToEvaluateOnNewDocument",
 				params: {
-					source: '#!/usr/bin/env node\n"use strict";\nwindow.__relayInjected = true;',
+					source: '#!/usr/bin/env node\n"use strict";\nthrow new Error("boom");',
 					runImmediately: true,
 				},
 			}),
@@ -3168,8 +3168,8 @@ describe("RelayBridge tab grouping", () => {
 		const replay = ext2.rpcs("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(replay?.params).toMatchObject({ runImmediately: false });
 		const replaySource = (replay?.params as { source?: string } | undefined)?.source;
-		expect(replaySource).toStartWith('#!/usr/bin/env node\n"use strict";\nwindow.__relayInjected = true;');
-		expect(replaySource).toContain("Object.defineProperty");
+		expect(replaySource).toStartWith('#!/usr/bin/env node\n"use strict";\nObject.defineProperty');
+		expect(replaySource).toContain('configurable: true });\nthrow new Error("boom");');
 	});
 
 	it.each(["remove", "retry"] as const)(

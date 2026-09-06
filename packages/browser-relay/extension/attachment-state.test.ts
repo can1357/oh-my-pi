@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	captureRecoveryLoaderNavigation,
+	consumeGuardInitiatedDetach,
 	consumeRelayInitiatedDetach,
 	createRetryableLoader,
 	detachWithRecoveryLoaderObservation,
@@ -251,6 +252,38 @@ describe("attachment-state", () => {
 			true,
 		);
 		expect(markedTabs.has(1)).toBe(false);
+	});
+
+	it("clears overlapping relay attribution when a guard detach wins", () => {
+		const guardMarkedTabs = new Set([1]);
+		const relayMarkedTabs = new Set([1]);
+
+		expect(
+			consumeGuardInitiatedDetach(
+				guardMarkedTabs,
+				relayMarkedTabs,
+				1,
+				"target_closed",
+			),
+		).toBe(true);
+		expect(guardMarkedTabs.has(1)).toBe(false);
+		expect(relayMarkedTabs.has(1)).toBe(false);
+	});
+
+	it("lets user intent bypass guard attribution without hiding relay state", () => {
+		const guardMarkedTabs = new Set([1]);
+		const relayMarkedTabs = new Set([1]);
+
+		expect(
+			consumeGuardInitiatedDetach(
+				guardMarkedTabs,
+				relayMarkedTabs,
+				1,
+				"canceled_by_user",
+			),
+		).toBe(false);
+		expect(guardMarkedTabs.has(1)).toBe(false);
+		expect(relayMarkedTabs.has(1)).toBe(true);
 	});
 
 	it("records only completed relay detaches for reconnect reconciliation", () => {

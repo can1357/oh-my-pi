@@ -81,6 +81,16 @@ interface PreservedPreloadScript {
 	sequence: number;
 }
 
+function markPreloadApplication(source: unknown, marker: string): string {
+	if (typeof source !== "string") throw new Error("preload source must be a string");
+	const markerStatement = `Object.defineProperty(globalThis, ${JSON.stringify(marker)}, { value: true, configurable: true });`;
+	const prologue = source.match(
+		/^(?:#![^\r\n]*(?:\r?\n|$))?(?:(?:(?:[ \t\r\n]+|\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/))*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*(?:;[ \t]*(?:\r?\n)?|\r?\n|$))*/,
+	);
+	const offset = prologue?.[0].length ?? 0;
+	return `${source.slice(0, offset)}${markerStatement}\n${source.slice(offset)}`;
+}
+
 function subscriptionKey(method: string): string {
 	switch (method) {
 		case "Emulation.setTouchEmulationEnabled":
@@ -3080,7 +3090,7 @@ export class RelayBridge {
 							runImmediately,
 							...(applicationMarker
 								? {
-										source: `${script.params.source}\n;Object.defineProperty(globalThis, ${JSON.stringify(applicationMarker)}, { value: true, configurable: true });`,
+										source: markPreloadApplication(script.params.source, applicationMarker),
 									}
 								: {}),
 						}
