@@ -77,6 +77,56 @@ describe("read tool raw range exactness", () => {
 		expect(output).toContain("L32");
 	});
 
+	it("keeps the continuation when the byte budget stops inside requested buffered content", async () => {
+		const bufferedFile = path.join(testDir, "buffered-range.txt");
+		await Bun.write(
+			bufferedFile,
+			Array.from({ length: 100 }, (_, index) => `line-${index + 1} ${"x".repeat(1_016)}`).join("\n"),
+		);
+
+		const result = await tool.execute("call-buffered-byte-limited-range", { path: `${bufferedFile}:1-100` });
+		const output = getTextOutput(result);
+		const truncation = result.details?.meta?.truncation;
+
+		expect(output).not.toContain("could not fit after preceding context");
+		expect(output).not.toContain(":raw:");
+		expect(truncation).toBeDefined();
+		if (!truncation) throw new Error("expected truncation metadata");
+		const shownRange = truncation.shownRange;
+		expect(shownRange).toBeDefined();
+		if (!shownRange) throw new Error("expected shown range");
+		expect(truncation.nextOffset).toBe(shownRange.end + 1);
+		expect(formatTruncationMetaNotice(truncation)).toContain(`Use :${truncation.nextOffset} to continue`);
+	});
+
+	it("reports an oversized selected line from a buffered local file with a safe raw recovery selector", async () => {
+		const bufferedFile = path.join(testDir, "buffered-oversized.txt");
+		await Bun.write(
+			bufferedFile,
+			["leading-context", `oversized-${"x".repeat(70_000)}-end`, "trailing-one", "trailing-two"].join("\n"),
+		);
+
+		const result = await tool.execute("call-buffered-oversized-selected", { path: `${bufferedFile}:2-2` });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("leading-context");
+		expect(output).toContain("Line 2 is 68.4KB");
+		expect(output).toContain("50.0KB read budget");
+		expect(output).toContain(":raw:2-2");
+		const truncation = result.details?.meta?.truncation;
+		expect(truncation?.totalBytes).toBeGreaterThan(70_000);
+		expect(truncation?.nextOffset).toBeUndefined();
+		if (!truncation) throw new Error("expected truncation metadata");
+		expect(formatTruncationMetaNotice(truncation)).not.toContain("Use :2 to continue");
+
+		const recovered = await tool.execute("call-buffered-oversized-raw", { path: `${bufferedFile}:raw:2-2` });
+		const recoveredOutput = getTextOutput(recovered);
+		expect(recoveredOutput).toStartWith("oversized-");
+		expect(recoveredOutput).not.toContain("leading-context");
+		expect(recoveredOutput).not.toContain("trailing-one");
+		expect(recovered.details?.meta?.truncation?.partialLine).toBe(true);
+	});
+
 	it("accounts for the displayed preview when a single raw line exceeds the byte budget", async () => {
 		// Regression #10768: an oversized first line collects no complete line but
 		// still renders a ~50 KB byte-capped preview. The truncation meta used to

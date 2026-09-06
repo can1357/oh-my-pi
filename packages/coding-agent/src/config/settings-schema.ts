@@ -1837,6 +1837,17 @@ export const SETTINGS_SCHEMA = {
 				"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows). 0 disables the ceiling — to let the session auto-resume through provider-stated quota resets.",
 		},
 	},
+	"retry.waitForUsageReset": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Wait For Usage Reset",
+			description:
+				"When a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), sleep until the reset instead of failing fast past retry.maxDelayMs. Waits are abortable (Esc) but also hold subagents, so leave off for unattended runs.",
+		},
+	},
 	"retry.modelFallback": {
 		type: "boolean",
 		default: true,
@@ -2502,9 +2513,9 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Premium long-context tiers (OpenAI GPT-5.6 bills 2x input / 1.5x output
-	// above 272K input tokens). Off caps affected models at the threshold so
-	// compaction kicks in before any request crosses into premium billing.
+	// Opt in to advertised maximum context windows and premium long-context
+	// tiers. Off preserves default windows and caps premium models before
+	// requests cross into their higher pricing tier.
 	extendedContext: {
 		type: "boolean",
 		default: false,
@@ -2513,7 +2524,7 @@ export const SETTINGS_SCHEMA = {
 			group: "General",
 			label: "Extended Context",
 			description:
-				"Use premium long-context windows on models that bill extra past a threshold (e.g. GPT-5.6 1M charges 2x input above 272K); off caps them at the standard-pricing window",
+				"Use larger context windows where supported; may incur premium pricing. Off keeps default or standard-pricing windows",
 		},
 	},
 
@@ -3871,6 +3882,18 @@ export const SETTINGS_SCHEMA = {
 			group: "Bash",
 			label: "Bash",
 			description: "Enable the bash tool for shell command execution",
+		},
+	},
+
+	"bash.allowCompoundCommands": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Bash",
+			label: "Allow Compound Commands",
+			description:
+				"Evaluate literal && chains per command; unmatched commands use normal bash approval policy and mode",
 		},
 	},
 
@@ -6174,6 +6197,7 @@ export interface RetrySettings {
 	maxRetries: number;
 	baseDelayMs: number;
 	maxDelayMs: number;
+	waitForUsageReset: boolean;
 	modelFallback: boolean;
 	usageAwareFallback: boolean;
 	usageReservePct: number;

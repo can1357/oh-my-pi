@@ -6,6 +6,21 @@
 
 - Fixed GitHub Copilot (and other discovered providers) inheriting a cross-provider `requestModelId` when a served model id collides with a model bundled only under another provider, which sent an invalid wire model and returned HTTP 400 `model_not_supported`; upgrading invalidates the affected GitHub Copilot model cache so poisoned rows refetch instead of persisting for the cache TTL ([#10796](https://github.com/can1357/oh-my-pi/issues/10796)).
 
+## [18.1.12] - 2026-09-06
+
+### Added
+
+- Added Muse Code as a provider with Muse Spark models and live account-scoped discovery.
+- Muse Code subscriptions now resolve a compact edit-prompt variant, cutting recurring per-request tool bytes without touching other providers.
+- Added Meta's new `max` reasoning effort tier to Muse Spark 1.3 (standard) on the Meta Model API and Muse Code.
+
+### Fixed
+
+- Fixed OpenCode Go/Zen live model discovery (`GET /v1/models`) missing `x-opencode-session` and omp's `User-Agent`: discovery requests now attribute with the stable install id so the requests OpenCode flags as `Bun fetch` carry the required session header.
+	- Fixed GPT-6 Astra requests through GitHub Copilot failing with an unsupported endpoint error ([#10874](https://github.com/can1357/oh-my-pi/pull/10874) by [@xpcmdshell](https://github.com/xpcmdshell)).
+	- Fixed GPT-6 Astra showing as free with a 272K-token window in the OpenAI Codex catalog by applying its documented pricing; `/extended-context` enables the wire-advertised 872K-token maximum ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
+	- Made extended-context catalog rebuilds faster by resolving each model's maximum window once per process ([#11039](https://github.com/can1357/oh-my-pi/pull/11039) by [@H4vC](https://github.com/H4vC)).
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

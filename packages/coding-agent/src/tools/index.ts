@@ -261,8 +261,11 @@ export interface ToolSession {
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
-	/** Parent session journal used by tools that persist runtime lifecycle state. */
-	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries">;
+	/** Owning journal; full SDK managers also supply registered identity without changing advisor-local IDs. */
+	sessionManager?: Pick<
+		SessionManager,
+		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"
+	> & { getSessionId?: SessionManager["getSessionId"] };
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Current enabled eval prelude definitions. */
@@ -271,7 +274,7 @@ export interface ToolSession {
 	assertEvalExecutionAllowed?: () => void;
 	/** Track tool-owned eval work so session disposal can await/abort it like direct session eval runs. */
 	trackEvalExecution?<T>(execution: Promise<T>, abortController: AbortController): Promise<T>;
-	/** Get session ID */
+	/** Get tool-state session ID (distinct from the owning session for advisors). */
 	getSessionId?: () => string | null;
 	/** Get Hindsight runtime state for this agent session. */
 	getHindsightSessionState?: () => HindsightSessionState | undefined;

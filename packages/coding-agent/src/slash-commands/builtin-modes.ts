@@ -539,12 +539,12 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "extended-context",
 		icon: "expand",
-		description: "Toggle premium long-context windows",
+		description: "Toggle extended context windows",
 		acpDescription: "Toggle extended context",
 		acpInputHint: "[on|off|status]",
 		subcommands: [
-			{ name: "on", description: "Enable premium long-context windows" },
-			{ name: "off", description: "Use standard-pricing context windows" },
+			{ name: "on", description: "Enable larger context windows" },
+			{ name: "off", description: "Use default or standard-pricing context windows" },
 			{ name: "status", description: "Show extended context status" },
 		],
 		allowArgs: true,
