@@ -151,6 +151,12 @@ export interface DaemonOutputSubscription {
 	/** Client-managed cumulative ack: highest `seq` delivered for {@link lastEpoch}. */
 	lastSeq?: number;
 	/**
+	 * Artifact size (bytes) behind the last output batch the client delivered.
+	 * A fresh broker registration continues that capture by appending past it;
+	 * without it the registration starts a new capture at `artifactPath`.
+	 */
+	artifactBytes?: number;
+	/**
 	 * True while this registration targets the next daemon started with
 	 * {@link name}, rather than the current incarnation. The broker leaves it
 	 * unbound until that new record exists and never replays a prior terminal
@@ -190,6 +196,15 @@ export interface DaemonOutputNotification {
 	reminder?: ProgressReminder;
 	/** True when at least one model-facing line preview was clipped. */
 	truncated?: boolean;
+	/** Bytes readable in the registration's artifact once this batch is delivered. */
+	artifactBytes?: number;
+	/**
+	 * Output batches the broker evicted from its bounded replay buffer before
+	 * this client acknowledged them. Their raw text survives only in the
+	 * artifact; a batch carrying this is also `truncated` and counts the
+	 * evictions in {@link suppressedEvents}.
+	 */
+	replayGap?: number;
 }
 
 /** Socket form of monitored output, scoped to the exact advertised registration. */
@@ -323,6 +338,10 @@ function outputSubscriptions(value: unknown): DaemonOutputWireSubscription[] {
 				source.lastSeq === undefined
 					? undefined
 					: nonNegativeInteger(source.lastSeq, `request.outputSubscriptions[${index}].lastSeq`),
+			artifactBytes:
+				source.artifactBytes === undefined
+					? undefined
+					: nonNegativeInteger(source.artifactBytes, `request.outputSubscriptions[${index}].artifactBytes`),
 			startPending:
 				source.startPending === undefined
 					? undefined
@@ -484,6 +503,12 @@ export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 			suppressedEvents: nonNegativeInteger(source.suppressedEvents, "output.suppressedEvents"),
 			reminder: progressReminder(source.reminder),
 			truncated: source.truncated === undefined ? undefined : booleanValue(source.truncated, "output.truncated"),
+			artifactBytes:
+				source.artifactBytes === undefined
+					? undefined
+					: nonNegativeInteger(source.artifactBytes, "output.artifactBytes"),
+			replayGap:
+				source.replayGap === undefined ? undefined : nonNegativeInteger(source.replayGap, "output.replayGap"),
 		};
 	}
 	if (source.event === "daemon-monitor-completed") {

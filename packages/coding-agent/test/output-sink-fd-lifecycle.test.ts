@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as nodeFs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { OutputSink } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
@@ -225,5 +226,120 @@ describe("OutputSink fd lifecycle", () => {
 		expect(summary.output).toBe("inline output survives");
 		expect(summary.artifactId).toBeUndefined();
 		await expect(sink.dispose()).resolves.toBeUndefined();
+	});
+
+	// Append-mode sinks own a raw descriptor that Bun's fd writer never closes.
+	// These assert the descriptor is really gone (fstat → EBADF), not merely
+	// that dispose() resolved.
+	function captureAppendFd(): { fd: () => number } {
+		let opened: number | undefined;
+		const realOpenSync = nodeFs.openSync;
+		vi.spyOn(nodeFs, "openSync").mockImplementation((...args: Parameters<typeof nodeFs.openSync>) => {
+			const fd = realOpenSync(...args);
+			if (args[1] === "a") opened = fd;
+			return fd;
+		});
+		return {
+			fd: () => {
+				if (opened === undefined) throw new Error("append descriptor was never opened");
+				return opened;
+			},
+		};
+	}
+
+	function expectClosed(fd: number): void {
+		let code: string | undefined;
+		try {
+			nodeFs.fstatSync(fd);
+		} catch (error) {
+			code = (error as NodeJS.ErrnoException).code;
+		}
+		expect(code).toBe("EBADF");
+	}
+
+	test("dispose() closes the append-mode descriptor after a successful capture", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "append.txt");
+		await Bun.write(artifactPath, "prior\n");
+		const opened = captureAppendFd();
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "append",
+			artifactWriteMode: "mirror",
+			artifactAppend: true,
+		});
+		sink.push("later\n");
+		await sink.flushArtifact();
+		expect(sink.artifactBytes).toBe("later\n".length);
+		expect(nodeFs.fstatSync(opened.fd()).isFile()).toBeTrue();
+
+		await sink.dispose();
+		expectClosed(opened.fd());
+		expect(await Bun.file(artifactPath).text()).toBe("prior\nlater\n");
+	});
+
+	test("dispose() closes the append-mode descriptor when ending the writer fails", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "append-end-failure.txt");
+		const opened = captureAppendFd();
+		const fakeSink = {
+			write(chunk: string): number {
+				return Buffer.byteLength(chunk, "utf-8");
+			},
+			flush(): Promise<number> {
+				return Promise.resolve(0);
+			},
+			end(): Promise<number> {
+				return Promise.reject(new Error("simulated close failure"));
+			},
+		} as unknown as Bun.FileSink;
+		const realFile = Bun.file.bind(Bun);
+		vi.spyOn(Bun, "file").mockImplementation((source, options) => {
+			if (typeof source === "number") return { writer: () => fakeSink } as unknown as Bun.BunFile;
+			return realFile(source as string, options);
+		});
+
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "append-end",
+			artifactWriteMode: "mirror",
+			artifactAppend: true,
+		});
+		sink.push("captured\n");
+		await sink.flushArtifact();
+
+		await expect(sink.dispose()).resolves.toBeUndefined();
+		expectClosed(opened.fd());
+		// A capture whose close failed is never advertised as complete.
+		expect((await sink.dump()).artifactId).toBeUndefined();
+	});
+
+	test("a failed append-mode writer never leaks the descriptor it was opened on", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "append-writer-failure.txt");
+		const opened = captureAppendFd();
+		const realFile = Bun.file.bind(Bun);
+		vi.spyOn(Bun, "file").mockImplementation((source, options) => {
+			if (typeof source === "number") {
+				return {
+					writer: () => {
+						throw new Error("simulated writer failure");
+					},
+				} as unknown as Bun.BunFile;
+			}
+			return realFile(source as string, options);
+		});
+
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "append-writer",
+			artifactWriteMode: "mirror",
+			artifactAppend: true,
+		});
+		sink.push("lost to the failure\n");
+		await expect(sink.flushArtifact()).rejects.toThrow("simulated writer failure");
+		expectClosed(opened.fd());
+		await expect(sink.dispose()).resolves.toBeUndefined();
+		expectClosed(opened.fd());
 	});
 });

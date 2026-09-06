@@ -85,8 +85,22 @@ const SIGNAL_NUMBER: Record<DaemonSignal, number> = {
 	SIGKILL: os.constants.signals.SIGKILL,
 };
 
-const OUTPUT_RECONNECT_GRACE_MS = 30_000;
-const MAX_UNACKNOWLEDGED_OUTPUT_NOTIFICATIONS = 256;
+/**
+ * Bounds on the output batches a monitor registration retains until its client
+ * acknowledges sink delivery. Retention ends when a disconnected client's
+ * reconnect grace elapses, or once the count/byte cap evicts the oldest
+ * batches; evictions the client never received are reported as a replay gap.
+ */
+const OUTPUT_REPLAY_LIMITS = {
+	/** Reconnect grace for a disconnected monitor client before its registration is dropped. */
+	RETENTION_MS: 30_000,
+	/** Unacknowledged output batches retained, and in flight to the client, per registration. */
+	MAX_BATCHES: 256,
+	/** UTF-8 bytes of unacknowledged batch text retained per registration. */
+	MAX_BYTES: 256 * 1024,
+} as const;
+
+type OutputReplayLimits = Record<keyof typeof OUTPUT_REPLAY_LIMITS, number>;
 
 type DetachedOutputCursorPolicy = "preserve" | "reset";
 
@@ -138,6 +152,26 @@ interface MonitorProgressChunk {
 	preview: ProgressPreview;
 }
 
+/** One monitor notification retained until the client acknowledges its delivery. */
+interface RetainedMonitorNotification {
+	notification: DaemonMonitorWireNotification;
+	/** UTF-8 size of an output batch's text; terminal notifications count zero. */
+	bytes: number;
+}
+
+/** Output batches evicted from a registration's replay buffer ahead of the client's ack. */
+interface OutputReplayGap {
+	/** Lowest evicted `seq`. */
+	fromSeq: number;
+	/** Highest evicted `seq`; every retained batch is newer. */
+	throughSeq: number;
+	/**
+	 * Lowest evicted `seq` never written to the attached socket. Undefined once
+	 * the gap has been reported to that socket, or when no such batch exists.
+	 */
+	unwrittenFromSeq?: number;
+}
+
 interface OutputRegistration extends DaemonOutputWireSubscription {
 	socket?: net.Socket;
 	subscriptionId: string;
@@ -149,8 +183,24 @@ interface OutputRegistration extends DaemonOutputWireSubscription {
 	 * deliveries of a replaced registration can be recognized as stale.
 	 */
 	batchKey: string;
-	pending: DaemonMonitorWireNotification[];
+	/** Unacknowledged notifications in `seq` order, bounded by {@link OUTPUT_REPLAY_LIMITS}. */
+	pending: RetainedMonitorNotification[];
+	pendingBytes: number;
+	/** Highest output `seq` the client acknowledged for this epoch. */
+	ackSeq: number;
+	/**
+	 * Highest output `seq` written to the attached socket. Batches above it are
+	 * held until acknowledgements open the delivery window again; a reconnect
+	 * resets it to {@link ackSeq} so every retained batch replays.
+	 */
+	writtenSeq: number;
+	/** True once a terminal notification was written to the attached socket. */
+	terminalWritten: boolean;
+	replayGap?: OutputReplayGap;
 	artifactSink: OutputSink;
+	artifactDisposal?: Promise<void>;
+	/** Bytes already on disk when this registration's sink opened; its own capture appends past them. */
+	artifactBase: number;
 	offlineTimer?: NodeJS.Timeout;
 	/** Artifact persistence failed; retain only the terminal expiry until client cleanup. */
 	disabled?: boolean;
@@ -178,12 +228,18 @@ function quoteShellArg(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-/** Build a live output registration whose line fragments and artifact both start at attach time. */
+/**
+ * Build a live output registration whose line fragments start at attach time.
+ * Its artifact continues an existing capture only when the subscription
+ * acknowledges that capture's size: the sink then appends past the bytes
+ * already on disk. Otherwise the capture starts fresh at `artifactPath`.
+ */
 function createOutputRegistration(
 	subscription: DaemonOutputWireSubscription,
 	socket: net.Socket,
 	subscriptionId: string,
-	daemonId?: string,
+	daemonId: string | undefined,
+	existingArtifactBytes: number | undefined,
 ): OutputRegistration {
 	const progressPreview = new ProgressPreviewAccumulator();
 	return {
@@ -193,14 +249,16 @@ function createOutputRegistration(
 		daemonId,
 		batchKey: crypto.randomUUID(),
 		pending: [],
+		pendingBytes: 0,
+		ackSeq: 0,
+		writtenSeq: 0,
+		terminalWritten: false,
 		artifactSink: new OutputSink({
 			artifactPath: subscription.artifactPath,
 			artifactWriteMode: "mirror",
-			// A republish after the offline grace expired re-creates the sink on
-			// the same artifact path; append so capture behind already-delivered
-			// artifact links survives (a fresh path starts empty either way).
-			artifactAppend: true,
+			artifactAppend: existingArtifactBytes !== undefined,
 		}),
+		artifactBase: existingArtifactBytes ?? 0,
 		progressPreview,
 		progressLines: new ProgressLines(line => progressPreview.append(line.text, line.truncated)),
 	};
@@ -454,8 +512,7 @@ class DaemonBroker {
 	readonly #idleGraceMs: number;
 	readonly #restartBackoffBaseMs: number;
 	readonly #clientAuthTimeoutMs: number;
-	readonly #outputReconnectGraceMs: number;
-	readonly #maxUnacknowledgedOutputNotifications: number;
+	readonly #outputReplayLimits: OutputReplayLimits;
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
 	 * Names reserved by an in-flight `start` before its record lands in
@@ -487,8 +544,7 @@ class DaemonBroker {
 		restartBackoffBaseMs: number,
 		clientAuthTimeoutMs: number,
 		progressBatchIntervalMs: number,
-		outputReconnectGraceMs: number,
-		maxUnacknowledgedOutputNotifications: number,
+		outputReplayLimits: OutputReplayLimits,
 	) {
 		this.#projectDir = projectDir;
 		this.#runtimeDir = runtimeDir;
@@ -497,8 +553,7 @@ class DaemonBroker {
 		this.#idleGraceMs = idleGraceMs;
 		this.#restartBackoffBaseMs = restartBackoffBaseMs;
 		this.#clientAuthTimeoutMs = clientAuthTimeoutMs;
-		this.#outputReconnectGraceMs = outputReconnectGraceMs;
-		this.#maxUnacknowledgedOutputNotifications = maxUnacknowledgedOutputNotifications;
+		this.#outputReplayLimits = outputReplayLimits;
 		this.#progressBatcher = new ProgressBatcher<MonitorProgressChunk>(
 			(batchKey, batch) => this.#notifyOutput(batchKey, batch),
 			{
@@ -545,15 +600,7 @@ class DaemonBroker {
 		const outputDisposals: Promise<void>[] = [];
 		for (const registration of this.#outputRegistrations.values()) {
 			clearTimeout(registration.offlineTimer);
-			outputDisposals.push(
-				registration.artifactSink.dispose().catch(error => {
-					logger.warn("Failed to dispose daemon monitor artifact sink", {
-						monitorId: registration.id,
-						name: registration.name,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				}),
-			);
+			outputDisposals.push(this.#disposeOutputArtifact(registration));
 		}
 		this.#outputRegistrations.clear();
 		this.#progressBatcher.dispose();
@@ -611,15 +658,7 @@ class DaemonBroker {
 			for (const [registrationKey, registration] of this.#outputRegistrations) {
 				if (registration.socket !== socket) continue;
 				registration.socket = undefined;
-				registration.offlineTimer = setTimeout(() => {
-					if (registration.socket || this.#outputRegistrations.get(registrationKey) !== registration) {
-						return;
-					}
-					this.#outputRegistrations.delete(registrationKey);
-					this.#progressBatcher.clear(registration.batchKey);
-					void registration.artifactSink.dispose();
-				}, this.#outputReconnectGraceMs);
-				registration.offlineTimer.unref();
+				this.#scheduleOutputRegistrationCleanup(registrationKey, registration);
 			}
 		});
 	}
@@ -1088,17 +1127,54 @@ class DaemonBroker {
 						error: error instanceof Error ? error.message : String(error),
 					});
 				}
-				try {
-					await registration.artifactSink.dispose();
-				} catch (error) {
-					logger.warn("Failed to dispose daemon monitor artifact sink", {
-						monitorId: registration.id,
-						name: registration.name,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				}
+				await this.#disposeOutputArtifact(registration);
 			}),
 		);
+	}
+
+	/**
+	 * Dispose the registration's artifact sink once; a failure is logged, never
+	 * rethrown. Memoized so a later caller awaits the original close instead of
+	 * an idempotent no-op that resolves before the descriptor is released.
+	 */
+	#disposeOutputArtifact(registration: OutputRegistration): Promise<void> {
+		registration.artifactDisposal ??= registration.artifactSink.dispose().catch(error => {
+			logger.warn("Failed to dispose daemon monitor artifact sink", {
+				monitorId: registration.id,
+				name: registration.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		return registration.artifactDisposal;
+	}
+
+	#disposeOutputRegistration(registrationKey: string, registration: OutputRegistration): void {
+		if (this.#outputRegistrations.get(registrationKey) !== registration) return;
+		clearTimeout(registration.offlineTimer);
+		registration.offlineTimer = undefined;
+		this.#outputRegistrations.delete(registrationKey);
+		registration.pending.length = 0;
+		registration.pendingBytes = 0;
+		this.#progressBatcher.clear(registration.batchKey);
+		void this.#disposeOutputArtifact(registration);
+	}
+
+	/**
+	 * Drop a registration with no attached client once the reconnect grace
+	 * elapses. Disabled registrations keep their retained expiry for a
+	 * reconnecting client only until then, so a client that crashed after the
+	 * expiry frame cannot pin them for the broker's lifetime.
+	 */
+	#scheduleOutputRegistrationCleanup(registrationKey: string, registration: OutputRegistration): void {
+		clearTimeout(registration.offlineTimer);
+		const timer = setTimeout(() => {
+			if (registration.offlineTimer !== timer) return;
+			registration.offlineTimer = undefined;
+			if (registration.socket && !registration.socket.destroyed) return;
+			this.#disposeOutputRegistration(registrationKey, registration);
+		}, this.#outputReplayLimits.RETENTION_MS);
+		registration.offlineTimer = timer;
+		timer.unref();
 	}
 
 	async #syncOutputSubscriptions(
@@ -1120,12 +1196,7 @@ class DaemonBroker {
 				const record = this.#records.get(registration.name);
 				const remove = (): void => {
 					if (!current()) return;
-					const key = outputRegistrationKey(subscriptionId, registration.id);
-					if (this.#outputRegistrations.get(key) !== registration) return;
-					clearTimeout(registration.offlineTimer);
-					this.#outputRegistrations.delete(key);
-					this.#progressBatcher.clear(registration.batchKey);
-					void registration.artifactSink.dispose();
+					this.#disposeOutputRegistration(outputRegistrationKey(subscriptionId, registration.id), registration);
 				};
 				if (record && record.snapshot.id === registration.daemonId) {
 					await this.#queueRecordOutputWork(record, remove);
@@ -1152,17 +1223,17 @@ class DaemonBroker {
 						existing.startPending = subscription.startPending;
 						const reconnected = existing.socket !== socket;
 						existing.socket = socket;
-						this.#pruneAcknowledgedOutput(existing, subscription);
-						const replayedTerminal = existing.pending.some(
-							notification => notification.event !== "daemon-output",
-						);
-						// Retained notifications replay only across an actual socket change;
-						// on a steady-state envelope the client already holds them.
+						this.#acknowledgeOutput(existing, subscription);
 						if (reconnected) {
-							for (const notification of existing.pending) {
-								this.#writeMonitorNotification(existing, notification);
-							}
+							// Frames written to the previous socket are gone from the client's
+							// view; replay everything retained, and report evictions beyond
+							// its ack as a gap before that replay.
+							existing.writtenSeq = existing.ackSeq;
+							existing.terminalWritten = false;
+							if (existing.replayGap) existing.replayGap.unwrittenFromSeq = existing.replayGap.fromSeq;
 						}
+						const replayedTerminal = existing.pending.some(entry => entry.notification.event !== "daemon-output");
+						this.#flushRetainedOutput(existing);
 						if (
 							!existing.disabled &&
 							record &&
@@ -1185,19 +1256,22 @@ class DaemonBroker {
 						await this.#consumeDetachedOutput(record, record.generation);
 						if (!current() || this.#records.get(subscription.name) !== record) return;
 					}
-					if (!current()) return;
 					const replaced = this.#outputRegistrations.get(key);
-					if (replaced) {
-						clearTimeout(replaced.offlineTimer);
-						this.#outputRegistrations.delete(key);
-						this.#progressBatcher.clear(replaced.batchKey);
-						void replaced.artifactSink.dispose();
+					if (replaced) this.#disposeOutputRegistration(key, replaced);
+					let existingArtifactBytes: number | undefined;
+					if (subscription.artifactBytes !== undefined) {
+						// Continue a capture the client already acknowledged: settle the
+						// replaced sink first so the measured size is the real append point.
+						if (replaced) await this.#disposeOutputArtifact(replaced);
+						existingArtifactBytes = await this.#artifactSize(subscription.artifactPath);
+						if (!current()) return;
 					}
 					const registration = createOutputRegistration(
 						subscription,
 						socket,
 						subscriptionId,
 						subscription.startPending === true ? undefined : record?.snapshot.id,
+						existingArtifactBytes,
 					);
 					this.#outputRegistrations.set(key, registration);
 					if (
@@ -1229,48 +1303,129 @@ class DaemonBroker {
 		}
 	}
 
-	/** Drop retained output batches the client has cumulatively acknowledged. */
-	#pruneAcknowledgedOutput(registration: OutputRegistration, subscription: DaemonOutputSubscription): void {
-		const { lastEpoch, lastSeq } = subscription;
-		if (lastEpoch === undefined || lastSeq === undefined || registration.pending.length === 0) return;
-		registration.pending = registration.pending.filter(
-			notification =>
-				notification.event !== "daemon-output" || notification.epoch !== lastEpoch || notification.seq > lastSeq,
-		);
+	async #artifactSize(artifactPath: string): Promise<number> {
+		try {
+			return (await fs.stat(artifactPath)).size;
+		} catch (error) {
+			if (isEnoent(error)) return 0;
+			throw error;
+		}
 	}
 
+	/** Apply the client's cumulative delivery ack: drop acknowledged batches and any gap it now covers. */
+	#acknowledgeOutput(registration: OutputRegistration, subscription: DaemonOutputSubscription): void {
+		const { lastEpoch, lastSeq } = subscription;
+		if (lastEpoch !== registration.batchKey || lastSeq === undefined || lastSeq <= registration.ackSeq) return;
+		registration.ackSeq = lastSeq;
+		registration.writtenSeq = Math.max(registration.writtenSeq, lastSeq);
+		registration.pending = registration.pending.filter(entry => {
+			const { notification } = entry;
+			if (notification.event !== "daemon-output" || notification.seq > lastSeq) return true;
+			registration.pendingBytes -= entry.bytes;
+			return false;
+		});
+		if (registration.replayGap && registration.replayGap.throughSeq <= lastSeq) registration.replayGap = undefined;
+	}
+
+	/**
+	 * Retain a notification until the client acknowledges its delivery. Socket
+	 * writes only prove that bytes entered the kernel buffer; a reconnect
+	 * replays whatever the sink never confirmed. Retention is bounded: once the
+	 * count or byte cap is reached the oldest output batches are evicted and
+	 * later reported as a replay gap, and the socket receives no more output
+	 * than that same bound until acknowledgements catch up — so a stalled sink
+	 * holds a bounded backlog on both sides while the artifact keeps the
+	 * complete stream.
+	 */
 	#sendMonitorNotification(registration: OutputRegistration, notification: DaemonMonitorWireNotification): void {
-		// Retain until the client confirms sink delivery. Socket writes only prove
-		// that bytes entered the kernel buffer; trimming an unacknowledged prefix
-		// would make a reconnect lose progress already queued behind a slow sink.
-		// Once a live sink falls a bounded number of batches behind, stop delivery
-		// and preserve the complete stream in its artifact instead of growing both
-		// broker and client queues for the daemon's lifetime.
-		if (
-			notification.event === "daemon-output" &&
-			registration.pending.length >= this.#maxUnacknowledgedOutputNotifications
-		) {
-			registration.disabled = true;
-			this.#progressBatcher.clear(registration.batchKey);
-			void registration.artifactSink.dispose();
-			const expired: DaemonMonitorWireNotification = {
-				event: "daemon-monitor-expired",
-				monitorId: registration.id,
-				registrationId: registration.registrationId,
-				name: registration.name,
-				daemonId: notification.daemonId,
-			};
-			registration.pending = [expired];
-			this.#writeMonitorNotification(registration, expired);
-			logger.warn("Disabling daemon monitor after delivery backlog exceeded its limit", {
-				monitorId: registration.id,
-				name: registration.name,
-				limit: this.#maxUnacknowledgedOutputNotifications,
-			});
-			return;
+		const bytes = notification.event === "daemon-output" ? Buffer.byteLength(notification.text, "utf8") : 0;
+		registration.pending.push({ notification, bytes });
+		registration.pendingBytes += bytes;
+		this.#evictRetainedOutput(registration);
+		this.#flushRetainedOutput(registration);
+	}
+
+	/** Evict the oldest retained output batches, never terminal notifications, while a cap is exceeded. */
+	#evictRetainedOutput(registration: OutputRegistration): void {
+		const limits = this.#outputReplayLimits;
+		let outputBatches = 0;
+		for (const entry of registration.pending) if (entry.notification.event === "daemon-output") outputBatches++;
+		while (outputBatches > limits.MAX_BATCHES || registration.pendingBytes > limits.MAX_BYTES) {
+			const index = registration.pending.findIndex(entry => entry.notification.event === "daemon-output");
+			if (index < 0) return;
+			const [evicted] = registration.pending.splice(index, 1);
+			if (!evicted || evicted.notification.event !== "daemon-output") return;
+			outputBatches--;
+			registration.pendingBytes -= evicted.bytes;
+			const { seq } = evicted.notification;
+			const unwritten = seq > registration.writtenSeq;
+			const gap = registration.replayGap;
+			if (!gap) {
+				registration.replayGap = { fromSeq: seq, throughSeq: seq, unwrittenFromSeq: unwritten ? seq : undefined };
+			} else {
+				gap.throughSeq = seq;
+				if (unwritten && gap.unwrittenFromSeq === undefined) gap.unwrittenFromSeq = seq;
+			}
 		}
-		registration.pending.push(notification);
-		this.#writeMonitorNotification(registration, notification);
+	}
+
+	/**
+	 * Write retained notifications the attached socket has not seen, in order,
+	 * while the unacknowledged in-flight window stays within the replay caps.
+	 * Evicted batches the socket never received are announced first as one
+	 * synthetic gap batch, so a consumer cannot mistake the replay for
+	 * continuous coverage.
+	 */
+	#flushRetainedOutput(registration: OutputRegistration): void {
+		if (!registration.socket || registration.socket.destroyed) return;
+		const limits = this.#outputReplayLimits;
+		const gap = registration.replayGap;
+		// The gap marker is itself an in-flight batch: while the window is full it
+		// waits for an ack like any other, so a stalled client sees one marker
+		// covering every eviction instead of a marker per evicted batch.
+		if (gap?.unwrittenFromSeq !== undefined && registration.writtenSeq - registration.ackSeq < limits.MAX_BATCHES) {
+			const lostFrom = Math.max(gap.unwrittenFromSeq, registration.ackSeq + 1);
+			gap.unwrittenFromSeq = undefined;
+			if (lostFrom <= gap.throughSeq && registration.daemonId !== undefined) {
+				const lost = gap.throughSeq - lostFrom + 1;
+				this.#writeMonitorNotification(registration, {
+					event: "daemon-output",
+					monitorId: registration.id,
+					registrationId: registration.registrationId,
+					name: registration.name,
+					daemonId: registration.daemonId,
+					epoch: registration.batchKey,
+					seq: gap.throughSeq,
+					text: "",
+					batchKind: "progress",
+					suppressedEvents: lost,
+					truncated: true,
+					artifactBytes: registration.artifactBase + registration.artifactSink.artifactBytes,
+					replayGap: lost,
+				});
+				registration.writtenSeq = gap.throughSeq;
+			}
+		}
+		let inFlightBytes = 0;
+		for (const entry of registration.pending) {
+			const { notification } = entry;
+			if (notification.event !== "daemon-output") {
+				if (registration.terminalWritten) continue;
+				this.#writeMonitorNotification(registration, notification);
+				registration.terminalWritten = true;
+				continue;
+			}
+			if (notification.seq <= registration.writtenSeq) {
+				inFlightBytes += entry.bytes;
+				continue;
+			}
+			if (registration.writtenSeq - registration.ackSeq >= limits.MAX_BATCHES || inFlightBytes >= limits.MAX_BYTES) {
+				return;
+			}
+			this.#writeMonitorNotification(registration, notification);
+			registration.writtenSeq = notification.seq;
+			inFlightBytes += entry.bytes;
+		}
 	}
 
 	#writeMonitorNotification(registration: OutputRegistration, notification: DaemonMonitorWireNotification): void {
@@ -1314,11 +1469,12 @@ class DaemonBroker {
 			await registration.artifactSink.flushArtifact();
 		} catch (error) {
 			if (this.#outputRegistrations.get(key) === registration) {
+				// The retained expiry stays replayable for a reconnecting client, but
+				// only through the reconnect grace already running for an offline
+				// registration: its cleanup timer is deliberately left armed.
 				registration.disabled = true;
-				clearTimeout(registration.offlineTimer);
-				registration.offlineTimer = undefined;
 				this.#progressBatcher.clear(registration.batchKey);
-				void registration.artifactSink.dispose();
+				void this.#disposeOutputArtifact(registration);
 				this.#sendMonitorNotification(registration, {
 					event: "daemon-monitor-expired",
 					monitorId: registration.id,
@@ -1334,9 +1490,11 @@ class DaemonBroker {
 			}
 			return;
 		}
-		// A replacement or same-name daemon can land while the artifact flush
-		// yields. Both registration and daemon incarnation must still match.
+		// A replacement, artifact expiry, or same-name daemon can land while the
+		// artifact flush yields. Delivery must still be live and bound to this
+		// registration and daemon incarnation.
 		if (
+			registration.disabled ||
 			this.#outputRegistrations.get(key) !== registration ||
 			this.#records.get(registration.name)?.snapshot.id !== registration.daemonId
 		) {
@@ -1356,6 +1514,7 @@ class DaemonBroker {
 			reminder: batch.reminder,
 			truncated:
 				batch.kind === "artifact-only" ? undefined : preview?.truncated === true || batch.suppressedEvents > 0,
+			artifactBytes: registration.artifactBase + registration.artifactSink.artifactBytes,
 		};
 		this.#sendMonitorNotification(registration, notification);
 	}
@@ -2029,8 +2188,10 @@ export interface DaemonBrokerStartOptions {
 	progressBatchIntervalMs?: number;
 	/** Grace for a disconnected monitor client to reconnect before its registration is dropped. */
 	outputReconnectGraceMs?: number;
-	/** Maximum retained monitor notifications awaiting client sink acknowledgement. */
-	maxUnacknowledgedOutputNotifications?: number;
+	/** Unacknowledged output batches retained per monitor before the oldest are evicted. */
+	maxRetainedOutputBatches?: number;
+	/** Unacknowledged output text bytes retained per monitor before the oldest batches are evicted. */
+	maxRetainedOutputBytes?: number;
 	/** Called after the broker endpoint is ready to accept authenticated requests. */
 	onListening?: () => void | Promise<void>;
 }
@@ -2061,18 +2222,23 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 		Number.isFinite(requestedProgressBatchIntervalMs) && requestedProgressBatchIntervalMs >= 0
 			? requestedProgressBatchIntervalMs
 			: PROGRESS_LIMITS.BATCH_INTERVAL_MS;
-	const requestedOutputReconnectGraceMs = options.outputReconnectGraceMs ?? OUTPUT_RECONNECT_GRACE_MS;
-	const outputReconnectGraceMs =
-		Number.isFinite(requestedOutputReconnectGraceMs) && requestedOutputReconnectGraceMs >= 0
-			? requestedOutputReconnectGraceMs
-			: OUTPUT_RECONNECT_GRACE_MS;
-	const requestedMaxUnacknowledgedOutputNotifications =
-		options.maxUnacknowledgedOutputNotifications ?? MAX_UNACKNOWLEDGED_OUTPUT_NOTIFICATIONS;
-	const maxUnacknowledgedOutputNotifications =
-		Number.isFinite(requestedMaxUnacknowledgedOutputNotifications) &&
-		requestedMaxUnacknowledgedOutputNotifications >= 1
-			? Math.floor(requestedMaxUnacknowledgedOutputNotifications)
-			: MAX_UNACKNOWLEDGED_OUTPUT_NOTIFICATIONS;
+	const requestedOutputReconnectGraceMs = options.outputReconnectGraceMs ?? OUTPUT_REPLAY_LIMITS.RETENTION_MS;
+	const requestedMaxRetainedOutputBatches = options.maxRetainedOutputBatches ?? OUTPUT_REPLAY_LIMITS.MAX_BATCHES;
+	const requestedMaxRetainedOutputBytes = options.maxRetainedOutputBytes ?? OUTPUT_REPLAY_LIMITS.MAX_BYTES;
+	const outputReplayLimits: OutputReplayLimits = {
+		RETENTION_MS:
+			Number.isFinite(requestedOutputReconnectGraceMs) && requestedOutputReconnectGraceMs >= 0
+				? requestedOutputReconnectGraceMs
+				: OUTPUT_REPLAY_LIMITS.RETENTION_MS,
+		MAX_BATCHES:
+			Number.isFinite(requestedMaxRetainedOutputBatches) && requestedMaxRetainedOutputBatches >= 1
+				? Math.floor(requestedMaxRetainedOutputBatches)
+				: OUTPUT_REPLAY_LIMITS.MAX_BATCHES,
+		MAX_BYTES:
+			Number.isFinite(requestedMaxRetainedOutputBytes) && requestedMaxRetainedOutputBytes >= 1
+				? Math.floor(requestedMaxRetainedOutputBytes)
+				: OUTPUT_REPLAY_LIMITS.MAX_BYTES,
+	};
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 	const lease = await acquireBrokerLease(runtimeDir);
 	if (!lease) return;
@@ -2101,8 +2267,7 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 		restartBackoffBaseMs,
 		clientAuthTimeoutMs,
 		progressBatchIntervalMs,
-		outputReconnectGraceMs,
-		maxUnacknowledgedOutputNotifications,
+		outputReplayLimits,
 	);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {
