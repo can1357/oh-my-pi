@@ -1089,7 +1089,14 @@ export function applyResolvedSystemPromptInputs(
 function personaExplicitModelPattern(parsed: Args, resolved: ResolveCliModelResult | undefined): string | undefined {
 	if (!parsed.model) return undefined;
 	if (!parsed.provider) return parsed.model;
-	return resolved?.model ? `${resolved.model.provider}/${resolved.model.id}` : `${parsed.provider}/${parsed.model}`;
+	if (!resolved?.model) return `${parsed.provider}/${parsed.model}`;
+	// A thinking suffix on the CLI pattern (`--provider openai --model gpt-5:high`)
+	// must survive the provider-qualified composition: the resume reconcile
+	// re-resolves the persisted pattern, so dropping the suffix silently
+	// re-classifies the thinking effort. `resolved.thinkingLevel` is set exactly
+	// when the resolver stripped a valid suffix — append it back.
+	const qualified = `${resolved.model.provider}/${resolved.model.id}`;
+	return resolved.thinkingLevel ? `${qualified}:${resolved.thinkingLevel}` : qualified;
 }
 
 /** Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage. */

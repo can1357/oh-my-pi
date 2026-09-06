@@ -153,11 +153,17 @@ export class PersonaRuntime {
 	 * normally. Without deferral hooks, a mid-turn switch throws
 	 * {@link PersonaSwitchError} — the caller has no safe channel for the model
 	 * half, so the whole switch is refused.
+	 *
+	 * `baselineOverride` (fvInv) replaces the live pre-enter capture — the
+	 * launch-over-resume seam passes the persisted journal baseline so the
+	 * eventual exit restores the true pre-persona state, matching
+	 * {@link reconcile}.
 	 */
 	async enter(
 		agent: DiscoveredAgent,
 		explicit: PersonaExplicitOverrides,
 		hooks: PersonaModelApplyHooks,
+		baselineOverride?: ModelOverrideState,
 	): Promise<void> {
 		const deferModel = this.session.isStreaming && (hooks.shouldDeferModelSwitch?.() ?? false);
 		if (this.session.isStreaming && !deferModel) {
@@ -173,7 +179,7 @@ export class PersonaRuntime {
 			if (this.policy.isPersonaActive()) {
 				await this.#exitInner(hooks, deferModel);
 			}
-			await this.#enterInner(agent, explicit, hooks, deferModel);
+			await this.#enterInner(agent, explicit, hooks, deferModel, baselineOverride);
 		} catch (err) {
 			await this.restore(txSnapshot);
 			throw err;
@@ -390,9 +396,15 @@ export class PersonaRuntime {
 		// excludes mounted `xd://` names, so filtering it would silently unmount
 		// every mounted device on enter. `setActiveToolPresentation` re-derives
 		// the top-level vs mounted split from the mounted subset passed below.
+		//
+		// fureZ: the filter must be the PERMISSION question (granted()), not
+		// effective() — a defaultInactive tool the user ALREADY activated
+		// (RPC set-tools, /mcp toggle, extension funnel, explicit CLI grant)
+		// before the persona entered must stay active; effective() would
+		// re-derive its dormant default and silently strip the activation.
 		await this.session.setActiveToolPresentation(
-			this.session.getEnabledToolNames().filter(name => this.policy.effective(name)),
-			this.session.getMountedXdevToolNames().filter(name => this.policy.effective(name)),
+			this.session.getEnabledToolNames().filter(name => this.policy.granted(name)),
+			this.session.getMountedXdevToolNames().filter(name => this.policy.granted(name)),
 		);
 		this.session.setSessionSpawns(agent.spawns ?? null);
 		this.session.applyPersonaAppendPrompt(agent.systemPrompt);
@@ -494,6 +506,12 @@ export class PersonaRuntime {
 	 */
 	async #exitInner(hooks: PersonaModelApplyHooks, deferModel: boolean): Promise<void> {
 		this.session.clearInheritedProviderPromptCacheKey();
+		// furec: the persona's grant is needed AFTER exitPersona() below to tell
+		// "the user deactivated a granted tool mid-persona" (furec → stays off)
+		// from "the persona itself stripped this name at enter" (→ snapshot
+		// governs the restore). effectiveSet() is post-exit, so the LIVE grant
+		// must be captured first.
+		const personaGrant: ReadonlySet<string> | null = this.policy.snapshot().persona?.grant ?? null;
 		this.policy.exitPersona();
 		this.session.setSessionSpawns(null);
 		this.session.applyPersonaAppendPrompt(undefined);
@@ -512,18 +530,41 @@ export class PersonaRuntime {
 			// decides its default-active state, so a default-inactive registration
 			// stays dormant. A tool DEACTIVATED before the persona entered is in
 			// neither the snapshot nor the baseline and stays off.
-			const merged = [...snapshot.tools];
-			const mergedMounted = [...snapshot.mountedToolNames];
+			// furec: the merge must respect a deactivation made UNDER the persona —
+			// but the live enabled set is PERSONA-NARROWED (enter filtered it down
+			// to the grant), so it cannot discriminate "user turned it off
+			// mid-persona" from "the persona never granted it". A snapshot name the
+			// persona GRANTED but is now absent from the live enabled set was
+			// deactivated mid-persona — drop it from the restore (the disable
+			// persists across exit). A name the persona never granted was stripped
+			// at enter, not by the user: the snapshot governs.
 			const baseline = this.policy.effectiveSet();
+			const liveEnabled = new Set(this.session.getEnabledToolNames());
+			const wasGrantedByPersona = (name: string): boolean => personaGrant === null || personaGrant.has(name);
+			// Current state wins in BOTH directions (furec + mirror): the
+			// live enabled set carries activations AND deactivations made
+			// under the persona, and neither the pre-enter snapshot nor the
+			// post-exit baseline knows about a defaultInactive tool that was
+			// re-enabled mid-persona (it is filtered by the toggle layer at
+			// both ends). Names registered while the persona was active come
+			// from the enter-registry exclusion, not here.
+			const merged = new Set(snapshot.tools.filter(name => liveEnabled.has(name) || !wasGrantedByPersona(name)));
 			for (const name of baseline) {
-				if (!enterRegistry?.has(name) && !merged.includes(name)) merged.push(name);
+				if (!enterRegistry?.has(name)) merged.add(name);
 			}
+			for (const name of liveEnabled) {
+				if (this.policy.granted(name)) merged.add(name);
+			}
+			const liveMounted = new Set(this.session.getMountedXdevToolNames());
+			const mergedMounted = snapshot.mountedToolNames.filter(
+				name => liveMounted.has(name) || !wasGrantedByPersona(name),
+			);
 			for (const name of this.session.getMountedXdevToolNames()) {
 				if (baseline.has(name) && !enterRegistry?.has(name) && !mergedMounted.includes(name)) {
 					mergedMounted.push(name);
 				}
 			}
-			await this.session.setActiveToolPresentation(merged, mergedMounted);
+			await this.session.setActiveToolPresentation([...merged], mergedMounted);
 		} else {
 			const baseline = this.policy.effectiveSet();
 			await this.session.setActiveToolPresentation(

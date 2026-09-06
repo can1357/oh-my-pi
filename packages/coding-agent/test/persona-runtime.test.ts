@@ -4,7 +4,8 @@ import {
 	readPersistedAgentPersona,
 	serializePersonaBaseline,
 } from "@oh-my-pi/pi-coding-agent/session/persisted-persona";
-import { PersonaSwitchError } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
+import { PersonaRuntime, PersonaSwitchError } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
+import { SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
 import type { PersonaModelApplyHooks } from "@oh-my-pi/pi-coding-agent/session/persona-model-hooks";
 import { makePersonaAgent, makePersonaHooks, makeRuntime, makeSessionStub, ALL_TOOLS } from "./persona-test-utils";
 
@@ -499,6 +500,48 @@ describe("PersonaRuntime", () => {
 		expect(last?.mountedToolNames).toContain("xd://alpha");
 	});
 
+	// fureZ: a defaultInactive tool the user already activated (RPC set-tools,
+	// /mcp toggle, extension funnel) before the persona entered must STAY
+	// active — the enter filter is the permission question (granted()), not
+	// effective(), which would re-derive the dormant default and strip it.
+	it("enter keeps a pre-activated defaultInactive tool active (fureZ)", async () => {
+		const { stub, session } = makeSessionStub({
+			enabledToolNames: ["read", "grep", "dormant"],
+			activeToolNames: ["read", "grep", "dormant"],
+			registeredToolNames: [...ALL_TOOLS, "dormant"],
+		});
+		const policy = new SessionToolPolicy({
+			registry: () => new Set(stub.registeredToolNames),
+			isDefaultActive: name => name !== "dormant",
+		});
+		const runtime = new PersonaRuntime(policy, session);
+		await runtime.enter(makeAgent(), {}, makeHooks()); // unrestricted persona
+
+		const last = stub.presentationCalls.at(-1);
+		expect(last?.toolNames).toContain("dormant"); // activation survives enter
+	});
+
+	// furec: a tool DISABLED while the persona was active stays disabled at
+	// exit — the CURRENT toggle state wins over the pre-enter snapshot; the
+	// snapshot restore must not resurrect the deactivation.
+	it("exit keeps a mid-persona deactivation (furec)", async () => {
+		const { stub, session } = makeSessionStub({
+			enabledToolNames: ["read", "grep", "write"],
+			activeToolNames: ["read", "grep", "write"],
+		});
+		const runtime = makeRuntime(session);
+		await runtime.enter(makeAgent(), {}, makeHooks()); // unrestricted persona
+
+		// The user (extension funnel, granted) disables `write` mid-persona.
+		stub.enabledToolNames = ["read", "grep"];
+		stub.activeToolNames = ["read", "grep"];
+
+		await runtime.exit(makeHooks());
+		const last = stub.presentationCalls.at(-1);
+		expect(last?.toolNames).not.toContain("write"); // disable persists
+		expect(last?.toolNames).toContain("read"); // untouched tools restore
+	});
+
 	// j2l regression: exit restored the POST-exit policy derivation (the
 	// unrestricted default set), erasing user/extension deactivations made
 	// before the persona entered. Exit must restore the PRE-ENTER presentation.
@@ -514,6 +557,27 @@ describe("PersonaRuntime", () => {
 		const last = stub.presentationCalls.at(-1);
 		expect(last?.toolNames).toEqual(["read", "grep", "write"]); // glob stays OUT
 		expect(last?.mountedToolNames).toEqual(["xd://alpha"]);
+	});
+
+	// furec mirror: a defaultInactive tool the user explicitly RE-ENABLED
+	// (extension funnel, granted) mid-persona stays enabled after exit —
+	// current state wins in the enable direction too; the pre-enter snapshot
+	// (which lacked it) must not drop the re-enable.
+	it("exit keeps a mid-persona re-enable of a defaultInactive tool (furec mirror)", async () => {
+		const { stub, session } = makeSessionStub({
+			enabledToolNames: ["read", "grep"],
+			activeToolNames: ["read", "grep"],
+		});
+		const runtime = makeRuntime(session);
+		await runtime.enter(makeAgent({ tools: ["read", "grep", "glob"] }), {}, makeHooks());
+
+		// The user re-enables `glob` (defaultInactive, persona-granted) mid-persona.
+		stub.enabledToolNames = ["read", "grep", "glob"];
+		stub.activeToolNames = ["read", "grep", "glob"];
+
+		await runtime.exit(makeHooks());
+		const last = stub.presentationCalls.at(-1);
+		expect(last?.toolNames).toContain("glob"); // re-enable persists
 	});
 
 	// j2l merge regression: a tool REGISTERED while the persona was active is

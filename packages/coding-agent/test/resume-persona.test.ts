@@ -270,12 +270,16 @@ describe("InteractiveMode persona resume reconcile", () => {
 		resumedManager.appendModeChange("agent", { name: "fixture-reader" });
 
 		const created = createMode(createdSession);
+		const modeChangesBefore = (await lastAgentModeChange(resumedManager))?.data.name;
 		await created.init({ suppressWelcomeIntro: true });
 
 		const policy = createdSession.getPersonaRuntime()!.policy;
 		expect(policy.isPersonaActive()).toBe(true);
 		const entry = await lastAgentModeChange(resumedManager);
 		expect(entry?.data.name).toBe("fixture-reader");
+		// fvInv double-enter guard: the same-name reconcile must be a no-op —
+		// no fresh exit/enter, so no NEW journal entry after the seam's.
+		expect(entry?.data.name).toBe(modeChangesBefore);
 		expect(statusMessages.some(message => message.includes("stale-persona"))).toBe(false);
 	});
 
@@ -577,6 +581,45 @@ You are the fixture thinker persona.`,
 		expect(switchModel).toBe(liveSession.model as Model);
 	});
 
+	// fvFVp: a persona whose MODEL pattern carries the thinking suffix
+	// (`model: [provider/m:high]`, no `thinkingLevel` frontmatter) mid-turn —
+	// the deferred queue must carry the PATTERN-DERIVED level, not just the
+	// frontmatter one; the flush would otherwise land on the model's default.
+	it("modeled persona with suffix pattern queues the pattern-derived thinking mid-turn (fvFVp)", async () => {
+		await writeFixtureAgent(
+			`---
+name: fixture-suffixed
+description: Persona whose model pattern carries a thinking suffix
+tools:
+  - read
+model:
+  - anthropic/claude-opus-4-5:high
+---
+
+You are the suffixed persona.`,
+			"fixture-suffixed.md",
+		);
+
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => true });
+		const setModelSpy = vi.spyOn(liveSession, "setModelTemporary").mockResolvedValue(undefined);
+		await created.switchAgentPersona("fixture-suffixed");
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+		expect(setModelSpy).not.toHaveBeenCalled();
+
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => false });
+		await created.flushPendingModelSwitch();
+
+		expect(setModelSpy).toHaveBeenCalledTimes(1);
+		const [switchModel, switchThinking] = setModelSpy.mock.calls[0] ?? [];
+		expect(switchModel?.id).toBe("claude-opus-4-5");
+		expect(switchThinking).toBe(Effort.High);
+	});
+
 	it("thinking-only persona B merges into persona A's queued restore (j2w)", async () => {
 		// A (modeled persona) exits mid-turn: its PRE-persona model restore is
 		// queued. B (thinking-only, no model) then enters mid-turn: the queue
@@ -681,6 +724,46 @@ You are the modeled fixture persona.`,
 		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
 		// The USER's pick survives the persona exit — not the pre-enter model.
 		expect(liveSession.model?.id).toBe("claude-opus-4-5");
+	});
+
+	// fvFVr: role cycling (alt+m) is a USER model change — under an active
+	// persona it must re-root the exit baseline exactly like /model does;
+	// otherwise the persona's exit restores the stale pre-enter model.
+	it("role model cycle under a persona re-roots the exit baseline (fvFVr)", async () => {
+		await writeFixtureAgent(
+			`---
+name: fixture-modeled
+description: Modeled fixture persona
+tools:
+  - read
+model:
+  - anthropic/claude-sonnet-4-5
+---
+
+You are the modeled fixture persona.`,
+			"fixture-modeled.md",
+		);
+
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		const opus = getBundledModel("anthropic", "claude-opus-4-5");
+		if (!opus) throw new Error("Expected built-in anthropic opus model to exist");
+		// The role cycle needs a second role to land on.
+		Settings.instance.setModelRole("slow", "anthropic/claude-opus-4-5:high");
+
+		await created.switchAgentPersona("fixture-modeled");
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+
+		// The user cycles through the role order mid-persona (alt+m channel).
+		const result = await liveSession.cycleRoleModels(["default", "slow"]);
+		if (!result) throw new Error("Expected role cycle to land on a model");
+		expect(liveSession.model?.id).toBe(result.model.id);
+
+		await created.exitAgentPersona();
+		// The CYCLED model survives the persona exit.
+		expect(liveSession.model?.id).toBe(result.model.id);
 	});
 
 	it("user model pick under a persona persists the rerooted baseline to the journal (j2r)", async () => {
@@ -789,6 +872,45 @@ You are the modeled fixture persona.`,
 		expect(policy.effective("write")).toBe(false);
 	});
 
+	// fured: the gone-persona degrade on a headless switch surfaces as a
+	// session notice (the client-facing channel on ACP/RPC surfaces), not a
+	// silent journal write only.
+	it("headless switch to a session whose persona is gone emits a notice (fured)", async () => {
+		// Target journal names a persona no fixture defines.
+		const goneTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		goneTarget.appendMessage({ role: "user", content: "gone persona turn", timestamp: Date.now() });
+		goneTarget.appendModeChange("agent", { name: "no-such-persona" });
+		await goneTarget.ensureOnDisk();
+		await goneTarget.flush();
+		const goneFile = goneTarget.getSessionFile();
+		if (!goneFile) throw new Error("Expected session file");
+		await goneTarget.close();
+
+		const plainSource = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		plainSource.appendMessage({ role: "user", content: "plain", timestamp: Date.now() });
+		await plainSource.ensureOnDisk();
+		await plainSource.flush();
+		const plainFile = plainSource.getSessionFile();
+		if (!plainFile) throw new Error("Expected session file");
+		await plainSource.close();
+
+		const sourceManager = await SessionManager.open(plainFile, path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(sourceManager);
+		const notices: Array<{ level: string; message: string }> = [];
+		liveSession.subscribe(event => {
+			if (event.type === "notice") notices.push({ level: event.level, message: event.message });
+		});
+
+		const switched = await liveSession.switchSession(goneFile);
+		expect(switched).toBe(true);
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+		expect(
+			notices.some(
+				notice => notice.message.includes('"no-such-persona"') && notice.message.includes("no longer available"),
+			),
+		).toBe(true);
+	});
+
 	it("failed headless switch restores the source persona from the rollback (j2n)", async () => {
 		// A FAILED switch rolls the session state back to the SOURCE session;
 		// its persona must be re-entered by the session-level reconcile —
@@ -831,5 +953,64 @@ You are the modeled fixture persona.`,
 		// Rollback reinstated the SOURCE persona.
 		expect(runtime.policy.isPersonaActive()).toBe(true);
 		expect(liveSession.getPersonaAppendPrompt()).toContain("fixture reader persona");
+	});
+
+	// fvIn0: a FAILED persona teardown (runtime.exit throws) aborts the switch —
+	// the rollback inside exit keeps the source persona intact, and continuing
+	// would load the target with the source's stale grant/prompt/presentation.
+	it("failed persona teardown aborts the switch (fvIn0)", async () => {
+		const sourcePersona = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		sourcePersona.appendMessage({ role: "user", content: "source turn", timestamp: Date.now() });
+		sourcePersona.appendModeChange("agent", { name: "fixture-reader" });
+		await sourcePersona.ensureOnDisk();
+		await sourcePersona.flush();
+		const sourceFile = sourcePersona.getSessionFile();
+		if (!sourceFile) throw new Error("Expected session file");
+		await sourcePersona.close();
+
+		const plainTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		plainTarget.appendMessage({ role: "user", content: "plain", timestamp: Date.now() });
+		await plainTarget.ensureOnDisk();
+		await plainTarget.flush();
+		const plainFile = plainTarget.getSessionFile();
+		if (!plainFile) throw new Error("Expected session file");
+		await plainTarget.close();
+
+		await writeFixtureAgent(READER_AGENT_MD);
+
+		const liveManager = await SessionManager.open(sourceFile, path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(liveManager);
+		const runtime = liveSession.getPersonaRuntime()!;
+
+		// Enter the persona, then sabotage the teardown: setActiveToolPresentation
+		// throws so runtime.exit rolls back and rethrows (the same channel a
+		// failing presentation apply exercises in production).
+		const boom = new Error("teardown boom");
+		const fixtureAgent = getAgent(await discoverAgents(tempDir.path()).then(d => d.agents), "fixture-reader");
+		if (!fixtureAgent) throw new Error("Expected fixture persona to resolve");
+		await runtime.reconcile(
+			{ agent: fixtureAgent },
+			{
+				apply: async () => {},
+			},
+		);
+		expect(runtime.policy.isPersonaActive()).toBe(true);
+		const presentationSpy = vi.spyOn(liveSession, "setActiveToolPresentation").mockImplementation(async () => {
+			throw boom;
+		});
+		const exiting = runtime.exit({ apply: async () => {} });
+		await expect(exiting).rejects.toThrow(boom);
+		expect(runtime.policy.isPersonaActive()).toBe(true); // rollback reinstated
+		presentationSpy.mockRestore();
+
+		// fvIn0 (the agent-session change): a teardown failure DURING switchSession
+		// aborts the switch — the source persona survives intact. The exit inside
+		// switchSession re-throws through the same sabotaged presentation channel.
+		vi.spyOn(liveSession, "setActiveToolPresentation").mockImplementation(async () => {
+			throw boom;
+		});
+		const switched = await liveSession.switchSession(plainFile);
+		expect(switched).toBe(false);
+		expect(runtime.policy.isPersonaActive()).toBe(true); // source persona intact
 	});
 });

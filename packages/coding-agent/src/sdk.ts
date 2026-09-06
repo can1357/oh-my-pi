@@ -92,7 +92,11 @@ import {
 	setInvocationConfiguredExtensions,
 	withOmpExtensionRootScope,
 } from "./discovery/omp-extension-roots";
-import { appendPersonaJournalEntry } from "./session/persisted-persona";
+import {
+	appendPersonaJournalEntry,
+	deserializePersonaBaseline,
+	readPersistedAgentPersona,
+} from "./session/persisted-persona";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
@@ -4058,10 +4062,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				});
 			});
 			if (options.pendingPersonaAgent) {
+				// fvInv: `--agent X --resume` re-enters the CLI persona over a stored
+				// journal. The persisted persona's baseline (the pre-persona state
+				// captured at the ORIGINAL enter) is authoritative for the eventual
+				// exit — the live session state is persona-produced, so a live
+				// capture would restore the persona model. Read it from the target
+				// journal and pass it through `enter`, exactly as
+				// reconcileSessionPersona does for the resume path.
+				const persisted = readPersistedAgentPersona(sessionManager.getEntries());
+				const baselineOverride = persisted?.baseline
+					? deserializePersonaBaseline(session, persisted.baseline)
+					: undefined;
 				await personaRuntime.enter(
 					options.pendingPersonaAgent,
 					options.pendingPersonaExplicit ?? {},
 					createDefaultPersonaModelHooks(session),
+					baselineOverride,
 				);
 				// j2g: the pre-persona baseline rides the journal entry so a resume
 				// re-enter uses it as the authoritative exit baseline.

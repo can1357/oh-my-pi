@@ -251,6 +251,33 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	// fureZ-adjacent (apply-funnel enforcement): the internal think-tool apply
+	// consults the session tool policy — a persona that does not grant `think`
+	// keeps the scratchpad registered but DORMANT.
+	it("think tool stays dormant under a persona grant that excludes it", async () => {
+		const tempDir = makeTempDir();
+		const settings = Settings.isolated({ externalThinking: true });
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			model: requireBundledModel("openai", "gpt-5"),
+			settings,
+		});
+		try {
+			// Simulate a persona active in the policy without `think` granted.
+			const policy = session.getToolPolicy();
+			if (!policy) throw new Error("Expected a session tool policy");
+			policy.enterPersona({ name: "p", description: "", systemPrompt: "", tools: ["read"], source: "bundled" }, {});
+			expect(policy.granted("think")).toBe(false);
+
+			await session.setThinkToolEnabled(true);
+			expect(session.getToolByName("think")).toBeDefined(); // registered
+			expect(session.getEnabledToolNames()).not.toContain("think"); // dormant
+			expect(session.getActiveToolNames()).not.toContain("think"); // dormant
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("exposes the private think tool only on transports that can disable native reasoning", async () => {
 		const tempDir = makeTempDir();
 		const settings = Settings.isolated({ externalThinking: true });

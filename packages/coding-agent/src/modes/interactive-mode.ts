@@ -6077,9 +6077,16 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 				const resolved = resolveModelOverride(agent.model, this.session.modelRegistry, this.session.settings);
 				if (!resolved.model) return;
+				// The pattern itself can carry the thinking level (`model: [provider/m:high]`).
+				// The default hooks resolve that suffix in the synchronous apply
+				// (persona-model-hooks.ts j2v); the queue must receive the same value
+				// or the deferred switch lands on the model's default effort instead
+				// of the pattern's.
+				const queuedThinking =
+					agent.thinkingLevel ?? (resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined);
 				this.#pendingModelSwitch = {
 					model: resolved.model,
-					thinkingLevel: agent.thinkingLevel,
+					thinkingLevel: queuedThinking,
 				};
 				this.#pendingPlanModelSwitch = false;
 			},

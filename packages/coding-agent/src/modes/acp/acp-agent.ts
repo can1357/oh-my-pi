@@ -1506,6 +1506,21 @@ export class AcpAgent implements Agent {
 	}
 
 	async #handleLifetimeEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
+		// fured: a session notice (e.g. the gone-persona degrade on a headless
+		// switch) reaches the client as an in-band message chunk — the same
+		// channel #emitPersonaNotices uses, so the text is never silently
+		// swallowed by the generic reconcile path.
+		if (event.type === "notice") {
+			try {
+				await this.#emitPersonaNotices([event.message], record.session.sessionId);
+			} catch (error) {
+				logger.warn("Failed to emit a session notice to the ACP client", {
+					sessionId: record.session.sessionId,
+					error,
+				});
+			}
+			return;
+		}
 		if (event.type !== "thinking_level_changed" && event.type !== "model_changed") {
 			return;
 		}

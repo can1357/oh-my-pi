@@ -7,6 +7,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { loadSessionExtensions } from "@oh-my-pi/pi-coding-agent/sdk";
+import { discoverAgents, getAgent } from "@oh-my-pi/pi-coding-agent/task";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -85,7 +86,6 @@ test("file-form trusted extension contributes its package root to --agent discov
 	// via options.extensionRoots.
 	expect(options.additionalExtensionPaths).toEqual([realpathSync.native(`${packageDir}/index.ts`)]);
 	expect(options.extensionRoots).toBeDefined();
-	const { discoverAgents, getAgent } = await import("@oh-my-pi/pi-coding-agent/task");
 	// Mirror production: discovery consumes the session's effectiveExtensionRoots
 	// view (which carries the merged package root), not the loader-only paths.
 	const effectiveRoots = options.extensionRoots?.() ?? {

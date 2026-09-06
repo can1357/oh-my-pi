@@ -352,6 +352,33 @@ describe("--agent launch-as-switch", () => {
 		expect(desired?.explicit?.tools).toEqual([]);
 	});
 
+	// P2 (PRRT_kwDOQxs0bc6fvFVo): `--provider openai --model gpt-5:high` — the
+	// provider-qualified composition of the persona's explicit model override
+	// must preserve the thinking suffix, or resume reconcile silently
+	// re-classifies the effort.
+	it("persists the thinking suffix through the provider-qualified pattern", async () => {
+		await writeFixtureAgents({ name: "fixture-modeled.md", content: MODELED_AGENT_MD });
+		const parsed = parseArgs([
+			"--cwd",
+			workspace.path(),
+			"--agent",
+			"fixture-modeled",
+			"--provider",
+			"anthropic",
+			"--model",
+			"claude-opus-4-1:high",
+		]);
+		const options = await buildSessionOptions(
+			parsed,
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			Settings.isolated(),
+		);
+
+		expect(options.pendingPersonaExplicit?.model).toBe("anthropic/claude-opus-4-1:high");
+	});
+
 	// j2m (PRRT_kwDOQxs0bc6ftJ2Z): a live /agent switch under a CLI tool ceiling
 	// must serialize the ceiling into explicit.tools BEFORE enter, so the journal
 	// entry carries it and a resume cannot widen the persona past it.

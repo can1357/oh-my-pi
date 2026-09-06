@@ -2090,6 +2090,16 @@ export class AgentSession {
 		}
 		await reconcileSessionPersona(this, {
 			buildHooks: createDefaultPersonaModelHooks,
+			// fured: the gone-persona degrade must reach the client on headless
+			// surfaces too — a session-level notice (TUI forwards it as a status
+			// line, RPC includes `notice` in its event stream, ACP maps it onto
+			// an agent_message_chunk). Matching the TUI reconcile wording.
+			onGone: (session, persona) => {
+				session.emitNotice(
+					"warning",
+					`Agent persona "${persona}" is no longer available; session resumed without it.`,
+				);
+			},
 			onError: (session, persona, error) => {
 				logger.warn("Failed to reconcile persisted persona after session switch", {
 					sessionFile,
@@ -7974,9 +7984,18 @@ export class AgentSession {
 		runtime.noteUserModelChange();
 	}
 
-	/** Cycles the scoped model set, or all available models when no scope exists. */
-	cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		return this.#models.cycleModel(direction);
+	/**
+	 * Cycles the scoped model set, or all available models when no scope exists.
+	 * fvFVr: a user cycle lands OUTSIDE the persona's own apply, so it routes
+	 * through the same reroot funnel as setModel/setModelTemporary — with the
+	 * runtime-applying suppression so the persona's self-applied model (which
+	 * also flows through ModelControls) is never mis-attributed as a user pick.
+	 */
+	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
+		const personaApplying = this.#personaRuntime?.isApplyingPersonaModel ?? false;
+		const result = await this.#models.cycleModel(direction);
+		if (!personaApplying) this.#noteUserModelChange();
+		return result;
 	}
 
 	/** Resolves configured role models and the currently active role index. */
@@ -7984,17 +8003,30 @@ export class AgentSession {
 		return this.#models.getRoleModelCycle(roleOrder);
 	}
 
-	/** Applies a resolved role model without changing global settings. */
-	applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		return this.#models.applyRoleModel(entry);
+	/**
+	 * Applies a resolved role model without changing global settings. fvFVr:
+	 * same reroot funnel as the other user-driven model changes (suppressed
+	 * while the persona runtime itself is applying).
+	 */
+	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
+		const personaApplying = this.#personaRuntime?.isApplyingPersonaModel ?? false;
+		await this.#models.applyRoleModel(entry);
+		if (!personaApplying) this.#noteUserModelChange();
 	}
 
-	/** Cycles the configured role models in the supplied order. */
-	cycleRoleModels(
+	/**
+	 * Cycles the configured role models in the supplied order. fvFVr: the apply
+	 * runs through #models.applyRoleModel, so the note fires ONCE here (with
+	 * the runtime-applying suppression, same as setModelTemporary).
+	 */
+	async cycleRoleModels(
 		roleOrder: readonly string[],
 		direction: "forward" | "backward" = "forward",
 	): Promise<RoleModelCycleResult | undefined> {
-		return this.#models.cycleRoleModels(roleOrder, direction);
+		const personaApplying = this.#personaRuntime?.isApplyingPersonaModel ?? false;
+		const result = await this.#models.cycleRoleModels(roleOrder, direction);
+		if (!personaApplying) this.#noteUserModelChange();
+		return result;
 	}
 
 	/** Lists available models after applying the configured enabled-model filter. */
@@ -8917,10 +8949,22 @@ export class AgentSession {
 			try {
 				await runtime.exit(createDefaultPersonaModelHooks(this));
 			} catch (error) {
+				// fvIn0: the failed exit already ROLLED BACK inside runtime.exit —
+				// the source persona is still active, and its grant/prompt/
+				// presentation would leak onto the target if the switch continued.
+				// Abort the switch: the rollback keeps the source persona intact and
+				// the caller surfaces the error. (The runtime's own exit-restore
+				// already reverted the model/thinking it managed to apply.)
 				logger.warn("Failed to exit the active persona before switching sessions", {
 					sessionFile: this.sessionFile,
 					error: String(error),
 				});
+				// The disconnect above severed the agent-event pipeline; the
+				// switch is aborted, so restore it before returning. Without
+				// this, the source session keeps running but persistence and
+				// event emission are dead until the next successful switch.
+				this.#reconnectToAgent();
+				return false;
 			}
 		}
 		await this.#sessionBeforeSwitchReconciler?.();

@@ -1439,7 +1439,10 @@ export class SessionTools {
 				this.#builtInToolNames.add(wrapped.name);
 				nextActive.push(wrapped.name);
 			}
-			await this.#applyActiveToolsByName([...new Set(nextActive)]);
+			// Persona/restricted policies must gate internally-driven applies too:
+			// a memory backend swap must not widen the enabled surface past the
+			// policy (same seam the public funnels consult).
+			await this.#applyActiveToolsByName(this.#policyFilter([...new Set(nextActive)]));
 		});
 	}
 
@@ -1458,7 +1461,12 @@ export class SessionTools {
 	/** Reconciles the external scratchpad after the active model changes. */
 	reconcileThinkTool(): Promise<boolean> {
 		return this.#setThinkToolActive(
-			this.#host.settings.get("externalThinking") && supportsExternalThinking(this.#host.model()),
+			this.#host.settings.get("externalThinking") &&
+				supportsExternalThinking(this.#host.model()) &&
+				// The scratchpad is a granted-surface tool: a policy that does not
+				// grant it keeps it dormant (the internal apply funnel consults the
+				// same permission question as the public funnels).
+				(this.#isToolGranted?.("think") ?? true),
 		);
 	}
 
@@ -1467,7 +1475,7 @@ export class SessionTools {
 			const active = this.getEnabledToolNames();
 			if (!enabled) {
 				if (active.includes("think")) {
-					await this.#applyActiveToolsByName(active.filter(name => name !== "think"));
+					await this.#applyActiveToolsByName(this.#policyFilter(active.filter(name => name !== "think")));
 				}
 				return true;
 			}
@@ -1478,8 +1486,13 @@ export class SessionTools {
 				this.#toolRegistry.set(wrapped.name, wrapped);
 				this.#builtInToolNames.add(wrapped.name);
 			}
-			if (!active.includes("think")) {
-				await this.#applyActiveToolsByName([...active, "think"]);
+			// Persona/restricted policies must gate internally-driven applies too
+			// (same seam the public funnels consult): the scratchpad stays
+			// registered-but-dormant when the policy does not grant it. The apply
+			// runs whenever the enable decision and the live set disagree — a
+			// policy-revoked name is dropped here, not just an absent one.
+			if (!active.includes("think") || !this.#policyFilter(["think"]).includes("think")) {
+				await this.#applyActiveToolsByName(this.#policyFilter([...active, "think"]));
 			}
 			return true;
 		});

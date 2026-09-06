@@ -58,7 +58,7 @@ export function serializePersonaBaseline(baseline: {
  * can no longer resolve drops to `undefined` (the persona model may have been
  * removed from the catalog between sessions; the thinking half still restores).
  */
-function deserializePersonaBaseline(session: AgentSession, baseline: AgentPersonaBaseline): ModelOverrideState {
+export function deserializePersonaBaseline(session: AgentSession, baseline: AgentPersonaBaseline): ModelOverrideState {
 	return {
 		model: baseline.model
 			? (session.modelRegistry
@@ -204,6 +204,16 @@ export async function reconcileSessionPersona(
 		// are persona-produced, so re-capturing them would make a later exit
 		// restore the persona model.
 		const baselineOverride = desired.baseline ? deserializePersonaBaseline(session, desired.baseline) : undefined;
+		// fvInv double-enter guard: the CLI `--agent X --resume` launch seam
+		// (sdk.ts) already entered the same persona during construction with the
+		// same explicit overrides and the journal's baseline — a second
+		// reconcile would exit (restoring the pre-persona state) and re-enter,
+		// pointlessly replaying the switch and re-noticing nothing. Skip when
+		// the live persona already IS the desired one.
+		const active = runtime.policy.snapshot().persona;
+		if (active && active.agent.name === desired.name) {
+			return { entered: true };
+		}
 		await runtime.reconcile({ agent, explicit: desired.explicit, baselineOverride }, hooks.buildHooks(session));
 		return { entered: true };
 	} catch (error) {
