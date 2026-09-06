@@ -7,9 +7,9 @@ import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
-import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
+import type { AgentSession, FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
-import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { buildReplanTitleContext, USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
 import { toggleSessionPin } from "../session/session-pins";
 import {
@@ -35,6 +35,16 @@ import type {
 function formatFreshSessionResult(result: FreshSessionResult): string {
 	const stateLabel = result.closedProviderSessions === 1 ? "provider state" : "provider states";
 	return `Fresh provider session started (${result.closedProviderSessions} ${stateLabel} pruned).`;
+}
+
+async function generateRenameTitle(session: AgentSession): Promise<string | null> {
+	const context = buildReplanTitleContext(session.messages);
+	if (!context) return null;
+	const { sessionManager } = session;
+	const sessionId = sessionManager.getSessionId();
+	const revision = sessionManager.titleRevision;
+	const title = await session.generateTitle(context);
+	return sessionManager.getSessionId() === sessionId && sessionManager.titleRevision === revision ? title : null;
 }
 
 export const shutdownHandlerTui = (
@@ -628,28 +638,44 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "rename",
 		icon: "pencil",
-		description: "Rename the current session",
-		inlineHint: "<title>",
+		description: "Rename the current session (omit title to generate)",
+		inlineHint: "[title]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			if (!command.args) return usage("Usage: /rename <title>", runtime);
-			const ok = await runtime.sessionManager.setSessionName(command.args, "user");
-			if (!ok) {
-				await runtime.output("Session name not changed (a user-set name takes precedence).");
+			const session = runtime.session;
+			const runRename = async (): Promise<void> => {
+				const title = command.args || (await generateRenameTitle(session));
+				if (runtime.session !== session) return;
+				if (!title) {
+					await runtime.output("Could not generate a session title. Use /rename <title> to set one.");
+					return;
+				}
+				const ok = await runtime.sessionManager.setSessionName(title, "user");
+				if (!ok) {
+					await runtime.output("Session name not changed (a user-set name takes precedence).");
+					return;
+				}
+				await runtime.notifyTitleChanged?.();
+				await runtime.output(`Session renamed to ${title}.`);
+			};
+			if (!command.args && runtime.runCommandInBackground) {
+				runtime.runCommandInBackground(() =>
+					runRename().catch(err => runtime.output(`Rename failed: ${errorMessage(err)}`)),
+				);
 				return commandConsumed();
 			}
-			await runtime.notifyTitleChanged?.();
-			await runtime.output(`Session renamed to ${command.args}.`);
+			await runRename();
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			const title = command.args.trim();
+			runtime.ctx.editor.setText("");
+			const session = runtime.ctx.session;
+			const title = command.args.trim() || (await generateRenameTitle(session));
+			if (runtime.ctx.session !== session) return;
 			if (!title) {
-				runtime.ctx.showStatus("Usage: /rename <title>");
-				runtime.ctx.editor.setText("");
+				runtime.ctx.showStatus("Could not generate a session title. Use /rename <title> to set one.");
 				return;
 			}
-			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleRenameCommand(title);
 		},
 	},
