@@ -5,6 +5,7 @@
 ### Added
 
 - Documented Grok Bot one-shot text and tools probes, per-family tool wire, and the live AvailableModels matrix (`docs/grokbot.md`, `scripts/grokbot-catalog-matrix.ts`).
+- Grok Bot catalog matrix now smokes bash + read + write and retries HTTP 502/504 gateway flakes.
 
 ### Fixed
 

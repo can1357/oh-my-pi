@@ -1,3 +1,5 @@
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import type { ModelIdentity } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -35,11 +37,14 @@ import {
 	applyAnthropicSandToolWire,
 	resolveAnthropicSandToolsWire,
 	type AnthropicSandToolsWire,
+	type AnthropicSandToolWireResult,
 } from "./grokbot/anthropic-sand-wire";
 import {
 	advertisedNamesForJsonTextToolCall,
+	assistantTextForJsonPromotion,
 	parseJsonTextToolCall,
 } from "./grokbot/json-text-tool-call";
+import { nativeToolParametersForIdentity } from "./grokbot/tool-policy";
 import {
 	augmentToolIndexForProductWire,
 	parseSendToUserContent,
@@ -187,7 +192,7 @@ function toolParametersToJson(tool: Tool): Record<string, unknown> {
 	}
 }
 
-function toInferenceTools(tools: Context["tools"]) {
+function toInferenceTools(tools: Context["tools"], identity?: Pick<ModelIdentity, "class">) {
 	if (!Array.isArray(tools)) return [];
 	const out: Array<{
 		name: string;
@@ -201,10 +206,13 @@ function toInferenceTools(tools: Context["tools"]) {
 		if (!name) continue;
 		const wireName =
 			typeof tool.customWireName === "string" && tool.customWireName.trim() ? tool.customWireName.trim() : name;
+		const parameters = identity
+			? nativeToolParametersForIdentity(toolParametersToJson(tool), identity)
+			: toolParametersToJson(tool);
 		const entry: (typeof out)[number] = {
 			name: wireName,
 			description: typeof tool.description === "string" ? tool.description : "",
-			parameters: toolParametersToJson(tool),
+			parameters,
 		};
 		if (tool.customFormat && typeof tool.customFormat === "object") {
 			entry.customToolFormat = {
@@ -667,518 +675,559 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
 			);
 			const messages = toInferenceMessages(context);
-			const tools = toInferenceTools(context.tools);
+			const identity = classifyModel("grokbot", model.id, { lenient: true });
+			const tools = toInferenceTools(context.tools, identity);
 			const grammarTools = buildGrammarToolIndex(context.tools);
-			const modelConfig = buildModelConfig(model, options);
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
-			const reqModel = resolveGrokbotRequestedModel(model.id, {
-				effort: options?.effort,
-				effortMap: model.thinking?.effortMap,
-				fast: options?.fast,
-				thinking: options?.thinking,
-				context: options?.context,
-				sandParameterDefaults: model.sandParameterDefaults,
-				sandParameterIds: model.sandParameterIds,
-				sandMaxMode: model.sandMaxMode,
-				canonicalModelId: model.requestModelId,
-				sandVariantStringRepresentation: model.sandVariantStringRepresentation,
-			});
-			let body: Record<string, unknown> = {
-				messages,
+			let emptyToolRetryUsed = false;
+			let started = false;
+			let anthropicWire: AnthropicSandToolWireResult = {
+				requestedModel: { modelId: model.id },
 				tools,
-				requestedModel: reqModel,
-				invocationId: crypto.randomUUID(),
-				conversationId,
+				modelId: model.id,
 			};
-			if (modelConfig) body.modelConfig = modelConfig;
-			const resolvedWire = resolveAnthropicSandToolsWire(
-				typeof process !== "undefined" ? process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE : undefined,
-				options?.anthropicToolsWire,
-				{ modelId: model.id, toolCount: tools.length, sandToolsWire: model.sandToolsWire },
-			);
-			const anthropicWire = applyAnthropicSandToolWire(
-				{
-					requestedModel: reqModel,
-					tools,
-					modelId: model.id,
-					ompTools: context.tools,
-					sandToolsWire: model.sandToolsWire,
-				},
-				resolvedWire,
-			);
-			if (anthropicWire.wireMode) {
-				body.requestedModel = anthropicWire.requestedModel;
-				body.tools = anthropicWire.tools;
-				if (anthropicWire.subagentType) body.subagentType = anthropicWire.subagentType;
-				if (anthropicWire.automationId) body.automationId = anthropicWire.automationId;
-				if (anthropicWire.acceptedUnadvertisedToolNames?.length) {
-					body.acceptedUnadvertisedToolNames = anthropicWire.acceptedUnadvertisedToolNames;
-				}
-				augmentToolIndexForProductWire(grammarTools, context.tools);
-				if (
-					anthropicWire.wireMode === "automation" ||
-					anthropicWire.wireMode === "parent-chat" ||
-					anthropicWire.wireMode === "keep-model"
-				) {
-					// History stores omp names (bash/read/write); product tools are
-					// Shell/Read/Write — rewrite replayed call/result names to match.
-					body.messages = rewriteInferenceMessagesForProductWire(
-						(body.messages as Record<string, unknown>[]) ?? [],
-					);
-					logger.info("grokbot: product sand tool wire", {
-						wireMode: anthropicWire.wireMode,
-						originalModelId: anthropicWire.originalModelId,
-						wireModelId: anthropicWire.requestedModel.modelId,
-						subagentType: anthropicWire.subagentType,
-						tools: anthropicWire.tools.length,
-					});
-				} else if (anthropicWire.wireMode === "sand-default-fallback") {
-					logger.warn("grokbot: anthropic sand tool wire fallback", {
-						originalModelId: anthropicWire.originalModelId,
-						fallbackModelId: anthropicWire.requestedModel.modelId,
-						tools: tools.length,
-					});
-				}
-			}
-			const replacementPayload = await options?.onPayload?.(body, model);
-			if (replacementPayload !== undefined) {
-				body = replacementPayload as Record<string, unknown>;
-			}
-			const protoBytes = encodeInferenceStreamRequest(body);
-			const wireModel = body.requestedModel as GrokbotRequestedModel;
-			const effort = (wireModel.parameters || []).find(p => p.id === "effort")?.value || "";
-			const fast = (wireModel.parameters || []).find(p => p.id === "fast")?.value || "";
-
-			// model.headers + options.headers first; provider-owned auth/client
-			// headers win so reverse-proxy keys cannot override sand identity.
-			// Case-insensitive merge prevents Authorization/authorization duplicates.
-			const headers = mergeGrokbotHeaders(model.headers, options?.headers, grokbotClientHeaders(authCfg), {
-				authorization: `Bearer ${accessToken}`,
-				"x-cursor-checksum": createGrokbotChecksum(authCfg.machineId),
-				"x-ghost-mode": "true",
-				"x-request-id": crypto.randomUUID(),
-				"content-type": "application/connect+proto",
-				accept: "application/connect+proto",
-				"connect-protocol-version": "1",
-			});
-
-			logger.debug("grokbot: stream request", {
-				modelId: (body.requestedModel as GrokbotRequestedModel).modelId,
-				maxMode: Boolean((body.requestedModel as GrokbotRequestedModel).maxMode),
-				effort,
-				fast,
-				tools: tools.length,
-				toolNames: tools.map(t => t.name),
-				messages: messages.length,
-				hasModelConfig: Boolean(modelConfig),
-				anthropicWireMode: anthropicWire.wireMode,
-				anthropicOriginalModelId: anthropicWire.originalModelId,
-			});
-
-			const backend = (model.baseUrl || GROKBOT_BACKEND).replace(/\/+$/, "");
-			const response = await fetchImpl(joinGrokbotBackendUrl(backend, STREAM_PATH), {
-				method: "POST",
-				headers,
-				body: frameConnectProto(protoBytes),
-				signal: options?.signal,
-			});
-			await notifyProviderResponse(options, response, model, response.headers.get("x-request-id"));
-
-			if (!response.ok || !response.body) {
-				if (response.status === 401) clearGrokbotTokenCache();
-				output.errorStatus = response.status;
-				const errText = await response.text().catch(() => "");
-				throw new Error(
-					`Grok Bot stream failed (HTTP ${response.status})${errText ? `: ${errText.slice(0, 200)}` : ""}`,
-				);
-			}
-
-			stream.push({ type: "start", partial: output });
-
-			let openKind: "" | "text" | "thinking" = "";
-			let openIndex = -1;
-			let sendToUserArgsText = "";
-			let sendToUserLastContent = "";
+			let body: Record<string, unknown> = {};
 			let routedResponseModel = "";
-			const toolStates = new Map<
-				string,
-				{ key: string; index: number; block: ToolCall; argsText: string; ended: boolean; isGrammar: boolean }
-			>();
 
-			const closeOpen = () => {
-				if (openKind === "text" && openIndex >= 0) {
-					const block = output.content[openIndex] as TextContent;
-					stream.push({
-						type: "text_end",
-						contentIndex: openIndex,
-						content: block?.text || "",
-						partial: output,
-					});
-				} else if (openKind === "thinking" && openIndex >= 0) {
-					const block = output.content[openIndex] as ThinkingContent;
-					stream.push({
-						type: "thinking_end",
-						contentIndex: openIndex,
-						content: block?.thinking || "",
-						partial: output,
-					});
-				}
-				openKind = "";
-				openIndex = -1;
-			};
-
-			const ensureText = () => {
-				if (openKind === "text") return openIndex;
-				closeOpen();
-				openIndex = output.content.length;
-				output.content.push({ type: "text", text: "" });
-				openKind = "text";
-				stream.push({ type: "text_start", contentIndex: openIndex, partial: output });
-				return openIndex;
-			};
-
-			const ensureThinking = () => {
-				if (openKind === "thinking") return openIndex;
-				closeOpen();
-				openIndex = output.content.length;
-				output.content.push({ type: "thinking", thinking: "" });
-				openKind = "thinking";
-				stream.push({ type: "thinking_start", contentIndex: openIndex, partial: output });
-				return openIndex;
-			};
-
-			const finishTool = (state: {
-				ended: boolean;
-				argsText: string;
-				block: ToolCall;
-				index: number;
-				isGrammar: boolean;
-			}) => {
-				if (state.ended) return;
-				// Parse before marking ended so malformed JSON does not leave a
-				// "completed" state without a successful toolcall_end.
-				state.block.arguments = parseCompletedToolArgs(state.argsText, state.isGrammar);
-				clearStreamingPartialJson(state.block);
-				state.ended = true;
-				stream.push({
-					type: "toolcall_end",
-					contentIndex: state.index,
-					toolCall: state.block,
-					partial: output,
+			attempt: while (true) {
+				const modelConfig = buildModelConfig(model, {
+					...options,
+					maxTokens: emptyToolRetryUsed ? Math.max(Number(options?.maxTokens) || 0, 4096) : options?.maxTokens,
 				});
-			};
-
-			const handleSendToUser = (part: Record<string, unknown>) => {
-				const argsText =
-					part.args == null ? "" : typeof part.args === "string" ? part.args : JSON.stringify(part.args);
-				if (argsText) sendToUserArgsText = argsText;
-				const parsed = parseSendToUserContent(sendToUserArgsText);
-				if (parsed !== undefined && parsed !== sendToUserLastContent) {
-					const delta = parsed.startsWith(sendToUserLastContent)
-						? parsed.slice(sendToUserLastContent.length)
-						: parsed;
-					sendToUserLastContent = parsed;
-					if (delta) {
-						const idx = ensureText();
-						(output.content[idx] as TextContent).text += delta;
-						stream.push({ type: "text_delta", contentIndex: idx, delta, partial: output });
+				const reqModel = resolveGrokbotRequestedModel(model.id, {
+					effort: options?.effort,
+					effortMap: model.thinking?.effortMap,
+					fast: options?.fast,
+					thinking: emptyToolRetryUsed ? false : options?.thinking,
+					context: options?.context,
+					sandParameterDefaults: model.sandParameterDefaults,
+					sandParameterIds: model.sandParameterIds,
+					sandMaxMode: model.sandMaxMode,
+					canonicalModelId: model.requestModelId,
+					sandVariantStringRepresentation: model.sandVariantStringRepresentation,
+				});
+				body = {
+					messages,
+					tools,
+					requestedModel: reqModel,
+					invocationId: crypto.randomUUID(),
+					conversationId,
+				};
+				if (modelConfig) body.modelConfig = modelConfig;
+				const resolvedWire = resolveAnthropicSandToolsWire(
+					typeof process !== "undefined" ? process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE : undefined,
+					options?.anthropicToolsWire,
+					{ modelId: model.id, toolCount: tools.length, sandToolsWire: model.sandToolsWire },
+				);
+				anthropicWire = applyAnthropicSandToolWire(
+					{
+						requestedModel: reqModel,
+						tools,
+						modelId: model.id,
+						ompTools: context.tools,
+						sandToolsWire: model.sandToolsWire,
+					},
+					resolvedWire,
+				);
+				if (anthropicWire.wireMode) {
+					body.requestedModel = anthropicWire.requestedModel;
+					body.tools = anthropicWire.tools;
+					if (anthropicWire.subagentType) body.subagentType = anthropicWire.subagentType;
+					if (anthropicWire.automationId) body.automationId = anthropicWire.automationId;
+					if (anthropicWire.acceptedUnadvertisedToolNames?.length) {
+						body.acceptedUnadvertisedToolNames = anthropicWire.acceptedUnadvertisedToolNames;
 					}
-				}
-				if (part.isComplete ?? part.is_complete) closeOpen();
-			};
-
-			const upsertTool = (part: Record<string, unknown>) => {
-				const id = String(part.toolCallId || part.tool_call_id || "");
-				const name = String(part.toolName || part.tool_name || "");
-				const argsText =
-					part.args == null ? "" : typeof part.args === "string" ? part.args : JSON.stringify(part.args);
-				const isComplete = Boolean(part.isComplete ?? part.is_complete);
-				const indexHint = part.toolIndex ?? part.tool_index;
-				const idxKey = typeof indexHint === "number" ? `idx:${indexHint}` : undefined;
-				// Correlate chunks by id and/or index — frames may omit one of the two.
-				let state =
-					(id ? toolStates.get(id) : undefined) ?? (idxKey ? toolStates.get(idxKey) : undefined) ?? undefined;
-
-				if (!state) {
-					closeOpen();
-					const meta = (name ? grammarTools.get(name) : undefined) ?? undefined;
-					// Mark every grammar/customFormat call (hashline/sloppy have no
-					// customWireName) so live preview + history replay stay on raw args.
-					// Do not persist productWireName (Shell/Read/Write) — that alias is
-					// lookup-only and must not flip OpenAI Responses into custom_tool_call.
-					const grammarWire = meta?.isGrammar
-						? meta.customWireName || meta.name || name || undefined
-						: meta?.customWireName;
-					const block: ToolCall = {
-						type: "toolCall",
-						id: id || `call_${output.content.length}`,
-						name: meta?.name || name || "unknown",
-						arguments: {},
-						...(grammarWire ? { customWireName: grammarWire } : {}),
-					};
-					const index = output.content.length;
-					output.content.push(block);
-					const key = id || idxKey || `anon:${toolStates.size}`;
-					state = {
-						key,
-						index,
-						block,
-						argsText: "",
-						ended: false,
-						isGrammar: Boolean(meta?.isGrammar),
-					};
-					toolStates.set(key, state);
-					if (id) toolStates.set(id, state);
-					if (idxKey) toolStates.set(idxKey, state);
-					stream.push({ type: "toolcall_start", contentIndex: index, partial: output });
-				} else {
-					if (id) toolStates.set(id, state);
-					if (idxKey) toolStates.set(idxKey, state);
-					if (name && (!state.block.name || state.block.name === "unknown")) {
-						const meta = grammarTools.get(name);
-						state.block.name = meta?.name || name;
-						if (meta?.isGrammar) {
-							state.isGrammar = true;
-							state.block.customWireName = meta.customWireName || meta.name || name;
-						} else if (meta?.customWireName) {
-							state.block.customWireName = meta.customWireName;
-						}
-					}
-				}
-				if (id && state.block.id.startsWith("call_")) state.block.id = id;
-
-				if (argsText && argsText !== state.argsText) {
-					let delta = argsText;
-					if (argsText.startsWith(state.argsText)) delta = argsText.slice(state.argsText.length);
-					state.argsText = argsText;
-					// Keep ToolCall.arguments + streamed buffer current so live
-					// message_update snapshots show bash/edit previews mid-stream.
-					setStreamingPartialJson(state.block, argsText);
-					state.block.arguments = state.isGrammar ? { input: argsText } : parseToolArgs(argsText, false);
-					if (delta) {
-						stream.push({
-							type: "toolcall_delta",
-							contentIndex: state.index,
-							delta,
-							partial: output,
+					augmentToolIndexForProductWire(grammarTools, context.tools);
+					if (
+						anthropicWire.wireMode === "automation" ||
+						anthropicWire.wireMode === "parent-chat" ||
+						anthropicWire.wireMode === "keep-model"
+					) {
+						// History stores omp names (bash/read/write); product tools are
+						// Shell/Read/Write — rewrite replayed call/result names to match.
+						body.messages = rewriteInferenceMessagesForProductWire(
+							(body.messages as Record<string, unknown>[]) ?? [],
+						);
+						logger.info("grokbot: product sand tool wire", {
+							wireMode: anthropicWire.wireMode,
+							originalModelId: anthropicWire.originalModelId,
+							wireModelId: anthropicWire.requestedModel.modelId,
+							subagentType: anthropicWire.subagentType,
+							tools: anthropicWire.tools.length,
+						});
+					} else if (anthropicWire.wireMode === "sand-default-fallback") {
+						logger.warn("grokbot: anthropic sand tool wire fallback", {
+							originalModelId: anthropicWire.originalModelId,
+							fallbackModelId: anthropicWire.requestedModel.modelId,
+							tools: tools.length,
 						});
 					}
 				}
-				if (isComplete) finishTool(state);
-			};
-
-			let pending = Buffer.alloc(0);
-			let sawEndStream = false;
-			const reader = (response.body as ReadableStream<Uint8Array>).getReader();
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) {
-					if (pending.length > 0 || !sawEndStream) {
-						throw new AIError.ProviderResponseError(
-							pending.length > 0
-								? "Grok Bot stream ended with a truncated connect frame"
-								: "Grok Bot stream ended without a connect end-stream trailer",
-							{ provider: model.provider, kind: "incomplete-stream" },
-						);
-					}
-					break;
+				const replacementPayload = await options?.onPayload?.(body, model);
+				if (replacementPayload !== undefined) {
+					body = replacementPayload as Record<string, unknown>;
 				}
-				pending = Buffer.concat([pending, Buffer.from(value)]);
-				const frames: Array<{ flags: number; bytes: Buffer }> = [];
-				let offset = 0;
-				while (offset + 5 <= pending.length) {
-					const flags = pending[offset]!;
-					const len = pending.readUInt32BE(offset + 1);
-					if (len > MAX_CONNECT_FRAME_PAYLOAD) {
-						throw new Error(`Grok Bot connect frame too large (${len} bytes)`);
-					}
-					if (offset + 5 + len > pending.length) break;
-					frames.push({ flags, bytes: pending.subarray(offset + 5, offset + 5 + len) });
-					offset += 5 + len;
-				}
-				pending = pending.subarray(offset);
+				const protoBytes = encodeInferenceStreamRequest(body);
+				const wireModel = body.requestedModel as GrokbotRequestedModel;
+				const effort = (wireModel.parameters || []).find(p => p.id === "effort")?.value || "";
+				const fast = (wireModel.parameters || []).find(p => p.id === "fast")?.value || "";
 
-				for (const frame of frames) {
-					if (frame.flags & CONNECT_END_STREAM_FLAG) {
-						sawEndStream = true;
-						const jsonText = Buffer.from(frame.bytes).toString("utf8").trim();
-						let parsedEnd: Record<string, unknown> = {};
-						if (jsonText) {
-							try {
-								parsedEnd = JSON.parse(jsonText) as Record<string, unknown>;
-							} catch {
-								throw new AIError.ProviderResponseError(
-									"Grok Bot connect end-stream trailer is not valid JSON",
-									{ provider: model.provider, kind: "envelope" },
-								);
+				// model.headers + options.headers first; provider-owned auth/client
+				// headers win so reverse-proxy keys cannot override sand identity.
+				// Case-insensitive merge prevents Authorization/authorization duplicates.
+				const headers = mergeGrokbotHeaders(model.headers, options?.headers, grokbotClientHeaders(authCfg), {
+					authorization: `Bearer ${accessToken}`,
+					"x-cursor-checksum": createGrokbotChecksum(authCfg.machineId),
+					"x-ghost-mode": "true",
+					"x-request-id": crypto.randomUUID(),
+					"content-type": "application/connect+proto",
+					accept: "application/connect+proto",
+					"connect-protocol-version": "1",
+				});
+
+				logger.debug("grokbot: stream request", {
+					modelId: (body.requestedModel as GrokbotRequestedModel).modelId,
+					maxMode: Boolean((body.requestedModel as GrokbotRequestedModel).maxMode),
+					effort,
+					fast,
+					tools: tools.length,
+					toolNames: tools.map(t => t.name),
+					messages: messages.length,
+					hasModelConfig: Boolean(modelConfig),
+					anthropicWireMode: anthropicWire.wireMode,
+					anthropicOriginalModelId: anthropicWire.originalModelId,
+				});
+
+				const backend = (model.baseUrl || GROKBOT_BACKEND).replace(/\/+$/, "");
+				const response = await fetchImpl(joinGrokbotBackendUrl(backend, STREAM_PATH), {
+					method: "POST",
+					headers,
+					body: frameConnectProto(protoBytes),
+					signal: options?.signal,
+				});
+				await notifyProviderResponse(options, response, model, response.headers.get("x-request-id"));
+
+				if (!response.ok || !response.body) {
+					if (response.status === 401) clearGrokbotTokenCache();
+					output.errorStatus = response.status;
+					const errText = await response.text().catch(() => "");
+					throw new Error(
+						`Grok Bot stream failed (HTTP ${response.status})${errText ? `: ${errText.slice(0, 200)}` : ""}`,
+					);
+				}
+
+				if (!started) {
+					stream.push({ type: "start", partial: output });
+					started = true;
+				}
+
+				let openKind: "" | "text" | "thinking" = "";
+				let openIndex = -1;
+				let sendToUserArgsText = "";
+				let sendToUserLastContent = "";
+				const toolStates = new Map<
+					string,
+					{ key: string; index: number; block: ToolCall; argsText: string; ended: boolean; isGrammar: boolean }
+				>();
+
+				const closeOpen = () => {
+					if (openKind === "text" && openIndex >= 0) {
+						const block = output.content[openIndex] as TextContent;
+						stream.push({
+							type: "text_end",
+							contentIndex: openIndex,
+							content: block?.text || "",
+							partial: output,
+						});
+					} else if (openKind === "thinking" && openIndex >= 0) {
+						const block = output.content[openIndex] as ThinkingContent;
+						stream.push({
+							type: "thinking_end",
+							contentIndex: openIndex,
+							content: block?.thinking || "",
+							partial: output,
+						});
+					}
+					openKind = "";
+					openIndex = -1;
+				};
+
+				const ensureText = () => {
+					if (openKind === "text") return openIndex;
+					closeOpen();
+					openIndex = output.content.length;
+					output.content.push({ type: "text", text: "" });
+					openKind = "text";
+					stream.push({ type: "text_start", contentIndex: openIndex, partial: output });
+					return openIndex;
+				};
+
+				const ensureThinking = () => {
+					if (openKind === "thinking") return openIndex;
+					closeOpen();
+					openIndex = output.content.length;
+					output.content.push({ type: "thinking", thinking: "" });
+					openKind = "thinking";
+					stream.push({ type: "thinking_start", contentIndex: openIndex, partial: output });
+					return openIndex;
+				};
+
+				const finishTool = (state: {
+					ended: boolean;
+					argsText: string;
+					block: ToolCall;
+					index: number;
+					isGrammar: boolean;
+				}) => {
+					if (state.ended) return;
+					// Parse before marking ended so malformed JSON does not leave a
+					// "completed" state without a successful toolcall_end.
+					state.block.arguments = parseCompletedToolArgs(state.argsText, state.isGrammar);
+					clearStreamingPartialJson(state.block);
+					state.ended = true;
+					stream.push({
+						type: "toolcall_end",
+						contentIndex: state.index,
+						toolCall: state.block,
+						partial: output,
+					});
+				};
+
+				const handleSendToUser = (part: Record<string, unknown>) => {
+					const argsText =
+						part.args == null ? "" : typeof part.args === "string" ? part.args : JSON.stringify(part.args);
+					if (argsText) sendToUserArgsText = argsText;
+					const parsed = parseSendToUserContent(sendToUserArgsText);
+					if (parsed !== undefined && parsed !== sendToUserLastContent) {
+						const delta = parsed.startsWith(sendToUserLastContent)
+							? parsed.slice(sendToUserLastContent.length)
+							: parsed;
+						sendToUserLastContent = parsed;
+						if (delta) {
+							const idx = ensureText();
+							(output.content[idx] as TextContent).text += delta;
+							stream.push({ type: "text_delta", contentIndex: idx, delta, partial: output });
+						}
+					}
+					if (part.isComplete ?? part.is_complete) closeOpen();
+				};
+
+				const upsertTool = (part: Record<string, unknown>) => {
+					const id = String(part.toolCallId || part.tool_call_id || "");
+					const name = String(part.toolName || part.tool_name || "");
+					const argsText =
+						part.args == null ? "" : typeof part.args === "string" ? part.args : JSON.stringify(part.args);
+					const isComplete = Boolean(part.isComplete ?? part.is_complete);
+					const indexHint = part.toolIndex ?? part.tool_index;
+					const idxKey = typeof indexHint === "number" ? `idx:${indexHint}` : undefined;
+					// Correlate chunks by id and/or index — frames may omit one of the two.
+					let state =
+						(id ? toolStates.get(id) : undefined) ?? (idxKey ? toolStates.get(idxKey) : undefined) ?? undefined;
+
+					if (!state) {
+						closeOpen();
+						const meta = (name ? grammarTools.get(name) : undefined) ?? undefined;
+						// Mark every grammar/customFormat call (hashline/sloppy have no
+						// customWireName) so live preview + history replay stay on raw args.
+						// Do not persist productWireName (Shell/Read/Write) — that alias is
+						// lookup-only and must not flip OpenAI Responses into custom_tool_call.
+						const grammarWire = meta?.isGrammar
+							? meta.customWireName || meta.name || name || undefined
+							: meta?.customWireName;
+						const block: ToolCall = {
+							type: "toolCall",
+							id: id || `call_${output.content.length}`,
+							name: meta?.name || name || "unknown",
+							arguments: {},
+							...(grammarWire ? { customWireName: grammarWire } : {}),
+						};
+						const index = output.content.length;
+						output.content.push(block);
+						const key = id || idxKey || `anon:${toolStates.size}`;
+						state = {
+							key,
+							index,
+							block,
+							argsText: "",
+							ended: false,
+							isGrammar: Boolean(meta?.isGrammar),
+						};
+						toolStates.set(key, state);
+						if (id) toolStates.set(id, state);
+						if (idxKey) toolStates.set(idxKey, state);
+						stream.push({ type: "toolcall_start", contentIndex: index, partial: output });
+					} else {
+						if (id) toolStates.set(id, state);
+						if (idxKey) toolStates.set(idxKey, state);
+						if (name && (!state.block.name || state.block.name === "unknown")) {
+							const meta = grammarTools.get(name);
+							state.block.name = meta?.name || name;
+							if (meta?.isGrammar) {
+								state.isGrammar = true;
+								state.block.customWireName = meta.customWireName || meta.name || name;
+							} else if (meta?.customWireName) {
+								state.block.customWireName = meta.customWireName;
 							}
 						}
-						const errObj = parsedEnd.error as Record<string, unknown> | undefined;
-						const code = errObj ? String(errObj.code ?? "").toLowerCase() : "";
-						if (errObj) {
-							// Connect often reports revoked JWTs as end-stream
-							// `unauthenticated` on HTTP 200; treat like HTTP 401.
-							if (code === "unauthenticated") {
-								clearGrokbotTokenCache();
-								throw new Error(`${formatGrokbotConnectTrailerError(parsedEnd)} (HTTP 401)`);
-							}
-							throw new Error(formatGrokbotConnectTrailerError(parsedEnd));
-						}
-						continue;
 					}
+					if (id && state.block.id.startsWith("call_")) state.block.id = id;
 
-					let parsed: Record<string, unknown>;
-					try {
-						parsed = decodeInferenceStreamResponse(frame.bytes) as Record<string, unknown>;
-					} catch (err) {
-						if (frame.bytes.length === 0) continue;
-						throw new AIError.ProviderResponseError(
-							`Grok Bot stream frame decode failed: ${err instanceof Error ? err.message : String(err)}`,
-							{ provider: model.provider, kind: "envelope" },
-						);
-					}
-
-					const errObj = firstPresent(parsed, ["error"]);
-					if (errObj && typeof errObj === "object") {
-						const e = errObj as Record<string, unknown>;
-						if (e.isOutputTokenLimitError || e.is_output_token_limit_error) {
-							output.stopReason = "length";
-							continue;
+					if (argsText && argsText !== state.argsText) {
+						let delta = argsText;
+						if (argsText.startsWith(state.argsText)) delta = argsText.slice(state.argsText.length);
+						state.argsText = argsText;
+						// Keep ToolCall.arguments + streamed buffer current so live
+						// message_update snapshots show bash/edit previews mid-stream.
+						setStreamingPartialJson(state.block, argsText);
+						state.block.arguments = state.isGrammar ? { input: argsText } : parseToolArgs(argsText, false);
+						if (delta) {
+							stream.push({
+								type: "toolcall_delta",
+								contentIndex: state.index,
+								delta,
+								partial: output,
+							});
 						}
-						if (e.isInputTokenLimitError || e.is_input_token_limit_error) {
+					}
+					if (isComplete) finishTool(state);
+				};
+
+				let pending = Buffer.alloc(0);
+				let sawEndStream = false;
+				const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) {
+						if (pending.length > 0 || !sawEndStream) {
 							throw new AIError.ProviderResponseError(
-								"Grok Bot input token count exceeds the maximum context length",
-								{ provider: model.provider, kind: "output" },
+								pending.length > 0
+									? "Grok Bot stream ended with a truncated connect frame"
+									: "Grok Bot stream ended without a connect end-stream trailer",
+								{ provider: model.provider, kind: "incomplete-stream" },
 							);
 						}
-						if (e.message || e.code) throw new Error(String(e.message || e.code));
+						break;
 					}
-					if (typeof errObj === "string" && errObj) throw new Error(errObj);
+					pending = Buffer.concat([pending, Buffer.from(value)]);
+					const frames: Array<{ flags: number; bytes: Buffer }> = [];
+					let offset = 0;
+					while (offset + 5 <= pending.length) {
+						const flags = pending[offset]!;
+						const len = pending.readUInt32BE(offset + 1);
+						if (len > MAX_CONNECT_FRAME_PAYLOAD) {
+							throw new Error(`Grok Bot connect frame too large (${len} bytes)`);
+						}
+						if (offset + 5 + len > pending.length) break;
+						frames.push({ flags, bytes: pending.subarray(offset + 5, offset + 5 + len) });
+						offset += 5 + len;
+					}
+					pending = pending.subarray(offset);
 
-					const thinkingPart = firstPresent(parsed, ["thinkingPart", "thinking_part"]) as
-						| Record<string, unknown>
-						| undefined;
-					if (thinkingPart) {
-						const delta = String(thinkingPart.text || "");
-						const signature =
-							typeof thinkingPart.signature === "string" && thinkingPart.signature
-								? thinkingPart.signature
-								: undefined;
-						if (delta || signature) {
-							const idx = ensureThinking();
-							const block = output.content[idx] as ThinkingContent;
-							if (delta) {
-								block.thinking += delta;
-								stream.push({ type: "thinking_delta", contentIndex: idx, delta, partial: output });
+					for (const frame of frames) {
+						if (frame.flags & CONNECT_END_STREAM_FLAG) {
+							sawEndStream = true;
+							const jsonText = Buffer.from(frame.bytes).toString("utf8").trim();
+							let parsedEnd: Record<string, unknown> = {};
+							if (jsonText) {
+								try {
+									parsedEnd = JSON.parse(jsonText) as Record<string, unknown>;
+								} catch {
+									throw new AIError.ProviderResponseError(
+										"Grok Bot connect end-stream trailer is not valid JSON",
+										{ provider: model.provider, kind: "envelope" },
+									);
+								}
 							}
-							if (signature) block.thinkingSignature = signature;
+							const errObj = parsedEnd.error as Record<string, unknown> | undefined;
+							const code = errObj ? String(errObj.code ?? "").toLowerCase() : "";
+							if (errObj) {
+								// Connect often reports revoked JWTs as end-stream
+								// `unauthenticated` on HTTP 200; treat like HTTP 401.
+								if (code === "unauthenticated") {
+									clearGrokbotTokenCache();
+									throw new Error(`${formatGrokbotConnectTrailerError(parsedEnd)} (HTTP 401)`);
+								}
+								throw new Error(formatGrokbotConnectTrailerError(parsedEnd));
+							}
+							continue;
 						}
-						if (thinkingPart.isFinal || thinkingPart.is_final) closeOpen();
-					}
 
-					const textPart = firstPresent(parsed, ["textPart", "text_part"]) as Record<string, unknown> | undefined;
-					const textDelta =
-						(textPart ? String(textPart.text || "") : "") ||
-						(typeof parsed.text === "string" && !textPart && !thinkingPart ? parsed.text : "");
-					if (textDelta) {
-						const idx = ensureText();
-						(output.content[idx] as TextContent).text += textDelta;
-						stream.push({ type: "text_delta", contentIndex: idx, delta: textDelta, partial: output });
-					}
-					if (textPart && (textPart.isFinal || textPart.is_final)) closeOpen();
-
-					const toolPart = firstPresent(parsed, ["toolCallPart", "tool_call_part"]);
-					if (toolPart && typeof toolPart === "object") {
-						const wireToolName = String(
-							(toolPart as Record<string, unknown>).toolName ||
-								(toolPart as Record<string, unknown>).tool_name ||
-								"",
-						);
-						if (wireToolName === SEND_TO_USER_WIRE_NAME) {
-							handleSendToUser(toolPart as Record<string, unknown>);
-						} else {
-							upsertTool(toolPart as Record<string, unknown>);
+						let parsed: Record<string, unknown>;
+						try {
+							parsed = decodeInferenceStreamResponse(frame.bytes) as Record<string, unknown>;
+						} catch (err) {
+							if (frame.bytes.length === 0) continue;
+							throw new AIError.ProviderResponseError(
+								`Grok Bot stream frame decode failed: ${err instanceof Error ? err.message : String(err)}`,
+								{ provider: model.provider, kind: "envelope" },
+							);
 						}
-					}
 
-					const usage = firstPresent(parsed, ["usage", "extendedUsage", "extended_usage"]);
-					if (usage && typeof usage === "object") applyUsage(output, usage as Record<string, unknown>);
-
-					const info = firstPresent(parsed, ["responseInfo", "response_info"]) as
-						| Record<string, unknown>
-						| undefined;
-					if (info) {
-						const errorMessage =
-							(typeof info.errorMessage === "string" && info.errorMessage) ||
-							(typeof info.error_message === "string" && info.error_message) ||
-							"";
-						if (errorMessage) {
-							throw new Error(errorMessage);
+						const errObj = firstPresent(parsed, ["error"]);
+						if (errObj && typeof errObj === "object") {
+							const e = errObj as Record<string, unknown>;
+							if (e.isOutputTokenLimitError || e.is_output_token_limit_error) {
+								output.stopReason = "length";
+								continue;
+							}
+							if (e.isInputTokenLimitError || e.is_input_token_limit_error) {
+								throw new AIError.ProviderResponseError(
+									"Grok Bot input token count exceeds the maximum context length",
+									{ provider: model.provider, kind: "output" },
+								);
+							}
+							if (e.message || e.code) throw new Error(String(e.message || e.code));
 						}
-						if (typeof info.id === "string" && info.id) output.responseId = info.id;
-						const routedModel =
-							(typeof info.model === "string" && info.model) ||
-							(typeof (info as { modelId?: string }).modelId === "string" &&
-								(info as { modelId?: string }).modelId) ||
-							"";
-						if (routedModel) {
-							routedResponseModel = routedModel;
-							output.upstreamModel = routedModel;
+						if (typeof errObj === "string" && errObj) throw new Error(errObj);
+
+						const thinkingPart = firstPresent(parsed, ["thinkingPart", "thinking_part"]) as
+							| Record<string, unknown>
+							| undefined;
+						if (thinkingPart) {
+							const delta = String(thinkingPart.text || "");
+							const signature =
+								typeof thinkingPart.signature === "string" && thinkingPart.signature
+									? thinkingPart.signature
+									: undefined;
+							if (delta || signature) {
+								const idx = ensureThinking();
+								const block = output.content[idx] as ThinkingContent;
+								if (delta) {
+									block.thinking += delta;
+									stream.push({ type: "thinking_delta", contentIndex: idx, delta, partial: output });
+								}
+								if (signature) block.thinkingSignature = signature;
+							}
+							if (thinkingPart.isFinal || thinkingPart.is_final) closeOpen();
+						}
+
+						const textPart = firstPresent(parsed, ["textPart", "text_part"]) as
+							| Record<string, unknown>
+							| undefined;
+						const textDelta =
+							(textPart ? String(textPart.text || "") : "") ||
+							(typeof parsed.text === "string" && !textPart && !thinkingPart ? parsed.text : "");
+						if (textDelta) {
+							const idx = ensureText();
+							(output.content[idx] as TextContent).text += textDelta;
+							stream.push({ type: "text_delta", contentIndex: idx, delta: textDelta, partial: output });
+						}
+						if (textPart && (textPart.isFinal || textPart.is_final)) closeOpen();
+
+						const toolPart = firstPresent(parsed, ["toolCallPart", "tool_call_part"]);
+						if (toolPart && typeof toolPart === "object") {
+							const wireToolName = String(
+								(toolPart as Record<string, unknown>).toolName ||
+									(toolPart as Record<string, unknown>).tool_name ||
+									"",
+							);
+							if (wireToolName === SEND_TO_USER_WIRE_NAME) {
+								handleSendToUser(toolPart as Record<string, unknown>);
+							} else {
+								upsertTool(toolPart as Record<string, unknown>);
+							}
+						}
+
+						const usage = firstPresent(parsed, ["usage", "extendedUsage", "extended_usage"]);
+						if (usage && typeof usage === "object") applyUsage(output, usage as Record<string, unknown>);
+
+						const info = firstPresent(parsed, ["responseInfo", "response_info"]) as
+							| Record<string, unknown>
+							| undefined;
+						if (info) {
+							const errorMessage =
+								(typeof info.errorMessage === "string" && info.errorMessage) ||
+								(typeof info.error_message === "string" && info.error_message) ||
+								"";
+							if (errorMessage) {
+								throw new Error(errorMessage);
+							}
+							if (typeof info.id === "string" && info.id) output.responseId = info.id;
+							const routedModel =
+								(typeof info.model === "string" && info.model) ||
+								(typeof (info as { modelId?: string }).modelId === "string" &&
+									(info as { modelId?: string }).modelId) ||
+								"";
+							if (routedModel) {
+								routedResponseModel = routedModel;
+								output.upstreamModel = routedModel;
+							}
 						}
 					}
 				}
-			}
 
-			closeOpen();
-			// Only finalize tools that received isComplete. Incomplete ToolCallPart
-			// states must not be parsed as {} / emitted as successful toolUse.
-			for (const state of toolStates.values()) {
-				if (!state.ended) {
-					throw new AIError.ProviderResponseError("Grok Bot stream ended with incomplete tool call", {
+				closeOpen();
+				// Only finalize tools that received isComplete. Incomplete ToolCallPart
+				// states must not be parsed as {} / emitted as successful toolUse.
+				for (const state of toolStates.values()) {
+					if (!state.ended) {
+						throw new AIError.ProviderResponseError("Grok Bot stream ended with incomplete tool call", {
+							provider: model.provider,
+							kind: "incomplete-stream",
+						});
+					}
+				}
+
+				// sand-automation → cursor-grok-4.5-high often dumps a fenced
+				// `{"name":"Shell","arguments":{…}}` instead of toolCallPart.
+				// Gemini/GPT-mini thought-only turns hide the same JSON in thinking.
+				if (!output.content.some(b => b.type === "toolCall")) {
+					const text = assistantTextForJsonPromotion(output.content);
+					const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
+					const promoted = parseJsonTextToolCall(text, advertised);
+					if (promoted) {
+						output.content = output.content.filter(b => b.type !== "text" && b.type !== "thinking");
+						upsertTool({
+							toolCallId: `call_json_${crypto.randomUUID()}`,
+							toolName: promoted.name,
+							args: JSON.stringify(promoted.arguments),
+							isComplete: true,
+						});
+						logger.info("grokbot: promoted JSON-as-text tool call", {
+							toolName: promoted.name,
+							wireMode: anthropicWire.wireMode,
+							routedResponseModel: routedResponseModel || undefined,
+						});
+					}
+				}
+
+				const hasVisibleText = output.content.some(
+					b => b.type === "text" && typeof b.text === "string" && b.text.trim().length > 0,
+				);
+				const hasToolCall = output.content.some(b => b.type === "toolCall");
+				// Trailer-only / thinking-only completions leave the agent with nothing to
+				// retry or show — require visible text or a completed tool call, unless the
+				// caller opted into empty responses (passive/zero-output advisors).
+				if (!hasVisibleText && !hasToolCall && options?.acceptEmptyResponse !== true) {
+					// Gemini 3 flash / GPT-5-mini often spend a low maxTokens budget on
+					// thinking and emit nothing. One replay with thinking off + a larger
+					// cap is enough for native bash/read/write to appear.
+					if (!emptyToolRetryUsed && tools.length > 0) {
+						emptyToolRetryUsed = true;
+						output.content = [];
+						output.usage = {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						};
+						output.stopReason = "stop";
+						logger.info("grokbot: retrying empty tool turn", {
+							modelId: model.id,
+							class: identity.class,
+						});
+						continue attempt;
+					}
+					throw new AIError.ProviderResponseError("Grok Bot stream completed with no text or tool call", {
 						provider: model.provider,
-						kind: "incomplete-stream",
+						kind: "empty-body",
 					});
 				}
+				break;
 			}
-
-			// sand-automation → cursor-grok-4.5-high often dumps a fenced
-			// `{"name":"Shell","arguments":{…}}` instead of toolCallPart.
-			if (!output.content.some(b => b.type === "toolCall")) {
-				const text = output.content
-					.filter((b): b is TextContent => b.type === "text")
-					.map(b => b.text)
-					.join("");
-				const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
-				const promoted = parseJsonTextToolCall(text, advertised);
-				if (promoted) {
-					output.content = output.content.filter(b => b.type !== "text");
-					upsertTool({
-						toolCallId: `call_json_${crypto.randomUUID()}`,
-						toolName: promoted.name,
-						args: JSON.stringify(promoted.arguments),
-						isComplete: true,
-					});
-					logger.info("grokbot: promoted JSON-as-text tool call", {
-						toolName: promoted.name,
-						wireMode: anthropicWire.wireMode,
-						routedResponseModel: routedResponseModel || undefined,
-					});
-				}
-			}
-
-			const hasVisibleText = output.content.some(
-				b => b.type === "text" && typeof b.text === "string" && b.text.trim().length > 0,
-			);
 			const hasToolCall = output.content.some(b => b.type === "toolCall");
-			// Trailer-only / thinking-only completions leave the agent with nothing to
-			// retry or show — require visible text or a completed tool call, unless the
-			// caller opted into empty responses (passive/zero-output advisors).
-			if (!hasVisibleText && !hasToolCall && options?.acceptEmptyResponse !== true) {
-				throw new AIError.ProviderResponseError("Grok Bot stream completed with no text or tool call", {
-					provider: model.provider,
-					kind: "empty-body",
-				});
-			}
 			if (output.stopReason !== "length") {
 				output.stopReason = hasToolCall ? "toolUse" : "stop";
 			}

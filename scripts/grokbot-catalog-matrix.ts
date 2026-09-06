@@ -37,6 +37,8 @@ const TEXT_TOKEN = "pong42";
 type Mode = "text" | "tools" | "all";
 type Slice = "representative" | "all";
 
+type ToolsSet = "bash" | "core";
+
 type MatrixArgs = {
 	mode: Mode;
 	slice: Slice;
@@ -48,6 +50,7 @@ type MatrixArgs = {
 	allowMissingCreds: boolean;
 	probeGated: boolean;
 	dryRun: boolean;
+	toolsSet: ToolsSet;
 };
 
 type Row = {
@@ -76,6 +79,7 @@ function parseArgs(argv: string[]): MatrixArgs {
 	const limitRaw = get("--limit");
 	const idsRaw = get("--ids");
 	const concurrencyRaw = get("--concurrency");
+	const toolsSetRaw = get("--tools-set");
 	return {
 		mode: mode === "text" || mode === "tools" ? mode : "all",
 		slice: slice === "representative" ? "representative" : "all",
@@ -92,6 +96,7 @@ function parseArgs(argv: string[]): MatrixArgs {
 		allowMissingCreds: argv.includes("--allow-missing-creds"),
 		probeGated: argv.includes("--probe-gated"),
 		dryRun: argv.includes("--dry-run"),
+		toolsSet: toolsSetRaw === "bash" ? "bash" : "core",
 	};
 }
 
@@ -137,11 +142,18 @@ function classifyError(message: string | undefined, status?: number): string {
 	if (status === 422 || /HTTP 422/.test(text)) return "http-422";
 	if (status === 400 || /HTTP 400/.test(text) || /ERROR_PROVIDER_ERROR/.test(text)) return "http-400";
 	if (status === 401 || /HTTP 401|unauthenticated/i.test(text)) return "http-401";
+	if (status === 504 || /HTTP 504|gateway timeout/i.test(text)) return "http-504";
+	if (status === 502 || /HTTP 502|bad gateway/i.test(text)) return "http-502";
 	if (status === 404 || /model.?not.?found/i.test(text)) return "model-not-found";
 	if (/no text or tool call/i.test(text)) return "empty-body";
 	if (/incomplete tool call/i.test(text)) return "incomplete-tool";
 	if (text) return "provider-error";
 	return "unknown";
+}
+
+function isGatewayFlake(status?: number, message?: string): boolean {
+	const cls = classifyError(message, status);
+	return cls === "http-502" || cls === "http-504";
 }
 
 function httpStatusOf(message: AssistantMessage): number | undefined {
@@ -161,12 +173,29 @@ function toolCallsOf(message: AssistantMessage): ToolCall[] {
 	return message.content.filter((b): b is ToolCall => b.type === "toolCall");
 }
 
-async function streamOnce(model: Model<Api>, context: Context): Promise<AssistantMessage> {
-	return streamGrokBot(model as Model<"grokbot-sand">, context, {
-		maxTokens: 512,
-		effort: "low",
-		acceptEmptyResponse: false,
-	}).result();
+const GATEWAY_RETRIES = 2;
+
+async function streamOnce(
+	model: Model<Api>,
+	context: Context,
+	opts?: { maxTokens?: number },
+): Promise<AssistantMessage> {
+	let last: AssistantMessage | undefined;
+	for (let attempt = 0; attempt <= GATEWAY_RETRIES; attempt++) {
+		const result = await streamGrokBot(model as Model<"grokbot-sand">, context, {
+			maxTokens: opts?.maxTokens ?? 512,
+			effort: "low",
+			acceptEmptyResponse: false,
+		}).result();
+		last = result;
+		const status = httpStatusOf(result);
+		if (result.stopReason === "error" && isGatewayFlake(status, result.errorMessage) && attempt < GATEWAY_RETRIES) {
+			await Bun.sleep(400 * 2 ** attempt);
+			continue;
+		}
+		return result;
+	}
+	return last!;
 }
 
 async function runText(model: Model<Api>): Promise<{
@@ -207,7 +236,29 @@ async function runText(model: Model<Api>): Promise<{
 	};
 }
 
-async function runTools(model: Model<Api>): Promise<{
+type ToolSmokeKind = "bash" | "read" | "write";
+
+const TOOL_NAME_RE: Record<ToolSmokeKind, RegExp> = {
+	bash: /^(bash|Shell|shell)$/i,
+	read: /^(read|Read)$/i,
+	write: /^(write|Write)$/i,
+};
+
+function toolSmokePrompt(kind: ToolSmokeKind, ping: string, id: string): string {
+	const safe = idSafe(id);
+	if (kind === "bash") {
+		return `Use the bash or Shell tool to run exactly: echo ${ping}. Do not explain. Call the tool now.`;
+	}
+	if (kind === "read") {
+		return `Use the read or Read tool to read the file /tmp/grokbot-read-${safe}.txt. Do not explain. Call the tool now.`;
+	}
+	return `Use the write or Write tool to write exactly ${ping} to /tmp/grokbot-write-${safe}.txt. Do not explain. Call the tool now.`;
+}
+
+async function runOneTool(
+	model: Model<Api>,
+	kind: ToolSmokeKind,
+): Promise<{
 	pass: boolean;
 	routedModel?: string;
 	httpStatus?: number;
@@ -215,13 +266,17 @@ async function runTools(model: Model<Api>): Promise<{
 	toolNames?: string[];
 	detail?: string;
 }> {
-	const ping = `tools-pong-${idSafe(model.id)}`;
-	const userText = `Use the bash or Shell tool to run exactly: echo ${ping}. ` + `Do not explain. Call the tool now.`;
-	const turn1 = await streamOnce(model, {
-		systemPrompt: ["You are a coding agent. Prefer the bash/Shell tool when asked to run a command."],
-		messages: [{ role: "user", content: userText, timestamp: Date.now() }],
-		tools: OMP_TOOLS,
-	});
+	const ping = `tools-pong-${kind}-${idSafe(model.id)}`;
+	const userText = toolSmokePrompt(kind, ping, model.id);
+	const turn1 = await streamOnce(
+		model,
+		{
+			systemPrompt: ["You are a coding agent. Prefer the named file/shell tool when asked."],
+			messages: [{ role: "user", content: userText, timestamp: Date.now() }],
+			tools: OMP_TOOLS,
+		},
+		{ maxTokens: 4096 },
+	);
 	const status1 = httpStatusOf(turn1);
 	if (turn1.stopReason === "error") {
 		return {
@@ -229,13 +284,13 @@ async function runTools(model: Model<Api>): Promise<{
 			routedModel: turn1.upstreamModel,
 			httpStatus: status1,
 			errorClass: classifyError(turn1.errorMessage, status1),
-			detail: (turn1.errorMessage ?? "").slice(0, 240),
+			detail: `${kind}: ${(turn1.errorMessage ?? "").slice(0, 240)}`,
 		};
 	}
 	const calls = toolCallsOf(turn1);
 	const names = calls.map(c => c.name);
-	const bashLike = calls.find(c => /^(bash|Shell|shell)$/i.test(c.name));
-	if (!bashLike) {
+	const match = calls.find(c => TOOL_NAME_RE[kind].test(c.name));
+	if (!match) {
 		const body = textOf(turn1);
 		return {
 			pass: false,
@@ -243,25 +298,29 @@ async function runTools(model: Model<Api>): Promise<{
 			httpStatus: status1,
 			errorClass: "no-tool-call",
 			toolNames: names,
-			detail: `no bash/Shell call (got ${names.join(",") || "none"}); text=${body.slice(0, 120)}`,
+			detail: `no ${kind} call (got ${names.join(",") || "none"}); text=${body.slice(0, 120)}`,
 		};
 	}
-	const turn2 = await streamOnce(model, {
-		systemPrompt: ["You are a coding agent. After a tool result, reply with the exact stdout."],
-		messages: [
-			{ role: "user", content: userText, timestamp: Date.now() },
-			turn1,
-			{
-				role: "toolResult",
-				toolCallId: bashLike.id,
-				toolName: bashLike.name,
-				content: [{ type: "text", text: ping }],
-				isError: false,
-				timestamp: Date.now(),
-			},
-		],
-		tools: OMP_TOOLS,
-	});
+	const turn2 = await streamOnce(
+		model,
+		{
+			systemPrompt: ["You are a coding agent. After a tool result, reply with the exact result text."],
+			messages: [
+				{ role: "user", content: userText, timestamp: Date.now() },
+				turn1,
+				{
+					role: "toolResult",
+					toolCallId: match.id,
+					toolName: match.name,
+					content: [{ type: "text", text: ping }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+			],
+			tools: OMP_TOOLS,
+		},
+		{ maxTokens: 4096 },
+	);
 	const status2 = httpStatusOf(turn2);
 	if (turn2.stopReason === "error") {
 		return {
@@ -270,7 +329,7 @@ async function runTools(model: Model<Api>): Promise<{
 			httpStatus: status2,
 			errorClass: classifyError(turn2.errorMessage, status2),
 			toolNames: names,
-			detail: (turn2.errorMessage ?? "").slice(0, 240),
+			detail: `${kind}: ${(turn2.errorMessage ?? "").slice(0, 240)}`,
 		};
 	}
 	const body = textOf(turn2);
@@ -281,8 +340,42 @@ async function runTools(model: Model<Api>): Promise<{
 		httpStatus: status2,
 		errorClass: pass ? undefined : "missing-pong",
 		toolNames: names,
-		detail: pass ? undefined : body.slice(0, 160),
+		detail: pass ? undefined : `${kind}: ${body.slice(0, 160)}`,
 	};
+}
+
+async function runTools(
+	model: Model<Api>,
+	toolsSet: ToolsSet,
+): Promise<{
+	pass: boolean;
+	routedModel?: string;
+	httpStatus?: number;
+	errorClass?: string;
+	toolNames?: string[];
+	detail?: string;
+}> {
+	const kinds: ToolSmokeKind[] = toolsSet === "core" ? ["bash", "read", "write"] : ["bash"];
+	const names: string[] = [];
+	let routedModel: string | undefined;
+	let httpStatus: number | undefined;
+	for (const kind of kinds) {
+		const result = await runOneTool(model, kind);
+		if (result.toolNames) names.push(...result.toolNames.map(n => `${kind}:${n}`));
+		routedModel = result.routedModel ?? routedModel;
+		httpStatus = result.httpStatus ?? httpStatus;
+		if (!result.pass) {
+			return {
+				pass: false,
+				routedModel,
+				httpStatus,
+				errorClass: result.errorClass,
+				toolNames: names,
+				detail: result.detail,
+			};
+		}
+	}
+	return { pass: true, routedModel, httpStatus, toolNames: names };
 }
 
 async function mapPool<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -390,7 +483,7 @@ async function main() {
 	if (args.limit && Number.isFinite(args.limit)) selected = selected.slice(0, args.limit);
 
 	console.log(
-		`=== GROKBOT CATALOG MATRIX  live=${specs.length} selected=${selected.length} slice=${args.slice} mode=${args.mode} ===`,
+		`=== GROKBOT CATALOG MATRIX  live=${specs.length} selected=${selected.length} slice=${args.slice} mode=${args.mode} tools=${args.toolsSet} ===`,
 	);
 	if (args.dryRun) {
 		for (const id of selected) console.log(id);
@@ -436,7 +529,7 @@ async function main() {
 			row.detail = text.detail;
 		}
 		if (args.mode !== "text") {
-			const tools = await runTools(model);
+			const tools = await runTools(model, args.toolsSet);
 			row.toolsPass = tools.pass;
 			row.routedModel = tools.routedModel ?? row.routedModel;
 			row.httpStatus = tools.httpStatus ?? row.httpStatus;

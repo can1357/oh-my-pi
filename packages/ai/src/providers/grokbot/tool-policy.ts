@@ -7,6 +7,7 @@
  */
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type { ModelIdentity } from "@oh-my-pi/pi-catalog/compat/types";
+import { adaptSchemaForStrict, normalizeSchemaForGoogle } from "../../utils/schema";
 import {
 	applyAnthropicSandToolWire,
 	isAnthropicSandModelId,
@@ -35,13 +36,17 @@ export const GROKBOT_MATRIX_REPRESENTATIVE_IDS = [
 	"grok-4.6",
 	"grok-4.5",
 	"gemini-3.7-flash",
+	"gemini-3-flash",
 	"gpt-5.6-sol",
+	"gpt-5-mini",
+	"gpt-5.2-fast",
 	"composer-2.5",
 	"kimi-k3",
 	"glm-5.2",
 	"sand-default",
 	"sand-cua",
 	"sand-automation",
+	"default",
 ] as const;
 
 /** Extra live-id tokens to pick one openai-family row each (sol already listed). */
@@ -93,6 +98,30 @@ export function applyGrokbotSandToolPolicy(
 ): AnthropicSandToolWireResult {
 	if (policy.kind === "disabled") return input;
 	return applyAnthropicSandToolWire(input, policy.wire);
+}
+
+/**
+ * Family-specific native field-2 parameter schema.
+ *
+ * Gemini backends reject leftover JSON Schema keywords (`additionalProperties`,
+ * `format`, …). OpenAI mini/strict backends require `additionalProperties: false`.
+ * Other families keep the raw omp JSON Schema (the working grok/composer path).
+ */
+export function nativeToolParametersForIdentity(
+	schema: Record<string, unknown>,
+	identity: Pick<ModelIdentity, "class">,
+): Record<string, unknown> {
+	if (identity.class === "gemini") {
+		const normalized = normalizeSchemaForGoogle(schema);
+		if (normalized && typeof normalized === "object" && !Array.isArray(normalized)) {
+			return normalized as Record<string, unknown>;
+		}
+		return schema;
+	}
+	if (identity.class === "openai") {
+		return adaptSchemaForStrict(schema, true).schema;
+	}
+	return schema;
 }
 
 /** Advertised field-2 names after family mapping (product PascalCase or omp native). */

@@ -4,6 +4,7 @@ import { streamGrokBot } from "../../src/providers/grokbot";
 import * as grokbotAuth from "../../src/providers/grokbot/auth";
 import {
 	advertisedNamesForJsonTextToolCall,
+	assistantTextForJsonPromotion,
 	parseJsonTextToolCall,
 } from "../../src/providers/grokbot/json-text-tool-call";
 import {
@@ -25,9 +26,7 @@ describe("parseJsonTextToolCall", () => {
 	});
 
 	test("accepts bare JSON and omp bash name against product advertisements", () => {
-		expect(
-			parseJsonTextToolCall('{"name":"bash","arguments":{"command":"echo hi"}}', ["Shell", "Read"]),
-		).toEqual({
+		expect(parseJsonTextToolCall('{"name":"bash","arguments":{"command":"echo hi"}}', ["Shell", "Read"])).toEqual({
 			name: "Shell",
 			arguments: { command: "echo hi" },
 		});
@@ -43,6 +42,23 @@ describe("parseJsonTextToolCall", () => {
 		).toBeUndefined();
 		expect(parseJsonTextToolCall('{"name":"WebSearch","arguments":{"q":"x"}}', advertised)).toBeUndefined();
 		expect(parseJsonTextToolCall('{"name":"Shell","arguments":{"command":"x"}}', [])).toBeUndefined();
+	});
+
+	test("unwraps Gemini functionCall wrappers and tool_code fences", () => {
+		expect(
+			parseJsonTextToolCall(
+				'```tool_code\n{"functionCall":{"name":"bash","args":{"command":"echo hi"}}}\n```',
+				advertised,
+			),
+		).toEqual({ name: "bash", arguments: { command: "echo hi" } });
+	});
+
+	test("assistantTextForJsonPromotion joins thinking so thought-only JSON can promote", () => {
+		expect(
+			assistantTextForJsonPromotion([
+				{ type: "thinking", thinking: '{"name":"bash","arguments":{"command":"echo hi"}}' },
+			]),
+		).toBe('{"name":"bash","arguments":{"command":"echo hi"}}');
 	});
 
 	test("advertisedNamesForJsonTextToolCall unions wire + omp aliases", () => {
@@ -125,6 +141,109 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		]);
 	});
 
+	test("promotes JSON-as-text hidden in a thinking-only turn", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const thinking = frameConnectProto(
+			encodeInferenceStreamResponse({
+				thinkingPart: {
+					text: '{"name":"bash","arguments":{"command":"echo tools-pong-think"}}',
+					isFinal: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(thinking, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "Use bash", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				name: "bash",
+				arguments: { command: "echo tools-pong-think" },
+			}),
+		]);
+	});
+
+	test("retries a thinking-only empty tool turn and accepts the second toolCall", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const thinkingOnly = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					thinkingPart: { text: "planning", isFinal: true },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const toolCall = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					toolCallPart: {
+						toolCallId: "c-retry",
+						toolName: "bash",
+						args: '{"command":"echo retried"}',
+						isComplete: true,
+					},
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		let calls = 0;
+		const fetchImpl = (async () => {
+			calls += 1;
+			return connectBody(...(calls === 1 ? [thinkingOnly] : [toolCall]));
+		}) as FetchImpl;
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+		});
+		const context: Context = {
+			messages: [{ role: "user", content: "Use bash", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(gemini as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+			maxTokens: 512,
+		}).result();
+		expect(calls).toBe(2);
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				name: "bash",
+				arguments: { command: "echo retried" },
+			}),
+		]);
+	});
+
 	test("does not promote ordinary assistant text when tools were advertised", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
@@ -134,9 +253,7 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		});
 		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
 
-		const text = frameConnectProto(
-			encodeInferenceStreamResponse({ textPart: { text: "pong42", isFinal: true } }),
-		);
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "pong42", isFinal: true } }));
 		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
 		const fetchImpl = (async () => connectBody(text, trailer)) as FetchImpl;
 		const context: Context = {

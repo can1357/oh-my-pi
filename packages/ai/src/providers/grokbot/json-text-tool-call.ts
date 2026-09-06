@@ -16,10 +16,32 @@ export type JsonTextToolCall = {
 function stripMarkdownFence(text: string): string | undefined {
 	const trimmed = text.trim();
 	if (!trimmed) return undefined;
-	const fenced = /^```(?:json|jsonc|javascript|js)?\s*\r?\n?([\s\S]*?)\r?\n?```$/i.exec(trimmed);
+	const fenced = /^```(?:json|jsonc|javascript|js|tool_code)?\s*\r?\n?([\s\S]*?)\r?\n?```$/i.exec(trimmed);
 	if (fenced?.[1] !== undefined) return fenced[1].trim();
 	if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed;
 	return undefined;
+}
+
+function unwrapFunctionCall(obj: Record<string, unknown>): Record<string, unknown> {
+	const inner = obj.functionCall ?? obj.function_call;
+	if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+		return inner as Record<string, unknown>;
+	}
+	return obj;
+}
+
+/** Join visible text and thinking so JSON-as-text dumps in thought-only turns promote. */
+export function assistantTextForJsonPromotion(
+	content: ReadonlyArray<{ type: string; text?: string; thinking?: string }>,
+): string {
+	return content
+		.map(block => {
+			if (block.type === "text" && typeof block.text === "string") return block.text;
+			if (block.type === "thinking" && typeof block.thinking === "string") return block.thinking;
+			return "";
+		})
+		.filter(Boolean)
+		.join("\n");
 }
 
 function resolveAdvertisedName(raw: string, advertised: ReadonlySet<string>): string | undefined {
@@ -89,10 +111,7 @@ export function advertisedNamesForJsonTextToolCall(
  * matching an advertised tool. Returns undefined when the text is prose, mixed
  * content, or names a tool that was not offered.
  */
-export function parseJsonTextToolCall(
-	text: string,
-	advertisedNames: Iterable<string>,
-): JsonTextToolCall | undefined {
+export function parseJsonTextToolCall(text: string, advertisedNames: Iterable<string>): JsonTextToolCall | undefined {
 	const advertised = advertisedNames instanceof Set ? advertisedNames : new Set(advertisedNames);
 	if (advertised.size === 0) return undefined;
 	const candidate = stripMarkdownFence(text);
@@ -104,7 +123,7 @@ export function parseJsonTextToolCall(
 		return undefined;
 	}
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-	const obj = parsed as Record<string, unknown>;
+	const obj = unwrapFunctionCall(parsed as Record<string, unknown>);
 	const rawName = obj.name ?? obj.tool ?? obj.toolName ?? obj.tool_name;
 	if (typeof rawName !== "string" || !rawName.trim()) return undefined;
 	const name = resolveAdvertisedName(rawName.trim(), advertised);

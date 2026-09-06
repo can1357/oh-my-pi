@@ -7,6 +7,7 @@ import {
 	applyGrokbotSandToolPolicy,
 	GROKBOT_MATRIX_REPRESENTATIVE_IDS,
 	grokbotToolsSkipReason,
+	nativeToolParametersForIdentity,
 	resolveGrokbotSandToolPolicy,
 	selectGrokbotMatrixIds,
 } from "../../src/providers/grokbot/tool-policy";
@@ -108,6 +109,19 @@ describe("grokbot family tool mapping", () => {
 		}
 	});
 
+	test("catalog parent-chat on Auto routers (default / default[] / auto) uses product tools", () => {
+		for (const id of ["default", "default[]", "auto", "auto[]"]) {
+			const { policy, applied, names } = wireFor(id, { sandToolsWire: "parent-chat" });
+			expect(policy.kind).toBe("product");
+			expect(policy.wire).toBe("parent-chat");
+			expect(applied.requestedModel.modelId).toBe(id);
+			expect(names[0]).toBe("SendToUser");
+			expect(names).toContain("Shell");
+			expect(names).toContain("Read");
+			expect(names).toContain("Write");
+		}
+	});
+
 	test("catalog parent-chat on sand-default and sand-cua advertises product tools without rewriting the router id", () => {
 		for (const id of ["sand-default", "sand-cua"]) {
 			const { policy, applied, names } = wireFor(id, { sandToolsWire: "parent-chat" });
@@ -181,6 +195,9 @@ describe("grokbot family tool mapping", () => {
 			"gpt-5.3-terra",
 			"composer-2.5",
 			"sand-default",
+			"default",
+			"gemini-3-flash",
+			"gpt-5-mini",
 			"unrelated-other",
 		];
 		const picked = selectGrokbotMatrixIds(live, "representative");
@@ -189,10 +206,41 @@ describe("grokbot family tool mapping", () => {
 		expect(picked).toContain("gpt-5.6-sol");
 		expect(picked).toContain("composer-2.5");
 		expect(picked).toContain("sand-default");
+		expect(picked).toContain("default");
+		expect(picked).toContain("gemini-3-flash");
+		expect(picked).toContain("gpt-5-mini");
 		expect(picked).toContain("gpt-5.4-luna");
 		expect(picked).toContain("gpt-5.3-terra");
 		expect(picked).not.toContain("unrelated-other");
 		expect(selectGrokbotMatrixIds(live, "all")).toEqual(live);
 		expect(GROKBOT_MATRIX_REPRESENTATIVE_IDS).toContain("sand-cua");
+	});
+
+	test("gemini native schema strips Google-unsupported keywords (empty-body regression)", () => {
+		const raw = {
+			type: "object",
+			properties: { command: { type: "string", format: "uri" } },
+			required: ["command"],
+			additionalProperties: true,
+		};
+		const gemini = nativeToolParametersForIdentity(raw, { class: "gemini" });
+		expect(gemini).not.toHaveProperty("additionalProperties");
+		const command = gemini.properties as Record<string, Record<string, unknown>>;
+		expect(command.command).not.toHaveProperty("format");
+		expect(command.command?.type).toBe("string");
+	});
+
+	test("openai native schema enforces additionalProperties false (gpt-5-mini wire)", () => {
+		const raw = {
+			type: "object",
+			properties: { command: { type: "string" } },
+			required: ["command"],
+		};
+		const openai = nativeToolParametersForIdentity(raw, { class: "openai" });
+		expect(openai.additionalProperties).toBe(false);
+		expect(openai.required).toEqual(["command"]);
+		const xai = nativeToolParametersForIdentity(raw, { class: "xai" });
+		expect(xai).not.toHaveProperty("additionalProperties");
+		expect(xai).toEqual(raw);
 	});
 });

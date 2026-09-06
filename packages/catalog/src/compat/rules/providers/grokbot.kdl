@@ -23,7 +23,12 @@ provider "grokbot" {
 	models "sand-automation" {
 		sand-tools-wire "automation"
 	}
-	models "sand-default" "sand-cua" "sand-automation" "default" "auto" {
+	// Auto / default sand routers land on cursor-grok-4.5-high with native omp
+	// tools (HTTP 422). Product parent-chat is the same wire as sand-default.
+	models "default" "default[]" "auto" "auto[]" {
+		sand-tools-wire "parent-chat"
+	}
+	models "sand-default" "sand-cua" "sand-automation" "default" "default[]" "auto" "auto[]" {
 		context-window-floor 200000
 	}
 	// Static offline seed for grok-4.6: sand effort dial + wire params when no

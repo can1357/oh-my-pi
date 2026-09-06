@@ -18,7 +18,14 @@ const FIXTURE = {
 			supportsImages: true,
 			idAliases: ["auto"],
 			parameterDefinitions: [],
-			variants: [{ displayName: "Auto", isDefaultNonMaxConfig: true, parameterValues: [] }],
+			variants: [
+				{
+					displayName: "Auto",
+					isDefaultNonMaxConfig: true,
+					parameterValues: [],
+					variantStringRepresentation: "default[]",
+				},
+			],
 		},
 		{
 			name: "grok-4.6",
@@ -228,6 +235,11 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(buildModel(sandDefault!).sandToolsWire).toBe("parent-chat");
 		expect(buildModel(models.find(m => m.id === "sand-automation")!).sandToolsWire).toBe("automation");
 		expect(buildModel(models.find(m => m.id === "sand-cua")!).sandToolsWire).toBe("parent-chat");
+		expect(buildModel(auto!).sandToolsWire).toBe("parent-chat");
+		const defaultVariant = models.find(m => m.id === "default[]");
+		expect(defaultVariant?.requestModelId).toBe("default");
+		expect(defaultVariant?.sandVariantStringRepresentation).toBe(true);
+		expect(buildModel(defaultVariant!).sandToolsWire).toBe("parent-chat");
 		expect(buildModel(models.find(m => m.id === "sand-cua")!).reasoning).toBe(false);
 		expect(sandDefault?.input).toEqual(["text"]);
 		expect(models.find(m => m.id === "sand-cua")?.input).toEqual(["text"]);
