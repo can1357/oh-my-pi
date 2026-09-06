@@ -11,6 +11,12 @@
 - Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load; a socket that never authenticates is now closed after the client authentication timeout so it cannot keep the broker alive.
 - Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check, and gave each tunnel child a private temporary log directory so concurrent tunnels cannot share a log path.
 - Daemon broker clients can subscribe to live, rate-limited output previews for supervised processes while the broker mirrors the complete raw stream into a session artifact. Replay after a reconnect is bounded by time, batch count, and bytes; evicted batches are reported as an explicit gap, each batch carries the artifact size it is backed by, and a republished subscription continues its capture only past the size it acknowledged. A subscription replaced on the same artifact path waits for the previous sink to close before its capture opens, and a fresh capture truncates the file instead of overwriting it in place.
+- Daemon broker clients can subscribe to live, rate-limited output previews for supervised processes while the broker mirrors the complete raw stream into a session artifact. Replay after a reconnect is bounded by time, batch count, and bytes; evicted batches are reported as an explicit gap, each batch carries the artifact size it is backed by, and a republished subscription continues its capture only past the size it acknowledged.
+- Added Hub process monitoring modes (wake, ambient, off) to attach, retune, or detach live progress delivery without changing process lifetime; `ps` and `describe` list each process's watchers, and monitoring a detached process now explains the alternatives (`logs` with `follow: true`, or a non-detached start).
+
+### Fixed
+
+- Fixed a failed progress preview delivery leaving a mirrored output artifact unfinalized (open descriptor, missing capped tail).
 
 ## [18.1.12] - 2026-09-06
 
@@ -639,7 +645,6 @@
 - Accelerated SHA-2 and SHA-3 checksums on supported ARM64 hardware.
 - Fixed large MCP tool payloads being stored redundantly on disk.
 - Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues, and completion notices that carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
-- Added Hub process monitoring modes (wake, ambient, off) to attach, retune, or detach live progress delivery without changing process lifetime.
 
 ### Fixed
 

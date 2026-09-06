@@ -19,6 +19,7 @@ import {
 } from "../../launch/client";
 import type {
 	DaemonMonitorNotification,
+	DaemonMonitorWatcher,
 	DaemonOperation,
 	DaemonOutputSubscription,
 	DaemonRpcResult,
@@ -104,6 +105,8 @@ interface OutputRegistration {
 	localStop: LocalStopLifecycle;
 	artifactId?: string;
 	cleanup: () => Promise<void>;
+	/** Switch the delivery mode in place and re-advertise it so `ps`/`describe` watcher rows stay accurate. */
+	retune: (delivery: AsyncJobProgressDelivery) => void;
 	acquirePendingStart?: (delivery: AsyncJobProgressDelivery) => OutputLease;
 }
 
@@ -326,10 +329,8 @@ async function registerOutputSink(
 					await existing.cleanup();
 					return;
 				}
-				if (!existing.active || existing.delivery === delivery) return;
-				session.setLaunchMonitorActive?.(existing.id, existing.delivery, false, existing.epoch);
-				existing.delivery = delivery;
-				session.setLaunchMonitorActive?.(existing.id, delivery, true, existing.epoch);
+				if (!existing.active) return;
+				existing.retune(delivery);
 			},
 			reject: async () => {
 				settled = true;
@@ -441,7 +442,7 @@ async function registerOutputSink(
 	const artifactId = artifact.id;
 	let unregisterDispose: (() => void) | void;
 	let unregisterSessionChange: (() => void) | void;
-	let unregisterOutput = (): void => {};
+	let outputUnregister: DaemonOutputUnregister | undefined;
 	let cleanupPromise: Promise<void> | undefined;
 	const registration: OutputRegistration = {
 		id,
@@ -460,7 +461,7 @@ async function registerOutputSink(
 			if (cleanupPromise) return cleanupPromise;
 			registration.active = false;
 			session.setLaunchMonitorActive?.(id, registration.delivery, false, registration.epoch);
-			unregisterOutput();
+			outputUnregister?.();
 			unregisterDispose?.();
 			unregisterSessionChange?.();
 			monitors.delete(name);
@@ -468,6 +469,14 @@ async function registerOutputSink(
 			if (clients.size === 0) outputRegistrations.delete(session);
 			cleanupPromise = Promise.resolve();
 			return cleanupPromise;
+		},
+		retune: next => {
+			if (registration.delivery === next) return;
+			session.setLaunchMonitorActive?.(id, registration.delivery, false, registration.epoch);
+			registration.delivery = next;
+			subscription.delivery = next;
+			session.setLaunchMonitorActive?.(id, next, true, registration.epoch);
+			outputUnregister?.republish();
 		},
 	};
 	const deliver = async (notification: DaemonMonitorNotification, waitForTerminalCompletion = true): Promise<void> => {
@@ -556,7 +565,16 @@ async function registerOutputSink(
 		if (speculativeFlush) await speculativeFlush;
 		await deliver(notification);
 	};
-	const subscription: DaemonOutputSubscription = { id, name, owner, artifactPath: artifact.path, daemonId };
+	const subscription: DaemonOutputSubscription = {
+		id,
+		name,
+		owner,
+		artifactPath: artifact.path,
+		daemonId,
+		delivery,
+		since: Date.now(),
+		artifactId,
+	};
 	if (startPending) subscription.startPending = true;
 	const restorePrevious = async (fence: OutputRegistration = registration): Promise<void> => {
 		if (!previous) return;
@@ -576,7 +594,6 @@ async function registerOutputSink(
 		);
 		await restored?.retain();
 	};
-	let outputUnregister: DaemonOutputUnregister;
 	try {
 		outputUnregister = client.onOutput(subscription, sink);
 	} catch (error) {
@@ -584,7 +601,6 @@ async function registerOutputSink(
 		await restorePrevious(replaceable);
 		throw error;
 	}
-	unregisterOutput = outputUnregister;
 	registration.ready = outputUnregister.ready;
 	const bindDaemon = (boundDaemonId: string): void => {
 		registration.daemonId ??= boundDaemonId;
@@ -627,11 +643,7 @@ async function registerOutputSink(
 						return;
 					}
 					if (!registration.active) return;
-					if (registration.delivery !== requestedDelivery) {
-						session.setLaunchMonitorActive?.(id, registration.delivery, false, registration.epoch);
-						registration.delivery = requestedDelivery;
-						session.setLaunchMonitorActive?.(id, requestedDelivery, true, registration.epoch);
-					}
+					registration.retune(requestedDelivery);
 					if (startAccepted) return;
 					startAccepted = true;
 					registration.binding = "attached";
@@ -811,6 +823,10 @@ const KEY_INPUT: Record<string, string> = {
 /** Terminal daemon lifecycle states — the process is no longer running. */
 const TERMINAL_STATES: Partial<Record<DaemonState, true>> = { exited: true, failed: true };
 
+/** Monitoring needs a live broker connection to the process; detached daemons have none, so name the alternatives. */
+const DETACHED_MONITOR_ERROR =
+	"Detached processes cannot be live-monitored; start it without detached: true, or read its output with logs (follow: true)";
+
 /** Structured launch state retained for compact TUI rendering. */
 export interface LaunchToolDetails {
 	op: LaunchParams["op"];
@@ -830,6 +846,8 @@ export interface LaunchToolDetails {
 	monitoring?: AsyncJobProgressDelivery | "off";
 	/** monitor off: whether an active monitor was actually detached. */
 	monitorDetached?: boolean;
+	/** list/describe: live output monitors per process, absent when the broker predates watcher reporting. */
+	monitors?: DaemonMonitorWatcher[];
 }
 
 function requiredName(params: LaunchParams): string {
@@ -963,7 +981,39 @@ function readyPendingSummary(daemon: DaemonSnapshot, ready?: LaunchParams["ready
 	return parts;
 }
 
-function toolContent(result: DaemonRpcResult, params: LaunchParams, detached?: boolean): string {
+/**
+ * One watcher in prose: who (this session vs. a session id), the delivery
+ * mode, how long it has been attached, its artifact, and any state that
+ * explains silence (disconnected, still waiting for a start, or bound to a
+ * previous incarnation of the same name).
+ */
+function watcherLabel(watcher: DaemonMonitorWatcher, daemon: DaemonSnapshot, sessionOwner: string | undefined): string {
+	const who = watcher.owner === sessionOwner ? "this session" : watcher.owner;
+	const facts = [watcher.delivery ?? "unknown mode"];
+	if (watcher.since !== undefined) facts.push(`since ${formatDuration(Math.max(0, Date.now() - watcher.since))} ago`);
+	if (watcher.artifactId) facts.push(`artifact://${watcher.artifactId}`);
+	if (!watcher.connected) facts.push("disconnected");
+	if (watcher.daemonId === undefined) facts.push("awaiting start");
+	else if (watcher.daemonId !== daemon.id) facts.push("previous incarnation");
+	return `${who} (${facts.join(", ")})`;
+}
+
+function describeWatchers(
+	watchers: DaemonMonitorWatcher[] | undefined,
+	daemon: DaemonSnapshot,
+	sessionOwner: string | undefined,
+): string[] {
+	if (!watchers) return [];
+	if (watchers.length === 0) return ["Watchers: none"];
+	return ["Watchers:", ...watchers.map(watcher => `- ${watcherLabel(watcher, daemon, sessionOwner)}`)];
+}
+
+function toolContent(
+	result: DaemonRpcResult,
+	params: LaunchParams,
+	detached: boolean | undefined,
+	sessionOwner: string | undefined,
+): string {
 	switch (result.op) {
 		case "ping":
 		case "shutdown":
@@ -984,10 +1034,19 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams, detached?: b
 			}
 			return lines.join("\n");
 		}
-		case "list":
-			return result.daemons.length
-				? result.daemons.map(daemon => `- ${daemonLabel(daemon)}`).join("\n")
-				: "No daemons.";
+		case "list": {
+			if (result.daemons.length === 0) return "No daemons.";
+			const lines: string[] = [];
+			for (const daemon of result.daemons) {
+				lines.push(`- ${daemonLabel(daemon)}`);
+				const watchers = result.monitors?.filter(watcher => watcher.name === daemon.name) ?? [];
+				if (watchers.length === 0) continue;
+				lines.push(
+					`  watched by: ${watchers.map(watcher => watcherLabel(watcher, daemon, sessionOwner)).join("; ")}`,
+				);
+			}
+			return lines.join("\n");
+		}
 		case "logs": {
 			const text = sanitizeText(result.text);
 			return `${text}${text && !text.endsWith("\n") ? "\n" : ""}[${result.name}: ${result.state}; cursor=${result.cursor}${result.timedOut ? "; follow timed out" : ""}]`;
@@ -1017,6 +1076,7 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams, detached?: b
 				`Command: ${[result.spec.application, ...result.spec.args].join(" ")}`,
 				`Cwd: ${shortenPath(result.spec.cwd)}`,
 				`PTY: ${result.spec.pty}; restart=${result.spec.restart}; persist=${result.spec.persist}; detached=${result.spec.detached}`,
+				...describeWatchers(result.monitors, result.daemon, sessionOwner),
 			].join("\n");
 	}
 }
@@ -1043,7 +1103,7 @@ async function toolDetails(
 		case "start":
 			return { op: "start", daemon: result.daemon, timedOut: result.readyTimedOut };
 		case "list":
-			return { op: "list", daemons: result.daemons };
+			return { op: "list", daemons: result.daemons, monitors: result.monitors };
 		case "logs":
 			return {
 				op: "logs",
@@ -1065,6 +1125,7 @@ async function toolDetails(
 				op: params.op === "monitor" ? "monitor" : "describe",
 				daemon: result.daemon,
 				spec: result.spec,
+				monitors: params.op === "monitor" ? undefined : result.monitors,
 				monitoring: params.op === "monitor" ? params.progress : undefined,
 				monitorDetached: params.op === "monitor" && params.progress === "off" ? detached === true : undefined,
 			};
@@ -1086,7 +1147,7 @@ export async function executeLaunch(
 	}
 	if (params.op === "start" && params.progress === "off") throw new ToolError("start progress cannot be off");
 	if (params.op === "start" && params.detached && params.progress !== undefined) {
-		throw new ToolError("Live progress monitoring is unavailable for detached processes");
+		throw new ToolError(DETACHED_MONITOR_ERROR);
 	}
 	if (params.op === "monitor" && params.progress === undefined) {
 		throw new ToolError("monitor requires progress: wake, ambient, or off");
@@ -1155,8 +1216,7 @@ export async function executeLaunch(
 				? await detachOutputSink(session, client, name)
 				: undefined;
 		if (progressDelivery && "daemon" in result && result.daemon) {
-			if (result.daemon.detached)
-				throw new ToolError("Live progress monitoring is unavailable for detached processes");
+			if (result.daemon.detached) throw new ToolError(DETACHED_MONITOR_ERROR);
 			if (params.op === "monitor" && TERMINAL_STATES[result.daemon.state]) {
 				throw new ToolError(`Cannot monitor ${params.name}: process is ${result.daemon.state}`);
 			}
@@ -1196,7 +1256,9 @@ export async function executeLaunch(
 		if (params.op === "list" && resumedOwner && !resumedDaemonFound) completionLease?.reject(true);
 		else completionLease?.retain();
 		return {
-			content: [{ type: "text", text: replaceTabs(toolContent(result, params, detached)) }],
+			content: [
+				{ type: "text", text: replaceTabs(toolContent(result, params, detached, sessionOwner ?? undefined)) },
+			],
 			details: await toolDetails(result, params, detached),
 		};
 	} catch (error) {
@@ -1266,6 +1328,17 @@ function daemonMeta(daemon: DaemonSnapshot, theme: Theme): string[] {
 	if (daemon.detached) meta.push("detached");
 	else if (daemon.persist) meta.push("persistent");
 	return meta;
+}
+
+/** Indented `↳ owner · mode · age · state` row under a process line; owner ids are sanitized like any display text. */
+function watcherRow(watcher: DaemonMonitorWatcher, daemon: DaemonSnapshot, theme: Theme): string {
+	const owner = truncateToWidth(replaceTabs(sanitizeText(watcher.owner)), TRUNCATE_LENGTHS.TITLE);
+	const facts = [theme.fg("accent", watcher.delivery ?? "unknown mode")];
+	if (watcher.since !== undefined) facts.push(`${formatDuration(Math.max(0, Date.now() - watcher.since))} ago`);
+	if (!watcher.connected) facts.push(theme.fg("warning", "disconnected"));
+	if (watcher.daemonId === undefined) facts.push(theme.fg("muted", "awaiting start"));
+	else if (watcher.daemonId !== daemon.id) facts.push(theme.fg("warning", "previous incarnation"));
+	return `  ${theme.fg("dim", "↳ watched by")} ${owner} ${theme.fg("dim", facts.join(theme.sep.dot))}`;
 }
 
 /** Op-specific call context (command line, log filters, wait condition, send payload). */
@@ -1387,6 +1460,9 @@ export function launchRenderResult(
 					body.push(
 						`${theme.fg("accent", replaceTabs(item.name))} ${theme.fg("dim", daemonMeta(item, theme).join(theme.sep.dot))}`,
 					);
+					for (const watcher of details?.monitors ?? []) {
+						if (watcher.name === item.name) body.push(watcherRow(watcher, item, theme));
+					}
 				}
 				break;
 			}
@@ -1426,6 +1502,10 @@ export function launchRenderResult(
 					if (spec.detached) flags.push("detached");
 					else if (spec.persist) flags.push("persistent");
 					body.push(theme.fg("dim", flags.join(theme.sep.dot)));
+				}
+				if (daemon && details?.monitors) {
+					if (details.monitors.length === 0) body.push(theme.fg("muted", "no watchers"));
+					for (const watcher of details.monitors) body.push(watcherRow(watcher, daemon, theme));
 				}
 				break;
 			}

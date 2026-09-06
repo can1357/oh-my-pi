@@ -60,6 +60,7 @@ interface MonitorHarness {
 	getOutputSink(): ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
 	getSubscription(): DaemonOutputSubscription | undefined;
 	unregisterCount(): number;
+	republishCount(): number;
 	registrationCount(): number;
 }
 
@@ -82,6 +83,7 @@ function createHarness(
 	let outputSink: ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
 	let subscription: DaemonOutputSubscription | undefined;
 	let unregisters = 0;
+	let republishes = 0;
 	const registrations = new Set<string>();
 	const client = {
 		projectDir: process.cwd(),
@@ -99,7 +101,12 @@ function createHarness(
 				if (subscription === registered) subscription = undefined;
 				if (outputSink === sink) outputSink = undefined;
 			};
-			return Object.assign(unregister, { ready: outputReady });
+			return Object.assign(unregister, {
+				ready: outputReady,
+				republish: () => {
+					republishes++;
+				},
+			});
 		},
 		request: async (operation: DaemonOperation): Promise<DaemonRpcResult> => {
 			requests.push(operation);
@@ -157,6 +164,7 @@ function createHarness(
 		getOutputSink: () => outputSink,
 		getSubscription: () => subscription,
 		unregisterCount: () => unregisters,
+		republishCount: () => republishes,
 		registrationCount: () => registrations.size,
 	};
 }
@@ -434,6 +442,128 @@ describe("hub process output monitoring", () => {
 			{ monitorId: subscription.id, delivery: "wake", active: false },
 			{ monitorId: subscription.id, delivery: "ambient", active: true },
 		]);
+	});
+
+	it("advertises delivery mode, attach time, and artifact on the subscription and re-advertises a retune", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const before = Date.now();
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+		const subscription = harness.getSubscription();
+		if (!subscription) throw new Error("Expected output subscription");
+		expect(subscription).toMatchObject({
+			delivery: "wake",
+			artifactId: expect.stringContaining("hub-progress-"),
+		});
+		expect(subscription.since).toBeGreaterThanOrEqual(before);
+		expect(harness.republishCount()).toBe(0);
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" });
+		// Same registration, updated wire metadata, one re-advertisement so the
+		// broker's watcher rows switch to ambient without a new capture.
+		expect(harness.getSubscription()).toBe(subscription);
+		expect(subscription.delivery).toBe("ambient");
+		expect(harness.republishCount()).toBe(1);
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" });
+		expect(harness.republishCount()).toBe(1);
+	});
+
+	it("lists each process's watchers on ps and describe", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const other: DaemonSnapshot = { ...daemon, name: "worker", id: "worker-id", owner: "someone-else" };
+		const monitors = [
+			{
+				name: daemon.name,
+				id: "own-monitor",
+				owner: OWNER,
+				delivery: "wake" as const,
+				since: Date.now() - 90_000,
+				artifactId: "hub-progress-own",
+				daemonId: daemon.id,
+				connected: true,
+			},
+			{
+				name: daemon.name,
+				id: "stale-monitor",
+				owner: "other-session",
+				delivery: "ambient" as const,
+				since: Date.now() - 5_000,
+				artifactId: "hub-progress-other",
+				daemonId: "previous-daemon-id",
+				connected: false,
+			},
+			{ name: other.name, id: "pending-monitor", owner: "third-session", connected: true },
+		];
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "list") return { op: "list", daemons: [daemon, other], monitors };
+			if (operation.op === "describe") {
+				return { op: "describe", daemon, spec, monitors: monitors.filter(item => item.name === daemon.name) };
+			}
+			throw new Error(`Unexpected operation: ${operation.op}`);
+		});
+
+		const listed = await executeLaunch(harness.session, { op: "list" });
+		const listText = listed.content[0]?.type === "text" ? listed.content[0].text : "";
+		expect(listText.split("\n")).toEqual([
+			expect.stringMatching(/^- web: running/),
+			expect.stringMatching(
+				/^ {2}watched by: this session \(wake, since 1m30s ago, artifact:\/\/hub-progress-own\); other-session \(ambient, since 5\.\ds ago, artifact:\/\/hub-progress-other, disconnected, previous incarnation\)$/,
+			),
+			expect.stringContaining("- worker:"),
+			"  watched by: third-session (unknown mode, awaiting start)",
+		]);
+		expect(listed.details?.monitors).toEqual(monitors);
+
+		const described = await executeLaunch(harness.session, { op: "describe", name: daemon.name });
+		const describeText = described.content[0]?.type === "text" ? described.content[0].text : "";
+		expect(describeText.split("\n").slice(-3)).toEqual([
+			"Watchers:",
+			expect.stringMatching(/^- this session \(wake, since 1m30s ago, artifact:\/\/hub-progress-own\)$/),
+			expect.stringMatching(/^- other-session \(ambient, .*disconnected, previous incarnation\)$/),
+		]);
+		expect(described.details?.monitors).toHaveLength(2);
+
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "describe") return { op: "describe", daemon, spec, monitors: [] };
+			throw new Error(`Unexpected operation: ${operation.op}`);
+		});
+		const unwatched = await executeLaunch(harness.session, { op: "describe", name: daemon.name });
+		const unwatchedText = unwatched.content[0]?.type === "text" ? unwatched.content[0].text : "";
+		expect(unwatchedText.split("\n").at(-1)).toBe("Watchers: none");
+		expect(unwatched.details?.monitors).toEqual([]);
+	});
+
+	it("tells the caller how to get output when a detached process cannot be monitored", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const remediation = /start it without detached: true, or read its output with logs \(follow: true\)/;
+
+		await expect(
+			executeLaunch(harness.session, {
+				op: "start",
+				name: daemon.name,
+				application: process.execPath,
+				detached: true,
+				progress: "wake",
+			}),
+		).rejects.toThrow(remediation);
+		expect(harness.requests).toEqual([]);
+
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "describe") return { op: "describe", daemon: { ...daemon, detached: true }, spec };
+			throw new Error(`Unexpected operation: ${operation.op}`);
+		});
+		await expect(
+			executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" }),
+		).rejects.toThrow(remediation);
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.active).toEqual([]);
 	});
 
 	it("replaces an attached monitor when the same name describes a new incarnation", async () => {

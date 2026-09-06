@@ -7016,6 +7016,11 @@ export class AgentSession {
 		// model-facing text, so (like AsyncJobManager for managed jobs) they never
 		// become a progress entry, spend a wake permit, or start an idle turn.
 		if (notification.batchKind === "artifact-only") return;
+		// Wake monitors enqueue into the same ASYNC_PROGRESS_WAKE_QUEUE_KIND as
+		// wake background jobs. That kind is the one registered with the
+		// session-wide WakeTurnBudget, so Hub monitor wake-ups draw on the same
+		// idle-turn budget as jobs; monitors deliberately have no budget of their
+		// own and aggregate wake traffic stays bounded per session, not per source.
 		const queueKind = delivery === "wake" ? ASYNC_PROGRESS_WAKE_QUEUE_KIND : ASYNC_PROGRESS_MESSAGE_TYPE;
 		this.yieldQueue.enqueue<AsyncProgressEntry>(queueKind, {
 			jobId: notification.name,

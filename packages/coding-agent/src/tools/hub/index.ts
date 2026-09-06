@@ -111,7 +111,7 @@ const hubSchema = type({
 		"start: survive every omp and broker exit; implies persist and disables PTY input",
 	),
 	"progress?": type("'wake' | 'ambient' | 'off'").describe(
-		"start: push live output with wake/ambient; monitor: attach with wake/ambient or detach with off",
+		"start: push live output with wake/ambient; monitor: attach with wake/ambient or detach with off. wake spends model turns from the shared session wake budget; ambient is free",
 	),
 	"lines?": type("number > 0").describe("logs: output lines; default 100, max 1000"),
 	"head?": type("boolean").describe("logs: read from the beginning instead of the tail"),
