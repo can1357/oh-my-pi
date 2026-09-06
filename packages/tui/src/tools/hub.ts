@@ -2,7 +2,7 @@ import { styleTerminalRow } from "./terminal-output";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import { visibleWidth } from "../utils";
-import { formatAge, pluralize } from "@oh-my-pi/pi-utils";
+import { formatAge, pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shimmerEnabled, shimmerText } from "../theme/shimmer";
 import type { Theme, ThemeColor } from "../theme/theme";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../render/index";
@@ -242,6 +242,29 @@ export interface DaemonSnapshot {
 	persist: boolean;
 	detached: boolean;
 }
+
+/** Model-facing delivery mode a client attached to one output subscription. */
+export type DaemonMonitorDelivery = "wake" | "ambient";
+
+/** One live output monitor as the broker sees it; listed by `list` and `describe` so watchers are debuggable. */
+export interface DaemonMonitorWatcher {
+	/** Process name the monitor targets. */
+	name: string;
+	/** Client-scoped subscription id. */
+	id: string;
+	/** Session that registered the monitor. */
+	owner: string;
+	/** Delivery mode advertised by the client; absent for clients that predate the field. */
+	delivery?: DaemonMonitorDelivery;
+	/** Epoch milliseconds when the client registered the monitor; absent for older clients. */
+	since?: number;
+	/** Session artifact id receiving the raw capture; absent for older clients. */
+	artifactId?: string;
+	/** Daemon incarnation the monitor is bound to; absent while it waits for a start. */
+	daemonId?: string;
+	/** False while the registering client is disconnected inside the reconnect grace. */
+	connected: boolean;
+}
 /** Serializable peer message retained in hub result snapshots. */
 export interface IrcMessage {
 	id: string;
@@ -316,6 +339,8 @@ export interface LaunchToolDetails {
 	monitoring?: "wake" | "ambient" | "off";
 	/** monitor off: whether an active monitor was actually detached. */
 	monitorDetached?: boolean;
+	/** list/describe: live output monitors per process, absent when the broker predates watcher reporting. */
+	monitors?: DaemonMonitorWatcher[];
 }
 
 /** Terminal daemon lifecycle states — the process is no longer running. */
@@ -771,6 +796,17 @@ function daemonMeta(daemon: DaemonSnapshot, theme: Theme): string[] {
 	return meta;
 }
 
+/** Indented `↳ owner · mode · age · state` row under a process line; owner ids are sanitized like any display text. */
+function watcherRow(watcher: DaemonMonitorWatcher, daemon: DaemonSnapshot, theme: Theme): string {
+	const owner = truncateToWidth(replaceTabs(sanitizeText(watcher.owner)), TRUNCATE_LENGTHS.TITLE);
+	const facts = [theme.fg("accent", watcher.delivery ?? "unknown mode")];
+	if (watcher.since !== undefined) facts.push(`${formatDuration(Math.max(0, Date.now() - watcher.since))} ago`);
+	if (!watcher.connected) facts.push(theme.fg("warning", "disconnected"));
+	if (watcher.daemonId === undefined) facts.push(theme.fg("muted", "awaiting start"));
+	else if (watcher.daemonId !== daemon.id) facts.push(theme.fg("warning", "previous incarnation"));
+	return `  ${theme.fg("dim", "↳ watched by")} ${owner} ${theme.fg("dim", facts.join(theme.sep.dot))}`;
+}
+
 /** Op-specific call context (command line, log filters, wait condition, send payload). */
 function launchCallMeta(args: LaunchRenderArgs): string[] {
 	const meta: string[] = [];
@@ -889,6 +925,9 @@ export function launchRenderResult(
 					body.push(
 						`${theme.fg("accent", replaceTabs(item.name))} ${theme.fg("dim", daemonMeta(item, theme).join(theme.sep.dot))}`,
 					);
+					for (const watcher of details?.monitors ?? []) {
+						if (watcher.name === item.name) body.push(watcherRow(watcher, item, theme));
+					}
 				}
 				break;
 			}
@@ -928,6 +967,10 @@ export function launchRenderResult(
 					if (spec.detached) flags.push("detached");
 					else if (spec.persist) flags.push("persistent");
 					body.push(theme.fg("dim", flags.join(theme.sep.dot)));
+				}
+				if (daemon && details?.monitors) {
+					if (details.monitors.length === 0) body.push(theme.fg("muted", "no watchers"));
+					for (const watcher of details.monitors) body.push(watcherRow(watcher, daemon, theme));
 				}
 				break;
 			}

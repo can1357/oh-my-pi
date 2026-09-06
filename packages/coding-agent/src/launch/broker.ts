@@ -25,7 +25,7 @@ import {
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
-import type { DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/hub";
+import type { DaemonMonitorWatcher, DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/hub";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -830,6 +830,7 @@ class DaemonBroker {
 				return {
 					op: "list",
 					daemons: orderDaemonsForListing([...this.#records.values()].map(record => record.snapshot)),
+					monitors: this.#monitorWatchers(),
 				};
 			}
 			case "logs":
@@ -848,11 +849,36 @@ class DaemonBroker {
 			case "describe": {
 				const record = this.#record(operation.name);
 				await this.#refreshDetached(record);
-				return { op: "describe", daemon: record.snapshot, spec: record.spec };
+				return {
+					op: "describe",
+					daemon: record.snapshot,
+					spec: record.spec,
+					monitors: this.#monitorWatchers(operation.name),
+				};
 			}
 			case "shutdown":
 				return { op: "shutdown" };
 		}
+	}
+
+	/** Live output monitors, so `ps`/`describe` can show who is watching a process and how. */
+	#monitorWatchers(name?: string): DaemonMonitorWatcher[] {
+		const watchers: DaemonMonitorWatcher[] = [];
+		for (const registration of this.#outputRegistrations.values()) {
+			if (registration.disabled) continue;
+			if (name !== undefined && registration.name !== name) continue;
+			watchers.push({
+				name: registration.name,
+				id: registration.id,
+				owner: registration.owner,
+				delivery: registration.delivery,
+				since: registration.since,
+				artifactId: registration.artifactId,
+				daemonId: registration.daemonId,
+				connected: registration.socket !== undefined && !registration.socket.destroyed,
+			});
+		}
+		return watchers;
 	}
 
 	async #start(spec: DaemonSpec, owner?: string): Promise<DaemonRpcResult> {
@@ -1272,6 +1298,7 @@ class DaemonBroker {
 						clearTimeout(existing.offlineTimer);
 						existing.offlineTimer = undefined;
 						existing.owner = subscription.owner;
+						existing.delivery = subscription.delivery;
 						existing.startPending = subscription.startPending;
 						const reconnected = existing.socket !== socket;
 						existing.startPending = subscription.startPending;
