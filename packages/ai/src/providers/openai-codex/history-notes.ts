@@ -50,10 +50,7 @@ export function codexHistoryNotesAgentPath(agent: HistoryNotesAgentIdentity): st
 		case "main":
 			return "/root";
 		case "sub": {
-			// Subagent ids are case-sensitive and children share the root backend
-			// session, so only an already-lowercase id can take the direct path;
-			// anything else (BuildWorker vs buildworker, Build-Agent vs Build_Agent)
-			// keeps a hash suffix so two agents never share one namespace.
+			// Subagent ids are case-sensitive, so only a lowercase id takes the direct path.
 			const name = agent.id.toLowerCase();
 			if (agent.id === name && /^[a-z0-9_]+$/.test(name) && name !== "root") return `/root/${name}`;
 			const suffix = new Bun.CryptoHasher("sha256").update(agent.id).digest("hex").slice(0, 12);
@@ -138,7 +135,6 @@ export class CodexHistoryNotesBackend {
 				return undefined;
 			return result.text;
 		} catch {
-			// Thread hints are optional context; backend failure must stay silent.
 			return undefined;
 		}
 	}

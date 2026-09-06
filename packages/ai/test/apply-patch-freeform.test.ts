@@ -212,8 +212,6 @@ describe("convertTools: freeform emission", () => {
 		// distinguish it from an omitted flag when generating optional-arg values.
 		expect(out.strict).toBe(false);
 		expect(items.oneOf).toBeUndefined();
-		// The wire schema is a post-processed copy, so compare structurally: the
-		// fixture itself must stay untouched by serialization.
 		expect(items.anyOf).toMatchObject(unionBranches);
 		expect(unionBranches[0]).toEqual({
 			type: "object",

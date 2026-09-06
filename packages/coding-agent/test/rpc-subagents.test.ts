@@ -372,7 +372,6 @@ describe("readRpcSubagentTranscript", () => {
 		expect(serialized).not.toContain("subagent-details");
 		expect(serialized).toContain("[private model-only result]");
 		expect(result.messages).toHaveLength(1);
-		// The on-disk transcript keeps the replayable ciphertext.
 		expect(await Bun.file(sessionFile).text()).toContain("subagent-ciphertext");
 	});
 

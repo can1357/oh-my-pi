@@ -1,10 +1,3 @@
-/**
- * Codex private history/notes payloads are opaque ciphertext the inference side
- * decrypts on replay. The notes protocol allows files up to 1,000,000 UTF-8
- * bytes, so a legitimate result exceeds the generic persistence limit; a
- * truncated blob (or truncated encrypted call arguments) is undecryptable after
- * resume, which silently loses the checkpoint the model saved.
- */
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";

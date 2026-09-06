@@ -2269,8 +2269,8 @@ export class SessionManager {
 
 	/**
 	 * Snapshot the session for collab replication: the live header plus a deep
-	 * copy of each public entry (the host mutates entries in place on rewrite
-	 * paths, so guests must not share references or receive private replay data).
+	 * copy of every public entry (the host mutates entries in place on rewrite paths, so
+	 * guests must not share references).
 	 */
 	snapshotForReplication(): { header: SessionHeader; entries: SessionEntry[] } {
 		return { header: structuredClone(this.#header), entries: structuredClone(this.#entries.map(publicSessionEntry)) };

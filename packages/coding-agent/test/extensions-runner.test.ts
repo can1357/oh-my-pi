@@ -486,7 +486,7 @@ describe("ExtensionRunner", () => {
 		expect(JSON.stringify(transformed[0])).not.toContain("entry-1");
 	});
 
-	it("context hooks see public results while Codex replay retains private results", async () => {
+	it("context hooks see public exchanges while Codex replay retains private calls and results", async () => {
 		const observedPath = tempDir.join("context.json");
 		await Bun.write(
 			path.join(extensionsDir, "context.ts"),
@@ -512,6 +512,36 @@ describe("ExtensionRunner", () => {
 		const messages: AgentMessage[] = [
 			{ role: "user", content: "Public prompt", timestamp: 0 },
 			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "Saving a checkpoint" },
+					{
+						type: "toolCall",
+						id: "private",
+						name: "notes.read_file",
+						arguments: { path: "checkpoint", text: "private-argument" },
+						modelOnly: true,
+					},
+				],
+				api: "openai-responses",
+				provider: "openai-codex",
+				model: "fixture",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					items: [{ type: "function_call", arguments: '{"text":"private-payload"}' }],
+				},
+				timestamp: 1,
+			},
+			{
 				role: "toolResult",
 				toolCallId: "private",
 				toolName: "notes.read_file",
@@ -519,16 +549,21 @@ describe("ExtensionRunner", () => {
 				details: { secret: "private-details" },
 				modelOnly: true,
 				isError: false,
-				timestamp: 1,
+				timestamp: 2,
 			},
 		];
 		const transformed = await runner.emitContext(messages);
 		const observed = await Bun.file(observedPath).text();
 		expect(observed).not.toContain("private-ciphertext");
 		expect(observed).not.toContain("private-details");
+		expect(observed).not.toContain("private-argument");
+		expect(observed).not.toContain("private-payload");
 		expect(observed).toContain("[private model-only result]");
+		expect(observed).toContain("[private model-only call]");
+		expect(observed).toContain("Saving a checkpoint");
 		expect(transformed[0]).toMatchObject({ content: "Transformed public prompt" });
 		expect(transformed[1]).toEqual(messages[1]);
+		expect(transformed[2]).toEqual(messages[2]);
 		expect(messages[0]).toMatchObject({ content: "Public prompt" });
 	});
 

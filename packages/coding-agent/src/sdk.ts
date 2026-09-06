@@ -3891,7 +3891,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			void checkpointRefresh
 				.then(async () => {
 					await liveSession.waitForIdle();
-					// A late catalog response must not undo a model switch or revive a disposed child.
 					if (liveSession.isDisposed || liveSession.model !== startupModel) return;
 					const discovered = modelRegistry.find(startupModel.provider, startupModel.id);
 					if (!discovered || !getCodexContextWindowPolicy(discovered)) return;

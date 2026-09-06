@@ -26,8 +26,6 @@ describe("Codex history notes backend", () => {
 	});
 
 	test("keeps case-distinct, unsupported, and reserved agent identifiers valid and distinct", () => {
-		// Subagent ids are case-sensitive, so BuildWorker and buildworker are two
-		// agents and must not share one server-side namespace.
 		const names = ["BuildWorker", "buildworker", "Build-Agent", "Build_Agent", "root", ""].map(id =>
 			codexHistoryNotesAgentPath({ kind: "sub", id }),
 		);

@@ -1,6 +1,7 @@
-import type { EncryptedContent, ImageContent, Message, TextContent } from "../types";
+import type { AssistantMessage, EncryptedContent, ImageContent, Message, TextContent, ToolCall } from "../types";
 
 export const PRIVATE_MODEL_RESULT = "[private model-only result]";
+export const PRIVATE_MODEL_CALL = "[private model-only call]";
 
 export function publicToolContent(
 	content: (TextContent | ImageContent | EncryptedContent)[],
@@ -10,13 +11,7 @@ export function publicToolContent(
 	return [{ type: "text", text: PRIVATE_MODEL_RESULT }];
 }
 
-/**
- * Public projection of a tool result plus whether the payload was private.
- * Hook wrappers need both: a private result must be redacted on the event and
- * its replayable original must survive any patch the handler returns — echoing
- * the redacted content back would otherwise destroy the ciphertext Codex
- * replays.
- */
+/** Public projection of a tool result plus whether the payload was private. */
 export function publicToolProjection(
 	content: (TextContent | ImageContent | EncryptedContent)[],
 	modelOnly = false,
@@ -25,13 +20,30 @@ export function publicToolProjection(
 	return { content: projected, isPrivate: projected !== content };
 }
 
-/**
- * Redact private payloads without changing the replayable stored message.
- * Only results are private: the backend returns them as ciphertext. Tool-call
- * arguments stay public — the schema-flagged fields are already encrypted on
- * the wire and everything else is ordinary model output.
- */
+/** Public projection of a model-only call, whose arguments are ciphertext. */
+export function publicToolCall(call: ToolCall): ToolCall {
+	if (call.modelOnly !== true) return call;
+	return {
+		type: "toolCall",
+		id: call.id,
+		name: call.name,
+		modelOnly: true,
+		arguments: { redacted: PRIVATE_MODEL_CALL },
+	};
+}
+
+function publicAssistantMessage(message: AssistantMessage): AssistantMessage {
+	if (!message.content.some(block => block.type === "toolCall" && block.modelOnly === true)) return message;
+	return {
+		...message,
+		content: message.content.map(block => (block.type === "toolCall" ? publicToolCall(block) : block)),
+		providerPayload: undefined,
+	};
+}
+
+/** Public projection of a message; the stored message keeps its replay payloads. */
 export function publicMessage<T extends Message>(message: T): T {
+	if (message.role === "assistant") return publicAssistantMessage(message) as Message as T;
 	if (
 		message.role !== "toolResult" ||
 		(!message.modelOnly && !message.content.some(block => block.type === "encrypted"))
@@ -45,14 +57,7 @@ export function publicMessage<T extends Message>(message: T): T {
 	};
 }
 
-/**
- * Remove private model-only exchanges when a request leaves the Codex
- * protocol. Replacing only the result is not enough: the paired assistant call
- * keeps its namespaced name (`notes.read_file`), and providers that constrain
- * function names to alphanumerics, underscores, and hyphens reject the dot, so
- * every later request fails. Public content in the same assistant turn stays.
- * Returns the input array untouched when nothing was private.
- */
+/** Drop private model-only exchanges when a request leaves the Codex protocol. */
 export function dropModelOnlyToolExchanges(messages: Message[]): Message[] {
 	let privateCallIds: Set<string> | undefined;
 	for (const message of messages) {

@@ -184,18 +184,21 @@ test("checkpoint then new_context cuts history at a paired-tool boundary and sur
 	expect(frames[2].messages.findLast(message => message.role === "toolResult")?.content).toEqual(
 		expect.arrayContaining([{ type: "encrypted", encryptedContent: "opaque-result" }]),
 	);
-	// Backend requests use the session-store identity and an absolute provider agent path.
 	const wireIdentity = getOpenAICodexContextWindow(manager.getSessionId(), session.providerSessionState);
 	expect(backendCalls.mock.calls.map(([route, , context]) => [route, context.sessionId, context.agentName])).toEqual([
 		["alpha/notes/v2/write_file", wireIdentity.sessionId, "/root"],
 	]);
 	expect(events.filter(event => event.includes("opaque-result")).map(event => event.slice(0, 100))).toEqual([]);
 	expect(events.join("\n")).toContain("[private model-only result]");
-	expect(events.some(event => event.includes("opaque-argument"))).toBe(true);
+	expect(events.some(event => event.includes("opaque-argument"))).toBe(false);
+	expect(events.join("\n")).toContain("[private model-only call]");
 	const shared = JSON.stringify(buildShareSnapshot(manager));
 	expect(shared).not.toContain("opaque-result");
-	expect(shared).toContain("opaque-argument");
-	expect(JSON.stringify(manager.getEntries())).toContain("opaque-result");
+	expect(shared).not.toContain("opaque-argument");
+	expect(shared).toContain("[private model-only call]");
+	const journal = JSON.stringify(manager.getEntries());
+	expect(journal).toContain("opaque-result");
+	expect(journal).toContain("opaque-argument");
 	const entry = manager.getBranch().find(entry => entry.type === "compaction" && entry.method === "window");
 	if (!entry || entry.type !== "compaction") throw new Error("Window reset was not persisted");
 	const identity = entry.preserveData?.codexContextWindow;
@@ -418,12 +421,9 @@ test.each(["tree", "branch", "switch"] as const)(
 		const actual = getOpenAICodexContextWindow(session.sessionId, session.providerSessionState);
 		const stale = getOpenAICodexContextWindow(expected.sessionId, session.providerSessionState);
 		if (actual.sessionId === expected.sessionId) {
-			// Same backend store: the branch's own lineage is restored verbatim.
 			expect(actual.threadId).toBe(expected.threadId);
 			expect(actual.windowId).toBe(expected.windowId);
 		} else {
-			// A boundary that mints a new backend session cannot adopt a window whose
-			// checkpoints live in the old store, so it starts a fresh lineage.
 			expect(actual.threadId).not.toBe(stale.threadId);
 			expect(actual.windowId).not.toBe(stale.windowId);
 		}
@@ -592,7 +592,9 @@ test("an extension-provided compaction rotates and persists the window lineage",
 	if (!isRecord(lineage)) throw new Error("Hook compaction persisted no window lineage");
 	expect(lineage.windowNumber).toBe(before.windowNumber + 1);
 	expect(lineage.windowId).not.toBe(before.windowId);
-	expect(getOpenAICodexContextWindow(session.sessionId, session.providerSessionState).windowId).toBe(lineage.windowId);
+	expect(getOpenAICodexContextWindow(session.sessionId, session.providerSessionState).windowId).toBe(
+		String(lineage.windowId),
+	);
 }, 20000);
 
 test("a shadowed new_context disables window mode instead of arming an uncommittable reset", async () => {
@@ -615,8 +617,6 @@ test("a shadowed new_context disables window mode instead of arming an uncommitt
 	await session.prompt("Work until the window is exhausted");
 	await session.waitForIdle();
 
-	// Without a committable reset the checkpoint protocol stays off: no meter,
-	// no catalog fallback, and no window compaction entry.
 	const journal = JSON.stringify(manager.getEntries());
 	expect(journal).not.toContain(policy.autoCompactFallbackPrompt);
 	expect(journal).not.toContain("tokens left in this context window");
@@ -632,8 +632,6 @@ test("a clone with a new backend session starts a fresh lineage instead of adopt
 	const lineage = reset.preserveData?.codexContextWindow;
 	if (!isRecord(lineage)) throw new Error("Missing durable window identity");
 
-	// A fork / `/branch` / `/tree` copies the entries but mints a new session id,
-	// so the copied lineage points at a store holding none of its checkpoints.
 	const clone = SessionManager.inMemory(manager.getCwd());
 	cleanups.push(() => clone.close());
 	clone.appendCustomEntry("codex.context-window", lineage);
@@ -684,8 +682,6 @@ test("a vetoed window reset tells the model the window still stands", async () =
 	await session.prompt("Work until the window is exhausted");
 	await session.waitForIdle();
 
-	// The reset tool already reported a fresh window, so the veto must be visible
-	// to the model, keep the current window, and hand the turn to summarization.
 	expect(JSON.stringify(manager.getEntries())).toContain("The new context window was cancelled");
 	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(false);
 	expect(getOpenAICodexContextWindow(session.sessionId, session.providerSessionState).windowId).toBe(before.windowId);

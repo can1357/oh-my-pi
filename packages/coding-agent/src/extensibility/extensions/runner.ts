@@ -18,7 +18,7 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
-import { publicAgentMessage } from "../../session/private-content";
+import { privateExchangeKey, publicAgentMessage } from "../../session/private-content";
 import { markJournaled, sessionEntryIdOf } from "../../session/session-entries";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
@@ -1630,20 +1630,18 @@ export class ExtensionRunner {
 		}
 		if (!hasContextHandlers) return messages;
 
-		let privateResults: Map<string, AgentMessage> | undefined;
+		let privateOriginals: Map<string, AgentMessage> | undefined;
 		const publicMessages = messages.map(message => {
 			const projected = publicAgentMessage(message);
-			if (projected !== message && message.role === "toolResult") {
-				(privateResults ??= new Map()).set(message.toolCallId, message);
-			}
+			const key = projected === message ? undefined : privateExchangeKey(message);
+			if (key) (privateOriginals ??= new Map()).set(key, message);
 			return projected;
 		});
 
 		let currentMessages: AgentMessage[];
 		try {
 			currentMessages = structuredClone(publicMessages);
-			// structuredClone drops the non-enumerable journal id, so even a
-			// read-only handler would cost the Codex transform its `[id: …]` markers.
+			// structuredClone drops the non-enumerable journal id.
 			for (let index = 0; index < currentMessages.length; index++) {
 				const entryId = sessionEntryIdOf(messages[index]);
 				if (entryId) markJournaled(currentMessages[index], entryId);
@@ -1675,11 +1673,12 @@ export class ExtensionRunner {
 			}
 		}
 
-		return !privateResults
+		return !privateOriginals
 			? currentMessages
-			: currentMessages.map(message =>
-					message.role === "toolResult" ? (privateResults?.get(message.toolCallId) ?? message) : message,
-				);
+			: currentMessages.map(message => {
+					const key = privateExchangeKey(message);
+					return key ? (privateOriginals?.get(key) ?? message) : message;
+				});
 	}
 
 	/** Runs request payload hooks with the model used for that provider request. */

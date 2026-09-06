@@ -45,7 +45,6 @@ test("notes-only runtime enables native history ingestion and removes it when au
 		await runtime.refresh();
 		const first = requestMetadata();
 		expect(first).toMatchObject({ history_ingest_requested: true, window_number: 1 });
-		// Mixed-case ids keep a hash suffix so case-distinct subagents never collide.
 		expect(first.agent_name).toMatch(/^\/root\/workerone_[0-9a-f]{12}$/);
 		expect(runtime.windowActive).toBe(false);
 		providerSessionState.clear();

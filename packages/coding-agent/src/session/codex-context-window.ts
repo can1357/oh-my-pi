@@ -88,11 +88,7 @@ export class CodexContextWindowProtocol {
 		return renderRemaining({ remaining: this.#remaining ?? "unknown" }).trimEnd();
 	}
 
-	/**
-	 * `checkpointCompleted` reports whether the paired tool result for a notes
-	 * write succeeded. A failed or missing result is not a checkpoint: the reset
-	 * would discard the exhausted conversation with nothing recoverable.
-	 */
+	/** A failed or missing notes result is not a checkpoint. */
 	observe(
 		message: AssistantMessage,
 		effectiveLimit: number,
@@ -120,12 +116,7 @@ export class CodexContextWindowProtocol {
 		return this.observeInputTokens(calculatePromptTokens(message.usage), effectiveLimit, policy);
 	}
 
-	/**
-	 * A vetoed reset must reach the model: `new_context` already reported that a
-	 * fresh window would start, and the exhausted window is still in force. The
-	 * protocol also yields, so the next boundary summarizes instead of waiting
-	 * for another checkpoint sequence that cannot commit.
-	 */
+	/** Tells the model the window still stands, and yields to summarization. */
 	resetCancelled(): DeveloperMessage {
 		this.#fallbackFailed = true;
 		return { role: "developer", content: cancelledText.trimEnd(), timestamp: Date.now(), synthetic: true };
@@ -185,7 +176,6 @@ export class CodexContextWindowProtocol {
 				messages.push({ role: "developer", content: renderGuidance({ guidance }).trimEnd(), timestamp: 0 });
 			this.#staticContext = { key, messages };
 		}
-		// A stable prefix appears on full frames; transport append slicing excludes it thereafter.
 		const messages = [
 			...this.#staticContext.messages,
 			...context.messages.map(message => appendCodexHistoryItemId(message, options.getMessageId(message))),

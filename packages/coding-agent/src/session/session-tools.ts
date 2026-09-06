@@ -620,10 +620,8 @@ export class SessionTools {
 		}
 		for (const tool of tools) {
 			if (this.#contextWindowToolNames.has(tool.name)) continue;
-			// A user tool that already owns the name wins, as with vibe tools.
 			if (this.#toolRegistry.has(tool.name)) {
 				desired.delete(tool.name);
-				// Window mode cannot commit a reset through a foreign implementation.
 				if (tool.name === "new_context") this.#host.disableContextWindowMode?.(`tool "${tool.name}" is shadowed`);
 				continue;
 			}

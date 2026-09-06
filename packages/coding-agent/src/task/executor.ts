@@ -530,12 +530,7 @@ export interface ExecutorOptions {
 	parentMnemopiSessionState?: MnemopiSessionState;
 	/** Parent agent's eval executor session id. Subagents reuse it so eval state is shared. */
 	parentEvalSessionId?: string;
-	/**
-	 * Root Codex backend session id. Subagents reuse it as their provider
-	 * session id so the backend keys their private history/notes to one store
-	 * (their `current_agent_name` stays distinct), matching codex-rs where
-	 * child agents share the thread and differ only by agent path.
-	 */
+	/** Root Codex backend session id; subagents reuse it so history/notes share one store. */
 	parentCodexSessionId?: string;
 	/**
 	 * Parent agent's OpenTelemetry configuration. When defined, the subagent's

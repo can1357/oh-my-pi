@@ -1881,12 +1881,7 @@ export class AgentSession {
 		return this.#agentId;
 	}
 
-	/**
-	 * Backend session id for Codex private history/notes, or `null` when neither
-	 * feature is live. Subagents adopt it as their provider session id so their
-	 * notes and history share the root's server-side store while keeping their
-	 * own agent path.
-	 */
+	/** Backend session id for Codex private history/notes, or `null` when neither is live. */
 	getCodexBackendSessionId(): string | null {
 		const runtime = this.#maintenance.contextWindows;
 		if (!runtime.notesActive && !runtime.windowActive) return null;

@@ -85,11 +85,7 @@ export class CodexContextWindowRuntime {
 		);
 	}
 
-	/**
-	 * Turn window mode off for the rest of the session. Used when the reset tool
-	 * cannot be installed: the checkpoint protocol would otherwise demand a
-	 * `new_context` call that never reaches this runtime.
-	 */
+	/** Turn window mode off for the rest of the session. */
 	disableWindowMode(reason: string): void {
 		if (this.#windowDisabledReason !== undefined) return;
 		this.#windowDisabledReason = reason;
@@ -136,8 +132,6 @@ export class CodexContextWindowRuntime {
 			setOpenAICodexHistoryIngestion(this.#host.providerSessionId(), this.#host.providerSessionState, undefined);
 		}
 		const model = this.#host.model();
-		// Freeze auto activation once catalog metadata exists, not while optional
-		// discovery is still pending during a non-blocking subagent startup.
 		this.#notesRequested ??= getCodexContextWindowPolicy(model)?.useHistoryNotes;
 		if ((!this.#windowRequested && !this.#notesRequested) || model?.api !== "openai-codex-responses") return;
 		try {
@@ -167,8 +161,6 @@ export class CodexContextWindowRuntime {
 		let restored = false;
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
-			// Codex rotates its window lineage on every history rewrite, so ordinary
-			// compaction entries carry the same restorable identity window resets do.
 			const candidate =
 				entry.type === "compaction"
 					? entry.preserveData?.codexContextWindow
@@ -179,9 +171,7 @@ export class CodexContextWindowRuntime {
 			const identity = identitySchema(candidate);
 			if (identity instanceof type.errors) continue;
 			if (this.#host.agentIdentity.kind === "sub" && identity.agentPath !== this.protocol.agentName) continue;
-			// A clone (fork, `/branch`, `/tree`) copies entries but mints a new backend
-			// session, so the copied window would point at a store holding none of its
-			// checkpoints: start a fresh lineage instead of mixing the two.
+			// A clone mints a new backend session, so its copied window has no checkpoints there.
 			if (identity.sessionId !== undefined && identity.sessionId !== liveStoreId) continue;
 			restoreOpenAICodexContextWindow(sessionId, this.#host.providerSessionState, identity);
 			restored = true;
@@ -195,12 +185,7 @@ export class CodexContextWindowRuntime {
 		this.protocol.reset(this.identity);
 	}
 
-	/**
-	 * The thread hint is optional and its alpha route can stall for the backend
-	 * timeout, so the fetch never joins session start: it resolves into
-	 * `#threadHint` for the next render that reads it, and a hint arriving after
-	 * a session or window change is discarded.
-	 */
+	/** Fire-and-forget; a hint for a stale session or window is discarded. */
 	refreshThreadHint(): void {
 		if (!this.notesActive) {
 			this.#threadHint = undefined;

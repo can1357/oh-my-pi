@@ -1,12 +1,22 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessageEvent } from "@oh-my-pi/pi-ai";
-import { publicMessage } from "@oh-my-pi/pi-ai/utils/private-content";
+import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai";
+import { PRIVATE_MODEL_CALL, publicMessage, publicToolCall } from "@oh-my-pi/pi-ai/utils/private-content";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { FileEntry } from "./session-entries";
 
 export function publicAgentMessage(message: AgentMessage): AgentMessage {
 	return message.role === "assistant" || message.role === "toolResult" ? publicMessage(message) : message;
+}
+
+/** Key for one side of a private exchange, so the original can be swapped back. */
+export function privateExchangeKey(message: AgentMessage): string | undefined {
+	if (message.role === "toolResult") return `result:${message.toolCallId}`;
+	if (message.role !== "assistant") return undefined;
+	for (const block of message.content) {
+		if (block.type === "toolCall" && block.modelOnly === true) return `call:${block.id}`;
+	}
+	return undefined;
 }
 
 export function publicSessionEntry<T extends FileEntry>(entry: T): T {
@@ -48,11 +58,24 @@ export function publicCompactionPreparation(preparation: CompactionPreparation):
 	return { ...preparation, messagesToSummarize, turnPrefixMessages, recentMessages };
 }
 
+/** Streaming events carry private arguments as a delta and a finished call too. */
 function publicAssistantEvent(event: AssistantMessageEvent): AssistantMessageEvent {
 	if ("message" in event) return { ...event, message: publicMessage(event.message) };
 	if (!("partial" in event)) return event;
 	const partial = publicMessage(event.partial);
+	if (event.type === "toolcall_end") {
+		const toolCall = publicToolCall(event.toolCall);
+		if (toolCall !== event.toolCall) return { ...event, toolCall, partial };
+	}
+	if (event.type === "toolcall_delta" && isPrivateStreamedCall(event.partial, event.contentIndex)) {
+		return { ...event, delta: PRIVATE_MODEL_CALL, partial };
+	}
 	return partial === event.partial ? event : { ...event, partial };
+}
+
+function isPrivateStreamedCall(partial: AssistantMessage, contentIndex: number): boolean {
+	const block = partial.content[contentIndex];
+	return block?.type === "toolCall" && block.modelOnly === true;
 }
 
 export function publicSessionEvent(event: AgentSessionEvent): AgentSessionEvent {

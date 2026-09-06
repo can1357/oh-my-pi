@@ -337,12 +337,7 @@ export interface UsageStatistics {
 	cost: number;
 }
 
-/**
- * Journal entry id carried on a message for provider history references.
- * Defined non-enumerable: providers, cache keys, exports, and retries must
- * serialize identical bytes whether or not the message has been journaled
- * yet (the live user turn is journaled after its first send).
- */
+/** Journal entry id; non-enumerable so serialized bytes never change once journaled. */
 export function markJournaled<T extends object>(message: T, id: string): T {
 	Object.defineProperty(message, "sessionEntryId", {
 		value: id,

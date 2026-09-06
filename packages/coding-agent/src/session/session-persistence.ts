@@ -152,11 +152,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		// `encrypted_content`, server-validated on replay — atomic like signed blocks.
 		const encryptedReasoning =
 			obj.type === "reasoning" && "encrypted_content" in obj && isNonEmptyString(obj.encrypted_content);
-		// Codex private history/notes payloads are ciphertext only the inference
-		// side can decrypt, and the notes protocol allows files up to 1,000,000
-		// UTF-8 bytes. Truncating the result block — or the encrypted arguments a
-		// model-only call carries — makes the value undecryptable on resume, so
-		// both persist verbatim.
+		// Codex ciphertext (results and model-only arguments) is undecryptable if truncated.
 		const encryptedResult = obj.type === "encrypted" && "encryptedContent" in obj;
 		const modelOnlyCall = obj.type === "toolCall" && "modelOnly" in obj && obj.modelOnly === true;
 		if (signed || redacted || encryptedReasoning || encryptedResult || modelOnlyCall) return obj;

@@ -162,7 +162,6 @@ test.each(["notes", "window", "off"] as const)(
 			return;
 		}
 		expect(shared).toBe(session.agent.sessionId ?? session.sessionId);
-		// Children reuse the id while keeping their own agent path.
 		expect(shared).not.toBe(null);
 	},
 );
@@ -173,7 +172,6 @@ test("a stalled thread-hint route neither delays session creation nor blocks the
 		AbortSignal.timeout(10_000),
 		start("notes", false, () => pending.promise),
 	);
-	// Session start returned while the optional route is still in flight.
 	const context = session.transformCodexContext({ messages: [] });
 	expect(JSON.stringify(context.messages)).not.toContain("late hint");
 	expect(session.getActiveToolNames()).toContain("notes.read_file");

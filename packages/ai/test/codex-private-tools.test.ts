@@ -155,12 +155,6 @@ describe("Codex private tool wire contract", () => {
 	});
 
 	test("reserved schemas reach the wire verbatim after a generic serializer processed the same schema object", () => {
-		// Astra validates reserved tools byte-for-byte: `anyOf: [string, null]` is
-		// accepted while the equivalent `type: [string, null]` is rejected with
-		// "must match the configured schema". Wire post-processing rewrites
-		// nullable scalars, so a serializer that dropped the model-only flags
-		// (token estimation, catalog rendering, exports) must not be able to
-		// alter what the Codex transport sends afterwards.
 		const parameters = {
 			type: "object",
 			properties: { agent_name: { anyOf: [{ type: "string" }, { type: "null" }], description: "Agent" } },
@@ -272,7 +266,6 @@ describe("leaving the Codex protocol", () => {
 		expect(wire).not.toContain("notes.read_file");
 		expect(wire).not.toContain("call_notes");
 		expect(wire).not.toContain("opaque-ciphertext");
-		// Public assistant prose from the same turn survives the boundary.
 		expect(wire).toContain("Recovering my checkpoint");
 	});
 	test("keeps the private exchange intact for Codex requests", () => {

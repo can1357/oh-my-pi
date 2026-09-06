@@ -4835,8 +4835,7 @@ export function convertOpenAICodexResponsesTools(
 		}
 		const strict = !!(!NO_STRICT && tool.strict);
 		const schema = toolWireSchema(tool);
-		// Server-owned model-only namespaces require the configured schema exactly;
-		// even equivalent nullable-anyOf rewrites are rejected by Codex.
+		// Codex rejects even an equivalent nullable-anyOf rewrite of a reserved schema.
 		const { schema: parameters, strict: effectiveStrict } =
 			tool.modelOnly && tool.namespace
 				? { schema, strict }

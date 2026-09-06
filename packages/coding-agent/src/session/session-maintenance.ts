@@ -500,7 +500,6 @@ export class SessionMaintenance {
 			}
 			result = await compact(preparation, model, "", undefined, controller.signal, {
 				contextWindow: {
-					// System/world context lives outside the transcript; no retained-client-developer mode exists.
 					initialContext: [],
 					startNewWindow: () => this.contextWindows.startNewWindow(),
 				},
@@ -1686,19 +1685,11 @@ export class SessionMaintenance {
 	}): Promise<CompactionEntry | undefined> {
 		let preserveData = args.preserveData;
 		if (args.method !== "window") {
-			// codex-rs advances the window lineage on every compaction that rewrites
-			// history (rust-v0.154.0-alpha.3 `codex-rs/core/src/compact_remote.rs`
-			// calls `advance_auto_compact_window` and persists the result in
-			// `CompactedHistoryMetadata`), so the rotated identity must be persisted
-			// here too or a resume replays the pre-compaction window number and UUID.
+			// codex-rs advances the window lineage on every compaction that rewrites history.
 			if (args.codexCompaction) this.#host.resetCodexProviderAfterCompaction(args.codexCompaction);
 			else this.#host.closeCodexProviderSessionsForHistoryRewrite();
 			if (this.#model?.api === "openai-codex-responses") {
-				// Closing provider sessions does not advance the lineage, so local and
-				// hook-supplied rewrites (snapcompact, handoff, extensions) rotate here
-				// instead of persisting the pre-compaction window. Reading the identity
-				// first re-materializes the provider state the close just dropped, so the
-				// rotation advances the restored lineage rather than replacing it.
+				// Read the identity first: the provider close drops it, so rotation advances the restored lineage.
 				let identity = this.contextWindows.identity;
 				if (!args.codexCompaction) identity = this.contextWindows.startNewWindow();
 				preserveData = {
@@ -1843,8 +1834,6 @@ export class SessionMaintenance {
 					this.#host.sessionManager.appendMessage(item);
 					this.#host.agent.appendMessage(item);
 				}
-				// Keep the pending user input out of the exhausted frame. The ordinary
-				// tool loop writes the checkpoint and commits the reset at its paired boundary.
 				await this.#host.agent.continue();
 				if (runtime.identity.windowId === windowId && !runtime.protocol.fallbackFailed) {
 					throw new Error("Context window checkpoint did not complete; the pending prompt was not sent.");
