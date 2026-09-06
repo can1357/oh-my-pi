@@ -528,6 +528,41 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
+		name: "continue",
+		description: "Continue the agent's current work without initiating a user turn",
+		handle: async (_command, runtime) => {
+			if (runtime.session.isStreaming) {
+				return usage("Wait for the current response to finish or abort it before continuing.", runtime);
+			}
+			const didContinue = runtime.session.continueTurn({
+				onError: error => runtime.output(`Continuation failed: ${errorMessage(error)}`),
+			});
+			if (!didContinue) {
+				return usage("Nothing to continue.", runtime);
+			}
+			await runtime.output("Continuing the agent's work.");
+			// `AgentSession.continueTurn()` only schedules the continuation as a
+			// post-prompt task; it returns before the continued turn streams. Hosts
+			// whose prompt turn owns the event subscription (ACP) must stay open
+			// across that turn — same contract as `/retry`.
+			await runtime.keepTurnOpenUntilIdle?.();
+			return commandConsumed({ agentInvoked: true });
+		},
+		handleTui: async (_command, runtime) => {
+			if (runtime.ctx.session.isStreaming) {
+				runtime.ctx.showStatus("Wait for the current response to finish or abort it before continuing");
+			} else {
+				const didContinue = runtime.ctx.session.continueTurn({
+					onError: error => runtime.ctx.showError(`Continuation failed: ${errorMessage(error)}`),
+				});
+				if (!didContinue) {
+					runtime.ctx.showStatus("Nothing to continue");
+				}
+			}
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "debug",
 		icon: "bug",
 		description: "Open debug tools selector",

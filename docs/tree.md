@@ -234,6 +234,15 @@ Key distinction: `/tree` is a navigation/repositioning tool inside one session f
 
 Effect: new branch grows from selected point within same session file.
 
+### Continue from an earlier assistant turn without a user prompt
+
+1. `/tree`
+2. search/select an earlier assistant message
+3. choose `No summary` (or summarize if needed)
+4. `/continue` (or the `.`/`c` shortcut)
+
+Effect: a new branch resumes the current intent without adding a user turn.
+
 ### Leave current branch with context breadcrumb
 
 1. enable `branchSummary.enabled`

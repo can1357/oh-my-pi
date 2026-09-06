@@ -173,6 +173,7 @@ import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with {
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import checkpointActiveNoticeTemplate from "../prompts/system/checkpoint-active-notice.md" with { type: "text" };
 import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
+import manualContinuePrompt from "../prompts/system/manual-continue.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
 import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with { type: "text" };
@@ -438,7 +439,7 @@ type ScheduledAgentContinueOptions = {
 	generation?: number;
 	shouldContinue?: () => boolean;
 	onSkip?: (reason: AgentContinueSkipReason) => void;
-	onError?: (error: unknown) => void;
+	onError?: (error: unknown) => void | Promise<void>;
 };
 
 type ScheduledAgentContinueRequest = {
@@ -748,6 +749,7 @@ export class AgentSession {
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
 	#abortInProgress = false;
+	#manualContinuationPending = false;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
 	// checks in #handleAgentEvent) still fire on the original schedule — only the
@@ -3572,11 +3574,14 @@ export class AgentSession {
 		request.options.onSkip?.(reason);
 	}
 
-	#handleAgentContinueOutcome(outcome: AgentContinueOutcome, request: ScheduledAgentContinueRequest): void {
+	async #handleAgentContinueOutcome(
+		outcome: AgentContinueOutcome,
+		request: ScheduledAgentContinueRequest,
+	): Promise<void> {
 		if (outcome.status === "skipped") {
 			this.#skipAgentContinue(outcome.reason, request);
 		} else if (outcome.status === "failed") {
-			request.options.onError?.(outcome.error);
+			await request.options.onError?.(outcome.error);
 		}
 	}
 
@@ -3679,7 +3684,7 @@ export class AgentSession {
 						activeSource: active.source,
 						activeSchedulerToken: active.schedulerToken,
 					});
-					this.#handleAgentContinueOutcome(await active.promise, request);
+					await this.#handleAgentContinueOutcome(await active.promise, request);
 					return;
 				}
 
@@ -3694,7 +3699,7 @@ export class AgentSession {
 				};
 				this.#activeAgentContinue = attempt;
 				try {
-					this.#handleAgentContinueOutcome(await promise, request);
+					await this.#handleAgentContinueOutcome(await promise, request);
 				} finally {
 					// Clear the active attempt BEFORE #endInFlight(): the settle drain it
 					// triggers (#drainStrandedQueuedMessages -> queued-message-drain) runs
@@ -3734,49 +3739,70 @@ export class AgentSession {
 		if (!options.autoContinue) return false;
 		const activeGoal = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
 		if (options.terminalTextAnswer && !activeGoal) return false;
-		return this.#scheduleAutoContinuePrompt(options.generation);
+		return this.#scheduleContinuationPrompt(options.generation, autoContinuePrompt, {
+			includePostCompactionEagerNudges: true,
+		});
 	}
 
-	#scheduleAutoContinuePrompt(generation: number): boolean {
-		const continuePrompt = async () => {
-			// Compaction summarizes away the first-message eager preludes, so re-assert the
-			// delegate-via-tasks / phased-todo reminders on this auto-resumed turn. This runs
-			// at invocation (past the abort check below), so an aborted continuation queues
-			// nothing; scoped to this request via prependMessages, never the shared queue.
-			const eagerNudges = this.#todo.buildPostCompactionEagerNudges();
-			await this.#promptWithMessage(
-				{
-					role: "developer",
-					content: [{ type: "text", text: autoContinuePrompt }],
-					attribution: "agent",
-					timestamp: Date.now(),
-					// Distinguishes this run-initiating prompt from same-turn
-					// continuation reminders (todo/plan) that are also persisted as
-					// developer messages; replay uses it for the prompt→yield anchor.
-					synthetic: true,
-				},
-				autoContinuePrompt,
-				{
-					skipPostPromptRecoveryWait: true,
-					prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
-				},
-			);
-		};
+	#scheduleContinuationPrompt(
+		generation: number,
+		text: string,
+		options?: {
+			userInitiated?: boolean;
+			includePostCompactionEagerNudges?: boolean;
+			onSettled?: () => void;
+			onError?: (error: unknown) => void | Promise<void>;
+		},
+	): boolean {
 		this.#schedulePostPromptTask(
 			async signal => {
-				await Promise.resolve();
-				if (signal.aborted) return;
-				if (this.agent.hasQueuedMessages()) {
-					this.#scheduleAgentContinue({
-						source: "auto-continue-queued-message",
-						generation,
-						shouldContinue: () => this.agent.hasQueuedMessages(),
-					});
-					return;
+				try {
+					await Promise.resolve();
+					if (signal.aborted || this.#promptGeneration !== generation) return;
+					if (options?.userInitiated) this.#markUserInitiatedPrompt();
+					if (this.agent.hasQueuedMessages()) {
+						this.#scheduleAgentContinue({
+							source: options?.userInitiated ? "manual-continue-queued-message" : "auto-continue-queued-message",
+							generation,
+							shouldContinue: () => this.agent.hasQueuedMessages(),
+							onError: options?.onError,
+						});
+						return;
+					}
+					// Compaction summarizes away the first-message eager preludes, so
+					// re-assert them only for automatic post-compaction continuation.
+					const eagerNudges = options?.includePostCompactionEagerNudges
+						? this.#todo.buildPostCompactionEagerNudges()
+						: [];
+					const dispatched = await this.#promptWithMessage(
+						{
+							role: "developer",
+							content: [{ type: "text", text }],
+							attribution: "agent",
+							timestamp: Date.now(),
+							// Distinguishes this run-initiating prompt from same-turn
+							// continuation reminders (todo/plan) that are also persisted as
+							// developer messages; replay uses it for the prompt→yield anchor.
+							synthetic: true,
+							userInitiated: options?.userInitiated === true ? true : undefined,
+						},
+						text,
+						{
+							skipPostPromptRecoveryWait: true,
+							prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
+						},
+					);
+					if (!dispatched && this.#promptGeneration === generation) {
+						await options?.onError?.(new Error("Continuation did not start."));
+					}
+				} catch (error) {
+					if (!options?.onError) throw error;
+					await options.onError(error);
+				} finally {
+					options?.onSettled?.();
 				}
-				await continuePrompt();
 			},
-			{ generation },
+			{ generation, onSkip: options?.onSettled },
 		);
 		return true;
 	}
@@ -5899,6 +5925,15 @@ export class AgentSession {
 		return keywordNotices;
 	}
 
+	#markUserInitiatedPrompt(): void {
+		this.#advisors.autoResumeSuppressed = false;
+		this.#planModeReminderCount = 0;
+		this.#planModeReminderAwaitingProgress = false;
+		// A user-initiated prompt owns the next decision; drop a queued forced
+		// choice from a reminder continuation this prompt just preempted.
+		this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+	}
+
 	/**
 	 * Send a prompt to the agent.
 	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
@@ -5962,16 +5997,11 @@ export class AgentSession {
 		// agent-initiated turns never trigger them.
 		const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(expandedText);
 
-		// A user-initiated prompt (typed message or the `.`/`c` continue shortcut)
-		// re-enables advisor auto-resume that a prior user interrupt suppressed.
-		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) do not.
+		// A user-initiated prompt (typed message or manual continuation) re-enables
+		// advisor auto-resume that a prior user interrupt suppressed. Agent-initiated
+		// synthetic prompts (auto-continue, plan, reminders) do not.
 		if (options?.userInitiated ?? !options?.synthetic) {
-			this.#advisors.autoResumeSuppressed = false;
-			this.#planModeReminderCount = 0;
-			this.#planModeReminderAwaitingProgress = false;
-			// A user turn owns the next decision; drop a queued forced choice from
-			// a reminder continuation this prompt just preempted.
-			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+			this.#markUserInitiatedPrompt();
 		}
 
 		// If streaming, queue via steer()/followUp()/aside based on option
@@ -8392,6 +8422,24 @@ export class AgentSession {
 	/** Retry the last failed assistant turn when the session is idle. */
 	retry(): Promise<boolean> {
 		return this.#recovery.retry();
+	}
+
+	/**
+	 * Resume the agent's work without a user message, using the same hidden
+	 * developer directive as the `.`/`c` shortcuts. Returns false when the
+	 * session is busy or has no transcript to continue.
+	 */
+	continueTurn(options?: { onError?: (error: unknown) => void | Promise<void> }): boolean {
+		if (this.isStreaming || this.isCompacting || this.isRetrying || this.#manualContinuationPending) return false;
+		if (this.agent.state.messages.length === 0) return false;
+		this.#manualContinuationPending = true;
+		return this.#scheduleContinuationPrompt(this.#promptGeneration, manualContinuePrompt, {
+			userInitiated: true,
+			onError: options?.onError,
+			onSettled: () => {
+				this.#manualContinuationPending = false;
+			},
+		});
 	}
 
 	// =========================================================================
