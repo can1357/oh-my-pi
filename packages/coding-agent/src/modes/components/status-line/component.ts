@@ -2124,7 +2124,7 @@ export class StatusLineComponent implements Component {
 		const embeddedContextWidth = embedContext
 			? ctx.startupPlaceholder
 				? embedCompactContext
-					? "ctx:…".length
+					? "ctx:…".length + (showEmbeddedContextWindow ? "…".length + 4 : 0)
 					: "…%".length + "…".length + 4
 				: embeddedContextGaugeMinWidth(
 						ctx.contextPercent ?? 0,
