@@ -3168,10 +3168,8 @@ describe("RelayBridge tab grouping", () => {
 		const replay = ext2.rpcs("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(replay?.params).toMatchObject({ runImmediately: false });
 		const replaySource = (replay?.params as { source?: string } | undefined)?.source;
-		expect(replaySource).toBe('#!/usr/bin/env node\n"use strict";\nthrow new Error("boom");');
-		const marker = ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")[1];
-		expect(marker?.params).toMatchObject({ runImmediately: false });
-		expect((marker?.params as { source?: string } | undefined)?.source).toStartWith('this["__ompRelayPreload');
+		expect(replaySource).toStartWith('#!/usr/bin/env node\n"use strict";\nObject.defineProperty');
+		expect(replaySource).toContain('configurable: true });\nthrow new Error("boom");');
 	});
 
 	it.each(["remove", "retry"] as const)(
@@ -3313,7 +3311,7 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toHaveLength(
 			0,
 		);
-		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(2);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(1);
 	});
 
 	it("does not rerun a preload for navigation before registration was acknowledged", async () => {
@@ -3379,9 +3377,9 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toHaveLength(
-			1,
+			0,
 		);
-		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(2);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(1);
 	});
 
 	it("refreshes the root when navigation precedes registration but its event is delivered afterward", async () => {
@@ -3429,7 +3427,7 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-after-navigation" } } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		const markerProbe = ext2.pending("send").find(rpc => rpc.method === "Runtime.evaluate");
-		expect((markerProbe?.params as { expression?: string } | undefined)?.expression).toContain("delete this");
+		expect((markerProbe?.params as { expression?: string } | undefined)?.expression).toContain("Object.hasOwn");
 		ack(bridge, ext2, "send", { result: { value: false } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
@@ -3518,9 +3516,9 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toHaveLength(
-			1,
+			0,
 		);
-		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(2);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(1);
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toContain("Page.disable");
 	});
 

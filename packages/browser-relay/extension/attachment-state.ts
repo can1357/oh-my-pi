@@ -60,7 +60,11 @@ export async function detachWithRecoveryLoaderObservation(
 	// Page.enable mutates the surviving debugger root. Persist that fact before
 	// any later await so an MV3 worker termination cannot expose the root as
 	// reusable while the loader snapshot or detach is still pending.
-	if (observingPage) await onObservationStarted();
+	if (observingPage) {
+		try {
+			await onObservationStarted();
+		} catch {}
+	}
 	const loaderId = await readMainFrameLoaderId().catch(() => undefined);
 	if (
 		loaderGeneration === loaderGenerations.get(tabId) &&

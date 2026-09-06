@@ -110,8 +110,11 @@ async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations,
     await enablePage();
     observingPage = true;
   } catch {}
-  if (observingPage)
-    await onObservationStarted();
+  if (observingPage) {
+    try {
+      await onObservationStarted();
+    } catch {}
+  }
   const loaderId = await readMainFrameLoaderId().catch(() => {
     return;
   });

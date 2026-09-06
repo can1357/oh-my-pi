@@ -146,6 +146,41 @@ describe("attachment-state", () => {
 		expect(calls).toEqual(["Page.enable", "fresh-root-required", "detach"]);
 	});
 
+	it("still detaches an orphan when persisting the fresh-root marker fails", async () => {
+		const calls: string[] = [];
+
+		await detachWithRecoveryLoaderObservation(
+			new Map(),
+			new Map(),
+			1,
+			async () => {
+				calls.push("Page.enable");
+			},
+			async () => {
+				calls.push("Page.getFrameTree");
+				return "loader-before";
+			},
+			async () => {
+				calls.push("detach");
+			},
+			async () => {
+				calls.push("fresh-root-required");
+				throw new Error("storage unavailable");
+			},
+			async () => {
+				calls.push("fresh-root-cleared");
+			},
+		);
+
+		expect(calls).toEqual([
+			"Page.enable",
+			"fresh-root-required",
+			"Page.getFrameTree",
+			"detach",
+			"fresh-root-cleared",
+		]);
+	});
+
 	it("does not require a fresh root when Page observation never started", async () => {
 		let freshRootRequired = false;
 		const pending = detachWithRecoveryLoaderObservation(
