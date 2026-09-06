@@ -187,6 +187,10 @@
 ### Fixed
 
 - Fixed GPT-6 Astra requiring `/extended-context` for its full context window: it now keeps the documented 1.05M-token window with the setting on or off, and explicit per-model `contextWindow` overrides still win.
+### Fixed
+
+- Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load; a socket that never authenticates is now closed after the client authentication timeout so it cannot keep the broker alive.
+- Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check, and gave each tunnel child a private temporary log directory so concurrent tunnels cannot share a log path.
 
 ## [18.1.12] - 2026-09-06
 
