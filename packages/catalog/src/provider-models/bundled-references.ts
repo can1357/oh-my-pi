@@ -73,9 +73,10 @@ function getGlobalReferences(): Map<string, Model<Api>> {
 /**
  * Fields of a bundled reference that steer the OUTBOUND request for the provider
  * that authored it: the wire model id, per-effort wire-id routing, sibling-model
- * pointers, transport overrides, provider-native request-shaping flags, and
- * provider-scoped request metadata. They are meaningless — and frequently
- * rejected — on any other provider's endpoint.
+ * pointers, transport overrides, provider-native request-shaping flags,
+ * provider-scoped request headers, output-cap suppression, and request
+ * metadata. They are meaningless — and frequently rejected — on any other
+ * provider's endpoint.
  *
  * A global-index reference is always a bare-id collision with a DIFFERENT
  * provider's bundled model (the provider-scoped map is consulted first), so none
@@ -105,6 +106,8 @@ function stripCrossProviderRouting<TApi extends Api>(spec: ModelSpec<TApi>): Mod
 		guardrailTrace: _guardrailTrace,
 		requestMetadata: _requestMetadata,
 		isOAuth: _isOAuth,
+		omitMaxOutputTokens: _omitMaxOutputTokens,
+		headers: _headers,
 		thinking,
 		...rest
 	} = spec;
