@@ -2448,6 +2448,10 @@ export interface IrcWakeTurnMonitorOptions {
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
+	/** Registry id of the spawning parent agent. */
+	parentAgentId?: string;
+	/** Requested model patterns before resolution (role aliases and explicit selectors). */
+	requestedModelPatterns?: string[];
 	/** Fallback session file when the registry ref carries none. */
 	sessionFile?: string;
 	maxRuntimeMs?: number;
@@ -2580,6 +2584,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			subagentEventBus: options.subagentEventBus,
 			parentToolCallId: options.parentToolCallId,
 			parentAgentId: options.parentAgentId,
+			requestedModelPatterns: options.requestedModelPatterns,
 			detached: true,
 			sessionFile,
 			softRequestBudget: 0,
@@ -2592,7 +2597,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			agent: agent.name,
 			parentToolCallId: options.parentToolCallId,
 			parentAgentId: options.parentAgentId,
-			requestedModelPatterns: turnMonitor.progress.requestedModelPatterns,
+			requestedModelPatterns:
+				options.requestedModelPatterns ?? turnMonitor.progress.requestedModelPatterns,
 			detached: true,
 			agentSource: agent.source,
 			description: options.description,
