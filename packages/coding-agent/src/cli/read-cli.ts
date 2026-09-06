@@ -65,6 +65,12 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 				...settings.getGroup("skills"),
 				cwd,
 				disabledExtensions: settings.get("disabledExtensions") ?? [],
+				extensionRoots: {
+					explicit: [],
+					mode: "merge",
+					configured: settings.get("extensions") ?? [],
+					configuredLevel: settings.extensionsSourceLevel(),
+				},
 			});
 			session.skills = discovered.skills;
 		}
