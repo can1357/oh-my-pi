@@ -76,7 +76,11 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	ensureOpenAICodexSessionIdentity,
+	type OpenAICodexSessionIdentity,
+	resetOpenAICodexHistoryAfterCompaction,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -346,7 +350,7 @@ import {
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import type { BranchSummaryEntry, NewSessionOptions, SessionEntry } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -378,6 +382,20 @@ import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
+const CODEX_SESSION_IDENTITY_ENTRY_TYPE = "openai-codex-session-identity";
+
+function persistedCodexSessionIdentity(entries: readonly SessionEntry[]): OpenAICodexSessionIdentity | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry?.type !== "custom" || entry.customType !== CODEX_SESSION_IDENTITY_ENTRY_TYPE) continue;
+		if (!isRecord(entry.data)) return undefined;
+		const threadId = stringProperty(entry.data, "threadId");
+		const windowId = stringProperty(entry.data, "windowId");
+		return threadId && windowId ? { threadId, windowId } : undefined;
+	}
+	return undefined;
+}
+
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
 
 /** Internal marker for hook messages queued through the agent loop */
@@ -709,6 +727,7 @@ export class AgentSession {
 	#usagePreflightReadyModel: Model | undefined;
 	#detachUsageBeforeQueueDequeue: (() => void) | undefined;
 	#detachUsageBeforeModelCall: (() => void) | undefined;
+	#codexSessionIdentityKey: string | undefined;
 
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
@@ -1324,17 +1343,20 @@ export class AgentSession {
 			}
 		});
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
-			if (!this.settings.get("retry.usageAwareFallback")) return;
-			if (this.#usagePreflightReadyForNextModelCall) {
-				const checkedModel = this.#usagePreflightReadyModel;
-				this.#usagePreflightReadyForNextModelCall = false;
-				this.#usagePreflightReadyModel = undefined;
-				if (checkedModel === this.model) return;
+			if (this.settings.get("retry.usageAwareFallback")) {
+				let preflightRequired = true;
+				if (this.#usagePreflightReadyForNextModelCall) {
+					const checkedModel = this.#usagePreflightReadyModel;
+					this.#usagePreflightReadyForNextModelCall = false;
+					this.#usagePreflightReadyModel = undefined;
+					preflightRequired = checkedModel !== this.model;
+				}
+				if (preflightRequired && !(await this.#runUsageAwarePreflight(signal))) {
+					signal?.throwIfAborted();
+					throw new DOMException("Usage preflight cancelled", "AbortError");
+				}
 			}
-			if (!(await this.#runUsageAwarePreflight(signal))) {
-				signal?.throwIfAborted();
-				throw new DOMException("Usage preflight cancelled", "AbortError");
-			}
+			this.#ensureCodexSessionIdentity();
 		});
 		const statsHost: SessionStatsTrackerHost = {
 			session: this,
@@ -1607,6 +1629,7 @@ export class AgentSession {
 		this.agent.beforeToolCall = (ctx, signal) => this.#beforeToolCall(ctx, signal);
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
+		this.#ensureCodexSessionIdentity({ restoreOnly: true });
 		this.#todo.syncFromBranch();
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
@@ -4261,6 +4284,28 @@ export class AgentSession {
 		}
 	}
 
+	#recordCodexSessionIdentity(identity: OpenAICodexSessionIdentity): void {
+		const persisted = persistedCodexSessionIdentity(this.sessionManager.getBranch());
+		if (persisted?.threadId === identity.threadId && persisted.windowId === identity.windowId) return;
+		this.sessionManager.appendCustomEntry(CODEX_SESSION_IDENTITY_ENTRY_TYPE, identity);
+	}
+
+	#ensureCodexSessionIdentity(options?: { fresh?: boolean; restoreOnly?: boolean }): void {
+		if (this.model?.api !== "openai-codex-responses") return;
+		const sessionId = this.sessionId;
+		if (!options?.fresh && this.#codexSessionIdentityKey === sessionId) return;
+		const persisted = options?.fresh ? undefined : persistedCodexSessionIdentity(this.sessionManager.getBranch());
+		if (options?.restoreOnly && !persisted) return;
+		const identity = ensureOpenAICodexSessionIdentity({
+			providerSessionState: this.#providerSessionState,
+			sessionId,
+			identity: persisted,
+		});
+		if (!identity) return;
+		this.#codexSessionIdentityKey = sessionId;
+		if (!persisted) this.#recordCodexSessionIdentity(identity);
+	}
+
 	/**
 	 * Set agent.sessionId from the session manager and install a dynamic
 	 * metadata resolver so every Anthropic API request carries
@@ -4666,6 +4711,7 @@ export class AgentSession {
 		}
 
 		this.#providerSessionState.clear();
+		this.#codexSessionIdentityKey = undefined;
 	}
 
 	freshSession(): FreshSessionResult | undefined {
@@ -4675,6 +4721,7 @@ export class AgentSession {
 		this.#closeAllProviderSessions("fresh session");
 		this.#freshProviderSessionId = Bun.randomUUIDv7();
 		this.#syncAgentSessionId();
+		this.#ensureCodexSessionIdentity({ fresh: true });
 		this.#memory.rekeyForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
 		return {
@@ -4752,6 +4799,7 @@ export class AgentSession {
 		this.#closeAllProviderSessions("reset context");
 		this.#freshProviderSessionId = Bun.randomUUIDv7();
 		this.#syncAgentSessionId();
+		this.#ensureCodexSessionIdentity({ fresh: true });
 		this.#memory.rekeyForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
 
@@ -8255,11 +8303,12 @@ export class AgentSession {
 	}
 
 	#resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void {
-		resetOpenAICodexHistoryAfterCompaction({
+		const identity = resetOpenAICodexHistoryAfterCompaction({
 			providerSessionState: this.#providerSessionState,
 			sessionId: this.sessionId,
 			compaction,
 		});
+		if (identity) this.#recordCodexSessionIdentity(identity);
 	}
 
 	#resetCurrentResponsesProviderSession(reason: string): void {
@@ -8305,6 +8354,7 @@ export class AgentSession {
 		const providerKeys = new Set<string>();
 		if (currentModel.api === "openai-codex-responses" || nextModel.api === "openai-codex-responses") {
 			providerKeys.add("openai-codex-responses");
+			this.#codexSessionIdentityKey = undefined;
 		}
 		if (currentModel.api === "openai-responses") {
 			providerKeys.add(`openai-responses:${currentModel.provider}`);

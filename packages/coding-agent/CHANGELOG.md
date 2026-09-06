@@ -33,6 +33,10 @@
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
 
+### Fixed
+
+- Preserved Codex thread and window identity when resuming a session, retaining provider affinity and prompt-cache reuse ([#10799](https://github.com/can1357/oh-my-pi/issues/10799)).
+
 ## [18.1.10] - 2026-09-04
 
 ### Changed

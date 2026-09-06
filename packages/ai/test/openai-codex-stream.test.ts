@@ -3151,7 +3151,7 @@ describe("openai-codex streaming", () => {
 		expect(websocketInstances[1]?.readyState).toBe(MockWebSocket.CLOSED);
 		expect(websocketInstances[1]?.options?.headers?.["x-codex-turn-state"]).toBe("ws-turn-state-1");
 		expect(websocketInstances[1]?.options?.headers?.["x-models-etag"]).toBe("models-etag-1");
-		resetOpenAICodexHistoryAfterCompaction({
+		const rotatedIdentity = resetOpenAICodexHistoryAfterCompaction({
 			providerSessionState,
 			sessionId: "ws-handshake-session",
 			compaction: midTurnCompaction,
@@ -3236,7 +3236,13 @@ describe("openai-codex streaming", () => {
 			request_kind: "turn",
 			turn_started_at_unix_ms: context.messages[0]?.timestamp,
 		});
-		expect(typeof continuationMetadata["x-codex-window-id"]).toBe("string");
+		const firstThreadId = firstMetadata.thread_id;
+		const continuationWindowId = continuationMetadata["x-codex-window-id"];
+		if (typeof firstThreadId !== "string" || typeof continuationWindowId !== "string") {
+			throw new Error("expected Codex thread and window identity");
+		}
+		expect(rotatedIdentity?.threadId).toBe(firstThreadId);
+		expect(rotatedIdentity?.windowId).toBe(continuationWindowId);
 		expect(continuationMetadata["x-codex-window-id"]).not.toBe(firstMetadata["x-codex-window-id"]);
 		expect(firstMetadata.session_id).toBe(continuationHeaders.get("session-id"));
 		expect(firstMetadata.thread_id).toBe(continuationHeaders.get("thread-id"));

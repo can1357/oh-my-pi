@@ -489,6 +489,11 @@ interface CodexProviderSessionState extends ProviderSessionState {
 
 /** Request classification encoded in Codex turn metadata. */
 export type OpenAICodexRequestKind = "turn" | "prewarm" | "compaction";
+/** Durable Codex conversation identity restored by hosts across process lifetimes. */
+export interface OpenAICodexSessionIdentity {
+	threadId: string;
+	windowId: string;
+}
 
 interface CodexMetadataSessionState {
 	sessionId: string;
@@ -546,11 +551,14 @@ const CODEX_RESERVED_METADATA_KEYS: Record<string, true> = {
 	workspaces: true,
 };
 
-function createCodexMetadataSessionState(sessionId: string): CodexMetadataSessionState {
+function createCodexMetadataSessionState(
+	sessionId: string,
+	identity?: Readonly<OpenAICodexSessionIdentity>,
+): CodexMetadataSessionState {
 	return {
 		sessionId,
-		threadId: crypto.randomUUID(),
-		windowId: crypto.randomUUID(),
+		threadId: identity?.threadId ?? crypto.randomUUID(),
+		windowId: identity?.windowId ?? crypto.randomUUID(),
 		turnStates: new Map(),
 	};
 }
@@ -565,6 +573,32 @@ function getOrCreateCodexMetadataSessionState(
 	const created = createCodexMetadataSessionState(sessionId);
 	providerState.metadataSessions.set(sessionId, created);
 	return created;
+}
+function codexSessionIdentity(session: CodexMetadataSessionState): OpenAICodexSessionIdentity {
+	return {
+		threadId: session.threadId,
+		windowId: session.windowId,
+	};
+}
+
+/**
+ * Restore a durable Codex identity into process-local provider state, or create
+ * the identity that a host must persist before its first request.
+ */
+export function ensureOpenAICodexSessionIdentity(options: {
+	providerSessionState: Map<string, ProviderSessionState>;
+	sessionId: string;
+	identity?: Readonly<OpenAICodexSessionIdentity>;
+}): OpenAICodexSessionIdentity | undefined {
+	const sessionId = normalizeOpenAIPromptCacheKey(options.sessionId);
+	if (!sessionId) return undefined;
+	const providerState = getCodexProviderSessionState(options.providerSessionState);
+	if (!providerState) return undefined;
+	const existing = providerState.metadataSessions.get(sessionId);
+	if (existing) return codexSessionIdentity(existing);
+	const created = createCodexMetadataSessionState(sessionId, options.identity);
+	providerState.metadataSessions.set(sessionId, created);
+	return codexSessionIdentity(created);
 }
 
 function getOrCreateCodexTurnState(
@@ -762,19 +796,22 @@ export function createOpenAICodexCompatibilityMetadata(
  * Invalidate Codex history-dependent transport state after compaction while
  * retaining the session identity and live connection.
  */
-export function resetOpenAICodexHistoryAfterCompaction(options: OpenAICodexCompactionResetOptions): void {
+export function resetOpenAICodexHistoryAfterCompaction(
+	options: OpenAICodexCompactionResetOptions,
+): OpenAICodexSessionIdentity | undefined {
 	const providerState = options.providerSessionState?.get(CODEX_PROVIDER_SESSION_STATE_KEY);
-	if (!isCodexProviderSessionState(providerState)) return;
+	if (!isCodexProviderSessionState(providerState)) return undefined;
 	for (const websocketState of providerState.webSocketSessions.values()) {
 		resetCodexWebSocketAppendState(websocketState);
 	}
 	const sessionId = normalizeOpenAIPromptCacheKey(options.sessionId);
-	if (!sessionId) return;
+	if (!sessionId) return undefined;
 	const metadataSession = providerState.metadataSessions.get(sessionId);
-	if (!metadataSession) return;
+	if (!metadataSession) return undefined;
 	metadataSession.windowId = crypto.randomUUID();
 	metadataSession.compactionOperationId = undefined;
 	metadataSession.reuseTurnForNextRequest = options.compaction.phase !== "standalone_turn";
+	return codexSessionIdentity(metadataSession);
 }
 
 interface CodexRequestContext {
