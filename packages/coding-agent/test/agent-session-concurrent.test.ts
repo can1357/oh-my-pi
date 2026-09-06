@@ -1799,7 +1799,9 @@ describe("AgentSession TTSR resume gate", () => {
 				},
 			}),
 		);
-		const modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
+		const modelRegistry = new ModelRegistry(authStorage, modelsConfigPath, {
+			settings: Settings.isolated({ extendedContext: true }),
+		});
 
 		const smallModel = modelRegistry.find("openai-codex", "gpt-5.5");
 		const largeModel = modelRegistry.find("openai-codex", "gpt-5.6-sol");
