@@ -1,7 +1,13 @@
-export function parseCommandArgs(argsString: string): string[] {
+export interface ParseCommandArgsOptions {
+	rejectUnterminatedQuotes?: boolean;
+	escapeQuotes?: boolean;
+}
+
+export function parseCommandArgs(argsString: string, options?: ParseCommandArgsOptions): string[] {
 	const args: string[] = [];
 	let current = "";
 	let inQuote: string | null = null;
+	const escapeQuotes = options?.escapeQuotes ?? false;
 
 	for (let i = 0; i < argsString.length; i++) {
 		const char = argsString[i];
@@ -9,12 +15,21 @@ export function parseCommandArgs(argsString: string): string[] {
 		if (inQuote) {
 			if (char === inQuote) {
 				inQuote = null;
+			} else if (escapeQuotes && char === "\\" && i + 1 < argsString.length && argsString[i + 1] === inQuote) {
+				current += argsString[++i];
 			} else {
 				current += char;
 			}
 		} else if (char === '"' || char === "'") {
 			inQuote = char;
-		} else if (char === " " || char === "\t") {
+		} else if (
+			escapeQuotes &&
+			char === "\\" &&
+			i + 1 < argsString.length &&
+			(argsString[i + 1] === '"' || argsString[i + 1] === "'")
+		) {
+			current += argsString[++i];
+		} else if (/\s/.test(char)) {
 			if (current) {
 				args.push(current);
 				current = "";
@@ -22,6 +37,9 @@ export function parseCommandArgs(argsString: string): string[] {
 		} else {
 			current += char;
 		}
+	}
+	if (inQuote && options?.rejectUnterminatedQuotes) {
+		throw new Error("Unterminated quote in command arguments");
 	}
 
 	if (current) {
