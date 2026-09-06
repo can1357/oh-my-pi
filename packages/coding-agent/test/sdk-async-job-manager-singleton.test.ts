@@ -92,12 +92,15 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		expect(AsyncJobManager.instance()).toBeUndefined();
 	}, 60000);
 
-	// Capability markers, not prose: each is a parameter literal the guidance can
-	// only instruct when the built-in tool's schema exposes it, so copy edits to
-	// the surrounding sentences never fail these tests.
+	// Capability markers, not prose: each is a parameter literal (or the label
+	// frame that routes a clause to one surface) the guidance can only instruct
+	// when the built-in tool's schema exposes it, so copy edits to the
+	// surrounding sentences never fail these tests.
 	const BASH_ASYNC_MARKER = 'async: "auto"';
 	const HUB_PROGRESS_MARKER = 'op: "start"';
-	const HUB_POLLING_MARKER = "NEVER call `hub wait`";
+	const HUB_WAIT_MARKER = "`pattern`/`for`/`timeout`";
+	const BASH_CHATTY_MARKER = "\nBash:";
+	const HUB_CHATTY_MARKER = "\nHub:";
 
 	function asyncProgressBlock(systemPrompt: string): string | undefined {
 		const start = systemPrompt.indexOf("<async-progress>");
@@ -120,29 +123,13 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			const block = asyncProgressBlock(systemPrompt);
 			if (block === undefined) throw new Error("Expected <async-progress> block");
 			// Both built-in surfaces are registered, so both async-parameter
-			// instructions must render inside the block.
+			// instructions and both chatty-guidance clauses must render inside
+			// the block.
 			expect(block).toContain(BASH_ASYNC_MARKER);
+			expect(block).toContain(BASH_CHATTY_MARKER);
 			expect(block).toContain(HUB_PROGRESS_MARKER);
-			expect(block).toContain(HUB_POLLING_MARKER);
-			expect(block).toContain(
-				'Finite commands → `bash` with `async: "auto"`, `progress: "wake"` (quick stays inline). NEVER use `async: true` unless the user explicitly requests immediate background.',
-			);
-			expect(block).toContain(
-				"Progress uses 200 ms batches and a 10-event burst, then regains one rate-limit permit every 2 seconds.",
-			);
-			expect(block).toContain(
-				"Chatty progress → lower source verbosity (quiet or warning-only) or filter to actionable lines. If safe to retry, stop/cancel and relaunch with less output.",
-			);
-			expect(block).toContain("Hub: retune the monitor to `ambient` or `off` without stopping the process.");
-			expect(block).toContain("Bash: progress cannot be retuned; if retry is unsafe, let it finish.");
-			expect(block).toContain(
-				'Actionable process output → `hub`, `progress: "wake"` (`op: "start"` new; `op: "monitor"` existing).',
-			);
-			expect(block).toContain("Verbose producer? Capture full logs unmonitored; filter one async Bash monitor.");
-			expect(block).toContain("Existing condition? One sleeping async `until` loop; NEVER repeat tool polls.");
-			expect(block).toContain(
-				"NEVER call `hub wait`, follow logs, or block to receive progress or keep the turn alive; use async progress and end the turn instead.",
-			);
+			expect(block).toContain(HUB_WAIT_MARKER);
+			expect(block).toContain(HUB_CHATTY_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -155,15 +142,21 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			let block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
 			if (block === undefined) throw new Error("Expected Hub-only <async-progress> block");
 			expect(block).not.toContain(BASH_ASYNC_MARKER);
+			expect(block).not.toContain(BASH_CHATTY_MARKER);
 			expect(block).toContain(HUB_PROGRESS_MARKER);
-			expect(block).toContain(HUB_POLLING_MARKER);
+			expect(block).toContain(HUB_WAIT_MARKER);
+			expect(block).toContain(HUB_CHATTY_MARKER);
 
 			await session.setActiveToolPresentation(["read", "bash"], []);
 			block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
 			if (block === undefined) throw new Error("Expected Bash-only <async-progress> block");
 			expect(block).toContain(BASH_ASYNC_MARKER);
+			expect(block).toContain(BASH_CHATTY_MARKER);
+			// Hub is inactive, so no clause may reference it: neither the
+			// Hub-only parameter literals nor the tool name itself.
 			expect(block).not.toContain(HUB_PROGRESS_MARKER);
-			expect(block).not.toContain(HUB_POLLING_MARKER);
+			expect(block).not.toContain(HUB_WAIT_MARKER);
+			expect(block).not.toMatch(/\bhub\b/i);
 
 			await session.setActiveToolPresentation(["read"], []);
 			expect(asyncProgressBlock(session.systemPrompt.join("\n\n"))).toBeUndefined();
@@ -173,7 +166,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			if (block === undefined) throw new Error("Expected restored <async-progress> block");
 			expect(block).toContain(BASH_ASYNC_MARKER);
 			expect(block).toContain(HUB_PROGRESS_MARKER);
-			expect(block).toContain(HUB_POLLING_MARKER);
+			expect(block).toContain(HUB_WAIT_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -185,15 +178,10 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			const block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
 			if (block === undefined) throw new Error("Expected <async-progress> block");
 			expect(block).not.toContain(BASH_ASYNC_MARKER);
+			expect(block).not.toContain(BASH_CHATTY_MARKER);
 			expect(block).toContain(HUB_PROGRESS_MARKER);
-			expect(block).toContain(HUB_POLLING_MARKER);
-			expect(block).not.toContain("Finite commands");
-			expect(block).not.toContain("Bash: progress cannot be retuned");
-			expect(block).not.toContain("Verbose producer");
-			expect(block).not.toContain("Existing condition?");
-			expect(block).toContain("Actionable process output");
-			expect(block).toContain("Chatty progress → lower source verbosity");
-			expect(block).toContain("Hub: retune the monitor");
+			expect(block).toContain(HUB_WAIT_MARKER);
+			expect(block).toContain(HUB_CHATTY_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -233,7 +221,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			expect(block).not.toContain(BASH_ASYNC_MARKER);
 			// Hub guidance is unaffected by the bash override.
 			expect(block).toContain(HUB_PROGRESS_MARKER);
-			expect(block).toContain(HUB_POLLING_MARKER);
+			expect(block).toContain(HUB_WAIT_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -245,7 +233,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			const block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
 			if (block === undefined) throw new Error("Expected <async-progress> block");
 			expect(block).not.toContain(HUB_PROGRESS_MARKER);
-			expect(block).not.toContain(HUB_POLLING_MARKER);
+			expect(block).not.toContain(HUB_WAIT_MARKER);
 			// Bash guidance is unaffected by the hub override.
 			expect(block).toContain(BASH_ASYNC_MARKER);
 		} finally {
