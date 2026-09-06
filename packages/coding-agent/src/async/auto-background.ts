@@ -49,6 +49,11 @@ export function resolveAutoBackgroundWaitMs(
 	thresholdMs: number,
 	timeoutMs: number | undefined,
 	timeoutKind: AutoBackgroundTimeoutKind,
+): number | undefined;
+export function resolveAutoBackgroundWaitMs(
+	thresholdMs: number,
+	timeoutMs: number | undefined,
+	timeoutKind: AutoBackgroundTimeoutKind,
 ): number | undefined {
 	if (thresholdMs <= 0) return 0;
 	if (timeoutMs === undefined) return thresholdMs;
