@@ -165,6 +165,20 @@ describe("StatusLineComponent", () => {
 		expect(git.content).toContain(theme.getFgAnsi("statusLineGitDirty"));
 	});
 
+	it("preserves the compact context prefix in startup placeholders", () => {
+		const statusLine = new StatusLineComponent(makeSessionWithLastMessage(null) as unknown as AgentSession);
+		statusLine.updateSettings({
+			preset: "custom",
+			leftSegments: ["context_pct"],
+			rightSegments: [],
+			contextLine: "off",
+			segmentOptions: { context_pct: { compact: true } },
+		});
+
+		const placeholder = Bun.stripANSI(statusLine.renderStartupPlaceholder(80, "box"));
+		expect(placeholder).toContain("ctx:…");
+	});
+
 	it("renders primary and advisor costs separately with subscription indicator in Unicode preset", () => {
 		const statusLine = new StatusLineComponent(
 			makeSessionWithLastMessage(null, false, {

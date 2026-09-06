@@ -666,7 +666,9 @@ const contextPctSegment: StatusLineSegment = {
 		}
 		const compact = ctx.options.context_pct?.compact === true;
 		const display = ctx.startupPlaceholder
-			? STARTUP_PLACEHOLDER
+			? compact
+				? `ctx:${STARTUP_PLACEHOLDER}`
+				: STARTUP_PLACEHOLDER
 			: compact
 				? `ctx:${formatCompactContextPercent(pct)}`
 				: formatContextUsage(pct, window, ctx.contextTokens);
