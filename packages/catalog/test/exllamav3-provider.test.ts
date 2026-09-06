@@ -111,6 +111,31 @@ describe("ExLlamaV3 (TabbyAPI) provider discovery", () => {
 		expect(models?.[0]?.contextWindow).toBe(131_072);
 	});
 
+	test("publishes an empty catalog when TabbyAPI answers 503 with no model loaded", async () => {
+		// Admin-authenticated TabbyAPI still enumerates directories and dummy
+		// ids on /v1/models while nothing is loaded, but none of them are
+		// servable — an authoritative empty catalog must win over that list.
+		let listCalls = 0;
+		const fetchMock: FetchImpl = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.endsWith("/models")) {
+				listCalls++;
+				return jsonResponse({
+					data: [
+						{ id: "unloaded-directory-model", object: "model", parameters: null },
+						{ id: "gpt-4", object: "model", parameters: null },
+					],
+				});
+			}
+			return new Response("No models are currently loaded.", { status: 503 });
+		}) as FetchImpl;
+
+		const models = await exllamav3ModelManagerOptions({ baseUrl: BASE_URL, fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models).toEqual([]);
+		expect(listCalls).toBe(0);
+	});
+
 	test("routes thinking through the flat enable_thinking dialect like llama.cpp", () => {
 		// TabbyAPI accepts top-level enable_thinking / reasoning_effort
 		// directly (forwarded into the chat template), so exllamav3 rides the

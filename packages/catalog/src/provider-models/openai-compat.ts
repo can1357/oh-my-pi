@@ -6032,12 +6032,26 @@ interface Exllamav3LoadedModelCard {
 	inputs: ("text" | "image")[];
 }
 
-async function fetchExllamav3LoadedModelCard(
+/**
+ * Probe result for the TabbyAPI model-card endpoint.
+ *
+ * - `noModelLoaded` — the server answered HTTP 503 "No models are currently
+ *   loaded": reachable, but nothing is servable and the admin-key `/v1/models`
+ *   listing (directories + dummy ids) must not be published.
+ * - `card: null` otherwise (no card) — endpoint missing, unauthorized, or the
+ *   request failed; discovery falls back to the raw list.
+ */
+interface Exllamav3ModelCardProbe {
+	card: Exllamav3LoadedModelCard | null;
+	noModelLoaded: boolean;
+}
+
+async function fetchExllamav3ModelCardProbe(
 	baseUrl: string,
 	apiKey: string | undefined,
 	fetchImpl: FetchImpl,
-): Promise<Exllamav3LoadedModelCard | null> {
-	const fetchCard = async (signal: AbortSignal): Promise<Exllamav3LoadedModelCard | null> => {
+): Promise<Exllamav3ModelCardProbe> {
+	const fetchCard = async (signal: AbortSignal): Promise<Exllamav3ModelCardProbe> => {
 		try {
 			const response = await fetchImpl(`${baseUrl.replace(/\/+$/, "")}/model`, {
 				method: "GET",
@@ -6047,23 +6061,28 @@ async function fetchExllamav3LoadedModelCard(
 				},
 				signal,
 			});
+			if (response.status === 503) {
+				return { card: null, noModelLoaded: true };
+			}
 			if (!response.ok) {
-				// No model loaded yet, or the endpoint requires an admin key.
-				return null;
+				return { card: null, noModelLoaded: false };
 			}
 			const payload: unknown = await response.json();
 			if (!isRecord(payload) || typeof payload.id !== "string" || payload.id.length === 0) {
-				return null;
+				return { card: null, noModelLoaded: false };
 			}
 			const parameters = isRecord(payload.parameters) ? payload.parameters : undefined;
 			const maxSeqLen = parameters === undefined ? null : toPositiveNumber(parameters.max_seq_len, null);
 			return {
-				id: payload.id,
-				...(maxSeqLen === null ? {} : { contextWindow: maxSeqLen }),
-				inputs: parameters?.use_vision === true ? (["text", "image"] as const) : (["text"] as const),
+				card: {
+					id: payload.id,
+					...(maxSeqLen === null ? {} : { contextWindow: maxSeqLen }),
+					inputs: parameters?.use_vision === true ? (["text", "image"] as const) : (["text"] as const),
+				},
+				noModelLoaded: false,
 			};
 		} catch {
-			return null;
+			return { card: null, noModelLoaded: false };
 		}
 	};
 	return withCatalogDiscoveryTimeout(EXLLAMAV3_MODEL_CARD_TIMEOUT_MS, fetchCard);
@@ -6094,7 +6113,15 @@ export function exllamav3ModelManagerOptions(
 					fetch: config?.fetch,
 					timeoutMs: DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 				});
-			const loadedCard = await fetchExllamav3LoadedModelCard(baseUrl, apiKey, fetchImpl);
+			const probe = await fetchExllamav3ModelCardProbe(baseUrl, apiKey, fetchImpl);
+			if (probe.noModelLoaded) {
+				// TabbyAPI answered 503 "No models are currently loaded". An admin
+				// key still enumerates directories and dummy ids on /v1/models, but
+				// none of them are servable — publish an authoritative empty catalog
+				// instead of ids inference would immediately fail on.
+				return [];
+			}
+			const loadedCard = probe.card;
 			const models = await discover(loadedCard);
 			if (!loadedCard || models === null || models.length > 0) {
 				return models;
@@ -6104,9 +6131,12 @@ export function exllamav3ModelManagerOptions(
 			// This manager is authoritative, so returning the emptied result would
 			// prune the catalog even though the newly loaded model is servable —
 			// revalidate both requests once before giving up on enrichment.
-			const revalidatedCard = await fetchExllamav3LoadedModelCard(baseUrl, apiKey, fetchImpl);
-			const revalidated = await discover(revalidatedCard);
-			if (revalidated !== null && (revalidated.length > 0 || revalidatedCard === null)) {
+			const revalidationProbe = await fetchExllamav3ModelCardProbe(baseUrl, apiKey, fetchImpl);
+			if (revalidationProbe.noModelLoaded) {
+				return [];
+			}
+			const revalidated = await discover(revalidationProbe.card);
+			if (revalidated !== null && (revalidated.length > 0 || revalidationProbe.card === null)) {
 				return revalidated;
 			}
 			// Persistent mismatch (reload storm, admin-key directory churn): keep

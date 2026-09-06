@@ -7,6 +7,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import type { ModelRegistry, ProviderDiscoveryState } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ModelRegistry as ModelRegistryImpl } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ModelHubComponent } from "@oh-my-pi/pi-coding-agent/modes/components/model-hub";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -533,6 +534,12 @@ describe("issue #970 custom provider discovery", () => {
 
 			expect(probed).toContain("http://10.0.0.5:5000/v1/model");
 			expect(registry.find("exllamav3", "GLM-5.2-exl3")?.contextWindow).toBe(131_072);
+			// Availability and request auth must follow the env opt-in: the
+			// provider is usable keyless (kNoAuth), not discovered-but-locked.
+			expect(registry.getAvailableForProviders(new Set(["exllamav3"])).map(model => model.id)).toContain(
+				"GLM-5.2-exl3",
+			);
+			await expect(registry.getApiKeyForProvider("exllamav3")).resolves.toBe(kNoAuth);
 		} finally {
 			if (previousBaseUrl === undefined) delete Bun.env.EXLLAMAV3_BASE_URL;
 			else Bun.env.EXLLAMAV3_BASE_URL = previousBaseUrl;

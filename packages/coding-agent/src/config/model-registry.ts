@@ -738,6 +738,17 @@ export class ModelRegistry {
 		this.#modelOverrides = modelOverrides;
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);
+		// A bare EXLLAMAV3_BASE_URL points at a keyless TabbyAPI (disable_auth)
+		// the way models.yml `auth: none` does: beyond opting built-in discovery
+		// in, it marks the provider available without stored credentials.
+		// getApiKey still prefers a real stored key over kNoAuth.
+		if (
+			!configuredProviders.has("exllamav3") &&
+			Bun.env.EXLLAMAV3_BASE_URL?.trim() &&
+			!this.authStorage.hasAuth("exllamav3")
+		) {
+			this.#keylessProviders.add("exllamav3");
+		}
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
 		this.#pendingStandardCacheProviders = new Set(
 			STARTUP_MODEL_CACHE_PROVIDER_IDS.filter(
@@ -1866,14 +1877,13 @@ export class ModelRegistry {
 			const apiKey = standardProviderKeys[i];
 			// Local engines with opt-in discovery: an explicit settings override or
 			// `auth: none` stands in for a key so discovery still probes the
-			// configured endpoint. For exllamav3, pointing EXLLAMAV3_BASE_URL at a
-			// keyless TabbyAPI (disable_auth: true) is that explicit opt-in.
+			// configured endpoint. EXLLAMAV3_BASE_URL lands here too — #loadModels
+			// marks a keyless exllamav3 (no stored key) as keyless.
 			const hasExplicitLocalEngineConfig =
 				(descriptor.providerId === "vllm" || descriptor.providerId === "exllamav3") &&
 				(this.#runtimeProviderOverrides.has(descriptor.providerId) ||
 					this.#providerOverrides.has(descriptor.providerId) ||
-					this.#keylessProviders.has(descriptor.providerId) ||
-					(descriptor.providerId === "exllamav3" && Boolean(Bun.env.EXLLAMAV3_BASE_URL?.trim())));
+					this.#keylessProviders.has(descriptor.providerId));
 			const supportsSharedCatalog = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[descriptor.providerId] === true;
 			const canUseSharedCatalogWithoutAuth = supportsSharedCatalog && !descriptor.dynamicModelsAuthoritative;
 			if (
