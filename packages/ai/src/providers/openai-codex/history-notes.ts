@@ -50,9 +50,12 @@ export function codexHistoryNotesAgentPath(agent: HistoryNotesAgentIdentity): st
 		case "main":
 			return "/root";
 		case "sub": {
+			// Subagent ids are case-sensitive and children share the root backend
+			// session, so only an already-lowercase id can take the direct path;
+			// anything else (BuildWorker vs buildworker, Build-Agent vs Build_Agent)
+			// keeps a hash suffix so two agents never share one namespace.
 			const name = agent.id.toLowerCase();
-			if (/^[a-z0-9_]+$/.test(name) && name !== "root") return `/root/${name}`;
-			// Distinct IDs such as Build-Agent and Build_Agent must not share notes.
+			if (agent.id === name && /^[a-z0-9_]+$/.test(name) && name !== "root") return `/root/${name}`;
 			const suffix = new Bun.CryptoHasher("sha256").update(agent.id).digest("hex").slice(0, 12);
 			return `/root/${name.replace(/[^a-z0-9_]+/g, "_") || "agent"}_${suffix}`;
 		}

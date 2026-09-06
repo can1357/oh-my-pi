@@ -20,13 +20,15 @@ const context: CodexHistoryNotesContext = {
 };
 
 describe("Codex history notes backend", () => {
-	test("maps OMP main and mixed-case sub identities to native backend paths", () => {
+	test("maps OMP identities to native backend paths", () => {
 		expect(codexHistoryNotesAgentPath({ kind: "main", id: "Main" })).toBe("/root");
-		expect(codexHistoryNotesAgentPath({ kind: "sub", id: "BuildWorker" })).toBe("/root/buildworker");
+		expect(codexHistoryNotesAgentPath({ kind: "sub", id: "buildworker" })).toBe("/root/buildworker");
 	});
 
-	test("keeps unsupported or reserved agent identifiers valid and distinct", () => {
-		const names = ["Build-Agent", "Build_Agent", "root", ""].map(id =>
+	test("keeps case-distinct, unsupported, and reserved agent identifiers valid and distinct", () => {
+		// Subagent ids are case-sensitive, so BuildWorker and buildworker are two
+		// agents and must not share one server-side namespace.
+		const names = ["BuildWorker", "buildworker", "Build-Agent", "Build_Agent", "root", ""].map(id =>
 			codexHistoryNotesAgentPath({ kind: "sub", id }),
 		);
 		for (const name of names) expect(name).toMatch(/^\/root\/(?!root$)[a-z0-9_]+$/);
