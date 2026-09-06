@@ -71,6 +71,16 @@ export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
 const BASH_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DEFAULT_ASYNC_AUTO_INLINE_GRACE_MS = 1_000;
+/**
+ * Upper bound on draining pre-promotion chunk deliveries before an
+ * `async: "auto"` job promotes anyway. Five progress batch windows: a
+ * healthy mirror flush or throttle settles far sooner, so anything slower
+ * is a stalled delivery that must not hold the foreground turn.
+ */
+// TODO(restack): replace with PROGRESS_LIMITS.BATCH_INTERVAL_MS * 5 from ../async/progress-limits
+const PROMOTION_DRAIN_TIMEOUT_MS = 1_000;
+const AUTO_AT_CAPACITY_NOTICE =
+	"Background job limit reached; ran inline to completion instead of promoting to a background job.";
 const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
 	"\n": true,
 	"\r": true,
@@ -336,7 +346,7 @@ const bashSchemaWithAsync = type({
 	"cwd?": "string",
 	"pty?": "boolean",
 	"async?": type("boolean | 'auto'").describe(
-		"auto starts inline and backgrounds after a brief grace period; true starts in background immediately",
+		"auto runs inline for a brief grace period and promotes the same process to a background job if still running; true starts in the background immediately",
 	),
 	"progress?": type("'ambient' | 'wake'").describe(
 		"deliver complete output lines to the agent while the background job runs; wake starts a follow-up turn while idle",
@@ -709,6 +719,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			asyncEnabled: this.#asyncEnabled,
 			autoBackgroundEnabled: this.#autoBackgroundEnabled,
 			autoBackgroundThresholdSeconds: Math.max(0, Math.floor(this.#autoBackgroundThresholdMs / 1000)),
+			asyncAutoInlineGraceMs: this.#asyncAutoInlineGraceMs,
 			hasAstGrep: isToolActive("ast_grep", this.session.settings.get("astGrep.enabled")),
 			hasAstEdit: isToolActive("ast_edit", this.session.settings.get("astEdit.enabled")),
 			hasGrep: isToolActive("grep", this.session.settings.get("grep.enabled")),
@@ -1100,24 +1111,40 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				promotionRequested = true;
 				trackPromotionDeliveries = false;
 				const prePromotionDeliveries = chunkDeliveryBarrier;
+				const drainGuard = Promise.withResolvers<"stalled">();
+				const drainTimer = setTimeout(() => drainGuard.resolve("stalled"), PROMOTION_DRAIN_TIMEOUT_MS);
 				try {
 					// Mirror-mode artifact flushing and throttling can delay onChunk,
 					// which owns latestText. Drain those entry-time-stamped chunks
 					// through the inactive foreground gate before taking an immutable
 					// preview snapshot and activating progress. OutputSink settles each
-					// token even if artifact persistence fails.
-					await Promise.race([prePromotionDeliveries, completion.promise.then(() => undefined)]);
+					// token even if artifact persistence fails; a delivery that still
+					// stalls past the guard cannot hold the turn: promote without it,
+					// and mark coverage gapped so completion keeps the terminal text
+					// that the preview never showed.
+					const drain = await Promise.race([
+						prePromotionDeliveries.then(() => "drained" as const),
+						completion.promise.then(() => "settled" as const),
+						drainGuard.promise,
+					]);
 					const foregroundPreview = latestText;
+					const previewComplete = drain !== "stalled";
 					pendingChunkDeliveries.length = 0;
 					nextChunkDelivery = 0;
 					if (settledCompletion) return settledCompletion;
 					if (delivery) {
 						const foregroundStreamProvenance = progressSampler?.resetDisplayAndCaptureProvenance();
-						manager.activateProgressDelivery(jobId, delivery, foregroundStreamProvenance);
+						manager.activateProgressDelivery(
+							jobId,
+							delivery,
+							previewComplete ? foregroundStreamProvenance : undefined,
+							previewComplete ? "continuous" : "gapped",
+						);
 						if (settledCompletion) return settledCompletion;
 					}
 					return { kind: "promoted", foregroundPreview };
 				} finally {
+					clearTimeout(drainTimer);
 					promotionRequested = false;
 				}
 			},
@@ -1262,6 +1289,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			if (!this.session.asyncJobManager) {
 				throw new ToolError("Async job manager unavailable for this session.");
 			}
+			// Explicit background at the cap is an error the caller asked for;
+			// `async: "auto"` below degrades to inline with a notice instead.
+			if (this.session.asyncJobManager.atCapacity) {
+				throw new ToolError("Background job limit reached. Wait for a running job to finish or cancel one.");
+			}
 			const job = this.#startManagedBashJob({
 				command,
 				commandCwd,
@@ -1294,20 +1326,23 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		if (autoRequested && !autoBgManager) {
 			throw new ToolError("Background job manager unavailable for this session.");
 		}
+		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(
+			autoRequested ? this.#asyncAutoInlineGraceMs : this.#autoBackgroundThresholdMs,
+			timeoutMs,
+			"wall-clock",
+		);
 		if (autoRequested && autoBgManager?.atCapacity) {
-			throw new ToolError("Background job limit reached. Wait for a running job to finish or cancel one.");
-		}
-		// At the running-job cap, fall through to direct foreground execution
-		// instead of failing every bash call until a slot frees up.
-		if (
+			// One shape at the running-job cap: auto runs inline to completion
+			// and says so; implicit auto-background silently falls through.
+			pendingNotices.push(AUTO_AT_CAPACITY_NOTICE);
+		} else if (
 			(autoRequested || (this.#autoBackgroundEnabled && !pty && !bridgeTerminalAvailable)) &&
 			autoBgManager &&
-			!autoBgManager.atCapacity
+			!autoBgManager.atCapacity &&
+			// A deadline that cannot outlive the grace never promotes: the
+			// command resolves (or expires) inline instead of dying as a job.
+			autoBackgroundWaitMs !== undefined
 		) {
-			const autoBackgroundThresholdMs = autoRequested
-				? this.#asyncAutoInlineGraceMs
-				: this.#autoBackgroundThresholdMs;
-			const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(autoBackgroundThresholdMs, timeoutMs);
 			const startBackgrounded = autoBackgroundWaitMs === 0;
 			const job = this.#startManagedBashJob({
 				command,
