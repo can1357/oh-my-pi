@@ -6,6 +6,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
+import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -389,6 +390,14 @@ describe("github copilot model limits mapping", () => {
 		// Provider-independent metadata still crosses (this is why the global
 		// index exists): the cursor context window is inherited.
 		expect(model?.contextWindow).toBe(collision!.contextWindow);
+		// Drive the discovered model through the wire-id serializer the request
+		// builders call (`resolveWireModelId`, used by the openai-completions and
+		// anthropic request paths to fill `body.model`). The emitted id must be the
+		// logical Copilot id for every effort -- the issue reported that even
+		// `--thinking max` kept sending the wrong cursor wire id.
+		const built = buildModel(model!);
+		expect(resolveWireModelId(built, undefined)).toBe(servedId);
+		expect(resolveWireModelId(built, Effort.Max)).toBe(servedId);
 	});
 	it("abandons a pre-fix cache row carrying a cross-provider requestModelId (#10796)", async () => {
 		// The sanitizer only runs during discovery. A user who discovered a
