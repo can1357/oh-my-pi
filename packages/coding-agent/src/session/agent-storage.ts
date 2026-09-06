@@ -428,21 +428,28 @@ FROM model_usage_legacy
 	}
 
 	#close(): void {
+		if (this.#closing) return;
 		this.#closing = true;
-		// Model-performance batches are synchronous once invoked, so this
-		// persists them before finalizing their statements during process exit.
-		void this.#perfDrain.flush();
-		checkpointWal(this.#db);
-		this.#listSettingsStmt.finalize();
-		this.#upsertModelUsageStmt.finalize();
-		this.#listModelUsageStmt.finalize();
-		this.#upsertModelPerfStmt.finalize();
-		this.#listModelPerfStmt.finalize();
-		this.#upsertCommandUsageStmt.finalize();
-		this.#listCommandUsageStmt.finalize();
-		// SqliteAuthCredentialStore.close() finalizes its own statements and
-		// closes the shared #db handle — must run after our statements finalize.
-		this.#authStore.close();
+		try {
+			// Model-performance batches are synchronous once invoked, so this
+			// persists them before finalizing their statements during process exit.
+			void this.#perfDrain.flush();
+			checkpointWal(this.#db);
+			this.#listSettingsStmt.finalize();
+			this.#upsertModelUsageStmt.finalize();
+			this.#listModelUsageStmt.finalize();
+			this.#upsertModelPerfStmt.finalize();
+			this.#listModelPerfStmt.finalize();
+			this.#upsertCommandUsageStmt.finalize();
+			this.#listCommandUsageStmt.finalize();
+			// SqliteAuthCredentialStore.close() finalizes its own statements and
+			// closes the shared #db handle — must run after our statements finalize.
+			this.#authStore.close();
+		} catch (err) {
+			// Leave the instance retryable when checkpoint/finalize fails mid-close.
+			this.#closing = false;
+			throw err;
+		}
 	}
 
 	/**

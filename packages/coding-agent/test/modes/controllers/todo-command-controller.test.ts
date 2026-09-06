@@ -19,7 +19,7 @@ function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext
 		sessionManager: {
 			appendCustomEntry: vi.fn(),
 			appendMessage: vi.fn(),
-			getBranch: () => [],
+			getBranch: vi.fn(() => []),
 			getCwd: () => cwd,
 		},
 		setTodos: vi.fn(),
@@ -46,6 +46,24 @@ describe("TodoCommandController", () => {
 
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("/todo export [<path>]"));
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("/todo import [<path>]"));
+	});
+
+	it("keeps an explicit empty live list authoritative over a stale branch snapshot", async () => {
+		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tui-todo-empty-live-"));
+		const stale: TodoPhase[] = [{ name: "Stale", tasks: [{ content: "Resurrect me", status: "pending" }] }];
+		const ctx = createContext(tempRoot, []);
+		(ctx.sessionManager.getBranch as Mock).mockReturnValue([
+			{ type: "custom", customType: USER_TODO_EDIT_CUSTOM_TYPE, data: { phases: stale } },
+		]);
+		const controller = new TodoCommandController(ctx);
+
+		await controller.handleTodoCommand("append Ship");
+
+		const committed = (ctx.session.setTodoPhases as Mock).mock.calls[0]?.[0] as TodoPhase[];
+		expect(committed).toHaveLength(1);
+		expect(committed[0]?.name).toBe("Todos");
+		expect(committed[0]?.tasks.map(task => task.content)).toEqual(["Ship"]);
+		expect(committed[0]?.tasks.map(task => task.content)).not.toContain("Resurrect me");
 	});
 
 	it("exports the default TODO.md under the active session cwd", async () => {
@@ -94,6 +112,27 @@ describe("TodoCommandController", () => {
 		expect(ctx.agent.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
 		expect(ctx.sessionManager.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
 		expect(ctx.showStatus).toHaveBeenCalledWith(`Imported 1 phase(s), 1 task(s) from ${target}.`);
+		expect(ctx.showError).not.toHaveBeenCalled();
+	});
+
+	it("imports abandoned checklist markers as user cancels over a prior model drop", async () => {
+		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tui-todo-import-abandon-"));
+		const target = path.join(tempRoot, "TODO.md");
+		await fs.writeFile(target, "# Work\n- [-] Ship feature\n", "utf8");
+		const prior: TodoPhase[] = [
+			{ name: "Work", tasks: [{ content: "Ship feature", status: "abandoned" }] },
+		];
+		const ctx = createContext(tempRoot, prior);
+		const controller = new TodoCommandController(ctx);
+
+		await controller.handleTodoCommand("import");
+
+		expect(ctx.session.setTodoPhases).toHaveBeenCalledWith([
+			{
+				name: "Work",
+				tasks: [{ content: "Ship feature", status: "abandoned", droppedBy: "user" }],
+			},
+		]);
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});
 
