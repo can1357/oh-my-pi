@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.12] - 2026-09-06
+
 ### Added
 
 - Added Muse Code subscription sign-in, credential refresh, inference, and quota reporting in `/usage`, with durable rate-limit backoff so quota refresh recovers instead of repeatedly retrying.
