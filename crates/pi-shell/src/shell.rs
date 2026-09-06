@@ -2840,8 +2840,12 @@ mod tests {
 		let (mut session, params) = kill_test_context().await;
 		let source_info = SourceInfo::from("pi-natives:test");
 
+		// A safety net, not a latency assertion: the healthy path stops in well
+		// under 300ms, but nextest full-suite parallelism can starve the pipeline
+		// long enough to trip a tight deadline. Bound a real hang generously so
+		// scheduler contention never fails the test (issue #10820).
 		time::timeout(
-			Duration::from_secs(5),
+			Duration::from_secs(30),
 			session.shell.run_string(command, &source_info, &params),
 		)
 		.await
