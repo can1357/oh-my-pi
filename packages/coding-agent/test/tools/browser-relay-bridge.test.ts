@@ -3335,26 +3335,24 @@ describe("RelayBridge tab grouping", () => {
 		const guardedSource = (guarded?.params as { source?: string } | undefined)?.source;
 		const overlapDocument: Record<string, unknown> = {};
 		vm.runInNewContext(markedSource!, overlapDocument);
-		vm.runInNewContext(guardedSource!, overlapDocument);
+		let guardedAborted = false;
+		try {
+			vm.runInNewContext(guardedSource!, overlapDocument);
+		} catch {
+			guardedAborted = true;
+		}
+		expect(guardedAborted).toBe(true);
 		expect(overlapDocument.__preloadRuns).toBe(1);
 		expect(Object.keys(overlapDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 		ack(bridge, ext2, "send", { identifier: "root-script-guarded" });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		const lasting = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
-		expect(lasting?.params).toEqual({ source, runImmediately: false });
-		ack(bridge, ext2, "send", { identifier: "root-script-lasting" });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		ack(bridge, ext2, "send", { result: { value: false } });
-		const lastingSource = (lasting?.params as { source?: string } | undefined)?.source;
-		expect(lastingSource).toBe(source);
 		const laterDocument: Record<string, unknown> = {};
 		laterDocument.window = laterDocument;
 		vm.createContext(laterDocument);
-		vm.runInContext(lastingSource ?? "", laterDocument);
+		vm.runInContext(guardedSource ?? "", laterDocument);
 		expect(laterDocument.__preloadRuns).toBe(1);
 		expect(vm.runInContext("relayValue", laterDocument)).toBe(1);
 		expect(vm.runInContext("typeof RelayValue", laterDocument)).toBe("function");
@@ -3574,10 +3572,6 @@ describe("RelayBridge tab grouping", () => {
 		vm.runInNewContext(cleanSource!, laterDocument);
 		expect(laterDocument.__relayInjected).toBe(true);
 		ack(bridge, ext2, "send", { identifier: "root-script-guarded" });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext2, "send", { identifier: "root-script-lasting" });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
@@ -3587,9 +3581,9 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toHaveLength(
-			2,
+			1,
 		);
-		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(3);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(2);
 	});
 
 	it("rechecks a navigation preload after removal before invoking it immediately", async () => {
@@ -3736,10 +3730,6 @@ describe("RelayBridge tab grouping", () => {
 		vm.runInNewContext(cleanSource!, laterDocument);
 		expect(laterDocument.__relayInjected).toBe(true);
 		ack(bridge, ext2, "send", { identifier: "root-script-guarded" });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext2, "send", { identifier: "root-script-lasting" });
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
@@ -3749,9 +3739,9 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toHaveLength(
-			2,
+			1,
 		);
-		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(3);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(2);
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toContain("Page.disable");
 	});
 

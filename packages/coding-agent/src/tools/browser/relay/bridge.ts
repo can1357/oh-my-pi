@@ -119,7 +119,12 @@ function suppressMarkedPreloadApplication(source: unknown, marker: string): stri
 	if (typeof source !== "string") throw new Error("preload source must be a string");
 	const offset = preloadDirectiveEnd(source);
 	const markerAccess = `this[${JSON.stringify(marker)}]`;
-	return `${source.slice(0, offset)}if (${markerAccess} === true) { delete ${markerAccess}; } else {\n${source.slice(offset)}\n}`;
+	// Abort only the document already covered by the marker-bearing registration.
+	// Unlike wrapping the source in an `else` block, an early throw leaves the
+	// client's top-level lexical declarations in the global lexical environment
+	// for every later document. Throw the marker string directly so client
+	// declarations cannot shadow anything the guard needs before they initialize.
+	return `${source.slice(0, offset)}if (${markerAccess} === true) { delete ${markerAccess}; throw ${JSON.stringify(marker)}; }\n${source.slice(offset)}`;
 }
 
 function subscriptionKey(method: string): string {
@@ -3253,33 +3258,14 @@ export class RelayBridge {
 					if (typeof guarded?.identifier !== "string") {
 						throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
 					}
-					// The overlap guard necessarily puts top-level lexical declarations in
-					// a block. Keep it only for the marker-bearing handoff, then restore the
-					// client's byte-for-byte source so later documents retain their original
-					// global lexical bindings.
-					const lasting = (await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						method: "Page.addScriptToEvaluateOnNewDocument",
-						params: { ...originalParams, source: originalParams.source, runImmediately: false },
-					})) as Record<string, unknown> | undefined;
-					if (typeof lasting?.identifier !== "string") {
-						throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
-					}
-					rootIdentifier = lasting.identifier;
-					await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						method: "Page.removeScriptToEvaluateOnNewDocument",
-						params: { identifier: guarded.identifier },
-					});
+					rootIdentifier = guarded.identifier;
 					await this.#rpc({
 						op: "send",
 						tabId: tab.tabId,
 						method: "Page.removeScriptToEvaluateOnNewDocument",
 						params: { identifier },
 					});
-					// A navigation during either overlap can leave the temporary marker in
+					// A navigation during the overlap can leave the temporary marker in
 					// its new document. Delete it after the marker registration is gone.
 					await this.#preloadApplicationMarker(tab.tabId, applicationMarker, originalParams.worldName);
 				} catch (err) {
