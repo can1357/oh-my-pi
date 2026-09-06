@@ -5,6 +5,8 @@
 ### Fixed
 - Fixed Grok Bot file-backed model caches to scope by the real renewer instead of the shared `<authenticated>` sentinel.
 - Fixed Grok Bot file-only auth so the authenticated sentinel is never used as a renewal credential override, and added `sand-tools-wire` for router tool-wire policy.
+
+- Fixed OpenCode Go/Zen live model discovery (`GET /v1/models`) missing `x-opencode-session` and omp's `User-Agent`: discovery requests now attribute with the stable install id so the requests OpenCode flags as `Bun fetch` carry the required session header.
 ### Added
 
 - Added Muse Code as a provider with Muse Spark models and live account-scoped discovery.
