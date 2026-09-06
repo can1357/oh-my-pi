@@ -4,6 +4,8 @@ node_modules
 
 # Build output
 dist/
+!vendor/thinking-orbs/dist/
+!vendor/thinking-orbs/dist/**
 packages/*/dist/
 packages/*/dist-chrome/
 packages/*/dist-firefox/
@@ -93,3 +95,6 @@ packages/coding-agent/bench/boot-baseline.json
 /.bazelrc.user
 
 .parity/
+
+# Pack-time copy of file: deps (see bundleExternalFileDependencies)
+packages/coding-agent/vendor/

@@ -236,6 +236,7 @@ export async function rewriteManifest(pkg: PublishPackage, write: boolean): Prom
 		if (!hasDist && !files.includes(extra)) files.push(extra);
 	}
 	manifest.files = files;
+	await bundleExternalFileDependencies(manifest, path.join(repoRoot, pkg.dir), write);
 	if (write) await Bun.write(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
 	return manifest;
 }
@@ -264,6 +265,55 @@ async function preparePackage(pkg: PublishPackage): Promise<PackageManifest> {
 	return rewriteManifest(pkg, !isDryRun);
 }
 
+function depRecord(value: JsonValue | undefined): JsonObject | null {
+	if (value === null || value === undefined || typeof value !== "object" || Array.isArray(value)) return null;
+	return value as JsonObject;
+}
+
+function stringList(value: JsonValue | undefined): string[] {
+	if (!Array.isArray(value)) return [];
+	return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+/**
+ * Rewrite `file:` dependencies so published tarballs stay installable.
+ * Bun resolves `file:` specs against its install cache, not the unpacked
+ * tarball, so a packed `file:./vendor/...` still fails. Copy the tree
+ * into `node_modules/<name>`, drop the spec, and set `bundledDependencies`
+ * so `bun pm pack` includes the nested package. Workspace manifests keep
+ * `file:../../vendor/...` for nix.
+ */
+export async function bundleExternalFileDependencies(
+	manifest: PackageManifest,
+	pkgDir: string,
+	write: boolean,
+): Promise<void> {
+	const files = Array.isArray(manifest.files) ? [...manifest.files] : [];
+	const bundled = new Set<string>([
+		...stringList(manifest.bundledDependencies),
+		...stringList(manifest.bundleDependencies),
+	]);
+	for (const key of ["dependencies", "optionalDependencies"] as const) {
+		const deps = depRecord(manifest[key]);
+		if (!deps) continue;
+		for (const name of Object.keys(deps)) {
+			const spec = deps[name];
+			if (typeof spec !== "string" || !spec.startsWith("file:")) continue;
+			const source = path.resolve(pkgDir, spec.slice("file:".length));
+			const destRel = `node_modules/${name}`;
+			delete deps[name];
+			bundled.add(name);
+			if (!files.includes(destRel)) files.push(destRel);
+			if (write) await fs.cp(source, path.join(pkgDir, destRel), { recursive: true, force: true });
+		}
+	}
+	manifest.files = files;
+	if (bundled.size > 0) {
+		manifest.bundledDependencies = [...bundled];
+		delete manifest.bundleDependencies;
+	}
+}
+
 /**
  * Apply only the published `bin` rewrite to a package's working-tree
  * manifest. Used by `scripts/install-tests/run-ci.sh` to pack the coding
@@ -276,6 +326,7 @@ export async function applyPublishBin(pkgRelDir: string, write: boolean): Promis
 	const manifestPath = path.join(repoRoot, pkgRelDir, "package.json");
 	const manifest = (await Bun.file(manifestPath).json()) as PackageManifest;
 	manifest.bin = { ...pkg.publishBin };
+	await bundleExternalFileDependencies(manifest, path.join(repoRoot, pkgRelDir), write);
 	if (write) await Bun.write(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
 	return manifest;
 }

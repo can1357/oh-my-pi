@@ -14,6 +14,7 @@ interface ContextHarness {
 	focused: unknown[];
 	/** Every component handed to `editorContainer.addChild`, in order. */
 	mounted: unknown[];
+	clearEditorSlot: () => void;
 	/** Resolves when `ui.setFocus` sees the original editor again. */
 	editorRefocused: Promise<void>;
 }
@@ -26,6 +27,7 @@ function createContext(): ContextHarness {
 	const focused: unknown[] = [];
 	const mounted: unknown[] = [];
 	const refocused = Promise.withResolvers<void>();
+	const clearEditorSlot = vi.fn();
 	const ctx = {
 		settings: Settings.isolated({ "live.voice": "vale" }),
 		keybindings: { getKeys: vi.fn(() => ["ctrl+l"]) },
@@ -33,7 +35,7 @@ function createContext(): ContextHarness {
 		extractAssistantText: vi.fn(() => ""),
 		editor,
 		editorContainer: {
-			clear: vi.fn(),
+			clear: clearEditorSlot,
 			addChild: vi.fn((component: unknown) => {
 				mounted.push(component);
 			}),
@@ -52,7 +54,7 @@ function createContext(): ContextHarness {
 		chatContainer: { children: [] },
 		present: vi.fn(),
 	} as unknown as InteractiveModeContext;
-	return { ctx, editor, focused, mounted, editorRefocused: refocused.promise };
+	return { ctx, editor, focused, mounted, clearEditorSlot, editorRefocused: refocused.promise };
 }
 
 afterEach(() => {
@@ -80,7 +82,7 @@ describe("LiveCommandController", () => {
 	});
 
 	it("stops the session and restores the editor when the live-toggle chord hits the focused visualizer", async () => {
-		const { ctx, editor, focused, mounted, editorRefocused } = createContext();
+		const { ctx, editor, focused, mounted, clearEditorSlot, editorRefocused } = createContext();
 		const stop = vi.fn(async () => {});
 		const controller = new LiveCommandController(ctx, options => {
 			const session = new LiveSessionController(options);
@@ -92,8 +94,8 @@ describe("LiveCommandController", () => {
 		await controller.handleCommand();
 		expect(controller.active).toBe(true);
 
-		// The controller replaces and focuses the editor with the visualizer;
-		// Ctrl+L must end the call from there, not just from the editor.
+		// Live mode owns the centered editor slot while active, and the toggle
+		// chord must restore the original editor after stopping.
 		const visualizer = focused[0];
 		if (!(visualizer instanceof LiveVisualizer)) {
 			throw new Error("expected the controller to focus a LiveVisualizer");
@@ -102,7 +104,8 @@ describe("LiveCommandController", () => {
 		await editorRefocused;
 
 		expect(stop).toHaveBeenCalled();
-		expect(mounted.at(-1)).toBe(editor);
+		expect(mounted).toEqual([visualizer, editor]);
+		expect(clearEditorSlot).toHaveBeenCalledTimes(2);
 		expect(focused.at(-1)).toBe(editor);
 		// `active` stays true until #finish's fire-and-forget settling promise
 		// clears; drain microtasks deterministically instead of sleeping.

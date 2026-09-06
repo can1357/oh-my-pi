@@ -8,16 +8,23 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { ORB_HEIGHT, ORB_WIDTH, renderVoiceOrb } from "../modes/components/voice-indicator";
 import { type ThemeColor, theme } from "../modes/theme/theme";
 
 /** Distinct states of a realtime call connection. */
 export type LivePhase = "connecting" | "listening" | "working" | "speaking" | "muted" | "error";
+
+/** Visual style for the live panel body. Spectrum is the default; orbs is opt-in. */
+export type LiveVisualizerStyle = "spectrum" | "orbs";
+
 /** Configuration callbacks for user interactions in the visualizer. */
 export interface LiveVisualizerOptions {
 	onStop(): void;
 	onToggleMute(): void;
 	/** Configured `app.live.toggle` chords that also end the call (Ctrl+L by default). */
 	stopKeys?: readonly KeyId[];
+	/** Body style. Defaults to the classic width-aware spectrum. */
+	style?: LiveVisualizerStyle;
 }
 
 function normalizeTranscript(text: string): string {
@@ -37,6 +44,7 @@ export class LiveVisualizer implements Component {
 	readonly wantsKeyRelease = false;
 
 	readonly #options: LiveVisualizerOptions;
+	readonly #style: LiveVisualizerStyle;
 
 	#phase: LivePhase = "connecting";
 	#inputLevel = 0;
@@ -57,14 +65,14 @@ export class LiveVisualizer implements Component {
 
 	constructor(options: LiveVisualizerOptions) {
 		this.#options = options;
+		this.#style = options.style === "orbs" ? "orbs" : "spectrum";
 	}
 
 	/** Updates the current call phase. */
 	setPhase(phase: LivePhase): void {
-		if (this.#phase !== phase) {
-			this.#phase = phase;
-			this.invalidate();
-		}
+		if (this.#phase === phase) return;
+		this.#phase = phase;
+		this.invalidate();
 	}
 
 	/** Updates the microphone volume level (0..1). */
@@ -72,13 +80,19 @@ export class LiveVisualizer implements Component {
 		const next = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
 		if (this.#inputLevel === next) return;
 		this.#inputLevel = next;
-		if (next > this.#displayLevel) this.#displayLevel = next;
+		if (this.#style === "spectrum") {
+			if (next > this.#displayLevel) this.#displayLevel = next;
+		}
 		this.invalidate();
 	}
 
-	/** Advances the spectrum animation and its peak decay. */
+	/** Advances the body animation (spectrum peak decay or orb energy ease). */
 	setFrame(frame: number): void {
-		const nextLevel = Math.max(this.#inputLevel, this.#displayLevel * 0.84);
+		const nextLevel =
+			this.#style === "orbs"
+				? this.#displayLevel +
+					(this.#inputLevel - this.#displayLevel) * (this.#inputLevel > this.#displayLevel ? 0.22 : 0.08)
+				: Math.max(this.#inputLevel, this.#displayLevel * 0.84);
 		if (this.#frame !== frame || this.#displayLevel !== nextLevel) {
 			this.#frame = frame;
 			this.#displayLevel = nextLevel;
@@ -119,7 +133,7 @@ export class LiveVisualizer implements Component {
 		this.#cache = undefined;
 	}
 
-	/** Renders the microphone spectrum into a compact fixed-height panel. */
+	/** Renders the live panel body into a compact fixed-height panel. */
 	render(width: number): readonly string[] {
 		if (
 			this.#cache &&
@@ -150,11 +164,44 @@ export class LiveVisualizer implements Component {
 		const border = (content: string): string =>
 			theme.fg("border", "│") + content + (width > 1 ? theme.fg("border", "│") : "");
 		const top = theme.fg("border", `┌${"─".repeat(innerWidth)}${width > 1 ? "┐" : ""}`);
-		const spectrumColor: ThemeColor = this.#phase === "muted" ? "dim" : this.#phase === "error" ? "error" : "success";
-		const spectrum = this.#generateSpectrum(innerWidth, 2);
-		const spectrumRows = spectrum.map(row => border(theme.fg(spectrumColor, row)));
+		const body =
+			this.#style === "orbs"
+				? this.#renderOrbRows(innerWidth, border)
+				: this.#renderSpectrumRows(innerWidth, border);
 		const transcript = this.#renderTranscript(this.#userTranscript, innerWidth, border);
-		return [top, ...spectrumRows, transcript, this.#renderFooter(width, innerWidth)];
+		return [top, ...body, transcript, this.#renderFooter(width, innerWidth)];
+	}
+
+	#renderSpectrumRows(innerWidth: number, border: (content: string) => string): readonly string[] {
+		const spectrumColor: ThemeColor = this.#phase === "muted" ? "dim" : this.#phase === "error" ? "error" : "success";
+		return this.#generateSpectrum(innerWidth, 2).map(row => border(theme.fg(spectrumColor, row)));
+	}
+
+	#renderOrbRows(innerWidth: number, border: (content: string) => string): readonly string[] {
+		const orbState =
+			this.#phase === "connecting"
+				? "connecting"
+				: this.#phase === "listening"
+					? "listening"
+					: this.#phase === "working"
+						? "solving"
+						: this.#phase === "speaking"
+							? "composing"
+							: this.#phase === "muted"
+								? "breathing"
+								: "shaping";
+		const energy =
+			this.#phase === "muted" || this.#phase === "error"
+				? 0
+				: this.#phase === "speaking"
+					? Math.max(0.68, this.#displayLevel)
+					: this.#displayLevel;
+		const columns = Math.max(1, Math.min(ORB_WIDTH, innerWidth));
+		// Fixed body height (matches the classic panel contract; spectrum uses 2 rows).
+		return renderVoiceOrb(orbState, this.#frame, energy, ORB_HEIGHT, columns).map(line => {
+			const content = truncateToWidth(line, innerWidth);
+			return border(content + " ".repeat(Math.max(0, innerWidth - visibleWidth(content))));
+		});
 	}
 
 	#renderTranscript(transcript: string, innerWidth: number, border: (content: string) => string): string {
