@@ -15,6 +15,9 @@ import {
 	type DaemonOperation,
 	type DaemonRpcResult,
 	type DaemonWireMessage,
+	LIVE_SESSION_PROTOCOL_VERSION,
+	type LiveSessionMessageNotification,
+	type LiveSessionRegistration,
 	parseDaemonRpcResult,
 	parseDaemonWireMessage,
 } from "./protocol";
@@ -60,6 +63,13 @@ export interface DaemonBrokerClient {
 	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
 	close(): void;
 }
+
+export interface LiveSessionHost {
+	update(registration: LiveSessionRegistration): Promise<void>;
+	close(): Promise<void>;
+}
+
+export type LiveSessionMessageSink = (message: string) => Promise<void> | void;
 
 /** A request reached the broker and the broker rejected the operation. */
 export class DaemonBrokerRejectedError extends Error {}
@@ -150,7 +160,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#connectPromise: Promise<void> | undefined;
 	#buffer = "";
 	#closed = false;
-	#completionReconnectTimer: NodeJS.Timeout | undefined;
+	#eventReconnectTimer: NodeJS.Timeout | undefined;
+	#liveSession:
+		| {
+				registration: LiveSessionRegistration;
+				sink: (message: LiveSessionMessageNotification) => Promise<void> | void;
+		  }
+		| undefined;
 
 	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
 		this.projectDir = projectDir;
@@ -199,6 +215,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionUnsubscribes,
 				completionReplays,
 				completionSubscriptionId: this.#completionSubscriptionId,
+				liveSessionEvents: true,
+				liveSession: this.#liveSession?.registration,
 				operation,
 			})}\n`,
 		);
@@ -215,12 +233,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
-		clearTimeout(this.#completionReconnectTimer);
-		this.#completionReconnectTimer = undefined;
+		clearTimeout(this.#eventReconnectTimer);
+		this.#eventReconnectTimer = undefined;
 		this.#socket?.destroy();
 		this.#completionSinks.clear();
 		this.#preservedCompletionOwners.clear();
 		this.#completionReplays.clear();
+		this.#liveSession = undefined;
 		this.#socket = undefined;
 		this.#rejectPending(new Error("Daemon broker client closed"));
 	}
@@ -232,7 +251,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#completionUnsubscribes.delete(owner);
 		if (this.#preservedCompletionOwners.delete(owner)) this.#completionReplays.add(owner);
 		this.#completionSinks.set(owner, sink);
-		this.#publishCompletionOwners();
+		this.#publishRegistrations();
 		return options => {
 			if (this.#completionSinks.get(owner) !== sink) return;
 			this.#completionSinks.delete(owner);
@@ -242,33 +261,48 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				this.#preservedCompletionOwners.delete(owner);
 				this.#completionUnsubscribes.add(owner);
 			}
-			if (this.#completionSinks.size === 0 && this.#completionReconnectTimer) {
-				clearTimeout(this.#completionReconnectTimer);
-				this.#completionReconnectTimer = undefined;
+			if (this.#completionSinks.size === 0 && !this.#liveSession && this.#eventReconnectTimer) {
+				clearTimeout(this.#eventReconnectTimer);
+				this.#eventReconnectTimer = undefined;
 			}
-			this.#publishCompletionOwners();
+			this.#publishRegistrations();
 		};
 	}
 
-	#publishCompletionOwners(): void {
-		if (this.#closed) return;
-		void this.request({ op: "ping" }).catch(() => this.#scheduleCompletionReconnect());
+	async hostLiveSession(
+		registration: LiveSessionRegistration,
+		sink: (message: LiveSessionMessageNotification) => Promise<void> | void,
+	): Promise<void> {
+		if (this.#closed) throw new Error("Daemon broker client is closed");
+		this.#liveSession = { registration, sink };
+		await this.request({ op: "ping" });
 	}
 
-	#scheduleCompletionReconnect(): void {
+	async clearLiveSession(): Promise<void> {
+		if (!this.#liveSession) return;
+		this.#liveSession = undefined;
+		await this.request({ op: "ping" });
+	}
+
+	#publishRegistrations(): void {
+		if (this.#closed) return;
+		void this.request({ op: "ping" }).catch(() => this.#scheduleEventReconnect());
+	}
+
+	#scheduleEventReconnect(): void {
 		if (
 			this.#closed ||
-			this.#completionSinks.size === 0 ||
-			this.#completionReconnectTimer !== undefined ||
+			(this.#completionSinks.size === 0 && !this.#liveSession) ||
+			this.#eventReconnectTimer !== undefined ||
 			(this.#socket !== undefined && !this.#socket.destroyed)
 		) {
 			return;
 		}
-		this.#completionReconnectTimer = setTimeout(() => {
-			this.#completionReconnectTimer = undefined;
-			this.#publishCompletionOwners();
+		this.#eventReconnectTimer = setTimeout(() => {
+			this.#eventReconnectTimer = undefined;
+			this.#publishRegistrations();
 		}, CONNECT_RETRY_MS);
-		this.#completionReconnectTimer.unref();
+		this.#eventReconnectTimer.unref();
 	}
 
 	async #connect(): Promise<void> {
@@ -334,7 +368,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		socket.on("close", () => {
 			if (this.#socket === socket) this.#socket = undefined;
 			this.#rejectPending(new Error("Daemon broker connection closed"));
-			this.#scheduleCompletionReconnect();
+			this.#scheduleEventReconnect();
 		});
 	}
 
@@ -358,20 +392,16 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				message = parseDaemonWireMessage(decoded);
 			} catch (error) {
 				const parseError = error instanceof Error ? error : new Error(String(error));
-				if (
-					typeof decoded === "object" &&
-					decoded !== null &&
-					"event" in decoded &&
-					decoded.event === "daemon-completed"
-				) {
-					logger.warn("Ignoring malformed daemon completion", { error: parseError.message });
+				if (typeof decoded === "object" && decoded !== null && "event" in decoded) {
+					logger.warn("Ignoring malformed daemon broker event", { error: parseError.message });
 					continue;
 				}
 				this.#rejectPending(parseError);
 				continue;
 			}
 			if ("event" in message) {
-				void this.#deliverCompletion(message);
+				if (message.event === "daemon-completed") void this.#deliverCompletion(message);
+				else void this.#deliverLiveSessionMessage(message);
 				continue;
 			}
 			const response = message;
@@ -421,6 +451,50 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 	}
 
+	async #deliverLiveSessionMessage(message: LiveSessionMessageNotification): Promise<void> {
+		const hosted = this.#liveSession;
+		if (
+			!hosted ||
+			hosted.registration.endpointId !== message.endpointId ||
+			hosted.registration.sessionId !== message.sessionId
+		) {
+			this.#ackLiveSessionMessage(message.deliveryId, "Live session registration changed before delivery");
+			return;
+		}
+		try {
+			await hosted.sink(message);
+			this.#ackLiveSessionMessage(message.deliveryId);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			logger.warn("Live session message sink failed", {
+				endpointId: message.endpointId,
+				deliveryId: message.deliveryId,
+				error: detail,
+			});
+			this.#ackLiveSessionMessage(message.deliveryId, detail);
+		}
+	}
+
+	#ackLiveSessionMessage(deliveryId: string, error?: string): void {
+		const socket = this.#socket;
+		if (!socket || socket.destroyed) return;
+		socket.write(
+			`${JSON.stringify({
+				id: crypto.randomUUID(),
+				token: this.#token,
+				owners: [...this.#completionSinks.keys()],
+				detachedOwners: [...this.#preservedCompletionOwners],
+				completionEvents: true,
+				completionUnsubscribes: [...this.#completionUnsubscribes],
+				completionSubscriptionId: this.#completionSubscriptionId,
+				liveSessionEvents: true,
+				liveSession: this.#liveSession?.registration,
+				liveSessionMessageAcks: [{ deliveryId, error }],
+				operation: { op: "ping" },
+			})}\n`,
+		);
+	}
+
 	#ackCompletion(completionId: string): void {
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return;
@@ -434,6 +508,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionAcks: [completionId],
 				completionUnsubscribes: [...this.#completionUnsubscribes],
 				completionSubscriptionId: this.#completionSubscriptionId,
+				liveSessionEvents: true,
+				liveSession: this.#liveSession?.registration,
 				operation: { op: "ping" },
 			})}\n`,
 		);
@@ -464,15 +540,54 @@ function sharedDaemonClient(key: string, create: () => Promise<DaemonBrokerClien
 	return pending;
 }
 
-/** Create an independent socket connection to one daemon broker scope. */
-export async function createDaemonBrokerClient(
+async function createSocketDaemonClient(
 	projectDir: string,
-	options: DaemonBrokerClientOptions = {},
-): Promise<DaemonBrokerClient> {
+	options: DaemonBrokerClientOptions,
+): Promise<SocketDaemonClient> {
 	const canonical = await canonicalProjectDir(projectDir);
 	const runtimeDir = options.runtimeDir ?? daemonRuntimeDir(canonical);
 	const token = await readOrCreateToken(runtimeDir);
 	return new SocketDaemonClient(canonical, runtimeDir, token, options);
+}
+
+/** Create an independent socket connection to one daemon broker scope. */
+export function createDaemonBrokerClient(
+	projectDir: string,
+	options: DaemonBrokerClientOptions = {},
+): Promise<DaemonBrokerClient> {
+	return createSocketDaemonClient(projectDir, options);
+}
+
+/** Host one interactive session on an independent broker connection. */
+export async function createLiveSessionHost(
+	projectDir: string,
+	registration: LiveSessionRegistration,
+	sink: LiveSessionMessageSink,
+	options: DaemonBrokerClientOptions = {},
+): Promise<LiveSessionHost> {
+	const client = await createSocketDaemonClient(projectDir, options);
+	let closed = false;
+	try {
+		await client.hostLiveSession(registration, notification => sink(notification.message));
+	} catch (error) {
+		client.close();
+		throw error;
+	}
+	return {
+		async update(nextRegistration: LiveSessionRegistration): Promise<void> {
+			if (closed) throw new Error("Live session host is closed");
+			await client.hostLiveSession(nextRegistration, notification => sink(notification.message));
+		},
+		async close(): Promise<void> {
+			if (closed) return;
+			closed = true;
+			try {
+				await client.clearLiveSession();
+			} finally {
+				client.close();
+			}
+		},
+	};
 }
 
 /** Get the process-shared daemon broker client for one canonical project directory. */
@@ -506,20 +621,53 @@ export async function closeDaemonClients(): Promise<void> {
 
 /** Exercise worker-host broker startup and authenticated RPC for distribution smoke tests. */
 export async function smokeTestDaemonBroker(): Promise<void> {
-	// Keep the broker's runtime dir under a private parent this process owns, so
-	// the broker's dead-scope sweep (pruneDeadDaemonRuntimeDirs, fired on startup)
-	// can only ever reclaim siblings inside it — never unrelated neighbours in
-	// os.tmpdir() such as tmux/ssh sockets or build trees (issue #8721).
 	const smokeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-"));
 	const projectDir = path.join(smokeRoot, "project");
 	const runtimeDir = path.join(smokeRoot, "run");
 	await fs.mkdir(projectDir, { recursive: true });
-	const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+	const options = { runtimeDir, idleGraceMs: 5_000 };
+	const client = await createDaemonBrokerClient(projectDir, options);
+	let host: LiveSessionHost | undefined;
+	let deliveredMessage: string | undefined;
 	try {
 		const ping = await client.request({ op: "ping" });
 		if (ping.op !== "ping" || ping.projectDir !== client.projectDir) throw new Error("daemon broker ping mismatch");
+		host = await createLiveSessionHost(
+			projectDir,
+			{
+				version: LIVE_SESSION_PROTOCOL_VERSION,
+				endpointId: "smoke-endpoint",
+				sessionId: "smoke-session",
+				title: "Broker smoke",
+				startedAt: new Date().toISOString(),
+			},
+			message => {
+				deliveredMessage = message;
+			},
+			options,
+		);
+		const listed = await client.request({ op: "session-list" });
+		if (listed.op !== "session-list" || listed.sessions[0]?.sessionId !== "smoke-session") {
+			throw new Error("live session registration was not listed");
+		}
+		const sent = await client.request({
+			op: "session-send",
+			endpointId: "smoke-endpoint",
+			sessionId: "smoke-session",
+			message: "smoke message",
+		});
+		if (sent.op !== "session-send" || deliveredMessage !== "smoke message") {
+			throw new Error("live session message was not delivered");
+		}
+		await host.close();
+		host = undefined;
+		const afterClose = await client.request({ op: "session-list" });
+		if (afterClose.op !== "session-list" || afterClose.sessions.length !== 0) {
+			throw new Error("closed live session remained registered");
+		}
 		await client.request({ op: "shutdown" });
 	} finally {
+		await host?.close().catch(() => undefined);
 		client.close();
 		await fs.rm(smokeRoot, { recursive: true, force: true });
 	}

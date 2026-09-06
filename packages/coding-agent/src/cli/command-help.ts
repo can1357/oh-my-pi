@@ -5,7 +5,7 @@ export const acpHelp = {
 } satisfies CommandMetadata;
 
 export const attachHelp = {
-	description: "List live OMP sessions or send an attached editor review comment",
+	description: "List live OMP sessions or deliver a nonblocking message to one",
 } satisfies CommandMetadata;
 
 export const agentsHelp = { description: "Manage bundled task agents" } satisfies CommandMetadata;
