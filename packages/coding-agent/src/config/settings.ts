@@ -181,7 +181,7 @@ const SETTING_PATH_SEGMENTS: Record<SettingPath, readonly string[]> = Object.fro
  * Set a nested value in an object by path segments.
  * Creates intermediate objects as needed.
  */
-function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
+function setByPath(obj: RawSettings, segments: readonly string[], value: unknown): void {
 	let current = obj;
 	for (let i = 0; i < segments.length - 1; i++) {
 		const segment = segments[i];

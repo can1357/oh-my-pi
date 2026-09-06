@@ -3896,7 +3896,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					if (liveSession.isDisposed || liveSession.model !== startupModel) return;
 					const discovered = modelRegistry.find(startupModel.provider, startupModel.id);
 					if (!discovered || !getCodexContextWindowPolicy(discovered)) return;
-					await liveSession.setModelTemporary(discovered, liveSession.configuredThinkingLevel, {
+					await liveSession.setModelTemporary(discovered, liveSession.configuredThinkingLevel(), {
 						ephemeral: true,
 					});
 				})
