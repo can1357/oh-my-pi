@@ -7,6 +7,7 @@ import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
+import { redactMemorySecrets as redactSecrets } from "../memory-backend/redact";
 import { truncateApproxTokens } from "../mnemopi/config";
 import consolidateInputTemplate from "../prompts/memories/sharpshooter-consolidate-input.md" with { type: "text" };
 import consolidateSystemTemplate from "../prompts/memories/sharpshooter-consolidate-system.md" with { type: "text" };
@@ -304,22 +305,6 @@ async function recordConsolidationError(
 	} catch {
 		// The original consolidation error is more actionable than a secondary state-write failure.
 	}
-}
-
-function redactSecrets(input: string): string {
-	let out = input;
-	const patterns = [
-		/(?:sk|pk|rk|tok|key|secret|token|password)[-_A-Za-z0-9]{12,}/g,
-		/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
-		/(?:AKIA|ASIA)[A-Z0-9]{16}/g,
-		/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
-		/github_pat_[A-Za-z0-9_]{20,}/g,
-		/npm_[A-Za-z0-9]{30,}/g,
-		/xox[baprs]-[A-Za-z0-9-]{10,}/g,
-		/AIza[A-Za-z0-9_-]{30,}/g,
-	];
-	for (const pattern of patterns) out = out.replace(pattern, "[REDACTED]");
-	return out;
 }
 
 function errorMessage(error: unknown): string {
