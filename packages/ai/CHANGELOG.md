@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- Fixed fresh auth-broker snapshot caches retaining stale credentials: startup now revalidates through the configured client transport under one shared 500 ms deadline (or a supplied revalidation signal), falls back to cache for unavailable or slow brokers, and preserves 401/403 token-rejection errors ([#11073](https://github.com/can1357/oh-my-pi/pull/11073) by [@pedropaulovc](https://github.com/pedropaulovc)).
 - Fixed startup failing with `no such column: salt` when `agent.db` records auth schema v9 but its credentials table has no `salt` column
 - An OpenAI Responses request retried after an empty completion keeps the provider session it started with, so a session the host retired mid-request (a model switch) is not recreated for the next model ([#20858](https://github.com/can1357/oh-my-pi/pull/20858) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed DeepSeek sessions failing every request with `400 … image special token` after a tool result quoted DeepSeek's chat template: `<｜…｜>` and `｜DSML｜` tokens in outgoing message text are now broken with a zero-width space ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
