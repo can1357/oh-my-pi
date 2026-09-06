@@ -5139,6 +5139,116 @@ describe("agentLoop streaming snapshots", () => {
 		// partial, never the mutable partial object itself.
 		expect(update.message).not.toBe(livePartial);
 	});
+
+	it("rebuilds snapshots incrementally across interleaved finalized and streaming blocks", async () => {
+		const context: AgentContext = {
+			systemPrompt: ["You are helpful."],
+			messages: [],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: createMockModel().model,
+			convertToLlm: identityConverter,
+		};
+
+		// Interleaved block lifecycle: block 0 finalizes first; block 2 starts
+		// and ends while block 1 is still streaming. Events are pushed one
+		// microtask at a time, mutating the live partial immediately before each
+		// push (the mutate-then-push stream contract), so the consumer observes
+		// each event with only the deltas delivered so far applied.
+		const partial = createAssistantMessage([], "stop");
+		const streamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			stream.push({ type: "start", partial });
+			const steps: (() => void)[] = [
+				() => {
+					partial.content.push({ type: "text", text: "A" });
+					stream.push({ type: "text_start", contentIndex: 0, partial });
+				},
+				() => stream.push({ type: "text_delta", contentIndex: 0, delta: "A", partial }),
+				() => stream.push({ type: "text_end", contentIndex: 0, content: "A", partial }),
+				() => {
+					partial.content.push({ type: "text", text: "B" });
+					stream.push({ type: "text_start", contentIndex: 1, partial });
+				},
+				() => stream.push({ type: "text_delta", contentIndex: 1, delta: "B", partial }),
+				() => {
+					partial.content.push({ type: "text", text: "C" });
+					stream.push({ type: "text_start", contentIndex: 2, partial });
+				},
+				() => stream.push({ type: "text_delta", contentIndex: 2, delta: "C", partial }),
+				() => {
+					(partial.content[1] as { type: "text"; text: string }).text = "B2";
+					stream.push({ type: "text_delta", contentIndex: 1, delta: "2", partial });
+				},
+				() => stream.push({ type: "text_end", contentIndex: 2, content: "C", partial }),
+				() => stream.push({ type: "text_end", contentIndex: 1, content: "B2", partial }),
+				() => stream.push({ type: "done", reason: "stop", message: partial }),
+			];
+			let step = 0;
+			const runNext = (): void => {
+				if (step < steps.length) {
+					steps[step++]!();
+					setTimeout(runNext, 0);
+				}
+			};
+			setTimeout(runNext, 0);
+			return stream;
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("stream")], context, config, undefined, streamFn);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		type MessageUpdate = Extract<AgentEvent, { type: "message_update" }>;
+		const updates = events.filter((e): e is MessageUpdate => e.type === "message_update");
+		const contentOf = (update: MessageUpdate): AssistantMessage["content"] => {
+			if (update.message.role !== "assistant") throw new Error("expected assistant message_update");
+			return update.message.content;
+		};
+		const textOf = (update: MessageUpdate, index: number): string => {
+			const block = contentOf(update)[index];
+			if (block?.type !== "text") throw new Error(`expected text block at content[${index}]`);
+			return block.text;
+		};
+
+		// One update per streamed event (start/done do not emit updates).
+		expect(updates.length).toBe(10);
+
+		// Appended-block loop: block 1 appears once it starts (updates 3-4), and
+		// block 2 only once IT starts (update 5 onward) — later blocks never
+		// leak into earlier snapshots.
+		expect(updates.slice(0, 3).every(u => contentOf(u).length === 1)).toBe(true);
+		expect(updates.slice(3, 5).every(u => contentOf(u).length === 2)).toBe(true);
+		expect(updates.slice(5).every(u => contentOf(u).length === 3)).toBe(true);
+		// ...and the final snapshot carries every block with its accumulated text.
+		const last = updates.at(-1)!;
+		expect(textOf(last, 0)).toBe("A");
+		expect(textOf(last, 1)).toBe("B2");
+		expect(textOf(last, 2)).toBe("C");
+
+		// Finalized blocks are shared by reference: from the first update after
+		// block 0's end event, every snapshot carries the SAME content[0] object.
+		expect(new Set(updates.slice(3).map(u => contentOf(u)[0])).size).toBe(1);
+		// Block 2 finalizes at update 8; the final update shares its clone.
+		expect(contentOf(updates[8]!)[2]).toBe(contentOf(updates[9]!)[2]);
+
+		// Open blocks are re-cloned on every delta: while block 1 streams, each
+		// consecutive update carries a FRESH clone (never the previous snapshot's).
+		for (let i = 3; i < updates.length - 1; i++) {
+			expect(contentOf(updates[i + 1]!)[1]).not.toBe(contentOf(updates[i]!)[1]);
+		}
+
+		// Snapshot blocks never alias the mutable live partial.
+		updates.forEach(u => {
+			contentOf(u).forEach((block, i) => expect(block).not.toBe(partial.content[i]));
+		});
+
+		// The finalized block's content stays stable across the whole turn.
+		updates.forEach(u => expect(textOf(u, 0)).toBe("A"));
+	});
 });
 
 describe("agentLoop kCursorExecResolved (issue #4348)", () => {
