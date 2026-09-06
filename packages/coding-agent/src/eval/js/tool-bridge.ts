@@ -1,4 +1,11 @@
-import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentTool,
+	type AgentToolResult,
+	finishExecuteToolSpan,
+	resolveTelemetry,
+	runInActiveSpan,
+	startExecuteToolSpan,
+} from "@oh-my-pi/pi-agent-core";
 import { toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -205,6 +212,46 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	}
 	const tool = getTool(options.session, name);
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
+	// Use an independent collector: these child spans describe work already
+	// included in the outer eval tool's duration and must not inflate run totals.
+	const telemetry = resolveTelemetry(options.session.getTelemetry?.(), options.session.getSessionId?.() ?? undefined);
+	const span = startExecuteToolSpan(telemetry, { tool, toolName: name, toolCallId, args });
+	let result: AgentToolResult | undefined;
+	let caughtError: unknown;
+	let failed = false;
+	try {
+		const execution = await runInActiveSpan(span, () => executeSessionTool(name, tool, toolCallId, args, options));
+		result = execution.result;
+		return normalizeAgentToolResult(name, execution.args, result, options);
+	} catch (error) {
+		failed = true;
+		caughtError = error;
+		throw error;
+	} finally {
+		const isError = failed || (result !== undefined && toolResultHasError(result));
+		const reason = options.signal?.reason;
+		finishExecuteToolSpan(telemetry, span, {
+			toolName: name,
+			toolCallId,
+			result,
+			isError,
+			status: options.signal?.aborted
+				? reason instanceof Error && reason.name === "TimeoutError"
+					? "timeout"
+					: "aborted"
+				: undefined,
+			errorObject: caughtError,
+		});
+	}
+}
+
+async function executeSessionTool(
+	name: string,
+	tool: AgentTool,
+	toolCallId: string,
+	args: unknown,
+	options: ToolBridgeOptions,
+): Promise<{ result: AgentToolResult; args: unknown }> {
 	// A schema-owned name stays tool data across alternatives. Deleting an
 	// invalid value to make another branch match could select a different operation.
 	const intentIsDeclared = schemaDeclaresIntentField(toolWireSchema(tool));
@@ -251,7 +298,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			undefined,
 			options.session.getToolContext?.(),
 		);
-		return normalizeAgentToolResult(name, normalizedArgs, result, options);
+		return { result, args: normalizedArgs };
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,
