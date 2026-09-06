@@ -6,8 +6,8 @@ The critical distinction: **notebook support is file conversion/editing, not not
 
 ## Implementation files
 
-- [`src/edit/notebook.ts`](../packages/coding-agent/src/edit/notebook.ts)
-- [`src/edit/read-file.ts`](../packages/coding-agent/src/edit/read-file.ts)
+- [`crates/pi-edit/src/notebook.rs`](../crates/pi-edit/src/notebook.rs)
+- [`crates/pi-edit/src/files.rs`](../crates/pi-edit/src/files.rs)
 - [`src/tools/read.ts`](../packages/coding-agent/src/tools/read.ts)
 - [`src/tools/eval.ts`](../packages/coding-agent/src/tools/eval.ts)
 - [`src/eval/py/executor.ts`](../packages/coding-agent/src/eval/py/executor.ts)
