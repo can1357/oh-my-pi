@@ -82,10 +82,11 @@ export interface DiscoverAuthStorageOptions extends ResolveAuthBrokerConfigOptio
 	/** Transport for every broker request. Default global `fetch`. */
 	fetch?: typeof fetch;
 	/**
-	 * Startup budget for revalidating a fresh cached snapshot.
-	 * Default {@link SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS}.
+	 * Deadline for revalidating a fresh cached snapshot; one signal governs both
+	 * the reachability probe and the snapshot fetch. Default
+	 * `AbortSignal.timeout(SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS)`.
 	 */
-	revalidationTimeoutMs?: number;
+	revalidationSignal?: AbortSignal;
 }
 
 /** A failed attempt at the initial snapshot that startup retries. */
@@ -511,7 +512,7 @@ async function fetchInitialSnapshot(
 function initialSnapshotRetriesSpent(lastError: AuthBrokerError): AuthBrokerError {
 	return new AuthBrokerError(
 		`Auth broker gave no initial snapshot after retrying for ${INITIAL_SNAPSHOT_RETRY_BUDGET_MS / 1000}s: ${lastError.message}`,
-		{ status: lastError.status, body: lastError.body, cause: lastError },
+		{ status: lastError.status, body: lastError.body, kind: lastError.kind, cause: lastError },
 	);
 }
 
@@ -659,9 +660,7 @@ async function openCredentialStore(
 			// or an authorization rejection wins synchronously; a broker that is
 			// unreachable, slow, or failing for any other reason leaves startup on the
 			// cache and the store's background stream picks up the current generation.
-			const revalidation = AbortSignal.timeout(
-				options.revalidationTimeoutMs ?? SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS,
-			);
+			const revalidation = options.revalidationSignal ?? AbortSignal.timeout(SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS);
 			if (await isAuthBrokerReachable(client, revalidation)) {
 				try {
 					const initialResult = await client.fetchSnapshot({ signal: revalidation });
@@ -703,7 +702,7 @@ export class AuthBrokerStartupError extends AuthBrokerError {
 		readonly url: string,
 		cause: AuthBrokerError,
 	) {
-		super(cause.message, { status: cause.status, body: cause.body, cause });
+		super(cause.message, { status: cause.status, body: cause.body, kind: cause.kind, cause });
 	}
 }
 
