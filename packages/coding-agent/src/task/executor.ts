@@ -3018,7 +3018,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 	// Ordinary agents retain the host's always-on collaboration capability.
 	// Restricted sessions must not widen their explicit host tool list with hub.
-	if (toolNames && !options.restrictToolNames && !toolNames.includes("hub")) {
+	if (toolNames && !options.restrictToolNames && !toolNames.includes("hub") && !isReadOnlyAgent(agent)) {
 		toolNames = [...toolNames, "hub"];
 	}
 	if (toolNames?.includes("exec")) {
