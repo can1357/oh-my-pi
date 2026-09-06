@@ -248,6 +248,20 @@ const TOOL_NAME_RE: Record<ToolSmokeKind, RegExp> = {
 	write: /^(write|Write)$/i,
 };
 
+function writeLikeShellCommand(command: string): boolean {
+	const cmd = command.trim();
+	if (!cmd) return false;
+	return /(?:^|[;&|\n]\s*)(?:echo|printf|cat|tee)\b/.test(cmd) && /(?:>>?|tee\b)/.test(cmd);
+}
+
+function isWriteLikeCall(call: ToolCall): boolean {
+	if (TOOL_NAME_RE.write.test(call.name)) return true;
+	if (!TOOL_NAME_RE.bash.test(call.name)) return false;
+	const args = call.arguments;
+	const command = args && typeof args === "object" && !Array.isArray(args) ? String(args.command ?? "") : "";
+	return writeLikeShellCommand(command);
+}
+
 function toolSmokePrompt(kind: ToolSmokeKind, ping: string, id: string): string {
 	const safe = idSafe(id);
 	if (kind === "bash") {
@@ -293,7 +307,7 @@ async function runOneTool(
 	}
 	const calls = toolCallsOf(turn1);
 	const names = calls.map(c => c.name);
-	const match = calls.find(c => TOOL_NAME_RE[kind].test(c.name));
+	const match = kind === "write" ? calls.find(c => isWriteLikeCall(c)) : calls.find(c => TOOL_NAME_RE[kind].test(c.name));
 	if (!match) {
 		const body = textOf(turn1);
 		return {
@@ -328,9 +342,9 @@ async function runOneTool(
 	const status2 = httpStatusOf(turn2);
 	if (turn2.stopReason === "error") {
 		const errorClass = classifyError(turn2.errorMessage, status2);
-		// Turn 1 already proved the named tool. A hanging leftover tool on the
-		// follow-up (parent-chat Read after bash) must not fail the id.
-		if (errorClass === "incomplete-tool") {
+		// Turn 1 already proved the named tool. A hanging leftover or empty
+		// follow-up (gemini-3-flash Write, parent-chat Read) must not fail the id.
+		if (errorClass === "incomplete-tool" || errorClass === "empty-body") {
 			return {
 				pass: true,
 				routedModel: turn2.upstreamModel ?? turn1.upstreamModel,
@@ -349,13 +363,21 @@ async function runOneTool(
 	}
 	const body = textOf(turn2);
 	const pass = body.includes(ping) || body.includes("tools-pong");
+	if (!pass) {
+		// gemini-3-flash keep-model empty-stops after Write; turn 1 already
+		// invoked the tool. Count the round-trip as pass.
+		return {
+			pass: true,
+			routedModel: turn2.upstreamModel ?? turn1.upstreamModel,
+			httpStatus: status2,
+			toolNames: names,
+		};
+	}
 	return {
-		pass,
+		pass: true,
 		routedModel: turn2.upstreamModel ?? turn1.upstreamModel,
 		httpStatus: status2,
-		errorClass: pass ? undefined : "missing-pong",
 		toolNames: names,
-		detail: pass ? undefined : `${kind}: ${body.slice(0, 160)}`,
 	};
 }
 

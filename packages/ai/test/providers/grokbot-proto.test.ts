@@ -1030,6 +1030,46 @@ describe("grokbot incomplete tool calls", () => {
 		expect(result.content.some(b => b.type === "toolCall" && Object.keys(b.arguments).length === 0)).toBe(true);
 	});
 
+	test("normalizes Write contents alias to omp content", async () => {
+		mockAuth();
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "w1",
+					toolName: "Write",
+					args: '{"path":"/tmp/x","contents":"tools-pong"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(complete, trailer)) as FetchImpl;
+		const writeContext: Context = {
+			messages: [{ role: "user", content: "write", timestamp: 1 }],
+			tools: [
+				{
+					name: "write",
+					description: "write file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" }, content: { type: "string" } },
+						required: ["path", "content"],
+					},
+				},
+			],
+		};
+
+		const result = await streamGrokBot(model, writeContext, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				name: "write",
+				arguments: expect.objectContaining({ path: "/tmp/x", content: "tools-pong" }),
+			}),
+		]);
+	});
+
 	test("finalizes isComplete:false when args are already a complete JSON object", async () => {
 		mockAuth();
 		const incomplete = frameConnectProto(
