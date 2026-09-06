@@ -4,7 +4,8 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { ensureTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -14,6 +15,7 @@ import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-comman
 import { DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
 
 let session: AgentSession | undefined;
 let authStorage: AuthStorage | undefined;
@@ -43,20 +45,21 @@ function createRuntime(mode: "TUI" | "headless", topic: string | null = "Repair 
 		refreshCommands: () => {},
 		reloadPlugins: async () => {},
 	};
-	const ctx = {
+	const ctx = createInteractiveModeContext({
 		session,
 		sessionManager,
 		settings,
 		editor: { setText: () => {}, addToHistory: () => {} },
 		showStatus: () => {},
 		showError: () => {},
-	} as unknown as InteractiveModeContext;
+	});
 	const controller = new CommandController(ctx);
 	ctx.handleRenameCommand = title => controller.handleRenameCommand(title);
 	return {
 		session,
 		sessionManager,
 		runtime,
+		ctx,
 		execute: (text: string) =>
 			mode === "TUI" ? executeBuiltinSlashCommand(text, { ctx }) : executeAcpBuiltinSlashCommand(text, runtime),
 	};
@@ -80,6 +83,56 @@ afterEach(async () => {
 		vi.restoreAllMocks();
 		session = undefined;
 		authStorage = undefined;
+	}
+});
+
+it("shows local model download progress while a TUI rename waits for a cold model", async () => {
+	await ensureTheme();
+	const { session, execute, ctx } = createRuntime("TUI");
+	const input = new InputController(ctx);
+	session.setTitleGenerationStart(() => input.notifyTitleGenerationStart());
+	let progress: Parameters<typeof tinyTitleClient.onProgress>[0] | undefined;
+	vi.spyOn(tinyTitleClient, "onProgress").mockImplementation(listener => {
+		progress = listener;
+		return () => {
+			progress = undefined;
+		};
+	});
+	const { started, response } = deferTitle();
+	vi.useFakeTimers();
+	const performanceNow = vi.spyOn(performance, "now").mockReturnValue(0);
+	const pending = execute("/rename");
+	try {
+		await Promise.race([started.promise, pending]);
+		const download = {
+			modelKey: DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY,
+			status: "progress",
+			file: "onnx/model.onnx",
+			total: 1024,
+		} as const;
+		progress?.({ ...download, loaded: 256, progress: 25 });
+		expect(ctx.chatContainer.render(120).join("\n")).not.toContain("Downloading");
+		performanceNow.mockReturnValue(1001);
+		progress?.({ ...download, loaded: 512, progress: 50 });
+		const rendered = ctx.chatContainer.render(120).join("\n");
+		expect(rendered).toContain("Downloading");
+		expect(rendered).toContain("50%");
+		expect(rendered).toContain("model.onnx");
+
+		progress?.({ modelKey: DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY, status: "ready" });
+		vi.advanceTimersByTime(3000);
+		expect(ctx.chatContainer.render(120).join("\n")).not.toContain("Tiny model");
+		response.resolve("Cache invalidation repair");
+		await pending;
+		expect(session.sessionName).toBe("Cache invalidation repair");
+	} finally {
+		progress?.({ modelKey: DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY, status: "ready" });
+		vi.advanceTimersByTime(3000);
+		session.setTitleGenerationStart(undefined);
+		performanceNow.mockRestore();
+		vi.useRealTimers();
+		response.resolve(null);
+		await pending;
 	}
 });
 

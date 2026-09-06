@@ -21,6 +21,7 @@ import {
 } from "../session/session-worktree";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { isLowSignalTitleInput } from "../tiny/text";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -41,8 +42,9 @@ async function generateRenameTitle(session: AgentSession): Promise<string | null
 	const { sessionManager } = session;
 	const revision = sessionManager.reserveTitleRevision();
 	const context = buildReplanTitleContext(session.messages);
-	if (!context) return null;
+	if (!context || isLowSignalTitleInput(context)) return null;
 	const sessionId = sessionManager.getSessionId();
+	session.notifyTitleGenerationStart();
 	const title = await session.generateTitle(context);
 	return sessionManager.getSessionId() === sessionId && sessionManager.titleRevision === revision ? title : null;
 }
