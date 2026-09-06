@@ -37,6 +37,7 @@ const TOOLS = new Map<string, SystemPromptToolMetadata>([
 		{
 			label: "Bash",
 			description: "Executes a shell command.",
+			readsSkillUris: true,
 			parameters: { type: "object", properties: { command: { type: "string" } } },
 		},
 	],
@@ -813,15 +814,14 @@ describe("system prompt tool inventory", () => {
 
 		expect(text).toContain("- prompt-authoring: Prompt authoring workflow");
 	});
-
-	it("omits bare skill URL guidance when bash is the only content reader", async () => {
+	it("keeps skill URL guidance when bash is the only skill reader", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
 			skills: [
 				{
-					name: "search-only-skill",
-					description: "Should not render without read",
+					name: "bash-only-skill",
+					description: "Readable through bash",
 					filePath: path.join(tempDir, "SKILL.md"),
 					baseDir: tempDir,
 					source: "test",
@@ -834,8 +834,8 @@ describe("system prompt tool inventory", () => {
 		});
 		const text = systemPrompt.join("\n\n");
 
-		expect(text).not.toContain("search-only-skill");
-		expect(text).not.toContain("`skill://<name>`");
+		expect(text).toContain("bash-only-skill");
+		expect(text).toContain("`skill://<name>`");
 	});
 
 	it("omits skill URL guidance when glob is the only active resolver", async () => {

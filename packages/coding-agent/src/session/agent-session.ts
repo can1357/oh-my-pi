@@ -7888,9 +7888,9 @@ export class AgentSession {
 		if (this.agent.state.messages.length === 0) {
 			await this.refreshBaseSystemPrompt();
 		} else if (enabled) {
-			const hasSkillReader = [...this.getActiveToolNames(), ...this.getMountedXdevToolNames()].some(name =>
-				toolReadsSkillUris(this.getToolByName(name)),
-			);
+			// Enabled covers top-level, xd://-mounted, and Code Mode bridge-demoted
+			// tools: every path through which the model can still reach a reader.
+			const hasSkillReader = this.getEnabledToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)));
 			const renderedSkills = hasSkillReader ? this.skills.filter(skill => skill.hide !== true) : [];
 			const alreadyAnnounced = this.agent.state.messages.some(
 				message => message.role === "custom" && message.customType === "skillful-notice",
