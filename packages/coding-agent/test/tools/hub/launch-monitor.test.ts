@@ -1904,6 +1904,61 @@ describe("hub process output monitoring", () => {
 		expect(allocationCount).toBe(3);
 	});
 
+	it("restores a replaced start-pending registration as start-pending when the replacement fails publication", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const startEntered = Promise.withResolvers<void>();
+		const releaseStart = Promise.withResolvers<void>();
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "describe") return { op: "describe", daemon, spec };
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			startEntered.resolve();
+			await releaseStart.promise;
+			return { op: "start", daemon, readyTimedOut: false };
+		});
+		const onOutput = harness.client.onOutput;
+		if (!onOutput) throw new Error("Expected output monitoring support");
+		let publicationCount = 0;
+		vi.spyOn(harness.client, "onOutput").mockImplementation((subscription, sink) => {
+			publicationCount++;
+			const unregister = onOutput.call(harness.client, subscription, sink);
+			if (!unregister) throw new Error("Expected output registration");
+			return Object.assign(unregister, {
+				ready: publicationCount === 2 ? Promise.reject(new Error("publication failed")) : Promise.resolve(),
+			});
+		});
+
+		const start = executeLaunch(harness.session, {
+			op: "start",
+			name: daemon.name,
+			application: process.execPath,
+			pty: false,
+			persist: true,
+			progress: "wake",
+		});
+		await startEntered.promise;
+		expect(harness.getSubscription()?.startPending).toBeTrue();
+
+		// A monitor call for the same name while the start is still validating
+		// replaces the start-pending registration; when its publication fails,
+		// the restored registration must still be waiting for the start rather
+		// than bound to whatever incarnation `describe` reported.
+		await expect(
+			executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" }),
+		).rejects.toThrow("publication failed");
+		const restored = harness.getSubscription();
+		if (!restored) throw new Error("Expected restored output subscription");
+		expect(restored.startPending).toBeTrue();
+		expect(restored.daemonId).toBeUndefined();
+
+		releaseStart.resolve();
+		await start;
+		expect(harness.getSubscription()?.daemonId).toBe(daemon.id);
+	});
+
 	it("restores start-pending state when an overlapping replacement start fails", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
