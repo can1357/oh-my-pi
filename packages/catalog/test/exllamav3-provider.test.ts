@@ -114,6 +114,30 @@ describe("ExLlamaV3 (TabbyAPI) provider discovery", () => {
 		expect(models).toBeNull();
 	});
 
+	test("retains the cache when the revalidation card probe fails after a mismatch", async () => {
+		// First round: valid card A, list B (mismatch — filtering is required).
+		// Second card probe fails (timeout/401/404): the raw admin-key list
+		// must NOT be published as an authoritative catalog; report failed
+		// discovery and keep the last cached catalog.
+		let modelCardCalls = 0;
+		const fetchMock: FetchImpl = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.endsWith("/models")) {
+				return jsonResponse({ data: [{ id: "GLM-5.2-exl3", object: "model", parameters: null }] });
+			}
+			modelCardCalls++;
+			if (modelCardCalls === 1) {
+				return jsonResponse({ id: "Qwen3.8-Flash-Next-exl3", parameters: { max_seq_len: 262_144 } });
+			}
+			return new Response("not found", { status: 404 });
+		}) as FetchImpl;
+
+		const models = await exllamav3ModelManagerOptions({ baseUrl: BASE_URL, fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(modelCardCalls).toBe(2);
+		expect(models).toBeNull();
+	});
+
 	test("publishes an empty catalog only for TabbyAPI's own no-models 503, not unrelated 503s", async () => {
 		// TabbyAPI's check_model_container raises 503 with detail "No models
 		// currently loaded."; an unrelated 503 (transient failure, reverse

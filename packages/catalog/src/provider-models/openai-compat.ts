@@ -6140,8 +6140,12 @@ export function exllamav3ModelManagerOptions(
 			if (revalidationProbe.noModelLoaded) {
 				return [];
 			}
+			// Only a revalidated card that matches the fresh list is conclusive. The
+			// first round proved a card is available and filtering required, so a
+			// failed re-probe (timeout/401/404) must NOT fall back to the raw list —
+			// with an admin key that publishes unservable directory/dummy ids.
 			const revalidated = await discover(revalidationProbe.card);
-			if (revalidated !== null && (revalidated.length > 0 || revalidationProbe.card === null)) {
+			if (revalidationProbe.card && revalidated !== null && revalidated.length > 0) {
 				return revalidated;
 			}
 			// Persistent mismatch (reload storm, admin-key directory churn): report
