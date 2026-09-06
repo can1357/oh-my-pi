@@ -3235,6 +3235,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const sessionManagerPromise = sessionFile
 				? SessionManager.open(sessionFile, undefined, undefined, {
 						initialCwd: effectiveCwd,
+						// Isolated runs execute in the worktree; a stale transcript at
+						// the child session path must not relocate them (#10914).
+						...(worktree !== undefined ? { pinnedCwd: worktree } : {}),
 						suppressBreadcrumb: true,
 					})
 				: Promise.resolve(SessionManager.inMemory(effectiveCwd));

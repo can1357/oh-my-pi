@@ -20,7 +20,8 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
-const TEST_TASK: TaskParams = { agent: "task", name: "CheckLsp", task: "Inspect LSP tools." };
+const TEST_TASK_NAME = "CheckLsp";
+const TEST_TASK: TaskParams = { agent: "task", name: TEST_TASK_NAME, task: "Inspect LSP tools." };
 
 function createAssistantStopMessage(text: string): AssistantMessage {
 	return {
@@ -254,6 +255,44 @@ describe("subagent LSP availability", () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolated-session-cwd-"));
 		try {
 			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const tool = await TaskTool.create(createSession({ isolationEnabled: true, sessionFile: parentSessionFile }));
+			await tool.execute("tool-call", { ...TEST_TASK, isolated: true });
+
+			const sessionManager = getOptions()?.sessionManager as { getCwd?: () => string } | undefined;
+			expect(getOptions()?.cwd).toBe("/tmp/isolated-subagent");
+			expect(sessionManager?.getCwd?.()).toBe("/tmp/isolated-subagent");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("keeps the isolated worktree cwd when a transcript already occupies the child session path", async () => {
+		mockAgents({
+			name: "task",
+			description: "Task agent",
+			systemPrompt: "Use normal tools.",
+			source: "bundled",
+			tools: ["write"],
+		});
+		mockIsolation();
+		const { getOptions } = mockCreateAgentSession();
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolated-session-cwd-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			// A transcript from an earlier run already sits at the child's session
+			// path and records the parent checkout as its cwd. Adopting a recorded
+			// cwd is right for a resume, but an isolated run's cwd is the worktree
+			// that was just created for it (#10914).
+			await Bun.write(
+				path.join(tempDir, "parent", `${TEST_TASK_NAME}.jsonl`),
+				`${JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "stale-transcript",
+					timestamp: new Date().toISOString(),
+					cwd: tempDir,
+				})}\n`,
+			);
 			const tool = await TaskTool.create(createSession({ isolationEnabled: true, sessionFile: parentSessionFile }));
 			await tool.execute("tool-call", { ...TEST_TASK, isolated: true });
 

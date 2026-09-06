@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Isolated subagents now keep the worktree created for them even when a stale transcript already occupies the child session path; previously the recorded parent-checkout cwd was adopted and bash ran in the parent session directory.
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
 ### Changed

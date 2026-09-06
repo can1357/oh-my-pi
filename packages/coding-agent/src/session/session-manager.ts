@@ -1407,7 +1407,8 @@ export class SessionManager {
 		await this.#setSessionFile(sessionFile);
 	}
 
-	async #setSessionFile(sessionFile: string, loadedSession?: SessionLoadResult): Promise<void> {
+	/** @param pinnedCwd Caller-authoritative cwd; when set, the header cwd is never adopted. */
+	async #setSessionFile(sessionFile: string, loadedSession?: SessionLoadResult, pinnedCwd?: string): Promise<void> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
@@ -1447,8 +1448,17 @@ export class SessionManager {
 		// (extension UI, RPC) would otherwise track a directory the process
 		// cannot enter. Keep the current cwd so the session stays where the
 		// user already is.
+		//
+		// A pinned cwd skips adoption entirely: the caller's directory is
+		// authoritative, not a default. An isolated subagent run pins the
+		// worktree created for it, so a cwd recorded by whatever transcript
+		// already occupies this path can never relocate the run back into the
+		// parent checkout (#10914). Nothing is pending relocation, so workspace
+		// edits stay persistable.
 		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
-		if (headerCwd && headerCwd !== path.resolve(this.#cwd) && (await directoryIsEnterable(headerCwd))) {
+		if (pinnedCwd !== undefined) {
+			this.#fallbackRuntimeOnly = false;
+		} else if (headerCwd && headerCwd !== path.resolve(this.#cwd) && (await directoryIsEnterable(headerCwd))) {
 			this.#cwd = headerCwd;
 			this.#sessionDir = path.dirname(resolvedSessionFile);
 			this.#fallbackRuntimeOnly = false;
@@ -2914,7 +2924,7 @@ export class SessionManager {
 		filePath: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
+		options?: { initialCwd?: string; suppressBreadcrumb?: boolean; pinnedCwd?: string },
 	): Promise<SessionManager> {
 		const loaded = await loadSessionFile(filePath, storage);
 		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
@@ -2924,9 +2934,13 @@ export class SessionManager {
 		// interactive mode runs next — fail, so fall back to the launch cwd and
 		// anchor /new and /branch there too, keeping the resumed session where
 		// the user already is.
+		// A pinned cwd wins over the recorded one: an isolated subagent run
+		// pins the worktree created for it, so a cwd recorded by whatever
+		// transcript already occupies this path can never relocate the run
+		// back into the parent checkout (#10914).
 		const recordedCwd = header?.cwd;
 		const recordedCwdUsable = !!recordedCwd && (await directoryIsEnterable(recordedCwd));
-		const cwd = recordedCwdUsable ? recordedCwd : (options?.initialCwd ?? getProjectDir());
+		const cwd = options?.pinnedCwd ?? (recordedCwdUsable ? recordedCwd : (options?.initialCwd ?? getProjectDir()));
 		const dir =
 			sessionDir ??
 			(recordedCwd && !recordedCwdUsable
@@ -2934,7 +2948,7 @@ export class SessionManager {
 				: path.dirname(path.resolve(filePath)));
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
-		await manager.#setSessionFile(filePath, loaded);
+		await manager.#setSessionFile(filePath, loaded, options?.pinnedCwd);
 		return manager;
 	}
 
