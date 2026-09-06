@@ -99,7 +99,13 @@ pub struct VcsStatusSummary {
 	pub staged:    u32,
 	pub unstaged:  u32,
 	pub untracked: u32,
+	/// Commits ahead of the upstream tracking branch; absent for jj or
+	/// branches without an upstream.
+	pub ahead:     Option<u32>,
+	/// Commits behind the upstream tracking branch; same absence rules.
+	pub behind:    Option<u32>,
 }
+
 /// Resolved HEAD state.
 #[napi(object)]
 pub struct VcsHeadState {
@@ -266,7 +272,13 @@ impl From<core::GitRepoInfo> for VcsGitRepoInfo {
 }
 impl From<core::StatusSummary> for VcsStatusSummary {
 	fn from(v: core::StatusSummary) -> Self {
-		Self { staged: v.staged, unstaged: v.unstaged, untracked: v.untracked }
+		Self {
+			staged:    v.staged,
+			unstaged:  v.unstaged,
+			untracked: v.untracked,
+			ahead:     v.ahead,
+			behind:    v.behind,
+		}
 	}
 }
 impl From<core::HeadState> for VcsHeadState {

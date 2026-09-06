@@ -402,7 +402,90 @@ impl GitRepo {
 				}
 			}
 		}
+		if let Some((ahead, behind)) = self.ahead_behind()? {
+			summary.ahead = Some(ahead);
+			summary.behind = Some(behind);
+		}
 		Ok(summary)
+	}
+
+	/// Count commits HEAD is ahead of and behind its upstream tracking branch.
+	/// `None` when HEAD is detached/unborn or no upstream is configured; the
+	/// counts are `(0, 0)` when HEAD and upstream point at the same commit.
+	pub fn ahead_behind(&self) -> Result<Option<(u32, u32)>> {
+		let HeadState::Ref { branch: Some(branch), commit: Some(head), .. } = self.head()? else {
+			return Ok(None);
+		};
+		let Some(upstream_ref) = self.upstream_ref(&branch)? else {
+			return Ok(None);
+		};
+		let Some(upstream) = self.peel_symbolic(self.read_ref(&upstream_ref)?)? else {
+			return Ok(None);
+		};
+		if upstream == head {
+			return Ok(Some((0, 0)));
+		}
+		if self.is_reftable() {
+			let spec = format!("{head}...{upstream}");
+			let Some(counts) = cli_try(self.root(), &["rev-list", "--left-right", "--count", &spec])?
+			else {
+				return Ok(None);
+			};
+			let Some((ahead, behind)) = counts.split_once('\t') else {
+				return Err(Error::backend("git rev-list", "unexpected --count output"));
+			};
+			let ahead = ahead
+				.trim()
+				.parse()
+				.map_err(|err| Error::backend("git rev-list", err))?;
+			let behind = behind
+				.trim()
+				.parse()
+				.map_err(|err| Error::backend("git rev-list", err))?;
+			return Ok(Some((ahead, behind)));
+		}
+		let repo = self.gix()?;
+		let parse = |sha: &str| {
+			repo
+				.rev_parse_single(sha)
+				.map(|id| id.detach())
+				.map_err(|err| Error::backend("git rev-list", err))
+		};
+		let head_id = parse(&head)?;
+		let upstream_id = parse(&upstream)?;
+		let count = |tips: gix::ObjectId, hidden: gix::ObjectId| -> Result<u32> {
+			let mut n = 0u32;
+			for item in repo
+				.rev_walk([tips])
+				.with_hidden([hidden])
+				.all()
+				.map_err(|err| Error::backend("git rev-list", err))?
+			{
+				item.map_err(|err| Error::backend("git rev-list", err))?;
+				n = n.saturating_add(1);
+			}
+			Ok(n)
+		};
+		Ok(Some((count(head_id, upstream_id)?, count(upstream_id, head_id)?)))
+	}
+
+	/// Resolve the full ref name of `branch`'s configured upstream, from
+	/// `branch.<name>.remote` + `branch.<name>.merge`. A `.` remote tracks a
+	/// local branch; anything else maps to its remote-tracking ref.
+	fn upstream_ref(&self, branch: &str) -> Result<Option<String>> {
+		let Some(remote) = self.config_get(&format!("branch.{branch}.remote"))? else {
+			return Ok(None);
+		};
+		let Some(merge) = self.config_get(&format!("branch.{branch}.merge"))? else {
+			return Ok(None);
+		};
+		let Some(short) = merge.strip_prefix("refs/heads/") else {
+			return Ok(None);
+		};
+		if remote == "." {
+			return Ok(Some(format!("refs/heads/{short}")));
+		}
+		Ok(Some(format!("refs/remotes/{remote}/{short}")))
 	}
 
 	/// Read a scalar git config value.
@@ -1356,10 +1439,56 @@ mod tests {
 		let fallback = repo.status_porcelain_gix(&StatusOptions::default())?;
 		assert_eq!(fallback.as_bytes(), expected.as_bytes());
 		assert_eq!(repo.status_summary()?, StatusSummary {
-			staged:    2,
-			unstaged:  2,
+			staged: 2,
+			unstaged: 2,
 			untracked: 2,
+			..Default::default()
 		});
+		Ok(())
+	}
+
+	#[test]
+	fn status_summary_counts_upstream_divergence() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		// No upstream configured: counts stay absent, not zero.
+		assert_eq!(repo.status_summary()?.ahead, None);
+		assert_eq!(repo.ahead_behind()?, None);
+
+		let remote = tempfile::tempdir()?;
+		git(remote.path(), &["init", "--bare", "-b", "main"])?;
+		git(root, &["remote", "add", "origin", remote.path().to_str().unwrap()])?;
+		git(root, &["push", "-u", "origin", "main"])?;
+		// In sync with upstream.
+		assert_eq!(repo.ahead_behind()?, Some((0, 0)));
+
+		// Two local commits the remote does not have.
+		commit(root, "a1", "a1\n", "a1")?;
+		commit(root, "a2", "a2\n", "a2")?;
+		assert_eq!(repo.ahead_behind()?, Some((2, 0)));
+		assert_eq!(repo.status_summary()?.ahead, Some(2));
+
+		// The remote advances independently; after fetch we are only behind.
+		git(root, &["push", "origin", "main"])?;
+		let other = tempfile::tempdir()?;
+		git(other.path(), &["clone", remote.path().to_str().unwrap(), "."])?;
+		git(other.path(), &["config", "user.name", "Other"])?;
+		git(other.path(), &["config", "user.email", "other@example.com"])?;
+		commit(other.path(), "b1", "b1\n", "b1")?;
+		git(other.path(), &["push", "origin", "main"])?;
+		git(root, &["fetch", "origin"])?;
+		assert_eq!(repo.ahead_behind()?, Some((0, 1)));
+
+		// One more local commit: diverged both ways.
+		commit(root, "a3", "a3\n", "a3")?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 1)));
+
+		// A branch without upstream reports absence again, as does detached HEAD.
+		git(root, &["checkout", "-b", "local-only"])?;
+		assert_eq!(repo.ahead_behind()?, None);
+		git(root, &["checkout", "--detach", "HEAD"])?;
+		assert_eq!(repo.ahead_behind()?, None);
 		Ok(())
 	}
 

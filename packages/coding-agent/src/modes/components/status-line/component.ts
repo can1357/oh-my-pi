@@ -5,7 +5,7 @@ import {
 	getAntigravityCounterKeyForModel,
 	scopeAntigravityLimitsForModel,
 } from "@oh-my-pi/pi-ai/usage/google-antigravity";
-import type { VcsRepo } from "@oh-my-pi/pi-natives";
+import type { VcsRepo, VcsStatusSummary } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
@@ -446,7 +446,7 @@ export class StatusLineComponent implements Component {
 	#activeRepoCache: ActiveRepoCache | undefined;
 
 	// Git status caching (1s TTL)
-	#cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+	#cachedGitStatus: VcsStatusSummary | null = null;
 	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
 	#gitStatusInFlightCwd: string | undefined = undefined;
@@ -454,7 +454,7 @@ export class StatusLineComponent implements Component {
 	#jjBranchLastFetch = 0;
 	#jjResolveSeq = 0;
 	#jjBranchActive: JjResolveRequest | undefined = undefined;
-	#cachedJjStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+	#cachedJjStatus: VcsStatusSummary | null = null;
 	#jjStatusLastFetch = 0;
 	#jjStatusActive: JjResolveRequest | undefined = undefined;
 	// Bumped on every jj-cache reset — a cwd switch (#applyCwdChange) or a HEAD /
@@ -1132,11 +1132,7 @@ export class StatusLineComponent implements Component {
 		return branch === this.#defaultBranch;
 	}
 
-	#getStatus(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): {
-		staged: number;
-		unstaged: number;
-		untracked: number;
-	} | null {
+	#getStatus(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): VcsStatusSummary | null {
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = activeRepoCache.effectiveGitCwd;
@@ -1153,7 +1149,7 @@ export class StatusLineComponent implements Component {
 			this.#jjStatusActive = request;
 			const generation = this.#jjCacheGeneration;
 			(async () => {
-				let next: { staged: number; unstaged: number; untracked: number } | null = null;
+				let next: VcsStatusSummary | null = null;
 				try {
 					next = await repository.statusSummary(
 						withTimeoutSignal(JJ_COMMAND_TIMEOUT_MS, request.controller.signal),
@@ -1182,7 +1178,7 @@ export class StatusLineComponent implements Component {
 		this.#gitStatusInFlightCwd = gitCwd;
 
 		(async () => {
-			let nextStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+			let nextStatus: VcsStatusSummary | null = null;
 			try {
 				nextStatus = (await repository.statusSummary()) ?? null;
 			} catch {

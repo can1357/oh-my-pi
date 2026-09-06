@@ -584,6 +584,8 @@ export class Theme {
 			git: this.#symbols["icon.git"],
 			branch: this.#symbols["icon.branch"],
 			pr: this.#symbols["icon.pr"],
+			ahead: this.#symbols["icon.ahead"],
+			behind: this.#symbols["icon.behind"],
 			pin: this.#symbols["icon.pin"],
 			tokens: this.#symbols["icon.tokens"],
 			context: this.#symbols["icon.context"],

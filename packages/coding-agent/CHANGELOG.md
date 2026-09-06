@@ -5,6 +5,9 @@
 ### Fixed
 
 - Repeated soft compaction now includes messages retained by the previous pass instead of silently dropping them from model context.
+### Added
+
+- Added git upstream divergence counts (⇡ ahead / ⇣ behind) to the status line git segment, toggleable via `statusLine.segmentOptions.git.showAheadBehind`.
 
 ## [18.1.16] - 2026-09-09
 
