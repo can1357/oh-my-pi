@@ -757,7 +757,7 @@ describe("Cursor MCP task tool adapter", () => {
 
 		for (let i = 0; i < aliases.length; i++) {
 			const alias = aliases[i];
-			const result = await handlers.mcp({
+			const call: Parameters<CursorExecHandlers["mcp"]>[0] = {
 				name: alias,
 				providerIdentifier: "cursor",
 				toolName: alias,
@@ -767,12 +767,15 @@ describe("Cursor MCP task tool adapter", () => {
 					description: `Task-${alias}`,
 				},
 				rawArgs: {},
-			});
+			};
+			const result = await handlers.mcp(call);
 
 			expect(result.isError).toBe(false);
 			expect(executedCalls.length).toBe(i + 1);
 			expect(executedCalls[i].args.task).toBe(`Do work via ${alias}`);
 			expect(executedCalls[i].args.name).toBe(`Task-${alias}`);
+			expect(call.args.task).toBe(`Do work via ${alias}`);
+			expect(call.args.name).toBe(`Task-${alias}`);
 		}
 	});
 

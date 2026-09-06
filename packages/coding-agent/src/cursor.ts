@@ -970,7 +970,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 					const message = formatMcpToolErrorMessage(toolName, availableTools);
 					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
 				}
-				return await executeTool(this.options, targetToolName, toolCallId, normalizeCursorTaskArgs(args));
+				const normalizedArgs = normalizeCursorTaskArgs(args);
+				call.args = normalizedArgs;
+				return await executeTool(this.options, targetToolName, toolCallId, normalizedArgs);
 			}
 		}
 		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);

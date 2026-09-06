@@ -1979,9 +1979,15 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		expect(answer.value.result.case).toBe("success");
 	});
 
-	it("canonicalizes synthesized toolCall block name when handler returns a different canonical toolName", async () => {
+	it("canonicalizes synthesized toolCall block name and arguments when the handler adapts an alias", async () => {
 		const handlers: CursorExecHandlers = {
 			async mcp(call) {
+				call.args = {
+					...call.args,
+					task: call.args.prompt,
+					name: call.args.description,
+					agent: "scout",
+				};
 				return {
 					role: "toolResult",
 					toolCallId: call.toolCallId ?? "c3",
@@ -2001,6 +2007,11 @@ describe("Cursor MCP frame: approval-only probes", () => {
 					toolName: "Subagent",
 					toolCallId: "c3",
 					providerIdentifier: "cursor",
+					args: {
+						prompt: new TextEncoder().encode(JSON.stringify("Inspect auth")),
+						description: new TextEncoder().encode(JSON.stringify("AuthExplorer")),
+						subagent_type: new TextEncoder().encode(JSON.stringify("explore")),
+					},
 				}),
 			}),
 			{ execHandlers: handlers },
@@ -2013,6 +2024,7 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		const blocks = output.content.filter(block => block.type === "toolCall");
 		expect(blocks).toHaveLength(1);
 		expect(blocks[0].name).toBe("task");
+		expect(blocks[0].arguments).toMatchObject({ task: "Inspect auth", name: "AuthExplorer", agent: "scout" });
 	});
 });
 
