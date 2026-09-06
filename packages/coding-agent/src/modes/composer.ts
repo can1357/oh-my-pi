@@ -194,6 +194,12 @@ export class Composer implements TerminalFrameProvider {
 	#retiredHeaderStart = 0;
 	#resizeRetiredHeaderStart: number | undefined;
 	#lastNormalRows = 0;
+	// Smallest below-transcript chrome height (editor + status + any transient
+	// inline dialog) seen at the current terminal height. Retirement is billed
+	// against this persistent baseline, never the transient peak, so a dialog or
+	// tall editor that later shrinks never leaves committed transcript rows the
+	// live viewport cannot reclaim (#11007). Reset when the height changes.
+	#retirementBelowFloor: number | undefined;
 	#lastInterruptAt = 0;
 	#started = false;
 	#stopped = false;
@@ -256,6 +262,7 @@ export class Composer implements TerminalFrameProvider {
 			this.#retiredHeaderStart = this.#resizeRetiredHeaderStart;
 			this.#resizeRetiredHeaderStart = undefined;
 		}
+		if (rows !== this.#lastNormalRows) this.#retirementBelowFloor = undefined;
 		this.#lastNormalRows = rows;
 		const roots = this.#runtimeMounted
 			? [...this.#runtimeChildren, this.#statusHost]
@@ -271,7 +278,16 @@ export class Composer implements TerminalFrameProvider {
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
-		const history = this.#offerHistory(transcript, width, rows, preRoots.length + after.length);
+		//
+		// Retirement is billed against the persistent below-transcript chrome
+		// baseline, not the transient peak: a confirmation dialog or a tall
+		// multi-line editor swapped in below the transcript clips the live tail
+		// for its lifetime, but must not permanently commit transcript rows to
+		// native history — otherwise a later shrink cannot refill the freed rows
+		// and the editor drifts up above a band of blank rows (#11007).
+		this.#retirementBelowFloor =
+			this.#retirementBelowFloor === undefined ? after.length : Math.min(this.#retirementBelowFloor, after.length);
+		const history = this.#offerHistory(transcript, width, rows, preRoots.length + this.#retirementBelowFloor);
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];
 		const before = [...headerRows, ...preRoots];
