@@ -407,7 +407,7 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 		if (sessionChanges.size !== 0 || cwdChanges.size !== 0 || titleChanges.size !== 0) {
 			throw new Error("live session registration callbacks remained subscribed after close");
 		}
-		await waitForSmokeSessions(clientB, sessions => sessions.length === 0, "closed live session remained registered");
+		await waitForSmokeSessions(clientA, sessions => sessions.length === 0, "closed live session remained registered");
 	} finally {
 		await registration?.close().catch(() => undefined);
 		await Promise.all([
