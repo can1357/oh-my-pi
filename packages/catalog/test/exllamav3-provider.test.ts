@@ -70,6 +70,47 @@ describe("ExLlamaV3 (TabbyAPI) provider discovery", () => {
 		expect(models?.find(model => model.id === "qwen2.5-coder-7b")?.reasoning).toBe(false);
 	});
 
+	test("recovers when the loaded model changes between the card and list requests", async () => {
+		// TabbyAPI reloads A → B after discovery fetched A's card: the first
+		// pass filters everything out, and an authoritative empty result would
+		// prune the catalog even though B is servable.
+		let modelCardCalls = 0;
+		const fetchMock: FetchImpl = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.endsWith("/models")) {
+				return jsonResponse({ data: [{ id: "GLM-5.2-exl3", object: "model", parameters: null }] });
+			}
+			modelCardCalls++;
+			return jsonResponse({
+				id: modelCardCalls === 1 ? "Qwen3.8-Flash-Next-exl3" : "GLM-5.2-exl3",
+				parameters: { max_seq_len: modelCardCalls === 1 ? 262_144 : 131_072, use_vision: false },
+			});
+		}) as FetchImpl;
+
+		const models = await exllamav3ModelManagerOptions({ baseUrl: BASE_URL, fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(modelCardCalls).toBe(2);
+		expect(models?.map(model => model.id)).toEqual(["GLM-5.2-exl3"]);
+		expect(models?.[0]?.contextWindow).toBe(131_072);
+	});
+
+	test("keeps the advertised list when the card persistently names a reloaded-away model", async () => {
+		const fetchMock: FetchImpl = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.endsWith("/models")) {
+				return jsonResponse({
+					data: [{ id: "GLM-5.2-exl3", object: "model", parameters: { max_seq_len: 131_072 } }],
+				});
+			}
+			return jsonResponse({ id: "Qwen3.8-Flash-Next-exl3", parameters: { max_seq_len: 262_144 } });
+		}) as FetchImpl;
+
+		const models = await exllamav3ModelManagerOptions({ baseUrl: BASE_URL, fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.map(model => model.id)).toEqual(["GLM-5.2-exl3"]);
+		expect(models?.[0]?.contextWindow).toBe(131_072);
+	});
+
 	test("routes thinking through the flat enable_thinking dialect like llama.cpp", () => {
 		// TabbyAPI accepts top-level enable_thinking / reasoning_effort
 		// directly (forwarded into the chat template), so exllamav3 rides the

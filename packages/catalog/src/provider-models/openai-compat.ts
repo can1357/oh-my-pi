@@ -6083,41 +6083,63 @@ export function exllamav3ModelManagerOptions(
 		// B under A's id.
 		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: async () => {
-			const loadedCard = await fetchExllamav3LoadedModelCard(baseUrl, apiKey, discoveryFetch(config?.fetch));
-			return fetchOpenAICompatibleModels({
-				api: "openai-completions",
-				provider: "exllamav3",
-				baseUrl,
-				apiKey,
-				mapModel: (entry, defaults) => {
-					// TabbyAPI serves exactly the loaded model. When the card is
-					// reachable, drop the unloaded directory entries and dummy ids an
-					// admin key enumerates — any other id silently generates on the
-					// loaded model.
-					if (loadedCard && entry.id !== loadedCard.id) return null;
-					// Future-proofing: some TabbyAPI forks populate parameters on the
-					// list entries themselves.
-					const entryParameters = isRecord(entry.parameters) ? entry.parameters : undefined;
-					const entryMaxSeqLen =
-						entryParameters === undefined ? null : toPositiveNumber(entryParameters.max_seq_len, null);
-					const contextWindow = loadedCard?.contextWindow ?? entryMaxSeqLen ?? defaults.contextWindow;
-					const identity = classifyModel("exllamav3", defaults.id, { lenient: true });
-					return {
-						...defaults,
-						...(contextWindow === null ? {} : { contextWindow }),
-						...(loadedCard ? { input: [...loadedCard.inputs] } : {}),
-						// TabbyAPI reports no capability metadata on /v1/models. Qwen 3.8+
-						// open weights always think (the template cannot disable it), so
-						// light up the effort dial; buildModel derives the template
-						// ladder from the id + local-backend compat.
-						reasoning:
-							defaults.reasoning || (identity.class === "qwen" && revisionAtLeast(identity.revision, "3.8")),
-					};
-				},
-				fetch: config?.fetch,
-				timeoutMs: DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
-			});
+			const fetchImpl = discoveryFetch(config?.fetch);
+			const discover = (loadedCard: Exllamav3LoadedModelCard | null) =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "exllamav3",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => mapExllamav3Model(entry, defaults, loadedCard),
+					fetch: config?.fetch,
+					timeoutMs: DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+				});
+			const loadedCard = await fetchExllamav3LoadedModelCard(baseUrl, apiKey, fetchImpl);
+			const models = await discover(loadedCard);
+			if (!loadedCard || models === null || models.length > 0) {
+				return models;
+			}
+			// TabbyAPI can reload models between the card request and the list
+			// request, leaving the card naming a model the list no longer contains.
+			// This manager is authoritative, so returning the emptied result would
+			// prune the catalog even though the newly loaded model is servable —
+			// revalidate both requests once before giving up on enrichment.
+			const revalidatedCard = await fetchExllamav3LoadedModelCard(baseUrl, apiKey, fetchImpl);
+			const revalidated = await discover(revalidatedCard);
+			if (revalidated !== null && (revalidated.length > 0 || revalidatedCard === null)) {
+				return revalidated;
+			}
+			// Persistent mismatch (reload storm, admin-key directory churn): keep
+			// the advertised list rather than an authoritative empty catalog.
+			return discover(null);
 		},
+	};
+}
+
+function mapExllamav3Model(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	loadedCard: Exllamav3LoadedModelCard | null,
+): ModelSpec<"openai-completions"> | null {
+	// TabbyAPI serves exactly the loaded model. When the card is reachable,
+	// drop the unloaded directory entries and dummy ids an admin key
+	// enumerates — any other id silently generates on the loaded model.
+	if (loadedCard && entry.id !== loadedCard.id) return null;
+	// Future-proofing: some TabbyAPI forks populate parameters on the list
+	// entries themselves.
+	const entryParameters = isRecord(entry.parameters) ? entry.parameters : undefined;
+	const entryMaxSeqLen = entryParameters === undefined ? null : toPositiveNumber(entryParameters.max_seq_len, null);
+	const contextWindow = loadedCard?.contextWindow ?? entryMaxSeqLen ?? defaults.contextWindow;
+	const identity = classifyModel("exllamav3", defaults.id, { lenient: true });
+	return {
+		...defaults,
+		...(contextWindow === null ? {} : { contextWindow }),
+		...(loadedCard ? { input: [...loadedCard.inputs] } : {}),
+		// TabbyAPI reports no capability metadata on /v1/models. Qwen 3.8+ open
+		// weights always think (the template cannot disable it), so light up the
+		// effort dial; buildModel derives the template ladder from the id +
+		// local-backend compat.
+		reasoning: defaults.reasoning || (identity.class === "qwen" && revisionAtLeast(identity.revision, "3.8")),
 	};
 }
 
