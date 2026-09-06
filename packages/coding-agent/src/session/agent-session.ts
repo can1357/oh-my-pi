@@ -38,6 +38,7 @@ import {
 	type BeforeToolCallResult,
 	EventLoopKeepalive,
 	resolveTelemetry,
+	STEERING_MESSAGE_IMMEDIATE,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	type ThinkingLevel,
@@ -834,11 +835,15 @@ export class AgentSession {
 		}
 	}
 
+	#preserveSettledDeferredAdvice(): void {
+		this.#advisors.preserveDeferredAdviceAfterSettle();
+	}
 	#endInFlight(onSettled?: () => void | Promise<void>): void {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
+		this.#preserveSettledDeferredAdvice();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
@@ -1073,6 +1078,7 @@ export class AgentSession {
 	#resetInFlight(): void {
 		this.#promptInFlightCount = 0;
 		this.yieldQueue.requestIdleFlush();
+		this.#preserveSettledDeferredAdvice();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
@@ -1672,6 +1678,7 @@ export class AgentSession {
 			onSseEvent: this.#onSseEvent,
 			isDisposed: () => this.#isDisposed,
 			abortInProgress: () => this.#abortInProgress,
+			isAgentConnected: () => this.#unsubscribeAgent !== undefined,
 			allowAgentInitiatedTurns: () => this.#allowAcpAgentInitiatedTurns,
 			planModeState: () => this.#planModeState,
 			clientBridge: () => this.#clientBridge,
@@ -4238,6 +4245,7 @@ export class AgentSession {
 	#reconnectToAgent(): void {
 		if (this.#unsubscribeAgent) return; // Already connected
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
+		this.#preserveSettledDeferredAdvice();
 	}
 
 	#activeProviderSessionId(sessionId?: string): string {
@@ -7005,6 +7013,7 @@ export class AgentSession {
 			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
+			immediateInterrupt?: boolean;
 		},
 	): Promise<boolean> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
@@ -7030,6 +7039,9 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (options?.immediateInterrupt) {
+			Object.defineProperty(normalizedAppMessage, STEERING_MESSAGE_IMMEDIATE, { value: true });
+		}
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);
@@ -7485,7 +7497,9 @@ export class AgentSession {
 		// Pull advisor concerns out of the steer/follow-up queues before any await so
 		// the post-abort stranded-message drain can't auto-resume the run on them.
 		// They are re-recorded as visible advice once the agent settles (below).
-		const strandedAdvisorCards = userInterrupt ? this.#extractQueuedAdvisorCards() : [];
+		const strandedAdvisorCards = userInterrupt
+			? [...this.#extractQueuedAdvisorCards(), ...this.#advisors.drainDeferredAdvice()]
+			: [];
 		// Session switch/compact paths disconnect first; explicit aborts should
 		// leave any queued steer/follow-up visible for the user rather than
 		// auto-starting a fresh turn during cleanup.

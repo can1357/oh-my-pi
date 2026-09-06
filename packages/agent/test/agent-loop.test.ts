@@ -1851,6 +1851,56 @@ describe("agentLoop with AgentMessage", () => {
 		expect(advisorInjected).toBe(true);
 	});
 
+	it("marked advisor steering interrupts even when global interrupt mode waits", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			concurrency: "exclusive",
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		let delivered = false;
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+						{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "wait",
+			hasSteeringMessages: () =>
+				executed.length >= 1 && !delivered
+					? { queued: true, source: "system", immediate: true }
+					: { queued: false },
+			getSteeringMessages: async () => {
+				if (executed.length < 1 || delivered) return [];
+				delivered = true;
+				return [createUserMessage("immediate advisor")];
+			},
+		};
+
+		for await (const _event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			// drain
+		}
+
+		expect(executed).toEqual(["first"]);
+		expect(delivered).toBe(true);
+	});
+
 	it("drains queued steering by aborting an interruptible tool mid-wait", async () => {
 		const toolSchema = type({});
 		let steerReady = false;

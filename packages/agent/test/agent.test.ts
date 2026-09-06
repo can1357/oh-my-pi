@@ -1,6 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, AgentBusyError, type AgentEvent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	AgentBusyError,
+	type AgentEvent,
+	type AgentMessage,
+	type AgentTool,
+	STEERING_MESSAGE_IMMEDIATE,
+	ThinkingLevel,
+} from "@oh-my-pi/pi-agent-core";
 import type { SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -153,6 +161,193 @@ describe("Agent", () => {
 		if (skippedContent?.type !== "text") throw new Error("skipped tool result must be text");
 		expect(skippedContent.text).toContain("Skipped due to queued user message");
 		expect(skippedContent.text).not.toContain("pending system advisory");
+	});
+
+	it("finds an immediate advisor steer behind ordinary steering in all mode", async () => {
+		const toolSchema = type({ value: type("string") });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			concurrency: "exclusive",
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				if (params.value === "first") {
+					agent.steer(createUserMessage("ordinary steer"));
+					const advisor = createUserMessage("immediate advisor") as AgentMessage & {
+						[STEERING_MESSAGE_IMMEDIATE]?: boolean;
+					};
+					advisor[STEERING_MESSAGE_IMMEDIATE] = true;
+					agent.steer(advisor);
+				}
+				return { content: [{ type: "text", text: params.value }], details: params };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+						{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			steeringMode: "all",
+			interruptMode: "wait",
+		});
+
+		await agent.prompt("start");
+
+		expect(executed).toEqual(["first"]);
+	});
+
+	it("global wait mode does not spin on an ordinary queued steer", async () => {
+		const toolSchema = type({});
+		const release = Promise.withResolvers<void>();
+		let started = false;
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait tool",
+			parameters: toolSchema,
+			async execute() {
+				started = true;
+				agent.steer(createUserMessage("ordinary steer"));
+				await release.promise;
+				return { content: [{ type: "text", text: "done" }], details: {} };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			interruptMode: "wait",
+		});
+
+		const running = agent.prompt("start");
+		while (!started) await Bun.sleep(0);
+		await Bun.sleep(10);
+		release.resolve();
+		await running;
+
+		expect(agent.peekSteeringQueue()).toEqual([]);
+	});
+
+	it("one-at-a-time wait mode does not wake for an immediate steer behind an ordinary steer", async () => {
+		const toolSchema = type({});
+		const release = Promise.withResolvers<void>();
+		let started = false;
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait tool",
+			parameters: toolSchema,
+			async execute() {
+				started = true;
+				agent.steer(createUserMessage("ordinary steer"));
+				const advisor = createUserMessage("immediate advisor") as AgentMessage & {
+					[STEERING_MESSAGE_IMMEDIATE]?: boolean;
+				};
+				advisor[STEERING_MESSAGE_IMMEDIATE] = true;
+				agent.steer(advisor);
+				await release.promise;
+				return { content: [{ type: "text", text: "done" }], details: {} };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["ordinary handled"] },
+				{ content: ["advisor handled"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			steeringMode: "one-at-a-time",
+			interruptMode: "wait",
+		});
+
+		const running = agent.prompt("start");
+		while (!started) await Bun.sleep(0);
+		await Bun.sleep(10);
+		release.resolve();
+		await running;
+
+		expect(agent.peekSteeringQueue()).toEqual([]);
+	});
+
+	it("wakes immediate steering when one-at-a-time mode widens to all", async () => {
+		const toolSchema = type({});
+		const started = Promise.withResolvers<void>();
+		let observedAbort = false;
+		let resolvedByTimeout = false;
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait tool",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				if (!signal) throw new Error("missing tool abort signal");
+				started.resolve();
+				const { promise, resolve } = Promise.withResolvers<void>();
+				const timer = setTimeout(() => {
+					resolvedByTimeout = true;
+					resolve();
+				}, 500);
+				signal.addEventListener(
+					"abort",
+					() => {
+						clearTimeout(timer);
+						resolve();
+					},
+					{ once: true },
+				);
+				await promise;
+				observedAbort = signal.aborted;
+				return { content: [{ type: "text", text: "done" }], details: {} };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["done"] },
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			steeringMode: "one-at-a-time",
+			interruptMode: "wait",
+		});
+
+		const running = agent.prompt("start");
+		await started.promise;
+		agent.steer(createUserMessage("ordinary steer"));
+		const advisor = createUserMessage("immediate advisor") as AgentMessage & {
+			[STEERING_MESSAGE_IMMEDIATE]?: boolean;
+		};
+		advisor[STEERING_MESSAGE_IMMEDIATE] = true;
+		agent.steer(advisor);
+		agent.setSteeringMode("all");
+		await running;
+
+		expect(observedAbort).toBe(true);
+		expect(resolvedByTimeout).toBe(false);
 	});
 	it("continue() re-executes a trailing assistant's unpaired tool calls before the next model call", async () => {
 		const toolSchema = type({ value: type("string") });

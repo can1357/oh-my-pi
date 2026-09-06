@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -321,6 +321,115 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		// compact()'s finally re-drained the stranded queue after reconnecting.
 		expect(continueSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("preserves a deferred concern after manual compaction reconnects", async () => {
+		session.settings.set("compaction.keepRecentTokens", 1);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		type DeferredAdvice = {
+			note: string;
+			severity: "concern" | "blocker";
+			deferredInterrupt: true;
+		};
+		session.yieldQueue.register<DeferredAdvice>("advisor", {
+			build: entries =>
+				({
+					role: "custom",
+					customType: "advisor",
+					content: entries.map(entry => entry.note).join("\n"),
+					display: true,
+					attribution: "agent",
+					details: { notes: entries },
+					timestamp: Date.now(),
+				}) as AgentMessage,
+			skipIdleFlush: true,
+		});
+		const persisted: string[] = [];
+		sessionManager.onEntryAppended = entry => {
+			if (entry.type === "custom_message" && entry.customType === "advisor") {
+				persisted.push(typeof entry.content === "string" ? entry.content : JSON.stringify(entry.content));
+			}
+		};
+		session.yieldQueue.enqueue("advisor", {
+			note: "deferred concern during compact",
+			severity: "concern",
+			deferredInterrupt: true,
+		});
+
+		await session.compact();
+		await session.waitForIdle();
+
+		expect(persisted).toEqual([expect.stringContaining("deferred concern during compact")]);
+		expect(session.yieldQueue.has("advisor")).toBe(false);
+	});
+
+	it("restarts after manual compaction to acknowledge a deferred blocker", async () => {
+		session.settings.set("compaction.keepRecentTokens", 1);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.yieldQueue.register<{ note: string; severity: "blocker"; deferredInterrupt: true }>("advisor", {
+			build: entries =>
+				({
+					role: "custom",
+					customType: "advisor",
+					content: entries.map(entry => entry.note).join("\n"),
+					display: true,
+					attribution: "agent",
+					details: { notes: entries },
+					timestamp: Date.now(),
+				}) as AgentMessage,
+			skipIdleFlush: true,
+		});
+		const sendCustomMessage = vi.spyOn(session, "sendCustomMessage").mockResolvedValue(false);
+		session.yieldQueue.enqueue("advisor", {
+			note: "deferred blocker during compact",
+			severity: "blocker",
+			deferredInterrupt: true,
+		});
+
+		await session.compact();
+		await Promise.resolve();
+
+		expect(sendCustomMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				customType: "advisor",
+				content: expect.stringContaining("deferred blocker during compact"),
+			}),
+			expect.objectContaining({ deliverAs: "steer", triggerTurn: true }),
+		);
+		expect(session.agent.state.messages.some(message => message.role === "custom")).toBe(false);
+		expect(session.yieldQueue.has("advisor")).toBe(false);
 	});
 
 	it("cancels an in-flight auto-compaction when manual compact startup aborts", async () => {
