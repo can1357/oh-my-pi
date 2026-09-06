@@ -84,6 +84,9 @@
 - Removed the librarian agent.
 
 ## [18.1.8] - 2026-09-03
+### Added
+
+- Added a read-only `omp session-stats <session-id | previous | path>` CLI that prints the lifetime token and cost totals of a persisted session's active branch from its JSONL transcript (branch-only: off-branch forks excluded; deliberately broader than the live context-window-scoped `session_stats` surface, which resets after compaction).
 
 ### Fixed
 
