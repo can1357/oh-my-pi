@@ -3240,7 +3240,7 @@ export class RelayBridge {
 					const navigationNeedsInvocation =
 						navigationDuringRegistration ||
 						tab.mainFrameNavigationGeneration !== navigationGenerationBeforeRegistration;
-					const clean = (await this.#rpc({
+					const guarded = (await this.#rpc({
 						op: "send",
 						tabId: tab.tabId,
 						method: "Page.addScriptToEvaluateOnNewDocument",
@@ -3250,18 +3250,37 @@ export class RelayBridge {
 							runImmediately: navigationNeedsInvocation && !appliedToCurrentDocument,
 						},
 					})) as Record<string, unknown> | undefined;
-					if (typeof clean?.identifier !== "string") {
+					if (typeof guarded?.identifier !== "string") {
 						throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
 					}
-					rootIdentifier = clean.identifier;
+					// The overlap guard necessarily puts top-level lexical declarations in
+					// a block. Keep it only for the marker-bearing handoff, then restore the
+					// client's byte-for-byte source so later documents retain their original
+					// global lexical bindings.
+					const lasting = (await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						method: "Page.addScriptToEvaluateOnNewDocument",
+						params: { ...originalParams, source: originalParams.source, runImmediately: false },
+					})) as Record<string, unknown> | undefined;
+					if (typeof lasting?.identifier !== "string") {
+						throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
+					}
+					rootIdentifier = lasting.identifier;
+					await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						method: "Page.removeScriptToEvaluateOnNewDocument",
+						params: { identifier: guarded.identifier },
+					});
 					await this.#rpc({
 						op: "send",
 						tabId: tab.tabId,
 						method: "Page.removeScriptToEvaluateOnNewDocument",
 						params: { identifier },
 					});
-					// A navigation during the brief overlap can leave the temporary marker
-					// in its new document. Delete it after the marker registration is gone.
+					// A navigation during either overlap can leave the temporary marker in
+					// its new document. Delete it after the marker registration is gone.
 					await this.#preloadApplicationMarker(tab.tabId, applicationMarker, originalParams.worldName);
 				} catch (err) {
 					if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;

@@ -3297,7 +3297,7 @@ describe("RelayBridge tab grouping", () => {
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
-		const source = "this.__preloadRuns = (this.__preloadRuns ?? 0) + 1;";
+		const source = "let relayValue = 1; class RelayValue {}; this.__preloadRuns = (this.__preloadRuns ?? 0) + 1;";
 
 		bridge.cdpMessage(
 			connId,
@@ -3329,24 +3329,35 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		ack(bridge, ext2, "send", { result: { value: true } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		const lasting = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
-		expect(lasting?.params).toMatchObject({ runImmediately: false });
+		const guarded = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(guarded?.params).toMatchObject({ runImmediately: false });
 		const markedSource = (marked?.params as { source?: string } | undefined)?.source;
-		const lastingSource = (lasting?.params as { source?: string } | undefined)?.source;
+		const guardedSource = (guarded?.params as { source?: string } | undefined)?.source;
 		const overlapDocument: Record<string, unknown> = {};
 		vm.runInNewContext(markedSource!, overlapDocument);
-		vm.runInNewContext(lastingSource!, overlapDocument);
+		vm.runInNewContext(guardedSource!, overlapDocument);
 		expect(overlapDocument.__preloadRuns).toBe(1);
 		expect(Object.keys(overlapDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
-		ack(bridge, ext2, "send", { identifier: "root-script-clean" });
+		ack(bridge, ext2, "send", { identifier: "root-script-guarded" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		const lasting = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(lasting?.params).toEqual({ source, runImmediately: false });
+		ack(bridge, ext2, "send", { identifier: "root-script-lasting" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		ack(bridge, ext2, "send", { result: { value: false } });
+		const lastingSource = (lasting?.params as { source?: string } | undefined)?.source;
+		expect(lastingSource).toBe(source);
 		const laterDocument: Record<string, unknown> = {};
 		laterDocument.window = laterDocument;
-		vm.runInNewContext(lastingSource!, laterDocument);
+		vm.createContext(laterDocument);
+		vm.runInContext(lastingSource ?? "", laterDocument);
 		expect(laterDocument.__preloadRuns).toBe(1);
+		expect(vm.runInContext("relayValue", laterDocument)).toBe(1);
+		expect(vm.runInContext("typeof RelayValue", laterDocument)).toBe("function");
 		expect(Object.keys(laterDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 	});
 
@@ -3562,7 +3573,11 @@ describe("RelayBridge tab grouping", () => {
 		laterDocument.window = laterDocument;
 		vm.runInNewContext(cleanSource!, laterDocument);
 		expect(laterDocument.__relayInjected).toBe(true);
-		ack(bridge, ext2, "send", { identifier: "root-script-clean" });
+		ack(bridge, ext2, "send", { identifier: "root-script-guarded" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send", { identifier: "root-script-lasting" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
@@ -3572,9 +3587,9 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toHaveLength(
-			1,
+			2,
 		);
-		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(2);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(3);
 	});
 
 	it("rechecks a navigation preload after removal before invoking it immediately", async () => {
@@ -3720,7 +3735,11 @@ describe("RelayBridge tab grouping", () => {
 		laterDocument.window = laterDocument;
 		vm.runInNewContext(cleanSource!, laterDocument);
 		expect(laterDocument.__relayInjected).toBe(true);
-		ack(bridge, ext2, "send", { identifier: "root-script-clean" });
+		ack(bridge, ext2, "send", { identifier: "root-script-guarded" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send", { identifier: "root-script-lasting" });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
@@ -3730,9 +3749,9 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toHaveLength(
-			1,
+			2,
 		);
-		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(2);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(3);
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toContain("Page.disable");
 	});
 
