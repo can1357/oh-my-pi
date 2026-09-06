@@ -152,7 +152,14 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		// `encrypted_content`, server-validated on replay — atomic like signed blocks.
 		const encryptedReasoning =
 			obj.type === "reasoning" && "encrypted_content" in obj && isNonEmptyString(obj.encrypted_content);
-		if (signed || redacted || encryptedReasoning) return obj;
+		// Codex private history/notes payloads are ciphertext only the inference
+		// side can decrypt, and the notes protocol allows files up to 1,000,000
+		// UTF-8 bytes. Truncating the result block — or the encrypted arguments a
+		// model-only call carries — makes the value undecryptable on resume, so
+		// both persist verbatim.
+		const encryptedResult = obj.type === "encrypted" && "encryptedContent" in obj;
+		const modelOnlyCall = obj.type === "toolCall" && "modelOnly" in obj && obj.modelOnly === true;
+		if (signed || redacted || encryptedReasoning || encryptedResult || modelOnlyCall) return obj;
 	}
 
 	if (typeof obj === "string") {
@@ -164,7 +171,13 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 			// verbatim, but if one is reached here (unknown carrier shape), preserve it —
 			// truncation produces an invalid signature the API rejects, and clearing
 			// drops reasoning context the provider needs on replay.
-			if (key === "thinkingSignature" || key === "thoughtSignature" || key === "textSignature") {
+			if (
+				key === "thinkingSignature" ||
+				key === "thoughtSignature" ||
+				key === "textSignature" ||
+				key === "encryptedContent" ||
+				key === "encrypted_content"
+			) {
 				return obj;
 			}
 			const limit = Math.max(0, MAX_PERSIST_CHARS - TRUNCATION_NOTICE.length);
