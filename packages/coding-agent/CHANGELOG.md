@@ -18,6 +18,7 @@
 ### Fixed
 
 - Fixed fullscreen `/copy` outlining only a lazily created grouped Read card, so Enter copies the assistant yield instead of tool output.
+- Fixed `details.truncation.lastLinePartial` reporting `false` when an oversized first line was delivered as a byte-capped preview window ([#10774](https://github.com/can1357/oh-my-pi/issues/10774)).
 
 ## [18.1.11] - 2026-09-05
 
