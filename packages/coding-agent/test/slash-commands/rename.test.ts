@@ -216,3 +216,33 @@ it("releases the RPC command while title inference runs in the background and pr
 		await backgroundTask;
 	}
 });
+
+it.each([true, false])("keeps the latest RPC rename request when older finishes first: %s", async olderFirst => {
+	const { session, sessionManager, runtime } = createRuntime("headless");
+	await sessionManager.setSessionName("Original title", "user");
+	const responses = [Promise.withResolvers<string | null>(), Promise.withResolvers<string | null>()];
+	const generate = vi
+		.spyOn(tinyTitleClient, "generate")
+		.mockImplementationOnce(() => responses[0].promise)
+		.mockImplementationOnce(() => responses[1].promise);
+	const pending: Promise<void>[] = [];
+	runtime.runCommandInBackground = task => {
+		pending.push(task());
+	};
+	try {
+		await executeAcpBuiltinSlashCommand("/rename", runtime);
+		await executeAcpBuiltinSlashCommand("/rename", runtime);
+		expect(generate).toHaveBeenCalledTimes(2);
+		const first = olderFirst ? 0 : 1;
+		const titles = ["Stale generated title", "Latest generated title"];
+		responses[first].resolve(titles[first]);
+		await pending[first];
+		expect(session.sessionName).toBe(olderFirst ? "Original title" : titles[1]);
+		responses[1 - first].resolve(titles[1 - first]);
+		await pending[1 - first];
+		expect(session.sessionName).toBe(titles[1]);
+	} finally {
+		for (const response of responses) response.resolve(null);
+		await Promise.all(pending);
+	}
+});

@@ -2195,9 +2195,14 @@ export class SessionManager {
 		return this.#titleSource;
 	}
 
-	/** Changes synchronously on every accepted rename, including reassertions of the same title. */
+	/** Changes synchronously when generation starts or a rename is accepted. */
 	get titleRevision(): number {
 		return this.#titleRevision;
+	}
+
+	/** Invalidate older generated renames before starting a new request. */
+	reserveTitleRevision(): number {
+		return ++this.#titleRevision;
 	}
 
 	getSessionName(): string | undefined {

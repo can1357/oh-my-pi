@@ -38,11 +38,11 @@ function formatFreshSessionResult(result: FreshSessionResult): string {
 }
 
 async function generateRenameTitle(session: AgentSession): Promise<string | null> {
+	const { sessionManager } = session;
+	const revision = sessionManager.reserveTitleRevision();
 	const context = buildReplanTitleContext(session.messages);
 	if (!context) return null;
-	const { sessionManager } = session;
 	const sessionId = sessionManager.getSessionId();
-	const revision = sessionManager.titleRevision;
 	const title = await session.generateTitle(context);
 	return sessionManager.getSessionId() === sessionId && sessionManager.titleRevision === revision ? title : null;
 }
