@@ -993,28 +993,28 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				return await executeTool(this.options, route.toolName, toolCallId, args, route.tool);
 			}
 
+			const normalizedArgs = normalizeCursorTaskArgs(args);
+			call.args = normalizedArgs;
 			const resumeId = getCursorTaskResumeId(args);
 			if (resumeId) {
 				const message = `Resuming subagents via task.resume ("${resumeId}") is not supported. Use the \`hub\` tool to message and resume existing subagents.`;
-				return rejectToolCall(this.options, toolName, toolCallId, message);
+				return rejectToolCall(this.options, route.toolName, toolCallId, message);
 			}
 			const unsupportedModel = getCursorTaskUnsupportedModel(args);
 			if (unsupportedModel) {
 				const message = `Explicit subagent model override via task.model ("${unsupportedModel}") is not supported. Subagents use the model configured for their agent role.`;
-				return rejectToolCall(this.options, toolName, toolCallId, message);
+				return rejectToolCall(this.options, route.toolName, toolCallId, message);
 			}
 			const unsupportedSubagentType = getCursorTaskUnsupportedSubagentType(args);
 			if (unsupportedSubagentType) {
 				const message = `Cursor subagent type "${unsupportedSubagentType}" is not supported by OMP task delegation.`;
-				return rejectToolCall(this.options, toolName, toolCallId, message);
+				return rejectToolCall(this.options, route.toolName, toolCallId, message);
 			}
 			if (!route.tool) {
 				const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
 				const message = formatMcpToolErrorMessage(toolName, availableTools);
 				return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
 			}
-			const normalizedArgs = normalizeCursorTaskArgs(args);
-			call.args = normalizedArgs;
 			return await executeTool(this.options, route.toolName, toolCallId, normalizedArgs, route.tool);
 		}
 		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);

@@ -776,9 +776,9 @@ describe("Cursor MCP task tool adapter", () => {
 			expect(result.isError).toBe(false);
 			expect(executedCalls.length).toBe(i + 1);
 			expect(executedCalls[i].args.task).toBe(`Do work via ${alias}`);
-			expect(executedCalls[i].args.name).toBe(`Task-${alias}`);
+			expect(executedCalls[i].args.name).toBeUndefined();
 			expect(call.args.task).toBe(`Do work via ${alias}`);
-			expect(call.args.name).toBe(`Task-${alias}`);
+			expect(call.args.name).toBeUndefined();
 		}
 	});
 
@@ -806,7 +806,7 @@ describe("Cursor MCP task tool adapter", () => {
 		expect(result.isError).toBe(false);
 		expect(executedCalls.length).toBe(1);
 		expect(executedCalls[0].args.task).toBe("Explore auth subsystem");
-		expect(executedCalls[0].args.name).toBe("AuthExplorer");
+		expect(executedCalls[0].args.name).toBeUndefined();
 		expect(executedCalls[0].args.agent).toBe("scout");
 	});
 
@@ -1199,19 +1199,22 @@ describe("Cursor MCP task tool adapter", () => {
 				emitEvent: event => events.push(event),
 			});
 			const toolCallId = `reject-${testCase.id}`;
-			const result = await handlers.mcp({
+			const call: Parameters<CursorExecHandlers["mcp"]>[0] = {
 				name: "Subagent",
 				providerIdentifier: "cursor",
 				toolName: "Subagent",
 				toolCallId,
 				args: testCase.args,
 				rawArgs: {},
-			});
+			};
+			const result = await handlers.mcp(call);
 
 			expect(result.isError).toBe(true);
+			expect(result.toolName).toBe("task");
+			expect(call.args.task).toBe(testCase.args.prompt);
 			expect(events.filter(event => event.type === "tool_execution_start")).toHaveLength(0);
 			const end = events.find(event => event.type === "tool_execution_end");
-			expect(end).toMatchObject({ type: "tool_execution_end", toolCallId, toolName: "Subagent", isError: true });
+			expect(end).toMatchObject({ type: "tool_execution_end", toolCallId, toolName: "task", isError: true });
 		}
 		expect(executedCalls).toHaveLength(0);
 	});
