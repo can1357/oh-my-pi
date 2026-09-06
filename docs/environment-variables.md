@@ -201,7 +201,7 @@ Sand InferenceService — not Cursor AgentService, not xAI. One-shot commands an
 | `GROKBOT_MACHINE_ID`             | Required for `x-cursor-checksum` on discovery and stream.                                                   |
 | `GROKBOT_NAMESPACE`              | `prod` (default), `dev`, or `lab`. Selects the sand client-version suffix.                                  |
 | `GROKBOT_CLIENT_VERSION`         | Override for `x-cursor-client-version` (sent as-is).                                                        |
-| `GROKBOT_ANTHROPIC_TOOLS_WIRE`   | Anthropic+tools policy: `auto` (default, keep-model), `keep-model`, `automation`, `parent-chat`, `sand-default-fallback`, `error`. |
+| `GROKBOT_ANTHROPIC_TOOLS_WIRE`   | Anthropic+tools policy: `auto` (default, keep-model; native families report `native`), `keep-model`, `automation`, `parent-chat`, `native`, `sand-default-fallback`, `error`. |
 
 ### Amazon Bedrock
 

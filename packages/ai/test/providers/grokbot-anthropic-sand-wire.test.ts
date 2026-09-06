@@ -40,6 +40,12 @@ describe("anthropic sand tool wire", () => {
 			tools,
 			modelId: "grok-4.6",
 		});
+		expect(applyAnthropicSandToolWire({ requestedModel, tools, modelId: "grok-4.6" }, "native")).toEqual({
+			requestedModel,
+			tools,
+			modelId: "grok-4.6",
+			wireMode: "native",
+		});
 	});
 
 	test("throws on explicit anthropic id with field-2 tools when wire is error", () => {
@@ -105,7 +111,7 @@ describe("anthropic sand tool wire", () => {
 				modelId: "grok-4.6",
 				toolCount: 2,
 			}),
-		).toBe("error");
+		).toBe("native");
 		// Router wire mode comes from catalog `sand-tools-wire`, not id compares.
 		expect(
 			resolveAnthropicSandToolsWire(undefined, undefined, {
@@ -126,7 +132,7 @@ describe("anthropic sand tool wire", () => {
 				modelId: "sand-default",
 				toolCount: 2,
 			}),
-		).toBe("error");
+		).toBe("native");
 	});
 
 	test("keep-model keeps anthropic requestedModel and maps product tools", () => {
@@ -219,6 +225,7 @@ describe("anthropic sand tool wire", () => {
 		expect(resolveAnthropicSandToolsWire("keep-model", undefined)).toBe("keep-model");
 		expect(resolveAnthropicSandToolsWire("keep-id", undefined)).toBe("keep-model");
 		expect(resolveAnthropicSandToolsWire("keep", undefined)).toBe("keep-model");
+		expect(resolveAnthropicSandToolsWire("native", undefined)).toBe("native");
 	});
 });
 

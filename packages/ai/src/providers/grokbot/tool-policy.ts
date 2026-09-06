@@ -79,7 +79,12 @@ export function resolveGrokbotSandToolPolicy(opts: {
 	if (wire === "keep-model" || wire === "automation" || wire === "parent-chat") {
 		return { kind: "product", wire, identity };
 	}
-	return { kind: "native", wire, identity };
+	if (wire === "sand-default-fallback") {
+		return { kind: "native", wire, identity };
+	}
+	// Native families (grok/gpt/gemini/…) used to leak resolve's "error"
+	// sentinel into matrix `wire:` even when tools passed.
+	return { kind: "native", wire: "native", identity };
 }
 
 export function applyGrokbotSandToolPolicy(

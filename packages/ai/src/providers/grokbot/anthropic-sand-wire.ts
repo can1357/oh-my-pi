@@ -20,6 +20,7 @@ import {
 
 export type AnthropicSandToolsWire =
 	| "error"
+	| "native"
 	| "sand-default-fallback"
 	| "automation"
 	| "keep-model"
@@ -39,7 +40,7 @@ export type AnthropicSandWireResolveContext = {
 	 * Reviewed catalog fact (`sand-tools-wire`) for synthetic routers.
 	 * When set, auto mode uses this instead of comparing model ids.
 	 */
-	sandToolsWire?: "parent-chat" | "automation" | "keep-model" | "error" | "sand-default-fallback";
+	sandToolsWire?: "parent-chat" | "automation" | "keep-model" | "error" | "native" | "sand-default-fallback";
 };
 
 export function resolveAnthropicSandToolsWire(
@@ -54,6 +55,7 @@ export function resolveAnthropicSandToolsWire(
 	if (raw === "automation" || raw === "product") return "automation";
 	if (raw === "keep-model" || raw === "keep-id" || raw === "keep") return "keep-model";
 	if (raw === "parent-chat" || raw === "parent") return "parent-chat";
+	if (raw === "native") return "native";
 	if (raw === "error") return "error";
 	if (raw !== "auto") return "error";
 
@@ -67,11 +69,12 @@ export function resolveAnthropicSandToolsWire(
 		catalogWire === "automation" ||
 		catalogWire === "keep-model" ||
 		catalogWire === "error" ||
+		catalogWire === "native" ||
 		catalogWire === "sand-default-fallback"
 	) {
 		return catalogWire;
 	}
-	return "error";
+	return "native";
 }
 
 export type AnthropicSandToolWireInput = {
@@ -134,6 +137,7 @@ export function applyAnthropicSandToolWire(
 	const toolCount = Array.isArray(input.tools) ? input.tools.length : 0;
 	const modelId = input.modelId?.trim() || input.requestedModel.modelId;
 	if (toolCount === 0) return input;
+	if (wire === "native") return { ...input, wireMode: "native" };
 
 	if (wire === "keep-model") {
 		if (!isAnthropicSandModelId(modelId)) return input;
@@ -162,10 +166,13 @@ export function applyAnthropicSandToolWire(
 			sandMaxMode: false,
 		});
 		if (profile === "automation") {
-			// Routers already on this catalog wire keep their requestedModel.
+			// Routers already on this catalog wire keep their id, but drop
+			// thinking/effort/fast — the historical working automation probe
+			// used a bare `{ modelId: "sand-automation" }`. Extra params pin
+			// cursor-grok-4.5-high into a JSON-as-text dump instead of toolCallPart.
 			const keepRouter = !anthropic && (catalogOwns || modelId === "sand-automation");
 			return applyProductWire(input, profile, wire, {
-				requestedModel: keepRouter ? input.requestedModel : automationModel,
+				requestedModel: keepRouter ? { modelId: input.requestedModel.modelId } : automationModel,
 				subagentType: "generalPurpose",
 				automationId: crypto.randomUUID(),
 				originalModelId: anthropic ? modelId : undefined,

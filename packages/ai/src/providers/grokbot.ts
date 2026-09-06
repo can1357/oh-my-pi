@@ -37,6 +37,10 @@ import {
 	type AnthropicSandToolsWire,
 } from "./grokbot/anthropic-sand-wire";
 import {
+	advertisedNamesForJsonTextToolCall,
+	parseJsonTextToolCall,
+} from "./grokbot/json-text-tool-call";
+import {
 	augmentToolIndexForProductWire,
 	parseSendToUserContent,
 	type ProductWireToolIndexMeta,
@@ -82,7 +86,8 @@ export interface GrokbotOptions extends StreamOptions {
 	/**
 	 * Anthropic + tools sand wire. Default `auto` resolves to `keep-model`
 	 * (product PascalCase+jsonSchema tools, original requestedModel).
-	 * `automation` still rewrites to sand-automation. `error` throws;
+	 * Non-Anthropic families resolve to `native` (raw omp bash/read/write).
+	 * `automation` still rewrites to sand-automation. `error` throws on Anthropic;
 	 * `sand-default-fallback` rewrites to bare sand-default (tools work; model not guaranteed Opus).
 	 */
 	anthropicToolsWire?: AnthropicSandToolsWire;
@@ -1132,6 +1137,31 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					throw new AIError.ProviderResponseError("Grok Bot stream ended with incomplete tool call", {
 						provider: model.provider,
 						kind: "incomplete-stream",
+					});
+				}
+			}
+
+			// sand-automation → cursor-grok-4.5-high often dumps a fenced
+			// `{"name":"Shell","arguments":{…}}` instead of toolCallPart.
+			if (!output.content.some(b => b.type === "toolCall")) {
+				const text = output.content
+					.filter((b): b is TextContent => b.type === "text")
+					.map(b => b.text)
+					.join("");
+				const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
+				const promoted = parseJsonTextToolCall(text, advertised);
+				if (promoted) {
+					output.content = output.content.filter(b => b.type !== "text");
+					upsertTool({
+						toolCallId: `call_json_${crypto.randomUUID()}`,
+						toolName: promoted.name,
+						args: JSON.stringify(promoted.arguments),
+						isComplete: true,
+					});
+					logger.info("grokbot: promoted JSON-as-text tool call", {
+						toolName: promoted.name,
+						wireMode: anthropicWire.wireMode,
+						routedResponseModel: routedResponseModel || undefined,
 					});
 				}
 			}

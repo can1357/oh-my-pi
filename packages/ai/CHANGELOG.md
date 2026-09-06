@@ -6,6 +6,10 @@
 
 - Grok Bot family tool-wire policy: Anthropic keep-model product Shell/Read/Write, catalog `sand-tools-wire` for sand routers (including `sand-cua` parent-chat), native bash/read/write for other families, and a live AvailableModels catalog matrix.
 
+### Fixed
+
+- Grok Bot `sand-automation` now promotes grok-4.5-high fenced `{"name":"Shell",…}` text into a real Shell/bash tool call, and native-family matrix rows report `wire: native` instead of the internal `error` sentinel.
+
 ## [18.1.12] - 2026-09-06
 
 ### Added

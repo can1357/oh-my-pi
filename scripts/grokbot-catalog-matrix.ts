@@ -412,7 +412,7 @@ async function main() {
 			class: policy.identity.class,
 			family: policy.identity.family,
 			wireKind: policy.kind,
-			wire: policy.wire,
+			wire: policy.kind === "native" ? "native" : policy.wire,
 		};
 		const skip = grokbotToolsSkipReason(model);
 		if (skip && !args.probeGated) {
