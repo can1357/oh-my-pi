@@ -392,6 +392,10 @@ describe("task.batch spawning", () => {
 		expect(text).toContain("- `Alpha`");
 		expect(text).toContain("- `Beta`");
 		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
+		expect(result.details?.progress?.map(({ id, jobId }) => ({ id, jobId }))).toEqual([
+			{ id: "Alpha", jobId: "Alpha" },
+			{ id: "Beta", jobId: "Beta" },
+		]);
 		expect(result.details?.async?.state).toBe("running");
 
 		const alphaJob = manager.getJob("Alpha");
@@ -414,6 +418,34 @@ describe("task.batch spawning", () => {
 		expect(byId.get("Beta")?.outputSchemaMode).toBe("permissive");
 		expect(seen.map(spawn => spawn.assignment).sort()).toEqual(["Do A.", "Do B."]);
 		for (const spawn of seen) expect(spawn.parentAgentId).toBe("ParentA");
+	});
+
+	it("binds identical task text to independent jobs by dispatch identity", async () => {
+		mockDiscovery();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => makeResult(options.id ?? "?"));
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({ manager, settings: { "async.enabled": true, "task.batch": true } }),
+		);
+		const result = await tool.execute("tc-identical", {
+			context: "Shared context.",
+			tasks: [
+				{ name: "SameAlpha", task: "Run the same assignment." },
+				{ name: "SameBeta", task: "Run the same assignment." },
+			],
+		} as TaskParams);
+
+		expect(result.details?.progress?.map(({ id, jobId, assignment }) => ({ id, jobId, assignment }))).toEqual([
+			{ id: "SameAlpha", jobId: "SameAlpha", assignment: "Run the same assignment." },
+			{ id: "SameBeta", jobId: "SameBeta", assignment: "Run the same assignment." },
+		]);
+		const alphaJob = manager.getJob("SameAlpha");
+		const betaJob = manager.getJob("SameBeta");
+		expect(alphaJob).toBeDefined();
+		expect(betaJob).toBeDefined();
+		expect(alphaJob).not.toBe(betaJob);
+		await Promise.all([alphaJob!.promise, betaJob!.promise]);
 	});
 
 	it("routes each mixed-agent item through its selected definition while preserving caller overrides", async () => {
