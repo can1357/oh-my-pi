@@ -1,4 +1,3 @@
-import { logger } from "@oh-my-pi/pi-utils";
 import type { EncryptedContent, ImageContent, Message, TextContent } from "../types";
 
 export const PRIVATE_MODEL_RESULT = "[private model-only result]";
@@ -32,13 +31,15 @@ export function publicMessage<T extends Message>(message: T): T {
 	};
 }
 
-/** Remove private payloads when switching away from the Codex protocol. */
+/**
+ * Remove private payloads when switching away from the Codex protocol.
+ * Returns the input array untouched when nothing was private.
+ */
 export function stripEncryptedToolResults(messages: Message[]): Message[] {
 	let result: Message[] | undefined;
 	for (let index = 0; index < messages.length; index++) {
 		const projected = publicMessage(messages[index]);
 		if (projected !== messages[index]) (result ??= messages.slice())[index] = projected;
 	}
-	if (result) logger.warn("Removed private Codex tool output from a non-Codex request");
 	return result ?? messages;
 }

@@ -16,6 +16,7 @@ import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import type { AgentSessionEvent } from "./agent-session-events";
+import { markJournaled } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 interface TtsrContinueOptions {
@@ -444,12 +445,15 @@ export class TtsrCoordinator {
 						attribution: "agent",
 						timestamp: Date.now(),
 					};
-					reminder.sessionEntryId = this.#host.sessionManager.appendCustomMessageEntry(
-						"ttsr-injection",
-						injection.content,
-						false,
-						details,
-						"agent",
+					markJournaled(
+						reminder,
+						this.#host.sessionManager.appendCustomMessageEntry(
+							"ttsr-injection",
+							injection.content,
+							false,
+							details,
+							"agent",
+						),
 					);
 					this.#host.agent.appendMessage(reminder);
 					this.#markInjected(details.rules);

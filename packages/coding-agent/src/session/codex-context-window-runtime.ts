@@ -21,6 +21,7 @@ import type { CodexContextWindows } from "@oh-my-pi/pi-catalog/types";
 import type { Settings } from "../config/settings";
 import { createCodexHistoryNotesTools } from "../tools/codex-history-notes";
 import { CodexContextWindowProtocol } from "./codex-context-window";
+import { sessionEntryIdOf } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import { DEFAULT_MAX_BYTES } from "./streaming-output";
 
@@ -181,7 +182,7 @@ export class CodexContextWindowRuntime {
 			identity,
 			policy: this.#policy,
 			threadHint: this.#threadHint,
-			getMessageId: message => (message.role === "assistant" ? undefined : message.sessionEntryId),
+			getMessageId: message => (message.role === "assistant" ? undefined : sessionEntryIdOf(message)),
 		});
 	}
 

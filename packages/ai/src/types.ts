@@ -902,8 +902,6 @@ export interface ProviderInputTransformation {
 
 export interface UserMessage {
 	role: "user";
-	/** Stable journal entry id used by provider history references. */
-	sessionEntryId?: string;
 	content: string | (TextContent | ImageContent)[];
 	/** True if the message was injected by the system (e.g., auto-continue). */
 	synthetic?: boolean;
@@ -920,8 +918,6 @@ export interface UserMessage {
 
 export interface DeveloperMessage {
 	role: "developer";
-	/** Stable journal entry id used by provider history references. */
-	sessionEntryId?: string;
 	content: string | (TextContent | ImageContent)[];
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
@@ -1042,8 +1038,6 @@ export interface EncryptedContent {
 
 export interface ToolResultMessage<TDetails = unknown> {
 	role: "toolResult";
-	/** Stable journal entry id used by provider history references. */
-	sessionEntryId?: string;
 	toolCallId: string;
 	toolName: string;
 	/** Private result, including any attached images and textual fallback. */

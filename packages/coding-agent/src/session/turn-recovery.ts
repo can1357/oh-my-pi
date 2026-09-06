@@ -63,7 +63,7 @@ import {
 	validateRetryFallbackChains,
 } from "./retry-fallback-chains";
 import { getLatestCompactionEntry } from "./session-context";
-import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, markJournaled, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
@@ -2576,12 +2576,15 @@ export class TurnRecovery {
 			attribution: "agent",
 			timestamp: Date.now(),
 		};
-		redirect.sessionEntryId = this.#host.sessionManager.appendCustomMessageEntry(
-			THINKING_LOOP_REDIRECT_TYPE,
-			thinkingLoopRedirectTemplate,
-			false,
-			undefined,
-			"agent",
+		markJournaled(
+			redirect,
+			this.#host.sessionManager.appendCustomMessageEntry(
+				THINKING_LOOP_REDIRECT_TYPE,
+				thinkingLoopRedirectTemplate,
+				false,
+				undefined,
+				"agent",
+			),
 		);
 		this.#host.agent.appendMessage(redirect);
 	}

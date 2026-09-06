@@ -8,6 +8,7 @@ import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type:
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { CustomMessage } from "./messages";
+import { markJournaled } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 /** Capabilities the IRC bridge borrows from its owning session. */
@@ -206,12 +207,15 @@ export class IrcBridge {
 		}
 		if (this.#host.planModeEnabled()) {
 			this.#host.agent.appendMessage(record);
-			record.sessionEntryId = this.#host.sessionManager.appendCustomMessageEntry(
-				record.customType,
-				record.content,
-				record.display,
-				record.details,
-				record.attribution ?? "agent",
+			markJournaled(
+				record,
+				this.#host.sessionManager.appendCustomMessageEntry(
+					record.customType,
+					record.content,
+					record.display,
+					record.details,
+					record.attribution ?? "agent",
+				),
 			);
 			if (autoReply) this.#startAutoReply(msg);
 			return "injected";

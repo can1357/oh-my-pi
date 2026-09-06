@@ -21,6 +21,7 @@ import {
 	attachSessionEntryId,
 	type CompactionEntry,
 	EPHEMERAL_MODEL_CHANGE_ROLE,
+	markJournaled,
 	type SessionEntry,
 } from "./session-entries";
 
@@ -364,22 +365,21 @@ export function buildSessionContext(
 			if (!isCustomMessageContent(entry.content)) return;
 			const normalized = normalizeCustomMessagePayload(entry);
 			const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
-			pushMessage({
-				...createCustomMessage(
-					normalized.customType,
-					normalized.content,
-					normalized.display,
-					normalized.details,
-					entry.timestamp,
-					attribution,
+			pushMessage(
+				markJournaled(
+					createCustomMessage(
+						normalized.customType,
+						normalized.content,
+						normalized.display,
+						normalized.details,
+						entry.timestamp,
+						attribution,
+					),
+					entry.id,
 				),
-				sessionEntryId: entry.id,
-			});
+			);
 		} else if (entry.type === "branch_summary" && entry.summary) {
-			pushMessage({
-				...createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp),
-				sessionEntryId: entry.id,
-			});
+			pushMessage(markJournaled(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp), entry.id));
 		}
 	};
 
@@ -468,7 +468,7 @@ export function buildSessionContext(
 				tokensAfter: compaction.tokensAfter,
 			},
 		);
-		compactionSummaryMsg.sessionEntryId = compaction.id;
+		markJournaled(compactionSummaryMsg, compaction.id);
 		// Agent context (non-transcript): summary first so the LLM sees the
 		// compacted context before recent messages.
 		if (!options?.transcript) {

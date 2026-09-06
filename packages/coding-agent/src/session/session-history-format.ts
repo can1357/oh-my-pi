@@ -310,7 +310,12 @@ function toolCallLine(
 	transformExpandedToolIO?: (text: string) => string,
 ): string {
 	const head = `→ ${name}(${formatToolCallPrimaryArg(name, args)})`;
-	const rawResultText = result ? contentToText(publicToolContent(result.content, result.modelOnly)) : undefined;
+	// Legacy entries may carry string content; only block arrays can hold ciphertext.
+	const rawResultText = result
+		? contentToText(
+				typeof result.content === "string" ? result.content : publicToolContent(result.content, result.modelOnly),
+			)
+		: undefined;
 	const visibleResultText =
 		rawResultText === undefined ? undefined : (transformExpandedToolIO?.(rawResultText) ?? rawResultText);
 	let base: string;

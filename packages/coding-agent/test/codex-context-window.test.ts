@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { CodexContextWindows } from "@oh-my-pi/pi-catalog/types";
 import { CodexContextWindowProtocol, appendCodexHistoryItemId } from "../src/session/codex-context-window";
+import { sessionEntryIdOf } from "../src/session/session-entries";
 import { convertToLlm } from "../src/session/messages";
 import { SessionManager } from "../src/session/session-manager";
 
@@ -52,7 +53,7 @@ test("history item references use journal ids without changing persisted content
 		timestamp: 1,
 	};
 	const id = manager.appendMessage(message);
-	const projected = appendCodexHistoryItemId(message, message.sessionEntryId);
+	const projected = appendCodexHistoryItemId(message, sessionEntryIdOf(message));
 	expect(projected.content).toEqual([
 		{ type: "text", text: `request\n[id: ${id}]` },
 		{ type: "image", data: "image", mimeType: "image/png" },
@@ -73,12 +74,12 @@ test("late journal persistence and resumed custom entries retain provider histor
 	const userId = manager.appendMessage(messages[0]);
 	const converted = convertToLlm(messages)[0];
 	if (converted.role === "assistant") throw new Error("Expected a non-assistant provider input");
-	expect(appendCodexHistoryItemId(converted, converted.sessionEntryId).content).toBe(`request\n[id: ${userId}]`);
+	expect(appendCodexHistoryItemId(converted, sessionEntryIdOf(converted)).content).toBe(`request\n[id: ${userId}]`);
 	const customId = manager.appendCustomMessageEntry("reminder", "continue the investigation", false);
 	const resumed = convertToLlm(manager.buildSessionContext().messages);
 	const reminder = resumed[1];
 	if (reminder.role === "assistant") throw new Error("Expected a non-assistant provider reminder");
-	expect(appendCodexHistoryItemId(reminder, reminder.sessionEntryId).content).toEqual([
+	expect(appendCodexHistoryItemId(reminder, sessionEntryIdOf(reminder)).content).toEqual([
 		{ type: "text", text: `continue the investigation\n[id: ${customId}]` },
 	]);
 	manager.close();

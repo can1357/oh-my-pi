@@ -39,6 +39,7 @@ export {
 
 import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
+import { markJournaled, sessionEntryIdOf } from "./session-entries";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
@@ -781,7 +782,7 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 		const message = messages[i];
 		if (!isSteeringUserMessage(message)) continue;
 		const wrappedMessage = wrapSteeringUserMessage(message);
-		if (wrappedMessage === message) continue;
+		if ((wrappedMessage as AgentMessage) === message) continue;
 		if (wrappedMessages === undefined) {
 			wrappedMessages = messages.slice();
 		}
@@ -1329,8 +1330,9 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 	const cached = convertCache.get(m);
 	if (cached !== undefined && cached.interruptedNext === interruptedNext) return cached.fragment;
 	const fragment = convertOne(m, interruptedNext);
-	if (m.sessionEntryId) {
-		for (const message of fragment) if (message.role !== "assistant") message.sessionEntryId = m.sessionEntryId;
+	const journalId = sessionEntryIdOf(m);
+	if (journalId) {
+		for (const message of fragment) if (message.role !== "assistant") markJournaled(message, journalId);
 	}
 	convertCache.set(m, { interruptedNext, fragment });
 	return fragment;

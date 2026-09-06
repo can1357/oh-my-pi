@@ -212,7 +212,14 @@ describe("convertTools: freeform emission", () => {
 		// distinguish it from an omitted flag when generating optional-arg values.
 		expect(out.strict).toBe(false);
 		expect(items.oneOf).toBeUndefined();
-		expect(items.anyOf).toEqual(unionBranches);
+		// The wire schema is a post-processed copy, so compare structurally: the
+		// fixture itself must stay untouched by serialization.
+		expect(items.anyOf).toMatchObject(unionBranches);
+		expect(unionBranches[0]).toEqual({
+			type: "object",
+			properties: { type: { enum: ["insert"] }, text: { type: "string" } },
+			required: ["type", "text"],
+		});
 	});
 
 	test("rewrites oneOf to anyOf before strict schema enforcement", () => {

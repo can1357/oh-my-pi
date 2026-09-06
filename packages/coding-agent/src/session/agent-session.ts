@@ -347,7 +347,7 @@ import {
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import { type BranchSummaryEntry, markJournaled, type NewSessionOptions } from "./session-entries";
 import { publicAgentMessage, publicSessionEvent } from "./private-content";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
@@ -2705,16 +2705,19 @@ export class AgentSession {
 			// One-run instructions must not return from persisted history: prewalk
 			// nudges are consumed once, and Vibe context is rebuilt only while active.
 			if (!isPrewalkPlanNudge(message) && message.customType !== VIBE_MODE_CONTEXT_MESSAGE_TYPE) {
-				message.sessionEntryId = this.sessionManager.appendCustomMessageEntry(
-					message.customType,
-					message.content,
-					message.display,
-					message.details,
-					message.attribution ?? "agent",
-					// Preserve the initiating message's own timestamp: the entry
-					// otherwise records emission time, which on rebuild excludes
-					// provider preparation / hook time from the prompt→yield anchor.
-					message.timestamp,
+				markJournaled(
+					message,
+					this.sessionManager.appendCustomMessageEntry(
+						message.customType,
+						message.content,
+						message.display,
+						message.details,
+						message.attribution ?? "agent",
+						// Preserve the initiating message's own timestamp: the entry
+						// otherwise records emission time, which on rebuild excludes
+						// provider preparation / hook time from the prompt→yield anchor.
+						message.timestamp,
+					),
 				);
 				invalidateMessageCache(message);
 			}
@@ -3037,12 +3040,15 @@ export class AgentSession {
 			}
 			if (this.#promptGeneration !== eventPromptGeneration) return;
 			if (interruptedThinkingMessage) {
-				interruptedThinkingMessage.sessionEntryId = this.sessionManager.appendCustomMessageEntry(
-					interruptedThinkingMessage.customType,
-					interruptedThinkingMessage.content,
-					interruptedThinkingMessage.display,
-					interruptedThinkingMessage.details,
-					interruptedThinkingMessage.attribution,
+				markJournaled(
+					interruptedThinkingMessage,
+					this.sessionManager.appendCustomMessageEntry(
+						interruptedThinkingMessage.customType,
+						interruptedThinkingMessage.content,
+						interruptedThinkingMessage.display,
+						interruptedThinkingMessage.details,
+						interruptedThinkingMessage.attribution,
+					),
 				);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
@@ -7087,12 +7093,15 @@ export class AgentSession {
 				});
 			}
 			this.agent.appendMessage(normalizedAppMessage);
-			normalizedAppMessage.sessionEntryId = this.sessionManager.appendCustomMessageEntry(
-				normalizedAppMessage.customType,
-				normalizedAppMessage.content,
-				normalizedAppMessage.display,
-				normalizedAppMessage.details,
-				normalizedAppMessage.attribution,
+			markJournaled(
+				normalizedAppMessage,
+				this.sessionManager.appendCustomMessageEntry(
+					normalizedAppMessage.customType,
+					normalizedAppMessage.content,
+					normalizedAppMessage.display,
+					normalizedAppMessage.details,
+					normalizedAppMessage.attribution,
+				),
 			);
 			return false;
 		}
@@ -7135,12 +7144,15 @@ export class AgentSession {
 		}
 
 		this.agent.appendMessage(normalizedAppMessage);
-		normalizedAppMessage.sessionEntryId = this.sessionManager.appendCustomMessageEntry(
-			normalizedAppMessage.customType,
-			normalizedAppMessage.content,
-			normalizedAppMessage.display,
-			normalizedAppMessage.details,
-			normalizedAppMessage.attribution,
+		markJournaled(
+			normalizedAppMessage,
+			this.sessionManager.appendCustomMessageEntry(
+				normalizedAppMessage.customType,
+				normalizedAppMessage.content,
+				normalizedAppMessage.display,
+				normalizedAppMessage.details,
+				normalizedAppMessage.attribution,
+			),
 		);
 		return false;
 	}
