@@ -86,6 +86,10 @@ class AttachmentGuard {
 function noteAttachmentStateChange(epochs, tabId) {
   epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
 }
+function noteDebuggerDetach(attachmentEpochs, loaderGenerations, tabId) {
+  noteAttachmentStateChange(attachmentEpochs, tabId);
+  noteAttachmentStateChange(loaderGenerations, tabId);
+}
 function captureRecoveryLoaderNavigation(loaderIds, loaderGenerations, tabId, method, params) {
   if (method !== "Page.frameNavigated" || !params || typeof params !== "object")
     return false;
@@ -124,6 +128,14 @@ function consumeRelayInitiatedDetach(markedTabs, tabId, reason) {
   const relayMarked = markedTabs.delete(tabId);
   const userDetach = reason === "canceled_by_user" || reason === "replaced_with_devtools";
   return relayMarked && !userDetach;
+}
+function consumeGuardInitiatedDetach(guardMarkedTabs, relayMarkedTabs, tabId, reason) {
+  const guardMarked = guardMarkedTabs.delete(tabId);
+  const userDetach = reason === "canceled_by_user" || reason === "replaced_with_devtools";
+  if (!guardMarked || userDetach)
+    return false;
+  relayMarkedTabs.delete(tabId);
+  return true;
 }
 function noteRelayDetachOutcome(completedTabs, tabId, relayInitiated) {
   if (relayInitiated)
@@ -981,12 +993,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === undefined)
     return;
-  noteAttachmentStateChange(attachmentStateEpochs, source.tabId);
+  noteDebuggerDetach(attachmentStateEpochs, recoveryLoaderGenerations, source.tabId);
   forgetLiveOwnership(source.tabId);
   attachmentGuard.untrack(source.tabId);
-  const guardMarked = guardDetachments.delete(source.tabId);
-  const userDetach = reason === "canceled_by_user" || reason === "replaced_with_devtools";
-  if (guardMarked && !userDetach) {
+  if (consumeGuardInitiatedDetach(guardDetachments, relayInitiatedDetachTabs, source.tabId, reason)) {
     refreshHello();
     return;
   }
