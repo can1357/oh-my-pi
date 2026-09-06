@@ -22,7 +22,7 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
-import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
+import { type DiscoveryResult, discoverAgents, formatAgentSearchPaths, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
 	applyEligibleNestedPatches,
@@ -114,7 +114,11 @@ export interface StructuredSubagentRequest {
 	onArtifactsRetained?: (cleanup: () => Promise<void>) => void;
 	/** Task UI agents keep live registry references; eval one-shots normally do not. */
 	keepAlive?: boolean;
-	/** Task subagents share their parent's eval kernel; eval bridge children must not. */
+	/**
+	 * Opt in to executing the child's eval cells in the parent's kernel. Any
+	 * other value gives the child its own kernel identity, because independent
+	 * children must not observe each other's variables.
+	 */
 	shareEvalSession?: boolean;
 	/** Task frontends may inherit LSP; eval frontends normally set this false. */
 	enableLsp?: boolean;
@@ -162,11 +166,18 @@ export interface StructuredSubagentResult {
 /** Machine-readable failure category so adapters can retain their native errors. */
 export class StructuredSubagentError extends Error {
 	readonly kind: "preflight" | "isolation" | "execution";
+	/** The child's settled result, when the run produced one before failing. */
+	readonly result?: SingleResult;
 
-	constructor(kind: "preflight" | "isolation" | "execution", message: string, options?: ErrorOptions) {
+	constructor(
+		kind: "preflight" | "isolation" | "execution",
+		message: string,
+		options?: ErrorOptions & { result?: SingleResult },
+	) {
 		super(message, options);
 		this.name = "StructuredSubagentError";
 		this.kind = kind;
+		if (options?.result) this.result = options.result;
 	}
 }
 
@@ -272,8 +283,13 @@ export async function resolveEffectiveSubagentPolicy(
 	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.effectiveExtensionRoots?.());
 	const agent = getAgent(discovery.agents, agentName);
 	if (!agent) {
-		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
-		throw new StructuredSubagentError("preflight", `Unknown agent "${agentName}". Available: ${available}`);
+		// A missing agent is a registration problem, so the failure names the
+		// roster that loaded and every directory read.
+		const roster = discovery.agents.map(candidate => candidate.name);
+		throw new StructuredSubagentError(
+			"preflight",
+			`Unknown agent "${agentName}".\nLoaded roster (${roster.length}): ${roster.join(", ") || "none"}\nSearched, in precedence order:\n${formatAgentSearchPaths(discovery.searched)}\nBundled agents are compiled in and always present. Register the agent in one of these directories, or repair an unusable file; do not substitute a different agent name.`,
+		);
 	}
 	const disabledAgents = request.session.settings.get("task.disabledAgents") as string[];
 	if (disabledAgents.includes(agentName)) {
@@ -388,6 +404,22 @@ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
 	return { skills, autoloadSkills };
 }
 
+/**
+ * The eval kernel identity a child executes under: parent identity plus the
+ * child's allocated agent id, so siblings cannot overwrite each other's
+ * variables. Sharing is opt-in (`shareEvalSession`, `task.shareEvalSession`).
+ *
+ * Delimiter must stay `:`, matching {@link defaultEvalSessionId}: the id
+ * reaches the Python kernel through `PI_TOOL_BRIDGE_SESSION`, and env values
+ * cannot carry the `\0` used by in-process owner keys.
+ */
+function resolveChildEvalSessionId(request: StructuredSubagentRequest, id: string): string | undefined {
+	const parentEvalSessionId = request.session.getEvalSessionId?.() ?? undefined;
+	const shared = request.shareEvalSession ?? request.session.settings.get("task.shareEvalSession") === true;
+	if (shared) return parentEvalSessionId;
+	return `${parentEvalSessionId ?? `cwd:${request.session.cwd}`}:agent:${id}`;
+}
+
 function buildExecutorOptions(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
@@ -471,7 +503,7 @@ function buildExecutorOptions(
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
-		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
+		parentEvalSessionId: resolveChildEvalSessionId(request, id),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 	};
@@ -568,6 +600,18 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
 	result.structuredOutput = output;
 }
 
+/** Name the child's exit status and written artifact for a failure message. */
+function describeSalvagedWork(result: SingleResult | undefined): string {
+	if (!result) return "";
+	const exit = result.aborted
+		? `aborted${result.abortReason ? ` (${result.abortReason})` : ""}`
+		: `exit ${result.exitCode}${result.error ? ` (${result.error})` : ""}`;
+	const artifact = result.outputPath
+		? ` Its last written artifact is \`agent://${result.id}\` at \`${result.outputPath}\`; read it before rerunning this work.`
+		: " It wrote no output artifact.";
+	return `\nThe child settled before this failure: ${exit}.${artifact}`;
+}
+
 /**
  * Execute a validated subagent. Preflight errors occur before any artifact
  * lease or child dispatch; callers keep responsibility for their result text.
@@ -580,6 +624,8 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
 	let hasValidStructuredOutput = false;
+	/** The child's settled result, read by the `catch` below. */
+	let settled: SingleResult | undefined;
 	let deferredCleanup: Promise<void> | undefined;
 	const onSubprocessResult =
 		request.invocationKind === "eval"
@@ -626,6 +672,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				onSubprocessResult,
 			});
 		}
+		// Must precede every post-processing step below: each can throw after
+		// the child already produced its exit status and artifact.
+		settled = result;
 		attachStructuredOutputMetadata(result, policy.schema);
 		hasValidStructuredOutput = result.structuredOutput?.status === "valid";
 		requiresRecoveryArtifacts =
@@ -684,12 +733,16 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		if (error instanceof StructuredSubagentError) throw error;
 		throw new StructuredSubagentError(
 			"execution",
-			`Subagent execution failed: ${error instanceof Error ? error.message : String(error)}`,
-			{ cause: error },
+			`Subagent execution failed: ${error instanceof Error ? error.message : String(error)}${describeSalvagedWork(settled)}`,
+			{ cause: error, ...(settled ? { result: settled } : {}) },
 		);
 	} finally {
+		// The failure hands `agent://<id>` back, so its artifact must outlive
+		// this cleanup.
+		const failedWithArtifact = settled?.outputPath !== undefined && !completedSuccessfully;
 		const shouldRetainArtifacts =
 			request.detached === true ||
+			failedWithArtifact ||
 			(request.retainArtifacts && (completedSuccessfully || hasValidStructuredOutput)) ||
 			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;

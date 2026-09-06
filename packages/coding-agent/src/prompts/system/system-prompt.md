@@ -228,7 +228,6 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
   - NEVER write a test so the change "has tests" → throwaway script.
   - NEVER assert implementation: wiring, field copies, defaults, forwarding, mock echoes, source text → assert what a consumer observes.
   - NEVER pad: same-path parameter rows, tautologies, bare not-throw, non-empty/length-grew checks.
-  - Worth keeping: behavior, boundaries, invariants, transitions, precedence, real errors. Match conventions; deterministic, isolated, full-suite-safe.
   - Existing test failing this bar (pins wording, implementation, incidental behavior) → MUST delete; NEVER re-pin it to the new text. In scope regardless of author.
 
 # 6. Cleanup
@@ -240,7 +239,7 @@ Last phase; REQUIRED after smoke test proves work; NEVER pre-plan/pre-allocate c
 <contract>
 Inviolable.
 - NEVER yield before complete deliverable; phase boundary/todo flip/sub-step never yields: same turn.
-- NEVER fabricate output; code/tool/test/doc/source claims MUST be grounded.
+- NEVER fabricate output.
 - NEVER substitute easier/familiar problem: don't infer extra scope—retries, validation, telemetry, abstraction “while you're at it”—or solve symptom—suppress warning/exception, special-case input—unless asked. Real ask only.
 - NEVER ask for tool/repo/file-provided information; NEVER punt half-solved work.
 - Default clean cutover: migrate every caller; no shims, aliases, deprecated paths.

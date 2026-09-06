@@ -1,5 +1,5 @@
-Run one step of code in a persistent kernel. State persists across calls and `task` subagents.
-{{#if spawns}}Eval `agent()` children use independent kernels.{{/if}}
+Run one step of code in a persistent kernel. State persists across calls in this session's kernel.
+{{#if spawns}}Subagents use separate kernels by default. Enable `task.shareEvalSession` when a `task` child is meant to continue this kernel. Eval `agent()` children always use separate kernels.{{/if}}
 
 Work incrementally: imports → define → test → use, each its own cell. Re-run setup ONLY after `reset`, kernel crash.
 {{#if spawns}}{{#if eagerDelegation}}Two or more independent items → named `workpool()` + `.push(…)`; poll outside eval with `hub wait` on the pool name. Handles + `wait()` are for dependency-coupled results.{{/if}}{{/if}}

@@ -91,6 +91,32 @@ describe("discoverAgents", () => {
 		expect(projectAgentsDir).toBe(path.join(projectDir, ".omp", "agents"));
 	});
 
+	test("reports each searched directory with what it yielded", async () => {
+		const agentsDir = path.join(projectDir, ".omp", "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(path.join(agentsDir, "omp-test-agent.md"), OMP_AGENT_MD);
+		// No frontmatter: present as a file, unusable as an agent.
+		await fs.writeFile(path.join(agentsDir, "broken.md"), "just prose, no frontmatter\n");
+		// An extension root that ships no agents/ directory at all.
+		const emptyExt = path.join(tempHome, "empty-ext");
+		await fs.mkdir(emptyExt, { recursive: true });
+		injectOmpExtensionCliRoots([emptyExt], tempHome, projectDir);
+
+		const { searched } = await discoverAgents(projectDir, tempHome);
+
+		expect(searched?.find(entry => entry.dir === agentsDir)).toEqual({
+			dir: agentsDir,
+			source: "project",
+			readable: true,
+			loaded: 1,
+			unusable: 1,
+		});
+		expect(searched?.find(entry => entry.dir === path.join(emptyExt, "agents"))).toMatchObject({
+			readable: false,
+			loaded: 0,
+		});
+	});
+
 	test("loads agents from OMP npm plugins under <home>/.omp/plugins/node_modules", async () => {
 		await writeOmpPluginAgent(tempHome);
 

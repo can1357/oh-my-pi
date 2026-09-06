@@ -76,6 +76,7 @@ Artifacts and side channels:
 - A subagent's own children are dot-qualified (`<id>.<child>`); `agent://<id>/<child>` reads that nested output. When the path names no nested output and the file is JSON, `agent://<id>/<path>` and `agent://<id>?q=<query>` perform JSON extraction.
 - Each subagent gets `<id>.jsonl` session history when the parent persists artifacts; `history://<id>` renders it as a concise transcript (works for live and parked agents).
 - Isolated patch mode writes `<id>.patch` before merge.
+- A child that wrote `<id>.md` and then failed keeps it: the temporary artifacts directory is retained, and the failure carries the child's settled `SingleResult`, so the parent sees the real `exitCode`, `usage`, and `outputPaths` instead of a bare error string. The text still reports a failed execution — nothing about the salvaged artifact marks the run successful.
 
 ## Flow
 1. `TaskTool.create(...)` discovers agents once per cwd through a process-level memo (`discoverAgentsForCreate`) to render the dynamic prompt description.
@@ -95,7 +96,7 @@ Artifacts and side channels:
 10. Artifacts dir comes from the parent session file when available, otherwise a temp dir. When the session is executing an approved plan, the plan reference is handed to the subagent.
 11. Non-isolated spawns call `runSubprocess(...)` directly with parent cwd; isolated spawns run inside the isolation workspace, then commit to a branch (`mergeMode === "branch"`) or capture a patch, and always clean up the workspace.
 12. `runSubprocess(...)` creates a child agent session with an isolated settings snapshot (parent settings inherited — `async.enabled` and `bash.autoBackground.enabled` are **inherited** from the parent, not force-disabled; `tier.openai`/`tier.anthropic`/`tier.google` are re-resolved through `tier.subagent`; `tools.approvalMode` is forced to `yolo` because headless subagents have no UI to confirm prompts against; `advisor.enabled` is forced off unless the spawn opts in per agent; per-spawn overrides may disable read summarization and clear extra workspace roots for isolated runs), child `agentId` equal to the allocated id, child internal URL router/`AgentOutputManager`, output schema, the shared `context` (batch calls) in the system prompt's `CONTEXT` section, and the IRC peer roster in the system prompt.
-13. Child tool availability: explicit `agent.tools` if provided; auto-add `task` when the agent has `spawns` and depth allows; strip `task` at `task.maxRecursionDepth`; ensure `hub` is present in explicit tool lists; expand `exec` to `eval` + `bash`; strip parent-owned `todo` — unless the spawn is prewalk-armed, whose plan nudge + todo gate need the child to commit its own todo list before the model hand-off.
+13. Child tool availability: explicit `agent.tools` if provided; an explicit roster must declare `task` and `hub` to grant them. Strip `task` at `task.maxRecursionDepth`; expand `exec` to `eval` + `bash`; strip parent-owned `todo` unless the spawn is prewalk-armed. Read-only rosters use the SDK restricted-tool mode, which excludes MCP, extensions, custom tools, and the device-write transport. Supply reviewers with diff text or a readable patch artifact; the caller owns command execution.
 14. The child must finish through the hidden `yield` tool; up to 3 reminder prompts, the last forcing `toolChoice = yield` when supported. `finalizeSubprocessOutput(...)` reconciles raw text, `yield` payloads, structured schemas, and abort states.
 15. End-of-run lifecycle (keep-alive, in the run finalizer):
     - caller signal, wall-clock timeout, or internal hard abort → registry status `aborted`, session disposed — terminal;
@@ -148,6 +149,7 @@ Artifacts and side channels:
 - Soft request budget: `task.softRequestBudget` defaults to 200 requests (`0` disables). Crossing it injects a wrap-up notice when `task.softRequestBudgetNotice` is enabled; at 1.5× the budget the run is force-stopped to yield partial findings. Bundled scout/sonic agents may impose a lower built-in cap.
 - Hard wall clock: `task.maxRuntimeMs` applies to every spawn; default `0` disables it.
 - Recursion depth gate: `task.maxRecursionDepth`; `packages/coding-agent/src/tools/index.ts` hides the `task` tool at or beyond the limit, and `runSubprocess(...)` also strips child `task` access at max depth.
+- Eval kernel identity: every spawn runs its `eval` cells in its own kernel, keyed by the parent's eval session id plus the child's agent id, so siblings cannot overwrite each other's variables. `task.shareEvalSession` (default `false`) puts task children back in the parent's kernel; children created by eval's own `agent()` never share it.
 - Final inline summary preview uses `fullOutputThreshold = 5000` chars in `packages/coding-agent/src/task/index.ts`; `agent://<id>` points to the full artifact.
 
 ## Errors

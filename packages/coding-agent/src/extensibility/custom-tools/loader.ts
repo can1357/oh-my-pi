@@ -234,8 +234,15 @@ export async function loadCustomTools(
  *
  * @param configuredPaths - Explicit paths from settings.json and CLI --tool flags
  * @param cwd - Current working directory
+ * @param agentDir - Native user config dir; defaults to the process-global
+ *   `getAgentDir()`. A session created with its own `agentDir` passes it here so
+ *   the user lane of this scan matches the dir its settings and sessions use.
  */
-export async function discoverCustomToolPaths(configuredPaths: string[], cwd: string): Promise<ToolPathWithSource[]> {
+export async function discoverCustomToolPaths(
+	configuredPaths: string[],
+	cwd: string,
+	agentDir?: string,
+): Promise<ToolPathWithSource[]> {
 	const allPathsWithSources: ToolPathWithSource[] = [];
 	const seen = new Set<string>();
 
@@ -249,7 +256,7 @@ export async function discoverCustomToolPaths(configuredPaths: string[], cwd: st
 	};
 
 	// 1. Discover tools via capability system (user + project from all providers)
-	const discoveredTools = await loadCapability<CustomTool>(toolCapability.id, { cwd });
+	const discoveredTools = await loadCapability<CustomTool>(toolCapability.id, { cwd, agentDir });
 	for (const tool of discoveredTools.items) {
 		addPath(tool.path, {
 			provider: tool._source.provider,

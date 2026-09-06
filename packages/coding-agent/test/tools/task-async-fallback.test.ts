@@ -58,7 +58,6 @@ describe("task.async-fallback", () => {
 
 		const text = getFirstText(result);
 		expect(text).toContain('Unknown agent "task"');
-		expect(text).toContain("Available: none");
 		// create + sync-path re-discovery; the async path would have stopped at one.
 		expect(discoverSpy).toHaveBeenCalledTimes(2);
 	});

@@ -17,6 +17,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
+type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 
 type RecoveryRun = {
 	session: AgentSession;
@@ -28,6 +29,13 @@ type RecoveryRun = {
 const RATE_LIMIT_ERROR =
 	'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}} retry-after-ms=11180000';
 const RETRIABLE_SERVER_ERROR = "503 service unavailable: overloaded_error";
+
+/** Provider rejection naming a minimum client build: terminal, never retried. */
+const CLIENT_VERSION_ERROR =
+	'400 {"type":"error","error":{"type":"invalid_request_error","message":"This endpoint requires Claude Code version 2.1.251 or higher."}}';
+
+/** Bun's bare phrasing for a mid-request socket close: transient, retried. */
+const SOCKET_CLOSED_ERROR = "Socket is closed";
 
 function emptyUsage(): Usage {
 	return {
@@ -423,6 +431,124 @@ describe("AgentSession retry recovery", () => {
 			.map(candidate => resolveAssistantErrorPresentation(candidate.message))
 			.filter(presentation => presentation.kind !== "none");
 		expect(visibleErrors).toHaveLength(1);
+		expect(sessionManager.buildSessionContext().messages.map(message => message.role)).toEqual(["user"]);
+	});
+
+	it("retries a bare socket-close settle on the same model and recovers", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+
+		const mock = createMockModel({
+			responses: [{ throw: SOCKET_CLOSED_ERROR }, { content: ["recovered after socket close"], stopReason: "stop" }],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 1,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
+		sessions.push(session);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger a socket close mid-stream");
+		await session.waitForIdle();
+		await sessionManager.flush();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
+
+		const recoveredEntry = recoveredAssistantEntry(sessionManager);
+		expect(recoveredEntry.message.errorMessage).toContain(SOCKET_CLOSED_ERROR);
+		expect(successfulAssistantEntry(sessionManager, "recovered after socket close").message.stopReason).toBe("stop");
+		expect(sessionManager.buildSessionContext().messages.map(message => message.role)).toEqual(["user", "assistant"]);
+	});
+
+	it("settles a client-version rejection as one visible terminal error without retrying", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+
+		const mock = createMockModel({
+			responses: [{ throw: CLIENT_VERSION_ERROR }, { content: ["must never be reached"], stopReason: "stop" }],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 3,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
+		sessions.push(session);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+		});
+
+		await session.prompt("Send a request an older client cannot make");
+		await session.waitForIdle();
+		await sessionManager.flush();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(retryStartEvents).toEqual([]);
+
+		const errors = assistantEntries(sessionManager).filter(candidate => candidate.message.stopReason === "error");
+		expect(errors).toHaveLength(1);
+		expect(errors[0].message.retryRecovery).toBeUndefined();
+		expect(resolveAssistantErrorPresentation(errors[0].message)).toEqual({
+			kind: "full",
+			text: CLIENT_VERSION_ERROR,
+			isError: true,
+		});
 		expect(sessionManager.buildSessionContext().messages.map(message => message.role)).toEqual(["user"]);
 	});
 

@@ -174,3 +174,23 @@ test("absent RULES.md does not produce a rule", async () => {
 
 	expect(rules.find(r => r.name === "RULES")).toBeUndefined();
 });
+
+test("ctx.agentDir owns the user rule set, sticky file and rules/ dir alike", async () => {
+	// The process-global dir (set in beforeEach) and the dir this load carries
+	// hold different rules. A profile session is the live case: `getAgentDir()`
+	// points at the profile's agent dir, and a session handed another one must
+	// not mix the two.
+	writeFile(path.join(home, ".omp", "agent", "RULES.md"), "# Global\nGlobal sticky rule.\n");
+	writeFile(path.join(home, ".omp", "agent", "rules", "global-only.md"), "# Global dir rule\n");
+	const scoped = path.join(tempDir, "scoped-agent");
+	writeFile(path.join(scoped, "RULES.md"), "# Scoped\nScoped sticky rule.\n");
+	writeFile(path.join(scoped, "rules", "scoped-only.md"), "# Scoped dir rule\n");
+
+	const rules = await loadNativeRules({ cwd: project, home, repoRoot: project, agentDir: scoped });
+
+	const userRule = rules.find(r => r._source.level === "user" && r.name === "RULES");
+	expect(userRule?.content).toContain("Scoped sticky rule");
+	expect(userRule?.content).not.toContain("Global sticky rule");
+	expect(rules.find(r => r.name === "scoped-only")).toBeDefined();
+	expect(rules.find(r => r.name === "global-only")).toBeUndefined();
+});

@@ -58,6 +58,7 @@ CustomTool.execute(toolCallId, params, onUpdate, ctx, signal)
 - Tool name conflicts are rejected against built-ins and already-loaded custom tools.
 - `.md` and `.json` files are discovered as tool metadata by some providers, but the executable module loader rejects them as runnable tools.
 - Relative configured paths are resolved from `cwd`; `~` is expanded.
+- The native user lane follows the session's agent dir. `discoverCustomToolPaths(configuredPaths, cwd, agentDir)` takes it as a third argument and `createAgentSession` passes its own `agentDir`, so a session pointed at another agent dir reads that dir's `tools/` instead of the process-global one — the same way its settings, models, sessions, and prompt templates resolve.
 
 ## Module contract
 
