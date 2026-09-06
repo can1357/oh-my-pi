@@ -1,6 +1,5 @@
 import { truncateHeadBytes, truncateTailBytes } from "./streaming-output";
-
-export const PROGRESS_PREVIEW_MAX_BYTES = 3_000;
+import { PROGRESS_LIMITS } from "../async/progress-limits";
 
 export interface ProgressPreview {
 	text?: string;
@@ -9,8 +8,8 @@ export interface ProgressPreview {
 	truncated: boolean;
 }
 
-const PROGRESS_PREVIEW_HEAD_BYTES = Math.floor(PROGRESS_PREVIEW_MAX_BYTES / 2);
-const PROGRESS_PREVIEW_TAIL_BYTES = PROGRESS_PREVIEW_MAX_BYTES - PROGRESS_PREVIEW_HEAD_BYTES;
+const PROGRESS_PREVIEW_HEAD_BYTES = Math.floor(PROGRESS_LIMITS.PREVIEW_BYTES / 2);
+const PROGRESS_PREVIEW_TAIL_BYTES = PROGRESS_LIMITS.PREVIEW_BYTES - PROGRESS_PREVIEW_HEAD_BYTES;
 
 /** Drop a partial trailing line so a truncated head ends on a complete line. */
 function snapHeadToLine(head: string): string {
@@ -33,10 +32,10 @@ function snapTailToLine(tail: string): string {
  */
 export function buildProgressPreview(text: string, sourceTruncated = false): ProgressPreview {
 	const fullBytes = Buffer.byteLength(text, "utf8");
-	if (fullBytes <= PROGRESS_PREVIEW_MAX_BYTES) {
+	if (fullBytes <= PROGRESS_LIMITS.PREVIEW_BYTES) {
 		return { text, truncated: sourceTruncated };
 	}
-	const retainedBytes = Math.min(fullBytes, PROGRESS_PREVIEW_MAX_BYTES);
+	const retainedBytes = Math.min(fullBytes, PROGRESS_LIMITS.PREVIEW_BYTES);
 	const headBytes = Math.floor(retainedBytes / 2);
 	const tailBytes = retainedBytes - headBytes;
 	return {
@@ -56,7 +55,7 @@ export function buildLineSnappedPreview(text: string, sourceTruncated = false): 
 	const preview = buildProgressPreview(text, sourceTruncated);
 	if (!preview.truncated) return preview;
 	const fullBytes = Buffer.byteLength(text, "utf8");
-	if (fullBytes <= PROGRESS_PREVIEW_MAX_BYTES) {
+	if (fullBytes <= PROGRESS_LIMITS.PREVIEW_BYTES) {
 		const midpoint = Math.floor(text.length / 2);
 		const before = text.lastIndexOf("\n", midpoint);
 		const after = text.indexOf("\n", midpoint + 1);
@@ -97,7 +96,7 @@ export class ProgressPreviewAccumulator {
 		}
 
 		const combined = `${this.#text}${chunk}`;
-		if (Buffer.byteLength(combined, "utf8") <= PROGRESS_PREVIEW_MAX_BYTES) {
+		if (Buffer.byteLength(combined, "utf8") <= PROGRESS_LIMITS.PREVIEW_BYTES) {
 			this.#text = combined;
 			return;
 		}

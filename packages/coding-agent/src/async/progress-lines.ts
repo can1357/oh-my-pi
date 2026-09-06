@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import { PROGRESS_LIMITS } from "./progress-limits";
 
 /**
  * Fixed-size identity of the exact normalized stream consumed by
@@ -28,11 +29,14 @@ export interface ProgressLine {
 	streamProvenance: ProgressStreamProvenance;
 }
 
-/** Incrementally reports complete, non-empty output lines with bounded partial state. */
+/**
+ * Incrementally reports complete, non-empty output lines with bounded partial
+ * state; a line longer than {@link PROGRESS_LIMITS.LINE_CHARS} keeps only its
+ * head and tail.
+ */
 export class ProgressLines {
-	static readonly MAX_LINE_CHARS = 500;
-	static readonly #HEAD_CHARS = Math.floor(ProgressLines.MAX_LINE_CHARS / 2);
-	static readonly #TAIL_CHARS = ProgressLines.MAX_LINE_CHARS - ProgressLines.#HEAD_CHARS;
+	static readonly #HEAD_CHARS = Math.floor(PROGRESS_LIMITS.LINE_CHARS / 2);
+	static readonly #TAIL_CHARS = PROGRESS_LIMITS.LINE_CHARS - ProgressLines.#HEAD_CHARS;
 	readonly #report: (line: ProgressLine) => void;
 	#partial = "";
 	#head = "";
@@ -99,7 +103,7 @@ export class ProgressLines {
 					: `${this.#tail.slice(-(ProgressLines.#TAIL_CHARS - segment.length))}${segment}`;
 			return;
 		}
-		if (this.#partial.length + segment.length <= ProgressLines.MAX_LINE_CHARS) {
+		if (this.#partial.length + segment.length <= PROGRESS_LIMITS.LINE_CHARS) {
 			this.#partial += segment;
 			return;
 		}

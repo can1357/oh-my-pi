@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { PROGRESS_LIMITS } from "@oh-my-pi/pi-coding-agent/async/progress-limits";
 import {
 	buildLineSnappedPreview,
 	buildProgressPreview,
 	flattenPreviewText,
 	mergeProgressPreviews,
-	PROGRESS_PREVIEW_MAX_BYTES,
 	ProgressPreviewAccumulator,
 } from "@oh-my-pi/pi-coding-agent/session/progress-preview";
 
@@ -18,7 +18,7 @@ describe("progress preview line snapping", () => {
 	});
 
 	test("single oversized line keeps the byte split", () => {
-		const preview = buildLineSnappedPreview("x".repeat(PROGRESS_PREVIEW_MAX_BYTES + 100));
+		const preview = buildLineSnappedPreview("x".repeat(PROGRESS_LIMITS.PREVIEW_BYTES + 100));
 		expect(preview.truncated).toBe(true);
 		expect(preview.head!.length).toBeGreaterThan(0);
 		expect(preview.tail!.length).toBeGreaterThan(0);
