@@ -50,6 +50,13 @@ export interface DiscoverAuthStorageOptions {
 	accountPool?: AuthBrokerAccountPool;
 	accountPolicies?: AuthAccountPolicies;
 	authStorageOptions?: Omit<AuthStorageOptions, "accountPolicies" | "configValueResolver" | "sourceLabel">;
+	/** Transport for every broker request. Default global `fetch`. */
+	fetch?: typeof fetch;
+	/**
+	 * Startup budget for revalidating a fresh cached snapshot.
+	 * Default {@link SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS}.
+	 */
+	revalidationTimeoutMs?: number;
 }
 
 /**
@@ -58,7 +65,7 @@ export interface DiscoverAuthStorageOptions {
  * authenticated snapshot fetch so a proxy that answers `/v1/healthz` quickly
  * but stalls `/v1/snapshot` cannot hold startup past the budget.
  */
-const SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS = 500;
+export const SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS = 500;
 
 /**
  * The client's health request uses the same fetch transport (including proxy
@@ -72,7 +79,7 @@ async function isAuthBrokerReachable(client: AuthBrokerClient, signal: AbortSign
 	} catch (error) {
 		// Any HTTP response proves the transport reached the broker. Network and
 		// timeout failures leave startup on the fresh cached snapshot.
-		return error instanceof AuthBrokerError && error.status !== undefined;
+		return error instanceof AuthBrokerError && error.kind !== "transport";
 	}
 }
 
@@ -417,7 +424,11 @@ export async function openAuthCredentialStore(
 	const brokerConfig = options.brokerConfig;
 	if (brokerConfig) {
 		const accountPool = options.accountPool ?? (await loadAuthBrokerAccountPool());
-		const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
+		const client = new AuthBrokerClient({
+			url: brokerConfig.url,
+			token: brokerConfig.token,
+			fetchImpl: options.fetch,
+		});
 		const cachePath = options.cachePath ?? getAuthBrokerSnapshotCachePath();
 		const ttlMs = resolveSnapshotTtlMs();
 		const persist =
@@ -456,7 +467,9 @@ export async function openAuthCredentialStore(
 		// or an authorization rejection wins synchronously; a broker that is
 		// unreachable, slow, or failing for any other reason leaves startup on the
 		// cache and the store's background stream picks up the current generation.
-		const revalidation = cachedSnapshot ? AbortSignal.timeout(SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS) : undefined;
+		const revalidation = cachedSnapshot
+			? AbortSignal.timeout(options.revalidationTimeoutMs ?? SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS)
+			: undefined;
 		if (!revalidation || (await isAuthBrokerReachable(client, revalidation))) {
 			try {
 				const initialResult = await client.fetchSnapshot({ signal: revalidation });
@@ -467,8 +480,7 @@ export async function openAuthCredentialStore(
 				initialSnapshot = initialResult.snapshot;
 				persist?.(initialSnapshot);
 			} catch (error) {
-				if (!cachedSnapshot || (error instanceof AuthBrokerError && [401, 403].includes(error.status ?? 0)))
-					throw error;
+				if (!cachedSnapshot || (error instanceof AuthBrokerError && error.kind === "unauthorized")) throw error;
 				logger.debug("auth-broker snapshot revalidation failed; starting from cache", { error: String(error) });
 			}
 		}

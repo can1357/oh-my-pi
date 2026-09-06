@@ -14,7 +14,10 @@ import { AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
-import { describeAuthBrokerStartupError } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
+import {
+	describeAuthBrokerStartupError,
+	getAuthBrokerTokenFilePath,
+} from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import { setInteractiveHost } from "@oh-my-pi/pi-utils";
 
 class ProcessExitSignal extends Error {
@@ -35,6 +38,31 @@ describe("describeAuthBrokerStartupError", () => {
 		expect(message).toContain("omp auth-broker serve");
 		expect(message).toContain("omp config reset auth.broker.url");
 		expect(message).toContain("OMP_AUTH_BROKER_URL");
+	});
+
+	it.each([401, 403])("points a %d rejection at the token, not at starting the broker", async status => {
+		const message = await describeAuthBrokerStartupError(
+			new AuthBrokerError(`Auth broker request failed: ${status} Unauthorized`, { status }),
+		);
+		expect(message).not.toBeNull();
+		expect(message).toContain("rejected the configured bearer token");
+		expect(message).not.toContain("is unreachable");
+		expect(message).not.toContain("omp auth-broker serve");
+		// Every place the token is read from, plus how to obtain the current one.
+		expect(message).toContain("omp auth-broker token");
+		expect(message).toContain("OMP_AUTH_BROKER_TOKEN");
+		expect(message).toContain("auth.broker.token");
+		expect(message).toContain(getAuthBrokerTokenFilePath());
+		// Disabling the broker stays a valid way out.
+		expect(message).toContain("omp config reset auth.broker.url");
+	});
+
+	it("treats other HTTP failures as an unreachable broker", async () => {
+		const message = await describeAuthBrokerStartupError(
+			new AuthBrokerError("Auth broker request failed: 503 Service Unavailable", { status: 503 }),
+		);
+		expect(message).toContain("is unreachable");
+		expect(message).toContain("omp auth-broker serve");
 	});
 
 	it("names the configured broker URL when it can be resolved", async () => {
