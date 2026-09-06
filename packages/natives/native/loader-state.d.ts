@@ -26,6 +26,7 @@ export interface DetectCompiledBinaryInput {
 
 export function detectCompiledBinary(input: DetectCompiledBinaryInput): boolean;
 
+
 export interface GetAddonFilenamesInput {
 	tag: string;
 	arch: string;

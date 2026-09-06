@@ -14,7 +14,7 @@
  * Throws on any failure (no model, no key, unparseable output, abort/timeout);
  * the caller falls back to a concrete level and continues the turn.
  */
-import { type AssistantMessage, completeSimple, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { prompt } from "@oh-my-pi/pi-utils";
 
@@ -60,14 +60,24 @@ function difficultySystemPromptFor(ceiling: Effort): string {
 
 /** Local classifiers occasionally need more room for chat-template boilerplate. */
 const LOCAL_ANSWER_MAX_TOKENS = 16;
+/** On-device reasoning classifiers need room for the bucket keyword after the `<think>` preamble. */
+const LOCAL_REASONING_MAX_TOKENS = 1024;
 /**
- * Online classifier budget. Sized to survive backends that ignore
- * `disableReasoning` (e.g. Qwen3 via llama.cpp catalogued `reasoning: false`
- * but still emitting thinking): the classifier keyword needs to land after any
- * unavoidable thinking preamble. `maxTokens` is a hard cap — non-thinking
- * completions still return in a handful of tokens (issue #4355).
+ * Online classifier budget. Sized against two independent constraints:
+ *   - Backends that ignore `disableReasoning` still emit a thinking preamble
+ *     (e.g. Qwen3 via llama.cpp catalogued `reasoning: false` but still thinking;
+ *     Anthropic via LiteLLM/Vertex, whose `openai-completions` route downgrades a
+ *     disabled request to the lowest reasoning effort instead of turning thinking
+ *     off). The classifier keyword must have room to land after that preamble
+ *     (issue #4355).
+ *   - Anthropic-dialect proxies reject `max_tokens <= thinking.budget_tokens`. The
+ *     pinned lowest effort maps to at least Anthropic's 1024-token minimum budget,
+ *     so the cap MUST comfortably exceed 1024 or every classifier call 400s with
+ *     `max_tokens must be greater than thinking.budget_tokens` (issue #8610).
+ * `maxTokens` is a hard cap — non-thinking completions still return in a handful
+ * of tokens.
  */
-const REASONING_SAFE_MAX_TOKENS = 1024;
+const ONLINE_REASONING_SAFE_MAX_TOKENS = 4096;
 
 export interface ClassifyDifficultyDeps {
 	settings: Settings;
@@ -113,21 +123,25 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceili
 	}
 	// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 	const metadata = deps.metadataResolver?.(model.provider);
-	const maxTokens = REASONING_SAFE_MAX_TOKENS;
+	const maxTokens = ONLINE_REASONING_SAFE_MAX_TOKENS;
 
-	const response = await completeSimple(
-		model,
-		{
-			systemPrompt: [difficultySystemPromptFor(ceiling)],
-			messages: [{ role: "user", content: input, timestamp: Date.now() }],
-		},
-		{
-			apiKey: deps.registry.resolver(model, deps.sessionId),
-			maxTokens,
-			disableReasoning: true,
-			metadata,
-			signal: deps.signal,
-		},
+	const response = await retryTransientCompletion(
+		() =>
+			completeSimple(
+				model,
+				{
+					systemPrompt: [difficultySystemPromptFor(ceiling)],
+					messages: [{ role: "user", content: input, timestamp: Date.now() }],
+				},
+				{
+					apiKey: deps.registry.resolver(model, deps.sessionId),
+					maxTokens,
+					disableReasoning: true,
+					metadata,
+					signal: deps.signal,
+				},
+			),
+		{ signal: deps.signal },
 	);
 
 	if (response.stopReason === "error") {
@@ -147,7 +161,7 @@ async function classifyLocal(input: string, modelKey: string, deps: ClassifyDiff
 		throw new Error(`auto-thinking: unsupported local classifier model: ${modelKey}`);
 	}
 	const maxTokens = isTinyMemoryReasoningModelKey(modelKey)
-		? Math.max(LOCAL_ANSWER_MAX_TOKENS, REASONING_SAFE_MAX_TOKENS)
+		? Math.max(LOCAL_ANSWER_MAX_TOKENS, LOCAL_REASONING_MAX_TOKENS)
 		: LOCAL_ANSWER_MAX_TOKENS;
 	const builtPrompt = prompt.render(difficultyLocalPrompt, { prompt: input });
 	const text = await tinyModelClient.complete(modelKey, builtPrompt, {

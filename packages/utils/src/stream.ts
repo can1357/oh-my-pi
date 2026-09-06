@@ -4,25 +4,6 @@ import { abortableSource } from "./abortable";
 import { parseStreamingJson } from "./json-parse";
 
 const LF = 0x0a;
-type JsonlChunkResult = {
-	values: unknown[];
-	error: unknown;
-	read: number;
-	done: boolean;
-};
-
-function parseJsonlChunkCompat(input: Uint8Array, beg?: number, end?: number): JsonlChunkResult;
-function parseJsonlChunkCompat(input: string): JsonlChunkResult;
-function parseJsonlChunkCompat(input: Uint8Array | string, beg?: number, end?: number): JsonlChunkResult {
-	if (typeof input === "string") {
-		const { values, error, read, done } = Bun.JSONL.parseChunk(input);
-		return { values, error, read, done };
-	}
-	const start = beg ?? 0;
-	const stop = end ?? input.length;
-	const { values, error, read, done } = Bun.JSONL.parseChunk(input, start, stop);
-	return { values, error, read, done };
-}
 
 export async function* readLines(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
 	const buffer = new ConcatSink();
@@ -58,7 +39,7 @@ export async function* readJsonl<T>(stream: ReadableStream<Uint8Array>, signal?:
 			const tail = buffer.flush();
 			if (tail) {
 				buffer.clear();
-				const { values, error, done } = parseJsonlChunkCompat(tail, 0, tail.length);
+				const { values, error, done } = Bun.JSONL.parseChunk(tail, 0, tail.length);
 				if (values.length > 0) {
 					yield* values as T[];
 				}
@@ -174,8 +155,15 @@ class ConcatSink {
 		return text;
 	}
 	*pullJSONL<T>(chunk: Uint8Array, beg: number, end: number) {
+		const newline = chunk.indexOf(LF, beg);
+		if (newline === -1 || newline >= end) {
+			if (this.isEmpty) this.reset(chunk.subarray(beg, end));
+			else this.append(chunk.subarray(beg, end));
+			return;
+		}
+
 		if (this.isEmpty) {
-			const { values, error, read, done } = parseJsonlChunkCompat(chunk, beg, end);
+			const { values, error, read, done } = Bun.JSONL.parseChunk(chunk, beg, end);
 			if (values.length > 0) {
 				yield* values as T[];
 			}
@@ -192,7 +180,7 @@ class ConcatSink {
 		space.set(chunk.subarray(beg, end), offset);
 		this.#length = total;
 
-		const { values, error, read, done } = parseJsonlChunkCompat(space.subarray(0, total), 0, total);
+		const { values, error, read, done } = Bun.JSONL.parseChunk(space, 0, total);
 		if (values.length > 0) {
 			yield* values as T[];
 		}
@@ -446,16 +434,17 @@ export async function* readSseEvents(
  * Uses `Bun.JSONL.parseChunk` internally. On parse errors, the malformed
  * region is skipped up to the next newline and parsing continues.
  *
+ * @param options.onMalformedRecord Called once for every skipped JSONL record.
  * @example
  * ```ts
  * const entries = parseJsonlLenient<MyType>(fileContents);
  * ```
  */
-export function parseJsonlLenient<T>(buffer: string): T[] {
+export function parseJsonlLenient<T>(buffer: string, options: { onMalformedRecord?: () => void } = {}): T[] {
 	let entries: T[] | undefined;
 
 	while (buffer.length > 0) {
-		const { values, error, read, done } = parseJsonlChunkCompat(buffer);
+		const { values, error, read, done } = Bun.JSONL.parseChunk(buffer);
 		if (values.length > 0) {
 			const ext = values as T[];
 			if (!entries) {
@@ -466,11 +455,16 @@ export function parseJsonlLenient<T>(buffer: string): T[] {
 		}
 		if (error) {
 			const nextNewline = buffer.indexOf("\n", read);
+			const malformedEnd = nextNewline === -1 ? buffer.length : nextNewline;
+			if (buffer.substring(read, malformedEnd).trim().length > 0) options.onMalformedRecord?.();
 			if (nextNewline === -1) break;
 			buffer = buffer.substring(nextNewline + 1);
 			continue;
 		}
-		if (read === 0) break;
+		if (read === 0) {
+			if (buffer.trim().length > 0) options.onMalformedRecord?.();
+			break;
+		}
 		buffer = buffer.substring(read);
 		if (done) break;
 	}

@@ -5,7 +5,7 @@ import type { SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { createAssistantMessage } from "./helpers";
+import { createAssistantMessage, createUserMessage } from "./helpers";
 
 describe("Agent", () => {
 	it("should support steering message queueing", async () => {
@@ -150,6 +150,51 @@ describe("Agent", () => {
 		expect(skippedContent.text).toContain("Skipped due to queued user message");
 		expect(skippedContent.text).not.toContain("pending system advisory");
 	});
+	it("continue() re-executes a trailing assistant's unpaired tool calls before the next model call", async () => {
+		const toolSchema = type({ value: type("string") });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "probe",
+			label: "Probe",
+			description: "Probe tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: params };
+			},
+		};
+		// One response only: the tool must run WITHOUT a model call re-issuing it,
+		// and the single call is the post-tool continuation on the fresh result.
+		const mock = createMockModel({ responses: [{ content: ["done after replay"] }] });
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [tool],
+				// A harness stripped the failed tool result (AgentSession.retry's tool
+				// replay), leaving the tool-calling assistant as the transcript tail.
+				messages: [
+					createUserMessage("run the probe"),
+					createAssistantMessage(
+						[{ type: "toolCall", id: "call_1", name: "probe", arguments: { value: "again" } }],
+						"toolUse",
+					),
+				],
+			},
+			streamFn: mock.stream,
+		});
+
+		await agent.continue();
+
+		expect(executed).toEqual(["again"]);
+		expect(mock.calls.length).toBe(1);
+		const roles = agent.state.messages.map(message => message.role);
+		expect(roles).toEqual(["user", "assistant", "toolResult", "assistant"]);
+		const result = agent.state.messages[2] as ToolResultMessage;
+		expect(result.toolCallId).toBe("call_1");
+		expect(result.isError).not.toBe(true);
+		expect(result.content).toContainEqual({ type: "text", text: "ok:again" });
+	});
 
 	it("classifies one-at-a-time steering from the next queued mixed source", async () => {
 		const cases = [
@@ -279,7 +324,11 @@ describe("Agent", () => {
 	});
 	it("keeps follow-up ownership when the deadline expires during a dequeue hook", async () => {
 		const mock = createMockModel({ responses: [{ content: ["done"] }] });
-		const agent = new Agent({ streamFn: mock.stream, deadline: Date.now() + 25 });
+		// Generous budget: the loop checks the deadline before invoking dequeue
+		// hooks, so the mock roundtrip must beat it even on starved CI runners.
+		// The hook itself parks until the deadline timer aborts the loop signal,
+		// so the expiry-during-hook branch stays exercised.
+		const agent = new Agent({ streamFn: mock.stream, deadline: Date.now() + 1_000 });
 		let hookSignal: AbortSignal | undefined;
 		agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (!signal) throw new Error("Expected the active loop signal");
@@ -297,7 +346,8 @@ describe("Agent", () => {
 		expect(agent.peekFollowUpQueue()).toHaveLength(1);
 	});
 	it("keeps queued work when continue() reaches its deadline inside a dequeue hook", async () => {
-		const agent = new Agent({ deadline: Date.now() + 25 });
+		// Same starvation guard as above: hook entry must precede expiry.
+		const agent = new Agent({ deadline: Date.now() + 1_000 });
 		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
 		agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (!signal) throw new Error("Expected the deadline-aware dequeue signal");

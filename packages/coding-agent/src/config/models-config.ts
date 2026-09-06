@@ -28,6 +28,7 @@ export interface ProviderValidationConfig {
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: unknown;
 	disableStrictTools?: boolean;
+	guardrailIdentifier?: string;
 	modelOverrides?: Record<string, unknown>;
 	models: ProviderValidationModel[];
 }
@@ -50,12 +51,13 @@ export function validateProviderConfiguration(
 				!config.apiKey &&
 				config.auth !== "none" &&
 				!config.disableStrictTools &&
+				!config.guardrailIdentifier &&
 				!config.remoteCompaction &&
 				!hasModelOverrides &&
 				!config.discovery
 			) {
 				throw new Error(
-					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "remoteCompaction", "modelOverrides", "discovery", or "models"`,
+					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "guardrailIdentifier", "remoteCompaction", "modelOverrides", "discovery", or "models"`,
 				);
 			}
 		}
@@ -66,12 +68,12 @@ export function validateProviderConfiguration(
 		const requiresAuth =
 			mode === "runtime-register"
 				? !config.apiKey && !config.oauthConfigured
-				: !config.apiKey && (config.auth ?? "apiKey") !== "none";
+				: !config.apiKey && (config.auth ?? "apiKey") !== "none" && (config.auth ?? "apiKey") !== "oauth";
 		if (requiresAuth) {
 			throw new Error(
 				mode === "runtime-register"
 					? `Provider ${providerName}: "apiKey" or "oauth" is required when defining models.`
-					: `Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none".`,
+					: `Provider ${providerName}: "apiKey" is required when defining custom models unless auth is "none" or "oauth".`,
 			);
 		}
 	}
@@ -121,6 +123,7 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
 				compat: providerConfig.compat,
 				remoteCompaction: providerConfig.remoteCompaction,
 				disableStrictTools: providerConfig.disableStrictTools,
+				guardrailIdentifier: providerConfig.guardrailIdentifier,
 				modelOverrides: providerConfig.modelOverrides,
 				models: (providerConfig.models ?? []) as ProviderValidationModel[],
 			},

@@ -30,6 +30,7 @@ import { computeEditDiff, type DiffError, type DiffResult } from "./diff";
 import { computeHashlineDiff, computeHashlineSectionDiff } from "./hashline/diff";
 import { type ApplyPatchEntry, expandApplyPatchToEntries, expandApplyPatchToPreviewEntries } from "./modes/apply-patch";
 import { computePatchDiff, type PatchEditEntry } from "./modes/patch";
+import { computeSloppySectionDiff, splitSloppySections } from "./sloppy";
 
 export interface PerFileDiffPreview {
 	path: string;
@@ -77,7 +78,7 @@ export interface EditStreamingStrategy<Args = unknown> {
 	 * compute a diff against. Strategies drop the trailing incomplete entry
 	 * when `partialJson` indicates its closing `}` hasn't arrived yet.
 	 */
-	extractCompleteEdits(args: Args, partialJson: string | undefined): Args;
+	extractCompleteEdits(args: Args, partialJson: string | undefined, isStreaming: boolean): Args;
 	/**
 	 * Compute diff(s) for the given partial args. Returns `null` when args
 	 * do not yet carry enough structure to compute anything.
@@ -689,11 +690,65 @@ const applyPatchStrategy: EditStreamingStrategy<ApplyPatchArgs> = {
 		return entries.length > 0 ? entries : undefined;
 	},
 };
+interface SloppyArgs {
+	input?: string;
+}
+
+/**
+ * Sloppy previews apply each complete `[path]` section in memory and diff the
+ * result — the same pure engine the executor runs, never writing.
+ */
+const sloppyStrategy: EditStreamingStrategy<SloppyArgs> = {
+	extractCompleteEdits(args, _partialJson, isStreaming) {
+		const input = args.input;
+		return isStreaming && typeof input === "string" ? { input: trimTrailingPartialLine(input, true) } : args;
+	},
+	async computeDiffPreview(args, ctx) {
+		if (typeof args.input !== "string" || args.input.length === 0) return null;
+		const input = trimTrailingPartialLine(args.input, ctx.isStreaming);
+		const sections = splitSloppySections(input);
+		if (sections.length === 0) return null;
+		const previews: PerFileDiffPreview[] = [];
+		const lastIndex = sections.length - 1;
+		for (let i = 0; i < sections.length; i++) {
+			ctx.signal.throwIfAborted();
+			const result = await computeSloppySectionDiff(sections[i], ctx.cwd);
+			ctx.signal.throwIfAborted();
+			// The trailing section is still being typed while streaming; a
+			// transient parse/match error there would wipe stable previews of
+			// earlier sections. Suppress it until args are complete.
+			if (ctx.isStreaming && i === lastIndex && "error" in result) continue;
+			previews.push(toPerFilePreview(sections[i].path, result));
+		}
+		return previews.length > 0 ? previews : null;
+	},
+	renderStreamingFallback() {
+		// Never leak the raw payload (§/¤ grammar, unsanitized tabs) into the TUI.
+		return "";
+	},
+	matcherDigest(args) {
+		return typeof args?.input === "string" ? args.input : undefined;
+	},
+	matcherPaths(args) {
+		// Paths live in the payload's `[path]` section headers.
+		if (typeof args?.input !== "string") return undefined;
+		const sections = splitSloppySections(args.input);
+		return sections.length > 0 ? sections.map(section => section.path) : undefined;
+	},
+	matcherEntries(args) {
+		if (typeof args?.input !== "string") return undefined;
+		const sections = splitSloppySections(args.input);
+		if (sections.length === 0) return undefined;
+		return sections.map(section => ({ path: section.path, digest: section.body }));
+	},
+};
+
 export const EDIT_MODE_STRATEGIES: Record<EditMode, EditStreamingStrategy<unknown>> = {
 	replace: replaceStrategy as EditStreamingStrategy<unknown>,
 	patch: patchStrategy as EditStreamingStrategy<unknown>,
 	hashline: hashlineStrategy as EditStreamingStrategy<unknown>,
 	apply_patch: applyPatchStrategy as EditStreamingStrategy<unknown>,
+	sloppy: sloppyStrategy as EditStreamingStrategy<unknown>,
 };
 
 export { resolveEditMode };

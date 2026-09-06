@@ -83,7 +83,7 @@ const todoSchema = type({
 	// No `atLeastLength(1)` here: `items` is only meaningful for `init`/`append`,
 	// and both enforce non-empty with op-specific errors. A stray `items: []` on
 	// an op that ignores it (e.g. `view`) must not be a hard schema rejection.
-	"items?": type("string").describe("task content").array().describe("tasks to append"),
+	"items?": type("string").describe("task content").array().describe("tasks for single-phase init or append"),
 	"reason?": type("string").describe("blocker note (block op)"),
 }).describe("apply a single todo operation");
 
@@ -683,7 +683,10 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 			continue;
 		}
 
-		const taskMatch = /^[-*+]\s*\[(.?)\]\s+(.+?)\s*$/.exec(trimmed);
+		// Tolerate backslash-escaped brackets (`- \[x\]`): some editors and
+		// markdown serializers escape `[` (and `]`) when round-tripping, yet the
+		// line still renders as a normal `[x]` checkbox. Accept either form.
+		const taskMatch = /^[-*+]\s*\\?\[(.?)\\?\]\s+(.+?)\s*$/.exec(trimmed);
 		if (taskMatch) {
 			if (!currentPhase) {
 				currentPhase = { name: "Todos", tasks: [] };

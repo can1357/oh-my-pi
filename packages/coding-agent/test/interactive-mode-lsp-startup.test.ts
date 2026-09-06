@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -126,5 +127,25 @@ describe("InteractiveMode LSP startup welcome banner", () => {
 			error: "rust-analyzer timed out",
 		} satisfies LspStartupEvent);
 		expect(showWarningSpy).not.toHaveBeenCalled();
+	});
+
+	it("surfaces a sanitized warning when session persistence fails", async () => {
+		await mode.init();
+		await session.sessionManager.ensureOnDisk();
+		const showWarning = vi.spyOn(mode, "showWarning").mockImplementation(() => {});
+		const writeFailure = vi.spyOn(fs, "writeSync").mockImplementation(() => {
+			throw Object.assign(new Error("ENOSPC:\tdisk full\n\u001b[31mretry later\u001b[0m"), { code: "ENOSPC" });
+		});
+		session.sessionManager.appendCustomEntry("persistence-failure-probe", {});
+
+		expect(showWarning).toHaveBeenCalledTimes(1);
+		const warning = showWarning.mock.calls[0]?.[0] ?? "";
+		expect(warning).toContain("Session persistence failed: ENOSPC:");
+		expect(warning).toContain("Unsaved entries remain in memory");
+		expect(warning).not.toContain("\t");
+		expect(warning).not.toContain("\n");
+		expect(warning).not.toContain("\u001b");
+		writeFailure.mockRestore();
+		session.sessionManager.appendCustomEntry("persistence-recovery-probe", {});
 	});
 });

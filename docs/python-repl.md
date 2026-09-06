@@ -92,7 +92,7 @@ The runner's source transformer rewrites IPython-style magics to plain Python ca
 | `%reset`                          | Clear user globals and re-inject prelude.                                                                                                                   |
 | `%load <path>`                    | Read a file into a fresh cell and execute.                                                                                                                  |
 | `%run <path>`                     | `runpy.run_path` and merge globals back.                                                                                                                    |
-| `%%bash` / `%%sh`                 | Run the cell body via `bash`/`sh`.                                                                                                                          |
+| `%%bash`                          | Run the cell body via `bash`. The only registered shell cell magic — `%%sh` does not exist, and unregistered names raise `Cell magic function '%%<name>' not found`. |
 | `%%capture [name]`                | Run body with stdout/stderr captured into `name`.                                                                                                           |
 | `%%timeit`                        | Time the cell body.                                                                                                                                         |
 | `%%writefile <path>`              | Write body to file.                                                                                                                                         |

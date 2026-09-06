@@ -7,6 +7,7 @@ import {
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { CredentialRankingStrategy, UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
 import { logger } from "@oh-my-pi/pi-utils";
 
 interface CacheEntry {
@@ -607,5 +608,110 @@ describe("AuthStorage corrupt persisted block store", () => {
 			expect(calls, scenario.name).toBe(1);
 		}
 		expect(errorSpy).toHaveBeenCalledTimes(scenarios.length);
+	});
+});
+
+describe("AuthStorage Claude tier reserve health", () => {
+	const storages: AuthStorage[] = [];
+	afterEach(() => {
+		for (const storage of storages) storage.close();
+		storages.length = 0;
+	});
+
+	const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+	const HOUR_MS = 60 * 60 * 1000;
+
+	function claudeLimit(opts: {
+		id: string;
+		windowId: "5h" | "7d";
+		usedFraction: number;
+		shared?: boolean;
+		tier?: string;
+		exhausted?: boolean;
+	}): UsageLimit {
+		const resetsAt = Date.now() + 3 * 24 * 60 * 60 * 1000;
+		return {
+			id: opts.id,
+			label: opts.id,
+			scope: {
+				provider: "anthropic",
+				windowId: opts.windowId,
+				...(opts.tier !== undefined ? { tier: opts.tier } : {}),
+				...(opts.shared !== undefined ? { shared: opts.shared } : {}),
+			},
+			window: {
+				id: opts.windowId,
+				label: opts.windowId,
+				durationMs: opts.windowId === "5h" ? 5 * HOUR_MS : WEEK_MS,
+				resetsAt,
+			},
+			amount: { usedFraction: opts.usedFraction, unit: "percent" },
+			status: opts.exhausted ? "exhausted" : "ok",
+		};
+	}
+
+	async function createClaudeStorage(reports: Record<string, UsageReport | null>): Promise<AuthStorage> {
+		const storage = new AuthStorage(makeStore([oauthRow(1)]), {
+			usageProviderResolver: provider => (provider === "anthropic" ? makeUsageProvider(reports) : undefined),
+			rankingStrategyResolver: provider => (provider === "anthropic" ? claudeRankingStrategy : undefined),
+			configValueResolver: async value => value,
+		});
+		await storage.reload();
+		storages.push(storage);
+		return storage;
+	}
+
+	function tieredReport(fableUsedFraction: number, exhausted = false): UsageReport {
+		return report("account-1", [
+			claudeLimit({ id: "anthropic:5h", windowId: "5h", usedFraction: 0.1, shared: true }),
+			claudeLimit({ id: "anthropic:7d", windowId: "7d", usedFraction: 0.72, shared: true }),
+			claudeLimit({
+				id: "anthropic:7d:fable",
+				windowId: "7d",
+				usedFraction: fableUsedFraction,
+				tier: "fable",
+				exhausted,
+			}),
+		]);
+	}
+
+	it("reports reserve when the mapped Fable tier row is inside the reserve margin", async () => {
+		const storage = await createClaudeStorage({ "account-1": tieredReport(0.96) });
+		const health = await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude-fable-5",
+			reserveFraction: 0.1,
+		});
+		expect(health.state).toBe("reserve");
+		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.04);
+	});
+
+	it("keeps a Fable model healthy while its tier row stays outside the reserve margin", async () => {
+		const storage = await createClaudeStorage({ "account-1": tieredReport(0.85) });
+		const health = await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude-fable-5",
+			reserveFraction: 0.1,
+		});
+		expect(health.state).toBe("healthy");
+		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.15);
+	});
+
+	it("does not let a Fable-only tier row pull unrelated Opus traffic into reserve", async () => {
+		const storage = await createClaudeStorage({ "account-1": tieredReport(0.96) });
+		const health = await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude-opus-4-8",
+			reserveFraction: 0.1,
+		});
+		expect(health.state).toBe("healthy");
+		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.28);
+	});
+
+	it("still depletes a Fable model on a confirmed 100% tier row", async () => {
+		const storage = await createClaudeStorage({ "account-1": tieredReport(1, true) });
+		const health = await storage.getModelUsageHealth("anthropic", {
+			modelId: "claude-fable-5",
+			reserveFraction: 0.1,
+		});
+		expect(health.state).toBe("depleted");
+		expect(health.accounts[0]?.resetsAt).toBeGreaterThan(Date.now());
 	});
 });

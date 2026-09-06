@@ -1,10 +1,10 @@
 {
   "type": "module",
   "name": "@oh-my-pi/omp-stats",
-  "version": "17.3.3",
+  "version": "18.0.11",
   "description": "Local observability dashboard for pi AI usage statistics",
   "homepage": "https://omp.sh",
-  "author": "Can Boluk",
+  "author": "Stencil Labs, Inc.",
   "license": "MIT",
   "repository": {
     "type": "git",

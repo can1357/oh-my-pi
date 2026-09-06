@@ -140,7 +140,7 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 		fixtureDir.removeSync();
 	});
 
-	async function createHarness(strategy: "context-full" | "snapcompact" = "context-full"): Promise<Harness> {
+	async function createHarness(method: "soft" | "snapcompact" = "soft"): Promise<Harness> {
 		const observedCalls: ObservedPromptCall[] = [];
 		const waiters: Array<{
 			predicate: (call: ObservedPromptCall) => boolean;
@@ -157,8 +157,11 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
+			// Assert the blocking threshold pass itself; keep the speculation
+			// grace band from deferring it.
+			"compaction.asyncEnabled": false,
 			"compaction.autoContinue": true,
-			"compaction.strategy": strategy,
+			"compaction.methodOrder": method === "snapcompact" ? ["snapcompact", "soft"] : ["soft"],
 			"task.eager": "default",
 			"todo.enabled": false,
 			"todo.eager": "default",

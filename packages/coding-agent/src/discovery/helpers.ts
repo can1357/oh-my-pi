@@ -11,6 +11,7 @@ import {
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
+import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
@@ -261,7 +262,8 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		return null;
 	}
 
-	let tools = parseArrayOrCSV(frontmatter.tools);
+	let tools =
+		Array.isArray(frontmatter.tools) && frontmatter.tools.length === 0 ? [] : parseArrayOrCSV(frontmatter.tools);
 	if (tools) tools = normalizeToolNames(tools);
 
 	// Subagents with explicit tool lists always need yield
@@ -512,6 +514,11 @@ export async function loadFilesFromDir<T>(
 			gitignore: true,
 			hidden: false,
 			fileType: FileType.File,
+			// Thread the caller's non-recursive intent explicitly: the native glob
+			// defaults `recursive` to true and rewrites `*.{ts,js}` -> `**/*.{ts,js}`,
+			// which would walk the entire subtree (e.g. a venv's site-packages under
+			// ~/.codex/tools) and import arbitrary frontend assets as tools (#8552).
+			recursive,
 		});
 		matches = result.matches;
 	} catch {
@@ -558,6 +565,102 @@ export async function loadFilesFromDir<T>(
  */
 export function calculateDepth(cwd: string, targetDir: string, separator: string): number {
 	return cwd.split(separator).length - targetDir.split(separator).length;
+}
+// =============================================================================
+// Standalone context-file walker (AGENTS.md, CLAUDE.md, …)
+// =============================================================================
+
+/**
+ * Compare paths while tolerating Windows drive casing.
+ */
+function samePath(left: string, right: string): boolean {
+	const normalizedLeft = path.resolve(left);
+	const normalizedRight = path.resolve(right);
+	return process.platform === "win32"
+		? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+		: normalizedLeft === normalizedRight;
+}
+
+/**
+ * Return whether `child` is at or below `parent`.
+ */
+function isWithin(parent: string, child: string): boolean {
+	const normalizedParent = path.resolve(parent);
+	const normalizedChild = path.resolve(child);
+	const relative = path.relative(
+		process.platform === "win32" ? normalizedParent.toLowerCase() : normalizedParent,
+		process.platform === "win32" ? normalizedChild.toLowerCase() : normalizedChild,
+	);
+	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+/**
+ * Load standalone context files (e.g. AGENTS.md, CLAUDE.md) by walking up from
+ * cwd. Shared across providers whose files live in project root rather than
+ * config directories (which their own providers handle).
+ *
+ * When a repository is nested below the user's home directory, continue past
+ * the Git root to discover workspace-level files, but stop before loading the
+ * home directory's own copy as project context. A repository rooted at the
+ * home directory itself is not "nested below" it, so the home-level file
+ * remains project context.
+ */
+export async function loadStandaloneContextFiles(
+	ctx: LoadContext,
+	providerId: string,
+	fileName: string,
+): Promise<LoadResult<ContextFile>> {
+	const items: ContextFile[] = [];
+	const warnings: string[] = [];
+	const home = path.resolve(ctx.home);
+	const cwd = path.resolve(ctx.cwd);
+	const repoRoot = ctx.repoRoot ? path.resolve(ctx.repoRoot) : null;
+	const filesystemRoot = path.parse(cwd).root;
+	const cwdIsUnderHome = isWithin(home, cwd);
+	const repoIsHome = repoRoot !== null && samePath(home, repoRoot);
+	const repoIsUnderHome = repoRoot !== null && isWithin(home, repoRoot) && !repoIsHome;
+	const scanToHome = repoRoot !== null && cwdIsUnderHome && repoIsUnderHome;
+	const boundary = scanToHome ? home : (repoRoot ?? (cwdIsUnderHome ? home : filesystemRoot));
+	const includeBoundary = repoRoot === null ? cwdIsUnderHome : !samePath(boundary, home) || repoIsHome;
+	const excludeHome = scanToHome;
+
+	let current = cwd;
+	while (true) {
+		const atBoundary = samePath(current, boundary);
+		const atHome = excludeHome && samePath(current, home);
+		if (!(atHome || (atBoundary && !includeBoundary))) {
+			const candidate = path.join(current, fileName);
+			const content = await readFile(candidate);
+
+			// Empty files contribute nothing and must not claim the depth scope:
+			// at a priority tie, an empty first-registered file would shadow a
+			// non-empty sibling (e.g. an empty AGENTS.md shadowing CLAUDE.md).
+			if (content !== null && content !== "") {
+				const parent = path.dirname(candidate);
+				const baseName = parent.split(path.sep).pop() ?? "";
+
+				if (!baseName.startsWith(".")) {
+					const fileDir = path.dirname(candidate);
+					const calculatedDepth = calculateDepth(cwd, fileDir, path.sep);
+
+					items.push({
+						path: candidate,
+						content,
+						level: "project",
+						depth: calculatedDepth,
+						_source: createSourceMeta(providerId, candidate, "project"),
+					});
+				}
+			}
+		}
+		if (atBoundary) break;
+
+		const parent = path.dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+
+	return { items, warnings };
 }
 
 interface ExtensionModuleManifest {
@@ -761,7 +864,7 @@ export function buildExtensionModuleItems(
  * Entry for an installed Claude Code plugin.
  */
 export interface ClaudePluginEntry {
-	/** Claude registry scope; local entries are restricted to their project path. */
+	/** Claude registry scope; project and local entries are restricted to their project path. */
 	scope?: "user" | "project" | "local";
 	installPath: string;
 	version: string;
@@ -769,7 +872,7 @@ export interface ClaudePluginEntry {
 	lastUpdated: string;
 	gitCommitSha?: string;
 	enabled?: boolean;
-	/** Project root recorded by Claude for a local installation. */
+	/** Project root recorded by Claude for a project-bound installation. */
 	projectPath?: string;
 }
 
@@ -893,6 +996,40 @@ async function canonicalClaudeProjectPath(projectPath: string): Promise<string |
 	}
 }
 
+/**
+ * Claude Code `enabledPlugins` overrides, merged across the same settings
+ * layers Claude Code itself consults: `<claude-config>/settings.json`, then
+ * `<dir>/.claude/settings.json` and `<dir>/.claude/settings.local.json` for
+ * each project directory (later layers win, `.local` wins within a layer).
+ *
+ * Returns `pluginId -> boolean` for the ids the user toggled explicitly, and
+ * the list of settings files that contributed (for cache keying).
+ */
+async function readClaudeEnabledPlugins(
+	claudeConfigDir: string,
+	projectDirs: string[],
+): Promise<{ enabled: Map<string, boolean>; sources: string[] }> {
+	const enabled = new Map<string, boolean>();
+	const sources: string[] = [];
+	const candidates = [path.join(claudeConfigDir, "settings.json")];
+	for (const dir of projectDirs) {
+		candidates.push(path.join(dir, ".claude", "settings.json"), path.join(dir, ".claude", "settings.local.json"));
+	}
+	for (const file of candidates) {
+		const content = await readFile(file);
+		if (!content) continue;
+		const data = tryParseJson<{ enabledPlugins?: unknown }>(content);
+		if (!data || typeof data !== "object") continue;
+		const map = data.enabledPlugins;
+		if (!map || typeof map !== "object" || Array.isArray(map)) continue;
+		sources.push(file);
+		for (const [pluginId, value] of Object.entries(map as Record<string, unknown>)) {
+			if (typeof value === "boolean") enabled.set(pluginId, value);
+		}
+	}
+	return { enabled, sources };
+}
+
 const pluginRootsCache = new Map<string, { roots: ClaudePluginRoot[]; warnings: string[] }>();
 
 const pluginCacheInvalidators = new Set<() => void>();
@@ -917,7 +1054,10 @@ export async function listClaudePluginRoots(
 	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd) : null;
 	const projectRoot = resolvedProjectPath ? path.dirname(path.dirname(path.dirname(resolvedProjectPath))) : cwd;
 	const activeClaudeProjectPath = projectRoot ? await canonicalClaudeProjectPath(projectRoot) : null;
-	const cacheKey = `${claudeConfigDir}:${ompRegistryPath}:${resolvedProjectPath ?? ""}:${activeClaudeProjectPath ?? ""}`;
+	const canonicalCwd = cwd ? await canonicalClaudeProjectPath(cwd) : null;
+	const settingsDirs = [...new Set([activeClaudeProjectPath, canonicalCwd].filter((d): d is string => !!d))];
+	const enabledOverrides = await readClaudeEnabledPlugins(claudeConfigDir, settingsDirs);
+	const cacheKey = `${claudeConfigDir}:${ompRegistryPath}:${resolvedProjectPath ?? ""}:${activeClaudeProjectPath ?? ""}:${canonicalCwd ?? ""}:${enabledOverrides.sources.join("|")}`;
 	const cached = pluginRootsCache.get(cacheKey);
 	if (cached) return cached;
 
@@ -956,7 +1096,13 @@ export async function listClaudePluginRoots(
 						continue;
 					}
 					if (entry.enabled === false) continue;
-					if (entry.scope === "local") {
+					// Claude Code's own on/off switch: `enabledPlugins` in settings.json /
+					// settings.local.json. `false` hides the plugin here even though it is
+					// installed; `true` opts a project-bound install into this project even
+					// when its recorded projectPath is a different directory.
+					const override = enabledOverrides.enabled.get(pluginId);
+					if (override === false) continue;
+					if ((entry.scope === "local" || entry.scope === "project") && override !== true) {
 						if (!entry.projectPath || !activeClaudeProjectPath) continue;
 						let entryProjectPath = canonicalClaudeProjectPaths.get(entry.projectPath);
 						if (entryProjectPath === undefined) {

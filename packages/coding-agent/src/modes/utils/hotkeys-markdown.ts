@@ -39,7 +39,7 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"| `Tab` | Path completion / accept autocomplete |",
 		`| \`${appKey(bindings, "app.interrupt")}\` | Cancel autocomplete / interrupt active work |`,
 		`| \`${appKey(bindings, "app.clear")}\` | Clear editor (first) / exit (second) |`,
-		`| \`${appKey(bindings, "app.exit")}\` | Exit (when editor is empty) |`,
+		`| \`${appKey(bindings, "app.exit")}\` | Exit (saves current prompt as draft) |`,
 		`| \`${appKey(bindings, "app.suspend")}\` | Suspend to background |`,
 		`| \`${appKey(bindings, "app.display.reset")}\` | Reset terminal display |`,
 		`| \`${appKey(bindings, "app.thinking.cycle")}\` | Cycle thinking level |`,

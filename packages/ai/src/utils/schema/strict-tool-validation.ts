@@ -7,7 +7,17 @@
  * copied onto a `type: "null"` branch, or an `enum` placed on an `array`
  * schema instead of its `items`). One such tool 400s the entire turn, so
  * callers quarantine just the offending tool. See issue #2652.
+ *
+ * xAI additionally rejects a leftover *root* `anyOf`/`oneOf` whose branches
+ * are not objects ("tool parameter root must be an object type"). That class
+ * is opt-in via {@link FindStrictToolSchemaViolationOptions.rejectXaiRootObjectUnion}
+ * so OpenAI/Azure/Codex keep valid object-root unions.
  */
+
+export interface FindStrictToolSchemaViolationOptions {
+	/** xAI (paid + OAuth) only: leftover object-root unions 400 the whole turn. */
+	rejectXaiRootObjectUnion?: boolean;
+}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -70,10 +80,14 @@ const CHILD_ARRAY_KEYS = ["anyOf", "oneOf", "allOf", "prefixItems"] as const;
  * contradictions. Returns a JSON-pointer-ish path to the first offending node,
  * or `null` when the schema is safe to emit.
  */
-export function findStrictToolSchemaViolation(schema: unknown, path = "#"): string | null {
+export function findStrictToolSchemaViolation(
+	schema: unknown,
+	path = "#",
+	options?: FindStrictToolSchemaViolationOptions,
+): string | null {
 	if (Array.isArray(schema)) {
 		for (let i = 0; i < schema.length; i++) {
-			const hit = findStrictToolSchemaViolation(schema[i], `${path}/${i}`);
+			const hit = findStrictToolSchemaViolation(schema[i], `${path}/${i}`, options);
 			if (hit) return hit;
 		}
 		return null;
@@ -91,25 +105,45 @@ export function findStrictToolSchemaViolation(schema: unknown, path = "#"): stri
 		}
 	}
 
+	// xAI rejects the whole request when the *root* schema is typed as object
+	// (or has properties) AND still carries an anyOf/oneOf with a typeless or
+	// non-object branch. Nested unions and pure root unions are not this error.
+	if (
+		options?.rejectXaiRootObjectUnion &&
+		path === "#" &&
+		(types.includes("object") || (node.properties !== undefined && typeof node.properties === "object"))
+	) {
+		for (const key of ["anyOf", "oneOf"] as const) {
+			const arr = node[key];
+			if (!Array.isArray(arr) || arr.length === 0) continue;
+			const hasNonObjectBranch = arr.some(branch => {
+				if (typeof branch !== "object" || branch === null || Array.isArray(branch)) return true;
+				const branchTypes = declaredTypes(branch as JsonRecord);
+				return !branchTypes.includes("object");
+			});
+			if (hasNonObjectBranch) return `${path}/${key}`;
+		}
+	}
+
 	for (const key of CHILD_MAP_KEYS) {
 		const sub = node[key];
 		if (sub && typeof sub === "object" && !Array.isArray(sub)) {
 			for (const k of Object.keys(sub as JsonRecord)) {
-				const hit = findStrictToolSchemaViolation((sub as JsonRecord)[k], `${path}/${key}/${k}`);
+				const hit = findStrictToolSchemaViolation((sub as JsonRecord)[k], `${path}/${key}/${k}`, options);
 				if (hit) return hit;
 			}
 		}
 	}
 	for (const key of CHILD_SCHEMA_KEYS) {
 		if (key in node) {
-			const hit = findStrictToolSchemaViolation(node[key], `${path}/${key}`);
+			const hit = findStrictToolSchemaViolation(node[key], `${path}/${key}`, options);
 			if (hit) return hit;
 		}
 	}
 	for (const key of CHILD_ARRAY_KEYS) {
 		const arr = node[key];
 		if (Array.isArray(arr)) {
-			const hit = findStrictToolSchemaViolation(arr, `${path}/${key}`);
+			const hit = findStrictToolSchemaViolation(arr, `${path}/${key}`, options);
 			if (hit) return hit;
 		}
 	}

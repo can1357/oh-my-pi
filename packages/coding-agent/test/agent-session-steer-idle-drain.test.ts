@@ -112,6 +112,23 @@ describe("AgentSession steer idle drain", () => {
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("delivers successive idle steers after each successful drain", async () => {
+		await createSession([{ role: "user", content: "hello", timestamp: Date.now() }, createAssistantMessage()]);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+			session.agent.clearAllQueues();
+		});
+
+		await session.steer("first steer");
+		vi.advanceTimersByTime(200);
+		await session.waitForIdle();
+
+		await session.steer("second steer");
+		vi.advanceTimersByTime(200);
+		await session.waitForIdle();
+
+		expect(continueSpy).toHaveBeenCalledTimes(2);
+	});
+
 	it("delivers a steer queued after an interrupted tool result", async () => {
 		await createSession([
 			{ role: "user", content: "hello", timestamp: Date.now() },

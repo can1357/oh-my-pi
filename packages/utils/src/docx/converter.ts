@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { archiveEntryText, readArchiveEntries } from "../ar";
 import { attribute, childElements, descendants, firstChild, localName, parseXml, type XmlElement } from "./xml";
-import { readZip, readZipText, type ZipEntries } from "./zip";
 
 /** A mammoth-compatible diagnostic emitted while converting a document. */
 export interface DocxMessage {
@@ -119,7 +119,7 @@ interface NumberingLevel {
 }
 
 interface ConversionContext {
-	readonly entries: ZipEntries;
+	readonly entries: ReadonlyMap<string, Uint8Array>;
 	readonly relationships: ReadonlyMap<string, Relationship>;
 	readonly contentTypes: ReadonlyMap<string, string>;
 	readonly styles: ReadonlyMap<string, Style>;
@@ -655,21 +655,21 @@ function defaultImageConverter(): ImageConverter {
 /** Convert a DOCX buffer or path to mammoth-compatible HTML. */
 export async function convertToHtml(input: DocxInput, options: ConvertToHtmlOptions = {}): Promise<DocxResult> {
 	const bytes = "buffer" in input && input.buffer ? input.buffer : await fs.readFile(input.path);
-	const entries = readZip(bytes);
-	const documentXml = readZipText(entries, "word/document.xml");
+	const entries = await readArchiveEntries({ bytes, format: "zip" });
+	const documentXml = archiveEntryText(entries, "word/document.xml");
 	if (!documentXml) throw new Error("Invalid DOCX: missing word/document.xml");
 	const context: ConversionContext = {
 		entries,
-		relationships: parseRelationships(readZipText(entries, "word/_rels/document.xml.rels")),
-		contentTypes: parseContentTypes(readZipText(entries, "[Content_Types].xml")),
-		styles: parseStyles(readZipText(entries, "word/styles.xml")),
-		numbering: parseNumbering(readZipText(entries, "word/numbering.xml")),
+		relationships: parseRelationships(archiveEntryText(entries, "word/_rels/document.xml.rels")),
+		contentTypes: parseContentTypes(archiveEntryText(entries, "[Content_Types].xml")),
+		styles: parseStyles(archiveEntryText(entries, "word/styles.xml")),
+		numbering: parseNumbering(archiveEntryText(entries, "word/numbering.xml")),
 		messages: [],
 		warnedStyles: new Set(),
 		customStyles: parseCustomStyles(options.styleMap),
 		includeDefaultStyleMap: options.includeDefaultStyleMap !== false,
 		convertImage: options.convertImage ?? defaultImageConverter(),
-		footnotes: parseFootnotes(readZipText(entries, "word/footnotes.xml")),
+		footnotes: parseFootnotes(archiveEntryText(entries, "word/footnotes.xml")),
 		usedFootnotes: [],
 		footnoteOrdinals: new Map(),
 	};

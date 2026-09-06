@@ -15,7 +15,6 @@ const legacyHtmlExportAssetPattern = /^(?:template-[^.]+\.(?:css|html|js)|tool-v
 // `omp-legacy-pi-modules` exists only in compiled binaries via the build plugin;
 // the npm bundle never executes that `isCompiledBinary()` branch.
 const ALWAYS_EXTERNAL = [
-	"mupdf",
 	"@oh-my-pi/pi-natives",
 	"@huggingface/transformers",
 	"fastembed",

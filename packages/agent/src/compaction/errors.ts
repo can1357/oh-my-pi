@@ -13,8 +13,8 @@
 export class CompactionCancelledError extends Error {
 	override readonly name = "CompactionCancelledError" as const;
 
-	constructor(message = "Compaction cancelled") {
-		super(message);
+	constructor(message = "Compaction cancelled", options?: ErrorOptions) {
+		super(message, options);
 	}
 }
 

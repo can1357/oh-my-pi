@@ -3,16 +3,7 @@
  *
  * Interactive multi-step wizard for adding MCP servers.
  */
-import {
-	Container,
-	Input,
-	matchesKey,
-	replaceTabs,
-	Spacer,
-	Text,
-	TruncatedText,
-	truncateToWidth,
-} from "@oh-my-pi/pi-tui";
+import { Container, Input, matchesKey, replaceTabs, Spacer, Text, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import { validateServerName } from "../../mcp/config-writer";
 import { analyzeAuthError, discoverOAuthEndpoints, fetchResourceMetadataScopes } from "../../mcp/oauth-discovery";
@@ -20,7 +11,7 @@ import type { MCPHttpServerConfig, MCPServerConfig, MCPSseServerConfig, MCPStdio
 import { shortenPath } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel } from "./overlay-box";
 
 type TransportType = "stdio" | "http" | "sse";
 type AuthMethod = "none" | "oauth" | "manual";
@@ -64,6 +55,7 @@ interface MCPAddWizardOAuthOptions {
 	serverUrl?: string;
 	resource?: string;
 	registrationUrl?: string;
+	issuerUrl?: string;
 	/**
 	 * External cancellation source. Aborting it tears down the in-flight OAuth
 	 * flow and surfaces a neutral cancellation error. The wizard wires its own
@@ -84,6 +76,7 @@ interface WizardState {
 	oauthAuthUrl: string;
 	oauthTokenUrl: string;
 	oauthRegistrationUrl: string;
+	oauthIssuerUrl: string;
 	oauthClientId: string;
 	oauthClientSecret: string;
 	oauthScopes: string;
@@ -104,7 +97,7 @@ function sanitize(text: string): string {
 	return truncateToWidth(replaceTabs(text), MAX_DISPLAY_WIDTH);
 }
 
-export class MCPAddWizard extends Container {
+export class MCPAddWizard extends OverlayPanel {
 	#currentStep: WizardStep = "name";
 	#state: WizardState = {
 		name: "",
@@ -116,6 +109,7 @@ export class MCPAddWizard extends Container {
 		oauthAuthUrl: "",
 		oauthTokenUrl: "",
 		oauthRegistrationUrl: "",
+		oauthIssuerUrl: "",
 		oauthClientId: "",
 		oauthClientSecret: "",
 		oauthScopes: "",
@@ -168,7 +162,7 @@ export class MCPAddWizard extends Container {
 		onRender?: () => void,
 		initialName?: string,
 	) {
-		super();
+		super("Add MCP Server");
 		this.#onCompleteCallback = onComplete;
 		this.#onCancelCallback = onCancel;
 		this.#onOAuthCallback = onOAuth ?? null;
@@ -179,12 +173,6 @@ export class MCPAddWizard extends Container {
 			this.#currentStep = "transport";
 		}
 
-		// Add border
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
-
-		// Add title
-		this.addChild(new TruncatedText(theme.bold("Add MCP Server")));
 		this.addChild(new Spacer(1));
 
 		// Content container for step-specific content
@@ -192,9 +180,6 @@ export class MCPAddWizard extends Container {
 		this.addChild(this.#contentContainer);
 
 		this.addChild(new Spacer(1));
-
-		// Add bottom border
-		this.addChild(new DynamicBorder());
 
 		// Render first step
 		this.#renderStep();
@@ -1030,6 +1015,7 @@ export class MCPAddWizard extends Container {
 					this.#state.oauthAuthUrl = oauth.authorizationUrl;
 					this.#state.oauthTokenUrl = oauth.tokenUrl;
 					this.#state.oauthRegistrationUrl = oauth.registrationUrl || "";
+					this.#state.oauthIssuerUrl = oauth.issuerUrl || "";
 					this.#state.oauthClientId = oauth.clientId || "";
 					this.#state.oauthScopes = oauth.scopes || "";
 					this.#state.oauthResource = oauth.resource || (this.#state.transport === "stdio" ? "" : this.#state.url);
@@ -1201,6 +1187,7 @@ export class MCPAddWizard extends Container {
 				{
 					serverUrl: this.#state.url || undefined,
 					registrationUrl: this.#state.oauthRegistrationUrl || undefined,
+					issuerUrl: this.#state.oauthIssuerUrl || undefined,
 					resource: oauthResource || undefined,
 					abortSignal: this.#oauthAbort.signal,
 				},

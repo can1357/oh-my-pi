@@ -27,7 +27,7 @@ import {
 	type AnthropicUserContentBlock,
 	anthropicMessagesRequestSchema,
 } from "./anthropic-messages-server-schema";
-import { isAnthropicWebSearchHistoryBlock } from "./anthropic-wire";
+import { isAnthropicServerToolHistoryBlock } from "./anthropic-wire";
 
 /**
  * Anthropic Messages API (https://docs.anthropic.com/en/api/messages) ↔ pi-ai
@@ -216,10 +216,10 @@ function walkAssistantContent(
 				break;
 			case "server_tool_use":
 			case "web_search_tool_result":
-				if (isAnthropicWebSearchHistoryBlock(block)) {
-					// Native web-search call/result. Anthropic requires these
-					// replayed verbatim (encrypted_content included), so retain
-					// the block instead of flattening it to text.
+			case "tool_search_tool_result":
+				if (isAnthropicServerToolHistoryBlock(block)) {
+					// Anthropic requires supported server-tool call/results replayed
+					// verbatim, so retain each opaque block instead of flattening it.
 					out.push({ type: "anthropicServerTool", block: { ...block } });
 				} else {
 					// Other server tools use distinct result block types that omp

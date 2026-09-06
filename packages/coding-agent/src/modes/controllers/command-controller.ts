@@ -29,7 +29,7 @@ import {
 	summarizeMentalModel,
 } from "../../hindsight";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
-import { BashExecutionComponent } from "../../modes/components/bash-execution";
+import { BashExecutionComponent, bashPtyViewport } from "../../modes/components/bash-execution";
 import { BorderedLoader } from "../../modes/components/bordered-loader";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
@@ -59,6 +59,10 @@ import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 
+function formatCreditValue(value: number): string {
+	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
 function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown: string): void {
 	const block = new TranscriptBlock();
 	block.addChild(new DynamicBorder());
@@ -71,6 +75,56 @@ function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown:
 
 export class CommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
+
+	async #restoreAfterMoveFailure(
+		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
+		initialError?: unknown,
+	): Promise<void> {
+		if (initialError !== undefined) {
+			this.ctx.showError(
+				`Failed to switch workspace: ${initialError instanceof Error ? initialError.message : String(initialError)}`,
+			);
+		}
+
+		try {
+			await this.ctx.sessionManager.rollbackMove(previousState);
+		} catch (rollbackError) {
+			const actual = this.ctx.sessionManager.getCwd();
+			let realigned = false;
+			try {
+				realigned = await this.ctx.applyCwdChange(actual);
+			} catch {}
+			if (!realigned) {
+				this.ctx.showError(
+					`Failed to roll back move: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} (failed to re-align workspace to ${actual})`,
+				);
+				await this.ctx.shutdown();
+				return;
+			}
+			this.ctx.showError(
+				`Failed to roll back move: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} (workspace remains at ${actual})`,
+			);
+			return;
+		}
+
+		let sourceRestored = false;
+		try {
+			sourceRestored = await this.ctx.applyCwdChange(previousState.cwd);
+		} catch {}
+		if (sourceRestored) return;
+
+		const actual = this.ctx.sessionManager.getCwd();
+		let realigned = false;
+		try {
+			realigned = await this.ctx.applyCwdChange(actual);
+		} catch {}
+		if (!realigned) {
+			this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
+			await this.ctx.shutdown();
+			return;
+		}
+		this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
+	}
 
 	openInBrowser(urlOrPath: string): void {
 		openPath(urlOrPath);
@@ -252,9 +306,9 @@ export class CommandController {
 				: this.ctx.session.sessionManager.getUsageStatistics().premiumRequests;
 		const normalizedPremiumRequests = Math.round((premiumRequests + Number.EPSILON) * 100) / 100;
 
-		let info = `${theme.bold("Session Info")}\n\n`;
+		let info = "";
 		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
-		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
+		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n`;
 		info += `\n${theme.bold("Provider")}\n`;
 		const model = this.ctx.session.model;
 		if (!model) {
@@ -277,6 +331,14 @@ export class CommandController {
 				providerSessionState: this.ctx.session.providerSessionState,
 			});
 			info += renderProviderSection(providerDetails, theme);
+			if (stats.routedModels !== undefined) {
+				const routed = Object.entries(stats.routedModels)
+					.sort(([aId, aCount], [bId, bCount]) => bCount - aCount || aId.localeCompare(bId))
+					.map(
+						([id, count]) => `${replaceTabs(sanitizeText(id))}${count > 1 ? theme.fg("dim", ` ×${count}`) : ""}`,
+					);
+				info += `${theme.fg("dim", "Served:")} ${routed.join(", ")}\n`;
+			}
 		}
 		info += `\n`;
 		info += `${theme.bold("Messages")}\n`;
@@ -305,13 +367,18 @@ export class CommandController {
 		}
 		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
-		if (stats.cost > 0 || normalizedPremiumRequests > 0) {
+		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined) {
 			info += `\n${theme.bold("Cost")}\n`;
 			if (stats.cost > 0) {
 				info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}\n`;
 			}
 			if (normalizedPremiumRequests > 0) {
 				info += `${theme.fg("dim", "Premium Requests:")} ${normalizedPremiumRequests.toLocaleString()}\n`;
+			}
+			if (stats.credits !== undefined) {
+				info += `${theme.fg("dim", "Credits:")} ${formatCreditValue(stats.credits.cost)}\n`;
+				info += `${theme.fg("dim", "Committed Credits:")} ${formatCreditValue(stats.credits.committedCost)}\n`;
+				info += `${theme.fg("dim", "Committed ACU:")} ${formatCreditValue(stats.credits.acuCost)}\n`;
 			}
 		}
 
@@ -346,7 +413,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+		this.ctx.showSessionInfo(info);
 	}
 
 	static readonly #advisorStatusGlyph: Record<string, string> = {
@@ -652,6 +719,33 @@ export class CommandController {
 			}
 			return;
 		}
+		if (action === "queue") {
+			try {
+				const payload = await backend.queuePreview?.({
+					agentDir,
+					cwd: this.ctx.sessionManager.getCwd(),
+					session: this.ctx.session,
+				});
+				if (!payload) {
+					this.ctx.showWarning(`Memory queue is not available for the ${backend.id} backend.`);
+					return;
+				}
+				showMarkdownPanel(this.ctx, "Memory Queue", payload);
+			} catch (error) {
+				this.ctx.showError(`Memory queue failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
+
+		if (action === "sync") {
+			try {
+				await backend.enqueue(agentDir, this.ctx.sessionManager.getCwd(), this.ctx.session);
+				this.ctx.showStatus("Memory consolidation ran.");
+			} catch (error) {
+				this.ctx.showError(`Memory sync failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
 
 		if (action === "stats" || action === "diagnose") {
 			const hook = action === "stats" ? backend.stats : backend.diagnose;
@@ -673,7 +767,7 @@ export class CommandController {
 			return;
 		}
 
-		this.ctx.showError("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|mm ...>");
+		this.ctx.showError("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync|mm ...>");
 	}
 
 	async #handleMentalModelsSubcommand(argumentText: string): Promise<void> {
@@ -1103,13 +1197,24 @@ export class CommandController {
 			return;
 		}
 
+		const previousState = this.ctx.sessionManager.captureState();
 		try {
 			await this.ctx.session.moveSession(resolvedPath);
 		} catch (err) {
 			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
 			return;
 		}
-		await this.ctx.applyCwdChange(resolvedPath);
+		let applied = false;
+		try {
+			applied = await this.ctx.applyCwdChange(resolvedPath);
+		} catch (error) {
+			await this.#restoreAfterMoveFailure(previousState, error);
+			return;
+		}
+		if (!applied) {
+			await this.#restoreAfterMoveFailure(previousState);
+			return;
+		}
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
@@ -1161,7 +1266,16 @@ export class CommandController {
 						this.ctx.bashComponent.appendOutput(chunk);
 					}
 				},
-				{ excludeFromContext, useUserShell: true },
+				{
+					excludeFromContext,
+					useUserShell: true,
+					// User-shell zsh/fish `!` commands run on a headless PTY; raw
+					// bytes render through the component's vterm replay (color-safe).
+					pty: {
+						...bashPtyViewport(this.ctx.ui),
+						onChunk: chunk => this.ctx.bashComponent?.appendPtyChunk(chunk),
+					},
+				},
 			);
 			if (this.ctx.bashComponent) {
 				const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
@@ -1191,8 +1305,20 @@ export class CommandController {
 	}
 
 	async #moveInteractiveCwd(resolvedPath: string): Promise<void> {
+		const previousState = this.ctx.sessionManager.captureState();
 		await this.ctx.sessionManager.moveTo(resolvedPath);
-		await this.ctx.applyCwdChange(resolvedPath);
+		let applied = false;
+		try {
+			applied = await this.ctx.applyCwdChange(resolvedPath);
+		} catch (error) {
+			await this.#restoreAfterMoveFailure(previousState, error);
+			return;
+		}
+		if (!applied) {
+			await this.#restoreAfterMoveFailure(previousState);
+			return;
+		}
+
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
 	}
@@ -1283,8 +1409,9 @@ export class CommandController {
 	}
 
 	/**
-	 * TUI handler for `/shake`. `elide` drops heavy structural content and
-	 * `images` strips image blocks. Rebuilds the chat and reports counts.
+	 * TUI handler for `/shake`. `elide` drops heavy structural content,
+	 * `images` strips image blocks, and `thinking` drops all thinking blocks.
+	 * Rebuilds the chat and reports counts.
 	 */
 	async handleShakeCommand(mode: ShakeMode): Promise<void> {
 		let result: ShakeResult;
@@ -1295,7 +1422,11 @@ export class CommandController {
 			return;
 		}
 
-		const dropped = result.toolResultsDropped + result.blocksDropped + (result.imagesDropped ?? 0);
+		const dropped =
+			result.toolResultsDropped +
+			result.blocksDropped +
+			(result.imagesDropped ?? 0) +
+			(result.thinkingBlocksDropped ?? 0);
 		if (dropped === 0) {
 			this.ctx.showStatus("Nothing to shake.");
 			return;
@@ -1412,7 +1543,8 @@ export class CommandController {
 		this.ctx.ui.requestRender();
 
 		try {
-			// Handoff generation runs as a oneshot request; the new session is shown after it completes.
+			// Handoff generation runs as a oneshot request; the document is then
+			// committed as a compaction entry on this session.
 			const result = await this.ctx.session.handoff(customInstructions);
 
 			if (!result) {
@@ -1420,7 +1552,7 @@ export class CommandController {
 				return;
 			}
 
-			// Rebuild chat from the new session (which now contains the handoff document).
+			// Rebuild chat from the session, which now shows the handoff compaction divider.
 			this.ctx.clearTransientSessionUi();
 			await this.ctx.renderInitialMessages();
 			this.ctx.statusLine.invalidate();
@@ -1429,7 +1561,11 @@ export class CommandController {
 
 			this.ctx.present([
 				new Spacer(1),
-				new Text(`${theme.fg("accent", `${theme.status.success} New session started with handoff context`)}`, 1, 1),
+				new Text(
+					`${theme.fg("accent", `${theme.status.success} Context handed off and compacted in place`)}`,
+					1,
+					1,
+				),
 			]);
 			if (result.savedPath) {
 				this.ctx.showStatus(`Handoff document saved to: ${result.savedPath}`);

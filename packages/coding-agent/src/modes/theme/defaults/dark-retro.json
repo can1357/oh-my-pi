@@ -43,7 +43,7 @@
 		"mdLinkUrl": "phosphorVeryDim",
 		"mdCode": "phosphorBright",
 		"mdCodeBlock": "phosphor",
-		"mdCodeBlockBorder": "phosphorVeryDim",
+		"mdCodeBlockBorder": "phosphorDim",
 		"mdQuote": "phosphorDim",
 		"mdQuoteBorder": "phosphorVeryDim",
 		"mdHr": "phosphorVeryDim",

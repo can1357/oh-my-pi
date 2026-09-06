@@ -710,7 +710,7 @@ function formatAgentHeaderLabel(args: Partial<TaskParams> | undefined): string |
 }
 
 /** Dim `⟨agent⟩` badge for a non-default agent type; empty for the generic worker. */
-function agentTypeBadge(agent: string | undefined, theme: Theme): string {
+export function agentTypeBadge(agent: string | undefined, theme: Theme): string {
 	const trimmed = agent?.trim();
 	if (!trimmed || trimmed === "task") return "";
 	return ` ${theme.fg("dim", `${theme.format.bracketLeft}${trimmed}${theme.format.bracketRight}`)}`;

@@ -1,10 +1,10 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-utils",
-  "version": "17.3.3",
+  "version": "18.0.11",
   "description": "Shared utilities for pi packages",
   "homepage": "https://omp.sh",
-  "author": "Can Boluk",
+  "author": "Stencil Labs, Inc.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -48,6 +48,10 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts"
+    },
+    "./ar": {
+      "types": "./src/ar/index.ts",
+      "import": "./src/ar/index.ts"
     },
     "./*": {
       "types": "./src/*.ts",

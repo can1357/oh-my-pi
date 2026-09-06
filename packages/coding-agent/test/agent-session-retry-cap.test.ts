@@ -2,13 +2,22 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ApiKeyResolveContext, AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type {
+	ApiKeyResolveContext,
+	AssistantMessage,
+	TextContent,
+	ThinkingContent,
+	ToolCall,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -77,7 +86,7 @@ describe("AgentSession retry delay cap", () => {
 		for (const provider of ["anthropic", "openai-codex"]) {
 			await authStorage.remove(provider);
 		}
-		for (const provider of ["anthropic", "openai", "openai-codex", "openrouter", "cursor"]) {
+		for (const provider of ["anthropic", "openai", "openai-codex", "openrouter", "github-copilot", "cursor"]) {
 			authStorage.removeRuntimeApiKey(provider);
 		}
 		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
@@ -284,6 +293,65 @@ describe("AgentSession retry delay cap", () => {
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after stream read retry" });
+	});
+
+	it("auto-retries an empty Anthropic stream truncated before message_stop", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel({
+			responses: [
+				{ throw: "Anthropic stream envelope error: stream ended before message_stop" },
+				{ content: ["recovered after envelope retry"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 5_000,
+			"retry.maxRetries": 1,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger empty envelope retry");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		const last = lastAssistant(session);
+		expect(last.stopReason).toBe("stop");
+		expect(last.content).toContainEqual({ type: "text", text: "recovered after envelope retry" });
 	});
 
 	it("auto-retries Unable to connect transport failures instead of stopping the conversation", async () => {
@@ -918,13 +986,20 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("stop");
 	});
 
-	it("does not auto-retry a timeout after streaming a complete write tool call", async () => {
+	it("auto-retries a timeout after streaming a complete unexecuted write tool call", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
 
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "tc-write",
+			name: "write",
+			arguments: { path: "doc/report.md", content: "large report chunk" },
+		};
 		let streamCalls = 0;
+		let resumedWithSyntheticResult = false;
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
 			initialState: {
@@ -933,8 +1008,26 @@ describe("AgentSession retry delay cap", () => {
 				tools: [],
 				messages: [],
 			},
-			streamFn: requestedModel => {
+			streamFn: (requestedModel, context, options) => {
 				streamCalls += 1;
+				if (streamCalls > 1) {
+					const matchingResult = context.messages.find(
+						message => message.role === "toolResult" && message.toolCallId === toolCall.id,
+					);
+					resumedWithSyntheticResult =
+						matchingResult?.role === "toolResult" &&
+						typeof matchingResult.details === "object" &&
+						matchingResult.details !== null &&
+						"executed" in matchingResult.details &&
+						matchingResult.details.executed === false;
+					const recoveryModel = createMockModel({
+						id: requestedModel.id,
+						provider: requestedModel.provider,
+					});
+					recoveryModel.push({ content: ["Recovered after timeout"] });
+					return recoveryModel.stream(recoveryModel, context, options);
+				}
+
 				const stream = new AssistantMessageEventStream();
 				queueMicrotask(() => {
 					const partial: AssistantMessage = {
@@ -953,12 +1046,6 @@ describe("AgentSession retry delay cap", () => {
 						},
 						stopReason: "stop",
 						timestamp: Date.now(),
-					};
-					const toolCall: ToolCall = {
-						type: "toolCall",
-						id: "tc-write",
-						name: "write",
-						arguments: { path: "doc/report.md", content: "large report chunk" },
 					};
 					partial.content.push(toolCall);
 					stream.push({ type: "start", partial });
@@ -1001,27 +1088,22 @@ describe("AgentSession retry delay cap", () => {
 
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
-		const agentEndEvents: Array<Extract<AgentSessionEvent, { type: "agent_end" }>> = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
-			if (event.type === "agent_end") agentEndEvents.push(event);
 		});
 
 		await session.prompt("Write a large report");
 		await session.waitForIdle();
 
-		expect(streamCalls).toBe(1);
-		expect(retryStartEvents).toHaveLength(0);
-		expect(retryEndEvents).toHaveLength(0);
-		expect(session.agent.state.messages.at(-1)?.role).toBe("toolResult");
-		expect(agentEndEvents).toHaveLength(1);
-		expect(agentEndEvents[0].isTerminal).toBe(true);
-		const terminalError = [...agentEndEvents[0].messages]
-			.reverse()
-			.find((message): message is AssistantMessage => message.role === "assistant");
-		expect(terminalError?.stopReason).toBe("error");
-		expect(terminalError?.errorMessage).toBe("The operation timed out.");
+		expect(streamCalls).toBe(2);
+		expect(resumedWithSyntheticResult).toBe(true);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
+		expect(lastAssistant(session).content).toContainEqual({
+			type: "text",
+			text: "Recovered after timeout",
+		});
 	});
 
 	it.each([
@@ -1263,6 +1345,251 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
 		expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "Recovered after Cursor stall" });
 	});
+
+	it("resumes a Cursor HTTP/2 stream reset after an unmarked MCP tool result", async () => {
+		const resetMessage = "Stream closed with error code NGHTTP2_INTERNAL_ERROR";
+		const model = createMockModel({
+			id: "composer-2.5",
+			provider: "cursor",
+		});
+		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "cursor-mcp-1",
+			name: "mcp__databricks_production_execute_sql",
+			arguments: { query: "SELECT 1" },
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "1" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		let streamCalls = 0;
+		let resumedWithToolResult = false;
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			cursorOnToolResult: message => message,
+			streamFn: (_requestedModel, context, options) => {
+				streamCalls += 1;
+				if (streamCalls > 1) {
+					resumedWithToolResult = context.messages.some(
+						message => message.role === "toolResult" && message.toolCallId === toolCall.id,
+					);
+					model.push({ content: ["Recovered after Cursor HTTP/2 reset"] });
+					return model.stream(model, context, options);
+				}
+
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					await options?.cursorOnToolResult?.(toolResult);
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: [toolCall],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial });
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+					stream.push({
+						type: "toolcall_delta",
+						contentIndex: 0,
+						delta: JSON.stringify(toolCall.arguments),
+						partial,
+					});
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...partial,
+							stopReason: "error",
+							errorMessage: resetMessage,
+						},
+					});
+				});
+				return stream;
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Run the query");
+		await session.waitForIdle();
+
+		expect(streamCalls).toBe(2);
+		expect(resumedWithToolResult).toBe(true);
+		expect(
+			session.agent.state.messages.some(
+				message => message.role === "toolResult" && message.toolCallId === toolCall.id,
+			),
+		).toBe(true);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
+		expect(lastAssistant(session).content).toContainEqual({
+			type: "text",
+			text: "Recovered after Cursor HTTP/2 reset",
+		});
+	});
+
+	it("resumes a Cursor idle stall after an unmarked MCP tool result", async () => {
+		const stallMessage = "Provider stream stalled while waiting for the next event";
+		const model = createMockModel({
+			id: "composer-2.5",
+			provider: "cursor",
+		});
+		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "cursor-mcp-idle-1",
+			name: "mcp__databricks_production_execute_sql",
+			arguments: { query: "SELECT 1" },
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "1" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		let streamCalls = 0;
+		let resumedWithToolResult = false;
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			cursorOnToolResult: message => message,
+			streamFn: (_requestedModel, context, options) => {
+				streamCalls += 1;
+				if (streamCalls > 1) {
+					resumedWithToolResult = context.messages.some(
+						message => message.role === "toolResult" && message.toolCallId === toolCall.id,
+					);
+					model.push({ content: ["Recovered after Cursor idle stall"] });
+					return model.stream(model, context, options);
+				}
+
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(async () => {
+					await options?.cursorOnToolResult?.(toolResult);
+					const partial: AssistantMessage = {
+						role: "assistant",
+						content: [toolCall],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial });
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+					stream.push({
+						type: "toolcall_delta",
+						contentIndex: 0,
+						delta: JSON.stringify(toolCall.arguments),
+						partial,
+					});
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							...partial,
+							stopReason: "error",
+							errorMessage: stallMessage,
+						},
+					});
+				});
+				return stream;
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Run the query");
+		await session.waitForIdle();
+
+		expect(streamCalls).toBe(2);
+		expect(resumedWithToolResult).toBe(true);
+		expect(
+			session.agent.state.messages.some(
+				message => message.role === "toolResult" && message.toolCallId === toolCall.id,
+			),
+		).toBe(true);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
+		expect(lastAssistant(session).content).toContainEqual({
+			type: "text",
+			text: "Recovered after Cursor idle stall",
+		});
+	});
+
 	it("resumes a Cursor reasonless abort after an unmarked client-side tool call", async () => {
 		const model = createMockModel({
 			id: "composer-2.5",
@@ -1839,38 +2166,75 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("aborted");
 	});
 
-	it("caps repeated OpenRouter stream closes after streamed thinking at one retry", async () => {
-		const model = getBundledModel("openrouter", "~google/gemini-flash-latest");
-		if (!model) {
-			throw new Error("Expected bundled OpenRouter Gemini test model to exist");
-		}
-		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
-
-		const mock = createMockModel({
-			provider: "openrouter",
-			responses: [
-				{
-					content: [{ type: "thinking", thinking: "reasoning attempt 1" }],
-					stopReason: "error",
-					errorMessage: "server_error: stream closed with reason: error",
-				},
-				{
-					content: [{ type: "thinking", thinking: "reasoning attempt 2" }],
-					stopReason: "error",
-					errorMessage: "server_error: stream closed with reason: error",
-				},
-				{ content: ["must remain unused"] },
-			],
-		});
+	async function expectThinkingStreamCloseRetryCap(options: {
+		model: Model;
+		errorMessage: string;
+		prompt: string;
+	}): Promise<void> {
+		authStorage.setRuntimeApiKey(options.model.provider, `${options.model.provider}-test-key`);
+		let calls = 0;
 		const agent = new Agent({
 			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
 			initialState: {
-				model,
+				model: options.model,
 				systemPrompt: ["Test"],
 				tools: [],
 				messages: [],
 			},
-			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+			streamFn: requestedModel => {
+				calls++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const usage: AssistantMessage["usage"] = {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					};
+					if (calls > 2) {
+						const text: TextContent = { type: "text", text: "must remain unused" };
+						const message: AssistantMessage = {
+							role: "assistant",
+							content: [text],
+							api: requestedModel.api,
+							provider: requestedModel.provider,
+							model: requestedModel.id,
+							usage,
+							stopReason: "stop",
+							timestamp: Date.now(),
+						};
+						stream.push({ type: "start", partial: message });
+						stream.push({ type: "text_start", contentIndex: 0, partial: message });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: text.text, partial: message });
+						stream.push({ type: "text_end", contentIndex: 0, content: text.text, partial: message });
+						stream.push({ type: "done", reason: "stop", message });
+						return;
+					}
+					const thinking: ThinkingContent = { type: "thinking", thinking: "" };
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [thinking],
+						api: requestedModel.api,
+						provider: requestedModel.provider,
+						model: requestedModel.id,
+						usage,
+						stopReason: "error",
+						errorMessage: options.errorMessage,
+						errorId: AIError.create(AIError.Flag.Transient),
+						timestamp: Date.now(),
+					};
+					const delta = `reasoning attempt ${calls}`;
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "thinking_start", contentIndex: 0, partial: message });
+					thinking.thinking = delta;
+					stream.push({ type: "thinking_delta", contentIndex: 0, delta, partial: message });
+					stream.push({ type: "thinking_end", contentIndex: 0, content: thinking.thinking, partial: message });
+					stream.push({ type: "error", reason: "error", error: message });
+				});
+				return stream;
+			},
 		});
 
 		const settings = Settings.isolated({
@@ -1879,7 +2243,7 @@ describe("AgentSession retry delay cap", () => {
 			"retry.maxRetries": 10,
 			"retry.modelFallback": false,
 		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		settings.setModelRole("default", `${options.model.provider}/${options.model.id}`);
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -1895,18 +2259,40 @@ describe("AgentSession retry delay cap", () => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
 		});
 
-		await session.prompt("Trigger OpenRouter reasoning transition failure");
+		await session.prompt(options.prompt);
 		await session.waitForIdle();
 
-		expect(mock.calls).toHaveLength(2);
+		expect(calls).toBe(2);
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryStartEvents[0]).toMatchObject({ attempt: 1, maxAttempts: 1 });
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: false, attempt: 1 });
-		expect(lastAssistant(session).errorMessage).toBe(
-			"Retry budget exhausted after 1 retry: server_error: stream closed with reason: error",
-		);
+		expect(lastAssistant(session).errorMessage).toBe(`Retry budget exhausted after 1 retry: ${options.errorMessage}`);
 		expect(session.isRetrying).toBe(false);
+	}
+
+	it("caps repeated OpenRouter stream closes after streamed thinking at one retry", async () => {
+		const model = getBundledModel("openrouter", "~google/gemini-flash-latest");
+		if (!model) {
+			throw new Error("Expected bundled OpenRouter Gemini test model to exist");
+		}
+		await expectThinkingStreamCloseRetryCap({
+			model,
+			errorMessage: "server_error: stream closed with reason: error",
+			prompt: "Trigger OpenRouter reasoning transition failure",
+		});
+	});
+
+	it("caps repeated Copilot Grok Responses closes after streamed thinking at one retry", async () => {
+		const model = getBundledModel("github-copilot", "grok-4.6");
+		if (!model) {
+			throw new Error("Expected bundled Copilot Grok 4.6 test model to exist");
+		}
+		await expectThinkingStreamCloseRetryCap({
+			model,
+			errorMessage: "OpenAI responses stream closed before a terminal response event was received",
+			prompt: "Trigger Copilot Grok Responses incomplete stream",
+		});
 	});
 
 	it("defaults 502 auto-retry to ten capped backoff attempts", async () => {

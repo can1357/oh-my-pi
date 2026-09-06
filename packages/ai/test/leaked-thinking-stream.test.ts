@@ -15,6 +15,7 @@ import { getStreamingPartialJson, setStreamingPartialJson } from "@oh-my-pi/pi-a
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { wrapLeakedThinkingStream } from "@oh-my-pi/pi-ai/utils/leaked-thinking-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { withOfficialAnthropicEndpoint } from "./helpers";
 
 /** Minimal assistant message; `content`/`stopReason` overridden per event. */
 function msg(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
@@ -91,6 +92,8 @@ async function nextToolSnapshot(iterator: AsyncIterator<AssistantMessageEvent>):
 		};
 	}
 }
+
+withOfficialAnthropicEndpoint();
 
 describe("wrapLeakedThinkingStream", () => {
 	async function runLeakedText(chunks: readonly string[]): Promise<{
@@ -419,6 +422,58 @@ describe("wrapLeakedThinkingStream", () => {
 		expect(result.content.slice(1, 3)).toEqual(serverBlocks);
 	});
 
+	it("preserves complete Anthropic tool-search history through the custom-endpoint projector", async () => {
+		const firstThinking: ThinkingContent = {
+			type: "thinking",
+			thinking: "find the deferred tool",
+			thinkingSignature: "sig-1",
+		};
+		const serverBlocks: AnthropicServerToolContent[] = [
+			{
+				type: "anthropicServerTool",
+				block: {
+					type: "server_tool_use",
+					id: "srvtoolu_search",
+					name: "tool_search_tool_regex",
+					input: { pattern: "read" },
+				},
+			},
+			{
+				type: "anthropicServerTool",
+				block: {
+					type: "tool_search_tool_result",
+					tool_use_id: "srvtoolu_search",
+					content: {
+						type: "tool_search_tool_search_result",
+						tool_references: [{ type: "tool_reference", tool_name: "_read" }],
+					},
+				},
+			},
+		];
+		const secondThinking: ThinkingContent = {
+			type: "thinking",
+			thinking: "use the discovered tool",
+			thinkingSignature: "sig-2",
+		};
+		const call: ToolCall = {
+			type: "toolCall",
+			id: "toolu_read",
+			name: "_read",
+			arguments: { path: "notes.txt" },
+		};
+		const content: AssistantMessage["content"] = [firstThinking, ...serverBlocks, secondThinking, call];
+		const terminal = msg({ content, stopReason: "toolUse" });
+
+		const { result } = await runWrapper(inner => {
+			inner.push({ type: "start", partial: msg() });
+			inner.push({ type: "toolcall_start", contentIndex: 4, partial: terminal });
+			inner.push({ type: "toolcall_end", contentIndex: 4, toolCall: call, partial: terminal });
+			inner.push({ type: "done", reason: "toolUse", message: terminal });
+		});
+
+		expect(result.content).toEqual(content);
+	});
+
 	it("drops incomplete Anthropic web-search history instead of replaying orphan blocks", async () => {
 		const content: AssistantMessage["content"] = [
 			{
@@ -659,6 +714,43 @@ describe("leaked thinking healing through stream()", () => {
 		return Object.assign(fn, { preconnect: fetch.preconnect });
 	}
 
+	function anthropicThinkingFetch(): FetchImpl {
+		const body = [
+			sseFrame("message_start", {
+				type: "message_start",
+				message: { id: "msg_thinking_prefix", usage: { input_tokens: 5, output_tokens: 0 } },
+			}),
+			sseFrame("content_block_start", {
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "thinking", thinking: "Summary prefix" },
+			}),
+			sseFrame("content_block_delta", {
+				type: "content_block_delta",
+				index: 0,
+				delta: { type: "thinking_delta", thinking: " summary tail" },
+			}),
+			sseFrame("content_block_delta", {
+				type: "content_block_delta",
+				index: 0,
+				delta: { type: "signature_delta", signature: "sig_thinking" },
+			}),
+			sseFrame("content_block_stop", { type: "content_block_stop", index: 0 }),
+			sseFrame("message_delta", {
+				type: "message_delta",
+				delta: { stop_reason: "end_turn" },
+				usage: { input_tokens: 5, output_tokens: 4 },
+			}),
+			sseFrame("message_stop", { type: "message_stop" }),
+		].join("");
+		const fn = async (_input: string | URL | Request, _init?: RequestInit): Promise<Response> =>
+			new Response(body, {
+				status: 200,
+				headers: { "content-type": "text/event-stream", "request-id": "req_thinking_prefix" },
+			});
+		return Object.assign(fn, { preconnect: fetch.preconnect });
+	}
+
 	function anthropicModel(overrides: Partial<Model<"anthropic-messages">> = {}): Model<"anthropic-messages"> {
 		return buildModel({
 			id: "claude-sonnet-4-5",
@@ -709,6 +801,25 @@ describe("leaked thinking healing through stream()", () => {
 			.join("");
 		expect(thinking).toContain("Deliberate.");
 		expect(texts(result).join("").trim()).toBe("Final answer.");
+	});
+
+	it("preserves thinking bytes from content_block_start through a non-official endpoint", async () => {
+		const result = await stream(
+			anthropicModel({ provider: "zai", baseUrl: "https://api.z.ai/api/anthropic" }),
+			context,
+			{
+				apiKey: "test",
+				fetch: anthropicThinkingFetch(),
+			},
+		).result();
+
+		expect(thinks(result)).toEqual([
+			{
+				type: "thinking",
+				thinking: "Summary prefix summary tail",
+				thinkingSignature: "sig_thinking",
+			},
+		]);
 	});
 
 	it("replays native web-search history on a custom Anthropic continuation", async () => {

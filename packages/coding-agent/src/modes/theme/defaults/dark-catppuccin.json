@@ -58,7 +58,7 @@
 		"mdLinkUrl": "overlay0",
 		"mdCode": "rosewater",
 		"mdCodeBlock": "text",
-		"mdCodeBlockBorder": "surface0",
+		"mdCodeBlockBorder": "overlay0",
 		"mdQuote": "overlay1",
 		"mdQuoteBorder": "surface0",
 		"mdHr": "surface0",

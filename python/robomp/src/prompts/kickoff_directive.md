@@ -25,7 +25,7 @@ Working branch (checked out at cwd): `{{workspace.branch}}`
 1. Classify first. MUST call `classify_issue(primary=..., priority=..., functional=[...], rationale=...)` before any other side effect, even if directive states answer. Labels: org triage.
 
 2. Execute directive in same session on `{{workspace.branch}}`:
-   - Code change → commit on `{{workspace.branch}}`; then `gh_push_branch` + `gh_open_pr`. Both run `bun run fix`, then `bun check`, against worktree; if `bun check` fails, fix cause and call again. PR body MUST use verbatim: `## Repro` / `## Cause` / `## Fix` / `## Verification`. Reply: single `gh_post_comment` linking PR.
+   - Code change → commit on `{{workspace.branch}}`; then `gh_push_branch` + `gh_open_pr`. Both run `bun run fix`, then `bun check`, against worktree; `gh_open_pr` also runs the repo's full `bun run test` and refuses while it is red. On failure, fix cause and call again. PR body MUST use verbatim: `## Repro` / `## Cause` / `## Fix` / `## Verification`. Reply: single `gh_post_comment` linking PR.
    - Question / clarification → one `gh_post_comment`. No branch or PR.
    - Explicit stop / ignore → one acknowledging `gh_post_comment`; halt.
 

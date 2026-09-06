@@ -3,7 +3,7 @@ import type * as fsNode from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type ApiKey, completeSimple, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type ApiKey, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getAgentDbPath, getMemoriesDir, isEnoent, logger, parseJsonlLenient, prompt } from "@oh-my-pi/pi-utils";
 
@@ -750,18 +750,20 @@ async function runStage1Job(options: {
 			response_items_json: truncatedItems,
 		});
 
-		const response = await completeSimple(
-			model,
-			{
-				systemPrompt: [stageOneSystemTemplate],
-				messages: [{ role: "user", content: [{ type: "text", text: inputPrompt }], timestamp: Date.now() }],
-			},
-			{
-				apiKey,
-				metadata: options.metadata,
-				maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
-				reasoning: clampThinkingLevelForModel(model, Effort.Low),
-			},
+		const response = await retryTransientCompletion(() =>
+			completeSimple(
+				model,
+				{
+					systemPrompt: [stageOneSystemTemplate],
+					messages: [{ role: "user", content: [{ type: "text", text: inputPrompt }], timestamp: Date.now() }],
+				},
+				{
+					apiKey,
+					metadata: options.metadata,
+					maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
+					reasoning: clampThinkingLevelForModel(model, Effort.Low),
+				},
+			),
 		);
 
 		if (response.stopReason === "error") {
@@ -887,18 +889,20 @@ async function runConsolidationModel(options: {
 		rollout_summaries: truncateByApproxTokens(rolloutSummaries, 12_000),
 	});
 
-	const response = await completeSimple(
-		model,
-		{
-			systemPrompt: [consolidationSystemTemplate],
-			messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
-		},
-		{
-			apiKey,
-			metadata: options.metadata,
-			maxTokens: 8192,
-			reasoning: clampThinkingLevelForModel(model, Effort.Medium),
-		},
+	const response = await retryTransientCompletion(() =>
+		completeSimple(
+			model,
+			{
+				systemPrompt: [consolidationSystemTemplate],
+				messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
+			},
+			{
+				apiKey,
+				metadata: options.metadata,
+				maxTokens: 8192,
+				reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+			},
+		),
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "phase2 model error");

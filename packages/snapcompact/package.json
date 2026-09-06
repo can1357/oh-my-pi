@@ -1,10 +1,10 @@
 {
   "type": "module",
   "name": "@oh-my-pi/snapcompact",
-  "version": "17.3.3",
+  "version": "18.0.11",
   "description": "Bitmap-frame context compression for vision-capable LLMs",
   "homepage": "https://omp.sh",
-  "author": "Can Boluk",
+  "author": "Stencil Labs, Inc.",
   "license": "MIT",
   "repository": {
     "type": "git",

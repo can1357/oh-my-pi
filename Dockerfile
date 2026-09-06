@@ -22,7 +22,7 @@
 #     FROM ${PI_BASE} AS pi-base
 ###############################################################################
 
-ARG BUN_VERSION=1.3.14
+ARG BUN_VERSION=1.4.0
 
 ############################
 # 1) natives-builder — Rust + Bun → pi_natives.linux-<arch>.node (local cargo)
@@ -31,15 +31,14 @@ FROM rust:1.86-slim-bookworm AS natives-builder
 
 ARG BUN_VERSION
 
-# The addon is built with cargo/napi-rs (OMP_NATIVE_BUILD_BACKEND=cargo)
-# instead of Bazel: the image is one fixed host target, so Bazel's hermetic
-# cross toolchains and crate_universe splice buy nothing while costing a
-# bazelisk download plus a full analysis phase on every build. `ci` profile =
-# release codegen, thin LTO, stripped.
+# The addon is built with the default cargo/napi-rs host backend, not Bazel:
+# the image is one fixed host target, so Bazel's hermetic cross toolchains
+# and crate_universe splice buy nothing while costing a bazelisk download
+# plus a full analysis phase on every build. `ci` profile = release codegen,
+# thin LTO, stripped.
 ENV BUN_INSTALL=/opt/bun \
     PATH=/opt/bun/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
     CARGO_TERM_COLOR=never \
-    OMP_NATIVE_BUILD_BACKEND=cargo \
     OMP_NATIVE_CARGO_PROFILE=ci
 
 # clang/libclang-dev: bindgen for pipewire-sys/libspa-sys (Linux desktop capture);
@@ -155,6 +154,9 @@ COPY --from=natives-builder /out/pi_natives.linux-*.node /opt/bun/bin/
 # omp-rpc Python wheel.
 COPY --from=wheel-builder /out/*.whl /tmp/wheels/
 RUN pip install /tmp/wheels/omp_rpc-*.whl && rm -rf /tmp/wheels
+
+# Legal payload for the reusable SDKs and the OMP product installed in this image.
+COPY LICENSE  THIRD-PARTY-NOTICES.txt /usr/share/doc/omp/
 
 # `omp` shim — runs the coding-agent CLI against $PI_ROOT via Bun. Derived
 # images override PI_ROOT to point at wherever their pi source lives.

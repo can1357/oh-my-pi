@@ -1,9 +1,6 @@
 /**
- * Per-agent subagent advisors: the `advisor.subagents` → `task.agentAdvisor`
- * settings migration (per-layer, so a project-level `false` keeps overriding a
- * global `true`), the subagent-settings advisor-off default that replaced the
- * old blanket toggle (spawns opt back in per agent), and discovery of nested
- * per-subagent `__advisor.jsonl` transcripts.
+ * Per-agent settings migrations, advisor defaults for spawned sessions, and
+ * discovery of nested per-subagent `__advisor.jsonl` transcripts.
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
@@ -15,7 +12,7 @@ import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/p
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 
-describe("advisor.subagents migration", () => {
+describe("per-agent settings migrations", () => {
 	let agentDir = "";
 	afterEach(() => {
 		if (agentDir) fs.rmSync(agentDir, { recursive: true, force: true });
@@ -47,6 +44,14 @@ describe("advisor.subagents migration", () => {
 	it("keeps an explicit task.agentAdvisor entry over the legacy toggle", async () => {
 		const settings = await load('advisor:\n  subagents: true\ntask:\n  agentAdvisor:\n    task: "off"\n');
 		expect(settings.get("task.agentAdvisor")).toEqual({ task: "off" });
+	});
+
+	it("normalizes boolean per-agent prewalk and advisor overrides", async () => {
+		const settings = await load(
+			"task:\n  agentPrewalk:\n    librarian: true\n    task: false\n  agentAdvisor:\n    librarian: false\n    task: true\n",
+		);
+		expect(settings.get("task.agentPrewalk")).toEqual({ librarian: "on", task: "off" });
+		expect(settings.get("task.agentAdvisor")).toEqual({ librarian: "off", task: "on" });
 	});
 });
 

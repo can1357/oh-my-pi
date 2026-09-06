@@ -10,6 +10,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
@@ -173,7 +174,11 @@ function extractStats(
 	// non-zero value already in `usage.premiumRequests` (Copilot multipliers or
 	// the new AI code path) and only synthesise when the field is missing/zero.
 	const recorded = rawUsage.premiumRequests ?? 0;
-	const model = { provider: msg.provider, api: msg.api, id: msg.model };
+	const model = {
+		provider: msg.provider,
+		api: msg.api,
+		identity: classifyModel(msg.provider, msg.model, { lenient: true }),
+	};
 	const tier = resolveModelServiceTier(currentServiceTier, model);
 	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(tier, model);
 	const wellFormed =

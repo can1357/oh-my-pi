@@ -36,10 +36,17 @@ describe("QwenCloud Token Plan login", () => {
 	test("China (Beijing) region validates against and routes inference to cn-beijing", async () => {
 		const authRequests: { url: string; instructions?: string }[] = [];
 		let requestedUrl = "";
+		let cookiePrompt = "";
 		const prompts = ["2", "sk-sp-beijing"];
 		const credential = await loginAlibabaTokenPlan({
 			onAuth: request => authRequests.push(request),
-			onPrompt: async prompt => (prompt.allowEmpty ? "" : (prompts.shift() ?? "")),
+			onPrompt: async prompt => {
+				if (prompt.allowEmpty) {
+					cookiePrompt = prompt.message;
+					return "";
+				}
+				return prompts.shift() ?? "";
+			},
 			fetch: input => {
 				requestedUrl = String(input);
 				return Promise.resolve(Response.json({ data: [{ id: "qwen3.7-plus" }] }));
@@ -48,6 +55,7 @@ describe("QwenCloud Token Plan login", () => {
 
 		expect(requestedUrl).toBe("https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/models");
 		expect(authRequests[0]?.url).toBe("https://www.aliyun.com/benefit/scene/tokenplan");
+		expect(cookiePrompt).toContain("bailian-cs.console.aliyun.com/data/api.json");
 		expect(JSON.parse(credential)).toEqual({
 			token: "sk-sp-beijing",
 			baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",

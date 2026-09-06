@@ -111,7 +111,11 @@ export abstract class SnapshotStore {
 	abstract clear(): void;
 }
 
-const DEFAULT_MAX_PATHS = 30;
+// Wide sessions routinely touch far more than a few dozen files; evicting a
+// path downgrades a genuinely in-session tag to the misleading "hash is not
+// from this session" rejection. Retention is still bounded by
+// DEFAULT_MAX_TOTAL_BYTES, so a high path count costs little.
+const DEFAULT_MAX_PATHS = 256;
 const DEFAULT_MAX_VERSIONS_PER_PATH = 4;
 /** Global ceiling on retained snapshot text across all paths (UTF-16 code units). */
 const DEFAULT_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
@@ -124,7 +128,7 @@ function mergeSeenLines(snapshot: Snapshot, lines: Iterable<number> | undefined)
 }
 
 export interface InMemorySnapshotStoreOptions {
-	/** Maximum number of distinct paths tracked at once (default 30). LRU eviction. */
+	/** Maximum number of distinct paths tracked at once (default 256). LRU eviction. */
 	maxPaths?: number;
 	/** Maximum full-file versions retained per path (default 4). Oldest dropped first. */
 	maxVersionsPerPath?: number;

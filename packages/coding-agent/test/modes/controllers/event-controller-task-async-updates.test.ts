@@ -15,7 +15,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -62,7 +62,7 @@ describe("EventController async update finalization", () => {
 			isInitialized: true,
 			init: vi.fn(async () => {}),
 			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-			statusLine: { invalidate: vi.fn() },
+			statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), markActivityEnd: vi.fn() },
 			updateEditorTopBorder: vi.fn(),
 			toolOutputExpanded: false,
 			transcriptMessageComponents: new WeakMap(),
@@ -70,11 +70,14 @@ describe("EventController async update finalization", () => {
 			chatContainer,
 			session: { getToolByName: () => undefined, hasBuiltInTool: () => true, isStreaming: true },
 			showWarning: vi.fn(),
-			viewSession: { getToolByName: () => undefined, hasBuiltInTool: () => true },
+			viewSession: { getToolByName: () => undefined, hasBuiltInTool: () => true, isStreaming: false },
 			sessionManager: { getCwd: () => process.cwd() },
 			setTodos: vi.fn(),
+			clearPinnedError: vi.fn(),
+			statusContainer: { disposeChildren: vi.fn() },
+			ensureLoadingAnimation: vi.fn(),
 		} as unknown as InteractiveModeContext;
-		return { controller: new EventController(ctx), pendingTools };
+		return { controller: new EventController(ctx), pendingTools, chatContainer, ctx };
 	}
 
 	async function startTask(controller: EventController, pendingTools: Map<string, ToolExecutionComponent>) {
@@ -163,5 +166,50 @@ describe("EventController async update finalization", () => {
 
 		expect(pendingTools.has("tc-bash")).toBe(false);
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("seals a foreground card orphaned before the next agent turn", async () => {
+		const { controller, chatContainer, ctx } = createFixture();
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-stale",
+			toolName: "hub",
+			args: { op: "wait", ids: ["job-stale"] },
+		});
+		const component = chatContainer.children.find(
+			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
+		);
+		if (!component) throw new Error("expected stale Hub card");
+		sealed.push(component);
+		// Model a dropped live completion: the timeline still owns the card but
+		// its pending-map entry is gone, so agent_end cannot find it.
+		ctx.pendingTools.delete("tc-stale");
+		const later = new ToolExecutionComponent("bash", { command: "echo done" }, {}, undefined, ctx.ui, process.cwd());
+		sealed.push(later);
+		later.updateResult({ content: [{ type: "text", text: "done" }] });
+		chatContainer.addChild(later);
+
+		expect(component.isTranscriptBlockFinalized()).toBe(false);
+		expect(chatContainer.peekFinalizedBatch(80, 0)).toBeUndefined();
+		await controller.handleEvent({ type: "agent_start" });
+
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
+		expect(chatContainer.peekFinalizedBatch(80, 0)?.rows).toBeDefined();
+	});
+
+	it("keeps a parked task card available across the next agent turn", async () => {
+		const { controller, pendingTools } = createFixture();
+		const component = await startTask(controller, pendingTools);
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-task",
+			toolName: "task",
+			result: taskResult("running", "Spawned agent `Job1` (job `Job1`)."),
+			isError: false,
+		});
+
+		await controller.handleEvent({ type: "agent_start" });
+
+		expect(pendingTools.get("tc-task")).toBe(component);
 	});
 });

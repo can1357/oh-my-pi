@@ -25,6 +25,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import {
+	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
@@ -416,6 +417,7 @@ function buildCompactionV2Headers(
 		if (accountId) {
 			headers[OPENAI_HEADERS.ACCOUNT_ID] = accountId;
 		}
+		applyCodexResidencyHeader(headers, apiKey);
 		if (routingSessionId) {
 			headers[OPENAI_HEADERS.CONVERSATION_ID] = routingSessionId;
 			headers[OPENAI_HEADERS.SESSION_ID] = routingSessionId;
@@ -423,6 +425,7 @@ function buildCompactionV2Headers(
 		}
 		headers[OPENAI_HEADERS.BETA] = OPENAI_HEADER_VALUES.BETA_RESPONSES;
 		headers[OPENAI_HEADERS.ORIGINATOR] = OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
+		headers[OPENAI_HEADERS.CODEX_BETA_FEATURES] = OPENAI_HEADER_VALUES.REMOTE_COMPACTION_V2;
 		if (model.useResponsesLite) {
 			headers[OPENAI_HEADERS.RESPONSES_LITE] = "true";
 		}

@@ -5,7 +5,7 @@
   "private": true,
   "description": "Browser guest client and local relay tools for omp collab live sessions",
   "homepage": "https://omp.sh",
-  "author": "Can Boluk",
+  "author": "Stencil Labs, Inc.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -40,6 +40,7 @@
     "@oh-my-pi/pi-utils": "catalog:",
     "@oh-my-pi/pi-wire": "catalog:",
     "lucide-react": "catalog:",
+    "katex": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:"
   },

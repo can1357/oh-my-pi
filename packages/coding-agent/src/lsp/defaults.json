@@ -69,7 +69,7 @@
 	"biome": {
 		"command": "biome",
 		"args": ["lsp-proxy"],
-		"fileTypes": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".jsonc"],
+		"fileTypes": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".jsonc", ".css"],
 		"rootMarkers": ["biome.json", "biome.jsonc"],
 		"isLinter": true
 	},

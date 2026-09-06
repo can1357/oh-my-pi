@@ -34,31 +34,21 @@ async function expectPromptDateFromStartupTimezone(options: {
 	await Bun.write(
 		scenarioPath,
 		`import { setSystemTime } from "bun:test";
-import { buildSystemPrompt } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/system-prompt.ts"))};
+import { renderDateCwdReminder } from ${JSON.stringify(
+			path.resolve(import.meta.dir, "../src/session/date-cwd-reminder.ts"),
+		)};
+import { formatLocalCalendarDate } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/utils/local-date.ts"))};
 
 setSystemTime(new Date(process.env.OMP_TEST_NOW!));
 try {
-	const { systemPrompt } = await buildSystemPrompt({
-		cwd: process.cwd(),
-		contextFiles: [],
-		skills: [],
-		rules: [],
-		toolNames: [],
-		workspaceTree: {
-			rootPath: process.cwd(),
-			rendered: "",
-			truncated: false,
-			totalLines: 0,
-			agentsMdFiles: [],
-		},
-		activeRepoContext: null,
-	});
-	const rendered = systemPrompt.join("\\n\\n");
-	if (!rendered.includes(\`Today: \${process.env.OMP_EXPECTED_DATE}\`)) {
-		throw new Error(\`Prompt did not contain expected local date:\\n\${rendered}\`);
+	// The date/cwd reminder is built per request in the startup local timezone;
+	// the system prompt no longer embeds the date (#7404).
+	const reminder = renderDateCwdReminder(formatLocalCalendarDate(), "/cwd");
+	if (!reminder.includes(\`Today: \${process.env.OMP_EXPECTED_DATE}\`)) {
+		throw new Error(\`Reminder did not contain expected local date:\\n\${reminder}\`);
 	}
-	if (rendered.includes(\`Today: \${process.env.OMP_REJECTED_DATE}\`)) {
-		throw new Error(\`Prompt contained rejected UTC date:\\n\${rendered}\`);
+	if (reminder.includes(\`Today: \${process.env.OMP_REJECTED_DATE}\`)) {
+		throw new Error(\`Reminder contained rejected UTC date:\\n\${reminder}\`);
 	}
 } finally {
 	setSystemTime();
@@ -114,7 +104,7 @@ describe("system prompt model identifier", () => {
 		expect(systemPrompt.join("\n\n")).toContain("Model: anthropic/claude-opus-4");
 	});
 
-	it("renders the prompt date from the startup local timezone rather than UTC", async () => {
+	it("renders the first-turn reminder date from the startup local timezone rather than UTC", async () => {
 		await expectPromptDateFromStartupTimezone({
 			tempDir,
 			tempHomeDir,

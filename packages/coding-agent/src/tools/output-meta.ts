@@ -12,7 +12,7 @@ import type {
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { getDefault, type Settings } from "../config/settings";
 import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";
@@ -793,6 +793,44 @@ async function spillLargeResultToArtifact(
 
 	const newMeta: OutputMeta = { ...(existingMeta ?? {}), truncation: truncationMeta };
 	const newDetails = { ...(result.details ?? {}), meta: newMeta };
+
+	// Prune the raw payload only MCP results duplicate into `details.rawContent`.
+	// Identify them by the required `serverName` + `mcpToolName` markers (the same
+	// signature the MCP renderer uses) so a property-name collision on an
+	// SDK/extension tool's intentionally unconstrained details can never trigger
+	// this transformation. Everything already stored elsewhere is dropped so
+	// `rawContent` cannot re-inflate the on-disk size: text blocks and
+	// `resource.text` are captured verbatim by the artifact, and image data
+	// survives on the result content (and eval's `images`). Resource URI/MIME/blob
+	// metadata has no other home, so it is retained.
+	if (
+		typeof newDetails.serverName === "string" &&
+		typeof newDetails.mcpToolName === "string" &&
+		Array.isArray(newDetails.rawContent)
+	) {
+		const structuredContent: unknown[] = [];
+		for (const block of newDetails.rawContent) {
+			if (!isRecord(block)) {
+				structuredContent.push(block);
+				continue;
+			}
+			// Text and image payloads live in the artifact / result content.
+			if (block.type === "text" || block.type === "image") continue;
+			// Resource text is folded into the artifact; keep the rest of the resource.
+			if (block.type === "resource" && isRecord(block.resource) && "text" in block.resource) {
+				const resource = { ...block.resource };
+				delete resource.text;
+				structuredContent.push({ ...block, resource });
+				continue;
+			}
+			structuredContent.push(block);
+		}
+		if (structuredContent.length > 0) {
+			newDetails.rawContent = structuredContent;
+		} else {
+			delete newDetails.rawContent;
+		}
+	}
 
 	return { ...result, content: newContent, details: newDetails };
 }

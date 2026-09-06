@@ -41,10 +41,14 @@ const LEGACY_BUILTIN_TOOL_NAME_ALIASES: ReadonlyMap<string, BuiltinToolName> = n
 	["find", "glob"],
 ]);
 
-/** Return the canonical tool name for current and legacy built-in tool IDs. */
+const CANONICAL_TOOL_NAMES: Record<string, true> = Object.fromEntries(
+	[...BUILTIN_TOOL_NAMES, ...HIDDEN_TOOL_NAMES].map(name => [name, true]),
+);
+
+/** Canonicalize built-in IDs and legacy aliases. Leave plugin names unchanged. */
 export function normalizeToolName(name: string): string {
-	const normalized = name.toLowerCase();
-	return LEGACY_BUILTIN_TOOL_NAME_ALIASES.get(normalized) ?? normalized;
+	const lower = name.toLowerCase();
+	return LEGACY_BUILTIN_TOOL_NAME_ALIASES.get(lower) ?? (Object.hasOwn(CANONICAL_TOOL_NAMES, lower) ? lower : name);
 }
 
 /** Normalize and deduplicate tool names while preserving first-seen order. */

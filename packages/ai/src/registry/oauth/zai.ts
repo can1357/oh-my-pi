@@ -217,7 +217,11 @@ export class ZaiOAuthFlow extends OAuthCallbackFlow {
 	#fetch: FetchImpl;
 
 	constructor(ctrl: OAuthController) {
-		super(ctrl, CALLBACK_PORT, CALLBACK_PATH);
+		super(ctrl, {
+			preferredPort: CALLBACK_PORT,
+			callbackPath: CALLBACK_PATH,
+			allowPortFallback: false,
+		});
 		this.#fetch = ctrl.fetch ?? fetch;
 	}
 

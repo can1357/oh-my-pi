@@ -75,6 +75,7 @@ describe("QwenCloud Token Plan provider", () => {
 						},
 						{ id: "deepseek-v4-flash", owned_by: "qwencloud" },
 						{ id: "deepseek-v4-flash-0731", owned_by: "qwencloud" },
+						{ id: "deepseek-v4-pro-0813", owned_by: "qwencloud" },
 						{ id: "kimi-k2.7-code", owned_by: "qwencloud" },
 						{ id: "MiniMax-M2.5", owned_by: "qwencloud" },
 						{ id: "qwen3.6-plus", owned_by: "qwencloud" },
@@ -106,6 +107,7 @@ describe("QwenCloud Token Plan provider", () => {
 			"deepseek-v3.2",
 			"deepseek-v4-flash",
 			"deepseek-v4-flash-0731",
+			"deepseek-v4-pro-0813",
 			"future-chat-model",
 			"glm-5",
 			"glm-5.1",
@@ -122,6 +124,7 @@ describe("QwenCloud Token Plan provider", () => {
 			["qwen3.8-max", 1_000_000, 131_072],
 			["deepseek-v4-flash", 1_000_000, 384_000],
 			["deepseek-v4-flash-0731", 1_000_000, 384_000],
+			["deepseek-v4-pro-0813", 1_000_000, 384_000],
 			["deepseek-v3.2", 131_072, 65_536],
 			["glm-5.1", 202_752, 128_000],
 			["glm-5", 202_752, 16_384],
@@ -133,7 +136,7 @@ describe("QwenCloud Token Plan provider", () => {
 		for (const [id, contextWindow, maxTokens] of expectedLimits) {
 			expect(models?.find(model => model.id === id)).toMatchObject({ contextWindow, maxTokens });
 		}
-		for (const id of ["deepseek-v4-flash", "deepseek-v4-flash-0731"]) {
+		for (const id of ["deepseek-v4-flash", "deepseek-v4-flash-0731", "deepseek-v4-pro-0813"]) {
 			expect(models?.find(model => model.id === id)).toMatchObject({
 				reasoning: true,
 				thinking: {

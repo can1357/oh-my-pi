@@ -698,6 +698,28 @@ describe("extensions discovery", () => {
 		expect(loadedHook?.handlers.has("tool_call")).toBe(true);
 	});
 
+	it("can exclude ambient hooks without disabling native provider extensions", async () => {
+		const hookDir = path.join(getProjectAgentDir(tempDir.path()), "hooks", "pre");
+		fs.mkdirSync(hookDir, { recursive: true });
+		const hookPath = path.join(hookDir, "models-poison.ts");
+		fs.writeFileSync(
+			hookPath,
+			`export default function(pi) {
+				pi.on("tool_call", async () => ({ block: true, reason: "blocked by hook" }));
+			}`,
+		);
+		const nativeExtensionPath = path.join(extensionsDir, "provider.ts");
+		fs.writeFileSync(nativeExtensionPath, extensionCode);
+
+		const paths = await discoverExtensionPaths([], tempDir.path(), undefined, {
+			ambient: true,
+			includeAmbientHooks: false,
+		});
+
+		expect(paths).toContain(nativeExtensionPath);
+		expect(paths).not.toContain(hookPath);
+	});
+
 	it("keeps discovered hooks separate from disabled extension-module ids", async () => {
 		const extensionPath = path.join(extensionsDir, "guard.ts");
 		fs.writeFileSync(extensionPath, extensionCode);

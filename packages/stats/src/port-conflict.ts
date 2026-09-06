@@ -17,23 +17,28 @@ interface PortHolder {
 
 /** Header stamped on every dashboard response so reuse probes can identify us. */
 export const STATS_DASHBOARD_HEADER = "x-omp-stats-dashboard";
+/** Header recording the server's requested bind host so reuse cannot change its exposure scope. */
+export const STATS_DASHBOARD_HOSTNAME_HEADER = "x-omp-stats-hostname";
 
-/** Identity-header value for dashboards enforcing loopback-only, same-origin access. */
-export const STATS_DASHBOARD_SECURITY_VERSION = "2";
+/** Identity-header value for dashboards enforcing an explicit bind host and same-origin access. */
+export const STATS_DASHBOARD_SECURITY_VERSION = "3";
 
 /** IPv4 loopback address shared by the dashboard server and reuse probe. */
 export const STATS_DASHBOARD_HOSTNAME = "127.0.0.1";
 
 type StatsDashboardProbe = "reusable" | "occupied" | "unreachable";
 
-async function probeStatsDashboard(port: number): Promise<StatsDashboardProbe> {
+async function probeStatsDashboard(port: number, hostname: string): Promise<StatsDashboardProbe> {
+	const probeHostname = hostname === "0.0.0.0" ? STATS_DASHBOARD_HOSTNAME : hostname === "::" ? "::1" : hostname;
+	const urlHostname = probeHostname.includes(":") ? `[${probeHostname}]` : probeHostname;
 	try {
-		const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${port}/api/stats/models`, {
+		const response = await fetch(`http://${urlHostname}:${port}/api/stats/models`, {
 			signal: AbortSignal.timeout(STATS_PROBE_TIMEOUT_MS),
 		});
 		const reusable =
 			response.status === 200 &&
 			response.headers.get(STATS_DASHBOARD_HEADER) === STATS_DASHBOARD_SECURITY_VERSION &&
+			response.headers.get(STATS_DASHBOARD_HOSTNAME_HEADER) === hostname &&
 			!response.headers.has("Access-Control-Allow-Origin");
 		await response.body?.cancel();
 		return reusable ? "reusable" : "occupied";
@@ -248,16 +253,16 @@ async function reclaimStatsPort(port: number): Promise<"retry"> {
  * The preflight is needed on platforms that permit wildcard and loopback-specific
  * listeners to coexist on one port.
  */
-export async function prepareStatsPort(port: number): Promise<"retry" | "reuse"> {
+export async function prepareStatsPort(port: number, hostname = STATS_DASHBOARD_HOSTNAME): Promise<"retry" | "reuse"> {
 	if (port === 0) return "retry";
-	const probe = await probeStatsDashboard(port);
+	const probe = await probeStatsDashboard(port, hostname);
 	if (probe === "reusable") return "reuse";
 	if (probe === "occupied") return reclaimStatsPort(port);
 	return "retry";
 }
 
 /** Reuse or reclaim a listener found after the server bind reports EADDRINUSE. */
-export async function recoverStatsPort(port: number): Promise<"retry" | "reuse"> {
-	if ((await probeStatsDashboard(port)) === "reusable") return "reuse";
+export async function recoverStatsPort(port: number, hostname = STATS_DASHBOARD_HOSTNAME): Promise<"retry" | "reuse"> {
+	if ((await probeStatsDashboard(port, hostname)) === "reusable") return "reuse";
 	return reclaimStatsPort(port);
 }

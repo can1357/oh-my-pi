@@ -1,6 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
+import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { ModelRegistry } from "../config/model-registry";
@@ -14,7 +16,6 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
-import * as git from "../utils/git";
 import { createExactSecurityOAuthResolver, selectSecurityAccount } from "./auth";
 import type {
 	SecurityCoverage,
@@ -316,6 +317,15 @@ function operationPhaseFromStatus(status: SecurityScan["status"]): SecurityOpera
 	return status === "running" || status === "planned" ? "failed" : status;
 }
 
+async function tryRemoveWorktree(repo: VcsGitRepo | null, cwd: string): Promise<boolean> {
+	if (!repo) return false;
+	try {
+		return await repo.worktreeRemove(cwd, true);
+	} catch {
+		return false;
+	}
+}
+
 async function prepareSecurityExecutionTarget(
 	plan: SecurityScanPlan,
 	store: SecurityStore,
@@ -333,21 +343,22 @@ async function prepareSecurityExecutionTarget(
 	await fs.mkdir(targetsRoot, { recursive: true, mode: 0o700 });
 	if (process.platform !== "win32") await fs.chmod(targetsRoot, 0o700);
 	const cwd = path.join(targetsRoot, scanId);
+	const repo = vcs.requireGit(plan.repositoryRoot);
 	let added = false;
 	try {
-		await git.worktree.add(plan.repositoryRoot, cwd, headRevision, { detach: true, signal });
+		await repo.worktreeAdd(cwd, headRevision, true, signal);
 		added = true;
 		const diffText = await adapter.diffTree(plan.repositoryRoot, baseRevision, headRevision, signal);
 		return {
 			cwd,
 			diffText,
 			async cleanup() {
-				const removed = await git.worktree.tryRemove(plan.repositoryRoot, cwd, { force: true });
+				const removed = await tryRemoveWorktree(repo, cwd);
 				if (!removed) await fs.rm(cwd, { recursive: true, force: true });
 			},
 		};
 	} catch (error) {
-		if (added) await git.worktree.tryRemove(plan.repositoryRoot, cwd, { force: true });
+		if (added) await tryRemoveWorktree(repo, cwd);
 		await fs.rm(cwd, { recursive: true, force: true });
 		throw error;
 	}
@@ -391,7 +402,7 @@ export class SecurityCoordinator {
 				await store.putBundle(bundle);
 				if (bundle.scan.target.kind === "ref_diff") {
 					const targetPath = path.join(store.projectDirectory, "targets", bundle.scan.id);
-					await git.worktree.tryRemove(bundle.scan.target.repositoryRoot, targetPath, { force: true });
+					await tryRemoveWorktree(vcs.git(bundle.scan.target.repositoryRoot), targetPath);
 					await fs.rm(targetPath, { recursive: true, force: true });
 				}
 			}

@@ -2,6 +2,7 @@
 
 <instruction>
 Select via `op`.
+- `repo`: `[host/]owner/repo`; qualify the host for a repo outside the checkout's own GitHub instance.
 - `repo_view`: omit `repo` → current checkout.
 - `file_read`: read `path` from `repo`; omit `repo` → current checkout, `branch` → default branch.
 - `pr_create`: `head` defaults current branch.

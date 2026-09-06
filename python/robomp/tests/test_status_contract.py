@@ -175,6 +175,7 @@ def test_status_contract(settings: Settings) -> None:
             "running_events",
             "inflight",
             "issues",
+            "releases",
             "recent_events",
         }
         assert set(data.keys()) == expected_keys

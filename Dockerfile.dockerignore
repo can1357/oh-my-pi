@@ -75,5 +75,9 @@ out.jsonl
 out.html
 pi-*.html
 
-# Secrets. Should never be in the image regardless.
-.env
+# Host virtualenvs — the image installs its own interpreter deps.
+**/.venv/
+
+# Secrets. Should never be in the image regardless. Depth-agnostic: a bare
+# `.env` misses `python/robomp/.env`, which `COPY . /pi/` would bake in.
+**/.env

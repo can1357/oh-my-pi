@@ -8,7 +8,7 @@
  * the final shipped behavior belongs in release notes.
  *
  * For every non-empty `[Unreleased]` section this script hands the whole section
- * to a small model (default `google-vertex/gemini-3.5-flash` via `@oh-my-pi/pi-ai`)
+ * to a small model (default `openai-codex/gpt-5.6-luna` via `@oh-my-pi/pi-ai`),
  * and asks for a complete replacement grouped by changelog category. The model
  * returns structured sections/items; markdown is rendered locally so only the
  * Unreleased section changes and formatting stays deterministic.
@@ -32,18 +32,9 @@
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import { type } from "@oh-my-pi/omptype";
-import {
-	type Api,
-	AuthStorage,
-	completeSimple,
-	Effort,
-	type Model,
-	SqliteAuthCredentialStore,
-	type Tool,
-	type ToolCall,
-} from "@oh-my-pi/pi-ai";
+import { type Api, completeSimple, Effort, type Model, type Tool, type ToolCall } from "@oh-my-pi/pi-ai";
+import { discoverAuthStorage } from "@oh-my-pi/pi-ai/auth-broker";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import {
 	type ChangelogDocument,
 	changelogPaths,
@@ -55,7 +46,9 @@ import {
 	resolveRepoRoot,
 } from "./fix-changelogs";
 
-const DEFAULT_MODEL = "google-vertex/gemini-3.5-flash";
+const DEFAULT_MODEL = "openai-codex/gpt-5.6-luna";
+/** Tried in order after the primary model fails (quota exhaustion, auth, hard API errors). */
+const FALLBACK_MODELS = [];
 
 // --------------------------------------------------------------------------
 // Prompts
@@ -109,14 +102,20 @@ async function openModel(modelSpec: string): Promise<RewriteModel> {
 	const modelId = modelSpec.slice(slash + 1);
 	const model = getBundledModel(provider as GeneratedProvider, modelId);
 	if (!model) throw new Error(`unknown model "${modelSpec}" (not in bundled catalog)`);
-	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
-	const storage = new AuthStorage(store);
-	await storage.reload();
-	const apiKey = await storage.getApiKey(provider);
-	if (!apiKey) {
-		throw new Error(`no credentials for provider "${provider}" (run \`omp login\` or set the provider env var)`);
+	const storage = await discoverAuthStorage({ sourceLabel: "rewrite-changelog" });
+	try {
+		const apiKey = await storage.getApiKey(provider);
+		if (!apiKey) {
+			throw new Error(
+				`no credentials for provider "${provider}" via ${storage.sourceLabel ?? "auth storage"} (check broker or run \`omp login\`)`,
+			);
+		}
+		return { model, apiKey, spec: modelSpec };
+	} finally {
+		// Broker-backed storage runs a background SSE/long-poll loop that keeps
+		// the event loop alive; release it once the key is captured.
+		storage.close();
 	}
-	return { model, apiKey, spec: modelSpec };
 }
 
 // --------------------------------------------------------------------------
@@ -309,7 +308,35 @@ async function run(options: RunOptions): Promise<RunResult> {
 	const paths = (await changelogPaths(repoRoot)).filter(
 		changelogPath => !options.packageFilter || changelogPath.includes(options.packageFilter),
 	);
-	const model = await openModel(options.model);
+	const specs = [options.model, ...FALLBACK_MODELS.filter(spec => spec !== options.model)];
+	const opened = new Map<string, Promise<RewriteModel>>();
+	// Once a model spec fails (all requestRewrite retries or open error), later
+	// files skip straight to the next spec instead of re-burning its retries.
+	let activeSpec = 0;
+	async function rewriteWithFallback(packageName: string, unreleasedBody: string): Promise<RewrittenSection[]> {
+		let lastError: unknown;
+		for (let i = activeSpec; i < specs.length; i++) {
+			const spec = specs[i];
+			if (!spec) continue;
+			try {
+				let model = opened.get(spec);
+				if (!model) {
+					model = openModel(spec);
+					opened.set(spec, model);
+				}
+				return await requestRewrite(await model, packageName, unreleasedBody);
+			} catch (error) {
+				lastError = error;
+				activeSpec = Math.max(activeSpec, i + 1);
+				const next = specs[i + 1];
+				if (next) {
+					const message = error instanceof Error ? error.message : String(error);
+					console.warn(`${packageName}: ${spec} failed (${message}); falling back to ${next}`);
+				}
+			}
+		}
+		throw lastError;
+	}
 	const concurrency = options.concurrency ?? 4;
 	const results: Array<RewrittenFile | undefined> = new Array(paths.length);
 
@@ -332,7 +359,7 @@ async function run(options: RunOptions): Promise<RunResult> {
 				.replace(/^## \[Unreleased\]\n?/, "")
 				.trim();
 
-			const rewritten = await requestRewrite(model, changelogPath, unreleasedBody);
+			const rewritten = await rewriteWithFallback(changelogPath, unreleasedBody);
 			applyRewrite(section, rewritten);
 			const next = renderChangelog(document);
 			if (next === content) continue;
@@ -359,7 +386,7 @@ async function run(options: RunOptions): Promise<RunResult> {
 		if (res !== undefined) changed.push(res);
 	}
 
-	return { model: model.spec, changed };
+	return { model: specs.slice(0, activeSpec + 1).join(" -> "), changed };
 }
 
 // --------------------------------------------------------------------------
@@ -379,7 +406,7 @@ function parseCli(argv: string[]): CliOptions | "help" {
 		options: {
 			"dry-run": { type: "boolean", default: false },
 			check: { type: "boolean", default: false },
-			model: { type: "string", default: DEFAULT_MODEL },
+			model: { type: "string", short: "m", default: DEFAULT_MODEL },
 			package: { type: "string" },
 			"repo-root": { type: "string" },
 			concurrency: { type: "string", default: "4" },
@@ -398,14 +425,14 @@ function parseCli(argv: string[]): CliOptions | "help" {
 
 function usage(): string {
 	return [
-		"Usage: bun scripts/rewrite-changelog.ts [--dry-run|--check] [--model <prov/id>] [--package <substr>] [--concurrency <n>]",
+		"Usage: bun scripts/rewrite-changelog.ts [--dry-run|--check] [-m|--model <prov/id>] [--package <substr>] [--concurrency <n>]",
 		"",
 		"Hands each non-empty [Unreleased] changelog section to a small model and rewrites the entries",
 		"into user-facing release notes, dropping intermediate developer churn and implementation-only details",
 		"while preserving public contract, exports, API, config, auth, and billing behavior.",
 		"",
 		"Options:",
-		`  --model <prov/id>  Classifier model (default ${DEFAULT_MODEL}).`,
+		`  -m, --model <prov/id>  Classifier model (default ${DEFAULT_MODEL}${FALLBACK_MODELS.length > 0 ? `; falls back to ${FALLBACK_MODELS.join(", ")} on failure` : ""}).`,
 		"  --package <substr> Only changelogs whose path contains this substring.",
 		"  --concurrency <n>  Max concurrent changelogs to process in parallel (default 4).",
 		"  --dry-run          Report what would be dropped without writing files.",

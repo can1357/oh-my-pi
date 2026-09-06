@@ -110,6 +110,11 @@ describe("formatScreenshot", () => {
 		expect(shortenPath(String.raw`C:\Users\me\projects\demo`, home)).toBe("~/projects/demo");
 	});
 
+	it("shortens Windows home paths case-insensitively", () => {
+		const home = String.raw`C:\Users\Alice`;
+		expect(shortenPath(String.raw`c:\users\alice\projects\demo`, home)).toBe("~/projects/demo");
+	});
+
 	it("does not shorten paths outside the home boundary", () => {
 		const home = String.raw`C:\Users\me`;
 		const sibling = String.raw`C:\Users\me2\projects\demo`;
@@ -285,6 +290,75 @@ describe("truncateDiffByHunk", () => {
 		expect(idxLeading).toBeLessThan(idxOld);
 		expect(idxOld).toBeLessThan(idxNew);
 		expect(idxNew).toBeLessThan(idxTrailing);
+	});
+	it("caps one oversized change hunk at the line budget", () => {
+		const diff = makeHunk("+", 0, 1_000).join("\n");
+		const head = truncateDiffByHunk(diff, 4, 32);
+		const tail = truncateDiffByHunk(diff, 4, 32, { fromTail: true });
+
+		expect(head.text.split("\n")).toHaveLength(32);
+		expect(head.text).toStartWith("+ new 0\n");
+		expect(head.text).toEndWith("+ new 31");
+		expect(head.hiddenLines).toBe(968);
+		expect(head.hiddenHunks).toBe(0);
+
+		expect(tail.text.split("\n")).toHaveLength(32);
+		expect(tail.text).toStartWith("+ new 968\n");
+		expect(tail.text).toEndWith("+ new 999");
+		expect(tail.hiddenLines).toBe(968);
+		expect(tail.hiddenHunks).toBe(0);
+	});
+
+	it("keeps an exact-size change hunk unchanged", () => {
+		const diff = makeHunk("-", 0, 32).join("\n");
+		expect(truncateDiffByHunk(diff, 4, 32)).toEqual({
+			text: diff,
+			hiddenHunks: 0,
+			hiddenLines: 0,
+		});
+	});
+	it("drops surrounding context when changes exactly fill the line budget", () => {
+		const diff = [" leading context", ...makeHunk("+", 0, 32), " trailing context"].join("\n");
+
+		for (const result of [truncateDiffByHunk(diff, 4, 32), truncateDiffByHunk(diff, 4, 32, { fromTail: true })]) {
+			expect(result.text.split("\n")).toHaveLength(32);
+			expect(result.text).not.toContain("context");
+			expect(result.hiddenLines).toBe(2);
+			expect(result.hiddenHunks).toBe(0);
+		}
+	});
+
+	it("does not exceed the line budget when context rounding spans multiple hunks", () => {
+		const diff = [
+			" leading context",
+			...makeHunk("+", 0, 15),
+			" middle context a",
+			" middle context b",
+			...makeHunk("-", 100, 15),
+			" trailing context",
+		].join("\n");
+
+		for (const result of [truncateDiffByHunk(diff, 4, 32), truncateDiffByHunk(diff, 4, 32, { fromTail: true })]) {
+			expect(result.text.split("\n")).toHaveLength(32);
+			expect(result.hiddenLines).toBe(2);
+			expect(result.hiddenHunks).toBe(0);
+		}
+	});
+	it("does not count a removed separator as a hidden hunk", () => {
+		const diff = [...makeHunk("+", 0, 16), " hunk separator", ...makeHunk("-", 100, 16)].join("\n");
+
+		for (const result of [truncateDiffByHunk(diff, 4, 32), truncateDiffByHunk(diff, 4, 32, { fromTail: true })]) {
+			expect(result.text.split("\n")).toHaveLength(32);
+			expect(result.hiddenLines).toBe(1);
+			expect(result.hiddenHunks).toBe(0);
+		}
+	});
+	it("reports every hunk excluded by the hunk limit", () => {
+		const diff = buildDiff(6, 1);
+
+		for (const result of [truncateDiffByHunk(diff, 2, 100), truncateDiffByHunk(diff, 2, 100, { fromTail: true })]) {
+			expect(result.hiddenHunks).toBe(4);
+		}
 	});
 });
 

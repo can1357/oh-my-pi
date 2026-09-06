@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-// Relative import: exercise THIS worktree's compat builder, not the symlinked
+// Relative import: exercise THIS worktree's policy engine, not the symlinked
 // node_modules copy (which resolves to the primary checkout).
-import { buildAnthropicCompat } from "../src/compat/anthropic";
+import { resolveModelPolicy } from "../src/compat/resolve";
 import type { ModelSpec } from "../src/types";
 
 /**
@@ -32,15 +32,15 @@ function spec(overrides: Partial<ModelSpec<"anthropic-messages">>): ModelSpec<"a
 
 describe("#4192 anthropic compat: zenmux is a signing endpoint", () => {
 	it("does NOT replay unsigned thinking for the zenmux anthropic proxy (sonnet 5)", () => {
-		const compat = buildAnthropicCompat(spec({}));
+		const compat = resolveModelPolicy(spec({})).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 		expect(compat.officialEndpoint).toBe(false);
 	});
 
 	it("also excludes the free tier (anthropic/claude-sonnet-5-free)", () => {
-		const compat = buildAnthropicCompat(
+		const compat = resolveModelPolicy(
 			spec({ id: "anthropic/claude-sonnet-5-free", name: "Claude Sonnet 5 (Free)" }),
-		);
+		).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 	});
 
@@ -48,24 +48,28 @@ describe("#4192 anthropic compat: zenmux is a signing endpoint", () => {
 		// User-configured Zenmux entries may point at a mirror path. Provider id
 		// is authoritative because the anthropic route always forwards to
 		// signature-enforcing Anthropic.
-		const compat = buildAnthropicCompat(spec({ baseUrl: "https://mirror.example.com/zenmux/anthropic" }));
+		const compat = resolveModelPolicy(spec({ baseUrl: "https://mirror.example.com/zenmux/anthropic" })).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 	});
 
 	it("classifies by url marker even under a custom provider id", () => {
-		const compat = buildAnthropicCompat(spec({ provider: "custom", baseUrl: "https://zenmux.ai/api/anthropic" }));
+		const compat = resolveModelPolicy(
+			spec({ provider: "custom", baseUrl: "https://zenmux.ai/api/anthropic" }),
+		).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 	});
 
 	it("still replays unsigned thinking for generic non-official reasoning endpoints (#2005, no regression)", () => {
-		const compat = buildAnthropicCompat(spec({ provider: "custom", baseUrl: "https://llm.example.com/anthropic" }));
+		const compat = resolveModelPolicy(
+			spec({ provider: "custom", baseUrl: "https://llm.example.com/anthropic" }),
+		).compat;
 		expect(compat.replayUnsignedThinking).toBe(true);
 	});
 
 	it("still degrades unsigned thinking to text for official Anthropic", () => {
-		const compat = buildAnthropicCompat(
+		const compat = resolveModelPolicy(
 			spec({ provider: "anthropic", baseUrl: "https://api.anthropic.com", id: "claude-opus-4.8" }),
-		);
+		).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 		expect(compat.officialEndpoint).toBe(true);
 	});

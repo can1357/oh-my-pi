@@ -20,6 +20,7 @@ export class SessionFocusController {
 	/** Session currently attached while focused; undefined when unfocused. */
 	#attachedSession: AgentSession | undefined;
 	#registryUnsubscribe: (() => void) | undefined;
+	#attachGeneration = 0;
 
 	constructor(
 		private ctx: InteractiveModeContext,
@@ -45,8 +46,10 @@ export class SessionFocusController {
 		this.#focusedAgentId = id;
 		this.#attachedSession = session;
 		this.#registryUnsubscribe ??= this.registry.onChange(e => this.#onRegistryEvent(e));
-		await this.#attach(session);
-		this.ctx.showStatus(`Viewing agent ${id} — Esc returns to main, ←← hops to parent`);
+		const attached = await this.#attach(session);
+		if (attached && this.#focusedAgentId === id && this.#attachedSession === session) {
+			this.ctx.showStatus(`Viewing agent ${id} — Esc returns to main, ←← hops to parent`);
+		}
 	}
 
 	/** Focus the focused agent's parent agent, falling back to the main session. No-op when unfocused. */
@@ -64,8 +67,8 @@ export class SessionFocusController {
 		if (!this.#focusedAgentId) return;
 		this.#focusedAgentId = undefined;
 		this.#attachedSession = undefined;
-		await this.#attach(this.ctx.session);
-		this.ctx.showStatus("Returned to main session");
+		const attached = await this.#attach(this.ctx.session);
+		if (attached && this.#focusedAgentId === undefined) this.ctx.showStatus("Returned to main session");
 	}
 
 	dispose(): void {
@@ -84,7 +87,8 @@ export class SessionFocusController {
 	}
 
 	/** Retarget core, both directions: swap subscription, transcript, and status line onto `target`. */
-	async #attach(target: AgentSession): Promise<void> {
+	async #attach(target: AgentSession): Promise<boolean> {
+		const generation = ++this.#attachGeneration;
 		this.ctx.unsubscribe?.();
 		this.ctx.clearTransientSessionUi();
 		this.ctx.eventController.resetTranscriptAnchors();
@@ -103,15 +107,34 @@ export class SessionFocusController {
 			}
 			await this.ctx.eventController.handleEvent(event);
 		});
+		// Events emitted while another session was focused had no TUI listener,
+		// but their message_end handlers still persist authoritative transcript
+		// state asynchronously. Subscribe first, then settle the persistence
+		// already in flight at this boundary before replay: an already-emitted
+		// tool completion becomes a persisted toolResult, so the rebuild can't
+		// resurrect a result-less toolCall whose only completion was lost during
+		// the blackout (#9816). Later events reach the newly installed listener.
+		await target.settleInFlightMessagePersistence();
+		if (generation !== this.#attachGeneration) return false;
 		this.ctx.statusLine.setSession(target, this.#focusedAgentId);
 		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+		if (generation !== this.#attachGeneration) return false;
+		// Retarget the sticky Todo HUD too. While a subagent is focused the main
+		// session's `todo` completions never reach this controller; returning to
+		// main must therefore reload its current state instead of retaining the
+		// pre-focus snapshot. Passing `target` also restores a focused subagent's
+		// own todos rather than overwriting them with the main session's list.
+		await this.ctx.reloadTodos(target);
+		if (generation !== this.#attachGeneration) return false;
 		// Sync the run-state title to the attached target: a streaming target has no
 		// agent_start incoming, so arm the loader/working title manually; an idle
 		// target would otherwise inherit the previous session's stuck spinner, so
 		// reset it to idle (agent_end teardown already ran via clearTransientSessionUi).
 		if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
 		else setTerminalTitleState("idle");
+		if (generation !== this.#attachGeneration) return false;
 		this.ctx.updateEditorBorderColor();
 		this.ctx.ui.requestRender();
+		return true;
 	}
 }

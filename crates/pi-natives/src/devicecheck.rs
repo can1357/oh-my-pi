@@ -99,6 +99,43 @@ mod platform {
 		static _NSConcreteStackBlock: *const c_void;
 	}
 
+	// `SessionGetInfo` reports the caller's login-session attributes; consulted
+	// to detect a GUI/graphic session before touching the GUI-only DeviceCheck
+	// daemon.
+	#[link(name = "Security", kind = "framework")]
+	unsafe extern "C" {
+		fn SessionGetInfo(session: u32, session_id: *mut u32, attributes: *mut u32) -> i32;
+	}
+
+	/// `callerSecuritySession` — query the session hosting the current process.
+	const CALLER_SECURITY_SESSION: u32 = u32::MAX;
+	/// `sessionHasGraphicAccess` attribute bit from `Security/AuthSession.h`.
+	const SESSION_HAS_GRAPHIC_ACCESS: u32 = 0x0010;
+
+	/// Whether the caller's security session has GUI/graphic access.
+	///
+	/// `DCDevice.isSupported` synchronously opens an XPC connection to the
+	/// per-user `DeviceCheck` metadata daemon, which exists only in an
+	/// interactive GUI login session. From a session without graphic access
+	/// (SSH, a launchd `LaunchDaemon`, a CI runner, a service account, a
+	/// sandbox) the connection setup hits `_xpc_api_misuse` and aborts the
+	/// whole process with `SIGTRAP` before the completion handler can run — so
+	/// there is no error to return, only a dead process. Gating on the
+	/// documented session attribute keeps the call out of that trapping path.
+	///
+	/// Returns `false` when graphic access is absent *or* the session cannot be
+	/// queried: degrading to "unsupported" merely drops the attestation header
+	/// (exactly as on every non-macOS host), whereas optimistically assuming
+	/// "supported" risks the process-killing trap.
+	fn session_has_graphic_access() -> bool {
+		let mut attributes: u32 = 0;
+		// SAFETY: `SessionGetInfo` writes the caller session's attribute bits
+		// through the out-pointer; the session-id slot is unused, so it is null.
+		let status =
+			unsafe { SessionGetInfo(CALLER_SECURITY_SESSION, ptr::null_mut(), &mut attributes) };
+		status == 0 && attributes & SESSION_HAS_GRAPHIC_ACCESS != 0
+	}
+
 	/// Outcome delivered once from the completion block to the waiting worker.
 	enum Completion {
 		Token(String),
@@ -289,6 +326,10 @@ mod platform {
 			error:        None,
 			latency_ms:   0.0,
 		};
+		if !session_has_graphic_access() {
+			result.error = Some("DeviceCheck unavailable without a GUI login session".to_owned());
+			return result;
+		}
 		// SAFETY: `c"DCDevice"` is a valid null-terminated class name.
 		let class = unsafe { objc_getClass(c"DCDevice".as_ptr()) };
 		if class.is_null() {

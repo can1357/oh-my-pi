@@ -157,7 +157,7 @@ const validSamples: Record<SchemaName, unknown> = {
 			},
 		],
 	},
-	clientUsageReportRequestSchema: { installId: "install", hostname: "host", entries: [OBSERVED_USAGE] },
+	clientUsageReportRequestSchema: { installId: "install", hostname: "host", app: "robomp", entries: [OBSERVED_USAGE] },
 	clientUsageReportResponseSchema: { ok: true },
 	clientUsageSummaryResponseSchema: {
 		generatedAt: 2_000,
@@ -167,7 +167,7 @@ const validSamples: Record<SchemaName, unknown> = {
 				hostname: "host",
 				firstSeen: 1_000,
 				lastSeen: 2_000,
-				providers: [{ ...OBSERVED_USAGE, firstSeen: undefined, at: undefined, model: undefined }],
+				providers: [{ ...OBSERVED_USAGE, app: "robomp", firstSeen: undefined, at: undefined, model: undefined }],
 			},
 		],
 	},

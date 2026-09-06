@@ -26,6 +26,24 @@ matches_parser!(Yes, app);
 impl Utility for Yes {
 	const NAME: &'static str = "yes";
 
+	fn rewrite_argv(mut argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
+		// GNU yes (gnulib `parse_gnu_standard_options_only`) recognizes
+		// `--help`/`--version` only as the sole argument; everything else —
+		// `yes -n`, `yes --no`, even `yes --help me` — is echoed verbatim.
+		// Insert `--` so clap treats every remaining argument as an operand.
+		if argv.is_empty()
+			|| (argv.len() == 2 && matches!(argv[1].to_str(), Some("--help" | "--version")))
+		{
+			return Ok(argv);
+		}
+		// GNU consumes one leading `--` as the operand separator; ours replaces it.
+		if argv.get(1).is_some_and(|arg| arg.to_str() == Some("--")) {
+			argv.remove(1);
+		}
+		argv.insert(1, OsString::from("--"));
+		Ok(argv)
+	}
+
 	fn run(self, host: &mut Host) -> i32 {
 		let mut buffer = Vec::with_capacity(BUF_SIZE);
 		let Some(strings) = self.matches.get_many::<OsString>("STRING") else {
@@ -59,7 +77,9 @@ fn app() -> Command {
 			Arg::new("STRING")
 				.default_value("y")
 				.value_parser(ValueParser::os_string())
-				.action(ArgAction::Append),
+				.action(ArgAction::Append)
+				.allow_hyphen_values(true)
+				.trailing_var_arg(true),
 		)
 		.infer_long_args(true)
 }
@@ -214,8 +234,12 @@ mod tests {
 		budget: usize,
 		fail_kind: io::ErrorKind,
 	) -> (i32, String, String) {
-		let parsed = Yes::try_parse_from(std::iter::once("yes").chain(arguments.iter().copied()))
-			.expect("test arguments should parse");
+		let argv: Vec<OsString> = std::iter::once("yes")
+			.chain(arguments.iter().copied())
+			.map(OsString::from)
+			.collect();
+		let argv = Yes::rewrite_argv(argv).expect("yes rewrite is infallible");
+		let parsed = Yes::try_parse_from(argv).expect("test arguments should parse");
 		let (mut host, capture) = Host::for_test("yes", Vec::new(), Path::new("/"));
 		let state = Arc::new(Mutex::new(WriterState { bytes: Vec::new(), remaining: budget }));
 		host.stdout = OpenFile::Stream(Box::new(FailingWriter {
@@ -226,6 +250,52 @@ mod tests {
 		let code = parsed.run(&mut host);
 		let stdout = String::from_utf8(state.lock().bytes.clone()).expect("yes output is UTF-8");
 		(code, stdout, capture.err())
+	}
+
+	#[test]
+	fn hyphen_operands_are_echoed_not_parsed() {
+		// Failure mode: clap rejecting `yes -n` / `yes --no` / `yes -1` as
+		// unknown options where GNU yes echoes them.
+		let (code, stdout, stderr) = run_with(&["-n"], 6, io::ErrorKind::BrokenPipe);
+		assert_eq!(code, 0);
+		assert_eq!(stdout, "-n\n-n\n");
+		assert_eq!(stderr, "");
+
+		let (code, stdout, _) = run_with(&["--no", "-1"], 16, io::ErrorKind::BrokenPipe);
+		assert_eq!(code, 0);
+		assert_eq!(stdout, "--no -1\n--no -1\n");
+	}
+
+	#[test]
+	fn help_is_special_only_as_sole_argument() {
+		// Failure mode: `yes --help me` rendering help; GNU echoes "--help me".
+		let (code, stdout, _) = run_with(&["--help", "me"], 20, io::ErrorKind::BrokenPipe);
+		assert_eq!(code, 0);
+		assert_eq!(stdout, "--help me\n--help me\n");
+	}
+
+	#[test]
+	fn version_is_special_only_as_sole_argument() {
+		let (code, capture) = run_util::<Yes>(&["--version"], "", "/");
+		assert_eq!(code, 0);
+		assert!(capture.out().contains("0.8.0"), "stdout: {:?}", capture.out());
+
+		// Failure mode: `yes --version x` printing the version banner.
+		let (code, stdout, _) = run_with(&["--version", "x"], 24, io::ErrorKind::BrokenPipe);
+		assert_eq!(code, 0);
+		assert_eq!(stdout, "--version x\n--version x\n");
+	}
+
+	#[test]
+	fn leading_double_dash_is_operand_separator() {
+		// Failure mode: the rewrite doubling `--` so `yes --` echoes "--".
+		let (code, stdout, _) = run_with(&["--"], 4, io::ErrorKind::BrokenPipe);
+		assert_eq!(code, 0);
+		assert_eq!(stdout, "y\ny\n");
+
+		let (code, stdout, _) = run_with(&["--", "--help"], 14, io::ErrorKind::BrokenPipe);
+		assert_eq!(code, 0);
+		assert_eq!(stdout, "--help\n--help\n");
 	}
 
 	#[test]

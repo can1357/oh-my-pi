@@ -1,10 +1,10 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-ai",
-  "version": "17.3.3",
+  "version": "18.0.11",
   "description": "Unified LLM API with automatic model discovery and provider configuration",
   "homepage": "https://omp.sh",
-  "author": "Can Boluk",
+  "author": "Stencil Labs, Inc.",
   "contributors": [
     "Mario Zechner"
   ],
@@ -37,14 +37,12 @@
     "fmt": "biome format --write ."
   },
   "dependencies": {
-    "@bufbuild/protobuf": "catalog:",
     "@oh-my-pi/omptype": "catalog:",
     "@oh-my-pi/pi-catalog": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",
     "@oh-my-pi/pi-wire": "catalog:"
   },
   "devDependencies": {
-    "@bufbuild/protoc-gen-es": "catalog:",
     "@types/bun": "catalog:"
   },
   "engines": {

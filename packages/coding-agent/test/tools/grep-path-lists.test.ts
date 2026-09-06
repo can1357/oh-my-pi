@@ -536,6 +536,32 @@ describe("tool path arrays", () => {
 		expect(details?.notes).toEqual(["Note: interpreted as 2 paths: apps/grep.txt, packages/grep.txt"]);
 	});
 
+	it("read treats semicolon lists as explicit scope before fuzzy suffix recovery", async () => {
+		const decoyRoot = path.join(tempDir, "decoy");
+		const decoyPath = path.join(decoyRoot, "apps", "grep.txt; packages", "grep.txt");
+		await fs.mkdir(path.dirname(decoyPath), { recursive: true });
+		await Bun.write(decoyPath, "fuzzy-decoy\n");
+
+		try {
+			const tools = await createTools(createTestSession(tempDir));
+			const tool = tools.find(entry => entry.name === "read");
+			expect(tool).toBeDefined();
+			if (!tool) throw new Error("Missing read tool");
+
+			const result = await tool.execute("read-semicolon-delimited", {
+				path: "apps/grep.txt; packages/grep.txt",
+			});
+			const text = getText(result);
+
+			expect(text).toContain("Note: interpreted as 2 paths: apps/grep.txt, packages/grep.txt");
+			expect(text).toContain("shared-needle apps");
+			expect(text).toContain("shared-needle packages");
+			expect(text).not.toContain("fuzzy-decoy");
+		} finally {
+			await removeWithRetries(decoyRoot);
+		}
+	});
+
 	it("read keeps readable delimited paths when peers are missing", async () => {
 		const tools = await createTools(createTestSession(tempDir));
 		const tool = tools.find(entry => entry.name === "read");

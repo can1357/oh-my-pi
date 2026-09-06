@@ -39,12 +39,14 @@ const ONE_PX_PNG = Buffer.from(
 function createContext() {
 	const pasteText = vi.fn();
 	const insertText = vi.fn();
+	const insertAtom = vi.fn();
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
 	const ctx = {
 		editor: {
 			pasteText,
 			insertText,
+			insertAtom,
 			imageLinks: undefined,
 			pendingImages: [] as ImageContent[],
 			pendingImageLinks: [] as (string | undefined)[],
@@ -56,7 +58,7 @@ function createContext() {
 		} as unknown as InteractiveModeContext["sessionManager"],
 		showStatus,
 	} as unknown as InteractiveModeContext;
-	return { ctx, spies: { pasteText, insertText, requestRender, showStatus } };
+	return { ctx, spies: { pasteText, insertText, insertAtom, requestRender, showStatus } };
 }
 
 describe("InputController.handleImagePathPaste (issue #2375)", () => {

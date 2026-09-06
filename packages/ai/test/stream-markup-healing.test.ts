@@ -159,18 +159,31 @@ function mockNdjsonFetch(lines: ReadonlyArray<unknown>): FetchImpl {
 	const fn = async (_input: string | URL | Request, _init?: RequestInit): Promise<Response> => ndjsonResponse(lines);
 	return Object.assign(fn, { preconnect: fetch.preconnect });
 }
+function healingModel(provider: string, id: string): Model<"ollama-chat"> {
+	return buildModel({
+		id,
+		api: "ollama-chat",
+		provider,
+		baseUrl: "http://localhost:11434",
+		name: id,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	});
+}
 
 describe("StreamMarkupHealing pattern selection", () => {
 	it("routes tool-call leaks to their grammar and everything else to thinking", () => {
-		expect(getStreamMarkupHealingPattern("openrouter", "moonshotai/kimi-k2")).toBe("kimi");
-		expect(getStreamMarkupHealingPattern("ollama-cloud", "deepseek-v4-pro")).toBe("dsml");
-		expect(getStreamMarkupHealingPattern("nanogpt", "deepseek/deepseek-v4-pro")).toBe("dsml");
+		expect(getStreamMarkupHealingPattern(healingModel("openrouter", "moonshotai/kimi-k2"))).toBe("kimi");
+		expect(getStreamMarkupHealingPattern(healingModel("ollama-cloud", "deepseek-v4-pro"))).toBe("dsml");
+		expect(getStreamMarkupHealingPattern(healingModel("nanogpt", "deepseek/deepseek-v4-pro"))).toBe("dsml");
 		// Every other model heals leaked reasoning idioms by default.
-		expect(getStreamMarkupHealingPattern("opencode-zen", "minimax-m3")).toBe("thinking");
-		expect(getStreamMarkupHealingPattern("openrouter", "google/gemini-3.5-flash")).toBe("thinking");
-		expect(getStreamMarkupHealingPattern("ollama-cloud", "gpt-oss:120b")).toBe("thinking");
-		// A DeepSeek id on a non-DSML provider falls back to thinking, not the envelope grammar.
-		expect(getStreamMarkupHealingPattern("openai", "deepseek-v4-pro")).toBe("thinking");
+		expect(getStreamMarkupHealingPattern(healingModel("opencode-zen", "minimax-m3"))).toBe("thinking");
+		expect(getStreamMarkupHealingPattern(healingModel("openrouter", "google/gemini-3.5-flash"))).toBe("thinking");
+		expect(getStreamMarkupHealingPattern(healingModel("ollama-cloud", "gpt-oss:120b"))).toBe("thinking");
+		expect(getStreamMarkupHealingPattern(healingModel("openai", "deepseek-v4-pro"))).toBe("dsml");
 	});
 });
 
@@ -447,6 +460,44 @@ describe("StreamMarkupHealing DSML envelope pattern", () => {
 		expect(thinking).toBe("plan\n");
 		expect(text).toBe("before  after");
 		expect(calls).toHaveLength(1);
+	});
+});
+
+describe("StreamMarkupHealing Qwen XML pattern", () => {
+	const leaked = '<tool_calls>\n<read path="/etc/hostname" />\n</tool_calls>';
+
+	it("parses a self-closing tool element into a structured call", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		expect(healing.feed(leaked)).toBe("");
+
+		const calls = healing.drainCompleted();
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.name).toBe("read");
+		expect(JSON.parse(calls[0]!.arguments)).toEqual({ path: "/etc/hostname" });
+	});
+
+	it("reconstructs markup split across arbitrary chunk boundaries", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		let visible = "";
+		for (const char of leaked) visible += healing.feed(char);
+		visible += healing.flushPending();
+
+		expect(visible).toBe("");
+		expect(healing.drainCompleted()).toHaveLength(1);
+	});
+
+	it("preserves text around a complete tool-call section", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		const events = healing.feedEvents(`Before\n${leaked}\nAfter`);
+
+		expect(events.map(event => event.type)).toEqual(["text", "toolCall", "text"]);
+	});
+
+	it("drops an incomplete tool-call section", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		expect(healing.feed('<tool_calls><read path="/etc/host')).toBe("");
+		expect(healing.flushPending()).toBe("");
+		expect(healing.drainCompleted()).toHaveLength(0);
 	});
 });
 

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage, SyntheticToolResultDetails } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -45,12 +46,24 @@ function createHost(
 		fallbackChains?: Record<string, string[]>;
 		textOutputCommitted?: boolean;
 		messages?: readonly AgentMessage[];
+		lastModelChangeRole?: string;
+		modelRoles?: Record<string, string>;
 	} = {},
 ): TurnRecoveryHost {
-	const settings = Settings.isolated(options.fallbackChains ? { "retry.fallbackChains": options.fallbackChains } : {});
+	const settings = Settings.isolated({
+		...(options.fallbackChains ? { "retry.fallbackChains": options.fallbackChains } : {}),
+		...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
+	});
+	if (options.modelRoles) {
+		for (const [role, selector] of Object.entries(options.modelRoles)) {
+			settings.setModelRole(role, selector);
+		}
+	}
 	return {
-		agent: (options.messages ? { state: { messages: options.messages } } : undefined) as never,
-		sessionManager: undefined as never,
+		agent: { state: { messages: options.messages ?? [] } } as never,
+		sessionManager: {
+			getLastModelChangeRole: () => options.lastModelChangeRole,
+		} as never,
 		persistedAssistantEntryId: () => undefined,
 		settings,
 		modelRegistry,
@@ -94,6 +107,9 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-turn-recovery-replay-");
 		authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
+		// Live-role resolution (#liveRetryRoleHint) filters by provider auth;
+		// pin a runtime key so the test does not depend on host env credentials.
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 	});
 
@@ -294,6 +310,45 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(recovery.isFireworksFastFallbackEligible(makeMessage([{ type: "text", text: "   \n" }], fastModel))).toBe(
 			true,
 		);
+	});
+
+	it("bars usage-backed payload-shaped overflows from the hard-error fallback chain", () => {
+		const fallbackChains = { [`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"] };
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { fallbackChains }));
+		const message = {
+			...makeMessage([], model),
+			errorMessage: "request_too_large: image count exceeds the limit of 20",
+			usage: { ...USAGE, input: (model.contextWindow ?? 0) + 1_000 },
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		expect(AIError.isPayloadRejection(message)).toBe(true);
+		expect(AIError.isUsageBackedContextOverflow(message, model.contextWindow ?? 0)).toBe(true);
+		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
+	});
+
+	it("keeps text-ambiguous media-budget 413s eligible for the configured chain", () => {
+		const fallbackChains = { [`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"] };
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { fallbackChains }));
+		const message = {
+			...makeMessage([], model),
+			errorMessage: "request_too_large: image count exceeds the limit of 20",
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		expect(AIError.isContextOverflow(message, model.contextWindow ?? 0)).toBe(true);
+		expect(recovery.isHardErrorFallbackEligible(message)).toBe(true);
+	});
+
+	it("keeps pure token-context overflows barred from the configured chain", () => {
+		const fallbackChains = { [`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"] };
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { fallbackChains }));
+		const message = {
+			...makeMessage([], model),
+			errorMessage: "prompt is too long: 250000 tokens > 200000 maximum",
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		expect(AIError.isContextOverflow(message, model.contextWindow ?? 0)).toBe(true);
+		expect(AIError.isPayloadRejection(message)).toBe(false);
+		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
 	});
 
 	it("treats a thinking-only partial turn as still retriable", () => {
@@ -529,9 +584,342 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
 		});
 
-		it("keeps a non-refusal error with an unexecuted tool call non-retriable", () => {
+		it("retries a transport error with a provably unexecuted tool call", () => {
 			const message = makeMessage([toolCall("call-1")], model);
-			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(true);
 		});
+	});
+
+	// A provider transport error (e.g. `The socket connection was closed
+	// unexpectedly` after the model emitted a complete tool call) ends the turn
+	// with `stopReason: "error"`; the agent loop pairs every emitted-but-unrun
+	// call with a synthetic `executed: false` result. With positive proof that
+	// none of them ran, the turn is replay-safe the same way a post-call
+	// classifier refusal is, so the configured retry/fallback policy gets its
+	// chance instead of surfacing the socket error as terminal.
+	describe("transport error with emitted tool calls", () => {
+		const socketClose =
+			"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
+
+		function transportError(content: AssistantMessage["content"]): AssistantMessage {
+			const message = makeMessage(content, model);
+			message.errorMessage = socketClose;
+			return message;
+		}
+
+		function toolCall(id: string): AssistantMessage["content"][number] {
+			return { type: "toolCall", id, name: "bash", arguments: { command: "ssh host" } };
+		}
+
+		function syntheticResult(toolCallId: string): ToolResultMessage<SyntheticToolResultDetails> {
+			return {
+				role: "toolResult",
+				toolCallId,
+				toolName: "bash",
+				content: [{ type: "text", text: "Tool call was not executed." }],
+				isError: true,
+				details: { __synthetic: true, source: "assistant_stop_error", executed: false },
+				timestamp: Date.now(),
+			};
+		}
+
+		function realResult(toolCallId: string): ToolResultMessage {
+			return {
+				role: "toolResult",
+				toolCallId,
+				toolName: "bash",
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+				timestamp: Date.now(),
+			};
+		}
+
+		function recoveryForTransport(message: AssistantMessage, tail: readonly AgentMessage[]): TurnRecovery {
+			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
+		}
+
+		it("retries when the only tool call provably never executed", () => {
+			const message = transportError([toolCall("call-1")]);
+			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(true);
+		});
+
+		it("does not retry when the tool call produced a real result", () => {
+			const message = transportError([toolCall("call-1")]);
+			expect(recoveryForTransport(message, [realResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry when only some tool calls went unexecuted", () => {
+			const message = transportError([toolCall("call-1"), toolCall("call-2")]);
+			const recovery = recoveryForTransport(message, [realResult("call-1"), syntheticResult("call-2")]);
+			expect(recovery.isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry when the turn also committed visible text", () => {
+			const message = transportError([{ type: "text", text: "Connecting..." }, toolCall("call-1")]);
+			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry when the tool call has no result at all", () => {
+			const message = transportError([toolCall("call-1")]);
+			expect(recoveryForTransport(message, []).isRetryableError(message)).toBe(false);
+		});
+	});
+
+	describe("HTTP/2 stream reset after resolved tool calls", () => {
+		const nghttp2Internal = "Stream closed with error code NGHTTP2_INTERNAL_ERROR";
+		const nghttp2Refused = "Stream closed with error code NGHTTP2_REFUSED_STREAM";
+		const stallMessage = "Provider stream stalled while waiting for the next event";
+
+		function cursorMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
+			const message = makeMessage(content, model);
+			message.provider = "cursor";
+			message.errorMessage = errorMessage;
+			return message;
+		}
+
+		function execToolCall(id: string, marked = false): AssistantMessage["content"][number] {
+			const block: AssistantMessage["content"][number] = {
+				type: "toolCall",
+				id,
+				name: "bash",
+				arguments: { command: "pwd" },
+			};
+			if (marked) (block as { [kCursorExecResolved]?: true })[kCursorExecResolved] = true;
+			return block;
+		}
+
+		function mcpToolCall(id: string): AssistantMessage["content"][number] {
+			return {
+				type: "toolCall",
+				id,
+				name: "mcp__databricks_production_execute_sql",
+				arguments: { query: "SELECT 1" },
+			};
+		}
+
+		function realResult(toolCallId: string, toolName = "bash"): ToolResultMessage {
+			return {
+				role: "toolResult",
+				toolCallId,
+				toolName,
+				content: [{ type: "text", text: "/workspace" }],
+				isError: false,
+				timestamp: Date.now(),
+			};
+		}
+
+		function recoveryForReset(message: AssistantMessage, tail: readonly AgentMessage[]): TurnRecovery {
+			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
+		}
+
+		it("continues a Cursor NGHTTP2_INTERNAL_ERROR after a marked exec result", () => {
+			const message = cursorMessage([execToolCall("call-1", true)], nghttp2Internal);
+			const recovery = recoveryForReset(message, [realResult("call-1")]);
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+		});
+
+		it("continues a Cursor NGHTTP2_REFUSED_STREAM after a marked exec result", () => {
+			const message = cursorMessage([execToolCall("call-1", true)], nghttp2Refused);
+			expect(recoveryForReset(message, [realResult("call-1")]).classifyResolvedInterruptedToolTurn(message)).toBe(
+				"stream-stall",
+			);
+		});
+
+		it("continues a Cursor HTTP/2 reset after an unmarked MCP result", () => {
+			const message = cursorMessage([mcpToolCall("mcp-1")], nghttp2Internal);
+			const recovery = recoveryForReset(message, [realResult("mcp-1", "mcp__databricks_production_execute_sql")]);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+		});
+
+		it("continues a Cursor idle stall after an unmarked MCP call", () => {
+			const message = cursorMessage([mcpToolCall("mcp-1")], stallMessage);
+			const recovery = recoveryForReset(message, [realResult("mcp-1", "mcp__databricks_production_execute_sql")]);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+		});
+
+		it("does not continue an HTTP/2 reset whose tool call has no result", () => {
+			const message = cursorMessage([execToolCall("call-1", true)], nghttp2Internal);
+			expect(recoveryForReset(message, []).classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+		});
+
+		it("does not continue an HTTP/2 CANCEL reset", () => {
+			const message = cursorMessage([execToolCall("call-1", true)], "Stream closed with error code NGHTTP2_CANCEL");
+			expect(
+				recoveryForReset(message, [realResult("call-1")]).classifyResolvedInterruptedToolTurn(message),
+			).toBeUndefined();
+		});
+
+		it("matches a Connect-wrapped NGHTTP2 close", () => {
+			const message = cursorMessage(
+				[mcpToolCall("mcp-1")],
+				"Connect error failed_precondition: Error: Stream closed with error code NGHTTP2_INTERNAL_ERROR",
+			);
+			expect(
+				recoveryForReset(message, [
+					realResult("mcp-1", "mcp__databricks_production_execute_sql"),
+				]).classifyResolvedInterruptedToolTurn(message),
+			).toBe("stream-stall");
+		});
+	});
+
+	describe("premature stream close after resolved tool calls", () => {
+		const completionsClose = "OpenAI completions stream closed before a finish_reason was received";
+		const responsesClose = "OpenAI responses stream closed before a terminal response event was received";
+
+		function gatewayMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
+			const message = makeMessage(content, model);
+			message.provider = "opencode-go";
+			message.errorMessage = errorMessage;
+			// Production persists the Transient flag that ProviderResponseError(kind:
+			// "incomplete-stream") attaches; the bare message text classifies as 0.
+			message.errorId = AIError.create(AIError.Flag.Transient);
+			return message;
+		}
+
+		function recoveryForClose(message: AssistantMessage, tail: readonly AgentMessage[]): TurnRecovery {
+			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
+		}
+
+		it("continues a premature completions close after a resolved tool call", () => {
+			const message = gatewayMessage(
+				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
+				completionsClose,
+			);
+			const recovery = recoveryForClose(message, [
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "bash",
+					content: [{ type: "text", text: "Tool call was not executed." }],
+					isError: true,
+					details: { __synthetic: true, source: "assistant_stop_error", executed: false },
+					timestamp: Date.now(),
+				},
+			]);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+		});
+
+		it("continues a premature responses close after a resolved tool call", () => {
+			const message = gatewayMessage(
+				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
+				responsesClose,
+			);
+			const recovery = recoveryForClose(message, [
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "bash",
+					content: [{ type: "text", text: "Tool call was not executed." }],
+					isError: true,
+					details: { __synthetic: true, source: "assistant_stop_error", executed: false },
+					timestamp: Date.now(),
+				},
+			]);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+		});
+
+		it("does not continue a premature close whose tool call has no result", () => {
+			const message = gatewayMessage(
+				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
+				completionsClose,
+			);
+			expect(recoveryForClose(message, []).classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+		});
+
+		it("does not continue an unrelated provider error", () => {
+			const message = gatewayMessage(
+				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
+				"Provider returned 500 boom",
+			);
+			const recovery = recoveryForClose(message, [
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "bash",
+					content: [{ type: "text", text: "/workspace" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+			]);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+		});
+	});
+
+	it("maps an ephemeral fallback hop to the default chain instead of a shared later-listed role", () => {
+		const vision = getBundledModel("openai", "gpt-4o-mini");
+		if (!vision) throw new Error("Expected bundled model gpt-4o-mini");
+		const selector = `${model.provider}/${model.id}`;
+		const recovery = new TurnRecovery(
+			createHost(model, modelRegistry, {
+				lastModelChangeRole: "fallback",
+				modelRoles: {
+					default: selector,
+					vision: selector,
+				},
+				fallbackChains: {
+					vision: [`${vision.provider}/${vision.id}`],
+					default: [`${vision.provider}/${vision.id}`],
+				},
+			}),
+		);
+		expect(recovery.resolveRetryFallbackRole(selector, model)).toBe("default");
+	});
+
+	it("uses the live vision role when that role shares a model with default", () => {
+		const visionFallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!visionFallback) throw new Error("Expected bundled model gpt-4o-mini");
+		const selector = `${model.provider}/${model.id}`;
+		const recovery = new TurnRecovery(
+			createHost(model, modelRegistry, {
+				lastModelChangeRole: "vision",
+				modelRoles: {
+					default: selector,
+					vision: selector,
+				},
+				fallbackChains: {
+					vision: [`${visionFallback.provider}/${visionFallback.id}`],
+					default: [`${visionFallback.provider}/${visionFallback.id}`],
+				},
+			}),
+		);
+		expect(recovery.resolveRetryFallbackRole(selector, model)).toBe("vision");
+	});
+
+	it("ignores a recorded role whose assignment no longer matches the active model", () => {
+		const vision = getBundledModel("openai", "gpt-4o-mini");
+		if (!vision) throw new Error("Expected bundled model gpt-4o-mini");
+		const selector = `${model.provider}/${model.id}`;
+		const recovery = new TurnRecovery(
+			createHost(model, modelRegistry, {
+				lastModelChangeRole: "vision",
+				modelRoles: {
+					default: selector,
+					vision: `${vision.provider}/${vision.id}`,
+				},
+				fallbackChains: {
+					vision: [`${vision.provider}/${vision.id}`],
+					default: [`${vision.provider}/${vision.id}`],
+				},
+			}),
+		);
+		expect(recovery.resolveRetryFallbackRole(selector, model)).toBe("default");
+	});
+
+	it("does not attach the default chain to a model that is not default's primary", () => {
+		const other = getBundledModel("openai", "gpt-4o-mini");
+		if (!other) throw new Error("Expected bundled model gpt-4o-mini");
+		const recovery = new TurnRecovery(
+			createHost(other, modelRegistry, {
+				lastModelChangeRole: "fallback",
+				modelRoles: {
+					default: `${model.provider}/${model.id}`,
+				},
+				fallbackChains: {
+					default: [`${model.provider}/${model.id}`],
+				},
+			}),
+		);
+		expect(recovery.resolveRetryFallbackRole(`${other.provider}/${other.id}`, other)).toBeUndefined();
 	});
 });

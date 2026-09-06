@@ -6,7 +6,7 @@ let tempDir: TempDir | null = null;
 
 async function freshStorage(): Promise<HistoryStorage> {
 	tempDir = TempDir.createSync("@omp-history-search-");
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	return HistoryStorage.open(tempDir.join("history.db"));
 }
 
@@ -17,12 +17,12 @@ async function seed(storage: HistoryStorage, prompts: string[]): Promise<void> {
 }
 
 beforeEach(() => {
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	vi.useFakeTimers();
 });
 
 afterEach(async () => {
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	vi.useRealTimers();
 	if (tempDir) {
 		await Bun.sleep(0);

@@ -4414,6 +4414,48 @@ describe("agentLoopContinue with AgentMessage", () => {
 		).toBe(false);
 	});
 
+	it("runs onTurnEnd for a terminal-yield turn without a spent abort signal", async () => {
+		const toolSchema = type({ value: "string" });
+		const controller = new AbortController();
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "yield",
+			label: "Yield",
+			description: "Yield tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "yield-1", name: "yield", arguments: { value: "final answer" } }] },
+				{ content: ["must not be reached"] },
+			],
+		});
+		const turnEndCalls: Array<{ willContinue: boolean | undefined; signalAborted: boolean }> = [];
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			afterToolCall: async () => {
+				controller.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
+			},
+			onTurnEnd: (_messages, signal, ctx) => {
+				turnEndCalls.push({ willContinue: ctx?.willContinue, signalAborted: signal?.aborted === true });
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("go")], context, config, controller.signal, mock.stream);
+		for await (const event of stream) events.push(event);
+
+		// The terminal-yield abort must not suppress per-turn bookkeeping: the
+		// hook runs once for the yield turn, marked complete (willContinue:false)
+		// and with no aborted signal so downstream waits behave like a plain turn.
+		expect(mock.calls).toHaveLength(1);
+		expect(turnEndCalls).toEqual([{ willContinue: false, signalAborted: false }]);
+	});
+
 	it("preserves an external abort boundary when a completed tool ignores cancellation", async () => {
 		const toolSchema = type({ value: "string" });
 		const controller = new AbortController();

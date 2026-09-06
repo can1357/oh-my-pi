@@ -30,6 +30,7 @@ async function runSwiftLint(
 	args: string[],
 	cwd: string,
 	resolvedCommand?: string,
+	signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; success: boolean }> {
 	const command = resolvedCommand ?? "swiftlint";
 
@@ -39,14 +40,17 @@ async function runSwiftLint(
 			stdout: "pipe",
 			stderr: "pipe",
 			windowsHide: true,
+			signal,
 		});
 
 		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 		await proc.exited;
+		signal?.throwIfAborted();
 
 		// swiftlint exits non-zero when violations found — that's not a failure
 		return { stdout, stderr, success: stdout.length > 0 };
 	} catch (err) {
+		if (signal?.aborted) throw err;
 		return { stdout: "", stderr: String(err), success: false };
 	}
 }
@@ -71,11 +75,12 @@ export class SwiftLintClient implements LinterClient {
 		return content;
 	}
 
-	async lint(filePath: string): Promise<Diagnostic[]> {
+	async lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]> {
 		const result = await runSwiftLint(
 			["lint", "--quiet", "--reporter", "json", filePath],
 			this.cwd,
 			this.config.resolvedCommand,
+			signal,
 		);
 
 		if (!result.success) {

@@ -1,5 +1,4 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { estimateTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
@@ -14,6 +13,7 @@ import {
 	PRIMARY_CONTEXT_CUSTOM_TYPES,
 } from "../session/session-history-format";
 import { ADVISOR_RENDER_OPTIONS, renderAdvisorDeltaChunks } from "./delta-split";
+import { fingerprintMessage } from "./message-fingerprint";
 
 /**
  * Minimal slice of `Agent` the runtime drives — satisfied by pi-agent-core
@@ -48,9 +48,12 @@ export interface AdvisorRuntimeHost {
 	 * when the advisor must clear its own context before sending the current
 	 * incremental update. The cursor stays at the current primary position: this
 	 * recovery path must never replay the full primary transcript.
+	 *
+	 * Takes the pending update as a message rather than a token count: sizing it
+	 * needs the advisor model's tokenizer, which the host owns.
 	 * Optional: hosts that omit it get no proactive maintenance.
 	 */
-	maintainContext?(incomingTokens: number, signal: AbortSignal): Promise<boolean>;
+	maintainContext?(incoming: AgentMessage, signal: AbortSignal): Promise<boolean>;
 	/**
 	 * Called immediately before each `agent.prompt(batch)` cycle. Lets the host
 	 * clear per-update advisor state and apply the in-progress delivery policy.
@@ -74,6 +77,8 @@ export interface AdvisorRuntimeHost {
 	): Promise<boolean | undefined> | boolean | undefined;
 	/** Called after a successful advisor turn so the host can finish fallback lifecycle reporting. */
 	onTurnSuccess?(): Promise<void> | void;
+	/** Called when a failed batch is permanently dropped so replay-only state can be discarded. */
+	onTurnAbandoned?(): void;
 	/** Surface a non-recovering advisor failure to the host UI without adding model-visible context. */
 	notifyFailure?(error: unknown): void;
 	/** Signal that the advisor paused on a quota/rate-limit after host-level
@@ -252,45 +257,6 @@ interface CatchupWaiter {
 interface DeliveredMessage {
 	message: AgentMessage;
 	fingerprint: bigint | undefined;
-}
-
-function fingerprintMessage(message: AgentMessage): bigint | undefined {
-	try {
-		// Field-selective fingerprint: hash every top-level field the advisor
-		// renderer actually reads (mirrors AppendOnlyContextManager.#messageDigest,
-		// issue #3406). Unrendered metadata (timestamp, usage, provider internals)
-		// churns on provider round-trips and would otherwise trigger a full
-		// transcript replay for a no-op change. Rendered fields (from
-		// session-history-format.ts): role, content, customType, display, isError,
-		// toolResult: cancelled/exitCode/output, custom: details, plus the
-		// execution/branch/compaction/file-mention fields the formatter reads:
-		// excludeFromContext, command (bashExecution), code (pythonExecution),
-		// summary + fromId (branch/compaction), files (fileMention).
-		const m = message as unknown as Record<string, unknown>;
-		const payload = JSON.stringify({
-			r: m.role ?? null,
-			c: m.content ?? null,
-			toolCallId: m.toolCallId ?? null,
-			toolName: m.toolName ?? null,
-			err: m.isError ?? null,
-			ct: m.customType ?? null,
-			disp: m.display ?? null,
-			cancel: m.cancelled ?? null,
-			exit: m.exitCode ?? null,
-			out: m.output ?? null,
-			det: m.details ?? null,
-			xfc: m.excludeFromContext ?? null,
-			cmd: m.command ?? null,
-			code: m.code ?? null,
-			sum: m.summary ?? null,
-			from: m.fromId ?? null,
-			files: m.files ?? null,
-		});
-		if (payload === undefined) return undefined;
-		return Bun.hash.wyhash(payload);
-	} catch {
-		return undefined;
-	}
 }
 
 export class AdvisorRuntime {
@@ -962,10 +928,12 @@ export class AdvisorRuntime {
 		for (let round = 0; round < MAX_COALESCE_ROUNDS; round++) {
 			if (this.#sessionTransitionPaused) break;
 			if (this.host.maintainContext) {
-				const incomingTokens = estimateTokens({ role: "user", content: batchText, timestamp: Date.now() });
 				let shouldResetContext = false;
 				try {
-					shouldResetContext = await this.host.maintainContext(incomingTokens, signal);
+					shouldResetContext = await this.host.maintainContext(
+						{ role: "user", content: batchText, timestamp: Date.now() },
+						signal,
+					);
 				} catch (err) {
 					logger.debug("advisor context maintenance failed", { err: String(err) });
 				}
@@ -1092,6 +1060,13 @@ export class AdvisorRuntime {
 			this.host.notifyFailure?.(error);
 		} catch (notifyErr) {
 			logger.warn("advisor failure notification failed", { err: String(notifyErr) });
+		}
+	}
+	#notifyTurnAbandoned(): void {
+		try {
+			this.host.onTurnAbandoned?.();
+		} catch (err) {
+			logger.debug("advisor onTurnAbandoned hook failed", { err: String(err) });
 		}
 	}
 
@@ -1302,6 +1277,7 @@ export class AdvisorRuntime {
 						// refusal cascade and must be allowed to try the chain again.
 						this.#refusalModelsTried.clear();
 						this.#notifyFailureOnce(err);
+						this.#notifyTurnAbandoned();
 						this.#clearSeenContext();
 						this.#backlog = Math.max(0, this.#backlog - finalTurns);
 						this.#notifyWaiters();
@@ -1332,6 +1308,7 @@ export class AdvisorRuntime {
 						if (this.#consecutiveQuarantines >= MAX_QUARANTINE_RETRIES) {
 							this.#notifyFailureOnce(err);
 							this.#consecutiveQuarantines = 0;
+							this.#notifyTurnAbandoned();
 							this.#resetAdvisorContext(true, true, "quarantine-retry-exhausted");
 							continue;
 						}
@@ -1386,6 +1363,7 @@ export class AdvisorRuntime {
 					if (!terminalFailureRetriable) {
 						logger.warn("advisor terminal failure is non-retriable; dropping bounded batch");
 						this.#notifyFailureOnce(err);
+						this.#notifyTurnAbandoned();
 						this.#consecutiveFailures = 0;
 						// The dropped batch may carry primary-context we never delivered; drop
 						// the seen-state too so queued raw deltas re-expand before delivery.
@@ -1400,6 +1378,7 @@ export class AdvisorRuntime {
 							// deltas remain eligible so one oversized update cannot disable the advisor.
 							logger.warn("advisor update overflowed a fresh context; dropping bounded batch");
 							this.#notifyFailureOnce(err);
+							this.#notifyTurnAbandoned();
 							success = true;
 						} else {
 							// Retry once against the fresh advisor context, using only the same
@@ -1423,6 +1402,7 @@ export class AdvisorRuntime {
 						if (this.#consecutiveFailures >= 3) {
 							logger.warn("advisor failed consecutively 3 times; dropping backlog to prevent stall");
 							this.#notifyFailureOnce(err);
+							this.#notifyTurnAbandoned();
 							this.#consecutiveFailures = 0;
 							// The dropped batch may carry primary-context we never delivered; drop
 							// the seen-state too so queued raw deltas re-expand before delivery.

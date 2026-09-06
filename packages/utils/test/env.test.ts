@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	$envExact,
+	filterChildShellEnv,
 	filterProcessEnv,
 	getDbBusyTimeoutMs,
 	parseEnvFile,
@@ -164,6 +165,78 @@ describe("filterProcessEnv", () => {
 		).toEqual({
 			"ProgramFiles(x86)": "C:\\Program Files (x86)",
 			"CommonProgramFiles(x86)": "C:\\Program Files (x86)\\Common Files",
+		});
+	});
+});
+
+describe("filterChildShellEnv", () => {
+	// filterChildShellEnv resolves the mode-local dotenv name from the *launch*
+	// NODE_ENV (on Linux, /proc/self/environ — e.g. `test` inside a parallel
+	// bun-test worker), so the fixture must target that same mode instead of
+	// assuming `development`.
+	function launchDotenvMode(): string {
+		if (process.platform === "linux") {
+			try {
+				for (const entry of fs.readFileSync("/proc/self/environ", "utf8").split("\0")) {
+					if (entry.startsWith("NODE_ENV=")) return entry.slice("NODE_ENV=".length) || "development";
+				}
+				return "development";
+			} catch {}
+		}
+		return "development";
+	}
+
+	it("drops values Bun loaded from the default mode-local dotenv file", () => {
+		const cwd = path.dirname(writeTempEnv(""));
+		fs.writeFileSync(
+			path.join(cwd, `.env.${launchDotenvMode()}.local`),
+			"OMP_DOTENV_REPRO_MARKER=synthetic-mode-local-value\n",
+		);
+
+		const child = filterChildShellEnv(
+			{
+				OMP_DOTENV_REPRO_MARKER: "synthetic-mode-local-value",
+				UNCHANGED: "parent-value",
+			},
+			cwd,
+		);
+
+		expect(child).toEqual({ UNCHANGED: "parent-value" });
+	});
+
+	it("uses the launch mode when dotenv changes NODE_ENV", async () => {
+		const cwd = path.dirname(writeTempEnv("NODE_ENV=production\n"));
+		fs.writeFileSync(
+			path.join(cwd, ".env.development.local"),
+			"OMP_DOTENV_REPRO_MARKER=synthetic-mode-local-value\n",
+		);
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const script = [
+			`import { filterChildShellEnv } from ${JSON.stringify(envModulePath)};`,
+			"const child = filterChildShellEnv(process.env, process.cwd());",
+			"process.stdout.write(JSON.stringify({",
+			"  processValue: process.env.OMP_DOTENV_REPRO_MARKER ?? null,",
+			"  childValue: child.OMP_DOTENV_REPRO_MARKER ?? null,",
+			"  nodeEnv: process.env.NODE_ENV ?? null,",
+			"}));",
+		].join("\n");
+		const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+			cwd,
+			env: { ...process.env, NODE_ENV: undefined, OMP_DOTENV_REPRO_MARKER: undefined },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout)).toEqual({
+			processValue: "synthetic-mode-local-value",
+			childValue: null,
+			nodeEnv: "production",
 		});
 	});
 });

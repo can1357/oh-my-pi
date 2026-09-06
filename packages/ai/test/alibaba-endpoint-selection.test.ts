@@ -69,8 +69,10 @@ describe("alibaba-coding-plan endpoint selection", () => {
 		expect(result.access).toBe("sk-cn-key");
 		expect(result.refresh).toBe("sk-cn-key");
 		expect(result.enterpriseUrl).toBe("https://coding.dashscope.aliyuncs.com/v1");
-		expect(capturedAuth?.url).toBe("https://dashscope.console.aliyun.com/");
-		expect(capturedAuth?.instructions).toContain("China mainland");
+		expect(capturedAuth?.url).toBe("https://bailian.console.aliyun.com/?tab=model#/api-key");
+		expect(capturedAuth?.instructions).toBe(
+			"Copy your API key from the Alibaba Cloud Bailian console (China mainland)",
+		);
 
 		expect(validateSpy).toHaveBeenCalledWith({
 			provider: "Alibaba Coding Plan",

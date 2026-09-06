@@ -30,6 +30,8 @@ import {
 	completeSimple,
 	type Message,
 	type Model,
+	type OneshotRetryOptions,
+	retryTransientCompletion,
 	type ServiceTier,
 	type SimpleStreamOptions,
 	type StopReason,
@@ -1663,6 +1665,23 @@ export interface InstrumentedChatSpanOptions {
 		ctx: Context,
 		options: SimpleStreamOptions,
 	) => Promise<AssistantMessage>;
+	/**
+	 * Opt in to transient-failure retry for this oneshot (Anthropic
+	 * `overloaded_error`, `rate_limit_error`, 429/500/502/503/529). Omitted or
+	 * `undefined` means **no retry** — the failure is surfaced exactly as before.
+	 *
+	 * Deliberately opt-in rather than default-on: `oneshotKind` is free-form and
+	 * callers may pass arbitrary `ctx.tools` / `options.toolChoice`, so this
+	 * funnel cannot itself prove a given request is replay-safe. Re-issuing is
+	 * only safe when the call performs no side effect and nothing consumed
+	 * partial output — true for summaries, titles, handoffs and image
+	 * descriptions, which parse a complete response after it resolves. Enable it
+	 * per call site, as a reviewed decision.
+	 *
+	 * Pass `{}` to accept the {@link retryTransientCompletion} defaults
+	 * (3 attempts, 500ms base backoff, `retry-after` honored).
+	 */
+	readonly retry?: OneshotRetryOptions;
 }
 
 /**
@@ -1723,10 +1742,26 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
 			const complete = span.completeImpl ?? completeSimple;
-			const message = await complete(model, ctx, {
-				...options,
-				onResponse: captureOnResponse,
-			});
+			// Opt-in only (see `retry` on InstrumentedChatSpanOptions): each attempt
+			// re-issues the whole request, which is safe only for replay-safe
+			// oneshots. `getResponseHeaders` hands the failed attempt's headers to
+			// the retry layer — an AssistantMessage carries none, so this is what
+			// makes `retry-after` on a real 429/529 actually honored.
+			const runOnce = () => {
+				// Clear first so a previous attempt's `retry-after` can never be
+				// reused for a later failure that arrived without headers.
+				capturedHeaders = undefined;
+				return complete(model, ctx, { ...options, onResponse: captureOnResponse });
+			};
+			const message = span.retry
+				? await retryTransientCompletion(runOnce, {
+						...span.retry,
+						// Framework-owned: the caller must not be able to detach the
+						// abort signal or the header source by passing them itself.
+						signal: options.signal,
+						getResponseHeaders: () => capturedHeaders,
+					})
+				: await runOnce();
 			await finishChatSpan(telemetry, chatSpan, message, {
 				stepNumber,
 				serviceTier: options.serviceTier,

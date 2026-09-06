@@ -8,9 +8,9 @@
  * `prompts/`, `.mcp.json`) are wired into discovery by `omp-plugins.ts`.
  *
  * CLI-provided paths are injected via {@link injectOmpExtensionCliRoots}
- * before discovery runs; settings paths are read lazily from
- * `<scope>/settings.json` in {@link listOmpExtensionRoots} to mirror what
- * `loadExtensionModules` already does.
+ * before discovery runs. Capability loads supply the effective `extensions`
+ * setting; direct callers reconstruct its array-replacement precedence from
+ * canonical YAML config and legacy `settings.json`.
  *
  * @see ./omp-plugins.ts
  * @see ./builtin.ts `loadExtensionModules`
@@ -18,9 +18,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, isEnoent, logger, tryParseJson } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent, logger, MAIN_CONFIG_FILENAMES, tryParseJson } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import { readDirEntries, readFile } from "../capability/fs";
-import type { LoadContext } from "../capability/types";
+import type { ExtensionRootMode, LoadContext } from "../capability/types";
 import { getEnabledPlugins } from "../extensibility/plugins/loader";
 import { expandTilde } from "../tools/path-utils";
 import { listClaudePluginRoots } from "./helpers";
@@ -42,12 +43,23 @@ interface InjectedRoot {
 	level: "user" | "project";
 }
 
-export type OmpExtensionRootMode = "merge" | "explicit-only";
+/** Extension sub-discovery mode; re-exported alias of {@link ExtensionRootMode}. */
+export type OmpExtensionRootMode = ExtensionRootMode;
 
 interface InvocationRootScope {
 	/** Raw SDK spellings, resolved against the LoadContext that performs discovery. */
 	paths: readonly string[];
 	mode: OmpExtensionRootMode;
+	/**
+	 * Effective `extensions` setting for the owning session, captured once its
+	 * `Settings` instance is loaded. Session-local so concurrent SDK sessions
+	 * never observe each other's configured roots. `undefined` until
+	 * {@link setInvocationConfiguredExtensions} runs; discovery then falls back
+	 * to reading the persisted config from disk.
+	 */
+	configuredExtensions?: readonly string[];
+	/** Provenance of {@link configuredExtensions}, from `Settings`. Defaults to `user` when unset. */
+	configuredLevel?: "user" | "project";
 }
 
 const invocationRootScope = new AsyncLocalStorage<InvocationRootScope>();
@@ -78,6 +90,21 @@ export function withOmpExtensionRootScope<T>(
 	callback: () => T,
 ): T {
 	return invocationRootScope.run({ paths: [...paths], mode }, callback);
+}
+
+/**
+ * Record the owning session's effective `extensions` setting (and its
+ * `Settings`-resolved provenance) on the active invocation scope so
+ * sub-discovery honors overlays/runtime overrides and foreign project
+ * providers without reading the process-global settings singleton. No-op
+ * outside a {@link withOmpExtensionRootScope} callback.
+ */
+export function setInvocationConfiguredExtensions(paths: readonly string[], level: "user" | "project" = "user"): void {
+	const scope = invocationRootScope.getStore();
+	if (scope) {
+		scope.configuredExtensions = [...paths];
+		scope.configuredLevel = level;
+	}
 }
 
 /**
@@ -137,13 +164,74 @@ function scopeDirs(ctx: LoadContext): ScopeDirs {
 	};
 }
 
-async function readSettingsExtensions(settingsPath: string): Promise<string[]> {
-	const content = await readFile(settingsPath);
-	if (!content) return [];
-	const parsed = tryParseJson<{ extensions?: unknown }>(content);
-	const raw = parsed?.extensions;
-	if (!Array.isArray(raw)) return [];
+function readExtensionsArray(raw: unknown): string[] | null {
+	if (!Array.isArray(raw)) return null;
 	return raw.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+}
+
+async function readSettingsExtensions(settingsPath: string): Promise<string[] | null> {
+	const content = await readFile(settingsPath);
+	if (!content) return null;
+	const parsed = tryParseJson<{ extensions?: unknown }>(content);
+	return readExtensionsArray(parsed?.extensions);
+}
+
+/** Project native config filename; matches the single `.omp/config.yml` the settings loader reads. */
+const PROJECT_CONFIG_FILENAMES = ["config.yml"] as const;
+
+interface YamlExtensions {
+	exists: boolean;
+	entries: string[] | null;
+}
+
+/**
+ * Read the first present YAML config filename, matching the settings loader's
+ * `config.yml` before `config.yaml` selection.
+ */
+async function readYamlExtensions(scopeDir: string, filenames: readonly string[]): Promise<YamlExtensions> {
+	for (const filename of filenames) {
+		const content = await readFile(path.join(scopeDir, filename));
+		if (content === null) continue;
+		let parsed: unknown;
+		try {
+			parsed = YAML.parse(content);
+		} catch {
+			return { exists: true, entries: null };
+		}
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return { exists: true, entries: null };
+		}
+		const raw = "extensions" in parsed ? parsed.extensions : undefined;
+		return { exists: true, entries: readExtensionsArray(raw) };
+	}
+	return { exists: false, entries: null };
+}
+
+interface ConfiguredExtensions {
+	entries: string[];
+	level: "user" | "project";
+}
+
+/**
+ * Select the persisted `extensions` array with the same array-replacement
+ * precedence as `Settings`: project YAML, project legacy settings, user YAML,
+ * then user legacy settings. A present user YAML config suppresses its legacy
+ * migration source even when it omits `extensions`.
+ */
+async function readConfiguredExtensions(ctx: LoadContext): Promise<ConfiguredExtensions | null> {
+	const { project, user } = scopeDirs(ctx);
+	const [projectYaml, projectSettings, userYaml, userSettings] = await Promise.all([
+		readYamlExtensions(project, PROJECT_CONFIG_FILENAMES),
+		readSettingsExtensions(path.join(project, "settings.json")),
+		readYamlExtensions(user, MAIN_CONFIG_FILENAMES),
+		readSettingsExtensions(path.join(user, "settings.json")),
+	]);
+	if (projectYaml.entries !== null) return { entries: projectYaml.entries, level: "project" };
+	if (projectSettings !== null) return { entries: projectSettings, level: "project" };
+	if (userYaml.entries !== null) return { entries: userYaml.entries, level: "user" };
+	if (userYaml.exists) return null;
+	if (userSettings !== null) return { entries: userSettings, level: "user" };
+	return null;
 }
 
 function resolveAgainst(raw: string, ctx: LoadContext): string {
@@ -168,46 +256,70 @@ async function isDirectory(p: string): Promise<boolean> {
 /**
  * Resolve every configured extension package directory for the given context.
  *
- * Sources, in order of precedence (later entries with the same absolute path
- * are dropped):
+ * Sources are threaded as one `EffectiveExtensionRoots` value — from
+ * `ctx.extensionRoots` (a post-startup reload), else the invocation scope
+ * (a construction-time load), else the process defaults (CLI injection + disk).
+ * The three lanes stay separate so no dimension is lost:
  *
- * 1. Invocation-scoped SDK roots, when present; otherwise CLI roots injected
- *    via {@link injectOmpExtensionCliRoots}
- * 2. Project `<cwd>/.omp/settings.json#extensions`
- * 3. User `~/.omp/agent/settings.json#extensions`
- * 4. Enabled npm/link plugins installed under `<plugins>/node_modules/` (for
- *    `omp install <pkg>` / `omp plugin install` / `omp plugin link`). Marketplace
- *    installs are loaded by the `claude-plugins` provider and are excluded here.
+ * 1. Explicit lane — `explicit` roots (SDK `additionalExtensionPaths` / CLI
+ *    `--extension`). Always active, always user-level.
+ * 2. Configured lane — the effective `extensions:` setting, added only in
+ *    `merge` mode. Its provenance (`configuredLevel`) is carried from
+ *    `Settings` (the authority that merges every project provider, incl.
+ *    `.claude/settings.json`, and honors overlays/overrides), never re-derived
+ *    from a partial `.omp` disk scan; scopeless callers read the persisted
+ *    `.omp` config, which supplies its own level.
+ * 3. Installed npm/link plugins under `<plugins>/node_modules/`, added only in
+ *    `merge` mode. Marketplace installs load via the `claude-plugins` provider.
+ *
+ * `explicit-only` mode (an SDK `disableExtensionDiscovery` session) contributes
+ * the explicit lane alone — no ambient `extensions:`, installed plugins, or
+ * disk config — identically inside and outside the construction scope.
+ *
  * Only entries that resolve to a directory on disk are returned; file
  * entrypoints contribute zero sub-discovery surface and are filtered out.
- * Installed-plugin enumeration failures (missing lockfile, unreadable
- * `package.json`, etc.) are logged at `debug` and degrade gracefully — the
- * other sources still surface.
+ * Installed-plugin enumeration failures degrade gracefully at `debug`.
  */
 export async function listOmpExtensionRoots(ctx: LoadContext): Promise<OmpExtensionRoot[]> {
 	const scopedRoots = invocationRootScope.getStore();
-	const rootMode = scopedRoots?.mode ?? injectedCliRootMode;
-	let candidates: InjectedRoot[] = scopedRoots
-		? scopedRoots.paths.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
-		: injectedCliRoots.map(root =>
-				root.relativePath ? { ...root, path: path.resolve(ctx.cwd, root.relativePath) } : root,
-			);
+	// Explicit lane, in precedence order: caller-provided reload value, then the
+	// construction-time invocation scope, then process-level CLI injection.
+	const explicitSeed: InjectedRoot[] = ctx.extensionRoots
+		? ctx.extensionRoots.explicit.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
+		: scopedRoots
+			? scopedRoots.paths.map(raw => ({ path: resolveAgainst(raw, ctx), level: "user" }))
+			: injectedCliRoots.map(root =>
+					root.relativePath ? { ...root, path: path.resolve(ctx.cwd, root.relativePath) } : root,
+				);
+	const rootMode: OmpExtensionRootMode = ctx.extensionRoots?.mode ?? scopedRoots?.mode ?? injectedCliRootMode;
+	let candidates: InjectedRoot[] = explicitSeed;
 	if (rootMode === "merge") {
-		const { project, user } = scopeDirs(ctx);
-		const [projectExtensions, userExtensions, installedPlugins] = await Promise.all([
-			readSettingsExtensions(path.join(project, "settings.json")),
-			readSettingsExtensions(path.join(user, "settings.json")),
-			listInstalledPluginRoots(ctx),
-		]);
+		const installedPlugins = await listInstalledPluginRoots(ctx);
+		// Configured lane. When a session supplies the effective value (reload
+		// struct or invocation-scoped snapshot), its provenance came from
+		// `Settings` — the authority that merges every project provider (incl.
+		// `.claude/settings.json`) and honors overlays/overrides — so trust the
+		// carried `configuredLevel` verbatim. When no session value is present,
+		// read the persisted `.omp` config on disk, which is the authoritative
+		// source (and its own provenance) in that scopeless path.
+		const configuredEntries = ctx.extensionRoots?.configured ?? scopedRoots?.configuredExtensions;
+		const configured =
+			configuredEntries !== undefined
+				? {
+						entries: [...configuredEntries],
+						level: ctx.extensionRoots?.configuredLevel ?? scopedRoots?.configuredLevel ?? ("user" as const),
+					}
+				: await readConfiguredExtensions(ctx);
 		candidates = [
 			...candidates,
-			...projectExtensions.map((raw): InjectedRoot => ({ path: resolveAgainst(raw, ctx), level: "project" })),
-			...userExtensions.map((raw): InjectedRoot => ({ path: resolveAgainst(raw, ctx), level: "user" })),
+			...(configured?.entries.map(
+				(raw): InjectedRoot => ({ path: resolveAgainst(raw, ctx), level: configured.level }),
+			) ?? []),
 			...installedPlugins,
 		];
 	}
 
-	// First-seen-wins dedup preserves invocation/CLI > project-settings > user-settings > installed precedence.
+	// First-seen-wins dedup preserves invocation/CLI > configured settings > installed precedence.
 	const seen = new Set<string>();
 	const unique: InjectedRoot[] = [];
 	for (const candidate of candidates) {

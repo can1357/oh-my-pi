@@ -8,9 +8,11 @@
   lib,
   libopus,
   libpulseaudio,
+  makeBinaryWrapper,
   ninja,
   pipewire,
   pkg-config,
+  removeReferencesTo,
   rustPlatform,
   rustToolchain,
   source,
@@ -51,6 +53,9 @@ let
     _: patch: source + "/${patch}"
   ) rootPackageJson.patchedDependencies;
   patchOverrides = bun2nix.patchedDependenciesToOverrides { inherit patchedDependencies; };
+  runtimeNativeLibraries = lib.optionals stdenv.hostPlatform.isLinux (
+    [ stdenv.cc.cc.lib ] ++ lib.optional (stdenv.cc.cc ? libgcc) stdenv.cc.cc.libgcc
+  );
   bunRuntimeTemplate = stdenvNoCC.mkDerivation {
     pname = "omp-bun-runtime-template";
     inherit (bun) version;
@@ -85,11 +90,15 @@ stdenv.mkDerivation {
     cmake
     ninja
     pkg-config
+    removeReferencesTo
     rustPlatform.bindgenHook
     rustPlatform.cargoSetupHook
     rustToolchain
   ]
-  ++ lib.optionals stdenv.hostPlatform.isLinux [ autoPatchelfHook ]
+  ++ lib.optionals stdenv.hostPlatform.isLinux [
+    autoPatchelfHook
+    makeBinaryWrapper
+  ]
   ++ lib.optionals stdenv.hostPlatform.isDarwin [ darwin.autoSignDarwinBinariesHook ];
 
   # pcre2 is vendored via PCRE2_SYS_STATIC, but opus must link the nixpkgs
@@ -166,6 +175,8 @@ stdenv.mkDerivation {
     runHook preInstall
 
     install -Dm755 packages/coding-agent/dist/omp "$out/bin/omp"
+    install -Dm644 LICENSE "$out/share/doc/omp/LICENSE"
+    install -Dm644 THIRD-PARTY-NOTICES.txt "$out/share/doc/omp/THIRD-PARTY-NOTICES.txt"
 
     # The addon is gzip-compressed inside the compiled binary, so the store
     # paths it links against are invisible to the output reference scanner.
@@ -186,12 +197,72 @@ stdenv.mkDerivation {
     runHook postInstall
   '';
 
+  # Bun serializes the build interpreter path into the bundled entrypoint's
+  # inert shebang. Remove its hash before Nix scans output references; this
+  # runs before Darwin's binary-signing fixup hook.
+  preFixup = ''
+    remove-references-to -t ${bun} "$out/bin/omp"
+  '';
+
+  # Prebuilt addons that omp bun-installs into its cache at first use
+  # (onnxruntime-node, sherpa-onnx-node, sharp, fastembed) are process.dlopen'd and
+  # need libstdc++.so.6 / libgcc_s.so.1, which nix glibc's default loader path lacks;
+  # their own DT_RUNPATH means this executable's RPATH is never consulted for their
+  # dependencies, so only LD_LIBRARY_PATH resolves them. The agent injects this value
+  # into the inference worker subprocesses' LD_LIBRARY_PATH alone (see
+  # packages/coding-agent/src/subprocess/worker-client.ts) instead of exporting
+  # LD_LIBRARY_PATH process-wide, where it would also reorder the loader search path
+  # of every user command the bash tool, daemon PTY sessions and eval kernels spawn.
+  # Additionally, force libstdc++ to load at process start via DT_NEEDED: addons the
+  # main process itself dlopen's then resolve libstdc++.so.6 / libgcc_s.so.1 by
+  # soname from the already-loaded set, regardless of the addon's own DT_RUNPATH.
+  # stdenv.cc.cc.lib is already in buildInputs, so the autoPatchelfHook pass that
+  # follows resolves the new dependency and sets the RPATH. patchelf must run before
+  # wrapProgram: the wrapper replaces $out/bin/omp with a script and moves the ELF
+  # to $out/bin/.omp-wrapped.
+  postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
+    patchelf --add-needed libstdc++.so.6 "$out/bin/omp"
+    wrapProgram "$out/bin/omp" \
+      --set-default OMP_NATIVE_LIBRARY_PATH "${lib.makeLibraryPath runtimeNativeLibraries}"
+  '';
+
+  disallowedReferences = [ bun ];
+
+  # patchelf leaves DT_VERDEF pointing at the pre-relocation `.gnu.version_d`
+  # address whenever it grows `.dynamic`: both the `--add-needed libstdc++.so.6`
+  # above and the autoPatchelfHook RPATH pass that follows it do. bun --compile
+  # output defines its own symbol versions (DT_VERDEFNUM), so glibc follows that
+  # stale pointer in `_dl_check_map_versions` and the binary SIGSEGVs in the
+  # loader before `main()` runs (issue #9881). Repoint DT_VERDEF at the current
+  # section address. preInstallCheck runs after every fixupPhase hook, including
+  # the autoPatchelfHook pass that follows postFixup, so it is the last point at
+  # which the field can be corrected; wrapProgram moved the real ELF to
+  # `.omp-wrapped`.
+  preInstallCheck = lib.optionalString stdenv.hostPlatform.isLinux ''
+    bun ${../scripts/fix-dt-verdef.ts} "$out/bin/.omp-wrapped"
+  '';
+
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
-    HOME="$TMPDIR" "$out/bin/omp" --smoke-test | grep -q "smoke-test: ok"
+    # Capture rather than pipe into grep: piping masks a signal death of omp
+    # under `set -o pipefail` (grep -q's exit status wins), which hid the
+    # loader SIGSEGV in issue #9881. With a variable, errexit surfaces omp's
+    # real exit status and stderr in the build log.
+    smokeOutput="$(HOME="$TMPDIR" "$out/bin/omp" --smoke-test)"
+    grep -q "smoke-test: ok" <<<"$smokeOutput"
     BUN_BE_BUN=1 "$out/bin/omp" -e \
       'if (Bun.version !== "${bun.version}" || typeof Bun.Image !== "function") process.exit(1)'
+    ${lib.optionalString stdenv.hostPlatform.isLinux ''
+      # The addons are dlopen'd, so prove the advertised directories actually
+      # resolve the libraries rather than merely carrying a plausible string.
+      env -u LD_LIBRARY_PATH BUN_BE_BUN=1 "$out/bin/omp" -e \
+        'const {dlopen}=require("bun:ffi");const dirs=(process.env.OMP_NATIVE_LIBRARY_PATH||"").split(":").filter(Boolean);const need={"libstdc++.so.6":{__cxa_demangle:{args:["ptr","ptr","ptr","ptr"],returns:"ptr"}},"libgcc_s.so.1":{_Unwind_Backtrace:{args:["ptr","ptr"],returns:"i32"}}};for(const lib of Object.keys(need)){let ok=false;for(const d of dirs){try{dlopen(d+"/"+lib,need[lib]);ok=true;break}catch(e){}}if(!ok){console.error("unresolved: "+lib);process.exit(1)}}'
+      # The libstdc++ preload (see postFixup) must survive: without it addons the
+      # main process dlopen's directly fail to resolve libstdc++.so.6 on NixOS.
+      # wrapProgram moved the real ELF to .omp-wrapped.
+      patchelf --print-needed "$out/bin/.omp-wrapped" | grep -q '^libstdc++\.so\.6$'
+    ''}
     runHook postInstallCheck
   '';
 

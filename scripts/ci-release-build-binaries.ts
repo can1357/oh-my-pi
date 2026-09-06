@@ -158,24 +158,20 @@ async function generateBundle(): Promise<void> {
 	if (isDryRun) {
 		console.log("DRY RUN bun run gen:stats");
 		console.log("DRY RUN bun --cwd=packages/collab-web run gen:tool-views");
-		console.log("DRY RUN bun run gen:mupdf");
 		return;
 	}
 	await runCommand(["bun", "run", "gen:stats"], repoRoot);
 	await runCommand(["bun", "--cwd=packages/collab-web", "run", "gen:tool-views"], repoRoot);
-	await runCommand(["bun", "run", "gen:mupdf"], repoRoot);
 }
 
 async function resetArtifacts(): Promise<void> {
 	if (isDryRun) {
 		console.log("DRY RUN bun run gen:native:reset");
 		console.log("DRY RUN bun run gen:stats:reset");
-		console.log("DRY RUN bun run gen:mupdf:reset");
 		return;
 	}
 	await runCommand(["bun", "run", "gen:native:reset"], repoRoot);
 	await runCommand(["bun", "run", "gen:stats:reset"], repoRoot);
-	await runCommand(["bun", "run", "gen:mupdf:reset"], repoRoot);
 }
 
 async function main(): Promise<void> {

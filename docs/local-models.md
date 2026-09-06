@@ -13,6 +13,13 @@ fallback is used when that role is unset.
 
 - **Stack**: `@huggingface/transformers` (transformers.js) v4 running under Bun. In Bun the library
   loads the **native `onnxruntime-node` backend** (not the WASM build).
+- **Non-FHS distros (NixOS, and any host without `libstdc++.so.6` on the loader path)**: the
+  on-demand `onnxruntime-node` / `sherpa-onnx-node` / `sharp` addons are prebuilt binaries that
+  `dlopen` `libstdc++.so.6` and `libgcc_s.so.1`, and they carry their own `DT_RUNPATH`, so nothing in
+  the omp executable's own RPATH can resolve them. Set `OMP_NATIVE_LIBRARY_PATH` to the
+  colon-separated directories holding those libraries; omp appends it to `LD_LIBRARY_PATH` for the
+  inference worker subprocesses only (never for shell/eval/daemon children). The Nix package
+  (`nix/package.nix`) sets this by default.
 - **Device policy**: local tiny models default to CPU-only inference and retry once on CPU if an
   explicit accelerated provider cannot initialize.
   - Pick a provider persistently with the `providers.tinyModelDevice` setting (`default` keeps CPU),

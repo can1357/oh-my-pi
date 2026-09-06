@@ -23,16 +23,20 @@ import {
 	loadCapability,
 } from "../../../discovery";
 import { readDisabledServers, readEnabledServers } from "../../../mcp/config-writer";
-import type {
-	DashboardState,
-	Extension,
-	ExtensionKind,
-	ExtensionState,
-	FlatTreeItem,
-	ProviderTab,
-	TreeNode,
+import { commandPreview } from "./inspector-model";
+import { inferMcpTransport } from "./mcp-runtime";
+import {
+	type DashboardState,
+	type Extension,
+	type ExtensionKind,
+	type ExtensionState,
+	type FlatTreeItem,
+	isShadowedExtension,
+	makeExtensionId,
+	type ProviderTab,
+	sourceFromMeta,
+	type TreeNode,
 } from "./types";
-import { makeExtensionId, sourceFromMeta } from "./types";
 
 /**
  * Settings manager interface for granular toggle persistence.
@@ -192,8 +196,10 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 				kind: "mcp",
 				name: server.name,
 				displayName: server.name,
-				description: server.command || server.url,
-				trigger: server.transport || "stdio",
+				// Config command/url is plumbing, not a description. Live
+				// identity comes from serverInfo at inspector render time.
+				description: undefined,
+				trigger: inferMcpTransport(server),
 				path: server._source.path,
 				source: sourceFromMeta(server._source),
 				state,
@@ -220,7 +226,10 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 	try {
 		const commands = await loadCapability<SlashCommand>("slash-commands", loadOpts);
 		addItems(commands.all, "slash-command", {
-			getDescription: () => undefined,
+			getDescription: c => {
+				const preserved = typeof c.description === "string" ? c.description.trim() : "";
+				return preserved.length > 0 ? preserved : commandPreview(c.content).description;
+			},
 			getTrigger: c => `/${c.name}`,
 		});
 	} catch (error) {
@@ -303,7 +312,6 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 				name,
 				displayName: name,
 				description: file.level === "user" ? "User-level context" : "Project-level context",
-				trigger: file.level,
 				path: file.path,
 				source: sourceFromMeta(file._source),
 				state,
@@ -529,10 +537,7 @@ export function filterByProvider(extensions: Extension[], providerId: string): E
 	return extensions.filter(ext => ext.source.provider === providerId);
 }
 
-function isShadowedExtension(ext: Extension): boolean {
-	if (ext.shadowedBy) return true;
-	return Boolean((ext.raw as { _shadowed?: boolean } | null | undefined)?._shadowed);
-}
+export { isShadowedExtension } from "./types";
 
 /**
  * Apply setting-backed item disable overrides to an existing dashboard state.

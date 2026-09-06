@@ -8,6 +8,36 @@ const repoRoot = path.join(import.meta.dir, "..");
 
 /** Pinned npm package matching flake.lock's bun2nix revision (`0f2a1f…`). */
 export const BUN2NIX_NPM_SPEC = "bun2nix@2.1.2";
+/**
+ * Restamp a `bun.lock` whose `lockfileVersion` is 2 back to 1 so the pinned
+ * bun2nix (which rejects anything but version 1) can parse it.
+ *
+ * Sound because Bun's own writer documents v1→v2 as "only added parse-time
+ * strictness on identical content" (src/install/lockfile/bun.lock.rs): the
+ * two versions share a byte-identical content format, and Bun never silently
+ * upgrades a loaded v1 lockfile. Version 3+ (scoped override objects) does
+ * change content, so it throws instead of downgrading.
+ */
+export function normalizeLockfileVersion(contents: string): string {
+	const stamp = /^(\s*"lockfileVersion":\s*)(\d+)(,)/m.exec(contents);
+	if (!stamp) throw new Error("bun.lock is missing a lockfileVersion stamp");
+	const version = Number(stamp[2]);
+	if (version <= 1) return contents;
+	if (version > 2) {
+		throw new Error(
+			`bun.lock is lockfileVersion ${version}, which changes content (scoped overrides) and cannot be downgraded for bun2nix`,
+		);
+	}
+	return `${contents.slice(0, stamp.index)}${stamp[1]}1${stamp[3]}${contents.slice(stamp.index + stamp[0].length)}`;
+}
+
+/** Rewrite `bun.lock` in place when Bun 1.4+ stamped it lockfileVersion 2. */
+async function normalizeBunLock(): Promise<void> {
+	const lockPath = path.join(repoRoot, "bun.lock");
+	const contents = await Bun.file(lockPath).text();
+	const normalized = normalizeLockfileVersion(contents);
+	if (normalized !== contents) await Bun.write(lockPath, normalized);
+}
 
 type FindExecutable = (command: string) => string | null;
 
@@ -30,6 +60,7 @@ export function resolveNixBunDepsGenerator(findExecutable: FindExecutable = $whi
 
 /** Regenerate the checked-in Bun dependency expression with the pinned bun2nix input. */
 export async function generateNixBunDeps(generator: NixBunDepsGenerator = resolveNixBunDepsGenerator()): Promise<void> {
+	await normalizeBunLock();
 	if (generator.kind === "bun2nix") {
 		await $`${generator.executable} -l bun.lock -c ../ -o nix/bun.nix`.cwd(repoRoot);
 		return;

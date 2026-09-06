@@ -14,7 +14,7 @@
 name = "pi-builtins"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 authors.workspace = true
 repository.workspace = true
 rust-version = "1.88.0"
@@ -97,7 +97,7 @@ smallvec.workspace = true
 similar = "3.1.0"
 tempfile = "3.15.0"
 tokio-util = "0.7"
-unicode-width = "0.2.0"
+xutf.workspace = true
 libc = "0.2.172"
 memmap2 = "0.9"
 uutils_term_grid = "0.8"
@@ -157,6 +157,11 @@ notify = { version = "=8.2.0", features = ["macos_kqueue"] }
 rlimit = "0.11.0"
 rustix = { version = "1.1.4", features = ["fs", "process", "time"] }
 uucore = { version = "0.8.0", features = ["fsxattr", "safe-traversal"] }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+# Enable runtime-dispatched ARMv8 hash instructions for uucore's checksum implementations.
+sha2 = { version = "0.10", features = ["asm"] }
+sha3 = { version = "0.10", features = ["asm"] }
 
 [target."cfg(windows)".dependencies]
 notify = "=8.2.0"

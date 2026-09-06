@@ -108,7 +108,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 		const modelRegistry = sharedModelRegistry;
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
-			"compaction.strategy": "context-full",
+			"compaction.methodOrder": ["soft"],
 			"compaction.autoContinue": true,
 			"compaction.midTurnEnabled": true,
 			"compaction.thresholdTokens": 1000,
@@ -218,20 +218,6 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
 		expect(observedContexts[1].join("\n")).toContain("ACTIVE-GOAL-MID-RUN-COMPACTED");
-	});
-
-	it("falls back to in-place compaction for mid-run handoff strategy", async () => {
-		const { session, observedContexts } = await createHarness({ "compaction.strategy": "handoff" });
-		const handoffSpy = vi.spyOn(session, "handoff").mockImplementation(async () => {
-			throw new Error("mid-run compaction must not reset the session through handoff");
-		});
-		const compactSpy = mockCompaction("HANDOFF-MID-RUN-COMPACTED-IN-PLACE");
-
-		await session.prompt("work on the release");
-
-		expect(handoffSpy).not.toHaveBeenCalled();
-		expect(compactSpy).toHaveBeenCalledTimes(1);
-		expect(observedContexts[1].join("\n")).toContain("HANDOFF-MID-RUN-COMPACTED-IN-PLACE");
 	});
 
 	it("does not wait for message persistence below the mid-run threshold", async () => {
@@ -494,6 +480,71 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
 		expect(observedContexts[1].join("\n")).toContain("MID-RUN-COMPACTED-WITH-CONTENT-VARIANT");
 		expect(JSON.stringify(session.messages)).not.toContain("display-variant");
+	});
+
+	it.each([
+		["auto_compaction_end", "context-full", ["soft"]],
+		["session_compact", "context-full", ["soft"]],
+		["auto_compaction_end", "shake", ["shake", "soft"]],
+		["session_compact", "shake", ["shake", "soft"]],
+	] as const)("hung %s handlers do not pin the mid-run %s loop", async (handlerType, action, methodOrder) => {
+		const releaseHandler = Promise.withResolvers<void>();
+		const handlerEntered = Promise.withResolvers<void>();
+		const nextProviderCall = Promise.withResolvers<void>();
+		const extensionRunner = {
+			hasHandlers: vi.fn((eventType: string) => eventType === handlerType),
+			emitBeforeAgentStart: vi.fn(async () => undefined),
+			emit: vi.fn(async (event: { type: string }) => {
+				if (event.type === handlerType) {
+					handlerEntered.resolve();
+					await releaseHandler.promise;
+				}
+			}),
+		} as unknown as ExtensionRunner;
+		const { session, observedContexts } = await createHarness(
+			{ "compaction.methodOrder": methodOrder },
+			{
+				extensionRunner,
+				onProviderCall: index => {
+					if (index === 1) nextProviderCall.resolve();
+				},
+			},
+		);
+		const shakeSpy =
+			action === "shake"
+				? vi
+						.spyOn(session, "shake")
+						.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 })
+				: undefined;
+		const compactSpy = mockCompaction("MID-RUN-COMPACTED-WITHOUT-WAITING-ON-LIFECYCLE");
+
+		const prompt = session.prompt("work on the release");
+		const handlerOutcome = await raceWithTimeout(
+			handlerEntered.promise.then(() => "entered" as const),
+			2_000,
+			"blocked" as const,
+		);
+		const providerOutcome =
+			handlerOutcome === "entered"
+				? await raceWithTimeout(
+						nextProviderCall.promise.then(() => "dispatched" as const),
+						2_000,
+						"blocked" as const,
+					)
+				: "blocked";
+		const promptOutcome = await raceWithTimeout(
+			prompt.then(() => "settled" as const),
+			2_000,
+			"blocked" as const,
+		);
+		releaseHandler.resolve();
+
+		expect(handlerOutcome).toBe("entered");
+		expect(providerOutcome).toBe("dispatched");
+		expect(promptOutcome).toBe("settled");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		if (shakeSpy) expect(shakeSpy).toHaveBeenCalledTimes(1);
+		expect(observedContexts[1].join("\n")).toContain("MID-RUN-COMPACTED-WITHOUT-WAITING-ON-LIFECYCLE");
 	});
 
 	it("does not compact mid-run outside goal mode when disabled", async () => {

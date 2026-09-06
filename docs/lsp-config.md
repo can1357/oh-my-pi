@@ -233,6 +233,7 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `pyright`                     | Python                        | `pyright-langserver`              |
 | `basedpyright`                | Python                        | `basedpyright-langserver`         |
 | `pylsp`                       | Python                        | `pylsp`                           |
+| `ty`                          | Python                        | `ty`                              |
 | `ruff`                        | Python (linter)               | `ruff`                            |
 | `jdtls`                       | Java                          | `jdtls`                           |
 | `kotlin-lsp`                  | Kotlin                        | `kotlin-lsp`                      |

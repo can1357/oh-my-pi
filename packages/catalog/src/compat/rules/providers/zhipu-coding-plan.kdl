@@ -1,0 +1,47 @@
+// Provider-wire compat for "zhipu-coding-plan"; regenerated from the frozen census using deployment contract selectors.
+
+provider "zhipu-coding-plan" {
+	class "glm" {
+		thinking-mode "effort"
+		// Vision family and flash >=5.3 accept image input; the /models
+		// listing carries no modality metadata.
+		family "vision" {
+			input-modalities "text" "image"
+		}
+		family "flash" {
+			revision ">=5.3" {
+				input-modalities "text" "image"
+			}
+		}
+		family "turbo" {
+			reasoning-content-field "reasoning_content"
+			supports-developer-role #false
+			thinking-efforts "minimal" "low" "medium" "high"
+			thinking-format "zai"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*5" "glm-4.6" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-4.5-air" {
+		reasoning-content-field "reasoning_content"
+		supports-developer-role #false
+		thinking-format "zai"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-4.6v" "glm-4.7" "glm-5.1" {
+		reasoning-content-field "reasoning_content"
+		supports-developer-role #false
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-format "zai"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-5.2*" {
+		reasoning-content-field "reasoning_content"
+		supports-developer-role #false
+		thinking-efforts "high" "max"
+		thinking-format "zai"
+	}
+}

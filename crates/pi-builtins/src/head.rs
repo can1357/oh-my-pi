@@ -5,7 +5,7 @@
 use std::{
 	ffi::OsString,
 	fs::File,
-	io::{self, BufWriter, Read, Seek, SeekFrom, Write},
+	io::{self, Read, Seek, SeekFrom, Write},
 	num::TryFromIntError,
 	path::PathBuf,
 };
@@ -175,10 +175,13 @@ fn process_num_block(
 	let mut quiet = false;
 	let mut verbose = false;
 	let mut zero_terminated = false;
+	// Lowercase suffixes are byte multipliers (obsolete BSD `-Nc`/`-Nb`/`-Nk`/`-Nm`);
+	// uppercase suffixes mirror the modern `-n NUM<suffix>` form and scale the
+	// line count (`head -10K` == `head -n 10240`).
 	let mut multiplier = None;
+	let mut line_multiplier: usize = 1;
 	let mut c = last_char;
 	loop {
-		// note that here, we only match lower case 'k', 'c', and 'm'
 		match c {
 			// we want to preserve order
 			// this also saves us 1 heap allocation
@@ -195,6 +198,18 @@ fn process_num_block(
 			'b' => multiplier = Some(512),
 			'k' => multiplier = Some(1024),
 			'm' => multiplier = Some(1024 * 1024),
+			'K' => {
+				line_multiplier = 1024;
+				multiplier = None;
+			},
+			'M' => {
+				line_multiplier = 1024 * 1024;
+				multiplier = None;
+			},
+			'G' => {
+				line_multiplier = 1024 * 1024 * 1024;
+				multiplier = None;
+			},
 			'\0' => {},
 			_ => return Err(ParseError),
 		}
@@ -220,6 +235,7 @@ fn process_num_block(
 		options.push(OsString::from(format!("{num}")));
 	} else {
 		options.push(OsString::from("-n"));
+		let num = num.saturating_mul(line_multiplier);
 		options.push(OsString::from(format!("{num}")));
 	}
 	Ok(options)
@@ -266,6 +282,8 @@ mod tests {
 		assert_eq!(obsolete("-1k"), obsolete_result(&["-c", "1024"]));
 		assert_eq!(obsolete("-2b"), obsolete_result(&["-c", "1024"]));
 		assert_eq!(obsolete("-1mmk"), obsolete_result(&["-c", "1024"]));
+		assert_eq!(obsolete("-10K"), obsolete_result(&["-n", "10240"]));
+		assert_eq!(obsolete("-1M"), obsolete_result(&["-n", "1048576"]));
 		assert_eq!(obsolete("-1vz"), obsolete_result(&["-v", "-z", "-n", "1"]));
 		assert_eq!(
 			obsolete("-1vzqvq"),
@@ -1020,33 +1038,81 @@ impl Mode {
 	}
 }
 
-fn arg_iterate<'a>(
-	mut args: impl Iterator<Item = OsString> + 'a,
-) -> HeadResult<Box<dyn Iterator<Item = OsString> + 'a>> {
-	// argv[0] is always present
-	let first = args.next().unwrap();
-	if let Some(second) = args.next() {
-		if let Some(s) = second.to_str() {
-			if let Some(v) = parse::parse_obsolete(s) {
-				match v {
-					Ok(iter) => Ok(Box::new(vec![first].into_iter().chain(iter).chain(args))),
-					Err(parse::ParseError) => {
-						Err(HeadError::ParseError(format!("bad argument format: {}", s.quote())))
-					},
-				}
-			} else {
-				// The second argument contains non-UTF-8 sequences, so it can't be an obsolete
-				// option like "-5". Treat it as a regular file argument.
-				Ok(Box::new(vec![first, second].into_iter().chain(args)))
-			}
-		} else {
-			// The second argument contains non-UTF-8 sequences, so it can't be an obsolete
-			// option like "-5". Treat it as a regular file argument.
-			Ok(Box::new(vec![first, second].into_iter().chain(args)))
+/// True when `token` is an option that takes its value from the *next* argv
+/// token, so that value must never be mistaken for an obsolete `-NUM` form
+/// (e.g. the `-5` in `head -n -5 file`).
+fn consumes_separate_value(token: &str) -> bool {
+	if let Some(long) = token.strip_prefix("--") {
+		if long.is_empty() || long.contains('=') {
+			return false;
 		}
-	} else {
-		Ok(Box::new(vec![first].into_iter()))
+		// clap infers unambiguous long-option prefixes.
+		return ["lines", "bytes"].iter().any(|name| name.starts_with(long));
 	}
+	let Some(cluster) = token.strip_prefix('-') else {
+		return false;
+	};
+	let mut chars = cluster.chars();
+	while let Some(c) = chars.next() {
+		match c {
+			// Value-taking shorts: a trailing `-n`/`-c` consumes the next
+			// token; anything after them in the cluster is an attached value.
+			'n' | 'c' => return chars.next().is_none(),
+			'q' | 'v' | 'z' => {},
+			_ => return false,
+		}
+	}
+	false
+}
+
+/// Rewrites every obsolete `-NUM[suffix]` token (before `--`) into modern
+/// options, wherever it appears among flags and operands: GNU/BSD accept
+/// `head -q -5 file`, `head file -5`, and `head -5 -20 file`.
+fn arg_iterate(argv: Vec<OsString>) -> HeadResult<Vec<OsString>> {
+	let mut rewritten = Vec::with_capacity(argv.len() + 1);
+	let mut iter = argv.into_iter();
+	// argv[0] is always present
+	rewritten.extend(iter.next());
+	let mut skip_value = false;
+	let mut seen_ddash = false;
+	for arg in iter {
+		if skip_value || seen_ddash {
+			skip_value = false;
+			rewritten.push(arg);
+			continue;
+		}
+		let Some(token) = arg.to_str() else {
+			// Non-UTF-8 can't be an obsolete option like "-5"; treat it as a
+			// regular file argument.
+			rewritten.push(arg);
+			continue;
+		};
+		if token == "--" {
+			seen_ddash = true;
+			rewritten.push(arg);
+			continue;
+		}
+		if matches!(token.as_bytes(), [b'-', b'0'..=b'9', ..]) {
+			match parse::parse_obsolete(token) {
+				Some(Ok(options)) => {
+					rewritten.extend(options);
+					continue;
+				},
+				Some(Err(parse::ParseError)) => {
+					return Err(HeadError::ParseError(format!(
+						"bad argument format: {}",
+						token.quote()
+					)));
+				},
+				None => {},
+			}
+		}
+		if token.len() > 1 && token.starts_with('-') {
+			skip_value = consumes_separate_value(token);
+		}
+		rewritten.push(arg);
+	}
+	Ok(rewritten)
 }
 
 #[derive(Debug, PartialEq, Default)]
@@ -1100,9 +1166,8 @@ fn read_n_lines(
 	separator: u8,
 ) -> io::Result<u64> {
 	let mut reader = take_lines(input, n, separator);
-	let mut writer = BufWriter::with_capacity(BUF_SIZE, output);
-	let bytes_written = io::copy(&mut reader, &mut writer).map_err(wrap_in_stdout_error)?;
-	writer.flush().map_err(wrap_in_stdout_error)?;
+	let bytes_written = io::copy(&mut reader, output).map_err(wrap_in_stdout_error)?;
+	output.flush().map_err(wrap_in_stdout_error)?;
 	Ok(bytes_written)
 }
 
@@ -1301,9 +1366,7 @@ impl Utility for Head {
 	// Normalize GNU's obsolete `-NUM` syntax before clap sees argv; clap
 	// otherwise treats it as an unknown short-option cluster.
 	fn rewrite_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
-		arg_iterate(argv.into_iter())
-			.map(Iterator::collect)
-			.map_err(|err| err.to_string())
+		arg_iterate(argv).map_err(|err| err.to_string())
 	}
 
 
@@ -1316,27 +1379,38 @@ impl Utility for Head {
 			},
 		};
 
+		let print_headers = (options.files.len() > 1 && !options.quiet) || options.verbose;
+		// GNU head only emits the blank separator line before a header when a
+		// previous file actually produced output; open failures print nothing
+		// and must not flip `first`.
 		let mut first = true;
+		fn print_header(out: &mut impl Write, name: &[u8], first: &mut bool) {
+			if !*first {
+				let _ = writeln!(out);
+			}
+			let _ = out.write_all(b"==> ");
+			let _ = out.write_all(name);
+			let _ = out.write_all(b" <==\n");
+			*first = false;
+		}
+		let mut out = host.stdout_writer();
 		for file in &options.files {
 			let result = if file == "-" {
-				if (options.files.len() > 1 && !options.quiet) || options.verbose {
-					if !first {
-						let _ = writeln!(host.stdout);
-					}
-					let _ = writeln!(host.stdout, "==> standard input <==");
+				if print_headers {
+					print_header(&mut out, b"standard input", &mut first);
 				}
 				let mut input = io::BufReader::with_capacity(BUF_SIZE, &mut host.stdin);
 				match options.mode {
-					Mode::FirstBytes(n) => read_n_bytes(&mut input, &mut host.stdout, n),
+					Mode::FirstBytes(n) => read_n_bytes(&mut input, &mut out, n),
 					Mode::AllButLastBytes(n) => {
-						read_but_last_n_bytes(&mut input, &mut host.stdout, n)
+						read_but_last_n_bytes(&mut input, &mut out, n)
 					},
 					Mode::FirstLines(n) => {
-						read_n_lines(&mut input, &mut host.stdout, n, options.line_ending.into())
+						read_n_lines(&mut input, &mut out, n, options.line_ending.into())
 					},
 					Mode::AllButLastLines(n) => read_but_last_n_lines(
 						&mut input,
-						&mut host.stdout,
+						&mut out,
 						n,
 						options.line_ending.into(),
 					),
@@ -1344,27 +1418,25 @@ impl Utility for Head {
 			} else {
 				let resolved = host.resolve(file);
 				if resolved.is_dir() {
+					// GNU prints the header before reporting the read error,
+					// and that header counts as produced output.
+					if print_headers {
+						print_header(&mut out, file.as_encoded_bytes(), &mut first);
+					}
 					host.error(format!("error reading {}: Is a directory", file.quote()), 1);
-					first = false;
 					continue;
 				}
 				let mut input = match File::open(&resolved) {
 					Ok(input) => input,
 					Err(err) => {
 						host.error(format!("cannot open {} for reading: {err}", file.quote()), 1);
-						first = false;
 						continue;
 					},
 				};
-				if (options.files.len() > 1 && !options.quiet) || options.verbose {
-					if !first {
-						let _ = writeln!(host.stdout);
-					}
-					let _ = write!(host.stdout, "==> ");
-					let _ = host.stdout.write_all(file.as_encoded_bytes());
-					let _ = writeln!(host.stdout, " <==");
+				if print_headers {
+					print_header(&mut out, file.as_encoded_bytes(), &mut first);
 				}
-				head_file(&mut input, &mut host.stdout, &options)
+				head_file(&mut input, &mut out, &options)
 			};
 			if let Err(err) = result {
 				let name = if file == "-" {
@@ -1372,10 +1444,17 @@ impl Utility for Head {
 				} else {
 					PathBuf::from(file)
 				};
+				// A dead pipe ends the whole invocation; any other I/O error
+				// only fails this operand, and GNU keeps going.
+				let broken_pipe = err.kind() == io::ErrorKind::BrokenPipe;
 				host.error(HeadError::Io { name, err }, 1);
-				return 1;
+				if broken_pipe {
+					return 1;
+				}
 			}
-			first = false;
+		}
+		if let Err(err) = out.flush() {
+			host.error(wrap_in_stdout_error(err), 1);
 		}
 		host.exit_code()
 	}
@@ -1432,6 +1511,77 @@ mod tests {
 		let (code, capture) = run_util::<Head>(&["-123FooBar"], "", "/");
 		assert_eq!(code, 1);
 		assert_eq!(capture.err(), "head: bad argument format: '-123FooBar'\n");
+	}
+
+	fn rewritten(argv: &[&str]) -> Vec<String> {
+		Head::rewrite_argv(argv.iter().map(OsString::from).collect())
+			.unwrap()
+			.into_iter()
+			.map(|arg| arg.to_str().unwrap().to_owned())
+			.collect()
+	}
+
+	// Failure mode: obsolete `-NUM` was only recognized as argv[1], so
+	// `head -q -5 file`, `head file -5`, and repeated counts were parse errors.
+	#[test]
+	fn obsolete_num_is_rewritten_at_any_position() {
+		assert_eq!(rewritten(&["head", "-q", "-5", "f"]), ["head", "-q", "-n", "5", "f"]);
+		assert_eq!(rewritten(&["head", "-v", "-20", "f"]), ["head", "-v", "-n", "20", "f"]);
+		assert_eq!(rewritten(&["head", "f", "-5"]), ["head", "f", "-n", "5"]);
+		assert_eq!(
+			rewritten(&["head", "-5", "-20", "f"]),
+			["head", "-n", "5", "-n", "20", "f"]
+		);
+		assert_eq!(rewritten(&["head", "-5qz", "f"]), ["head", "-q", "-z", "-n", "5", "f"]);
+	}
+
+	// Failure mode: `-5` following a value-taking option is that option's
+	// value, and rewriting it would corrupt the invocation.
+	#[test]
+	fn option_values_and_post_ddash_operands_are_not_rewritten() {
+		assert_eq!(rewritten(&["head", "-n", "-5", "f"]), ["head", "-n", "-5", "f"]);
+		assert_eq!(rewritten(&["head", "-c", "-5", "f"]), ["head", "-c", "-5", "f"]);
+		assert_eq!(rewritten(&["head", "--lines", "-5", "f"]), ["head", "--lines", "-5", "f"]);
+		assert_eq!(rewritten(&["head", "--", "-5"]), ["head", "--", "-5"]);
+		assert_eq!(rewritten(&["head", "-n5", "-", "f"]), ["head", "-n5", "-", "f"]);
+	}
+
+	// Failure mode: uppercase suffixes in the obsolete form were rejected
+	// even though `head -n 10K` accepts them.
+	#[test]
+	fn obsolete_uppercase_suffixes_scale_lines() {
+		assert_eq!(options("-10K").unwrap().mode, Mode::FirstLines(10 * 1024));
+		assert_eq!(options("-1M").unwrap().mode, Mode::FirstLines(1024 * 1024));
+		assert_eq!(options("-1G").unwrap().mode, Mode::FirstLines(1024 * 1024 * 1024));
+		// Lowercase suffixes keep their historical byte meaning.
+		assert_eq!(options("-1k").unwrap().mode, Mode::FirstBytes(1024));
+	}
+
+	// Failure mode: an unreadable operand flipped the separator state and the
+	// next header gained a spurious leading blank line; a mid-list open error
+	// must also not abort the remaining operands.
+	#[test]
+	fn open_error_produces_no_separator_and_processing_continues() {
+		let dir = tempdir().unwrap();
+		std::fs::write(dir.path().join("f1"), b"a\n").unwrap();
+		std::fs::write(dir.path().join("f2"), b"b\n").unwrap();
+		let (code, capture) = run_util::<Head>(&["-n", "1", "missing", "f1", "f2"], "", dir.path());
+		assert_eq!(code, 1);
+		assert_eq!(capture.out(), "==> f1 <==\na\n\n==> f2 <==\nb\n");
+		assert!(capture.err().contains("cannot open 'missing' for reading"));
+	}
+
+	// Failure mode: the `==> dir <==` header was suppressed before the
+	// Is-a-directory diagnostic; GNU prints it and counts it as output.
+	#[test]
+	fn directory_operand_prints_header_before_error() {
+		let dir = tempdir().unwrap();
+		std::fs::create_dir(dir.path().join("d")).unwrap();
+		std::fs::write(dir.path().join("f"), b"a\n").unwrap();
+		let (code, capture) = run_util::<Head>(&["-n", "1", "d", "f"], "", dir.path());
+		assert_eq!(code, 1);
+		assert_eq!(capture.out(), "==> d <==\n\n==> f <==\na\n");
+		assert_eq!(capture.err(), "head: error reading 'd': Is a directory\n");
 	}
 
 	#[test]

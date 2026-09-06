@@ -56,6 +56,88 @@ describe("Tool argument coercion", () => {
 
 		expect(result.payload).toBe('{"a":1,"nested":["x"]}');
 	});
+	it("stringifies container values when a string union branch matches", () => {
+		const tool: Tool = {
+			name: "union-string",
+			description: "",
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					payload: { anyOf: [{ type: "string" }, { type: "number" }] },
+				},
+				required: ["payload"],
+			} as never,
+		};
+
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-union-object",
+			name: "union-string",
+			arguments: { payload: { a: 1 } },
+		}) as { payload: string };
+
+		expect(result.payload).toBe('{"a":1}');
+	});
+
+	it("does not delete unrecognized keys diagnosed inside a failed union branch", () => {
+		const tool: Tool = {
+			name: "union-closed",
+			description: "",
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					op: {
+						anyOf: [
+							{
+								type: "object",
+								additionalProperties: false,
+								properties: { kind: { type: "string" }, value: { type: "number" } },
+								required: ["kind", "value"],
+							},
+							{ type: "string" },
+						],
+					},
+				},
+				required: ["op"],
+			} as never,
+		};
+
+		// `extra` fails the closed object variant; deleting it would silently
+		// drop payload data on a branch guess. Must surface as a validation error.
+		expect(() =>
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "call-union-extra-key",
+				name: "union-closed",
+				arguments: { op: { kind: "set", value: 1, extra: "keep me" } },
+			}),
+		).toThrow(/op/);
+	});
+
+	it("still applies lossless repairs inside union branches", () => {
+		const tool: Tool = {
+			name: "union-lossless",
+			description: "",
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					payload: { anyOf: [{ type: "number" }, { type: "boolean" }] },
+				},
+				required: ["payload"],
+			} as never,
+		};
+
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-union-numeric-string",
+			name: "union-lossless",
+			arguments: { payload: "300" },
+		}) as { payload: number };
+		expect(result.payload).toBe(300);
+	});
 
 	it("stringifies array values when schema expects string", () => {
 		const tool: Tool = {

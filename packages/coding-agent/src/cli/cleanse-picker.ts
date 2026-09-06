@@ -7,14 +7,8 @@
  */
 import { Input, ProcessTerminal, type SelectItem, SelectList, TUI } from "@oh-my-pi/pi-tui";
 import type { CleanseCheckerDescriptor } from "../cleanse/checkers";
+import type { CleanseTargetChoice } from "../cleanse/types";
 import { getSelectListTheme } from "../modes/theme/theme";
-
-/** Outcome of the interactive cleanse target picker. */
-export type CleanseTargetChoice =
-	| { kind: "all" }
-	| { kind: "checker"; id: string }
-	| { kind: "request"; request: string }
-	| { kind: "cancel" };
 
 /** Pick between running every discovered checker, one specific checker, or a free-form request. */
 export async function pickCleanseTarget(checkers: readonly CleanseCheckerDescriptor[]): Promise<CleanseTargetChoice> {

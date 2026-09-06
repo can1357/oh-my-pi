@@ -9,7 +9,8 @@ import type {
 	ExtensionHandler,
 	SessionStartEvent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 // Reproduces issue #3665: when the upstream system prompt resolution leaves
@@ -73,8 +74,17 @@ describe("autoresearch before_agent_start handler", () => {
 		dbDir = TempDir.createSync("@pi-autoresearch-bas-test-");
 		process.env.OMP_AUTORESEARCH_DB_DIR = dbDir.path();
 		cwdDir = TempDir.createSync("@pi-autoresearch-bas-cwd-");
-		vi.spyOn(git.branch, "current").mockResolvedValue("autoresearch/test");
-		vi.spyOn(git.repo, "root").mockResolvedValue(cwdDir.path());
+		vi.spyOn(vcs, "git").mockReturnValue({
+			currentBranch: async () => "autoresearch/test",
+		} as unknown as VcsGitRepo);
+		vi.spyOn(vcs, "gitInfo").mockReturnValue({
+			commonDir: `${cwdDir.path()}/.git`,
+			gitDir: `${cwdDir.path()}/.git`,
+			gitEntryPath: `${cwdDir.path()}/.git`,
+			headPath: `${cwdDir.path()}/.git/HEAD`,
+			isReftable: false,
+			repoRoot: cwdDir.path(),
+		});
 	});
 
 	afterEach(() => {

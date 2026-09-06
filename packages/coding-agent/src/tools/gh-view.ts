@@ -1,6 +1,6 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Settings } from "../config/settings";
-import * as git from "../utils/git";
+import { type GhCommandOptions, github } from "../utils/github";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "./gh";
 import {
@@ -8,10 +8,12 @@ import {
 	buildTextResult,
 	formatAuthor,
 	formatLabels,
+	ghApiHostArgs,
 	normalizeOptionalString,
 	normalizeText,
 	parseIssueUrl,
 	parsePositiveDecimalInt,
+	parseRepoRef,
 	pushLine,
 	requireNonEmpty,
 	resolveDefaultRepoMemoized,
@@ -99,15 +101,15 @@ export async function githubIssueJsonWithStateReasonFallback<T>(
 	cwd: string,
 	args: readonly string[],
 	signal: AbortSignal | undefined,
-	options?: git.GhCommandOptions,
+	options?: GhCommandOptions,
 ): Promise<T> {
 	try {
-		return await git.github.json<T>(cwd, [...args], signal, options);
+		return await github.json<T>(cwd, [...args], signal, options);
 	} catch (err) {
 		if (!ghJsonErrorNamesField(err, GH_ISSUE_STATE_REASON_FIELD)) throw err;
 		const retryArgs = dropJsonField(args, GH_ISSUE_STATE_REASON_FIELD);
 		if (!retryArgs) throw err;
-		return await git.github.json<T>(cwd, retryArgs, signal, options);
+		return await github.json<T>(cwd, retryArgs, signal, options);
 	}
 }
 
@@ -177,17 +179,19 @@ export async function fetchPrReviewComments(
 	prNumber: number,
 	signal?: AbortSignal,
 ): Promise<GhPrReviewComment[]> {
+	const ref = parseRepoRef(repo);
 	const reviewComments: GhPrReviewComment[] = [];
 	let page = 1;
 
 	while (true) {
-		const response = await git.github.json<GhPrReviewCommentApi[]>(
+		const response = await github.json<GhPrReviewCommentApi[]>(
 			cwd,
 			[
 				"api",
+				...ghApiHostArgs(ref),
 				"--method",
 				"GET",
-				`/repos/${repo}/pulls/${prNumber}/comments`,
+				`/repos/${ref.slug}/pulls/${prNumber}/comments`,
 				"-F",
 				`per_page=${REVIEW_COMMENTS_PAGE_SIZE}`,
 				"-F",
@@ -451,7 +455,7 @@ export async function executeRepoView(
 	}
 	args.push("--json", GH_REPO_FIELDS.join(","));
 
-	const data = await git.github.json<GhRepoViewData>(session.cwd, args, signal, {
+	const data = await github.json<GhRepoViewData>(session.cwd, args, signal, {
 		repoProvided: Boolean(repo),
 	});
 	return buildTextResult(formatRepoView(data, { repo, branch }), data.url);
@@ -521,7 +525,7 @@ export async function fetchPrViewFresh(
 	const args = ["pr", "view", String(number)];
 	appendRepoFlag(args, repo, String(number));
 	args.push("--json", (includeComments ? GH_PR_FIELDS : GH_PR_FIELDS_NO_COMMENTS).join(","));
-	const data = await git.github.json<GhPrViewData>(cwd, args, signal, { repoProvided: true });
+	const data = await github.json<GhPrViewData>(cwd, args, signal, { repoProvided: true });
 	if (includeComments && typeof data.number === "number") {
 		data.reviewComments = await fetchPrReviewComments(cwd, repo, data.number, signal);
 	}

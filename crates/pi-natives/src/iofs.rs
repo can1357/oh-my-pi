@@ -4,8 +4,10 @@
 //! JavaScript-facing shapes plus conversions between walker entries and N-API
 //! payloads.
 
-use napi::bindgen_prelude::*;
+use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
+
+use crate::js;
 
 /// Resolved filesystem entry kind for glob filters and match metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,9 +77,10 @@ pub(crate) fn map_walker_error<E: std::fmt::Display>(err: pi_walker::WalkError<E
 /// Intended to be called after agent file mutations: write, edit, rename, or
 /// delete.
 #[napi]
-pub fn invalidate_fs_scan_cache(path: Option<String>) {
+pub fn invalidate_fs_scan_cache(path: Option<JsString>) -> Result<()> {
 	match path {
-		Some(path) => pi_walker::invalidate_path_string(&path),
+		Some(path) => pi_walker::invalidate_path_string(&js::utf8(path)?),
 		None => pi_walker::invalidate_all(),
 	}
+	Ok(())
 }

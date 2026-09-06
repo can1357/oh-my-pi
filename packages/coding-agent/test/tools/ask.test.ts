@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
@@ -12,6 +12,7 @@ import { getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-coding-agent
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, askToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -21,6 +22,7 @@ function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated(),
 		...overrides,
+		canPromptUser: overrides.canPromptUser ?? overrides.hasUI ?? true,
 	};
 }
 
@@ -1586,6 +1588,50 @@ describe("AskTool rich ask dialog", () => {
 		});
 	});
 
+	it("does not emit terminal notifications for non-terminal prompt surfaces", async () => {
+		const sendNotification = spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "storage",
+					question: "Storage?",
+					options: ["SQLite", "PostgreSQL"],
+					multi: false,
+					selectedOptions: ["PostgreSQL"],
+				},
+			],
+		});
+		const tool = new AskTool(
+			createSession({
+				hasUI: false,
+				canPromptUser: true,
+				settings: Settings.isolated({ "ask.notify": "on" }),
+			}),
+		);
+
+		try {
+			await tool.execute(
+				"call-acp-dialog",
+				{
+					questions: [
+						{
+							id: "storage",
+							question: "Storage?",
+							options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
+						},
+					],
+				},
+				undefined,
+				undefined,
+				createContext({ askDialog }),
+			);
+			expect(sendNotification).not.toHaveBeenCalled();
+		} finally {
+			sendNotification.mockRestore();
+		}
+	});
+
 	it("aborts and throws ToolAbortError when askDialog returns undefined", async () => {
 		const tool = new AskTool(createSession());
 		const abort = vi.fn();
@@ -1605,6 +1651,84 @@ describe("AskTool rich ask dialog", () => {
 		).rejects.toThrow(ToolAbortError);
 
 		expect(abort).toHaveBeenCalledTimes(1);
+	});
+
+	it("accepts an empty multi-select submission instead of aborting", async () => {
+		const tool = new AskTool(createSession());
+		const abort = vi.fn();
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Choose?",
+					options: ["A", "B"],
+					multi: true,
+					selectedOptions: [],
+					customInput: undefined,
+					timedOut: undefined,
+				},
+			],
+		});
+		const context = createContext({ askDialog, abort });
+
+		const result = await tool.execute(
+			"call-empty-multi",
+			{
+				questions: [{ id: "q1", question: "Choose?", options: [{ label: "A" }, { label: "B" }], multi: true }],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(abort).not.toHaveBeenCalled();
+		expect(result.details?.selectedOptions).toEqual([]);
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") {
+			expect(stripAnsi(result.content[0].text)).toContain("User did not select any options");
+		}
+	});
+
+	it("formats an empty multi-select answer in a multi-question response as an empty selection", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Choose any?",
+					options: ["A", "B"],
+					multi: true,
+					selectedOptions: [],
+				},
+				{
+					id: "q2",
+					question: "Choose one?",
+					options: ["C", "D"],
+					multi: false,
+					selectedOptions: ["C"],
+				},
+			],
+		});
+
+		const result = await tool.execute(
+			"call-empty-multi-among-many",
+			{
+				questions: [
+					{ id: "q1", question: "Choose any?", options: [{ label: "A" }, { label: "B" }], multi: true },
+					{ id: "q2", question: "Choose one?", options: [{ label: "C" }, { label: "D" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") {
+			expect(stripAnsi(result.content[0].text)).toBe("User answers:\nq1: []\nq2: C");
+		}
 	});
 
 	it("returns chat redirect result when askDialog returns kind chat", async () => {

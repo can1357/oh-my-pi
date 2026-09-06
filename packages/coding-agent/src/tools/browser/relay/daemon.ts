@@ -17,6 +17,7 @@ import { daemonClientForGlobal } from "../../../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../../../launch/ensure";
 import { resolveWorkerSpawnCmd } from "../../../subprocess/worker-client";
 import { throwIfAborted } from "../../tool-errors";
+import { probeCdpStatus } from "../attach";
 
 /** Stable broker daemon name for the relay server. */
 export const RELAY_DAEMON_NAME = "omp.browser.relay";
@@ -30,13 +31,8 @@ const ENSURE_ATTEMPTS = 3;
 
 /** True when the relay HTTP server answers /json/version at all (200 = extension connected, 503 = waiting for it). */
 export async function probeRelayServer(cdpUrl: string): Promise<boolean> {
-	try {
-		const res = await fetch(`${cdpUrl}/json/version`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-		await res.body?.cancel();
-		return res.ok || res.status === 503;
-	} catch {
-		return false;
-	}
+	const status = await probeCdpStatus(`${cdpUrl}/json/version`, { timeoutMs: PROBE_TIMEOUT_MS });
+	return status === 503 || (status !== null && status >= 200 && status < 300);
 }
 
 /** Auto-start is only safe for endpoints this machine can own. */

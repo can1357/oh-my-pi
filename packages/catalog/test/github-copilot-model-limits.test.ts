@@ -42,6 +42,13 @@ async function discoverCopilotModels(
 	const requestApiVersions: Array<string | undefined> = [];
 	const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 		const url = typeof input === "string" ? input : input.toString();
+		if (url === "https://api.github.com/copilot_internal/user") {
+			expect(getHeaderValue(init?.headers, "Authorization")).toBe(`token ${expectedAuthorizationToken}`);
+			// The probe must be bounded by the shared discovery deadline so a
+			// stalled endpoint cannot hang discovery (PR #8510 review).
+			expect(init?.signal).toBeInstanceOf(AbortSignal);
+			return Response.json({ endpoints: { api: expectedBaseUrl } });
+		}
 		expect(url).toBe(`${expectedBaseUrl}/models`);
 		expect(init?.method).toBe("GET");
 		expect(getHeaderValue(init?.headers, "Authorization")).toBe(`Bearer ${expectedAuthorizationToken}`);
@@ -72,13 +79,77 @@ function cachedCopilotCompletionModel(id: string, name: string): ModelSpec<"open
 }
 
 describe("github copilot model limits mapping", () => {
-	it("uses configured base URL for discovery", async () => {
+	it("discovers the plan endpoint for a raw environment token before model discovery", async () => {
+		const token = "ghu_valid_business_token";
 		const { fetchMock } = await discoverCopilotModels(
 			{ data: [] },
-			"copilot-test-key",
-			"https://api.githubcopilot.com",
+			token,
+			"https://api.business.githubcopilot.com",
+			token,
 		);
-		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+	it("falls back to the personal endpoint when the raw-token probe fails", async () => {
+		const token = "ghu_valid_business_token";
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://api.github.com/copilot_internal/user") {
+				expect(init?.signal).toBeInstanceOf(AbortSignal);
+				throw new DOMException("The operation timed out.", "TimeoutError");
+			}
+			expect(url).toBe("https://api.githubcopilot.com/models");
+			return Response.json({ data: [] });
+		});
+		const models = await githubCopilotModelManagerOptions({ apiKey: token, fetch: fetchMock }).fetchDynamicModels?.();
+		expect(models).toEqual([]);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+	it("does not reuse another token's authoritative cache after COPILOT_GITHUB_TOKEN switches", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-copilot-token-switch-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const personalFetch = vi.fn(async (input: string | URL | Request) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url === "https://api.github.com/copilot_internal/user") {
+					return Response.json({ endpoints: { api: "https://api.githubcopilot.com" } });
+				}
+				if (url === "https://api.githubcopilot.com/models") {
+					return Response.json({ data: [{ id: "gpt-5.5", name: "GPT-5.5" }] });
+				}
+				throw new Error(`unexpected personal request: ${url}`);
+			});
+			const personalManager = createModelManager({
+				...githubCopilotModelManagerOptions({ apiKey: "ghu_personal_token", fetch: personalFetch }),
+				cacheDbPath,
+			});
+			// Personal token discovery writes a fresh authoritative cache.
+			await personalManager.refresh("online");
+
+			const businessSeen: string[] = [];
+			const businessFetch = vi.fn(async (input: string | URL | Request) => {
+				const url = typeof input === "string" ? input : input.toString();
+				businessSeen.push(url);
+				if (url === "https://api.github.com/copilot_internal/user") {
+					return Response.json({ endpoints: { api: "https://api.business.githubcopilot.com" } });
+				}
+				if (url === "https://api.business.githubcopilot.com/models") {
+					return Response.json({ data: [{ id: "gpt-5.5", name: "GPT-5.5" }] });
+				}
+				throw new Error(`unexpected business request: ${url}`);
+			});
+			const businessManager = createModelManager({
+				...githubCopilotModelManagerOptions({ apiKey: "ghu_business_token", fetch: businessFetch }),
+				cacheDbPath,
+			});
+			// Default online-if-uncached must not satisfy the switched token from the
+			// prior token's fresh authoritative personal-endpoint cache.
+			const { models } = await businessManager.refresh("online-if-uncached");
+			expect(businessSeen).toContain("https://api.github.com/copilot_internal/user");
+			expect(businessSeen).toContain("https://api.business.githubcopilot.com/models");
+			expect(models.some(model => model.baseUrl === "https://api.business.githubcopilot.com")).toBe(true);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("unwraps structured OAuth keys for discovery and routes enterprise discovery to the enterprise host", async () => {
@@ -319,9 +390,23 @@ describe("github copilot model limits mapping", () => {
 		const model = models.find(candidate => candidate.id === "grok-4.5");
 		expect(model?.api).toBe("openai-responses");
 	});
+	it("routes grok-4.6 to the openai-responses endpoint (#8807)", async () => {
+		const { models } = await discoverCopilotModels({
+			data: [
+				{
+					id: "grok-4.6",
+					name: "Grok 4.6",
+				},
+			],
+		});
+
+		const model = models.find(candidate => candidate.id === "grok-4.6");
+		expect(model?.api).toBe("openai-responses");
+	});
 	for (const migration of [
 		{ id: "mai-code-1-flash-picker", name: "MAI-Code-1-Flash" },
 		{ id: "grok-4.5", name: "Grok 4.5" },
+		{ id: "grok-4.6", name: "Grok 4.6" },
 	]) {
 		it(`refreshes a cached ${migration.name} completion route after the endpoint migration`, async () => {
 			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), `pi-ai-copilot-${migration.id}-cache-`));
@@ -355,7 +440,7 @@ describe("github copilot model limits mapping", () => {
 				const { models } = await manager.refresh("online-if-uncached");
 				const model = models.find(candidate => candidate.id === migration.id);
 
-				expect(fetchMock).toHaveBeenCalledTimes(1);
+				expect(fetchMock).toHaveBeenCalledTimes(2);
 				expect(model?.api).toBe("openai-responses");
 			} finally {
 				await fs.rm(tempDir, { recursive: true, force: true });
@@ -390,7 +475,7 @@ describe("github copilot model limits mapping", () => {
 			});
 			const { models } = await manager.refresh("online-if-uncached");
 
-			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(fetchMock).toHaveBeenCalledTimes(2);
 			// The bundled catalog now ships a responses-route grok-4.5, so the id
 			// resurfaces from the bundle after the failed refresh. The migration
 			// contract is that the stale cached COMPLETIONS route never comes

@@ -1,10 +1,10 @@
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { Text } from "@oh-my-pi/pi-tui";
 import type { ToolDefinition } from "../../extensibility/extensions";
 import type { Theme } from "../../modes/theme/theme";
 import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
-import * as git from "../../utils/git";
 import { parseWorkDirDirtyPaths } from "../git";
 import { dedupeStrings, normalizePathSpec } from "../helpers";
 import { buildExperimentState } from "../state";
@@ -51,6 +51,7 @@ export function createInitExperimentTool(
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const storage = await openAutoresearchStorage(ctx.cwd);
 			const runtime = options.getRuntime(ctx);
+			const repository = vcs.git(ctx.cwd);
 
 			const direction = params.direction ?? "lower";
 			const metricUnit = params.metric_unit ?? "";
@@ -63,7 +64,7 @@ export function createInitExperimentTool(
 				params.max_iterations !== undefined && Number.isFinite(params.max_iterations) && params.max_iterations > 0
 					? Math.floor(params.max_iterations)
 					: null;
-			const branch = (await git.branch.current(ctx.cwd)) ?? null;
+			const branch = (await repository?.currentBranch()) ?? null;
 			const onAutoresearchBranch = branch?.startsWith("autoresearch/") ?? false;
 
 			const existing = storage.getActiveSessionForBranch(branch);
@@ -86,13 +87,13 @@ export function createInitExperimentTool(
 
 			let harnessCommitted = false;
 			let commitWarning: string | null = null;
-			if (requiresHarness && onAutoresearchBranch) {
+			if (requiresHarness && onAutoresearchBranch && repository) {
 				const dirty = await detectPendingChanges(ctx.cwd);
 				if (dirty) {
 					try {
-						await git.stage.files(ctx.cwd, []);
+						await repository.stageFiles([]);
 						const message = buildHarnessCommitMessage(goal, params.name);
-						await git.commit(ctx.cwd, message);
+						await repository.commitCreate(message, {});
 						harnessCommitted = true;
 					} catch (err) {
 						commitWarning = `Failed to auto-commit harness changes: ${err instanceof Error ? err.message : String(err)}. Recording baseline at current HEAD; discard may not preserve uncommitted harness files.`;
@@ -241,7 +242,7 @@ function renderInitCall(name: string, theme: Theme): string {
 
 async function tryReadHeadSha(cwd: string): Promise<string | null> {
 	try {
-		return (await git.head.sha(cwd)) ?? null;
+		return (await vcs.repo(cwd)?.headId()) ?? null;
 	} catch {
 		return null;
 	}
@@ -249,8 +250,9 @@ async function tryReadHeadSha(cwd: string): Promise<string | null> {
 
 async function detectPendingChanges(cwd: string): Promise<boolean> {
 	try {
-		const statusText = await git.status(cwd, { porcelainV1: true, untrackedFiles: "all", z: true });
-		const workDirPrefix = await git.show.prefix(cwd).catch(() => "");
+		const repository = vcs.requireGit(cwd);
+		const statusText = await repository.statusPorcelain({ untracked: "all", nulTerminated: true });
+		const workDirPrefix = repository.prefixOf(cwd) ?? "";
 		return parseWorkDirDirtyPaths(statusText, workDirPrefix).length > 0;
 	} catch {
 		return false;

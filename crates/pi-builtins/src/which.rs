@@ -22,6 +22,10 @@ pub(crate) struct WhichCli {
 	#[arg(short = 'a', long = "all")]
 	all: bool,
 
+	/// Silent (BSD): print nothing, report matches via the exit status only.
+	#[arg(short = 's')]
+	silent: bool,
+
 	/// Command names to locate.
 	#[arg(value_name = "name")]
 	names: Vec<String>,
@@ -32,6 +36,11 @@ impl Utility for WhichCli {
 	const USAGE_ERROR: u8 = 2;
 
 	fn run(self, host: &mut Host) -> i32 {
+		// BSD and GNU which both treat a bare `which` as a usage error (exit 1).
+		if self.names.is_empty() {
+			let _ = writeln!(host.stderr, "usage: which [-as] program ...");
+			return 1;
+		}
 		let path_var = host.var("PATH").unwrap_or_default().to_owned();
 		let mut all_found = true;
 
@@ -57,8 +66,10 @@ impl Utility for WhichCli {
 				// which(1) reports missing names via the exit status only.
 				all_found = false;
 			}
-			for path in matches {
-				let _ = writeln!(host.stdout, "{}", path.display());
+			if !self.silent {
+				for path in matches {
+					let _ = writeln!(host.stdout, "{}", path.display());
+				}
 			}
 		}
 
@@ -99,6 +110,38 @@ mod tests {
 		host.set_test_var("PATH", path);
 		let code = cli.run(&mut host);
 		(code, capture.out())
+	}
+
+	/// Bare `which` used to silently exit 0; BSD/GNU which report a usage
+	/// error on stderr and exit 1.
+	#[test]
+	fn no_operands_is_a_usage_error() {
+		let temp = tempfile::tempdir().expect("temp directory should be created");
+		let cwd = fs::canonicalize(temp.path()).expect("temp directory should canonicalize");
+		let cli = WhichCli::try_parse_from(["which"]).expect("test arguments should parse");
+		let (mut host, capture) = Host::for_test("which", Vec::new(), &cwd);
+		let code = cli.run(&mut host);
+
+		assert_eq!(code, 1);
+		assert_eq!(capture.out(), "");
+		assert_eq!(capture.err(), "usage: which [-as] program ...\n");
+	}
+
+	/// BSD `which -s` used to be rejected by clap with exit 2; it must print
+	/// nothing and report found/missing purely via the exit status, including
+	/// in the clustered `-as` spelling.
+	#[test]
+	fn silent_flag_suppresses_output_and_keeps_exit_status() {
+		let temp = tempfile::tempdir().expect("temp directory should be created");
+		let dir = fs::canonicalize(temp.path()).expect("temp directory should canonicalize");
+		place_file(&dir, "tool", true);
+		let path_var = dir.to_string_lossy();
+
+		assert_eq!(run_which(&["-s", "tool"], &path_var, &dir), (0, String::new()));
+		assert_eq!(run_which(&["-s", "missing"], &path_var, &dir), (1, String::new()));
+		assert_eq!(run_which(&["-as", "tool"], &path_var, &dir), (0, String::new()));
+		assert_eq!(run_which(&["-sa", "tool"], &path_var, &dir), (0, String::new()));
+		assert_eq!(run_which(&["-s", "tool", "missing"], &path_var, &dir), (1, String::new()));
 	}
 
 	#[test]

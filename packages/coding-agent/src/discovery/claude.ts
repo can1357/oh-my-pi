@@ -406,8 +406,9 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 	const userToolsDir = path.join(userBase, "tools");
 
 	const userResult = await loadFilesFromDir<CustomTool>(ctx, userToolsDir, PROVIDER_ID, "user", {
+		extensions: ["ts", "js"],
 		transform: (name, _content, path, source) => {
-			const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
+			const toolName = name.replace(/\.(ts|js)$/, "");
 			return {
 				name: toolName,
 				path,
@@ -425,8 +426,9 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 	const projectToolsDir = path.join(projectBase, "tools");
 
 	const projectResult = await loadFilesFromDir<CustomTool>(ctx, projectToolsDir, PROVIDER_ID, "project", {
+		extensions: ["ts", "js"],
 		transform: (name, _content, path, source) => {
-			const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
+			const toolName = name.replace(/\.(ts|js)$/, "");
 			return {
 				name: toolName,
 				path,

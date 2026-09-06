@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { isEnoent, logger, once, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
+import { isPermissionDeniedError, writeFileWithFallback } from "../tools/file-write-fallback";
 import { FileChangeType, notifyWorkspaceWatchedFiles } from "./client";
 import { getServersForFile } from "./config";
 import {
@@ -66,11 +67,7 @@ export async function writethroughNoop(
 	_batch?: LspWritethroughBatchRequest,
 	_getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 ): Promise<FileDiagnosticsResult | undefined> {
-	if (file) {
-		await file.write(content);
-	} else {
-		await Bun.write(dst, content);
-	}
+	await writeFileWithFallback(dst, content, file);
 	return undefined;
 }
 
@@ -78,6 +75,12 @@ interface PendingWritethrough {
 	dst: string;
 	file?: BunFile;
 	changeType: FileChangeType;
+	/**
+	 * The bytes this entry committed. The flush prefers a fresh read of `dst` so
+	 * post-processing sees whatever else in the batch touched the file, and falls
+	 * back to these when that read is denied.
+	 */
+	content: string;
 }
 
 interface RunLspWritethroughOptions {
@@ -134,6 +137,8 @@ function mergeDiagnostics(
 	let hasResults = false;
 	let hasFormatter = false;
 	let formatted = false;
+	let hasFailed = false;
+	let hasUnsupported = false;
 
 	for (const result of results) {
 		if (!result) continue;
@@ -153,6 +158,10 @@ function mergeDiagnostics(
 			hasFormatter = true;
 			if (result.formatter === FileFormatResult.FORMATTED) {
 				formatted = true;
+			} else if (result.formatter === FileFormatResult.FAILED) {
+				hasFailed = true;
+			} else if (result.formatter === FileFormatResult.UNSUPPORTED) {
+				hasUnsupported = true;
 			}
 		}
 	}
@@ -170,7 +179,16 @@ function mergeDiagnostics(
 		errored = summaryInfo.errored;
 		limitedMessages = limitDiagnosticMessages(messages);
 	}
-	const formatter = hasFormatter ? (formatted ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED) : undefined;
+	// Priority: FAILED > FORMATTED > UNCHANGED > UNSUPPORTED
+	const formatter = hasFormatter
+		? hasFailed
+			? FileFormatResult.FAILED
+			: formatted
+				? FileFormatResult.FORMATTED
+				: hasUnsupported && !formatted
+					? FileFormatResult.UNSUPPORTED
+					: FileFormatResult.UNCHANGED
+		: undefined;
 
 	return {
 		server: servers.size > 0 ? Array.from(servers).join(", ") : undefined,
@@ -288,7 +306,7 @@ async function runLspWritethrough(
 	const contentAlreadyWritten = runOptions?.contentAlreadyWritten ?? false;
 
 	let finalContent = content;
-	const writeContent = async (value: string) => (file ? file.write(value) : Bun.write(dst, value));
+	const writeContent = async (value: string) => writeFileWithFallback(dst, value, file);
 	const getWritePromise = once(() =>
 		contentAlreadyWritten && finalContent === content ? Promise.resolve() : writeContent(finalContent),
 	);
@@ -357,9 +375,15 @@ async function runLspWritethrough(
 					formatContent(dst, content, cwd, customLinterServers, operationSignal),
 					minVersionsPromise,
 				]);
-				finalContent = formattedContent;
+				finalContent = formattedContent.content;
 				minVersions = capturedVersions;
-				formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+				if (formattedContent.failed) {
+					formatter = FileFormatResult.FAILED;
+				} else if (formattedContent.unsupported) {
+					formatter = FileFormatResult.UNSUPPORTED;
+				} else {
+					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+				}
 				if (!contentAlreadyWritten || finalContent !== content) await writeContent(finalContent);
 				await notifyWriteCommitted(operationSignal);
 				await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal, enableDiagnostics);
@@ -369,8 +393,15 @@ async function runLspWritethrough(
 
 				// 2. Format in-memory via LSP
 				if (enableFormat) {
-					finalContent = await formatContent(dst, content, cwd, lspServers, operationSignal);
-					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+					const formatted = await formatContent(dst, content, cwd, lspServers, operationSignal);
+					finalContent = formatted.content;
+					if (formatted.failed) {
+						formatter = FileFormatResult.FAILED;
+					} else if (formatted.unsupported) {
+						formatter = FileFormatResult.UNSUPPORTED;
+					} else {
+						formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+					}
 				}
 
 				// 3. If formatted, sync formatted content to LSP servers
@@ -458,9 +489,16 @@ async function flushWritethroughBatch(
 		try {
 			content = await fs.promises.readFile(entry.dst, "utf8");
 		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			bundle?.finalize(undefined);
-			continue;
+			if (isEnoent(error)) {
+				bundle?.finalize(undefined);
+				continue;
+			}
+			// A brokered write lands bytes this process may not be able to read
+			// back: a sandbox that denies the write commonly denies the read too.
+			// Failing here would fail a flush whose every write succeeded, so the
+			// content this entry committed stands in for the unreadable file.
+			if (!isPermissionDeniedError(error)) throw error;
+			content = entry.content;
 		}
 		const deferredInner =
 			bundle &&
@@ -552,7 +590,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		}
 
 		const state = getOrCreateWritethroughBatch(batch.id, resolvedOptions);
-		state.entries.set(dst, { dst, file, changeType });
+		state.entries.set(dst, { dst, file, changeType, content });
 		if (!batch.flush) return undefined;
 
 		writethroughBatches.delete(batch.id);

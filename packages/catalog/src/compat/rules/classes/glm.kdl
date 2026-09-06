@@ -1,0 +1,77 @@
+// Model-lineage compat for "glm"; regenerated from the frozen census using class taxonomy selectors.
+
+class "glm" {
+	// GLM-5.2 exposes the default lower tiers plus a genuine max on generic
+	// OpenAI-compatible hosts; the zai-dialect and Anthropic-route hosts
+	// (Z.ai, Zhipu, Umans, Ollama Cloud, Baseten) serve only high/max.
+	revision ">=5.2 <5.3" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+	on "zai" "zhipu-coding-plan" {
+		revision ">=5.2 <5.3" {
+			zai-reasoning-effort-dialect #true
+			clamp-output-to-model-max #true
+		}
+	}
+	on "zai" "zhipu-coding-plan" "umans" "ollama-cloud" "baseten" {
+		revision ">=5.2 <5.3" {
+			thinking-efforts "high" "max"
+		}
+	}
+	// Vercel fronts GLM 5.2 on its Anthropic route with the generic ladder.
+	on "vercel-ai-gateway" {
+		revision ">=5.2 <5.3" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	// GLM Coding Plan: the selectable 1M-context served ids; pin them so
+	// endpoint discovery or older bundled fallbacks cannot regress to 200k.
+	on "zai" "zhipu-coding-plan" {
+		models "glm-5.2" "glm-5.3" "glm-5.3-flash" {
+			limits-patch {
+				context-window 1000000
+				max-tokens 131072
+			}
+		}
+	}
+	// glm-5.3-flash: keep the permanent documented list price, not the
+	// stencil.so launch promotion (expires 2026-09-09).
+	on "zai" {
+		models "glm-5.3-flash" {
+			cost-patch {
+				input 0.15
+				output 0.5
+				cache-read 0.03
+				cache-write 0.0
+			}
+		}
+	}
+	// glm-5.3-flash ships native image input that upstream metadata still
+	// reports as text-only.
+	on "zai" "zhipu-coding-plan" {
+		models "glm-5.3-flash" {
+			input-modalities "text" "image"
+		}
+	}
+	on "alibaba-coding-plan" "alibaba-token-plan" "wafer-serverless" {
+		supports-developer-role #false
+	}
+	on "openrouter" "zhipu-coding-plan" {
+		family "air" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	// GLM-5.3+ coding SKUs (base/air/turbo/flash, non-vision) expose a uniform
+	// wire-exact low/high/max reasoning-effort ladder on every host, thinking
+	// can no longer be disabled, and the default effort is max.
+	// residue: taxonomy ranks cannot separate these ids from the vision (`…v`)
+	// and flashx/preview shapes that keep host dialects; the explicit priority resolves
+	// the intentional overlap with census host-dialect residues such as
+	// baseten's `zai-org/GLM-5*`.
+	models "*glm-5.3" "*glm-5.3-air" "*glm-5.3-turbo" "*glm-5.3-flash" "*glm-5.3:*" \
+		"*glm-5.3-flash-uncensored" "*glm-5.3-free" "*glm-5.3-highspeed" "*glm-5.3-flash-lab" priority=10 {
+		thinking-default-level "max"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #true
+	}
+}

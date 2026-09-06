@@ -186,6 +186,8 @@ function createScriptedSession(
 			emittedGate.resolve();
 		},
 		waitForIdle: async () => {},
+		prepareForHeadlessAdvisorDrain: () => {},
+		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => undefined,
 		abort: async () => {
 			aborted = true;
@@ -193,6 +195,7 @@ function createScriptedSession(
 		isAborted: () => aborted,
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},
+		subscribeRunState: () => () => {},
 	};
 	// AgentSession is a concrete class; the executor consumes only this
 	// structural subset. Deliberate documented test-double escape hatch,

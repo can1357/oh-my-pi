@@ -12,11 +12,10 @@
 use std::{
 	ffi::{OsStr, OsString},
 	fs::File,
-	io::{self, BufWriter, Read, Write},
+	io::{self, Read, Write},
 	path::{Path, PathBuf},
 };
 
-use brush_core::openfiles::OpenFile;
 use clap::{ArgAction, Parser, ValueEnum};
 use grep_cli::DecompressionReaderBuilder;
 use grep_matcher::{Captures, LineTerminator, Matcher};
@@ -26,7 +25,9 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
 	BinaryDetection, Encoding, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
-use crate::host::{Host, Utility};
+use crate::host::{Host, StreamWriter, Utility};
+// Conventional shell status for a process terminated by SIGPIPE.
+const SIGPIPE_EXIT_CODE: i32 = 141;
 
 use ignore::{
 	Match,
@@ -113,15 +114,15 @@ pub(crate) struct Rg {
 	no_fixed_strings: bool,
 
 	/// Search case-insensitively.
-	#[arg(short = 'i', long = "ignore-case")]
+	#[arg(short = 'i', long = "ignore-case", overrides_with_all = ["case_sensitive", "smart_case"])]
 	ignore_case: bool,
 
 	/// Search case-sensitively.
-	#[arg(short = 's', long = "case-sensitive")]
+	#[arg(short = 's', long = "case-sensitive", overrides_with_all = ["ignore_case", "smart_case"])]
 	case_sensitive: bool,
 
 	/// Search case-insensitively when the pattern is all lowercase.
-	#[arg(short = 'S', long = "smart-case")]
+	#[arg(short = 'S', long = "smart-case", overrides_with_all = ["ignore_case", "case_sensitive"])]
 	smart_case: bool,
 
 	/// Invert matching.
@@ -297,16 +298,20 @@ pub(crate) struct Rg {
 	context: Option<usize>,
 
 	/// Show line numbers.
-	#[arg(short = 'n', long = "line-number")]
+	#[arg(short = 'n', long = "line-number", overrides_with = "no_line_number")]
 	line_number: bool,
 
 	/// Suppress line numbers.
-	#[arg(short = 'N', long = "no-line-number")]
+	#[arg(short = 'N', long = "no-line-number", overrides_with = "line_number")]
 	no_line_number: bool,
 
 	/// Show column numbers.
-	#[arg(long = "column")]
+	#[arg(long = "column", overrides_with = "no_column")]
 	column: bool,
+
+	/// Do not show column numbers.
+	#[arg(long = "no-column", overrides_with = "column")]
+	no_column: bool,
 
 	/// Show the zero-based byte offset for each result.
 	#[arg(short = 'b', long = "byte-offset", overrides_with = "no_byte_offset")]
@@ -464,6 +469,19 @@ pub(crate) struct Rg {
 	#[arg(long = "no-stats")]
 	_no_stats: bool,
 
+	/// Never read configuration files (accepted; this builtin never reads any).
+	#[arg(long = "no-config")]
+	_no_config: bool,
+
+	/// Number of search threads (accepted; this builtin searches in-process,
+	/// serially).
+	#[arg(short = 'j', long = "threads", value_name = "NUM")]
+	_threads: Option<usize>,
+
+	/// Print SEPARATOR instead of '/' in printed file paths.
+	#[arg(long = "path-separator", value_name = "SEPARATOR")]
+	path_separator: Option<String>,
+
 	/// Arguments: PATTERN followed by PATHs unless -e/-f/--files is used.
 	#[arg(value_name = "ARGS")]
 	args: Vec<OsString>,
@@ -479,27 +497,6 @@ enum RegexEngine {
 enum CompiledMatcher {
 	Rust(RegexMatcher),
 	Pcre(PcreMatcher),
-}
-
-enum RgOutput {
-	Buffered(BufWriter<OpenFile>),
-	Direct(OpenFile),
-}
-
-impl Write for RgOutput {
-	fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-		match self {
-			Self::Buffered(output) => output.write(bytes),
-			Self::Direct(output) => output.write(bytes),
-		}
-	}
-
-	fn flush(&mut self) -> io::Result<()> {
-		match self {
-			Self::Buffered(output) => output.flush(),
-			Self::Direct(output) => output.flush(),
-		}
-	}
 }
 
 struct SearchOptions {
@@ -520,6 +517,7 @@ struct SearchOptions {
 	max_columns:         Option<usize>,
 	max_columns_preview: bool,
 	null_paths:          bool,
+	path_separator:      Option<u8>,
 	no_messages:         bool,
 	replacement:         Option<Vec<u8>>,
 	json:                bool,
@@ -545,7 +543,7 @@ struct RgSink<'a, M: Matcher, W: Write> {
 impl<M: Matcher, W: Write> RgSink<'_, M, W> {
 	fn write_path(&mut self) -> io::Result<()> {
 		if let Some(name) = self.display {
-			self.out.write_all(name)?;
+			write_display_bytes(&mut *self.out, name, self.opts.path_separator)?;
 			if self.opts.null_paths {
 				self.out.write_all(b"\0")?;
 			}
@@ -562,7 +560,9 @@ impl<M: Matcher, W: Write> RgSink<'_, M, W> {
 	) -> io::Result<()> {
 		if self.display.is_some() {
 			self.write_path()?;
-			self.out.write_all(&[separator])?;
+			if !self.opts.null_paths {
+				self.out.write_all(&[separator])?;
+			}
 		}
 		if self.opts.line_number
 			&& let Some(number) = line_number
@@ -780,17 +780,23 @@ impl<M: Matcher, W: Write> Sink for RgSink<'_, M, W> {
 		if self.opts.files_with_matches {
 			if self.any_match {
 				self.write_path()?;
-				self.out.write_all(b"\n")?;
+				if !self.opts.null_paths {
+					self.out.write_all(b"\n")?;
+				}
 			}
 		} else if self.opts.files_without_match {
 			if !self.any_match {
 				self.write_path()?;
-				self.out.write_all(b"\n")?;
+				if !self.opts.null_paths {
+					self.out.write_all(b"\n")?;
+				}
 			}
 		} else if self.opts.count || self.opts.count_matches {
 			if self.display.is_some() {
 				self.write_path()?;
-				self.out.write_all(b":")?;
+				if !self.opts.null_paths {
+					self.out.write_all(b":")?;
+				}
 			}
 			let count = if self.opts.count_matches {
 				self.match_count
@@ -809,6 +815,42 @@ fn trim_ascii_start(bytes: &[u8]) -> &[u8] {
 		.position(|b| !b.is_ascii_whitespace() || *b == b'\n' || *b == b'\r')
 		.unwrap_or(bytes.len());
 	&bytes[start..]
+}
+
+/// Writes a display path, substituting `separator` for `/` when requested via
+/// `--path-separator`.
+fn write_display_bytes<W: Write>(out: &mut W, bytes: &[u8], separator: Option<u8>) -> io::Result<()> {
+	let Some(separator) = separator else {
+		return out.write_all(bytes);
+	};
+	let mut rest = bytes;
+	while let Some(pos) = rest.iter().position(|&byte| byte == b'/') {
+		out.write_all(&rest[..pos])?;
+		out.write_all(&[separator])?;
+		rest = &rest[pos + 1..];
+	}
+	out.write_all(rest)
+}
+
+fn parse_path_separator(spec: Option<&str>) -> Result<Option<u8>, String> {
+	match spec {
+		None | Some("") => Ok(None),
+		Some(separator) if separator.len() == 1 => Ok(Some(separator.as_bytes()[0])),
+		Some(separator) => Err(format!(
+			"error parsing flag --path-separator: a path separator must be exactly one byte, but the given separator is {} bytes",
+			separator.len()
+		)),
+	}
+}
+
+/// Line numbers follow real ripgrep's piped behavior: off unless requested
+/// (`-n`), or implied by `--column`/`--vimgrep`. Real rg enables them by
+/// default only on a tty; the builtin's output is always consumed piped.
+fn effective_line_number(cli: &Rg) -> bool {
+	if cli.no_line_number {
+		return false;
+	}
+	cli.line_number || cli.column || cli.vimgrep
 }
 
 fn first_column<M: Matcher>(matcher: &M, line: &[u8]) -> io::Result<Option<usize>> {
@@ -843,8 +885,8 @@ fn build_rust_matcher(patterns: &[String], cli: &Rg) -> Result<RegexMatcher, gre
 	let crlf = cli.crlf && !cli.no_crlf && !cli.null_data;
 	let mut builder = RegexMatcherBuilder::new();
 	builder
-		.case_insensitive(cli.ignore_case && !cli.case_sensitive)
-		.case_smart(cli.smart_case && !cli.ignore_case && !cli.case_sensitive)
+		.case_insensitive(cli.ignore_case)
+		.case_smart(cli.smart_case)
 		.word(cli.word_regexp && !cli.line_regexp)
 		.whole_line(cli.line_regexp)
 		.fixed_strings(cli.fixed_strings && !cli.no_fixed_strings)
@@ -864,8 +906,8 @@ fn build_pcre_matcher(host: &Host, patterns: &[String], cli: &Rg) -> Result<Pcre
 	let unicode = !cli.no_unicode;
 	let mut builder = PcreMatcherBuilder::new();
 	builder
-		.caseless(cli.ignore_case && !cli.case_sensitive)
-		.case_smart(cli.smart_case && !cli.ignore_case && !cli.case_sensitive)
+		.caseless(cli.ignore_case)
+		.case_smart(cli.smart_case)
 		.word(cli.word_regexp && !cli.line_regexp)
 		.whole_line(cli.line_regexp)
 		.fixed_strings(cli.fixed_strings && !cli.no_fixed_strings)
@@ -1000,6 +1042,9 @@ fn search_options(cli: &Rg) -> SearchOptions {
 		max_columns: cli.max_columns,
 		max_columns_preview: cli.max_columns_preview && !cli.no_max_columns_preview,
 		null_paths: cli.null,
+		// Validated --path-separator and the line-number default are applied in
+		// run() once paths are known.
+		path_separator: None,
 		no_messages: cli.no_messages && !cli.messages,
 		replacement: cli
 			.replacement
@@ -1279,7 +1324,7 @@ fn process_file<M: Matcher, W: Write>(
 	opts: &SearchOptions,
 	stats: &mut Stats,
 	out: &mut W,
-) -> SearchOutcome {
+) -> io::Result<SearchOutcome> {
 	let result = if cli.search_zip && !cli.no_search_zip {
 		let builder = DecompressionReaderBuilder::new();
 		if builder.get_matcher().has_command(path) {
@@ -1296,11 +1341,12 @@ fn process_file<M: Matcher, W: Write>(
 			.and_then(|file| process_reader(matcher, searcher, file, display, opts, stats, out))
 	};
 	match result {
-		Ok(any_match) => SearchOutcome { any_match, had_error: false },
-		Err(error) => SearchOutcome {
+		Ok(any_match) => Ok(SearchOutcome { any_match, had_error: false }),
+		Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(error),
+		Err(error) => Ok(SearchOutcome {
 			any_match: false,
 			had_error: report_path_error(host, display, path, error, opts),
-		},
+		}),
 	}
 }
 
@@ -1335,17 +1381,18 @@ fn search_collected_files<M: Matcher, W: Write>(
 	opts: &SearchOptions,
 	stats: &mut Stats,
 	out: &mut W,
-) -> SearchOutcome {
+) -> io::Result<SearchOutcome> {
 	let mut files = match collect_filtered_files(host, cli, root) {
 		Ok(files) => files,
 		Err(_) if host.is_cancelled() => {
-			return SearchOutcome { any_match: false, had_error: true };
+			return Ok(SearchOutcome { any_match: false, had_error: true });
 		},
+		Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Err(err),
 		Err(err) => {
 			if !opts.no_messages {
 				let _ = writeln!(host.stderr, "{err}");
 			}
-			return SearchOutcome { any_match: false, had_error: true };
+			return Ok(SearchOutcome { any_match: false, had_error: true });
 		},
 	};
 	files.sort_unstable_by(|a, b| b.cmp(a));
@@ -1364,7 +1411,7 @@ fn search_collected_files<M: Matcher, W: Write>(
 		let display_path = display_path(operand, root, &path);
 		let display_bytes = display_path.as_os_str().as_encoded_bytes().to_vec();
 		let display = (show_names || opts.json).then_some(display_bytes.as_slice());
-		let outcome = process_file(host, cli, matcher, searcher, &path, display, opts, stats, out);
+		let outcome = process_file(host, cli, matcher, searcher, &path, display, opts, stats, out)?;
 		any_match |= outcome.any_match;
 		had_error |= outcome.had_error;
 		if host.is_cancelled() {
@@ -1372,7 +1419,7 @@ fn search_collected_files<M: Matcher, W: Write>(
 			break;
 		}
 	}
-	SearchOutcome { any_match, had_error }
+	Ok(SearchOutcome { any_match, had_error })
 }
 
 #[allow(
@@ -1390,7 +1437,7 @@ fn search_dir<M: Matcher, W: Write>(
 	opts: &SearchOptions,
 	stats: &mut Stats,
 	out: &mut W,
-) -> SearchOutcome {
+) -> io::Result<SearchOutcome> {
 	if cli.sortr.as_deref() == Some("path") {
 		return search_collected_files(
 			host, cli, matcher, searcher, operand, root, show_names, opts, stats, out,
@@ -1402,7 +1449,7 @@ fn search_dir<M: Matcher, W: Write>(
 			if !opts.no_messages {
 				let _ = writeln!(host.stderr, "{err}");
 			}
-			return SearchOutcome { any_match: false, had_error: true };
+			return Ok(SearchOutcome { any_match: false, had_error: true });
 		},
 	};
 	let any_match = std::cell::Cell::new(false);
@@ -1435,7 +1482,7 @@ fn search_dir<M: Matcher, W: Write>(
 			let display_path = display_path(operand, root, path);
 			let display_bytes = display_path.as_os_str().as_encoded_bytes().to_vec();
 			let display = (show_names || opts.json).then_some(display_bytes.as_slice());
-			let outcome = process_file(host, cli, matcher, searcher, path, display, opts, stats, out);
+			let outcome = process_file(host, cli, matcher, searcher, path, display, opts, stats, out)?;
 			any_match.set(any_match.get() || outcome.any_match);
 			had_error.set(had_error.get() || outcome.had_error);
 			Ok(if opts.quiet && any_match.get() {
@@ -1454,20 +1501,28 @@ fn search_dir<M: Matcher, W: Write>(
 		},
 	) {
 		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => {
-			Some(SearchOutcome { any_match: any_match.get(), had_error: had_error.get() })
+			Some(Ok(SearchOutcome { any_match: any_match.get(), had_error: had_error.get() }))
 		},
 		Err(pi_walker::WalkError::Interrupted(_)) if host.is_cancelled() => {
 			// Harness cancellation; the shell wrapper overrides the exit code
 			// and stay-silent on stderr — no spurious "interrupted" diagnostic.
 			had_error.set(true);
-			Some(SearchOutcome { any_match: any_match.get(), had_error: true })
+			Some(Ok(SearchOutcome { any_match: any_match.get(), had_error: true }))
+		},
+		Err(pi_walker::WalkError::Interrupted(error))
+			if error.kind() == io::ErrorKind::BrokenPipe =>
+		{
+			Some(Err(error))
 		},
 		Err(err) => {
 			had_error.set(true);
 			if !opts.no_messages {
 				let _ = writeln!(host.stderr, "rg: {err}");
 			}
-			Some(SearchOutcome { any_match: any_match.get(), had_error: had_error.get() })
+			Some(Ok(SearchOutcome {
+				any_match: any_match.get(),
+				had_error: had_error.get(),
+			}))
 		},
 	};
 	streamed.unwrap_or_else(|| {
@@ -1475,36 +1530,50 @@ fn search_dir<M: Matcher, W: Write>(
 	})
 }
 
-fn collect_filtered_files(host: &mut Host, cli: &Rg, root: &Path) -> Result<Vec<PathBuf>, String> {
-	let walk = build_walk(host, cli, root)?;
+fn collect_filtered_files(host: &mut Host, cli: &Rg, root: &Path) -> io::Result<Vec<PathBuf>> {
+	let walk = build_walk(host, cli, root).map_err(io::Error::other)?;
 	let cancel = host.cancel_flag();
-	let outcome = match walk.request.collect_with_heartbeat(|| {
-		if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-			Err(io::Error::from(io::ErrorKind::Interrupted))
-		} else {
-			Ok::<(), io::Error>(())
-		}
-	}) {
-		Ok(outcome) => outcome,
-		Err(pi_walker::WalkError::Interrupted(_)) if host.is_cancelled() => {
-			return Err(String::from("rg: cancelled"));
-		},
-		Err(err) => return Err(format!("rg: {err}")),
-	};
 	let mut files = Vec::new();
-	for entry in outcome.entries {
-		if entry.file_type != pi_walker::FileType::File {
-			continue;
-		}
-		let path = entry.absolute_path(root);
-		if walk.filters.includes(&path, entry.file_type, entry.size) {
-			files.push(path);
-		}
+	let result = walk.request.for_each_entry_with_heartbeat(
+		|| {
+			if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+				Err(io::Error::from(io::ErrorKind::Interrupted))
+			} else {
+				Ok::<(), io::Error>(())
+			}
+		},
+		|entry| {
+			if entry.file_type == pi_walker::FileType::File {
+				let path = entry.absolute_path.as_ref();
+				if walk.filters.includes(path, entry.file_type, entry.size) {
+					files.push(path.to_path_buf());
+				}
+			}
+			Ok(pi_walker::WalkDecision::Include)
+		},
+		|_| Ok(pi_walker::WalkDecision::Include),
+	);
+	match result {
+		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => Ok(files),
+		Err(pi_walker::WalkError::Interrupted(_)) if host.is_cancelled() => {
+			Err(io::Error::other("rg: cancelled"))
+		},
+		Err(pi_walker::WalkError::Interrupted(error))
+			if error.kind() == io::ErrorKind::BrokenPipe =>
+		{
+			Err(error)
+		},
+		Err(err) => Err(io::Error::other(format!("rg: {err}"))),
 	}
-	Ok(files)
 }
 
-fn list_files<W: Write>(host: &mut Host, cli: &Rg, paths: &[OsString], out: &mut W) -> SearchOutcome {
+fn list_files<W: Write>(
+	host: &mut Host,
+	cli: &Rg,
+	paths: &[OsString],
+	path_separator: Option<u8>,
+	out: &mut W,
+) -> SearchOutcome {
 	let mut any = false;
 	let mut had_error = false;
 	let mut processed_operand = false;
@@ -1534,13 +1603,14 @@ fn list_files<W: Write>(host: &mut Host, cli: &Rg, paths: &[OsString], out: &mut
 				}
 				for path in files {
 					let display = display_path(operand.as_os_str(), &resolved, &path);
-					let _ = out.write_all(display.as_os_str().as_encoded_bytes());
+					let _ =
+						write_display_bytes(out, display.as_os_str().as_encoded_bytes(), path_separator);
 					let _ = out.write_all(if cli.null { b"\0" } else { b"\n" });
 					any = true;
 				}
 			},
 			Ok(meta) if meta.is_file() => {
-				let _ = out.write_all(operand.as_encoded_bytes());
+				let _ = write_display_bytes(out, operand.as_encoded_bytes(), path_separator);
 				let _ = out.write_all(if cli.null { b"\0" } else { b"\n" });
 				any = true;
 			},
@@ -1600,7 +1670,9 @@ fn write_json_summary<W: Write>(out: &mut W, stats: &Stats) -> io::Result<()> {
 			}
 		}
 	});
-	serde_json::to_writer(&mut *out, &summary).map_err(io::Error::other)?;
+	serde_json::to_writer(&mut *out, &summary).map_err(|error| {
+		io::Error::new(error.io_error_kind().unwrap_or(io::ErrorKind::Other), error)
+	})?;
 	out.write_all(b"\n")
 }
 
@@ -1656,6 +1728,9 @@ fn execute_search<M: Matcher, W: Write>(
 				out,
 			) {
 				Ok(matched) => any_match |= matched,
+				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+					return SIGPIPE_EXIT_CODE;
+				},
 				Err(error) => {
 					had_error = true;
 					if !opts.no_messages {
@@ -1672,7 +1747,7 @@ fn execute_search<M: Matcher, W: Write>(
 		let resolved = host.resolve(operand);
 		match std::fs::metadata(&resolved) {
 			Ok(meta) if meta.is_dir() => {
-				let outcome = search_dir(
+				match search_dir(
 					host,
 					cli,
 					matcher,
@@ -1683,14 +1758,26 @@ fn execute_search<M: Matcher, W: Write>(
 					opts,
 					&mut stats,
 					out,
-				);
-				any_match |= outcome.any_match;
-				had_error |= outcome.had_error;
+				) {
+					Ok(outcome) => {
+						any_match |= outcome.any_match;
+						had_error |= outcome.had_error;
+					},
+					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+						return SIGPIPE_EXIT_CODE;
+					},
+					Err(error) => {
+						had_error = true;
+						if !opts.no_messages {
+							let _ = writeln!(host.stderr, "rg: {error}");
+						}
+					},
+				}
 			},
 			Ok(meta) if meta.is_file() => {
 				let display =
 					(show_names || opts.json).then_some(operand.as_os_str().as_encoded_bytes());
-				let outcome = process_file(
+				match process_file(
 					host,
 					cli,
 					matcher,
@@ -1700,9 +1787,21 @@ fn execute_search<M: Matcher, W: Write>(
 					opts,
 					&mut stats,
 					out,
-				);
-				any_match |= outcome.any_match;
-				had_error |= outcome.had_error;
+				) {
+					Ok(outcome) => {
+						any_match |= outcome.any_match;
+						had_error |= outcome.had_error;
+					},
+					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+						return SIGPIPE_EXIT_CODE;
+					},
+					Err(error) => {
+						had_error = true;
+						if !opts.no_messages {
+							let _ = writeln!(host.stderr, "rg: {error}");
+						}
+					},
+				}
 			},
 			Ok(_) => {},
 			Err(error) => {
@@ -1719,9 +1818,15 @@ fn execute_search<M: Matcher, W: Write>(
 		}
 	}
 	if opts.json {
-		let _ = write_json_summary(out, &stats);
+		if write_json_summary(out, &stats)
+			.is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+		{
+			return SIGPIPE_EXIT_CODE;
+		}
 	}
-	let _ = out.flush();
+	if out.flush().is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe) {
+		return SIGPIPE_EXIT_CODE;
+	}
 	if opts.quiet {
 		if any_match {
 			0
@@ -1745,7 +1850,14 @@ impl Utility for Rg {
 
 	fn run(self, host: &mut Host) -> i32 {
 		let cli = self;
-	let opts = search_options(&cli);
+	let mut opts = search_options(&cli);
+	match parse_path_separator(cli.path_separator.as_deref()) {
+		Ok(separator) => opts.path_separator = separator,
+		Err(error) => {
+			let _ = writeln!(host.stderr, "rg: {error}");
+			return 2;
+		},
+	}
 	if opts.json
 		&& (cli.files
 			|| cli.type_list
@@ -1761,9 +1873,11 @@ impl Utility for Rg {
 		return 2;
 	}
 	let mut out = if cli.line_buffered && !cli.no_line_buffered {
-		RgOutput::Direct(host.stdout_clone())
+		StreamWriter::line(host.stdout_clone())
+	} else if cli.no_line_buffered {
+		StreamWriter::block(host.stdout_clone())
 	} else {
-		RgOutput::Buffered(BufWriter::new(host.stdout_clone()))
+		host.stdout_writer()
 	};
 	let (patterns, mut paths) = match resolve_patterns(host, &cli) {
 		Ok(resolved) => resolved,
@@ -1786,8 +1900,9 @@ impl Utility for Rg {
 		&mut paths,
 		!cli.files && !pattern_stdin_consumed && host.stdin_is_search_input(),
 	);
+	opts.line_number = effective_line_number(&cli);
 	if cli.files {
-		let outcome = list_files(host, &cli, &paths, &mut out);
+		let outcome = list_files(host, &cli, &paths, opts.path_separator, &mut out);
 		let _ = out.flush();
 		return if outcome.had_error {
 			2
@@ -1818,6 +1933,7 @@ impl Utility for Rg {
 mod tests {
 	use super::*;
 	use crate::host::{Host, run_util};
+	use brush_core::openfiles::OpenFile;
 
 	fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_util::<Rg>(args, stdin, "/");
@@ -1876,6 +1992,24 @@ mod tests {
 		assert_eq!(capture.out(), "sub/file.txt\n");
 	}
 
+
+	#[test]
+	fn broken_pipe_on_stdout_is_silent_and_exits_141() {
+		// Regression: `rg … | head` printed a BrokenPipe diagnostic and exited
+		// 2 after the downstream reader closed instead of dying silently.
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("match.txt"), "hit\n").unwrap();
+		let cli = Rg::try_parse_from(["rg", "hit", "match.txt"]).expect("argv");
+		let (mut host, capture) = Host::for_test("rg", "", tree.path());
+		let (reader, writer) = std::io::pipe().expect("pipe");
+		drop(reader); // downstream reader (e.g. `head`) already exited
+		host.stdout = OpenFile::from(writer);
+
+		let code = cli.run(&mut host);
+
+		assert_eq!(code, SIGPIPE_EXIT_CODE, "BrokenPipe must map to 128+SIGPIPE");
+		assert!(capture.err().is_empty(), "stderr must stay clean on a broken pipe");
+	}
 	#[test]
 	fn recursive_walk_observes_cancellation() {
 		let tree = tempfile::tempdir().unwrap();
@@ -1929,6 +2063,92 @@ mod tests {
 			run_util::<Rg>(&["--search-zip", "hit", "sample.gz"], "", tree.path());
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "hit\n");
+	}
+
+	#[test]
+	fn line_numbers_stay_off_when_piped_unless_requested() {
+		// Defends: the builtin's output is always consumed piped, where real
+		// rg omits line numbers; `1:` prefixes sprouting by default break
+		// text consumers. `-n` opts in, `-N` beats `-n`.
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("a.txt"), "miss\nhit\n").unwrap();
+		let (code, capture) = run_util::<Rg>(&["hit", "."], "", tree.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a.txt:hit\n");
+		let (code, capture) = run_util::<Rg>(&["-n", "hit", "."], "", tree.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a.txt:2:hit\n");
+		let (code, capture) = run_util::<Rg>(&["-n", "-N", "hit", "."], "", tree.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a.txt:hit\n");
+	}
+
+	#[test]
+	fn null_terminates_paths_without_trailing_newline() {
+		// Defends: `rg -l0 | xargs -0` must see `path\0`, not `path\0\n`.
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("a.txt"), "hit\n").unwrap();
+		let (code, capture) = run_util::<Rg>(&["-l0", "hit", "."], "", tree.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a.txt\0");
+		// Match lines: `path\0text` with no `:` after the NUL; with -n the
+		// line number follows the NUL (`path\0N:text`).
+		let (code, capture) = run_util::<Rg>(&["-0", "hit", "."], "", tree.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a.txt\0hit\n");
+		let (code, capture) = run_util::<Rg>(&["-n0", "hit", "."], "", tree.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a.txt\01:hit\n");
+		// --files-without-match also emits bare `path\0`. (Exit code for this
+		// mode is a pre-existing divergence outside this test's contract.)
+		let (_code, capture) =
+			run_util::<Rg>(&["--files-without-match", "-0", "nope", "."], "", tree.path());
+		assert_eq!(capture.out(), "a.txt\0");
+	}
+
+	#[test]
+	fn last_case_flag_wins() {
+		// Defends: real rg resolves -s/-i/-S by last occurrence, not by a
+		// fixed precedence.
+		let (code, out, err) = run(&["-s", "-i", "HIT", "-"], "hit\n");
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "hit\n");
+		let (code, out, _) = run(&["-i", "-s", "HIT", "-"], "hit\n");
+		assert_eq!(code, 1);
+		assert_eq!(out, "");
+		// -i then -S: smart case wins, and an uppercase pattern stays sensitive.
+		let (code, _, _) = run(&["-i", "-S", "HIT", "-"], "hit\n");
+		assert_eq!(code, 1);
+	}
+
+	#[test]
+	fn compat_flags_are_accepted() {
+		// Defends: `--no-config`/`-j`/`--threads`/`--no-column` must not be
+		// clap parse errors.
+		let (code, out, err) = run(&["--no-config", "-j2", "-S", "hit", "-"], "hit\n");
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "hit\n");
+		let (code, out, err) =
+			run(&["--threads", "4", "-n", "--column", "--no-column", "hit", "-"], "hit\n");
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "1:hit\n");
+	}
+
+	#[test]
+	fn path_separator_replaces_slash() {
+		// Defends: --path-separator must rewrite `/` in printed paths and
+		// reject multi-byte separators like real rg.
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::create_dir(tree.path().join("sub")).unwrap();
+		std::fs::write(tree.path().join("sub/a.txt"), "hit\n").unwrap();
+		let (code, capture) =
+			run_util::<Rg>(&["--path-separator", "|", "hit", "."], "", tree.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "sub|a.txt:hit\n");
+		let (code, capture) =
+			run_util::<Rg>(&["--path-separator", "::", "hit", "."], "", tree.path());
+		assert_eq!(code, 2);
+		assert!(capture.err().contains("exactly one byte"));
 	}
 }
 

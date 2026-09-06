@@ -7,7 +7,7 @@
  * `ToolSession` registered for the current execution and forwards to the same
  * `callSessionTool` implementation the JS bridge uses.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import { callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
 
@@ -42,6 +42,16 @@ interface BridgeServer {
 
 const registrations = new Map<string, PyToolBridgeEntry>();
 let serverPromise: Promise<BridgeServer> | null = null;
+
+function markExpectedBridgeShutdownError(error: unknown): error is Error {
+	if (!(error instanceof Error)) return false;
+	const expected =
+		error.name === "AbortError" ||
+		("code" in error &&
+			(error.code === "ERR_SOCKET_CLOSED" || error.code === "ECONNRESET" || error.code === "EPIPE"));
+	if (expected) postmortem.markExpectedCleanupError(error);
+	return expected;
+}
 
 /**
  * Forward a bridge call to {@link callSessionTool}, failing fast once the cell
@@ -136,6 +146,16 @@ async function startServer(): Promise<BridgeServer> {
 				});
 			}
 		},
+		error(err) {
+			if (markExpectedBridgeShutdownError(err)) {
+				logger.debug("Python tool bridge connection closed during shutdown", { error: err.message });
+			} else {
+				logger.error("Python tool bridge request failed", { error: err });
+			}
+			// Bun requires an error response even when the peer has already gone.
+			// An empty body minimizes further writes to a closing socket.
+			return new Response(null, { status: 500 });
+		},
 	});
 
 	const info: PyToolBridgeInfo = {
@@ -143,11 +163,18 @@ async function startServer(): Promise<BridgeServer> {
 		token,
 	};
 	logger.debug("Python tool bridge listening", { url: info.url });
+	let stopPromise: Promise<void> | null = null;
 
 	return {
 		info,
-		stop: async () => {
-			await server.stop(true);
+		stop: () => {
+			stopPromise ??= Promise.try(() => server.stop(true)).catch(error => {
+				if (!markExpectedBridgeShutdownError(error)) throw error;
+				logger.debug("Python tool bridge stopped after its socket closed", {
+					error: error.message,
+				});
+			});
+			return stopPromise;
 		},
 	};
 }

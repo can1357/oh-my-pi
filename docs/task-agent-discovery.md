@@ -71,7 +71,7 @@ modelRoles:
   review: openai/gpt-5.4:high
 ```
 
-`@review` resolves through `modelRoles.review`. Each `modelRoles.<role>` value stores a concrete model selector and may append a thinking suffix such as `:high` (`src/config/model-resolver.ts`). Changing that mapping affects subsequent task resolutions without editing agent definitions.
+`@review` resolves through `modelRoles.review`. Each `modelRoles.<role>` value stores a concrete model selector and may append a thinking suffix such as `:high` (`src/config/model-resolver.ts`). Changing that mapping affects subsequent task resolutions without editing agent definitions. Task/eval preflight reloads the current global, project, and explicit overlay settings before rediscovering agents, so agent files and their role aliases added during a live session resolve from one refreshed configuration state.
 
 For a dispatch, set the agent name and task:
 
@@ -185,11 +185,12 @@ Lookup is exact-name linear search:
 
 `resolveEffectiveSubagentPolicy()` is shared by task and eval-backed subagent launches. Before allocating artifacts it:
 
-1. resolves the omitted or explicit agent name from the parent spawn policy
-2. enforces depth, blocked-self-recursion, and parent spawn-policy guards
-3. rediscovers agents with `discoverAgents(session.cwd)` and performs exact lookup
-4. checks `task.disabledAgents`
-5. resolves plan-mode restrictions, output schema, model policy, and isolation policy
+1. atomically reloads the live session's persisted global, project, and explicit overlay settings while preserving runtime overrides
+2. resolves the omitted or explicit agent name from the parent spawn policy
+3. enforces depth, blocked-self-recursion, and parent spawn-policy guards
+4. rediscovers agents with `discoverAgents(session.cwd)` and performs exact lookup
+5. checks `task.disabledAgents`
+6. resolves plan-mode restrictions, output schema, model policy, and isolation policy
 
 A missing name fails preflight with `Unknown agent "...". Available: ...`; no subprocess runs.
 

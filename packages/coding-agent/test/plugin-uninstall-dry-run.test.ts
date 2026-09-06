@@ -7,17 +7,19 @@
  * methods, so a dry-run actually uninstalled the plugin on both the npm and
  * marketplace routes.
  *
- * `flags.json` is set so the renderer takes the JSON branch and avoids the
- * theme (`runPluginCommand` does not initialize the theme on its own).
+ * `runPluginCommand` does not initialize the theme on its own, so tests that exercise
+ * rendered success or error output initialize it explicitly.
  */
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { runPluginCommand } from "@oh-my-pi/pi-coding-agent/cli/plugin-cli";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import type { InstalledPluginSummary } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 describe("runPluginCommand({ action: 'uninstall', flags: { dryRun } })", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
+		await initTheme();
 		spyOn(console, "log").mockImplementation(() => undefined);
 		spyOn(console, "error").mockImplementation(() => undefined);
 	});
@@ -70,6 +72,7 @@ describe("runPluginCommand({ action: 'uninstall', flags: { dryRun } })", () => {
 
 	test("without --dry-run the npm route still uninstalls", async () => {
 		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
+		spyOn(PluginManager.prototype, "list").mockResolvedValue([{ name: "zmarketplace" }] as never);
 		const npmUninstall = spyOn(PluginManager.prototype, "uninstall").mockResolvedValue(undefined);
 		try {
 			await runPluginCommand({ action: "uninstall", args: ["zmarketplace"], flags: { json: true } });
@@ -78,5 +81,54 @@ describe("runPluginCommand({ action: 'uninstall', flags: { dryRun } })", () => {
 		} finally {
 			npmUninstall.mockRestore();
 		}
+	});
+	test("a unique bare marketplace name uninstalls its qualified plugin", async () => {
+		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([
+			{ id: "hello@local", scope: "user", entries: [] },
+		]);
+		const npmUninstall = spyOn(PluginManager.prototype, "uninstall").mockResolvedValue(undefined);
+		const mktUninstall = spyOn(MarketplaceManager.prototype, "uninstallPlugin").mockResolvedValue(undefined);
+
+		await runPluginCommand({ action: "uninstall", args: ["hello"], flags: { json: true } });
+
+		expect(mktUninstall).toHaveBeenCalledWith("hello@local", undefined);
+		expect(npmUninstall).not.toHaveBeenCalled();
+	});
+
+	test("an unknown npm name errors without reporting a false uninstall", async () => {
+		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
+		spyOn(PluginManager.prototype, "list").mockResolvedValue([]);
+		const npmUninstall = spyOn(PluginManager.prototype, "uninstall").mockResolvedValue(undefined);
+		const exit = spyOn(process, "exit").mockImplementation(() => {
+			throw new Error("process.exit");
+		});
+
+		await expect(
+			runPluginCommand({ action: "uninstall", args: ["not-installed"], flags: { json: true } }),
+		).rejects.toThrow("process.exit");
+
+		expect(exit).toHaveBeenCalledWith(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("not-installed is not installed"));
+		expect(npmUninstall).not.toHaveBeenCalled();
+	});
+	test("an ambiguous bare marketplace name lists qualified candidates without uninstalling", async () => {
+		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([
+			{ id: "hello@one", scope: "user", entries: [] },
+			{ id: "hello@two", scope: "user", entries: [] },
+		]);
+		const npmUninstall = spyOn(PluginManager.prototype, "uninstall").mockResolvedValue(undefined);
+		const mktUninstall = spyOn(MarketplaceManager.prototype, "uninstallPlugin").mockResolvedValue(undefined);
+		const exit = spyOn(process, "exit").mockImplementation(() => {
+			throw new Error("process.exit");
+		});
+
+		await expect(runPluginCommand({ action: "uninstall", args: ["hello"], flags: { json: true } })).rejects.toThrow(
+			"process.exit",
+		);
+
+		expect(exit).toHaveBeenCalledWith(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("hello@one, hello@two"));
+		expect(npmUninstall).not.toHaveBeenCalled();
+		expect(mktUninstall).not.toHaveBeenCalled();
 	});
 });

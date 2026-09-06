@@ -217,3 +217,112 @@ describe("insert-after-block inward landing shift", () => {
 		expect(result.warnings?.some(w => /placed inside the block/.test(w)) ?? false).toBe(false);
 	});
 });
+
+/**
+ * Opener-escape landing correction — the stdout_policy incident: a plain
+ * `PUT >N:` anchored on the OPENING line of `fn clone_box` inserted a whole
+ * tab-indented test `mod` between the opener and its body. The result parsed
+ * (items are legal inside Rust fn bodies), so no probe warning fired and the
+ * corruption landed silently. Contract under test: a balanced construct body
+ * claiming a column depth strictly above the opener is landed after the first
+ * closer returning to that depth, verified by the syntax probe; statements,
+ * equal-depth bodies, unverifiable languages, and unparseable relocations
+ * stay literal.
+ */
+describe("opener-anchored after-insert escape (the stdout_policy incident)", () => {
+	// Mirrors crates/pi-builtins/src/host.rs: 3-space file, tab-indented body.
+	const RUST_FILE = [
+		"mod testing {", // 1
+		"   struct MemStream;", // 2
+		"", // 3
+		"   impl Stream for MemStream {", // 4
+		"      fn clone_box(&self) -> u32 {", // 5
+		"         1", // 6
+		"      }", // 7
+		"", // 8
+		"      fn try_borrow(&self) -> u32 {", // 9
+		"         7", // 10
+		"      }", // 11
+		"   }", // 12
+		"}", // 13
+		"",
+	].join("\n");
+	const MOD_BODY = [
+		"PUT >5:",
+		"+",
+		"+\tmod stdout_policy {",
+		"+\t\tuse super::MemStream;",
+		"+",
+		"+\t\t#[test]",
+		"+\t\tfn line_policy() {",
+		"+\t\t\tassert!(true);",
+		"+\t\t}",
+		"+\t}",
+	].join("\n");
+
+	function applyRust(text: string, patch: string): { text: string; warnings: string[] } {
+		const result = applyEdits(text, parsePatch(patch).edits, { path: "fixture.rs" });
+		return { text: result.text, warnings: result.warnings ?? [] };
+	}
+
+	it("lands a tab-indented construct body after the block, not inside the opener", () => {
+		const { text, warnings } = applyRust(RUST_FILE, MOD_BODY);
+		const lines = text.split("\n");
+		// The fn body stays contiguous with its opener.
+		expect(lines[4]).toBe("      fn clone_box(&self) -> u32 {");
+		expect(lines[5]).toBe("         1");
+		// The mod landed after the impl closer (line 12), inside `mod testing`.
+		expect(lines[11]).toBe("   }");
+		expect(lines[13]).toBe("\tmod stdout_policy {");
+		expect(warnings.some(w => /PUT >5: line 5 opens a block/.test(w))).toBe(true);
+	});
+
+	it("keeps a bare shallower statement literal (first-statement inserts survive)", () => {
+		const { text, warnings } = applyRust(RUST_FILE, "PUT >5:\n+   let x = 1;");
+		expect(text.split("\n")[5]).toBe("   let x = 1;");
+		expect(warnings.some(w => /opens a block/.test(w))).toBe(false);
+	});
+
+	it("keeps an equal-depth body literal (matches the outward shift's contract)", () => {
+		const body = ["PUT >5:", "+      fn extra(&self) -> u32 {", "+         2", "+      }"].join("\n");
+		const { text, warnings } = applyRust(RUST_FILE, body);
+		expect(text.split("\n")[5]).toBe("      fn extra(&self) -> u32 {");
+		expect(warnings.some(w => /opens a block/.test(w))).toBe(false);
+	});
+
+	it("abandons the escape when the relocated result does not parse", () => {
+		// Balanced `{`-construct that is not a legal item: relocating it to
+		// `mod testing` scope would break the parse, so it stays literal.
+		const body = ["PUT >5:", "+   Some(1) => {", "+   }"].join("\n");
+		const { text, warnings } = applyRust(RUST_FILE, body);
+		expect(text.split("\n")[5]).toBe("   Some(1) => {");
+		expect(warnings.some(w => /opens a block/.test(w))).toBe(false);
+	});
+
+	it("stays literal without a parseable path (no probe, no relocation)", () => {
+		const { edits } = parsePatch(MOD_BODY);
+		const result = applyEdits(RUST_FILE, edits);
+		expect(result.text.split("\n")[6]).toBe("\tmod stdout_policy {");
+		expect((result.warnings ?? []).some(w => /opens a block/.test(w))).toBe(false);
+	});
+
+	it("escapes a shallower function body past a class in TypeScript", () => {
+		const file = ["class A {", "   method() {", "      return 1;", "   }", "}", ""].join("\n");
+		const body = ["PUT >2:", "+function helper() {", "+   return 2;", "+}"].join("\n");
+		const result = applyEdits(file, parsePatch(body).edits, { path: "fixture.ts" });
+		expect(result.text).toBe(
+			[
+				"class A {",
+				"   method() {",
+				"      return 1;",
+				"   }",
+				"}",
+				"function helper() {",
+				"   return 2;",
+				"}",
+				"",
+			].join("\n"),
+		);
+		expect((result.warnings ?? []).some(w => /PUT >2: line 2 opens a block/.test(w))).toBe(true);
+	});
+});

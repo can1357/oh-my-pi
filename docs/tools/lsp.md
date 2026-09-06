@@ -211,7 +211,7 @@ Uses the same location normalization and output shape as `definition`, but sends
 **Execution**
 - Workspace mode first invalidates the per-cwd configuration cache, reloads configuration from disk, and then reloads every newly configured non-custom LSP server.
 - Single-file mode keeps the cached configuration and reloads the primary server for that file.
-- Both modes clear matching recent initialization failures before starting a server. `reloadServer()` then tries the `rust-analyzer/reloadWorkspace` request, falls back to a `workspace/didChangeConfiguration` notification with `{ settings: {} }`, and finally tears down the client so the next request cold-starts it. For a shared-mux client, teardown first sends the mux restart notification so the shared server—not only this session's link—is replaced.
+- Both modes clear matching recent initialization failures before starting a server. For rust-analyzer servers, `reloadServer()` first tries the `rust-analyzer/reloadWorkspace` request (only rust-analyzer implements it; sending it to other servers such as Roslyn can crash them, so it is gated on the server binary/name). Every server then falls back to a `workspace/didChangeConfiguration` notification carrying the active client's configured settings. If that notification fails, reload tears down the client so the next request cold-starts it. For a shared-mux client, teardown first sends the mux restart notification so the shared server—not only this session's link—is replaced.
 
 **Output text**
 - One line per server: `Reloaded <server>`, `Restarted <server>`, or `Failed to reload <server>: ...`.

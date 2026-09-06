@@ -22,7 +22,12 @@ import {
 	createOpenAICodexCompatibilityMetadata,
 	getCodexAttestationHeader,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { parseAzureDeploymentNameMap, parseTextSignature } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import {
+	encodeResponsesToolResultOutput,
+	hoistInterleavedResponsesToolBatchMessages,
+	parseAzureDeploymentNameMap,
+	parseTextSignature,
+} from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type {
 	Api,
@@ -41,13 +46,14 @@ import {
 } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import {
+	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, isRecord, logger, prompt, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
-import { countTokensConservatively } from "../tokenizer";
+import { Tokenizer } from "../tokenizer";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
 
 export * from "./compaction-v2-streaming";
@@ -119,14 +125,36 @@ export interface TrimRemoteCompactionInputResult {
 	estimatedTokensAfter: number;
 }
 
-function estimateRemoteCompactionInputTokens(
+/** Verdict for one remote-compaction request measured against the model window. */
+interface RemoteCompactionBudgetProbe {
+	/** Estimated request tokens; the text part is exact when the cheap bound busted. */
+	tokens: number;
+	/** Whether the request fits the window. Always true when no window is known. */
+	fits: boolean;
+}
+
+/**
+ * Cheap-first sizing of a remote-compaction request. Images and the request
+ * frame are charged flat, so they come off the budget rather than through the
+ * tokenizer; the serialized transcript is then probed with
+ * {@link Tokenizer.checkTokenBudget}, which only pays for an exact count when
+ * the byte bound cannot already prove the request fits.
+ */
+function probeRemoteCompactionInputBudget(
 	input: Array<Record<string, unknown>>,
+	tokenizer: Tokenizer,
 	instructions: string,
-	tools?: unknown[],
-): number {
+	tools: unknown[] | undefined,
+	contextWindow: number | null | undefined,
+): RemoteCompactionBudgetProbe {
 	const normalized = normalizeRemoteCompactionEstimateValue({ instructions, input, ...(tools ? { tools } : {}) });
 	const serialized = stringifyJson(normalized.value) ?? "";
-	return countTokensConservatively(serialized) + normalized.imageTokens + REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS;
+	const flatTokens = normalized.imageTokens + REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS;
+	if (!contextWindow || contextWindow <= 0) {
+		return { tokens: tokenizer.countTokens(serialized, "upperbound") + flatTokens, fits: true };
+	}
+	const budget = tokenizer.checkTokenBudget(serialized, Math.max(0, contextWindow - flatTokens));
+	return { tokens: budget.tokens + flatTokens, fits: budget.fits };
 }
 
 function rewriteToolOutputForContextWindow(item: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -160,24 +188,25 @@ function isToolResultImageAttachment(item: Record<string, unknown>): boolean {
  */
 export function trimRemoteCompactionInputToContextWindow(
 	input: Array<Record<string, unknown>>,
+	tokenizer: Tokenizer,
 	contextWindow: number | null | undefined,
 	instructions: string,
 	tools?: unknown[],
 ): TrimRemoteCompactionInputResult {
-	const estimatedTokensBefore = estimateRemoteCompactionInputTokens(input, instructions, tools);
-	if (!contextWindow || contextWindow <= 0 || estimatedTokensBefore <= contextWindow) {
+	const before = probeRemoteCompactionInputBudget(input, tokenizer, instructions, tools, contextWindow);
+	if (before.fits) {
 		return {
 			input,
 			rewrittenOutputs: 0,
-			estimatedTokensBefore,
-			estimatedTokensAfter: estimatedTokensBefore,
+			estimatedTokensBefore: before.tokens,
+			estimatedTokensAfter: before.tokens,
 		};
 	}
 
 	let rewrittenInput: Array<Record<string, unknown>> | undefined;
-	let estimatedTokensAfter = estimatedTokensBefore;
+	let after = before;
 	let rewrittenOutputs = 0;
-	for (let index = input.length - 1; index >= 0 && estimatedTokensAfter > contextWindow; index--) {
+	for (let index = input.length - 1; index >= 0 && !after.fits; index--) {
 		const item = input[index];
 		if (isToolResultImageAttachment(item)) continue;
 		const rewritten = rewriteToolOutputForContextWindow(item);
@@ -185,23 +214,23 @@ export function trimRemoteCompactionInputToContextWindow(
 		rewrittenInput ??= input.slice();
 		rewrittenInput[index] = rewritten;
 		rewrittenOutputs++;
-		estimatedTokensAfter = estimateRemoteCompactionInputTokens(rewrittenInput, instructions, tools);
+		after = probeRemoteCompactionInputBudget(rewrittenInput, tokenizer, instructions, tools, contextWindow);
 	}
 
-	if (!rewrittenInput || estimatedTokensAfter > contextWindow) {
+	if (!rewrittenInput || !after.fits) {
 		return {
 			input,
 			rewrittenOutputs: 0,
-			estimatedTokensBefore,
-			estimatedTokensAfter: estimatedTokensBefore,
+			estimatedTokensBefore: before.tokens,
+			estimatedTokensAfter: before.tokens,
 		};
 	}
 
 	return {
 		input: rewrittenInput,
 		rewrittenOutputs,
-		estimatedTokensBefore,
-		estimatedTokensAfter,
+		estimatedTokensBefore: before.tokens,
+		estimatedTokensAfter: after.tokens,
 	};
 }
 
@@ -475,6 +504,7 @@ export function buildOpenAiNativeHistory(
 	messages: Message[],
 	model: Model,
 	previousReplacementHistory?: Array<Record<string, unknown>>,
+	supportsImageDetailOriginal = false,
 ): Array<Record<string, unknown>> {
 	const input: Array<Record<string, unknown>> = previousReplacementHistory
 		? adaptComputerHistoryForCompaction([...previousReplacementHistory], model.supportsComputerUse === true)
@@ -663,12 +693,7 @@ export function buildOpenAiNativeHistory(
 
 		if (message.role === "toolResult") {
 			const normalized = normalizeResponsesToolCallId(message.toolCallId);
-			const textOutput = message.content
-				.filter(block => block.type === "text")
-				.map(block => block.text)
-				.join("\n");
-			const hasImages = message.content.some(block => block.type === "image");
-			const outputText = textOutput.length > 0 ? textOutput : hasImages ? "(see attached image)" : "";
+			const { output, outputText } = encodeResponsesToolResultOutput(message, model, supportsImageDetailOriginal);
 			if (demotedComputerCallIds.has(normalized.callId)) {
 				const resultItem =
 					message.providerMetadata?.type === "computer"
@@ -718,29 +743,14 @@ export function buildOpenAiNativeHistory(
 			input.push({
 				type: customCallIds.has(normalized.callId) ? "custom_tool_call_output" : "function_call_output",
 				call_id: normalized.callId,
-				output: outputText.toWellFormed(),
+				output,
 			});
-
-			if (hasImages && model.input.includes("image")) {
-				const contentBlocks: Array<Record<string, unknown>> = [
-					{ type: "input_text", text: TOOL_RESULT_IMAGE_ATTACHMENT_TEXT },
-				];
-				for (const block of message.content) {
-					if (block.type !== "image") continue;
-					contentBlocks.push({
-						type: "input_image",
-						detail: "auto",
-						image_url: `data:${block.mimeType};base64,${block.data}`,
-					});
-				}
-				input.push({ type: "message", role: "user", content: contentBlocks });
-			}
 		}
 
 		msgIndex++;
 	}
 
-	return stripOpenAIResponsesOutputOnlyStatusesForReplay(input);
+	return stripOpenAIResponsesOutputOnlyStatusesForReplay(hoistInterleavedResponsesToolBatchMessages(input));
 }
 
 // ============================================================================
@@ -762,7 +772,12 @@ export async function requestOpenAiRemoteCompaction(
 ): Promise<OpenAiRemoteCompactionResponse> {
 	const endpoint = resolveOpenAiCompactEndpoint(model);
 	const requestModel = resolveOpenAiCompactModel(model);
-	const trimmed = trimRemoteCompactionInputToContextWindow(compactInput, model.contextWindow, instructions);
+	const trimmed = trimRemoteCompactionInputToContextWindow(
+		compactInput,
+		new Tokenizer(model),
+		model.contextWindow,
+		instructions,
+	);
 	if (trimmed.rewrittenOutputs > 0) {
 		logger.info("Rewrote trailing tool outputs before OpenAI remote compaction", {
 			model: model.id,
@@ -802,6 +817,7 @@ export async function requestOpenAiRemoteCompaction(
 		if (accountId) {
 			headers[OPENAI_HEADERS.ACCOUNT_ID] = accountId;
 		}
+		applyCodexResidencyHeader(headers, apiKey);
 		const attestation = await getCodexAttestationHeader(accountId);
 		if (attestation) {
 			headers[OPENAI_HEADERS.ATTESTATION] = attestation;

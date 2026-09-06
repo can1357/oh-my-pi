@@ -54,4 +54,31 @@ describe("usage report notes wire schema", () => {
 		const reports = validated.reports;
 		expect(reports[0]).toHaveProperty("notes", [PROVIDER_NOTE]);
 	});
+
+	it("both schema copies accept the credits unit (Z.AI GLM Coding Plan reports)", () => {
+		// `usage.ts` and `wire-schemas.ts` keep separate copies of the unit enum;
+		// a new unit added to only one copy makes broker `/v1/usage` responses
+		// containing it fail the `"+": "reject"` gate client-side.
+		const report = {
+			provider: "zai",
+			fetchedAt: Date.now(),
+			limits: [
+				{
+					id: "zai:credits:5h",
+					label: "ZAI 5 Hours Credit Quota",
+					scope: { provider: "zai", windowId: "5h", shared: true },
+					window: { id: "5h", label: "5 Hours", durationMs: 5 * 3_600_000 },
+					amount: { used: 1438, limit: 12000, usedFraction: 0.11, unit: "credits" },
+					status: "ok",
+				},
+			],
+			metadata: { planType: "pro" },
+		};
+
+		const local = usageReportSchema(report);
+		expect(local).not.toBeInstanceOf(type.errors);
+
+		const brokered = usageResponseSchema({ generatedAt: Date.now(), reports: [report] });
+		expect(brokered).not.toBeInstanceOf(type.errors);
+	});
 });

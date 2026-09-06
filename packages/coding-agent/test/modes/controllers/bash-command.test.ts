@@ -44,6 +44,10 @@ function createCwdContext(sourceDir: string, isStreaming = false) {
 			moveTo: vi.fn(async (cwd: string) => {
 				state.cwd = cwd;
 			}),
+			captureState: vi.fn(() => ({ cwd: state.cwd, sessionDir: "/tmp/bash-sessions" })),
+			restoreState: vi.fn((snapshot: { cwd: string }) => {
+				state.cwd = snapshot.cwd;
+			}),
 		},
 		chatContainer: createContainer(),
 		pendingMessagesContainer,
@@ -54,6 +58,7 @@ function createCwdContext(sourceDir: string, isStreaming = false) {
 		showWarning: vi.fn(),
 		applyCwdChange: vi.fn(async (cwd: string) => {
 			expect(state.cwd).toBe(cwd);
+			return true;
 		}),
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
@@ -104,6 +109,11 @@ describe("bash shortcut command", () => {
 		expect(executeBash).toHaveBeenCalledWith("echo hi", expect.any(Function), {
 			excludeFromContext: false,
 			useUserShell: true,
+			pty: {
+				cols: expect.any(Number),
+				rows: expect.any(Number),
+				onChunk: expect.any(Function),
+			},
 		});
 	});
 
@@ -153,10 +163,20 @@ describe("bash shortcut command", () => {
 			expect(executeBash).toHaveBeenNthCalledWith(1, "cd child", expect.any(Function), {
 				excludeFromContext: false,
 				useUserShell: true,
+				pty: {
+					cols: expect.any(Number),
+					rows: expect.any(Number),
+					onChunk: expect.any(Function),
+				},
 			});
 			expect(executeBash).toHaveBeenNthCalledWith(2, "cd", expect.any(Function), {
 				excludeFromContext: false,
 				useUserShell: true,
+				pty: {
+					cols: expect.any(Number),
+					rows: expect.any(Number),
+					onChunk: expect.any(Function),
+				},
 			});
 			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(1, childDir);
 			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(2, sourceDir);

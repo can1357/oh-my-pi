@@ -729,6 +729,54 @@ describe("processResponsesStream: terminal events", () => {
 	});
 });
 
+describe("processResponsesStream: reasoning summary recovery", () => {
+	test("streams summary deltas when the provider omits summary_part.added", async () => {
+		const output = makeOutput();
+		const emitted: EmittedEvent[] = [];
+		const stream = { push: (e: unknown) => emitted.push(e as EmittedEvent), end: () => {} } as never;
+
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { type: "reasoning", id: "rs_ollama", summary: [] },
+				},
+				{
+					type: "response.reasoning_summary_text.delta",
+					output_index: 0,
+					item_id: "rs_ollama",
+					summary_index: 0,
+					delta: "Let's ",
+				},
+				{
+					type: "response.reasoning_summary_text.done",
+					output_index: 0,
+					item_id: "rs_ollama",
+					summary_index: 0,
+					text: "Let's check",
+				},
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "reasoning", id: "rs_ollama", summary: [] },
+				},
+				{ type: "response.completed", response: { id: "resp_ollama", status: "completed" } },
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		expect(output.content).toEqual([expect.objectContaining({ type: "thinking", thinking: "Let's check" })]);
+		expect(emitted.filter(event => event.type === "thinking_delta").map(event => event.delta)).toEqual([
+			"Let's ",
+			"check",
+		]);
+		expect(emitted.find(event => event.type === "thinking_end")?.content).toBe("Let's check");
+	});
+});
+
 describe("processResponsesStream: lost output_item.added recovery", () => {
 	test("synthesizes the tool-call block when output_item.added was lost", async () => {
 		const output = makeOutput();

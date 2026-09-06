@@ -9,7 +9,7 @@
  *
  * Kept apart from `cursor/exec-modern.ts` on purpose: these are pure
  * string/path functions with no protobuf coupling, while that module pulls in
- * `@bufbuild/protobuf` and the generated `agent_pb` graph. The legacy shim is
+ * the generated cursor protobuf graph. The legacy shim is
  * compiled into the bundled virtual module registry, so importing it from a
  * nested path would drag the whole exec implementation in with it — and
  * `./providers/*` is a single-segment wildcard export that cannot serve a
@@ -43,8 +43,9 @@ export function piReadPath(readPath: string, offset?: number, limit?: number): s
 	const start = offset !== undefined ? Math.max(1, Math.floor(offset)) : undefined;
 	const count = limit !== undefined ? Math.floor(limit) : undefined;
 	if (start === undefined && count === undefined) return readPath;
-	if (start === undefined) return `${readPath}:raw:1+${count}`;
-	return count === undefined ? `${readPath}:raw:${start}-` : `${readPath}:raw:${start}+${count}`;
+	const base = readPath.split(":").some(chunk => chunk.toLowerCase() === "raw") ? readPath : `${readPath}:raw`;
+	if (start === undefined) return `${base}:1+${count}`;
+	return count === undefined ? `${base}:${start}-` : `${base}:${start}+${count}`;
 }
 
 const READ_RANGE_CHUNK_RE = /^L?(\d+)(?:(\.\.|[-+])L?(\d+)?)?$/i;
@@ -75,6 +76,41 @@ export function piReadPathHasRange(readPath: string): boolean {
 	if (last?.toLowerCase() !== "raw") return false;
 	const preceding = chunks.at(-2);
 	return preceding !== undefined && isReadRangeList(preceding);
+}
+
+/**
+ * Force a Cursor exec read onto `read`'s verbatim `:raw` selector.
+ *
+ * Native `editToolCall` (StrReplace) materializes via `readArgs` then
+ * `writeArgs`. The server treats the read result as file bytes and writes
+ * them back. A hashline-formatted native read (`[path#TAG]` + `LINE:`
+ * prefixes) poisons that cycle: the write would persist the markup.
+ * `:raw` is the existing selector that drops both. A path that already
+ * carries `raw` is left alone; a range-only selector gets `raw` inserted
+ * so the range still applies without the gutter.
+ */
+export function cursorRawReadPath(readPath: string): string {
+	const chunks = readPath.split(":");
+	if (chunks.some(chunk => chunk.toLowerCase() === "raw")) return readPath;
+	if (piReadPathHasRange(readPath)) {
+		const last = chunks.pop()!;
+		return `${chunks.join(":")}:raw:${last}`;
+	}
+	return `${readPath}:raw`;
+}
+
+/**
+ * Path the edit-owned materialization read should execute.
+ *
+ * Range is composed first (`piReadPath` already uses `:raw` for a range),
+ * then a whole-file path is forced onto `:raw`. The caller must drop
+ * `offset`/`limit` after this so the bridge's `piReadPath` cannot append a
+ * second `:raw` onto the already-composed selector.
+ */
+export function cursorEditOwnedReadPath(readPath: string, offset?: number, limit?: number): string | null {
+	const ranged = piReadPath(readPath, offset, limit);
+	if (ranged === null) return null;
+	return cursorRawReadPath(ranged);
 }
 
 /**

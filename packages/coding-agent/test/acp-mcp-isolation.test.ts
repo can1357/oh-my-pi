@@ -66,7 +66,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 			});
 
 			const result = await factory(tempDir.path());
-			expect(result).toBe(fakeSession);
+			expect(result.session).toBe(fakeSession);
 			expect(captured).toHaveLength(1);
 			expect(captured[0].enableMCP).toBe(false);
 		} finally {

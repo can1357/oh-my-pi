@@ -29,6 +29,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import type { EffectiveExtensionRoots } from "../../capability/types";
 import { getConfigDirs } from "../../config";
 import type { ModelRegistry } from "../../config/model-registry";
 import {
@@ -122,6 +123,13 @@ export interface AgentsHubModelContext {
 	modelRegistry?: ModelRegistry;
 	activeModelPattern?: string;
 	defaultModelPattern?: string;
+	/**
+	 * Live provider for the owning session's extension roots (explicit + mode +
+	 * configured). Supplied so `/agents` lists exactly the agents the session
+	 * can spawn — including `--extension` roots and honoring `explicit-only`.
+	 * Falls back to a settings-only merge struct when absent.
+	 */
+	extensionRoots?: () => EffectiveExtensionRoots;
 }
 
 export interface AgentsHubCallbacks {
@@ -280,6 +288,18 @@ export class AgentsHubComponent implements Component {
 	dispose(): void {}
 	invalidate(): void {}
 
+	/** Live extension roots for the owning session; settings-only merge fallback when no provider. */
+	#extensionRoots(): EffectiveExtensionRoots {
+		return (
+			this.#modelContext.extensionRoots?.() ?? {
+				explicit: [],
+				mode: "merge",
+				configured: this.#settings.get("extensions") ?? [],
+				configuredLevel: this.#settings.extensionsSourceLevel(),
+			}
+		);
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════
 	// Data pipeline
 	// ═══════════════════════════════════════════════════════════════════════
@@ -288,7 +308,7 @@ export class AgentsHubComponent implements Component {
 		this.#loadError = null;
 		try {
 			const selectedName = this.#selectedAgent()?.name;
-			const { agents } = await discoverAgents(this.#cwd);
+			const { agents } = await discoverAgents(this.#cwd, undefined, this.#extensionRoots());
 			const disabled = new Set(this.#settings.get("task.disabledAgents") ?? []);
 			const overrides = this.#settings.get("task.agentModelOverrides") ?? {};
 			const prewalkOverrides = this.#settings.get("task.agentPrewalk") ?? {};
@@ -805,7 +825,7 @@ export class AgentsHubComponent implements Component {
 		const frontmatter = YAML.stringify({ name: spec.identifier, description: spec.whenToUse }, null, 2).trimEnd();
 		const content = `---\n${frontmatter}\n---\n\n${spec.systemPrompt.trim()}\n`;
 		await Bun.write(filePath, content);
-		await refreshAgentDiscovery(this.#cwd);
+		await refreshAgentDiscovery(this.#cwd, this.#extensionRoots());
 		this.#clearCreateFlow();
 		this.#notice = `Created agent ${spec.identifier} at ${shortenPath(filePath)}`;
 		await this.#reload();

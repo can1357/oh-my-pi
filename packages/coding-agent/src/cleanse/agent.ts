@@ -2,25 +2,20 @@ import { getProjectDir, isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
+import { IrcBus } from "../irc/bus";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
-import { mapWithConcurrencyLimitAllSettled } from "../task/parallel";
-import { runStructuredSubagent } from "../task/structured-subagent";
+import { reserveStructuredSubagentId, runStructuredSubagent } from "../task/structured-subagent";
+import type { AgentProgress } from "../task/types";
 import type { ToolSession } from "../tools";
 import { EventBus } from "../utils/event-bus";
-import type { CustomCleanseCheckerSpec } from "./checkers";
+import type { CleanseCheckerDescriptor, CustomCleanseCheckerSpec } from "./checkers";
 import { CLEANSE_PARSER_KINDS } from "./parsers";
 import assignmentPrompt from "./prompts/assignment.md" with { type: "text" };
 import discoveryPrompt from "./prompts/discovery.md" with { type: "text" };
-import type {
-	CleanseAgentOutcome,
-	CleanseAssignment,
-	CleanseCheckResult,
-	CleanseDiagnostic,
-	CleanseDiagnosticReport,
-	CleanseLoopResult,
-} from "./types";
+import followUpPrompt from "./prompts/follow-up.md" with { type: "text" };
+import type { CleanseAgentOutcome, CleanseAssignment, CleanseDiagnostic, CleanseLoopResult } from "./types";
 
 const MAX_DIAGNOSTIC_MESSAGE = 4_000;
 
@@ -49,6 +44,8 @@ const DISCOVERY_SCHEMA = {
 /** Hooks used by the standalone command to render subagent lifecycle progress. */
 export interface CleanseAgentHooks {
 	onStart?(name: string, assignment: CleanseAssignment): void;
+	/** Streaming progress snapshots from a running repair subagent. */
+	onProgress?(name: string, assignment: CleanseAssignment, progress: AgentProgress): void;
 	onFinish?(outcome: CleanseAgentOutcome, assignment: CleanseAssignment): void;
 }
 
@@ -58,12 +55,18 @@ export interface CleanseAgentRuntime {
 	readonly sessionFile: string;
 	/** Run one discovery subagent that translates a user request into runnable checker specs. */
 	discoverCheckers(request: string, signal?: AbortSignal): Promise<CustomCleanseCheckerSpec[]>;
-	dispatch(
-		assignments: CleanseAssignment[],
-		wave: number,
-		report: CleanseDiagnosticReport,
+	/** Run one repair subagent to completion; the scheduler bounds concurrency. */
+	dispatchWorker(
+		assignment: CleanseAssignment,
+		context: {
+			worker: number;
+			peers: readonly CleanseAssignment[];
+			checkers: readonly CleanseCheckerDescriptor[];
+		},
 		signal?: AbortSignal,
-	): Promise<CleanseAgentOutcome[]>;
+	): Promise<CleanseAgentOutcome>;
+	/** Steer late diagnostics into a running worker's chat; false when undeliverable. */
+	followUp(worker: number, diagnostics: readonly CleanseDiagnostic[]): Promise<boolean>;
 	close(result?: CleanseLoopResult): Promise<void>;
 }
 
@@ -117,6 +120,8 @@ export async function createCleanseAgentRuntime(options: {
 		modelRegistry,
 	};
 	let closed = false;
+	/** Live worker number → reserved registry agent id, for follow-up steering. */
+	const workerAgentIds = new Map<number, string>();
 
 	return {
 		model: modelDisplay,
@@ -138,71 +143,78 @@ export async function createCleanseAgentRuntime(options: {
 			if (result.result.error) throw new Error(`Checker discovery failed: ${result.result.error}`);
 			return parseDiscoverySpecs(result.result.structuredOutput?.data);
 		},
-		async dispatch(
-			assignments: CleanseAssignment[],
-			wave: number,
-			report: CleanseDiagnosticReport,
+		async dispatchWorker(
+			assignment: CleanseAssignment,
+			context: {
+				worker: number;
+				peers: readonly CleanseAssignment[];
+				checkers: readonly CleanseCheckerDescriptor[];
+			},
 			signal?: AbortSignal,
-		): Promise<CleanseAgentOutcome[]> {
-			sessionManager.appendCustomEntry("cleanse_wave", {
-				wave,
-				assignments: assignments.map(assignment => ({
-					weight: assignment.weight,
-					files: assignment.groups.map(group => group.file ?? "<project>"),
-				})),
+		): Promise<CleanseAgentOutcome> {
+			sessionManager.appendCustomEntry("cleanse_dispatch", {
+				worker: context.worker,
+				weight: assignment.weight,
+				files: assignment.groups.map(group => group.file ?? "<project>"),
 			});
-			const settled = await mapWithConcurrencyLimitAllSettled(
-				assignments,
-				assignments.length,
-				async (assignment, index, workerSignal) => {
-					const name = `CleanseW${wave}A${index + 1}`;
-					options.hooks?.onStart?.(name, assignment);
-					const result = await runStructuredSubagent({
-						session: toolSession,
-						invocationKind: "task",
-						assignment: renderAssignment(assignment, assignments, wave, index + 1, report.checks),
-						agent: "sonic",
-						model: modelSelector,
-						identity: { label: name },
-						index,
-						enableLsp: true,
-						enableIrc: true,
-						signal: workerSignal,
-					});
-					const outcome: CleanseAgentOutcome = {
-						name,
-						success: result.result.exitCode === 0 && !result.result.error && result.result.aborted !== true,
-						output: result.result.output,
-						error: result.result.error ?? (result.result.stderr || undefined),
-						resolvedModel: result.result.resolvedModel,
-					};
-					options.hooks?.onFinish?.(outcome, assignment);
-					return outcome;
-				},
-				signal,
-			);
-			const outcomes: CleanseAgentOutcome[] = [];
-			for (let index = 0; index < settled.results.length; index += 1) {
-				const result = settled.results[index];
-				if (!result) {
-					outcomes.push({ name: `CleanseW${wave}A${index + 1}`, success: false, output: "", error: "Cancelled" });
-				} else if (result.status === "fulfilled") {
-					outcomes.push(result.value);
-				} else {
-					const error = result.reason instanceof Error ? result.reason.message : String(result.reason);
-					const outcome = { name: `CleanseW${wave}A${index + 1}`, success: false, output: "", error };
-					options.hooks?.onFinish?.(outcome, assignments[index]);
-					outcomes.push(outcome);
-				}
+			const name = `CleanseA${context.worker}`;
+			options.hooks?.onStart?.(name, assignment);
+			const agentId = await reserveStructuredSubagentId(toolSession, { label: name });
+			workerAgentIds.set(context.worker, agentId);
+			try {
+				const result = await runStructuredSubagent({
+					session: toolSession,
+					invocationKind: "task",
+					assignment: renderAssignment(assignment, context.peers, context.worker, context.checkers),
+					agent: "sonic",
+					model: modelSelector,
+					identity: { id: agentId, label: name },
+					index: assignment.index,
+					enableLsp: true,
+					enableIrc: true,
+					signal,
+					onProgress: progress => options.hooks?.onProgress?.(name, assignment, progress),
+				});
+				const outcome: CleanseAgentOutcome = {
+					name,
+					success: result.result.exitCode === 0 && !result.result.error && result.result.aborted !== true,
+					output: result.result.output,
+					error: result.result.error ?? (result.result.stderr || undefined),
+					resolvedModel: result.result.resolvedModel,
+				};
+				options.hooks?.onFinish?.(outcome, assignment);
+				return outcome;
+			} catch (error) {
+				const outcome: CleanseAgentOutcome = {
+					name,
+					success: false,
+					output: "",
+					error: signal?.aborted ? "Cancelled" : error instanceof Error ? error.message : String(error),
+				};
+				options.hooks?.onFinish?.(outcome, assignment);
+				return outcome;
+			} finally {
+				workerAgentIds.delete(context.worker);
 			}
-			return outcomes;
+		},
+		async followUp(worker: number, diagnostics: readonly CleanseDiagnostic[]): Promise<boolean> {
+			const agentId = workerAgentIds.get(worker);
+			if (!agentId) return false;
+			const receipt = await IrcBus.global().send({
+				from: MAIN_AGENT_ID,
+				to: agentId,
+				body: prompt.render(followUpPrompt, { diagnostics: formatDiagnostics(diagnostics) }),
+			});
+			if (receipt.outcome === "failed") return false;
+			sessionManager.appendCustomEntry("cleanse_follow_up", { worker, count: diagnostics.length });
+			return true;
 		},
 		async close(result?: CleanseLoopResult): Promise<void> {
 			if (closed) return;
 			closed = true;
 			sessionManager.appendCustomEntry("cleanse", {
 				status: result?.status ?? "interrupted",
-				waves: result?.waves ?? 0,
+				workers: result?.workers ?? 0,
 				remaining: result?.report.diagnostics.length,
 			});
 			await sessionManager.close();
@@ -233,10 +245,9 @@ function parseDiscoverySpecs(data: unknown): CustomCleanseCheckerSpec[] {
 
 function renderAssignment(
 	assignment: CleanseAssignment,
-	allAssignments: readonly CleanseAssignment[],
-	wave: number,
+	peers: readonly CleanseAssignment[],
 	worker: number,
-	checks: readonly CleanseCheckResult[],
+	checkers: readonly CleanseCheckerDescriptor[],
 ): string {
 	const hasProjectIssues = assignment.groups.some(group => group.file === undefined);
 	const files = assignment.groups.flatMap(group => (group.file ? [group.file] : []));
@@ -245,12 +256,11 @@ function renderAssignment(
 		...(hasProjectIssues ? ["- Minimal additional files strictly required by project-level diagnostics."] : []),
 	].join("\n");
 	return prompt.render(assignmentPrompt, {
-		wave,
 		worker,
 		write_scope: writeScope,
 		diagnostics: formatDiagnostics(assignment.groups.flatMap(group => group.diagnostics)),
-		checker_commands: formatCheckerCommands(checks),
-		peer_assignments: formatPeerAssignments(assignment, allAssignments),
+		checker_commands: formatCheckerCommands(checkers),
+		peer_assignments: formatPeerAssignments(assignment, peers),
 	});
 }
 
@@ -268,21 +278,21 @@ function formatDiagnostics(diagnostics: readonly CleanseDiagnostic[]): string {
 		.join("\n");
 }
 
-function formatCheckerCommands(checks: readonly CleanseCheckResult[]): string {
+function formatCheckerCommands(checkers: readonly CleanseCheckerDescriptor[]): string {
 	const seen = new Set<string>();
 	const lines: string[] = [];
-	for (const check of checks) {
-		const key = `${check.cwd}\u0000${check.command}`;
+	for (const checker of checkers) {
+		const key = `${checker.cwd}\u0000${checker.command}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
-		lines.push(`- [${check.cwd}] ${check.command}`);
+		lines.push(`- [${checker.cwd}] ${checker.command}`);
 	}
 	return lines.join("\n") || "- No command metadata available.";
 }
 
-function formatPeerAssignments(current: CleanseAssignment, assignments: readonly CleanseAssignment[]): string {
+function formatPeerAssignments(current: CleanseAssignment, peers: readonly CleanseAssignment[]): string {
 	const lines: string[] = [];
-	for (const assignment of assignments) {
+	for (const assignment of peers) {
 		if (assignment.index === current.index) continue;
 		const files = assignment.groups.map(group => group.file ?? "<project-level>").join(", ");
 		lines.push(`- Worker ${assignment.index + 1}: ${files}`);

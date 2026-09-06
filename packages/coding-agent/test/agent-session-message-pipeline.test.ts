@@ -178,7 +178,12 @@ describe("AgentSession message pipeline", () => {
 			isError: false,
 		});
 
-		expect(session.getImageAttachments()).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage }]);
+		const attachments = session.getImageAttachments();
+		const sourcePath = attachments[0]?.sourcePath;
+		if (!sourcePath) {
+			throw new Error("Expected attachment sourcePath to be populated");
+		}
+		expect(attachments).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage, sourcePath }]);
 	});
 
 	it("normalizes historical WebP on the main provider request path", async () => {
@@ -333,7 +338,10 @@ describe("AgentSession message pipeline", () => {
 
 			expect(contexts).toHaveLength(1);
 			const userMessage = contexts[0]!.messages.find(message => message.role === "user");
+			// The date/cwd reminder rides on the first user turn (#7404); the contract
+			// here is that the undecodable WebP is replaced by the placeholder text.
 			expect(userMessage?.content).toEqual([
+				{ type: "text", text: expect.stringContaining("<system-reminder>") },
 				{ type: "text", text: "inspect this" },
 				{ type: "text", text: "[image omitted: WebP could not be decoded for this model]" },
 			]);

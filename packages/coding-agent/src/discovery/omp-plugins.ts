@@ -32,6 +32,7 @@ import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
 	buildRuleFromMarkdown,
 	createSourceMeta,
+	expandEnvVarsDeep,
 	loadFilesFromDir,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
@@ -312,7 +313,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			logger.warn(`[omp-plugins] Invalid JSON in ${mcpPath}`);
 			continue;
 		}
-		const servers = parsed.mcpServers;
+		const servers = expandEnvVarsDeep(parsed.mcpServers);
 		if (!servers || typeof servers !== "object" || Array.isArray(servers)) continue;
 
 		for (const [serverName, serverCfg] of Object.entries(servers)) {

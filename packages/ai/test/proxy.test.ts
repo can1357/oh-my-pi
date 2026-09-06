@@ -3,9 +3,11 @@ import * as net from "node:net";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
+	__resetGlobalProxyFetch,
 	connectProxiedSocket,
 	getProxyForProvider,
 	getProxyForUrl,
+	installGlobalProxyFetch,
 	isLocalOrMetadataHost,
 	shouldBypassProxy,
 	wrapFetchForProxy,
@@ -296,6 +298,65 @@ describe("wrapFetchForProxy", () => {
 		await wrapFetchForProxy(fetch, "wrap-badurl")("not a url");
 		expect(calls).toHaveLength(1);
 		expect(calls[0].proxy).toBeUndefined();
+	});
+});
+
+describe("installGlobalProxyFetch", () => {
+	const nativeFetch = globalThis.fetch;
+	let calls: Array<{ url: string; proxy: unknown }>;
+
+	beforeEach(() => {
+		calls = [];
+		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			calls.push({
+				url: input instanceof Request ? input.url : String(input),
+				proxy: (init as { proxy?: unknown } | undefined)?.proxy,
+			});
+			return new Response("ok");
+		}) as typeof globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = nativeFetch;
+		__resetGlobalProxyFetch();
+	});
+
+	it("routes bare global fetch through PI_PROXY", async () => {
+		Bun.env.PI_PROXY = PROXY;
+		installGlobalProxyFetch();
+		await fetch("https://api.anthropic.com/v1/oauth/token", { method: "POST" });
+		expect(calls[0].proxy).toBe(PROXY);
+	});
+
+	it("leaves global fetch untouched when PI_PROXY is unset", async () => {
+		const before = globalThis.fetch;
+		installGlobalProxyFetch();
+		expect(globalThis.fetch).toBe(before);
+		await fetch("https://api.anthropic.com/v1/oauth/token");
+		expect(calls[0].proxy).toBeUndefined();
+	});
+
+	it("keeps a caller-supplied proxy so PI_PROXY_<PROVIDER> still wins", async () => {
+		Bun.env.PI_PROXY = PROXY;
+		Bun.env.PI_PROXY_GLOBAL_PREC = "http://127.0.0.1:24561";
+		installGlobalProxyFetch();
+		await wrapFetchForProxy(globalThis.fetch, "global-prec")("https://api.anthropic.com/v1/messages");
+		expect(calls[0].proxy).toBe("http://127.0.0.1:24561");
+	});
+
+	it("bypasses loopback targets so local model servers stay direct", async () => {
+		Bun.env.PI_PROXY = PROXY;
+		installGlobalProxyFetch();
+		await fetch("http://127.0.0.1:11434/api/chat");
+		expect(calls[0].proxy).toBeUndefined();
+	});
+
+	it("installs once", async () => {
+		Bun.env.PI_PROXY = PROXY;
+		installGlobalProxyFetch();
+		const wrapped = globalThis.fetch;
+		installGlobalProxyFetch();
+		expect(globalThis.fetch).toBe(wrapped);
 	});
 });
 

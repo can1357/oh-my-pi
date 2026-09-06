@@ -12,8 +12,11 @@
 
 use std::borrow::Cow;
 
+use napi::{JsString, Result};
 use napi_derive::napi;
 use phf::phf_map;
+
+use crate::js;
 
 const LOCK_MASK: u32 = 64 + 128;
 
@@ -298,11 +301,20 @@ static LETTERS: [&str; 26] = [
 /// base layout key) and modifier bits.
 #[napi]
 pub fn matches_kitty_sequence(
-	data: String,
+	data: JsString,
+	expected_codepoint: i32,
+	expected_modifier: u32,
+) -> Result<bool> {
+	let data = js::utf8(data)?;
+	Ok(matches_kitty_sequence_inner(data.as_bytes(), expected_codepoint, expected_modifier))
+}
+
+fn matches_kitty_sequence_inner(
+	data: &[u8],
 	expected_codepoint: i32,
 	expected_modifier: u32,
 ) -> bool {
-	let Some(parsed) = parse_kitty_sequence_bytes(data.as_bytes()) else {
+	let Some(parsed) = parse_kitty_sequence_bytes(data) else {
 		return false;
 	};
 
@@ -378,40 +390,46 @@ const fn is_symbol_key(cp: i32) -> bool {
 ///
 /// Returns a key id like "escape" or "ctrl+c", or None if unrecognized.
 #[napi]
-pub fn parse_key(data: String, kitty_protocol_active: bool) -> Option<String> {
-	parse_key_inner(data.as_bytes(), kitty_protocol_active).map(|s| s.into_owned())
+pub fn parse_key(data: JsString, kitty_protocol_active: bool) -> Result<Option<String>> {
+	let data = js::utf8(data)?;
+	Ok(parse_key_inner(data.as_bytes(), kitty_protocol_active).map(|key| key.into_owned()))
 }
 
 /// Check if input matches a legacy escape sequence for the given key name.
 ///
 /// Returns true only when the byte sequence maps to the exact key identifier.
 #[napi]
-pub fn matches_legacy_sequence(data: String, key_name: String) -> bool {
-	LEGACY_SEQUENCES
+pub fn matches_legacy_sequence(data: JsString, key_name: JsString) -> Result<bool> {
+	let data = js::utf8(data)?;
+	let key_name = js::utf8(key_name)?;
+	Ok(LEGACY_SEQUENCES
 		.get(data.as_bytes())
-		.is_some_and(|&id| id == key_name)
+		.is_some_and(|&id| id == &*key_name))
 }
 
 /// Match input data against a key identifier string.
 ///
 /// Returns true when the bytes represent the specified key with modifiers.
 #[napi]
-pub fn matches_key(data: String, key_id: String, kitty_protocol_active: bool) -> bool {
-	matches_key_inner(data.as_bytes(), &key_id, kitty_protocol_active)
+pub fn matches_key(data: JsString, key_id: JsString, kitty_protocol_active: bool) -> Result<bool> {
+	let data = js::utf8(data)?;
+	let key_id = js::utf8(key_id)?;
+	Ok(matches_key_inner(data.as_bytes(), &key_id, kitty_protocol_active))
 }
 
 /// Parse a Kitty keyboard protocol sequence.
 ///
 /// Returns a structured parse result when the input is a valid Kitty sequence.
 #[napi]
-pub fn parse_kitty_sequence(data: String) -> Option<ParsedKittyResult> {
-	parse_kitty_sequence_bytes(data.as_bytes()).map(|p| ParsedKittyResult {
-		codepoint:       p.codepoint,
-		shifted_key:     p.shifted_key,
-		base_layout_key: p.base_layout_key,
-		modifier:        p.modifier,
-		event_type:      optional_kitty_event_type(p.event_type),
-	})
+pub fn parse_kitty_sequence(data: JsString) -> Result<Option<ParsedKittyResult>> {
+	let data = js::utf8(data)?;
+	Ok(parse_kitty_sequence_bytes(data.as_bytes()).map(|parsed| ParsedKittyResult {
+		codepoint:       parsed.codepoint,
+		shifted_key:     parsed.shifted_key,
+		base_layout_key: parsed.base_layout_key,
+		modifier:        parsed.modifier,
+		event_type:      optional_kitty_event_type(parsed.event_type),
+	}))
 }
 
 // =============================================================================
@@ -1590,20 +1608,12 @@ mod tests {
 		let plain_cyrillic_c = b"\x1b[1089::99u";
 		assert!(!matches_key_inner(plain_cyrillic_c, "c", true));
 		assert_eq!(parse_key_inner(plain_cyrillic_c, true).as_deref(), None);
-		assert!(!matches_kitty_sequence(
-			String::from_utf8_lossy(plain_cyrillic_c).into_owned(),
-			i32::from(b'c'),
-			0,
-		));
+		assert!(!matches_kitty_sequence_inner(plain_cyrillic_c, i32::from(b'c'), 0));
 
 		let ctrl_cyrillic_c = b"\x1b[1089::99;5u";
 		assert!(matches_key_inner(ctrl_cyrillic_c, "ctrl+c", true));
 		assert_eq!(parse_key_inner(ctrl_cyrillic_c, true).as_deref(), Some("ctrl+c"));
-		assert!(matches_kitty_sequence(
-			String::from_utf8_lossy(ctrl_cyrillic_c).into_owned(),
-			i32::from(b'c'),
-			MOD_CTRL,
-		));
+		assert!(matches_kitty_sequence_inner(ctrl_cyrillic_c, i32::from(b'c'), MOD_CTRL));
 	}
 
 	#[test]

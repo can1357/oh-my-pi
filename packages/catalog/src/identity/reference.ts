@@ -8,14 +8,25 @@
  * may strip `search`-style markers and prefers cache-pricing-complete
  * references, both of which would be wrong for canonical coalescing.
  */
+import { collapseVocabulary, discoveryVocabulary } from "../compat/taxonomy";
 import type { Api, Model, ThinkingConfig } from "../types";
 import { getBracketStrippedModelIdCandidates, getLongestModelLikeIdSegment, getModelLikeIdSegments } from "./id";
-import { REFERENCE_TRAILING_MARKER_PATTERN } from "./markers";
-
 export interface ModelReferenceIndex {
 	exact: Map<string, Model<Api>>;
 	suffixAlias: Map<string, Model<Api>>;
 }
+
+const REFERENCE_MARKER_SUFFIXES = (() => {
+	const discovery = discoveryVocabulary();
+	const suffixes: string[] = [];
+	for (const marker of discovery.trailingMarkers) {
+		suffixes.push(`-${marker}`, `:${marker}`);
+	}
+	for (const marker of discovery.referenceOnlyTrailingMarkers) {
+		suffixes.push(`-${marker}`, `:${marker}`);
+	}
+	return suffixes;
+})();
 
 // xai-oauth subscription entries carry zero public pricing and inflated maxTokens;
 // keep them provider-local so they cannot outrank paid/public Grok references.
@@ -89,8 +100,23 @@ function buildSuffixAliasMap(exactReferences: ReadonlyMap<string, Model<Api>>): 
 }
 
 function stripReferenceTrailingMarker(candidate: string): string | undefined {
-	const match = REFERENCE_TRAILING_MARKER_PATTERN.exec(candidate);
-	return match ? candidate.slice(0, match.index) : undefined;
+	const lower = candidate.toLowerCase();
+	let suffixLength = 0;
+	const discovery = discoveryVocabulary();
+	for (const suffix of discovery.billingVariantSuffixes) {
+		if (lower.endsWith(suffix) && suffix.length > suffixLength) suffixLength = suffix.length;
+	}
+	for (const suffix of REFERENCE_MARKER_SUFFIXES) {
+		if (lower.endsWith(suffix) && suffix.length > suffixLength) suffixLength = suffix.length;
+	}
+	const collapse = collapseVocabulary();
+	for (const rule of collapse.suffixes) {
+		if (lower.endsWith(rule.suffix) && rule.suffix.length > suffixLength) suffixLength = rule.suffix.length;
+	}
+	for (const rule of collapse.routingVariants) {
+		if (lower.endsWith(rule.suffix) && rule.suffix.length > suffixLength) suffixLength = rule.suffix.length;
+	}
+	return suffixLength > 0 && suffixLength < candidate.length ? candidate.slice(0, -suffixLength) : undefined;
 }
 
 function getReferenceCandidateIds(modelId: string): string[] {

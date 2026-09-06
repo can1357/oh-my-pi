@@ -66,7 +66,9 @@ it("stops writing when the real terminal path crosses the backlog cap", () => {
 
 	try {
 		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-		const terminal = new ProcessTerminal();
+		// conpty: false keeps the single-write path so the 64 MiB cap trips at the
+		// 65th frame; ConPTY would chunk each frame and skew the write count.
+		const terminal = new ProcessTerminal({ conpty: false });
 		const frame = "x".repeat(1024 * 1024);
 		for (let i = 0; i < 70; i++) terminal.write(frame);
 

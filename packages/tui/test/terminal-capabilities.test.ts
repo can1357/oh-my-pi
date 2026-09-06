@@ -4,7 +4,9 @@ import {
 	getTerminalInfo,
 	hyperlinksUserOverride,
 	ImageProtocol,
+	isPaseoEmbedder,
 	NotifyProtocol,
+	resolveImageProtocol,
 	resolveWarpImageProtocol,
 	shouldEnableHyperlinksByDefault,
 	shouldEnableSynchronizedOutputByDefault,
@@ -173,7 +175,7 @@ console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProto
 		expect(warp.trueColor).toBe(true);
 		expect(warp.hyperlinks).toBe(false);
 		expect(warp.notifyProtocol).toBe(NotifyProtocol.Osc9);
-		expect(warp.textSizing).toBe(false);
+		expect(warp.supportsTextSizing).toBe(false);
 	});
 
 	it("uses Kitty images on macOS/Linux and disables them on Windows", () => {
@@ -190,7 +192,7 @@ console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProto
 		expect(linux.trueColor).toBe(true);
 		expect(linux.hyperlinks).toBe(false);
 		expect(linux.deccara).toBe(false);
-		expect(linux.textSizing).toBe(false);
+		expect(linux.supportsTextSizing).toBe(false);
 	});
 
 	it("treats WSL as the Windows host so Kitty APC garbage never reaches Warp for Windows", () => {
@@ -209,6 +211,100 @@ console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProto
 		expect(shouldEnableSynchronizedOutputByDefault({}, "warp")).toBe(false);
 		expect(shouldEnableHyperlinksByDefault({}, "warp")).toBe(false);
 		expect(shouldEnableHyperlinksByDefault({ PI_FORCE_HYPERLINKS: "1" }, "warp")).toBe(true);
+	});
+});
+
+/**
+ * Build a child-process env for the TERMINAL resolution subprocesses: inherits
+ * the runner's environment, strips every terminal-identification marker and
+ * image-protocol pin, then applies the caller's overrides. Keeps the suite
+ * independent of which terminal it runs inside (full-suite safe).
+ */
+function subprocessEnv(overrides: Record<string, string | undefined>): Record<string, string | undefined> {
+	const env: Record<string, string | undefined> = { ...Bun.env };
+	for (const key of [
+		"PI_FORCE_IMAGE_PROTOCOL",
+		"PASEO_TERMINAL_ID",
+		"KITTY_WINDOW_ID",
+		"GHOSTTY_RESOURCES_DIR",
+		"WEZTERM_PANE",
+		"ITERM_SESSION_ID",
+		"VSCODE_PID",
+		"ALACRITTY_WINDOW_ID",
+	]) {
+		delete env[key];
+	}
+	return { ...env, ...overrides };
+}
+
+describe("Paseo embedder carve-out", () => {
+	it("detects Paseo via PASEO_TERMINAL_ID", () => {
+		expect(isPaseoEmbedder({})).toBe(false);
+		expect(isPaseoEmbedder({ PASEO_TERMINAL_ID: "term-1" })).toBe(true);
+	});
+
+	it("drops the multiplexer-restored Kitty fallback inside Paseo", () => {
+		// Regression (getpaseo/paseo#3850): tmux inside a Paseo pane resolves to
+		// base (null static protocol) and TERM=tmux-* would restore Kitty via
+		// the fallback — the embedder carve-out must win over the fallback.
+		expect(resolveImageProtocol("base", { TERM: "tmux-256color", PASEO_TERMINAL_ID: "term-1" }, true)).toBeNull();
+		expect(resolveImageProtocol("base", { TERM: "tmux-256color" }, true)).toBe(ImageProtocol.Kitty);
+	});
+
+	it("drops Kitty graphics when Paseo hosts the terminal", async () => {
+		const env = subprocessEnv({ TERM_PROGRAM: "kitty", PASEO_TERMINAL_ID: "term-1" });
+
+		const proc = Bun.spawn({
+			cmd: [
+				process.execPath,
+				"--eval",
+				`import { ImageProtocol, TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
+console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProtocol, expected: ImageProtocol.Kitty }));`,
+			],
+			env,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(stderr).toBe("");
+		expect(exitCode).toBe(0);
+		const resolved = JSON.parse(stdout) as { id: string; imageProtocol: string | null };
+		expect(resolved.id).toBe("kitty");
+		// Paseo's xterm.js renderer implements neither Kitty graphics nor
+		// Unicode placeholders (getpaseo/paseo#3850).
+		expect(resolved.imageProtocol).toBeNull();
+	});
+
+	it("keeps Kitty graphics for a real kitty without PASEO_TERMINAL_ID", async () => {
+		const env = subprocessEnv({ TERM_PROGRAM: "kitty" });
+
+		const proc = Bun.spawn({
+			cmd: [
+				process.execPath,
+				"--eval",
+				`import { ImageProtocol, TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
+console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProtocol, expected: ImageProtocol.Kitty }));`,
+			],
+			env,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(stderr).toBe("");
+		expect(exitCode).toBe(0);
+		const resolved = JSON.parse(stdout) as { id: string; imageProtocol: string | null; expected: string };
+		expect(resolved.id).toBe("kitty");
+		expect(resolved.imageProtocol).toBe(resolved.expected);
 	});
 });
 

@@ -1,10 +1,10 @@
 {
   "type": "module",
   "name": "@oh-my-pi/hashline",
-  "version": "17.3.3",
+  "version": "18.0.11",
   "description": "Hashline: a compact, line-anchored patch language and applier. Pluggable FS/IO so it works over disk, in-memory, or any custom backend.",
   "homepage": "https://omp.sh",
-  "author": "Can Boluk",
+  "author": "Stencil Labs, Inc.",
   "license": "MIT",
   "repository": {
     "type": "git",

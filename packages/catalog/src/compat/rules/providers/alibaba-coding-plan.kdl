@@ -1,0 +1,16 @@
+// Provider-wire compat for "alibaba-coding-plan"; regenerated from the frozen census using deployment contract selectors.
+
+provider "alibaba-coding-plan" {
+	thinking-mode "effort"
+	class "glm" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*.5" {
+		thinking-format "qwen"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-5" {
+		thinking-format "qwen"
+	}
+}

@@ -5,7 +5,12 @@ import * as path from "node:path";
 import { getProviderDashboardStats } from "@oh-my-pi/omp-stats/aggregator";
 import { initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
-import { computeUsageWindowStats, readUsageSnapshots, type UsageSnapshotRow } from "@oh-my-pi/omp-stats/usage-windows";
+import {
+	computeUsageWindowStats,
+	readUsageSnapshots,
+	sumFleetTokens,
+	type UsageSnapshotRow,
+} from "@oh-my-pi/omp-stats/usage-windows";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -147,7 +152,7 @@ describe("computeUsageWindowStats", () => {
 		expect(windowInsights[0].idealAccounts).toBe(1);
 	});
 
-	it("keeps windows with distinct labels separate", () => {
+	it("keeps windows with distinct limit ids separate", () => {
 		const rows: UsageSnapshotRow[] = [
 			snapshot({ recordedAt: T0, usedFraction: 0.2, limitId: "5h", windowLabel: "5h" }),
 			snapshot({ recordedAt: T0, usedFraction: 0.1, limitId: "weekly", windowLabel: "Weekly", label: "Weekly" }),
@@ -161,7 +166,100 @@ describe("computeUsageWindowStats", () => {
 			}),
 		];
 		const { windowInsights } = computeUsageWindowStats(rows, new Map());
-		expect(windowInsights.map(i => i.windowKey).sort()).toEqual(["5h", "Weekly"]);
+		expect(windowInsights.map(i => i.windowKey).sort()).toEqual(["5h", "weekly"]);
+	});
+
+	it("never merges distinct limits sharing a window label", () => {
+		// Anthropic reports an overall 7-day window and a model-scoped one with
+		// the same "7 Day" window label. Grouping by label interleaved the two
+		// fraction series per account, inflating consumption from oscillation:
+		// here 0.8 - 0.1 = 0.7 fake burn per interleaved pair.
+		const base = { windowLabel: "7 Day", accountKey: "acct-1" };
+		const rows: UsageSnapshotRow[] = [
+			snapshot({ ...base, recordedAt: T0 + 0 * MINUTE, limitId: "7d", label: "Claude 7 Day", usedFraction: 0.8 }),
+			snapshot({
+				...base,
+				recordedAt: T0 + 1 * MINUTE,
+				limitId: "7d:opus",
+				label: "Claude 7 Day (Opus)",
+				usedFraction: 0.1,
+			}),
+			snapshot({ ...base, recordedAt: T0 + 2 * MINUTE, limitId: "7d", label: "Claude 7 Day", usedFraction: 0.9 }),
+			snapshot({
+				...base,
+				recordedAt: T0 + 3 * MINUTE,
+				limitId: "7d:opus",
+				label: "Claude 7 Day (Opus)",
+				usedFraction: 0.15,
+			}),
+		];
+		const { windowInsights } = computeUsageWindowStats(rows, new Map([["prov-a", 1_000_000]]));
+
+		expect(windowInsights.map(i => i.windowKey).sort()).toEqual(["7d", "7d:opus"]);
+		const overall = windowInsights.find(i => i.windowKey === "7d");
+		const opus = windowInsights.find(i => i.windowKey === "7d:opus");
+		expect(overall?.fractionConsumed).toBeCloseTo(0.1, 10);
+		expect(opus?.fractionConsumed).toBeCloseTo(0.05, 10);
+		expect(overall?.cycles).toBe(0);
+		// The limit label (not the shared window label) tells the two apart.
+		expect(overall?.windowLabel).toBe("Claude 7 Day");
+		expect(opus?.windowLabel).toBe("Claude 7 Day (Opus)");
+	});
+
+	it("suffixes the window label when the limit label lacks the duration", () => {
+		// Antigravity exposes daily and weekly limits under the same limit
+		// label; the display label must carry the duration to tell them apart.
+		const rows: UsageSnapshotRow[] = [
+			snapshot({
+				recordedAt: T0,
+				limitId: "g:daily",
+				label: "Usage (Google)",
+				windowLabel: "Daily",
+				usedFraction: 0.2,
+			}),
+			snapshot({
+				recordedAt: T0,
+				limitId: "g:weekly",
+				label: "Usage (Google)",
+				windowLabel: "Weekly",
+				usedFraction: 0.1,
+			}),
+		];
+		const { windowInsights } = computeUsageWindowStats(rows, new Map());
+		expect(windowInsights.map(i => i.windowLabel).sort()).toEqual([
+			"Usage (Google) · Daily",
+			"Usage (Google) · Weekly",
+		]);
+	});
+});
+
+describe("sumFleetTokens", () => {
+	it("sums all four token components per provider across clients, null when empty", () => {
+		const client = (installId: string, provider: string, tokens: [number, number, number, number]) => ({
+			installId,
+			firstSeen: T0,
+			lastSeen: T0,
+			providers: [
+				{
+					provider,
+					requests: 1,
+					inputTokens: tokens[0],
+					outputTokens: tokens[1],
+					cacheReadTokens: tokens[2],
+					cacheWriteTokens: tokens[3],
+					costUsd: 0,
+				},
+			],
+		});
+		const tokens = sumFleetTokens([
+			client("install-1", "prov-a", [100, 20, 300, 4]),
+			client("install-2", "prov-a", [1, 2, 3, 4]),
+			client("install-3", "prov-b", [10, 0, 0, 0]),
+		]);
+		expect(tokens?.get("prov-a")).toBe(434);
+		expect(tokens?.get("prov-b")).toBe(10);
+		// No reports must read as "no data" (fall back to local stats), not zero burn.
+		expect(sumFleetTokens([])).toBeNull();
 	});
 });
 

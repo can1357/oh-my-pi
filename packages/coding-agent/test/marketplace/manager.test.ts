@@ -9,6 +9,8 @@ import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/m
 import {
 	MarketplaceManager,
 	readInstalledPluginsRegistry,
+	readMarketplacesRegistry,
+	writeMarketplacesRegistry,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
@@ -166,6 +168,34 @@ describe("MarketplaceManager", () => {
 		expect(updated.addedAt).toBe(added.addedAt);
 		// updatedAt must be at or after addedAt
 		expect(new Date(updated.updatedAt) >= new Date(added.addedAt)).toBe(true);
+	});
+
+	it("updateMarketplace expands a home-relative catalog path", async () => {
+		const fakeHome = fs.mkdtempSync(path.join(ctx.tmpDir, "home-"));
+		const homedirSpy = spyOn(os, "homedir").mockReturnValue(fakeHome);
+		const registryPath = path.join(ctx.tmpDir, "marketplaces.json");
+		const originalCwd = process.cwd();
+		const cwd = path.join(ctx.tmpDir, "cwd");
+
+		try {
+			const added = await ctx.manager.addMarketplace(FIXTURE_DIR);
+			const catalogPath = "~/.omp/plugins/cache/marketplaces/test-marketplace/marketplace.json";
+			const registry = await readMarketplacesRegistry(registryPath);
+			await writeMarketplacesRegistry(registryPath, {
+				...registry,
+				marketplaces: [{ ...added, catalogPath }],
+			});
+			fs.mkdirSync(cwd);
+			process.chdir(cwd);
+
+			await ctx.manager.updateMarketplace("test-marketplace");
+
+			expect(fs.existsSync(path.join(fakeHome, catalogPath.slice(2)))).toBe(true);
+			expect(fs.existsSync(path.join(cwd, catalogPath))).toBe(false);
+		} finally {
+			process.chdir(originalCwd);
+			homedirSpy.mockRestore();
+		}
 	});
 
 	// ── Plugin discovery ───────────────────────────────────────────────────

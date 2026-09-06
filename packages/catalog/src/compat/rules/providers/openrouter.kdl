@@ -1,0 +1,56 @@
+// Provider-wire compat for "openrouter"; regenerated from the frozen census using deployment contract selectors.
+
+provider "openrouter" {
+	thinking-format "openrouter"
+	thinking-mode "effort"
+	class "minimax" {
+		family "m3" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	class "openai" {
+		family "o-series" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	class "stepfun" {
+		family "step" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*thinking-2507" "*thinking:free" "arcee-ai/trinity-large-thinking" \
+		"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" {
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek/deepseek-chat-v3.1" "deepseek/deepseek-v4-pro" {
+		thinking-efforts "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/gpt-5.1-codex-mini" {
+		thinking-efforts "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/o1:batch" "openai/o3:batch" {
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "qwen/qwen3-coder" {
+		thinking-format "openrouter"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "z*5" "z-ai/glm-4.6*" "z-ai/glm-4.7*" "amazon/nova-2-lite-v1" "baidu/ernie-4.5-vl-28b-a3b" "cohere/north-mini-code:free" \
+		"minimax/minimax-m1" "nvidia/llama-3.3-nemotron-super-49b-v1.5" "openai/gpt-5.1-codex" \
+		"openai/gpt-5.1-codex-max" "openai/gpt-chat-latest" "z-ai/glm-4.5v" "z-ai/glm-5.1" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "z-ai/glm-5.2*" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+}

@@ -23,7 +23,7 @@ afterEach(async () => {
 	tempAgentDir = undefined;
 });
 
-it("uses the Nerd Fonts v3 Material Design session icon", async () => {
+it("uses the Nerd Fonts v3 session and C# icons", async () => {
 	originalAgentDir = getAgentDir();
 	originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 	tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nerd-symbols-"));
@@ -38,4 +38,25 @@ it("uses the Nerd Fonts v3 Material Design session icon", async () => {
 
 	const theme = await getThemeByName(customThemeName);
 	expect(theme?.symbol("icon.session")).toBe("\u{f0051}");
+	expect(theme?.getLangIcon("csharp")).toBe("\u{e7b2}");
+});
+
+it("resolves subscription and advisor icons in Nerd Font mode", async () => {
+	originalAgentDir = getAgentDir();
+	originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+	tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nerd-symbols-"));
+	setAgentDir(tempAgentDir);
+
+	const dark = await Bun.file(DARK_THEME_PATH).json();
+	const customThemeName = "nerd-annotation-symbols";
+	await Bun.write(
+		path.join(getCustomThemesDir(), `${customThemeName}.json`),
+		JSON.stringify({ ...dark, name: customThemeName, symbols: { ...dark.symbols, preset: "nerd" } }),
+	);
+
+	const theme = await getThemeByName(customThemeName);
+	expect(theme?.symbol("icon.subscription")).toBe("\u{f067a}");
+	expect(theme?.symbol("icon.advisor")).toBe("\uea70");
+	expect(theme?.icon.subscription).toBe("\u{f067a}");
+	expect(theme?.icon.advisor).toBe("\uea70");
 });

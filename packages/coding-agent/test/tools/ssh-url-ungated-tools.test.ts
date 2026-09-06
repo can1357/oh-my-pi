@@ -43,7 +43,7 @@ describe("ssh:// is rejected before any connection in read/write-tier tools", ()
 		for (const internalUrlAction of ["search", "rewrite"]) {
 			await expect(
 				resolveToolSearchScope({ rawPaths: ["ssh://h/x"], cwd: os.tmpdir(), internalUrlAction }),
-			).rejects.toThrow(/ssh:\/\//);
+			).rejects.toThrow(/use `grep` on a specific remote file/);
 		}
 		expect(spy).not.toHaveBeenCalled();
 	});

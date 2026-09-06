@@ -1,0 +1,45 @@
+// Provider-wire compat for "xai"; regenerated from the frozen census using deployment contract selectors.
+
+provider "xai" {
+	class "xai" {
+		family "grok" {
+			// Paid xAI routes through /v1/responses like SuperGrok. Encrypted
+			// reasoning is requested and replayed across
+			// turns, api.x.ai rejects `reasoning.summary`, `minimal` clamps to
+			// `low`, and root-union tool schemas are flattened for the xAI
+			// function-calling validator.
+			filter-reasoning-history #false
+			include-encrypted-reasoning #true
+			reasoning-effort-map {
+				minimal "low"
+				xhigh "high"
+				max "high"
+			}
+			supports-reasoning-summary #false
+			thinking-mode "effort"
+		}
+	}
+	// Dormant until a catalog snapshot ships grok-4.6; xhigh is native there.
+	// The effort-capable allowlist accepts the wire reasoning.effort dial;
+	// xhigh-capable SKUs (4.6, multi-agent) keep xhigh unmapped.
+	models "grok-3-mini*" "grok-4.20-multi-agent*" "grok-4.3*" "grok-4.5*" "grok-4.6*" {
+		supports-reasoning-effort #true
+		omit-reasoning-effort #false
+	}
+	models "grok-4.20-multi-agent*" "grok-4.6*" priority=1 {
+		reasoning-effort-map {
+			minimal "low"
+		}
+	}
+	// residue: no-dial Responses rows (reasoning-suffixed SKUs, grok-build,
+	// grok-code-fast, composer) 400 when `reasoning.effort` is present.
+	models "*reasoning" "grok-build*" "grok-code-fast*" "*composer*" {
+		omit-reasoning-effort #true
+		supports-reasoning-effort #false
+	}
+	// residue: multi-agent Responses SKUs keep the native effort dial.
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "grok-4.20-0309-reasoning" "grok-4.20-beta-latest-reasoning" {
+		thinking-requires-effort #true
+	}
+}

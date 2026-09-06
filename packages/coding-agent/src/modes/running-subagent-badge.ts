@@ -8,6 +8,9 @@ export function getRunningSubagentBadgeRegistry(collabGuest: RunningSubagentRegi
 	return collabGuest?.agentRegistry ?? AgentRegistry.global();
 }
 
-export function countRunningSubagentBadgeAgents(registry: AgentRegistry): number {
-	return registry.list().filter(ref => ref.kind === "sub" && ref.status === "running").length;
+export function getRunningSubagentBadgeAgentIds(registry: AgentRegistry): string[] {
+	return registry
+		.list()
+		.filter(ref => ref.kind === "sub" && ref.status === "running")
+		.map(ref => ref.id);
 }

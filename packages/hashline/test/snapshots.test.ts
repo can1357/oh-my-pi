@@ -69,6 +69,16 @@ describe("InMemorySnapshotStore", () => {
 		expect(store.head(PATH)).toBeNull();
 	});
 
+	// The tokens.rs incident: a tag minted early in a session touching dozens
+	// of files aged out of the path LRU, downgrading a recoverable stale-tag
+	// mismatch to the misleading "hash is not from this session" rejection.
+	it("keeps an early tag resolvable across a wide session at default capacity", () => {
+		const store = new InMemorySnapshotStore();
+		const tag = store.record(PATH, "first\n");
+		for (let i = 0; i < 100; i++) store.record(`/w/other-${i}.ts`, `content ${i}\n`);
+		expect(store.byHash(PATH, tag)?.text).toBe("first\n");
+	});
+
 	it("rejects cross-path lookups", () => {
 		const store = new InMemorySnapshotStore();
 		const tag = store.record(PATH, "shared\n");

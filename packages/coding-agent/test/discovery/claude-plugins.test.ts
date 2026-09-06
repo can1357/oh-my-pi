@@ -14,6 +14,7 @@ import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
+import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import type { SlashCommand } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
 
@@ -186,7 +187,7 @@ describe("listClaudePluginRoots", () => {
 		]);
 	});
 
-	test("isolates local plugins to their canonical project", async () => {
+	test("isolates local and project plugins to their canonical project", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
 		const projectA = path.join(tempDir, "project-a");
 		const projectB = path.join(tempDir, "project-b");
@@ -200,7 +201,7 @@ describe("listClaudePluginRoots", () => {
 		]);
 		await fs.symlink(projectB, projectBAlias, "dir");
 
-		const entry = (scope: "user" | "local", installPath: string, projectPath?: string) => ({
+		const entry = (scope: "user" | "project" | "local", installPath: string, projectPath?: string) => ({
 			scope,
 			installPath,
 			projectPath,
@@ -212,42 +213,122 @@ describe("listClaudePluginRoots", () => {
 			version: 2,
 			plugins: {
 				"user-plugin@market": [entry("user", "/plugins/user")],
-				"active-plugin@market": [entry("local", "/plugins/active", projectB)],
-				"foreign-plugin@market": [entry("local", "/plugins/foreign", projectA)],
+				"active-local-plugin@market": [entry("local", "/plugins/active-local", projectB)],
+				"foreign-local-plugin@market": [entry("local", "/plugins/foreign-local", projectA)],
+				"active-project-plugin@market": [entry("project", "/plugins/active-project", projectB)],
+				"foreign-project-plugin@market": [entry("project", "/plugins/foreign-project", projectA)],
 			},
 		};
 		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
 
 		const result = await listClaudePluginRoots(tempDir, path.join(projectBAlias, "packages", "app"));
 
-		expect(result.roots.map(root => root.id)).toEqual(["user-plugin@market", "active-plugin@market"]);
-		expect(result.roots.find(root => root.id === "active-plugin@market")?.scope).toBe("project");
+		expect(result.roots.map(root => root.id)).toEqual([
+			"user-plugin@market",
+			"active-local-plugin@market",
+			"active-project-plugin@market",
+		]);
+		expect(result.roots.filter(root => root.id !== "user-plugin@market").map(root => root.scope)).toEqual([
+			"project",
+			"project",
+		]);
 	});
 
-	test("parses plugin with project scope", async () => {
+	test("hides a plugin the user switched off with enabledPlugins in project settings", async () => {
+		// Contract: a plugin Claude Code would not load in this project (enabledPlugins:false in
+		// .claude/settings.local.json) must not contribute skills/MCP/commands here either.
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
-		await fs.mkdir(pluginsDir, { recursive: true });
+		const project = path.join(tempDir, "project");
+		await Promise.all([
+			fs.mkdir(pluginsDir, { recursive: true }),
+			fs.mkdir(path.join(project, ".claude"), { recursive: true }),
+			fs.mkdir(path.join(project, ".git"), { recursive: true }),
+		]);
+		const entry = (installPath: string) => ({
+			scope: "user",
+			installPath,
+			version: "1.0.0",
+			installedAt: "2025-01-01T00:00:00Z",
+			lastUpdated: "2025-01-01T00:00:00Z",
+		});
+		await fs.writeFile(
+			path.join(pluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"kept@market": [entry("/plugins/kept")],
+					"muted@market": [entry("/plugins/muted")],
+					"muted-then-restored@market": [entry("/plugins/restored")],
+				},
+			}),
+		);
+		// settings.json turns two off; settings.local.json turns one of them back on (local wins).
+		await fs.writeFile(
+			path.join(project, ".claude", "settings.json"),
+			JSON.stringify({ enabledPlugins: { "muted@market": false, "muted-then-restored@market": false } }),
+		);
+		await fs.writeFile(
+			path.join(project, ".claude", "settings.local.json"),
+			JSON.stringify({ enabledPlugins: { "muted-then-restored@market": true } }),
+		);
 
-		const registry = {
-			version: 2,
-			plugins: {
-				"project-plugin@market": [
-					{
-						scope: "project",
-						installPath: "/path/to/project-plugin",
-						version: "2.0.0",
-						installedAt: "2025-01-01T00:00:00Z",
-						lastUpdated: "2025-01-01T00:00:00Z",
-					},
-				],
-			},
-		};
+		const inProject = await listClaudePluginRoots(tempDir, project);
+		expect(inProject.roots.map(root => root.id).sort()).toEqual(["kept@market", "muted-then-restored@market"]);
 
-		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		// The switch is per project: elsewhere the same user-scope install still loads.
+		const elsewhere = path.join(tempDir, "elsewhere");
+		await fs.mkdir(path.join(elsewhere, ".git"), { recursive: true });
+		const outside = await listClaudePluginRoots(tempDir, elsewhere);
+		expect(outside.roots.map(root => root.id).sort()).toEqual([
+			"kept@market",
+			"muted-then-restored@market",
+			"muted@market",
+		]);
+	});
 
-		const result = await listClaudePluginRoots(tempDir);
-		expect(result.roots).toHaveLength(1);
-		expect(result.roots[0].scope).toBe("project");
+	test("enabledPlugins:true opts a local-scope install into a project with a different projectPath", async () => {
+		// Contract: Claude Code loads a plugin wherever enabledPlugins says true, regardless of
+		// which directory the local-scope install was recorded under. Without this, a plugin
+		// installed from a parent directory never loads from the child project it is enabled in.
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const parent = path.join(tempDir, "clients");
+		const child = path.join(parent, "acme");
+		await Promise.all([
+			fs.mkdir(pluginsDir, { recursive: true }),
+			fs.mkdir(path.join(child, ".claude"), { recursive: true }),
+			fs.mkdir(path.join(child, ".git"), { recursive: true }),
+		]);
+		await fs.writeFile(
+			path.join(pluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"acme@market": [
+						{
+							scope: "local",
+							installPath: "/plugins/acme",
+							projectPath: parent,
+							version: "1.0.0",
+							installedAt: "2025-01-01T00:00:00Z",
+							lastUpdated: "2025-01-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+
+		const before = await listClaudePluginRoots(tempDir, child);
+		expect(before.roots).toEqual([]);
+
+		clearClaudePluginRootsCache();
+		clearFsCache();
+		await fs.writeFile(
+			path.join(child, ".claude", "settings.local.json"),
+			JSON.stringify({ enabledPlugins: { "acme@market": true } }),
+		);
+		const after = await listClaudePluginRoots(tempDir, child);
+		expect(after.roots.map(root => root.id)).toEqual(["acme@market"]);
+		expect(after.roots[0]?.scope).toBe("project");
 	});
 
 	test("handles multiple entries per plugin ID", async () => {
@@ -267,6 +348,7 @@ describe("listClaudePluginRoots", () => {
 					},
 					{
 						scope: "project",
+						projectPath: tempDir,
 						installPath: "/path/to/v1",
 						version: "1.0.0",
 						installedAt: "2025-01-01T00:00:00Z",
@@ -278,7 +360,7 @@ describe("listClaudePluginRoots", () => {
 
 		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
 
-		const result = await listClaudePluginRoots(tempDir);
+		const result = await listClaudePluginRoots(tempDir, tempDir);
 		// Should return both entries, not just the first one
 		expect(result.roots).toHaveLength(2);
 		expect(result.roots[0].version).toBe("2.0.0");
@@ -452,6 +534,43 @@ describe("listClaudePluginRoots", () => {
 		const result = await listClaudePluginRoots(tempDir);
 		expect(result.roots).toHaveLength(1);
 		expect(result.roots[0].scope).toBe("user");
+	});
+	test("loads rules from OMP marketplace plugins", async () => {
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "omp-rules");
+		await Promise.all([
+			fs.mkdir(pluginsDir, { recursive: true }),
+			fs.mkdir(path.join(pluginPath, "rules"), { recursive: true }),
+		]);
+		await fs.writeFile(
+			path.join(pluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"omp-rules@market": [
+						{
+							scope: "user",
+							installPath: pluginPath,
+							version: "1.0.0",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(
+			path.join(pluginPath, "package.json"),
+			JSON.stringify({ name: "omp-rules", omp: { extensions: ["./extension.ts"] } }),
+		);
+		await fs.writeFile(
+			path.join(pluginPath, "rules", "style.md"),
+			"---\ndescription: Marketplace style rule\n---\nUse tabs.\n",
+		);
+
+		const result = await loadCapability<Rule>("rules", { cwd: tempDir });
+		const found = result.all.find(rule => rule.name === "style");
+
+		expect(found?.description).toBe("Marketplace style rule");
+		expect(found?._source?.provider).toBe("claude-plugins");
 	});
 	test("reads skills directory from plugin manifest skills field", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
@@ -1424,6 +1543,7 @@ describe("discoverAgents plugin precedence", () => {
 					},
 					{
 						scope: "project",
+						projectPath: tempDir,
 						installPath: projectPluginPath,
 						version: "1.0.1",
 						installedAt: "2025-01-02T00:00:00Z",

@@ -34,9 +34,11 @@ import {
 	normalizeMessagesForProvider,
 	normalizeTools,
 	resolveOwnedDialectFromEnv,
+	unpairedToolCallTail,
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { isProviderRefusalMessage } from "./replay-policy";
+import { Tokenizer, tokenizerEncodingForModel } from "./tokenizer";
 import type {
 	AgentBeforeModelCall,
 	AgentContext,
@@ -363,7 +365,7 @@ export class Agent {
 		pendingToolCalls: new Set<string>(),
 		error: undefined,
 	};
-
+	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
@@ -459,6 +461,7 @@ export class Agent {
 		if (opts.initialState?.messages) this.#state.messages = opts.initialState.messages.slice();
 		if (opts.initialState?.pendingToolCalls)
 			this.#state.pendingToolCalls = new Set(opts.initialState.pendingToolCalls);
+		this.#syncTokenizer(this.#state.model);
 		this.#convertToLlm = opts.convertToLlm || defaultConvertToLlm;
 		this.#transformContext = opts.transformContext;
 		this.#steeringMode = opts.steeringMode || "one-at-a-time";
@@ -720,9 +723,27 @@ export class Agent {
 	set maxRetryDelayMs(value: number | undefined) {
 		this.#maxRetryDelayMs = value;
 	}
-
 	get state(): AgentState {
 		return this.#state;
+	}
+
+	/**
+	 * Tokenizer for the active model. The instance is replaced whenever the
+	 * active model's encoding changes (see {@link setModel}), so callers must
+	 * not cache it across model switches.
+	 */
+	get tokenizer(): Tokenizer {
+		return this.#tokenizer;
+	}
+
+	/**
+	 * Swap the tokenizer only when the encoding actually changes, so the warm
+	 * per-message memo survives same-encoding model switches.
+	 */
+	#syncTokenizer(model: Model | null | undefined): void {
+		if (tokenizerEncodingForModel(model) !== this.#tokenizer.encoding) {
+			this.#tokenizer = new Tokenizer(model);
+		}
 	}
 
 	get appendOnlyContext(): AppendOnlyContextManager | undefined {
@@ -902,8 +923,9 @@ export class Agent {
 		this.#state.systemPrompt = typeof v === "string" ? [v] : v;
 	}
 
-	setModel(m: Model) {
-		this.#state.model = m;
+	setModel(model: Model) {
+		this.#state.model = model;
+		this.#syncTokenizer(model);
 	}
 
 	setThinkingLevel(l: Effort | undefined) {
@@ -1228,6 +1250,15 @@ export class Agent {
 				throw new Error("No messages to continue from");
 			}
 			if (messages[messages.length - 1].role === "assistant") {
+				// A tail with unpaired runnable tool calls resumes by re-executing
+				// them (see `unpairedToolCallTail` in agent-loop). This must win over
+				// queued-message delivery: injecting a message between the tool_use
+				// blocks and their results would break the provider's pairing
+				// invariant. Queued messages drain inside the resumed loop instead.
+				if (unpairedToolCallTail(messages)) {
+					await this.#runLoop(undefined, undefined, signal, true);
+					return;
+				}
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
 				if (queuedSteering.length > 0) {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);

@@ -459,6 +459,20 @@ export function blockInsertLandingShiftWarning(blockStart: number, closerLine: n
 	return `PUT >${blockStart}*: body indented deeper than closing line ${closerLine}, so it was placed inside the block, after line ${landingLine}. \`PUT >N*\` lands AFTER the block at sibling depth — if inside was intended, use plain \`PUT >${closerLine}:\`.`;
 }
 
+/**
+ * Plain `PUT >N:` anchored on a block-opener line with a shallower construct
+ * body: the landing was moved past the whole block — anchoring on an opener
+ * places the body between the opener and its first statement, a position a
+ * body at the opener's depth or above never intends.
+ */
+export function afterInsertOpenerEscapeWarning(anchorLine: number, landingLine: number): string {
+	return (
+		`PUT >${anchorLine}: line ${anchorLine} opens a block, and the body's indentation claims a position ` +
+		`outside it, so the body was landed after line ${landingLine} (verified by the syntax probe). ` +
+		`To insert after a whole construct, anchor on its closing line or use \`PUT >N*:\`.`
+	);
+}
+
 /** `Recovery`: an external write matched a cached snapshot. */
 export const RECOVERY_EXTERNAL_WARNING =
 	"Recovered from a stale file hash using a previous read snapshot (file changed externally between read and edit).";

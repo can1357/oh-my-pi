@@ -86,9 +86,13 @@ export async function loginAlibabaTokenPlan(options: OAuthController): Promise<s
 		fetch: options.fetch,
 	});
 
+	const cookieRequestHost =
+		baseUrl === ALIBABA_TOKEN_PLAN_CN_BASE_URL ? "bailian-cs.console.aliyun.com" : "cs-data.qwencloud.com";
 	const rawCookie = await options.onPrompt({
 		message:
-			"Optional quota reporting: open browser DevTools → Network, reload the Token Plan page, filter for api.json, and select the cs-data.qwencloud.com/data/api.json request whose api query ends in /tokenplan/personal/api/v2/usage. Copy Request Headers → Cookie, then paste the complete name=value; ... value here, or press Enter to skip.",
+			baseUrl === ALIBABA_TOKEN_PLAN_CN_BASE_URL
+				? "Optional quota reporting: open browser DevTools → Network, reload the Token Plan page, filter for api.json, and select the bailian-cs.console.aliyun.com/data/api.json request whose api query ends in /tokenplan/personal/api/v2/usage. Copy Request Headers → Cookie, then paste the complete name=value; ... value here, or press Enter to skip."
+				: "Optional quota reporting: open browser DevTools → Network, reload the Token Plan page, filter for api.json, and select the cs-data.qwencloud.com/data/api.json request whose api query ends in /tokenplan/personal/api/v2/usage. Copy Request Headers → Cookie, then paste the complete name=value; ... value here, or press Enter to skip.",
 		placeholder: "name=value; name=value; ...",
 		allowEmpty: true,
 	});
@@ -107,7 +111,7 @@ export async function loginAlibabaTokenPlan(options: OAuthController): Promise<s
 		})
 	) {
 		throw new AIError.ConfigurationError(
-			"Invalid QwenCloud Cookie header. Copy the complete Cookie request header from the cs-data.qwencloud.com usage request, not a single cookie value.",
+			`Invalid QwenCloud Cookie header. Copy the complete Cookie request header from the ${cookieRequestHost} usage request, not a single cookie value.`,
 		);
 	}
 

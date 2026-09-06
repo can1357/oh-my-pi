@@ -93,6 +93,41 @@ describe("verifyExpectedFiles", () => {
 		}
 	});
 
+	it("succeeds when a code file differs only by a stray seam blank line", async () => {
+		const { expectedDir, actualDir, cleanup } = await createTempDirs();
+		try {
+			// A block move that leaves one extra blank line where the block was
+			// deleted must not fail verification (prettier preserves single
+			// blank lines, so formatting alone cannot repair this).
+			const expected = "function a() {\n  return 1;\n}\nfunction b() {\n  return 2;\n}\n";
+			const actual = "function a() {\n  return 1;\n}\n\nfunction b() {\n  return 2;\n}\n";
+			await Bun.write(path.join(expectedDir, "index.ts"), expected);
+			await Bun.write(path.join(actualDir, "index.ts"), actual);
+
+			const result = await verifyExpectedFiles(expectedDir, actualDir);
+
+			expect(result.success).toBe(true);
+			expect(result.formattedEquivalent).toBe(true);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("keeps blank lines significant for markdown files", async () => {
+		const { expectedDir, actualDir, cleanup } = await createTempDirs();
+		try {
+			// One paragraph vs two: a real markdown content difference.
+			await Bun.write(path.join(expectedDir, "README.md"), "alpha\nbeta\n");
+			await Bun.write(path.join(actualDir, "README.md"), "alpha\n\nbeta\n");
+
+			const result = await verifyExpectedFiles(expectedDir, actualDir);
+
+			expect(result.success).toBe(false);
+		} finally {
+			await cleanup();
+		}
+	});
+
 	it("normalizes line endings before comparison", async () => {
 		const { expectedDir, actualDir, cleanup } = await createTempDirs();
 		try {

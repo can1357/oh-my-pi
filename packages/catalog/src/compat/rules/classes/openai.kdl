@@ -1,0 +1,38 @@
+// Model-lineage compat for "openai"; regenerated from the frozen census using class taxonomy selectors.
+
+class "openai" {
+	// GPT wire ladders are model generations, not host contracts: <5.2 keeps
+	// the classic four-tier scale, 5.2+ drops minimal for xhigh, and 5.6+
+	// exposes the wire-exact five-tier low..max scale.
+	family "gpt" {
+		revision "<5.2" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	family "codex" {
+		revision "<5.2" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+		revision "=5.1" {
+			models "*codex-mini*" {
+				thinking-efforts "medium" "high"
+			}
+		}
+	}
+	revision ">=5.2 <5.6" {
+		thinking-efforts "low" "medium" "high" "xhigh"
+	}
+	revision ">=5.6" {
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		requires-reasoning-off-juice-instruction #true
+	}
+	// Codex SKUs: the advertised 400K figure includes the output budget; the
+	// true prompt window is 272K. Spark budgets are its own family's.
+	family "codex" {
+		revision ">=1" {
+			limits-patch {
+				context-window 272000
+			}
+		}
+	}
+}

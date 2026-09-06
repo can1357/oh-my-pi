@@ -202,6 +202,7 @@ describe("openai-completions compatibility", () => {
 			allowsSyntheticReasoningContentForToolCalls: true,
 			replayReasoningContent: false,
 			qwenPreserveThinking: false,
+			qwenTemplateReasoningEffort: false,
 			requiresAssistantContentForToolCalls: false,
 			openRouterRouting: {},
 			vercelGatewayRouting: {},
@@ -210,6 +211,7 @@ describe("openai-completions compatibility", () => {
 			toolStrictMode: "none",
 			supportsReasoningParams: true,
 			supportsSamplingParams: true,
+			supportsPenaltyAndStopParams: true,
 			alwaysSendMaxTokens: false,
 			isOpenRouterHost: false,
 			isVercelGatewayHost: false,
@@ -219,6 +221,10 @@ describe("openai-completions compatibility", () => {
 			emptyLengthFinishIsContextError: false,
 			usesOpenAIToolCallIdLimit: false,
 			dropThinkingWhenReasoningEffort: false,
+			nativeKimiK3Reasoning: false,
+			zaiReasoningEffortDialect: false,
+			clampOutputToModelMax: false,
+			stripImageInput: false,
 		} satisfies ResolvedOpenAICompat;
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",
@@ -626,6 +632,79 @@ describe("openai-completions compatibility", () => {
 		expect(result.usage.output).toBe(3);
 		expect(result.usage.cacheRead).toBe(2);
 		expect(result.usage.totalTokens).toBe(15);
+	});
+
+	it("preserves opaque tool-call IDs when replaying a custom Chat Completions turn", async () => {
+		const model: Model<"openai-completions"> = buildModel({
+			id: "gateway-model",
+			name: "Gateway Model",
+			api: "openai-completions",
+			provider: "custom-gateway",
+			baseUrl: "https://gateway.example/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		} satisfies ModelSpec<"openai-completions">);
+		const toolCallId = "call_abc||gateway_state||opaque";
+		const assistant = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: createMockFetch([
+				{
+					id: "chatcmpl-opaque-tool-id",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: model.id,
+					choices: [
+						{
+							index: 0,
+							delta: {
+								tool_calls: [
+									{
+										index: 0,
+										id: toolCallId,
+										type: "function",
+										function: { name: "read", arguments: '{"path":"README.md"}' },
+									},
+								],
+							},
+						},
+					],
+				},
+				{
+					id: "chatcmpl-opaque-tool-id",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: model.id,
+					choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+				},
+				"[DONE]",
+			]),
+		}).result();
+		const streamedToolCall = assistant.content.find(content => content.type === "toolCall");
+		expect(streamedToolCall?.id).toBe(toolCallId);
+
+		const payload = await captureOpenAICompletionsPayload(model, {
+			messages: [
+				{ role: "user", content: "Read README", timestamp: 1 },
+				assistant,
+				{
+					role: "toolResult",
+					toolCallId,
+					toolName: "read",
+					content: [{ type: "text", text: "done" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+		});
+		const replayMessages = getPayloadMessages(payload);
+		const assistantPayload = replayMessages.find(message => message.role === "assistant");
+		const toolCalls = assistantPayload?.tool_calls;
+		if (!Array.isArray(toolCalls)) throw new Error("assistant tool_calls missing");
+		expect(toObject(toolCalls[0])?.id).toBe(toolCallId);
+		expect(replayMessages.find(message => message.role === "tool")?.tool_call_id).toBe(toolCallId);
 	});
 
 	it("keeps unindexed batched tool-call arguments isolated", async () => {
@@ -1717,7 +1796,9 @@ describe("kimi model detection via detectCompat", () => {
 	// Dropping reasoning_effort does not turn off the gateway's default thinking
 	// mode, so the compat descriptor itself must mark forced tool choice
 	// unsupported (no per-model override) and buildParams must downgrade the
-	// selector to "auto" while keeping the tool advertised.
+	// selector while keeping the tool advertised. The downgraded "auto" is then
+	// dropped as redundant so reasoning survives (#1207) — omission and "auto"
+	// are wire-equivalent for tool selection.
 	it("scopes the DeepSeek forced tool_choice downgrade to OpenCode gateways", async () => {
 		const todoTool: Tool = {
 			name: "todo",
@@ -1764,7 +1845,7 @@ describe("kimi model detection via detectCompat", () => {
 		const openCode = buildModel(deepseekSpec);
 		expect(openCode.compat.supportsForcedToolChoice).toBe(false);
 		const openCodePayload = await captureToolChoice(openCode);
-		expect(openCodePayload.tool_choice).toBe("auto");
+		expect(openCodePayload.tool_choice).toBeUndefined();
 		expect(
 			Array.isArray(openCodePayload.tools) &&
 				openCodePayload.tools.some(tool => getNestedObject(tool, "function")?.name === "todo"),
@@ -1778,7 +1859,7 @@ describe("kimi model detection via detectCompat", () => {
 		} satisfies ModelSpec<"openai-completions">);
 		expect(customOpenCode.compat.supportsForcedToolChoice).toBe(false);
 		const customPayload = await captureToolChoice(customOpenCode);
-		expect(customPayload.tool_choice).toBe("auto");
+		expect(customPayload.tool_choice).toBeUndefined();
 
 		const nvidia = buildModel({
 			...deepseekSpec,

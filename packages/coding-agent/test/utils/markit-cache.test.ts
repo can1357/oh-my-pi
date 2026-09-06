@@ -105,7 +105,7 @@ describe("document conversion cache", () => {
 
 	it("skips cache for imageDir conversions", async () => {
 		const convert = vi.spyOn(Markit.prototype, "convert").mockResolvedValue({ markdown: "image body" });
-		const docPath = path.join(testDir, "image-doc.pdf");
+		const docPath = path.join(testDir, "image-doc.docx");
 		await fs.writeFile(docPath, new TextEncoder().encode("image bytes"));
 		const imageDir = path.join(testDir, "images");
 

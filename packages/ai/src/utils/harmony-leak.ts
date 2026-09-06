@@ -7,7 +7,6 @@
  * hashline DSL form. Other tools and surfaces fall through to
  * abort-and-retry handled by the agent loop.
  */
-import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { AssistantMessage, Model, ToolCall } from "../types";
 
 // Single source of truth for the marker pattern. `M` in the errata.
@@ -55,7 +54,7 @@ export function escapeHarmonyControlTokensInJson(text: string): string {
  * `gpt-5.4` — are detected even when the local id is opaque.
  */
 export function isHarmonyDialectModel(model: Model): boolean {
-	return preferredDialect(model.requestModelId ?? model.id) === "harmony";
+	return model.identity.class === "gpt-oss";
 }
 
 // Channel-word adjacency (`C`): channel/role name appearing immediately before the marker.

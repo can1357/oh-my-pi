@@ -1,0 +1,24 @@
+// Model-lineage compat for "mimo"; regenerated from the frozen census using class taxonomy selectors.
+
+class "mimo" {
+	// MiMo remaps the pi ladder edges (minimal→low, xhigh→high) on every
+	// census host except the Xiaomi first-party endpoints (zai dialect).
+	on "aimlapi" "cline-pass" "deepinfra" "huggingface" "kilo" "nanogpt" "novita" "opencode-go" \
+		"opencode-zen" "openrouter" "venice" "zenmux" {
+		reasoning-effort-map {
+			minimal "low"
+			xhigh "high"
+		}
+	}
+	on "aimlapi" "cline-pass" "deepinfra" "huggingface" "kilo" "nanogpt" "novita" "opencode-go" "opencode-zen" "openrouter" \
+		"venice" "zenmux" {
+		family "v2" {
+			thinking-efforts "low" "medium" "high"
+		}
+	}
+	on "xiaomi" "xiaomi-token-plan-ams" "xiaomi-token-plan-cn" "xiaomi-token-plan-sgp" {
+		family "v2" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+}

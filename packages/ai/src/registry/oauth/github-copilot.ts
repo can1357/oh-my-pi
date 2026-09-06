@@ -5,10 +5,10 @@ import { scheduler } from "node:timers/promises";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
 	COPILOT_API_HEADERS,
+	discoverGitHubCopilotApiEndpoint,
 	getGitHubCopilotBaseUrl,
 	isPublicGitHubHost,
 	normalizeDomain,
-	normalizeGitHubCopilotApiEndpoint,
 	normalizeGitHubCopilotEnterpriseDomain,
 	OPENCODE_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
@@ -224,27 +224,6 @@ export function refreshGitHubCopilotToken(
 		enterpriseUrl: enterpriseDomain,
 		apiEndpoint,
 	};
-}
-
-async function discoverGitHubCopilotApiEndpoint(token: string, fetchImpl: FetchImpl): Promise<string | undefined> {
-	try {
-		const data = await fetchJson(
-			"https://api.github.com/copilot_internal/user",
-			{
-				headers: {
-					Accept: "application/json",
-					Authorization: `token ${token}`,
-					...OPENCODE_HEADERS,
-				},
-			},
-			fetchImpl,
-		);
-		if (!data || typeof data !== "object") return undefined;
-		const endpoints = (data as { endpoints?: { api?: unknown } }).endpoints;
-		return typeof endpoints?.api === "string" ? normalizeGitHubCopilotApiEndpoint(endpoints.api) : undefined;
-	} catch {
-		return undefined;
-	}
 }
 
 /**

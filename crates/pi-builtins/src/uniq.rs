@@ -847,16 +847,15 @@ fn run_uniq(matches: &ArgMatches, host: &mut Host) -> PortResult<()> {
 		})
 		.transpose()?;
 
+	// Writer first: `stdout_writer` method-borrows `host`, which must not
+	// overlap the `&mut host.stdin` held by the reader.
+	let writer: Box<dyn Write + '_> = match output_file {
+		Some(file) => Box::new(BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, file)),
+		None => Box::new(host.stdout_writer()),
+	};
 	let reader: Box<dyn BufRead + '_> = match input_file {
 		Some(file) => Box::new(BufReader::new(file)),
 		None => Box::new(BufReader::new(&mut host.stdin)),
-	};
-	let writer: Box<dyn Write + '_> = match output_file {
-		Some(file) => Box::new(BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, file)),
-		None => Box::new(BufWriter::with_capacity(
-			OUTPUT_BUFFER_CAPACITY,
-			&mut host.stdout,
-		)),
 	};
 	uniq.write_uniq(reader, writer)
 }

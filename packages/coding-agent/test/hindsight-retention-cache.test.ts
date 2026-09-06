@@ -305,4 +305,41 @@ describe("Hindsight incremental full-session retention cache", () => {
 		expect(client.calls.length).toBe(1);
 		expect(client.calls[0].transcript).toBe(expected);
 	});
+
+	it("rebuilds when only a retained prefix timestamp changes", async () => {
+		const client = new FakeHindsightApi();
+		const config = makeConfig({ retainMode: "full-session" });
+		const session = {
+			sessionId: "test-session",
+		} as object as AgentSession;
+		const banksSet = new Set<string>();
+
+		const state = new HindsightSessionState({
+			sessionId: "test-session",
+			client,
+			bankId: "test-bank",
+			config,
+			session,
+			banksSet,
+		});
+
+		const messages1: HindsightMessage[] = [
+			{ role: "user", content: "hello first turn", timestamp: "2026-08-17T10:00:00.000Z" },
+			{ role: "assistant", content: "hi there first response", timestamp: "2026-08-17T10:00:05.000Z" },
+		];
+		await state.retainSession(messages1);
+		expect(client.calls[0].transcript).toContain("[timestamp: 2026-08-17T10:00:00.000Z]");
+
+		client.calls = [];
+		const messages2: HindsightMessage[] = [
+			{ role: "user", content: "hello first turn", timestamp: "2026-08-17T09:00:00.000Z" },
+			{ role: "assistant", content: "hi there first response", timestamp: "2026-08-17T10:00:05.000Z" },
+			{ role: "user", content: "hello second turn", timestamp: "2026-08-17T11:00:00.000Z" },
+		];
+		await state.retainSession(messages2);
+		expect(client.calls.length).toBe(1);
+		expect(client.calls[0].transcript).toContain("[timestamp: 2026-08-17T09:00:00.000Z]");
+		expect(client.calls[0].transcript).not.toContain("[timestamp: 2026-08-17T10:00:00.000Z]");
+		expect(client.calls[0].transcript).toContain("hello second turn");
+	});
 });

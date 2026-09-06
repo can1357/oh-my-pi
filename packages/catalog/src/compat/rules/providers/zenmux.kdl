@@ -1,0 +1,106 @@
+// Provider-wire compat for "zenmux"; regenerated from the frozen census using deployment contract selectors.
+
+provider "zenmux" {
+	class "anthropic" {
+		revision ">=3.7 <4.6" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	class "baidu" {
+		family "ernie" {
+			thinking-mode "effort"
+		}
+	}
+	class "bytedance" {
+		family "doubao" {
+			thinking-mode "effort"
+		}
+	}
+	class "deepseek" {
+		thinking-mode "effort"
+	}
+	class "gemini" {
+		revision ">=2.5 <3.7" {
+			thinking-mode "effort"
+		}
+	}
+	class "glm" {
+		thinking-mode "effort"
+		family "flash" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+		family "turbo" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	class "kimi" {
+		thinking-mode "effort"
+	}
+	class "mimo" {
+		family "v2" {
+			thinking-mode "effort"
+		}
+	}
+	class "minimax" {
+		thinking-mode "effort"
+	}
+	class "openai" {
+		revision ">=4 <5.7" {
+			thinking-mode "effort"
+		}
+	}
+	class "qwen" {
+		revision ">=3 <3.236" {
+			thinking-mode "effort"
+		}
+	}
+	class "stepfun" {
+		family "step" {
+			thinking-mode "effort"
+		}
+	}
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "effort"
+	}
+	class "xai" {
+		family "grok" {
+			thinking-mode "effort"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "baidu/ernie-5.0-thinking-preview" "tencent/hunyuan-2.0-thinking" {
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek/deepseek-chat-v3.1" {
+		requires-reasoning-content-for-all-assistant-turns #true
+		thinking-efforts "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek/deepseek-reasoner" {
+		requires-reasoning-content-for-all-assistant-turns #true
+		thinking-efforts "high" "max"
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "google/gemma-4-26b-a4b-it" {
+		thinking-mode "effort"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/gpt-5.1-codex" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/gpt-5.1-codex-mini" {
+		thinking-efforts "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "z*5" "z-ai/glm-4.5-air" "z-ai/glm-4.6" "z-ai/glm-4.6v" "z-ai/glm-4.7" "z-ai/glm-5.1" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "z-ai/glm-5.2*" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+}

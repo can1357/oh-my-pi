@@ -10,6 +10,12 @@ import type {
 import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import {
+	DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
+	formatBackgroundNotice,
+	raceJobSettlement,
+	resolveAutoBackgroundWaitMs,
+} from "../async";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -57,7 +63,6 @@ import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
 const BASH_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
 const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
 	"\n": true,
 	"\r": true,
@@ -166,7 +171,13 @@ function shellBuiltinsDisabled(settings: Settings): boolean {
  */
 export const CRITICAL_BASH_PATTERNS = [
 	// Recursive destruction.
-	/\brm\s+-[a-z]*[rRfF][a-z]*\s+\//i, // rm -rf /, rm -fr /, rm -r /, rm -f /…
+	// Options may sit on either side of the recursive/force flag, so only that flag is pinned and
+	// any other options are skipped: `rm -rf /`, `rm -rf -- /`, `rm --recursive --force /`,
+	// `rm -rf -v /`, `rm -v -rf /`. An absolute target is still required.
+	/\brm\s+(?:-\S+\s+)*(?:-[a-z]*[rRfF][a-z]*|--recursive|--force)\s+(?:-\S+\s+)*\//i,
+	// `--no-preserve-root` defeats coreutils' own refusal to recurse on `/`, so it is critical
+	// wherever it appears — including forms this list would otherwise reach only via the target.
+	/\brm\s+(?:-\S+\s+)*--no-preserve-root\b/i,
 	/\bsudo\s+rm\b/i, // any `sudo rm`.
 	/\bchmod\s+-R\s+[0-7]+\s+\//i, // `chmod -R 777 /`.
 	/\bchmod\s+-R\s+[ugoa+\-=rwxXst,]+\s+\//, // `chmod -R u+x /`, `chmod -R u+rwx,o+w /etc` (symbolic mode, root target).
@@ -497,10 +508,6 @@ function formatWallTimeNotice(wallTimeMs: number): string {
 
 function formatExitCodeNotice(exitCode: number): string {
 	return `Command exited with code ${exitCode}`;
-}
-
-function formatBackgroundNotice(jobId: string): string {
-	return `Backgrounded as job ${jobId}; result will be delivered automatically.`;
 }
 
 /**
@@ -888,60 +895,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		};
 	}
 
-	async #waitForManagedBashJob(
-		job: ManagedBashJobHandle,
-		thresholdMs: number,
-		signal?: AbortSignal,
-		steeringSignal?: AbortSignal,
-	): Promise<ManagedBashJobCompletion | { kind: "running" } | { kind: "steer" } | { kind: "aborted" }> {
-		if (signal?.aborted) {
-			return { kind: "aborted" };
-		}
-		if (steeringSignal?.aborted) {
-			return { kind: "steer" };
-		}
-
-		// Cancellable threshold: a bare Bun.sleep(thresholdMs) leaves a live, ref'd
-		// timer for the full threshold after the command finishes (or abort/steer)
-		// wins the race first — delaying SDK/headless shutdown and accumulating
-		// timers under fast command rates. Settle a withResolvers promise from
-		// setTimeout so the finally can clear it regardless of which waiter wins.
-		const { promise: thresholdPromise, resolve: resolveThreshold } = Promise.withResolvers<{
-			kind: "running";
-		}>();
-		const thresholdTimer = setTimeout(() => resolveThreshold({ kind: "running" }), thresholdMs);
-		const waiters: Array<
-			Promise<ManagedBashJobCompletion | { kind: "running" } | { kind: "steer" } | { kind: "aborted" }>
-		> = [job.completion, thresholdPromise];
-
-		const { promise: abortedPromise, resolve: resolveAborted } = Promise.withResolvers<{ kind: "aborted" }>();
-		const onAbort = () => resolveAborted({ kind: "aborted" });
-		const { promise: steerPromise, resolve: resolveSteer } = Promise.withResolvers<{ kind: "steer" }>();
-		const onSteer = () => resolveSteer({ kind: "steer" });
-		if (signal) {
-			signal.addEventListener("abort", onAbort, { once: true });
-			waiters.push(abortedPromise);
-		}
-		if (steeringSignal) {
-			steeringSignal.addEventListener("abort", onSteer, { once: true });
-			waiters.push(steerPromise);
-		}
-		try {
-			return await Promise.race(waiters);
-		} finally {
-			clearTimeout(thresholdTimer);
-			signal?.removeEventListener("abort", onAbort);
-			steeringSignal?.removeEventListener("abort", onSteer);
-		}
-	}
-
-	#resolveAutoBackgroundWaitMs(timeoutMs: number | undefined): number {
-		if (this.#autoBackgroundThresholdMs <= 0) return 0;
-		if (timeoutMs === undefined) return this.#autoBackgroundThresholdMs;
-		const timeoutBufferMs = 1_000;
-		return Math.max(0, Math.min(this.#autoBackgroundThresholdMs, timeoutMs - timeoutBufferMs));
-	}
-
 	async execute(
 		_toolCallId: string,
 		{
@@ -992,8 +945,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		const internalUrlOptions: InternalUrlExpansionOptions = {
 			skills: this.session.skills ?? [],
+			attachments: this.session.getImageAttachments?.() ?? [],
 			internalRouter: InternalUrlRouter.instance(),
 			cwd: this.session.cwd,
+			sessionFile: this.session.getSessionFile() ?? undefined,
 			localOptions: {
 				getArtifactsDir: this.session.getArtifactsDir,
 				getSessionId: this.session.getSessionId,
@@ -1093,7 +1048,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			autoBgManager &&
 			!autoBgManager.atCapacity
 		) {
-			const autoBackgroundWaitMs = this.#resolveAutoBackgroundWaitMs(timeoutMs);
+			const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(this.#autoBackgroundThresholdMs, timeoutMs);
 			const startBackgrounded = autoBackgroundWaitMs === 0;
 			const job = this.#startManagedBashJob({
 				command,
@@ -1117,8 +1072,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			// foreground-wait cannot also be injected by the delivery loop. Lifted
 			// via resumeDeliveries() if we end up backgrounding after all.
 			autoBgManager.acknowledgeDeliveries([job.jobId]);
-			const waitResult = await this.#waitForManagedBashJob(
-				job,
+			const waitResult = await raceJobSettlement(
+				job.completion,
 				autoBackgroundWaitMs,
 				signal,
 				ctx?.toolCall?.steeringSignal,

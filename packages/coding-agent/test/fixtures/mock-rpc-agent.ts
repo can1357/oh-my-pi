@@ -30,7 +30,14 @@ const legacyState = {
 };
 
 if (Bun.env.MOCK_RPC_EXIT_BEFORE_READY) {
-	process.stderr.write(Bun.env.MOCK_RPC_EXIT_STDERR ?? "");
+	const message = Bun.env.MOCK_RPC_EXIT_STDERR ?? "";
+	if (message) {
+		// Await the pipe write: exiting immediately can drop unflushed stderr
+		// bytes, leaving the client's startup error without the failure text.
+		const { promise, resolve } = Promise.withResolvers<void>();
+		process.stderr.write(message, () => resolve());
+		await promise;
+	}
 	process.exit(Number(Bun.env.MOCK_RPC_EXIT_BEFORE_READY));
 }
 

@@ -176,7 +176,13 @@ describe("auto thinking classifier helpers", () => {
 			| undefined;
 
 		expect(effort).toBe(Effort.High);
-		expect(options).toMatchObject({ disableReasoning: true, maxTokens: 1024 });
+		// The cap must exceed Anthropic's 1024-token minimum thinking budget so an
+		// Anthropic-dialect proxy (LiteLLM/Vertex) that downgrades the disabled
+		// request to the lowest reasoning effort still satisfies
+		// `max_tokens > thinking.budget_tokens` (issue #8610).
+		expect(options?.disableReasoning).toBe(true);
+		expect(options?.maxTokens).toBe(4096);
+		expect(options?.maxTokens).toBeGreaterThan(1024);
 	});
 
 	function createOnlineFixture(targetModel: Model, answer: string, maxEffort: "xhigh" | "max" = "xhigh") {

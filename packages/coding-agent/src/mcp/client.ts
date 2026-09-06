@@ -92,7 +92,7 @@ async function initializeConnection(
 	transport: MCPTransport,
 	options?: {
 		signal?: AbortSignal;
-		/** Called after the initialize response (which sets the session ID) but before notifications/initialized. */
+		/** Called after notifications/initialized succeeds. */
 		onInitialized?: () => void | Promise<void>;
 	},
 ): Promise<MCPInitializeResult> {
@@ -119,13 +119,12 @@ async function initializeConnection(
 	// initialize; transports that don't need it ignore this.
 	transport.setProtocolVersion?.(result.protocolVersion);
 
-	// Hook point: the transport now has the session ID from the initialize response.
-	// For HTTP, this is the moment to open the SSE stream so server-to-client requests
-	// triggered by notifications/initialized (e.g. roots/list) can be delivered.
-	await options?.onInitialized?.();
-
-	// Send initialized notification
+	// Send initialized before opening the optional GET SSE stream. Servers may
+	// reject or terminate sessions that receive session traffic before this
+	// notification; POST response streams already carry messages during setup.
 	await transport.notify("notifications/initialized");
+
+	await options?.onInitialized?.();
 
 	return result;
 }
@@ -162,8 +161,8 @@ export async function connectToServer(
 			const initResult = await initializeConnection(transport, {
 				signal: options?.signal,
 				async onInitialized() {
-					// Open the SSE stream before sending initialized, so server-to-client
-					// requests triggered by on_initialized (e.g. roots/list) are delivered.
+					// Open the optional GET SSE stream only after the initialized
+					// notification makes the session ready for further traffic.
 					if ("startSSEListener" in transport! && typeof transport!.startSSEListener === "function") {
 						await (transport as { startSSEListener(): Promise<void> }).startSSEListener();
 					}

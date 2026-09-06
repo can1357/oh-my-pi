@@ -7,6 +7,8 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
+import type { AsyncJobType } from "../../async";
+import type { DaemonSnapshot } from "../../launch/protocol";
 import {
 	type CustomMessage,
 	type FileMentionMessage,
@@ -32,10 +34,10 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 	const details = (
 		message as CustomMessage<{
 			jobId?: string;
-			type?: "bash" | "task";
+			type?: AsyncJobType;
 			label?: string;
 			durationMs?: number;
-			jobs?: Array<{ jobId?: string; type?: "bash" | "task"; label?: string; durationMs?: number }>;
+			jobs?: Array<{ jobId?: string; type?: AsyncJobType; label?: string; durationMs?: number }>;
 		}>
 	).details;
 	const jobs =
@@ -58,6 +60,39 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 			theme.fg("success", `${theme.status.done} Background job completed`),
 			theme.fg("dim", typeLabel),
 			theme.fg("accent", jobId),
+			duration ? theme.fg("dim", `(${duration})`) : undefined,
+		]
+			.filter(Boolean)
+			.join(" ");
+		block.addChild(new Text(line, 1, 0));
+	}
+	return new ToolActivityContainer(block);
+}
+
+/**
+ * Render a `launch-completion` custom message (terminal supervised-process
+ * exits from the launch broker) as a transcript block of one compact
+ * "Supervised process ..." row per daemon, matching background-job rows.
+ */
+export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolActivityContainer {
+	const details = (message as CustomMessage<{ daemons?: DaemonSnapshot[] }>).details;
+	const block = new TranscriptBlock();
+	const daemons = details?.daemons ?? [];
+	if (daemons.length === 0 && typeof message.content === "string") {
+		block.addChild(new Text(theme.fg("dim", `${theme.status.done} ${message.content}`), 1, 0));
+	}
+	for (const daemon of daemons) {
+		const failed = daemon.state === "failed" || (daemon.exitCode !== undefined && daemon.exitCode !== 0);
+		const duration =
+			daemon.exitedAt !== undefined && daemon.startedAt !== undefined
+				? formatDuration(daemon.exitedAt - daemon.startedAt)
+				: undefined;
+		const line = [
+			failed
+				? theme.fg("error", `${theme.status.error} Supervised process failed`)
+				: theme.fg("success", `${theme.status.done} Supervised process completed`),
+			theme.fg("accent", daemon.name),
+			daemon.exitCode !== undefined ? theme.fg("dim", `(exit ${daemon.exitCode})`) : undefined,
 			duration ? theme.fg("dim", `(${duration})`) : undefined,
 		]
 			.filter(Boolean)

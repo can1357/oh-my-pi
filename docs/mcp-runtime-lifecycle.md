@@ -42,7 +42,7 @@ Filtering behavior:
 
 - `enableProjectConfig: false` removes project-level entries (`_source.level === "project"`).
 - `enabled: false` entries are suppressed unless the active-profile user `enabledServers` allowlist names them; the user `disabledServers` denylist always suppresses a same-named entry.
-- Exa servers are filtered out by default and API keys are extracted for native Exa tool integration; browser automation MCP servers are filtered when `filterBrowser` is true.
+- Exa servers are filtered out by default and API keys are extracted for native Exa tool integration, unless the config explicitly requests Exa tools the native integration does not provide (`web_fetch_exa`, `web_search_advanced_exa`); browser automation MCP servers are filtered when `filterBrowser` is true.
 
 Result includes both `configs` and `sources` (metadata used later for provider labeling).
 
@@ -95,10 +95,10 @@ For each discovered server in `connectServers()`:
 `connectToServer()` behavior (`src/mcp/client.ts`):
 
 - creates stdio or HTTP/SSE transport,
-- performs MCP `initialize` using protocol version `2025-03-26` and advertises the `roots` capability,
+- performs MCP `initialize` using protocol version `2025-11-25` and advertises the `roots` capability,
 - answers server-to-client `ping` and `roots/list` requests; unsupported request methods return JSON-RPC `-32601`,
-- for HTTP/SSE, starts the background SSE listener before `notifications/initialized`,
-- sends `notifications/initialized`,
+- sends `notifications/initialized` before any further session traffic,
+- for Streamable HTTP, starts the background SSE listener only after `notifications/initialized`,
 - uses timeout precedence `OMP_MCP_TIMEOUT_MS`, then `config.timeout`, then 30s; `0` disables the client-side timeout,
 - closes transport on init failure.
 

@@ -17,7 +17,7 @@ Current PR state: `{{state.pr_status}}`.
 Read thread first: reviewer bots (e.g. `chatgpt-codex-connector`) may reference earlier comments by line; directive is a delta on established context.
 
 Request type:
-- **Code change**: commit on `{{workspace.branch}}`; NEVER open a second PR; push to this branch. `gh_push_branch` / `gh_open_pr`: run `bun run fix` + `bun check` before remote contact — you do NOT. If either refuses an enhancement/proposal because directive author lacks implementation authority, post ONE `gh_post_comment` stating a repo OWNER or allowlisted maintainer must explicitly authorize implementation; stop. After pushing, post ONE `gh_post_comment` summarizing the fix, one line per concrete change. Multiple issues (e.g. several inline review comments): address each; group in reply.
+- **Code change**: commit on `{{workspace.branch}}`; NEVER open a second PR; push to this branch. `gh_push_branch` / `gh_open_pr`: run `bun run fix` + `bun check` before remote contact — you do NOT; `gh_open_pr` also runs the full `bun run test` and opens nothing while it is red. If either refuses an enhancement/proposal because directive author lacks implementation authority, post ONE `gh_post_comment` stating a repo OWNER or allowlisted maintainer must explicitly authorize implementation; stop. After pushing, post ONE `gh_post_comment` summarizing the fix, one line per concrete change. Multiple issues (e.g. several inline review comments): address each; group in reply.
 - **Question / clarification**: one `gh_post_comment`; no code change.
 - **Explicit stop / drop this**: one ack comment; halt.
 - **Ambiguous**: exactly one clarifying question; stop. NEVER guess.

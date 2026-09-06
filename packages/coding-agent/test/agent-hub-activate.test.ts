@@ -23,6 +23,21 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 const AGENT_ID = "Worker";
 const TEST_CWD = path.resolve("agent-hub-cwd");
 
+function persistedChildJsonl(id: string): string {
+	return [
+		JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-07-30T01:13:37.835Z", cwd: TEST_CWD }),
+		JSON.stringify({
+			type: "session_init",
+			id: "init",
+			parentId: null,
+			timestamp: "2026-07-30T01:13:37.835Z",
+			systemPrompt: "system",
+			task: "work",
+			tools: ["read"],
+		}),
+	].join("\n");
+}
+
 function makeHub(focusAgent: (id: string) => Promise<void>) {
 	const agents = new AgentRegistry();
 	agents.register({
@@ -118,12 +133,62 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
+	it("Enter opens an aborted agent's read-only transcript instead of focusing it", () => {
+		const agents = new AgentRegistry();
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile: null,
+			status: "aborted",
+		});
+		const focusAgent = vi.fn(async () => {});
+		let viewer: { render(width: number): readonly string[] } | undefined;
+		const showOverlay = vi.fn((component: { render(width: number): readonly string[] }) => {
+			viewer = component;
+			return { hide: () => {} };
+		});
+		const setFocus = vi.fn();
+		const onDone = vi.fn();
+		const hub = new AgentHubOverlayComponent({
+			settings: Settings.isolated(),
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone,
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent,
+			ui: {
+				requestRender: () => {},
+				requestComponentRender: () => {},
+				showOverlay,
+				setFocus,
+			} as never,
+		});
+
+		hub.handleInput("\r");
+
+		expect(focusAgent).not.toHaveBeenCalled();
+		expect(showOverlay).toHaveBeenCalledWith(expect.anything(), {
+			width: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		expect(setFocus).toHaveBeenCalledWith(expect.anything());
+		expect(Bun.stripANSI(viewer!.render(120).join("\n"))).not.toContain("Enter:send");
+		expect(onDone).not.toHaveBeenCalled();
+		hub.dispose();
+	});
+
 	it("lists persisted subagent session files after restart", async () => {
 		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-");
 		const sessionFile = path.join(tempDir.path(), "main.jsonl");
 		const workerSessionFile = path.join(tempDir.path(), "main", "Worker.jsonl");
 		await Bun.write(sessionFile, "");
-		await Bun.write(workerSessionFile, "");
+		await Bun.write(workerSessionFile, persistedChildJsonl("worker"));
 		const agents = new AgentRegistry();
 		const hub = new AgentHubOverlayComponent({
 			settings: Settings.isolated(),
@@ -172,8 +237,8 @@ describe("Agent hub Enter activation", () => {
 		const parentSessionFile = path.join(tempDir.path(), "main", "Parent.jsonl");
 		const childSessionFile = path.join(tempDir.path(), "main", "Parent", "Child.jsonl");
 		await Bun.write(sessionFile, "");
-		await Bun.write(parentSessionFile, "");
-		await Bun.write(childSessionFile, "");
+		await Bun.write(parentSessionFile, persistedChildJsonl("parent"));
+		await Bun.write(childSessionFile, persistedChildJsonl("child"));
 		const agents = new AgentRegistry();
 		const hub = new AgentHubOverlayComponent({
 			settings: Settings.isolated(),
@@ -393,9 +458,10 @@ describe("Agent hub Enter activation", () => {
 		if (!sourceSessionFile) throw new Error("Expected source session file");
 		const sourceArtifacts = sourceSessionFile.slice(0, -6);
 		await fs.mkdir(sourceArtifacts, { recursive: true });
-		for (const id of ["ActiveVibe", "KilledVibe", "OrdinaryTask"]) {
+		for (const id of ["ActiveVibe", "KilledVibe"]) {
 			await fs.writeFile(path.join(sourceArtifacts, `${id}.jsonl`), "persisted child");
 		}
+		await fs.writeFile(path.join(sourceArtifacts, "OrdinaryTask.jsonl"), persistedChildJsonl("OrdinaryTask"));
 		const fork = await manager.fork();
 		if (!fork) throw new Error("Expected persisted fork");
 		await fs.cp(sourceArtifacts, fork.newSessionFile.slice(0, -6), { recursive: true });
@@ -581,7 +647,7 @@ describe("Agent hub double-← gating", () => {
 		const sessionFile = path.join(tempDir.path(), "main.jsonl");
 		const workerSessionFile = path.join(tempDir.path(), "main", "Worker.jsonl");
 		await Bun.write(sessionFile, "");
-		await Bun.write(workerSessionFile, "");
+		await Bun.write(workerSessionFile, persistedChildJsonl("worker"));
 		const agents = new AgentRegistry();
 		const { controller, shown, shownReady } = setup(agents, sessionFile);
 
@@ -597,7 +663,7 @@ describe("Agent hub double-← gating", () => {
 		using tempDir = TempDir.createSync("@omp-agent-hub-explicit-");
 		const sessionFile = path.join(tempDir.path(), "main.jsonl");
 		await Bun.write(sessionFile, "");
-		await Bun.write(path.join(tempDir.path(), "main", "Worker.jsonl"), "");
+		await Bun.write(path.join(tempDir.path(), "main", "Worker.jsonl"), persistedChildJsonl("worker"));
 		const agents = new AgentRegistry();
 		const { controller, shown, overlayOptions } = setup(agents, sessionFile);
 

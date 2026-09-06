@@ -1,0 +1,24 @@
+# nextest runs every test in its own process and schedules them in parallel
+# across the whole workspace, so anything that relied on `cargo test`'s
+# one-binary-at-a-time execution has to declare that here.
+#
+# Doctests are NOT run by nextest (upstream limitation: they have no stable
+# libtest-json interface). `scripts/run-rs-task.ts` pairs the nextest run with
+# `cargo test --doc`. That pass executes nothing today — pi-natives is a
+# `cdylib` (rustdoc collects no doctests from it) and pi-builtins' examples are
+# `ignore`d vendored uutils docs — and is kept so the first runnable doctest
+# added to a lib crate actually runs.
+
+[profile.default]
+# Print each failure when it happens and again in the final summary — a run
+# that fails early in a long workspace sweep should not need scrollback.
+failure-output = "immediate-final"
+# Report every failing test in one pass instead of stopping at the first.
+fail-fast = false
+
+[profile.ci]
+failure-output = "immediate-final"
+fail-fast = false
+# No retries: a flaky test is a bug we want to see, not paper over.
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 4 }

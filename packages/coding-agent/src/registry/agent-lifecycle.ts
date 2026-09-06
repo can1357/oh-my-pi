@@ -175,6 +175,40 @@ export class AgentLifecycleManager {
 	}
 
 	/**
+	 * Reclaim a provably-dead parked corpse so a fresh spawn can reuse its id.
+	 * Refuses live, adopted, in-flight, or cold-revivable refs. For a parked ref
+	 * restored from disk, the persisted factory is consulted before removal
+	 * because cold revivers are created lazily by {@link ensureLive}.
+	 *
+	 * Only refs in the registry this manager owns are touched; the transcript
+	 * stays readable at `history://<id>`. Returns true when the corpse was
+	 * unregistered.
+	 */
+	async reclaimDeadCorpse(id: string, expected: AgentRef): Promise<boolean> {
+		const ref = this.#registry.get(id);
+		if (ref !== expected || ref.status !== "parked" || ref.session) return false;
+		if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
+
+		const persistedFactory = ref.sessionFile ? this.#persistedReviverFactory : undefined;
+		if (persistedFactory) {
+			try {
+				if (await persistedFactory(ref)) return false;
+			} catch (error) {
+				logger.warn("AgentLifecycleManager.reclaimDeadCorpse: persisted reviver probe failed", {
+					id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return false;
+			}
+			// The factory awaited I/O; another lifecycle operation may now own or
+			// have replaced this ref. Revalidate every reclaim invariant.
+			if (this.#registry.get(id) !== ref || ref.status !== "parked" || ref.session) return false;
+			if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
+		}
+		return this.#registry.unregister(id, ref);
+	}
+
+	/**
 	 * True when this manager owns `registry` — i.e. its adopt/park/revive state
 	 * describes that registry's refs. Lets a caller holding a specific registry
 	 * (e.g. a custom-registry {@link IrcBus} that fell back to the global

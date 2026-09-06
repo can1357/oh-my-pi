@@ -9,7 +9,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
-function makeModel(provider: string, id: string): Model {
+/** Optional upstream presentation metadata a discovery source may attach. */
+type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended">;
+
+function makeModel(provider: string, id: string, metadata?: NativeMetadata): Model {
 	return buildModel({
 		id,
 		name: id,
@@ -21,6 +24,7 @@ function makeModel(provider: string, id: string): Model {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128_000,
 		maxTokens: 1024,
+		...metadata,
 	});
 }
 
@@ -102,5 +106,37 @@ describe("ModelBrowser perf display", () => {
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 
 		expect(renderPlain(browser, 120)[2]).not.toContain("t/s");
+	});
+});
+
+describe("ModelBrowser native model metadata", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	function renderDetail(model: Model): string {
+		const browser = new ModelBrowser(Settings.isolated({}));
+		browser.setItems(buildBrowserItems([model]));
+		const lines = browser.render(160).map(line => Bun.stripANSI(line));
+		return lines[lines.length - 2] as string;
+	}
+
+	test("detail line badges upstream flags and appends the provider blurb", () => {
+		const detail = renderDetail(
+			makeModel("devin", "swe-2", {
+				description: "Fast\tagentic\ncoder",
+				isNew: true,
+				isBeta: true,
+				isRecommended: true,
+			}),
+		);
+
+		expect(detail).toContain("swe-2 · new · beta · recommended · 128k ctx · 1k out · free per M");
+		// Tabs and newlines are flattened so the blurb stays one detail row.
+		expect(detail).toMatch(/free per M · Fast {2,}agentic coder$/);
+	});
+
+	test("models without upstream metadata render the plain detail line", () => {
+		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · free per M");
 	});
 });

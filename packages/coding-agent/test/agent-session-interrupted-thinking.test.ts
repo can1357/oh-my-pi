@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, Model, ThinkingContent } from "@oh-my-pi/pi-ai";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -115,12 +115,17 @@ describe("AgentSession interrupted thinking persistence", () => {
 		}
 	});
 
-	function createSession(extensionRunner?: ExtensionRunner): {
+	// Mechanism tests default to a non-anthropic model: anthropic-dialect targets
+	// skip the hidden continuity quote entirely (reasoning_extraction refusal).
+	function createSession(
+		extensionRunner?: ExtensionRunner,
+		providerModel: [GeneratedProvider, string] = ["openai", "gpt-5.2"],
+	): {
 		model: Model<Api>;
 		sessionManager: SessionManager;
 		session: AgentSession;
 	} {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const model = getBundledModel(providerModel[0], providerModel[1]);
 		const agent = new Agent({
 			getApiKey: () => "anthropic-test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -165,8 +170,8 @@ describe("AgentSession interrupted thinking persistence", () => {
 			`You were saying this but I interrupted you:\n\`\`\`\n${REASONING_TEXT}\n\`\`\``,
 		);
 		expect(hidden?.details).toMatchObject({
-			provider: "anthropic",
-			model: "claude-sonnet-4-5",
+			provider: harness.model.provider,
+			model: harness.model.id,
 			blockCount: 1,
 		});
 		expect(typeof (hidden?.details as { interruptedAt?: unknown } | undefined)?.interruptedAt).toBe("number");
@@ -205,6 +210,32 @@ describe("AgentSession interrupted thinking persistence", () => {
 		const developerLlm = llm.filter(entry => entry.role === "developer");
 		expect(developerLlm.some(entry => JSON.stringify(entry.content).includes(REASONING_TEXT))).toBe(true);
 	});
+	it("skips hidden continuity for anthropic-dialect targets — reasoning never replays as text", async () => {
+		const harness = createSession(undefined, ["anthropic", "claude-sonnet-4-5"]);
+		await emitAssistantEnd(
+			harness.session,
+			harness.sessionManager,
+			thinkingAssistant(harness.model, USER_INTERRUPT_LABEL),
+			entry => entry.type === "message" && entry.message.role === "assistant",
+		);
+
+		const messages = harness.session.agent.state.messages;
+		// Thinking stays on the assistant for display/reload; the provider transform
+		// drops the unsigned run from replay (pi-ai anthropic-prior-turn-thinking suite).
+		expect(messages.find(isAssistantMessage)?.content.some(block => block.type === "thinking")).toBe(true);
+		expect(messages.some(isInterruptedThinkingMessage)).toBe(false);
+		expect(
+			harness.sessionManager
+				.getBranch()
+				.some(entry => entry.type === "custom_message" && entry.customType === INTERRUPTED_THINKING_MESSAGE_TYPE),
+		).toBe(false);
+		// Session-level LLM view carries no text-form echo of the reasoning.
+		const llm = convertToLlm(messages);
+		expect(
+			llm.some(entry => entry.role !== "assistant" && JSON.stringify(entry.content).includes(REASONING_TEXT)),
+		).toBe(false);
+	});
+
 	it("skips hidden continuity for interrupted reasoning shorter than 60 characters", async () => {
 		const harness = createSession();
 		const reasoning = "x".repeat(59);

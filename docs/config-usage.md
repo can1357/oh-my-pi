@@ -194,20 +194,41 @@ Most non-core config loading flows through the capability registry (`src/capabil
 
 ## Provider ordering
 
-Providers are sorted by numeric priority (higher first). Example priorities:
+Providers are sorted by numeric priority (higher first). Full set:
 
 - Native OMP (`builtin.ts`): `100`
+- OMP plugins (`omp-plugins`): `90`
 - Claude: `80`
-- Codex / agents / Claude marketplace: `70`
+- Agent Plugins standard (`agent-plugins`): `75`
+- Codex / agents / Claude plugins marketplace: `70`
 - Gemini: `60`
+- OpenCode: `55`
+- Cursor / Windsurf: `50`
+- Cline: `40`
+- GitHub Copilot: `30`
+- VS Code: `20`
+- agents-md (`AGENTS.md` files): `10`
+- mcp-json / ssh-json: `5`
+- Built-in default rules (`builtin-defaults`): `1`
 
 ```text
 Provider precedence (higher wins)
 
-native (.omp)          priority 100
-claude                 priority  80
-codex / agents / ...   priority  70
-gemini                 priority  60
+native (.omp)           priority 100
+omp-plugins             priority  90
+claude                  priority  80
+agent-plugins           priority  75
+codex / agents /
+  claude-plugins        priority  70
+gemini                  priority  60
+opencode                priority  55
+cursor / windsurf       priority  50
+cline                   priority  40
+github                  priority  30
+vscode                  priority  20
+agents-md               priority  10
+mcp-json / ssh-json     priority   5
+builtin-defaults        priority   1
 ```
 
 ## Dedup semantics

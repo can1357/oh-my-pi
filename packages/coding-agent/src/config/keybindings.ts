@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getActiveProfile, getAgentDir, getProfileRootDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
+import { stringifyYamlConfig } from "./config-file";
 
 /**
  * Application-level keybindings (coding agent specific).
@@ -141,7 +142,10 @@ export const KEYBINDINGS = {
 		description: "Send follow-up message",
 	},
 	"app.retry": {
-		defaultKeys: "alt+r",
+		// F5 leads: it is delivered verbatim by every terminal, unlike modified
+		// Enter chords (Ctrl/Alt/Cmd+Enter), which various terminals swallow or
+		// fold into plain Enter. The idle "F5 to Retry" status row advertises it.
+		defaultKeys: ["f5", "alt+r"],
 		description: "Retry last failed assistant turn",
 	},
 	"app.message.dequeue": {
@@ -418,7 +422,7 @@ function loadRawConfig(filePath: string): unknown {
 
 function writeKeybindingsConfig(filePath: string, config: KeybindingsConfig): boolean {
 	try {
-		fs.writeFileSync(filePath, YAML.stringify(config, null, 2), "utf-8");
+		fs.writeFileSync(filePath, stringifyYamlConfig(config), "utf-8");
 		logger.debug("Migrated keybindings config", { path: filePath });
 		return true;
 	} catch (error) {

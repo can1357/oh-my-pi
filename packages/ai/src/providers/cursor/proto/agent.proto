@@ -426,11 +426,13 @@ message ToolCall {
       PiLsToolCall pi_ls_tool_call = 67;
       ConnectScmToolCall connect_scm_tool_call = 68;
       SearchConversationsToolCall search_conversations_tool_call = 69;
+      FetchToolCall web_fetch_tool_call = 37;
    }
    // Modern builds carry the call id on the envelope instead of inside each
-   // variant's args. Fields 37-53, 55, 56, 58 (further tool variants) and 54
-   // (hook_additional_contexts), 59/60 (started_at_ms/completed_at_ms) are not
-   // modelled and decode into unknown fields; do not reuse those numbers.
+   // variant's args. Field 37 is the hosted WebFetch tool. Fields 38-53, 55,
+   // 56, 58 (further tool variants) and 54 (hook_additional_contexts),
+   // 59/60 (started_at_ms/completed_at_ms) are not modelled and decode into
+   // unknown fields; do not reuse those numbers.
    optional string tool_call_id = 57;
 }
 
@@ -883,6 +885,7 @@ message InteractionQuery {
       ExaFetchRequestQuery exa_fetch_request_query = 6;
       CreatePlanRequestQuery create_plan_request_query = 7;
       SetupVmEnvironmentArgs setup_vm_environment_args = 8;
+      WebFetchRequestQuery web_fetch_request_query = 9;
    }
 }
 
@@ -896,7 +899,26 @@ message InteractionResponse {
       ExaFetchRequestResponse exa_fetch_request_response = 6;
       CreatePlanRequestResponse create_plan_request_response = 7;
       SetupVmEnvironmentResult setup_vm_environment_result = 8;
+      WebFetchRequestResponse web_fetch_request_response = 9;
    }
+}
+
+message WebFetchRequestQuery {
+   FetchArgs args = 1;
+}
+
+message WebFetchRequestResponse {
+   oneof result {
+      WebFetchRequestResponse_Approved approved = 1;
+      WebFetchRequestResponse_Rejected rejected = 2;
+   }
+}
+
+message WebFetchRequestResponse_Approved {
+}
+
+message WebFetchRequestResponse_Rejected {
+   string reason = 1;
 }
 
 message AskQuestionInteractionQuery {

@@ -622,7 +622,7 @@ describe("GrepTool internal URL resolution", () => {
 		const listSpy = vi.spyOn(sshFileTransfer, "listRemoteDir").mockResolvedValue([]);
 		const tool = new GrepTool(createSession());
 		await expect(tool.execute("ssh-dir-search", { pattern: "x", path: "ssh://h/etc" })).rejects.toThrow(
-			/directory listing|cannot recurse/,
+			/grep cannot recurse the directory listing/,
 		);
 		expect(listSpy).not.toHaveBeenCalled();
 	});

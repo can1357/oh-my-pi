@@ -4,17 +4,22 @@ import type * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as zlib from "node:zlib";
+import { type ArchiveLimits, extractArchive } from "./ar";
 
 const CHROME_FOR_TESTING_BASE_URL = "https://storage.googleapis.com/chrome-for-testing-public";
 const CHROME_METADATA_BASE_URL = "https://googlechromelabs.github.io/chrome-for-testing";
-const ZIP_LOCAL_FILE_HEADER = 0x04034b50;
-const ZIP_CENTRAL_DIRECTORY_HEADER = 0x02014b50;
-const ZIP_END_OF_CENTRAL_DIRECTORY = 0x06054b50;
-const ZIP_DIRECTORY_MODE = 0o040000;
-const ZIP_REGULAR_FILE_MODE = 0o100000;
-const ZIP_SYMLINK_MODE = 0o120000;
-const ZIP_FILE_TYPE_MASK = 0o170000;
+
+/**
+ * Archive ceilings for the managed browser download. The default archive
+ * limits (64 MiB per member / 256 MiB in memory) guard against attacker-
+ * controlled archives, but the Chrome-for-Testing binary is a trusted
+ * first-party download whose `chrome` executable already exceeds both
+ * (~269 MB and growing), so extraction gets a ceiling sized for it.
+ */
+const BROWSER_ARCHIVE_LIMITS: Partial<ArchiveLimits> = {
+	maxMemberSize: 1024 * 1024 * 1024,
+	maxInMemorySize: 1024 * 1024 * 1024,
+};
 
 /** Supported browser products. */
 export enum Browser {
@@ -102,16 +107,6 @@ interface MilestoneVersions {
 
 interface PatchVersions {
 	builds: Record<string, { version: string }>;
-}
-
-interface ZipEntry {
-	name: string;
-	method: number;
-	crc: number;
-	compressedSize: number;
-	uncompressedSize: number;
-	externalAttributes: number;
-	localHeaderOffset: number;
 }
 
 /** Detect the current host's Puppeteer browser platform. */
@@ -259,7 +254,7 @@ export async function install(options: InstallOptions): Promise<InstalledBrowser
 			archivePath,
 			options.downloadProgressCallback,
 		);
-		await extractZipArchive(archivePath, stagingPath);
+		await extractArchive(archivePath, stagingPath, { limits: BROWSER_ARCHIVE_LIMITS });
 		await fsp.mkdir(path.dirname(installPath), { recursive: true });
 		await fsp.rm(installPath, { recursive: true, force: true });
 		await fsp.rename(stagingPath, installPath);
@@ -368,134 +363,4 @@ async function downloadArchive(
 	} finally {
 		await file.close();
 	}
-}
-
-async function extractZipArchive(archivePath: string, destination: string): Promise<void> {
-	const archive = await fsp.readFile(archivePath);
-	const entries = readCentralDirectory(archive);
-	await fsp.mkdir(destination, { recursive: true });
-	const root = path.resolve(destination);
-	for (const entry of entries) {
-		const outputPath = safeArchivePath(root, entry.name);
-		const mode = entry.externalAttributes >>> 16;
-		const type = mode & ZIP_FILE_TYPE_MASK;
-		if (entry.name.endsWith("/") || type === ZIP_DIRECTORY_MODE) {
-			await fsp.mkdir(outputPath, { recursive: true });
-			if (mode & 0o777) await fsp.chmod(outputPath, mode & 0o777);
-			continue;
-		}
-
-		const contents = readZipEntry(archive, entry);
-		await fsp.mkdir(path.dirname(outputPath), { recursive: true });
-		if (type === ZIP_SYMLINK_MODE) {
-			const target = contents.toString("utf8");
-			validateSymlinkTarget(root, outputPath, target);
-			await fsp.symlink(target, outputPath);
-			continue;
-		}
-		await fsp.writeFile(outputPath, contents, { mode: mode & 0o777 ? mode & 0o777 : 0o644 });
-		if ((mode & ZIP_FILE_TYPE_MASK) === ZIP_REGULAR_FILE_MODE && mode & 0o777)
-			await fsp.chmod(outputPath, mode & 0o777);
-	}
-}
-
-function readCentralDirectory(archive: Buffer): ZipEntry[] {
-	const minimumOffset = Math.max(0, archive.length - 65_557);
-	let endOffset = -1;
-	for (let offset = archive.length - 22; offset >= minimumOffset; offset--) {
-		if (archive.readUInt32LE(offset) === ZIP_END_OF_CENTRAL_DIRECTORY) {
-			endOffset = offset;
-			break;
-		}
-	}
-	if (endOffset < 0) throw new Error("Invalid ZIP archive: central directory was not found");
-	const disk = archive.readUInt16LE(endOffset + 4);
-	const centralDisk = archive.readUInt16LE(endOffset + 6);
-	const entryCount = archive.readUInt16LE(endOffset + 10);
-	const centralSize = archive.readUInt32LE(endOffset + 12);
-	const centralOffset = archive.readUInt32LE(endOffset + 16);
-	if (disk !== 0 || centralDisk !== 0) throw new Error("Multi-disk ZIP archives are not supported");
-	if (entryCount === 0xffff || centralSize === 0xffffffff || centralOffset === 0xffffffff) {
-		throw new Error("ZIP64 archives are not supported");
-	}
-	if (centralOffset + centralSize > endOffset)
-		throw new Error("Invalid ZIP archive: central directory is out of bounds");
-
-	const entries: ZipEntry[] = [];
-	let offset = centralOffset;
-	for (let index = 0; index < entryCount; index++) {
-		if (offset + 46 > archive.length || archive.readUInt32LE(offset) !== ZIP_CENTRAL_DIRECTORY_HEADER) {
-			throw new Error("Invalid ZIP archive: malformed central directory entry");
-		}
-		const flags = archive.readUInt16LE(offset + 8);
-		if (flags & 1) throw new Error("Encrypted ZIP entries are not supported");
-		const nameLength = archive.readUInt16LE(offset + 28);
-		const extraLength = archive.readUInt16LE(offset + 30);
-		const commentLength = archive.readUInt16LE(offset + 32);
-		const end = offset + 46 + nameLength + extraLength + commentLength;
-		if (end > archive.length) throw new Error("Invalid ZIP archive: truncated central directory entry");
-		entries.push({
-			name: archive.subarray(offset + 46, offset + 46 + nameLength).toString("utf8"),
-			method: archive.readUInt16LE(offset + 10),
-			crc: archive.readUInt32LE(offset + 16),
-			compressedSize: archive.readUInt32LE(offset + 20),
-			uncompressedSize: archive.readUInt32LE(offset + 24),
-			externalAttributes: archive.readUInt32LE(offset + 38),
-			localHeaderOffset: archive.readUInt32LE(offset + 42),
-		});
-		offset = end;
-	}
-	return entries;
-}
-
-function readZipEntry(archive: Buffer, entry: ZipEntry): Buffer {
-	const offset = entry.localHeaderOffset;
-	if (offset + 30 > archive.length || archive.readUInt32LE(offset) !== ZIP_LOCAL_FILE_HEADER) {
-		throw new Error(`Invalid ZIP archive: malformed local header for ${entry.name}`);
-	}
-	const nameLength = archive.readUInt16LE(offset + 26);
-	const extraLength = archive.readUInt16LE(offset + 28);
-	const start = offset + 30 + nameLength + extraLength;
-	const end = start + entry.compressedSize;
-	if (end > archive.length) throw new Error(`Invalid ZIP archive: truncated data for ${entry.name}`);
-	const compressed = archive.subarray(start, end);
-	let contents: Buffer;
-	if (entry.method === 0) contents = Buffer.from(compressed);
-	else if (entry.method === 8) contents = zlib.inflateRawSync(compressed);
-	else throw new Error(`Unsupported ZIP compression method ${entry.method} for ${entry.name}`);
-	if (contents.length !== entry.uncompressedSize)
-		throw new Error(`Invalid uncompressed size for ZIP entry ${entry.name}`);
-	if (crc32(contents) !== entry.crc) throw new Error(`CRC mismatch for ZIP entry ${entry.name}`);
-	return contents;
-}
-
-function safeArchivePath(root: string, name: string): string {
-	if (!name || name.includes("\0") || name.startsWith("/") || name.startsWith("\\") || /^[A-Za-z]:/.test(name)) {
-		throw new Error(`Unsafe path in ZIP archive: ${name}`);
-	}
-	const segments = name.replaceAll("\\", "/").split("/");
-	if (segments.some(segment => segment === "..")) throw new Error(`Unsafe path in ZIP archive: ${name}`);
-	const target = path.resolve(root, ...segments.filter(Boolean));
-	if (target !== root && !target.startsWith(`${root}${path.sep}`))
-		throw new Error(`Unsafe path in ZIP archive: ${name}`);
-	return target;
-}
-
-function validateSymlinkTarget(root: string, linkPath: string, target: string): void {
-	if (!target || target.includes("\0") || path.isAbsolute(target) || /^[A-Za-z]:/.test(target)) {
-		throw new Error(`Unsafe symlink target in ZIP archive: ${target}`);
-	}
-	const resolved = path.resolve(path.dirname(linkPath), target);
-	if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
-		throw new Error(`Unsafe symlink target in ZIP archive: ${target}`);
-	}
-}
-
-function crc32(contents: Uint8Array): number {
-	let crc = 0xffffffff;
-	for (const byte of contents) {
-		crc ^= byte;
-		for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-	}
-	return (crc ^ 0xffffffff) >>> 0;
 }
