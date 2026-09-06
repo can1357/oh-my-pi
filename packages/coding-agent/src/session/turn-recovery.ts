@@ -54,6 +54,7 @@ import {
 	formatRetryFallbackSelector,
 	getRetryFallbackChains,
 	getRetryFallbackRevertPolicy,
+	hasEligibleRetryFallbackHop,
 	parseRetryFallbackSelector,
 	type RetryFallbackChains,
 	type RetryFallbackResolutionContext,
@@ -2141,13 +2142,9 @@ export class TurnRecovery {
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
-		const remainingMs = remainingSessionDeadlineMs(this.#host.agent.deadline);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
-		if (!staleOpenAIResponsesReplayError) {
-			delayMs = capDurationToSessionDeadline(delayMs, remainingMs, retrySettings.modelFallback) ?? delayMs;
-		}
 		// Transient rate/concurrency caps stay on the same credential, but must
 		// honor their reason-specific windows. The default exponential base
 		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
@@ -2438,6 +2435,21 @@ export class TurnRecovery {
 			this.#clearPendingRetryErrors();
 			this.resolveRetry();
 			return false;
+		}
+
+		// Bound the wait that actually reaches scheduler.wait(), after every
+		// later override (reason backoff, sibling/usage-limit wait, Retry-After).
+		// Fail-fast above uses the uncapped provider request so a 3-hour window
+		// still surfaces instead of being silently shortened to the deadline.
+		// delayMs === 0 is an immediate credential/model retry and must stay 0:
+		// capDurationToSessionDeadline treats <= 0 as "unset" and would replace it.
+		if (!staleOpenAIResponsesReplayError && delayMs > 0) {
+			delayMs =
+				capDurationToSessionDeadline(
+					delayMs,
+					remainingSessionDeadlineMs(this.#host.agent.deadline),
+					hasEligibleRetryFallbackHop(this.#host.settings, currentModel, currentSelector),
+				) ?? delayMs;
 		}
 
 		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });

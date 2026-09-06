@@ -14,6 +14,7 @@ import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
+import { hasEligibleRetryFallbackHop } from "./retry-fallback-chains";
 import { capDurationToSessionDeadline, remainingSessionDeadlineMs } from "./session-deadline";
 
 function timeoutSecondsToMs(value: number): number | undefined {
@@ -26,7 +27,11 @@ function timeoutSecondsToMs(value: number): number | undefined {
  * Build a {@link StreamFn} that reads provider routing/guard settings from
  * `settings` per call and forwards to `base` (defaults to `streamSimple`).
  *
- * Caller-supplied `streamOptions` always win — the helper only fills holes.
+ * Caller-supplied `streamOptions` fill holes for routing and guard fields.
+ * An absolute session deadline (`getDeadline`) re-caps stream watchdogs and
+ * `maxRetryDelayMs`, including an explicit caller timeout or `0` (disabled),
+ * so `--max-time` can still abort a hung primary in time for a configured
+ * fallback hop. Without a deadline the caller-supplied timeouts win.
  */
 export function createSettingsAwareStreamFn(
 	settings: Settings,
@@ -54,16 +59,16 @@ export function createSettingsAwareStreamFn(
 		const cacheRetentionSetting = settings.get("providers.cacheRetention");
 		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
 		const remainingMs = remainingSessionDeadlineMs(options?.getDeadline?.());
-		const modelFallback = settings.get("retry.modelFallback");
+		const reserveFallbackHop = hasEligibleRetryFallbackHop(settings, model);
 		const streamFirstEventTimeoutMs = capDurationToSessionDeadline(
 			timeoutSecondsToMs(settings.get("providers.streamFirstEventTimeoutSeconds")),
 			remainingMs,
-			modelFallback,
+			reserveFallbackHop,
 		);
 		const streamIdleTimeoutMs = capDurationToSessionDeadline(
 			timeoutSecondsToMs(settings.get("providers.streamIdleTimeoutSeconds")),
 			remainingMs,
-			modelFallback,
+			reserveFallbackHop,
 		);
 		// Server-side fallback (opt-in): when the user enables it AND the
 		// resolved model is a Claude Fable/Mythos on Anthropic's messages
@@ -91,17 +96,17 @@ export function createSettingsAwareStreamFn(
 			streamFirstEventTimeoutMs: capDurationToSessionDeadline(
 				streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 				remainingMs,
-				modelFallback,
+				reserveFallbackHop,
 			),
 			streamIdleTimeoutMs: capDurationToSessionDeadline(
 				streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
 				remainingMs,
-				modelFallback,
+				reserveFallbackHop,
 			),
 			maxRetryDelayMs: capDurationToSessionDeadline(
 				streamOptions?.maxRetryDelayMs ?? settings.get("retry.maxDelayMs"),
 				remainingMs,
-				modelFallback,
+				reserveFallbackHop,
 			),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
 				streamOptions?.maxInFlightRequests ?? settings.get("providers.maxInFlightRequests"),

@@ -366,6 +366,82 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	it("hops a configured fallbackChains entry after a reasonless primary abort before the session deadline", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const deadline = Date.now() + 8_000;
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			deadline,
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+					mock.push({ stopReason: "aborted", errorMessage: "Request was aborted" });
+				} else if (model.provider === fallbackModel.provider && model.id === fallbackModel.id) {
+					mock.push({ content: ["recovered on fallback before deadline"] });
+				} else {
+					throw new Error(`Unexpected model requested during deadline hop test: ${model.provider}/${model.id}`);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 5_000,
+			"retry.maxRetries": 1,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+		});
+
+		await session.prompt("Trigger reasonless abort with a configured chain");
+		await session.waitForIdle();
+
+		expect(Date.now()).toBeLessThan(deadline);
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(fallbackAppliedEvents).toEqual([
+			{
+				type: "retry_fallback_applied",
+				from: `${primaryModel.provider}/${primaryModel.id}`,
+				to: `${fallbackModel.provider}/${fallbackModel.id}`,
+				role: "default",
+			},
+		]);
+		const last = getLastAssistantMessage(session);
+		expect(last.stopReason).toBe("stop");
+		expect(last.content).toContainEqual({ type: "text", text: "recovered on fallback before deadline" });
+	});
+
 	it("hops to the chain owned by a fallback that is the last entry of the chain it came from", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const firstFallback = getBundledModel("openai", "gpt-4o-mini");

@@ -191,6 +191,67 @@ describe("AgentSession retry delay cap", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
+	it("caps the final Retry-After wait to the remaining session deadline after later overrides", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const deadline = Date.now() + 20_000;
+		const mock = createMockModel({
+			responses: [
+				{ throw: "503 service unavailable: overloaded_error retry-after-ms=60000" },
+				{ content: ["recovered after capped wait"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			deadline,
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 120_000,
+			"retry.maxRetries": 1,
+			"retry.modelFallback": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+		});
+
+		await session.prompt("Trigger Retry-After larger than the remaining deadline");
+		await session.waitForIdle();
+
+		expect(retryStartEvents).toHaveLength(1);
+		const scheduled = retryStartEvents[0]?.delayMs ?? 0;
+		expect(scheduled).toBeGreaterThanOrEqual(16_000);
+		expect(scheduled).toBeLessThanOrEqual(19_500);
+		expect(scheduled).toBeLessThan(60_000);
+		expect(waitSpy.mock.calls.some(call => call[0] === scheduled)).toBe(true);
+		const last = lastAssistant(session);
+		expect(last.stopReason).toBe("stop");
+		expect(last.content).toContainEqual({ type: "text", text: "recovered after capped wait" });
+	});
+
 	it("waits past retry.maxDelayMs for a usage-limit reset when retry.waitForUsageReset is set", async () => {
 		// Contract: with the opt-in set, a provider-stated usage-limit reset
 		// sleeps until the reset instead of failing fast. Uses the reported
