@@ -11,7 +11,7 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
 import { createDefaultPersonaModelHooks } from "../session/persona-model-hooks";
-import { serializePersonaBaseline } from "../session/persisted-persona";
+import { appendPersonaJournalEntry, clearPersonaJournalEntry } from "../session/persisted-persona";
 import { discoverAgents, getAgent } from "../task";
 import type { PersonaExplicitOverrides } from "../session/tool-policy";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
@@ -683,7 +683,7 @@ async function handleAgentCommandNoName(runtime: SlashCommandRuntime): Promise<S
 		// mode-entry refusal — a guard here would deadlock the user inside the
 		// persona (TUI exitAgentPersona mirrors this).
 		await session.getPersonaRuntime()?.exit(createDefaultPersonaModelHooks(session));
-		session.sessionManager.appendModeChange("none");
+		clearPersonaJournalEntry(session);
 		await runtime.output("Agent persona cleared.");
 		return commandConsumed();
 	}
@@ -722,16 +722,10 @@ async function handleAgentCommandSwitch(name: string, runtime: SlashCommandRunti
 	}
 	// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
 	// j2g: the pre-persona baseline rides the entry for the resume reconcile.
-	const baseline = serializePersonaBaseline(
-		personaRuntime.getActiveBaseline() ?? {
-			model: undefined,
-			thinkingLevel: undefined,
-		},
-	);
-	session.sessionManager.appendModeChange("agent", {
+	appendPersonaJournalEntry(session, {
 		name: agent.name,
-		...(Object.keys(explicitOverrides).length > 0 ? { explicit: explicitOverrides } : {}),
-		...(baseline ? { baseline } : {}),
+		explicit: explicitOverrides,
+		baseline: personaRuntime.getActiveBaseline(),
 	});
 	await runtime.output(`Agent persona: ${agent.name}`);
 	await runtime.notifyConfigChanged?.();

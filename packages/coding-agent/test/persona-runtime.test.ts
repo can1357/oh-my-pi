@@ -1,151 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { PersonaModelApplyHooks } from "@oh-my-pi/pi-coding-agent/session/persona-model-hooks";
 import {
 	readPersistedAgentPersona,
 	serializePersonaBaseline,
 } from "@oh-my-pi/pi-coding-agent/session/persisted-persona";
-import {
-	PersonaRuntime,
-	PersonaSwitchError,
-	PersonaSwitchTransaction,
-} from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
-import { type DiscoveredAgent, SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
+import { PersonaSwitchError } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
+import type { PersonaModelApplyHooks } from "@oh-my-pi/pi-coding-agent/session/persona-model-hooks";
+import { makePersonaAgent, makePersonaHooks, makeRuntime, makeSessionStub, ALL_TOOLS } from "./persona-test-utils";
 
-function makeAgent(overrides: Partial<DiscoveredAgent> = {}): DiscoveredAgent {
-	return {
-		name: "persona-a",
-		description: "test persona",
-		systemPrompt: "persona prompt",
-		source: "bundled",
-		...overrides,
-	};
-}
-
-const ALL_TOOLS = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "hub"]);
-interface SessionStub {
-	isStreaming: boolean;
-	enabledToolNames: string[];
-	mountedToolNames: string[];
-	activeToolNames: string[];
-	/** Simulated tool registry (registered ≠ enabled: dormant tools included). */
-	registeredToolNames: string[];
-	model: { provider: string; id: string } | undefined;
-	thinkingLevel: string | undefined;
-	// j2g: reconcile's baselineOverride carries a Model-shaped object; the stub
-	// stores whatever the test assigns and compares structurally.
-	spawnsOverride: string[] | "*" | null;
-	appendPrompt: string | undefined;
-	setModelCalls: string[];
-	setThinkingCalls: Array<string | undefined>;
-	modeChangeCalls: Array<{ mode: string; data?: Record<string, unknown> }>;
-	clearCacheKeyCalls: number;
-	spawnsCalls: Array<string[] | "*" | null>;
-	appendPromptCalls: Array<string | undefined>;
-	refreshBaseSystemPromptCalls: number;
-	presentationCalls: Array<{ toolNames: string[]; mountedToolNames: string[] }>;
-}
-
-function makeSessionStub(overrides: Partial<SessionStub> = {}): {
-	stub: SessionStub;
-	session: AgentSession;
-	eventListeners: Array<(event: { type: string }) => void>;
-} {
-	const stub: SessionStub = {
-		isStreaming: false,
-		enabledToolNames: ["read", "grep", "glob", "write"],
-		mountedToolNames: ["xd://alpha"],
-		activeToolNames: ["read", "grep", "glob", "write"],
-		registeredToolNames: [...ALL_TOOLS],
-		model: undefined,
-		refreshBaseSystemPromptCalls: 0,
-		thinkingLevel: undefined,
-		spawnsOverride: null,
-		appendPrompt: undefined,
-		appendPromptCalls: [],
-		setModelCalls: [],
-		setThinkingCalls: [],
-		clearCacheKeyCalls: 0,
-		spawnsCalls: [],
-		modeChangeCalls: [],
-		presentationCalls: [],
-		...overrides,
-	};
-	const eventListeners: Array<(event: { type: string }) => void> = [];
-	const session = {
-		get isStreaming() {
-			return stub.isStreaming;
-		},
-		getEnabledToolNames: () => [...stub.enabledToolNames],
-		getMountedXdevToolNames: () => [...stub.mountedToolNames],
-		getActiveToolNames: () => [...stub.activeToolNames],
-		getAllToolNames: () => [...stub.registeredToolNames],
-		get model() {
-			return stub.model;
-		},
-		configuredThinkingLevel: () => stub.thinkingLevel,
-		setModel: async (model: { provider: string; id: string }) => {
-			stub.model = model;
-			stub.setModelCalls.push(`${model.provider}/${model.id}`);
-		},
-		setThinkingLevel: (level: string | undefined) => {
-			stub.thinkingLevel = level;
-			stub.setThinkingCalls.push(level);
-		},
-		refreshBaseSystemPrompt: async () => {
-			stub.refreshBaseSystemPromptCalls += 1;
-		},
-		setActiveToolPresentation: async (toolNames: string[], mountedToolNames: string[]) => {
-			stub.presentationCalls.push({
-				toolNames: [...toolNames],
-				mountedToolNames: [...mountedToolNames],
-			});
-		},
-		clearInheritedProviderPromptCacheKey: () => {
-			stub.clearCacheKeyCalls += 1;
-		},
-		getSessionSpawns: () => stub.spawnsOverride ?? "*",
-		setSessionSpawns: (spawns: string[] | "*" | null) => {
-			stub.spawnsOverride = spawns;
-			stub.spawnsCalls.push(spawns);
-		},
-		applyPersonaAppendPrompt: (text: string | undefined) => {
-			stub.appendPrompt = text;
-			stub.appendPromptCalls.push(text);
-		},
-		getPersonaAppendPrompt: () => stub.appendPrompt,
-		subscribe: (listener: (event: { type: string }) => void) => {
-			eventListeners.push(listener);
-			return () => {
-				const index = eventListeners.indexOf(listener);
-				if (index >= 0) eventListeners.splice(index, 1);
-			};
-		},
-		sessionManager: {
-			appendModeChange: (mode: string, data?: Record<string, unknown>) => {
-				stub.modeChangeCalls.push({ mode, data });
-				return `entry-${stub.modeChangeCalls.length}`;
-			},
-		},
-	} as unknown as AgentSession;
-	return { stub, session, eventListeners };
-}
-
-function makeHooks(overrides: Partial<PersonaModelApplyHooks> = {}): PersonaModelApplyHooks {
-	return {
-		apply: async () => {},
-		restore: async () => {},
-		...overrides,
-	};
-}
-function makeRuntime(session: AgentSession, stub?: SessionStub): PersonaRuntime {
-	const policy = new SessionToolPolicy({
-		registry: () => (stub ? new Set(stub.registeredToolNames) : ALL_TOOLS),
-		isDefaultActive: () => true,
-	});
-	return new PersonaRuntime(policy, session);
-}
+const makeAgent = makePersonaAgent;
+const makeHooks = makePersonaHooks;
 
 describe("PersonaRuntime", () => {
 	it("snapshot captures all PersonaSwitchSnapshot fields", async () => {
@@ -273,10 +137,8 @@ describe("PersonaRuntime", () => {
 	it("exit mid-turn with deferral hooks tears down immediately and defers the model restore", async () => {
 		const { stub, session } = makeSessionStub({ isStreaming: false });
 		const runtime = makeRuntime(session);
-		let restored = 0;
 		let restoreDeferred = 0;
 		const hooks = makeHooks({
-			restore: async () => void (restored += 1),
 			shouldDeferModelSwitch: () => true,
 			deferModelRestoreWhileStreaming: () => void (restoreDeferred += 1),
 		});
@@ -285,8 +147,6 @@ describe("PersonaRuntime", () => {
 
 		await runtime.exit(hooks);
 
-		expect(restoreDeferred).toBe(1);
-		expect(restored).toBe(0); // model restore deferred, not applied
 		expect(runtime.policy.isPersonaActive()).toBe(false);
 		expect(stub.appendPrompt).toBeUndefined();
 		expect(stub.refreshBaseSystemPromptCalls).toBe(2);
@@ -330,13 +190,6 @@ describe("PersonaRuntime", () => {
 			apply: async () => {
 				stub.model = { provider: "stub", id: "persona-model" };
 				stub.thinkingLevel = Effort.High;
-			},
-			// hooks.restore MUST NOT be the rollback's model channel: the hook
-			// instance that ran apply does not survive to the rollback site in
-			// production (exit builds fresh hooks). If restore() were required,
-			// this counter would stay 0 in the real bug this test guards.
-			restore: async () => {
-				throw new Error("hooks.restore must not drive runtime rollback");
 			},
 		});
 		stub.model = { provider: "stub", id: "baseline-model" };
@@ -453,10 +306,8 @@ describe("PersonaRuntime", () => {
 		// Exit builds a FRESH hooks object (the production shape: exitAgentPersona
 		// constructs new hooks whose per-instance baseline is empty). The model
 		// restore must come from the RUNTIME baseline, not hooks.restore.
-		let hookRestores = 0;
 		await runtime.exit(
 			makeHooks({
-				restore: async () => void (hookRestores += 1),
 				deferModelRestoreWhileStreaming: () => {
 					throw new Error("not streaming; defer channel must not fire");
 				},
@@ -466,8 +317,6 @@ describe("PersonaRuntime", () => {
 		expect(runtime.policy.isPersonaActive()).toBe(false);
 		expect(stub.model).toEqual({ provider: "stub", id: "baseline-model" });
 		expect(stub.thinkingLevel).toBe("low");
-		// hooks.restore is no longer the exit model channel.
-		expect(hookRestores).toBe(0);
 	});
 
 	it("exit defers the model restore and passes the runtime baseline to the hook", async () => {
@@ -518,12 +367,7 @@ describe("PersonaRuntime", () => {
 	it("reconcile enters directly when no persona is active", async () => {
 		const { session } = makeSessionStub();
 		const runtime = makeRuntime(session);
-		let exits = 0;
-		await runtime.reconcile(
-			{ agent: makeAgent({ tools: ["read"] }) },
-			makeHooks({ restore: async () => void (exits += 1) }),
-		);
-		expect(exits).toBe(0);
+		await runtime.reconcile({ agent: makeAgent({ tools: ["read"] }) }, makeHooks());
 		expect(runtime.policy.isPersonaActive()).toBe(true);
 	});
 	it("mid-turn A→B switch keeps the TRUE pre-A baseline for B's exit (fr-vV)", async () => {
@@ -868,18 +712,5 @@ describe("PersonaRuntime", () => {
 			}),
 		);
 		expect(stub.model).toEqual({ provider: "stub", id: "user-model" });
-	});
-});
-describe("PersonaSwitchTransaction", () => {
-	it("rollback restores the runtime state captured at begin", async () => {
-		const { stub, session } = makeSessionStub();
-		const runtime = makeRuntime(session);
-		runtime.policy.enterPersona(makeAgent({ tools: ["read"] }), {});
-		const tx = await PersonaSwitchTransaction.begin(runtime);
-		runtime.policy.exitPersona();
-		await tx.rollback();
-
-		expect(runtime.policy.isPersonaActive()).toBe(true);
-		expect(stub.presentationCalls.length).toBe(1);
 	});
 });

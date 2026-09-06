@@ -1,16 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import type { DiscoveredAgent, PersonaExplicitOverrides } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
 import { SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
+import { makePersonaAgent } from "./persona-test-utils";
 
-function makeAgent(overrides: Partial<DiscoveredAgent> = {}): DiscoveredAgent {
-	return {
+/** Shared persona fixture with this suite's name-only identity default. */
+const makeAgent = (overrides: Partial<DiscoveredAgent> = {}): DiscoveredAgent =>
+	makePersonaAgent({
 		name: "test-agent",
 		description: "test",
 		systemPrompt: "test prompt",
-		source: "bundled",
 		...overrides,
-	};
-}
+	});
 
 const NO_EXPLICIT: PersonaExplicitOverrides = {};
 

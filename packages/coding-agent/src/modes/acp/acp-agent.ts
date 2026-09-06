@@ -65,7 +65,11 @@ import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } fro
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
-import { readPersistedAgentPersona } from "../../session/persisted-persona";
+import {
+	appendPersonaJournalEntry,
+	reconcileSessionPersona,
+	readPersistedAgentPersona,
+} from "../../session/persisted-persona";
 import { createDefaultPersonaModelHooks, type PersonaModelApplyHooks } from "../../session/persona-model-hooks";
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
@@ -73,7 +77,6 @@ import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
-import { discoverAgents, getAgent, refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
 import { OTHER_OPTION } from "../../tools/ask";
 import { normalizeLocalScheme } from "../../tools/path-utils";
@@ -84,6 +87,7 @@ import {
 	TTS_LOCAL_MODELS,
 	TTS_LOCAL_VOICE_OPTIONS,
 } from "../../tts/models";
+import { refreshAgentDiscovery } from "../../task";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
@@ -151,84 +155,38 @@ export function createAcpPersonaModelHooks(
 }
 
 /**
- * Re-activates the persisted persona on session load/resume/fork: read the
- * journal's LAST agent `mode_change` entry, resolve the agent against the
- * session's effective discovery roots, and drive
- * `PersonaRuntime.reconcile`. On success appends a fresh `mode_change agent`
- * entry (drift-free resume); a persona that no longer resolves degrades to
- * unrestricted with a warn log and NO journal write. `emitNotice` lets the
- * caller route surfaced text (a gone-persona notice) through its own channel.
- * Notices emitted during reconcile are routed through `emitNotice`; the
- * session-open paths buffer them until registration so the client is never
- * notified for an unknown session id.
+ * Re-activates the persisted persona on session load/resume/fork through the
+ * shared `reconcileSessionPersona` helper (journal read, discovery, baseline
+ * deserialization, `PersonaRuntime.reconcile`, gone-persona degrade). On
+ * success appends a fresh `mode_change agent` entry (drift-free resume) with
+ * the (unchanged) baseline carried forward so the contract key survives across
+ * load/resume cycles. `emitNotice` routes surfaced text (a gone-persona
+ * notice) through the caller's channel; the session-open paths buffer it until
+ * registration so the client is never notified for an unknown session id.
  */
 export async function reconcileAcpSessionPersona(
 	session: AgentSession,
 	emitNotice: (text: string) => void | Promise<void>,
 ): Promise<void> {
-	const runtime = "getPersonaRuntime" in session ? session.getPersonaRuntime() : undefined;
-	if (!runtime) {
-		return;
-	}
-	const desired = readPersistedAgentPersona(session.sessionManager.getEntries());
-	if (!desired) {
-		return;
-	}
-	try {
-		const { agents } = await discoverAgents(
-			session.sessionManager.getCwd(),
-			undefined,
-			session.effectiveExtensionRoots,
-		);
-		const agent = getAgent(agents, desired.name);
-		if (!agent) {
-			logger.warn(`ACP session persona "${desired.name}" is no longer available; resuming without it`, {
-				sessionId: session.sessionId,
+	const result = await reconcileSessionPersona(session, {
+		buildHooks: current => createAcpPersonaModelHooks(current, emitNotice),
+		onGone: (current, name) => emitNotice(PERSONA_GONE_NOTICE_TEMPLATE.replace("{name}", name)),
+		onError: (current, persona, error) => {
+			// No journal write and no client notice on an internal failure: the
+			// session simply resumes without the persona rather than failing load.
+			logger.warn("Failed to reconcile persisted persona on ACP session open", {
+				sessionId: current.sessionId,
+				persona,
+				error: error instanceof Error ? error.message : String(error),
 			});
-			await emitNotice(PERSONA_GONE_NOTICE_TEMPLATE.replace("{name}", desired.name));
-			// Journal clear marker (plan §3, P3): without it the stale `agent`
-			// entry stays LAST and every future resume re-notices the
-			// gone-persona degrade. Same shape the persona exit paths use.
-			session.sessionManager.appendModeChange("none");
-			return;
-		}
-		await runtime.reconcile(
-			{
-				agent,
-				explicit: desired.explicit,
-				// j2g: the entry's baseline (the ORIGINAL enter's pre-persona state)
-				// stays authoritative — the live model is persona-produced.
-				baselineOverride: desired.baseline
-					? {
-							model: desired.baseline.model
-								? session.modelRegistry
-										.getAvailable()
-										.find(candidate => `${candidate.provider}/${candidate.id}` === desired.baseline?.model)
-								: undefined,
-							thinkingLevel: desired.baseline.thinkingLevel
-								? parseConfiguredThinkingLevel(desired.baseline.thinkingLevel)
-								: undefined,
-						}
-					: undefined,
-			},
-			createAcpPersonaModelHooks(session, emitNotice),
-		);
-		// Re-append carries the (unchanged) baseline forward so the contract key
-		// survives across load/resume cycles.
-		const baseline = desired.baseline;
-		session.sessionManager.appendModeChange("agent", {
-			name: desired.name,
-			...(desired.explicit ? { explicit: desired.explicit } : {}),
-			...(baseline ? { baseline } : {}),
-		});
-	} catch (error) {
-		// No journal write and no client notice on an internal failure: the
-		// session simply resumes without the persona rather than failing load.
-		logger.warn("Failed to reconcile persisted persona on ACP session open", {
-			sessionId: session.sessionId,
-			persona: desired.name,
-			error: error instanceof Error ? error.message : String(error),
-		});
+		},
+	});
+	if (!result.entered) return;
+	// Re-append carries the (unchanged) baseline forward so the contract key
+	// survives across load/resume cycles.
+	const desired = readPersistedAgentPersona(session.sessionManager.getEntries());
+	if (desired) {
+		appendPersonaJournalEntry(session, desired);
 	}
 }
 

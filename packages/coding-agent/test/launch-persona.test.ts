@@ -387,10 +387,7 @@ You are the wide persona.`,
 		const cliGrant = launched.getToolPolicy()?.cliGrant;
 		expect(cliGrant).not.toBeNull();
 		const explicitOverrides = cliGrant ? { tools: [...cliGrant] } : {};
-		await runtime.reconcile(
-			{ agent: wide!, explicit: explicitOverrides },
-			{ apply: async () => {}, restore: async () => {} },
-		);
+		await runtime.reconcile({ agent: wide!, explicit: explicitOverrides }, { apply: async () => {} });
 		launched.sessionManager.appendModeChange("agent", {
 			name: wide!.name,
 			...(Object.keys(explicitOverrides).length > 0 ? { explicit: explicitOverrides } : {}),

@@ -111,7 +111,12 @@ import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { readPersistedAgentPersona, serializePersonaBaseline } from "../session/persisted-persona";
+import {
+	appendPersonaJournalEntry,
+	clearPersonaJournalEntry,
+	readPersistedAgentPersona,
+	reconcileSessionPersona,
+} from "../session/persisted-persona";
 import { createDefaultPersonaModelHooks, type PersonaModelApplyHooks } from "../session/persona-model-hooks";
 import type { PersonaExplicitOverrides } from "../session/tool-policy";
 import type { SessionContext } from "../session/session-context";
@@ -126,7 +131,7 @@ import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-pro
 import { type AgentDefinition, discoverAgents, getAgent } from "../task";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "../task/render";
-import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
+import { type ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
 import { isMCPToolName } from "../tools/builtin-names";
@@ -3257,10 +3262,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Re-apply the persisted persona on resume/switch, mirroring the ACP
-	 * `session/load` path: read the journal's LAST agent `mode_change` entry and
-	 * drive `PersonaRuntime.reconcile`. A gone persona degrades to unrestricted
-	 * with a transient status notice rather than failing the resume.
+	 * Re-apply the persisted persona on resume/switch through the shared
+	 * `reconcileSessionPersona` helper, mirroring the ACP `session/load` path.
+	 * A gone persona degrades to unrestricted with a transient status notice
+	 * rather than failing the resume.
 	 *
 	 * The runtime is reused across an in-process `switchSession`, so a
 	 * persona-active SOURCE session switching to a target whose journal has no
@@ -3270,64 +3275,27 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	async #reconcilePersonaFromSession(): Promise<void> {
 		const desired = readPersistedAgentPersona(this.sessionManager.getEntries());
-		const runtime = this.session.getPersonaRuntime();
 		if (!desired) {
 			await this.#exitSourcePersonaForSwitch("on switch to a non-persona session");
 			return;
 		}
-		if (!runtime) return;
-		try {
-			const { agents } = await discoverAgents(
-				this.sessionManager.getCwd(),
-				undefined,
-				this.session.effectiveExtensionRoots,
-			);
-			const agent = getAgent(agents, desired.name);
-			if (!agent) {
-				// Target journal names a persona discovery no longer resolves. The
-				// runtime is reused across an in-process switchSession, so the SOURCE
-				// persona may still be attached here: exiting (not just skipping)
-				// clears its grant, identity prompt, and narrowed presentation
-				// before the target session lands.
+		await reconcileSessionPersona(this.session, {
+			buildHooks: () => this.#createPersonaModelHooks(),
+			onGone: async () => {
+				// The runtime may still hold the SOURCE persona here: exiting (not
+				// just skipping) clears its grant, identity prompt, and narrowed
+				// presentation before the target session lands.
 				await this.#exitSourcePersonaForSwitch("on switch to a persona-less target");
 				this.showStatus(`Agent persona "${desired.name}" is no longer available; session resumed without it.`, {
 					dim: true,
 				});
-				// Journal clear marker (plan §3, P3): without it the stale `agent` entry
-				// stays LAST and every future resume re-notices the degrade. Same shape
-				// the persona exit paths use.
-				this.sessionManager.appendModeChange("none");
-				return;
-			}
-			// j2g: the journal's baseline (captured at the ORIGINAL enter, before any
-			// persona model apply) is the authoritative pre-persona state on resume —
-			// the live model/thinking are persona-produced, so re-capturing them
-			// would make a later exit restore the persona model.
-			const baselineOverride = desired.baseline
-				? {
-						model: desired.baseline.model
-							? this.session.modelRegistry
-									.getAvailable()
-									.find(candidate => `${candidate.provider}/${candidate.id}` === desired.baseline?.model)
-							: undefined,
-						thinkingLevel: desired.baseline.thinkingLevel
-							? parseConfiguredThinkingLevel(desired.baseline.thinkingLevel)
-							: undefined,
-					}
-				: undefined;
-			await runtime.reconcile(
-				{ agent, explicit: desired.explicit, baselineOverride },
-				this.#createPersonaModelHooks(),
-			);
-		} catch (error) {
-			logger.warn("Failed to reconcile persisted persona on resume", {
-				sessionFile: this.sessionManager.getSessionFile(),
-				error: error instanceof Error ? error.message : String(error),
-			});
-			this.showStatus(`Failed to restore agent persona "${desired.name}"; session resumed without it.`, {
-				dim: true,
-			});
-		}
+			},
+			onError: () => {
+				this.showStatus(`Failed to restore agent persona "${desired.name}"; session resumed without it.`, {
+					dim: true,
+				});
+			},
+		});
 	}
 
 	/**
@@ -6003,13 +5971,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
 		// j2g: the runtime's captured pre-persona baseline rides the entry so a
 		// resume can re-enter with it as the authoritative exit baseline.
-		const baseline = serializePersonaBaseline(
-			runtime.getActiveBaseline() ?? { model: undefined, thinkingLevel: undefined },
-		);
-		this.sessionManager.appendModeChange("agent", {
+		appendPersonaJournalEntry(this.session, {
 			name: agent.name,
-			...(Object.keys(explicitOverrides).length > 0 ? { explicit: explicitOverrides } : {}),
-			...(baseline ? { baseline } : {}),
+			explicit: explicitOverrides,
+			baseline: runtime.getActiveBaseline(),
 		});
 		this.showStatus(`Agent persona: ${agent.name}`);
 	}
@@ -6038,7 +6003,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		} finally {
 			this.#afterPersonaSwitch();
 		}
-		this.sessionManager.appendModeChange("none");
+		clearPersonaJournalEntry(this.session);
 		this.showStatus("Agent persona cleared.");
 	}
 

@@ -1,3 +1,12 @@
+import { logger } from "@oh-my-pi/pi-utils";
+import type { Model } from "@oh-my-pi/pi-ai";
+import type { ConfiguredThinkingLevel } from "../thinking";
+import { parseConfiguredThinkingLevel } from "../thinking";
+import type { AgentSession } from "./agent-session";
+import type { PersonaModelApplyHooks } from "./persona-model-hooks";
+import type { ModelOverrideState } from "./persona-runtime";
+import { discoverAgents, getAgent } from "../task/discovery";
+
 import type { PersonaExplicitOverrides } from "./tool-policy";
 
 /**
@@ -40,6 +49,26 @@ export function serializePersonaBaseline(baseline: {
 	if (model) out.model = `${model.provider}/${model.id}`;
 	if (baseline.thinkingLevel !== undefined) out.thinkingLevel = String(baseline.thinkingLevel);
 	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Resolves a journal-persisted baseline against the session's model registry:
+ * the "provider/modelId" string becomes the live `Model` object, the persisted
+ * thinking string parses to a `ConfiguredThinkingLevel`. A model the registry
+ * can no longer resolve drops to `undefined` (the persona model may have been
+ * removed from the catalog between sessions; the thinking half still restores).
+ */
+function deserializePersonaBaseline(session: AgentSession, baseline: AgentPersonaBaseline): ModelOverrideState {
+	return {
+		model: baseline.model
+			? (session.modelRegistry
+					.getAvailable()
+					.find(candidate => `${candidate.provider}/${candidate.id}` === baseline.model) as Model | undefined)
+			: undefined,
+		thinkingLevel: baseline.thinkingLevel
+			? (parseConfiguredThinkingLevel(baseline.thinkingLevel) as ConfiguredThinkingLevel | undefined)
+			: undefined,
+	};
 }
 
 /**
@@ -109,4 +138,107 @@ export function readPersistedAgentPersona(
 		return undefined;
 	}
 	return undefined;
+}
+
+/**
+ * Callbacks the reconcile helper delegates surface differences to. The
+ * gone-persona channel fires before the journal clear marker; the failure
+ * channel fires when reconcile itself throws (the session resumes without
+ * the persona).
+ */
+export interface ReconcileSessionPersonaHooks {
+	/** Persona model hooks passed to `runtime.reconcile` (TUI/ACP override the mid-turn channels). */
+	buildHooks: (session: AgentSession) => PersonaModelApplyHooks;
+	/** Surface a gone-persona degrade (TUI status line, ACP client notice). */
+	onGone?: (session: AgentSession, name: string) => void | Promise<void>;
+	/** Surface a reconcile failure; the default logs a warn with this context. */
+	onError?: (session: AgentSession, name: string, error: unknown) => void | Promise<void>;
+}
+
+/**
+ * j2g/j2n: session-level persona reconcile shared by the TUI resume, the
+ * headless switch (ACP/RPC/SDK) and the ACP load/fork paths. Reads the
+ * journal's LAST agent `mode_change` entry, re-resolves the agent against the
+ * session's effective discovery roots, and drives `PersonaRuntime.reconcile`
+ * with the journal's baseline as the authoritative pre-persona state.
+ *
+ * Journal rules: NO write on success (the entry already exists); a persona the
+ * journal names but discovery no longer resolves degrades to unrestricted —
+ * append a `mode_change none` clear marker (so every future resume does not
+ * re-notice the degrade), warn, and route the surface notice through
+ * `hooks.onGone`. An internal failure logs and resumes without the persona.
+ */
+export async function reconcileSessionPersona(
+	session: AgentSession,
+	hooks: ReconcileSessionPersonaHooks,
+): Promise<{ entered: boolean }> {
+	const runtime = session.getPersonaRuntime();
+	const desired = readPersistedAgentPersona(session.sessionManager.getEntries());
+	if (!runtime || !desired) {
+		return { entered: false };
+	}
+	try {
+		const { agents } = await discoverAgents(
+			session.sessionManager.getCwd(),
+			undefined,
+			session.effectiveExtensionRoots,
+		);
+		const agent = getAgent(agents, desired.name);
+		if (!agent) {
+			// Surface the degrade BEFORE the journal clear marker (the ACP path
+			// emitted its notice first; ordering is unobservable to the journal).
+			await hooks.onGone?.(session, desired.name);
+			// Journal clear marker (plan §3, P3): without it the stale `agent`
+			// entry stays LAST and every future resume re-notices the
+			// gone-persona degrade. Same shape the persona exit paths use.
+			session.sessionManager.appendModeChange("none");
+			logger.warn(`Session persona "${desired.name}" is no longer available; resuming without it`, {
+				sessionId: session.sessionId,
+			});
+			return { entered: false };
+		}
+		// j2g: the journal's baseline (captured at the ORIGINAL enter) is the
+		// authoritative pre-persona state on resume — the live model/thinking
+		// are persona-produced, so re-capturing them would make a later exit
+		// restore the persona model.
+		const baselineOverride = desired.baseline ? deserializePersonaBaseline(session, desired.baseline) : undefined;
+		await runtime.reconcile({ agent, explicit: desired.explicit, baselineOverride }, hooks.buildHooks(session));
+		return { entered: true };
+	} catch (error) {
+		if (hooks.onError) {
+			await hooks.onError(session, desired.name, error);
+		} else {
+			logger.warn("Failed to reconcile persisted persona", {
+				sessionId: session.sessionId,
+				persona: desired.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		return { entered: false };
+	}
+}
+
+/**
+ * Caller-owned persona journal persistence (the runtime stays pure; the
+ * resume reconcile reads the entry back). Serializes the runtime's captured
+ * pre-persona baseline once here, omitting the key when nothing was captured.
+ */
+export function appendPersonaJournalEntry(
+	session: AgentSession,
+	entry: { name: string; explicit?: PersonaExplicitOverrides; baseline?: unknown },
+): void {
+	const baseline =
+		entry.baseline === undefined
+			? undefined
+			: serializePersonaBaseline(entry.baseline as { model: unknown; thinkingLevel: unknown });
+	session.sessionManager.appendModeChange("agent", {
+		name: entry.name,
+		...(entry.explicit && Object.keys(entry.explicit).length > 0 ? { explicit: entry.explicit } : {}),
+		...(baseline ? { baseline } : {}),
+	});
+}
+
+/** Appends the persona clear marker (`mode_change none`) for an explicit persona exit. */
+export function clearPersonaJournalEntry(session: AgentSession): void {
+	session.sessionManager.appendModeChange("none");
 }

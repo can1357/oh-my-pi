@@ -119,7 +119,6 @@ import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { WorkPoolRegistry } from "../task/workpool";
 import { isScoutSpawnable } from "../task/spawn-policy";
-import { discoverAgents, getAgent } from "../task/discovery";
 import type { BashPtyOptions, BashResult } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -366,7 +365,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
 import type { PersonaRuntime } from "./persona-runtime";
 import type { SessionToolPolicy } from "./tool-policy";
-import { readPersistedAgentPersona } from "./persisted-persona";
+import { readPersistedAgentPersona, reconcileSessionPersona } from "./persisted-persona";
 import { createDefaultPersonaModelHooks } from "./persona-model-hooks";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
@@ -2073,60 +2072,32 @@ export class AgentSession {
 	 * target journal, and a failed switch re-enters the SOURCE journal's persona.
 	 * Never journal-writes on success (the entry already exists); a persona the
 	 * journal names but discovery can no longer resolve degrades to unrestricted
-	 * with a warn log — matching the ACP load path, minus client notices.
+	 * — via the shared helper, so this surface journals the clear marker too
+	 * (matching the ACP load path, minus client notices).
 	 */
 	async #reconcilePersonaAfterSwitch(
 		sessionFile: string | undefined,
 		options: { fromRollback: boolean },
 	): Promise<void> {
-		const runtime = this.getPersonaRuntime();
-		if (!runtime) return;
-		const desired = readPersistedAgentPersona(this.sessionManager.getEntries());
-		if (!desired) {
-			// Target has no persona entry: the teardown before the switch already
-			// exited the source persona (and a rollback restored the source state,
-			// whose persona was ALSO exited by that same teardown — nothing to do).
-			if (options.fromRollback) {
-				logger.warn("Persona re-activation after switch rollback skipped: journal has no agent entry", {
-					sessionFile,
-				});
-			}
+		// Target has no persona entry: the teardown before the switch already
+		// exited the source persona (and a rollback restored the source state,
+		// whose persona was ALSO exited by that same teardown — nothing to do).
+		if (options.fromRollback && !readPersistedAgentPersona(this.sessionManager.getEntries())) {
+			logger.warn("Persona re-activation after switch rollback skipped: journal has no agent entry", {
+				sessionFile,
+			});
 			return;
 		}
-		try {
-			const { agents } = await discoverAgents(this.sessionManager.getCwd(), undefined, this.effectiveExtensionRoots);
-			const agent = getAgent(agents, desired.name);
-			if (!agent) {
-				logger.warn(`Session persona "${desired.name}" is no longer available; resuming without it`, {
+		await reconcileSessionPersona(this, {
+			buildHooks: createDefaultPersonaModelHooks,
+			onError: (session, persona, error) => {
+				logger.warn("Failed to reconcile persisted persona after session switch", {
 					sessionFile,
+					persona,
+					error: error instanceof Error ? error.message : String(error),
 				});
-				return;
-			}
-			// j2g: the journal's baseline (captured at the ORIGINAL enter) is the
-			// authoritative pre-persona state on resume.
-			const baselineOverride = desired.baseline
-				? {
-						model: desired.baseline.model
-							? this.modelRegistry
-									.getAvailable()
-									.find(candidate => `${candidate.provider}/${candidate.id}` === desired.baseline?.model)
-							: undefined,
-						thinkingLevel: desired.baseline.thinkingLevel
-							? parseConfiguredThinkingLevel(desired.baseline.thinkingLevel)
-							: undefined,
-					}
-				: undefined;
-			await runtime.reconcile(
-				{ agent, explicit: desired.explicit, baselineOverride },
-				createDefaultPersonaModelHooks(this),
-			);
-		} catch (error) {
-			logger.warn("Failed to reconcile persisted persona after session switch", {
-				sessionFile,
-				persona: desired.name,
-				error: error instanceof Error ? error.message : String(error),
-			});
-		}
+			},
+		});
 	}
 
 	/**

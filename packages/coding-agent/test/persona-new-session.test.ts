@@ -73,7 +73,7 @@ describe("persona state teardown for /new sessions", () => {
 			extensionRunner,
 		});
 		s.setPersonaRuntime(new PersonaRuntime(policy, s));
-		if (persona) await s.getPersonaRuntime()!.enter(persona, {}, { apply: async () => {}, restore: async () => {} });
+		if (persona) await s.getPersonaRuntime()!.enter(persona, {}, { apply: async () => {} });
 		return s;
 	}
 

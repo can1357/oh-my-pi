@@ -162,7 +162,7 @@ export class PersonaRuntime {
 		if (this.session.isStreaming && !deferModel) {
 			throw new PersonaSwitchError("Cannot switch persona while the session is streaming");
 		}
-		const tx = await PersonaSwitchTransaction.begin(this);
+		const txSnapshot = await this.snapshot();
 		try {
 			// Switching personas directly must not narrow cumulatively: the live
 			// partition already reflects the PRIOR persona's grant, so filtering it
@@ -174,7 +174,7 @@ export class PersonaRuntime {
 			}
 			await this.#enterInner(agent, explicit, hooks, deferModel);
 		} catch (err) {
-			await this.restore(tx.snapshot);
+			await this.restore(txSnapshot);
 			throw err;
 		}
 	}
@@ -202,11 +202,11 @@ export class PersonaRuntime {
 		if (this.session.isStreaming && !deferModel) {
 			throw new PersonaSwitchError("Cannot exit persona while the session is streaming");
 		}
-		const tx = await PersonaSwitchTransaction.begin(this);
+		const txSnapshot = await this.snapshot();
 		try {
 			await this.#exitInner(hooks, deferModel);
 		} catch (err) {
-			await this.restore(tx.snapshot);
+			await this.restore(txSnapshot);
 			throw err;
 		}
 	}
@@ -227,14 +227,14 @@ export class PersonaRuntime {
 		// ONE pre-reconcile snapshot guards the whole exit→enter pair: if enter
 		// fails, the session is restored to the state BEFORE the reconcile (persona
 		// still active), not to the post-exit default.
-		const guard = await PersonaSwitchTransaction.begin(this);
+		const guardSnapshot = await this.snapshot();
 		try {
 			if (this.policy.isPersonaActive()) {
 				await this.#exitInner(hooks, deferModel);
 			}
 			await this.#enterInner(desired.agent, desired.explicit ?? {}, hooks, deferModel, desired.baselineOverride);
 		} catch (err) {
-			await this.restore(guard.snapshot);
+			await this.restore(guardSnapshot);
 			throw err;
 		}
 	}
@@ -273,15 +273,14 @@ export class PersonaRuntime {
 
 	/**
 	 * Symmetric restore of `snapshot()` — the single rollback mechanism.
-	 * Model/thinking revert from the captured `baseModelOverride` directly, NOT
-	 * through `hooks.restore()`: the hook instance that ran `apply` does not
-	 * survive to the rollback site (exit/reconcile callers build fresh hooks),
-	 * so a hooks-only rollback would leave a half-applied switch. The runtime
-	 * baseline round-trips through the snapshot: a persona→persona switch whose
-	 * new enter fails rolls the surviving persona back WITH its baseline, so a
-	 * later exit still restores the pre-switch model. Prompt rebuild last: the
-	 * restored append prompt/policy shape what the next render shows, so a
-	 * rollback never serves a stale cached prompt.
+	 * Model/thinking revert from the captured `baseModelOverride` directly —
+	 * the hook instance that ran `apply` does not survive to the rollback site
+	 * (exit/reconcile callers build fresh hooks), so no hooks channel exists.
+	 * The runtime baseline round-trips through the snapshot: a persona→persona
+	 * switch whose new enter fails rolls the surviving persona back WITH its
+	 * baseline, so a later exit still restores the pre-switch model. Prompt
+	 * rebuild last: the restored append prompt/policy shape what the next render
+	 * shows, so a rollback never serves a stale cached prompt.
 	 */
 	async restore(snap: PersonaSwitchSnapshot): Promise<void> {
 		this.policy.restore(snap.policy);
@@ -445,12 +444,9 @@ export class PersonaRuntime {
 	 * caller's pre-computed mid-turn deferral decision.
 	 *
 	 * Model/thinking restore reads the RUNTIME-owned `#activeBaseline` (captured
-	 * by `#enterInner`), not `hooks.restore()`: the hook instance that ran
-	 * `apply` does not survive to exit — `exitAgentPersona` and the ACP/text
-	 * `/agent` path build fresh hooks whose per-instance baseline is empty, so a
-	 * hooks-only restore would silently leave the persona's model/thinking
-	 * applied. `hooks.restore()` is kept as a no-op-compatible surface channel
-	 * (a surface hooks impl may still queue/skip there).
+	 * by `#enterInner`): the hook instance that ran `apply` does not survive to
+	 * exit — `exitAgentPersona` and the ACP/text `/agent` path build fresh hooks,
+	 * so no hooks restore channel exists.
 	 */
 	async #exitInner(hooks: PersonaModelApplyHooks, deferModel: boolean): Promise<void> {
 		this.session.clearInheritedProviderPromptCacheKey();
@@ -521,30 +517,5 @@ export class PersonaRuntime {
 			}
 		}
 		await this.session.refreshBaseSystemPrompt();
-	}
-}
-
-/**
- * A captured persona state bound to its runtime. Modes open a transaction
- * before partitioning tools and roll back on mode exit; `PersonaRuntime`
- * uses the same mechanism internally for atomic enter/exit.
- */
-export class PersonaSwitchTransaction {
-	readonly snapshot: PersonaSwitchSnapshot;
-	#runtime: PersonaRuntime;
-
-	constructor(runtime: PersonaRuntime, snapshot: PersonaSwitchSnapshot) {
-		this.#runtime = runtime;
-		this.snapshot = snapshot;
-	}
-
-	/** Captures the runtime's current persona state. */
-	static async begin(runtime: PersonaRuntime): Promise<PersonaSwitchTransaction> {
-		return new PersonaSwitchTransaction(runtime, await runtime.snapshot());
-	}
-
-	/** Restores the captured state through the runtime's single restore path. */
-	async rollback(): Promise<void> {
-		await this.#runtime.restore(this.snapshot);
 	}
 }

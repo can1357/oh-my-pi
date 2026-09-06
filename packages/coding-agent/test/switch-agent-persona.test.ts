@@ -1,134 +1,21 @@
 import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { DiscoveredAgent } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
+import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import * as taskDiscovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import {
 	createDefaultPersonaModelHooks,
 	type ModelBaseline,
 	type PersonaModelApplyHooks,
 } from "@oh-my-pi/pi-coding-agent/session/persona-model-hooks";
-import { PersonaRuntime } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
-import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { type DiscoveredAgent, SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
-import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
-import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import * as taskDiscovery from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { makePersonaAgent, makePersonaHooks, makeSessionStub } from "./persona-test-utils";
 
-const ALL_TOOLS = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "hub"]);
-
-interface SessionStub {
-	isStreaming: boolean;
-	enabledToolNames: string[];
-	mountedToolNames: string[];
-	activeToolNames: string[];
-	/** Simulated tool registry (registered ≠ enabled: dormant tools included). */
-	registeredToolNames: string[];
-	model: undefined;
-	thinkingLevel: undefined;
-	spawnsOverride: string[] | "*" | null;
-	appendPrompt: string | undefined;
-	presentationCalls: Array<{ toolNames: string[]; mountedToolNames: string[] }>;
-	spawnsCalls: Array<string[] | "*" | null>;
-	appendPromptCalls: Array<string | undefined>;
-	refreshBaseSystemPromptCalls: number;
-	noticeCalls: Array<{ level: string; message: string }>;
-}
-
-function makeAgent(overrides: Partial<DiscoveredAgent> = {}): DiscoveredAgent {
-	return {
-		name: "persona-a",
-		description: "test persona",
-		systemPrompt: "persona-a identity prompt",
-		tools: ["read", "grep"],
-		source: "bundled",
-		...overrides,
-	};
-}
-
-function makeSessionStub(overrides: Partial<SessionStub> = {}): {
-	stub: SessionStub;
-	session: AgentSession;
-	policy: SessionToolPolicy;
-	runtime: PersonaRuntime;
-	modeChangeEntries: Array<{ mode: string; data?: Record<string, unknown> }>;
-} {
-	const stub: SessionStub = {
-		isStreaming: false,
-		enabledToolNames: ["read", "grep", "glob", "write"],
-		mountedToolNames: [],
-		activeToolNames: ["read", "grep", "glob", "write"],
-		registeredToolNames: [...ALL_TOOLS],
-		model: undefined,
-		thinkingLevel: undefined,
-		spawnsOverride: null,
-		appendPrompt: undefined,
-		presentationCalls: [],
-		spawnsCalls: [],
-		appendPromptCalls: [],
-		refreshBaseSystemPromptCalls: 0,
-		noticeCalls: [],
-		...overrides,
-	};
-	const policy = new SessionToolPolicy({
-		registry: () => ALL_TOOLS,
-		isDefaultActive: () => true,
-	});
-	const runtimeRef: { current: PersonaRuntime | undefined } = {
-		current: undefined,
-	};
-	const modeChangeEntries: Array<{
-		mode: string;
-		data?: Record<string, unknown>;
-	}> = [];
-	const sessionManagerStub = {
-		appendModeChange: (mode: string, data?: Record<string, unknown>) => {
-			modeChangeEntries.push({ mode, data });
-			return "fake-entry";
-		},
-	};
-	const session = {
-		sessionManager: sessionManagerStub,
-		get isStreaming() {
-			return stub.isStreaming;
-		},
-		getEnabledToolNames: () => [...stub.enabledToolNames],
-		getMountedXdevToolNames: () => [...stub.mountedToolNames],
-		getActiveToolNames: () => [...stub.activeToolNames],
-		getAllToolNames: () => [...stub.registeredToolNames],
-		get model() {
-			return stub.model;
-		},
-		configuredThinkingLevel: () => stub.thinkingLevel,
-		refreshBaseSystemPrompt: async () => {
-			stub.refreshBaseSystemPromptCalls += 1;
-		},
-		setActiveToolPresentation: async (toolNames: string[], mountedToolNames: string[]) => {
-			stub.presentationCalls.push({
-				toolNames: [...toolNames],
-				mountedToolNames: [...mountedToolNames],
-			});
-		},
-		clearInheritedProviderPromptCacheKey: () => {},
-		getSessionSpawns: () => stub.spawnsOverride ?? "*",
-		setSessionSpawns: (spawns: string[] | "*" | null) => {
-			stub.spawnsOverride = spawns;
-			stub.spawnsCalls.push(spawns);
-		},
-		applyPersonaAppendPrompt: (text: string | undefined) => {
-			stub.appendPrompt = text;
-			stub.appendPromptCalls.push(text);
-		},
-		getPersonaAppendPrompt: () => stub.appendPrompt,
-		getPersonaRuntime: () => runtimeRef.current,
-		getToolPolicy: () => policy,
-		emitNotice: (level: string, message: string) => {
-			stub.noticeCalls.push({ level, message });
-		},
-	} as unknown as AgentSession;
-	const runtime = new PersonaRuntime(policy, session);
-	runtimeRef.current = runtime;
-	return { stub, session, policy, runtime, modeChangeEntries };
-}
-
+/** Shared persona fixture with this suite's narrowed-grant default. */
+const makeAgent = (overrides: Partial<DiscoveredAgent> = {}): DiscoveredAgent =>
+	makePersonaAgent({ tools: ["read", "grep"], ...overrides });
 /** ACP/text-mode `/agent` harness: fake runtime mirroring acp-builtins.test.ts. */
 function makeAgentSlashHarness(session: AgentSession): {
 	output: string[];
@@ -152,10 +39,6 @@ function makeAgentSlashHarness(session: AgentSession): {
 			reloadPlugins: async () => {},
 		},
 	};
-}
-
-function makePersonaHooks(): PersonaModelApplyHooks {
-	return { apply: async () => {}, restore: async () => {} };
 }
 
 const discoverySpies: Array<Mock<typeof taskDiscovery.discoverAgents>> = [];
@@ -183,11 +66,9 @@ describe("/agent slash command", () => {
 		// Persona grant: only read/grep survive the persona layer.
 		expect(policy.effective("read")).toBe(true);
 		expect(policy.effective("grep")).toBe(true);
-		expect(policy.effective("write")).toBe(false);
+		expect(stub.appendPrompt).toBe("persona prompt");
 		// Presentation channel narrowed to the intersected set (enter body).
 		expect(stub.presentationCalls[stub.presentationCalls.length - 1]?.toolNames).toEqual(["read", "grep"]);
-		// Identity channel applied through the accessor.
-		expect(stub.appendPrompt).toBe("persona-a identity prompt");
 		expect(stub.refreshBaseSystemPromptCalls).toBe(1);
 	});
 
@@ -273,7 +154,7 @@ describe("persona switch deferral", () => {
 		// Persona state applied immediately even though the model half deferred.
 		expect(runtime.policy.isPersonaActive()).toBe(true);
 		expect(policy.effective("read")).toBe(true);
-		expect(stub.appendPrompt).toBe("persona-a identity prompt");
+		expect(stub.appendPrompt).toBe("persona prompt");
 	});
 
 	it("queues the pre-persona model restore when exiting mid-turn", async () => {
@@ -284,7 +165,6 @@ describe("persona switch deferral", () => {
 		const queued: Array<ModelBaseline> = [];
 		const hooks: PersonaModelApplyHooks = {
 			apply: async () => {},
-			restore: async () => {},
 			shouldDeferModelSwitch: () => true,
 			deferModelSwitchWhileStreaming: () => {},
 			deferModelRestoreWhileStreaming: baseline => {

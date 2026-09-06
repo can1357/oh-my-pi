@@ -10,32 +10,22 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import { parseConfiguredThinkingLevel } from "../thinking";
 
 /**
- * Model/thinking apply + restore seam between the persona runtime and the
- * session's model machinery. Stage 1 of the PR 9510 re-architecture
- * (docs/plans/2026-09-05-persona-runtime-rearchitect.md §2): the runtime calls
- * these hooks instead of touching `AgentSession` model APIs directly, so each
- * host surface (TUI queues, ACP notices) can override the mid-turn channels.
+ * Model/thinking apply seam between the persona runtime and the session's
+ * model machinery (PR 9510 re-architecture): the runtime calls these hooks
+ * instead of touching `AgentSession` model APIs directly, so each host surface
+ * (TUI queues, ACP notices) can override the mid-turn channels.
  *
  * Baseline OWNERSHIP note: the runtime captures the pre-apply model/thinking
  * itself and restores it on exit/rollback — a hooks instance's internal
- * baseline does NOT survive exit (callers build fresh hooks objects). The
- * instance's `restore` exists for direct rollback callers that hold the hooks
- * instance that applied, never across a persona lifecycle.
+ * baseline does NOT survive exit (callers build fresh hooks objects), so there
+ * is no per-instance restore channel.
  */
 export interface PersonaModelApplyHooks {
 	/**
 	 * Apply the agent's model + thinking preference to the session. The runtime
-	 * owns the lifecycle baseline and never reads it back through
-	 * {@link restore}.
+	 * owns the lifecycle baseline.
 	 */
 	apply(agent: DiscoveredAgent, explicit?: PersonaExplicitOverrides): Promise<void>;
-
-	/**
-	 * Surface-specific restore channel. The runtime does NOT call this on the
-	 * persona exit path anymore (it restores its own captured baseline); kept
-	 * for direct rollback callers that hold the hooks instance that applied.
-	 */
-	restore(): Promise<void>;
 
 	/**
 	 * Defer a mid-turn persona model switch (ACP semantics: notice + skip,
@@ -69,19 +59,12 @@ export interface ModelBaseline {
 
 /**
  * Default hooks bound to one session. Baseline capture reads `session.model`
- * and `session.configuredThinkingLevel()` immediately before any mutation, so
- * `restore` always lands the session exactly where the persona found it.
+ * and `session.configuredThinkingLevel()` immediately before any mutation; the
+ * runtime owns the restore (it never calls back into this instance).
  */
 export function createDefaultPersonaModelHooks(session: AgentSession): PersonaModelApplyHooks {
-	let baseline: ModelBaseline | undefined;
-
 	return {
 		async apply(agent: DiscoveredAgent, explicit?: PersonaExplicitOverrides): Promise<void> {
-			baseline = {
-				model: session.model,
-				thinkingLevel: session.configuredThinkingLevel(),
-			};
-
 			const explicitModelPattern = explicit?.model?.trim();
 			if (explicitModelPattern) {
 				const resolved = resolveModelOverride([explicitModelPattern], session.modelRegistry, session.settings);
@@ -101,20 +84,6 @@ export function createDefaultPersonaModelHooks(session: AgentSession): PersonaMo
 				explicitThinking ?? (agent.thinkingLevel !== undefined ? agent.thinkingLevel : undefined);
 			if (thinking !== undefined) {
 				session.setThinkingLevel(thinking);
-			}
-		},
-
-		async restore(): Promise<void> {
-			if (!baseline) return;
-			const { model, thinkingLevel } = baseline;
-			baseline = undefined;
-			if (model && session.model && session.model !== model) {
-				await session.setModel(model);
-			} else if (model && !session.model) {
-				await session.setModel(model);
-			}
-			if (session.configuredThinkingLevel() !== thinkingLevel) {
-				session.setThinkingLevel(thinkingLevel);
 			}
 		},
 	};

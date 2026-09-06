@@ -263,7 +263,7 @@ describe("InteractiveMode persona resume reconcile", () => {
 		await runtime.enter(
 			{ name: "fixture-reader", description: "", systemPrompt: "", tools: ["read"], source: "bundled" },
 			{},
-			{ apply: async () => {}, restore: async () => {} },
+			{ apply: async () => {} },
 		);
 		resumedManager.appendModeChange("agent", { name: "fixture-reader" });
 
@@ -686,7 +686,7 @@ You are the modeled fixture persona.`,
 		const { agents } = await discoverAgents(tempDir.path());
 		const agent = getAgent(agents, "fixture-reader");
 		if (!agent) throw new Error("Expected fixture persona to resolve");
-		await runtime.reconcile({ agent }, { apply: async () => {}, restore: async () => {} });
+		await runtime.reconcile({ agent }, { apply: async () => {} });
 		expect(runtime.policy.isPersonaActive()).toBe(true);
 
 		const switched = await liveSession.switchSession(otherFile);

@@ -83,11 +83,10 @@ function makeAgent(overrides?: { model?: string[]; thinkingLevel?: StubThinkingL
 }
 
 describe("PersonaModelApplyHooks", () => {
-	test("hooks shape: apply/restore required; per-surface channels absent on default hooks", async () => {
+	test("hooks shape: apply only; per-surface channels absent on default hooks", async () => {
 		const { session } = makeStubSession();
 		const hooks: PersonaModelApplyHooks = createDefaultPersonaModelHooks(session);
 		expect(typeof hooks.apply).toBe("function");
-		expect(typeof hooks.restore).toBe("function");
 		expect(hooks.deferModelSwitchWhileStreaming).toBeUndefined();
 		expect(hooks.deferModelRestoreWhileStreaming).toBeUndefined();
 		expect(hooks.shouldDeferModelSwitch).toBeUndefined();
@@ -122,7 +121,7 @@ describe("PersonaModelApplyHooks", () => {
 		expect(stub.state.thinkingLevel).toBe(ThinkingLevel.Low);
 	});
 
-	test("restore returns to the baseline captured at apply time", async () => {
+	test("repeated apply re-captures the session state at each apply (the runtime owns the restore)", async () => {
 		const stub = makeStubSession({
 			model: BASELINE_MODEL,
 			thinkingLevel: ThinkingLevel.Medium,
@@ -137,22 +136,16 @@ describe("PersonaModelApplyHooks", () => {
 		expect(stub.state.model).toBe(PERSONA_MODEL);
 		expect(stub.state.thinkingLevel).toBe(ThinkingLevel.High);
 
-		await hooks.restore();
-
-		expect(stub.state.model).toBe(BASELINE_MODEL);
-		expect(stub.state.thinkingLevel).toBe(ThinkingLevel.Medium);
-	});
-
-	test("restore without a prior apply is a no-op", async () => {
-		const stub = makeStubSession({
-			model: BASELINE_MODEL,
-			thinkingLevel: ThinkingLevel.Medium,
-		});
-		const hooks = createDefaultPersonaModelHooks(stub.session);
-		await hooks.restore();
-		expect(stub.state.model).toBe(BASELINE_MODEL);
-		expect(stub.state.thinkingLevel).toBe(ThinkingLevel.Medium);
-		expect(stub.calls).toHaveLength(0);
+		// A second apply re-runs the resolution against the (already
+		// persona-modeled) session: the hooks object holds no restore channel.
+		await hooks.apply(
+			makeAgent({
+				model: ["stub/claude-persona"],
+				thinkingLevel: ThinkingLevel.Low,
+			}),
+		);
+		expect(stub.state.model).toBe(PERSONA_MODEL);
+		expect(stub.state.thinkingLevel).toBe(ThinkingLevel.Low);
 	});
 
 	test("apply with no persona model and no explicit override leaves session untouched", async () => {
@@ -198,27 +191,16 @@ describe("PersonaModelApplyHooks", () => {
 		expect(stub.state.thinkingLevel).toBe(ThinkingLevel.Low);
 	});
 
-	test("restore after second apply reverts to the last-captured baseline", async () => {
+	test("apply re-resolution under an explicit override wins over the agent definition again", async () => {
 		const stub = makeStubSession({
 			model: BASELINE_MODEL,
 			thinkingLevel: ThinkingLevel.Medium,
 		});
-		const hooks = createDefaultPersonaModelHooks(stubRegistry(stub.session));
-		await hooks.apply(
-			makeAgent({
-				model: ["stub/claude-persona"],
-				thinkingLevel: ThinkingLevel.High,
-			}),
+		const hooks = createDefaultPersonaModelHooks(
+			stubRegistry(stub.session, [PERSONA_MODEL, { provider: "stub", id: "claude-explicit" } as Model]),
 		);
-		// Second apply re-captures: the persona model is now the baseline.
-		await hooks.apply(
-			makeAgent({
-				model: ["stub/claude-persona"],
-				thinkingLevel: ThinkingLevel.Low,
-			}),
-		);
-		await hooks.restore();
-		expect(stub.state.model).toBe(PERSONA_MODEL);
-		expect(stub.state.thinkingLevel).toBe(ThinkingLevel.High);
+		const explicit: PersonaExplicitOverrides = { model: "stub/claude-explicit" };
+		await hooks.apply(makeAgent({ model: ["stub/claude-persona"] }), explicit);
+		expect(stub.state.model?.id).toBe("claude-explicit");
 	});
 });
