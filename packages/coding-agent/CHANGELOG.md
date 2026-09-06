@@ -366,6 +366,9 @@
 - Corrected labels under `Settings > Context > Compaction Token Limit`.
 - Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
 
+### Fixed
+
+- Kept `checkpoint` and `rewind` on the direct tool surface under Codex Code Mode; routed through the eval bridge they were invisible to the session's checkpoint state machine, leaving sessions unable to rewind or yield.
 ## [18.0.10] - 2026-08-28
 
 ### Added
@@ -564,6 +567,7 @@
 - Commit-message generation errors in the git TUI now remain visible in the status bar instead of disappearing and returning to an idle state.
 - Fixed `omp update` leaving standalone Windows binaries on the old version when stale Bun launcher metadata was present, and preserved launchers installed by a newer concurrent update during binary repair ([#9806](https://github.com/can1357/oh-my-pi/issues/9806)).
 - Quitting `omp git` during commit-message generation now exits cleanly without leaving the process running.
+- Corrected `checkpoint` and `rewind` in Codex Code Mode. Sessions can rewind and yield normally.
 
 ## [18.0.5] - 2026-08-25
 

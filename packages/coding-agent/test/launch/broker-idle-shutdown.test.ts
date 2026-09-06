@@ -40,17 +40,19 @@ describe("daemon broker idle shutdown", () => {
 
 		const previousTitle = process.title;
 		// Create the client (writes broker.token) before starting the broker, which reads that token.
-		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 100 });
-		const broker = startBroker(projectDir, runtimeDir, 100);
+		// The 500ms grace gives the first request room on loaded CI runners: with 100ms the broker's
+		// initial idle timer could fire before connect+auth finished, closing the connection at ~120ms.
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 500 });
+		const broker = startBroker(projectDir, runtimeDir, 500);
 		try {
-			// A persistent daemon that outlives the first idle-shutdown timer (100ms) and then
-			// self-exits (~300ms). restart:"no" so its exit is terminal.
+			// A persistent daemon that outlives the first idle-shutdown timer (500ms) and then
+			// self-exits (~1500ms). restart:"no" so its exit is terminal.
 			const started = await client.request({
 				op: "start",
 				spec: {
 					name: "persistent-temp",
 					application: process.execPath,
-					args: ["-e", "setTimeout(() => {}, 300)"],
+					args: ["-e", "setTimeout(() => {}, 1500)"],
 					env: {},
 					cwd: projectDir,
 					pty: false,
