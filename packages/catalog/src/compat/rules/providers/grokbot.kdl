@@ -24,9 +24,17 @@ provider "grokbot" {
 		sand-tools-wire "automation"
 	}
 	// Auto / default sand routers land on cursor-grok-4.5-high with native omp
-	// tools (HTTP 422). Product parent-chat is the same wire as sand-default.
+	// tools (HTTP 422). Product parent-chat is the same wire as sand-default;
+	// the stream rewrites these aliases to a bare sand-default requestedModel
+	// so a follow-up Read/Write does not hang as an incomplete tool call.
 	models "default" "default[]" "auto" "auto[]" {
 		sand-tools-wire "parent-chat"
+	}
+	// gemini-3-flash native field-2 tools complete with an empty body. Product
+	// keep-model (Shell/Read/Write + jsonSchema, original requestedModel) is
+	// the same shape Anthropic uses; the stream also promotes ```tool_code.
+	models "gemini-3-flash" "gemini-3-flash[]" {
+		sand-tools-wire "keep-model"
 	}
 	models "sand-default" "sand-cua" "sand-automation" "default" "default[]" "auto" "auto[]" {
 		context-window-floor 200000

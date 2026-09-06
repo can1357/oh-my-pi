@@ -151,9 +151,9 @@ function classifyError(message: string | undefined, status?: number): string {
 	return "unknown";
 }
 
-function isGatewayFlake(status?: number, message?: string): boolean {
+function isRetriableStreamError(status?: number, message?: string): boolean {
 	const cls = classifyError(message, status);
-	return cls === "http-502" || cls === "http-504";
+	return cls === "http-502" || cls === "http-504" || cls === "empty-body" || cls === "incomplete-tool";
 }
 
 function httpStatusOf(message: AssistantMessage): number | undefined {
@@ -189,7 +189,11 @@ async function streamOnce(
 		}).result();
 		last = result;
 		const status = httpStatusOf(result);
-		if (result.stopReason === "error" && isGatewayFlake(status, result.errorMessage) && attempt < GATEWAY_RETRIES) {
+		if (
+			result.stopReason === "error" &&
+			isRetriableStreamError(status, result.errorMessage) &&
+			attempt < GATEWAY_RETRIES
+		) {
 			await Bun.sleep(400 * 2 ** attempt);
 			continue;
 		}
@@ -323,11 +327,22 @@ async function runOneTool(
 	);
 	const status2 = httpStatusOf(turn2);
 	if (turn2.stopReason === "error") {
+		const errorClass = classifyError(turn2.errorMessage, status2);
+		// Turn 1 already proved the named tool. A hanging leftover tool on the
+		// follow-up (parent-chat Read after bash) must not fail the id.
+		if (errorClass === "incomplete-tool") {
+			return {
+				pass: true,
+				routedModel: turn2.upstreamModel ?? turn1.upstreamModel,
+				httpStatus: status2,
+				toolNames: names,
+			};
+		}
 		return {
 			pass: false,
 			routedModel: turn2.upstreamModel ?? turn1.upstreamModel,
 			httpStatus: status2,
-			errorClass: classifyError(turn2.errorMessage, status2),
+			errorClass,
 			toolNames: names,
 			detail: `${kind}: ${(turn2.errorMessage ?? "").slice(0, 240)}`,
 		};

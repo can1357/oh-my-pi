@@ -9,7 +9,9 @@
 ### Fixed
 
 - Grok Bot Auto routers (`default`, `default[]`) now use product parent-chat tools so they do not land on grok-4.5 with native tools (HTTP 422).
+- Grok Bot Auto parent-chat aliases now rewrite to a bare `sand-default` requestedModel, and incomplete leftover tool fragments after a completed call are finalized or dropped instead of failing the turn.
 - Grok Bot Gemini/OpenAI native tool schemas are family-normalized, thought-only JSON in thinking is promoted, and an empty tool turn retries once with thinking off.
+- Grok Bot `gemini-3-flash` now uses product keep-model tools and promotes Gemini `tool_code` / `default_api` dumps so bash/read/write can complete.
 - Grok Bot `sand-automation` now promotes grok-4.5-high fenced `{"name":"Shell",…}` text into a real Shell/bash tool call, and native-family matrix rows report `wire: native` instead of the internal `error` sentinel.
 
 ## [18.1.12] - 2026-09-06

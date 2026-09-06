@@ -8875,7 +8875,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:28",
+				"source": "providers/grokbot.kdl:30",
 				"providers": [
 					"grokbot"
 				],
@@ -8902,7 +8902,26 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:31",
+				"source": "providers/grokbot.kdl:36",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gemini-3-flash"
+					},
+					{
+						"kind": "exact",
+						"value": "gemini-3-flash[]"
+					}
+				],
+				"catalog": {
+					"sandToolsWire": "keep-model"
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:39",
 				"providers": [
 					"grokbot"
 				],
@@ -8941,7 +8960,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:36",
+				"source": "providers/grokbot.kdl:44",
 				"providers": [
 					"grokbot"
 				],
@@ -8969,7 +8988,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:43",
+				"source": "providers/grokbot.kdl:51",
 				"providers": [
 					"grokbot"
 				],

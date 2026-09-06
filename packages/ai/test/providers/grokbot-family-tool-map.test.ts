@@ -109,12 +109,12 @@ describe("grokbot family tool mapping", () => {
 		}
 	});
 
-	test("catalog parent-chat on Auto routers (default / default[] / auto) uses product tools", () => {
+	test("catalog parent-chat on Auto routers (default / default[] / auto) rewrites to bare sand-default", () => {
 		for (const id of ["default", "default[]", "auto", "auto[]"]) {
 			const { policy, applied, names } = wireFor(id, { sandToolsWire: "parent-chat" });
 			expect(policy.kind).toBe("product");
 			expect(policy.wire).toBe("parent-chat");
-			expect(applied.requestedModel.modelId).toBe(id);
+			expect(applied.requestedModel).toEqual({ modelId: "sand-default" });
 			expect(names[0]).toBe("SendToUser");
 			expect(names).toContain("Shell");
 			expect(names).toContain("Read");
@@ -122,18 +122,46 @@ describe("grokbot family tool mapping", () => {
 		}
 	});
 
-	test("catalog parent-chat on sand-default and sand-cua advertises product tools without rewriting the router id", () => {
+	test("catalog parent-chat on sand-default and sand-cua keeps the router id as a bare wire", () => {
 		for (const id of ["sand-default", "sand-cua"]) {
 			const { policy, applied, names } = wireFor(id, { sandToolsWire: "parent-chat" });
 			expect(policy.kind).toBe("product");
 			expect(policy.wire).toBe("parent-chat");
-			expect(applied.requestedModel.modelId).toBe(id);
+			expect(applied.requestedModel).toEqual({ modelId: id });
 			expect(applied.subagentType).toBeUndefined();
 			expect(names[0]).toBe("SendToUser");
 			expect(names).toContain("Shell");
 			expect(names).toContain("Read");
 			expect(names).toContain("Write");
 		}
+	});
+
+	test("catalog keep-model on gemini-3-flash advertises product tools on a bare requestedModel", () => {
+		for (const id of ["gemini-3-flash", "gemini-3-flash[]"]) {
+			const { policy, applied, names } = wireFor(id, { sandToolsWire: "keep-model" });
+			expect(policy.kind).toBe("product");
+			expect(policy.wire).toBe("keep-model");
+			expect(applied.requestedModel).toEqual({ modelId: id });
+			expect(applied.subagentType).toBeUndefined();
+			expect(names).toEqual(["Shell", "Read", "Write"]);
+			for (const tool of applied.tools as Array<{ parameters: Record<string, unknown> }>) {
+				expect(tool.parameters).toHaveProperty("jsonSchema");
+			}
+		}
+		const parameterized = requested("gemini-3-flash", ["effort", "fast"]);
+		expect(parameterized.parameters?.length).toBeGreaterThan(0);
+		const stripped = applyAnthropicSandToolWire(
+			{
+				requestedModel: parameterized,
+				tools: OMP_CORE,
+				modelId: "gemini-3-flash",
+				ompTools: OMP_CORE,
+				sandToolsWire: "keep-model",
+			},
+			"keep-model",
+		);
+		expect(stripped.requestedModel).toEqual({ modelId: "gemini-3-flash" });
+		expect(stripped.wireMode).toBe("keep-model");
 	});
 
 	test("catalog automation on sand-automation advertises product tools and keeps the router id", () => {
@@ -145,6 +173,33 @@ describe("grokbot family tool mapping", () => {
 		expect(applied.subagentType).toBe("generalPurpose");
 		expect(typeof applied.automationId).toBe("string");
 		expect(names).toEqual(["Shell", "Read", "Write"]);
+	});
+
+	test("parent-chat strips thinking/effort/fast from parameterized default and sand-default", () => {
+		const parameterized = requested("default", ["thinking", "context", "effort", "fast"]);
+		expect(parameterized.parameters?.length).toBeGreaterThan(0);
+		const wired = applyAnthropicSandToolWire(
+			{
+				requestedModel: parameterized,
+				tools: OMP_CORE,
+				modelId: "default",
+				ompTools: OMP_CORE,
+				sandToolsWire: "parent-chat",
+			},
+			"parent-chat",
+		);
+		expect(wired.requestedModel).toEqual({ modelId: "sand-default" });
+		const sand = applyAnthropicSandToolWire(
+			{
+				requestedModel: requested("sand-default", ["thinking", "effort"]),
+				tools: OMP_CORE,
+				modelId: "sand-default",
+				ompTools: OMP_CORE,
+				sandToolsWire: "parent-chat",
+			},
+			"parent-chat",
+		);
+		expect(sand.requestedModel).toEqual({ modelId: "sand-default" });
 	});
 
 	test("automation wire strips thinking/effort/fast from a parameterized sand-automation request", () => {

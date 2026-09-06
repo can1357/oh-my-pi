@@ -123,6 +123,21 @@ const FIXTURE = {
 			],
 		},
 		{
+			name: "gemini-3-flash",
+			clientDisplayName: "Gemini 3 Flash",
+			supportsThinking: true,
+			supportsImages: true,
+			parameterDefinitions: [{ id: "effort" }],
+			variants: [
+				{
+					displayName: "Gemini 3 Flash",
+					isDefaultNonMaxConfig: true,
+					parameterValues: [{ id: "effort", value: "low" }],
+					variantStringRepresentation: "gemini-3-flash[]",
+				},
+			],
+		},
+		{
 			name: "text-only-omitted-images",
 			clientDisplayName: "Text Only Omitted Images",
 			supportsThinking: false,
@@ -240,6 +255,13 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(defaultVariant?.requestModelId).toBe("default");
 		expect(defaultVariant?.sandVariantStringRepresentation).toBe(true);
 		expect(buildModel(defaultVariant!).sandToolsWire).toBe("parent-chat");
+		const geminiFlash = models.find(m => m.id === "gemini-3-flash");
+		expect(geminiFlash?.sandToolsWire).toBeUndefined();
+		expect(buildModel(geminiFlash!).sandToolsWire).toBe("keep-model");
+		const geminiFlashVariant = models.find(m => m.id === "gemini-3-flash[]");
+		expect(geminiFlashVariant?.requestModelId).toBe("gemini-3-flash");
+		expect(geminiFlashVariant?.sandVariantStringRepresentation).toBe(true);
+		expect(buildModel(geminiFlashVariant!).sandToolsWire).toBe("keep-model");
 		expect(buildModel(models.find(m => m.id === "sand-cua")!).reasoning).toBe(false);
 		expect(sandDefault?.input).toEqual(["text"]);
 		expect(models.find(m => m.id === "sand-cua")?.input).toEqual(["text"]);

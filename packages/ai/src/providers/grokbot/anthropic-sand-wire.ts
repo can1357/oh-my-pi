@@ -140,9 +140,14 @@ export function applyAnthropicSandToolWire(
 	if (wire === "native") return { ...input, wireMode: "native" };
 
 	if (wire === "keep-model") {
-		if (!isAnthropicSandModelId(modelId)) return input;
+		const anthropic = isAnthropicSandModelId(modelId);
+		const catalogOwns = input.sandToolsWire === "keep-model";
+		// Anthropic keep-model is identity-owned. Catalog can also opt a
+		// non-Anthropic row (gemini-3-flash) onto product tools without
+		// rewriting the requestedModel id.
+		if (!anthropic && !catalogOwns) return input;
 		return applyProductWire(input, "automation", "keep-model", {
-			requestedModel: input.requestedModel,
+			requestedModel: anthropic ? input.requestedModel : { modelId: input.requestedModel.modelId },
 			originalModelId: modelId,
 		});
 	}
@@ -161,10 +166,6 @@ export function applyAnthropicSandToolWire(
 			sandParameterIds: [],
 			sandMaxMode: false,
 		});
-		const parentModel = resolveGrokbotRequestedModel("sand-default", {
-			sandParameterIds: [],
-			sandMaxMode: false,
-		});
 		if (profile === "automation") {
 			// Routers already on this catalog wire keep their id, but drop
 			// thinking/effort/fast — the historical working automation probe
@@ -178,9 +179,13 @@ export function applyAnthropicSandToolWire(
 				originalModelId: anthropic ? modelId : undefined,
 			});
 		}
-		const keepRouter = !anthropic && (catalogOwns || modelId === "sand-default");
+		// sand-default / sand-cua keep their router id but drop thinking/effort
+		// params (same bare-wire lesson as automation). Auto aliases
+		// (`default`, `default[]`, `auto`) rewrite to bare sand-default so a
+		// Read/Write follow-up does not hang mid-tool on cursor-grok-4.5-high.
+		const keepCua = modelId === "sand-cua" || input.requestedModel.modelId === "sand-cua";
 		return applyProductWire(input, profile, wire, {
-			requestedModel: keepRouter ? input.requestedModel : parentModel,
+			requestedModel: keepCua ? { modelId: "sand-cua" } : { modelId: "sand-default" },
 			originalModelId: anthropic ? modelId : undefined,
 		});
 	}
