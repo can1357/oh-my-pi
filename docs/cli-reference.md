@@ -63,8 +63,18 @@ Argument handling:
 | `--profile <name>` | Use an isolated profile for auth, sessions, settings, and caches. |
 | `--alias <name>` | Create a shell shortcut for the selected profile and exit. |
 | `--config <file>` | Load an extra `config.yml`-style overlay for this run (repeatable). |
+| `--reapply-config` | On resume, adopt the config-resolved default model, thinking level, and service tier instead of the session's own; applied per knob. Default off. |
 | `--session-dir <dir>` | Directory for session storage and lookup. |
 | `--no-session` | Don't save the session (ephemeral). |
+
+`--reapply-config` re-applies a `--config`/`--profile` overlay to a resumed
+session, which otherwise restores the model, thinking level, and service tier
+baked in at its original launch. Adoption is per knob — a value the config does
+not specify keeps the session's own. The model and thinking level are only
+adopted when no explicit `--model` is given (`--model` pins those two); the
+service tier re-applies per family regardless of `--model` (a family the config
+omits keeps the session's), and `--service-tier` still overrides it. A bare
+resume (flag off) always restores the session's own values.
 
 #### Session history
 

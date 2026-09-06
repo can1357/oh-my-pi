@@ -223,6 +223,11 @@ describe("extractProfileFlags", () => {
 			profile: "work",
 			aliasName: undefined,
 		});
+		expect(extractProfileFlags(["--reapply-config", "--profile", "work"])).toEqual({
+			argv: ["--reapply-config"],
+			profile: "work",
+			aliasName: undefined,
+		});
 		expect(extractProfileFlags(["-p", "--profile", "work"])).toEqual({
 			argv: ["-p"],
 			profile: "work",

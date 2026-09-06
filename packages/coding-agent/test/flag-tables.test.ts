@@ -68,6 +68,19 @@ describe("--external-thinking", () => {
 		expect(parseArgs([]).externalThinking).toBeUndefined();
 	});
 });
+
+describe("--reapply-config", () => {
+	it("enables config-model adoption without consuming the initial message", () => {
+		const result = parseArgs(["--reapply-config", "check this"]);
+
+		expect(result.reapplyConfig).toBe(true);
+		expect(result.messages).toEqual(["check this"]);
+	});
+
+	it("stays unset when omitted", () => {
+		expect(parseArgs([]).reapplyConfig).toBeUndefined();
+	});
+});
 describe("--session-dir", () => {
 	it("uses PI_CODING_AGENT_SESSION_DIR unless the CLI flag overrides it", () => {
 		const previous = Bun.env.PI_CODING_AGENT_SESSION_DIR;

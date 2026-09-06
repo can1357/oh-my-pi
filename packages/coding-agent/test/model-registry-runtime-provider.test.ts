@@ -15,6 +15,7 @@ import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oau
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry runtime provider registration", () => {
@@ -25,6 +26,8 @@ describe("ModelRegistry runtime provider registration", () => {
 	let fetchRequests: string[];
 
 	const sourceIds = ["ext://atomic", "ext://runtime", "ext://oauth"];
+	/** Every config-declared discovery provider id, for the disable list. */
+	const scoped0Providers = (): string[] => registry.getDiscoverableProviders();
 
 	// Stub transport: reject every request so refresh("online") drives the full
 	// online discovery path with deterministic, instant failures instead of real
@@ -1378,5 +1381,41 @@ describe("ModelRegistry runtime provider registration", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	// The cold-cache discovery guard in `createAgentSession` asks this predicate.
+	// `getDiscoverableProviders()` projects only the CONFIG-declared half, so an
+	// extension supplying the configured default through `fetchDynamicModels`
+	// left the guard blind: with every config provider disabled that list
+	// contributes nothing, the guard skipped the refresh that DOES cover runtime
+	// managers, and the resume fell through to the baked-model fallback.
+	test("hasRefreshableProviders counts a runtime provider when every config provider is disabled", async () => {
+		const providerName = "dynamic-refreshable-provider";
+		// Disable every config-declared discovery provider, so ONLY a runtime
+		// manager can make the registry refreshable — the exact case the guard's
+		// old `getDiscoverableProviders().length === 0` test got wrong.
+		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: { disabledProviders: scoped0Providers(), "compaction.enabled": false },
+			}),
+		});
+
+		expect(scoped.hasRefreshableProviders()).toBe(false);
+
+		scoped.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-responses",
+				fetchDynamicModels: async () => [{ ...baseModel, id: "dynamic-refreshable-model" }],
+			},
+			"ext://runtime",
+		);
+
+		expect(scoped.hasRefreshableProviders()).toBe(true);
 	});
 });

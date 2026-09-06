@@ -1059,7 +1059,7 @@ export function parseModelPattern(
 	);
 }
 
-const DEFAULT_MODEL_ROLE = "default";
+export const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
 
 export interface ModelRoleLookup {
@@ -1121,12 +1121,36 @@ export function resolveExplicitModelRole(
 	return undefined;
 }
 
+/**
+ * True when a model selector is a self alias for the default role — the bare
+ * `default` sentinel or one of its alias spellings (`*`, `@default`,
+ * `pi/default`), each optionally carrying a thinking suffix (`*:low`,
+ * `@default:xhigh`). All of them name the default role rather than a model, so
+ * {@link resolveModelRoleValue} resolves them to nothing. Callers deciding
+ * whether `modelRoles.default` actually SETS a model must ask here rather than
+ * re-spelling the list: a second copy is what let `*` and `@default` count as a
+ * configured model while the bare sentinel did not.
+ *
+ * The suffix is split off first, with the same prefix-aware split
+ * {@link resolveExplicitModelRole} uses, because the alias parser accepts a
+ * suffixed self alias as the default role. Comparing the unsplit value would
+ * call `*:low` a concrete model knob: `--reapply-config` would then take the
+ * "config named a model" path, fail to resolve the circular selector, warn
+ * about a broken default, and drop the requested tier.
+ */
+export function isDefaultModelRoleSelfAlias(value: string): boolean {
+	const { base } = splitThinkingSuffix(value, modelRoleAliasPrefixLength(value) ?? -1, MAX_THINKING_SUFFIX_OPTIONS);
+	return (
+		base === DEFAULT_MODEL_ROLE ||
+		base === formatModelRoleAlias(DEFAULT_MODEL_ROLE) ||
+		base === DEFAULT_MODEL_ROLE_ALIAS ||
+		base === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}${DEFAULT_MODEL_ROLE}`
+	);
+}
+
 function isSessionInheritedAgentPattern(value: string): boolean {
 	return (
-		value === DEFAULT_MODEL_ROLE ||
-		value === formatModelRoleAlias(DEFAULT_MODEL_ROLE) ||
-		value === DEFAULT_MODEL_ROLE_ALIAS ||
-		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}${DEFAULT_MODEL_ROLE}` ||
+		isDefaultModelRoleSelfAlias(value) ||
 		value === formatModelRoleAlias("task") ||
 		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
 	);

@@ -7,6 +7,7 @@ import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
+	isDefaultModelRoleSelfAlias,
 	parseModelPattern,
 	parseModelString,
 	pickDefaultAvailableModel,
@@ -1960,6 +1961,44 @@ describe("resolveExplicitModelRole", () => {
 		expect(resolveExplicitModelRole("openai/gpt-4o:high", settings)).toBeUndefined();
 		expect(resolveExplicitModelRole("openai/gpt-4o:max", settings)).toBeUndefined();
 		expect(resolveExplicitModelRole(["openai/gpt-4o", "@reviewer:high"], settings)).toBe("reviewer");
+	});
+});
+
+describe("isDefaultModelRoleSelfAlias", () => {
+	test("classifies every bare self-alias spelling", () => {
+		expect(isDefaultModelRoleSelfAlias("default")).toBe(true);
+		expect(isDefaultModelRoleSelfAlias("@default")).toBe(true);
+		expect(isDefaultModelRoleSelfAlias(DEFAULT_MODEL_ROLE_ALIAS)).toBe(true);
+		expect(isDefaultModelRoleSelfAlias(`${LEGACY_MODEL_ROLE_ALIAS_PREFIX}default`)).toBe(true);
+	});
+
+	// The alias parser accepts a thinking suffix on every self-alias spelling
+	// (`resolveExplicitModelRole("*:low")` resolves to `default`), so the
+	// selector still names the default role and still resolves to no model. A
+	// predicate that compares the unsplit string would call `*:low` a concrete
+	// model knob and send `--reapply-config` down the "config named a model"
+	// path, where the circular selector cannot resolve.
+	test("classifies suffixed self aliases the alias parser accepts", () => {
+		for (const suffix of ["low", "xhigh", "max", "auto"]) {
+			expect(isDefaultModelRoleSelfAlias(`${DEFAULT_MODEL_ROLE_ALIAS}:${suffix}`)).toBe(true);
+			expect(isDefaultModelRoleSelfAlias(`@default:${suffix}`)).toBe(true);
+			expect(isDefaultModelRoleSelfAlias(`default:${suffix}`)).toBe(true);
+			expect(isDefaultModelRoleSelfAlias(`${LEGACY_MODEL_ROLE_ALIAS_PREFIX}default:${suffix}`)).toBe(true);
+		}
+	});
+
+	// A suffix that is not a thinking level is part of the selector, not a
+	// stripped tier — `@default:nonsense` is not the default role.
+	test("does not classify a non-thinking suffix as a self alias", () => {
+		expect(isDefaultModelRoleSelfAlias("@default:nonsense")).toBe(false);
+		expect(isDefaultModelRoleSelfAlias("*:nonsense")).toBe(false);
+	});
+
+	test("does not classify another role or a concrete model", () => {
+		expect(isDefaultModelRoleSelfAlias("@smol")).toBe(false);
+		expect(isDefaultModelRoleSelfAlias("@smol:low")).toBe(false);
+		expect(isDefaultModelRoleSelfAlias("anthropic/claude-sonnet-4-5")).toBe(false);
+		expect(isDefaultModelRoleSelfAlias("anthropic/claude-sonnet-4-5:low")).toBe(false);
 	});
 });
 

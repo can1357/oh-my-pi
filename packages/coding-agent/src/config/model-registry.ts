@@ -2366,6 +2366,23 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Whether {@link refresh} has any catalog left to discover: a config-declared
+	 * discovery provider, or a runtime provider an extension registered through
+	 * `fetchDynamicModels`. `refresh` covers both, but
+	 * {@link getDiscoverableProviders} only reports the config-declared half, so
+	 * a guard written against it skips the refresh for an extension-only catalog
+	 * — exactly the case whose cache is cold at session creation.
+	 */
+	hasRefreshableProviders(): boolean {
+		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
+		if (this.#discoverableProviders.some(provider => !disabledProviders.has(provider.provider))) return true;
+		for (const provider of this.#runtimeModelManagers.keys()) {
+			if (!disabledProviders.has(provider)) return true;
+		}
+		return false;
+	}
+
+	/**
 	 * Whether `providerId` is known to the registry: it has at least one live
 	 * model, or it is configured for dynamic discovery (models.yml `discovery:`
 	 * or a runtime extension provider) and is not disabled. Discovery-only

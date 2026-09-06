@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--reapply-config` (and the `reapplyConfig` SDK option): on `--resume`, adopt the config-resolved default model, its thinking level, and service tier instead of restoring the values baked into the session at its original launch. Adoption is per-knob (and per-family for the service tier) — a value the config does not specify keeps the session's own — and the flag is off by default, so a bare resume still restores the session's model/thinking/tier. A resume that swaps the model, or falls back after a broken config default, is surfaced as a notice. Lets a `--config`/`--profile` overlay re-apply on resume.
+
+### Fixed
+
+- Fixed `--reapply-config` skipping the cold-cache discovery retry for a configured `modelRoles.default`: the retry now runs before the session-model and availability fallbacks can claim the model, so a default on a discovery-backed provider (ollama, LM Studio, llama.cpp, an openai-compat proxy) is resolved instead of silently losing to a lower-priority pick ([#11065](https://github.com/can1357/oh-my-pi/pull/11065) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- Fixed `--reapply-config` treating a `modelRoles.default` self alias — `*`, `@default`, or the legacy `pi/default` — as a concrete configured model; those name the default role rather than a model, so they now count as an unset knob like the bare `default` sentinel and the session's own model is restored without a bogus broken-default warning ([#11065](https://github.com/can1357/oh-my-pi/pull/11065) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- Extended the `--reapply-config` self-alias fix to suffixed spellings: `modelRoles.default` set to `*:low`, `@default:xhigh`, or `pi/default:max` still names the default role, so the thinking suffix is now stripped before classification and the resume keeps the session's model instead of reporting a broken config default ([#11065](https://github.com/can1357/oh-my-pi/pull/11065) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- Fixed the `--reapply-config` cold-cache discovery retry skipping a configured default supplied by an extension: the guard only counted config-declared discovery providers, so an extension registering its catalog through `fetchDynamicModels` was passed over when no implicit or config provider was enabled, and the resume fell back to the session's baked model ([#11065](https://github.com/can1357/oh-my-pi/pull/11065) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
