@@ -1881,6 +1881,18 @@ export class AgentSession {
 		return this.#agentId;
 	}
 
+	/**
+	 * Backend session id for Codex private history/notes, or `null` when neither
+	 * feature is live. Subagents adopt it as their provider session id so their
+	 * notes and history share the root's server-side store while keeping their
+	 * own agent path.
+	 */
+	getCodexBackendSessionId(): string | null {
+		const runtime = this.#maintenance.contextWindows;
+		if (!runtime.notesActive && !runtime.windowActive) return null;
+		return this.agent.sessionId ?? this.sessionManager.getSessionId();
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {

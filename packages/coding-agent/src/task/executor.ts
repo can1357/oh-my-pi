@@ -531,6 +531,13 @@ export interface ExecutorOptions {
 	/** Parent agent's eval executor session id. Subagents reuse it so eval state is shared. */
 	parentEvalSessionId?: string;
 	/**
+	 * Root Codex backend session id. Subagents reuse it as their provider
+	 * session id so the backend keys their private history/notes to one store
+	 * (their `current_agent_name` stays distinct), matching codex-rs where
+	 * child agents share the thread and differ only by agent path.
+	 */
+	parentCodexSessionId?: string;
+	/**
 	 * Parent agent's OpenTelemetry configuration. When defined, the subagent's
 	 * loop is started with the same tracer/hooks but its own agent identity
 	 * stamped, so its `invoke_agent` / `chat` / `execute_tool` spans appear as
@@ -3406,6 +3413,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
+				providerSessionId: options.parentCodexSessionId,
 				onFirstChatDispatch: () => {
 					firstChatDispatchAt ??= performance.now();
 				},

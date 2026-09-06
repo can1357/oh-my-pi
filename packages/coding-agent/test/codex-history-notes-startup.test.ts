@@ -147,3 +147,18 @@ test("SDK provider transforms retain the first user message's journal marker thr
 	expect(message.content).toBe("Checkpoint this request");
 	expect(JSON.stringify(message)).not.toContain("request-entry");
 });
+
+test.each(["notes", "window", "off"] as const)(
+	"exposes the backend session id for subagents in %s mode",
+	async mode => {
+		const { session } = await start(mode);
+		const shared = session.getCodexBackendSessionId();
+		if (mode === "off") {
+			expect(shared).toBeNull();
+			return;
+		}
+		expect(shared).toBe(session.agent.sessionId ?? session.sessionId);
+		// Children reuse the id while keeping their own agent path.
+		expect(shared).not.toBe(null);
+	},
+);

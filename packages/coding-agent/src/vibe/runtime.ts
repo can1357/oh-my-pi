@@ -1364,6 +1364,7 @@ export class VibeSessionRegistry {
 			parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 			parentTelemetry: session.getTelemetry?.(),
 			parentEvalSessionId: session.getEvalSessionId?.() ?? undefined,
+			parentCodexSessionId: session.getCodexBackendSessionId?.() ?? undefined,
 			parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 			parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 			keepAlive: true,
