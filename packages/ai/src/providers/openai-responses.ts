@@ -1238,7 +1238,7 @@ export function buildParams(
 	if (responseFormat !== undefined && typeof responseFormat === "object" && responseFormat !== null) {
 		const format = responseFormat as {
 			type?: string;
-			json_schema?: { name?: string; schema?: unknown; strict?: boolean };
+			json_schema?: { name?: string; schema?: unknown; strict?: boolean; description?: string };
 		};
 		if (
 			format.type === "json_schema" &&
@@ -1253,6 +1253,9 @@ export function buildParams(
 					type: "json_schema",
 					name: format.json_schema.name ?? "response",
 					schema: format.json_schema.schema,
+					...(format.json_schema.description !== undefined
+						? { description: format.json_schema.description }
+						: {}),
 					...(format.json_schema.strict !== undefined ? { strict: format.json_schema.strict } : {}),
 				} as never,
 			};

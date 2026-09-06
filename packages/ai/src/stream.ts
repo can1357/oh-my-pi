@@ -2121,6 +2121,12 @@ function mapOptionsForApi<TApi extends Api>(
 					textVerbosity: options?.textVerbosity,
 					promptCache: options?.promptCache,
 					statefulResponses: options?.statefulResponses,
+					previousResponseId: options?.previousResponseId,
+					parallelToolCalls: options?.parallelToolCalls,
+					seed: options?.seed,
+					logitBias: options?.logitBias,
+					user: options?.user,
+					responseFormat: options?.responseFormat,
 				});
 			}
 			return castApi<"openai-completions">({
@@ -2132,6 +2138,11 @@ function mapOptionsForApi<TApi extends Api>(
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 		}
 
@@ -2145,6 +2156,11 @@ function mapOptionsForApi<TApi extends Api>(
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 
 		case "openai-responses":
@@ -2161,6 +2177,12 @@ function mapOptionsForApi<TApi extends Api>(
 				textVerbosity: options?.textVerbosity,
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
+				previousResponseId: options?.previousResponseId,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 
 		case "azure-openai-responses":
@@ -2174,6 +2196,12 @@ function mapOptionsForApi<TApi extends Api>(
 				statefulResponses: options?.statefulResponses,
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				forceReasoningOff: options?.forceReasoningOff,
+				previousResponseId: options?.previousResponseId,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 
 		case "openai-codex-responses":

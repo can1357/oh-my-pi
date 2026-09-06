@@ -61,7 +61,7 @@ const REVOKED_PATTERN = /\brevoked\b|\binvalid_grant\b/i;
 const TIMEOUT_OR_CONNECTION_PATTERN =
 	/\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bconnection(?:\s+error|\s+refused)?\b|\bsocket hang up\b|\bfetch failed\b/i;
 const POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
-const MODEL_UNAVAILABLE_PATTERN = /\bmodel[_ ]?(?:not[_ ]found|unavailable|not[_ ]supported)\b/i;
+const MODEL_UNAVAILABLE_PATTERN = /\bmodel[_ ]?(?:not[_ ]found|unavailable|not[_ ]supported)\b|\b(?:the\s+)?(?:requested\s+)?model\s+does\s+not\s+exist\b|\bmodel\s+is\s+not\s+supported\b/i;
 const INVALID_REQUEST_PATTERN =
 	/\b(?:unsupported|invalid_request|invalid request|bad request|malformed|GenerateContentRequest)\b/i;
 const GATEWAY_INVARIANT_PATTERN = /\bgateway_terminal\b|\binternal invariant\b/i;
@@ -82,16 +82,12 @@ const GATEWAY_INVARIANT_PATTERN = /\bgateway_terminal\b|\binternal invariant\b/i
 export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	const message = err instanceof Error ? err.message : String(err);
 
+	// Structural AbortError stays first. Free-text "aborted" must not beat an
+	// authoritative provider status (e.g. "HTTP 503: upstream request aborted").
 	if (err instanceof Error && err.name === "AbortError") {
 		return withOwnerDisposition(err, { status: 499, type: "request_aborted", message });
 	}
-	if (/\baborted\b|\babort signal\b/i.test(message)) {
-		return withOwnerDisposition(err, { status: 499, type: "request_aborted", message });
-	}
 
-	// Honour an explicit numeric `status` property on the thrown error. This
-	// sits below the abort checks on purpose: acting on a stale transport
-	// status after the client cancelled could trigger post-abort failover.
 	let statusProp: number | undefined;
 	if (typeof err === "object" && err !== null && "status" in err && typeof err.status === "number") {
 		statusProp = err.status | 0;
@@ -105,6 +101,10 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	// don't trip on incidental three-digit numbers ("took 200ms").
 	const embedded = extractEmbeddedStatus(message);
 	if (embedded !== undefined) return withOwnerDisposition(err, bucketStatus(embedded, message));
+
+	if (/\baborted\b|\babort signal\b/i.test(message)) {
+		return withOwnerDisposition(err, { status: 499, type: "request_aborted", message });
+	}
 
 	if (
 		// Match rate-limit phrasings before auth wording: some providers
@@ -130,6 +130,17 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	}
 	if (/\b(?:unsupported|invalid_request|invalid request|bad request|malformed)\b/i.test(message)) {
 		return withOwnerDisposition(err, { status: 400, type: "invalid_request_error", message });
+	}
+	// Status-less errors: evaluate policy / overflow / model heuristics before
+	// synthesizing the default 502 so dispositions are not stuck on provider_unavailable.
+	if (hasPolicySignal(err, message)) {
+		return withOwnerDisposition(err, { status: 403, type: "authentication_error", message });
+	}
+	if (matchesOverflowText(message)) {
+		return withOwnerDisposition(err, { status: 400, type: "invalid_request_error", message });
+	}
+	if (MODEL_UNAVAILABLE_PATTERN.test(message)) {
+		return withOwnerDisposition(err, { status: 404, type: "invalid_request_error", message });
 	}
 	return withOwnerDisposition(err, { status: 502, type: "upstream_error", message });
 }
@@ -158,11 +169,12 @@ function classifyOwnerDisposition(
 ): { owner: GatewayErrorOwner; disposition: GatewayErrorDisposition } {
 	const { status, type, message } = http;
 
-	if (
-		status === 499 ||
-		(err instanceof Error && err.name === "AbortError") ||
-		/\baborted\b|\babort signal\b/i.test(message)
-	) {
+	if (status === 499 || (err instanceof Error && err.name === "AbortError")) {
+		return { owner: "cancelled", disposition: "cancelled" };
+	}
+	// Free-text "aborted" only cancels when there is no authoritative provider
+	// status. A 503 body that mentions "aborted" must stay provider-failoverable.
+	if (status <= 0 && /\baborted\b|\babort signal\b/i.test(message)) {
 		return { owner: "cancelled", disposition: "cancelled" };
 	}
 
@@ -203,6 +215,11 @@ function classifyOwnerDisposition(
 		return { owner: "quota", disposition: "credential_quota" };
 	}
 
+	// Policy denials must win over the generic 401/403 auth bucket.
+	if (hasPolicySignal(err, message) && (status === 0 || status < 500)) {
+		return { owner: "policy", disposition: "policy_terminal" };
+	}
+
 	if (status === 401 || status === 403 || type === "authentication_error") {
 		if (REVOKED_PATTERN.test(message)) {
 			return { owner: "credential", disposition: "credential_permanent" };
@@ -232,6 +249,10 @@ function classifyOwnerDisposition(
 
 	if (status === 408) {
 		return { owner: "provider", disposition: "provider_transient" };
+	}
+
+	if ((status === 400 || type === "invalid_request_error") && MODEL_UNAVAILABLE_PATTERN.test(message)) {
+		return { owner: "model", disposition: "model_unavailable" };
 	}
 
 	if (status === 400 || type === "invalid_request_error") {
@@ -274,6 +295,16 @@ function classifyOwnerDisposition(
  * Pull a status code from common error-message shapes. Returns undefined when
  * no contextual keyword is present, so we never guess at incidental numbers.
  */
+
+/** True when message text or a structured `code` property signals account policy. */
+function hasPolicySignal(err: unknown, message: string): boolean {
+	if (POLICY_PATTERN.test(message)) return true;
+	if (typeof err === "object" && err !== null && "code" in err && typeof err.code === "string") {
+		return POLICY_PATTERN.test(err.code);
+	}
+	return false;
+}
+
 function extractEmbeddedStatus(message: string): number | undefined {
 	// `Google API error (400)`, `OpenAI API error (429): …`, `(503)`
 	// `HTTP 429: too many requests`
