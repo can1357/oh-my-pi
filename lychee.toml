@@ -2,6 +2,7 @@
 # OMP, so checking it would make the repository gate depend on unrelated links.
 exclude_path = [
 	"(^|/)crates/vendor/",
+	"(^|/)CHANGELOG\\.md$",
 ]
 
 # npm serves package pages through an anti-bot layer that returns 403 to Lychee,
