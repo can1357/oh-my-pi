@@ -54,10 +54,7 @@ import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
-function resolveEffectiveAgentBlocking(
-	agent: AgentDefinition,
-	settingsBlocking: Record<string, boolean>,
-): boolean {
+function resolveEffectiveAgentBlocking(agent: AgentDefinition, settingsBlocking: Record<string, boolean>): boolean {
 	return agent.blocking === true || settingsBlocking[agent.name] === true;
 }
 

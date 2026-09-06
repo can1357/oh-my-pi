@@ -28,7 +28,7 @@ function createSession(
 	return {
 		cwd: "/tmp",
 		hasUI: false,
-		settings: Settings.isolated({ "async.enabled": true, ...(options.settings ?? {}) }),
+		settings: Settings.isolated({ "async.enabled": true, ...options.settings }),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "estate-luna, reviewer",
 		getAgentId: () => "ParentLead",

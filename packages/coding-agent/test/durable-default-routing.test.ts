@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-	ESTATE_IMPLEMENTATION_DEFAULTS,
-	resolveDefaultSpawnAgent,
-	resolveSpawnPolicy,
-} from "../src/task/spawn-policy";
+import { ESTATE_IMPLEMENTATION_DEFAULTS, resolveDefaultSpawnAgent, resolveSpawnPolicy } from "../src/task/spawn-policy";
 
 describe("spawn-policy estate DEFAULT spine", () => {
 	test("omitted-agent defaults follow spawns frontmatter (Sol→task, Terra→Luna, Luna→Muse)", () => {
