@@ -4,10 +4,9 @@ from __future__ import annotations
 if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
-    import os, json, math, re
+    import asyncio, collections.abc, inspect, os, json, math, re, types, typing
     from urllib.parse import unquote
 
-    INTENT_FIELD = "i"
 
     # __omp_display is injected by runner.py before the prelude executes; it
     # mirrors IPython's display() semantics with the same MIME bundle output.
@@ -419,6 +418,39 @@ if "__omp_prelude_loaded__" not in globals():
             raise RuntimeError(msg or f"bridge call {name!r} failed")
         return data.get("value")
 
+    def _surface_bridged_tool_images(value):
+        """Surface bridge metadata/images without leaking opaque payloads to cell code."""
+        if not isinstance(value, dict):
+            return value
+        images = value.get("images")
+        if not isinstance(images, list) or not images:
+            return value
+        displayed = 0
+        for image in images:
+            if not isinstance(image, dict):
+                continue
+            data = image.get("data")
+            mime_type = image.get("mimeType")
+            if not isinstance(data, str) or not isinstance(mime_type, str):
+                continue
+            _omp_display({mime_type: data}, raw=True)
+            displayed += 1
+        if displayed == 0:
+            return value
+        surfaced = {key: item for key, item in value.items() if key != "images"}
+        suffix = "" if displayed == 1 else "s"
+        surfaced["images"] = f"({displayed} image{suffix} displayed)"
+        return surfaced
+
+    async def _omp_prelude(name: str, parameters):
+        """Invoke one enabled eval prelude capability through the host bridge."""
+        value = await asyncio.to_thread(
+            _bridge_call,
+            "__prelude__",
+            {"name": name, "parameters": parameters},
+        )
+        return _surface_bridged_tool_images(value)
+
     class _ToolCallable:
         """Invokes one host-side tool via the loopback HTTP bridge."""
 
@@ -430,7 +462,7 @@ if "__omp_prelude_loaded__" not in globals():
         def __repr__(self) -> str:
             return f"<tool.{self._name}>"
 
-        def __call__(self, args=None, /, **kwargs):
+        async def __call__(self, args=None, /, **kwargs):
             if args is None:
                 merged: dict = {}
             elif isinstance(args, dict):
@@ -440,14 +472,165 @@ if "__omp_prelude_loaded__" not in globals():
                     f"tool.{self._name}(...) expects a dict of arguments (got {type(args).__name__})"
                 )
             merged.update(kwargs)
-            if INTENT_FIELD not in merged:
-                merged[INTENT_FIELD] = "py prelude"
-            return _bridge_call(self._name, merged)
+            value = await asyncio.to_thread(_bridge_call, self._name, merged)
+            return _surface_bridged_tool_images(value)
+
+    def _annotation_schema(annotation) -> dict:
+        """Map supported Python annotations to JSON Schema."""
+        if annotation is inspect.Parameter.empty or annotation is typing.Any:
+            return {}
+
+        origin = typing.get_origin(annotation)
+        args = typing.get_args(annotation)
+        if origin is typing.Annotated:
+            schema = _annotation_schema(args[0])
+            description = next((item for item in args[1:] if isinstance(item, str)), None)
+            if description is not None:
+                schema = {**schema, "description": description}
+            return schema
+        if origin is typing.Literal:
+            return {"enum": list(args)}
+        if origin in (typing.Union, types.UnionType):
+            non_null = [item for item in args if item is not type(None)]
+            if len(non_null) == 1 and len(non_null) != len(args):
+                return {
+                    "anyOf": [
+                        _annotation_schema(non_null[0]),
+                        {"type": "null"},
+                    ]
+                }
+            return {}
+
+        if annotation is str:
+            return {"type": "string"}
+        if annotation is int:
+            return {"type": "integer"}
+        if annotation is float:
+            return {"type": "number"}
+        if annotation is bool:
+            return {"type": "boolean"}
+
+        array_origins = {
+            list,
+            tuple,
+            set,
+            collections.abc.Sequence,
+        }
+        if annotation in array_origins or origin in array_origins:
+            schema = {"type": "array"}
+            if args:
+                schema["items"] = _annotation_schema(args[0])
+            return schema
+
+        object_origins = {
+            dict,
+            collections.abc.Mapping,
+        }
+        if annotation in object_origins or origin in object_origins:
+            schema = {"type": "object"}
+            if len(args) >= 2:
+                schema["additionalProperties"] = _annotation_schema(args[1])
+            return schema
+        return {}
+
+    def _tool_schema(fn) -> dict:
+        """Infer one eval-defined tool's object schema from its signature."""
+        signature = inspect.signature(fn)
+        try:
+            hints = typing.get_type_hints(fn, include_extras=True)
+        except Exception:
+            hints = getattr(fn, "__annotations__", {})
+        properties = {}
+        required = []
+        for parameter in signature.parameters.values():
+            if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+                raise TypeError("tool parameters must be keyword-capable")
+            if parameter.kind in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
+                continue
+            schema = _annotation_schema(hints.get(parameter.name, parameter.annotation))
+            if parameter.default is inspect.Parameter.empty:
+                required.append(parameter.name)
+            else:
+                try:
+                    json.dumps(parameter.default)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    schema = {**schema, "default": parameter.default}
+            properties[parameter.name] = schema
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        }
+
+    class _EvalTool:
+        """Kernel-owned function and its model-facing tool metadata."""
+
+        __slots__ = ("name", "fn", "description", "parameters")
+
+        def __init__(self, name, fn, description, parameters):
+            self.name = name
+            self.fn = fn
+            self.description = description
+            self.parameters = parameters
+
+        def describe(self) -> dict:
+            return {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            }
+
+    __omp_tools__: dict[str, _EvalTool] = {}
+    globals()["__omp_tools__"] = __omp_tools__
+    _TOOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
     class _ToolProxy:
-        """`tool.<name>(args)` proxy mirroring the JS runtime bridge."""
+        """Define kernel tools or invoke host-side tools by attribute."""
 
         __slots__ = ()
+
+        def __call__(self, fn=None, /, *, name=None, description=None):
+            if fn is None:
+                return lambda decorated: self(
+                    decorated,
+                    name=name,
+                    description=description,
+                )
+            if not callable(fn):
+                raise TypeError("@tool expects a function")
+            resolved_name = name or getattr(fn, "__name__", "")
+            if not isinstance(resolved_name, str) or _TOOL_NAME_RE.fullmatch(resolved_name) is None:
+                raise ValueError(f"invalid tool name {resolved_name!r}")
+            schema = _tool_schema(fn)
+            resolved_description = (
+                description
+                if isinstance(description, str) and description
+                else inspect.getdoc(fn) or f"Python tool {resolved_name}"
+            )
+            __omp_tools__[resolved_name] = _EvalTool(
+                resolved_name,
+                fn,
+                resolved_description,
+                schema,
+            )
+            _emit_status(
+                "tool_define",
+                name=resolved_name,
+                params=list(schema["properties"]),
+            )
+            return fn
+
+        def defined(self) -> list[str]:
+            return list(__omp_tools__)
+
+        def undefine(self, name) -> bool:
+            return __omp_tools__.pop(name, None) is not None
 
         def __getattr__(self, name: str) -> _ToolCallable:
             if name.startswith("_"):
@@ -467,41 +650,168 @@ if "__omp_prelude_loaded__" not in globals():
 
     tool = _ToolProxy()
 
-    def completion(prompt, *, model="default", system=None, schema=None):
-        """Oneshot, stateless completion against a model tier.
+    _HANDLE_UNSET = object()
 
-        `model` selects a tier: "smol", "default" (the session's active model),
-        or "slow". Pass `system` for a system prompt. Pass a JSON-Schema dict
-        as `schema` to force a structured response; the parsed object is then
-        returned instead of the completion text.
-        """
+    class _Handle:
+        """Shared process-local agent/completion handle behavior."""
+
+        __slots__ = ("id", "_schema", "_result")
+
+        kind = ""
+
+        def __init__(self, id, schema=None):
+            self.id = id
+            self._schema = schema
+            self._result = _HANDLE_UNSET
+
+        @property
+        def status(self):
+            snapshot = _bridge_call(
+                "__status__",
+                {"item": {"kind": self.kind, "id": self.id}},
+            )
+            return snapshot.get("status") if isinstance(snapshot, dict) else "failed"
+
+        def done(self):
+            return self.status != "running"
+
+        def wait(self, timeout=None):
+            if self._result is not _HANDLE_UNSET:
+                return self._result
+            return wait([self], timeout=timeout)[0]
+
+        def cancel(self):
+            result = _bridge_call(
+                "__cancel__",
+                {"item": {"kind": self.kind, "id": self.id}},
+            )
+            return bool(result.get("cancelled")) if isinstance(result, dict) else False
+
+        def __await__(self):
+            return asyncio.get_running_loop().run_in_executor(
+                None,
+                self.wait,
+            ).__await__()
+
+    class AgentHandle(_Handle):
+        """Background subagent handle returned by ``agent()``."""
+
+        __slots__ = ("agent", "handle")
+        kind = "agent"
+
+        def __init__(self, id, agent, schema=None):
+            super().__init__(id, schema)
+            self.agent = agent
+            self.handle = f"agent://{id}"
+
+        def __repr__(self):
+            return f"<agent {self.id} ({self.agent})>"
+
+        def send(self, message):
+            return _bridge_call(
+                "hub",
+                {
+                    "op": "send",
+                    "to": self.id,
+                    "message": str(message),
+                    "i": "agent handle",
+                },
+            )
+
+        def output(self, **kwargs):
+            return output(self.id, **kwargs)
+
+    class CompletionHandle(_Handle):
+        """Background one-shot completion handle returned by ``completion()``."""
+
+        __slots__ = ()
+        kind = "completion"
+
+        def __repr__(self):
+            return f"<completion {self.id}>"
+
+    def _handle_value(handle, snapshot):
+        status = snapshot.get("status") if isinstance(snapshot, dict) else "failed"
+        if status == "running":
+            raise TimeoutError(f"{handle.kind} handle {handle.id} is still running")
+        if status in ("failed", "cancelled"):
+            message = (
+                snapshot.get("error")
+                if isinstance(snapshot, dict)
+                else f"{handle.kind} handle {handle.id} failed"
+            )
+            raise RuntimeError(message or f"{handle.kind} handle {handle.id} failed")
+        if isinstance(snapshot, dict) and "data" in snapshot:
+            value = snapshot["data"]
+        else:
+            text = snapshot.get("text", "") if isinstance(snapshot, dict) else ""
+            value = json.loads(text) if handle._schema is not None else text
+        handle._result = value
+        return value
+
+    def wait(handles, timeout=None, *, raise_errors=True):
+        """Wait for agent/completion handles in input order."""
+        items = [handles] if isinstance(handles, _Handle) else list(handles)
+        for handle in items:
+            if not isinstance(handle, _Handle):
+                raise TypeError("wait() expects agent or completion handles")
+        results = [None] * len(items)
+        pending = []
+        pending_indexes = []
+        for index, handle in enumerate(items):
+            if handle._result is _HANDLE_UNSET:
+                pending.append({"kind": handle.kind, "id": handle.id})
+                pending_indexes.append(index)
+            else:
+                results[index] = handle._result
+        if pending:
+            args = {"items": pending}
+            if timeout is not None:
+                args["timeoutMs"] = max(0, float(timeout) * 1000)
+            response = _bridge_call("__wait__", args)
+            snapshots = response.get("items", []) if isinstance(response, dict) else []
+            for index, handle, snapshot in zip(
+                pending_indexes,
+                (items[index] for index in pending_indexes),
+                snapshots,
+            ):
+                try:
+                    results[index] = _handle_value(handle, snapshot)
+                except RuntimeError as error:
+                    results[index] = error
+            if len(snapshots) != len(pending):
+                raise RuntimeError("wait() returned an incomplete handle result")
+        if raise_errors:
+            for result in results:
+                if isinstance(result, RuntimeError):
+                    raise result
+        return results
+
+    def completion(prompt, *, model="default", system=None, schema=None):
+        """Start a stateless completion and return its handle."""
         args = {"prompt": prompt, "model": model}
         if system is not None:
             args["system"] = system
         if schema is not None:
             args["schema"] = schema
-        res = _bridge_call("__completion__", args)
-        text = res.get("text") if isinstance(res, dict) else res
-        return json.loads(text) if schema is not None else text
+        result = _bridge_call("__completion__", args)
+        if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+            raise RuntimeError("completion() did not return a handle")
+        return CompletionHandle(result["id"], schema)
 
     def agent(
         prompt,
         *,
-        agent="task",
+        agent=None,
         label=None,
         schema=None,
         schema_mode=None,
         isolated=None,
         apply=None,
         merge=None,
-        handle=False,
+        tools=None,
     ):
-        """Run a subagent and return its final output or structured data.
-
-        `schema` overrides agent and session schemas. `schema_mode` is
-        `"permissive"` or `"strict"`. `handle=True` returns the child output
-        reference and metadata, with parsed data under `"data"` when available.
-        """
+        """Start a background subagent and return its handle."""
         args = {"prompt": prompt}
         if agent is not None:
             args["agent"] = agent
@@ -517,124 +827,68 @@ if "__omp_prelude_loaded__" not in globals():
             args["apply"] = bool(apply)
         if merge is not None:
             args["merge"] = bool(merge)
-        if handle:
-            args["handle"] = True
-        res = _bridge_call("__agent__", args)
-        text = res.get("text") if isinstance(res, dict) else res
-        has_data = isinstance(res, dict) and "data" in res
-        parsed = res["data"] if has_data else json.loads(text) if schema is not None else text
-        if not handle:
-            return parsed
-        details = res.get("details") if isinstance(res, dict) else None
-        if not isinstance(details, dict) or details.get("id") is None:
-            return {
-                "text": text,
-                "output": text,
-                "handle": None,
-                "id": None,
-                "agent": None,
-            }
-        node = {
-            "text": text,
-            "output": text,
-            "handle": f"agent://{details['id']}",
-            "id": details["id"],
-            "agent": details.get("agent"),
-        }
-        if has_data or schema is not None:
-            node["data"] = parsed
-        for src_key, dst_key in (
-            ("isolated", "isolated"),
-            ("patchPath", "patch_path"),
-            ("branchName", "branch_name"),
-            ("nestedPatches", "nested_patches"),
-            ("changesApplied", "changes_applied"),
-            ("isolationSummary", "isolation_summary"),
-        ):
-            if src_key in details:
-                node[dst_key] = details[src_key]
-        return node
+        if tools is not None:
+            args["tools"] = list(tools)
+        result = _bridge_call("__agent__", args)
+        if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+            raise RuntimeError("agent() did not return a handle")
+        return AgentHandle(result["id"], result.get("agent"), schema)
 
-    def _concurrency_limit():
-        """Worker-pool ceiling from the host ``task.maxConcurrency`` setting.
+    class WorkPool:
+        """Pool of keep-alive subagents fed through the host workpool bridge."""
 
-        An eval fan-out runs as wide as a ``task`` batch would. Returns ``0`` for
-        unbounded (run every item at once); falls back to ``0`` if the host
-        bridge is unreachable.
-        """
-        try:
-            snap = _bridge_call("__concurrency__", {}) or {}
-            n = int(snap.get("limit") or 0)
-        except Exception:
-            return 0
-        return n if n > 0 else 0
+        __slots__ = ("name", "agent", "limit")
 
-    class _AwaitableList(list):
-        """Completed list result accepted by both sync and ``await`` syntax."""
+        def __init__(self, name, agent, limit):
+            self.name = name
+            self.agent = agent
+            self.limit = limit
 
-        def __await__(self):
-            yield from ()
-            return self
+        def push(self, *items):
+            if not all(isinstance(item, str) for item in items):
+                raise TypeError("WorkPool.push() expects string items")
+            result = _bridge_call(
+                "__workpool__",
+                {"op": "push", "name": self.name, "items": list(items)},
+            )
+            return result.get("ids", []) if isinstance(result, dict) else []
 
+        def status(self):
+            return _bridge_call(
+                "__workpool__",
+                {"op": "status", "name": self.name},
+            )
 
-    def _pool_map(items, fn):
-        """Run ``fn`` over ``items`` through a bounded thread pool.
+        def peek(self):
+            return _bridge_call(
+                "__workpool__",
+                {"op": "peek", "name": self.name},
+            )
 
-        Preserves input order, barriers until every task settles, and raises the
-        lowest-index exception if any task failed. Each task runs inside a copy
-        of the submitting thread's context so the ``_CURRENT_RID`` ContextVar
-        propagates and bridge calls (agent(), tool.*, etc.) keep working. The
-        pool width tracks ``task.maxConcurrency`` (0 = run every item at once).
-        """
-        import concurrent.futures, contextvars
+        def close(self):
+            return _bridge_call(
+                "__workpool__",
+                {"op": "close", "name": self.name},
+            )
 
-        items = list(items)
-        if not items:
-            return _AwaitableList()
-        limit = _concurrency_limit()
-        workers = min(limit, len(items)) if limit > 0 else len(items)
-        results = _AwaitableList(None for _ in items)
-        errors = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {}
-            for i, item in enumerate(items):
-                ctx = contextvars.copy_context()
-                futures[pool.submit(ctx.run, fn, item)] = i
-            for fut in concurrent.futures.as_completed(futures):
-                i = futures[fut]
-                try:
-                    results[i] = fut.result()
-                except BaseException as exc:  # noqa: BLE001 - propagate to caller
-                    errors[i] = exc
-        if errors:
-            raise errors[min(errors)]
-        return results
+        def __repr__(self):
+            return f"<workpool {self.name} ({self.agent}) {self.limit} agents>"
 
-    def parallel(thunks):
-        """Run zero-arg callables through a bounded pool, preserving input order.
-
-        Barriers until all finish; re-raises the lowest-index exception if any
-        thunk raised. Pool width tracks the task tool's ``task.maxConcurrency``.
-        """
-        thunks = list(thunks)
-        for t in thunks:
-            if not callable(t):
-                raise TypeError("parallel() expects an iterable of zero-arg callables")
-        return _pool_map(thunks, lambda t: t())
-
-    def pipeline(items, *stages):
-        """Map items left-to-right through one-arg stage callables.
-
-        Every item clears stage N before any item enters stage N+1 (barrier per
-        stage). Stage 1 receives the original item; later stages receive the
-        previous stage's result. Pool width tracks ``task.maxConcurrency``.
-        """
-        current = _AwaitableList(items)
-        for stage in stages:
-            if not callable(stage):
-                raise TypeError("pipeline() stages must be callables")
-            current = _pool_map(current, stage)
-        return current
+    def workpool(agent=None, *, name=None, context=None, tools=None):
+        """Create a pool of keep-alive subagents."""
+        args = {"op": "create"}
+        if agent is not None:
+            args["agent"] = agent
+        if name is not None:
+            args["name"] = name
+        if context is not None:
+            args["context"] = context
+        if tools is not None:
+            args["tools"] = list(tools)
+        result = _bridge_call("__workpool__", args)
+        if not isinstance(result, dict) or not isinstance(result.get("name"), str):
+            raise RuntimeError("workpool() did not return a pool")
+        return WorkPool(result["name"], result.get("agent"), result.get("limit"))
 
     def log(message):
         """Emit a status ``log`` event for TUI rendering."""

@@ -16,7 +16,7 @@ import type { FetchImpl } from "../../types";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const CLIENT_ID = "Ov23ctDVkRmgkPke0Mmm";
-const OAUTH_SCOPE = "read:user,read:org,repo,gist,codespace";
+const OAUTH_SCOPE = "read:user";
 const OAUTH_HEADERS = {
 	Accept: "application/json",
 	"Content-Type": "application/x-www-form-urlencoded",

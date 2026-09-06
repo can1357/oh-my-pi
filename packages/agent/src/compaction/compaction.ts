@@ -25,7 +25,12 @@ import {
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	buildTransformedCodexRequestBody,
+	createOpenAICodexCompactionRequestContext,
+	type OpenAICodexCompactionBody,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import type { InputItem as CodexInputItem } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput, resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
@@ -39,6 +44,7 @@ import { Tokenizer } from "../tokenizer";
 import type { AgentMessage } from "../types";
 import {
 	buildCompactionV2Request,
+	buildCompactionV2RequestFromBody,
 	getCompactionV2PreserveData,
 	requestCompactionV2Streaming,
 	shouldUseCompactionV2Streaming,
@@ -660,7 +666,8 @@ export interface SummaryOptions {
 	promptOverride?: string;
 	extraContext?: string[];
 	remoteEndpoint?: string;
-	remoteInstructions?: string;
+	/** Stable system-prompt segments from the live turn, preserved for provider cache reuse. */
+	remoteSystemPrompt?: string[];
 	initiatorOverride?: MessageAttribution;
 	metadata?: Record<string, unknown>;
 	convertToLlm?: ConvertToLlm;
@@ -1433,6 +1440,19 @@ export function prepareCompaction(
 // ============================================================================
 
 const TURN_PREFIX_SUMMARIZATION_PROMPT = prompt.render(compactionTurnPrefixPrompt);
+function isCodexResponsesModel(model: Model): model is Model<"openai-codex-responses"> {
+	return model.api === "openai-codex-responses";
+}
+
+function isCodexInputItem(item: Record<string, unknown>): item is CodexInputItem & Record<string, unknown> {
+	return (
+		(item.id === undefined || item.id === null || typeof item.id === "string") &&
+		(item.type === undefined || item.type === null || typeof item.type === "string") &&
+		(item.role === undefined || typeof item.role === "string") &&
+		(item.call_id === undefined || item.call_id === null || typeof item.call_id === "string") &&
+		(item.name === undefined || typeof item.name === "string")
+	);
+}
 
 function openAiCompatSupportsImageDetailOriginal(model: Model): boolean {
 	const compat = model.compat;
@@ -1546,7 +1566,7 @@ export async function compact(
 		promptOverride: options?.promptOverride,
 		extraContext: options?.extraContext,
 		remoteEndpoint: settings.remoteEnabled === false ? undefined : settings.remoteEndpoint,
-		remoteInstructions: options?.remoteInstructions,
+		remoteSystemPrompt: options?.remoteSystemPrompt,
 		initiatorOverride: options?.initiatorOverride,
 		metadata: options?.metadata,
 		convertToLlm: options?.convertToLlm,
@@ -1598,17 +1618,63 @@ export async function compact(
 			previousRemoteCompaction?.provider === model.provider
 				? previousRemoteCompaction.replacementHistory
 				: undefined;
-		const remoteHistory = buildOpenAiResponsesCompactionInput(
-			(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
-			model,
-			previousReplacementHistory,
-		);
+		const messages = (summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages);
+		const remoteSystemPrompt = summaryOptions.remoteSystemPrompt ?? [SUMMARIZATION_SYSTEM_PROMPT];
+		let codexBody: OpenAICodexCompactionBody | undefined;
+		let remoteHistory: Array<Record<string, unknown>>;
+		if (isCodexResponsesModel(model)) {
+			const previousCodexInput: CodexInputItem[] = [];
+			for (const item of previousReplacementHistory ?? []) {
+				if (!isCodexInputItem(item)) {
+					throw new Error("Stored Codex V2 compaction history contains an invalid input item");
+				}
+				previousCodexInput.push(item);
+			}
+			codexBody = await buildTransformedCodexRequestBody(
+				model,
+				{ systemPrompt: remoteSystemPrompt, messages, tools: summaryOptions.tools },
+				{
+					reasoning: resolveCompactionEffort(model, summaryOptions.thinkingLevel),
+					forceReasoningOff: summaryOptions.thinkingLevel === ThinkingLevel.Off,
+					responsesLite: model.useResponsesLite,
+					sessionId: summaryOptions.sessionId,
+					promptCacheKey: summaryOptions.promptCacheKey,
+					providerSessionState: summaryOptions.providerSessionState,
+					codexCompaction: createOpenAICodexCompactionRequestContext({
+						context: summaryOptions.codexCompaction,
+						implementation: "responses_compaction_v2",
+					}),
+				},
+				undefined,
+				previousCodexInput,
+			);
+			const input = Array.isArray(codexBody.input) ? codexBody.input : [];
+			const nativeInput: Array<Record<string, unknown>> = [];
+			for (const item of input) {
+				if (!isRecord(item)) {
+					throw new Error("Codex V2 compaction input contains a non-object item");
+				}
+				nativeInput.push(item);
+			}
+			remoteHistory = stripOpenAIResponsesOutputOnlyStatusesForReplay(nativeInput);
+			codexBody.input = remoteHistory;
+		} else {
+			remoteHistory = buildOpenAiResponsesCompactionInput(messages, model, previousReplacementHistory);
+		}
 		if (remoteHistory.length > 0) {
 			try {
-				const instructions = summaryOptions.remoteInstructions ?? SUMMARIZATION_SYSTEM_PROMPT;
-				const tools = summaryOptions.tools
-					? convertTools(summaryOptions.tools, model.compat.supportsStrictMode, model)
-					: undefined;
+				const instructions = codexBody
+					? typeof codexBody.instructions === "string"
+						? codexBody.instructions
+						: ""
+					: remoteSystemPrompt.join("\n\n");
+				const tools = codexBody
+					? Array.isArray(codexBody.tools)
+						? codexBody.tools
+						: undefined
+					: summaryOptions.tools
+						? convertTools(summaryOptions.tools, model.compat.supportsStrictMode, model)
+						: undefined;
 				const trimmed = trimRemoteCompactionInputToContextWindow(
 					remoteHistory,
 					new Tokenizer(model),
@@ -1626,13 +1692,18 @@ export async function compact(
 						contextWindow: model.contextWindow,
 					});
 				}
-				const request = buildCompactionV2Request(model, trimmed.input, instructions, {
-					tools,
-					reasoning: buildCompactionV2Reasoning(model, summaryOptions.thinkingLevel),
+				const requestOptions = {
 					sessionId: summaryOptions.sessionId,
 					promptCacheKey: summaryOptions.promptCacheKey,
 					retainedMessageBudget: settings.v2RetainedMessageBudget,
-				});
+				};
+				const request = codexBody
+					? buildCompactionV2RequestFromBody(model, { ...codexBody, input: trimmed.input }, requestOptions)
+					: buildCompactionV2Request(model, trimmed.input, instructions, {
+							...requestOptions,
+							tools,
+							reasoning: buildCompactionV2Reasoning(model, summaryOptions.thinkingLevel),
+						});
 				const remote = await withAuth(
 					apiKey,
 					key =>
@@ -1685,7 +1756,7 @@ export async function compact(
 							model,
 							key,
 							remoteHistory,
-							summaryOptions.remoteInstructions ?? SUMMARIZATION_SYSTEM_PROMPT,
+							summaryOptions.remoteSystemPrompt?.join("\n\n") ?? SUMMARIZATION_SYSTEM_PROMPT,
 							signal,
 							{
 								fetch: summaryOptions.fetch,

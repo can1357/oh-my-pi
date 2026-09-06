@@ -108,6 +108,7 @@ export type SymbolKey =
 	| "icon.input"
 	| "icon.output"
 	| "icon.throughput"
+	| "icon.intelligence"
 	| "icon.host"
 	| "icon.session"
 	| "icon.package"
@@ -238,8 +239,9 @@ export type SymbolKey =
 	| "lang.pdf"
 	| "lang.archive"
 	| "lang.binary"
-	// Composer attachment chips (image paste / large text paste)
+	// Composer attachment chips (image/video paste / large text paste)
 	| "chip.image"
+	| "chip.video"
 	| "chip.paste"
 	// Settings tab icons
 	| "tab.appearance"
@@ -273,7 +275,6 @@ export type SymbolKey =
 	| "tool.ask"
 	| "tool.resolve"
 	| "tool.review"
-	| "tool.inspectImage"
 	| "tool.goal"
 	| "tool.irc"
 	| "tool.delete"
@@ -460,6 +461,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.input": "⤵",
 	"icon.output": "⤴",
 	"icon.throughput": "⚡",
+	"icon.intelligence": "🧠",
 	"icon.host": "🖥",
 	"icon.session": "🆔",
 	"icon.package": "📦",
@@ -591,6 +593,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"lang.binary": "⚙",
 	// Composer attachment chips
 	"chip.image": "🖼",
+	"chip.video": "🎞",
 	"chip.paste": "📄",
 	// Settings tabs
 	"tab.appearance": "🎨",
@@ -624,7 +627,6 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tool.ask": "?",
 	"tool.resolve": "✓",
 	"tool.review": "◉",
-	"tool.inspectImage": "🖼",
 	"tool.goal": "◎",
 	"tool.irc": "✉",
 	"tool.delete": "🗑",
@@ -820,6 +822,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.output": "\uf08b",
 	// pick:  (nf-fa-tachometer) | alt:  ⚡ ↬
 	"icon.throughput": "\uf0e4",
+	// findnerd brain:  (nf-fa-brain)
+	"icon.intelligence": "\uee9c",
 	// pick:  | alt:  
 	"icon.host": "\uf109",
 	// pick: 󰁑 (nf-md-arrow_left_bold_hexagon_outline) | alt:  
@@ -1022,6 +1026,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	// Composer attachment chips
 	// pick:  (fa-image, matches omp2) | alt: 󰋩 (md-image) 󰈟 (md-file_image)
 	"chip.image": "\uf03e",
+	// pick:  (fa-film)
+	"chip.video": "\uf008",
 	// pick:  (fa-file_text, matches omp2) | alt: 󰈙 (md-file_document)  (cod-file)
 	"chip.paste": "\uf15c",
 	// Settings tab icons
@@ -1056,7 +1062,6 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tool.ask": "\uEAC7",
 	"tool.resolve": "\uEBB1",
 	"tool.review": "\uEA70",
-	"tool.inspectImage": "\uEAEA",
 	"tool.goal": "\uEBF8",
 	"tool.irc": "\uF086",
 	"tool.delete": "\uf12d",
@@ -1161,6 +1166,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.job": "bg",
 	"icon.output": "out:",
 	"icon.throughput": "tok/s:",
+	"icon.intelligence": "IQ",
 	"icon.cache": "cache",
 	"icon.cacheMiss": "!",
 	"icon.input": "in:",
@@ -1292,6 +1298,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"lang.binary": "bin",
 	// Composer attachment chips
 	"chip.image": "img",
+	"chip.video": "vid",
 	"chip.paste": "txt",
 	// Settings tab icons
 	"tab.appearance": "[A]",
@@ -1325,7 +1332,6 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tool.ask": "[?]",
 	"tool.resolve": "[v]",
 	"tool.review": "rev",
-	"tool.inspectImage": "[i]",
 	"tool.goal": "(o)",
 	"tool.irc": "#",
 	"tool.delete": "rm",

@@ -6,8 +6,6 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
-import { getEditClipboard } from "../../edit/edit-clipboard";
-import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { createBackgroundTanDispatchBlock } from "../../modes/components/background-tan-message";
@@ -44,6 +42,7 @@ import { createUsageRowBlock, turnElapsedMs } from "../../modes/components/usage
 import { UserMessageComponent } from "../../modes/components/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
 import { materializeImageReferenceLinksSync } from "../../modes/image-references";
+import { videoPreviewSource } from "../../utils/video";
 import { theme } from "../../modes/theme/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext, RenderSessionContextOptions } from "../../modes/types";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
@@ -58,7 +57,11 @@ import {
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
 import { replaceTabs } from "../../tools/render-utils";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
-import { createAssistantMessageComponent } from "./interactive-context-helpers";
+import {
+	createAssistantMessageComponent,
+	getAssistantMessageLinkTargets,
+	refreshAssistantMessageLinkTargets,
+} from "./interactive-context-helpers";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
@@ -115,7 +118,8 @@ function imageLinksForMessage(
 		(content): content is ImageContent =>
 			content.type === "image" && typeof content.data === "string" && typeof content.mimeType === "string",
 	);
-	return materializeImageReferenceLinksSync(images, putBlobSync);
+	const materialized = materializeImageReferenceLinksSync(images, putBlobSync);
+	return images.map((image, index) => videoPreviewSource(image) ?? materialized?.[index]);
 }
 
 export class UiHelpers {
@@ -169,6 +173,8 @@ export class UiHelpers {
 				}
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
+					images: message.images,
+					showImages: settings.get("terminal.showImages"),
 				});
 				this.ctx.chatContainer.addChild(component);
 				break;
@@ -221,7 +227,8 @@ export class UiHelpers {
 					if (
 						message.customType === "irc:incoming" ||
 						message.customType === "irc:autoreply" ||
-						message.customType === "irc:relay"
+						message.customType === "irc:relay" ||
+						message.customType === "irc:workpool"
 					) {
 						const card = buildIrcMessageCard(message, () => this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(card);
@@ -304,10 +311,15 @@ export class UiHelpers {
 				const assistantComponent =
 					cached instanceof AssistantMessageComponent
 						? cached
-						: createAssistantMessageComponent(this.ctx, splitAssistantMessageToolTimeline(message).beforeTools);
+						: createAssistantMessageComponent(
+								this.ctx,
+								splitAssistantMessageToolTimeline(message).beforeTools,
+								getAssistantMessageLinkTargets(this.ctx),
+							);
 				if (cached !== assistantComponent) {
 					this.ctx.transcriptMessageComponents.set(message, assistantComponent);
 				}
+				assistantComponent.pickReactionTarget(this.ctx.chatContainer.children);
 				this.ctx.chatContainer.addChild(assistantComponent);
 				break;
 			}
@@ -507,7 +519,11 @@ export class UiHelpers {
 				const errorMessage = hasErrorStop ? errorPresentation.text : null;
 				const appendAssistantSegment = (segment: AssistantMessage | undefined) => {
 					if (!segment || !assistantHasVisibleContent(segment)) return;
-					const component = createAssistantMessageComponent(this.ctx, segment);
+					const component = createAssistantMessageComponent(
+						this.ctx,
+						segment,
+						getAssistantMessageLinkTargets(this.ctx),
+					);
 					this.ctx.chatContainer.addChild(component);
 				};
 
@@ -585,11 +601,7 @@ export class UiHelpers {
 						renderArgs,
 						{
 							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
-							snapshots: getFileSnapshotStore(this.ctx.viewSession),
-							clipboard: getEditClipboard(this.ctx.viewSession),
 							showImages: settings.get("terminal.showImages"),
-							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
-							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
 						},
 						tool,
 						this.ctx.ui,
@@ -890,6 +902,13 @@ export class UiHelpers {
 	}
 
 	async renderInitialMessages(options: RenderInitialMessagesOptions = {}): Promise<void> {
+		// Collapsed replay keeps in-flight calls so pending tools remain routable during mid-turn rebuilds.
+		let context = this.ctx.viewSession.buildTranscriptSessionContext({
+			collapseCompactedHistory: settings.get("display.collapseCompacted"),
+			keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
+		});
+		let replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
+
 		// Build against a detached container. Incremental construction still yields
 		// to terminal input, while paints keep using the complete visible transcript
 		// until the replacement is ready to swap in.
@@ -903,25 +922,6 @@ export class UiHelpers {
 		const previousPendingPythonComponents = this.ctx.pendingPythonComponents;
 		const previousLastAssistantUsage = this.ctx.lastAssistantUsage;
 		const chatWasAlreadyRendered = this.ctx.initialChatRendered;
-
-		this.ctx.chatContainer = stagedChatContainer;
-		this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
-		this.ctx.pendingTools = new Map<string, ToolExecutionHandle>();
-		this.ctx.pendingMessagesContainer.disposeChildren();
-		this.ctx.pendingBashComponents = [];
-		this.ctx.pendingPythonComponents = [];
-
-		// Live display collapses to the compacted transcript tail unless the
-		// user opted into the full inline history; export/resume callers can
-		// still request either mode. Mid-turn rebuilds
-		// (focus attach/unfocus while a tool executes) keep dangling toolCalls so
-		// the in-flight call re-renders as pending instead of vanishing;
-		// renderSessionContext then keeps it in `pendingTools` for live routing.
-		let context = this.ctx.viewSession.buildTranscriptSessionContext({
-			collapseCompactedHistory: settings.get("display.collapseCompacted"),
-			keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
-		});
-		let replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
 		const renderOptions = {
 			updateFooter: true,
 		};
@@ -929,6 +929,18 @@ export class UiHelpers {
 		let replayAttempts = 0;
 		this.ctx.initialChatRendered = false;
 		try {
+			// Resolve before replacing live component maps: streaming events may arrive during filesystem I/O.
+			await refreshAssistantMessageLinkTargets(
+				this.ctx,
+				context.messages.filter((message): message is AssistantMessage => message.role === "assistant"),
+			);
+
+			this.ctx.chatContainer = stagedChatContainer;
+			this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
+			this.ctx.pendingTools = new Map<string, ToolExecutionHandle>();
+			this.ctx.pendingMessagesContainer.disposeChildren();
+			this.ctx.pendingBashComponents = [];
+			this.ctx.pendingPythonComponents = [];
 			while (true) {
 				if (this.ctx.viewSession.isStreaming) {
 					// Live events mutate the same component maps; keep their replay atomic so
@@ -956,16 +968,20 @@ export class UiHelpers {
 				// yielded. The display callback stayed gated by initialChatRendered;
 				// discard the stale partial tree and replay the current session once
 				// more instead of letting a reentrant synchronous rebuild interleave.
-				stagedChatContainer.disposeChildren();
-				this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
-				this.ctx.pendingTools.clear();
-				this.ctx.pendingBashComponents = [];
-				this.ctx.pendingPythonComponents = [];
 				context = this.ctx.viewSession.buildTranscriptSessionContext({
 					collapseCompactedHistory: settings.get("display.collapseCompacted"),
 					keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
 				});
 				replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
+				await refreshAssistantMessageLinkTargets(
+					this.ctx,
+					context.messages.filter((message): message is AssistantMessage => message.role === "assistant"),
+				);
+				stagedChatContainer.disposeChildren();
+				this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
+				this.ctx.pendingTools.clear();
+				this.ctx.pendingBashComponents = [];
+				this.ctx.pendingPythonComponents = [];
 			}
 
 			const replayedChatChildren = [...stagedChatContainer.children];

@@ -20,7 +20,6 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"reflect",
 	"retain",
 	"memory_edit",
-	"inspect_image",
 	"checkpoint",
 	"rewind",
 ]);

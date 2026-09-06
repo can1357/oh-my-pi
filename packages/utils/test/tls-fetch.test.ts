@@ -3,13 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as tls from "node:tls";
-import {
-	__resetExtraCaCache,
-	ExtraCaError,
-	type FetchImpl,
-	withExtraCaFetch,
-	wrapFetchForExtraCa,
-} from "@oh-my-pi/pi-utils/tls-fetch";
+import { __resetExtraCaCache, ExtraCaError, type FetchImpl, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils/tls-fetch";
 
 const SAMPLE_PEM =
 	"-----BEGIN CERTIFICATE-----\nMIIBkTCCATegAwIBAgIUF/sample/extra/ca/for/tests/1234567=\n-----END CERTIFICATE-----\n";
@@ -149,51 +143,5 @@ describe("wrapFetchForExtraCa", () => {
 		const once = wrapFetchForExtraCa(fetchImpl);
 		const twice = wrapFetchForExtraCa(once);
 		expect(twice).toBe(once);
-	});
-});
-
-describe("withExtraCaFetch", () => {
-	let tmpDir: string;
-	let originalEnv: string | undefined;
-
-	beforeEach(async () => {
-		__resetExtraCaCache();
-		originalEnv = Bun.env.NODE_EXTRA_CA_CERTS;
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extra-ca-opts-"));
-	});
-
-	afterEach(async () => {
-		__resetExtraCaCache();
-		if (originalEnv === undefined) delete Bun.env.NODE_EXTRA_CA_CERTS;
-		else Bun.env.NODE_EXTRA_CA_CERTS = originalEnv;
-		await fs.rm(tmpDir, { recursive: true, force: true });
-	});
-
-	it("returns the original options when NODE_EXTRA_CA_CERTS is unset", () => {
-		delete Bun.env.NODE_EXTRA_CA_CERTS;
-		const original = { fetch: undefined };
-		expect(withExtraCaFetch(original)).toBe(original);
-	});
-
-	it("wraps the supplied fetch when the env var is set", async () => {
-		const caPath = path.join(tmpDir, "corp.pem");
-		await Bun.write(caPath, SAMPLE_PEM);
-		Bun.env.NODE_EXTRA_CA_CERTS = caPath;
-
-		const { fetchImpl, calls } = makeRecordingFetch();
-		const wrapped = withExtraCaFetch({ fetch: fetchImpl });
-		expect(wrapped.fetch).not.toBe(fetchImpl);
-		await wrapped.fetch?.("https://corp.example/v1");
-		expect(calls[0].tls?.ca).toContain(SAMPLE_PEM);
-	});
-
-	it("wraps globalThis.fetch when no fetch is supplied", async () => {
-		const caPath = path.join(tmpDir, "corp.pem");
-		await Bun.write(caPath, SAMPLE_PEM);
-		Bun.env.NODE_EXTRA_CA_CERTS = caPath;
-
-		const wrapped = withExtraCaFetch({} as { fetch?: FetchImpl });
-		expect(typeof wrapped.fetch).toBe("function");
-		expect(wrapped.fetch).not.toBe(globalThis.fetch);
 	});
 });

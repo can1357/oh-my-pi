@@ -382,7 +382,7 @@ export interface CompiledCredentialField {
 
 /** Expiry derivation for a token response. */
 export type CompiledCredentialExpiry =
-	| { mode: "seconds"; path: string; fromPath?: string; skewMs: number }
+	| { mode: "seconds"; path: string; fromPath?: string; skewMs: number; fallbackMs?: number }
 	| { mode: "jwt"; skewMs: number; fallbackMs?: number }
 	| { mode: "never" };
 
@@ -422,7 +422,7 @@ export interface CompiledOAuthRequest {
 	timeoutMs?: number;
 }
 
-/** Loopback callback configuration for authorization-code logins. */
+/** Callback transport configuration for authorization-code logins. */
 export interface CompiledCallback {
 	port: number;
 	path: string;
@@ -430,9 +430,11 @@ export interface CompiledCallback {
 	redirectUri?: CompiledAuthValue;
 	portFallback: boolean;
 	manualOnly: boolean;
+	/** Temporarily receive a custom-scheme redirect through the native OS handler. */
+	nativeScheme: boolean;
 }
 
-/** Authorization-code login through the loopback callback server. */
+/** Authorization-code login through a loopback, native-scheme, or manual callback. */
 export interface CompiledOAuthCodeLogin {
 	kind: "oauth-code";
 	clientId?: CompiledAuthValue;

@@ -1,7 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -10,6 +12,7 @@ import {
 	applyHyperlinkSetting,
 	fileHyperlink,
 	isHyperlinkEnabled,
+	resolveMarkdownLinkTargets,
 	tryResolveInternalUrlSync,
 	uriHyperlink,
 	urlHyperlink,
@@ -23,9 +26,6 @@ const ST = "\x1b\\";
 const BEL = "\x07";
 const LINK_END = `${OSC}8;;${ST}`;
 const ORIGINAL_NO_COLOR = Bun.env.NO_COLOR;
-// Detected OSC 8 capability, captured at import exactly as hyperlink.ts snapshots
-// it — before any test mutates the runtime flag.
-const DETECTED_HYPERLINKS = terminalCaps.TERMINAL.hyperlinks;
 
 /** Extract the hyperlink URI from a wrapped string. Returns undefined if not wrapped. */
 function extractLinkUri(text: string): string | undefined {
@@ -115,12 +115,13 @@ describe("isHyperlinkEnabled", () => {
 		const origHyperlinks = terminalCaps.TERMINAL.hyperlinks;
 		try {
 			Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-			// auto mirrors the capability detected at import...
-			expect(isHyperlinkEnabled()).toBe(DETECTED_HYPERLINKS);
-			// ...and a prior always/off application that flipped the runtime flag
-			// must not poison it (regression: #10196 review).
-			terminalCaps.setTerminalHyperlinks(!DETECTED_HYPERLINKS);
-			expect(isHyperlinkEnabled()).toBe(DETECTED_HYPERLINKS);
+			// Other test modules may have already changed the runtime flag since
+			// hyperlink.ts captured detection. Neither runtime value may change auto.
+			const detected = isHyperlinkEnabled();
+			terminalCaps.setTerminalHyperlinks(false);
+			expect(isHyperlinkEnabled()).toBe(detected);
+			terminalCaps.setTerminalHyperlinks(true);
+			expect(isHyperlinkEnabled()).toBe(detected);
 		} finally {
 			terminalCaps.setTerminalHyperlinks(origHyperlinks);
 			if (origTTY) {
@@ -383,6 +384,131 @@ describe("chat markdown links honor tui.hyperlinks", () => {
 		const output = renderChatLink();
 		expect(output).toContain("the docs");
 		expect(output.includes(`${OSC}8;`)).toBe(false);
+	});
+});
+
+describe("resource links in chat markdown", () => {
+	let tempDir: string;
+	let originalHyperlinks: boolean;
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-markdown-links-"));
+		originalHyperlinks = terminalCaps.TERMINAL.hyperlinks;
+		terminalCaps.setTerminalHyperlinks(true);
+		await initTheme();
+	});
+
+	afterEach(async () => {
+		terminalCaps.setTerminalHyperlinks(originalHyperlinks);
+		await fs.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("expands labeled, reference, and table links to real local and artifact files", async () => {
+		const localFile = path.join(tempDir, "local", "reviewed findings#.json");
+		const artifactFile = path.join(tempDir, "42.txt");
+		await Bun.write(localFile, '{"reviewed":true}');
+		await Bun.write(artifactFile, "artifact output");
+		const href = "local://reviewed%20findings%23.json";
+		const text = [
+			`[Reviewed findings](${href})`,
+			"",
+			"| Report |",
+			"| --- |",
+			"| [Artifact][output] |",
+			"",
+			"[output]: artifact://42",
+		].join("\n");
+		const targets = await resolveMarkdownLinkTargets([text], {
+			localProtocolOptions: { getArtifactsDir: () => tempDir },
+		});
+		const localUri = url.pathToFileURL(await fs.realpath(localFile)).href;
+		const artifactUri = url.pathToFileURL(artifactFile).href;
+		const markdown = new terminalCaps.Markdown(text, 0, 0, {
+			...getMarkdownTheme(),
+			resolveLink: href => targets.get(href),
+		});
+		const output = markdown.render(300).join("\n");
+		expect(extractAnyTerminatorLinkUri(output)).toBe(localUri);
+		expect(output).toContain(`\x1b]8;;${artifactUri}\x07`);
+		const visible = stripVTControlCharacters(output);
+		expect(visible).toContain(`Reviewed findings (${href})`);
+		expect(visible).toContain("Artifact (artifact://42)");
+		expect(visible).not.toContain("file://");
+	});
+
+	it("links ordinary paths against the session cwd while preserving displayed paths and source anchors", async () => {
+		const file = path.join(tempDir, "src", "my file.ts");
+		await Bun.write(file, "export const value = 1;");
+		const relative = "src/my%20file.ts#L7";
+		const absolute = file.replaceAll("\\", "/").replaceAll(" ", "%20");
+		const text = `[Source](${relative}) and [Absolute](${absolute}) and [Missing](src/missing.ts) and [Heading](#heading)`;
+		const targets = await resolveMarkdownLinkTargets([text], { cwd: tempDir });
+		const fileUri = url.pathToFileURL(file).href;
+		const output = new terminalCaps.Markdown(text, 0, 0, {
+			...getMarkdownTheme(),
+			resolveLink: href => targets.get(href),
+		})
+			.render(300)
+			.join("\n");
+		expect(extractAnyTerminatorLinkUri(output)).toBe(`${fileUri}#L7`);
+		expect(output).toContain(`\x1b]8;;${fileUri}\x07`);
+		expect(output).toContain("\x1b]8;;src/missing.ts\x07");
+		expect(output).toContain("\x1b]8;;#heading\x07");
+		const visible = stripVTControlCharacters(output);
+		expect(visible).toContain(`Source (${relative})`);
+		expect(visible).toContain(`Absolute (${absolute})`);
+		expect(visible).not.toContain("file://");
+	});
+
+	it("leaves missing, escaping, remote, and non-link destinations unexpanded", async () => {
+		await Bun.write(path.join(tempDir, "local", "report.json"), "{}");
+		await Bun.write(path.join(tempDir, "outside.json"), "{}");
+		await fs.symlink(path.join(tempDir, "outside.json"), path.join(tempDir, "local", "escape.json"));
+		const text = [
+			"`[code](local://report.json)`",
+			"![image](local://report.json)",
+			"```md",
+			"[fenced](local://report.json)",
+			"```",
+			"[missing](local://missing.json)",
+			"[escape](local://escape.json)",
+			"[remote](mcp://server/resource)",
+			"[web](https://example.com/report)",
+		].join("\n\n");
+		const targets = await resolveMarkdownLinkTargets([text], {
+			localProtocolOptions: { getArtifactsDir: () => tempDir },
+		});
+		expect([...targets]).toEqual([]);
+		const output = new terminalCaps.Markdown(text, 0, 0, {
+			...getMarkdownTheme(),
+			resolveLink: href => targets.get(href),
+		})
+			.render(200)
+			.join("\n");
+		expect(output).toContain("\x1b]8;;local://missing.json\x07");
+		expect(output).toContain("\x1b]8;;https://example.com/report\x07");
+	});
+
+	it("pins identical local links to their calling sessions", async () => {
+		const text = "[Report](local://report.json)";
+		const outputs: string[] = [];
+		for (const session of ["a", "b"]) {
+			const artifactsDir = path.join(tempDir, session);
+			const file = path.join(artifactsDir, "local", "report.json");
+			await Bun.write(file, session);
+			const targets = await resolveMarkdownLinkTargets([text], {
+				localProtocolOptions: { getArtifactsDir: () => artifactsDir },
+			});
+			const output = new terminalCaps.Markdown(text, 0, 0, {
+				...getMarkdownTheme(),
+				resolveLink: href => targets.get(href),
+			})
+				.render(300)
+				.join("\n");
+			expect(extractAnyTerminatorLinkUri(output)).toBe(url.pathToFileURL(await fs.realpath(file)).href);
+			outputs.push(output);
+		}
+		expect(outputs[0]).not.toBe(outputs[1]);
 	});
 });
 

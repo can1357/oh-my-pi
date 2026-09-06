@@ -9,14 +9,23 @@ import type { ToolSession } from "../../tools";
 import { ToolAbortError, ToolError } from "../../tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
-import { attachSessionOwner, resolveOwnerScopedSessionKey, type SessionOwners } from "../executor-base";
+import { getEnabledEvalPreludes } from "../preludes";
+import {
+	attachSessionOwner,
+	EvalKernelNotRunningError,
+	resolveOwnerScopedSessionKey,
+	type SessionOwners,
+} from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
+import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 import { WorkerCore } from "./worker-core";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
 import type {
+	EvalPreludeSource,
 	JsDisplayOutput,
+	JsToolRequest,
 	RunErrorPayload,
 	SessionSnapshot,
 	Transport,
@@ -178,6 +187,94 @@ export async function executeInVmContext(options: {
 	return await runOnce(session, options);
 }
 
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Describe or invoke tools defined in a retained JavaScript kernel. */
+export async function invokeJsTool(
+	request: JsToolRequest,
+	options: {
+		sessionKey: string;
+		ownerId?: string;
+		session: ToolSession;
+		signal?: AbortSignal;
+	},
+): Promise<EvalToolInvokeResult | { ok: true; tools: EvalToolDescriptor[]; missing: string[] }> {
+	const sessionKey = resolveOwnerScopedSessionKey({
+		baseKey: options.sessionKey,
+		ownerId: options.ownerId,
+		reset: false,
+		hasSession: key => sessions.has(key) || startingSessions.has(key),
+		getOwners: key => sessions.get(key) ?? startingSessions.get(key),
+	});
+	const session = sessions.get(sessionKey);
+	if (!session || session.state !== "alive") throw new EvalKernelNotRunningError("JavaScript");
+
+	const runId = `tool-${crypto.randomUUID()}`;
+	const { promise, resolve, reject } = Promise.withResolvers<{ value: unknown }>();
+	let envelope: unknown;
+	const pending: PendingRun = {
+		runId,
+		runState: {
+			signal: options.signal,
+			onDisplay: output => {
+				if (output.type === "json") envelope = output.data;
+			},
+		},
+		toolSession: options.session,
+		resolve,
+		reject,
+		toolCalls: new Map(),
+		deferDepth: 0,
+		aborted: false,
+		settled: false,
+	};
+	session.pending.set(runId, pending);
+
+	const onAbort = (): void => {
+		if (pending.settled) return;
+		pending.aborted = true;
+		pending.settled = true;
+		const error = reasonToError(options.signal?.reason, "Tool invocation aborted");
+		for (const controller of pending.toolCalls.values()) controller.abort(error);
+		reject(error);
+	};
+	if (options.signal?.aborted) onAbort();
+	else options.signal?.addEventListener("abort", onAbort, { once: true });
+
+	try {
+		if (!pending.settled) safeSend(session, { type: "tool", runId, ...request });
+		await promise;
+	} catch (error) {
+		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+	} finally {
+		options.signal?.removeEventListener("abort", onAbort);
+		session.pending.delete(runId);
+	}
+
+	if (!isUnknownRecord(envelope) || envelope.ok !== true) {
+		return { ok: false, error: "JavaScript tool request returned an invalid response" };
+	}
+	if (request.op === "call") {
+		if (!("value" in envelope)) return { ok: false, error: "JavaScript tool call returned an invalid response" };
+		return { ok: true, value: envelope.value };
+	}
+
+	const rawTools = Array.isArray(envelope.tools) ? envelope.tools : [];
+	const tools: EvalToolDescriptor[] = [];
+	for (const rawTool of rawTools) {
+		if (!isUnknownRecord(rawTool)) continue;
+		const { name, description, parameters } = rawTool;
+		if (typeof name !== "string" || typeof description !== "string" || !isUnknownRecord(parameters)) continue;
+		tools.push({ name, description, parameters, language: "js" });
+	}
+	const missing = Array.isArray(envelope.missing)
+		? envelope.missing.filter((name): name is string => typeof name === "string")
+		: [];
+	return { ok: true, tools, missing };
+}
+
 export async function resetVmContext(sessionKey: string): Promise<void> {
 	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 	if (!session) return;
@@ -267,6 +364,15 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 	}
 }
 
+function javascriptPreludeSources(session: ToolSession): EvalPreludeSource[] {
+	const definitions = getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []);
+	return definitions.flatMap(definition =>
+		definition.javascript.trim().length === 0
+			? []
+			: [{ name: definition.name, exports: [...definition.exports], source: definition.javascript }],
+	);
+}
+
 async function runOnce(
 	session: JsSession,
 	options: {
@@ -327,7 +433,12 @@ async function runOnce(
 			runId,
 			code: options.code,
 			filename: options.filename,
-			snapshot: { cwd: options.cwd, sessionId: options.sessionId, localRoots: options.localRoots },
+			snapshot: {
+				cwd: options.cwd,
+				sessionId: options.sessionId,
+				localRoots: options.localRoots,
+				preludes: javascriptPreludeSources(options.session),
+			},
 		});
 		return await promise;
 	} finally {

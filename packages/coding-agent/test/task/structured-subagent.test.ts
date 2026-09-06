@@ -9,6 +9,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import {
@@ -166,6 +167,19 @@ describe("structured subagent primitive", () => {
 				request({ session: session({ planMode: true }), isolation: { requested: false } }),
 			),
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
+
+		const planSession = session({ planMode: true });
+		const customTools = createEvalCustomTools(planSession, [
+			{
+				name: "word_count",
+				description: "Count words",
+				parameters: { type: "object", properties: {} },
+				language: "python",
+			},
+		]);
+		await expect(resolveEffectiveSubagentPolicy(request({ session: planSession, customTools }))).rejects.toThrow(
+			"Eval-defined tools are unavailable in plan mode.",
+		);
 		expect(discover).not.toHaveBeenCalled();
 	});
 	it("reloads model roles before resolving an agent added during the session", async () => {
@@ -350,6 +364,30 @@ describe("structured subagent primitive", () => {
 			data: { ok: true },
 		});
 		expect(path.basename(settled.artifactsDir)).toStartWith("omp-task-");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("retains temporary artifacts when the run failed but yielded schema-valid structured output", async () => {
+		// Regression: a task can produce schema-valid data and then fail (or
+		// exceed its runtime limit). The async notice still advertises the
+		// full payload at `agent://<id>` for schema-valid output, so
+		// retention must not require `exitCode === 0` too — otherwise the
+		// directory is already gone by the time the model follows that URL
+		// (PR #10625 review).
+		mockDiscovery();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => {
+			return {
+				...result(),
+				exitCode: 1,
+				error: "runtime limit exceeded",
+				structuredOutput: { source: "agent", mode: "permissive", status: "valid", data: { ok: true } },
+			};
+		});
+
+		const settled = await runStructuredSubagent(request({ retainArtifacts: true }));
+		expect(settled.result.exitCode).toBe(1);
+		expect(settled.result.structuredOutput?.status).toBe("valid");
+		await expect(fs.stat(settled.artifactsDir)).resolves.toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 	it("uses identical non-plan LSP and IRC policy for task and eval invocations", async () => {
@@ -594,6 +632,28 @@ describe("structured subagent primitive", () => {
 
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 		await expect(fs.stat(artifactsDir ?? "")).rejects.toThrow();
+	});
+
+	it("retains a detached task's artifacts on failure even without valid structured output", async () => {
+		// Regression: a detached (async) task job that fails with schema
+		// status "invalid" (not "valid") previously had its temp dir wiped
+		// immediately, breaking the "failed agent stays interrogable"
+		// invariant (task/index.ts) — the model could no longer read the
+		// failure via agent://<id> or history://<id> (PR #10625 review).
+		mockDiscovery();
+		let artifactsDir: string | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			artifactsDir = options.artifactsDir;
+			return { ...result(), exitCode: 1, error: "agent failed" };
+		});
+
+		const settled = await runStructuredSubagent(request({ retainArtifacts: true, detached: true }));
+
+		expect(settled.result.exitCode).toBe(1);
+		expect(settled.result.structuredOutput?.status).toBe("invalid");
+		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
+		await expect(fs.stat(artifactsDir ?? "")).resolves.toBeDefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("retains isolated failure artifacts needed for recovery", async () => {

@@ -1,0 +1,449 @@
+{
+	"source": "packages/hashline/test/clipboard.test.ts",
+	"cases": [
+		{
+			"name": "lowers `CUT N-M` to a capture plus per-line deletes",
+			"parse": [
+				{
+					"input": "CUT 2-3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "parses every PUT paste locator, rejecting colons on register PUTs",
+			"parse": [
+				{
+					"input": "CUT 1\nPUT <2\nPUT >3\nPUT <1\nPUT >$",
+					"expect": {
+						"editCount": 6,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects colon on register PUT",
+			"parse": [
+				{
+					"input": "PUT >2 @name:",
+					"error": "Error: line 1: `PUT … @name` pastes the register and never takes `:` — the colon promises body rows. Drop the colon (`PUT >40 @name`), or drop `@name` and write `+TEXT` body rows."
+				}
+			]
+		},
+		{
+			"name": "rejects body rows under CUT",
+			"parse": [
+				{
+					"input": "CUT 1-2\n+x",
+					"error": "Error: line 2: `CUT` deletes (and captures) the named lines and takes no body rows. To write new content, use `PUT N.=M:` with `+TEXT` rows."
+				}
+			]
+		},
+		{
+			"name": "rejects a CUT range overlapping another hunk's range",
+			"parse": [
+				{
+					"input": "CUT 2-4\nPUT 3:\n+x",
+					"error": "Error: line 2: anchor line 3 is already targeted by another hunk on line 1. Issue ONE hunk per range; payload is only the final desired content, never a before/after pair."
+				}
+			]
+		},
+		{
+			"name": "reports inverted CUT ranges with op-specific retry forms",
+			"parse": [
+				{
+					"input": "CUT 5-2",
+					"error": "InvalidAbsoluteRangeError: line 1: Invalid absolute range: start 5, end 2. The value after `.=` is an absolute source line, not a line count or replacement length. For one line use `CUT 5`. For 2 lines starting at 5, use `CUT 5.=6`."
+				}
+			]
+		},
+		{
+			"name": "moves a range within a file (CUT + PUT)",
+			"parse": [
+				{
+					"input": "CUT 2-3\nPUT >5",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\nl3\nl4\nl5\n",
+					"path": "x.ts",
+					"clipboard": {},
+					"input": "CUT 2-3\nPUT >5",
+					"expect": {
+						"text": "l1\nl4\nl5\nl2\nl3\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "repeats CUT content without consuming the clipboard",
+			"parse": [
+				{
+					"input": "CUT 2\nPUT <1\nPUT >$",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\nl3\n",
+					"path": "x.ts",
+					"clipboard": {},
+					"input": "CUT 2\nPUT <1\nPUT >$",
+					"expect": {
+						"text": "l2\nl1\nl3\nl2\n",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "swaps two regions with named registers",
+			"parse": [
+				{
+					"input": "CUT 1-2 @a\nCUT 3-4 @b\nPUT <1 @b\nPUT >$ @a",
+					"expect": {
+						"editCount": 8,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a1\na2\nb1\nb2",
+					"path": "x.ts",
+					"clipboard": {},
+					"input": "CUT 1-2 @a\nCUT 3-4 @b\nPUT <1 @b\nPUT >$ @a",
+					"expect": {
+						"text": "b1\nb2\na1\na2",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects PUT with an empty register",
+			"parse": [
+				{
+					"input": "PUT >1",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\n",
+					"path": "x.ts",
+					"input": "PUT >1",
+					"error": "Error: line 1: Nothing to paste: no unlabeled `CUT` precedes this `PUT` in this call, and the anonymous register never carries across calls. Put `CUT N.=M` / `CUT N*` above it, or use named registers (`CUT … @name` → `PUT … @name`) for cross-call moves."
+				}
+			]
+		},
+		{
+			"name": "rejects a span paste from an empty named register instead of deleting the range",
+			"parse": [
+				{
+					"input": "PUT 2-3 @gone",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\nl3\nl4\n",
+					"path": "x.ts",
+					"input": "PUT 2-3 @gone",
+					"error": "Error: line 1: `@gone` is empty — no `CUT … @gone` precedes this op in this call and no persisted register has that name — so pasting it over a range would delete those lines and write nothing back. Capture the register first (`CUT … @gone`), or use `CUT` if deleting the range is what you meant."
+				}
+			]
+		},
+		{
+			"name": "pastes nothing at a gap from an empty named register, with a warning",
+			"parse": [
+				{
+					"input": "CUT 1 @kept\nPUT >2 @gone",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\n",
+					"path": "x.ts",
+					"clipboard": {},
+					"input": "CUT 1 @kept\nPUT >2 @gone",
+					"expect": {
+						"text": "l2\n",
+						"firstChangedLine": 1,
+						"warnings": [
+							"line 2: `@gone` was empty — no `CUT … @gone` precedes this op in this call and no persisted register has that name — so nothing was pasted. Available registers: `@kept`."
+						]
+					}
+				}
+			]
+		},
+		{
+			"name": "drops an empty-register PUT on the streaming-tolerant path"
+		},
+		{
+			"name": "allows a CUT without a following PUT",
+			"parse": [
+				{
+					"input": "CUT 2",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\nl3\n",
+					"path": "x.ts",
+					"clipboard": {},
+					"input": "CUT 2",
+					"expect": {
+						"text": "l1\nl3\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects multiple unlabeled CUTs before an unlabeled paste",
+			"parse": [
+				{
+					"input": "CUT 1\nCUT 3\nPUT >$",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\nl3\n",
+					"path": "x.ts",
+					"input": "CUT 1\nCUT 3\nPUT >$",
+					"error": "Error: line 3: 2 unlabeled `CUT`s are pending (CUT 1, CUT 3) — an unlabeled paste cannot tell which one you meant. Label the moves (`CUT … @name` → `PUT … @name`), or keep at most one unlabeled `CUT` before each unlabeled paste."
+				}
+			]
+		},
+		{
+			"name": "allows consecutive CUTs into named registers",
+			"parse": [
+				{
+					"input": "CUT 1 @first\nCUT 3 @second\nPUT >$ @second",
+					"expect": {
+						"editCount": 5,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\nl3\n",
+					"path": "x.ts",
+					"clipboard": {},
+					"input": "CUT 1 @first\nCUT 3 @second\nPUT >$ @second",
+					"expect": {
+						"text": "l2\nl3\n",
+						"firstChangedLine": 1
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects an out-of-range capture",
+			"parse": [
+				{
+					"input": "CUT 8-9\nPUT <1",
+					"expect": {
+						"editCount": 4,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "l1\nl2\n",
+					"path": "x.ts",
+					"input": "CUT 8-9\nPUT <1",
+					"error": "Error: line 1: `CUT 8.=9` is out of range (file has 3 lines)."
+				}
+			]
+		},
+		{
+			"name": "threads host-owned named registers across applyEdits calls",
+			"parse": [
+				{
+					"input": "CUT 1 @r",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT >$ @r",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb",
+					"clipboard": {},
+					"input": "CUT 1 @r",
+					"expect": {
+						"text": "b",
+						"firstChangedLine": 1
+					}
+				},
+				{
+					"text": "x\ny",
+					"clipboard": {
+						"named": {
+							"r": [
+								"a"
+							]
+						}
+					},
+					"input": "PUT >$ @r",
+					"expect": {
+						"text": "x\ny\na",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "expands CUT N* to a span capture plus per-line deletes",
+			"parse": [
+				{
+					"input": "CUT 2*\nPUT >$",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "moves a block after another block via PUT >N*",
+			"parse": [
+				{
+					"input": "CUT 1*\nPUT >3*",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "echoes clipboard block resolutions with their op",
+			"parse": [
+				{
+					"input": "CUT 2*\nPUT >$",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects a single-line CUT N* resolution with the plain-op retry",
+			"parse": [
+				{
+					"input": "CUT 2*\nPUT >$",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "lowers an unresolvable PUT >N* to a plain paste with a warning",
+			"parse": [
+				{
+					"input": "CUT 1\nPUT >2*",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			]
+		},
+		{
+			"name": "moves lines between files within one patch",
+			"parse": [
+				{
+					"input": "CUT 2-3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT >$",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "keep\nmove1\nmove2\n",
+					"path": "a.ts",
+					"clipboard": {},
+					"input": "CUT 2-3",
+					"expect": {
+						"text": "keep\n",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "b1\n",
+					"path": "b.ts",
+					"clipboard": {
+						"lines": [
+							"move1",
+							"move2"
+						],
+						"pendingAnonCuts": [
+							"CUT 2.=3"
+						]
+					},
+					"input": "PUT >$",
+					"expect": {
+						"text": "b1\nmove1\nmove2\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		}
+	]
+}

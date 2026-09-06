@@ -20,7 +20,8 @@ export function getSegmentGalleryInventory(): readonly StatusLineSegmentId[] {
 	return [...ALL_SEGMENT_IDS];
 }
 
-function baseContext(sessionOptions?: GallerySessionOptions): SegmentContext {
+/** Deterministic full context for isolated status-segment previews and tests. */
+export function createGallerySegmentContext(sessionOptions?: GallerySessionOptions): SegmentContext {
 	return {
 		session: createGallerySession(sessionOptions),
 		now: FIXED_NOW,
@@ -89,6 +90,10 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 				{ label: "idle", context: { turnElapsedMs: null } },
 				{ label: "active", context: { turnElapsedMs: 92_000 } },
 				{ label: "focused subagent", context: { focusedAgentId: "Scout" } },
+			];
+		case "status":
+			return [
+				{ label: "multiple extension statuses", context: { hookStatuses: ["Indexer ready", "Tests passing"] } },
 			];
 		case "model":
 			return [
@@ -239,7 +244,7 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 }
 
 function renderIsolatedSegment(id: StatusLineSegmentId, spec: SegmentVariantSpec, width: number): readonly string[] {
-	const base = baseContext(spec.session);
+	const base = createGallerySegmentContext(spec.session);
 	const override = spec.context;
 	const context: SegmentContext = {
 		...base,

@@ -142,6 +142,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.isolation.enabled",
 	"isolation.backend",
 	"worktree.clone",
+	"worktree.cleanSource",
 	"task.isolation.apply",
 	"task.isolation.merge",
 	"task.isolation.commits",
