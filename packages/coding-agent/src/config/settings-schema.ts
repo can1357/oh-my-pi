@@ -5160,10 +5160,6 @@ export const SETTINGS_SCHEMA = {
 		type: "record",
 		default: DEFAULT_AGENT_BLOCKING,
 	},
-	"task.roleCoordinationFile": {
-		type: "string",
-		default: undefined,
-	},
 	"task.agentPrewalk": {
 		type: "record",
 		default: {} as Record<string, string>,

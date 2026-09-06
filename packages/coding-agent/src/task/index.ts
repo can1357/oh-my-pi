@@ -28,12 +28,6 @@ import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
-import {
-	buildCoordinationSpawnContext,
-	loadTaskRoleCoordination,
-	resolveEffectiveAgentBlocking,
-	resolveSpawnExecutionBlocking,
-} from "../config/estate-role-runtime";
 import { isScoutSpawnable, resolveDefaultSpawnAgent, resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
@@ -59,6 +53,13 @@ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+
+function resolveEffectiveAgentBlocking(
+	agent: AgentDefinition,
+	settingsBlocking: Record<string, boolean>,
+): boolean {
+	return agent.blocking === true || settingsBlocking[agent.name] === true;
+}
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -749,20 +750,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
 		const agentBlocking = this.session.settings.get("task.agentBlocking");
-		const roleCoordination = loadTaskRoleCoordination(this.session.settings, this.session.cwd);
 		const itemBlocking = policies.map(policy => resolveEffectiveAgentBlocking(policy.effectiveAgent, agentBlocking));
-		const routedBlocking = resolveSpawnExecutionBlocking(resolvedAgents, itemBlocking);
-		const coordinationContext = buildCoordinationSpawnContext(roleCoordination, resolvedAgents);
-		const executionParams: TaskParams =
-			coordinationContext && coordinationContext.trim()
-				? {
-						...params,
-						context:
-							typeof params.context === "string" && params.context.trim()
-								? `${params.context.trim()}\n\n${coordinationContext}`
-								: coordinationContext,
-					}
-				: params;
 
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
@@ -770,7 +758,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// execution is available.
 		const asyncEnabled = this.session.settings.get("async.enabled");
 		const manager = asyncEnabled ? this.session.asyncJobManager : undefined;
-		const asyncItems = manager ? spawnItems.filter((_, index) => !routedBlocking[index]) : [];
+		const asyncItems = manager ? spawnItems.filter((_, index) => !itemBlocking[index]) : [];
 		const depthCapacity = canSpawnAtDepth(
 			this.session.settings.get("task.maxRecursionDepth") ?? 2,
 			this.session.taskDepth ?? 0,
@@ -799,7 +787,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					});
 			const result = await this.#executeSyncFanout(
 				toolCallId,
-				executionParams,
+				params,
 				spawnItems.map((item, index) => ({ item, index })),
 				defaultAgent,
 				signal,
@@ -856,7 +844,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			return withAdvisory(
 				await this.#executeSyncFanout(
 					toolCallId,
-					executionParams,
+					params,
 					spawnItems.map((item, index) => ({ item, index })),
 					defaultAgent,
 					signal,
@@ -890,7 +878,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				agentId,
 				item,
 				index,
-				blocking: routedBlocking[index],
+				blocking: itemBlocking[index],
 				progress: {
 					index,
 					id: agentId,
@@ -955,7 +943,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				const jobId = this.#registerSpawnJob({
 					manager,
 					toolCallId,
-					spawnParams: spawnParamsFor(executionParams, spawn.item, defaultAgent),
+					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
 					agentId: spawn.agentId,
 					progress: spawn.progress,
 					ircEnabled,
@@ -1052,7 +1040,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		});
 		const payloads = await this.#runSyncSpawns({
 			toolCallId,
-			executionParams,
+			params,
 			defaultAgent,
 			signal,
 			spawns: syncSpawns.map(spawn => ({ item: spawn.item, index: spawn.index, preAllocatedId: spawn.agentId })),

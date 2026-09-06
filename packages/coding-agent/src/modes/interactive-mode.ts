@@ -58,7 +58,11 @@ import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { formatKeyHint, KeybindingsManager } from "../config/keybindings";
-import { formatRequestedModelRoute } from "../config/estate-role-runtime";
+function formatRequestedModelRoute(patterns: readonly string[] | undefined): string | undefined {
+	if (!patterns || patterns.length === 0) return undefined;
+	return patterns.map(pattern => pattern.replace(/^@/, "")).join(">");
+}
+
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
