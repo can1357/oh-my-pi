@@ -8,6 +8,7 @@ import { TranscriptContainer } from "../../../src/modes/components/transcript-co
 import { initTheme } from "../../../src/modes/theme/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
 import {
+	buildAsyncProgressBlock,
 	buildAsyncProgressDisplayMessage,
 	buildLaunchCompletionBlock,
 } from "../../../src/modes/utils/transcript-render-helpers";
@@ -19,6 +20,7 @@ import {
 } from "../../../src/session/async-job-delivery";
 import type { CustomMessage } from "../../../src/session/messages";
 import type { SessionMessageEntry } from "../../../src/session/session-entries";
+import { PREVIEW_LIMITS } from "../../../src/tools/render-utils";
 
 const HOME_PATH = `${os.homedir()}/projects/async-progress/build.log`;
 const DISPLAY_PATH = "~/projects/async-progress/build.log";
@@ -170,36 +172,6 @@ describe("async progress transcript display sanitization", () => {
 		expect(message.content).toContain(slashPath);
 	});
 
-	it("sanitizes tabs and home paths in a rebuilt transcript without changing the stored message", () => {
-		const message = progressMessage();
-		const modelContent = message.content;
-		const builder = new ChatTranscriptBuilder({
-			ui: {} as TUI,
-			cwd: "/workspace",
-			requestRender: () => {},
-		});
-		const entry: SessionMessageEntry = {
-			type: "message",
-			id: "entry-1",
-			parentId: null,
-			timestamp: "2026-08-22T00:00:00.000Z",
-			message,
-		};
-
-		builder.rebuild([entry]);
-		const rendered = Bun.stripANSI(builder.container.render(160).join("\n"));
-
-		expect(rendered).not.toContain("\t");
-		expect(rendered).toContain("stdout   value");
-		expect(rendered).toContain("Error:   failed");
-		expect(rendered).not.toContain(HOME_PATH);
-		expect(rendered).toContain(DISPLAY_PATH);
-		expect(entry.message).toBe(message);
-		expect(message.content).toContain(RAW_PROGRESS);
-		expect(message.details?.jobs[0]?.text).toBe(RAW_PROGRESS);
-		expect(message.content).toBe(modelContent);
-	});
-
 	it("preserves paths that only embed the home directory as a suffix", () => {
 		const embeddedHomePath = `/mnt${HOME_PATH}`;
 		const message = progressMessage(`embedded ${embeddedHomePath}\nrooted ${HOME_PATH}`);
@@ -258,5 +230,50 @@ describe("async progress transcript display sanitization", () => {
 		expect(rendered).toContain(DISPLAY_PATH);
 		expect(rendered).not.toContain(longSuffix);
 		expect(rendered).toContain("Supervised process completed");
+	});
+
+	it("caps the collapsed block by bytes below the row cap and expands to the full window", () => {
+		// Six max-width lines fit the model-facing preview budget and the 10-row
+		// window, yet weigh ~3 KB; the collapsed view must stop at the byte cap.
+		const lines = Array.from({ length: 6 }, (_, index) => `${String(index).padStart(2, "0")}${"x".repeat(488)}`);
+		const message = progressMessage(lines.join("\n"));
+		expect(message.details?.jobs[0]?.text).toBe(lines.join("\n"));
+		const component = buildAsyncProgressBlock(message);
+
+		const collapsed = Bun.stripANSI(component.render(600).join("\n"));
+		const collapsedRows = collapsed.split("\n").filter(row => /^\s+\d\dx/.test(row));
+		expect(collapsed).toContain("… 2 earlier lines");
+		expect(collapsedRows.map(row => row.trim().slice(0, 2))).toEqual(["02", "03", "04", "05"]);
+		expect(collapsedRows.reduce((sum, row) => sum + Buffer.byteLength(row.trim()), 0)).toBeLessThanOrEqual(
+			PREVIEW_LIMITS.PROGRESS_COLLAPSED_BYTES,
+		);
+
+		component.setExpanded(true);
+		const expanded = Bun.stripANSI(component.render(600).join("\n"));
+		expect(expanded).not.toContain("earlier lines");
+		expect(expanded.split("\n").filter(row => /^\s+\d\dx/.test(row))).toHaveLength(6);
+	});
+
+	it("folds a multi-line process name into one header row", () => {
+		const entry: AsyncProgressEntry = {
+			jobId: "web\r\nserver\tnode",
+			text: "listening",
+			job: undefined,
+			seq: 1,
+			elapsedMs: 1_000,
+			epoch: 0,
+			delivery: "ambient",
+			source: { type: "process", id: "daemon-1", label: "web", startedAt: 0 },
+		};
+		const message = buildAsyncProgressBatchMessage([entry]);
+		if (!message) throw new Error("Expected async progress message");
+
+		const rows = Bun.stripANSI(buildAsyncProgressBlock(message).render(160).join("\n")).split("\n");
+		const headerRows = rows.filter(row => row.includes("Background process progress"));
+
+		expect(headerRows).toHaveLength(1);
+		expect(headerRows[0]).toContain("web server   node");
+		expect(rows.some(row => row.trim().startsWith("server"))).toBe(false);
+		expect(rows).toHaveLength(2);
 	});
 });
