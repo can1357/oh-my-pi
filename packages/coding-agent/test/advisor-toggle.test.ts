@@ -971,7 +971,16 @@ describe("AgentSession advisor toggle", () => {
 		}
 	});
 	it("marks structurally classified advisor usage limits", async () => {
-		const mock = createMockModel({ responses: [{ content: ["primary complete"] }] });
+		const mock = createMockModel({
+			responses: [
+				{ content: ["primary complete"] },
+				{
+					content: [{ type: "toolCall", id: "continuing-turn", name: "missing-tool", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{ content: ["primary still complete"] },
+			],
+		});
 		const primaryAgent = new Agent({
 			initialState: {
 				model,
@@ -1022,6 +1031,36 @@ describe("AgentSession advisor toggle", () => {
 			// failed batch stays requeued (the quota latch makes yielded true).
 			await advisorYielded.promise;
 			unsubscribe();
+
+			const adviseTool = advisorAgent.state.tools.find(tool => tool.name === "advise");
+			if (!(adviseTool instanceof advisorModule.AdviseTool)) throw new Error("Expected advisor advise tool");
+			adviseTool.beginUpdate(true);
+			const deferred = await adviseTool.execute("deferred-before-quota", {
+				note: "The final result still needs a regression test.",
+				severity: "nit",
+			});
+			expect(JSON.stringify(deferred.content)).toContain("Deferred");
+
+			// The quota latch prevents another advisor dispatch. The tool boundary
+			// must keep the note out of the continuing model request; terminal
+			// completion may then release it into the primary transcript.
+			await quotaSession.prompt("Complete another primary turn");
+			await quotaSession.waitForIdle();
+			const continuingCall = mock.calls[2];
+			if (!continuingCall) throw new Error("Expected primary continuation call");
+			expect(
+				continuingCall.context.messages.some(message =>
+					JSON.stringify(message).includes("The final result still needs a regression test."),
+				),
+			).toBe(false);
+			expect(
+				quotaSession.messages.some(
+					message =>
+						message.role === "custom" &&
+						typeof message.content === "string" &&
+						message.content.includes("The final result still needs a regression test."),
+				),
+			).toBe(true);
 		} finally {
 			await quotaSession.dispose();
 			vi.restoreAllMocks();

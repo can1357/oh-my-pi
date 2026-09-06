@@ -11,15 +11,13 @@
  * 114× `Stop.`, 52× `No issue; continue.`, 41× `Done.` — flooding the primary
  * transcript with `<advisory severity="blocker">Stop.</advisory>` after the
  * task was already complete. The fix is to make the rules load-bearing in code
- * instead of prose: silently drop duplicates, content-free self-talk, and
- * over-budget calls at the `enqueueAdvice` boundary so the primary stays
- * clean even when the advisor misbehaves.
- *
- * The gate is intentionally invisible to the advisor model — `AdviseTool`
- * still returns `Recorded.` for a suppressed call. Surfacing "suppressed"
- * back into advisor context risks the model rephrasing the same useless note
- * to bypass the dedupe ("Stop.", then "Halt." then "Stop now.").
+ * instead of prose: classify duplicates, content-free self-talk, and over-budget
+ * calls at the emission boundary so the primary stays clean even when the advisor
+ * misbehaves. `AdviseTool` reports the resulting decision; in particular, an
+ * actionable over-budget note is told to retry instead of being falsely recorded.
  */
+
+import type { AdvisorSeverity } from "./advise-tool";
 
 /**
  * Case-insensitive, punctuation-folded normalization. Collapses every run of
@@ -100,6 +98,9 @@ const SUPPRESSED_NORMALIZED_PHRASES: Record<string, true> = {
  */
 const DEFAULT_HISTORY_CAPACITY = 4096;
 
+/** Why an advisor note was accepted or rejected by the emission policy. */
+export type AdvisorEmissionDecision = "accepted" | "duplicate" | "rate_limited" | "suppressed_noise";
+
 /**
  * Decides whether an advisor `advise()` call should reach the primary agent.
  *
@@ -107,7 +108,9 @@ const DEFAULT_HISTORY_CAPACITY = 4096;
  * dedupe (FIFO-evicted at {@link DEFAULT_HISTORY_CAPACITY}), and a per-update
  * rate limit of one accepted note per advisor model prompt. Suppressed calls
  * never consume the per-update budget — a noise call doesn't burn the slot
- * for a real concern that follows in the same update.
+ * for a real concern that follows in the same update. A `blocker` is exempt
+ * from the budget: it must always interrupt, so a lower-severity note emitted
+ * earlier in the same update can never rate-limit it out.
  *
  * Reset on advisor reset (compaction, session switch, `/new`) via
  * {@link reset}. Per-update gate is cleared at the start of every advisor
@@ -146,25 +149,16 @@ export class AdvisorEmissionGuard {
 	}
 
 	/**
-	 * Whether the proposed note should reach the primary. On `true` the gate
-	 * has already recorded the note (consumed the per-update budget and added
-	 * it to the dedupe history) — caller delivers the note. On `false` the
-	 * caller drops it.
-	 *
-	 * The single authority for the one-advise-per-update budget: called at the
-	 * moment a note is emitted, whether it is delivered live or held for a
-	 * deferred flush. A note that fails the noise/empty/dedupe filter never
-	 * consumes the budget, so a suppressed phrase cannot burn the update's slot
-	 * ahead of a substantive concern. Empty / whitespace-only notes are
-	 * suppressed defensively even though the tool-args contract requires a
-	 * non-empty string.
+	 * Classify and reserve a proposed note. Accepted notes consume the update
+	 * budget and enter the dedupe history; rejected notes leave both unchanged.
+	 * A `blocker` still runs the noise and dedupe filters but bypasses the
+	 * one-note-per-update budget so it always reaches the primary.
 	 */
-	accept(note: string): boolean {
+	accept(note: string, severity?: AdvisorSeverity): AdvisorEmissionDecision {
 		const key = normalizeAdvisorNote(note);
-		if (!key) return false;
-		if (SUPPRESSED_NORMALIZED_PHRASES[key]) return false;
-		if (this.#seen.has(key)) return false;
-		if (this.#consumedThisUpdate) return false;
+		if (!key || SUPPRESSED_NORMALIZED_PHRASES[key]) return "suppressed_noise";
+		if (this.#seen.has(key)) return "duplicate";
+		if (severity !== "blocker" && this.#consumedThisUpdate) return "rate_limited";
 		this.#consumedThisUpdate = true;
 		this.#seen.add(key);
 		this.#seenOrder.push(key);
@@ -172,6 +166,6 @@ export class AdvisorEmissionGuard {
 			const stale = this.#seenOrder.shift();
 			if (stale !== undefined) this.#seen.delete(stale);
 		}
-		return true;
+		return "accepted";
 	}
 }
