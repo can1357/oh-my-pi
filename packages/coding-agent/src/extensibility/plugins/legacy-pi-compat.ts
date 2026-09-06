@@ -17,7 +17,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { registerPluginCacheInvalidator } from "../../discovery/helpers";
 
-const IS_COMPILED_BINARY = isCompiledBinary();
+const USE_BUNDLED_PI_MODULES = isCompiledBinary() || Boolean(process.env.PI_BUNDLED);
 
 // === Bundled host modules (issue #3423) ===
 //
@@ -27,7 +27,7 @@ const IS_COMPILED_BINARY = isCompiledBinary();
 // embedded entries. Bun.plugin `onResolve` also no longer fires for transitive
 // imports inside runtime-loaded extensions.
 //
-// Compiled builds retain lazy loaders for host packages and serve requested
+// Compiled binaries and npm bundles retain lazy host-package loaders and serve requested
 // surfaces through `omp-legacy-pi-bundled:<key>` synthetic modules.
 // `scripts/legacy-pi-virtual-module.ts` derives literal dynamic-import edges
 // from current package exports inside a Bun build plugin: no generated source
@@ -742,11 +742,11 @@ let bundledModuleLoadersPromise: Promise<BundledModuleLoaders> | null = null;
  *
  * `globalThis` bridges the synthetic ES modules, which cannot close over this
  * file's lexical scope. Dev/test runs never execute the conditional import;
- * binary builds resolve it through the in-memory build plugin.
+ * binary and npm builds resolve it through the in-memory build plugin.
  */
 function ensureBundledModuleLoadersLoaded(): Promise<BundledModuleLoaders> {
-	if (!IS_COMPILED_BINARY) {
-		return Promise.reject(new Error("omp:legacy-pi-shim: bundled modules are only available in compiled mode"));
+	if (!USE_BUNDLED_PI_MODULES) {
+		return Promise.reject(new Error("omp:legacy-pi-shim: bundled modules are only available in bundled mode"));
 	}
 	if (!bundledModuleLoadersPromise) {
 		bundledModuleLoadersPromise = import("omp-legacy-pi-modules").then(module => {
@@ -977,9 +977,9 @@ function sourceShimPath(file: string): string {
  * TypeBox facade with legacy `Type.Unsafe`, then drop the remap when that
  * entrypoint is missing.
  *
- * In compiled-binary mode the surface is served through the
+ * In compiled binaries and npm bundles the surface is served through the
  * `omp-legacy-pi-bundled:` virtual namespace (issue #3423). Dev, source-link,
- * and installed-package modes use the shipped source module.
+ * and source SDK imports use the shipped source module.
  *
  * Exported for tests; production callers use `TYPEBOX_SHIM_PATH`.
  */
@@ -994,7 +994,7 @@ export function __resolveTypeBoxShimPath(
 	return pathExistsSync(sourcePath) ? sourcePath : null;
 }
 
-const TYPEBOX_SHIM_PATH = __resolveTypeBoxShimPath(IS_COMPILED_BINARY, sourceShimPath("legacy-typebox.ts"));
+const TYPEBOX_SHIM_PATH = __resolveTypeBoxShimPath(USE_BUNDLED_PI_MODULES, sourceShimPath("legacy-typebox.ts"));
 
 // Legacy extensions historically imported `Type` (and `Static`/`TSchema`) from
 // the package root of `@(scope)/pi-ai`. pi-ai 15.1.0 removed the runtime `Type`
@@ -1004,33 +1004,33 @@ const TYPEBOX_SHIM_PATH = __resolveTypeBoxShimPath(IS_COMPILED_BINARY, sourceShi
 // plus the borrowed `Type` runtime from the omptype TypeBox facade. Subpath
 // imports such as `@oh-my-pi/pi-ai/oauth` continue to resolve directly
 // against the bundled pi-ai package.
-const LEGACY_PI_AI_SHIM_PATH = IS_COMPILED_BINARY
+const LEGACY_PI_AI_SHIM_PATH = USE_BUNDLED_PI_MODULES
 	? bundledModuleVirtualSpecifier(`${CANONICAL_PI_SCOPE}/pi-ai`)
 	: sourceShimPath("legacy-pi-ai-shim.ts");
 
 // The coding-agent's own `./src/index.ts` cannot be listed as an extra
 // `bun --compile` entrypoint alongside the CLI entry without breaking binary
-// startup (issue #1474 follow-up). In compiled-binary mode the legacy
+// startup (issue #1474 follow-up). In compiled binaries and npm bundles the legacy
 // `@(scope)/pi-coding-agent` root therefore resolves through the bundled
-// module shim; in dev / source-link / installed-package mode it points at the
+// module shim; in dev / source-link / source SDK mode it points at the
 // sibling source shim whose distinct file path avoids the #1474 collision
 // while still re-exporting the canonical package surface.
-const LEGACY_PI_CODING_AGENT_SHIM_PATH = IS_COMPILED_BINARY
+const LEGACY_PI_CODING_AGENT_SHIM_PATH = USE_BUNDLED_PI_MODULES
 	? bundledModuleVirtualSpecifier(`${CANONICAL_PI_SCOPE}/pi-coding-agent`)
 	: sourceShimPath("legacy-pi-coding-agent-shim.ts");
 
 // Legacy pi-tui exported `decodeKittyPrintable` from its package root. The
 // canonical TUI replaced it with the broader `decodePrintableKey`; route only
 // legacy root imports through a sibling shim that preserves the old name.
-const LEGACY_PI_TUI_SHIM_PATH = IS_COMPILED_BINARY
+const LEGACY_PI_TUI_SHIM_PATH = USE_BUNDLED_PI_MODULES
 	? bundledModuleVirtualSpecifier(`${CANONICAL_PI_SCOPE}/pi-tui`)
 	: sourceShimPath("legacy-pi-tui-shim.ts");
 
 // Package-root overrides. Shim entries (`pi-ai`, `pi-coding-agent`, `pi-tui`)
 // always replace the canonical surface so legacy helpers stay reachable. The
 // other bundled host packages (`pi-agent-core`, `pi-natives`, `pi-utils`) are
-// added only in compiled-binary mode to route extensions onto the in-process
-// module instance — in dev / source-link / installed-package mode the canonical
+// added in compiled binaries and npm bundles to route extensions onto the in-process
+// module instance — in dev / source-link / source SDK mode the canonical
 // specifier resolves cleanly through `Bun.resolveSync` and hardcoding a
 // source-tree path would miss installs where bundled packages live at
 // `node_modules/@oh-my-pi/pi-*`.
@@ -1091,14 +1091,14 @@ export function __buildLegacyPiPackageRootOverrides(
 	return __validateLegacyPiPackageRootOverrides(candidates);
 }
 
-// Seeded with compat roots at module init; first compiled extension load adds
+// Seeded with compat roots at module init; first bundled extension load adds
 // every key supplied by the in-memory build module.
-let legacyPiPackageRootOverrides = __buildLegacyPiPackageRootOverrides(IS_COMPILED_BINARY);
+let legacyPiPackageRootOverrides = __buildLegacyPiPackageRootOverrides(USE_BUNDLED_PI_MODULES);
 let legacyPiOverridesReadyPromise: Promise<void> | null = null;
 
-/** Complete compiled-mode overrides from the lazy host-module registry. */
+/** Complete bundled-mode overrides from the lazy host-module registry. */
 function ensureLegacyPiOverridesReady(): Promise<void> {
-	if (!IS_COMPILED_BINARY) {
+	if (!USE_BUNDLED_PI_MODULES) {
 		return Promise.resolve();
 	}
 	if (!legacyPiOverridesReadyPromise) {

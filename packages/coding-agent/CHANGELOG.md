@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Extensions loaded by the npm CLI now apply settings overrides to the active session, so generated agents and model choices remain isolated between sessions.
+
 ## [18.1.11] - 2026-09-05
 
 ### Added
