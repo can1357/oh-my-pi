@@ -917,6 +917,8 @@ export class OutputSink {
 	#pendingArtifactWrites?: Set<Promise<void>>;
 	/** Set only after the artifact has been flushed or finalized without error. */
 	#artifactAvailable = false;
+	/** Bytes handed to the artifact writer while streaming; excludes the capped-mode tail replay at finalize. */
+	#artifactBytesWritten = 0;
 
 	readonly #artifactPath?: string;
 	readonly #artifactId?: string;
@@ -1207,15 +1209,17 @@ export class OutputSink {
 	 */
 	#emitToSink(chunk: string): void {
 		if (!this.#file || this.#artifactError || chunk.length === 0) return;
+		const chunkBytes = Buffer.byteLength(chunk, "utf-8");
 		if (this.#artifactMaxBytes === 0) {
 			this.#writeArtifact(chunk);
+			this.#artifactBytesWritten += chunkBytes;
 			return;
 		}
-		const chunkBytes = Buffer.byteLength(chunk, "utf-8");
 		const room = this.#artifactHeadClosed ? 0 : this.#artifactHeadBudget - this.#artifactHeadBytesWritten;
 		if (room >= chunkBytes) {
 			this.#writeArtifact(chunk);
 			this.#artifactHeadBytesWritten += chunkBytes;
+			this.#artifactBytesWritten += chunkBytes;
 			return;
 		}
 		let overflow = chunk;
@@ -1224,6 +1228,7 @@ export class OutputSink {
 			if (headSlice.bytes > 0) {
 				this.#writeArtifact(headSlice.text);
 				this.#artifactHeadBytesWritten += headSlice.bytes;
+				this.#artifactBytesWritten += headSlice.bytes;
 			}
 			// Even when UTF-8 boundary safety leaves a few bytes of nominal room,
 			// this chunk has already overflowed the head window. Close it now so a
@@ -1674,6 +1679,15 @@ export class OutputSink {
 		} finally {
 			await this.#finalizeFile();
 		}
+	}
+
+	/**
+	 * Bytes this sink has streamed into its artifact so far. An append-mode
+	 * sink does not count the file's prior content; the capped-mode tail
+	 * replay written at finalize is not included either.
+	 */
+	get artifactBytes(): number {
+		return this.#artifactBytesWritten;
 	}
 
 	/** Make mirrored bytes readable and return the verified artifact id. */
