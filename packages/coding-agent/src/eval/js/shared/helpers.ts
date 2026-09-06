@@ -64,7 +64,9 @@ export function createHelpers(ctx: HelperContext): HelperBundle {
 			} else {
 				await Bun.write(filePath, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
 			}
-			ctx.emitStatus({ op: "write", path: filePath, bytes: getDataSize(data) });
+			// A `write()` prelude call mutates the workspace like `tool.write`, so
+			// flag it as a prewalk implementation action (issue #11018).
+			ctx.emitStatus({ op: "write", path: filePath, bytes: getDataSize(data), implementationAction: true });
 			return filePath;
 		},
 		env: (key, value) => {

@@ -53,3 +53,30 @@ describe("eval js helpers internal-url resolution", () => {
 		expect(await helpers.read("foo/bar.txt")).toBe("bar");
 	});
 });
+
+/**
+ * Under Code Mode a model may mutate the workspace through the documented
+ * `write(path, content)` prelude instead of `tool.write`. That write must carry
+ * the prewalk implementation-action marker so the armed hand-off still fires
+ * (issue #11018); `read` stays unmarked so read-only cells never switch.
+ */
+describe("eval js helpers prewalk implementation marker", () => {
+	it("flags write() but not read() as an implementation action", async () => {
+		using tmp = TempDir.createSync("@eval-helpers-impl-");
+		const events: Array<Record<string, unknown>> = [];
+		const helpers = createHelpers({
+			cwd: () => tmp.path(),
+			env: new Map(),
+			localRoots: () => ({}),
+			emitStatus: event => events.push(event),
+		});
+
+		await helpers.writeFile("out.txt", "content");
+		await helpers.read("out.txt");
+
+		const write = events.find(event => event.op === "write");
+		const read = events.find(event => event.op === "read");
+		expect(write?.implementationAction).toBe(true);
+		expect(read?.implementationAction).toBeUndefined();
+	});
+});
