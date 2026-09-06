@@ -95,6 +95,8 @@ interface OutputRegistration {
 	active: boolean;
 	/** Terminal daemon state observed while an attach was still being published. */
 	terminalState?: DaemonState;
+	/** The broker disabled this monitor (artifact persistence failed or the process was replaced). */
+	expired?: true;
 	/** Readiness of the initial broker publication for this registration. */
 	ready: Promise<void>;
 	/**
@@ -502,6 +504,7 @@ async function registerOutputSink(
 			return;
 		}
 		if (notification.event === "daemon-monitor-expired") {
+			registration.expired = true;
 			await registration.cleanup();
 			return;
 		}
@@ -853,12 +856,24 @@ export interface LaunchToolDetails {
 	matched?: string;
 	/** describe: immutable launch spec backing the command/cwd detail lines. */
 	spec?: DaemonSpec;
-	/** monitor: progress delivery mode this call resulted in. */
+	/** start/monitor: progress delivery mode this call resulted in; "off" when no monitor is live. */
 	monitoring?: AsyncJobProgressDelivery | "off";
 	/** monitor off: whether an active monitor was actually detached. */
 	monitorDetached?: boolean;
+	/** start with progress: why the requested monitor is no longer live although the process started. */
+	monitorStopped?: string;
 	/** list/describe: live output monitors per process, absent when the broker predates watcher reporting. */
 	monitors?: DaemonMonitorWatcher[];
+}
+
+/** Why a start-requested monitor is no longer live once the start settled; undefined while it is. */
+function monitorStopReason(registration: OutputRegistration): string | undefined {
+	if (registration.terminalState !== undefined) return `process is ${registration.terminalState}`;
+	if (registration.active) return undefined;
+	if (registration.expired) {
+		return "the broker disabled the monitor (its output artifact could not be persisted or the process was replaced)";
+	}
+	return "the session context changed before the start settled";
 }
 
 function requiredName(params: LaunchParams): string {
@@ -1023,6 +1038,7 @@ function toolContent(
 	result: DaemonRpcResult,
 	params: LaunchParams,
 	detached: boolean | undefined,
+	monitorStopped: string | undefined,
 	sessionOwner: string | undefined,
 ): string {
 	switch (result.op) {
@@ -1042,6 +1058,11 @@ function toolContent(
 				);
 			} else if (params.ready && daemon.readyAt === undefined && TERMINAL_STATES[daemon.state]) {
 				lines.push("Process exited before readiness was observed.");
+			}
+			if (monitorStopped) {
+				lines.push(
+					`Progress monitoring for ${daemon.name} stopped: ${monitorStopped}. Read its output with logs (follow: true).`,
+				);
 			}
 			return lines.join("\n");
 		}
@@ -1108,11 +1129,18 @@ export async function renderLaunchLogTerminalRows(
 async function toolDetails(
 	result: DaemonRpcResult,
 	params: LaunchParams,
-	detached?: boolean,
+	detached: boolean | undefined,
+	monitorStopped: string | undefined,
 ): Promise<LaunchToolDetails> {
 	switch (result.op) {
 		case "start":
-			return { op: "start", daemon: result.daemon, timedOut: result.readyTimedOut };
+			return {
+				op: "start",
+				daemon: result.daemon,
+				timedOut: result.readyTimedOut,
+				monitoring: params.progress === undefined ? undefined : monitorStopped ? "off" : params.progress,
+				monitorStopped,
+			};
 		case "list":
 			return { op: "list", daemons: result.daemons, monitors: result.monitors };
 		case "logs":
@@ -1171,6 +1199,7 @@ export async function executeLaunch(
 		throw new ToolError("Live progress monitoring requires a session owner");
 	}
 	let outputLease: OutputLease | undefined;
+	let monitorStopped: string | undefined;
 	const completionOwner = operation.op === "start" ? operation.owner : undefined;
 	const resumedOwner = params.op !== "start" ? (session.getSessionId?.() ?? undefined) : undefined;
 	const completionLease = completionOwner
@@ -1246,13 +1275,15 @@ export async function executeLaunch(
 			outputLease.bindDaemon(result.daemon.id);
 			outputLease.registration.startedAt = result.daemon.startedAt;
 			await outputLease.retain();
-			if (
-				params.op === "monitor" &&
-				(!outputLease.registration.active || outputLease.registration.terminalState !== undefined)
-			) {
-				throw new ToolError(
-					`Cannot monitor ${params.name}: process is ${outputLease.registration.terminalState ?? "exited"}`,
-				);
+			// retain() flushes notifications buffered while the RPC was pending; a
+			// terminal or expiry notification among them has already torn the
+			// registration down. An attach has nothing to monitor, so it fails.
+			// A start launched a real process: report success and say that its
+			// monitor is gone rather than pretending wake/ambient delivery is live.
+			const stopped = monitorStopReason(outputLease.registration);
+			if (stopped !== undefined) {
+				if (params.op === "monitor") throw new ToolError(`Cannot monitor ${params.name}: ${stopped}`);
+				monitorStopped = stopped;
 			}
 		}
 		const sessionOwner = session.getSessionId?.();
@@ -1268,9 +1299,12 @@ export async function executeLaunch(
 		else completionLease?.retain();
 		return {
 			content: [
-				{ type: "text", text: replaceTabs(toolContent(result, params, detached, sessionOwner ?? undefined)) },
+				{
+					type: "text",
+					text: replaceTabs(toolContent(result, params, detached, monitorStopped, sessionOwner ?? undefined)),
+				},
 			],
-			details: await toolDetails(result, params, detached),
+			details: await toolDetails(result, params, detached, monitorStopped),
 		};
 	} catch (error) {
 		try {
@@ -1421,6 +1455,8 @@ export function launchRenderResult(
 			case "start": {
 				meta.push(...callMeta(params));
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
+				if (details?.monitoring === "off") meta.push(theme.fg("warning", "monitor stopped"));
+				else if (details?.monitoring) meta.push(theme.fg("accent", `monitor ${details.monitoring}`));
 				if (daemon?.readyMatch) body.push(theme.fg("dim", `log matched: ${replaceTabs(daemon.readyMatch)}`));
 				if (daemon?.state === "failed" && daemon.exitReason)
 					body.push(theme.fg("error", replaceTabs(daemon.exitReason)));
@@ -1436,6 +1472,9 @@ export function launchRenderResult(
 					);
 				} else if (params.ready && daemon && daemon.readyAt === undefined && TERMINAL_STATES[daemon.state]) {
 					body.push(theme.fg("warning", "Process exited before readiness was observed."));
+				}
+				if (details?.monitorStopped) {
+					body.push(theme.fg("warning", `Progress monitoring stopped: ${replaceTabs(details.monitorStopped)}.`));
 				}
 				break;
 			}
