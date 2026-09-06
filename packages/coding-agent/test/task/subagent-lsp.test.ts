@@ -291,14 +291,18 @@ describe("subagent LSP availability", () => {
 					id: "stale-transcript",
 					timestamp: new Date().toISOString(),
 					cwd: tempDir,
+					additionalDirectories: [tempDir],
 				})}\n`,
 			);
 			const tool = await TaskTool.create(createSession({ isolationEnabled: true, sessionFile: parentSessionFile }));
 			await tool.execute("tool-call", { ...TEST_TASK, isolated: true });
 
-			const sessionManager = getOptions()?.sessionManager as { getCwd?: () => string } | undefined;
+			const sessionManager = getOptions()?.sessionManager as
+				| { getCwd?: () => string; getAdditionalDirectories?: () => string[] }
+				| undefined;
 			expect(getOptions()?.cwd).toBe("/tmp/isolated-subagent");
 			expect(sessionManager?.getCwd?.()).toBe("/tmp/isolated-subagent");
+			expect(sessionManager?.getAdditionalDirectories?.()).toEqual([]);
 		} finally {
 			await removeWithRetries(tempDir);
 		}

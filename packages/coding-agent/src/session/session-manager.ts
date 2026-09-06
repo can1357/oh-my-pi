@@ -1473,7 +1473,11 @@ export class SessionManager {
 		}
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
-		this.#additionalDirectories = header.additionalDirectories ?? [];
+		// A pinned cwd also drops recorded workspace roots: the executor clears
+		// `workspace.additionalDirectories` for isolated runs, but createAgentSession
+		// only calls setAdditionalDirectories when the configured list is nonempty,
+		// so restored stale roots would otherwise stay exposed (#10914).
+		this.#additionalDirectories = pinnedCwd !== undefined ? [] : (header.additionalDirectories ?? []);
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;
 		this.#fileIsCurrent = true;
