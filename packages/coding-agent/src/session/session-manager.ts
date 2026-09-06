@@ -1285,7 +1285,7 @@ export class SessionManager {
 	}
 
 	#notifyCwdChangedListeners(): void {
-		for (const callback of [...this.#cwdChangedCallbacks]) {
+		for (const callback of Array.from(this.#cwdChangedCallbacks)) {
 			try {
 				callback();
 			} catch (error) {

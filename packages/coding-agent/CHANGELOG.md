@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Live interactive sessions can be discovered by project and receive nonblocking messages through `omp attach`.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
@@ -701,7 +705,6 @@
 
 ### Added
 
-- Live interactive sessions can be discovered by project and receive nonblocking messages through `omp attach`.
 - Plan review can save a plan to a chosen path and start a new session.
 - Edit results now warn when an edit leaves a previously parsing file unparseable, independent of the `edit.blackbox.enabled` recorder.
 - Added provider-wide Amazon Bedrock guardrail settings to models configuration, including custom models.

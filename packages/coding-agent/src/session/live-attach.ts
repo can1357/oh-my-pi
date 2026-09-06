@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
 	createDaemonBrokerClient,
@@ -13,7 +14,6 @@ import {
 	type LiveSessionInfo,
 	type LiveSessionRegistration,
 } from "../launch/protocol";
-import * as git from "../utils/git";
 
 interface AttachSession {
 	readonly sessionManager: {
@@ -59,7 +59,7 @@ async function requireLiveSessionCapability(client: DaemonBrokerClient): Promise
 }
 
 async function canonicalAttachProjectDir(cwd: string): Promise<string> {
-	const repositoryRoot = await git.repo.root(cwd);
+	const repositoryRoot = vcs.repo(cwd)?.root();
 	return canonicalProjectDir(repositoryRoot ?? cwd);
 }
 
