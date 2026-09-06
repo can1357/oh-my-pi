@@ -145,6 +145,12 @@ behavior {
 		substring="sensevoice" substring="cosyvoice" substring="fish-speech" substring="indextts" \
 		substring="sovits" substring="whisper" substring="hunyuanvideo" substring="wan2" \
 		substring="ltx-video" substring="speech" substring="moderator" substring="tts"
+	// DigitalOcean Serverless Inference's `/v1/models` lists embeddings,
+	// rerankers, image/video/TTS generators, and router SKUs with no
+	// per-model type field.
+	exclude-models provider="digitalocean" prefix="router:" substring="embedding" substring="reranker" \
+		substring="image" substring="tts" substring="bge-" substring="e5-" substring="gte-" \
+		substring="all-mini" substring="mpnet" substring="wan2" substring="diffusion"
 	// Alibaba Token Plan serves ASR/image/embedding SKUs the chat picker
 	// cannot route.
 	exclude-models provider="alibaba-token-plan" prefix="fun-asr" prefix="happyhorse-" \

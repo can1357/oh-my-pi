@@ -43,6 +43,7 @@ import {
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
+	DIGITALOCEAN_STATIC_MODELS,
 	fetchWellKnownModels,
 	GMI_CLOUD_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
@@ -655,6 +656,13 @@ async function generateModels() {
 	// authoritative and replaces the seed.
 	if (!authoritativeCatalogProviders.has("yolo-auto")) {
 		allModels.push(...YOLO_AUTO_STATIC_MODELS);
+	}
+	// Seed the DigitalOcean default model so a fresh install (and a regen
+	// without a `DIGITALOCEAN_API_KEY`) still resolves the descriptor's
+	// `defaultModel` synchronously at boot. If live `/v1/models` discovery
+	// succeeds, it is authoritative.
+	if (!authoritativeCatalogProviders.has("digitalocean")) {
+		allModels.push(...DIGITALOCEAN_STATIC_MODELS);
 	}
 	// Seed the GMI Cloud default model so a fresh install (and a regen without a
 	// `GMI_API_KEY`) still resolves the descriptor's `defaultModel` synchronously

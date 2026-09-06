@@ -20,6 +20,7 @@
 		"auth/deepinfra.kdl",
 		"auth/deepseek.kdl",
 		"auth/devin.kdl",
+		"auth/digitalocean.kdl",
 		"auth/exa.kdl",
 		"auth/firepass.kdl",
 		"auth/fireworks.kdl",
@@ -14899,6 +14900,27 @@
 				}
 			},
 			{
+				"provider": "digitalocean",
+				"match": {
+					"prefix": [
+						"router:"
+					],
+					"substring": [
+						"embedding",
+						"reranker",
+						"image",
+						"tts",
+						"bge-",
+						"e5-",
+						"gte-",
+						"all-mini",
+						"mpnet",
+						"wan2",
+						"diffusion"
+					]
+				}
+			},
+			{
 				"provider": "alibaba-token-plan",
 				"match": {
 					"prefix": [
@@ -16839,6 +16861,28 @@
 						"label": "CoreWeave Serverless Inference",
 						"url": "https://api.inference.wandb.ai/v1/models",
 						"headersHook": "coreweave-project"
+					}
+				}
+			},
+			{
+				"id": "digitalocean",
+				"apiKeyFormat": "bearer",
+				"name": "DigitalOcean Serverless Inference",
+				"env": {
+					"vars": [
+						"DIGITALOCEAN_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://cloud.digitalocean.com/model-studio/manage-keys",
+					"instructions": "Create a model access key in the DigitalOcean Control Panel under INFERENCE → Manage",
+					"prompt": "Paste your DigitalOcean model access key",
+					"placeholder": "doo_v1_...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "DigitalOcean Serverless Inference",
+						"url": "https://inference.do-ai.run/v1/models"
 					}
 				}
 			},

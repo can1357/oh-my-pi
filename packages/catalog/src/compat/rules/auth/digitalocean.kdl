@@ -1,0 +1,10 @@
+auth "digitalocean" {
+	name "DigitalOcean Serverless Inference"
+	env "DIGITALOCEAN_API_KEY"
+	login "api-key" {
+		auth-url "https://cloud.digitalocean.com/model-studio/manage-keys"
+		instructions "Create a model access key in the DigitalOcean Control Panel under INFERENCE → Manage"
+		prompt "Paste your DigitalOcean model access key" placeholder="doo_v1_..."
+		validate "models-endpoint" label="DigitalOcean Serverless Inference" url="https://inference.do-ai.run/v1/models"
+	}
+}

@@ -7,7 +7,7 @@ login-order "openai-codex" "anthropic" "zai" "zai-coding-plan" "kimi-code" "open
 	"umans" "qwen-portal" "sakana" "minimax-code" "minimax-code-cn" "xiaomi" "xiaomi-token-plan-sgp" \
 	"xiaomi-token-plan-ams" "xiaomi-token-plan-cn" "firepass" "cline-pass" "deepseek" "muse-code" "meta" "moonshot" \
 	"cerebras" "baseten" "fireworks" "together" "nvidia" "novita" "deepinfra" "huggingface" "perplexity" \
-	"qianfan" "venice" "siliconflow" "siliconflow-cn" "synthetic" "nanogpt" "wafer-serverless" "coreweave" \
+	"qianfan" "venice" "siliconflow" "siliconflow-cn" "synthetic" "nanogpt" "wafer-serverless" "coreweave" "digitalocean" \
 	"vercel-ai-gateway" "cloudflare-ai-gateway" "litellm" "kilo" "zenmux" "opencode-zen" "opencode-go" \
 	"yolo-auto" "tavily" "kagi" "exa" "parallel" "ollama" "ollama-cloud" "lm-studio" "llama.cpp" "vllm" \
 	"gmi-cloud"

@@ -20,6 +20,7 @@ const ENV_KEYS = [
 	"UMANS_AI_CODING_PLAN_API_KEY",
 	"LLAMA_CPP_API_KEY",
 	"WANDB_API_KEY",
+	"DIGITALOCEAN_API_KEY",
 ] as const;
 const originalEnv = new Map(ENV_KEYS.map(key => [key, Bun.env[key]]));
 
@@ -58,6 +59,9 @@ describe("provider registry auth surface", () => {
 		expect(getEnvApiKey("coreweave")).toBe("wandb-env");
 		Bun.env.COREWEAVE_API_KEY = "coreweave-env";
 		expect(getEnvApiKey("coreweave")).toBe("coreweave-env");
+
+		Bun.env.DIGITALOCEAN_API_KEY = "digitalocean-env";
+		expect(getEnvApiKey("digitalocean")).toBe("digitalocean-env");
 	});
 
 	test("login list contains loginable providers and excludes env-only model providers", () => {

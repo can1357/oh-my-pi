@@ -23,6 +23,7 @@ import {
 	coreWeaveModelManagerOptions,
 	deepinfraModelManagerOptions,
 	deepseekModelManagerOptions,
+	digitalOceanModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
@@ -511,6 +512,14 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => coreWeaveModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "CoreWeave Serverless Inference" },
+	},
+	{
+		id: "digitalocean",
+		defaultModel: "glm-5.2",
+		envVars: ["DIGITALOCEAN_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => digitalOceanModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "DigitalOcean Serverless Inference" },
 	},
 	{
 		id: "xai",
