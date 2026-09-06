@@ -96,8 +96,11 @@ async function approvePreludeInvocation(
 				`Set tools.approval.${definition.name}: allow or use an interactive UI to approve the call.`,
 		);
 	}
+	// The eval call cannot proceed until this is answered, so it announces
+	// itself even when the pane sits in the background — the same contract as
+	// an extension tool approval.
 	const choice = await untilAborted(context.signal, () =>
-		ui.select(formatApprovalPrompt(subject, parameters, resolved.reason), ["Approve", "Deny"]),
+		ui.select(formatApprovalPrompt(subject, parameters, resolved.reason), ["Approve", "Deny"], { announce: true }),
 	);
 	if (choice !== "Approve") throw new Error(`Eval prelude call denied by user: ${definition.name}`);
 }

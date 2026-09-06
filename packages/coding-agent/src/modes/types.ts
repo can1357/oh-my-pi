@@ -114,6 +114,13 @@ export interface AgentHubOpenOptions {
 	armCloseTap?: boolean;
 	initialSection?: "agents" | "activity";
 }
+/**
+ * Internal companion to the public dialog options: announce this prompt only
+ * when the agent is the party waiting on it. A turn being in flight is not
+ * enough — the large-paste menu and slash-command pickers open mid-turn on the
+ * user's own initiative and must stay silent.
+ */
+export type AwaitedDialogOptions = { announce?: boolean };
 
 export interface InteractiveModeContext {
 	// UI access
@@ -562,7 +569,7 @@ export interface InteractiveModeContext {
 	showHookSelector(
 		title: string,
 		options: ExtensionUISelectItem[],
-		dialogOptions?: InteractiveSelectorDialogOptions,
+		dialogOptions?: InteractiveSelectorDialogOptions & AwaitedDialogOptions,
 	): Promise<string | undefined>;
 	hideHookSelector(): void;
 	showHookInput(title: string, placeholder?: string): Promise<string | undefined>;
@@ -570,7 +577,7 @@ export interface InteractiveModeContext {
 	showHookEditor(
 		title: string,
 		prefill?: string,
-		dialogOptions?: ExtensionUIDialogOptions,
+		dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined>;
 	hideHookEditor(): void;

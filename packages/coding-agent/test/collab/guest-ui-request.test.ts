@@ -29,7 +29,11 @@ import type {
 	ExtensionUISelectItem,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
-import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type {
+	AwaitedDialogOptions,
+	InteractiveModeContext,
+	InteractiveSelectorDialogOptions,
+} from "@oh-my-pi/pi-coding-agent/modes/types";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: shared FakeWebSocket + InMemoryRelay harness (see
@@ -43,7 +47,7 @@ interface DialogStub {
 	title: string;
 	options?: ExtensionUISelectItem[];
 	prefill?: string;
-	dialogOptions?: ExtensionUIDialogOptions;
+	dialogOptions?: (ExtensionUIDialogOptions | InteractiveSelectorDialogOptions) & AwaitedDialogOptions;
 	/** Flipped when the guest dismissed the presentation via the abort signal. */
 	aborted: boolean;
 	whenAborted: Promise<void>;
@@ -245,12 +249,12 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		showHookSelector: (
 			title: string,
 			options: ExtensionUISelectItem[],
-			dialogOptions?: InteractiveSelectorDialogOptions,
+			dialogOptions?: InteractiveSelectorDialogOptions & AwaitedDialogOptions,
 		): Promise<string | undefined> => presentStub({ kind: "select", title, options, dialogOptions }),
 		showHookEditor: (
 			title: string,
 			prefill?: string,
-			dialogOptions?: ExtensionUIDialogOptions,
+			dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
 		): Promise<string | undefined> => presentStub({ kind: "editor", title, prefill, dialogOptions }),
 	} as unknown as InteractiveModeContext;
 
@@ -325,6 +329,10 @@ describe("collab TUI guest ui-request handling (#4049)", () => {
 		expect(dialog.dialogOptions?.checkedIndices).toEqual([0]);
 		expect(dialog.dialogOptions?.markableCount).toBe(2);
 		expect(dialog.dialogOptions?.helpText).toBe("pick one");
+		// The `ui-request` frame carries no announcement intent, so the guest cannot
+		// tell a blocked host apart from a dialog the host's user opened; it stays
+		// silent rather than toasting every mirrored dialog.
+		expect(dialog.dialogOptions?.announce).toBeUndefined();
 
 		dialog.settle("Yes");
 		expect(await h.nextUiResponse()).toEqual({ reqId: 1, value: "Yes" });

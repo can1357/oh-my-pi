@@ -2392,10 +2392,13 @@ describe("ExtensionRunner", () => {
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
-				"Approve",
-				"Deny",
-			]);
+			// `announce: true` is what makes a backgrounded pane surface the approval:
+			// the turn cannot proceed until it is answered.
+			expect(select).toHaveBeenCalledWith(
+				expect.stringContaining("Allow tool: dangerous_tool"),
+				["Approve", "Deny"],
+				{ announce: true },
+			);
 			delete globalState.__approvalEvents;
 		});
 
