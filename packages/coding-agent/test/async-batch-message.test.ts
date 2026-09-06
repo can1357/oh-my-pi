@@ -18,7 +18,7 @@ import {
 	mergeAsyncProgressEntries,
 } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { PROGRESS_PREVIEW_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/progress-preview";
+import { PROGRESS_LIMITS } from "@oh-my-pi/pi-coding-agent/async/progress-limits";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 
 function fakeJob(overrides: Partial<AsyncJob> = {}): AsyncJob {
@@ -122,6 +122,33 @@ describe("async batch message boundaries", () => {
 		expect(suppressedOnly!.content).not.toContain("<tail>");
 	});
 
+	test("the artifact link precedes the bounded progress window", () => {
+		const middle = "middle line that the window will drop\n".repeat(200);
+		const message = buildAsyncProgressBatchMessage([
+			progressEntry({ text: `first line\n${middle}last line`, artifactId: "art-first" }),
+			progressEntry({ jobId: "bg_2", text: "short", artifactId: "art-short", seq: 1 }),
+		]);
+		expect(message).not.toBeNull();
+		const content = message!.content as string;
+		for (const [jobId, artifactId] of [
+			["bg_1", "art-first"],
+			["bg_2", "art-short"],
+		] as const) {
+			const job = content.indexOf(`<job-progress id="${jobId}"`);
+			expect(job).toBeGreaterThanOrEqual(0);
+			const link = content.indexOf(`Full output: artifact://${artifactId}`, job);
+			const output = content.indexOf("<output>", job);
+			expect(link).toBeGreaterThan(job);
+			expect(output).toBeGreaterThan(link);
+		}
+	});
+
+	test("omits the artifact line when progress has no artifact", () => {
+		const message = buildAsyncProgressBatchMessage([progressEntry({ text: "inline only" })]);
+		expect(message!.content).not.toContain("Full output:");
+		expect(message!.content).not.toContain("artifact://");
+	});
+
 	test("preserves result bodies while escaping header labels", () => {
 		const result = [
 			'<task-result id="Worker">',
@@ -207,10 +234,30 @@ describe("async batch message boundaries", () => {
 			'<suppressed reason="preview-limit" full-output="artifact://art-truncated" />',
 		);
 	});
+
+	test("the artifact link precedes the completion leftover and terminal result", () => {
+		const message = buildAsyncResultBatchMessage([
+			resultEntry({
+				result: "post-processed terminal text",
+				job: fakeJob(),
+				progressSummary: {
+					artifactId: "art-order",
+					leftover: { text: "leftover line", truncated: false },
+				},
+			}),
+		]);
+		expect(message).not.toBeNull();
+		const content = message!.content as string;
+		const link = content.indexOf("Full output: artifact://art-order");
+		expect(link).toBeGreaterThanOrEqual(0);
+		expect(content.indexOf("<output>")).toBeGreaterThan(link);
+		expect(content.indexOf("<result>")).toBeGreaterThan(content.indexOf("</output>"));
+		expect(content.indexOf("Full output: artifact://art-order", link + 1)).toBe(-1);
+	});
 });
 
 describe("async progress chatty guidance", () => {
-	test("renders every-fifth Bash reminder metadata with Bash-specific advice", () => {
+	test("renders scheduled Bash reminder metadata with Bash-specific advice", () => {
 		const message = buildAsyncProgressBatchMessage([
 			progressEntry({
 				job: fakeJob({ type: "bash" }),
@@ -487,7 +534,7 @@ describe("async progress coalescing", () => {
 		const custom = built!;
 		// Built message stays near the preview budget instead of materializing
 		// 500 windows (~25 KB of raw text).
-		expect(custom.content.length).toBeLessThan(PROGRESS_PREVIEW_MAX_BYTES + 2_000);
+		expect(custom.content.length).toBeLessThan(PROGRESS_LIMITS.PREVIEW_BYTES + 2_000);
 		// Folds that dropped middle content are reported as suppressed events…
 		expect(custom.details?.jobs[0]?.suppressedEvents ?? 0).toBeGreaterThan(0);
 		// …and the artifact link to the full stream survives.

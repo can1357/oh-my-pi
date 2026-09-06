@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, setSystemTime, test, vi } from "bun:test";
-import { PROGRESS_BATCH_INTERVAL_MS, type ProgressBatch, ProgressBatcher } from "../src/async/progress-batcher";
+import { PROGRESS_LIMITS } from "../src/async/progress-limits";
+import { type ProgressBatch, ProgressBatcher } from "../src/async/progress-batcher";
 
 describe("ProgressBatcher", () => {
 	afterEach(() => {
@@ -16,7 +17,7 @@ describe("ProgressBatcher", () => {
 
 		batcher.push("source", "first");
 		batcher.push("source", "second");
-		vi.advanceTimersByTime(PROGRESS_BATCH_INTERVAL_MS - 1);
+		vi.advanceTimersByTime(PROGRESS_LIMITS.BATCH_INTERVAL_MS - 1);
 		batcher.push("source", "third");
 		expect(seen).toEqual([]);
 
@@ -44,7 +45,7 @@ describe("ProgressBatcher", () => {
 		batcher.push("source", "first");
 		batcher.push("source", "second");
 		batcher.push("source", "third");
-		vi.advanceTimersByTime(PROGRESS_BATCH_INTERVAL_MS);
+		vi.advanceTimersByTime(PROGRESS_LIMITS.BATCH_INTERVAL_MS);
 
 		expect(seen[0]?.values).toEqual(["first|second|third"]);
 	});
@@ -127,7 +128,7 @@ describe("ProgressBatcher", () => {
 
 		for (let event = 1; event <= 21; event++) {
 			batcher.push("source", `event-${event}`);
-			vi.advanceTimersByTime(PROGRESS_BATCH_INTERVAL_MS);
+			vi.advanceTimersByTime(PROGRESS_LIMITS.BATCH_INTERVAL_MS);
 		}
 
 		expect(seen.slice(0, 11).map(batch => batch.kind)).toEqual(Array(11).fill("progress"));
@@ -140,27 +141,26 @@ describe("ProgressBatcher", () => {
 		});
 	});
 
-	test("adds the chatty-monitor reminder to every fifth suppression report", () => {
+	test("repeats the chatty-monitor reminder only at the scheduled suppression reports, then never again", () => {
 		vi.useFakeTimers();
 		const seen: ProgressBatch<string>[] = [];
 		const batcher = new ProgressBatcher<string>((_id, batch) => {
 			seen.push(batch);
 		});
 
-		for (let event = 1; event <= 61; event++) {
+		// One permit refills per RATE_LIMIT_REFILL_MS, i.e. one suppression
+		// report per ten 200 ms windows; run well past the last scheduled count.
+		const lastScheduled = PROGRESS_LIMITS.CHATTY_REMINDER_SCHEDULE.at(-1)!;
+		const events = (lastScheduled + 10) * 10 + 1;
+		for (let event = 1; event <= events; event++) {
 			batcher.push("source", `event-${event}`);
-			vi.advanceTimersByTime(PROGRESS_BATCH_INTERVAL_MS);
+			vi.advanceTimersByTime(PROGRESS_LIMITS.BATCH_INTERVAL_MS);
 		}
 
 		const reports = seen.filter(batch => batch.kind === "progress" && batch.suppressedEvents > 0);
-		expect(reports).toHaveLength(5);
-		expect(reports.map(batch => batch.reminder)).toEqual([
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			"chatty-monitor",
-		]);
+		expect(reports.length).toBeGreaterThan(lastScheduled);
+		const remindedAt = reports.flatMap((batch, index) => (batch.reminder === "chatty-monitor" ? [index + 1] : []));
+		expect(remindedAt).toEqual([...PROGRESS_LIMITS.CHATTY_REMINDER_SCHEDULE]);
 	});
 
 	test("refills one rate-limit permit after two quiet seconds", async () => {
@@ -217,7 +217,7 @@ describe("ProgressBatcher", () => {
 
 		for (let event = 1; event <= 11; event++) {
 			batcher.push("source", `event-${event}`);
-			vi.advanceTimersByTime(PROGRESS_BATCH_INTERVAL_MS);
+			vi.advanceTimersByTime(PROGRESS_LIMITS.BATCH_INTERVAL_MS);
 		}
 		batcher.push("source", "final-suppressed");
 		await batcher.finish("source");
@@ -280,9 +280,9 @@ describe("ProgressBatcher", () => {
 		});
 
 		batcher.push("source", "first");
-		vi.advanceTimersByTime(PROGRESS_BATCH_INTERVAL_MS);
+		vi.advanceTimersByTime(PROGRESS_LIMITS.BATCH_INTERVAL_MS);
 		batcher.push("source", "second");
-		vi.advanceTimersByTime(PROGRESS_BATCH_INTERVAL_MS);
+		vi.advanceTimersByTime(PROGRESS_LIMITS.BATCH_INTERVAL_MS);
 		firstDelivery.reject(new Error("transient sink failure"));
 		await batcher.flush("source");
 
