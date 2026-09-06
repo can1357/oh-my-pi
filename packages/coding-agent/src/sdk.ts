@@ -4165,7 +4165,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					minP: agent.minP,
 					presencePenalty: agent.presencePenalty,
 					repetitionPenalty: agent.repetitionPenalty,
-					serviceTierResolver: agent.serviceTierResolver,
+					// Auto-learn is background work. Keep the user's configured tier but
+					// never inherit a temporary primary-session activity lease.
+					serviceTierResolver: model => session.configuredServiceTier(model),
 					hideThinkingSummary: agent.hideThinkingSummary,
 					maxRetryDelayMs: agent.maxRetryDelayMs,
 					kimiApiFormat,

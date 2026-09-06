@@ -100,6 +100,18 @@ export interface UsageResetCredits {
 	credits?: UsageResetCreditDetail[];
 }
 
+/**
+ * Account-level eligibility for priority processing (`serviceTier: "priority"`,
+ * which direct Anthropic realizes as fast mode). Reported only by providers
+ * that expose the entitlement; an absent {@link UsageReport.priorityEntitlement}
+ * means "unknown" and callers MUST keep attempting priority.
+ */
+export interface PriorityEntitlement {
+	available: boolean;
+	/** Short human-readable cause, shown when `available` is false. */
+	reason?: string;
+}
+
 /** Aggregated usage report for a provider. */
 export interface UsageReport {
 	provider: Provider;
@@ -107,6 +119,8 @@ export interface UsageReport {
 	limits: UsageLimit[];
 	/** Saved rate-limit resets the account can redeem, when the provider reports them. */
 	resetCredits?: UsageResetCredits;
+	/** Whether the account may request priority processing, when the provider says. */
+	priorityEntitlement?: PriorityEntitlement;
 	/**
 	 * Provider-wide disclaimers shown once above per-account sections.
 	 * Use this for caveats that apply to every limit (e.g. "OMP-observed

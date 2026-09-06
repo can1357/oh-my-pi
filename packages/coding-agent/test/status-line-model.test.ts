@@ -157,3 +157,35 @@ describe("status line model segment compact thinking level", () => {
 		expect(Bun.stripANSI(rendered.content)).not.toContain(theme.sep.dot);
 	});
 });
+
+describe("status line model segment fast-mode icon", () => {
+	function createFastContext(fastState: "off" | "active" | "blocked"): SegmentContext {
+		return {
+			...createModelContext(false),
+			session: {
+				state: { model: { id: "test-model", name: "Test Model" } },
+				fastModeState: () => fastState,
+				isAutoThinking: false,
+				autoResolvedThinkingLevel: () => undefined,
+				isAdvisorActive: () => false,
+				getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			} as unknown as SegmentContext["session"],
+		};
+	}
+
+	it("paints the icon with the model name while priority is being served", () => {
+		const rendered = renderSegment("model", createFastContext("active"));
+		expect(rendered.content).toContain(theme.fg("statusLineModel", ` ${theme.icon.fast}`));
+	});
+
+	it("paints the icon red when priority is requested but refused", () => {
+		const rendered = renderSegment("model", createFastContext("blocked"));
+		expect(rendered.content).toContain(theme.fg("error", ` ${theme.icon.fast}`));
+		expect(rendered.content).not.toContain(theme.fg("statusLineModel", ` ${theme.icon.fast}`));
+	});
+
+	it("omits the icon when nothing asked for priority", () => {
+		const rendered = renderSegment("model", createFastContext("off"));
+		expect(Bun.stripANSI(rendered.content)).not.toContain(theme.icon.fast);
+	});
+});

@@ -17,6 +17,7 @@ import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-ut
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
+	fastState: "off" | "active" | "blocked";
 	forcedToolChoice: string | undefined;
 	isStreaming: boolean;
 	sessionFile: string | undefined;
@@ -28,6 +29,8 @@ interface FakeAcpBuiltinSession {
 	toggleFastMode(): boolean;
 	setFastMode(enabled: boolean): boolean;
 	isFastModeEnabled(): boolean;
+	isFastModeActive(): boolean;
+	fastModeState(): "off" | "active" | "blocked";
 	setForcedToolChoice(toolName: string): void;
 	fetchUsageReports?: () => Promise<unknown>;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
@@ -72,6 +75,7 @@ function createRuntime() {
 	const output: string[] = [];
 	const session: FakeAcpBuiltinSession = {
 		fastMode: false,
+		fastState: "off",
 		forcedToolChoice: undefined as string | undefined,
 		isStreaming: false,
 		sessionFile: undefined,
@@ -95,6 +99,12 @@ function createRuntime() {
 		},
 		isFastModeEnabled() {
 			return this.fastMode;
+		},
+		isFastModeActive() {
+			return this.fastState === "active";
+		},
+		fastModeState() {
+			return this.fastState;
 		},
 		setForcedToolChoice(toolName: string) {
 			this.forcedToolChoice = toolName;
@@ -269,6 +279,38 @@ describe("ACP builtin slash commands", () => {
 			"Extended context disabled.",
 			"Extended context is off.",
 		]);
+	});
+	it("reports active automatic fast mode as on", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.model = { provider: "openai", id: "gpt-5.2" };
+		session.fastState = "active";
+
+		const result = await executeAcpBuiltinSlashCommand("/fast status", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output).toEqual(["Fast mode is on."]);
+	});
+
+	it("excludes an uncontrollable Fireworks-only priority tier from fast status", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.model = { provider: "fireworks", id: "some-fireworks-model" };
+		session.fastState = "active";
+
+		const result = await executeAcpBuiltinSlashCommand("/fast status", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output).toEqual(["Fast mode is off."]);
+	});
+
+	it("reports refused priority as blocked", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.model = { provider: "openai", id: "gpt-5.2" };
+		session.fastState = "blocked";
+
+		const result = await executeAcpBuiltinSlashCommand("/fast status", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output).toEqual(["Fast mode is blocked."]);
 	});
 
 	it("forces a tool and returns remaining prompt text", async () => {

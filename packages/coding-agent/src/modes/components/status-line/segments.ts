@@ -235,18 +235,19 @@ const modelSegment: StatusLineSegment = {
 		const compact = ctx.compactThinkingLevel && thinkingDisplay !== "";
 		const modelIcon = compact ? thinkingGlyph(thinkingDisplay) : theme.icon.model;
 
-		// Fast-mode icon and thinking-level suffix trail the model name and are
-		// colored together with it as `statusLineModel`. The advisor symbol sits
-		// between the name and that tail, so it reads as a distinct marker.
-		// theme.fg resets only the fg, so the spans are concatenated (not
-		// nested) to keep each color intact.
-		let tail = "";
-		if (ctx.session.isFastModeActive() && theme.icon.fast) {
-			tail += ` ${theme.icon.fast}`;
-		}
-		if (!compact && thinkingDisplay) {
-			tail += `${theme.sep.dot}${thinkingDisplay}`;
-		}
+		// The fast-mode icon and thinking-level suffix trail the model name. The
+		// thinking suffix is colored with the name (`statusLineModel`); the icon
+		// takes `error` when priority was requested but the provider or account
+		// refuses it, so a fast mode that isn't working reads as red instead of
+		// silently matching a working one. The advisor "++" badge sits between the
+		// name and that tail, so it reads as a distinct marker. theme.fg resets
+		// only the fg, so the spans are concatenated (not nested) to keep each
+		// color intact.
+		// Optional chaining: lightweight session doubles (test mocks) may not
+		// implement fastModeState.
+		const fastState = ctx.session.fastModeState?.() ?? "off";
+		const fastIcon = fastState === "off" || !theme.icon.fast ? "" : ` ${theme.icon.fast}`;
+		const tail = !compact && thinkingDisplay ? `${theme.sep.dot}${thinkingDisplay}` : "";
 
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
@@ -272,6 +273,9 @@ const modelSegment: StatusLineSegment = {
 			const allYielded = advisorStats.advisors.every(a => a.yielded);
 			const advisorIcon = allYielded ? theme.icon.advisorClosed || theme.icon.advisor : theme.icon.advisor;
 			if (advisorIcon) content += theme.fg(badgeColor, ` ${advisorIcon}`);
+		}
+		if (fastIcon) {
+			content += theme.fg(fastState === "blocked" ? "error" : "statusLineModel", fastIcon);
 		}
 		if (tail) {
 			content += accentFg(ctx, "statusLineModel", tail);

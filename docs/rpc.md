@@ -245,6 +245,16 @@ remain `true` while `fastModeActive` is `false`. An explicit `set_fast_mode`
 enable expresses retry intent and clears that fallback so the provider attempt
 is re-armed.
 
+`fastModeActive` is also `false` while priority is requested but known not to
+land: the newest usage report says the account cannot use priority (Anthropic
+reports this when usage credits are off), or the provider refused the last
+turn — Anthropic dropping `speed: "fast"`, OpenAI echoing a lower
+`service_tier`. The TUI paints that case as a red fast-mode icon and `/fast
+status` reports `blocked`. What the provider did last outranks the account
+snapshot, so a served priority turn restores `true` without an explicit
+re-arm. `tier.autoFastMode` skips the request entirely when the account is
+known to be ineligible; an explicit `set_fast_mode` enable always attempts it.
+
 ```json
 {
   "model": { "provider": "...", "id": "..." },

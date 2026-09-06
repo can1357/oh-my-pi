@@ -389,6 +389,35 @@ export function applyOpenAIResponsesServiceTierCost(
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 }
 
+/**
+ * Record that a requested `priority` turn was served at a lower tier.
+ *
+ * Standard OpenAI Responses echoes the tier it actually ran in
+ * `response.service_tier`, so a downgrade (ineligible account, capacity) is
+ * observable instead of inferred. The marker reuses the `disabledFeatures`
+ * channel direct Anthropic uses for a rejected fast-mode turn, so sessions have
+ * one signal for "priority was asked for and not delivered".
+ *
+ * Scoped to `provider: "openai"`, matching
+ * {@link applyOpenAIResponsesServiceTierCost}: that is the only endpoint whose
+ * echo is authoritative. The Codex endpoint answers `service_tier` with a value
+ * unrelated to what it served, so reading a downgrade out of it reports every
+ * Codex turn as refused. An Azure/OpenRouter/Copilot relay can likewise echo an
+ * unrelated tier string.
+ */
+export function markOpenAIPriorityDowngrade(
+	model: Pick<Model, "provider">,
+	output: AssistantMessage,
+	responseServiceTier: unknown,
+	requestServiceTier: unknown,
+): void {
+	if (model.provider !== "openai") return;
+	if (requestServiceTier !== "priority") return;
+	if (typeof responseServiceTier !== "string" || responseServiceTier === "priority") return;
+	if (output.disabledFeatures?.includes("priority")) return;
+	output.disabledFeatures = [...(output.disabledFeatures ?? []), "priority"];
+}
+
 /** Reconcile token-price estimates with a gateway's authoritative account charge. */
 export function applyProviderReportedCost(model: Pick<Model, "provider">, usage: Usage, rawUsage: unknown): void {
 	if (
@@ -3355,6 +3384,12 @@ export async function processResponsesStream<TApi extends Api>(
 			applyOpenAIResponsesServiceTierCost(
 				model,
 				output.usage,
+				(response as { service_tier?: unknown } | undefined)?.service_tier,
+				options?.requestServiceTier,
+			);
+			markOpenAIPriorityDowngrade(
+				model,
+				output,
 				(response as { service_tier?: unknown } | undefined)?.service_tier,
 				options?.requestServiceTier,
 			);
