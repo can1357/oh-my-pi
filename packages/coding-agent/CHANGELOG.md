@@ -1121,6 +1121,10 @@
 - Fixed external thinking being offered on xAI reasoning-only Responses models (grok-4 family) that reject `reasoning.effort`, where the private scratchpad ran alongside native reasoning instead of replacing it.
 - Fixed the extension tool-call handler timeout rendering outside a titled section in `/settings` by registering its Extensions group on the Tools tab.
 
+### Added
+
+- Added a privacy-bounded `live:activity` extension event exposing the built-in `/live` session's semantic phase and normalized microphone and speaker RMS levels.
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed
