@@ -500,6 +500,21 @@ export interface StreamOptions {
 	 */
 	statefulResponses?: boolean;
 	/**
+	 * Client-supplied OpenAI Responses continuation id. When set, it wins over
+	 * internal chain state (`statefulResponses` / lastResponseId) for this request.
+	 */
+	previousResponseId?: string;
+	/** OpenAI `parallel_tool_calls`. */
+	parallelToolCalls?: boolean;
+	/** OpenAI deterministic-sampling `seed`. */
+	seed?: number;
+	/** OpenAI `logit_bias` map (token id → bias). */
+	logitBias?: Record<string, number>;
+	/** OpenAI / abuse-tracking `user` field. */
+	user?: string;
+	/** OpenAI `response_format` (text | json_object | json_schema). Opaque passthrough. */
+	responseFormat?: unknown;
+	/**
 	 * Disable native reasoning when the caller supplies an external scratchpad.
 	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
 	 * Google transports use their native thinking-off controls.
