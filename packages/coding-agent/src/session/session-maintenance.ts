@@ -1689,12 +1689,16 @@ export class SessionMaintenance {
 			if (args.codexCompaction) this.#host.resetCodexProviderAfterCompaction(args.codexCompaction);
 			else this.#host.closeCodexProviderSessionsForHistoryRewrite();
 			if (this.#model?.api === "openai-codex-responses") {
+				// Closing provider sessions does not advance the lineage, so local and
+				// hook-supplied rewrites (snapcompact, handoff, extensions) rotate here
+				// instead of persisting the pre-compaction window. Reading the identity
+				// first re-materializes the provider state the close just dropped, so the
+				// rotation advances the restored lineage rather than replacing it.
+				let identity = this.contextWindows.identity;
+				if (!args.codexCompaction) identity = this.contextWindows.startNewWindow();
 				preserveData = {
 					...preserveData,
-					codexContextWindow: {
-						...this.contextWindows.identity,
-						agentPath: this.contextWindows.protocol.agentName,
-					},
+					codexContextWindow: { ...identity, agentPath: this.contextWindows.protocol.agentName },
 				};
 			}
 		}

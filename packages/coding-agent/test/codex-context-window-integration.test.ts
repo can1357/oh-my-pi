@@ -541,3 +541,41 @@ test("ordinary compaction hooks receive public payloads while the journal keeps 
 	}
 	expect(JSON.stringify(manager.getEntries())).toContain("opaque-result");
 }, 20000);
+
+test("an extension-provided compaction rotates and persists the window lineage", async () => {
+	let firstKeptEntryId = "";
+	const extensionRunner = {
+		emit: async (event: { type: string }) =>
+			event.type === "session_before_compact"
+				? { compaction: { summary: "Hook summary", firstKeptEntryId, tokensBefore: 100 } }
+				: undefined,
+		emitBeforeAgentStart: async () => undefined,
+		hasHandlers: (event: string) => event === "session_before_compact",
+		emitSessionStop: async () => undefined,
+		consumeToolCallEmitted: () => false,
+		runScoped: <T>(run: () => T): T => run(),
+	} as unknown as ExtensionRunner;
+	const { session, manager, settings } = await harness(true, {
+		extensionRunner,
+		responses: [
+			{ content: ["Earlier response"], usage: { input: 100 } },
+			{ content: ["Recent response"], usage: { input: 100 } },
+		],
+	});
+	settings.override("compaction.keepRecentTokens", 1);
+	await session.prompt("Earlier task ".repeat(200));
+	await session.prompt("Recent task");
+	await session.waitForIdle();
+	firstKeptEntryId = manager.getBranch().at(-1)?.id ?? "";
+	const before = getOpenAICodexContextWindow(session.sessionId, session.providerSessionState);
+
+	await session.compact();
+
+	const entry = manager.getBranch().findLast(item => item.type === "compaction");
+	if (entry?.type !== "compaction") throw new Error("Missing hook compaction entry");
+	const lineage = entry.preserveData?.codexContextWindow;
+	if (!isRecord(lineage)) throw new Error("Hook compaction persisted no window lineage");
+	expect(lineage.windowNumber).toBe(before.windowNumber + 1);
+	expect(lineage.windowId).not.toBe(before.windowId);
+	expect(getOpenAICodexContextWindow(session.sessionId, session.providerSessionState).windowId).toBe(lineage.windowId);
+}, 20000);
