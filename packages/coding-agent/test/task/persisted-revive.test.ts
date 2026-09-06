@@ -7,7 +7,7 @@ import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-sub
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import type { AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, qualifyPersistedAgentId } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -56,6 +56,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 	let lastAssistantText: string | undefined;
 	const trackedReplies: Promise<void>[] = [];
 	const session = {
+		getAgentId: () => "persisted-restricted",
 		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
@@ -126,7 +127,7 @@ async function createPersistedSession(
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus) {
+function createFactory(cwd: string, eventBus?: EventBus, rootAgentId?: string) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
@@ -135,6 +136,7 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 		get sessionFile() {
 			return path.join(cwd, "parent.jsonl");
 		},
+		...(rootAgentId !== undefined ? { getAgentId: () => rootAgentId } : undefined),
 	} as unknown as AgentSession;
 	return createPersistedSubagentReviverFactory({
 		session: parentSession,
@@ -659,5 +661,91 @@ describe("persisted subagent revival", () => {
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
 		});
+	});
+
+	it("stops the depth walk at any unregistered family root, not just the literal MAIN_AGENT_ID", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-acp-depth-");
+		const mainChildFile = await createPersistedSession(cwd);
+		const acpChildFile = await createPersistedSession(cwd);
+		const acpGrandchildFile = await createPersistedSession(cwd);
+		const capturedDepths: Record<string, number> = {};
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedDepths[options?.agentId ?? "?"] = options?.taskDepth ?? -1;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		// Direct child of the literal "Main" root (`createRef` defaults `parentId` to `MAIN_AGENT_ID`).
+		const mainRef = createRef(mainChildFile);
+		const mainReviver = await createFactory(cwd)(mainRef);
+		if (!mainReviver) throw new Error("Expected a persisted reviver");
+		await mainReviver(mainRef);
+
+		// Direct child of an ACP top-level session id — never itself an AgentRef
+		// (only subagents/advisors are registered), matching main.ts's `acp:<session-id>`.
+		const acpRootId = "acp:test-session";
+		const acpChildRef: AgentRef = { ...createRef(acpChildFile), id: "AcpChild", parentId: acpRootId };
+		AgentRegistry.global().register({
+			id: acpChildRef.id,
+			displayName: acpChildRef.displayName,
+			kind: "sub",
+			parentId: acpRootId,
+			session: null,
+			sessionFile: acpChildFile,
+			status: "parked",
+		});
+		const acpFactory = createFactory(cwd, undefined, acpRootId);
+		const acpChildReviver = await acpFactory(acpChildRef);
+		if (!acpChildReviver) throw new Error("Expected a persisted reviver");
+		await acpChildReviver(acpChildRef);
+
+		// Grandchild: parented to the ACP-rooted direct child, not to the ACP
+		// root itself — must land one level deeper than its parent, exactly
+		// like a MAIN_AGENT_ID-rooted grandchild would.
+		const acpGrandchildRef: AgentRef = {
+			...createRef(acpGrandchildFile),
+			id: "AcpGrandchild",
+			parentId: acpChildRef.id,
+		};
+		const acpGrandchildReviver = await acpFactory(acpGrandchildRef);
+		if (!acpGrandchildReviver) throw new Error("Expected a persisted reviver");
+		await acpGrandchildReviver(acpGrandchildRef);
+
+		expect(capturedDepths["persisted-restricted"]).toBe(1);
+		expect(capturedDepths.AcpChild).toBe(1);
+		expect(capturedDepths.AcpGrandchild).toBe(2);
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("strips the collision-disambiguating owner qualifier from parentTaskPrefix while keeping the registry key qualified", async () => {
+		const cwd = makeTempDir("@pi-revive-qualified-prefix-");
+		const sessionFile = await createPersistedSession(cwd);
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		// Mirrors `registerPersistedSubagentsFromDir`'s collision handling: two
+		// unrelated ACP sessions each persisted a child named "Worker", so the
+		// second one's registry key is `qualifyPersistedAgentId(owner, "Worker")`.
+		const ownerId = "AcpSessionB";
+		const bareId = "Worker";
+		const ref: AgentRef = {
+			...createRef(sessionFile),
+			id: qualifyPersistedAgentId(ownerId, bareId),
+			parentId: ownerId,
+		};
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// The registry key stays qualified (needed for lookup/CAS on `ref.id`),
+		// but the naming basis handed to `AgentOutputManager` for any FUTURE
+		// descendant this revived agent spawns must be the bare id — otherwise
+		// `runSubprocess` writes descendants under an `${ownerId}/`-prefixed
+		// directory the persisted-agent scan never looks inside.
+		expect(capturedOptions?.agentId).toBe(qualifyPersistedAgentId(ownerId, bareId));
+		expect(capturedOptions?.parentTaskPrefix).toBe(bareId);
 	});
 });

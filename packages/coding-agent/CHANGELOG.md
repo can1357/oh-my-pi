@@ -93,6 +93,10 @@
 - Fixed the `inspect_image` status hint showing the wrong model after switching between image-capable model roles.
 - Fixed multi-minute TUI freezes during subagent activity and batch execution.
 
+### Added
+
+- Extension API: `api.agents` — list/get/ensureLive/prompt for named registry agents.
+
 ## [18.1.7] - 2026-09-03
 
 ### Breaking Changes

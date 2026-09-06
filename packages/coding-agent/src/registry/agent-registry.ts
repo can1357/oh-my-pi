@@ -310,3 +310,54 @@ export class AgentRegistry {
 		}
 	}
 }
+
+/** Every id transitively reachable from `rootId` by following `AgentRef.parentId` links, plus `rootId` itself. */
+export function collectAgentFamily(registry: AgentRegistry, rootId: string): ReadonlySet<string> {
+	const childrenByParent = new Map<string, string[]>();
+	for (const ref of registry.list()) {
+		if (ref.parentId === undefined) continue;
+		const siblings = childrenByParent.get(ref.parentId);
+		if (siblings) siblings.push(ref.id);
+		else childrenByParent.set(ref.parentId, [ref.id]);
+	}
+	const family = new Set<string>([rootId]);
+	const queue = [rootId];
+	for (let i = 0; i < queue.length; i++) {
+		for (const childId of childrenByParent.get(queue[i]) ?? []) {
+			if (family.has(childId)) continue;
+			family.add(childId);
+			queue.push(childId);
+		}
+	}
+	return family;
+}
+
+/**
+ * Disambiguated registry key for a persisted agent id that collides with an
+ * unrelated owner's identically-named entry. `AgentRegistry` is a flat,
+ * process-global map keyed by the bare id, but a subagent name is only
+ * guaranteed unique within its own owning top-level session's tree
+ * (`AgentOutputManager` allocates names per-session) — a host running several
+ * concurrent top-level sessions (ACP) can otherwise have two unrelated
+ * sessions each persist a child under the same bare filename.
+ */
+export function qualifyPersistedAgentId(ownerId: string, bareId: string): string {
+	return `${ownerId}/${bareId}`;
+}
+
+/**
+ * Inverse of {@link qualifyPersistedAgentId}: recovers the bare, path-safe id
+ * an owner-qualified registry key was built from. Consumers that hand a
+ * revived ref's id onward as a naming basis for FUTURE ids — `parentTaskPrefix`
+ * → `AgentOutputManager` → `runSubprocess`'s `path.join(artifactsDir,
+ * \`${id}.jsonl\`)` — must use this instead of the raw registry key, or a
+ * disambiguated `owner/bareId` id writes its descendants below an unexpected
+ * intermediate directory that the persisted-agent scan never looks inside.
+ * Returns `id` unchanged when it was never qualified against `ownerId` (the
+ * common case, and every case where `ownerId` is undefined).
+ */
+export function bareAgentId(id: string, ownerId: string | undefined): string {
+	if (ownerId === undefined) return id;
+	const prefix = `${ownerId}/`;
+	return id.startsWith(prefix) ? id.slice(prefix.length) : id;
+}

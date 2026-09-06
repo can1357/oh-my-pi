@@ -39,7 +39,7 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import { IrcBus } from "../irc/bus";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
-import { initializeExtensions } from "../modes/runtime-init";
+import { createExtensionAgentActions, initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
@@ -3571,6 +3571,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						appendEntry: (customType, data) => {
 							session.sessionManager.appendCustomEntry(customType, data);
 						},
+						...createExtensionAgentActions({
+							scopeAgentId: session.getAgentId() ?? MAIN_AGENT_ID,
+							getScopeSessionFile: () => session.sessionManager?.getSessionFile?.() ?? null,
+						}),
 						setLabel: (targetId, label) => {
 							session.sessionManager.appendLabelChange(targetId, label);
 						},
