@@ -531,6 +531,12 @@ export class SelectorController {
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
 				break;
+			case "advisor.maxNotesPerUpdate":
+				if (this.ctx.session.isAdvisorEnabled()) {
+					this.ctx.session.setAdvisorEnabled(true);
+					this.ctx.ui.requestRender();
+				}
+				break;
 			case "steeringMode":
 				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time");
 				break;

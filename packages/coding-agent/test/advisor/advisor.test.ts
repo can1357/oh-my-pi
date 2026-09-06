@@ -33,6 +33,8 @@ import { getThemeByName, setThemeInstance } from "../../src/modes/theme/theme";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
 import { formatSessionHistoryMarkdown } from "../../src/session/session-history-format";
 import { YieldQueue } from "../../src/session/yield-queue";
+import { prompt } from "@oh-my-pi/pi-utils";
+import advisorSystemPrompt from "../../src/prompts/advisor/system.md" with { type: "text" };
 
 /** Poll until the drain loop reaches the asserted state — waitForCatchup
  *  releases IMMEDIATELY on advisor failure (the primary must never park on a
@@ -941,6 +943,14 @@ describe("advisor", () => {
 			await tool.execute("s-3", { note: "Note 3", severity: "concern" });
 			await tool.execute("s-4", { note: "Note 4", severity: "concern" });
 			expect(delivered).toEqual(["Note 0", "Note 1", "Note 2", "Note 3"]);
+		});
+
+		it("renders max_notes_per_update into the advisor system prompt", () => {
+			const renderedDefault = prompt.render(advisorSystemPrompt, { max_notes_per_update: 4 });
+			expect(renderedDefault).toContain("max 4/update");
+
+			const renderedStrict = prompt.render(advisorSystemPrompt, { max_notes_per_update: 1 });
+			expect(renderedStrict).toContain("max 1/update");
 		});
 
 		it("delivers a blocker escalation of a reserved note live instead of dropping it as already seen", async () => {
@@ -6337,6 +6347,34 @@ describe("advisor", () => {
 			expect(text).toContain("○ Disabled");
 			// The preview of the highlighted (first) advisor shows its enabled status.
 			expect(text).toContain("● on");
+		});
+
+		it("preserves top-level maxNotesPerUpdate without stripping to an empty roster on save", async () => {
+			let savedDoc: WatchdogConfigDoc | undefined;
+			const overlay = new AdvisorConfigOverlayComponent(
+				{} as unknown as TUI,
+				{ ...deps },
+				"project",
+				{ maxNotesPerUpdate: 3, advisors: [] },
+				{
+					...callbacks,
+					save: async (_scope, doc) => {
+						savedDoc = doc;
+					},
+				},
+			);
+			overlay.render(200);
+			// Arrow down 4 times to "Save & apply" (advisor:0, add, shared, scope, save)
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\r");
+			await Promise.resolve();
+			expect(savedDoc).toBeDefined();
+			expect(savedDoc?.maxNotesPerUpdate).toBe(3);
+			expect(savedDoc?.advisors).toHaveLength(1);
+			expect(savedDoc?.advisors[0]?.name).toBe("default");
 		});
 	});
 });
