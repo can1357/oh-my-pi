@@ -70,6 +70,54 @@ function getGlobalReferences(): Map<string, Model<Api>> {
 	return references;
 }
 
+/**
+ * Fields of a bundled reference that steer the OUTBOUND request for the provider
+ * that authored it: the wire model id, per-effort wire-id routing, sibling-model
+ * pointers, transport overrides, provider-native request-shaping flags,
+ * provider-scoped request headers, output-cap suppression, and request
+ * metadata. They are meaningless — and frequently rejected — on any other
+ * provider's endpoint.
+ *
+ * A global-index reference is always a bare-id collision with a DIFFERENT
+ * provider's bundled model (the provider-scoped map is consulted first), so none
+ * of these may survive the crossing. Discovery mappers spread the resolved
+ * reference wholesale, so stripping here is the single choke point that keeps a
+ * `cursor` (`api: cursor-agent`) `requestModelId` from leaking onto a
+ * `github-copilot` model and being emitted as `body.model` (issue #10796, HTTP
+ * 400 `model_not_supported`). Mirrors the same-provider guards already applied
+ * to `reference.compat` (LiteLLM path) and `thinking.effortRouting`
+ * (`inheritReferenceThinking`).
+ */
+function stripCrossProviderRouting<TApi extends Api>(spec: ModelSpec<TApi>): ModelSpec<TApi> {
+	const {
+		requestModelId: _requestModelId,
+		reasoningMode: _reasoningMode,
+		contextPromotionTarget: _contextPromotionTarget,
+		compactionModel: _compactionModel,
+		remoteCompaction: _remoteCompaction,
+		transport: _transport,
+		preferWebsockets: _preferWebsockets,
+		useResponsesLite: _useResponsesLite,
+		toolMode: _toolMode,
+		cursorMaxMode: _cursorMaxMode,
+		gitlabDuoWorkflowRootNamespaceId: _gitlabDuoWorkflowRootNamespaceId,
+		guardrailIdentifier: _guardrailIdentifier,
+		guardrailVersion: _guardrailVersion,
+		guardrailTrace: _guardrailTrace,
+		requestMetadata: _requestMetadata,
+		isOAuth: _isOAuth,
+		omitMaxOutputTokens: _omitMaxOutputTokens,
+		headers: _headers,
+		thinking,
+		...rest
+	} = spec;
+	if (thinking?.effortRouting) {
+		const { effortRouting: _effortRouting, ...thinkingRest } = thinking;
+		return { ...rest, thinking: thinkingRest };
+	}
+	return thinking ? { ...rest, thinking } : rest;
+}
+
 export function createReferenceResolver<TApi extends Api>(
 	providerReferenceSource: ProviderReferenceSource<TApi>,
 ): (modelId: string) => ModelSpec<TApi> | undefined {
@@ -84,6 +132,6 @@ export function createReferenceResolver<TApi extends Api>(
 		const providerRef = providerRefs.get(modelId);
 		if (providerRef) return providerRef;
 		const globalRef = globalRefs.get(modelId);
-		return globalRef ? toModelSpec(globalRef as Model<TApi>) : undefined;
+		return globalRef ? stripCrossProviderRouting(toModelSpec(globalRef as Model<TApi>)) : undefined;
 	};
 }
