@@ -44,7 +44,7 @@ import { bottomBorder, divider, row, topBorder } from "../overlay-box";
 import { ExtensionList } from "./extension-list";
 import { InspectorPanel, type ToolRuntimeSource } from "./inspector-panel";
 import { snapshotToolRuntimeSource } from "./live-tool-session";
-import { applyMcpToggleRuntime } from "./mcp-runtime";
+import { applyMcpToggleRuntime, mcpServerNeedsProviderTeardown } from "./mcp-runtime";
 import {
 	applyDisabledExtensionsToState,
 	applyFilter,
@@ -339,7 +339,7 @@ export class ExtensionDashboard implements Component {
 							ext.source.provider === providerId &&
 							(level === undefined || ext.source.level === level) &&
 							!isShadowedExtension(ext) &&
-							this.mcpManager?.getConnectionStatus(ext.name) !== "disconnected",
+							mcpServerNeedsProviderTeardown(this.mcpManager, ext.name),
 					)
 					.map(ext => ext.name),
 			),

@@ -1318,7 +1318,31 @@ export class MCPCommandController {
 		if (!this.ctx.mcpManager) return;
 		if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") return;
 		await this.ctx.mcpManager.connectServers({ [name]: config }, {});
-		if (this.ctx.mcpManager.getConnectionStatus(name) === "connected") {
+		// A *lazy* server never connects through `connectServers`: with no
+		// cache it stays tool-less (dormant until `/mcp reconnect`), and with a
+		// cache it serves the LAST connect's catalog — which the test just
+		// proved stale when the server's tools changed. Either way the user
+		// explicitly exercised this server, so spend one forced connect through
+		// the documented seeding path: it registers the live catalog and
+		// rewrites the cache for future startups.
+		if (config.lazy) {
+			try {
+				await this.ctx.mcpManager.reconnectServer(name);
+			} catch {
+				// The direct test connection succeeded but the manager-side seed
+				// failed; keep the test's own verdict and leave seeding to
+				// `/mcp reconnect`.
+			}
+		}
+		// A lazy server keeps status "disconnected" by design even after
+		// `connectServers` installed its cached tools as deferred entries (and
+		// after the seeding reconnect above). Gate the session refresh on tools
+		// actually held for this server — not on the connection status alone —
+		// or a cache-hit lazy test mounts nothing until a session reload.
+		if (
+			this.ctx.mcpManager.getConnectionStatus(name) === "connected" ||
+			this.ctx.mcpManager.getTools().some(tool => tool.mcpServerName === name)
+		) {
 			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 		}
 	}

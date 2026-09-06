@@ -10,6 +10,7 @@ import {
 	inferMcpTransport,
 	isDiscoveredMcpServer,
 	type MCPRuntimeSource,
+	mcpServerNeedsProviderTeardown,
 	snapshotMcpRuntime,
 	visibleMcpTools,
 } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/mcp-runtime";
@@ -301,5 +302,64 @@ describe("applyMcpToggleRuntime", () => {
 			},
 		]);
 		expect(connected).toEqual([]);
+	});
+});
+
+describe("mcpServerNeedsProviderTeardown", () => {
+	test("regression: a dormant lazy server with cached tools still needs teardown", () => {
+		// `getConnectionStatus` intentionally stays "disconnected" for a lazy
+		// server whose tools came from a cache hit — connection status alone
+		// must not be read as "nothing to tear down" here.
+		const deferredTool = { ...stubCustomTool("lazy_tool"), mcpServerName: "lazyserver" };
+		const needsTeardown = mcpServerNeedsProviderTeardown(
+			{
+				getConnectionStatus: () => "disconnected",
+				getTools: () => [deferredTool],
+				disconnectServer: async () => {},
+				connectServers: async () => ({ errors: new Map() }),
+			},
+			"lazyserver",
+		);
+		expect(needsTeardown).toBe(true);
+	});
+
+	test("a disconnected server with no registered tools needs no teardown", () => {
+		const needsTeardown = mcpServerNeedsProviderTeardown(
+			{
+				getConnectionStatus: () => "disconnected",
+				getTools: () => [],
+				disconnectServer: async () => {},
+				connectServers: async () => ({ errors: new Map() }),
+			},
+			"neverconnected",
+		);
+		expect(needsTeardown).toBe(false);
+	});
+
+	test("a live connection needs teardown even without registered tools yet", () => {
+		const needsTeardown = mcpServerNeedsProviderTeardown(
+			{
+				getConnectionStatus: () => "connecting",
+				getTools: () => [],
+				disconnectServer: async () => {},
+				connectServers: async () => ({ errors: new Map() }),
+			},
+			"connecting-server",
+		);
+		expect(needsTeardown).toBe(true);
+	});
+
+	test("an unrelated server's tools do not force teardown", () => {
+		const otherTool = { ...stubCustomTool("other_tool"), mcpServerName: "other" };
+		const needsTeardown = mcpServerNeedsProviderTeardown(
+			{
+				getConnectionStatus: () => "disconnected",
+				getTools: () => [otherTool],
+				disconnectServer: async () => {},
+				connectServers: async () => ({ errors: new Map() }),
+			},
+			"lazyserver",
+		);
+		expect(needsTeardown).toBe(false);
 	});
 });

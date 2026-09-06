@@ -93,6 +93,10 @@
 - Fixed the `inspect_image` status hint showing the wrong model after switching between image-capable model roles.
 - Fixed multi-minute TUI freezes during subagent activity and batch execution.
 
+### Added
+
+- Added `lazy: true` for MCP servers in `mcp.json`: the server is not spawned at session startup — its tools are served from the tool cache and the first invocation (or `/mcp reconnect`) connects on demand. Useful for servers whose launch has side effects, such as credential prompts or approval flows.
+
 ## [18.1.7] - 2026-09-03
 
 ### Breaking Changes
