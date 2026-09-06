@@ -3531,6 +3531,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				// Approval provenance: subagents run headless, so a transcript is the only
+				// place these can be recovered from after the fact.
+				approvalMode: (subagentSettings.get("tools.approvalMode") ?? "yolo") as string,
+				approval: subagentSettings.get("tools.approval") as Record<string, unknown> | undefined,
+				hasUI: false,
 			});
 
 			abortSignal.addEventListener(

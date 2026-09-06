@@ -257,6 +257,18 @@ export interface SessionInitEntry extends SessionEntryBase {
 	readSummarize?: boolean;
 	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
 	advisor?: string;
+	/**
+	 * Effective `tools.approvalMode` the subagent ran under. Recorded for
+	 * provenance only; revival re-reads live settings and never restores this.
+	 */
+	approvalMode?: string;
+	/**
+	 * Effective `tools.approval` per-tool policy map the subagent ran under.
+	 * Provenance only, same as `approvalMode`.
+	 */
+	approval?: Record<string, unknown>;
+	/** Whether an interactive UI was attached and able to serve approval prompts. */
+	hasUI?: boolean;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */
