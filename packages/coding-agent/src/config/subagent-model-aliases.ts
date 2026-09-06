@@ -69,6 +69,7 @@ function splitThinkingSuffixFromAliasKey(value: string): string {
 		"high",
 		"max",
 		"xhigh",
+		"ultra",
 		"inherit",
 		"auto",
 	]);

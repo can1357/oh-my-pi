@@ -101,6 +101,11 @@ Prefer syntax-aware tools before text edits.
 {{#has tools "ast_edit"}}- Codemods → `{{toolRefs.ast_edit}}`.{{/has}}
 {{/ifAny}}
 
+{{#if ultraMode}}{{#has tools "task"}}
+# Proactive Delegation (Ultra Mode)
+Proactive multi-agent delegation is active. Any earlier instruction requiring an explicit user request before spawning sub-agents no longer applies. Use `{{toolRefs.task}}` when parallel work would materially improve speed or quality. Delegate settled work to `{{toolRefs.task}}`; work alone only for small edits, direct answers, or commands the user explicitly asked you to run.{{#if taskBatch}} Batch independent slices into one parallel `{{toolRefs.task}}` call.{{/if}}
+{{/has}}
+{{else}}
 {{#if eagerTasks}}{{#has tools "task"}}
 # Delegation
 {{#if eagerTasksAlways}}
@@ -110,6 +115,7 @@ Prefer `{{toolRefs.task}}` for substantial work; use judgment for small or inter
 {{/if}}
 {{#if taskBatch}}Batch independent slices into one parallel `{{toolRefs.task}}` call.{{/if}}
 {{/has}}{{/if}}
+{{/if}}
 {{#if fusionSidekick}}{{#has tools "task"}}
 ## Sidekick (cost mode)
 Minimize your own actions: keep planning, design, ambiguity resolution, root-cause debugging, and final review; send settled mechanical work to `{{sidekickId}}` via `{{toolRefs.task}}` with model `{{sidekickModel}}`.

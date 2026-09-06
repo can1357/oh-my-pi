@@ -1,4 +1,4 @@
-import { Effort } from "@pk-nerdsaver-ai/pi-ai";
+import { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
 
 /**
  * Agent-local thinking selector.
@@ -13,6 +13,8 @@ export const ThinkingLevel = {
 	Medium: Effort.Medium,
 	High: Effort.High,
 	XHigh: Effort.XHigh,
+	Max: Effort.Max,
+	Ultra: Effort.Ultra,
 } as const;
 
 export type ThinkingLevel = (typeof ThinkingLevel)[keyof typeof ThinkingLevel];

@@ -106,6 +106,9 @@ export default class Index extends Command {
 		"hide-thinking": Flags.boolean({
 			description: "Hide thinking blocks in TUI output (display only, does not disable model thinking)",
 		}),
+		ultra: Flags.boolean({
+			description: "Enable Ultra mode (maximum reasoning with automatic task delegation)",
+		}),
 		advisor: Flags.boolean({
 			description: "Enable the advisor runtime (passively reviews each turn and injects notes)",
 		}),

@@ -7,6 +7,7 @@
  * `stream_options.include_obfuscation`) — does not trip 400s on shapes we simply ignore.
  */
 
+import { THINKING_EFFORTS } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { type } from "arktype";
 import type {
 	ChatCompletionContentPart,
@@ -209,7 +210,7 @@ export const openaiChatRequestSchema = type({
 	"frequency_penalty?": "number",
 	"logit_bias?": type({ "[string]": "number" }),
 	"user?": "string",
-	"reasoning_effort?": "'minimal' | 'low' | 'medium' | 'high' | 'xhigh'",
+	"reasoning_effort?": type.enumerated(...THINKING_EFFORTS),
 	"parallel_tool_calls?": "boolean",
 	"service_tier?": "'auto' | 'default' | 'flex' | 'scale' | 'priority'",
 	"metadata?": type({ "[string]": "unknown" }),

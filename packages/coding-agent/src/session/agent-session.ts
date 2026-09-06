@@ -8305,7 +8305,7 @@ export class AgentSession {
 			}
 			return;
 		}
-
+		const wasUltra = this.#thinkingLevel === ThinkingLevel.Ultra;
 		const wasAuto = this.#autoThinking;
 		this.#autoThinking = false;
 		this.#autoResolvedLevel = undefined;
@@ -8321,9 +8321,19 @@ export class AgentSession {
 				this.settings.set("defaultThinkingLevel", effectiveLevel);
 			}
 			this.#emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
+			if (wasUltra !== (effectiveLevel === ThinkingLevel.Ultra)) {
+				void this.refreshBaseSystemPrompt();
+			}
 		}
 	}
 
+	/**
+	 * Returns true if the session is running in Ultra mode (maximum reasoning
+	 * with automatic proactive task delegation).
+	 */
+	isUltraMode(): boolean {
+		return this.#thinkingLevel === ThinkingLevel.Ultra || this.configuredThinkingLevel() === ThinkingLevel.Ultra;
+	}
 	/**
 	 * Re-apply the active thinking selection after a model change. Preserves `auto`
 	 * (re-clamping the provisional level to the new model); otherwise re-applies the
@@ -8340,10 +8350,12 @@ export class AgentSession {
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
 		if (!this.model?.reasoning) return undefined;
 
+		const available = this.getAvailableThinkingLevels();
 		const levels: ConfiguredThinkingLevel[] = [
 			ThinkingLevel.Off,
 			AUTO_THINKING,
-			...this.getAvailableThinkingLevels(),
+			...available,
+			...(available.includes(Effort.Ultra) ? [] : [ThinkingLevel.Ultra]),
 		];
 		const configured = this.configuredThinkingLevel();
 		const currentLevel = configured === ThinkingLevel.Inherit ? ThinkingLevel.Off : configured;
@@ -10147,7 +10159,7 @@ export class AgentSession {
 	}
 
 	#createEagerTaskPrelude(promptText: string | undefined): AgentMessage | undefined {
-		if (this.settings.get("task.eager") !== "always") return undefined;
+		if (this.settings.get("task.eager") !== "always" && !this.isUltraMode()) return undefined;
 		// Main agent only: subagents keep `task` active (the parent only filters `todo`),
 		// so a salient delegate-reminder there would amplify nested fan-out. Gate on the
 		// resolved agent kind, not the id, so a top-level session with a custom `agentId`

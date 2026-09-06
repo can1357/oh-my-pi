@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { THINKING_EFFORTS } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { type } from "arktype";
 import { resolvePromptCacheKey } from "../auth-gateway/http";
 /**
@@ -35,7 +36,7 @@ export type { ParsedRequest };
 type ReasoningEffort = NonNullable<ParsedRequest["options"]["reasoning"]>;
 
 function isReasoningEffort(value: unknown): value is ReasoningEffort {
-	return value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
+	return THINKING_EFFORTS.some(effort => effort === value);
 }
 
 function isServiceTier(value: unknown): value is ResolvedServiceTier {

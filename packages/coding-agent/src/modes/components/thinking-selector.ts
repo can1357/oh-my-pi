@@ -1,4 +1,4 @@
-import type { Effort } from "@pk-nerdsaver-ai/pi-ai";
+import { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { Container, type SelectItem, SelectList, type SgrMouseEvent } from "@pk-nerdsaver-ai/pi-tui";
 import { getSelectListTheme } from "../../modes/theme/theme";
 import { getThinkingLevelMetadata } from "../../thinking";
@@ -19,7 +19,8 @@ export class ThinkingSelectorComponent extends Container {
 	) {
 		super();
 
-		const thinkingLevels: SelectItem[] = availableLevels.map(getThinkingLevelMetadata);
+		const levels = availableLevels.includes(Effort.Ultra) ? availableLevels : [...availableLevels, Effort.Ultra];
+		const thinkingLevels: SelectItem[] = levels.map(getThinkingLevelMetadata);
 
 		// Add top border
 		this.addChild(new DynamicBorder());

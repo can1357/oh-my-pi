@@ -98,9 +98,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--config": (result, value) => {
 		result.config = [...(result.config ?? []), value];
 	},
-	"--mode": (result, value) => {
+	"--mode": (result, value, deps) => {
 		if (value === "text" || value === "json" || value === "rpc" || value === "acp" || value === "rpc-ui") {
 			result.mode = value;
+		} else if (value === "ultra") {
+			result.ultra = true;
+			result.thinking = deps.parseConfiguredThinkingLevel("ultra");
 		}
 	},
 	"--fork": (result, value) => {

@@ -431,6 +431,8 @@ export interface BuildSystemPromptOptions {
 	mcpDiscoveryServerSummaries?: string[];
 	/** Whether xd:// virtual tool devices are enabled for this prompt build. */
 	xdevEnabled?: boolean;
+	/** Ultra mode: maximum reasoning with automatic proactive task delegation. */
+	ultraMode?: boolean;
 	/** Encourage the agent to delegate via tasks unless changes are trivial. */
 	eagerTasks?: boolean;
 	/** When true, the Eager Tasks section uses the hard MUST/ONLY wording (`task.eager: always`) rather than the softer `preferred` nudge. */
@@ -495,8 +497,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		intentField,
 		mcpDiscoveryMode = false,
 		mcpDiscoveryServerSummaries = [],
-		eagerTasks = false,
-		eagerTasksAlways = false,
+		ultraMode = false,
+		eagerTasks: initialEagerTasks = false,
+		eagerTasksAlways: initialEagerTasksAlways = false,
 		taskBatch = true,
 		fusionSidekick = false,
 		fusionEscalate = false,
@@ -513,6 +516,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
+	const eagerTasks = ultraMode || initialEagerTasks;
+	const eagerTasksAlways = ultraMode || initialEagerTasksAlways;
 
 	const prepDefaults = {
 		resolvedCustomPrompt: undefined as string | undefined,
@@ -763,6 +768,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasMCPDiscoveryServers: mcpDiscoveryServerSummaries.length > 0,
 		mcpDiscoveryServerSummaries,
 		xdevEnabled: options.xdevEnabled === true,
+		ultraMode,
 		eagerTasks,
 		eagerTasksAlways,
 		taskBatch,

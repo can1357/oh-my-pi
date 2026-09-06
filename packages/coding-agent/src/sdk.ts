@@ -5,7 +5,7 @@ import {
 	type AgentTelemetryConfig,
 	type AgentTool,
 	AppendOnlyContextManager,
-	type ThinkingLevel,
+	ThinkingLevel,
 } from "@pk-nerdsaver-ai/pi-agent-core";
 import {
 	type Context,
@@ -2416,8 +2416,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// name list and provider-side schemas.
 		const resolveInlineToolDescriptors = (nativeTools: boolean): boolean =>
 			inlineToolDescriptorsSetting === "on" || (inlineToolDescriptorsSetting === "auto" && !nativeTools);
-		const eagerTasks = settings.get("task.eager") !== "default";
-		const eagerTasksAlways = settings.get("task.eager") === "always";
+		const isUltraModeActive = (): boolean => {
+			if (session) {
+				return session.isUltraMode();
+			}
+			return (
+				effectiveThinkingLevel === ThinkingLevel.Ultra ||
+				thinkingLevel === ThinkingLevel.Ultra ||
+				settings.get("defaultThinkingLevel") === "ultra"
+			);
+		};
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
@@ -2513,8 +2521,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				mcpDiscoveryMode: hasDiscoverableTools,
 				mcpDiscoveryServerSummaries: discoverableToolSummary.servers.map(formatDiscoverableToolServerSummary),
 				xdevEnabled: settings.get("tools.xdev"),
-				eagerTasks,
-				eagerTasksAlways,
+				ultraMode: isUltraModeActive(),
+				eagerTasks: isUltraModeActive() || settings.get("task.eager") !== "default",
+				eagerTasksAlways: isUltraModeActive() || settings.get("task.eager") === "always",
 				taskBatch: settings.get("task.batch"),
 				fusionSidekick:
 					agentKind === "main" &&

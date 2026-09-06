@@ -195,6 +195,30 @@ export const ANTHROPIC_CURATED_FALLBACK_MODELS: readonly ModelSpec<"anthropic-me
 	},
 ];
 
+/** First-party model metadata until the bundled reference includes this release.
+ * Source: https://developers.openai.com/api/docs/models/gpt-6-astra
+ * Codex has a separate, account-discovered context/effort contract.
+ */
+export const OPENAI_CURATED_FALLBACK_MODELS: readonly ModelSpec<"openai-responses">[] = [
+	{
+		id: "gpt-6-astra",
+		name: "GPT-6 Astra",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+		cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			requiresEffort: true,
+		},
+	},
+];
+
 function mapWithBundledReference<TApi extends Api>(
 	entry: OpenAICompatibleModelRecord,
 	defaults: ModelSpec<TApi>,
@@ -773,6 +797,9 @@ export function openaiModelManagerOptions(config?: OpenAIModelManagerConfig): Mo
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? "https://api.openai.com/v1";
 	const references = createBundledReferenceMap<"openai-responses">("openai");
+	for (const model of OPENAI_CURATED_FALLBACK_MODELS) {
+		if (!references.has(model.id)) references.set(model.id, model);
+	}
 	return {
 		providerId: "openai",
 		...(apiKey && {

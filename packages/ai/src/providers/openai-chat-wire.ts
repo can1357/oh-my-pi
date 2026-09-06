@@ -116,7 +116,7 @@ export type Metadata = {
 };
 
 /** Constrains effort on reasoning for reasoning models. */
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
 
 /** JSON object response format (older JSON mode). */
 export interface ResponseFormatJSONObject {

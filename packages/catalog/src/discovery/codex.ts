@@ -1,5 +1,6 @@
 import { type } from "arktype";
-import type { ModelSpec } from "../types";
+import { Effort, THINKING_EFFORTS } from "../effort";
+import type { ModelSpec, ThinkingConfig } from "../types";
 import { isRecord } from "../utils";
 import { CODEX_BASE_URL, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
 
@@ -20,6 +21,7 @@ const codexModelEntrySchema = type({
 	"context_window?": "unknown",
 	"default_reasoning_level?": "unknown",
 	"supported_reasoning_levels?": "unknown",
+	"multi_agent_reasoning_effort?": "unknown",
 	"input_modalities?": "unknown",
 	"supported_in_api?": "unknown",
 	"priority?": "unknown",
@@ -255,7 +257,7 @@ function normalizeCodexModelEntry(entry: unknown, baseUrl: string): NormalizedCo
 	const maxTokens = Math.min(DEFAULT_MAX_TOKENS, contextWindow);
 	const reasoning = supportsReasoning(payload.default_reasoning_level, payload.supported_reasoning_levels);
 	const input = normalizeInputModalities(payload.input_modalities);
-	const preferWebsockets = toBoolean(payload.prefer_websockets) === true;
+	const preferWebsockets = toBoolean(payload.prefer_websockets);
 	const priority = toFiniteNumber(payload.priority) ?? Number.MAX_SAFE_INTEGER;
 
 	return {
@@ -267,13 +269,46 @@ function normalizeCodexModelEntry(entry: unknown, baseUrl: string): NormalizedCo
 			provider: "openai-codex",
 			baseUrl,
 			reasoning,
+			thinking: normalizeThinking(payload),
 			input,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow,
 			maxTokens,
-			...(preferWebsockets ? { preferWebsockets: true } : {}),
+			...(preferWebsockets !== null ? { preferWebsockets } : {}),
 			...(priority !== Number.MAX_SAFE_INTEGER ? { priority } : {}),
 		},
+	};
+}
+
+/** Preserve backend capabilities instead of inferring a stale GPT-family ladder. */
+function normalizeThinking(payload: CodexModelEntry): ThinkingConfig | undefined {
+	if (!Array.isArray(payload.supported_reasoning_levels)) return undefined;
+	const advertised = new Set<string>();
+	for (const preset of payload.supported_reasoning_levels) {
+		const parsed = codexReasoningPresetSchema(preset);
+		if (parsed instanceof type.errors) continue;
+		const effort = toNonEmptyString(parsed.effort)?.toLowerCase();
+		if (effort) advertised.add(effort);
+	}
+	const efforts = THINKING_EFFORTS.filter(effort => advertised.has(effort));
+	if (efforts.length === 0) return undefined;
+	const defaultLevel = efforts.find(
+		effort => effort === toNonEmptyString(payload.default_reasoning_level)?.toLowerCase(),
+	);
+	const delegatedEffort = efforts.find(
+		effort =>
+			effort !== Effort.Ultra && effort === toNonEmptyString(payload.multi_agent_reasoning_effort)?.toLowerCase(),
+	);
+	const wireEfforts = efforts.filter(effort => effort !== Effort.Ultra);
+	// Codex Ultra prefers the advertised multi-agent effort, then max, then
+	// the highest supported non-Ultra effort. Ultra is never a wire value.
+	const ultraEffort = delegatedEffort ?? wireEfforts.at(-1);
+	return {
+		mode: "effort",
+		efforts,
+		requiresEffort: !advertised.has("none"),
+		...(defaultLevel ? { defaultLevel } : {}),
+		...(efforts.includes(Effort.Ultra) && ultraEffort ? { effortMap: { [Effort.Ultra]: ultraEffort } } : {}),
 	};
 }
 

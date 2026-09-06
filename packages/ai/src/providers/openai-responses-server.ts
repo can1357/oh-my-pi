@@ -9,6 +9,7 @@
  * Inverse direction (source-of-truth for item shapes): ../../providers/openai-responses.ts
  */
 
+import { THINKING_EFFORTS } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
 import { resolvePromptCacheKey } from "../auth-gateway/http";
@@ -40,7 +41,7 @@ export type { ParsedRequest };
 // ─── narrow guards ──────────────────────────────────────────────────────────
 
 function isReasoningEffort(value: unknown): value is NonNullable<ParsedRequest["options"]["reasoning"]> {
-	return value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
+	return THINKING_EFFORTS.some(effort => effort === value);
 }
 
 function isServiceTier(value: unknown): value is NonNullable<ParsedRequest["options"]["serviceTier"]> {

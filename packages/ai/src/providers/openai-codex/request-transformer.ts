@@ -1,18 +1,19 @@
 import type { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { requireSupportedEffort } from "@pk-nerdsaver-ai/pi-catalog/model-thinking";
 import type { Api, Model } from "../../types";
+import { mapOpenAIReasoningEffort } from "../openai-shared";
 
 /** Reasoning replay scope for the Codex Responses API (`reasoning.context`). */
 export type CodexReasoningContext = "auto" | "current_turn" | "all_turns";
 
 export interface ReasoningConfig {
-	effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	summary?: "auto" | "concise" | "detailed";
 	context?: CodexReasoningContext;
 }
 
 export interface CodexRequestOptions {
-	reasoningEffort?: ReasoningConfig["effort"];
+	reasoningEffort?: "none" | `${Effort}`;
 	reasoningSummary?: ReasoningConfig["summary"] | null;
 	/** Explicit `reasoning.context` override; defaults to `all_turns` for every Codex request when unset, except Codex Spark models (`-spark` in `model.id`) which default to `auto` since Spark rejects `all_turns`. */
 	reasoningContext?: CodexReasoningContext;
@@ -80,9 +81,23 @@ export function shouldUseCodexResponsesLite(body: RequestBody, requested: boolea
 }
 
 function getReasoningConfig(model: Model<Api>, options: CodexRequestOptions): ReasoningConfig {
+	const effort =
+		options.reasoningEffort === "none" ? "none" : requireSupportedEffort(model, options.reasoningEffort as Effort);
+	const compat = model.compat && "reasoningEffortMap" in model.compat ? model.compat : {};
+	const wireEffort = mapOpenAIReasoningEffort(model, compat, effort);
+	if (
+		wireEffort !== "none" &&
+		wireEffort !== "minimal" &&
+		wireEffort !== "low" &&
+		wireEffort !== "medium" &&
+		wireEffort !== "high" &&
+		wireEffort !== "xhigh" &&
+		wireEffort !== "max"
+	) {
+		throw new Error(`Unsupported Codex reasoning effort: ${wireEffort}`);
+	}
 	const config: ReasoningConfig = {
-		effort:
-			options.reasoningEffort === "none" ? "none" : requireSupportedEffort(model, options.reasoningEffort as Effort),
+		effort: wireEffort,
 	};
 	if (options.reasoningSummary !== null) {
 		config.summary = options.reasoningSummary ?? "detailed";

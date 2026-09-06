@@ -656,7 +656,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 
 /** Reasoning-relevant slice of caller options the Chat Completions dialect dispatch reads. */
 export interface ChatCompletionsReasoningOptions {
-	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: `${Effort}`;
 	disableReasoning?: boolean;
 }
 
@@ -727,13 +727,20 @@ export interface OpenAICompatPolicy {
 	};
 }
 
-function mapOpenAIReasoningEffort(
+export function mapOpenAIReasoningEffort(
 	model: Pick<Model, "thinking">,
-	compat: OpenAICompatPolicyCompat,
+	compat: Partial<Pick<OpenAICompatPolicyCompat, "reasoningEffortMap">>,
 	effort: string,
 ): string {
 	const level = effort as Effort;
-	return compat.reasoningEffortMap?.[level] ?? model.thinking?.effortMap?.[level] ?? effort;
+	const mapped = compat.reasoningEffortMap?.[level] ?? model.thinking?.effortMap?.[level];
+	if (mapped) return mapped;
+	if (level === "ultra") {
+		const supported = model.thinking?.efforts.filter(candidate => candidate !== "ultra");
+		const fallback = supported?.at(-1) ?? "xhigh";
+		return compat.reasoningEffortMap?.[fallback] ?? model.thinking?.effortMap?.[fallback] ?? fallback;
+	}
+	return effort;
 }
 
 function isImplicitDisableWhenNotRequested(disableMode: OpenAIReasoningDisableMode): boolean {

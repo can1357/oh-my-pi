@@ -1,3 +1,4 @@
+import type { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { fetchWithRetry, parseStreamingJson } from "@pk-nerdsaver-ai/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
@@ -34,7 +35,7 @@ import { transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, partitionVisionContent } from "./vision-guard";
 
 export interface OllamaChatOptions extends StreamOptions {
-	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: `${Effort}`;
 	disableReasoning?: boolean;
 	toolChoice?: ToolChoice;
 }

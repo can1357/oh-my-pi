@@ -1,5 +1,9 @@
 import { type ResolvedThinkingLevel, ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import { Effort, type Model, THINKING_EFFORTS } from "@pk-nerdsaver-ai/pi-ai";
+
+export { type ResolvedThinkingLevel, ThinkingLevel };
+
+import type { Model } from "@pk-nerdsaver-ai/pi-ai";
+import { Effort, THINKING_EFFORTS } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@pk-nerdsaver-ai/pi-catalog/model-thinking";
 
 /**
@@ -35,6 +39,16 @@ const THINKING_LEVEL_METADATA: Record<ThinkingLevel, ThinkingLevelMetadata> = {
 		label: "xhigh",
 		description: "Maximum reasoning (~32k tokens)",
 	},
+	[ThinkingLevel.Max]: {
+		value: ThinkingLevel.Max,
+		label: "max",
+		description: "Highest supported reasoning effort",
+	},
+	[ThinkingLevel.Ultra]: {
+		value: ThinkingLevel.Ultra,
+		label: "ultra",
+		description: "Maximum reasoning with automatic task delegation",
+	},
 };
 
 const EFFORT_BY_SELECTOR: Readonly<Record<string, Effort>> = {
@@ -43,7 +57,8 @@ const EFFORT_BY_SELECTOR: Readonly<Record<string, Effort>> = {
 	[Effort.Medium]: Effort.Medium,
 	[Effort.High]: Effort.High,
 	[Effort.XHigh]: Effort.XHigh,
-	max: Effort.XHigh,
+	[Effort.Max]: Effort.Max,
+	[Effort.Ultra]: Effort.Ultra,
 };
 const THINKING_LEVEL_BY_SELECTOR: Readonly<Record<string, ThinkingLevel>> = {
 	[ThinkingLevel.Inherit]: ThinkingLevel.Inherit,
@@ -53,6 +68,8 @@ const THINKING_LEVEL_BY_SELECTOR: Readonly<Record<string, ThinkingLevel>> = {
 	[ThinkingLevel.Medium]: ThinkingLevel.Medium,
 	[ThinkingLevel.High]: ThinkingLevel.High,
 	[ThinkingLevel.XHigh]: ThinkingLevel.XHigh,
+	[ThinkingLevel.Max]: ThinkingLevel.Max,
+	[ThinkingLevel.Ultra]: ThinkingLevel.Ultra,
 };
 
 function getOwnSelector<T>(selectors: Readonly<Record<string, T>>, value: string | null | undefined): T | undefined {
@@ -110,6 +127,9 @@ export function resolveThinkingLevelForModel(
 	if (level === ThinkingLevel.Off) {
 		return ThinkingLevel.Off;
 	}
+	if (level === ThinkingLevel.Ultra) {
+		return model?.reasoning ? ThinkingLevel.Ultra : undefined;
+	}
 	return clampThinkingLevelForModel(model, level);
 }
 
@@ -144,7 +164,6 @@ const AUTO_THINKING_METADATA: ConfiguredThinkingLevelMetadata = {
  */
 export function parseConfiguredThinkingLevel(value: string | null | undefined): ConfiguredThinkingLevel | undefined {
 	if (value === AUTO_THINKING) return AUTO_THINKING;
-	if (value === "max") return ThinkingLevel.XHigh;
 	return parseThinkingLevel(value);
 }
 
@@ -155,7 +174,7 @@ export function getConfiguredThinkingLevelMetadata(level: ConfiguredThinkingLeve
 
 /**
  * Thinking selectors accepted by the `--thinking` CLI flag, in display order:
- * `off`, every concrete effort (`minimal`..`xhigh`), then `auto`. Single source
+ * `off`, every concrete effort (`minimal`..`ultra`), then `auto`. Single source
  * for the flag's `options` list, shell completions, and the "invalid level"
  * warning so all three stay in sync.
  */
@@ -163,7 +182,7 @@ export const CLI_THINKING_LEVELS: readonly string[] = [ThinkingLevel.Off, ...THI
 
 /**
  * Parses a `--thinking` CLI value. Accepts every {@link parseConfiguredThinkingLevel}
- * selector (`off`, `auto`, `minimal`..`xhigh`, plus the `max` alias) but rejects
+ * selector (`off`, `auto`, `minimal`..`ultra`) but rejects
  * `inherit`: an explicit `inherit` on the command line would suppress the
  * settings/scoped-model fallback during startup resolution only to resolve back
  * to the provider default, which is never what the user means.

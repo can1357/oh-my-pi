@@ -701,6 +701,9 @@ export function requireSupportedEffort<TApi extends Api>(model: ApiModel<TApi>, 
 	}
 	const levels = getSupportedEfforts(model);
 	if (!levels.includes(effort)) {
+		if ((effort === Effort.Ultra || effort === Effort.Max) && levels.length > 0) {
+			return clampThinkingLevelForModel(model, effort) ?? levels[levels.length - 1];
+		}
 		throw new Error(
 			`Thinking effort ${effort} is not supported by ${model.provider}/${model.id}. Supported efforts: ${levels.join(", ")}`,
 		);
@@ -719,6 +722,8 @@ export function mapEffortToGoogleThinkingLevel(effort: Effort): "MINIMAL" | "LOW
 			return "MEDIUM";
 		case Effort.High:
 		case Effort.XHigh:
+		case Effort.Max:
+		case Effort.Ultra:
 			return "HIGH";
 	}
 }
@@ -732,13 +737,14 @@ export function mapEffortToAnthropicAdaptiveEffort<TApi extends Api>(
 	effort: Effort,
 ): "low" | "medium" | "high" | "xhigh" | "max" | "adaptive" {
 	const supported = requireSupportedEffort(model, effort);
-	return (model.thinking?.effortMap?.[supported] ?? supported) as
-		| "low"
-		| "medium"
-		| "high"
-		| "xhigh"
-		| "max"
-		| "adaptive";
+	const mapped = model.thinking?.effortMap?.[supported];
+	if (mapped) {
+		return mapped as "low" | "medium" | "high" | "xhigh" | "max" | "adaptive";
+	}
+	if (supported === Effort.Ultra) {
+		return "max";
+	}
+	return supported as "low" | "medium" | "high" | "xhigh" | "max" | "adaptive";
 }
 
 /**

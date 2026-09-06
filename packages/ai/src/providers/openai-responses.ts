@@ -1,3 +1,4 @@
+import type { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { hostMatchesUrl } from "@pk-nerdsaver-ai/pi-catalog/hosts";
 import { $flag, logger, structuredCloneJSON } from "@pk-nerdsaver-ai/pi-utils";
 import * as AIError from "../error";
@@ -95,7 +96,7 @@ import {
 
 // OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
-	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: `${Effort}`;
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ServiceTier;
 	textVerbosity?: "low" | "medium" | "high";

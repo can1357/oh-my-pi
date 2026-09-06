@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent, type AgentMessage, type AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool, ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { TextContent } from "@pk-nerdsaver-ai/pi-ai";
 import { AssistantMessageEventStream } from "@pk-nerdsaver-ai/pi-ai/utils/event-stream";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
@@ -273,6 +273,16 @@ describe("AgentSession eager task prelude", () => {
 		expect(observedCalls).toHaveLength(1);
 		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
 		expect(observedCalls[0]?.messageTexts).toEqual(["refactor the parser across modules"]);
+	});
+	it("prepends eager task prelude when in ultra mode even if task.eager is default", async () => {
+		const { session, observedCalls } = await createHarness({ "task.eager": "default" });
+		session.setThinkingLevel(ThinkingLevel.Ultra);
+
+		await session.prompt("refactor the parser across modules");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
+		expect(observedCalls[0]?.messageTexts[0]).toContain("Task delegation is enabled");
 	});
 
 	it("skips eager task prelude for subagent sessions", async () => {

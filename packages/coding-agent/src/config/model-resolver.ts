@@ -83,9 +83,10 @@ interface ModelStringParseOptions extends ThinkingSuffixOptions {
 const MAX_THINKING_SUFFIX_OPTIONS: ThinkingSuffixOptions = { allowMaxAlias: true };
 
 function parseThinkingSuffix(value: string, options?: ThinkingSuffixOptions): ThinkingLevel | undefined {
-	const level = parseThinkingLevel(value);
-	if (level !== undefined) return level;
-	return options?.allowMaxAlias === true && value === "max" ? ThinkingLevel.XHigh : undefined;
+	// Defer max to the context-aware pass so literal model IDs ending in
+	// :max still win before interpreting it as the distinct reasoning tier.
+	if (value === "max") return options?.allowMaxAlias === true ? ThinkingLevel.Max : undefined;
+	return parseThinkingLevel(value);
 }
 
 /**
@@ -171,7 +172,7 @@ export function parseModelString(
 	// Strip strict thinking level suffixes first (e.g. "claude-sonnet-4-6:high" -> id "claude-sonnet-4-6", thinkingLevel "high").
 	const strict = splitThinkingSuffix(id);
 	if (strict.level) return { provider, id: strict.base, thinkingLevel: strict.level };
-	// `max` is a provider-facing alias for xhigh, but real model IDs can end in
+	// `max` is a reasoning tier, but real model IDs can also end in
 	// `:max`. Context-aware callers pass a literal lookup so those models win.
 	const maxAlias = splitThinkingSuffix(id, -1, options);
 	if (maxAlias.level) {
@@ -227,7 +228,7 @@ function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: st
 	}
 
 	const suffix = modelId.slice(colonIdx + 1).trim();
-	// `max` is a thinking-level alias (xhigh), never an OpenRouter route suffix, so
+	// `max` is a thinking level, never an OpenRouter route suffix, so
 	// `openrouter/<id>:max` falls through to the max-aware selector split instead of
 	// being cloned into a literal `<id>:max` model id with the reasoning level lost.
 	if (!suffix || parseThinkingSuffix(suffix, MAX_THINKING_SUFFIX_OPTIONS)) {

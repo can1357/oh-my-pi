@@ -1,3 +1,4 @@
+import type { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { $env } from "@pk-nerdsaver-ai/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
@@ -56,7 +57,7 @@ function resolveDeploymentName(model: Model<"azure-openai-responses">, options?:
 
 // Azure OpenAI Responses-specific options
 export interface AzureOpenAIResponsesOptions extends StreamOptions {
-	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: `${Effort}`;
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	azureApiVersion?: string;
 	azureResourceName?: string;

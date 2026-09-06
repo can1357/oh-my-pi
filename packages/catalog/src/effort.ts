@@ -5,6 +5,8 @@ export const enum Effort {
 	Medium = "medium",
 	High = "high",
 	XHigh = "xhigh",
+	Max = "max",
+	Ultra = "ultra",
 }
 
 export const THINKING_EFFORTS: readonly Effort[] = [
@@ -13,4 +15,6 @@ export const THINKING_EFFORTS: readonly Effort[] = [
 	Effort.Medium,
 	Effort.High,
 	Effort.XHigh,
+	Effort.Max,
+	Effort.Ultra,
 ];

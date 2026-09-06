@@ -456,10 +456,10 @@ describe("parseModelPattern", () => {
 				expect(result.warning).toBeUndefined();
 			}
 		});
-		test("max aliases the highest thinking level after the literal pattern misses", () => {
+		test("max selects a distinct thinking tier after the literal pattern misses", () => {
 			const result = parseModelPattern("gpt-5.3-codex:max", allModels);
 			expect(result.model?.id).toBe("gpt-5.3-codex");
-			expect(result.thinkingLevel).toBe(Effort.XHigh);
+			expect(result.thinkingLevel).toBe(Effort.Max);
 			expect(result.explicitThinkingLevel).toBe(true);
 			expect(result.warning).toBeUndefined();
 		});
@@ -553,13 +553,13 @@ describe("parseModelPattern", () => {
 			expect(result.warning).toBeUndefined();
 		});
 
-		test("openrouter/<id>:max applies xhigh through the exact-selector path, not an OpenRouter route", () => {
-			// `max` is a thinking alias, never an OpenRouter route suffix: the request must
-			// resolve the base model and carry xhigh, not clone a literal `z-ai/glm-4.7:max`.
+		test("openrouter/<id>:max selects reasoning rather than an OpenRouter route", () => {
+			// Preserve the requested max tier; session resolution clamps it to the
+			// model's ceiling instead of cloning a literal `z-ai/glm-4.7:max` ID.
 			const result = parseModelPattern("openrouter/z-ai/glm-4.7:max", allModels);
 			expect(result.model?.provider).toBe("openrouter");
 			expect(result.model?.id).toBe("z-ai/glm-4.7");
-			expect(result.thinkingLevel).toBe(Effort.XHigh);
+			expect(result.thinkingLevel).toBe(Effort.Max);
 			expect(result.explicitThinkingLevel).toBe(true);
 		});
 	});
@@ -1199,7 +1199,7 @@ describe("parseModelString", () => {
 
 		test("extracts max when explicitly enabled for provider id selectors", () => {
 			const result = parseModelString("deepseek/deepseek-v4-pro:max", { allowMaxAlias: true });
-			expect(result).toEqual({ provider: "deepseek", id: "deepseek-v4-pro", thinkingLevel: Effort.XHigh });
+			expect(result).toEqual({ provider: "deepseek", id: "deepseek-v4-pro", thinkingLevel: Effort.Max });
 		});
 
 		test("preserves literal max model ids when the caller can prove they exist", () => {
@@ -1270,7 +1270,7 @@ describe("extractExplicitThinkingSelector", () => {
 		const result = extractExplicitThinkingSelector("nanogpt/coding-router:max", undefined, {
 			isLiteralModelId: () => false,
 		});
-		expect(result).toBe(Effort.XHigh);
+		expect(result).toBe(Effort.Max);
 	});
 
 	test("treats max on pi role aliases as an explicit selector before expansion", () => {
@@ -1279,7 +1279,7 @@ describe("extractExplicitThinkingSelector", () => {
 		const result = extractExplicitThinkingSelector("pi/smol:max", settings, {
 			isLiteralModelId: (provider, id) => provider === "nanogpt" && id === "coding-router:max",
 		});
-		expect(result).toBe(Effort.XHigh);
+		expect(result).toBe(Effort.Max);
 	});
 });
 

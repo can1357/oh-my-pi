@@ -6351,7 +6351,7 @@ export interface Reasoning {
  * - The `gpt-5-pro` model defaults to (and only supports) `high` reasoning effort.
  * - `xhigh` is supported for all models after `gpt-5.1-codex-max`.
  */
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
 /**
  * JSON object response format. An older method of generating JSON responses. Using
  * `json_schema` is recommended for models that support it. Note that the model

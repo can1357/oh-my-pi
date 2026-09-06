@@ -4,7 +4,7 @@
 import { THINKING_EFFORTS } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@pk-nerdsaver-ai/pi-utils";
 import chalk from "chalk";
-import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
+import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel, ThinkingLevel } from "../thinking";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
 	OPTIONAL_FLAGS,
@@ -33,6 +33,7 @@ export interface Args {
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
 	thinking?: ConfiguredThinkingLevel;
+	ultra?: boolean;
 	hideThinking?: boolean;
 	advisor?: boolean;
 	continue?: boolean;
@@ -217,6 +218,9 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noPty = true;
 		} else if (arg === "--hide-thinking") {
 			result.hideThinking = true;
+		} else if (arg === "--ultra") {
+			result.ultra = true;
+			result.thinking = ThinkingLevel.Ultra;
 		} else if (arg === "--advisor") {
 			result.advisor = true;
 		} else if (arg === "--print" || arg === "-p") {
