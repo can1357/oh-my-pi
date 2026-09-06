@@ -97,6 +97,7 @@ export function createCodexHistoryNotesTools(
 ): AgentTool[] {
 	return CODEX_HISTORY_NOTES_ROUTES.map(route => {
 		const spec = protocol[route];
+		const writes = route === "alpha/notes/v2/append_to_file" || route === "alpha/notes/v2/write_file";
 		return {
 			name: `${spec.namespace}.${spec.name}`,
 			namespace: spec.namespace,
@@ -113,8 +114,8 @@ export function createCodexHistoryNotesTools(
 			modelOnly: true,
 			intent: "omit",
 			strict: false,
-			concurrency:
-				route === "alpha/notes/v2/append_to_file" || route === "alpha/notes/v2/write_file" ? "exclusive" : "shared",
+			approval: writes ? "write" : "read",
+			concurrency: writes ? "exclusive" : "shared",
 			execute: async (_id, args, signal) => {
 				if (!isRecord(args)) throw new Error("History tool arguments must be a JSON object");
 				return { content: await backend.call(route, args, { ...context(), signal }) };
