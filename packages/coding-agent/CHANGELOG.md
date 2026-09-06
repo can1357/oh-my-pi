@@ -33,6 +33,10 @@
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
 
+### Fixed
+
+- Streaming edit preview failures (`edit.streamingAbort`) now surface the native patch diagnostic on the `edit` tool result and report `Streaming edit preview failed` instead of a generic `Request was aborted`, so the model can correct the patch ([#10808](https://github.com/can1357/oh-my-pi/issues/10808)).
+
 ## [18.1.10] - 2026-09-04
 
 ### Changed

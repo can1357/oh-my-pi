@@ -1,4 +1,10 @@
-import type { Agent, AgentEvent, AgentMessage, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
+import {
+	type Agent,
+	type AgentEvent,
+	type AgentMessage,
+	type AgentTurnEndContext,
+	createToolScopedAbortReason,
+} from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, Model, ToolCall } from "@oh-my-pi/pi-ai";
 import { GeminiHeaderRunDetector } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
@@ -158,7 +164,20 @@ export class StreamingEditGuard {
 	#abortPatch(toolCallId: string, filePath: string, error: string): void {
 		this.#abortTriggered = true;
 		logger.warn("Streaming edit aborted due to patch preview failure", { toolCallId, path: filePath, error });
-		this.#host.agent.abort();
+		// Carry the native diagnostic through the abort so it lands on the failing
+		// edit call's synthetic tool result (and the assistant errorMessage) instead
+		// of collapsing to the generic "Request was aborted" sentinel, which is
+		// indistinguishable from a provider/user cancellation and strands the model
+		// with no way to correct the patch. The no-retry terminal semantics stay
+		// intact (see turn-recovery's streamingEditAbortTriggered exclusion).
+		const diagnostic = `Streaming edit preview failed for ${filePath}: ${error}`;
+		this.#host.agent.abort(
+			createToolScopedAbortReason(
+				"Streaming edit preview failed",
+				{ [toolCallId]: diagnostic },
+				"Streaming edit preview failed",
+			),
+		);
 	}
 }
 

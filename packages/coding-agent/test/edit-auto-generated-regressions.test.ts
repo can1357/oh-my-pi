@@ -350,3 +350,118 @@ it("agent-loop propagates explicit isError from a tool result to the wire", asyn
 		}
 	}
 });
+
+// A mock edit tool whose streamed final preview reports a per-file patch error,
+// exercising the StreamingEditGuard patch-preview abort path through the real
+// agent loop without needing the native edit engine.
+function buildPreviewFailEditTool(failPath: string, failError: string): AgentTool {
+	const schema = type({ path: "string", diff: "string" });
+	return {
+		name: "edit",
+		label: "Edit",
+		description: "",
+		parameters: schema,
+		async execute() {
+			return { content: [{ type: "text", text: "applied" }] };
+		},
+		openArgStream(init) {
+			return {
+				push() {},
+				cancel() {},
+				end() {
+					init.emit({
+						generation: 1,
+						streaming: false,
+						files: [{ path: "untouched.ts" }, { path: failPath, error: failError }],
+					});
+				},
+			};
+		},
+	};
+}
+
+// Streams a single well-formed edit tool call (start → delta → end) so the agent
+// loop opens the arg stream and drives the tool's final preview. Once the guard
+// aborts in response to the failing preview, a real provider stops emitting;
+// we model that by awaiting the request signal after `toolcall_end` so the loop
+// finishes the turn as aborted (retaining the tool call) before dispatching it —
+// the `assistant_stop_aborted` path the report observed. No abort shim: the
+// aborted message, its errorMessage, and the per-call diagnostic are all
+// synthesized by the loop from the guard's abort signal.
+function streamEditPreviewCall(filePath: string, diff: string): Agent["streamFn"] {
+	let callIndex = 0;
+	const toolCallId = "call_edit_preview_fail";
+	return (_model, _context, options) => {
+		const signal = options?.signal;
+		const stream = new AssistantMessageEventStream();
+		queueMicrotask(async () => {
+			if (callIndex++ > 0) {
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "done" }], "stop"),
+				});
+				return;
+			}
+			stream.push({ type: "start", partial: createAssistantMessage([], "stop") });
+			const startCall = createToolCall(toolCallId, { path: filePath, diff: "" });
+			stream.push({ type: "toolcall_start", contentIndex: 0, partial: createAssistantMessage([startCall], "stop") });
+			const midCall = createToolCall(toolCallId, { path: filePath, diff });
+			stream.push({
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: diff,
+				partial: createAssistantMessage([midCall], "stop"),
+			});
+			const finalCall = createToolCall(toolCallId, { path: filePath, diff });
+			const finalMessage = createAssistantMessage([finalCall], "toolUse");
+			stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: finalCall, partial: finalMessage });
+			if (signal && !signal.aborted) {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				signal.addEventListener("abort", () => resolve(), { once: true });
+				await promise;
+			}
+			// If the guard did not abort (e.g. streamingAbort off), complete normally.
+			stream.push({ type: "done", reason: "toolUse", message: finalMessage });
+		});
+		return stream;
+	};
+}
+
+it("surfaces the streaming edit preview diagnostic on the aborted turn instead of a generic abort", async () => {
+	// Regression for #10808: with edit.streamingAbort enabled, a failed final
+	// preview aborted the turn with a bare agent.abort(), collapsing to the
+	// generic "Request was aborted" sentinel and discarding the native
+	// diagnostic so the model had nothing to correct. Drive the abort end to end
+	// through the agent loop and assert the surfaced assistant message and the
+	// failing edit call's synthetic tool result both carry the diagnostic.
+	const failError = "Line 99 does not exist (file has 4 lines)";
+	const streamFn = streamEditPreviewCall("target.ts", "[target.ts#B6C1]\nPUT 99.=99:\n+replacement-a\n");
+	const tool = buildPreviewFailEditTool("target.ts", failError);
+	const { session, authStorage } = await createSessionWith(tempDir, streamFn, tool, {
+		"edit.streamingAbort": true,
+	});
+
+	try {
+		await session.prompt("apply patch");
+
+		const lastAssistant = lastAssistantMessage(session.state.messages);
+		expect(lastAssistant?.stopReason).toBe("aborted");
+		expect(lastAssistant?.errorMessage).toBe("Streaming edit preview failed");
+		expect(lastAssistant?.errorMessage).not.toBe("Request was aborted");
+
+		const toolResult = session.state.messages.find(m => m.role === "toolResult") as
+			| { content: Array<{ type: string; text?: string }> }
+			| undefined;
+		expect(toolResult).toBeDefined();
+		const text = toolResult?.content?.find(c => c.type === "text")?.text ?? "";
+		expect(text).toContain(failError);
+		expect(text).toContain("target.ts");
+	} finally {
+		try {
+			await session.dispose();
+		} finally {
+			authStorage.close();
+		}
+	}
+});
