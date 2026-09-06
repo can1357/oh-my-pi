@@ -28,6 +28,7 @@ type FakeEditor = {
 	pendingImageLinks: (string | undefined)[];
 	setText(text: string): void;
 	getText(): string;
+	getExpandedText(): string;
 	setCollapsedText(text: string): void;
 	composerChips(): unknown[];
 	addToHistory(text: string): void;
@@ -41,6 +42,8 @@ function createContext() {
 	let editorText = "";
 	const steer = vi.fn(async (_text: string, _images?: unknown) => {});
 	const prompt = vi.fn(async () => {});
+	const followUp = vi.fn(async () => {});
+	const startPendingSubmission = vi.fn((submission: unknown) => submission);
 	const showStatus = vi.fn();
 	const addToHistory = vi.fn();
 	const requestRender = vi.fn();
@@ -58,6 +61,9 @@ function createContext() {
 			editorText = text;
 		},
 		getText() {
+			return editorText;
+		},
+		getExpandedText() {
 			return editorText;
 		},
 		setCollapsedText(text: string) {
@@ -87,6 +93,7 @@ function createContext() {
 		settings: Settings.isolated({}),
 		steer,
 		prompt,
+		followUp,
 		maybeStartTitleGeneration: vi.fn(),
 		queuedMessageCount: 0,
 		customCommands: [],
@@ -129,6 +136,7 @@ function createContext() {
 				throw err;
 			}
 		},
+		startPendingSubmission,
 		onInputCallback: undefined,
 		updatePendingMessagesDisplay: vi.fn(),
 		flushPendingBashComponents: vi.fn(),
@@ -137,7 +145,7 @@ function createContext() {
 		isPythonMode: false,
 	} as unknown as InteractiveModeContext;
 
-	return { ctx, editor, spies: { steer, prompt, showStatus, requestRender } };
+	return { ctx, editor, spies: { steer, prompt, followUp, startPendingSubmission, showStatus, requestRender } };
 }
 
 describe("InputController collab join window", () => {
@@ -166,6 +174,50 @@ describe("InputController collab join window", () => {
 		expect(spies.showStatus).toHaveBeenCalledTimes(1);
 		expect(spies.showStatus.mock.calls[0]?.[0]).toMatch(/collab/i);
 		expect(spies.requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("holds a `=> ` queue-shorthand prompt while a collab join is still syncing", async () => {
+		const { ctx, editor, spies } = createContext();
+		const text = "=> investigate this";
+		ctx.collabJoining = true;
+		ctx.collabGuest = undefined;
+		editor.setText(text);
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		await editor.submit(text);
+
+		// The queue path must not reach any local dispatch during the join.
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(spies.followUp).not.toHaveBeenCalled();
+		expect(spies.startPendingSubmission).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe(text);
+		expect(spies.showStatus).toHaveBeenCalledTimes(1);
+		expect(spies.showStatus.mock.calls[0]?.[0]).toMatch(/collab/i);
+	});
+
+	it("holds a Ctrl+Enter follow-up prompt while a collab join is still syncing", async () => {
+		const { ctx, editor, spies } = createContext();
+		const image: ImageContent = { type: "image", data: "abc", mimeType: "image/png" };
+		const imageLink = "file:///tmp/collab-followup.png";
+		const text = "wrap up [Image #1]";
+		ctx.collabJoining = true;
+		ctx.collabGuest = undefined;
+		editor.setText(text);
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = [imageLink];
+		editor.imageLinks = editor.pendingImageLinks;
+		const controller = new InputController(ctx);
+
+		await controller.handleFollowUp();
+
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(spies.followUp).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe(text);
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual([imageLink]);
+		expect(spies.showStatus).toHaveBeenCalledTimes(1);
+		expect(spies.showStatus.mock.calls[0]?.[0]).toMatch(/collab/i);
 	});
 
 	it("runs prompts locally once the join window has closed", async () => {
