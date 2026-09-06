@@ -82,6 +82,10 @@ export const psHelp = {
 	description: "List and control daemon-supervised background processes (logs, stop, kill, restart)",
 } satisfies CommandMetadata;
 
+export const sessionsHelp = {
+	description: "List saved sessions in the current project or every project",
+} satisfies CommandMetadata;
+
 export const readHelp = {
 	description: "Show what the read tool will return for a path, URL, or internal URI",
 } satisfies CommandMetadata;
