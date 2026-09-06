@@ -502,6 +502,116 @@ test("preserves the last ordinary segment when compact context labels cannot fit
 	expect(rendered).not.toContain("100K");
 });
 
+test("drops the last ordinary segment when the explicit compact total then fits", () => {
+	const component = new StatusLineComponent({
+		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+		messages: [],
+		model: { name: "M", contextWindow: 100000 },
+		systemPrompt: [],
+		agent: { state: { tools: [] } },
+		skills: [],
+		isStreaming: false,
+		isAutoThinking: false,
+		autoResolvedThinkingLevel: () => undefined,
+		isFastModeActive: () => false,
+		isAdvisorActive: () => false,
+		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+		getAsyncJobSnapshot: () => ({ running: [] }),
+		settings: { get: () => false },
+		modelRegistry: { isUsingOAuth: () => false },
+		sessionManager: {
+			getSessionName: () => "status demo",
+			getUsageStatistics: () => ({
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				orchestrationInput: 0,
+				orchestrationOutput: 0,
+				orchestrationCacheRead: 0,
+				premiumRequests: 0,
+				cost: 0,
+			}),
+		},
+		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+
+	component.updateSettings({
+		preset: "custom",
+		leftSegments: ["model", "context_pct"],
+		rightSegments: ["context_total"],
+		separator: "none",
+		sessionAccent: false,
+		transparent: true,
+		contextLine: "embedded",
+		segmentOptions: {
+			model: { showThinkingLevel: false },
+			context_pct: { compact: true },
+		},
+	});
+
+	const rendered = stripVTControlCharacters(component.getTopBorder(14).content);
+	expect(rendered).toContain("ctx:8%");
+	expect(rendered).toContain("100K");
+	expect(rendered).not.toContain("M");
+});
+
+test("reserves the live compact percentage width during startup", () => {
+	const component = new StatusLineComponent({
+		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+		messages: [],
+		model: { name: "M", contextWindow: 100000 },
+		systemPrompt: [],
+		agent: { state: { tools: [] } },
+		skills: [],
+		isStreaming: false,
+		isAutoThinking: false,
+		autoResolvedThinkingLevel: () => undefined,
+		isFastModeActive: () => false,
+		isAdvisorActive: () => false,
+		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+		getAsyncJobSnapshot: () => ({ running: [] }),
+		settings: { get: () => false },
+		modelRegistry: { isUsingOAuth: () => false },
+		sessionManager: {
+			getSessionName: () => "status demo",
+			getUsageStatistics: () => ({
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				orchestrationInput: 0,
+				orchestrationOutput: 0,
+				orchestrationCacheRead: 0,
+				premiumRequests: 0,
+				cost: 0,
+			}),
+		},
+		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+
+	component.updateSettings({
+		preset: "custom",
+		leftSegments: ["model", "context_pct"],
+		rightSegments: [],
+		separator: "none",
+		sessionAccent: false,
+		transparent: true,
+		contextLine: "embedded",
+		segmentOptions: {
+			model: { showThinkingLevel: false },
+			context_pct: { compact: true },
+		},
+	});
+
+	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(8, "box"));
+	const rendered = stripVTControlCharacters(component.getTopBorder(8).content);
+	expect(startup).not.toContain("M");
+	expect(rendered).not.toContain("M");
+});
+
 test("preserves the last ordinary segment when compact context cannot fit by itself", () => {
 	const component = new StatusLineComponent({
 		state: { messages: [], model: { name: "M", contextWindow: 100000 } },

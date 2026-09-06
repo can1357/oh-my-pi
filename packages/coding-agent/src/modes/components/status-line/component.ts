@@ -2121,22 +2121,20 @@ export class StatusLineComponent implements Component {
 		// handling, so the gauge must reserve enough room for both labels. Without
 		// this budget a long path/session title can leave a one-cell gap: the
 		// context segment is gone, and the gauge silently omits its labels too.
+		// Startup still knows the live usage values. Reserve those label widths
+		// while painting placeholders so the ordinary groups do not jump when the
+		// first live status line replaces `ctx:…` / `…`.
 		const embeddedContextWidth = embedContext
-			? ctx.startupPlaceholder
-				? embedCompactContext
-					? "ctx:…".length + (showEmbeddedContextWindow ? "…".length + 4 : 0)
-					: "…%".length + "…".length + 4
-				: embeddedContextGaugeMinWidth(
-						ctx.contextPercent ?? 0,
-						ctx.contextWindow,
-						embedCompactContext,
-						showEmbeddedContextWindow,
-					)
+			? embeddedContextGaugeMinWidth(
+					ctx.contextPercent ?? 0,
+					ctx.contextWindow,
+					embedCompactContext,
+					showEmbeddedContextWindow,
+				)
 			: 0;
-		const embeddedContextPercentWidth =
-			embedContext && !ctx.startupPlaceholder
-				? embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow, embedCompactContext, false)
-				: embeddedContextWidth;
+		const embeddedContextPercentWidth = embedContext
+			? embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow, embedCompactContext, false)
+			: 0;
 		// A default (non-compact) gauge may fall back to its short percentage-only
 		// label when both context labels cannot coexist with the final ordinary
 		// segment. Do not drop that last segment merely to satisfy the larger
@@ -2148,6 +2146,7 @@ export class StatusLineComponent implements Component {
 			const preserveLastOrdinarySegment =
 				ordinaryCount === 1 &&
 				ordinaryWidth + embeddedContextWidth > topFillWidth &&
+				(!embedCompactContext || embeddedContextWidth > topFillWidth) &&
 				(ordinaryWidth + embeddedContextPercentWidth <= topFillWidth || embeddedPercentCannotFit);
 			if (!preserveLastOrdinarySegment && embeddedContextWidth > 0) return embeddedContextWidth;
 			if (preserveLastOrdinarySegment) return embeddedPercentCannotFit ? 0 : 1;
