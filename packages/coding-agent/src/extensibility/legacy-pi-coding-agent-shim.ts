@@ -459,6 +459,7 @@ export function createReadToolDefinition(cwd: string, options?: ReadToolOptions)
 	);
 	return markToolDefinition({
 		name: "read",
+		readsSkillUris: true,
 		label: "Read",
 		description: tool.description,
 		parameters: legacyReadSchema,

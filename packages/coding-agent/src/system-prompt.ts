@@ -983,10 +983,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	// Filter skills for the rendered system prompt:
 	// - require an active tool that declares `skill://` read capability (any tool
-	//   name, not just `read`, so custom resolvers count once projected);
+	//   name, not just `read`, so custom resolvers count once projected; mounted
+	//   xd:// tools count too when their metadata is projected);
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasSkillReader =
-		tools === undefined ? toolNames.includes("read") : toolNames.some(name => toolReadsSkillUris(tools.get(name)));
+		tools === undefined
+			? toolNames.includes("read")
+			: toolNames.some(name => toolReadsSkillUris(tools.get(name))) ||
+				xdevTools.some(entry => toolReadsSkillUris(tools.get(entry.name)));
 	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
 	const filteredSkills = hasSkillReader ? skills.filter(skill => skill.hide !== true) : [];
 

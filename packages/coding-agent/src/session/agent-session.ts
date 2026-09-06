@@ -7888,7 +7888,9 @@ export class AgentSession {
 		if (this.agent.state.messages.length === 0) {
 			await this.refreshBaseSystemPrompt();
 		} else if (enabled) {
-			const hasSkillReader = this.getActiveToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)));
+			const hasSkillReader = [...this.getActiveToolNames(), ...this.getMountedXdevToolNames()].some(name =>
+				toolReadsSkillUris(this.getToolByName(name)),
+			);
 			const renderedSkills = hasSkillReader ? this.skills.filter(skill => skill.hide !== true) : [];
 			const alreadyAnnounced = this.agent.state.messages.some(
 				message => message.role === "custom" && message.customType === "skillful-notice",

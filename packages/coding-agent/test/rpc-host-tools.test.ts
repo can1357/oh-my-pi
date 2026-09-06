@@ -112,6 +112,22 @@ describe("RpcHostToolBridge", () => {
 		});
 		await expect(execution).rejects.toThrow('Host tool "host_wait" was aborted');
 	});
+
+	it("exposes skill URI readability declared by the host tool", async () => {
+		const { toolReadsSkillUris } = await import("@oh-my-pi/pi-coding-agent/system-prompt");
+		const bridge = new RpcHostToolBridge(() => {});
+		const [tool] = bridge.setTools([
+			{
+				name: "host_read",
+				label: "Host Read",
+				description: "Reads files in the host process",
+				parameters: { type: "object", properties: {}, additionalProperties: false },
+				readsSkillUris: true,
+			},
+		]);
+
+		expect(toolReadsSkillUris(tool)).toBe(true);
+	});
 });
 
 describe("RpcClient custom tools", () => {
