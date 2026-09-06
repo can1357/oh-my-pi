@@ -594,11 +594,10 @@ describe("InteractiveMode plan review rendering", () => {
 			title: "PLAN",
 		});
 
-		// The plan-approved prompt stays reference-only; approval must instead
-		// await the durable file mirror before dispatch so read sees the edit.
+		// The executor must receive the final approved text, including in-overlay edits.
 		const call = promptSpy.mock.calls.find(isPlanApprovedCall);
 		expect(call).toBeDefined();
-		expect(call?.[0] as string).not.toContain("edited body");
+		expect(call?.[0] as string).toContain("edited body");
 		expect(call?.[0] as string).not.toContain("original body");
 		// onPlanEdited mirrored the edit to the plan file.
 		expect(await Bun.file(resolvedPlanPath).text()).toContain("edited body");
