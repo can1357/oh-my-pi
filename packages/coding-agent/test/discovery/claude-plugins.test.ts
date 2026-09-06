@@ -10,6 +10,7 @@ import {
 	parseClaudePluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
+import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 
@@ -558,6 +559,59 @@ describe("listClaudePluginRoots", () => {
 
 		expect(result.all.find(skill => skill.name === "omp-demo")?._source.provider).toBe("claude-plugins");
 		expect(result.all.find(skill => skill.name === "claude-demo")).toBeUndefined();
+	});
+
+	test("loadSkills surfaces omp-installed plugin skills without enabling the Claude source", async () => {
+		// Regression (#10743): #10666 fixed allowedRoots() to keep user-scope roots
+		// with origin !== "claude", but isSourceEnabled() in extensibility/skills.ts
+		// re-dropped them via isUserSourceEnabled("claude-plugins"). The origin now
+		// rides SourceMeta, so the foreign gate applies only to claude-origin roots.
+		const ompPluginPath = path.join(tempDir, "plugins", "omp-owned");
+		const claudePluginPath = path.join(tempDir, "plugins", "claude-owned");
+		const ompRegistryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		const claudeRegistryPath = path.join(tempDir, ".claude", "plugins", "installed_plugins.json");
+		await Promise.all([
+			fs.mkdir(path.join(ompPluginPath, "skills", "omp-demo"), { recursive: true }),
+			fs.mkdir(path.join(claudePluginPath, "skills", "claude-demo"), { recursive: true }),
+			fs.mkdir(path.dirname(ompRegistryPath), { recursive: true }),
+			fs.mkdir(path.dirname(claudeRegistryPath), { recursive: true }),
+		]);
+		await Promise.all([
+			fs.writeFile(
+				path.join(ompPluginPath, "skills", "omp-demo", "SKILL.md"),
+				"---\nname: omp-demo\ndescription: OMP skill\n---\nBody\n",
+			),
+			fs.writeFile(
+				path.join(claudePluginPath, "skills", "claude-demo", "SKILL.md"),
+				"---\nname: claude-demo\ndescription: Claude skill\n---\nBody\n",
+			),
+			fs.writeFile(
+				ompRegistryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"omp-owned@market": [{ scope: "user", installPath: ompPluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+			fs.writeFile(
+				claudeRegistryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"claude-owned@market": [{ scope: "user", installPath: claudePluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		// enabledProviders unset (beforeEach disables the claude-plugins/claude
+		// user sources): the omp-origin skill must still load; the claude-origin
+		// one must stay opt-in.
+		const { skills } = await loadSkills({ cwd: tempDir });
+
+		expect(skills.map(s => s.name)).toContain("omp-demo");
+		expect(skills.map(s => s.name)).not.toContain("claude-demo");
 	});
 
 	test("defaults scope to user when not specified", async () => {

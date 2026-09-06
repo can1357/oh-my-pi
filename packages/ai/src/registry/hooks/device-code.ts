@@ -10,4 +10,6 @@ export const DEVICE_CODE_HEADERS_HOOKS: Record<string, Lazy<HeadersHook>> = {
 export const DEVICE_CODE_VALUE_HOOKS: Record<string, Lazy<ValueHook>> = {
 	"xai-token-endpoint": () => import("../oauth/xai-oauth").then(module => module.getXAITokenEndpoint),
 };
-export const DEVICE_CODE_AFTER_EXCHANGE_HOOKS: Record<string, Lazy<AfterExchangeHook>> = {};
+export const DEVICE_CODE_AFTER_EXCHANGE_HOOKS: Record<string, Lazy<AfterExchangeHook>> = {
+	"muse-code-key": () => import("../oauth/muse-code").then(module => module.attachMuseCodeApiKey),
+};

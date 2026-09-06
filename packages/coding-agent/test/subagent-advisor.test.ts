@@ -48,10 +48,10 @@ describe("per-agent settings migrations", () => {
 
 	it("normalizes boolean per-agent prewalk and advisor overrides", async () => {
 		const settings = await load(
-			"task:\n  agentPrewalk:\n    librarian: true\n    task: false\n  agentAdvisor:\n    librarian: false\n    task: true\n",
+			"task:\n  agentPrewalk:\n    reviewer: true\n    task: false\n  agentAdvisor:\n    reviewer: false\n    task: true\n",
 		);
-		expect(settings.get("task.agentPrewalk")).toEqual({ librarian: "on", task: "off" });
-		expect(settings.get("task.agentAdvisor")).toEqual({ librarian: "off", task: "on" });
+		expect(settings.get("task.agentPrewalk")).toEqual({ reviewer: "on", task: "off" });
+		expect(settings.get("task.agentAdvisor")).toEqual({ reviewer: "off", task: "on" });
 	});
 });
 
