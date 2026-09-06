@@ -286,6 +286,18 @@ export interface InteractiveModeNotify {
 	message: string;
 }
 
+/**
+ * Severity for a `modelFallbackMessage`. A `--reapply-config` config *adoption*
+ * ("resumed on X from config instead of the session's Y") is the user-requested
+ * outcome of the flag, so it is informational; the flag's other notices report a
+ * model that "did not resolve", which is a genuine fallback and stays a warning,
+ * as does every non-`--reapply-config` restore failure.
+ */
+export function buildModelFallbackNotification(modelFallbackMessage: string): InteractiveModeNotify {
+	const configAdoption = modelFallbackMessage.startsWith("--reapply-config: resumed on ");
+	return { kind: configAdoption ? "info" : "warn", message: modelFallbackMessage };
+}
+
 export function buildModelScopeNotification(
 	scopedModelsForDisplay: readonly Pick<ScopedModel, "model" | "thinkingLevel" | "explicitThinkingLevel">[],
 	startupQuiet: boolean,
@@ -1089,6 +1101,9 @@ export async function buildSessionOptions(
 		autoApprove: parsed.autoApprove ?? false,
 	};
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
+	if (parsed.reapplyConfig) {
+		options.reapplyConfig = true;
+	}
 	if (parsed.serviceTier !== undefined) {
 		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;
 	}
@@ -1130,7 +1145,12 @@ export async function buildSessionOptions(
 			parsed.systemPrompt !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
 			parsed.tools !== undefined ||
-			parsed.noTools === true;
+			parsed.noTools === true ||
+			// --reapply-config re-resolves the model / thinking level from config,
+			// so a resumed fork's request shape can change without --model or
+			// --thinking ever being passed. An explicit --prompt-cache-key still
+			// wins: that case never reaches this branch.
+			parsed.reapplyConfig === true;
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
 			options.providerPromptCacheKey = header.providerPromptCacheKey;
 			options.providerPromptCacheKeySource = "fork";
@@ -2019,7 +2039,7 @@ export async function runRootCommand(
 			}
 
 			if (modelFallbackMessage) {
-				notifs.push({ kind: "warn", message: modelFallbackMessage });
+				notifs.push(buildModelFallbackNotification(modelFallbackMessage));
 			}
 
 			const modelRegistryError = modelRegistry.getError();

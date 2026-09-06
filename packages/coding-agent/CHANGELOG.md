@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--reapply-config` (and the `reapplyConfig` SDK option): on `--resume`, adopt the config-resolved default model, its thinking level, and service tier instead of restoring the values baked into the session at its original launch. Adoption is per-knob (and per-family for the service tier) — a value the config does not specify keeps the session's own — and the flag is off by default, so a bare resume still restores the session's model/thinking/tier. A resume that swaps the model, or falls back after a broken config default, is surfaced as a notice. Lets a `--config`/`--profile` overlay re-apply on resume.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

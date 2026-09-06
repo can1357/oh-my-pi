@@ -1059,7 +1059,7 @@ export function parseModelPattern(
 	);
 }
 
-const DEFAULT_MODEL_ROLE = "default";
+export const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
 
 export interface ModelRoleLookup {

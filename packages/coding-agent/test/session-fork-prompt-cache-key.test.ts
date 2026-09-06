@@ -169,6 +169,16 @@ describe("provider prompt-cache key session affinity", () => {
 				name: "tools",
 				options: { toolNames: ["read"] },
 			},
+			{
+				// `--reapply-config` re-resolves model and thinking from config, so
+				// the request shape can change with no explicit model/thinking
+				// option. `main.ts` drops the inherited key for the CLI path, but
+				// `createAgentSessionScoped` reads the header independently — so
+				// without this in the SDK check, the SDK path (and the CLI through
+				// it) kept the parent's affinity anyway.
+				name: "reapply-config",
+				options: { reapplyConfig: true },
+			},
 		];
 
 		for (const entry of cases) {
@@ -226,6 +236,55 @@ describe("provider prompt-cache key session affinity", () => {
 
 			expect(options.model).toBe(OPENAI_TEST_MODEL);
 			expect(options.providerPromptCacheKey).toBeUndefined();
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("drops inherited prompt-cache affinity when --reapply-config can reshape the request", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-reapply-");
+		const source = await createSourceSessionFixture(tempDir, "parent-cache-session-reapply");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		const authStorage = await AuthStorage.create(tempDir.join("reapply-auth.db"));
+		authStorage.setRuntimeApiKey(OPENAI_TEST_MODEL.provider, "test-key");
+		try {
+			const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+			const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+
+			// Baseline: a bare resume of the same fork keeps the parent's key, so
+			// the fixture really does carry inheritable affinity.
+			const inherited = await buildSessionOptions(
+				parseArgs(["--cwd", source.cwd]),
+				[],
+				forkedManager,
+				modelRegistry,
+				settings,
+			);
+			expect(inherited.providerPromptCacheKey).toBe(source.sourceHeader.id);
+			expect(inherited.providerPromptCacheKeySource).toBe("fork");
+
+			// --reapply-config re-resolves model/thinking from config, so the
+			// parent's cache affinity no longer matches this request's shape.
+			const reapplied = await buildSessionOptions(
+				parseArgs(["--cwd", source.cwd, "--reapply-config"]),
+				[],
+				forkedManager,
+				modelRegistry,
+				settings,
+			);
+			expect(reapplied.providerPromptCacheKey).toBeUndefined();
+
+			// An explicit --prompt-cache-key is the user's own instruction and
+			// still wins over the reapply-driven discard.
+			const explicit = await buildSessionOptions(
+				parseArgs(["--cwd", source.cwd, "--reapply-config", "--prompt-cache-key", "pinned-affinity"]),
+				[],
+				forkedManager,
+				modelRegistry,
+				settings,
+			);
+			expect(explicit.providerPromptCacheKey).toBe("pinned-affinity");
+			expect(explicit.providerPromptCacheKeySource).toBe("explicit");
 		} finally {
 			authStorage.close();
 		}
