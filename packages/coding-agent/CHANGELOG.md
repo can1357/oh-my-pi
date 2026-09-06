@@ -5,8 +5,8 @@
 
 ### Added
 
-- Added `omp sessions list` for listing saved sessions in the current project or all projects.
-- Added `omp sessions roots` and `omp sessions list --cwd <path>` for browsing session work directories.
+- Added `omp sessions list` for listing saved sessions in the current project or all projects ([#11025](https://github.com/can1357/oh-my-pi/pull/11025) by [@kearril](https://github.com/kearril)).
+- Added `omp sessions roots` and `omp sessions list --cwd <path>` for browsing session work directories ([#11025](https://github.com/can1357/oh-my-pi/pull/11025) by [@kearril](https://github.com/kearril)).
 
 ### Changed
 
