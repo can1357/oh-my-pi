@@ -1674,6 +1674,25 @@ export class SessionMaintenance {
 		advisorResetReason: string;
 		detachExtensionEmit?: boolean;
 	}): Promise<CompactionEntry | undefined> {
+		let preserveData = args.preserveData;
+		if (args.method !== "window") {
+			// codex-rs advances the window lineage on every compaction that rewrites
+			// history (rust-v0.154.0-alpha.3 `codex-rs/core/src/compact_remote.rs`
+			// calls `advance_auto_compact_window` and persists the result in
+			// `CompactedHistoryMetadata`), so the rotated identity must be persisted
+			// here too or a resume replays the pre-compaction window number and UUID.
+			if (args.codexCompaction) this.#host.resetCodexProviderAfterCompaction(args.codexCompaction);
+			else this.#host.closeCodexProviderSessionsForHistoryRewrite();
+			if (this.#model?.api === "openai-codex-responses") {
+				preserveData = {
+					...preserveData,
+					codexContextWindow: {
+						...this.contextWindows.identity,
+						agentPath: this.contextWindows.protocol.agentName,
+					},
+				};
+			}
+		}
 		const entryId = this.#host.sessionManager.appendCompaction(
 			args.summary,
 			args.shortSummary,
@@ -1682,7 +1701,7 @@ export class SessionMaintenance {
 			{
 				details: args.details,
 				fromExtension: args.fromExtension,
-				preserveData: args.preserveData,
+				preserveData,
 				method: args.method,
 				providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 				tokensAfter:
@@ -1701,10 +1720,6 @@ export class SessionMaintenance {
 		this.#host.resetPlanReference();
 		this.#host.resetAdvisorRuntimes(args.advisorResetReason);
 		this.#host.syncTodoPhasesFromBranch();
-		if (args.method !== "window") {
-			if (args.codexCompaction) this.#host.resetCodexProviderAfterCompaction(args.codexCompaction);
-			else this.#host.closeCodexProviderSessionsForHistoryRewrite();
-		}
 		const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.id === entryId) as
 			| CompactionEntry
 			| undefined;

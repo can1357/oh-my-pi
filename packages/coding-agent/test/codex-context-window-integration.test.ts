@@ -6,6 +6,7 @@ import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mo
 import { CodexHistoryNotesBackend } from "@oh-my-pi/pi-ai/providers/openai-codex/history-notes";
 import {
 	convertOpenAICodexResponsesTools,
+	createOpenAICodexCompatibilityMetadata,
 	getOpenAICodexContextWindow,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -411,3 +412,63 @@ test.each(["tree", "branch", "switch"] as const)(
 	},
 	20000,
 );
+
+test("remote compaction lineage survives restart in the next Codex request", async () => {
+	vi.spyOn(compaction, "compact").mockImplementation(async preparation => ({
+		summary: "Remote summary",
+		firstKeptEntryId: preparation.firstKeptEntryId,
+		tokensBefore: preparation.tokensBefore,
+	}));
+	const { session, manager, settings, model } = await harness(true, {
+		responses: [
+			{ content: ["Earlier response"], usage: { input: 100 } },
+			{ content: ["Recent response"], usage: { input: 100 } },
+		],
+	});
+	settings.override("compaction.methodOrder", ["remote"]);
+	settings.override("compaction.keepRecentTokens", 1);
+	settings.override("compaction.remoteEndpoint", "https://compaction.invalid");
+	await session.prompt("Earlier task ".repeat(200));
+	await session.prompt("Recent task");
+	await session.waitForIdle();
+	const before = getOpenAICodexContextWindow(session.sessionId, session.providerSessionState);
+	await session.compact();
+	const rotated = getOpenAICodexContextWindow(session.sessionId, session.providerSessionState);
+	expect(rotated.windowNumber).toBe(before.windowNumber + 1);
+	expect(rotated.windowId).not.toBe(before.windowId);
+	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "remote")).toBe(true);
+	await manager.ensureOnDisk();
+	const file = manager.getSessionFile();
+	if (!file) throw new Error("Missing compacted journal");
+	await session.dispose();
+	await manager.close();
+	const resumed = await SessionManager.open(file);
+	cleanups.push(() => resumed.close());
+	const providerSessionState = new Map();
+	const runtime = new CodexContextWindowRuntime({
+		settings,
+		sessionManager: resumed,
+		providerSessionState,
+		providerSessionId: () => resumed.getSessionId(),
+		model: () => model,
+		resolveAuth: async () => ({
+			provider: model.provider,
+			accessToken: token,
+			accountId: "account",
+			baseUrl: model.baseUrl,
+		}),
+		agentIdentity: { kind: "main", id: "Main" },
+	});
+	await runtime.refresh();
+	runtime.transform({ messages: [] });
+	const next = createOpenAICodexCompatibilityMetadata({
+		sessionId: resumed.getSessionId(),
+		providerSessionState,
+		requestKind: "turn",
+	});
+	expect(JSON.parse(next.headers["x-codex-turn-metadata"])).toMatchObject({
+		window_number: rotated.windowNumber,
+		context_window_id: rotated.windowId,
+	});
+	expect(next.headers["x-codex-window-id"]).toBe(`${rotated.threadId}:${rotated.windowNumber}`);
+});

@@ -152,8 +152,10 @@ export class CodexContextWindowRuntime {
 		let restored = false;
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
+			// Codex rotates its window lineage on every history rewrite, so ordinary
+			// compaction entries carry the same restorable identity window resets do.
 			const candidate =
-				entry.type === "compaction" && entry.method === "window"
+				entry.type === "compaction"
 					? entry.preserveData?.codexContextWindow
 					: entry.type === "custom" && entry.customType === "codex.context-window"
 						? entry.data
