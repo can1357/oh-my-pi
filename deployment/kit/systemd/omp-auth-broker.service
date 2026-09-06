@@ -1,0 +1,27 @@
+[Unit]
+Description=omp auth-broker (credential vault for the omp coding agent)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated, unprivileged account created by install.sh --with-broker.
+User=omp-broker
+Group=omp-broker
+ExecStart=/usr/local/bin/omp auth-broker serve --bind=127.0.0.1:8765
+Restart=on-failure
+RestartSec=5
+
+# Broker holds OAuth refresh tokens — keep it tight.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

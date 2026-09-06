@@ -1,0 +1,27 @@
+# Custom / internal LLM providers — copy to ~/.omp/agent/models.yml
+# Anything speaking a supported API works; verify with: omp models <name>
+#
+# Supported api values include: openai-completions, openai-responses,
+# anthropic-messages, google-generative-ai, bedrock-converse-stream, ...
+
+providers:
+  spark:
+    baseUrl: http://192.168.10.223:8000/v1
+    api: openai-completions
+    apiKey: dummy
+    models:
+      - id: minimax-m3
+        name: MiniMax M3
+        contextWindow: 100000
+        maxTokens: 32000
+
+  # Example: internal Anthropic-compatible gateway
+  # corp-gateway:
+  #   baseUrl: https://llm-gw.internal.example.com
+  #   api: anthropic-messages
+  #   apiKey: dummy-key-in-env-instead
+  #   models:
+  #     - id: claude-sonnet-4-5
+  #       name: Claude Sonnet 4.5 (via gateway)
+  #       contextWindow: 200000
+  #       maxTokens: 64000

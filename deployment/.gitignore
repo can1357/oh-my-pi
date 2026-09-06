@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# deploy/.gitignore — keep the repo clean; bundles are build artifacts
+dist/

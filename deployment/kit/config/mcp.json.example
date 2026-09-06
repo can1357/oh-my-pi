@@ -1,0 +1,10 @@
+{
+	"$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+	"mcpServers": {
+		"example-stdio-server": {
+			"type": "stdio",
+			"command": "npx",
+			"args": ["-y", "some-mcp-server"]
+		}
+	}
+}
