@@ -138,8 +138,18 @@ test("fallback permits one checkpoint response before requiring a reset or recov
 	protocol.reset(identity);
 	const fallback = protocol.observe(response(801), 1000, policy);
 	protocol.transform({ messages: fallback }, { identity, policy, getMessageId: () => undefined });
-	protocol.observe(response(820, "notes.write_file"), 1000, policy);
+	protocol.observe(response(820, "notes.write_file"), 1000, policy, () => true);
 	expect(protocol.fallbackFailed).toBe(false);
 	protocol.observe(response(850), 1000, policy);
+	expect(protocol.fallbackFailed).toBe(true);
+});
+
+test("a failed checkpoint tool result fails the fallback sequence", () => {
+	const protocol = new CodexContextWindowProtocol("root");
+	const identity = getOpenAICodexContextWindow("session", new Map());
+	protocol.reset(identity);
+	const fallback = protocol.observe(response(801), 1000, policy);
+	protocol.transform({ messages: fallback }, { identity, policy, getMessageId: () => undefined });
+	protocol.observe(response(820, "notes.write_file"), 1000, policy, () => false);
 	expect(protocol.fallbackFailed).toBe(true);
 });

@@ -546,7 +546,16 @@ export class SessionMaintenance {
 		const policy = runtime.policy;
 		if (!policy) return false;
 		const failed = runtime.protocol.fallbackFailed;
-		for (const item of runtime.protocol.observe(message, runtime.effectiveLimit, policy)) {
+		const paired = activeMessages ?? this.#host.messages();
+		const checkpointCompleted = (toolCallId: string): boolean => {
+			for (let index = paired.length - 1; index >= 0; index--) {
+				const candidate = paired[index];
+				if (candidate.role === "toolResult" && candidate.toolCallId === toolCallId)
+					return candidate.isError !== true;
+			}
+			return false;
+		};
+		for (const item of runtime.protocol.observe(message, runtime.effectiveLimit, policy, checkpointCompleted)) {
 			this.#host.sessionManager.appendMessage(item);
 			this.#host.agent.appendMessage(item);
 			if (activeMessages && activeMessages !== this.#host.agent.state.messages) activeMessages.push(item);

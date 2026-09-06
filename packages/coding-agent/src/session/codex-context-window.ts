@@ -87,7 +87,17 @@ export class CodexContextWindowProtocol {
 		return renderRemaining({ remaining: this.#remaining ?? "unknown" }).trimEnd();
 	}
 
-	observe(message: AssistantMessage, effectiveLimit: number, policy: CodexContextWindows): DeveloperMessage[] {
+	/**
+	 * `checkpointCompleted` reports whether the paired tool result for a notes
+	 * write succeeded. A failed or missing result is not a checkpoint: the reset
+	 * would discard the exhausted conversation with nothing recoverable.
+	 */
+	observe(
+		message: AssistantMessage,
+		effectiveLimit: number,
+		policy: CodexContextWindows,
+		checkpointCompleted?: (toolCallId: string) => boolean,
+	): DeveloperMessage[] {
 		if (message === this.#lastResponse || message.stopReason === "error" || message.stopReason === "aborted")
 			return [];
 		this.#lastResponse = message;
@@ -95,7 +105,9 @@ export class CodexContextWindowProtocol {
 			this.#fallbackResponses++;
 			const calls = message.content.filter(block => block.type === "toolCall");
 			const writesCheckpoint =
-				calls.length === 1 && (calls[0].name === "notes.write_file" || calls[0].name === "notes.append_to_file");
+				calls.length === 1 &&
+				(calls[0].name === "notes.write_file" || calls[0].name === "notes.append_to_file") &&
+				checkpointCompleted?.(calls[0].id) === true;
 			const resetsWindow = calls.length === 1 && calls[0].name === "new_context";
 			if (
 				(this.#fallbackResponses === 1 && !writesCheckpoint) ||

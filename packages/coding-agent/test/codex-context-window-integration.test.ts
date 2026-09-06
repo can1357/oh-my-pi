@@ -52,6 +52,7 @@ async function harness(
 	options: {
 		enabled?: boolean;
 		notes?: boolean;
+		notesWriteFails?: boolean;
 		responses?: MockResponse[];
 		windowOnly?: boolean;
 		extensionRunner?: ExtensionRunner;
@@ -84,6 +85,14 @@ async function harness(
 	const backendCalls = vi
 		.spyOn(CodexHistoryNotesBackend.prototype, "call")
 		.mockResolvedValue([{ type: "encrypted", encryptedContent: "opaque-result" }]);
+	if (options.notesWriteFails) {
+		backendCalls.mockImplementation(async route => {
+			if (route === "alpha/notes/v2/write_file" || route === "alpha/notes/v2/append_to_file") {
+				throw new Error("Unable to perform operation: write_file");
+			}
+			return [{ type: "encrypted", encryptedContent: "opaque-result" }];
+		});
+	}
 	let workCalls = 0;
 	const work: AgentTool = {
 		name: "work",
@@ -472,3 +481,21 @@ test("remote compaction lineage survives restart in the next Codex request", asy
 	});
 	expect(next.headers["x-codex-window-id"]).toBe(`${rotated.threadId}:${rotated.windowNumber}`);
 });
+
+test("a failed checkpoint write blocks the exhausted-window reset", async () => {
+	const { session, manager, frames } = await harness(true, { notesWriteFails: true, windowOnly: true });
+	await session.prompt("Original task must survive a failed checkpoint");
+	await session.waitForIdle();
+	const failedWrite = manager
+		.getBranch()
+		.some(
+			entry =>
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				entry.message.toolName === "notes.write_file" &&
+				entry.message.isError === true,
+		);
+	expect(failedWrite).toBe(true);
+	expect(manager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
+	expect(JSON.stringify(frames.at(-1)?.messages)).toContain("Original task must survive a failed checkpoint");
+}, 20000);
