@@ -2,7 +2,7 @@ import { afterEach, expect, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { CodexHistoryNotesBackend } from "@oh-my-pi/pi-ai/providers/openai-codex/history-notes";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, untilAborted } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { createAgentSession } from "../src/sdk";
@@ -18,7 +18,11 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 });
 
-async function start(mode: "notes" | "window" | "off", offline = false) {
+async function start(
+	mode: "notes" | "window" | "off",
+	offline = false,
+	threadHint?: () => Promise<string | undefined>,
+) {
 	const dir = TempDir.createSync("@codex-notes-startup-");
 	cleanups.push(() => dir.removeSync());
 	const auth = await AuthStorage.create(":memory:");
@@ -52,7 +56,9 @@ async function start(mode: "notes" | "window" | "off", offline = false) {
 		if (offline) throw new Error("Discovery unavailable");
 		refreshed = true;
 	});
-	vi.spyOn(CodexHistoryNotesBackend.prototype, "threadHint").mockResolvedValue(undefined);
+	const hint = vi.spyOn(CodexHistoryNotesBackend.prototype, "threadHint");
+	if (threadHint) hint.mockImplementation(threadHint);
+	else hint.mockResolvedValue(undefined);
 	const manager = SessionManager.inMemory(dir.path());
 	cleanups.push(() => manager.close());
 	const { session } = await createAgentSession({
@@ -160,3 +166,20 @@ test.each(["notes", "window", "off"] as const)(
 		expect(shared).not.toBe(null);
 	},
 );
+
+test("a stalled thread-hint route neither delays session creation nor blocks the first render", async () => {
+	const pending = Promise.withResolvers<string | undefined>();
+	const { session } = await untilAborted(
+		AbortSignal.timeout(10_000),
+		start("notes", false, () => pending.promise),
+	);
+	// Session start returned while the optional route is still in flight.
+	const context = session.transformCodexContext({ messages: [] });
+	expect(JSON.stringify(context.messages)).not.toContain("late hint");
+	expect(session.getActiveToolNames()).toContain("notes.read_file");
+
+	pending.resolve("late hint");
+	await pending.promise;
+	await Promise.resolve();
+	expect(JSON.stringify(session.transformCodexContext({ messages: [] }).messages)).toContain("late hint");
+});

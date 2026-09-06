@@ -18,6 +18,7 @@ import {
 	CodexHistoryNotesBackend,
 } from "@oh-my-pi/pi-ai/providers/openai-codex/history-notes";
 import type { CodexContextWindows } from "@oh-my-pi/pi-catalog/types";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { createCodexHistoryNotesTools } from "../tools/codex-history-notes";
 import { CodexContextWindowProtocol } from "./codex-context-window";
@@ -139,7 +140,7 @@ export class CodexContextWindowRuntime {
 		if (this.#sessionId !== sessionId) this.#restoreIdentity(sessionId);
 		if (this.#initialized) return;
 		this.#initialized = true;
-		await this.refreshThreadHint();
+		this.refreshThreadHint();
 	}
 
 	#restoreIdentity(sessionId: string): void {
@@ -175,11 +176,28 @@ export class CodexContextWindowRuntime {
 		this.protocol.reset(this.identity);
 	}
 
-	async refreshThreadHint(): Promise<void> {
-		const identity = this.identity;
+	/**
+	 * The thread hint is optional and its alpha route can stall for the backend
+	 * timeout, so the fetch never joins session start: it resolves into
+	 * `#threadHint` for the next render that reads it, and a hint arriving after
+	 * a session or window change is discarded.
+	 */
+	refreshThreadHint(): void {
+		if (!this.notesActive) {
+			this.#threadHint = undefined;
+			return;
+		}
+		const windowId = this.identity.windowId;
 		const sessionId = this.#sessionId;
-		const hint = this.notesActive ? await this.backend.threadHint(this.#backendContext()) : undefined;
-		if (this.#sessionId === sessionId && this.#lastIdentity?.windowId === identity.windowId) this.#threadHint = hint;
+		this.#threadHint = undefined;
+		void this.backend.threadHint(this.#backendContext()).then(
+			hint => {
+				if (this.#sessionId === sessionId && this.#lastIdentity?.windowId === windowId) this.#threadHint = hint;
+			},
+			error => {
+				logger.debug("Codex thread hint unavailable", { error: String(error) });
+			},
+		);
 	}
 
 	#backendContext() {

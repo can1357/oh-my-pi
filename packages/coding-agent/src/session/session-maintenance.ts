@@ -518,7 +518,7 @@ export class SessionMaintenance {
 				detachExtensionEmit: true,
 			});
 			committed = true;
-			await this.contextWindows.refreshThreadHint();
+			this.contextWindows.refreshThreadHint();
 		} finally {
 			if (!committed) this.contextWindows.restore(previous);
 			this.#contextWindowResetRequested = undefined;
