@@ -3014,7 +3014,12 @@ describe("AuthStorage claude oauth ranking", () => {
 		expectExclusivePreference(counts, "api-acct-near", "api-acct-far");
 	});
 
-	test("assumes the full duration remains when ranking clockless windows", async () => {
+	// Anthropic publishes `resetsAt` only once a weekly window is running, so a
+	// seat nobody has touched this period reports 0% used and no clock. It must
+	// be started before a running sibling is drained further: idle weekly quota
+	// strands at the period roll-over, while draining a running seat past its
+	// cap spills into paid extra usage.
+	test("starts an unstarted weekly window before draining a clocked sibling", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
 		await authStorage.set("anthropic", [
@@ -3040,7 +3045,79 @@ describe("AuthStorage claude oauth ranking", () => {
 		);
 
 		const apiKey = await authStorage.getApiKey("anthropic", "session-claude-clockless");
+		expect(apiKey).toBe("api-acct-clockless");
+	});
+
+	// The bump above keys off "untouched", not "unclocked": a weekly window that
+	// already reports usage with no reset stamp (the duration-only shape Kimi's
+	// parser also emits) carries no evidence the quota is idle, so it still has
+	// to win on drain pressure like any other measured window.
+	test("keeps a partially used clockless weekly window behind an urgent clocked sibling", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-part-clockless", "part@example.com") },
+			{ type: "oauth", ...createCredential("acct-clocked", "clocked@example.com") },
+		]);
+
+		usageByAccount.set(
+			"acct-part-clockless",
+			createClaudeUsageReport({
+				accountId: "acct-part-clockless",
+				primary: { usedFraction: 0, resetInMs: FIVE_HOUR_MS },
+				// 0.5 headroom assumed to span a full week: ~0.003/h.
+				secondary: { usedFraction: 0.5 },
+			}),
+		);
+		usageByAccount.set(
+			"acct-clocked",
+			createClaudeUsageReport({
+				accountId: "acct-clocked",
+				primary: { usedFraction: 0, resetInMs: FIVE_HOUR_MS },
+				// Same headroom, 12h to burn it: ~0.042/h, so this seat is first.
+				secondary: { usedFraction: 0.5, resetInMs: 12 * HOUR_MS },
+			}),
+		);
+
+		const apiKey = await authStorage.getApiKey("anthropic", "session-claude-part-clockless");
 		expect(apiKey).toBe("api-acct-clocked");
+	});
+
+	// A tier row is nested inside the account-wide weekly quota, so 0% on
+	// `anthropic:7d:fable` says nothing about how much of the shared week is
+	// left. When a report ships that row but no shared `anthropic:7d`,
+	// `findClaudeSecondaryLimit` hands the tier row back as `secondary` — it
+	// must not buy the seat infinite priority on that evidence.
+	test("does not boost a clockless tier-scoped weekly row standing in for the shared window", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-tier-only", "tier@example.com") },
+			{ type: "oauth", ...createCredential("acct-shared", "shared@example.com") },
+		]);
+
+		usageByAccount.set(
+			"acct-tier-only",
+			createClaudeUsageReport({
+				accountId: "acct-tier-only",
+				primary: { usedFraction: 0, resetInMs: FIVE_HOUR_MS },
+				// No shared 7d row at all, just an untouched clockless Fable row.
+				fableSecondary: { usedFraction: 0 },
+			}),
+		);
+		usageByAccount.set(
+			"acct-shared",
+			createClaudeUsageReport({
+				accountId: "acct-shared",
+				primary: { usedFraction: 0, resetInMs: FIVE_HOUR_MS },
+				secondary: { usedFraction: 0.5, resetInMs: 12 * HOUR_MS },
+			}),
+		);
+
+		const apiKey = await authStorage.getApiKey("anthropic", "session-claude-tier-only", {
+			modelId: "claude-fable-5",
+		});
+		expect(apiKey).toBe("api-acct-shared");
 	});
 
 	test("does not rank a missing weekly window as the account's 5h window", async () => {
