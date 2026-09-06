@@ -835,9 +835,17 @@ export class InputController {
 			// failing with "No API key found" (issue #11067). Hold the input and
 			// keep the text so the user can resend once the join completes.
 			if (this.ctx.collabJoining && !this.ctx.collabGuest) {
-				if (text || (inputImages?.length ?? 0) > 0) {
-					this.ctx.showStatus("Joining collab session — wait for the sync to finish, then resend.");
-				}
+				this.ctx.editor.pendingImages = inputImages ? [...inputImages] : [];
+				this.ctx.editor.pendingImageLinks = inputImages
+					? inputImageLinks
+						? [...inputImageLinks]
+						: inputImages.map(() => undefined)
+					: [];
+				this.ctx.editor.imageLinks =
+					this.ctx.editor.pendingImageLinks.length > 0 ? this.ctx.editor.pendingImageLinks : undefined;
+				this.ctx.editor.setCollapsedText(text);
+				this.ctx.showStatus("Joining collab session — wait for the sync to finish, then resend.");
+				this.ctx.ui.requestRender();
 				return;
 			}
 

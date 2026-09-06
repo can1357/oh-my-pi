@@ -14,13 +14,15 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
  * completes.
  *
  * Contract: while a join is in flight (`collabJoining` set, `collabGuest`
- * unset) a free-text submit must NOT reach the local session prompt; it is held
- * with a status hint. Once the join settles the flag clears and prompts flow
- * normally.
+ * unset) a free-text submit must NOT reach the local session prompt. The real
+ * editor clears its buffer before invoking `onSubmit`, so the controller must
+ * restore the submitted text and image chips while showing a status hint. Once
+ * the join settles the flag clears and prompts flow normally.
  */
 
 type FakeEditor = {
 	onSubmit?: (text: string) => Promise<void>;
+	submit(text: string): Promise<void>;
 	imageLinks?: readonly (string | undefined)[];
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
@@ -41,8 +43,15 @@ function createContext() {
 	const prompt = vi.fn(async () => {});
 	const showStatus = vi.fn();
 	const addToHistory = vi.fn();
+	const requestRender = vi.fn();
 
 	const editor: FakeEditor = {
+		async submit(text: string) {
+			// Mirrors Editor.#submitValue: the visible buffer and atom table are
+			// cleared before the callback receives the expanded submission.
+			editorText = "";
+			await this.onSubmit?.(text);
+		},
 		pendingImages: [] as ImageContent[],
 		pendingImageLinks: [] as (string | undefined)[],
 		setText(text: string) {
@@ -87,7 +96,7 @@ function createContext() {
 
 	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
-		ui: { requestRender: vi.fn() } as unknown as InteractiveModeContext["ui"],
+		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
 		session,
 		settings: session.settings,
 		sessionManager: { getSessionName: () => "named-session" } as InteractiveModeContext["sessionManager"],
@@ -128,35 +137,46 @@ function createContext() {
 		isPythonMode: false,
 	} as unknown as InteractiveModeContext;
 
-	return { ctx, editor, spies: { steer, prompt, showStatus } };
+	return { ctx, editor, spies: { steer, prompt, showStatus, requestRender } };
 }
 
 describe("InputController collab join window", () => {
-	it("holds a typed prompt while a collab join is still syncing", async () => {
+	it("restores typed text and image chips while a collab join is still syncing", async () => {
 		const { ctx, editor, spies } = createContext();
+		const image: ImageContent = { type: "image", data: "abc", mimeType: "image/png" };
+		const imageLink = "file:///tmp/collab-draft.png";
+		const text = "is agent working? [Image #1]";
 		ctx.collabJoining = true;
 		ctx.collabGuest = undefined;
+		editor.setText(text);
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = [imageLink];
+		editor.imageLinks = editor.pendingImageLinks;
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await editor.onSubmit?.("is agent working?");
+		await editor.submit(text);
 
-		// No local inference: the prompt never touches the guest's own session.
 		expect(spies.prompt).not.toHaveBeenCalled();
 		expect(spies.steer).not.toHaveBeenCalled();
-		// The user gets a hint that the session is not ready yet.
+		expect(editor.getText()).toBe(text);
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual([imageLink]);
+		expect(editor.imageLinks).toEqual([imageLink]);
 		expect(spies.showStatus).toHaveBeenCalledTimes(1);
 		expect(spies.showStatus.mock.calls[0]?.[0]).toMatch(/collab/i);
+		expect(spies.requestRender).toHaveBeenCalledTimes(1);
 	});
 
 	it("runs prompts locally once the join window has closed", async () => {
 		const { ctx, editor, spies } = createContext();
 		ctx.collabJoining = false;
 		ctx.collabGuest = undefined;
+		editor.setText("is agent working?");
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await editor.onSubmit?.("is agent working?");
+		await editor.submit("is agent working?");
 
 		expect(spies.prompt).toHaveBeenCalledWith("is agent working?", {
 			streamingBehavior: "steer",
