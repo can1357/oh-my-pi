@@ -18,6 +18,7 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
+import { publicAgentMessage } from "../../session/private-content";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
@@ -1628,14 +1629,23 @@ export class ExtensionRunner {
 		}
 		if (!hasContextHandlers) return messages;
 
+		let privateResults: Map<string, AgentMessage> | undefined;
+		const publicMessages = messages.map(message => {
+			const projected = publicAgentMessage(message);
+			if (projected !== message && message.role === "toolResult") {
+				(privateResults ??= new Map()).set(message.toolCallId, message);
+			}
+			return projected;
+		});
+
 		let currentMessages: AgentMessage[];
 		try {
-			currentMessages = structuredClone(messages);
+			currentMessages = structuredClone(publicMessages);
 		} catch {
 			// Messages may contain non-cloneable objects (e.g. in ToolResultMessage.details
 			// or ProviderPayload). Fall back to a shallow array clone — extensions should
 			// return new message arrays rather than mutating in place.
-			currentMessages = [...messages];
+			currentMessages = publicMessages;
 		}
 
 		for (const ext of this.extensions) {
@@ -1658,7 +1668,11 @@ export class ExtensionRunner {
 			}
 		}
 
-		return currentMessages;
+		return !privateResults
+			? currentMessages
+			: currentMessages.map(message =>
+					message.role === "toolResult" ? (privateResults?.get(message.toolCallId) ?? message) : message,
+				);
 	}
 
 	/** Runs request payload hooks with the model used for that provider request. */

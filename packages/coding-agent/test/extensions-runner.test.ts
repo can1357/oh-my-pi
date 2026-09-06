@@ -457,6 +457,52 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	it("context hooks see public results while Codex replay retains private results", async () => {
+		const observedPath = tempDir.join("context.json");
+		await Bun.write(
+			path.join(extensionsDir, "context.ts"),
+			`
+			export default function(pi) {
+				pi.on("context", async event => {
+					await Bun.write(${JSON.stringify(observedPath)}, JSON.stringify(event.messages));
+					return { messages: event.messages.map(message =>
+						message.role === "user" ? { ...message, content: "Transformed public prompt" } : message
+					) };
+				});
+			}
+		`,
+		);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const messages: AgentMessage[] = [
+			{ role: "user", content: "Public prompt", timestamp: 0 },
+			{
+				role: "toolResult",
+				toolCallId: "private",
+				toolName: "notes.read_file",
+				content: [{ type: "encrypted", encryptedContent: "private-ciphertext" }],
+				details: { secret: "private-details" },
+				modelOnly: true,
+				isError: false,
+				timestamp: 1,
+			},
+		];
+		const transformed = await runner.emitContext(messages);
+		const observed = await Bun.file(observedPath).text();
+		expect(observed).not.toContain("private-ciphertext");
+		expect(observed).not.toContain("private-details");
+		expect(observed).toContain("[private model-only result]");
+		expect(transformed[0]).toMatchObject({ content: "Transformed public prompt" });
+		expect(transformed[1]).toEqual(messages[1]);
+		expect(messages[0]).toMatchObject({ content: "Public prompt" });
+	});
+
 	describe("error handling", () => {
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
