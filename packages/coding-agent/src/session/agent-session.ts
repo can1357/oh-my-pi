@@ -105,6 +105,7 @@ import {
 	type AsyncJobProgressInfo,
 } from "../async";
 import type { ProgressBatchKind, ProgressReminder } from "../async/progress-batcher";
+import { WakeTurnBudget } from "../async/wake-budget";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
@@ -698,6 +699,8 @@ export class AgentSession {
 	 * across a `/new` is dropped regardless of job-id reuse.
 	 */
 	#asyncDeliveryEpoch = 0;
+	/** Session-wide cap on idle turns started by wake-mode progress; see {@link WakeTurnBudget}. */
+	readonly #wakeTurnBudget = new WakeTurnBudget();
 
 	readonly #irc: IrcBridge;
 	#ircWakeTurnObserver:
@@ -1630,6 +1633,10 @@ export class AgentSession {
 			coalesce: mergeAsyncProgressEntries,
 			build: buildAsyncProgressBatchMessage,
 		});
+		// Every wake-mode producer (managed jobs and, via queueLaunchProgress,
+		// hub monitors) shares this one budget: per-source rate limits bound each
+		// producer, but only a session-wide cap keeps ten chatty sources from
+		// starting ten times the idle turns.
 		this.#unregisterAsyncProgressWakeQueue = this.yieldQueue.register<AsyncProgressEntry>(
 			ASYNC_PROGRESS_WAKE_QUEUE_KIND,
 			{
@@ -1637,6 +1644,7 @@ export class AgentSession {
 					entry.epoch !==
 						(entry.source?.type === "process" ? this.#launchProgressEpoch : this.#asyncDeliveryEpoch) ||
 					(entry.job !== undefined && this.#asyncJobManager?.isDeliverySuppressed(entry.jobId) === true),
+				idleTurnBudget: this.#wakeTurnBudget,
 				coalesceKey: asyncProgressCoalesceKey,
 				coalesce: mergeAsyncProgressEntries,
 				build: buildAsyncProgressBatchMessage,
@@ -2228,6 +2236,10 @@ export class AgentSession {
 		if (!manager || !this.#agentId) return;
 		await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
 		await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
+		// Queued wake progress may be held by the wake-turn budget; wait for that
+		// deferred flush (and the turn it starts) instead of spinning on
+		// hasPendingAsyncWork() until the budget refills.
+		await this.yieldQueue.idleFlushSettled();
 		await this.waitForIdle();
 	}
 
@@ -8912,6 +8924,10 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
+		// The boundary advances the launch-progress epoch so monitors bound to
+		// the outgoing transcript go stale; a rolled-back switch keeps that
+		// transcript live, so the epoch must roll back with it (below).
+		const previousLaunchProgressEpoch = this.#launchProgressEpoch;
 		using _launchProgressBoundary = switchingToDifferentSession ? this.#beginLaunchProgressBoundary() : undefined;
 		await this.abort({ goalReason: "internal" });
 		await this.#sessionBeforeSwitchReconciler?.();
@@ -9171,6 +9187,7 @@ export class AgentSession {
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#irc.restorePending(previousIrcPending);
 			this.#sessionGeneration = previousSessionGeneration;
+			this.#launchProgressEpoch = previousLaunchProgressEpoch;
 			transitionSettled.resolve();
 			this.#sessionTransitionSettled = previousSessionTransitionSettled;
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;

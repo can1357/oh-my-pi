@@ -424,6 +424,81 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(observedText).toContain("FRESH SESSION PROCESS EVENT");
 	});
 
+	it("keeps process progress deliverable when a session switch rolls back", async () => {
+		using sourceDir = TempDir.createSync("@omp-launch-progress-rollback-source-");
+		using targetDir = TempDir.createSync("@omp-launch-progress-rollback-target-");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const sessionManager = SessionManager.create(sourceDir.path(), sourceDir.path());
+		sessionManager.appendMessage({ role: "user", content: "source session", timestamp: 1 });
+		await sessionManager.flush();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "target session", timestamp: 2 });
+		await targetManager.ensureOnDisk();
+		await targetManager.flush();
+		const targetFile = targetManager.getSessionFile();
+		if (!targetFile) throw new Error("Expected target session file");
+		await targetManager.close();
+
+		const monitorEpoch = session.captureLaunchProgressEpoch();
+		const notification = (seq: number, text: string) => ({
+			event: "daemon-output" as const,
+			monitorId: "monitor",
+			name: "process",
+			daemonId: "daemon",
+			seq,
+			text,
+			batchKind: "progress" as const,
+			suppressedEvents: 0,
+		});
+		session.queueLaunchProgress(
+			notification(1, "QUEUED BEFORE ROLLED-BACK SWITCH"),
+			"ambient",
+			Date.now(),
+			monitorEpoch,
+		);
+
+		// The cwd callback rejects the adoption, so the switch unwinds to the
+		// still-live source transcript; its monitors must keep delivering.
+		await expect(session.switchSession(targetFile, { onCwdChange: async () => false })).resolves.toBe(false);
+		expect(session.captureLaunchProgressEpoch()).toBe(monitorEpoch);
+		session.queueLaunchProgress(
+			notification(2, "QUEUED AFTER ROLLED-BACK SWITCH"),
+			"ambient",
+			Date.now(),
+			monitorEpoch,
+		);
+		await session.sendUserMessage("continue");
+
+		const observedText = mock.calls
+			.flatMap(call =>
+				call.context.messages.flatMap(message =>
+					typeof message.content === "string"
+						? [message.content]
+						: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+				),
+			)
+			.join("\n");
+		expect(observedText).toContain("QUEUED BEFORE ROLLED-BACK SWITCH");
+		expect(observedText).toContain("QUEUED AFTER ROLLED-BACK SWITCH");
+	});
+
 	it("fences process progress and completions while resetting the session context", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
