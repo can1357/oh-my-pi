@@ -1956,7 +1956,68 @@ describe("hub process output monitoring", () => {
 
 		releaseStart.resolve();
 		await start;
-		expect(harness.getSubscription()?.daemonId).toBe(daemon.id);
+		const attached = harness.getSubscription();
+		expect(attached?.id).toBe(restored.id);
+		expect(attached?.daemonId).toBe(daemon.id);
+		expect(attached?.startPending).toBeUndefined();
+		expect(harness.registrationCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: restored.id, delivery: "wake", active: true });
+	});
+
+	it("releases a restored start-pending registration when the original start fails", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const startEntered = Promise.withResolvers<void>();
+		const failStart = Promise.withResolvers<void>();
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "describe") return { op: "describe", daemon, spec };
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			startEntered.resolve();
+			await failStart.promise;
+			throw new Error("spawn failed");
+		});
+		const onOutput = harness.client.onOutput;
+		if (!onOutput) throw new Error("Expected output monitoring support");
+		let publicationCount = 0;
+		vi.spyOn(harness.client, "onOutput").mockImplementation((subscription, sink) => {
+			publicationCount++;
+			const unregister = onOutput.call(harness.client, subscription, sink);
+			if (!unregister) throw new Error("Expected output registration");
+			return Object.assign(unregister, {
+				ready: publicationCount === 2 ? Promise.reject(new Error("publication failed")) : Promise.resolve(),
+			});
+		});
+
+		const start = executeLaunch(harness.session, {
+			op: "start",
+			name: daemon.name,
+			application: process.execPath,
+			pty: false,
+			persist: true,
+			progress: "wake",
+		});
+		await startEntered.promise;
+		await expect(
+			executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" }),
+		).rejects.toThrow("publication failed");
+		const restored = harness.getSubscription();
+		if (!restored) throw new Error("Expected restored output subscription");
+		expect(restored.startPending).toBeTrue();
+		expect(harness.active.at(-1)).toEqual({ monitorId: restored.id, delivery: "wake", active: true });
+
+		// The restored registration only exists on behalf of the in-flight
+		// start. When that start fails there is no process to monitor, so the
+		// restored slot must be released with it instead of staying active and
+		// start-pending forever (which would pin pending async work).
+		failStart.resolve();
+		await expect(start).rejects.toThrow("spawn failed");
+		expect(harness.getSubscription()).toBeUndefined();
+		expect(harness.getOutputSink()).toBeUndefined();
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.active.at(-1)).toEqual({ monitorId: restored.id, delivery: "wake", active: false });
 	});
 
 	it("restores start-pending state when an overlapping replacement start fails", async () => {
