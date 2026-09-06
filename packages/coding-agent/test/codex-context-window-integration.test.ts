@@ -45,7 +45,10 @@ function fixtureModel(): Model<"openai-codex-responses"> {
 		compat: { contextWindows: policy },
 	});
 }
-async function harness(reset: boolean, options: { enabled?: boolean; notes?: boolean } = {}) {
+async function harness(
+	reset: boolean,
+	options: { enabled?: boolean; notes?: boolean; responses?: MockResponse[]; windowOnly?: boolean } = {},
+) {
 	const dir = TempDir.createSync("codex-window-");
 	cleanups.push(() => dir.removeSync());
 	const auth = await AuthStorage.create(":memory:");
@@ -54,7 +57,7 @@ async function harness(reset: boolean, options: { enabled?: boolean; notes?: boo
 	const modelRegistry = new ModelRegistry(auth, undefined, { ignoreLocalModelConfig: true });
 	const model = fixtureModel();
 	const settings = Settings.isolated({
-		"compaction.methodOrder": ["window", "soft"],
+		"compaction.methodOrder": options.windowOnly ? ["window"] : ["window", "soft"],
 		"compaction.enabled": options.enabled ?? true,
 		"compaction.thresholdTokens": 10000,
 		"compaction.thresholdPercent": -1,
@@ -94,7 +97,7 @@ async function harness(reset: boolean, options: { enabled?: boolean; notes?: boo
 		{ content: [{ type: "toolCall", name: reset ? "new_context" : "work", arguments: {} }], usage: { input: 9300 } },
 		{ content: ["Finished"], usage: { input: 100 } },
 	];
-	const mock = createMockModel({ responses: script });
+	const mock = createMockModel({ responses: options.responses ?? script });
 	const frames: Context[] = [];
 	const agent = new Agent({
 		getApiKey: () => token,
@@ -223,3 +226,41 @@ test("ignoring new_context after the checkpoint falls through without silently r
 	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "soft")).toBe(true);
 	expect(JSON.stringify(frames.at(-1)?.messages)).toContain("Recovered task checkpoint");
 }, 20000);
+
+test.each([false, true])(
+	"pending prompt waits for a checkpoint before entering the new window (windowOnly=%s)",
+	async windowOnly => {
+		const pending = "New task input ".repeat(2000);
+		const { session, manager, frames } = await harness(true, {
+			windowOnly,
+			responses: [
+				{ content: ["Prior task result"], usage: { input: 100 } },
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "notes.write_file",
+							arguments: { path: "checkpoint", text: "opaque-argument" },
+						},
+					],
+					usage: { input: 500 },
+				},
+				{ content: [{ type: "toolCall", name: "new_context", arguments: {} }], usage: { input: 700 } },
+				{ content: ["Ready"], usage: { input: 100 } },
+				{ content: ["New task completed"], usage: { input: 100 } },
+			],
+		});
+		await session.prompt("Prior task");
+		await session.waitForIdle();
+		// The pending prompt crosses the configured threshold, but fits after the reset.
+		session.agent.appendMessage({ role: "user", content: "Old context ".repeat(4000), timestamp: Date.now() });
+		await session.prompt(pending);
+		await session.waitForIdle();
+		expect(JSON.stringify(frames[1].messages)).toContain(policy.autoCompactFallbackPrompt);
+		expect(JSON.stringify(frames[1].messages)).not.toContain("New task input");
+		expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(true);
+		expect(JSON.stringify(frames.at(-1)?.messages)).toContain("New task input");
+		expect(JSON.stringify(frames.at(-1)?.messages)).not.toContain("Old context");
+	},
+	20000,
+);

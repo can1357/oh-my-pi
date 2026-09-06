@@ -95,10 +95,11 @@ export class CodexContextWindowProtocol {
 				calls.length === 1 && (calls[0].name === "notes.write_file" || calls[0].name === "notes.append_to_file");
 			if (this.#fallbackResponses > 1 || !writesCheckpoint) this.#fallbackFailed = true;
 		}
-		this.#remaining = Math.max(
-			0,
-			Math.floor(effectiveLimit - calculatePromptTokens(message.usage) - policy.autoCompactFallbackBufferTokens),
-		);
+		return this.observeInputTokens(calculatePromptTokens(message.usage), effectiveLimit, policy);
+	}
+
+	observeInputTokens(inputTokens: number, effectiveLimit: number, policy: CodexContextWindows): DeveloperMessage[] {
+		this.#remaining = Math.max(0, Math.floor(effectiveLimit - inputTokens - policy.autoCompactFallbackBufferTokens));
 		const items: DeveloperMessage[] = [
 			{ role: "developer", content: this.remainingText(), timestamp: Date.now(), synthetic: true },
 		];

@@ -1804,6 +1804,41 @@ export class SessionMaintenance {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 			return;
 		}
+		if (this.#prefersContextWindow()) {
+			const runtime = this.contextWindows;
+			const policy = runtime.policy;
+			if (policy) {
+				const windowId = runtime.identity.windowId;
+				for (const item of runtime.protocol.observeInputTokens(contextTokens, runtime.effectiveLimit, policy)) {
+					this.#host.sessionManager.appendMessage(item);
+					this.#host.agent.appendMessage(item);
+				}
+				// Keep the pending user input out of the exhausted frame. The ordinary
+				// tool loop writes the checkpoint and commits the reset at its paired boundary.
+				await this.#host.agent.continue();
+				if (runtime.identity.windowId === windowId && !runtime.protocol.fallbackFailed) {
+					throw new Error("Context window checkpoint did not complete; the pending prompt was not sent.");
+				}
+				let pendingTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
+				if (runtime.protocol.fallbackFailed && shouldCompact(pendingTokens, contextWindow, compactionSettings)) {
+					await this.runAutoCompaction("threshold", false, false, false, {
+						autoContinue: false,
+						suppressContinuation: true,
+						triggerContextTokens: pendingTokens,
+						pendingContextTokens: this.#tokenizer.countMessages(messages),
+						preparedContextTokens: this.#estimateStoredContextTokens(),
+						phase: "pre_turn",
+					});
+					pendingTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
+				}
+				if (shouldCompact(pendingTokens, contextWindow, compactionSettings)) {
+					throw new Error(
+						"The pending prompt still exceeds the compaction threshold after checkpoint maintenance; reduce the prompt or configure another compaction method.",
+					);
+				}
+				return;
+			}
+		}
 		if (
 			pendingMidTurnDeadEnd &&
 			prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
