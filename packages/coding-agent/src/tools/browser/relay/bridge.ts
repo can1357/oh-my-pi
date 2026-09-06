@@ -88,7 +88,7 @@ function markPreloadApplication(source: unknown, marker: string): string {
 	// declares `const Object`, which would prevent the preload body from running.
 	const markerStatement = `this[${JSON.stringify(marker)}] = true;`;
 	const prologue = source.match(
-		/^(?:#![^\r\n]*(?:\r?\n|$))?(?:(?:(?:[ \t\r\n]+|\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/))*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*(?:;[ \t]*(?:\r?\n)?|\r?\n|$))*/,
+		/^(?:#![^\r\n]*(?:\r?\n|$))?(?:(?:(?:[ \t\r\n\uFEFF]+|\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/))*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*(?:;[ \t]*(?:\r?\n)?|\r?\n|$))*/,
 	);
 	const offset = prologue?.[0].length ?? 0;
 	return `${source.slice(0, offset)}${markerStatement}\n${source.slice(offset)}`;
