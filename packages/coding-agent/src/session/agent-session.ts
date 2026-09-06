@@ -6677,7 +6677,7 @@ export class AgentSession {
 	async #queueUserMessage(
 		text: string,
 		images: ImageContent[] | undefined,
-		mode: "steer" | "followUp" | "aside",
+		mode: "steer" | "followUp" | "aside" | "nonInterrupting",
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
 	): Promise<void> {
@@ -6723,8 +6723,12 @@ export class AgentSession {
 			this.#resumeStrandedIrcAsides();
 			return;
 		}
+		if (mode === "nonInterrupting" && this.#isDisposed) {
+			throw new Error("Session disposed before message delivery");
+		}
+		const queueMode = mode === "nonInterrupting" ? (this.isStreaming ? "followUp" : "steer") : mode;
 		this.#allowQueuedMessageDrainRetry();
-		if (mode === "followUp") {
+		if (queueMode === "followUp") {
 			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 			this.agent.followUp({
@@ -7122,6 +7126,14 @@ export class AgentSession {
 			normalizedAppMessage.attribution,
 		);
 		return false;
+	}
+	/** Queue a user message behind active work, or resume it immediately when idle. */
+	async queueNonInterruptingUserMessage(content: string, expectedSessionId: string): Promise<void> {
+		if (this.#isDisposed) throw new Error("Session disposed before message delivery");
+		if (!this.#unsubscribeAgent || this.sessionManager.getSessionId() !== expectedSessionId) {
+			throw new Error("Session changed before message delivery");
+		}
+		await this.#queueUserMessage(content, undefined, "nonInterrupting");
 	}
 
 	/**

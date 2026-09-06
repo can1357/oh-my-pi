@@ -8,6 +8,7 @@ import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
 	DAEMON_BROKER_WORKER_ARG,
+	DAEMON_CAPABILITY_LIVE_SESSIONS,
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
@@ -275,7 +276,11 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	): Promise<void> {
 		if (this.#closed) throw new Error("Daemon broker client is closed");
 		this.#liveSession = { registration, sink };
-		await this.request({ op: "ping" });
+		const ping = await this.request({ op: "ping" });
+		if (ping.op !== "ping" || !ping.capabilities?.includes(DAEMON_CAPABILITY_LIVE_SESSIONS)) {
+			this.#liveSession = undefined;
+			throw new Error("The running daemon broker must restart before live session attachment is available");
+		}
 	}
 
 	async clearLiveSession(): Promise<void> {
@@ -631,7 +636,13 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 	let deliveredMessage: string | undefined;
 	try {
 		const ping = await client.request({ op: "ping" });
-		if (ping.op !== "ping" || ping.projectDir !== client.projectDir) throw new Error("daemon broker ping mismatch");
+		if (
+			ping.op !== "ping" ||
+			ping.projectDir !== client.projectDir ||
+			!ping.capabilities?.includes(DAEMON_CAPABILITY_LIVE_SESSIONS)
+		) {
+			throw new Error("daemon broker ping mismatch");
+		}
 		host = await createLiveSessionHost(
 			projectDir,
 			{

@@ -67,6 +67,7 @@ export interface DaemonSnapshot {
 	detached: boolean;
 }
 
+export const DAEMON_CAPABILITY_LIVE_SESSIONS = "live-sessions";
 export const LIVE_SESSION_PROTOCOL_VERSION = 1;
 
 /** One interactive session hosted by a broker client in this project scope. */
@@ -120,7 +121,7 @@ export type DaemonOperation =
 
 /** Typed broker result decoded before it reaches tool code. */
 export type DaemonRpcResult =
-	| { op: "ping"; projectDir: string }
+	| { op: "ping"; projectDir: string; capabilities?: string[] }
 	| { op: "start"; daemon: DaemonSnapshot; readyTimedOut: boolean }
 	| { op: "list"; daemons: DaemonSnapshot[] }
 	| {
@@ -501,8 +502,15 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown): DaemonRpcResult {
 	const source = record(value, `${operation.op} result`);
 	switch (operation.op) {
-		case "ping":
-			return { op: "ping", projectDir: stringValue(source.projectDir, "result.projectDir") };
+		case "ping": {
+			const capabilities =
+				source.capabilities === undefined ? undefined : stringArray(source.capabilities, "result.capabilities");
+			return {
+				op: "ping",
+				projectDir: stringValue(source.projectDir, "result.projectDir"),
+				...(capabilities ? { capabilities } : {}),
+			};
+		}
 		case "start":
 			return {
 				op: "start",
