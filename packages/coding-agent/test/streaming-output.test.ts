@@ -512,6 +512,43 @@ describe("OutputSink", () => {
 		expect(await Bun.file(artifactPath).text()).toBe("first second");
 	});
 
+	test("a rejected mirror delivery still finalizes the artifact on dispose and dump", async () => {
+		const dir = await createTempDir();
+		const payload = "0123456789ABCDEF".repeat(4); // 64 bytes; cap keeps 16 head + 16 tail
+		const failing = (name: string) => {
+			const artifactPath = path.join(dir, `${name}.log`);
+			const sink = new OutputSink({
+				artifactPath,
+				artifactId: `art-${name}`,
+				artifactWriteMode: "mirror",
+				spillThreshold: 16,
+				artifactMaxBytes: 32,
+				artifactHeadBytes: 16,
+				onChunk: () => {
+					throw new Error("preview unavailable");
+				},
+			});
+			return { sink, artifactPath };
+		};
+
+		// dispose() runs from callers' `finally` blocks: it swallows the delivery
+		// failure but still replays the capped tail, which only happens at finalize.
+		const disposed = failing("disposed");
+		disposed.sink.push(payload);
+		await disposed.sink.dispose();
+		const disposedText = await Bun.file(disposed.artifactPath).text();
+		expect(disposedText).toContain("[ARTIFACT TRUNCATED:");
+		expect(disposedText.endsWith("0123456789ABCDEF")).toBe(true);
+
+		// dump() surfaces the failure to its caller, after finalizing the same way.
+		const dumped = failing("dumped");
+		dumped.sink.push(payload);
+		await expect(dumped.sink.dump()).rejects.toThrow("preview unavailable");
+		const dumpedText = await Bun.file(dumped.artifactPath).text();
+		expect(dumpedText).toContain("[ARTIFACT TRUNCATED:");
+		expect(dumpedText.endsWith("0123456789ABCDEF")).toBe(true);
+	});
+
 	test("replace cancels a throttled tail and discards its pending preview", () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];
