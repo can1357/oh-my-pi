@@ -410,11 +410,20 @@ def route(
         return _pr_review_pr(pr, repo, action, bot_login)
 
     # GitHub sends "pull_request_review_comment" for inline review comments.
-    # Forgejo/Gitea sends "pull_request_comment" instead (the Event() method
-    # in modules/webhook/type.go maps HookEventPullRequestReviewComment to
-    # "pull_request_comment", NOT "pull_request_review_comment").
-    # Accept both event type names so the same endpoint handles both platforms.
-    if event_type in ("pull_request_review_comment", "pull_request_comment") and action in (
+    # Forgejo/Gitea send several event types here (action=reviewed, body in
+    # payload.review.content):
+    #   - "pull_request_comment"  for comment-verdict reviews and inline
+    #     review comments (Event() maps HookEventPullRequestReviewComment to
+    #     "pull_request_comment", NOT "pull_request_review_comment")
+    #   - "pull_request_approved" / "pull_request_rejected" for
+    #     approve/reject verdicts (webhook/deliver.go pullRequestReview)
+    # Accept all of these so review submissions route on both platforms.
+    if event_type in (
+        "pull_request_review_comment",
+        "pull_request_comment",
+        "pull_request_approved",
+        "pull_request_rejected",
+    ) and action in (
         "created",
         "reviewed",
         "edited",

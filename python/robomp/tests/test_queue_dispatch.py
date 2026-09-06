@@ -157,6 +157,54 @@ async def test_dispatch_routes_review_comment_actions_to_handle_review(
     assert seen == [action]
 
 
+@pytest.mark.parametrize(
+    ("event_type", "action"),
+    [
+        ("pull_request_review_comment", "created"),
+        ("pull_request_comment", "reviewed"),
+        ("pull_request_approved", "reviewed"),
+        ("pull_request_rejected", "reviewed"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dispatch_routes_review_submission_to_handle_review(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch, event_type: str, action: str
+) -> None:
+    """Every event type `route` queues for review MUST reach tasks.handle_review.
+
+    Forgejo review submissions (approve/reject verdicts) arrive under
+    pull_request_approved/pull_request_rejected; a dispatch gap there drops
+    review bodies exactly like the route() gap did.
+    """
+    seen: list[str] = []
+
+    async def fake_handle_review(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "handle_review", fake_handle_review)
+
+    row = EventRow(
+        delivery_id=f"rc-{event_type}-{action}",
+        event_type=event_type,
+        repo="octo/widget",
+        issue_key="octo/widget#7",
+        payload={
+            "action": action,
+            "number": 7,
+            "pull_request": {"number": 7},
+            "review": {"content": "verdict body", "id": 553},
+            "sender": {"login": "alice"},
+        },
+        received_at="2026-01-01T00:00:00Z",
+        state="running",
+        attempts=1,
+        last_error=None,
+    )
+    await _make_pool(settings, db)._dispatch(row)  # noqa: SLF001
+
+    assert seen == [action]
+
+
 @pytest.mark.asyncio
 async def test_dispatch_review_comment_deleted_is_noop(
     settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
@@ -243,6 +291,7 @@ async def test_dispatch_uses_platform_scoped_client_for_forgejo(
 
     assert isinstance(seen["github"], GitHubProxyClient)
     assert isinstance(seen["git_transport"], ProxyGitTransport)
+
 
 @pytest.mark.asyncio
 async def test_dispatch_routes_completed_workflow_to_release_handler(

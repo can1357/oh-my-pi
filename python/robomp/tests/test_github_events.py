@@ -1043,6 +1043,77 @@ def test_route_pull_request_comment_reviewed_forgejo() -> None:
     assert decision.task == "handle_review"
 
 
+def test_route_pull_request_rejected_reviewed_forgejo() -> None:
+    """Forgejo 'request changes' verdicts arrive as pull_request_rejected.
+
+    Regression: these were skipped as 'pull_request_rejected.reviewed not
+    handled', so review bodies (with no inline comments) never reached the bot.
+    """
+    decision = route(
+        "pull_request_rejected",
+        {
+            "action": "reviewed",
+            "number": 1686,
+            "review": {
+                "type": "pull_request_review_rejected",
+                "id": 553,
+                "content": "## Verdict: changes requested\n\nThe patch is not mergeable because ...",
+            },
+            "sender": {"login": "alice"},
+            "pull_request": {"number": 1686, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_review"
+    assert decision.issue_key == "octo/widget#1686"
+    assert decision.submitter == "alice"
+
+
+def test_route_pull_request_approved_reviewed_forgejo() -> None:
+    """Forgejo 'approve' verdicts arrive as pull_request_approved and must route too."""
+    decision = route(
+        "pull_request_approved",
+        {
+            "action": "reviewed",
+            "number": 7,
+            "review": {
+                "type": "pull_request_review_approved",
+                "id": 42,
+                "content": "Nice, the bounds hold now.",
+            },
+            "sender": {"login": "alice"},
+            "pull_request": {"number": 7, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_review"
+    assert decision.submitter == "alice"
+
+
+def test_route_pull_request_rejected_from_bot_is_skipped() -> None:
+    """Self-submitted verdicts stay ignored on the new event types too."""
+    decision = route(
+        "pull_request_rejected",
+        {
+            "action": "reviewed",
+            "number": 7,
+            "review": {"type": "pull_request_review_rejected", "id": 9, "content": "self"},
+            "sender": {"login": BOT},
+            "pull_request": {"number": 7, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert not decision.should_queue
+
+
 def test_route_pull_request_review_comment_created_github() -> None:
     """GitHub's pull_request_review_comment with action=created still routes to handle_review."""
     decision = route(
