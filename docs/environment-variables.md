@@ -364,6 +364,7 @@ therefore completes through the paste-code path.
 | `KAGI_API_KEY`                                      | Kagi search provider                                                      |
 | `JINA_API_KEY`                                      | Jina search provider                                                      |
 | `PARALLEL_API_KEY`                                  | Parallel search provider                                                  |
+| `OLLAMA_CLOUD_API_KEY`                              | Ollama web search provider                                                |
 | `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`                 | SearXNG endpoint and optional bearer token                                |
 | `SEARXNG_BASIC_USERNAME`, `SEARXNG_BASIC_PASSWORD`  | SearXNG HTTP Basic Auth credentials                                       |
 
