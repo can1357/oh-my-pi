@@ -33,7 +33,9 @@ import {
 	stripInternalDetailsFields,
 } from "./messages";
 import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
+import { publicSessionEntry } from "./private-content";
 import {
+	attachSessionEntryId,
 	type BranchSummaryEntry,
 	type CompactionEntry,
 	type CredentialPinEntry,
@@ -1195,6 +1197,7 @@ export class SessionManager {
 			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
 			return;
 		}
+		attachSessionEntryId(entry);
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		const batch = this.#atomicEntryBatch;
@@ -2266,11 +2269,11 @@ export class SessionManager {
 
 	/**
 	 * Snapshot the session for collab replication: the live header plus a deep
-	 * copy of every entry (the host mutates entries in place on rewrite paths, so
+	 * copy of every public entry (the host mutates entries in place on rewrite paths, so
 	 * guests must not share references).
 	 */
 	snapshotForReplication(): { header: SessionHeader; entries: SessionEntry[] } {
-		return { header: structuredClone(this.#header), entries: structuredClone(this.#entries) as SessionEntry[] };
+		return { header: structuredClone(this.#header), entries: structuredClone(this.#entries.map(publicSessionEntry)) };
 	}
 
 	/**

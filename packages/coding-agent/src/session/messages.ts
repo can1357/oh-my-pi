@@ -16,6 +16,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import type {
 	AssistantMessage,
+	EncryptedContent,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -38,7 +39,15 @@ export {
 
 import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
+import { markJournaled, sessionEntryIdOf } from "./session-entries";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
+
+export function cloneJournaled<T extends AgentMessage>(message: T, patch: Partial<T>): T {
+	const cloned = { ...message, ...patch };
+	const entryId = sessionEntryIdOf(message);
+	if (entryId) markJournaled(cloned, entryId);
+	return cloned;
+}
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
@@ -80,7 +89,7 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 		}
 		content.push(block);
 	}
-	return { ...message, content, providerPayload: undefined };
+	return cloneJournaled(message, { content, providerPayload: undefined });
 }
 
 /**
@@ -422,7 +431,7 @@ function followedByInterruptedThinking(messages: AgentMessage[], index: number):
 /** Drop an incomplete trailing thinking run from an interrupted assistant in the LLM view. */
 function stripDemotedThinkingForLlm(message: AssistantMessage): AssistantMessage {
 	const demoted = demoteInterruptedThinking(message);
-	return demoted ? { ...message, content: demoted.strippedContent } : message;
+	return demoted ? cloneJournaled(message, { content: demoted.strippedContent }) : message;
 }
 
 /** Details persisted on a `/tan` background-dispatch breadcrumb. */
@@ -756,16 +765,18 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 					attribution: "user",
 					timestamp: message.timestamp,
 				};
+	const entryId = sessionEntryIdOf(message);
+	if (entryId) markJournaled(userMessage, entryId);
 	if (typeof message.content === "string") {
 		if (message.content.length === 0) return message.role === "user" ? message : userMessage;
-		return { ...userMessage, content: renderSteeringEnvelope(message.content) };
+		return cloneJournaled(userMessage, { content: renderSteeringEnvelope(message.content) });
 	}
 
 	const text = getArrayContentText(message.content);
 	if (text.length === 0) return message.role === "user" ? message : userMessage;
 	const content: (TextContent | ImageContent)[] = [{ type: "text", text: renderSteeringEnvelope(text) }];
 	content.push(...getArrayContentImages(message.content));
-	return { ...userMessage, content };
+	return cloneJournaled(userMessage, { content });
 }
 
 export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
@@ -780,7 +791,7 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 		const message = messages[i];
 		if (!isSteeringUserMessage(message)) continue;
 		const wrappedMessage = wrapSteeringUserMessage(message);
-		if (wrappedMessage === message) continue;
+		if ((wrappedMessage as AgentMessage) === message) continue;
 		if (wrappedMessages === undefined) {
 			wrappedMessages = messages.slice();
 		}
@@ -790,14 +801,16 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 }
 
 /** Result of filtering image blocks out of a `(TextContent | ImageContent)[]` array. */
-interface StripContentResult {
-	content: (TextContent | ImageContent)[];
+interface StripContentResult<T> {
+	content: (TextContent | T)[];
 	removed: number;
 }
 
-function stripImagesFromArrayContent(content: (TextContent | ImageContent)[]): StripContentResult {
+function stripImagesFromArrayContent<T extends TextContent | ImageContent | EncryptedContent>(
+	content: T[],
+): StripContentResult<T> {
 	let removed = 0;
-	const kept: (TextContent | ImageContent)[] = [];
+	const kept: (TextContent | T)[] = [];
 	for (const part of content) {
 		if (part.type === "image") {
 			removed++;
@@ -915,7 +928,7 @@ export function replaceLlmImagesWithText(messages: Message[], placeholder: strin
 		if (msg.role !== "user" && msg.role !== "developer" && msg.role !== "toolResult") continue;
 		const content = msg.content;
 		if (!Array.isArray(content) || !content.some(part => part.type === "image")) continue;
-		const replaced: (TextContent | ImageContent)[] = [];
+		const replaced: (TextContent | ImageContent | EncryptedContent)[] = [];
 		for (const part of content) {
 			if (part.type !== "image") {
 				replaced.push(part);
@@ -926,7 +939,7 @@ export function replaceLlmImagesWithText(messages: Message[], placeholder: strin
 			replaced.push({ type: "text", text: placeholder });
 		}
 		if (out === undefined) out = messages.slice();
-		out[i] = { ...msg, content: replaced } as Message;
+		out[i] = cloneJournaled(msg, { content: replaced }) as Message;
 	}
 	return out ?? messages;
 }
@@ -978,6 +991,7 @@ export interface CustomMessage<T = unknown> {
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	timestamp: number;
+	sessionEntryId?: string;
 }
 
 /**
@@ -992,6 +1006,7 @@ export interface HookMessage<T = unknown> {
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	timestamp: number;
+	sessionEntryId?: string;
 }
 
 /**
@@ -1094,11 +1109,10 @@ export function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: Assis
 	// it belongs to a previous live Copilot connection and replaying it on a
 	// warmed session causes 401 rejections. User/developer payloads are preserved
 	// separately by the caller.
-	return {
-		...message,
+	return cloneJournaled(message, {
 		...(didSanitizeContent ? { content: sanitizedContent } : {}),
 		providerPayload: undefined,
-	};
+	});
 }
 
 function customMessageContentToLlmContent(content: CustomMessage["content"]): (TextContent | ImageContent)[] {
@@ -1324,6 +1338,10 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 	const cached = convertCache.get(m);
 	if (cached !== undefined && cached.interruptedNext === interruptedNext) return cached.fragment;
 	const fragment = convertOne(m, interruptedNext);
+	const journalId = sessionEntryIdOf(m);
+	if (journalId) {
+		for (const message of fragment) if (message.role !== "assistant") markJournaled(message, journalId);
+	}
 	convertCache.set(m, { interruptedNext, fragment });
 	return fragment;
 }

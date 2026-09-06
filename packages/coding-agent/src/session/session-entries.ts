@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import type {
 	ImageContent,
 	MessageAttribution,
@@ -334,4 +335,28 @@ export interface UsageStatistics {
 	orchestrationCacheRead: number;
 	premiumRequests: number;
 	cost: number;
+}
+
+/** Journal entry id; non-enumerable so serialized bytes never change once journaled. */
+export function markJournaled<T extends object>(message: T, id: string): T {
+	Object.defineProperty(message, "sessionEntryId", {
+		value: id,
+		enumerable: false,
+		configurable: true,
+		writable: true,
+	});
+	return message;
+}
+
+export function sessionEntryIdOf(message: object): string | undefined {
+	const id = (message as { sessionEntryId?: unknown }).sessionEntryId;
+	return typeof id === "string" ? id : undefined;
+}
+
+export function attachSessionEntryId(entry: SessionEntry): void {
+	if (entry.type !== "message") return;
+	const message = entry.message;
+	if (message.role === "assistant" || sessionEntryIdOf(message) === entry.id) return;
+	markJournaled(message, entry.id);
+	invalidateMessageCache(message);
 }

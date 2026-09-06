@@ -5,10 +5,16 @@ import {
 	shouldUseProviderNativeCompaction,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { getCodexContextWindowPolicy } from "@oh-my-pi/pi-ai/providers/openai-codex/history-notes";
 import type { CompactionSettings } from "../config/settings-schema";
 
 /** Choices presented by the ordered compaction-method setting. */
 export const COMPACTION_METHOD_CHOICES = [
+	{
+		value: "window",
+		label: "New context window",
+		description: "Start a fresh context window using private model notes on OpenAI Codex; no summary is generated",
+	},
 	{
 		value: "remote",
 		label: "OpenAI server compaction",
@@ -49,6 +55,7 @@ export const DEFAULT_COMPACTION_METHOD_ORDER: CompactionMethod[] = [
 ];
 
 const COMPACTION_METHODS: Record<CompactionMethod, true> = {
+	window: true,
 	remote: true,
 	snapcompact: true,
 	handoff: true,
@@ -75,7 +82,11 @@ export function resolveCompactionMethodOrder(value: unknown): CompactionMethod[]
 	return methods;
 }
 
-const STRATEGY_BY_COMPACTION_METHOD: Record<CompactionMethod, "context-full" | "handoff" | "shake" | "snapcompact"> = {
+const STRATEGY_BY_COMPACTION_METHOD: Record<
+	CompactionMethod,
+	"context-full" | "context-window" | "handoff" | "shake" | "snapcompact"
+> = {
+	window: "context-window",
 	remote: "context-full",
 	snapcompact: "snapcompact",
 	handoff: "handoff",
@@ -118,6 +129,10 @@ export function resolveSpeculationMethod(
 	settings: CompactionSettings,
 ): "remote" | "handoff" | "soft" | undefined {
 	for (const candidate of resolveCompactionMethodOrder(settings.methodOrder)) {
+		if (candidate === "window") {
+			if (getCodexContextWindowPolicy(model)) return undefined;
+			continue;
+		}
 		const available =
 			candidate === "remote"
 				? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))

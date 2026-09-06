@@ -1,6 +1,7 @@
 import type {
 	Context,
 	DeveloperMessage,
+	EncryptedContent,
 	ImageContent,
 	Message,
 	Model,
@@ -16,6 +17,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "../utils/image-loading";
+import { cloneJournaled } from "./messages";
 
 const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
 	type: "text",
@@ -33,12 +35,12 @@ function countImages(context: Context): number {
 	return count;
 }
 
-function clampContent(
-	content: readonly (TextContent | ImageContent)[],
+function clampContent<T extends TextContent | ImageContent | EncryptedContent>(
+	content: readonly T[],
 	state: { remainingDrops: number },
-): (TextContent | ImageContent)[] | undefined {
+): T[] | undefined {
 	let changed = false;
-	const clamped: (TextContent | ImageContent)[] = [];
+	const clamped: T[] = [];
 	for (const part of content) {
 		if (part.type === "image" && state.remainingDrops > 0) {
 			state.remainingDrops--;
@@ -53,20 +55,20 @@ function clampContent(
 function clampUserMessage(message: UserMessage, state: { remainingDrops: number }): UserMessage {
 	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content, providerPayload: undefined } : message;
+	return content ? cloneJournaled(message, { content, providerPayload: undefined }) : message;
 }
 
 function clampDeveloperMessage(message: DeveloperMessage, state: { remainingDrops: number }): DeveloperMessage {
 	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content, providerPayload: undefined } : message;
+	return content ? cloneJournaled(message, { content, providerPayload: undefined }) : message;
 }
 
 function clampToolResultMessage(message: ToolResultMessage, state: { remainingDrops: number }): ToolResultMessage {
 	if (state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
 	if (!content) return message;
-	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
+	return cloneJournaled(message, { content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] });
 }
 
 /** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap. */
@@ -183,11 +185,11 @@ function inlineImageFromDataUri(imageUrl: unknown): ImageContent | undefined {
 }
 
 /** `undefined` when every image decodes, so callers can keep the original array. */
-async function replaceUnreadableContent(
-	content: readonly (TextContent | ImageContent)[],
+async function replaceUnreadableContent<T extends ImageContent | EncryptedContent>(
+	content: readonly (TextContent | T)[],
 	model: Model,
-): Promise<(TextContent | ImageContent)[] | undefined> {
-	let replaced: (TextContent | ImageContent)[] | undefined;
+): Promise<(TextContent | T)[] | undefined> {
+	let replaced: (TextContent | T)[] | undefined;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		if (part.type !== "image" || !sendsInlineImageBytes(part, model)) continue;
@@ -294,7 +296,10 @@ async function dropUnreadableFromMessage(message: Message, model: Model): Promis
 				: undefined;
 			const providerPayload = await replaceUnreadableNativePayload(message.providerPayload);
 			if (!content && !providerPayload) return undefined;
-			return { ...message, ...(content ? { content } : {}), ...(providerPayload ? { providerPayload } : {}) };
+			return cloneJournaled(message, {
+				...(content ? { content } : {}),
+				...(providerPayload ? { providerPayload } : {}),
+			});
 		}
 		case "toolResult": {
 			const content = await replaceUnreadableContent(message.content, model);
@@ -305,11 +310,10 @@ async function dropUnreadableFromMessage(message: Message, model: Model): Promis
 			// assistant note built from this result's generic `content`, so the model
 			// still learns the call ran and what it reported — the screenshot bytes
 			// were the only thing lost, and they were unreadable anyway.
-			return {
-				...message,
+			return cloneJournaled(message, {
 				...(content ? { content } : {}),
 				...(screenshotReason === null ? {} : { providerMetadata: undefined }),
-			};
+			});
 		}
 		case "assistant":
 			// Assistant payloads replay model OUTPUT items (reasoning, tool calls,

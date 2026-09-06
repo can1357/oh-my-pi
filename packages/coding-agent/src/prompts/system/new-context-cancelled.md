@@ -1,0 +1,1 @@
+The new context window was cancelled, so this conversation continues in the current window with the same remaining budget. Do not assume your notes checkpoint replaced the history: keep working here, and expect ordinary summarization to reduce this conversation instead.

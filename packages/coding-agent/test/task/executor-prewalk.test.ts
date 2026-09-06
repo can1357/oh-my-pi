@@ -140,6 +140,27 @@ describe("runSubprocess per-agent prewalk", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("spawns the subagent on the root Codex backend session id", async () => {
+		const spy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+
+		const shared = await runSubprocess({
+			...baseOptions("subagent-codex-shared", Settings.isolated()),
+			agent: { ...baseAgent, model: [`${primary.provider}/${primary.id}`] },
+			parentCodexSessionId: "root-backend-session",
+		});
+		expect(shared.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.providerSessionId).toBe("root-backend-session");
+
+		const isolated = await runSubprocess({
+			...baseOptions("subagent-codex-isolated", Settings.isolated()),
+			agent: { ...baseAgent, model: [`${primary.provider}/${primary.id}`] },
+		});
+		expect(isolated.exitCode).toBe(0);
+		expect(spy.mock.calls[1]?.[0]?.providerSessionId).toBeUndefined();
+	});
+
 	it("resolves a frontmatter prewalk pattern to a target for the spawned session", async () => {
 		const spy = vi
 			.spyOn(sdkModule, "createAgentSession")

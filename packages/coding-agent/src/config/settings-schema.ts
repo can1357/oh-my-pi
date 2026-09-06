@@ -618,6 +618,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"providers.openai-codex.historyNotes": {
+		type: "enum",
+		values: ["off", "on", "auto"] as const,
+		default: "off",
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "Codex History & Notes",
+			description:
+				"Expose private encrypted history and notes and inject the thread hint. Auto follows the catalog flag. Requires ChatGPT OAuth; activation is frozen for the session.",
+		},
+	},
+
 	"providers.openai-codex.codeMode": {
 		type: "enum",
 		values: ["off", "on", "auto"] as const,

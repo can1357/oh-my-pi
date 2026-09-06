@@ -50,6 +50,15 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai";
+import type { HistoryNotesAgentIdentity } from "@oh-my-pi/pi-ai/providers/openai-codex/history-notes";
+import { getCodexAccountId } from "@oh-my-pi/pi-catalog/wire/codex";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { createGetContextRemainingTool, createNewContextTool } from "../tools/codex-context-window";
+import { CodexContextWindowRuntime } from "./codex-context-window-runtime";
+import { publicMessage } from "@oh-my-pi/pi-ai/utils/private-content";
+import { publicAgentMessages, publicCompactionPreparation, publicSessionEntries } from "./private-content";
+import { createFileOps } from "@oh-my-pi/pi-agent-core/compaction";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -258,6 +267,7 @@ function handoffSummaryFromDocument(
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionMaintenanceHost {
+	agentIdentity?: HistoryNotesAgentIdentity;
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
@@ -357,6 +367,9 @@ export interface SessionMaintenanceHost {
 
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
 export class SessionMaintenance {
+	readonly contextWindows: CodexContextWindowRuntime;
+	#contextWindowResetRequested: "model" | undefined;
+	#windowControlTools?: AgentTool[];
 	#compactionAbortController: AbortController | undefined;
 	/** Resolves after an active manual compaction has reconnected the agent subscription. */
 	#manualCompactionCleanup: Promise<void> | undefined;
@@ -400,11 +413,178 @@ export class SessionMaintenance {
 
 	constructor(host: SessionMaintenanceHost) {
 		this.#host = host;
+		this.contextWindows = new CodexContextWindowRuntime({
+			settings: host.settings,
+			sessionManager: host.sessionManager,
+			providerSessionState: host.providerSessionState,
+			providerSessionId: () => host.agent.sessionId ?? host.sessionId(),
+			model: () => host.model(),
+			agentIdentity: host.agentIdentity ?? { kind: "main", id: "Main" },
+			resolveAuth: async model => {
+				const key = host.agent.getApiKey
+					? await resolveApiKeyOnce(await host.agent.getApiKey(model))
+					: await host.modelRegistry.getApiKey(model, host.agent.sessionId);
+				if (typeof key !== "string") throw new Error("Codex OAuth is unavailable");
+				return {
+					provider: model.provider,
+					accessToken: key,
+					accountId: getCodexAccountId(key),
+					baseUrl: model.baseUrl,
+					headers: model.headers,
+				};
+			},
+		});
+	}
+
+	async refreshContextWindowTools(): Promise<AgentTool[]> {
+		await this.contextWindows.refresh();
+		const tools = this.contextWindows.notesTools();
+		if (!this.contextWindows.windowActive) return tools;
+		this.#windowControlTools ??= [
+			createNewContextTool(() => this.runContextWindowReset("model")),
+			createGetContextRemainingTool(() => this.contextWindows.protocol.remainingText()),
+		];
+		return [...tools, ...this.#windowControlTools];
+	}
+
+	/** Model requests commit only after its tool result is paired at onTurnEnd. */
+	async runContextWindowReset(source: "model"): Promise<void> {
+		if (!this.contextWindows.windowActive)
+			throw new Error("Context-window reset is unavailable for the active route");
+		this.#contextWindowResetRequested = source;
+	}
+
+	async #commitContextWindowReset(): Promise<void> {
+		const model = this.#model;
+		if (!model || !this.contextWindows.windowActive || this.isCompacting)
+			throw new Error("Context-window reset is unavailable");
+		this.cancelSpeculation();
+		const controller = new AbortController();
+		this.#autoCompactionAbortController = controller;
+		const previous = this.contextWindows.identity;
+		const branch = this.#host.sessionManager.getBranch();
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: branch.at(-1)?.id ?? "",
+			messagesToSummarize: this.#host.messages(),
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: this.#estimateStoredContextTokens(),
+			fileOps: createFileOps(),
+			settings: resolveMethodSettings(this.#host.settings.getGroup("compaction"), "window"),
+		};
+		let result: CompactionResult | undefined;
+		let committed = false;
+		try {
+			await this.#emitLifecycleEvent(
+				{ type: "auto_compaction_start", reason: "threshold", action: "context-full", method: "window" },
+				false,
+			);
+			if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) {
+				const hook = (await this.#host.extensionRunner.emit({
+					type: "session_before_compact",
+					preparation: {
+						...preparation,
+						messagesToSummarize: convertToLlm(preparation.messagesToSummarize).map(publicMessage),
+					},
+					branchEntries: publicSessionEntries(branch),
+					customInstructions: undefined,
+					signal: controller.signal,
+				})) as SessionBeforeCompactResult | undefined;
+				if (hook?.cancel) {
+					const notice = this.contextWindows.protocol.resetCancelled();
+					this.#host.sessionManager.appendMessage(notice);
+					this.#host.agent.appendMessage(notice);
+					return;
+				}
+			}
+			result = await compact(preparation, model, "", undefined, controller.signal, {
+				contextWindow: {
+					initialContext: [],
+					startNewWindow: () => this.contextWindows.startNewWindow(),
+				},
+			});
+			await this.#commitCompactionEntry({
+				...result,
+				shortSummary: undefined,
+				details: undefined,
+				fromExtension: false,
+				preserveData: {
+					...result.preserveData,
+					codexContextWindow: {
+						...this.contextWindows.identity,
+						agentPath: this.contextWindows.protocol.agentName,
+					},
+				},
+				method: "window",
+				codexCompaction: undefined,
+				advisorResetReason: "context-window",
+				detachExtensionEmit: true,
+			});
+			committed = true;
+			this.contextWindows.refreshThreadHint();
+		} finally {
+			if (!committed) this.contextWindows.restore(previous);
+			this.#contextWindowResetRequested = undefined;
+			this.#autoCompactionAbortController = undefined;
+			await this.#emitLifecycleEvent(
+				{
+					type: "auto_compaction_end",
+					action: "context-full",
+					method: "window",
+					result: committed ? result : undefined,
+					aborted: !committed,
+					willRetry: false,
+				},
+				true,
+			);
+		}
+	}
+
+	#observeContextWindow(message: AssistantMessage, activeMessages?: AgentMessage[]): boolean {
+		const runtime = this.contextWindows;
+		const policy = runtime.policy;
+		if (!policy) return false;
+		const failed = runtime.protocol.fallbackFailed;
+		const paired = activeMessages ?? this.#host.messages();
+		const checkpointCompleted = (toolCallId: string): boolean => {
+			for (let index = paired.length - 1; index >= 0; index--) {
+				const candidate = paired[index];
+				if (candidate.role === "toolResult" && candidate.toolCallId === toolCallId)
+					return candidate.isError !== true;
+			}
+			return false;
+		};
+		for (const item of runtime.protocol.observe(message, runtime.effectiveLimit, policy, checkpointCompleted)) {
+			this.#host.sessionManager.appendMessage(item);
+			this.#host.agent.appendMessage(item);
+			if (activeMessages && activeMessages !== this.#host.agent.state.messages) activeMessages.push(item);
+		}
+		if (!failed && runtime.protocol.fallbackFailed)
+			logger.debug("Codex context window skipped", {
+				reason: "Model did not write a checkpoint followed by new_context",
+			});
+		return !failed && runtime.protocol.fallbackFailed;
+	}
+
+	#prefersContextWindow(): boolean {
+		const settings = this.#host.settings.getGroup("compaction");
+		if (!settings.enabled || !this.contextWindows.windowActive || this.contextWindows.protocol.fallbackFailed)
+			return false;
+		for (const method of resolveCompactionMethodOrder(settings.methodOrder)) {
+			if (method === "window") return true;
+			if (method === "remote" && !canUseRemoteCompaction(this.#model, resolveMethodSettings(settings, method)))
+				continue;
+			if (method === "snapcompact" && !this.#model?.input.includes("image")) continue;
+			return false;
+		}
+		return false;
 	}
 
 	/** Clears per-prompt recovery counters when a new user prompt starts. */
 	resetForNewPrompt(): void {
 		this.#incompleteRecoveryAttempts = 0;
+		this.#contextWindowResetRequested = undefined;
 	}
 
 	/** Whether manual or automatic context maintenance is active. */
@@ -854,8 +1034,8 @@ export class SessionMaintenance {
 			if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) {
 				const result = (await this.#host.extensionRunner.emit({
 					type: "session_before_compact",
-					preparation,
-					branchEntries: pathEntries,
+					preparation: publicCompactionPreparation(preparation),
+					branchEntries: publicSessionEntries(pathEntries),
 					customInstructions,
 					signal: compactionAbortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
@@ -1503,6 +1683,21 @@ export class SessionMaintenance {
 		advisorResetReason: string;
 		detachExtensionEmit?: boolean;
 	}): Promise<CompactionEntry | undefined> {
+		let preserveData = args.preserveData;
+		if (args.method !== "window") {
+			// codex-rs advances the window lineage on every compaction that rewrites history.
+			if (args.codexCompaction) this.#host.resetCodexProviderAfterCompaction(args.codexCompaction);
+			else this.#host.closeCodexProviderSessionsForHistoryRewrite();
+			if (this.#model?.api === "openai-codex-responses") {
+				// Read the identity first: the provider close drops it, so rotation advances the restored lineage.
+				let identity = this.contextWindows.identity;
+				if (!args.codexCompaction) identity = this.contextWindows.startNewWindow();
+				preserveData = {
+					...preserveData,
+					codexContextWindow: { ...identity, agentPath: this.contextWindows.protocol.agentName },
+				};
+			}
+		}
 		const entryId = this.#host.sessionManager.appendCompaction(
 			args.summary,
 			args.shortSummary,
@@ -1511,10 +1706,13 @@ export class SessionMaintenance {
 			{
 				details: args.details,
 				fromExtension: args.fromExtension,
-				preserveData: args.preserveData,
+				preserveData,
 				method: args.method,
 				providerReplayThroughEntryId: args.providerReplayThroughEntryId,
-				tokensAfter: this.#projectCompactedContextTokens(args),
+				tokensAfter:
+					args.method === "window"
+						? computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer)
+						: this.#projectCompactedContextTokens(args),
 			},
 		);
 		const newEntries = this.#host.sessionManager.getEntries();
@@ -1527,11 +1725,6 @@ export class SessionMaintenance {
 		this.#host.resetPlanReference();
 		this.#host.resetAdvisorRuntimes(args.advisorResetReason);
 		this.#host.syncTodoPhasesFromBranch();
-		if (args.codexCompaction) {
-			this.#host.resetCodexProviderAfterCompaction(args.codexCompaction);
-		} else {
-			this.#host.closeCodexProviderSessionsForHistoryRewrite();
-		}
 		const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.id === entryId) as
 			| CompactionEntry
 			| undefined;
@@ -1632,6 +1825,39 @@ export class SessionMaintenance {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 			return;
 		}
+		if (this.#prefersContextWindow()) {
+			const runtime = this.contextWindows;
+			const policy = runtime.policy;
+			if (policy) {
+				const windowId = runtime.identity.windowId;
+				for (const item of runtime.protocol.observeInputTokens(contextTokens, runtime.effectiveLimit, policy)) {
+					this.#host.sessionManager.appendMessage(item);
+					this.#host.agent.appendMessage(item);
+				}
+				await this.#host.agent.continue();
+				if (runtime.identity.windowId === windowId && !runtime.protocol.fallbackFailed) {
+					throw new Error("Context window checkpoint did not complete; the pending prompt was not sent.");
+				}
+				let pendingTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
+				if (runtime.protocol.fallbackFailed && shouldCompact(pendingTokens, contextWindow, compactionSettings)) {
+					await this.runAutoCompaction("threshold", false, false, false, {
+						autoContinue: false,
+						suppressContinuation: true,
+						triggerContextTokens: pendingTokens,
+						pendingContextTokens: this.#tokenizer.countMessages(messages),
+						preparedContextTokens: this.#estimateStoredContextTokens(),
+						phase: "pre_turn",
+					});
+					pendingTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
+				}
+				if (shouldCompact(pendingTokens, contextWindow, compactionSettings)) {
+					throw new Error(
+						"The pending prompt still exceeds the compaction threshold after checkpoint maintenance; reduce the prompt or configure another compaction method.",
+					);
+				}
+				return;
+			}
+		}
 		if (
 			pendingMidTurnDeadEnd &&
 			prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
@@ -1694,14 +1920,40 @@ export class SessionMaintenance {
 		signal: AbortSignal | undefined,
 		context: AgentTurnEndContext | undefined,
 	): Promise<void> {
-		if (
-			signal?.aborted ||
-			this.#host.isDisposed() ||
-			this.isCompacting ||
-			this.#host.isGeneratingHandoff() ||
-			!context?.willContinue
-		)
+		if (signal?.aborted || !context?.willContinue) {
+			this.#contextWindowResetRequested = undefined;
 			return;
+		}
+		if (this.#host.isDisposed() || this.isCompacting || this.#host.isGeneratingHandoff()) return;
+
+		if (this.contextWindows.windowActive) {
+			if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
+			const assistant = activeMessages.findLast(
+				(message): message is AssistantMessage => message.role === "assistant",
+			);
+			const checkpointFailed = assistant ? this.#observeContextWindow(assistant, activeMessages) : false;
+			if (this.#contextWindowResetRequested) {
+				if (this.contextWindows.protocol.resetAllowed) {
+					await this.#commitContextWindowReset();
+					const replacement = this.#host.agent.state.messages;
+					if (replacement !== activeMessages) activeMessages.splice(0, activeMessages.length, ...replacement);
+					return;
+				}
+				this.#contextWindowResetRequested = undefined;
+			}
+			if (checkpointFailed) {
+				await this.runAutoCompaction("threshold", false, false, false, {
+					autoContinue: false,
+					suppressContinuation: true,
+					phase: "mid_turn",
+					detachPostCommit: true,
+				});
+				const replacement = this.#host.agent.state.messages;
+				if (replacement !== activeMessages) activeMessages.splice(0, activeMessages.length, ...replacement);
+				return;
+			}
+			if (this.#prefersContextWindow()) return;
+		}
 
 		const model = this.#model;
 		const contextWindow = model?.contextWindow ?? 0;
@@ -1861,6 +2113,23 @@ export class SessionMaintenance {
 		const compactionEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		const errorIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime();
+		if (
+			sameModel &&
+			!errorIsFromBeforeCompaction &&
+			assistantMessage.stopReason !== "error" &&
+			assistantMessage.stopReason !== "length"
+		) {
+			if (this.#observeContextWindow(assistantMessage)) {
+				return this.runAutoCompaction("threshold", false, false, allowDefer, { autoContinue });
+			}
+			if (this.#prefersContextWindow()) {
+				if (autoContinue && this.contextWindows.protocol.fallbackPending) {
+					this.#host.scheduleAgentContinue({ source: "codex-context-window-checkpoint", generation });
+					return { ...COMPACTION_CHECK_NONE, continuationScheduled: true };
+				}
+				return COMPACTION_CHECK_NONE;
+			}
+		}
 		const payloadRejection =
 			sameModel && !errorIsFromBeforeCompaction && AIError.isPayloadRejection(assistantMessage);
 		const ambiguousPayloadRejection =
@@ -2374,7 +2643,7 @@ export class SessionMaintenance {
 			const result = (await this.#host.extensionRunner.emit({
 				type: "session.compacting",
 				sessionId: this.#host.sessionId(),
-				messages: compactMessages,
+				messages: publicAgentMessages(compactMessages),
 			})) as { context?: string[]; prompt?: string; preserveData?: Record<string, unknown> } | undefined;
 
 			hookContext = result?.context;
@@ -2988,6 +3257,14 @@ export class SessionMaintenance {
 		let method: CompactionMethod | undefined;
 		for (let index = startIndex; index < methods.length; index++) {
 			const candidate = methods[index];
+			if (candidate === "window") {
+				logger.debug("Codex context window skipped", {
+					reason: this.contextWindows.protocol.fallbackFailed
+						? "Checkpoint protocol was not followed"
+						: "Window reset requires a completed model checkpoint turn",
+				});
+				continue;
+			}
 			const available =
 				candidate === "remote"
 					? canUseRemoteCompaction(this.#model, resolveMethodSettings(compactionSettings, candidate))
@@ -3308,8 +3585,8 @@ export class SessionMaintenance {
 			if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) {
 				const hookResult = (await this.#host.extensionRunner.emit({
 					type: "session_before_compact",
-					preparation,
-					branchEntries: pathEntriesForCompaction,
+					preparation: publicCompactionPreparation(preparation),
+					branchEntries: publicSessionEntries(pathEntriesForCompaction),
 					customInstructions: undefined,
 					signal: autoCompactionSignal,
 				})) as SessionBeforeCompactResult | undefined;

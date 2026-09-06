@@ -123,7 +123,7 @@ export function estimateSkillsTokens(skills: readonly Skill[], tokenizer: Tokeni
 }
 
 export function estimateToolSchemaTokens(
-	tools: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>,
+	tools: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters" | "namespace" | "modelOnly">>,
 	tokenizer: Tokenizer,
 ): number {
 	const fragments: string[] = [];
@@ -139,6 +139,8 @@ export function estimateToolSchemaTokens(
 				name: tool.name,
 				description: tool.description,
 				parameters: tool.parameters as AiTool["parameters"],
+				namespace: tool.namespace,
+				modelOnly: tool.modelOnly,
 			};
 			const wireJson = JSON.stringify(toolWireSchema(wireTool) ?? {});
 			if (typeof wireJson === "string") fragments.push(wireJson);

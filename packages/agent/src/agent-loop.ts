@@ -23,6 +23,7 @@ import {
 	toolWireSchema,
 	validateToolArguments,
 } from "@oh-my-pi/pi-ai";
+import { PRIVATE_MODEL_CALL, PRIVATE_MODEL_RESULT } from "@oh-my-pi/pi-ai/utils/private-content";
 import {
 	type Dialect,
 	encodeInbandToolHistory,
@@ -481,6 +482,12 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 		if (block.type === "text" && typeof (block as { text?: unknown }).text === "string") {
 			content.push({ type: "text", text: sanitizeText((block as { text: string }).text) });
 		} else if (
+			block.type === "encrypted" &&
+			"encryptedContent" in block &&
+			typeof block.encryptedContent === "string"
+		) {
+			content.push({ type: "encrypted", encryptedContent: block.encryptedContent });
+		} else if (
 			block.type === "image" &&
 			typeof (block as { data?: unknown }).data === "string" &&
 			typeof (block as { mimeType?: unknown }).mimeType === "string"
@@ -892,6 +899,7 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 	const pruneDescriptions = options.pruneDescriptions === true;
 	const injectIntent = options.injectIntent && Bun.env.PI_NO_INTENT !== "1";
 	return tools?.map(t => {
+		if (t.modelOnly && t.namespace) return t;
 		const intentMode = resolveIntentMode(t.intent);
 		const doInjectIntent = injectIntent && intentMode !== "omit";
 		// When the full catalog is rendered into the system prompt, ship the tool
@@ -1907,6 +1915,7 @@ async function streamAssistantResponse(
 						const block = event.partial.content[event.contentIndex];
 						if (block?.type === "toolCall") {
 							const tool = resolveToolForCall(context.tools, block, config.resolveFallbackTool);
+							if (tool?.modelOnly) block.modelOnly = true;
 							if (tool?.openArgStream) {
 								try {
 									const argStream = tool.openArgStream({
@@ -1937,6 +1946,8 @@ async function streamAssistantResponse(
 							}
 						}
 					} else if (event.type === "toolcall_end") {
+						if (resolveToolForCall(context.tools, event.toolCall, config.resolveFallbackTool)?.modelOnly)
+							event.toolCall.modelOnly = true;
 						const entry = argStreams.get(event.contentIndex);
 						if (entry) {
 							try {
@@ -1952,6 +1963,13 @@ async function streamAssistantResponse(
 					switch (event.type) {
 						case "start":
 							partialMessage = event.partial;
+							for (const block of partialMessage.content) {
+								if (
+									block.type === "toolCall" &&
+									resolveToolForCall(context.tools, block, config.resolveFallbackTool)?.modelOnly
+								)
+									block.modelOnly = true;
+							}
 							if (addedPartial) {
 								context.messages[context.messages.length - 1] = partialMessage;
 								completedToolCallIds.clear();
@@ -2291,6 +2309,7 @@ async function prepareToolCallDispatch(
 		if (toolCall.type !== "toolCall") continue;
 		if ((toolCall as CursorExecResolvedCarrier)[kCursorExecResolved] === true) continue;
 		const tool = resolveToolForCall(context.tools, toolCall, resolveFallbackTool);
+		if (tool?.modelOnly) toolCall.modelOnly = true;
 		const entry: PreparedToolCall = { tool, args: toolCall.arguments as Record<string, unknown> };
 		prepared.set(toolCall.id, entry);
 		let argsForExecution = toolCall.arguments as Record<string, unknown>;
@@ -2524,7 +2543,7 @@ async function executeToolCalls(
 				type: "tool_execution_start",
 				toolCallId: toolCall.id,
 				toolName: toolCall.name,
-				args: record.args,
+				args: publicToolArgs(toolCall, record.args),
 				intent: toolCall.intent,
 			});
 		}
@@ -2532,7 +2551,7 @@ async function executeToolCalls(
 			type: "tool_execution_end",
 			toolCallId: toolCall.id,
 			toolName: toolCall.name,
-			result,
+			result: publicToolResult(toolCall, result),
 			isError,
 		});
 
@@ -2540,6 +2559,7 @@ async function executeToolCalls(
 			role: "toolResult",
 			toolCallId: toolCall.id,
 			toolName: toolCall.name,
+			...(toolCall.modelOnly ? { modelOnly: true } : {}),
 			content: result.content,
 			details: result.details,
 			providerMetadata: result.providerMetadata,
@@ -2614,7 +2634,7 @@ async function executeToolCalls(
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
 			toolName: toolCall.name,
-			args: effectiveArgs,
+			args: publicToolArgs(toolCall, effectiveArgs),
 			intent: toolCall.intent,
 		});
 
@@ -2622,7 +2642,7 @@ async function executeToolCalls(
 			tool,
 			toolName: toolCall.name,
 			toolCallId: toolCall.id,
-			args: effectiveArgs,
+			args: publicToolArgs(toolCall, effectiveArgs),
 			parent: invokeAgentSpan,
 		});
 		if (toolSpan && toolCall.intent) {
@@ -2677,8 +2697,8 @@ async function executeToolCalls(
 							type: "tool_execution_update",
 							toolCallId: toolCall.id,
 							toolName: toolCall.name,
-							args: executionArgs,
-							partialResult: coerceToolResult(partialResult).result,
+							args: publicToolArgs(toolCall, executionArgs),
+							partialResult: publicToolResult(toolCall, coerceToolResult(partialResult).result),
 						});
 					},
 					toolContext,
@@ -2766,7 +2786,7 @@ async function executeToolCalls(
 					? "error"
 					: "ok";
 		finishExecuteToolSpan(telemetry, toolSpan, {
-			result,
+			result: publicToolResult(toolCall, result),
 			isError,
 			status,
 			errorMessage: errorMessageForSpan,
@@ -2998,6 +3018,22 @@ export function createSyntheticToolResultMessage(
 	};
 }
 
+function publicToolArgs(
+	toolCall: Extract<AssistantMessage["content"][number], { type: "toolCall" }>,
+	args: unknown,
+): unknown {
+	return toolCall.modelOnly ? { redacted: PRIVATE_MODEL_CALL } : args;
+}
+
+/** Private results never leave the loop: events, hooks and telemetry see the placeholder. */
+function publicToolResult<TDetails>(
+	toolCall: Extract<AssistantMessage["content"][number], { type: "toolCall" }>,
+	result: AgentToolResult<TDetails>,
+): AgentToolResult<TDetails | undefined> {
+	if (!toolCall.modelOnly) return result;
+	return { content: [{ type: "text", text: PRIVATE_MODEL_RESULT }], details: undefined };
+}
+
 /**
  * Create and emit a tool result for a tool call that was emitted by the
  * assistant but never invoked locally.
@@ -3018,7 +3054,7 @@ function createAbortedToolResult(
 		type: "tool_execution_start",
 		toolCallId: toolCall.id,
 		toolName: toolCall.name,
-		args: toolCall.arguments,
+		args: publicToolArgs(toolCall, toolCall.arguments),
 		intent: toolCall.intent,
 	});
 	stream.push({

@@ -8,8 +8,9 @@
  * identity (e.g. Anthropic's resize memo) stay warm.
  */
 
-import type { Context, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import type { Context, EncryptedContent, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
+import { cloneJournaled } from "../session/messages";
 
 /** Responses/Chat APIs whose `image_url` accepts arbitrary https URLs. */
 const URL_CAPABLE_OPENAI_APIS: Record<string, true> = {
@@ -55,7 +56,7 @@ function mapContextImages(context: Context, mapBlock: (block: ImageContent) => I
 	const messages = context.messages.map(message => {
 		if (!isImageBearing(message) || !Array.isArray(message.content)) return message;
 		let contentChanged = false;
-		const content = message.content.map((block): TextContent | ImageContent => {
+		const content = message.content.map((block): TextContent | ImageContent | EncryptedContent => {
 			if (block.type !== "image") return block;
 			const next = mapBlock(block);
 			if (next !== block) contentChanged = true;
@@ -63,7 +64,7 @@ function mapContextImages(context: Context, mapBlock: (block: ImageContent) => I
 		});
 		if (!contentChanged) return message;
 		messagesChanged = true;
-		return { ...message, content } as Message;
+		return cloneJournaled(message, { content }) as Message;
 	});
 	return messagesChanged ? { ...context, messages } : context;
 }
@@ -120,7 +121,7 @@ export async function inlineContextImages(
 			if (!isImageBearing(message) || !Array.isArray(message.content)) return message;
 			let contentChanged = false;
 			const content = await Promise.all(
-				message.content.map(async (block): Promise<TextContent | ImageContent> => {
+				message.content.map(async (block): Promise<TextContent | ImageContent | EncryptedContent> => {
 					if (block.type !== "image" || (!block.url && !block.providerFile)) return block;
 					contentChanged = true;
 					const { url: _url, providerFile: _providerFile, ...rest } = block;
@@ -132,7 +133,7 @@ export async function inlineContextImages(
 			);
 			if (!contentChanged) return message;
 			messagesChanged = true;
-			return { ...message, content } as Message;
+			return cloneJournaled(message, { content }) as Message;
 		}),
 	);
 	return messagesChanged ? { ...context, messages } : context;

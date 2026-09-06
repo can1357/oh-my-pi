@@ -848,6 +848,10 @@ export interface ToolCall {
 	type: "toolCall";
 	id: string;
 	name: string;
+	/** Codex namespace required to replay a namespaced function call. */
+	namespace?: string;
+	/** Marks a provider-owned tool call whose paired result is redacted from public projections. */
+	modelOnly?: boolean;
 	arguments: Record<string, unknown>;
 	[kStreamingPartialJson]?: string;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
@@ -1026,11 +1030,18 @@ export interface AssistantMessage {
 	completedAt?: number;
 }
 
+/** Opaque inference-only tool output. Never decode, display, or index this value. */
+export interface EncryptedContent {
+	type: "encrypted";
+	encryptedContent: string;
+}
+
 export interface ToolResultMessage<TDetails = unknown> {
 	role: "toolResult";
 	toolCallId: string;
 	toolName: string;
-	content: (TextContent | ImageContent)[]; // Supports text and images
+	modelOnly?: boolean;
+	content: (TextContent | ImageContent | EncryptedContent)[];
 	details?: TDetails;
 	isError: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -1288,6 +1299,11 @@ export type ToolExample<TArgs = Record<string, unknown>> =
 
 export interface Tool<TParameters extends TSchema = TSchema> {
 	name: string;
+	/** Codex function namespace; name remains fully qualified inside the agent. */
+	namespace?: string;
+	namespaceDescription?: string;
+	/** Exclude from Code Mode and redact results from public projections; arguments remain visible. */
+	modelOnly?: boolean;
 	description: string;
 	parameters: TParameters;
 	/** If true, tool is strictly typed and validated against the parameters schema before execution */

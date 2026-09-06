@@ -10,6 +10,7 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
+import { publicToolContent } from "@oh-my-pi/pi-ai/utils/private-content";
 import {
 	BINARY_SNIFF_BYTES,
 	type ImageMetadata,
@@ -800,7 +801,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			try {
 				const result = await this.execute("read-delimited-part", { path: part }, signal);
 				displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
-				for (const block of result.content) {
+				for (const block of publicToolContent(result.content)) {
 					if (block.type === "text") {
 						appendText(block.text);
 						continue;

@@ -27,6 +27,8 @@ import {
 	getOpenAICodexTransportDetails,
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { getCodexContextWindowPolicy } from "@oh-my-pi/pi-ai/providers/openai-codex/history-notes";
+import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-ai";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import {
@@ -1271,6 +1273,10 @@ export function createAutoLearnCaptureRunner(
 		}
 	};
 }
+
+/** Optional checkpoint discovery is attempted once per shared registry, including failures. */
+const codexCheckpointRefreshes = new WeakMap<ModelRegistry, Promise<void>>();
+
 /**
  * Create an AgentSession with the specified options.
  *
@@ -2748,8 +2754,40 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		if (model) {
 			const selectedModel = model;
-			const refreshedModel = await logger.time("refreshInitialModelMetadata", () =>
-				modelRegistry.refreshSelectedModelMetadata(selectedModel),
+			let refreshedModel = selectedModel;
+			if (
+				selectedModel.provider === "openai-codex" &&
+				selectedModel.api === "openai-codex-responses" &&
+				isOfficialCodexApiUrl(selectedModel.baseUrl) &&
+				(settings.get("providers.openai-codex.historyNotes") !== "off" ||
+					settings.get("compaction.methodOrder").includes("window")) &&
+				!getCodexContextWindowPolicy(selectedModel)
+			) {
+				const cachedModel = modelRegistry.find(selectedModel.provider, selectedModel.id);
+				if (getCodexContextWindowPolicy(cachedModel)) {
+					refreshedModel = cachedModel ?? selectedModel;
+				} else {
+					let refresh = codexCheckpointRefreshes.get(modelRegistry);
+					if (!refresh) {
+						refresh = (async () => {
+							logger.debug("Refreshing missing Codex checkpoint catalog metadata", { model: selectedModel.id });
+							try {
+								await modelRegistry.refreshDiscoverableProviders([selectedModel.provider], "online");
+							} catch (error) {
+								logger.debug("Codex checkpoint catalog refresh unavailable", {
+									model: selectedModel.id,
+									error: String(error),
+								});
+							}
+						})();
+						codexCheckpointRefreshes.set(modelRegistry, refresh);
+					}
+					if (!isSubagentSession) await refresh;
+					refreshedModel = modelRegistry.find(selectedModel.provider, selectedModel.id) ?? selectedModel;
+				}
+			}
+			refreshedModel = await logger.time("refreshInitialModelMetadata", () =>
+				modelRegistry.refreshSelectedModelMetadata(refreshedModel),
 			);
 			if (refreshedModel !== selectedModel) {
 				model = refreshedModel;
@@ -3549,7 +3587,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			promptCacheKey: providerPromptCacheKey,
 			deadline: options.deadline,
 			transformContext,
-			transformProviderContext,
+			transformProviderContext: async (context, transformModel) => {
+				const transformed = await transformProviderContext(context, transformModel);
+				return hasSession ? session.transformCodexContext(transformed) : transformed;
+			},
 			steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
 			followUpMode: settings.get("followUpMode") ?? "one-at-a-time",
 			interruptMode: settings.get("interruptMode") ?? "immediate",
@@ -3842,6 +3883,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		await session.initializeCodexContext();
+		const checkpointRefresh = isSubagentSession ? codexCheckpointRefreshes.get(modelRegistry) : undefined;
+		const startupModel = session.model;
+		if (checkpointRefresh && startupModel && !getCodexContextWindowPolicy(startupModel)) {
+			const liveSession = session;
+			void checkpointRefresh
+				.then(async () => {
+					await liveSession.waitForIdle();
+					if (liveSession.isDisposed || liveSession.model !== startupModel) return;
+					const discovered = modelRegistry.find(startupModel.provider, startupModel.id);
+					if (!discovered || !getCodexContextWindowPolicy(discovered)) return;
+					await liveSession.setModelTemporary(discovered, liveSession.configuredThinkingLevel(), {
+						ephemeral: true,
+					});
+				})
+				.catch(error => logger.debug("Deferred Codex checkpoint activation unavailable", { error: String(error) }));
+		}
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the
 		// advisor transcript size (issue #9553).

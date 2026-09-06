@@ -118,7 +118,7 @@ function nativeTextOf(part: unknown): string {
 	return part.text;
 }
 
-function textOf(part: TextContent | ImageContent | undefined): string {
+function textOf(part: ToolResultMessage["content"][number] | undefined): string {
 	if (part?.type !== "text") throw new Error(`expected a text block, got ${part?.type}`);
 	return part.text;
 }

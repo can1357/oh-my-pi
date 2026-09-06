@@ -13,6 +13,7 @@
 import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import dateCwdReminderTemplate from "../prompts/system/date-cwd-reminder.md" with { type: "text" };
+import { cloneJournaled } from "./messages";
 
 /** Renders the reminder text for the given local calendar date and cwd. */
 export function renderDateCwdReminder(date: string, cwd: string): string {
@@ -29,7 +30,7 @@ function injectReminder(message: UserMessage, reminder: string): UserMessage {
 		typeof message.content === "string"
 			? `${reminder}\n\n${message.content}`
 			: [{ type: "text", text: reminder }, ...message.content];
-	return { ...message, content };
+	return cloneJournaled(message, { content });
 }
 
 /**

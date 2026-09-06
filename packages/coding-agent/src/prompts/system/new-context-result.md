@@ -1,0 +1,1 @@
+A new context window will start without summarizing conversation history.

@@ -6,6 +6,7 @@
 
 ### Added
 
+- Codex model discovery now carries the model's context-window guidance and private history/notes capability.
 - Added Muse Code as a provider with Muse Spark models and live account-scoped discovery.
 - Muse Code subscriptions now resolve a compact edit-prompt variant, cutting recurring per-request tool bytes without touching other providers.
 - Added Meta's new `max` reasoning effort tier to Muse Spark 1.3 (standard) on the Meta Model API and Muse Code.

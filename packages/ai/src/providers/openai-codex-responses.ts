@@ -208,7 +208,7 @@ export interface OpenAICodexCompatibilityMetadata {
 export interface OpenAICodexCompactionResetOptions {
 	providerSessionState?: Map<string, ProviderSessionState>;
 	sessionId?: string;
-	compaction: CodexCompactionContext;
+	compaction?: CodexCompactionContext;
 }
 
 /** Add the selected wire implementation to one logical compaction context. */
@@ -490,14 +490,23 @@ interface CodexProviderSessionState extends ProviderSessionState {
 /** Request classification encoded in Codex turn metadata. */
 export type OpenAICodexRequestKind = "turn" | "prewarm" | "compaction";
 
-interface CodexMetadataSessionState {
+export interface CodexContextWindowIdentity {
+	/** The session id sent as `client_metadata.session_id`; the backend's own key for the thread. */
 	sessionId: string;
 	threadId: string;
+	firstWindowId: string;
+	previousWindowId?: string;
 	windowId: string;
+	windowNumber: number;
+}
+
+interface CodexMetadataSessionState extends CodexContextWindowIdentity {
+	sessionId: string;
 	turnId?: string;
 	turnStartedAtUnixMs?: number;
 	compactionOperationId?: string;
 	reuseTurnForNextRequest?: boolean;
+	historyAgentName?: string;
 	turnStates: Map<string, CodexTurnStateCell>;
 }
 
@@ -523,6 +532,10 @@ const CODEX_RESERVED_METADATA_KEYS: Record<string, true> = {
 	[OPENAI_HEADERS.INSTALLATION_ID]: true,
 	session_id: true,
 	thread_id: true,
+	agent_name: true,
+	window_number: true,
+	context_window_id: true,
+	history_ingest_requested: true,
 	turn_id: true,
 	window_id: true,
 	[OPENAI_HEADERS.WINDOW_ID]: true,
@@ -547,10 +560,13 @@ const CODEX_RESERVED_METADATA_KEYS: Record<string, true> = {
 };
 
 function createCodexMetadataSessionState(sessionId: string): CodexMetadataSessionState {
+	const windowId = crypto.randomUUID();
 	return {
 		sessionId,
 		threadId: crypto.randomUUID(),
-		windowId: crypto.randomUUID(),
+		windowId,
+		firstWindowId: windowId,
+		windowNumber: 1,
 		turnStates: new Map(),
 	};
 }
@@ -599,7 +615,7 @@ function createCodexCompatibilityIdentity(session: CodexMetadataSessionState): C
 		installationId: getInstallId(),
 		sessionId: session.sessionId,
 		threadId: session.threadId,
-		windowId: session.windowId,
+		windowId: session.historyAgentName ? `${session.threadId}:${session.windowNumber}` : session.windowId,
 	};
 }
 
@@ -667,6 +683,12 @@ function createCodexRequestMetadata(
 		window_id: identity.windowId,
 		request_kind: requestKind,
 	};
+	if (session.historyAgentName) {
+		turnMetadata.agent_name = session.historyAgentName;
+		turnMetadata.window_number = session.windowNumber;
+		turnMetadata.context_window_id = session.windowId;
+		turnMetadata.history_ingest_requested = true;
+	}
 	if (parentTurnId) turnMetadata.parent_turn_id = parentTurnId;
 	if (options.compaction) {
 		turnMetadata.compaction = {
@@ -772,9 +794,57 @@ export function resetOpenAICodexHistoryAfterCompaction(options: OpenAICodexCompa
 	if (!sessionId) return;
 	const metadataSession = providerState.metadataSessions.get(sessionId);
 	if (!metadataSession) return;
+	metadataSession.previousWindowId = metadataSession.windowId;
 	metadataSession.windowId = crypto.randomUUID();
+	metadataSession.windowNumber++;
 	metadataSession.compactionOperationId = undefined;
-	metadataSession.reuseTurnForNextRequest = options.compaction.phase !== "standalone_turn";
+	metadataSession.reuseTurnForNextRequest = options.compaction?.phase !== "standalone_turn";
+}
+
+/** Opt the session into native backend history recording; undefined disables it. */
+export function setOpenAICodexHistoryIngestion(
+	sessionId: string,
+	providerSessionState: Map<string, ProviderSessionState>,
+	agentName: string | undefined,
+): void {
+	const providerState = getCodexProviderSessionState(providerSessionState);
+	const state = getOrCreateCodexMetadataSessionState(sessionId, providerState);
+	state.historyAgentName = agentName;
+}
+
+export function getOpenAICodexContextWindow(
+	sessionId: string,
+	providerSessionState: Map<string, ProviderSessionState>,
+): CodexContextWindowIdentity {
+	const providerState = getCodexProviderSessionState(providerSessionState);
+	const state = getOrCreateCodexMetadataSessionState(sessionId, providerState);
+	return {
+		sessionId: state.sessionId,
+		threadId: state.threadId,
+		firstWindowId: state.firstWindowId,
+		previousWindowId: state.previousWindowId,
+		windowId: state.windowId,
+		windowNumber: state.windowNumber,
+	};
+}
+
+/** The persisted, restorable part of the identity: window lineage, not the session it belongs to. */
+export type CodexContextWindowLineage = Omit<CodexContextWindowIdentity, "sessionId">;
+
+export function restoreOpenAICodexContextWindow(
+	sessionId: string,
+	providerSessionState: Map<string, ProviderSessionState>,
+	lineage: CodexContextWindowLineage,
+): void {
+	const providerState = getCodexProviderSessionState(providerSessionState);
+	const state = getOrCreateCodexMetadataSessionState(sessionId, providerState);
+	state.threadId = lineage.threadId;
+	state.firstWindowId = lineage.firstWindowId;
+	state.previousWindowId = lineage.previousWindowId;
+	state.windowId = lineage.windowId;
+	state.windowNumber = lineage.windowNumber;
+	for (const websocket of providerState?.webSocketSessions.values() ?? []) resetCodexWebSocketAppendState(websocket);
+	state.turnStates.clear();
 }
 
 interface CodexRequestContext {
@@ -1979,7 +2049,8 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 		return {
 			type: "toolCall",
 			id: encodeResponsesToolCallId(item.call_id, item.id),
-			name: item.name,
+			name: item.namespace ? `${item.namespace}.${item.name}` : item.name,
+			...(item.namespace ? { namespace: item.namespace } : {}),
 			arguments: {},
 			[kStreamingPartialJson]: item.arguments || "",
 		};
@@ -2444,13 +2515,16 @@ class CodexStreamProcessor {
 			const toolCall: ToolCall = {
 				type: "toolCall",
 				id: encodeResponsesToolCallId(item.call_id, item.id),
-				name: item.name,
+				name: item.namespace ? `${item.namespace}.${item.name}` : item.name,
+				...(item.namespace ? { namespace: item.namespace } : {}),
 				arguments: parseStreamingJson(item.arguments || "{}"),
 			};
 			if (block?.type === "toolCall") {
 				// Persist the authoritative final args on the stored block; the throttled
 				// delta parser may have left block.arguments stale (often `{}`).
 				block.arguments = toolCall.arguments;
+				block.name = toolCall.name;
+				block.namespace = toolCall.namespace;
 				clearStreamingPartialJson(block);
 			}
 			// Detach so a late/duplicate arguments.delta cannot append to the
@@ -4395,7 +4469,7 @@ async function openCodexSseEventStream(
 	);
 }
 
-function createCodexHeaders(
+export function createCodexHeaders(
 	initHeaders: Record<string, string> | undefined,
 	accountId: string | undefined,
 	accessToken: string,
@@ -4695,6 +4769,7 @@ function normalizeInputMessageContent(
 export { convertMessages as convertCodexResponsesMessages };
 
 type CodexToolPayload =
+	| { type: "namespace"; name: string; description: string; tools: CodexToolPayload[] }
 	| { type: "computer"; name?: never }
 	| {
 			type: "function";
@@ -4702,6 +4777,7 @@ type CodexToolPayload =
 			description: string;
 			parameters: Record<string, unknown>;
 			strict?: boolean;
+			defer_loading?: boolean;
 	  }
 	| {
 			type: "custom";
@@ -4717,17 +4793,37 @@ export function convertOpenAICodexResponsesTools(
 ): CodexToolPayload[] {
 	const allowFreeform = model.applyPatchToolType === "freeform";
 	const payloads: CodexToolPayload[] = [];
+	const namespaces = new Map<string, CodexToolPayload[]>();
 	for (const tool of tools) {
+		let target = payloads;
+		if (tool.namespace) {
+			let children = namespaces.get(tool.namespace);
+			if (!children) {
+				children = [];
+				namespaces.set(tool.namespace, children);
+				payloads.push({
+					type: "namespace",
+					name: tool.namespace,
+					description: tool.namespaceDescription ?? "",
+					tools: children,
+				});
+			}
+			target = children;
+		}
+		const wireName =
+			tool.namespace && tool.name.startsWith(`${tool.namespace}.`)
+				? tool.name.slice(tool.namespace.length + 1)
+				: tool.name;
 		// Subscription models default to the function fallback. Explicit metadata
 		// remains authoritative for future Codex endpoints that implement GA computer use.
 		if (tool.native?.type === "computer" && model.supportsComputerUse === true) {
-			payloads.push({ type: "computer" });
+			target.push({ type: "computer" });
 			continue;
 		}
 		if (allowFreeform && tool.customFormat) {
-			payloads.push({
+			target.push({
 				type: "custom",
-				name: tool.customWireName ?? tool.name,
+				name: tool.customWireName ?? wireName,
 				description: tool.description || "",
 				format: {
 					type: "grammar",
@@ -4738,13 +4834,18 @@ export function convertOpenAICodexResponsesTools(
 			continue;
 		}
 		const strict = !!(!NO_STRICT && tool.strict);
-		const baseParameters = sanitizeSchemaForOpenAIResponses(toolWireSchema(tool));
-		const { schema: parameters, strict: effectiveStrict } = adaptSchemaForStrict(baseParameters, strict);
-		payloads.push({
+		const schema = toolWireSchema(tool);
+		// Codex rejects even an equivalent nullable-anyOf rewrite of a reserved schema.
+		const { schema: parameters, strict: effectiveStrict } =
+			tool.modelOnly && tool.namespace
+				? { schema, strict }
+				: adaptSchemaForStrict(sanitizeSchemaForOpenAIResponses(schema), strict);
+		target.push({
 			type: "function",
-			name: tool.name,
+			name: wireName,
 			description: tool.description || "",
 			parameters,
+			...(tool.deferLoading ? { defer_loading: true } : {}),
 			...(effectiveStrict ? { strict: true } : !NO_STRICT && tool.strict === false ? { strict: false } : {}),
 		});
 	}

@@ -82,13 +82,36 @@ export interface ToolNamespacesInfo {
 }
 
 export function buildToolNamespacesInfo(args: {
-	tools: ReadonlyArray<{ name: string; customWireName?: string; loadMode?: string; mcpServerName?: string }>;
+	tools: ReadonlyArray<{
+		name: string;
+		namespace?: string;
+		modelOnly?: boolean;
+		customWireName?: string;
+		loadMode?: string;
+		mcpServerName?: string;
+	}>;
 	directToolNames: ReadonlySet<string>;
 }): ToolNamespacesInfo {
 	// Null prototype: a tool named `toString` or `__proto__` must land as an own
 	// entry instead of reading or replacing an inherited member.
 	const functions: Record<string, ToolNamespaceFunctionInfo> = Object.create(null);
+	const namespaces: ToolNamespacesInfo = Object.create(null);
+	namespaces.functions = { name: "functions", functions };
 	for (const tool of args.tools) {
+		if (tool.namespace) {
+			const group = (namespaces[tool.namespace] ??= { name: tool.namespace, functions: Object.create(null) });
+			const name = tool.name.startsWith(`${tool.namespace}.`)
+				? tool.name.slice(tool.namespace.length + 1)
+				: tool.name;
+			group.functions[name] = {
+				name,
+				direct: args.directToolNames.has(tool.name),
+				code_mode_name: tool.modelOnly ? null : tool.name,
+				deferred: tool.loadMode === "discoverable",
+				source: { kind: "harness" },
+			};
+			continue;
+		}
 		const direct = args.directToolNames.has(tool.name);
 		const wireName = direct ? (tool.customWireName ?? tool.name) : tool.name;
 		const existing = functions[wireName];
@@ -109,10 +132,10 @@ export function buildToolNamespacesInfo(args: {
 		functions[wireName] = {
 			name: wireName,
 			direct,
-			code_mode_name: tool.name,
+			code_mode_name: tool.modelOnly ? null : tool.name,
 			deferred: tool.loadMode === "discoverable",
 			source: tool.mcpServerName ? { kind: "mcp", server_name: tool.mcpServerName } : { kind: "harness" },
 		};
 	}
-	return { functions: { name: "functions", functions } };
+	return namespaces;
 }

@@ -188,11 +188,23 @@ export type OpenAIReasoningDisableMode =
 
 export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "qwen" | "thinking";
 
+/** Upstream-owned Codex context-window protocol from model_messages.token_budget. */
+export interface CodexContextWindows {
+	readonly enabled: boolean;
+	readonly useHistoryNotes: boolean;
+	readonly reminderThresholdTokens: number;
+	readonly reminderMessageTemplate: string;
+	readonly guidanceMessage: string;
+	readonly autoCompactFallbackPrompt: string;
+	readonly autoCompactFallbackBufferTokens: number;
+}
+
 /**
  * Compatibility settings for openai-completions API.
  * Use this to override URL-based auto-detection for custom providers.
  */
 export interface OpenAICompat {
+	contextWindows?: CodexContextWindows;
 	/** Whether the provider supports the `store` field. Default: auto-detected from URL. */
 	supportsStore?: boolean;
 	/** Whether the provider supports the `developer` role (vs `system`). Default: auto-detected from URL. */
@@ -737,6 +749,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		Omit<
 			OpenAICompat,
 			| "supportsDeveloperRole"
+			| "contextWindows"
 			| "supportsReasoningEffort"
 			| "reasoningEffortMap"
 			| "supportsReasoningParams"
@@ -813,6 +826,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 
 /** Fully-resolved Responses-API compat view (same contract as `ResolvedOpenAICompat`). */
 export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompat {
+	contextWindows?: CodexContextWindows;
 	supportsLongPromptCacheRetention: boolean;
 	strictResponsesPairing: boolean;
 	supportsImageDetailOriginal: boolean;
