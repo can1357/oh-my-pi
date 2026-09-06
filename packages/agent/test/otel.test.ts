@@ -1150,3 +1150,56 @@ describe("ChatUsageEvent.headers and pi.gen_ai.gateway.* span attributes", () =>
 		}
 	});
 });
+
+describe("model-only tool privacy", () => {
+	it("keeps private arguments, results and progress out of telemetry and events", async () => {
+		const mock = createMockModel({
+			...MOCK_IDENT,
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "tc-private",
+							name: "notes.write_file",
+							arguments: { text: "ciphertext-args" },
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			telemetry: { captureMessageContent: true },
+		};
+		const notes: AgentTool = {
+			name: "notes.write_file",
+			label: "notes.write_file",
+			description: "Private model-only tool",
+			parameters: type({ text: type("string") }),
+			modelOnly: true,
+			execute: async (_id, _args, _signal, onUpdate) => {
+				onUpdate?.({ content: [{ type: "text", text: "ciphertext-progress" }] });
+				return { content: [{ type: "encrypted", encryptedContent: "ciphertext-result" }], details: {} };
+			},
+		};
+		const ctx: AgentContext = { systemPrompt: [], messages: [], tools: [notes] };
+		const events = await runAndDrain(agentLoop([createUserMessage("hi")], ctx, config, undefined, mock.stream));
+
+		const span = findSpan(exporter.getFinishedSpans(), "execute_tool notes.write_file");
+		const spanArgs = String(span?.attributes[GenAIAttr.ToolCallArguments]);
+		const spanResult = String(span?.attributes[GenAIAttr.ToolCallResult]);
+		expect(spanArgs).not.toContain("ciphertext-args");
+		expect(spanArgs).toContain("[private model-only call]");
+		expect(spanResult).not.toContain("ciphertext-result");
+		expect(spanResult).toContain("[private model-only result]");
+
+		const streamed = JSON.stringify(events.filter(event => event.type.startsWith("tool_execution")));
+		expect(streamed).not.toContain("ciphertext-progress");
+		expect(streamed).not.toContain("ciphertext-args");
+		expect(streamed).not.toContain("ciphertext-result");
+		expect(streamed).toContain("[private model-only result]");
+	});
+});

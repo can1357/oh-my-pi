@@ -2551,7 +2551,7 @@ async function executeToolCalls(
 			type: "tool_execution_end",
 			toolCallId: toolCall.id,
 			toolName: toolCall.name,
-			result: toolCall.modelOnly ? { content: [{ type: "text", text: PRIVATE_MODEL_RESULT }] } : result,
+			result: publicToolResult(toolCall, result),
 			isError,
 		});
 
@@ -2642,7 +2642,7 @@ async function executeToolCalls(
 			tool,
 			toolName: toolCall.name,
 			toolCallId: toolCall.id,
-			args: effectiveArgs,
+			args: publicToolArgs(toolCall, effectiveArgs),
 			parent: invokeAgentSpan,
 		});
 		if (toolSpan && toolCall.intent) {
@@ -2698,7 +2698,7 @@ async function executeToolCalls(
 							toolCallId: toolCall.id,
 							toolName: toolCall.name,
 							args: publicToolArgs(toolCall, executionArgs),
-							partialResult: coerceToolResult(partialResult).result,
+							partialResult: publicToolResult(toolCall, coerceToolResult(partialResult).result),
 						});
 					},
 					toolContext,
@@ -2786,7 +2786,7 @@ async function executeToolCalls(
 					? "error"
 					: "ok";
 		finishExecuteToolSpan(telemetry, toolSpan, {
-			result,
+			result: publicToolResult(toolCall, result),
 			isError,
 			status,
 			errorMessage: errorMessageForSpan,
@@ -3023,6 +3023,15 @@ function publicToolArgs(
 	args: unknown,
 ): unknown {
 	return toolCall.modelOnly ? { redacted: PRIVATE_MODEL_CALL } : args;
+}
+
+/** Private results never leave the loop: events, hooks and telemetry see the placeholder. */
+function publicToolResult<TDetails>(
+	toolCall: Extract<AssistantMessage["content"][number], { type: "toolCall" }>,
+	result: AgentToolResult<TDetails>,
+): AgentToolResult<TDetails | undefined> {
+	if (!toolCall.modelOnly) return result;
+	return { content: [{ type: "text", text: PRIVATE_MODEL_RESULT }], details: undefined };
 }
 
 /**
