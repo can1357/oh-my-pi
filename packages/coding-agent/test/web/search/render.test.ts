@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { isFramedBlockComponent } from "@oh-my-pi/pi-coding-agent/tui/output-block";
 import { renderSearchResult, type SearchRenderDetails } from "@oh-my-pi/pi-coding-agent/web/search/render";
 import type { SearchResponse } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -96,5 +97,27 @@ describe("renderSearchResult", () => {
 
 		expect(answer).toMatch(/more line/);
 		expect(answer).not.toContain("FINAL_UNIQUE_MARKER");
+	});
+
+	it("stacks provider cards without adding an outer frame", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const perplexity = buildResult("Perplexity answer");
+		const gemini = buildResult("Gemini answer");
+		gemini.details.response.provider = "gemini";
+		const component = renderSearchResult(
+			{
+				content: [{ type: "text", text: "unused aggregate text" }],
+				details: { response: perplexity.details.response, results: [perplexity, gemini] },
+			},
+			{ expanded: true, isPartial: false },
+			uiTheme,
+			{ query: "test query" },
+		);
+		const rendered = component.render(120).map(line => sanitizeText(line));
+
+		expect(isFramedBlockComponent(component)).toBeTrue();
+		expect(rendered.filter(line => line.includes("Web Search")).length).toBe(2);
+		expect(rendered.join("\n")).toContain("Perplexity answer");
+		expect(rendered.join("\n")).toContain("Gemini answer");
 	});
 });

@@ -5,7 +5,7 @@
  */
 
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Markdown, Text } from "@oh-my-pi/pi-tui";
+import { Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { getMarkdownTheme, type Theme } from "../../modes/theme/theme";
 import {
@@ -54,9 +54,15 @@ function renderFallbackText(contentText: string, expanded: boolean, theme: Theme
 	return new Text(text, 0, 0);
 }
 
+export interface SearchRenderResult {
+	content: Array<{ type: string; text?: string }>;
+	details: SearchRenderDetails;
+}
+
 export interface SearchRenderDetails {
 	response: SearchResponse;
 	error?: string;
+	results?: SearchRenderResult[];
 }
 
 /** Render a web search failure as a framed error panel, matching the success layout. */
@@ -85,6 +91,14 @@ export function renderSearchResult(
 	},
 ): Component {
 	const details = result.details;
+	if (details?.results && details.results.length > 0) {
+		const stack = new Container();
+		for (const [index, entry] of details.results.entries()) {
+			if (index > 0) stack.addChild(new Spacer());
+			stack.addChild(renderSearchResult(entry, options, theme, args));
+		}
+		return markFramedBlockComponent(stack);
+	}
 
 	// Handle error case as a framed panel, matching the success layout.
 	if (details?.error) {
