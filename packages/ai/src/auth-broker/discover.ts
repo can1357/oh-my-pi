@@ -53,10 +53,11 @@ export interface DiscoverAuthStorageOptions {
 	/** Transport for every broker request. Default global `fetch`. */
 	fetch?: typeof fetch;
 	/**
-	 * Startup budget for revalidating a fresh cached snapshot.
-	 * Default {@link SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS}.
+	 * Deadline for revalidating a fresh cached snapshot; one signal governs both
+	 * the reachability probe and the snapshot fetch. Default
+	 * `AbortSignal.timeout(SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS)`.
 	 */
-	revalidationTimeoutMs?: number;
+	revalidationSignal?: AbortSignal;
 }
 
 /**
@@ -468,7 +469,7 @@ export async function openAuthCredentialStore(
 		// unreachable, slow, or failing for any other reason leaves startup on the
 		// cache and the store's background stream picks up the current generation.
 		const revalidation = cachedSnapshot
-			? AbortSignal.timeout(options.revalidationTimeoutMs ?? SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS)
+			? (options.revalidationSignal ?? AbortSignal.timeout(SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS))
 			: undefined;
 		if (!revalidation || (await isAuthBrokerReachable(client, revalidation))) {
 			try {
