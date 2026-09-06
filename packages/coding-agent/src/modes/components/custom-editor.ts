@@ -20,6 +20,7 @@ import {
 	COMPOSER_TOKEN_REGEX,
 	chipLabel,
 	collapseImageMarkers,
+	referencedAttachments,
 	renderPlaceholders,
 } from "../composer-attachments";
 import { MacOSSpellingProvider, type SpellingFeatures } from "../macos-spelling";
@@ -523,14 +524,12 @@ export class CustomEditor extends Editor {
 	/** Attachments whose chip token (or legacy bracketed marker) is still present in the buffer —
 	 *  deleting the inline token hides the chip and drops the attachment from the submission. */
 	composerChips(): ComposerChipDescriptor[] {
-		const text = this.getText();
+		const refs = referencedAttachments(this.getText());
 		const chips: ComposerChipDescriptor[] = [];
 		for (let i = 0; i < this.pendingImages.length; i++) {
 			const n = i + 1;
-			const video =
-				text.includes(chipLabel("video", n)) || text.includes(`[Video #${n}]`) || text.includes(`[Video #${n},`);
-			const image =
-				text.includes(chipLabel("image", n)) || text.includes(`[Image #${n}]`) || text.includes(`[Image #${n},`);
+			const video = refs.video.has(n);
+			const image = refs.image.has(n);
 			if (!video && !image) continue;
 			chips.push({
 				kind: video ? "video" : "image",
@@ -540,7 +539,7 @@ export class CustomEditor extends Editor {
 			});
 		}
 		for (const entry of this.pendingTexts) {
-			if (!text.includes(entry.label)) continue;
+			if (!refs.paste.has(entry.n)) continue;
 			chips.push({ kind: "paste", n: entry.n, text: entry });
 		}
 		return chips;
