@@ -39,9 +39,9 @@ import type {
 	MarketplacePluginEntry,
 	MarketplaceRegistryEntry,
 } from "./types";
-import { buildPluginId, parsePluginId } from "./types";
+import { buildPluginId, nameSegmentCollisionKey, parsePluginId } from "./types";
 
-const RUNTIME_PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+const RUNTIME_PACKAGE_NAME_RE = /^(?:@[a-zA-Z0-9][a-zA-Z0-9._~-]*\/)?[a-zA-Z0-9][a-zA-Z0-9._~-]*$/;
 const MAX_RUNTIME_PACKAGE_NAME_LENGTH = 214;
 
 function assertRuntimePackageName(name: string): string {
@@ -91,15 +91,21 @@ export class MarketplaceManager {
 
 	async addMarketplace(source: string): Promise<MarketplaceRegistryEntry> {
 		const reg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
-		const existingNames = new Set(reg.marketplaces.map(m => m.name));
 
 		const { catalog, clonePath } = await fetchMarketplace(source, this.#opts.marketplacesCacheDir);
 
-		if (existingNames.has(catalog.name)) {
+		const catalogKey = nameSegmentCollisionKey(catalog.name);
+		const existingName = reg.marketplaces.find(m => nameSegmentCollisionKey(m.name) === catalogKey)?.name;
+		if (existingName) {
 			if (clonePath) {
 				await fs.rm(clonePath, { recursive: true, force: true }).catch(() => {});
 			}
-			throw new Error(`Marketplace "${catalog.name}" already exists`);
+			if (existingName === catalog.name) {
+				throw new Error(`Marketplace "${catalog.name}" already exists`);
+			}
+			throw new Error(
+				`Marketplace "${catalog.name}" conflicts with existing marketplace "${existingName}" on case-insensitive filesystems`,
+			);
 		}
 
 		// Promote the temp clone to its final cache location now that we know it's not a duplicate.
@@ -298,11 +304,21 @@ export class MarketplaceManager {
 			tmpDir: os.tmpdir(),
 		});
 
-		// 5. Determine version: catalog entry > plugin manifest > git SHA > fallback
+		// 5. Resolve registration identity before replacing an active cache. A
+		// forced reinstall can reuse the same cache key, so validation after
+		// cachePlugin would already have destroyed the prior contents on failure.
 		let version!: string;
 		let cachePath!: string;
+		let packageName!: string;
 		try {
 			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
+			packageName = await this.#resolvePluginPackageName(sourcePath, name);
+			await this.#assertRuntimePackageNameAvailable(
+				scope,
+				packageName,
+				await readInstalledPluginsRegistry(registryPath),
+				pluginId,
+			);
 			cachePath = await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version);
 			await this.#writeEmbeddedLspConfig(pluginEntry, cachePath);
 			await this.#writeEmbeddedDapConfig(pluginEntry, cachePath);
@@ -313,7 +329,6 @@ export class MarketplaceManager {
 			}
 		}
 
-		const packageName = await this.#resolvePluginPackageName(cachePath, name);
 		const previousPackageNames = await this.#resolveInstalledPackageNames(existing ?? [], name);
 
 		// Only now clean up old entries — new cache succeeded, so it is safe to remove old ones.
@@ -811,6 +826,59 @@ export class MarketplaceManager {
 			throw new Error(`Marketplace plugin package path escapes node_modules: ${JSON.stringify(packageName)}`);
 		}
 		return linkPath;
+	}
+	async #assertRuntimePackageNameAvailable(
+		scope: "user" | "project",
+		packageName: string,
+		registry: InstalledPluginsRegistry,
+		pluginId: string,
+	): Promise<void> {
+		const key = packageName.toLowerCase();
+
+		// Marketplace plugins recorded in this scope's installed registry (keyed by plugin id).
+		for (const installedPluginId in registry.plugins) {
+			if (installedPluginId === pluginId) continue;
+			const fallbackName = parsePluginId(installedPluginId)?.name ?? installedPluginId;
+			const installedNames = await this.#resolveInstalledPackageNames(
+				registry.plugins[installedPluginId],
+				fallbackName,
+			);
+			for (const installedName of installedNames) {
+				if (installedName.toLowerCase() === key) {
+					throw new Error(
+						`Runtime package name "${packageName}" conflicts with installed plugin "${installedPluginId}"`,
+					);
+				}
+			}
+		}
+
+		// Ordinary npm plugins live in the runtime root's package.json dependencies,
+		// not installed_plugins.json; their node_modules link would still be
+		// clobbered by registration on a case-insensitive filesystem. Marketplace
+		// installs never add themselves here, so this cannot self-conflict on
+		// reinstall. Runtime-config keys mirror installed_plugins, already covered.
+		for (const dependencyName of await this.#readRuntimeDependencyNames(scope)) {
+			if (dependencyName.toLowerCase() === key) {
+				throw new Error(
+					`Runtime package name "${packageName}" conflicts with installed package "${dependencyName}"`,
+				);
+			}
+		}
+	}
+
+	async #readRuntimeDependencyNames(scope: "user" | "project"): Promise<Set<string>> {
+		const names = new Set<string>();
+		try {
+			const pkg: { dependencies?: Record<string, unknown> } = await Bun.file(
+				path.join(this.#runtimeRoot(scope), "package.json"),
+			).json();
+			if (pkg.dependencies && typeof pkg.dependencies === "object") {
+				for (const dep in pkg.dependencies) names.add(dep);
+			}
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+		}
+		return names;
 	}
 
 	async #resolveInstalledPackageNames(

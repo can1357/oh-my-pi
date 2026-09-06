@@ -4,7 +4,7 @@
  * Cache layout: `<cacheDir>/<marketplace>___<pluginName>___<version>/`
  *
  * All three components are validated before any filesystem operation:
- *   - marketplace / pluginName: isValidNameSegment (lowercase alnum + hyphens, max 64)
+ *   - marketplace / pluginName: isValidNameSegment (alnum + . - , max 64)
  *   - version: isValidVersionForCache (alnum + ._+-, max 128)
  *
  * This ensures cache paths cannot be crafted to escape the cache directory.

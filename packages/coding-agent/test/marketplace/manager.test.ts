@@ -59,6 +59,22 @@ function buildMinimalFixture(): string {
 	return root;
 }
 
+function buildNamedMarketplace(root: string, marketplaceName: string, pluginName: string): string {
+	const pluginDir = path.join(root, "plugins", pluginName);
+	fs.mkdirSync(path.join(root, ".claude-plugin"), { recursive: true });
+	fs.mkdirSync(pluginDir, { recursive: true });
+	fs.writeFileSync(
+		path.join(root, ".claude-plugin", "marketplace.json"),
+		JSON.stringify({
+			name: marketplaceName,
+			owner: { name: "Test Author" },
+			plugins: [{ name: pluginName, source: `./plugins/${pluginName}`, version: "1.0.0" }],
+		}),
+	);
+	fs.writeFileSync(path.join(pluginDir, "package.json"), JSON.stringify({ name: pluginName, version: "1.0.0" }));
+	return root;
+}
+
 // ── Test helper ───────────────────────────────────────────────────────────────
 
 interface TestContext {
@@ -139,6 +155,31 @@ describe("MarketplaceManager", () => {
 	it("addMarketplace with duplicate name → throws", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		await expect(ctx.manager.addMarketplace(FIXTURE_DIR)).rejects.toThrow(/already exists/);
+	});
+
+	it("rejects a case-equivalent marketplace before replacing its cache", async () => {
+		const existing = await ctx.manager.addMarketplace(FIXTURE_DIR);
+		const cachedCatalog = await Bun.file(existing.catalogPath).text();
+		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					name: "Test-Marketplace",
+					owner: { name: "Test Author" },
+					plugins: [],
+				}),
+			),
+		);
+
+		try {
+			await expect(ctx.manager.addMarketplace("https://example.com/marketplace.json")).rejects.toThrow(
+				'conflicts with existing marketplace "test-marketplace"',
+			);
+			expect(await Bun.file(existing.catalogPath).text()).toBe(cachedCatalog);
+			expect(fs.existsSync(path.join(ctx.tmpDir, "cache", "marketplaces", "Test-Marketplace"))).toBe(false);
+			expect(await ctx.manager.listMarketplaces()).toHaveLength(1);
+		} finally {
+			fetchSpy.mockRestore();
+		}
 	});
 
 	it("removeMarketplace → gone from list and catalog cache removed", async () => {
@@ -240,6 +281,144 @@ describe("MarketplaceManager", () => {
 		const installed = await ctx.manager.listInstalledPlugins();
 		expect(installed).toHaveLength(1);
 		expect(installed[0].id).toBe("hello-plugin@test-marketplace");
+	});
+
+	it("installs mixed-case plugin names without duplicating them in the npm plugin list", async () => {
+		const marketplaceDir = path.join(ctx.tmpDir, "mixed-case-marketplace");
+		const noManifestDir = path.join(marketplaceDir, "plugins", "No-Manifest");
+		const manifestDir = path.join(marketplaceDir, "plugins", "Manifest-Name");
+		fs.mkdirSync(path.join(marketplaceDir, ".claude-plugin"), { recursive: true });
+		fs.mkdirSync(noManifestDir, { recursive: true });
+		fs.mkdirSync(manifestDir, { recursive: true });
+		await Bun.write(
+			path.join(marketplaceDir, ".claude-plugin", "marketplace.json"),
+			`${JSON.stringify(
+				{
+					name: "Mixed-Marketplace",
+					owner: { name: "Test Author" },
+					plugins: [
+						{ name: "No-Manifest", source: "./plugins/No-Manifest", version: "1.0.0" },
+						{ name: "Manifest-Name", source: "./plugins/Manifest-Name", version: "2.0.0" },
+					],
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		// A Claude-style plugin whose package.json repeats the mixed-case catalog name.
+		await Bun.write(path.join(manifestDir, "package.json"), `${JSON.stringify({ name: "Manifest-Name" })}\n`);
+
+		await ctx.manager.addMarketplace(marketplaceDir);
+		const noManifest = await ctx.manager.installPlugin("No-Manifest", "Mixed-Marketplace");
+		const manifest = await ctx.manager.installPlugin("Manifest-Name", "Mixed-Marketplace");
+
+		// Runtime symlink and lock key keep the declared casing, matching the manifest identity.
+		expect(fs.realpathSync(path.join(ctx.tmpDir, "node_modules", "No-Manifest"))).toBe(
+			fs.realpathSync(noManifest.installPath),
+		);
+		expect(fs.realpathSync(path.join(ctx.tmpDir, "node_modules", "Manifest-Name"))).toBe(
+			fs.realpathSync(manifest.installPath),
+		);
+		const runtimeConfig = await Bun.file(path.join(ctx.tmpDir, "omp-plugins.lock.json")).json();
+		expect(Object.keys(runtimeConfig.plugins).sort()).toEqual(["Manifest-Name", "No-Manifest"]);
+		const installed = await ctx.manager.listInstalledPlugins();
+		expect(installed.map(plugin => plugin.id).sort()).toEqual([
+			"Manifest-Name@Mixed-Marketplace",
+			"No-Manifest@Mixed-Marketplace",
+		]);
+
+		// Both links are recognized as marketplace-owned, so PluginManager never
+		// surfaces them as duplicate npm plugins (the runtime key drift regression).
+		const spies = mockPluginManagerPaths(ctx.tmpDir);
+		try {
+			const plugins = await new PluginManager(ctx.tmpDir).list();
+			expect(plugins.map(plugin => plugin.name)).toEqual([]);
+		} finally {
+			for (const spy of spies) spy.mockRestore();
+		}
+	});
+
+	it("rejects case-equivalent runtime package names before replacing the installed link", async () => {
+		const upperMarketplace = buildNamedMarketplace(path.join(ctx.tmpDir, "upper-marketplace"), "upper-market", "Foo");
+		const lowerMarketplace = buildNamedMarketplace(path.join(ctx.tmpDir, "lower-marketplace"), "lower-market", "foo");
+		await ctx.manager.addMarketplace(upperMarketplace);
+		await ctx.manager.addMarketplace(lowerMarketplace);
+		const installed = await ctx.manager.installPlugin("Foo", "upper-market");
+		const linkPath = path.join(ctx.tmpDir, "node_modules", "Foo");
+		const installedRealpath = fs.realpathSync(installed.installPath);
+
+		await expect(ctx.manager.installPlugin("foo", "lower-market")).rejects.toThrow(
+			'Runtime package name "foo" conflicts with installed plugin "Foo@upper-market"',
+		);
+		expect(fs.realpathSync(linkPath)).toBe(installedRealpath);
+		const runtimeConfig = await Bun.file(path.join(ctx.tmpDir, "omp-plugins.lock.json")).json();
+		expect(Object.keys(runtimeConfig.plugins)).toEqual(["Foo"]);
+		expect((await ctx.manager.listInstalledPlugins()).map(plugin => plugin.id)).toEqual(["Foo@upper-market"]);
+		expect(fs.existsSync(path.join(ctx.tmpDir, "cache", "plugins", "lower-market___foo___1.0.0"))).toBe(false);
+	});
+
+	it("rejects a marketplace plugin that case-collides with an npm-managed dependency", async () => {
+		// An ordinary npm plugin recorded in the runtime root package.json + node_modules.
+		const npmPackage = path.join(ctx.tmpDir, "npm-foo");
+		fs.mkdirSync(npmPackage, { recursive: true });
+		fs.writeFileSync(path.join(npmPackage, "package.json"), JSON.stringify({ name: "foo", version: "9.9.9" }));
+		fs.writeFileSync(path.join(ctx.tmpDir, "package.json"), JSON.stringify({ dependencies: { foo: "9.9.9" } }));
+		const npmLink = path.join(ctx.tmpDir, "node_modules", "foo");
+		fs.mkdirSync(path.dirname(npmLink), { recursive: true });
+		fs.symlinkSync(npmPackage, npmLink, "dir");
+
+		const marketplaceDir = buildNamedMarketplace(path.join(ctx.tmpDir, "upper-marketplace"), "upper-market", "Foo");
+		await ctx.manager.addMarketplace(marketplaceDir);
+
+		await expect(ctx.manager.installPlugin("Foo", "upper-market")).rejects.toThrow(
+			'Runtime package name "Foo" conflicts with installed package "foo"',
+		);
+		// The npm-managed link is untouched and no marketplace cache was left behind.
+		expect(fs.realpathSync(npmLink)).toBe(fs.realpathSync(npmPackage));
+		expect(fs.existsSync(path.join(ctx.tmpDir, "node_modules", "Foo"))).toBe(false);
+		expect(fs.existsSync(path.join(ctx.tmpDir, "cache", "plugins", "upper-market___Foo___1.0.0"))).toBe(false);
+	});
+
+	it("preserves the active cache when a forced reinstall changes to a colliding runtime name", async () => {
+		const firstMarketplace = buildNamedMarketplace(
+			path.join(ctx.tmpDir, "first-marketplace"),
+			"first-market",
+			"first-plugin",
+		);
+		const secondMarketplace = buildNamedMarketplace(
+			path.join(ctx.tmpDir, "second-marketplace"),
+			"second-market",
+			"second-plugin",
+		);
+		const firstSourcePackage = path.join(firstMarketplace, "plugins", "first-plugin", "package.json");
+		const secondSourcePackage = path.join(secondMarketplace, "plugins", "second-plugin", "package.json");
+		fs.writeFileSync(firstSourcePackage, JSON.stringify({ name: "original-runtime", version: "1.0.0" }));
+		fs.writeFileSync(secondSourcePackage, JSON.stringify({ name: "taken-runtime", version: "1.0.0" }));
+		await ctx.manager.addMarketplace(firstMarketplace);
+		await ctx.manager.addMarketplace(secondMarketplace);
+		const first = await ctx.manager.installPlugin("first-plugin", "first-market");
+		await ctx.manager.installPlugin("second-plugin", "second-market");
+		const firstLink = path.join(ctx.tmpDir, "node_modules", "original-runtime");
+		const firstRealpath = fs.realpathSync(first.installPath);
+
+		// Same marketplace/plugin/version cache key, but the source manifest now
+		// claims a runtime name owned by the second installed plugin.
+		fs.writeFileSync(firstSourcePackage, JSON.stringify({ name: "TAKEN-RUNTIME", version: "1.0.0" }));
+		await expect(ctx.manager.installPlugin("first-plugin", "first-market", { force: true })).rejects.toThrow(
+			'Runtime package name "TAKEN-RUNTIME" conflicts with installed plugin "second-plugin@second-market"',
+		);
+
+		expect(fs.realpathSync(firstLink)).toBe(firstRealpath);
+		expect(await Bun.file(path.join(first.installPath, "package.json")).json()).toEqual({
+			name: "original-runtime",
+			version: "1.0.0",
+		});
+		expect((await ctx.manager.listInstalledPlugins()).map(plugin => plugin.id).sort()).toEqual([
+			"first-plugin@first-market",
+			"second-plugin@second-market",
+		]);
+		const runtimeConfig = await Bun.file(path.join(ctx.tmpDir, "omp-plugins.lock.json")).json();
+		expect(Object.keys(runtimeConfig.plugins).sort()).toEqual(["original-runtime", "taken-runtime"]);
 	});
 
 	it("installPlugin rejects package names that escape node_modules", async () => {
