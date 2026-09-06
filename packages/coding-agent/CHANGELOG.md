@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Documented Grok Bot one-shot text and tools probes from this checkout (`docs/grokbot.md`). Published `omp` 18.0.1 does not include this provider.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

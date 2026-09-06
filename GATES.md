@@ -1,6 +1,8 @@
 # Gates: grokbot multi-model via ompa
 
-OWNS: packages/ai/src/providers/grokbot/**, packages/ai/src/stream.ts, packages/ai/test/providers/grokbot-proto.test.ts, packages/ai/CHANGELOG.md, scripts/grokbot-matrix.mjs, scripts/grokbot-automation-tools-probe.mjs, GATES.md
+One-shot `omp -p` commands (text echo + tools round-trip) live in [`docs/grokbot.md`](docs/grokbot.md). Published `omp` 18.0.1 does not include `grokbot` — run from this checkout.
+
+OWNS: packages/ai/src/providers/grokbot/**, packages/ai/src/stream.ts, packages/ai/test/providers/grokbot-proto.test.ts, packages/ai/CHANGELOG.md, scripts/grokbot-matrix.mjs, scripts/grokbot-automation-tools-probe.mjs, GATES.md, docs/grokbot.md
 
 Scope: Multiple grokbot models complete inference via ompa/sand for text and tool-enabled requests. Explicit Anthropic ids with raw omp field-2 tools (unmapped names/schemas) remain HTTP 400 / ERROR_PROVIDER_ERROR upstream; product-shaped tools on original Anthropic requestedModel (**keep-model**) is the default workaround; **automation** remains opt-in.
 
