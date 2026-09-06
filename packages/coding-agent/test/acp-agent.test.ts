@@ -484,6 +484,7 @@ async function createHarness(
 	options: {
 		elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse>;
 		clientCapabilities?: ClientCapabilities;
+		sessionSetup?: (session: FakeAgentSession) => void;
 		/** Runs before a notification is recorded, so a test can delay one delivery. */
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
 	} = {},
@@ -522,6 +523,7 @@ async function createHarness(
 	sessions.push(initialSession);
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
 		const session = new FakeAgentSession(cwd);
+		options.sessionSetup?.(session);
 		const setToolUIContext = vi.fn();
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
@@ -2677,6 +2679,32 @@ describe("ACP agent", () => {
 		expect(harness.setToolUIContextSpies).toHaveLength(1);
 		expect(harness.setToolUIContextSpies[0]).not.toHaveBeenCalled();
 
+		await harness.agent.dispose();
+	});
+
+	it("initializes extensions as headless without form elicitation", async () => {
+		let extensionUiContext: ExtensionUIContext | undefined;
+		const harness = await createHarness({
+			clientCapabilities: {},
+			sessionSetup: session => {
+				(session as unknown as { extensionRunner: unknown }).extensionRunner = {
+					initialize(
+						_actions: unknown,
+						_contextActions: unknown,
+						_commandContextActions: unknown,
+						uiContext: ExtensionUIContext | undefined,
+					) {
+						extensionUiContext = uiContext;
+					},
+					emit: async () => {},
+					getRegisteredCommands: () => [],
+				};
+			},
+		});
+
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+
+		expect(extensionUiContext).toBeUndefined();
 		await harness.agent.dispose();
 	});
 

@@ -13,6 +13,10 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { Extension, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type {
 	ClientBridge,
@@ -22,7 +26,9 @@ import type {
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 import { dispatchXdevTool, resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 // ---------------------------------------------------------------------------
@@ -87,6 +93,7 @@ async function createSession(
 		xdev?: XdevState;
 		builtInToolNames?: string[];
 		persist?: boolean;
+		extension?: { runtime: ExtensionRuntime; value: Extension };
 	},
 ): Promise<AgentSession> {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -96,13 +103,26 @@ async function createSession(
 	const sessionManager = options?.persist
 		? SessionManager.create(tempDir.path(), `${tempDir.path()}/sessions`)
 		: SessionManager.inMemory(tempDir.path());
+	const modelRegistry = {} as never;
+	const extensionRunner = options?.extension
+		? new ExtensionRunner(
+				[options.extension.value],
+				options.extension.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				undefined,
+				settings,
+			)
+		: undefined;
+	const runtimeTools = extensionRunner ? tools.map(tool => new ExtensionToolWrapper(tool, extensionRunner)) : tools;
 
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: {
 			model,
 			systemPrompt: ["Test"],
-			tools,
+			tools: runtimeTools,
 			messages: [],
 		},
 		convertToLlm,
@@ -110,19 +130,52 @@ async function createSession(
 	});
 
 	const toolRegistry = options?.xdev?.tools ?? new Map<string, AgentTool>();
-	for (const tool of tools) toolRegistry.set(tool.name, tool);
+	for (const tool of runtimeTools) toolRegistry.set(tool.name, tool);
 	const sess = new AgentSession({
 		agent,
 		sessionManager,
 		settings,
-		modelRegistry: {} as never,
+		modelRegistry,
 		toolRegistry,
 		xdev: options?.xdev,
 		builtInToolNames: options?.builtInToolNames,
+		extensionRunner,
 	});
 
 	if (bridge) sess.setClientBridge(bridge);
 	return sess;
+}
+
+function initializeExtensionApprovalUI(runner: ExtensionRunner, select: ExtensionUIContext["select"]): void {
+	runner.initialize(
+		{
+			sendMessage: () => {},
+			sendUserMessage: () => {},
+			appendEntry: () => {},
+			setLabel: () => {},
+			getActiveTools: () => [],
+			getAllTools: () => [],
+			setActiveTools: async () => {},
+			getCommands: () => [],
+			setModel: async () => false,
+			getThinkingLevel: () => undefined,
+			setThinkingLevel: () => {},
+			getSessionName: () => undefined,
+			setSessionName: async () => {},
+		} as never,
+		{
+			getModel: () => undefined,
+			isIdle: () => true,
+			abort: () => {},
+			hasPendingMessages: () => false,
+			shutdown: () => {},
+			getContextUsage: () => undefined,
+			compact: async () => {},
+			getSystemPrompt: () => [],
+		} as never,
+		undefined,
+		{ select, notify: () => {} } as never,
+	);
 }
 
 async function createSessionWithMockModel(
@@ -187,6 +240,505 @@ it("allow_once: calls bridge once and executes the underlying tool", async () =>
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("extension denial runs before an ACP permission request", async () => {
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("tool_authorization", () => ({ decision: "deny", reason: "Blocked before ACP permission" }));
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"acp-final-authorization-order",
+	);
+	session = await createSession([bashTool], bridge, {}, { extension: { runtime, value: extension } });
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(tool => tool.name === "bash");
+
+	await expect(
+		wrappedBash!.execute(
+			"call-extension-deny",
+			{ command: "echo hi" },
+			undefined,
+			undefined as never,
+			undefined as never,
+		),
+	).rejects.toThrow("Blocked before ACP permission");
+	expect(permissionSpy).not.toHaveBeenCalled();
+	expect(bashTool.executeCalls).toBe(0);
+});
+
+it("extension ask uses one ACP permission request without form elicitation", async () => {
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("tool_authorization", () => ({ decision: "ask", reason: "Confirm protected command" }));
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"acp-final-authorization-approval",
+	);
+	session = await createSession([bashTool], bridge, {}, { extension: { runtime, value: extension } });
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(tool => tool.name === "bash");
+	await wrappedBash!.execute(
+		"call-extension-approve",
+		{ command: "echo hi" },
+		undefined,
+		undefined as never,
+		{ hasUI: false } as never,
+	);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("combined native and extension asks use one ACP permission request", async () => {
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("tool_authorization", () => ({ decision: "ask", reason: "Confirm protected command" }));
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"acp-final-authorization-combined-approval",
+	);
+	session = await createSession(
+		[bashTool],
+		bridge,
+		{ "tools.approvalMode": "write" },
+		{ extension: { runtime, value: extension } },
+	);
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(tool => tool.name === "bash");
+	await wrappedBash!.execute(
+		"call-combined-approval",
+		{ command: "echo hi" },
+		undefined,
+		undefined as never,
+		{ hasUI: false } as never,
+	);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("extension ask emits approval lifecycle events around deferred ACP permission", async () => {
+	const order: string[] = [];
+	const approvalEvents: Array<Record<string, unknown>> = [];
+	const bashTool = makeFakeTool("bash");
+	bashTool.execute = async () => {
+		order.push("execute");
+		bashTool.executeCalls++;
+		return { content: [{ type: "text" as const, text: "ok" }] };
+	};
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission() {
+			order.push("requestPermission");
+			return { outcome: "selected", optionId: "allow_once", kind: "allow_once" };
+		},
+	};
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("tool_authorization", () => ({ decision: "ask", reason: "Confirm protected command" }));
+			pi.on("tool_approval_requested", event => {
+				order.push("requested");
+				approvalEvents.push({
+					type: event.type,
+					toolName: event.toolName,
+					toolCallId: event.toolCallId,
+					reason: event.reason,
+					approvalMode: event.approvalMode,
+				});
+			});
+			pi.on("tool_approval_resolved", event => {
+				order.push("resolved");
+				approvalEvents.push({
+					type: event.type,
+					toolName: event.toolName,
+					toolCallId: event.toolCallId,
+					approved: event.approved,
+					reason: event.reason,
+				});
+			});
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"acp-final-authorization-lifecycle",
+	);
+	session = await createSession([bashTool], bridge, {}, { extension: { runtime, value: extension } });
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(tool => tool.name === "bash");
+	await wrappedBash!.execute(
+		"call-extension-lifecycle",
+		{ command: "echo hi" },
+		undefined,
+		undefined as never,
+		{ hasUI: false } as never,
+	);
+
+	expect(order).toEqual(["requested", "requestPermission", "resolved", "execute"]);
+	expect(approvalEvents).toEqual([
+		{
+			type: "tool_approval_requested",
+			toolName: "bash",
+			toolCallId: "call-extension-lifecycle",
+			reason: "Confirm protected command",
+			approvalMode: "yolo",
+		},
+		{
+			type: "tool_approval_resolved",
+			toolName: "bash",
+			toolCallId: "call-extension-lifecycle",
+			approved: true,
+			reason: undefined,
+		},
+	]);
+});
+
+it("extension ask includes its bounded reason in the ACP permission request", async () => {
+	const bashTool = makeFakeTool("bash");
+	const permissionRequests: ClientBridgePermissionToolCall[] = [];
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(toolCall, _options, _signal) {
+			permissionRequests.push(toolCall);
+			return { outcome: "selected", optionId: "allow_once", kind: "allow_once" };
+		},
+	};
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("tool_authorization", () => ({
+				decision: "ask",
+				reason: `Protected\tcommand\n${"界".repeat(200)}`,
+			}));
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"acp-final-authorization-reason",
+	);
+	session = await createSession([bashTool], bridge, {}, { extension: { runtime, value: extension } });
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(tool => tool.name === "bash");
+	await wrappedBash!.execute(
+		"call-extension-reason",
+		{ command: "echo hi" },
+		undefined,
+		undefined as never,
+		{ hasUI: false } as never,
+	);
+
+	const content = permissionRequests[0]?.content as
+		| Array<{ type: string; content?: { type: string; text?: string } }>
+		| undefined;
+	const reason = content?.find(item => item.content?.text?.startsWith("Protected"))?.content?.text;
+	expect(reason).toContain("Protected command");
+	expect(reason).not.toContain("\t");
+	expect(reason).not.toContain("\n");
+	expect(reason).toContain("…");
+	expect(Bun.stringWidth(reason ?? "")).toBeLessThanOrEqual(TRUNCATE_LENGTHS.CONTENT);
+});
+
+it("explicit yolo skips routine ACP prompts but preserves extension asks", async () => {
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const runtime = new ExtensionRuntime();
+	let authorizationCalls = 0;
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("tool_authorization", () => {
+				authorizationCalls++;
+				return authorizationCalls === 1
+					? { decision: "allow" }
+					: { decision: "ask", reason: "Confirm protected command" };
+			});
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"acp-final-authorization-yolo-fallback",
+	);
+	session = await createSession(
+		[bashTool],
+		bridge,
+		{ "tools.approvalMode": "yolo" },
+		{ extension: { runtime, value: extension } },
+	);
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(tool => tool.name === "bash");
+	await wrappedBash!.execute(
+		"call-yolo-allow",
+		{ command: "echo first" },
+		undefined,
+		undefined as never,
+		{ hasUI: false } as never,
+	);
+	await wrappedBash!.execute(
+		"call-yolo-extension-ask",
+		{ command: "echo second" },
+		undefined,
+		undefined as never,
+		{ hasUI: false } as never,
+	);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(bashTool.executeCalls).toBe(2);
+});
+
+it("extension ask requires fresh ACP permission after a persisted allow", async () => {
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_always", kind: "allow_always" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const runtime = new ExtensionRuntime();
+	let authorizationCalls = 0;
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("tool_authorization", () => {
+				authorizationCalls++;
+				return authorizationCalls === 1
+					? { decision: "allow" }
+					: { decision: "ask", reason: "Confirm protected command again" };
+			});
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"acp-final-authorization-fresh-approval",
+	);
+	session = await createSession([bashTool], bridge, {}, { extension: { runtime, value: extension } });
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(tool => tool.name === "bash");
+	await wrappedBash!.execute(
+		"call-persist-allow",
+		{ command: "echo first" },
+		undefined,
+		undefined as never,
+		{ hasUI: false } as never,
+	);
+	await wrappedBash!.execute(
+		"call-extension-ask-after-allow",
+		{ command: "echo second" },
+		undefined,
+		undefined as never,
+		{ hasUI: false } as never,
+	);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(2);
+	expect(bashTool.executeCalls).toBe(2);
+});
+
+it("extension approval with form elicitation avoids a second ACP permission request", async () => {
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("tool_authorization", () => ({ decision: "ask", reason: "Confirm protected command" }));
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"acp-final-authorization-form-approval",
+	);
+	session = await createSession([bashTool], bridge, {}, { extension: { runtime, value: extension } });
+	let selectCalls = 0;
+	const select: ExtensionUIContext["select"] = async () => {
+		selectCalls++;
+		return "Approve";
+	};
+	if (!session.extensionRunner) throw new Error("expected extension runner");
+	initializeExtensionApprovalUI(session.extensionRunner, select);
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(tool => tool.name === "bash");
+	await wrappedBash!.execute(
+		"call-extension-form-approve",
+		{ command: "echo hi" },
+		undefined,
+		undefined as never,
+		{ hasUI: true } as never,
+	);
+
+	expect(selectCalls).toBe(1);
+	expect(permissionSpy).not.toHaveBeenCalled();
+	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("extension approval does not approve a nested tool that reuses the call ID", async () => {
+	const deleteTool = makeFakeTool("delete");
+	deleteTool.loadMode = "discoverable";
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("tool_authorization", event =>
+				event.toolName === "write" ? { decision: "ask", reason: "Confirm outer write" } : { decision: "allow" },
+			);
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"acp-final-authorization-tool-scope",
+	);
+	let writeExecuteCalls = 0;
+	const writeTool: AgentTool = {
+		name: "write",
+		label: "write",
+		description: "Fake write",
+		parameters: type({}),
+		async execute(toolCallId) {
+			writeExecuteCalls++;
+			const dispatched = await dispatchXdevTool(
+				xdev,
+				"delete",
+				JSON.stringify({ path: "/tmp/gone.ts" }),
+				toolCallId,
+			);
+			return dispatched.result;
+		},
+	};
+	const tools = new Map([writeTool, deleteTool].map(tool => [tool.name, tool]));
+	const xdev: XdevState = {
+		tools,
+		mountedNames: new Set(["delete"]),
+		builtInNames: new Set(["write"]),
+		isActive: name => name === "write",
+	};
+	session = await createSession(
+		[writeTool, deleteTool],
+		bridge,
+		{},
+		{ xdev, builtInToolNames: ["write"], extension: { runtime, value: extension } },
+	);
+	let selectCalls = 0;
+	if (!session.extensionRunner) throw new Error("expected extension runner");
+	initializeExtensionApprovalUI(session.extensionRunner, async () => {
+		selectCalls++;
+		return "Approve";
+	});
+
+	const wrappedWrite = session.agent.state.tools.find(tool => tool.name === "write");
+	await wrappedWrite!.execute(
+		"call-reused-acp-id",
+		{ path: "/tmp/outer.ts" },
+		undefined,
+		undefined as never,
+		{ hasUI: true } as never,
+	);
+
+	expect({
+		selectCalls,
+		permissionCalls: permissionSpy.mock.calls.length,
+		writeExecuteCalls,
+		deleteExecuteCalls: deleteTool.executeCalls,
+	}).toEqual({ selectCalls: 1, permissionCalls: 1, writeExecuteCalls: 1, deleteExecuteCalls: 1 });
+});
+
+it("extension ask without form elicitation does not bypass ordinary edit calls", async () => {
+	const editTool = makeFakeTool("edit");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("tool_authorization", () => ({ decision: "ask", reason: "Confirm ordinary edit" }));
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"acp-final-authorization-edit-no-form",
+	);
+	session = await createSession([editTool], bridge, {}, { extension: { runtime, value: extension } });
+
+	await session.setActiveToolsByName(["edit"]);
+	const wrappedEdit = session.agent.state.tools.find(tool => tool.name === "edit");
+	await expect(
+		wrappedEdit!.execute(
+			"call-extension-edit-no-form",
+			{ command: "" },
+			undefined,
+			undefined as never,
+			{ hasUI: false } as never,
+		),
+	).rejects.toThrow("requires approval from an extension but no interactive UI is available");
+
+	expect(permissionSpy).not.toHaveBeenCalled();
+	expect(editTool.executeCalls).toBe(0);
+});
+
+it("persisted ACP rejection overrides later extension approval", async () => {
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "reject_always", kind: "reject_always" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const runtime = new ExtensionRuntime();
+	let authorizationCalls = 0;
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("tool_authorization", () => {
+				authorizationCalls++;
+				return authorizationCalls === 1
+					? { decision: "allow" }
+					: { decision: "ask", reason: "Confirm protected command" };
+			});
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"acp-final-authorization-persisted-rejection",
+	);
+	session = await createSession([bashTool], bridge, {}, { extension: { runtime, value: extension } });
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(tool => tool.name === "bash");
+	await expect(
+		wrappedBash!.execute(
+			"call-persist-reject",
+			{ command: "echo hi" },
+			undefined,
+			undefined as never,
+			{ hasUI: false } as never,
+		),
+	).rejects.toThrow("Tool call rejected by user (bash)");
+	await expect(
+		wrappedBash!.execute(
+			"call-still-rejected",
+			{ command: "echo hi" },
+			undefined,
+			undefined as never,
+			{ hasUI: false } as never,
+		),
+	).rejects.toThrow("Tool call rejected by user (preference)");
+
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(bashTool.executeCalls).toBe(0);
 });
 
 it("eval bridge dispatch uses the same ACP gate as a direct tool call", async () => {

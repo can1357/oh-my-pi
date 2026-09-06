@@ -131,11 +131,7 @@ Core methods:
 
 ### Provider registration
 
-`pi.registerProvider(name, config)` can include an optional `usage` field containing a
-`UsageProvider` imported from `@oh-my-pi/pi-ai`. Its `fetchUsage` implementation receives the
-normalized credential and returns a normalized `UsageReport`; the result is then handled
-by the host's AuthStorage cache, history, and usage displays just like built-in provider
-usage.
+`pi.registerProvider(name, config)` can include an optional `usage` field containing a `UsageProvider` imported from `@oh-my-pi/pi-ai`. Its `fetchUsage` implementation receives the normalized credential and returns a normalized `UsageReport`; the result is then handled by the host's AuthStorage cache, history, and usage displays just like built-in provider usage.
 
 ```ts
 pi.registerProvider("my-provider", {
@@ -166,10 +162,7 @@ pi.registerProvider("my-provider", {
 });
 ```
 
-An extension usage provider overrides a built-in provider with the same name for as
-long as that extension registration is active. `pi.unregisterProvider(name)` (and
-extension source cleanup) removes only that runtime override, restoring the built-in
-or configured usage resolver.
+An extension usage provider overrides a built-in provider with the same name for as long as that extension registration is active. `pi.unregisterProvider(name)` (and extension source cleanup) removes only that runtime override, restoring the built-in or configured usage resolver.
 
 Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
 
@@ -304,12 +297,15 @@ Cancelable pre-events:
 
 ### Tool lifecycle
 
-- `tool_call` (pre-exec, may block, or revise the tool's execution `input`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike)
+- `tool_call` (pre-exec, may block, or revise the tool's execution `input`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike; `finalAuthorization: true` means a later `tool_authorization` event will gate the final rewritten input)
+- `tool_authorization` (final pre-exec authorization after all `tool_call` rewrites and immediately before native approval; receives a canonical detached view of the final execution `input`, including derived hashline edit targets, plus the native allow/ask decision, approval mode, and whether tool policy, explicit user policy, or provider safety requires a human; provider-native computer calls expose `actions` and `pendingSafetyChecks`; returns `{ decision: "allow" | "ask" | "deny", reason?: string }`)
 - `tool_result` (post-exec, may patch content/details/isError)
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications.
+
+`tool_authorization` is strictest-wins across handlers: deny outranks ask, ask outranks allow, and handler failure, timeout, cancellation, or an unsupported decision denies. Each handler receives its own input snapshot, so mutations cannot rewrite execution or affect later handlers. A later ask without a reason preserves the previous nonempty ask reason. Ask and denial reasons are sanitized and bounded before display. Allow may satisfy an ordinary prompt produced by `always-ask` or `write` mode, but it cannot bypass a prompt required by tool policy, an explicit per-tool prompt policy, or a provider safety check. Ask forces the native approval UI even when native policy would allow. In ACP sessions, final authorization runs before the client's `requestPermission` call, so an extension denial does not disclose tool input to the client or open its permission prompt. Without form elicitation, an extension ask can defer to `requestPermission` only when the current tool call has a concrete ACP permission intent. Other headless asks, including transport calls without a permission intent, fail closed and require either an interactive UI or an extension policy change; native approval settings cannot override them. Human dialog time is excluded from the handler timeout budget, and cancellation of the tool dispatch closes an extension-forced approval prompt.
 
 ### Reliability/runtime signals
 
@@ -346,8 +342,7 @@ The runtime handles the JSON-RPC transport and its own list/update refresh first
 
 ### `resources_discover`
 
-`resources_discover` exists in extension types and `ExtensionRunner`.
-Current runtime note: `ExtensionRunner.emitResourcesDiscover(...)` is implemented, but there are no `AgentSession` callsites invoking it in the current codebase.
+`resources_discover` exists in extension types and `ExtensionRunner`. Current runtime note: `ExtensionRunner.emitResourcesDiscover(...)` is implemented, but there are no `AgentSession` callsites invoking it in the current codebase.
 
 ## Tool authoring details
 
@@ -367,9 +362,7 @@ execute(
 
 ### Delegating to a native built-in (`ctx.invokeTool`)
 
-A tool that re-registers a built-in name (e.g. wrapping `write` to add logging or a policy check) can
-run the original instead of reimplementing it. When your registered tool shadows a built-in, the `ctx`
-passed to `execute` carries:
+A tool that re-registers a built-in name (e.g. wrapping `write` to add logging or a policy check) can run the original instead of reimplementing it. When your registered tool shadows a built-in, the `ctx` passed to `execute` carries:
 
 ```ts
 ctx.invokeTool?<TDetails>(
@@ -378,12 +371,7 @@ ctx.invokeTool?<TDetails>(
 ): Promise<AgentToolResult<TDetails>>
 ```
 
-It runs the **native** built-in of the same name as your tool (delegation is same-tool only, so it
-cannot reach an arbitrary target or escalate past the approval already granted for this call) and
-returns its result, including the native tool's own side effects and internal bookkeeping. It is
-present only when a native built-in of that name exists — `ctx.invokeTool` is `undefined` for a
-net-new tool that shadows no built-in. The native call is not re-gated, since it is the same tool you
-are already approved as, and delegation depth is guarded against accidental self-recursion.
+It runs the **native** built-in of the same name as your tool (delegation is same-tool only, so it cannot reach an arbitrary target or escalate past the approval already granted for this call) and returns its result, including the native tool's own side effects and internal bookkeeping. It is present only when a native built-in of that name exists — `ctx.invokeTool` is `undefined` for a net-new tool that shadows no built-in. The native call is not re-gated, since it is the same tool you are already approved as, and delegation depth is guarded against accidental self-recursion.
 
 Template:
 
@@ -417,16 +405,11 @@ pi.registerTool({
 });
 ```
 
-`tool_call`/`tool_result` intercept all tools once the registry is wrapped in `sdk.ts`, including built-ins and extension/custom tools. `ToolDefinition` also supports optional `hidden`, `defaultInactive`, `loadMode` (`"discoverable"` by default, or `"essential"`), `deferrable`, `approval` (`"exec"` by default), `strict`, `mcpServerName`, `mcpToolName`, `renderCall`, and `renderResult` fields.
+`tool_call`/`tool_authorization`/`tool_result` intercept all tools once the registry is wrapped in `sdk.ts`, including built-ins and extension/custom tools. `ToolDefinition` also supports optional `hidden`, `defaultInactive`, `loadMode` (`"discoverable"` by default, or `"essential"`), `deferrable`, `approval` (`"exec"` by default), `strict`, `mcpServerName`, `mcpToolName`, `renderCall`, and `renderResult` fields.
 
 ### File write fallback (`registerFileWriteFallback`)
 
-`write`, `edit` and `apply_patch` perform the real byte-write to an ordinary file
-path through one shared primitive
-(`file ? file.write(content) : Bun.write(dst, content)`). When that primitive fails
-with a permission error (`EPERM`/`EACCES`/`EROFS` — every other error, such as
-`EISDIR`, is unaffected), the coding agent consults handlers registered
-via `pi.registerFileWriteFallback` before giving up:
+`write`, `edit` and `apply_patch` perform the real byte-write to an ordinary file path through one shared primitive (`file ? file.write(content) : Bun.write(dst, content)`). When that primitive fails with a permission error (`EPERM`/`EACCES`/`EROFS` — every other error, such as `EISDIR`, is unaffected), the coding agent consults handlers registered via `pi.registerFileWriteFallback` before giving up:
 
 ```ts
 import type { FileWriteFallbackHandler } from "@oh-my-pi/pi-coding-agent";
@@ -440,57 +423,20 @@ const writeThroughBroker: FileWriteFallbackHandler = async (req, ctx) => {
 pi.registerFileWriteFallback(writeThroughBroker);
 ```
 
-Handlers run in registration order; the first one to resolve `true` counts as the
-bytes being durably on disk, and the native tool continues exactly as if its own
-write had succeeded — including recording its file snapshot under the real
-destination path, so a later hashline `edit` on that path keeps working. A
-throwing handler is logged and skipped in favor of the next one — per handler, so a
-later handler registered by the same extension still runs; if every handler
-returns `false` (or none are registered), the original error is rethrown
-unchanged. Intended for a host that embeds the agent inside a sandbox denying
-direct filesystem writes but exposing a privileged write channel.
+Handlers run in registration order; the first one to resolve `true` counts as the bytes being durably on disk, and the native tool continues exactly as if its own write had succeeded — including recording its file snapshot under the real destination path, so a later hashline `edit` on that path keeps working. A throwing handler is logged and skipped in favor of the next one — per handler, so a later handler registered by the same extension still runs; if every handler returns `false` (or none are registered), the original error is rethrown unchanged. Intended for a host that embeds the agent inside a sandbox denying direct filesystem writes but exposing a privileged write channel.
 
-`req.dst` is the **symlink-resolved** destination, not the path the tool was given.
-The kernel follows every component above the last, so `ws/link/file` under a
-`ws/link -> /elsewhere` link lands outside `ws` while still looking in-workspace, and
-a prefix allowlist in your handler would pass on that innocent-looking path. For a
-write the final component is followed too, so it is resolved as well; for a delete it
-is not, because `unlink` removes a link rather than what it points at (so a delete
-`req.dst` may itself name a link). Treat `req.dst` as authoritative and do not
-re-derive the target from anything else. When the real destination cannot be
-established — a dangling final link, or an ancestor this process may not resolve — no
-handler is consulted at all and the original error is rethrown, because there is no
-destination to hand a privileged writer.
+`req.dst` is the **symlink-resolved** destination, not the path the tool was given. The kernel follows every component above the last, so `ws/link/file` under a `ws/link -> /elsewhere` link lands outside `ws` while still looking in-workspace, and a prefix allowlist in your handler would pass on that innocent-looking path. For a write the final component is followed too, so it is resolved as well; for a delete it is not, because `unlink` removes a link rather than what it points at (so a delete `req.dst` may itself name a link). Treat `req.dst` as authoritative and do not re-derive the target from anything else. When the real destination cannot be established — a dangling final link, or an ancestor this process may not resolve — no handler is consulted at all and the original error is rethrown, because there is no destination to hand a privileged writer.
 
 Two details matter when the destination is outside what the host allows:
 
-- **A missing parent directory.** `Bun.write` creates missing parents itself, and
-  when that `mkdir` is the operation being denied it reports the subsequent
-  `open()`'s `ENOENT` rather than the denial. The agent redoes the `mkdir`
-  explicitly to recover the real errno, so this still reaches a handler — with
-  `req.cause` set to the `mkdir` denial. In that case `req.dst`'s parent does not
-  exist yet and the handler is responsible for creating it. An `ENOENT` with a
-  genuinely creatable or invalid parent is not diverted. (`apply_patch` creates the
-  parent as a separate step before writing; that `mkdir` tolerates a denial when a
-  fallback is registered, so the write still reaches the handler.)
-- **A hashline `MV`.** `edit`'s move writes its destination directly rather than
-  through the LSP writethrough. It is routed to the same handlers, and the source
-  unlink goes to the delete seam below, so a move out of a directory you cannot
-  write completes too.
+- **A missing parent directory.** `Bun.write` creates missing parents itself, and when that `mkdir` is the operation being denied it reports the subsequent `open()`'s `ENOENT` rather than the denial. The agent redoes the `mkdir` explicitly to recover the real errno, so this still reaches a handler — with `req.cause` set to the `mkdir` denial. In that case `req.dst`'s parent does not exist yet and the handler is responsible for creating it. An `ENOENT` with a genuinely creatable or invalid parent is not diverted. (`apply_patch` creates the parent as a separate step before writing; that `mkdir` tolerates a denial when a fallback is registered, so the write still reaches the handler.)
+- **A hashline `MV`.** `edit`'s move writes its destination directly rather than through the LSP writethrough. It is routed to the same handlers, and the source unlink goes to the delete seam below, so a move out of a directory you cannot write completes too.
 
-This is deliberately not an interception of every write the agent can make. A
-permission error from these surfaces as it does today, with no handler consulted:
+This is deliberately not an interception of every write the agent can make. A permission error from these surfaces as it does today, with no handler consulted:
 
-- `write` to an archive member (`foo.zip:entry`) or to a SQLite row. Neither is a
-  byte-write to `dst`: an archive rewrite reads the whole archive, replaces one
-  entry, writes a temp file and renames over the original, so what lands is a whole
-  binary container rather than the string the tool was handed; a SQLite write is a
-  row operation inside the database engine with no byte payload at all. Brokering
-  either needs a different request shape than "these bytes belong at this path".
+- `write` to an archive member (`foo.zip:entry`) or to a SQLite row. Neither is a byte-write to `dst`: an archive rewrite reads the whole archive, replaces one entry, writes a temp file and renames over the original, so what lands is a whole binary container rather than the string the tool was handed; a SQLite write is a row operation inside the database engine with no byte payload at all. Brokering either needs a different request shape than "these bytes belong at this path".
 - The ACP bridge's `writeTextFile`, which hands the write to a remote client.
-- The `lsp` tool's own writes: applying a workspace edit or code action, and the
-  Biome formatter, which writes the buffer and then shells out to `biome format
-  --write` — a subprocess write no in-process seam can reach.
+- The `lsp` tool's own writes: applying a workspace edit or code action, and the Biome formatter, which writes the buffer and then shells out to `biome format --write` — a subprocess write no in-process seam can reach.
 
 ### File delete fallback (`registerFileDeleteFallback`)
 
@@ -503,52 +449,19 @@ pi.registerFileDeleteFallback(async (req, ctx) => {
 });
 ```
 
-It covers `edit`'s `REM`, the source side of a hashline `MV`, and `apply_patch`'s
-delete op, and follows the same rules as the write seam: same permission codes, first
-`true` wins, a throwing handler is skipped, the original error is rethrown if none
-succeed, and nothing happens at all when no handler is registered. Two differences:
+It covers `edit`'s `REM`, the source side of a hashline `MV`, and `apply_patch`'s delete op, and follows the same rules as the write seam: same permission codes, first `true` wins, a throwing handler is skipped, the original error is rethrown if none succeed, and nothing happens at all when no handler is registered. Two differences:
 
-- **`ENOENT` is never diverted.** Nothing is created on the way to an unlink, so a
-  missing file genuinely is missing — `REM` turns it into a not-found error.
-- **A handler must unlink, never remove recursively.** `unlink` on a directory reports
-  `EPERM` on macOS, which is indistinguishable from a sandbox denial by error code
-  alone, so the seam `lstat`s the target and refuses to divert a directory. But when
-  the target's own metadata sits behind the same boundary that denied the unlink —
-  the common sandbox case — that check cannot be resolved, and `req.dst` may then be a
-  directory. `req.confirmedFile` is `true` only when the seam positively established
-  the target is a plain regular file; a symlink reports `false` too, since unlinking a
-  link is fine but resolving it acts on something else entirely. A privileged helper
-  that recursively removes `req.dst`, or realpaths it first, would act far outside
-  what a tool that only ever removes one file asked for.
+- **`ENOENT` is never diverted.** Nothing is created on the way to an unlink, so a missing file genuinely is missing — `REM` turns it into a not-found error.
+- **A handler must unlink, never remove recursively.** `unlink` on a directory reports `EPERM` on macOS, which is indistinguishable from a sandbox denial by error code alone, so the seam `lstat`s the target and refuses to divert a directory. But when the target's own metadata sits behind the same boundary that denied the unlink — the common sandbox case — that check cannot be resolved, and `req.dst` may then be a directory. `req.confirmedFile` is `true` only when the seam positively established the target is a plain regular file; a symlink reports `false` too, since unlinking a link is fine but resolving it acts on something else entirely. A privileged helper that recursively removes `req.dst`, or realpaths it first, would act far outside what a tool that only ever removes one file asked for.
 
-**Registering for deletes is deliberately separate from registering for writes.** A
-write handler brokers `req.content` to `req.dst`; if a delete request reached it, the
-missing content invites brokering an empty write and *truncating* the file that was
-meant to be removed. A write-only handler therefore never sees a delete.
+**Registering for deletes is deliberately separate from registering for writes.** A write handler brokers `req.content` to `req.dst`; if a delete request reached it, the missing content invites brokering an empty write and *truncating* the file that was meant to be removed. A write-only handler therefore never sees a delete.
 
 Two lifecycle constraints, which apply to both seams:
 
-- **Register during extension load** (from the default factory), like other
-  `register*` calls. Handlers are installed when `ExtensionRunner.initialize` runs;
-  an extension that registered nothing by then is skipped entirely, so a first
-  registration made later never takes effect. The `ctx` a handler receives is built
-  per invocation, not captured at install time, so `ctx.cwd` and `ctx.hasUI` describe
-  the session as it is when the mutation is denied — a workspace change (`/move`) is
-  reflected in the next request rather than pinned to load time.
-- **The registries are process-wide.** A process can host several sessions (a subagent
-  gets its own runner), so a handler may be consulted for a denied write or delete
-  from any session in the process — not only the one whose extension registered it.
-  This is deliberate: a subagent spawned with restricted tools loads no extensions of
-  its own, and a host that registers once in its top-level session still expects its
-  subagents' writes brokered. `req.sessionId` names the session that issued the
-  mutation (`undefined` when it did not come from a tool call), and
-  `ctx.sessionManager.getSessionId()` names the handler's own — compare them to make
-  the decision per session. It matters most before prompting: `ctx.ui` belongs to the
-  handler's session, not necessarily to the one being asked about. Handlers are
-  removed on `session_shutdown`.
+- **Register during extension load** (from the default factory), like other `register*` calls. Handlers are installed when `ExtensionRunner.initialize` runs; an extension that registered nothing by then is skipped entirely, so a first registration made later never takes effect. The `ctx` a handler receives is built per invocation, not captured at install time, so `ctx.cwd` and `ctx.hasUI` describe the session as it is when the mutation is denied — a workspace change (`/move`) is reflected in the next request rather than pinned to load time.
+- **The registries are process-wide.** A process can host several sessions (a subagent gets its own runner), so a handler may be consulted for a denied write or delete from any session in the process — not only the one whose extension registered it. This is deliberate: a subagent spawned with restricted tools loads no extensions of its own, and a host that registers once in its top-level session still expects its subagents' writes brokered. `req.sessionId` names the session that issued the mutation (`undefined` when it did not come from a tool call), and `ctx.sessionManager.getSessionId()` names the handler's own — compare them to make the decision per session. It matters most before prompting: `ctx.ui` belongs to the handler's session, not necessarily to the one being asked about. Handlers are removed on `session_shutdown`.
 
-With nothing registered none of this engages: the primitive runs exactly as it did
-before and performs no extra syscalls.
+With nothing registered none of this engages: the primitive runs exactly as it did before and performs no extra syscalls.
 
 ## UI integration points
 
@@ -595,7 +508,7 @@ When no UI context is supplied to runner init, `ctx.hasUI` is `false` and method
 
 ### ACP mode
 
-ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in `acp-agent.ts`). `ctx.hasUI` is `true` while `select`/`confirm`/`input`/`editor` round-trip (as ACP elicitations; defaults are returned when the client lacks the `elicitation.form` capability). The non-elicitation surface (widgets, theming, terminal input, autocomplete stacking) is stubbed no-op.
+ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in `acp-agent.ts`) only when the client advertises the `elicitation.form` capability. With form elicitation, `ctx.hasUI` is `true` and `select`/`confirm`/`input`/`editor` round-trip as ACP elicitations. Without it, the extension runner is headless, `ctx.hasUI` is `false`, and dialog methods are unavailable. The client's separate `requestPermission` capability remains available as a fallback for eligible permission-gated tools. The non-elicitation surface (widgets, theming, terminal input, autocomplete stacking) is stubbed no-op.
 
 ## Session and state patterns
 

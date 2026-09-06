@@ -331,6 +331,18 @@ export interface ToolCallEventResult {
 	input?: Record<string, unknown>;
 }
 
+export type ToolAuthorizationDecision = "allow" | "ask" | "deny";
+
+/**
+ * Return type for final `tool_authorization` handlers.
+ * Multiple handlers combine by strictness: deny, then ask, then allow.
+ */
+export interface ToolAuthorizationEventResult {
+	decision: ToolAuthorizationDecision;
+	/** Human-readable reason for an ask or denial. */
+	reason?: string;
+}
+
 /**
  * Return type for `tool_result` handlers.
  * Allows handlers to modify tool results.

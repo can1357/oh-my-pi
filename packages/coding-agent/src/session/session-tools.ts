@@ -30,9 +30,14 @@ import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import {
 	extractPermissionLocations,
 	getPermissionIntent,
+	getRequiredAcpApprovalReason,
+	isApprovedAcpToolCall,
+	notifyRequiredAcpApprovalRequested,
+	notifyRequiredAcpApprovalResolved,
 	PERMISSION_OPTIONS,
 	PERMISSION_OPTIONS_BY_ID,
 	PERMISSION_REQUIRED_TOOLS,
+	requiresFreshAcpApproval,
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
 import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } from "./code-mode";
@@ -702,22 +707,31 @@ export class SessionTools {
 	 * When the user has explicitly opted into `yolo` / auto-approve behavior (via
 	 * the SDK/CLI `autoApprove` flag or a configured `tools.approvalMode: yolo`),
 	 * skips the gate unless the per-tool policy explicitly requires a prompt or
-	 * deny. The schema default is also `yolo`, so an explicit configuration or
-	 * explicit session flag is required: default-config ACP sessions keep the
-	 * client-side permission gate.
+	 * deny. Extension wrappers retain a dormant gate so a final authorization
+	 * ask can still request permission without prompting routine yolo calls. The
+	 * schema default is also `yolo`, so an explicit configuration or explicit
+	 * session flag is required: default-config ACP sessions keep the client-side
+	 * permission gate.
 	 */
-	#wrapToolForAcpPermission<T extends AgentTool>(tool: T): T {
+	#wrapToolForAcpPermission<T extends AgentTool>(tool: T, permissionOnlyWhenRequired = false): T {
 		const bridge = this.#host.clientBridge();
 		// Match the capability+method gating pattern used by read/write/bash.
 		if (!bridge?.capabilities.requestPermission || !bridge.requestPermission) return tool;
 		if (PERMISSION_REQUIRED_TOOLS[tool.name] !== true) return tool;
 		// Skip the gate only on explicit yolo opt-in; honour per-tool policies
 		// that require a prompt or deny (matching the normal approval wrapper).
+		let skipsRoutinePermission = false;
 		if (this.#isExplicitAutoApproveMode()) {
 			const userPolicies = (this.#host.settings.get("tools.approval") ?? {}) as Record<string, unknown>;
 			const toolPolicy = userPolicies[tool.name];
-			if (!toolPolicy || toolPolicy === "allow") return tool;
+			skipsRoutinePermission = !toolPolicy || toolPolicy === "allow";
 		}
+		if (tool instanceof ExtensionToolWrapper) {
+			return tool.wrapInnerTool(innerTool =>
+				this.#wrapToolForAcpPermission(innerTool, permissionOnlyWhenRequired || skipsRoutinePermission),
+			) as unknown as T;
+		}
+		if (skipsRoutinePermission && !permissionOnlyWhenRequired) return tool;
 		return new Proxy(tool, {
 			get: (target, prop) => {
 				if (prop !== "execute") return target[prop as keyof T];
@@ -739,13 +753,20 @@ export class SessionTools {
 					const commandContent = command
 						? [{ type: "content" as const, content: { type: "text" as const, text: `$ ${command}` } }]
 						: undefined;
-					// Short-circuit on persisted decisions.
-					const persisted = this.#acpPermissionDecisions.get(permissionIntent.cacheKey);
-					if (persisted === "allow_always") {
+					const freshApprovalRequired = requiresFreshAcpApproval(toolCallId, target.name);
+					if (permissionOnlyWhenRequired && !freshApprovalRequired) {
 						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
 					}
+					// Short-circuit on persisted decisions.
+					const persisted = this.#acpPermissionDecisions.get(permissionIntent.cacheKey);
 					if (persisted === "reject_always") {
 						throw new ToolError(`Tool call rejected by user (preference)`);
+					}
+					if (isApprovedAcpToolCall(toolCallId, target.name)) {
+						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
+					}
+					if (persisted === "allow_always" && !freshApprovalRequired) {
+						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
 					}
 					if (signal?.aborted) {
 						throw new ToolAbortError("Permission request cancelled");
@@ -758,6 +779,20 @@ export class SessionTools {
 					signal?.addEventListener("abort", onAbort, { once: true });
 					let raced: PermissionRaceResult;
 					try {
+						await notifyRequiredAcpApprovalRequested(toolCallId, target.name);
+						if (signal?.aborted) throw new ToolAbortError("Permission request cancelled");
+						const requiredApprovalReason = getRequiredAcpApprovalReason(toolCallId, target.name);
+						const permissionContent = [
+							...(requiredApprovalReason
+								? [
+										{
+											type: "content" as const,
+											content: { type: "text" as const, text: requiredApprovalReason },
+										},
+									]
+								: []),
+							...(commandContent ?? []),
+						];
 						const permissionPromise = bridge.requestPermission!(
 							{
 								toolCallId,
@@ -766,7 +801,7 @@ export class SessionTools {
 								...(target.name === "bash" ? { kind: "execute" } : {}),
 								status: "pending",
 								rawInput: args,
-								...(commandContent ? { content: commandContent } : {}),
+								...(permissionContent.length > 0 ? { content: permissionContent } : {}),
 								locations: extractPermissionLocations(
 									args,
 									this.#host.sessionManager.getCwd(),
@@ -777,19 +812,41 @@ export class SessionTools {
 							signal,
 						).then(outcome => ({ kind: "permission" as const, outcome }));
 						raced = await Promise.race([permissionPromise, abortPromise]);
+					} catch (error) {
+						await notifyRequiredAcpApprovalResolved(
+							toolCallId,
+							target.name,
+							false,
+							error instanceof Error ? error.message : "permission request failed",
+						);
+						throw error;
 					} finally {
 						signal?.removeEventListener("abort", onAbort);
 					}
 					if (raced.kind === "aborted" || signal?.aborted) {
+						await notifyRequiredAcpApprovalResolved(
+							toolCallId,
+							target.name,
+							false,
+							"permission request cancelled",
+						);
 						throw new ToolAbortError("Permission request cancelled");
 					}
 					const outcome = raced.outcome;
 					if (outcome.outcome === "cancelled") {
+						await notifyRequiredAcpApprovalResolved(
+							toolCallId,
+							target.name,
+							false,
+							"permission request cancelled",
+						);
 						throw new ToolAbortError("Permission request cancelled");
 					}
 					const selectedOption = PERMISSION_OPTIONS_BY_ID.get(outcome.optionId);
 					if (!selectedOption) {
-						throw new ToolError(`Tool permission response used unknown option ID: ${outcome.optionId}`);
+						const reason = `Tool permission response used unknown option ID: ${outcome.optionId}`;
+						await notifyRequiredAcpApprovalResolved(toolCallId, target.name, false, reason);
+						throw new ToolError(reason);
 					}
 					if (selectedOption.kind === "allow_always") {
 						this.#acpPermissionDecisions.set(permissionIntent.cacheKey, "allow_always");
@@ -797,8 +854,10 @@ export class SessionTools {
 						this.#acpPermissionDecisions.set(permissionIntent.cacheKey, "reject_always");
 					}
 					if (selectedOption.kind === "reject_once" || selectedOption.kind === "reject_always") {
+						await notifyRequiredAcpApprovalResolved(toolCallId, target.name, false, "denied by user");
 						throw new ToolError(`Tool call rejected by user (${target.name})`);
 					}
+					await notifyRequiredAcpApprovalResolved(toolCallId, target.name, true);
 					return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
 				};
 			},

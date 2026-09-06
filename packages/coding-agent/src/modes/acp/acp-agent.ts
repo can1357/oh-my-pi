@@ -2510,12 +2510,13 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
+		const supportsForm = this.#clientCapabilities?.elicitation?.form != null;
 		const uiContext = createAcpExtensionUiContext(
 			this.#connection,
 			() => record.session.sessionId,
 			this.#clientCapabilities,
 		);
-		if (this.#clientCapabilities?.elicitation?.form != null) {
+		if (supportsForm) {
 			record.setToolUIContext?.(uiContext, true);
 			record.session.setUsageFallbackConfirmer((confirmation, signal) => {
 				const reserve =
@@ -2612,7 +2613,7 @@ export class AcpAgent implements Agent {
 				},
 				compact: instructionsOrOptions => runExtensionCompact(record.session, instructionsOrOptions),
 			},
-			uiContext,
+			supportsForm ? uiContext : undefined,
 			"rpc",
 		);
 		await extensionRunner.emit({ type: "session_start" });
