@@ -284,34 +284,34 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 		expect(SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS).toBe(500);
 	});
 
-	test("healthz and the snapshot fetch share one revalidation budget", async () => {
+	test("healthz and the snapshot fetch share one revalidation deadline", async () => {
 		const cachePath = path.join(tempDir, "snapshot.enc");
 		const brokerUrl = "https://broker.stalled-snapshot.invalid";
-		// A budget the client's own 10 s timeout (plus one retry) can never fit
-		// in; healthz eats most of it so the snapshot fetch must inherit only the
-		// remainder instead of a fresh budget of its own. Real delays: the budget
-		// is an `AbortSignal.timeout` on the platform clock, which fake timers do
-		// not drive.
-		const budgetMs = 400;
-		const healthzMs = 350;
-		let snapshotStartedAt = 0;
-		let snapshotAbortedAt = 0;
+		// No clock: the test owns the deadline and releases each request itself.
+		const deadline = new AbortController();
+		const budgetExhausted = new Error("revalidation budget exhausted");
+		const healthzRequested = Promise.withResolvers<AbortSignal | null | undefined>();
+		const healthzRelease = Promise.withResolvers<void>();
+		const snapshotRequested = Promise.withResolvers<AbortSignal | null | undefined>();
+		const snapshotSettled = Promise.withResolvers<unknown>();
 		let storage: AuthStorage | undefined;
 		const transport = fakeFetch(async (input, init) => {
 			const requestedUrl = input instanceof Request ? input.url : String(input);
 			const pathname = new URL(requestedUrl).pathname;
 			if (pathname === "/v1/healthz") {
-				await Bun.sleep(healthzMs);
+				healthzRequested.resolve(init?.signal);
+				await healthzRelease.promise;
 				return Response.json({ ok: true });
 			}
 			// The store's background `/v1/snapshot/stream` also lands here and
-			// stalls until close; only the startup `/v1/snapshot` is timed.
+			// stalls until close; only the startup `/v1/snapshot` is observed.
 			if (pathname !== "/v1/snapshot") return stallUntilAbort(init?.signal);
-			snapshotStartedAt = performance.now();
+			snapshotRequested.resolve(init?.signal);
 			try {
 				return await stallUntilAbort(init?.signal);
-			} finally {
-				snapshotAbortedAt = performance.now();
+			} catch (reason) {
+				snapshotSettled.resolve(reason);
+				throw reason;
 			}
 		});
 
@@ -327,16 +327,22 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 				snapshot: makeSnapshot(Date.now()),
 			});
 
-			const startedAt = performance.now();
-			storage = await discoverAuthStorage(tempDir, { fetch: transport, revalidationTimeoutMs: budgetMs });
-			const elapsedMs = performance.now() - startedAt;
+			const discovery = discoverAuthStorage(tempDir, { fetch: transport, revalidationSignal: deadline.signal });
+			const healthzSignal = await healthzRequested.promise;
+			healthzRelease.resolve();
+			const snapshotSignal = await snapshotRequested.promise;
+			expect(snapshotSignal?.aborted).toBeFalse();
+
+			// Exhausting the one injected deadline after healthz already answered
+			// must cut the in-flight snapshot off with that same reason; a fresh
+			// per-request budget would leave it stalled on the client's timeout.
+			deadline.abort(budgetExhausted);
+			expect(await snapshotSettled.promise).toBe(budgetExhausted);
+			expect(healthzSignal?.aborted).toBeTrue();
+			expect(healthzSignal?.reason).toBe(budgetExhausted);
+
+			storage = await discovery;
 			expect(await storage.getApiKey(PROVIDER)).toBe("cached-api-key");
-			expect(snapshotStartedAt).toBeGreaterThan(0);
-			// Shared budget: the stalled snapshot is cut off ~50 ms after it starts.
-			// A per-request budget would let it run the full 400 ms; timers never
-			// fire early, so the 250 ms ceiling cannot pass by accident.
-			expect(snapshotAbortedAt - snapshotStartedAt).toBeLessThan(250);
-			expect(elapsedMs).toBeLessThan(1_000);
 		} finally {
 			storage?.close();
 		}
