@@ -127,6 +127,13 @@ function suppressMarkedPreloadApplication(source: unknown, marker: string): stri
 	return `${source.slice(0, offset)}if (${markerAccess} === true) { delete ${markerAccess}; throw ${JSON.stringify(marker)}; }\n${source.slice(offset)}`;
 }
 
+function runtimeExceptionValue(params: Record<string, unknown> | undefined): unknown {
+	const details = params?.exceptionDetails;
+	if (!details || typeof details !== "object" || !("exception" in details)) return undefined;
+	const exception = details.exception;
+	return exception && typeof exception === "object" && "value" in exception ? exception.value : undefined;
+}
+
 function subscriptionKey(method: string): string {
 	switch (method) {
 		case "Emulation.setTouchEmulationEnabled":
@@ -395,6 +402,8 @@ class TabState {
 	readonly realSessions = new Set<string>();
 	/** Live execution contexts from the shared root debugger session. */
 	readonly runtimeContexts = new Map<number, Record<string, unknown>>();
+	/** Private preload handoff sentinels whose synthetic exceptions stay relay-internal. */
+	readonly suppressedPreloadExceptions = new Set<string>();
 	/** Whether the shared root Runtime domain has been enabled by the bridge. */
 	rootRuntimeEnabled = false;
 	/** Root Runtime was enabled before a detach and must be restored for default sessions. */
@@ -2630,6 +2639,10 @@ export class RelayBridge {
 	): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
+		if (method === "Runtime.exceptionThrown") {
+			const value = runtimeExceptionValue(params);
+			if (typeof value === "string" && tab.suppressedPreloadExceptions.has(value)) return;
+		}
 		// Track real child sessions so downstream commands can route back.
 		if (method === "Target.attachedToTarget") {
 			const child = params?.sessionId;
@@ -2714,7 +2727,14 @@ export class RelayBridge {
 			// A replacement hello can observe the old attachment before the
 			// pending detach completes. Reconcile that stale snapshot unless a
 			// later attach has already superseded this detach.
-			if (!tab.reattachedAfterDetach) tab.attached = false;
+			if (!tab.reattachedAfterDetach) {
+				tab.attached = false;
+				// Chrome has confirmed that the shared debugger root is gone. Reset
+				// cached Runtime state on the event path as well as the RPC-success
+				// path: extension-side persistence can fail after detach succeeded,
+				// causing the RPC to reject even though a later attach gets a fresh root.
+				this.#resetRuntime(tab);
+			}
 			return;
 		}
 		this.#log("tab detached", { tabId, reason });
@@ -3127,6 +3147,7 @@ export class RelayBridge {
 				script.params?.runImmediately === true && !runImmediately && typeof script.params.source === "string"
 					? `__ompRelayPreload${tab.tabId}_${++this.#sessionSeq}`
 					: undefined;
+			if (applicationMarker !== undefined) tab.suppressedPreloadExceptions.add(applicationMarker);
 			const replayParams =
 				script.params && typeof script.params === "object" && "runImmediately" in script.params
 					? {

@@ -3335,15 +3335,25 @@ describe("RelayBridge tab grouping", () => {
 		const guardedSource = (guarded?.params as { source?: string } | undefined)?.source;
 		const overlapDocument: Record<string, unknown> = {};
 		vm.runInNewContext(markedSource!, overlapDocument);
-		let guardedAborted = false;
+		let guardedException: unknown;
 		try {
 			vm.runInNewContext(guardedSource!, overlapDocument);
-		} catch {
-			guardedAborted = true;
+		} catch (error) {
+			guardedException = error;
 		}
-		expect(guardedAborted).toBe(true);
+		expect(typeof guardedException).toBe("string");
 		expect(overlapDocument.__preloadRuns).toBe(1);
 		expect(Object.keys(overlapDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Runtime.exceptionThrown",
+				params: { exceptionDetails: { exception: { value: guardedException } } },
+			}),
+		);
+		expect(cdp.messages.some(message => message.method === "Runtime.exceptionThrown")).toBe(false);
 		ack(bridge, ext2, "send", { identifier: "root-script-guarded" });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
@@ -8428,6 +8438,45 @@ describe("RelayBridge Runtime sessions", () => {
 });
 
 describe("RelayBridge attachment release", () => {
+	it("resets cached Runtime state when relay detach succeeds before its RPC fails", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.enable" }));
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Runtime.disable"));
+		ack(bridge, ext, "send");
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Runtime.enable"));
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.detachFromTarget", params: { sessionId } }),
+		);
+		await waitFor(() => ext.pending("detach").length === 1);
+		bridge.extMessage(
+			ext,
+			JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed", relayInitiated: true }),
+		);
+		// Chrome detached first; failing to persist recovery metadata only rejects
+		// the RPC and must not preserve cached state from the dead debugger root.
+		nack(bridge, ext, "detach", "failed to persist recovery state");
+		await flush();
+
+		const nextSession = await attachPage(bridge, ext, cdp, connId, 1);
+		const sendsBeforeEnable = ext.rpcs("send").length;
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: nextSession, method: "Runtime.enable" }));
+		await waitFor(() => ext.rpcs("send").length === sendsBeforeEnable + 1);
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
+		ack(bridge, ext, "send");
+		await waitFor(() => ext.rpcs("send").length === sendsBeforeEnable + 2);
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.enable"]);
+		ack(bridge, ext, "send");
+	});
+
 	it("detaches cleanly on explicit last-session release and permits reattachment", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();
