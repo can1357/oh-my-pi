@@ -4139,6 +4139,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#vibeModeOwnerScope = undefined;
 		this.lastAssistantUsage = undefined;
 		this.#updateVibeModeStatus();
+		if (this.sessionManager.buildSessionContext().mode !== "none") this.sessionManager.appendModeChange("none");
 		this.showStatus(
 			killed > 0
 				? `Vibe mode disabled. Killed ${killed} worker session${killed === 1 ? "" : "s"}.`

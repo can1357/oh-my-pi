@@ -167,6 +167,12 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(mode.vibeModeEnabled).toBe(false);
 		expect(session.getActiveToolNames()).toEqual([]);
 		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+		expect(
+			session.sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "mode_change")
+				.map(entry => entry.mode),
+		).toEqual(["vibe", "none"]);
 	});
 
 	it("removes the Vibe directive from provider context on exit", async () => {
