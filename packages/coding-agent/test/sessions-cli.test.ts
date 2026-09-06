@@ -37,7 +37,7 @@ afterEach(() => {
 describe("sessions list CLI", () => {
 	it("lists only the current working directory's saved sessions as JSON", async () => {
 		const output = captureOutput();
-		const list = spyOn(SessionManager, "list").mockResolvedValue([session()]);
+		const list = spyOn(SessionManager, "listReadOnly").mockResolvedValue([session()]);
 		spyOn(SessionManager, "listAll").mockResolvedValue([]);
 		spyOn(sessionPins, "loadPinnedSessionIds").mockResolvedValue(new Set(["local"]));
 
@@ -63,7 +63,7 @@ describe("sessions list CLI", () => {
 
 	it("lists sessions from the requested working directory", async () => {
 		const output = captureOutput();
-		const list = spyOn(SessionManager, "list").mockResolvedValue([session({ cwd: "/other-project" })]);
+		const list = spyOn(SessionManager, "listReadOnly").mockResolvedValue([session({ cwd: "/other-project" })]);
 		spyOn(sessionPins, "loadPinnedSessionIds").mockResolvedValue(new Set());
 
 		await runSessionsCommand({ flags: { all: false, cwd: "/other-project", json: true } });
@@ -74,7 +74,7 @@ describe("sessions list CLI", () => {
 
 	it("includes sessions from every project only when --all is selected", async () => {
 		const output = captureOutput();
-		const local = spyOn(SessionManager, "list").mockResolvedValue([]);
+		const local = spyOn(SessionManager, "listReadOnly").mockResolvedValue([]);
 		const all = spyOn(SessionManager, "listAll").mockResolvedValue([
 			session(),
 			session({
@@ -96,10 +96,20 @@ describe("sessions list CLI", () => {
 		]);
 	});
 
+	it("sanitizes cwd control characters in the global session table", async () => {
+		const output = captureOutput();
+		spyOn(SessionManager, "listAll").mockResolvedValue([session({ cwd: "/project\u001b[2J" })]);
+		spyOn(sessionPins, "loadPinnedSessionIds").mockResolvedValue(new Set());
+
+		await runSessionsCommand({ flags: { all: true, json: false } });
+
+		expect(output.join("\n")).not.toContain("\u001b");
+	});
+
 	it("keeps JSON output to public, bounded session metadata", async () => {
 		const output = captureOutput();
 		const preview = "long preview ".repeat(20);
-		spyOn(SessionManager, "list").mockResolvedValue([session({ firstMessage: preview })]);
+		spyOn(SessionManager, "listReadOnly").mockResolvedValue([session({ firstMessage: preview })]);
 		spyOn(sessionPins, "loadPinnedSessionIds").mockResolvedValue(new Set());
 
 		await runSessionsCommand({ flags: { all: false, json: true } });
@@ -112,7 +122,7 @@ describe("sessions list CLI", () => {
 
 	it("renders an empty JSON array when the selected scope has no sessions", async () => {
 		const output = captureOutput();
-		spyOn(SessionManager, "list").mockResolvedValue([]);
+		spyOn(SessionManager, "listReadOnly").mockResolvedValue([]);
 		spyOn(sessionPins, "loadPinnedSessionIds").mockResolvedValue(new Set());
 
 		await runSessionsCommand({ flags: { all: false, json: true } });
@@ -166,6 +176,16 @@ describe("session roots CLI", () => {
 				latestModifiedAt: "2026-09-06T08:00:00.000Z",
 			},
 		]);
+	});
+
+	it("sanitizes cwd control characters in the roots table", async () => {
+		const output = captureOutput();
+		spyOn(SessionManager, "listAll").mockResolvedValue([session({ cwd: "/project\u001b[2J" })]);
+		spyOn(sessionPins, "loadPinnedSessionIds").mockResolvedValue(new Set());
+
+		await runSessionRootsCommand(false);
+
+		expect(output.join("\n")).not.toContain("\u001b");
 	});
 
 	it("renders an empty JSON array when no session roots exist", async () => {

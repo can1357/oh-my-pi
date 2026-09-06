@@ -62,6 +62,7 @@ function encodeHashedSessionDirName(canonicalCwd: string, scope: "home" | "tmp" 
 function getDefaultSessionDirName(cwd: string): {
 	encodedDirName: string;
 	hashedDirName: string;
+	legacyHomeDirName?: string;
 	resolvedCwd: string;
 } {
 	const resolvedCwd = path.resolve(cwd);
@@ -84,7 +85,33 @@ function getDefaultSessionDirName(cwd: string): {
 		encodedDirName = encodeLegacyAbsoluteSessionDirName(canonicalCwd);
 		scope = "abs";
 	}
-	return { encodedDirName, hashedDirName: encodeHashedSessionDirName(canonicalCwd, scope), resolvedCwd };
+	const legacyHomeDirName =
+		scope === "home"
+			? homeRelative
+				? `--${home.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}-${homeRelative.replace(/[/\\:]/g, "-")}--`
+				: `--${home.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`
+			: undefined;
+	return {
+		encodedDirName,
+		hashedDirName: encodeHashedSessionDirName(canonicalCwd, scope),
+		legacyHomeDirName,
+		resolvedCwd,
+	};
+}
+
+/**
+ * Resolve every known session directory for a cwd without creating, migrating,
+ * or otherwise modifying any path.
+ */
+export function resolveReadOnlySessionDirCandidates(cwd: string, sessionsRoot: string = getSessionsDir()): string[] {
+	const { encodedDirName, hashedDirName, legacyHomeDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
+	const dirNames = new Set([
+		encodedDirName,
+		encodeLegacyAbsoluteSessionDirName(resolvedCwd),
+		hashedDirName,
+		legacyHomeDirName,
+	]);
+	return [...dirNames].filter((name): name is string => name !== undefined).map(name => path.join(sessionsRoot, name));
 }
 
 /**

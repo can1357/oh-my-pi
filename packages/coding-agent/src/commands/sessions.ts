@@ -2,6 +2,7 @@ import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { sessionsHelp as commandHelp } from "../cli/command-help";
 import { runSessionRootsCommand, runSessionsCommand } from "../cli/sessions-cli";
 import { CliUsageError } from "../cli/usage-error";
+import { expandPath } from "../tools/path-utils";
 
 export default class Sessions extends Command {
 	static description = commandHelp.description;
@@ -30,15 +31,18 @@ export default class Sessions extends Command {
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Sessions);
+		const hasCwd = flags.cwd !== undefined;
+		const cwd = flags.cwd?.trim();
+		if (hasCwd && !cwd) throw new CliUsageError("--cwd must not be empty");
 		if (args.action === "roots") {
 			if (flags.all) throw new CliUsageError("--all only applies to sessions list");
-			if (flags.cwd) throw new CliUsageError("--cwd only applies to sessions list");
+			if (hasCwd) throw new CliUsageError("--cwd only applies to sessions list");
 			await runSessionRootsCommand(flags.json ?? false);
 			return;
 		}
-		if (flags.all && flags.cwd) throw new CliUsageError("--all and --cwd are mutually exclusive");
+		if (flags.all && hasCwd) throw new CliUsageError("--all and --cwd are mutually exclusive");
 		await runSessionsCommand({
-			flags: { all: flags.all ?? false, cwd: flags.cwd, json: flags.json ?? false },
+			flags: { all: flags.all ?? false, cwd: cwd ? expandPath(cwd) : undefined, json: flags.json ?? false },
 		});
 	}
 }

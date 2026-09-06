@@ -60,7 +60,13 @@ import {
 	type TtsrInjectionEntry,
 	type UsageStatistics,
 } from "./session-entries";
-import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
+import {
+	findMostRecentSession,
+	listAllSessions,
+	listSessions,
+	listSessionsReadOnly,
+	type SessionInfo,
+} from "./session-listing";
 import {
 	loadEntriesFromFile,
 	loadSessionFile,
@@ -73,6 +79,7 @@ import {
 	computeDefaultSessionDir,
 	readTerminalBreadcrumbEntry,
 	resolveManagedSessionRoot,
+	resolveReadOnlySessionDirCandidates,
 	writeTerminalBreadcrumb,
 } from "./session-paths";
 import { prepareEntryForPersistence } from "./session-persistence";
@@ -3120,6 +3127,28 @@ export class SessionManager {
 	): Promise<SessionInfo[]> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const sessions = await listSessions(dir, storage);
+		return sortPinnedFirst(sessions, await loadPinnedSessionIds());
+	}
+
+	/**
+	 * List sessions for a project directory without creating, migrating, or
+	 * recovering any session directory.
+	 */
+	static async listReadOnly(
+		cwd: string,
+		options: { sessionsRoot?: string; storage?: SessionStorage } = {},
+	): Promise<SessionInfo[]> {
+		const storage = options.storage ?? new FileSessionStorage();
+		const sessionDirs = resolveReadOnlySessionDirCandidates(cwd, options.sessionsRoot);
+		const sessions = (
+			await Promise.all(sessionDirs.map(sessionDir => listSessionsReadOnly(sessionDir, storage)))
+		).flat();
+		sessions.sort(
+			(a, b) =>
+				b.modified.getTime() - a.modified.getTime() ||
+				b.created.getTime() - a.created.getTime() ||
+				b.path.localeCompare(a.path),
+		);
 		return sortPinnedFirst(sessions, await loadPinnedSessionIds());
 	}
 

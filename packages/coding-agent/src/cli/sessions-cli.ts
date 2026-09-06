@@ -59,7 +59,7 @@ function toSessionListEntry(session: SessionInfo, pinnedIds: ReadonlySet<string>
 async function readSessionEntries(options: { all: boolean; cwd?: string }): Promise<SessionListEntry[]> {
 	const sessions = options.all
 		? await SessionManager.listAll()
-		: await SessionManager.list(options.cwd ?? process.cwd());
+		: await SessionManager.listReadOnly(options.cwd ?? process.cwd());
 	const pinnedIds = await loadPinnedSessionIds();
 	return sessions.map(session => toSessionListEntry(session, pinnedIds));
 }
@@ -102,7 +102,14 @@ function sessionTableCells(entry: SessionListEntry, includeCwd: boolean): string
 		entry.status,
 		`${entry.modifiedAt.slice(0, 10)} ${entry.modifiedAt.slice(11, 16)}Z`,
 		String(entry.messageCount),
-		...(includeCwd ? [truncateToWidth(shortenPath(entry.cwd) || "-", TRUNCATE_LENGTHS.CONTENT)] : []),
+		...(includeCwd
+			? [
+					truncateToWidth(
+						shortenPath(sanitizeText(entry.cwd).replace(/\s+/g, " ").trim()) || "-",
+						TRUNCATE_LENGTHS.CONTENT,
+					),
+				]
+			: []),
 		truncateToWidth(label, TRUNCATE_LENGTHS.CONTENT),
 	];
 }
@@ -132,7 +139,10 @@ export async function runSessionsCommand(cmd: SessionsCommandArgs): Promise<void
 	}
 	if (entries.length === 0) {
 		if (cmd.flags.all) process.stdout.write(`${chalk.dim("No saved sessions found.")}\n`);
-		else if (cmd.flags.cwd) process.stdout.write(`${chalk.dim(`No saved sessions in ${cmd.flags.cwd}.`)}\n`);
+		else if (cmd.flags.cwd)
+			process.stdout.write(
+				`${chalk.dim(`No saved sessions in ${sanitizeText(cmd.flags.cwd).replace(/\s+/g, " ").trim()}.`)}\n`,
+			);
 		else
 			process.stdout.write(
 				`${chalk.dim("No saved sessions in the current directory.\nUse --all to list sessions from every project.")}\n`,
@@ -158,11 +168,14 @@ export async function runSessionRootsCommand(json: boolean): Promise<void> {
 	}
 	printTable(
 		["CWD", "SESSIONS", "PINNED", "LAST MODIFIED"],
-		roots.map(root => [
-			truncateToWidth(shortenPath(root.cwd) || root.cwd, TRUNCATE_LENGTHS.CONTENT),
-			String(root.sessionCount),
-			String(root.pinnedCount),
-			`${root.latestModifiedAt.slice(0, 10)} ${root.latestModifiedAt.slice(11, 16)}Z`,
-		]),
+		roots.map(root => {
+			const cwd = sanitizeText(root.cwd).replace(/\s+/g, " ").trim() || "(unknown cwd)";
+			return [
+				truncateToWidth(shortenPath(cwd) || cwd, TRUNCATE_LENGTHS.CONTENT),
+				String(root.sessionCount),
+				String(root.pinnedCount),
+				`${root.latestModifiedAt.slice(0, 10)} ${root.latestModifiedAt.slice(11, 16)}Z`,
+			];
+		}),
 	);
 }
