@@ -67,6 +67,7 @@
 ### Fixed
 
 - Fixed Codex compaction timeouts triggering prolonged retries instead of advancing to the next compaction method.
+- Suppressed synthetic reasoning item synthesis in Responses input when `filterReasoningHistory` is enabled: when a model or endpoint requires filtering reasoning history, synthesizing placeholder `rs_*` items for assistant tool-call turns is now skipped, fixing HTTP 400 errors with Meta Muse Spark on OpenRouter ([#10966](https://github.com/can1357/oh-my-pi/issues/10966)).
 
 ## [18.1.11] - 2026-09-05
 
