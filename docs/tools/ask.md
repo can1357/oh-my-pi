@@ -44,21 +44,22 @@
 2. `execute()` also requires `context.hasUI` and `context.ui`; if missing it aborts the context and throws `ToolAbortError("Ask tool requires interactive mode")`.
 3. It reads `ask.timeout` from settings, converts seconds to milliseconds (`0` disables timeout), and disables timeout entirely while plan mode is enabled.
 4. If `ask.notify` is not `off`, it sends a terminal notification: `Waiting for input`. When `speech.enabled` is true, it also sends all question text to the vocalizer before opening the dialog.
-5. When the UI supplies `askDialog`, the tool opens one rich multi-question form. Rich options receive `header`, `description`, and `preview`; results may contain an answer note or choose the dialog's `Chat about this` redirect.
-6. Otherwise it uses the selector/editor fallback for each question:
+5. When the UI supplies `askDialog`, the tool opens one rich multi-question form. Rich options receive `header`, `description`, and `preview`; results may contain a question note or choose the dialog's `Chat about this` redirect.
+6. A rich-dialog custom answer is saved on the first editor submission and advances immediately. A question note remains visible in the dialog and review, is included even when the question is unanswered, and persists when the selected answer changes. Adding a note to a single-select question exposes the Submit tab so note-only context can be reviewed and sent without choosing an option. Submitting an empty or whitespace-only note clears it.
+7. Otherwise it uses the selector/editor fallback for each question:
    - single-select list plus `Other (type your own)`
    - multi-select checkbox loop plus `Done selecting` when applicable and `Other (type your own)`
-7. In fallback multi-question mode, left/right arrow handlers move backward/forward and preserve prior answers. The final question auto-advances on selection.
-8. If a timeout fires before an answer, the fallback auto-selects the valid recommended option, or the first option otherwise; result text gets ` (auto-selected after timeout)` and `details.timedOut` is set. The rich dialog reports its own `timedOut` answers.
-9. If the user cancels without timeout, `execute()` aborts the tool context and throws `ToolAbortError("Ask tool was cancelled by the user")`.
-10. On success it formats human-readable text plus structured `details`; the TUI renderer uses `details` for rich result display.
+8. In fallback multi-question mode, left/right arrow handlers move backward/forward and preserve prior answers. The final question auto-advances on selection.
+9. If a timeout fires before an answer, the fallback auto-selects the valid recommended option, or the first option otherwise; result text gets ` (auto-selected after timeout)` and `details.timedOut` is set. The rich dialog reports its own `timedOut` answers.
+10. If the user cancels without timeout, `execute()` aborts the tool context and throws `ToolAbortError("Ask tool was cancelled by the user")`.
+11. On success it formats human-readable text plus structured `details`; the TUI renderer uses `details` for rich result display.
 
 ## Modes / Variants
 - Single question: returns flattened `details` fields.
 - Multiple questions: returns `details.results[]`; the fallback permits arrow-key back/forward navigation, while a rich UI presents the complete form.
 - Single-select: one option or custom input.
 - Multi-select: toggled choices or custom input. In the fallback, `Done selecting` appears only when forward navigation is not active and at least one choice is selected.
-- Rich ask dialog: supports per-question headers, option previews, answer notes, and a `Chat about this` redirect.
+- Rich ask dialog: supports per-question headers, option previews, question notes, and a `Chat about this` redirect.
 - Selector/editor fallback: supports labels/descriptions but not headers, previews, notes, or chat redirect.
 
 ## Side Effects

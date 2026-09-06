@@ -105,7 +105,6 @@ interface QuestionState {
 	selectedOptions: Set<string>;
 	customInput: string | undefined;
 	note: string | undefined;
-	noteRowKey: string | undefined;
 	cursorIndex: number;
 	scrollOffset: number;
 	manualScroll: boolean;
@@ -116,7 +115,6 @@ type QuestionRowKind = "option" | "other";
 
 interface QuestionRow {
 	kind: QuestionRowKind;
-	key: string;
 	label: string;
 	optionIndex: number | undefined;
 }
@@ -272,28 +270,6 @@ function renderAnswerSummary(question: ExtensionAskDialogQuestion, state: Questi
 	return selected[0] ?? theme.fg("warning", "unanswered");
 }
 
-function clearNote(state: QuestionState): void {
-	state.note = undefined;
-	state.noteRowKey = undefined;
-}
-
-function clearNoteIfRow(state: QuestionState, rowKey: string): void {
-	if (state.noteRowKey === rowKey) clearNote(state);
-}
-
-function clearNoteUnlessRow(state: QuestionState, rowKey: string): void {
-	if (state.noteRowKey !== undefined && state.noteRowKey !== rowKey) clearNote(state);
-}
-
-function noteForSubmittedAnswer(question: ExtensionAskDialogQuestion, state: QuestionState): string | undefined {
-	if (state.note === undefined || state.noteRowKey === undefined) return undefined;
-	if (state.noteRowKey === "other") return state.customInput !== undefined ? state.note : undefined;
-	const match = /^option:(\d+)$/.exec(state.noteRowKey);
-	const optionIndex = match?.[1] === undefined ? Number.NaN : Number.parseInt(match[1], 10);
-	const option = Number.isInteger(optionIndex) ? question.options[optionIndex] : undefined;
-	return option && state.selectedOptions.has(option.label) ? state.note : undefined;
-}
-
 function optionMarker(question: ExtensionAskDialogQuestion, checked: boolean): string {
 	if (question.multi) return checked ? theme.checkbox.checked : theme.checkbox.unchecked;
 	return checked ? theme.radio.selected : theme.radio.unselected;
@@ -317,16 +293,14 @@ function renderRowLabel(
 	const marker = `${theme.fg(checked ? "success" : "dim", optionMarker(question, checked))} `;
 	const cursor = selected ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
 	const label = renderInlineMarkdown(rowItem.label, mdTheme, t => theme.fg(color, t));
-	const noteMarker = state.note && state.noteRowKey === rowItem.key ? theme.fg("success", "  ✎ note") : "";
 	// `width` is already the inner content width consumed by row(); when a
 	// scrollbar is needed, renderRows() calls this again with one less column.
-	// Keep the cursor, option marker, first wrapped label line, and optional
-	// note marker within that budget so the outer fit() never truncates them.
-	const noteWidth = noteMarker ? visibleWidth(noteMarker) : 0;
-	const labelWidth = Math.max(1, width - visibleWidth(cursor) - visibleWidth(marker) - noteWidth);
+	// Keep the cursor, option marker, and first wrapped label line within that
+	// budget so the outer fit() never truncates them.
+	const labelWidth = Math.max(1, width - visibleWidth(cursor) - visibleWidth(marker));
 	const wrappedLabel = wrapTextWithAnsi(label, labelWidth);
 	const indent = padding(visibleWidth(cursor) + visibleWidth(marker));
-	const lines = [`${cursor}${marker}${wrappedLabel[0] ?? ""}${noteMarker}`];
+	const lines = [`${cursor}${marker}${wrappedLabel[0] ?? ""}`];
 	for (let i = 1; i < wrappedLabel.length; i++) {
 		lines.push(`${indent}${wrappedLabel[i] ?? ""}`);
 	}
@@ -423,7 +397,6 @@ export class AskDialogComponent implements Component {
 				selectedOptions: new Set<string>(),
 				customInput: undefined,
 				note: undefined,
-				noteRowKey: undefined,
 				cursorIndex: clamp(recommended ?? 0, 0, maxIndex),
 				scrollOffset: 0,
 				manualScroll: false,
@@ -555,7 +528,8 @@ export class AskDialogComponent implements Component {
 	#measureHeight(width: number, termRows: number): number {
 		const maxHeight = Math.max(MIN_DIALOG_ROWS, Math.floor(termRows * DIALOG_HEIGHT_RATIO));
 		const chrome = 5; // topBorder + divider + divider + footer + bottomBorder
-		const tabBarRows = this.#hasSubmitTab() ? 1 : 0;
+		// Every question can gain a note-only Submit tab after the initial measurement.
+		const tabBarRows = this.#questions.length > 0 ? 1 : 0;
 		const mdTheme = getMarkdownTheme();
 		let needed = MIN_DIALOG_ROWS;
 		for (let index = 0; index < this.#questions.length; index++) {
@@ -589,10 +563,15 @@ export class AskDialogComponent implements Component {
 	}
 
 	#hasSubmitTab(): boolean {
-		// Multi questions confirm on the Submit tab (Enter toggles, never
-		// submits), so any multi question forces the tab even when there is
-		// only one question.
-		return this.#questions.length > 1 || this.#questions.some(question => question.multi);
+		// Multi questions confirm on the Submit tab, so any multi question
+		// forces the tab even when there is only one question. A note on a
+		// single-select question also needs this path so it can be submitted
+		// without selecting an answer.
+		return (
+			this.#questions.length > 1 ||
+			this.#questions.some(question => question.multi) ||
+			this.#states.some(state => state.note !== undefined)
+		);
 	}
 
 	#submitTabIndex(): number {
@@ -657,13 +636,16 @@ export class AskDialogComponent implements Component {
 			return `Enter submit · ↑/↓ scroll ·${scroll} ${cancel}`;
 		}
 		const question = this.#questions[this.#currentQuestionIndex()];
+		const state = this.#states[this.#currentQuestionIndex()];
 		// Enter advances in multi-question dialogs and submits single-question ones.
 		const enterAction = this.#questions.length > 1 ? "next" : "submit";
-		const action = question?.multi ? `Space toggle · Enter ${enterAction}` : "Enter select · n note";
+		const noteAction = state?.note === undefined ? "n note" : "n edit note";
+		const baseAction = question?.multi ? `Space toggle · Enter ${enterAction}` : "Enter select";
+		const action = `${baseAction} · ${noteAction}`;
 		const tabs = this.#hasSubmitTab() ? " · Tab/←/→" : "";
 		const expand = this.#expandHint();
 		if (this.#questionCanPage && indicator) {
-			return `${action} · ↑/↓${tabs} · ${cancel}${expand} · ${pageKeysLabel()} ${indicator}`;
+			return `${baseAction} · ↑/↓${tabs} · ${cancel}${expand} · ${pageKeysLabel()} ${indicator}`;
 		}
 		const scroll = indicator ? ` ${indicator} scroll ·` : "";
 		return `${action} · ↑/↓ move${tabs} ·${scroll} ${cancel}${expand}`;
@@ -672,11 +654,10 @@ export class AskDialogComponent implements Component {
 	#questionRows(question: ExtensionAskDialogQuestion): QuestionRow[] {
 		const rows: QuestionRow[] = question.options.map((option, index) => ({
 			kind: "option",
-			key: `option:${index}`,
 			label: this.#optionLabel(question, option.label, index),
 			optionIndex: index,
 		}));
-		rows.push({ kind: "other", key: "other", label: OTHER_OPTION, optionIndex: undefined });
+		rows.push({ kind: "other", label: OTHER_OPTION, optionIndex: undefined });
 		return rows;
 	}
 
@@ -725,16 +706,14 @@ export class AskDialogComponent implements Component {
 		const rowItem = rows[state.cursorIndex];
 		if (!rowItem) return;
 		if (keyData === "n" || keyData === "N") {
-			if (rowItem.kind === "option" || rowItem.kind === "other") {
-				void this.#promptForNote(question, state, rowItem);
-			}
+			void this.#promptForNote(question, state);
 			return;
 		}
 		const isEnter = matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n";
 		const isSpace = matchesKey(keyData, "space") || keyData === " ";
 		if (!isEnter && !(question.multi && isSpace)) return;
 		if (rowItem.kind === "other") {
-			void this.#promptForCustomInput(question, state, rowItem);
+			void this.#promptForCustomInput(question, state);
 			return;
 		}
 		const option = question.options[rowItem.optionIndex ?? -1];
@@ -750,7 +729,6 @@ export class AskDialogComponent implements Component {
 			}
 			if (state.selectedOptions.has(option.label)) {
 				state.selectedOptions.delete(option.label);
-				clearNoteIfRow(state, rowItem.key);
 			} else {
 				state.selectedOptions.add(option.label);
 			}
@@ -759,7 +737,6 @@ export class AskDialogComponent implements Component {
 		}
 		state.selectedOptions = new Set([option.label]);
 		state.customInput = undefined;
-		clearNoteUnlessRow(state, rowItem.key);
 		this.#advanceAfterQuestion();
 	}
 
@@ -796,11 +773,7 @@ export class AskDialogComponent implements Component {
 		this.#requestRender();
 	}
 
-	async #promptForCustomInput(
-		question: ExtensionAskDialogQuestion,
-		state: QuestionState,
-		rowItem: QuestionRow,
-	): Promise<void> {
+	async #promptForCustomInput(question: ExtensionAskDialogQuestion, state: QuestionState): Promise<void> {
 		this.#promptActive = true;
 		try {
 			const input = await this.callbacks.onPrompt(
@@ -811,15 +784,11 @@ export class AskDialogComponent implements Component {
 			if (input.trim() === "") {
 				// Submitting an empty value unselects the custom answer.
 				state.customInput = undefined;
-				clearNoteIfRow(state, rowItem.key);
 				return;
 			}
 			state.customInput = input;
-			if (!question.multi) {
-				state.selectedOptions.clear();
-				clearNoteUnlessRow(state, rowItem.key);
-				this.#advanceAfterQuestion();
-			}
+			if (!question.multi) state.selectedOptions.clear();
+			this.#advanceAfterQuestion();
 		} finally {
 			this.#promptActive = false;
 			this.#runDeferredTimeout();
@@ -827,20 +796,12 @@ export class AskDialogComponent implements Component {
 		}
 	}
 
-	async #promptForNote(
-		question: ExtensionAskDialogQuestion,
-		state: QuestionState,
-		rowItem: QuestionRow,
-	): Promise<void> {
+	async #promptForNote(question: ExtensionAskDialogQuestion, state: QuestionState): Promise<void> {
 		this.#promptActive = true;
 		try {
-			const input = await this.callbacks.onPrompt(
-				boundPromptTitle(`Note for ${rowItem.label}: `, question.question),
-				state.noteRowKey === rowItem.key ? state.note : undefined,
-			);
+			const input = await this.callbacks.onPrompt(boundPromptTitle("Note: ", question.question), state.note);
 			if (input === undefined || this.#closed) return;
-			state.note = input;
-			state.noteRowKey = rowItem.key;
+			state.note = input.trim() ? input : undefined;
 		} finally {
 			this.#promptActive = false;
 			this.#runDeferredTimeout();
@@ -854,7 +815,17 @@ export class AskDialogComponent implements Component {
 		const { question, state } = active;
 		const rowItems = this.#questionRows(question);
 		state.cursorIndex = clamp(state.cursorIndex, 0, Math.max(0, rowItems.length - 1));
-		return this.#renderQuestionList(question, state, rowItems, width, maxRows);
+		const note = state.note?.trim() ? normalizedInlineInput(state.note) : undefined;
+		if (!note) return this.#renderQuestionList(question, state, rowItems, width, maxRows);
+		const noteLine = theme.fg(
+			"warning",
+			`✎ Note: ${truncateToWidth(note, Math.max(1, width - 8), Ellipsis.Unicode)}`,
+		);
+		if (maxRows <= 1) {
+			return { lines: maxRows === 1 ? [noteLine] : [], scrollOffset: state.scrollOffset, indicator: "" };
+		}
+		const list = this.#renderQuestionList(question, state, rowItems, width, maxRows - 1);
+		return { ...list, lines: [noteLine, ...list.lines] };
 	}
 
 	#renderQuestionList(
@@ -944,9 +915,8 @@ export class AskDialogComponent implements Component {
 			const label = questionTabLabel(question, index);
 			const answer = renderAnswerSummary(question, state);
 			allLines.push(`${theme.fg("dim", `${index + 1}. ${label}:`)} ${answer}`);
-			const submittedNote = noteForSubmittedAnswer(question, state);
-			if (submittedNote?.trim()) {
-				const note = normalizedInlineInput(submittedNote);
+			if (state.note?.trim()) {
+				const note = normalizedInlineInput(state.note);
 				allLines.push(
 					theme.fg("muted", `   Note: ${truncateToWidth(note, Math.max(1, width - 9), Ellipsis.Unicode)}`),
 				);
@@ -1024,12 +994,7 @@ export class AskDialogComponent implements Component {
 			const state = this.#states[index];
 			if (!question || !state) continue;
 			if (state.selectedOptions.size === 0 && state.customInput === undefined) {
-				const noteMatch = /^option:(\d+)$/.exec(state.noteRowKey ?? "");
-				const notedIndex = noteMatch ? Number.parseInt(noteMatch[1], 10) : Number.NaN;
-				const fallbackIndex =
-					Number.isInteger(notedIndex) && question.options[notedIndex]
-						? notedIndex
-						: clamp(question.recommended ?? 0, 0, Math.max(0, question.options.length - 1));
+				const fallbackIndex = clamp(question.recommended ?? 0, 0, Math.max(0, question.options.length - 1));
 				const fallback = question.options[fallbackIndex];
 				if (fallback) state.selectedOptions.add(fallback.label);
 				state.timedOut = true;
@@ -1074,7 +1039,7 @@ export class AskDialogComponent implements Component {
 				multi: question.multi ?? false,
 				selectedOptions,
 				customInput: state.customInput,
-				note: noteForSubmittedAnswer(question, state),
+				note: state.note,
 				timedOut: state.timedOut || undefined,
 			});
 		}

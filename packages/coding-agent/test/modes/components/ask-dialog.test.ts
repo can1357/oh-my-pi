@@ -410,7 +410,7 @@ describe("AskDialogComponent", () => {
 		expect(onCancel).toHaveBeenCalledTimes(1);
 	});
 
-	it("n on an option calls onPrompt and stores note with marker", async () => {
+	it("n opens a question note and submits it with the answer", async () => {
 		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("My Custom Note"));
 		const onSubmit = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
@@ -435,7 +435,6 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 
 		expect(onPrompt).toHaveBeenCalledTimes(1);
-		expect(onPrompt.mock.calls[0][0]).toBe("Note for Option A: Choose one?");
 
 		// Verify note is saved by submitting
 		component.handleInput(ENTER);
@@ -444,7 +443,7 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].note).toBe("My Custom Note");
 	});
 
-	it("note prefill is empty when editing a different row after noting another option", async () => {
+	it("reuses a question note after moving to a different answer", async () => {
 		const onPrompt = vi.fn();
 		const onSubmit = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
@@ -461,74 +460,61 @@ describe("AskDialogComponent", () => {
 			onPrompt,
 		});
 
-		// Cursor starts on Option A. Add a note for A.
-		onPrompt.mockReturnValueOnce(Promise.resolve("Note for A"));
+		onPrompt.mockReturnValueOnce(Promise.resolve("Initial note"));
 		component.handleInput("n");
 		await Promise.resolve();
 		await Promise.resolve();
 
 		expect(onPrompt).toHaveBeenCalledTimes(1);
-		expect(onPrompt.mock.calls[0][0]).toBe("Note for Option A: Choose one?");
-		// No prior note → prefill is undefined.
 		expect(onPrompt.mock.calls[0][1]).toBeUndefined();
 
-		// Move down to Option B and open its note.
 		component.handleInput(DOWN);
-		onPrompt.mockReturnValueOnce(Promise.resolve("Note for B"));
-		component.handleInput("n");
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(onPrompt).toHaveBeenCalledTimes(2);
-		// Prefill for Option B must be undefined — not the note from Option A.
-		expect(onPrompt.mock.calls[1][1]).toBeUndefined();
-
-		// Move back up to Option A and re-open its note.
-		component.handleInput("\x1b[A"); // UP
-		onPrompt.mockReturnValueOnce(Promise.resolve("Updated note"));
-		component.handleInput("n");
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(onPrompt).toHaveBeenCalledTimes(3);
-		// Note now belongs to Option B, so re-editing Option A starts empty.
-		expect(onPrompt.mock.calls[2][1]).toBeUndefined();
-	});
-
-	it("note prefill reuses the existing note when re-editing the same row", async () => {
-		const onPrompt = vi.fn();
-		const questions: ExtensionAskDialogQuestion[] = [
-			{
-				id: "q1",
-				question: "Choose one?",
-				options: [{ label: "Option A" }],
-			},
-		];
-
-		const component = new AskDialogComponent(questions, {
-			onSubmit: vi.fn(),
-			onCancel: vi.fn(),
-			onPrompt,
-		});
-
-		// Add a note on Option A.
-		onPrompt.mockReturnValueOnce(Promise.resolve("My note"));
-		component.handleInput("n");
-		await Promise.resolve();
-		await Promise.resolve();
-
-		// Re-open the note on the same row (cursor still on Option A).
 		onPrompt.mockReturnValueOnce(Promise.resolve("Updated note"));
 		component.handleInput("n");
 		await Promise.resolve();
 		await Promise.resolve();
 
 		expect(onPrompt).toHaveBeenCalledTimes(2);
-		// Same row → prefill reuses the existing note.
-		expect(onPrompt.mock.calls[1][1]).toBe("My note");
+		expect(onPrompt.mock.calls[1][1]).toBe("Initial note");
+
+		component.handleInput(ENTER);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option B"]);
+		expect(onSubmit.mock.calls[0][0].results[0].note).toBe("Updated note");
 	});
 
-	it("omits a note when a single-select answer changes to a different option", async () => {
+	it("clears a question note when the editor submits whitespace", async () => {
+		const onPrompt = vi
+			.fn()
+			.mockReturnValueOnce(Promise.resolve("Initial note"))
+			.mockReturnValueOnce(Promise.resolve("   "));
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose one?",
+					options: [{ label: "Option A" }],
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
+
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(render(component)).toContain("✎ Note: Initial note");
+
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(render(component)).not.toContain("✎ Note:");
+		expect(render(component)).toContain("n note");
+
+		component.handleInput(ENTER);
+		expect(onSubmit.mock.calls[0][0].results[0].note).toBeUndefined();
+	});
+
+	it("preserves a note when a single-select answer changes", async () => {
 		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("Note for A"));
 		const onSubmit = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
@@ -554,10 +540,10 @@ describe("AskDialogComponent", () => {
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option B"]);
-		expect(onSubmit.mock.calls[0][0].results[0].note).toBeUndefined();
+		expect(onSubmit.mock.calls[0][0].results[0].note).toBe("Note for A");
 	});
 
-	it("clears the note when a noted multi-select option is toggled off", async () => {
+	it("preserves a note when a multi-select option is toggled off", async () => {
 		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("Note for A"));
 		const onSubmit = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
@@ -581,10 +567,7 @@ describe("AskDialogComponent", () => {
 
 		component.handleInput(SPACE);
 		component.handleInput(SPACE);
-		expect(render(component)).not.toContain("✎ note");
 
-		// Select Option B and confirm from the Submit tab; the cleared note
-		// must not resurface.
 		component.handleInput(DOWN);
 		component.handleInput(SPACE);
 		component.handleInput(TAB);
@@ -592,10 +575,74 @@ describe("AskDialogComponent", () => {
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option B"]);
-		expect(onSubmit.mock.calls[0][0].results[0].note).toBeUndefined();
+		expect(onSubmit.mock.calls[0][0].results[0].note).toBe("Note for A");
 	});
 
-	it("shows selected multi-select options together with custom input on Submit", async () => {
+	it("shows and submits a question note even while the answer is unanswered", async () => {
+		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("Additional context"));
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose multiple?",
+					options: [{ label: "Option A" }, { label: "Option B" }],
+					multi: true,
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
+
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		component.handleInput(DOWN);
+		expect(render(component)).toContain("✎ Note: Additional context");
+		component.handleInput(TAB);
+
+		const review = render(component);
+		expect(review).toContain("unanswered");
+		expect(review).toContain("Note: Additional context");
+
+		component.handleInput(ENTER);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual([]);
+		expect(onSubmit.mock.calls[0][0].results[0].note).toBe("Additional context");
+	});
+
+	it("shows Submit for a single-select note-only response", async () => {
+		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("Additional context"));
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose one?",
+					options: [{ label: "Option A" }, { label: "Option B" }],
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
+
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+
+		const question = render(component);
+		expect(question).toContain("Submit");
+		expect(question).toContain("Tab/←/→");
+
+		component.handleInput(TAB);
+		const review = render(component);
+		expect(review).toContain("unanswered");
+		expect(review).toContain("Note: Additional context");
+
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual([]);
+		expect(onSubmit.mock.calls[0][0].results[0].note).toBe("Additional context");
+	});
+
+	it("advances after the first multi-select custom input and shows it on Submit", async () => {
 		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("custom detail"));
 		const onSubmit = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
@@ -625,9 +672,9 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 		await Promise.resolve();
 
-		// Multi questions do not auto-advance after the Other prompt: still on
-		// q1, so Tab twice (q2, then Submit) to reach the review.
-		component.handleInput(TAB);
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(render(component)).toContain("Second question?");
+
 		component.handleInput(TAB);
 		const review = render(component);
 		expect(review).toContain("Option A");
@@ -637,6 +684,32 @@ describe("AskDialogComponent", () => {
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
+		expect(onSubmit.mock.calls[0][0].results[0].customInput).toBe("custom detail");
+	});
+
+	it("submits a single-select custom answer on the first prompt resolution", async () => {
+		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("custom detail"));
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose one?",
+					options: [{ label: "Option A" }, { label: "Option B" }],
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
+
+		component.handleInput(DOWN);
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual([]);
 		expect(onSubmit.mock.calls[0][0].results[0].customInput).toBe("custom detail");
 	});
 
@@ -798,7 +871,7 @@ describe("AskDialogComponent", () => {
 		expect(result.timedOut).toBeUndefined();
 	});
 
-	it("uses a noted non-recommended option as the timeout fallback", async () => {
+	it("keeps a question note without changing the timeout fallback", async () => {
 		vi.useFakeTimers();
 		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("why B"));
 		const onSubmit = vi.fn();
@@ -828,12 +901,12 @@ describe("AskDialogComponent", () => {
 		expect(onTimeout).toHaveBeenCalledTimes(1);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		const result = onSubmit.mock.calls[0][0].results[0];
-		expect(result.selectedOptions).toEqual(["Option B"]);
+		expect(result.selectedOptions).toEqual(["Option A"]);
 		expect(result.note).toBe("why B");
 		expect(result.timedOut).toBe(true);
 	});
 
-	it("preserves a pending note on a non-recommended option when deferred timeout submits", async () => {
+	it("preserves a pending question note when deferred timeout submits", async () => {
 		vi.useFakeTimers();
 		const deferred = Promise.withResolvers<string | undefined>();
 		const onPrompt = vi.fn().mockReturnValue(deferred.promise);
@@ -869,7 +942,7 @@ describe("AskDialogComponent", () => {
 		expect(onTimeout).toHaveBeenCalledTimes(1);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		const result = onSubmit.mock.calls[0][0].results[0];
-		expect(result.selectedOptions).toEqual(["Option B"]);
+		expect(result.selectedOptions).toEqual(["Option A"]);
 		expect(result.note).toBe("why B");
 		expect(result.timedOut).toBe(true);
 	});
@@ -1007,8 +1080,6 @@ describe("AskDialogComponent", () => {
 		const lines = title.split("\n");
 		// Title must be bounded to at most MAX_PROMPT_TITLE_ROWS lines.
 		expect(lines.length).toBeLessThanOrEqual(3);
-		// The multi-line question must be flattened (no raw newlines expanding rows).
-		expect(stripVTControlCharacters(title)).toContain("Note for Option A:");
 	});
 
 	it("scrolls question rows when cursor moves below the viewport", () => {
@@ -1534,6 +1605,30 @@ describe("AskDialogComponent", () => {
 		expect(component.render(80).length).toBe(questionTab.length);
 	});
 
+	it("reserves height when a note adds the Submit tab", async () => {
+		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("Additional context"));
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question:
+						"Choose the primary environment for this focused regression test before continuing with the remaining verification steps.",
+					options: [{ label: "Option A" }],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt },
+		);
+		const width = 28;
+		const initialRows = component.render(width).length;
+
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(component.render(width).length).toBe(initialRows);
+	});
+
 	it("clears the custom answer when the Other prompt is submitted empty", async () => {
 		const onPrompt = vi.fn();
 		const onSubmit = vi.fn();
@@ -1543,6 +1638,11 @@ describe("AskDialogComponent", () => {
 				question: "Choose multiple?",
 				options: [{ label: "Option A" }, { label: "Option B" }],
 				multi: true,
+			},
+			{
+				id: "q2",
+				question: "Second question?",
+				options: [{ label: "Option C" }],
 			},
 		];
 		const component = new AskDialogComponent(questions, {
@@ -1558,10 +1658,11 @@ describe("AskDialogComponent", () => {
 		component.handleInput(ENTER);
 		await Promise.resolve();
 		await Promise.resolve();
+		expect(render(component)).toContain("Second question?");
+		component.handleInput(SHIFT_TAB);
 		expect(render(component)).toContain("my custom answer");
 
-		// Reopen Other (prefilled with the current answer) and submit an
-		// empty value: the custom answer is unselected.
+		// Reopen Other with the saved answer and clear it.
 		onPrompt.mockReturnValueOnce(Promise.resolve(""));
 		component.handleInput(ENTER);
 		await Promise.resolve();
@@ -1570,6 +1671,7 @@ describe("AskDialogComponent", () => {
 		expect(render(component)).not.toContain("my custom answer");
 
 		// Submitting confirms nothing was kept.
+		component.handleInput(TAB);
 		component.handleInput(TAB);
 		component.handleInput(ENTER);
 		expect(onSubmit).toHaveBeenCalledTimes(1);

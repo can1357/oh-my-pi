@@ -104,7 +104,7 @@ export interface QuestionResult {
 	multi: boolean;
 	selectedOptions: string[];
 	customInput?: string;
-	/** Optional note attached to the selected answer in the rich ask dialog. */
+	/** Optional note attached to the question in the rich ask dialog. */
 	note?: string;
 	/** True when the answer was auto-selected because the dialog timed out. */
 	timedOut?: boolean;
@@ -116,7 +116,7 @@ export interface AskToolDetails {
 	multi?: boolean;
 	selectedOptions?: string[];
 	customInput?: string;
-	/** Optional note attached to the selected answer in the rich ask dialog. */
+	/** Optional note attached to the question in the rich ask dialog. */
 	note?: string;
 	/** True when the answer was auto-selected because the dialog timed out. */
 	timedOut?: boolean;
@@ -716,6 +716,7 @@ function formatQuestionResult(result: QuestionResult): string {
 			? `${result.id}: [${result.selectedOptions.join(", ")}]${suffix}`
 			: `${result.id}: ${result.selectedOptions[0]}${suffix}`;
 	}
+	if (!result.multi && result.note) return `${result.id}: (unanswered)${noteSuffix}`;
 	return result.multi ? `${result.id}: []${noteSuffix}` : `${result.id}: (cancelled)${noteSuffix}`;
 }
 
@@ -938,6 +939,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					if (!question || !result || result.id !== question.id) {
 						throw new Error("Ask dialog returned results that do not match the requested question order");
 					}
+					const note = result.note?.trim() ? result.note : undefined;
 					results.push({
 						id: question.id,
 						question: question.question,
@@ -945,7 +947,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						multi: question.multi ?? false,
 						selectedOptions: result.selectedOptions,
 						customInput: result.customInput,
-						note: result.note,
+						note,
 						timedOut: result.timedOut,
 					});
 				}
@@ -959,7 +961,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						(!result.timedOut &&
 							!result.multi &&
 							result.selectedOptions.length === 0 &&
-							result.customInput === undefined)
+							result.customInput === undefined &&
+							result.note === undefined)
 					) {
 						context.abort();
 						throw new ToolAbortError("Ask tool was cancelled by the user");

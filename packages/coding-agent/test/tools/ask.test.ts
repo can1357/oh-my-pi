@@ -1588,6 +1588,111 @@ describe("AskTool rich ask dialog", () => {
 		});
 	});
 
+	it("accepts a note-only single-select submission", async () => {
+		const tool = new AskTool(createSession());
+		const abort = vi.fn();
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Q1?",
+					options: ["Option A"],
+					multi: false,
+					selectedOptions: [],
+					note: "Question context",
+				},
+			],
+		});
+
+		const result = await tool.execute(
+			"call-note-only",
+			{
+				questions: [{ id: "q1", question: "Q1?", options: [{ label: "Option A" }] }],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog, abort }),
+		);
+
+		expect(abort).not.toHaveBeenCalled();
+		expect(result.details?.selectedOptions).toEqual([]);
+		expect(result.details?.note).toBe("Question context");
+	});
+
+	it("formats note-only single-select context as unanswered", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Q1?",
+					options: ["Option A"],
+					multi: false,
+					selectedOptions: [],
+					note: "Question context",
+				},
+				{
+					id: "q2",
+					question: "Q2?",
+					options: ["Option B"],
+					multi: false,
+					selectedOptions: ["Option B"],
+				},
+			],
+		});
+
+		const result = await tool.execute(
+			"call-note-only-among-many",
+			{
+				questions: [
+					{ id: "q1", question: "Q1?", options: [{ label: "Option A" }] },
+					{ id: "q2", question: "Q2?", options: [{ label: "Option B" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") {
+			expect(stripAnsi(result.content[0].text)).toBe(
+				"User answers:\nq1: (unanswered) (note: Question context)\nq2: Option B",
+			);
+		}
+	});
+
+	it("normalizes whitespace-only notes returned by askDialog", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Q1?",
+					options: ["Option A"],
+					multi: false,
+					selectedOptions: ["Option A"],
+					note: " \n\t ",
+				},
+			],
+		});
+
+		const result = await tool.execute(
+			"call-empty-note",
+			{
+				questions: [{ id: "q1", question: "Q1?", options: [{ label: "Option A" }] }],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.details?.note).toBeUndefined();
+	});
+
 	it("does not emit terminal notifications for non-terminal prompt surfaces", async () => {
 		const sendNotification = spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
 		const askDialog = vi.fn().mockResolvedValue({
