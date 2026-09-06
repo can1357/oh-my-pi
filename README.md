@@ -349,7 +349,7 @@ Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Devin `oauth` · Kimi 
 
 OpenAI-compatible `/v1/models`. Local instances skip the key.
 
-Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM `local` · LiteLLM
+Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM `local` · ExLlamaV3 (TabbyAPI) `local` · LiteLLM
 
 ### Custom OpenAI-compatible providers
 

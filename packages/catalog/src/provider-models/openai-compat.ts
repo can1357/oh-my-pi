@@ -6006,6 +6006,117 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// 22.1. ExLlamaV3 (via TabbyAPI)
+// ---------------------------------------------------------------------------
+
+const EXLLAMAV3_MODEL_CARD_TIMEOUT_MS = 2500;
+
+export interface Exllamav3ModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Metadata for the model TabbyAPI currently has loaded, from `GET /v1/model`.
+ *
+ * TabbyAPI's `/v1/models` returns bare ids only — `parameters` is always null
+ * there — so the servable model's context window and vision support live on
+ * the model-card endpoint. With an admin key the list also enumerates every
+ * directory under `model_dir` plus dummy OpenAI-compatibility ids, none of
+ * which are separately servable through the chat API.
+ */
+interface Exllamav3LoadedModelCard {
+	id: string;
+	contextWindow?: number;
+	inputs: ("text" | "image")[];
+}
+
+async function fetchExllamav3LoadedModelCard(
+	baseUrl: string,
+	apiKey: string | undefined,
+	fetchImpl: FetchImpl,
+): Promise<Exllamav3LoadedModelCard | null> {
+	const fetchCard = async (signal: AbortSignal): Promise<Exllamav3LoadedModelCard | null> => {
+		try {
+			const response = await fetchImpl(`${baseUrl.replace(/\/+$/, "")}/model`, {
+				method: "GET",
+				headers: {
+					Accept: "application/json",
+					...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+				},
+				signal,
+			});
+			if (!response.ok) {
+				// No model loaded yet, or the endpoint requires an admin key.
+				return null;
+			}
+			const payload: unknown = await response.json();
+			if (!isRecord(payload) || typeof payload.id !== "string" || payload.id.length === 0) {
+				return null;
+			}
+			const parameters = isRecord(payload.parameters) ? payload.parameters : undefined;
+			const maxSeqLen = parameters === undefined ? null : toPositiveNumber(parameters.max_seq_len, null);
+			return {
+				id: payload.id,
+				...(maxSeqLen === null ? {} : { contextWindow: maxSeqLen }),
+				inputs: parameters?.use_vision === true ? (["text", "image"] as const) : (["text"] as const),
+			};
+		} catch {
+			return null;
+		}
+	};
+	return withCatalogDiscoveryTimeout(EXLLAMAV3_MODEL_CARD_TIMEOUT_MS, fetchCard);
+}
+
+export function exllamav3ModelManagerOptions(
+	config?: Exllamav3ModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("exllamav3")!;
+	return {
+		providerId: "exllamav3",
+		cacheProviderId: resolveModelCacheProviderId("exllamav3", { baseUrl }),
+		fetchDynamicModels: async () => {
+			const loadedCard = await fetchExllamav3LoadedModelCard(baseUrl, apiKey, discoveryFetch(config?.fetch));
+			return fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "exllamav3",
+				baseUrl,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					// TabbyAPI serves exactly the loaded model. When the card is
+					// reachable, drop the unloaded directory entries and dummy ids an
+					// admin key enumerates — any other id silently generates on the
+					// loaded model.
+					if (loadedCard && entry.id !== loadedCard.id) return null;
+					// Future-proofing: some TabbyAPI forks populate parameters on the
+					// list entries themselves.
+					const entryParameters = isRecord(entry.parameters) ? entry.parameters : undefined;
+					const entryMaxSeqLen =
+						entryParameters === undefined ? null : toPositiveNumber(entryParameters.max_seq_len, null);
+					const contextWindow = loadedCard?.contextWindow ?? entryMaxSeqLen ?? defaults.contextWindow;
+					const identity = classifyModel("exllamav3", defaults.id, { lenient: true });
+					return {
+						...defaults,
+						...(contextWindow === null ? {} : { contextWindow }),
+						...(loadedCard ? { input: [...loadedCard.inputs] } : {}),
+						// TabbyAPI reports no capability metadata on /v1/models. Qwen 3.8+
+						// open weights always think (the template cannot disable it), so
+						// light up the effort dial; buildModel derives the template
+						// ladder from the id + local-backend compat.
+						reasoning:
+							defaults.reasoning || (identity.class === "qwen" && revisionAtLeast(identity.revision, "3.8")),
+					};
+				},
+				fetch: config?.fetch,
+				timeoutMs: DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+			});
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 23. NanoGPT
 // ---------------------------------------------------------------------------
 

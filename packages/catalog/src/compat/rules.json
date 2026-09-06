@@ -21,6 +21,7 @@
 		"auth/deepseek.kdl",
 		"auth/devin.kdl",
 		"auth/exa.kdl",
+		"auth/exllamav3.kdl",
 		"auth/firepass.kdl",
 		"auth/fireworks.kdl",
 		"auth/github-copilot.kdl",
@@ -6415,11 +6416,12 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:41",
+				"source": "classes/qwen.kdl:43",
 				"class": "qwen",
 				"providers": [
 					"llama.cpp",
-					"lm-studio"
+					"lm-studio",
+					"exllamav3"
 				],
 				"revision": [
 					{
@@ -6442,7 +6444,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:50",
+				"source": "classes/qwen.kdl:52",
 				"class": "qwen",
 				"providers": [
 					"vllm"
@@ -6468,7 +6470,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:60",
+				"source": "classes/qwen.kdl:62",
 				"class": "qwen",
 				"providers": [
 					"alibaba-token-plan"
@@ -6479,7 +6481,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:64",
+				"source": "classes/qwen.kdl:66",
 				"class": "qwen",
 				"providers": [
 					"alibaba-token-plan"
@@ -6501,7 +6503,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:68",
+				"source": "classes/qwen.kdl:70",
 				"class": "qwen",
 				"providers": [
 					"alibaba-token-plan"
@@ -17074,6 +17076,24 @@
 					"prompt": "Paste your vLLM API key (optional for local no-auth)",
 					"placeholder": "vllm-local",
 					"emptyFallback": "vllm-local"
+				}
+			},
+			{
+				"id": "exllamav3",
+				"apiKeyFormat": "bearer",
+				"name": "ExLlamaV3 (TabbyAPI, Local OpenAI-compatible)",
+				"env": {
+					"vars": [
+						"EXLLAMAV3_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://github.com/theroyallab/tabbyAPI",
+					"instructions": "Start TabbyAPI with an ExLlamaV3 model and paste the API key from its api_tokens.yml (default base URL: http://127.0.0.1:5000/v1; set EXLLAMAV3_BASE_URL to customize). Leave empty for local no-auth mode (disable_auth: true in config.yml).",
+					"prompt": "Paste your TabbyAPI API key (optional for local no-auth)",
+					"placeholder": "exllamav3-local",
+					"emptyFallback": "exllamav3-local"
 				}
 			},
 			{

@@ -685,6 +685,15 @@ providers:
       type: openai-models-list
 ```
 
+The built-in ExLlamaV3 provider talks to a local TabbyAPI server the same way: it defaults to `http://127.0.0.1:5000/v1` (`EXLLAMAV3_BASE_URL` overrides) and takes the TabbyAPI key from `EXLLAMAV3_API_KEY` or `omp auth-broker login exllamav3`. Discovery reads the loaded model's card (`/v1/model`) for the context window and vision support.
+
+```yaml
+providers:
+  exllamav3:
+    baseUrl: http://127.0.0.1:5000/v1
+    apiKey: TABBYAPI_API_KEY
+```
+
 ### Hosted proxy with env-based key
 
 ```yaml

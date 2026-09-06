@@ -18,6 +18,7 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"llama.cpp",
 	"lm-studio",
 	"vllm",
+	"exllamav3",
 	"openai-codex-device",
 ]);
 

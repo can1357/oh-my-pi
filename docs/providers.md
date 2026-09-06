@@ -152,6 +152,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                            |
 | `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                      |
 | `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                 |
+| `exllamav3`                      | `EXLLAMAV3_API_KEY` (TabbyAPI key from `api_tokens.yml`)                      |
 | `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
 
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.

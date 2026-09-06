@@ -1864,8 +1864,11 @@ export class ModelRegistry {
 		for (let i = 0; i < standardProviderDescriptors.length; i++) {
 			const descriptor = standardProviderDescriptors[i];
 			const apiKey = standardProviderKeys[i];
-			const hasExplicitVllmConfig =
-				descriptor.providerId === "vllm" &&
+			// Local engines with opt-in discovery: an explicit settings override or
+			// `auth: none` stands in for a key so discovery still probes the
+			// configured endpoint.
+			const hasExplicitLocalEngineConfig =
+				(descriptor.providerId === "vllm" || descriptor.providerId === "exllamav3") &&
 				(this.#runtimeProviderOverrides.has(descriptor.providerId) ||
 					this.#providerOverrides.has(descriptor.providerId) ||
 					this.#keylessProviders.has(descriptor.providerId));
@@ -1874,7 +1877,7 @@ export class ModelRegistry {
 			if (
 				isAuthenticated(apiKey) ||
 				descriptor.allowUnauthenticated ||
-				hasExplicitVllmConfig ||
+				hasExplicitLocalEngineConfig ||
 				canUseSharedCatalogWithoutAuth
 			) {
 				const discoveryConfig = {

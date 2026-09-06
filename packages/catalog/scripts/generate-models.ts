@@ -80,14 +80,21 @@ import {
 const packageRoot = path.join(import.meta.dir, "..");
 
 /**
- * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM). Their model
+ * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM, ExLlamaV3
+ * via TabbyAPI). Their model
  * catalogs are whatever happens to be running on the machine that invokes the
  * generator — bundling them would leak machine-specific endpoints (e.g.
  * `http://localhost:4000/v1`) into the committed snapshot. They are discovered
  * dynamically at runtime instead, so they are never fetched during generation
  * and never written to models.json.
  */
-const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
+const DISCOVERY_ONLY_PROVIDERS: Record<string, true> = {
+	ollama: true,
+	vllm: true,
+	"lm-studio": true,
+	litellm: true,
+	exllamav3: true,
+};
 /**
  * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
  * via `allowed_model_uids`). Fetching them during generation would bake one
@@ -118,7 +125,7 @@ export function mergePreviousSnapshotModels(
 			const model = toModelSpec(providerModels[id]);
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
-				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
+				DISCOVERY_ONLY_PROVIDERS[model.provider] !== true &&
 				!CREDENTIAL_SCOPED_PROVIDERS.has(model.provider) &&
 				// Yolo-Auto's documented static seed is the complete fallback
 				// catalog; never resurrect retired ids from the previous snapshot.
@@ -532,7 +539,7 @@ async function generateModels() {
 	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
 		(descriptor): descriptor is CatalogProviderDescriptor =>
 			isCatalogDescriptor(descriptor) &&
-			!DISCOVERY_ONLY_PROVIDERS.has(descriptor.providerId) &&
+			DISCOVERY_ONLY_PROVIDERS[descriptor.providerId] !== true &&
 			!CREDENTIAL_SCOPED_PROVIDERS.has(descriptor.providerId),
 	);
 	const catalogProviderModelBatches = await Promise.all(
@@ -794,7 +801,7 @@ async function generateModels() {
 	// Group by provider and sort each provider's models
 	const providers: Record<string, Record<string, ModelSpec>> = {};
 	for (const model of allModels) {
-		if (DISCOVERY_ONLY_PROVIDERS.has(model.provider) || isRetiredProvider(model.provider)) continue;
+		if (DISCOVERY_ONLY_PROVIDERS[model.provider] === true || isRetiredProvider(model.provider)) continue;
 		if (!providers[model.provider]) {
 			providers[model.provider] = {};
 		}

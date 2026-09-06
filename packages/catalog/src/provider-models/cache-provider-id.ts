@@ -32,6 +32,9 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/zen/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
+		case "exllamav3":
+			// TabbyAPI fronting ExLlamaV3; default port 5000.
+			return Bun.env.EXLLAMAV3_BASE_URL ?? "http://127.0.0.1:5000/v1";
 		default:
 			return undefined;
 	}
@@ -103,6 +106,10 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// carry `reasoning: false` and must be refetched.
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			return `vllm:models-v2:${Bun.hash(baseUrl).toString(36)}`;
+		}
+		case "exllamav3": {
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			return `exllamav3:models-v1:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		default:
 			return providerId;

@@ -23,6 +23,7 @@ import {
 	coreWeaveModelManagerOptions,
 	deepinfraModelManagerOptions,
 	deepseekModelManagerOptions,
+	exllamav3ModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
@@ -185,6 +186,13 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => devinModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Devin", envVars: ["DEVIN_API_KEY"], oauthProvider: "devin" },
+	},
+	{
+		id: "exllamav3",
+		defaultModel: "qwen3.8-27b-exl3",
+		envVars: ["EXLLAMAV3_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => exllamav3ModelManagerOptions(config),
+		catalogDiscovery: { label: "ExLlamaV3 (TabbyAPI)", allowUnauthenticated: true },
 	},
 	{
 		id: "cline-pass",

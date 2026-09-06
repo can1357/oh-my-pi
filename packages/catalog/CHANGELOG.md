@@ -6,6 +6,7 @@
 
 - Fixed OpenCode Go/Zen live model discovery (`GET /v1/models`) missing `x-opencode-session` and omp's `User-Agent`: discovery requests now attribute with the stable install id so the requests OpenCode flags as `Bun fetch` carry the required session header.
 ### Added
+- Added the `exllamav3` provider for local ExLlamaV3 models served through TabbyAPI's OpenAI-compatible API: set `EXLLAMAV3_API_KEY` (or `/login exllamav3`) to discover the loaded model with its context window and vision support from the TabbyAPI model card.
 
 - Added Muse Code as a provider with Muse Spark models and live account-scoped discovery.
 - Muse Code subscriptions now resolve a compact edit-prompt variant, cutting recurring per-request tool bytes without touching other providers.

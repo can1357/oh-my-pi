@@ -1,0 +1,96 @@
+import { describe, expect, test } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { exllamav3ModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+
+const BASE_URL = "http://127.0.0.1:5000/v1";
+
+function jsonResponse(payload: unknown): Response {
+	return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+function tabbyFetch(modelsPayload: unknown, modelCard: (() => Response) | null): FetchImpl {
+	return (async (input: string | URL | Request) => {
+		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+		if (url.endsWith("/models")) return jsonResponse(modelsPayload);
+		if (url.endsWith("/model")) return modelCard ? modelCard() : new Response("not found", { status: 404 });
+		return new Response("not found", { status: 404 });
+	}) as FetchImpl;
+}
+
+describe("ExLlamaV3 (TabbyAPI) provider discovery", () => {
+	test("keeps only the loaded model, enriched from the /v1/model card", async () => {
+		// An admin key makes /v1/models enumerate every directory plus dummy
+		// OpenAI compatibility ids; only the loaded card is servable, and its
+		// parameters (absent from list entries) carry the context window.
+		const fetchMock = tabbyFetch(
+			{
+				data: [
+					{ id: "Qwen3.8-Flash-Next-exl3", object: "model", owned_by: "tabbyAPI", parameters: null },
+					{ id: "unloaded-directory-model", object: "model", owned_by: "tabbyAPI", parameters: null },
+					{ id: "gpt-4", object: "model", owned_by: "tabbyAPI", parameters: null },
+				],
+			},
+			() =>
+				jsonResponse({
+					id: "Qwen3.8-Flash-Next-exl3",
+					parameters: { max_seq_len: 262144, use_vision: true },
+				}),
+		);
+
+		const models = await exllamav3ModelManagerOptions({ baseUrl: BASE_URL, fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.map(model => model.id)).toEqual(["Qwen3.8-Flash-Next-exl3"]);
+		expect(models?.[0]).toMatchObject({
+			provider: "exllamav3",
+			api: "openai-completions",
+			contextWindow: 262144,
+			input: ["text", "image"],
+			reasoning: true,
+		});
+	});
+
+	test("falls back to the raw list and entry parameters when no model card answers", async () => {
+		const fetchMock = tabbyFetch(
+			{
+				data: [
+					{ id: "qwen3.8-27b", object: "model", parameters: { max_seq_len: 131072 } },
+					{ id: "qwen2.5-coder-7b", object: "model", parameters: null },
+				],
+			},
+			null,
+		);
+
+		const models = await exllamav3ModelManagerOptions({ baseUrl: BASE_URL, fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.find(model => model.id === "qwen3.8-27b")).toMatchObject({ contextWindow: 131072 });
+		// Qwen 3.8+ open weights always think, so the effort dial lights up
+		// despite silent capability metadata; older Qwen keeps the default.
+		expect(models?.find(model => model.id === "qwen3.8-27b")?.reasoning).toBe(true);
+		expect(models?.find(model => model.id === "qwen2.5-coder-7b")?.reasoning).toBe(false);
+	});
+
+	test("routes thinking through the flat enable_thinking dialect like llama.cpp", () => {
+		// TabbyAPI accepts top-level enable_thinking / reasoning_effort
+		// directly (forwarded into the chat template), so exllamav3 rides the
+		// llama.cpp dialect rather than vLLM's chat_template_kwargs one.
+		const model = buildModel({
+			id: "qwen3.8-27b-exl3",
+			name: "qwen3.8-27b-exl3",
+			api: "openai-completions",
+			provider: "exllamav3",
+			baseUrl: BASE_URL,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: null,
+		});
+		expect(model.compat.thinkingFormat).toBe("qwen");
+		expect(model.compat.reasoningDisableMode).toBe("qwen-enable-thinking-false");
+		// Local OpenAI-compat backend: replay reasoning_content so the chat
+		// template rebuilds <think> blocks, and named tool_choice is native.
+		expect(model.compat.replayReasoningContent).toBe(true);
+		expect(model.compat.supportsNamedToolChoice).toBe(true);
+	});
+});

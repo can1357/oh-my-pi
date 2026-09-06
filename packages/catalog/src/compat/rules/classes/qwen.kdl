@@ -37,7 +37,9 @@ class "qwen" {
 	// llama.cpp-style hosts route the selected effort onto the template instead
 	// of always reasoning at xhigh. vLLM ignores top-level
 	// `enable_thinking`, so it rides the chat-template-kwargs dialect.
-	on "llama.cpp" "lm-studio" {
+	// TabbyAPI (exllamav3) accepts the flat top-level fields directly and
+	// forwards them into the chat template.
+	on "llama.cpp" "lm-studio" "exllamav3" {
 		revision ">=3.8" {
 			supports-reasoning-effort #true
 			template-reasoning-effort #true
