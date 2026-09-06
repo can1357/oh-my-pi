@@ -1973,8 +1973,14 @@ async function handleExecServerMessage(
 					if (block.name !== toolResult.toolName) block.name = toolResult.toolName;
 					if (mcpCall.args !== originalMcpArgs) {
 						const normalizedKeys = new Set<string>();
-						for (const [key, value] of Object.entries(mcpCall.args)) {
-							if (!Object.is(value, originalMcpArgs[key])) normalizedKeys.add(key);
+						const candidateKeys = new Set([...Object.keys(originalMcpArgs), ...Object.keys(mcpCall.args)]);
+						for (const key of candidateKeys) {
+							if (
+								Object.hasOwn(originalMcpArgs, key) !== Object.hasOwn(mcpCall.args, key) ||
+								!Object.is(mcpCall.args[key], originalMcpArgs[key])
+							) {
+								normalizedKeys.add(key);
+							}
 						}
 						block.arguments = mcpCall.args;
 						if (normalizedKeys.size > 0) block[kCursorExecNormalizedMcpArgKeys] = normalizedKeys;
@@ -3708,7 +3714,7 @@ export function flushOpenToolCalls(
 		const idx = output.content.indexOf(block);
 		const partialJson = block[kStreamingPartialJson];
 		if (partialJson !== undefined) {
-			block.arguments = parseStreamingJson(partialJson);
+			block.arguments = mergeCursorExecParsedMcpArgs(block, parseStreamingJson(partialJson));
 			clearStreamingPartialJson(block);
 		}
 		const kind = block[kStreamingBlockKind];
@@ -4104,13 +4110,20 @@ export function mergeCursorMcpToolCallArgs(
 	if (!completion) return merged;
 	for (const [key, completionValue] of Object.entries(completion)) {
 		const streamedValue = merged[key];
-		if (preserveStreamedKeys?.has(key) && Object.hasOwn(merged, key)) continue;
+		if (preserveStreamedKeys?.has(key)) continue;
 		if (typeof completionValue === "string" && streamedValue !== null && typeof streamedValue === "object") {
 			continue;
 		}
 		merged[key] = completionValue;
 	}
 	return merged;
+}
+
+/** Preserve bridge-normalized fields whenever raw streamed JSON is reparsed. */
+function mergeCursorExecParsedMcpArgs(block: ToolCallState, parsed: Record<string, unknown>): Record<string, unknown> {
+	const normalizedKeys = block[kCursorExecNormalizedMcpArgKeys];
+	if (!normalizedKeys?.size) return parsed;
+	return mergeCursorMcpToolCallArgs(block.arguments as Record<string, unknown> | undefined, parsed, normalizedKeys);
 }
 
 function endCurrentTextBlock(output: AssistantMessage, stream: AssistantMessageEventStream, state: BlockState): void {
@@ -4432,7 +4445,7 @@ export function processInteractionUpdate(
 			// `toolCallCompleted` (mcp branch) and the fallback end-of-stream path.
 			const throttled = parseStreamingJsonThrottled(nextBuffer, target[kStreamingLastParseLen] ?? 0);
 			if (throttled) {
-				target.arguments = throttled.value;
+				target.arguments = mergeCursorExecParsedMcpArgs(target, throttled.value);
 				target[kStreamingLastParseLen] = throttled.parsedLen;
 			}
 			const idx = output.content.indexOf(target);
@@ -4455,14 +4468,7 @@ export function processInteractionUpdate(
 				const partial = settled[kStreamingPartialJson];
 				const normalizedKeys = settled[kCursorExecNormalizedMcpArgKeys];
 				if (partial) {
-					const parsedPartial = parseStreamingJson(partial);
-					settled.arguments = normalizedKeys?.size
-						? mergeCursorMcpToolCallArgs(
-								settled.arguments as Record<string, unknown> | undefined,
-								parsedPartial,
-								normalizedKeys,
-							)
-						: parsedPartial;
+					settled.arguments = mergeCursorExecParsedMcpArgs(settled, parseStreamingJson(partial));
 				}
 				const decodedArgs = decodeMcpArgsMap(selectMcpCall(toolCall)?.args?.args);
 				settled.arguments = mergeCursorMcpToolCallArgs(

@@ -1694,6 +1694,11 @@ export class EventController {
 		component: ToolExecutionHandle,
 		event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
 	): void {
+		if (component instanceof ToolExecutionComponent && event.toolName === "task") {
+			const tool = this.ctx.viewSession.getToolByName("task");
+			component.retargetTool("task", tool, this.ctx.viewSession.hasBuiltInTool("task"));
+			if (event.args !== undefined) component.updateArgs(event.args, event.toolCallId);
+		}
 		component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
 		this.ctx.pendingTools.delete(event.toolCallId);
 		if (
@@ -1796,6 +1801,7 @@ export class EventController {
 				if (component instanceof ToolExecutionComponent && event.toolName === "task") {
 					const tool = this.ctx.viewSession.getToolByName("task");
 					component.retargetTool("task", tool, this.ctx.viewSession.hasBuiltInTool("task"));
+					if (event.args !== undefined) component.updateArgs(event.args, event.toolCallId);
 				}
 				const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
 				const isBackgroundTask = event.toolName === "task" && asyncState === "running";

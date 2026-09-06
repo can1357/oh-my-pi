@@ -1214,7 +1214,13 @@ describe("Cursor MCP task tool adapter", () => {
 			expect(call.args.task).toBe(testCase.args.prompt);
 			expect(events.filter(event => event.type === "tool_execution_start")).toHaveLength(0);
 			const end = events.find(event => event.type === "tool_execution_end");
-			expect(end).toMatchObject({ type: "tool_execution_end", toolCallId, toolName: "task", isError: true });
+			expect(end).toMatchObject({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: "task",
+				isError: true,
+				args: { task: testCase.args.prompt },
+			});
 		}
 		expect(executedCalls).toHaveLength(0);
 	});
@@ -1253,6 +1259,15 @@ describe("Cursor MCP task tool adapter", () => {
 		expect(items[0].task).toBe("canonical item task");
 		expect(items[0].name).toBe("ItemCanonical");
 		expect(items[0].agent).toBe("reviewer");
+	});
+
+	it("removes blank task identifiers and only maps the exact explore subagent type", () => {
+		const blank = normalizeCursorTaskArgs({ prompt: "inspect", name: "   ", agent: "" });
+		expect(blank.name).toBeUndefined();
+		expect(blank.agent).toBeUndefined();
+
+		const nearMiss = normalizeCursorTaskArgs({ prompt: "inspect", subagent_type: "explorer" });
+		expect(nearMiss.agent).toBeUndefined();
 	});
 
 	it("does not promote Cursor descriptions to task artifact IDs", () => {

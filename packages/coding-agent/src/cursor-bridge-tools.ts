@@ -114,6 +114,15 @@ function nonBlankProseArg(args: Record<string, unknown>, key: string): string | 
 	return value.trim().length > 0 ? value : undefined;
 }
 
+function withoutBlankTaskIdentifiers(args: Record<string, unknown>): Record<string, unknown> {
+	const normalized = { ...args };
+	for (const key of ["name", "agent"] as const) {
+		const value = normalized[key];
+		if (typeof value === "string" && value.trim().length === 0) delete normalized[key];
+	}
+	return normalized;
+}
+
 export function isCursorStrReplaceMcpName(name: string): boolean {
 	return CURSOR_STRREPLACE_MCP_NAMES.has(name);
 }
@@ -286,8 +295,11 @@ export function getCursorTaskUnsupportedSubagentType(args: Record<string, unknow
  */
 function resolveSubagentTypeToAgent(typeVal: unknown): string | undefined {
 	if (typeof typeVal === "string") {
-		const lower = typeVal.toLowerCase();
-		if (lower === "explore" || lower.includes("explore")) return "scout";
+		const normalized = typeVal
+			.trim()
+			.toLowerCase()
+			.replace(/[\s-]+/g, "_");
+		if (normalized === "explore") return "scout";
 		return undefined;
 	}
 	if (typeVal && typeof typeVal === "object") {
@@ -324,6 +336,7 @@ export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<s
 		const tasks = args.tasks.map(item => {
 			if (!item || typeof item !== "object") return item;
 			const itemRecord = item as Record<string, unknown>;
+			const normalizedItem = withoutBlankTaskIdentifiers(itemRecord);
 			const itemTask =
 				nonBlankProseArg(itemRecord, "task") ??
 				nonBlankProseArg(itemRecord, "prompt") ??
@@ -332,7 +345,7 @@ export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<s
 			const itemAgent =
 				nonEmptyStringArg(itemRecord, "agent") ?? resolveSubagentTypeToAgent(itemRecord.subagent_type);
 			return {
-				...itemRecord,
+				...normalizedItem,
 				...(itemTask !== undefined ? { task: itemTask } : {}),
 				...(itemName !== undefined ? { name: itemName } : {}),
 				...(itemAgent !== undefined ? { agent: itemAgent } : {}),
@@ -340,7 +353,7 @@ export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<s
 		});
 		const context = nonBlankProseArg(args, "context") ?? nonBlankProseArg(args, "description");
 		return {
-			...args,
+			...withoutBlankTaskIdentifiers(args),
 			...(context !== undefined ? { context } : {}),
 			tasks,
 		};
@@ -351,12 +364,8 @@ export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<s
 	const name = nonEmptyStringArg(args, "name");
 	const agent = nonEmptyStringArg(args, "agent") ?? resolveSubagentTypeToAgent(args.subagent_type);
 
-	if (task === undefined && name === undefined && agent === undefined) {
-		return args;
-	}
-
 	return {
-		...args,
+		...withoutBlankTaskIdentifiers(args),
 		...(task !== undefined ? { task } : {}),
 		...(name !== undefined ? { name } : {}),
 		...(agent !== undefined ? { agent } : {}),

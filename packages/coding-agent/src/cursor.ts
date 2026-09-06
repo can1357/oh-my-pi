@@ -325,13 +325,21 @@ function rejectToolCall(
 	toolName: string,
 	toolCallId: string,
 	message: string,
+	args?: Record<string, unknown>,
 ): ToolResultMessage {
 	const result = buildToolErrorResult(message);
 	const sanitizedResult: AgentToolResult<unknown> = {
 		content: result.content.map(c => (c.type === "text" ? { ...c, text: sanitizeText(c.text) } : c)),
 		details: result.details,
 	};
-	options.emitEvent?.({ type: "tool_execution_end", toolCallId, toolName, result: sanitizedResult, isError: true });
+	options.emitEvent?.({
+		type: "tool_execution_end",
+		toolCallId,
+		toolName,
+		result: sanitizedResult,
+		isError: true,
+		...(args !== undefined ? { args } : {}),
+	});
 	return createToolResultMessage(toolCallId, toolName, result, true);
 }
 
@@ -998,17 +1006,17 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			const resumeId = getCursorTaskResumeId(args);
 			if (resumeId) {
 				const message = `Resuming subagents via task.resume ("${resumeId}") is not supported. Use the \`hub\` tool to message and resume existing subagents.`;
-				return rejectToolCall(this.options, route.toolName, toolCallId, message);
+				return rejectToolCall(this.options, route.toolName, toolCallId, message, normalizedArgs);
 			}
 			const unsupportedModel = getCursorTaskUnsupportedModel(args);
 			if (unsupportedModel) {
 				const message = `Explicit subagent model override via task.model ("${unsupportedModel}") is not supported. Subagents use the model configured for their agent role.`;
-				return rejectToolCall(this.options, route.toolName, toolCallId, message);
+				return rejectToolCall(this.options, route.toolName, toolCallId, message, normalizedArgs);
 			}
 			const unsupportedSubagentType = getCursorTaskUnsupportedSubagentType(args);
 			if (unsupportedSubagentType) {
 				const message = `Cursor subagent type "${unsupportedSubagentType}" is not supported by OMP task delegation.`;
-				return rejectToolCall(this.options, route.toolName, toolCallId, message);
+				return rejectToolCall(this.options, route.toolName, toolCallId, message, normalizedArgs);
 			}
 			if (!route.tool) {
 				const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));

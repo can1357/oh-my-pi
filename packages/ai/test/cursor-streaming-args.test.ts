@@ -175,6 +175,15 @@ describe("mergeCursorMcpToolCallArgs", () => {
 		});
 	});
 
+	it("preserves deletion of normalized blank identifiers", () => {
+		const streamed = { task: "Inspect auth", agent: "scout" };
+		const completion = { task: "", agent: "", name: "   " };
+		expect(mergeCursorMcpToolCallArgs(streamed, completion, new Set(["task", "agent", "name"]))).toEqual({
+			task: "Inspect auth",
+			agent: "scout",
+		});
+	});
+
 	it("accepts completion-only keys that the streamed args never carried", () => {
 		const streamed = { agent: "task" };
 		const completion = { agent: "task", model: "default" };

@@ -215,6 +215,7 @@ describe("EventController + Cursor todo bridge", () => {
 			type: "tool_execution_end",
 			toolCallId: "cursor-task-rejected",
 			toolName: "task",
+			args: { task: "Inspect auth", resume: "old-agent" },
 			isError: true,
 			result: { content: [{ type: "text", text: "resume unsupported" }] },
 		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
