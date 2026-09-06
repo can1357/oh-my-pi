@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Linux desktop backend choosing Wayland whenever `WAYLAND_DISPLAY` or `WAYLAND_SOCKET` is set, even when nothing accepts connections there. A stale, orphaned, or empty value no longer hides a working X11 display from `computer` ([#10752](https://github.com/can1357/oh-my-pi/pull/10752) by [@jake8302](https://github.com/jake8302)).
+
 ## [18.1.9] - 2026-09-04
 
 ### Added
