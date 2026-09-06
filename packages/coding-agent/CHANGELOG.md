@@ -3,6 +3,10 @@
 ## [Unreleased]
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
+### Added
+
+- Added opt-in Codex long-task checkpoint mode with the `window` compaction method and independent `providers.openai-codex.historyNotes` setting.
+
 ### Changed
 
 - Ranged reads of text without bracket characters skip unnecessary lexical context scanning.
@@ -11,6 +15,10 @@
 
 ### Fixed
 
+- Fixed Codex notes writes failing with an internal server error.
+- Fixed Codex history tools failing to find earlier conversation messages.
+- Opt-in Codex checkpoint features now refresh missing model guidance at startup.
+- Prevented optional Codex catalog refreshes from delaying subagent creation.
 	- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
 
 ### Fixed

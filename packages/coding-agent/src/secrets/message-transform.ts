@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Context, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, EncryptedContent, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import type { SessionContext } from "../session/session-context";
 import type { JsonValue, SecretObfuscator } from "./obfuscator";
 import { collectJsonRegexSecretValues, mapJsonStrings } from "./placeholder-scan";
@@ -122,13 +122,13 @@ export function obfuscateToolArguments(
 type UserFacingMessage = Extract<Message, { role: "user" | "developer" | "toolResult" }>;
 
 /** Obfuscate `text` blocks of a content array; image and other blocks pass through. */
-function obfuscateTextBlocks(
+function obfuscateTextBlocks<T extends TextContent | ImageContent | EncryptedContent>(
 	obfuscator: SecretObfuscator,
-	content: (TextContent | ImageContent)[],
+	content: T[],
 	sharedRegexSecretValues?: ReadonlySet<string>,
-): (TextContent | ImageContent)[] {
+): T[] {
 	let changed = false;
-	const result = content.map((block): TextContent | ImageContent => {
+	const result = content.map((block): T => {
 		if (block.type !== "text") return block;
 		const text = obfuscator.obfuscate(block.text, sharedRegexSecretValues);
 		if (text === block.text) return block;

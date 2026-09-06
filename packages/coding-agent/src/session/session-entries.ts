@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import type {
 	ImageContent,
 	MessageAttribution,
@@ -334,4 +335,13 @@ export interface UsageStatistics {
 	orchestrationCacheRead: number;
 	premiumRequests: number;
 	cost: number;
+}
+
+/** Keep provider history references aligned with the owning journal entry, including forks. */
+export function attachSessionEntryId(entry: SessionEntry): void {
+	if (entry.type !== "message") return;
+	const message = entry.message;
+	if (message.role === "assistant" || message.sessionEntryId === entry.id) return;
+	message.sessionEntryId = entry.id;
+	invalidateMessageCache(message);
 }

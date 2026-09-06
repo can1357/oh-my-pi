@@ -206,7 +206,7 @@ export class IrcBridge {
 		}
 		if (this.#host.planModeEnabled()) {
 			this.#host.agent.appendMessage(record);
-			this.#host.sessionManager.appendCustomMessageEntry(
+			record.sessionEntryId = this.#host.sessionManager.appendCustomMessageEntry(
 				record.customType,
 				record.content,
 				record.display,

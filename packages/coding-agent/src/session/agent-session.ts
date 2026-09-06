@@ -54,6 +54,7 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	Context,
 	ImageContent,
 	Message,
 	Model,
@@ -347,6 +348,8 @@ import type { BuildSessionContextOptions, SessionContext } from "./session-conte
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import { publicAgentMessage, publicSessionEvent } from "./private-content";
+import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -1114,6 +1117,16 @@ export class AgentSession {
 		return this.#prewalk.arm(target, thinkingLevel);
 	}
 
+	/** Applies primary-runtime-only Codex protocol context, never advisor or summary requests. */
+	transformCodexContext(context: Context): Context {
+		return this.#maintenance.contextWindows.transform(context);
+	}
+
+	/** Resolves frozen Codex activation after the session and tool coordinators exist. */
+	async initializeCodexContext(): Promise<void> {
+		await this.#tools.syncAfterModelChange(this.#tools.resolveActiveEditMode());
+	}
+
 	/** Validate the active plan artifact and shape an `xd://propose` result for review-mode hosts. */
 	async preparePlanForReview(title: string): Promise<AgentToolResult<PlanApprovalDetails>> {
 		const state = this.getPlanModeState();
@@ -1491,6 +1504,7 @@ export class AgentSession {
 			queuedMessageCount: () => this.queuedMessageCount,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			model: () => this.model,
+			contextWindowTools: () => this.#maintenance.refreshContextWindowTools(),
 			setCodeModeNamespacesInfo: info => {
 				this.#codeModeState.namespacesInfo = info;
 			},
@@ -1726,6 +1740,7 @@ export class AgentSession {
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
 			providerSessionState: this.#providerSessionState,
+			agentIdentity: { kind: this.#agentKind, id: this.#agentId ?? this.sessionManager.getSessionId() },
 			preferWebsockets: this.#preferWebsockets,
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
@@ -2211,6 +2226,7 @@ export class AgentSession {
 
 	/** Emit an event to all listeners */
 	#emit(event: AgentSessionEvent): void {
+		event = publicSessionEvent(event);
 		// Copy array before iteration to avoid mutation during iteration.
 		const listeners = [...this.#eventListeners];
 		for (const l of listeners) {
@@ -2689,7 +2705,7 @@ export class AgentSession {
 			// One-run instructions must not return from persisted history: prewalk
 			// nudges are consumed once, and Vibe context is rebuilt only while active.
 			if (!isPrewalkPlanNudge(message) && message.customType !== VIBE_MODE_CONTEXT_MESSAGE_TYPE) {
-				this.sessionManager.appendCustomMessageEntry(
+				message.sessionEntryId = this.sessionManager.appendCustomMessageEntry(
 					message.customType,
 					message.content,
 					message.display,
@@ -2700,6 +2716,7 @@ export class AgentSession {
 					// provider preparation / hook time from the prompt→yield anchor.
 					message.timestamp,
 				);
+				invalidateMessageCache(message);
 			}
 			if (message.role === "custom" && message.customType === "ttsr-injection") {
 				this.#ttsr.markInjectedFromDetails(message.details);
@@ -3020,7 +3037,7 @@ export class AgentSession {
 			}
 			if (this.#promptGeneration !== eventPromptGeneration) return;
 			if (interruptedThinkingMessage) {
-				this.sessionManager.appendCustomMessageEntry(
+				interruptedThinkingMessage.sessionEntryId = this.sessionManager.appendCustomMessageEntry(
 					interruptedThinkingMessage.customType,
 					interruptedThinkingMessage.content,
 					interruptedThinkingMessage.display,
@@ -3892,7 +3909,8 @@ export class AgentSession {
 		}
 		// A computer call's event input is a synthetic {actions, pendingSafetyChecks}
 		// view, not the execution params — a revision cannot map back onto them.
-		if (callResult?.input !== undefined && !computer) {
+		// Model-only arguments carry backend-encrypted fields a revision would corrupt.
+		if (callResult?.input !== undefined && !computer && !ctx.tool.modelOnly) {
 			return { args: callResult.input };
 		}
 		return undefined;
@@ -3950,7 +3968,7 @@ export class AgentSession {
 	async #emitAgentEndNotification(messages: AgentMessage[], options?: { willContinue?: boolean }): Promise<void> {
 		await this.#extensionRunner?.emit({
 			type: "agent_end",
-			messages,
+			messages: messages.map(publicAgentMessage),
 			willContinue: options?.willContinue,
 		});
 	}
@@ -4013,6 +4031,7 @@ export class AgentSession {
 	/** Emit extension events based on session events */
 	async #emitExtensionEvent(event: AgentSessionEvent): Promise<void> {
 		if (!this.#extensionRunner) return;
+		event = publicSessionEvent(event);
 		if (event.type === "agent_start") {
 			this.#turnIndex = 0;
 			await this.#extensionRunner.emit({ type: "agent_start" });
@@ -4098,11 +4117,13 @@ export class AgentSession {
 				type: "auto_compaction_start",
 				reason: event.reason,
 				action: event.action,
+				method: event.method,
 			});
 		} else if (event.type === "auto_compaction_end") {
 			await this.#extensionRunner.emit({
 				type: "auto_compaction_end",
 				action: event.action,
+				method: event.method,
 				result: event.result,
 				aborted: event.aborted,
 				willRetry: event.willRetry,
@@ -7066,7 +7087,7 @@ export class AgentSession {
 				});
 			}
 			this.agent.appendMessage(normalizedAppMessage);
-			this.sessionManager.appendCustomMessageEntry(
+			normalizedAppMessage.sessionEntryId = this.sessionManager.appendCustomMessageEntry(
 				normalizedAppMessage.customType,
 				normalizedAppMessage.content,
 				normalizedAppMessage.display,
@@ -7114,7 +7135,7 @@ export class AgentSession {
 		}
 
 		this.agent.appendMessage(normalizedAppMessage);
-		this.sessionManager.appendCustomMessageEntry(
+		normalizedAppMessage.sessionEntryId = this.sessionManager.appendCustomMessageEntry(
 			normalizedAppMessage.customType,
 			normalizedAppMessage.content,
 			normalizedAppMessage.display,

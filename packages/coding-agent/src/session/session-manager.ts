@@ -34,6 +34,7 @@ import {
 } from "./messages";
 import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
 import {
+	attachSessionEntryId,
 	type BranchSummaryEntry,
 	type CompactionEntry,
 	type CredentialPinEntry,
@@ -1195,6 +1196,7 @@ export class SessionManager {
 			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
 			return;
 		}
+		attachSessionEntryId(entry);
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		const batch = this.#atomicEntryBatch;

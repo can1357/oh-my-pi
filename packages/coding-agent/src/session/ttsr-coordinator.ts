@@ -435,7 +435,7 @@ export class TtsrCoordinator {
 				const injection = this.#getInjectionContent();
 				if (injection) {
 					const details = { rules: injection.rules.map(rule => rule.name) };
-					this.#host.agent.appendMessage({
+					const reminder: AgentMessage = {
 						role: "custom",
 						customType: "ttsr-injection",
 						content: injection.content,
@@ -443,14 +443,15 @@ export class TtsrCoordinator {
 						details,
 						attribution: "agent",
 						timestamp: Date.now(),
-					});
-					this.#host.sessionManager.appendCustomMessageEntry(
+					};
+					reminder.sessionEntryId = this.#host.sessionManager.appendCustomMessageEntry(
 						"ttsr-injection",
 						injection.content,
 						false,
 						details,
 						"agent",
 					);
+					this.#host.agent.appendMessage(reminder);
 					this.#markInjected(details.rules);
 				}
 				try {

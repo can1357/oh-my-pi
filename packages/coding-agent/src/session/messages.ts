@@ -16,6 +16,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import type {
 	AssistantMessage,
+	EncryptedContent,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -790,14 +791,16 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 }
 
 /** Result of filtering image blocks out of a `(TextContent | ImageContent)[]` array. */
-interface StripContentResult {
-	content: (TextContent | ImageContent)[];
+interface StripContentResult<T> {
+	content: (TextContent | T)[];
 	removed: number;
 }
 
-function stripImagesFromArrayContent(content: (TextContent | ImageContent)[]): StripContentResult {
+function stripImagesFromArrayContent<T extends TextContent | ImageContent | EncryptedContent>(
+	content: T[],
+): StripContentResult<T> {
 	let removed = 0;
-	const kept: (TextContent | ImageContent)[] = [];
+	const kept: (TextContent | T)[] = [];
 	for (const part of content) {
 		if (part.type === "image") {
 			removed++;
@@ -915,7 +918,7 @@ export function replaceLlmImagesWithText(messages: Message[], placeholder: strin
 		if (msg.role !== "user" && msg.role !== "developer" && msg.role !== "toolResult") continue;
 		const content = msg.content;
 		if (!Array.isArray(content) || !content.some(part => part.type === "image")) continue;
-		const replaced: (TextContent | ImageContent)[] = [];
+		const replaced: (TextContent | ImageContent | EncryptedContent)[] = [];
 		for (const part of content) {
 			if (part.type !== "image") {
 				replaced.push(part);
@@ -978,6 +981,7 @@ export interface CustomMessage<T = unknown> {
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	timestamp: number;
+	sessionEntryId?: string;
 }
 
 /**
@@ -992,6 +996,7 @@ export interface HookMessage<T = unknown> {
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	timestamp: number;
+	sessionEntryId?: string;
 }
 
 /**
@@ -1324,6 +1329,9 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 	const cached = convertCache.get(m);
 	if (cached !== undefined && cached.interruptedNext === interruptedNext) return cached.fragment;
 	const fragment = convertOne(m, interruptedNext);
+	if (m.sessionEntryId) {
+		for (const message of fragment) if (message.role !== "assistant") message.sessionEntryId = m.sessionEntryId;
+	}
 	convertCache.set(m, { interruptedNext, fragment });
 	return fragment;
 }

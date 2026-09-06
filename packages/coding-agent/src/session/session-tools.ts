@@ -64,6 +64,8 @@ export interface SessionToolsHost {
 	localProtocolOptions(): LocalProtocolOptions;
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
 	setCodeModeNamespacesInfo?(info: unknown): void;
+	/** Provider context-window tools (notes, history, window controls) for the current model; empty when unavailable. */
+	contextWindowTools?(): Promise<AgentTool[]>;
 }
 
 interface SessionToolsOptions {
@@ -192,6 +194,7 @@ export class SessionTools {
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
 	#createThinkTool: SessionToolsOptions["createThinkTool"];
+	#contextWindowToolNames = new Set<string>();
 	#installedVibeToolNames = new Set<string>();
 	#builtInToolNames: Set<string>;
 	#rpcHostToolNames = new Set<string>();
@@ -606,6 +609,34 @@ export class SessionTools {
 		this.#installedVibeToolNames.clear();
 	}
 
+	/**
+	 * Reconciles the provider context-window tools against the registry for
+	 * the current model and returns the names that must stay active. Runs
+	 * inside the registry lock via `#applyActiveToolsByName`.
+	 */
+	async #syncContextWindowTools(signal?: AbortSignal): Promise<string[]> {
+		const tools = this.#host.contextWindowTools ? await untilAborted(signal, this.#host.contextWindowTools()) : [];
+		const desired = new Set(tools.map(tool => tool.name));
+		for (const name of this.#contextWindowToolNames) {
+			if (desired.has(name)) continue;
+			this.#toolRegistry.delete(name);
+			this.#builtInToolNames.delete(name);
+			this.#contextWindowToolNames.delete(name);
+		}
+		for (const tool of tools) {
+			if (this.#contextWindowToolNames.has(tool.name)) continue;
+			// A user tool that already owns the name wins, as with vibe tools.
+			if (this.#toolRegistry.has(tool.name)) {
+				desired.delete(tool.name);
+				continue;
+			}
+			this.#toolRegistry.set(tool.name, this.#wrapRuntimeTool(tool));
+			this.#builtInToolNames.add(tool.name);
+			this.#contextWindowToolNames.add(tool.name);
+		}
+		return [...desired];
+	}
+
 	#getEditModeSession() {
 		return {
 			settings: this.#host.settings,
@@ -630,6 +661,9 @@ export class SessionTools {
 
 	/** Rebuilds model-dependent tool prompts after a model change. */
 	async syncAfterModelChange(previousEditMode: EditMode): Promise<void> {
+		// The context-window tool set is model-scoped: reapplying the enabled
+		// set lets `#applyActiveToolsByName` reconcile it for the new model.
+		await this.reconcileCodeMode();
 		const currentEditMode = this.resolveActiveEditMode();
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt selects model-specific policy even when it does not display the model id.
@@ -649,7 +683,10 @@ export class SessionTools {
 				provider: model?.provider ?? "",
 				toolMode: model?.toolMode,
 				setting,
-				extraDirectTools,
+				extraDirectTools: [
+					...extraDirectTools,
+					...enabledToolNames.filter(name => this.#toolRegistry.get(name)?.modelOnly),
+				],
 				enabledToolNames,
 				evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 			});
@@ -823,12 +860,17 @@ export class SessionTools {
 
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
-		toolNames = normalizeToolNames(toolNames);
+		// Context-window tools are always active while the model offers them;
+		// stale names dropped from the registry fall out of `selectedTools` below.
+		toolNames = normalizeToolNames([...toolNames, ...(await this.#syncContextWindowTools(signal))]);
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
 			toolMode: this.#host.model()?.toolMode,
 			setting: this.#host.settings.get("providers.openai-codex.codeMode"),
-			extraDirectTools: this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
+			extraDirectTools: [
+				...this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
+				...toolNames.filter(name => this.#toolRegistry.get(name)?.modelOnly),
+			],
 			enabledToolNames: toolNames,
 			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 		});
@@ -929,6 +971,8 @@ export class SessionTools {
 						{
 							name,
 							customWireName: tool.customWireName,
+							namespace: tool.namespace,
+							modelOnly: tool.modelOnly,
 							loadMode: "loadMode" in tool && typeof tool.loadMode === "string" ? tool.loadMode : undefined,
 							mcpServerName:
 								"mcpServerName" in tool && typeof tool.mcpServerName === "string"

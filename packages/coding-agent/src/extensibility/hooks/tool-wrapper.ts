@@ -3,6 +3,7 @@
  */
 import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Static, TSchema } from "@oh-my-pi/pi-ai";
+import { publicToolContent } from "@oh-my-pi/pi-ai/utils/private-content";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { HookRunner } from "./runner";
@@ -88,8 +89,8 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 						this.tool.name,
 						resolveToolEventInput(this.tool, effectiveParams as Record<string, unknown>),
 					),
-					content: result.content,
-					details: result.details,
+					content: publicToolContent(result.content, this.tool.modelOnly),
+					details: this.tool.modelOnly ? undefined : result.details,
 					isError: false,
 				})) as ToolResultEventResult | undefined;
 

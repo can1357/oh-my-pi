@@ -8,6 +8,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { publicToolContent } from "@oh-my-pi/pi-ai/utils/private-content";
 import { escapeXmlText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type {
@@ -309,7 +310,7 @@ function toolCallLine(
 	transformExpandedToolIO?: (text: string) => string,
 ): string {
 	const head = `→ ${name}(${formatToolCallPrimaryArg(name, args)})`;
-	const rawResultText = result ? contentToText(result.content) : undefined;
+	const rawResultText = result ? contentToText(publicToolContent(result.content, result.modelOnly)) : undefined;
 	const visibleResultText =
 		rawResultText === undefined ? undefined : (transformExpandedToolIO?.(rawResultText) ?? rawResultText);
 	let base: string;

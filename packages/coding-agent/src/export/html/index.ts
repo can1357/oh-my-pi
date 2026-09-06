@@ -4,6 +4,7 @@ import type { AgentState } from "@oh-my-pi/pi-agent-core";
 import { APP_NAME, isEnoent } from "@oh-my-pi/pi-utils";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/theme/theme";
 import type { SessionEntry, SessionHeader } from "../../session/session-entries";
+import { publicSessionEntry } from "../../session/private-content";
 import { loadEntriesFromFile } from "../../session/session-loader";
 import { SessionManager } from "../../session/session-manager";
 import type { ExportThemeNames } from "./args";
@@ -192,7 +193,7 @@ function sessionHeaderForExport(header: SessionHeader | null): SessionHeader | n
 export function buildSessionData(sm: SessionManager, state?: AgentState): SessionData {
 	return {
 		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
+		entries: sm.getEntries().map(publicSessionEntry),
 		leafId: sm.getLeafId(),
 		systemPrompt: state?.systemPrompt.join("\n\n"),
 		tools: state?.tools?.map(t => ({ name: t.name, description: t.description })),
@@ -239,7 +240,7 @@ async function collectSubSessionsFromDir(
 				agentId,
 				parent: parentKey,
 				header: sessionHeaderForExport(header),
-				entries,
+				entries: entries.map(publicSessionEntry),
 				leafId: entries.length > 0 ? entries[entries.length - 1].id : null,
 			};
 		}

@@ -55,6 +55,7 @@ function getTool(session: ToolSession, name: string): AgentTool {
 	if (!tool) {
 		throw new ToolError(`Unknown tool from js runtime: ${name}`);
 	}
+	if (tool.modelOnly) throw new ToolError("History tools are unavailable in code mode.");
 	return tool;
 }
 

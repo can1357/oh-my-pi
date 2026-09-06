@@ -17,11 +17,13 @@ export type AgentSessionEvent =
 	  })
 	| {
 			type: "auto_compaction_start";
+			method?: "window";
 			reason: "threshold" | "overflow" | "idle" | "incomplete";
 			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
 	  }
 	| {
 			type: "auto_compaction_end";
+			method?: "window";
 			action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
 			result: CompactionResult | undefined;
 			aborted: boolean;

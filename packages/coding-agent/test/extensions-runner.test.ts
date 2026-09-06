@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { EncryptedContent, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1327,7 +1327,9 @@ describe("ExtensionRunner", () => {
 			execute: async () => ({ content: [{ type: "text" as const, text: "success" }] }),
 		};
 
-		const firstText = (result: { content: readonly (TextContent | ImageContent)[] }): string | undefined => {
+		const firstText = (result: {
+			content: readonly (TextContent | ImageContent | EncryptedContent)[];
+		}): string | undefined => {
 			const block = result.content[0];
 			return block?.type === "text" ? block.text : undefined;
 		};
