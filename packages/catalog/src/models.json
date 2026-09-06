@@ -58466,7 +58466,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 200000,
+			"contextWindow": 256000,
 			"maxTokens": 64000,
 			"cursorMaxMode": false,
 			"thinking": {
@@ -58510,7 +58510,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 200000,
+			"contextWindow": 256000,
 			"maxTokens": 64000,
 			"cursorMaxMode": false,
 			"thinking": {
@@ -58554,7 +58554,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 200000,
+			"contextWindow": 256000,
 			"maxTokens": 64000,
 			"cursorMaxMode": false,
 			"thinking": {
@@ -58600,7 +58600,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 200000,
+			"contextWindow": 256000,
 			"maxTokens": 64000,
 			"cursorMaxMode": false,
 			"thinking": {
@@ -58646,7 +58646,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 200000,
+			"contextWindow": 256000,
 			"maxTokens": 64000,
 			"cursorMaxMode": false,
 			"requiresGlyphTokenization": false,
@@ -60378,7 +60378,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 200000,
+			"contextWindow": 272000,
 			"maxTokens": 64000,
 			"cursorMaxMode": false,
 			"requestModelId": "gpt-5.6-luna-none-fast",
@@ -60476,7 +60476,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 200000,
+			"contextWindow": 272000,
 			"maxTokens": 64000,
 			"cursorMaxMode": false,
 			"requestModelId": "gpt-5.6-sol-none-fast",
@@ -60574,7 +60574,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 200000,
+			"contextWindow": 272000,
 			"maxTokens": 64000,
 			"cursorMaxMode": false,
 			"requestModelId": "gpt-5.6-terra-none-fast",
@@ -60696,7 +60696,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 200000,
+			"contextWindow": 262000,
 			"maxTokens": 64000,
 			"cursorMaxMode": false,
 			"thinking": {

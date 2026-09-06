@@ -7706,11 +7706,33 @@
 				],
 				"family": "fable",
 				"catalog": {
-					"requiresCursorToolSchemaProjection": true
+					"requiresCursorToolSchemaProjection": true,
+					"contextWindowFloor": 300000
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:14",
+				"source": "providers/cursor.kdl:12",
+				"class": "anthropic",
+				"providers": [
+					"cursor"
+				],
+				"family": "opus",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.0.0"
+					},
+					{
+						"op": "<",
+						"revision": "6.0.0"
+					}
+				],
+				"catalog": {
+					"contextWindowFloor": 300000
+				}
+			},
+			{
+				"source": "providers/cursor.kdl:23",
 				"class": "kimi",
 				"providers": [
 					"cursor"
@@ -7725,7 +7747,59 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:19",
+				"source": "providers/cursor.kdl:27",
+				"class": "kimi",
+				"providers": [
+					"cursor"
+				],
+				"family": "k2.7-code",
+				"catalog": {
+					"contextWindowFloor": 262000
+				}
+			},
+			{
+				"source": "providers/cursor.kdl:34",
+				"class": "xai",
+				"providers": [
+					"cursor"
+				],
+				"family": "grok",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "4.5.0"
+					},
+					{
+						"op": "<",
+						"revision": "4.7.0"
+					}
+				],
+				"catalog": {
+					"contextWindowFloor": 256000
+				}
+			},
+			{
+				"source": "providers/cursor.kdl:42",
+				"class": "openai",
+				"providers": [
+					"cursor"
+				],
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.6.0"
+					},
+					{
+						"op": "<",
+						"revision": "5.7.0"
+					}
+				],
+				"catalog": {
+					"contextWindowFloor": 272000
+				}
+			},
+			{
+				"source": "providers/cursor.kdl:48",
 				"providers": [
 					"cursor"
 				],
@@ -7748,7 +7822,22 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:25",
+				"source": "providers/cursor.kdl:52",
+				"providers": [
+					"cursor"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "default"
+					}
+				],
+				"catalog": {
+					"contextWindowFloor": 256000
+				}
+			},
+			{
+				"source": "providers/cursor.kdl:57",
 				"providers": [
 					"cursor"
 				],
@@ -7782,7 +7871,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:28",
+				"source": "providers/cursor.kdl:60",
 				"providers": [
 					"cursor"
 				],
@@ -7816,7 +7905,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:32",
+				"source": "providers/cursor.kdl:64",
 				"providers": [
 					"cursor"
 				],
@@ -7834,7 +7923,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:36",
+				"source": "providers/cursor.kdl:68",
 				"providers": [
 					"cursor"
 				],
@@ -7867,7 +7956,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:40",
+				"source": "providers/cursor.kdl:72",
 				"providers": [
 					"cursor"
 				],
@@ -7907,7 +7996,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:45",
+				"source": "providers/cursor.kdl:77",
 				"providers": [
 					"cursor"
 				],
@@ -7926,7 +8015,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:49",
+				"source": "providers/cursor.kdl:81",
 				"providers": [
 					"cursor"
 				],
