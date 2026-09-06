@@ -300,6 +300,21 @@ async function executeTool(
 	return createToolResultMessage(toolCallId, toolName, result, isError);
 }
 
+function rejectToolCall(
+	options: CursorExecBridgeOptions,
+	toolName: string,
+	toolCallId: string,
+	message: string,
+): ToolResultMessage {
+	const result = buildToolErrorResult(message);
+	const sanitizedResult: AgentToolResult<unknown> = {
+		content: result.content.map(c => (c.type === "text" ? { ...c, text: sanitizeText(c.text) } : c)),
+		details: result.details,
+	};
+	options.emitEvent?.({ type: "tool_execution_end", toolCallId, toolName, result: sanitizedResult, isError: true });
+	return createToolResultMessage(toolCallId, toolName, result, true);
+}
+
 function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
 	const grant = options.allowDirectFileMutation;
 	return typeof grant === "function" ? grant() : grant !== false;
@@ -960,17 +975,17 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				const resumeId = getCursorTaskResumeId(args);
 				if (resumeId) {
 					const message = `Resuming subagents via task.resume ("${resumeId}") is not supported. Use the \`hub\` tool to message and resume existing subagents.`;
-					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+					return rejectToolCall(this.options, toolName, toolCallId, message);
 				}
 				const unsupportedModel = getCursorTaskUnsupportedModel(args);
 				if (unsupportedModel) {
 					const message = `Explicit subagent model override via task.model ("${unsupportedModel}") is not supported. Subagents use the model configured for their agent role.`;
-					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+					return rejectToolCall(this.options, toolName, toolCallId, message);
 				}
 				const unsupportedSubagentType = getCursorTaskUnsupportedSubagentType(args);
 				if (unsupportedSubagentType) {
 					const message = `Cursor subagent type "${unsupportedSubagentType}" is not supported by OMP task delegation.`;
-					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+					return rejectToolCall(this.options, toolName, toolCallId, message);
 				}
 				const targetToolName = "task";
 				const tool = this.options.getExecutableTool?.(targetToolName) ?? this.options.tools.get(targetToolName);

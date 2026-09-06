@@ -2069,6 +2069,94 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		expect(blocks[0].name).toBe("task");
 		expect(blocks[0].arguments).toMatchObject({ task: "Inspect auth", name: "AuthExplorer", agent: "scout" });
 	});
+
+	it("keeps exec-normalized task fields when the later completion carries raw placeholders", async () => {
+		const rawArgs = {
+			task: new TextEncoder().encode(JSON.stringify("")),
+			prompt: new TextEncoder().encode(JSON.stringify("Inspect auth")),
+			agent: new TextEncoder().encode(JSON.stringify("")),
+			subagent_type: new TextEncoder().encode(JSON.stringify("explore")),
+		};
+		const mcpArgs = create(McpArgsSchema, {
+			name: "Subagent",
+			toolName: "Subagent",
+			toolCallId: "c5",
+			providerIdentifier: "cursor",
+			args: rawArgs,
+		});
+		const toolCall = fromBinary(
+			ToolCallSchema,
+			toBinary(
+				ToolCallSchema,
+				create(ToolCallSchema, {
+					tool: { case: "mcpToolCall", value: { args: mcpArgs } },
+				}),
+			),
+		);
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const usage = { sawTokenDelta: false };
+		const written: Buffer[] = [];
+		const h2Request = {
+			write: (chunk: Buffer) => {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		const handlers: CursorExecHandlers = {
+			async mcp(call) {
+				call.args = { ...call.args, task: "Inspect auth", agent: "scout" };
+				return toolResult("canonicalized", { toolCallId: "c5", toolName: "task" });
+			},
+		};
+
+		processInteractionUpdate(
+			{ message: { case: "toolCallStarted", value: { callId: "task-envelope", toolCall } } },
+			output,
+			stream,
+			state,
+			usage,
+		);
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: buildExecMessage({ case: "mcpArgs", value: mcpArgs }),
+				},
+			}),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			handlers,
+			undefined,
+			usage,
+			[],
+			[],
+		);
+		processInteractionUpdate(
+			{ message: { case: "toolCallCompleted", value: { callId: "task-envelope", toolCall } } },
+			output,
+			stream,
+			state,
+			usage,
+		);
+
+		const blocks = output.content.filter(block => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0]).toMatchObject({
+			name: "task",
+			arguments: {
+				task: "Inspect auth",
+				prompt: "Inspect auth",
+				agent: "scout",
+				subagent_type: "explore",
+			},
+		});
+		expect(soleResult(written.map(decodeClientFrame)).case).toBe("mcpResult");
+	});
 });
 
 describe("Cursor MCP frame: external executor handoff", () => {

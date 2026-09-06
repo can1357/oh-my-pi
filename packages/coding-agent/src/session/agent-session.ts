@@ -1675,6 +1675,7 @@ export class AgentSession {
 			allowAgentInitiatedTurns: () => this.#allowAcpAgentInitiatedTurns,
 			planModeState: () => this.#planModeState,
 			clientBridge: () => this.#clientBridge,
+			hasBuiltInTool: name => this.hasBuiltInTool(name),
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),

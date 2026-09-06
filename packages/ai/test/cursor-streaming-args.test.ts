@@ -164,6 +164,17 @@ describe("mergeCursorMcpToolCallArgs", () => {
 		expect(mergeCursorMcpToolCallArgs(streamed, completion)).toEqual({ tasks: [{ assignment: "do A" }] });
 	});
 
+	it("preserves exec-normalized keys over the original completion scalars", () => {
+		const streamed = { task: "Inspect auth", agent: "scout", prompt: "Inspect auth", subagent_type: "explore" };
+		const completion = { task: "", agent: "", prompt: "Inspect auth", subagent_type: "explore" };
+		expect(mergeCursorMcpToolCallArgs(streamed, completion, new Set(["task", "agent"]))).toEqual({
+			task: "Inspect auth",
+			agent: "scout",
+			prompt: "Inspect auth",
+			subagent_type: "explore",
+		});
+	});
+
 	it("accepts completion-only keys that the streamed args never carried", () => {
 		const streamed = { agent: "task" };
 		const completion = { agent: "task", model: "default" };

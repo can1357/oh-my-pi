@@ -246,6 +246,7 @@ import { handleInteractionQuery } from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.07.23-e383d2b";
+const kCursorExecNormalizedMcpArgKeys = Symbol("provider.block.cursorExecNormalizedMcpArgKeys");
 
 /**
  * HTTP/1 connection-specific headers that HTTP/2 forbids. Node's `http2.request()`
@@ -1094,6 +1095,7 @@ export type ToolCallState = ToolCall & {
 	[kStreamingBlockKind]: "mcp" | "todo" | "cursor-exec" | "cursor-edit" | "connect-scm" | "web-fetch";
 	[kStreamingEnvelopeId]?: string;
 	[kCursorExecResolved]?: true;
+	[kCursorExecNormalizedMcpArgKeys]?: ReadonlySet<string>;
 };
 
 export interface BlockState {
@@ -1969,7 +1971,14 @@ async function handleExecServerMessage(
 				);
 				if (block) {
 					if (block.name !== toolResult.toolName) block.name = toolResult.toolName;
-					if (mcpCall.args !== originalMcpArgs) block.arguments = mcpCall.args;
+					if (mcpCall.args !== originalMcpArgs) {
+						const normalizedKeys = new Set<string>();
+						for (const [key, value] of Object.entries(mcpCall.args)) {
+							if (!Object.is(value, originalMcpArgs[key])) normalizedKeys.add(key);
+						}
+						block.arguments = mcpCall.args;
+						if (normalizedKeys.size > 0) block[kCursorExecNormalizedMcpArgKeys] = normalizedKeys;
+					}
 				}
 			}
 			sendExecClientMessage(h2Request, execMsg, "mcpResult", execResult);
@@ -4080,6 +4089,8 @@ function buildMcpErrorResult(error: string) {
  *
  * Rules per key:
  * - completion key absent  → keep the streamed value.
+ * - a key rewritten by the local exec bridge → keep the executed value; the
+ *   completion frame still carries Cursor's pre-normalization arguments.
  * - completion is a string while the streamed value is structured (object or
  *   array) → keep the streamed value (the completion frame downgraded it).
  * - otherwise               → completion wins.
@@ -4087,11 +4098,13 @@ function buildMcpErrorResult(error: string) {
 export function mergeCursorMcpToolCallArgs(
 	streamed: Record<string, unknown> | undefined,
 	completion: Record<string, unknown> | undefined,
+	preserveStreamedKeys?: ReadonlySet<string>,
 ): Record<string, unknown> {
 	const merged: Record<string, unknown> = { ...streamed };
 	if (!completion) return merged;
 	for (const [key, completionValue] of Object.entries(completion)) {
 		const streamedValue = merged[key];
+		if (preserveStreamedKeys?.has(key) && Object.hasOwn(merged, key)) continue;
 		if (typeof completionValue === "string" && streamedValue !== null && typeof streamedValue === "object") {
 			continue;
 		}
@@ -4440,13 +4453,22 @@ export function processInteractionUpdate(
 				// Authoritative full parse of the accumulated argument buffer; the delta
 				// path throttles mid-stream parses, so `arguments` may lag the buffer.
 				const partial = settled[kStreamingPartialJson];
+				const normalizedKeys = settled[kCursorExecNormalizedMcpArgKeys];
 				if (partial) {
-					settled.arguments = parseStreamingJson(partial);
+					const parsedPartial = parseStreamingJson(partial);
+					settled.arguments = normalizedKeys?.size
+						? mergeCursorMcpToolCallArgs(
+								settled.arguments as Record<string, unknown> | undefined,
+								parsedPartial,
+								normalizedKeys,
+							)
+						: parsedPartial;
 				}
 				const decodedArgs = decodeMcpArgsMap(selectMcpCall(toolCall)?.args?.args);
 				settled.arguments = mergeCursorMcpToolCallArgs(
 					settled.arguments as Record<string, unknown> | undefined,
 					decodedArgs,
+					normalizedKeys,
 				);
 			} else if (settled[kStreamingBlockKind] === "connect-scm") {
 				// The authoritative outcome arrives only here, on the completion's

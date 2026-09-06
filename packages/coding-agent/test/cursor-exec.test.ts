@@ -1136,6 +1136,38 @@ describe("Cursor MCP task tool adapter", () => {
 		expect(approved).toBe(false);
 	});
 
+	it("settles aliased task cards when unsupported Cursor arguments are rejected", async () => {
+		const cases: Array<{ id: string; args: Record<string, unknown> }> = [
+			{ id: "resume", args: { prompt: "Continue work", resume: "agent-123" } },
+			{ id: "model", args: { prompt: "Run benchmarks", model: "claude-3.5-sonnet" } },
+			{ id: "computer-use", args: { prompt: "Use the browser", subagent_type: "computer_use" } },
+		];
+
+		for (const testCase of cases) {
+			const events: AgentEvent[] = [];
+			const handlers = new CursorExecHandlers({
+				cwd,
+				tools: new Map<string, Tool>([["task", taskTool]]),
+				emitEvent: event => events.push(event),
+			});
+			const toolCallId = `reject-${testCase.id}`;
+			const result = await handlers.mcp({
+				name: "Subagent",
+				providerIdentifier: "cursor",
+				toolName: "Subagent",
+				toolCallId,
+				args: testCase.args,
+				rawArgs: {},
+			});
+
+			expect(result.isError).toBe(true);
+			expect(events.filter(event => event.type === "tool_execution_start")).toHaveLength(0);
+			const end = events.find(event => event.type === "tool_execution_end");
+			expect(end).toMatchObject({ type: "tool_execution_end", toolCallId, toolName: "Subagent", isError: true });
+		}
+		expect(executedCalls).toHaveLength(0);
+	});
+
 	it("preserves canonical task, name, and agent fields over Cursor aliases", () => {
 		const raw = {
 			task: "canonical task",

@@ -248,6 +248,7 @@ export interface SessionAdvisorsHost {
 	allowAgentInitiatedTurns(): boolean;
 	planModeState(): PlanModeState | undefined;
 	clientBridge(): ClientBridge | undefined;
+	hasBuiltInTool(name: string): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	sendCustomMessage(message: CustomMessagePayload, options?: AdvisorMessageDeliveryOptions): Promise<boolean>;
@@ -929,6 +930,7 @@ export class SessionAdvisors {
 				cwd: this.#host.sessionManager.getCwd(),
 				getCwd: () => this.#host.sessionManager.getCwd(),
 				tools: bridgeToolMap(advisorToolMap, this.#advisorCreateEditTool),
+				isBuiltInTool: name => this.#host.hasBuiltInTool(name),
 				// Approval mode, per-tool policies and `autoApprove` live only on
 				// this context; without it every bridge tool resolves as `yolo`.
 				getToolContext: this.#advisorGetToolContext,
