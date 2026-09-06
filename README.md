@@ -170,6 +170,8 @@ _[Watch the capture ↗](https://omp.sh/clips/irc.mp4)_
 
 Watch the fan-out while it runs: `Alt+A` opens [Agent Hub](docs/agent-hub.md), where the roster shows current activity and usage for every subagent. Open one to read its live transcript, type a steering message, revive a parked worker, or kill a stuck one without aborting the parent session.
 
+The same agent definitions can drive the main session: `omp --agent <name>` starts — and `/agent` switches — the top-level session into an agent's persona (its system prompt, toolset, and model). See [Task agent discovery](docs/task-agent-discovery.md#using-agents-as-a-main-session-persona).
+
 ### 06 · A second model, watching every turn.
 
 Pair a reviewer model to the 'advisor' role and it reads every turn the main agent takes, injecting notes inline — a quiet aside, a concern, or a hard blocker. It runs on its own context and its own model, so it catches what the doer rushed past. The main agent sees the note and course-corrects, or tells you why it won't.

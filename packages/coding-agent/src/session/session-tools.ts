@@ -57,6 +57,8 @@ export interface SessionToolsHost {
 	model(): Model | undefined;
 	memoryBackendSession(): MemoryBackendStartOptions["session"];
 	clearInheritedProviderPromptCacheKey(): void;
+	/** Host spawn-policy fallback consulted by AgentSession.getSessionSpawns; `null` = unrestricted. */
+	getSessionSpawns(): string | null;
 	clearMemoryPromotionSnapshot(): void;
 	captureMemoryPromotionSnapshot(prompt: string[]): void;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;

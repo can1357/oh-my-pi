@@ -362,6 +362,9 @@ import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-sta
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
+import type { PersonaRuntime } from "./persona-runtime";
+import type { SessionToolPolicy } from "./tool-policy";
+import { createDefaultPersonaModelHooks } from "./persona-model-hooks";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
@@ -561,10 +564,22 @@ export class AgentSession {
 
 	readonly configWarnings: string[] = [];
 
+	/** Session-wide tool policy; populated from `AgentSessionConfig.toolPolicy` at construction. Inert until later stages consume it. */
+	readonly toolPolicy: SessionToolPolicy | undefined;
+
+	/** Session-level spawn policy override (`null` = unrestricted/unset → falls back to the host config getter). */
+	#sessionSpawns: string[] | "*" | null = null;
+	/** Persona identity prompt appended by the active persona; `undefined` when no persona is active. */
+	#personaAppendPrompt: string | undefined;
+	/** Persona runtime owning persona enter/exit/reconcile; installed by the session factory when constructed. */
+	#personaRuntime: PersonaRuntime | undefined;
+
 	readonly #models: ModelControls;
 	readonly #tools: SessionTools;
 	readonly #prewalk: PrewalkCoordinator;
 
+	/** Host config captured at construction; source of the spawn-policy fallback. */
+	#toolsHost: SessionToolsHost;
 	readonly #providerBoundary: SessionProviderBoundary;
 	#promptTemplates: PromptTemplate[];
 	#slashCommands: FileSlashCommand[];
@@ -1164,6 +1179,7 @@ export class AgentSession {
 		this.#preparedExtensions = config.preparedExtensions;
 		this.#extensionPaths = config.extensionPaths;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
+		this.toolPolicy = config.toolPolicy;
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1501,7 +1517,11 @@ export class AgentSession {
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
 			localProtocolOptions: () => this.#localProtocolOptions(),
+			// Host spawn-policy fallback (CLI `--spawns` / ToolSession contract); `null` = unrestricted.
+			getSessionSpawns: () => config.getSessionSpawns?.() ?? null,
 		};
+		// Captured so the persona spawn override can fall back to the host config getter.
+		this.#toolsHost = sessionToolsHost;
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
 			toolRegistry: config.toolRegistry,
@@ -1856,6 +1876,61 @@ export class AgentSession {
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this.#modelRegistry;
+	}
+
+	/**
+	 * Exposes the session-wide tool policy for callers that need the effective
+	 * tool-set derivations (cursor bridge, structured subagents, later stages).
+	 * Returns `undefined` for sessions constructed without one (all callers
+	 * until sdk.ts wires the policy through `AgentSessionConfig`).
+	 */
+	getToolPolicy(): SessionToolPolicy | undefined {
+		return this.toolPolicy;
+	}
+
+	/** Installs the session's persona runtime (called once by the session factory). */
+	setPersonaRuntime(runtime: PersonaRuntime): void {
+		this.#personaRuntime = runtime;
+	}
+
+	/** The session's persona runtime, or `undefined` for persona-incapable sessions. */
+	getPersonaRuntime(): PersonaRuntime | undefined {
+		return this.#personaRuntime;
+	}
+
+	/**
+	 * Effective session spawn policy. The persona-owned override wins when set;
+	 * otherwise the host config getter (CLI `--spawns`) applies.
+	 */
+	getSessionSpawns(): string[] | "*" | null {
+		if (this.#sessionSpawns !== null) return this.#sessionSpawns;
+		const hostSpawns = this.#toolsHost.getSessionSpawns();
+		return hostSpawns === null
+			? "*"
+			: (hostSpawns
+					.split(",")
+					.map(s => s.trim())
+					.filter(Boolean) as string[]);
+	}
+
+	/** Sets the persona-owned spawn policy override (`null` clears it back to the host config). */
+	setSessionSpawns(spawns: string[] | "*" | null): void {
+		this.#sessionSpawns = spawns;
+	}
+
+	/** Applies (or clears, with `undefined`) the persona identity append prompt. */
+	applyPersonaAppendPrompt(personaText: string | undefined): void {
+		this.#personaAppendPrompt = personaText;
+	}
+
+	/** The persona identity append prompt; `undefined` when no persona is active. */
+	getPersonaAppendPrompt(): string | undefined {
+		return this.#personaAppendPrompt;
+	}
+
+	/** Public persona/switch entry point for the private provider prompt-cache-key clear. */
+	clearInheritedProviderPromptCacheKey(): void {
+		this.#clearInheritedProviderPromptCacheKey();
 	}
 
 	get asyncJobManager(): AsyncJobManager | undefined {
@@ -7564,6 +7639,13 @@ export class AgentSession {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
+		// Persona teardown runs before the transcript/context clear so the outgoing
+		// session's journal records the persona exit while the state still belongs
+		// to it. Default hooks: teardown cannot defer (no streaming is possible here).
+		const personaRuntime = this.getPersonaRuntime();
+		if (personaRuntime && this.toolPolicy?.isPersonaActive()) {
+			await personaRuntime.exit(createDefaultPersonaModelHooks(this));
+		}
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)

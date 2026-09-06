@@ -64,6 +64,8 @@ import { theme } from "../../modes/theme/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
+import { createDefaultPersonaModelHooks, type PersonaModelApplyHooks } from "../../session/persona-model-hooks";
+import { readPersistedAgentPersona } from "../../session/persisted-persona";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
@@ -71,7 +73,7 @@ import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
-import { refreshAgentDiscovery } from "../../task";
+import { discoverAgents, getAgent, refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
 import { OTHER_OPTION } from "../../tools/ask";
 import { normalizeLocalScheme } from "../../tools/path-utils";
@@ -114,6 +116,85 @@ export const ACP_BOOTSTRAP_RACE_GUARD_MS = 50;
 const ACP_CANCEL_CLEANUP_TIMEOUT_MS = 5_000;
 const ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS = 250;
 const ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES = 3;
+
+const PERSONA_DEFERRED_NOTICE_TEMPLATE =
+	'Agent "{name}" model switch deferred: mid-turn. Its tools and prompt apply now; the model stays until the turn ends.';
+const PERSONA_GONE_NOTICE_TEMPLATE = 'Agent persona "{name}" is no longer available; session resumed without it.';
+
+/**
+ * ACP persona model hooks: the mid-turn channel is an in-band text notice
+ * (pre-runtime ACP semantics — tools/prompt flip immediately, the model switch
+ * is skipped until the surface retries when the turn ends), everything else
+ * falls through to the shared default hooks.
+ */
+export function createAcpPersonaModelHooks(
+	session: AgentSession,
+	emitNotice: (text: string) => void | Promise<void>,
+): PersonaModelApplyHooks {
+	const defaultHooks = createDefaultPersonaModelHooks(session);
+	return {
+		...defaultHooks,
+		shouldDeferModelSwitch: () => session.isStreaming,
+		deferModelSwitchWhileStreaming: agent => {
+			if (!agent.model || agent.model.length === 0) return;
+			void emitNotice(PERSONA_DEFERRED_NOTICE_TEMPLATE.replace("{name}", agent.name));
+		},
+	};
+}
+
+/**
+ * Re-activates the persisted persona on session load/resume/fork: read the
+ * journal's LAST agent `mode_change` entry, resolve the agent against the
+ * session's effective discovery roots, and drive
+ * `PersonaRuntime.reconcile`. On success appends a fresh `mode_change agent`
+ * entry (drift-free resume); a persona that no longer resolves degrades to
+ * unrestricted with a warn log and NO journal write. `emitNotice` lets the
+ * caller route surfaced text (a gone-persona notice) through its own channel.
+ * Notices emitted during reconcile are routed through `emitNotice`; the
+ * session-open paths buffer them until registration so the client is never
+ * notified for an unknown session id.
+ */
+export async function reconcileAcpSessionPersona(
+	session: AgentSession,
+	emitNotice: (text: string) => void | Promise<void>,
+): Promise<void> {
+	const runtime = "getPersonaRuntime" in session ? session.getPersonaRuntime() : undefined;
+	if (!runtime) {
+		return;
+	}
+	const desired = readPersistedAgentPersona(session.sessionManager.getEntries());
+	if (!desired) {
+		return;
+	}
+	try {
+		const { agents } = await discoverAgents(
+			session.sessionManager.getCwd(),
+			undefined,
+			session.effectiveExtensionRoots,
+		);
+		const agent = getAgent(agents, desired.name);
+		if (!agent) {
+			logger.warn(`ACP session persona "${desired.name}" is no longer available; resuming without it`, {
+				sessionId: session.sessionId,
+			});
+			await emitNotice(PERSONA_GONE_NOTICE_TEMPLATE.replace("{name}", desired.name));
+			return;
+		}
+		await runtime.reconcile({ agent, explicit: desired.explicit }, createAcpPersonaModelHooks(session, emitNotice));
+		session.sessionManager.appendModeChange(
+			"agent",
+			desired.explicit ? { name: desired.name, explicit: desired.explicit } : { name: desired.name },
+		);
+	} catch (error) {
+		// No journal write and no client notice on an internal failure: the
+		// session simply resumes without the persona rather than failing load.
+		logger.warn("Failed to reconcile persisted persona on ACP session open", {
+			sessionId: session.sessionId,
+			persona: desired.name,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
 
 type AgentImageContent = {
 	type: "image";
@@ -1288,7 +1369,15 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext);
+		// Fork of a persona session re-activates the persona on the new journal.
+		// Reconcile runs BEFORE registration so the fork response carries the
+		// persona's toolset/modes; notice text is buffered and flushed after
+		// registration (see #registerPreparedSession).
+		const forkNotices: string[] = [];
+		await reconcileAcpSessionPersona(session, text => {
+			forkNotices.push(text);
+		});
+		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext, forkNotices);
 	}
 
 	async #openStoredSession(
@@ -1311,13 +1400,21 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext);
+		// Session load/resume: re-activate the persisted persona before
+		// registration so the load response reflects it; notice text is buffered
+		// and flushed after registration (see #registerPreparedSession).
+		const openNotices: string[] = [];
+		await reconcileAcpSessionPersona(session, text => {
+			openNotices.push(text);
+		});
+		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, openNotices);
 	}
 
 	async #registerPreparedSession(
 		session: AgentSession,
 		mcpServers: McpServer[],
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined,
+		personaNotices: string[] = [],
 	): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext);
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
@@ -1327,10 +1424,34 @@ export class AcpAgent implements Agent {
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
 			this.#sessions.set(session.sessionId, record);
+			// Persona notices are flushed only after the session id is registered:
+			// notifications sent earlier race the load/fork response and hit
+			// `Received session notification for unknown session` — the same race
+			// `#scheduleBootstrapUpdates` guards against.
+			if (personaNotices.length > 0) {
+				await this.#emitPersonaNotices(personaNotices, session.sessionId);
+			}
 			return record;
 		} catch (error) {
 			await this.#disposeSessionRecord(record);
 			throw error;
+		}
+	}
+
+	/**
+	 * Emits persona notices collected during reconcile AFTER the session is
+	 * registered, in order.
+	 */
+	async #emitPersonaNotices(notices: string[], sessionId: string): Promise<void> {
+		for (const text of notices) {
+			await this.#connection.sessionUpdate({
+				sessionId,
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text },
+					messageId: crypto.randomUUID(),
+				},
+			});
 		}
 	}
 

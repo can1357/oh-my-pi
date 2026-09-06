@@ -58,7 +58,7 @@ import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { formatKeyHint, KeybindingsManager } from "../config/keybindings";
-import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, resolveModelOverride, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
@@ -111,6 +111,7 @@ import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { readPersistedAgentPersona } from "../session/persisted-persona";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
@@ -120,9 +121,11 @@ import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { type AgentDefinition, getAgent, discoverAgents } from "../task";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "../task/render";
 import type { ConfiguredThinkingLevel } from "../thinking";
+import { createDefaultPersonaModelHooks, type PersonaModelApplyHooks } from "../session/persona-model-hooks";
 import { tinyTitleClient } from "../tiny/title-client";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
@@ -160,6 +163,7 @@ import {
 	type VibeParentSession,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
+import { AgentPersonaPickerComponent } from "./components/agent-persona-picker";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import { AttachmentChipsBand } from "./components/attachment-chips";
 import type { BashExecutionComponent } from "./components/bash-execution";
@@ -2788,14 +2792,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
+  * Anchored HUD of in-flight subagents, mirroring the Todos block above the
 
-	/**
-	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
-	 * editor. Driven entirely by observer-registry change events, so rows appear
-	 * on spawn and the whole block clears itself once the last subagent leaves
-	 * the "active" state.
-	 */
+ /**
+  * Anchored HUD of in-flight subagents, mirroring the Todos block above the
+  * editor. Driven entirely by observer-registry change events, so rows appear
+  * on spawn and the whole block clears itself once the last subagent leaves
+  * the "active" state.
+  */
 	#renderSubagentList(): void {
 		this.subagentContainer.clear();
 		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
@@ -3133,6 +3137,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		const vibeToolsetLostToTeardown = this.vibeModeEnabled && !preserveVibe;
 		await this.#clearTransientModeState({ preserveVibe, vibeScopeAlreadySuspended });
 		await VibeSessionRegistry.global().rehydrate(vibeSession);
+		// Persona resume parity with the ACP surface (plan §3): a stored session can
+		// end under agent mode (`mode_change agent {name}`), so the persona is
+		// re-applied — or degraded to unrestricted when the definition is gone —
+		// through `PersonaRuntime.reconcile`. Runs after #clearTransientModeState so
+		// a persona-active source session's tool partition is torn down before the
+		// target's grant is applied. A CLI `--agent` override is handled by the
+		// launch seam (pendingPersonaAgent in sdk.ts, which appends its own
+		// mode_change agent entry), so the journal read below sees the override as
+		// the last entry and never fights the CLI flag.
+		await this.#reconcilePersonaFromSession();
 		const goalEnabled = this.session.settings.get("goal.enabled");
 		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
 			this.session.goalRuntime.clearAccounting();
@@ -3192,6 +3206,42 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.planModePaused = true;
 			this.#planModeHasEntered = true;
 			this.#updatePlanModeStatus();
+		}
+	}
+
+	/**
+	 * Re-apply the persisted persona on resume/switch, mirroring the ACP
+	 * `session/load` path: read the journal's LAST agent `mode_change` entry and
+	 * drive `PersonaRuntime.reconcile`. A gone persona degrades to unrestricted
+	 * with a transient status notice rather than failing the resume.
+	 */
+	async #reconcilePersonaFromSession(): Promise<void> {
+		const desired = readPersistedAgentPersona(this.sessionManager.getEntries());
+		if (!desired) return;
+		const runtime = this.session.getPersonaRuntime();
+		if (!runtime) return;
+		try {
+			const { agents } = await discoverAgents(
+				this.sessionManager.getCwd(),
+				undefined,
+				this.session.effectiveExtensionRoots,
+			);
+			const agent = getAgent(agents, desired.name);
+			if (!agent) {
+				this.showStatus(`Agent persona "${desired.name}" is no longer available; session resumed without it.`, {
+					dim: true,
+				});
+				return;
+			}
+			await runtime.reconcile({ agent, explicit: desired.explicit }, this.#createPersonaModelHooks());
+		} catch (error) {
+			logger.warn("Failed to reconcile persisted persona on resume", {
+				sessionFile: this.sessionManager.getSessionFile(),
+				error: error instanceof Error ? error.message : String(error),
+			});
+			this.showStatus(`Failed to restore agent persona "${desired.name}"; session resumed without it.`, {
+				dim: true,
+			});
 		}
 	}
 
@@ -5731,6 +5781,142 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void> {
 		return this.#selectorController.switchSessionModel(model, thinkingLevel);
+	}
+
+	/**
+	 * Live agent persona switch (`/agent <name>`) through the session's
+	 * PersonaRuntime. Mid-turn: the TUI queues the model channel via the
+	 * existing pending-switch flush (plan §8); tools/prompt still apply.
+	 */
+	async switchAgentPersona(agentName: string): Promise<void> {
+		const runtime = this.session.getPersonaRuntime();
+		if (!runtime) {
+			this.showWarning("Persona switching is unavailable: this session has no persona runtime.");
+			return;
+		}
+		const discovery = await discoverAgents(
+			this.sessionManager.getCwd(),
+			undefined,
+			this.session.effectiveExtensionRoots,
+		);
+		const agent = getAgent(discovery.agents, agentName);
+		if (!agent) {
+			const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
+			this.showError(`Unknown agent: ${agentName}. Available: ${available}`);
+			return;
+		}
+		await this.#applyPersonaSwitch(agent);
+		// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
+		this.sessionManager.appendModeChange("agent", { name: agent.name });
+		this.showStatus(`Agent persona: ${agent.name}`);
+	}
+
+	/** Clears the active persona (`/agent` with a persona active). */
+	async exitAgentPersona(): Promise<void> {
+		const runtime = this.session.getPersonaRuntime();
+		if (!runtime) {
+			this.showWarning("Persona switching is unavailable: this session has no persona runtime.");
+			return;
+		}
+		const hooks = this.#createPersonaModelHooks();
+		try {
+			await runtime.exit(hooks);
+		} finally {
+			this.#afterPersonaSwitch();
+		}
+		this.sessionManager.appendModeChange("none");
+		this.showStatus("Agent persona cleared.");
+	}
+
+	/** Bare `/agent` with no persona active: open the discovered-agents picker. */
+	async showAgentPersonaPicker(): Promise<void> {
+		const runtime = this.session.getPersonaRuntime();
+		if (!runtime) {
+			this.showWarning("Persona switching is unavailable: this session has no persona runtime.");
+			return;
+		}
+		await this.#loadPersonaPickerAgents();
+		this.#selectorController.showSelector(done => {
+			const picker = new AgentPersonaPickerComponent(
+				this.#personaPickerAgents,
+				agentName => {
+					done();
+					void this.switchAgentPersona(agentName).catch(error =>
+						this.showError(error instanceof Error ? error.message : String(error)),
+					);
+				},
+				() => done(),
+			);
+			return { component: picker, focus: picker.getSelectList() };
+		});
+	}
+
+	/** Lazily-resolved picker list; discovery is async so cache the latest result. */
+	#personaPickerAgents: Array<{ name: string; description: string }> = [];
+
+	async #loadPersonaPickerAgents(): Promise<void> {
+		const discovery = await discoverAgents(
+			this.sessionManager.getCwd(),
+			undefined,
+			this.session.effectiveExtensionRoots,
+		);
+		this.#personaPickerAgents = discovery.agents.map(agent => ({
+			name: agent.name,
+			description: agent.description,
+		}));
+	}
+
+	/** TUI persona-model hooks: queue the mid-turn model switch like the plan-mode reconciler. */
+	#createPersonaModelHooks(): PersonaModelApplyHooks {
+		const defaultHooks = createDefaultPersonaModelHooks(this.session);
+		return {
+			...defaultHooks,
+			shouldDeferModelSwitch: () => this.session.isStreaming,
+			deferModelSwitchWhileStreaming: agent => {
+				if (!agent.model || agent.model.length === 0) return;
+				const resolved = resolveModelOverride(agent.model, this.session.modelRegistry, this.session.settings);
+				if (!resolved.model) return;
+				this.#pendingModelSwitch = { model: resolved.model, thinkingLevel: agent.thinkingLevel };
+				this.#pendingPlanModelSwitch = false;
+			},
+			// Mid-turn exit: queue the pre-persona baseline for the same flush that
+			// pending model switches use, so the restore survives the turn boundary.
+			deferModelRestoreWhileStreaming: () => {
+				const baseline = defaultHooks.snapshotBaseline?.();
+				if (!baseline?.model) return;
+				this.#pendingModelSwitch = {
+					model: baseline.model,
+					thinkingLevel: baseline.thinkingLevel,
+				};
+				this.#pendingPlanModelSwitch = false;
+			},
+		};
+	}
+
+	/** Shared switch body: enter with TUI hooks, then refresh UI state. */
+	async #applyPersonaSwitch(agent: AgentDefinition): Promise<void> {
+		const runtime = this.session.getPersonaRuntime();
+		if (!runtime) return;
+		const hooks = this.#createPersonaModelHooks();
+		try {
+			// Plan-mode parity: a persona switch rebuilds the system prompt, which
+			// predictably invalidates the provider prompt cache (plan §9).
+			this.lastAssistantUsage = undefined;
+			await runtime.enter(agent, {}, hooks);
+			await this.#loadPersonaPickerAgents();
+		} finally {
+			this.#afterPersonaSwitch(agent.name);
+		}
+	}
+
+	/** Post-switch UI bookkeeping shared by enter/exit. */
+	#afterPersonaSwitch(agentName?: string): void {
+		this.statusLine.invalidate();
+		this.updateEditorBorderColor();
+		this.ui.requestRender();
+		if (agentName !== undefined) {
+			this.session.emitNotice("info", `Agent persona: ${agentName}`);
+		}
 	}
 
 	showPluginSelector(mode?: "install" | "uninstall"): void {

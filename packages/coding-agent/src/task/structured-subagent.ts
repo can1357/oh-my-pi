@@ -147,6 +147,10 @@ export interface EffectiveSubagentPolicy {
 	applyChanges: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
+	/** Whether this run dispatches a restricted child (plan mode, restricted host, or restricted policy). */
+	restrictToolNames: boolean;
+	/** The parent's effective tool grant when restricted; `null` for unrestricted parents. */
+	parentEffectiveGrant: ReadonlySet<string> | null;
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -318,6 +322,15 @@ export async function resolveEffectiveSubagentPolicy(
 			"Subagent isolated execution requires task.isolation.enabled; it is currently false.",
 		);
 	}
+
+	const toolPolicy = request.session.getToolPolicy?.();
+	// Persona/restriction state lives on the policy, not the legacy shadow
+	// field: launch (--agent) and live /agent switch both mutate the policy,
+	// so this derivation is identical for both paths.
+	const restrictToolNames =
+		planMode || request.session.restrictToolNames === true || (toolPolicy?.isRestricted() ?? false);
+	const parentEffectiveGrant: ReadonlySet<string> | null =
+		restrictToolNames && toolPolicy ? toolPolicy.effectiveSet() : null;
 	return {
 		discovery,
 		agentName,
@@ -328,6 +341,8 @@ export async function resolveEffectiveSubagentPolicy(
 		parentActiveModelPattern,
 		schema,
 		planMode,
+		restrictToolNames,
+		parentEffectiveGrant,
 		isIsolated,
 		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
 		applyChanges:
@@ -400,7 +415,7 @@ function buildExecutorOptions(
 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
 		getSessionId: session.getSessionId ?? (() => null),
 	};
-	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
+	const restrictToolNames = policy.restrictToolNames;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	return {
 		cwd: session.cwd,
@@ -435,6 +450,7 @@ function buildExecutorOptions(
 					outputSchemaMode: policy.schema.mode,
 				}),
 		sessionFile: lease.sessionFile,
+		parentEffectiveGrant: policy.parentEffectiveGrant,
 		persistArtifacts: !lease.temporary,
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,

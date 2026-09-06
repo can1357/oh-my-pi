@@ -102,6 +102,8 @@ import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import { discoverAgents, getAgent } from "./task/discovery";
+import type { PersonaExplicitOverrides } from "./session/tool-policy";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
@@ -1134,6 +1136,30 @@ export async function buildSessionOptions(
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
 			options.providerPromptCacheKey = header.providerPromptCacheKey;
 			options.providerPromptCacheKeySource = "fork";
+		}
+	}
+	// `--agent <name>`: resolve the persona BEFORE the session is built so its
+	// definition can enter through the PersonaRuntime seam (CreateAgentSessionOptions
+	// → sdk.ts constructs the runtime + enter() after the session exists but before
+	// the first user turn). Unresolvable names are a hard launch error.
+	if (parsed.agent) {
+		const options_cwd = parsed.cwd ?? getProjectDir();
+		const { agents } = await discoverAgents(options_cwd);
+		const agent = getAgent(agents, parsed.agent);
+		if (!agent) {
+			throw new Error(`Unknown --agent "${parsed.agent}". Run "omp agents" to list discovered agents.`);
+		}
+		options.pendingPersonaAgent = agent;
+		// Explicit CLI flags win over the persona's frontmatter: the persona model
+		// apply only uses agent.model when no explicit pattern was resolved (the
+		// PersonaModelApplyHooks defaults handle precedence), so threading the CLI
+		// values as explicit overrides keeps `--model`/`--thinking` authoritative.
+		const explicit: PersonaExplicitOverrides = {};
+		if (parsed.model) explicit.model = parsed.model;
+		if (parsed.thinking) explicit.thinking = parsed.thinking;
+		if (parsed.tools) explicit.tools = parsed.tools;
+		if (Object.keys(explicit).length > 0) {
+			options.pendingPersonaExplicit = explicit;
 		}
 	}
 

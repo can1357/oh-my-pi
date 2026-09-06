@@ -157,6 +157,9 @@ import {
 	type SecretObfuscator,
 } from "./secrets";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
+import { createDefaultPersonaModelHooks } from "./session/persona-model-hooks";
+import { PersonaRuntime } from "./session/persona-runtime";
+import type { DiscoveredAgent, PersonaExplicitOverrides } from "./session/tool-policy";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { DateCwdReminderInjector } from "./session/date-cwd-reminder";
@@ -183,6 +186,7 @@ import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./se
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
+import { SessionToolPolicy } from "./session/tool-policy";
 import { closeAllConnections } from "./ssh/connection-manager";
 import { unmountAll } from "./ssh/sshfs-mount";
 import {
@@ -383,6 +387,17 @@ export interface CreateAgentSessionOptions {
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
 	spawns?: string;
+	/**
+	 * `--agent <name>` launch-as-switch seam: the resolved persona to activate
+	 * right after the session exists but before the first user turn. sdk.ts
+	 * constructs the PersonaRuntime against the session's toolPolicy, wires it
+	 * onto the `personaRuntime` config slot, and calls `enter()`; any error
+	 * propagates as a session-construction failure. Explicit CLI flags
+	 * (model/thinking/tools) win via `pendingPersonaExplicit`.
+	 */
+	pendingPersonaAgent?: DiscoveredAgent;
+	/** Explicit per-invocation overrides for {@link pendingPersonaAgent}; absent fields defer to the agent definition. */
+	pendingPersonaExplicit?: PersonaExplicitOverrides;
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -1778,6 +1793,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const disposeCallbacks = new Set<() => void>();
 		const activeToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
+		// Session-wide tool policy owns effective tool-set derivation. Stage 1:
+		// constructed here (registry closure available), passed through the
+		// AgentSessionConfig seam, and otherwise inert — no live behavior reads
+		// it yet; later stages replace the shadow tool-state machinery.
+		// The registry has no defaultActive metadata yet (`defaultInactive` is
+		// consulted downstream when the active set is built), so the predicate
+		// is permissive: every registered tool defaults to active.
+		const toolPolicy = new SessionToolPolicy({
+			toolNames: options.toolNames,
+			restrictToolNames: options.restrictToolNames,
+			lspReadOnly: options.lspReadOnly,
+			registry: () => new Set(toolRegistry.keys()),
+			isDefaultActive: () => true,
+		});
 		const setActiveToolNames = (names: Iterable<string>): void => {
 			activeToolNames.clear();
 			for (const name of names) {
@@ -1847,6 +1876,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// dispose + unregister on the session's own registry.
 			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
 			getSessionSpawns: () => options.spawns ?? "*",
+			getToolPolicy: () => toolPolicy,
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
@@ -3125,6 +3155,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						learn: builtInToolNames.includes("learn"),
 					});
 			const appendParts: string[] = [];
+			// Persona identity channel (plan §2): the active persona's system prompt
+			// rides the same append path as memory/auto-learn so refreshBaseSystemPrompt
+			// rebuilds with it and exit removes it.
+			const personaAppendPrompt = session?.getPersonaAppendPrompt();
+			if (personaAppendPrompt) appendParts.push(personaAppendPrompt);
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
 			const projection = projectMountedMCPXdevGuidance(
@@ -3730,6 +3765,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			settings,
+			toolPolicy,
 			additionalExtensionPaths: options.additionalExtensionPaths,
 			extensionRoots: buildSessionExtensionRoots,
 			preparedExtensions: extensionsResult.preparedExtensions,
@@ -3822,6 +3858,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
+			// Host spawn-policy fallback for AgentSession.getSessionSpawns (persona
+			// override wins when set); `null` = unrestricted per the ToolSession contract.
+			getSessionSpawns: () => (options.spawns ? options.spawns : null),
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
@@ -3961,6 +4000,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			build: buildLateDiagnosticsBatchMessage,
 			isStale: entry => entry.isStale(),
 		});
+
+		// Persona runtime exists for EVERY session (not just `--agent <name>`
+		// launches): resume, ACP-created, and plain launches all need it so
+		// `/agent` and persona reconcile work. When a persona was resolved
+		// pre-launch, activate it here — before the first user turn — inside the
+		// same construction transaction; any error fails session construction
+		// (the catch below disposes the half-built session). PersonaRuntime stays
+		// pure — the journal entry for a future `--resume` reconcile is appended
+		// HERE, by the caller, after enter succeeds.
+		if (toolPolicy) {
+			const personaRuntime = new PersonaRuntime(toolPolicy, session);
+			session.setPersonaRuntime(personaRuntime);
+			if (options.pendingPersonaAgent) {
+				await personaRuntime.enter(
+					options.pendingPersonaAgent,
+					options.pendingPersonaExplicit ?? {},
+					createDefaultPersonaModelHooks(session),
+				);
+				session.sessionManager.appendModeChange("agent", {
+					name: options.pendingPersonaAgent.name,
+					...(options.pendingPersonaExplicit ? { explicit: options.pendingPersonaExplicit } : {}),
+				});
+			}
+		}
 
 		// Attach the live session to the pre-registered ref so peers can route IRC
 		// messages here. Refresh sessionFile in case it was unavailable at pre-register
