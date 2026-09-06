@@ -97,7 +97,7 @@ async function harness(
 		{ content: [{ type: "toolCall", name: reset ? "new_context" : "work", arguments: {} }], usage: { input: 9300 } },
 		{ content: ["Finished"], usage: { input: 100 } },
 	];
-	const mock = createMockModel({ responses: options.responses ?? script });
+	const mock = createMockModel({ id: model.id, provider: model.provider, responses: options.responses ?? script });
 	const frames: Context[] = [];
 	const agent = new Agent({
 		getApiKey: () => token,
@@ -264,3 +264,21 @@ test.each([false, true])(
 	},
 	20000,
 );
+
+test("window mode preserves recovery from an empty length stop", async () => {
+	const { session, frames, settings } = await harness(true, {
+		responses: [
+			{ content: [], stopReason: "length", usage: { input: 100, output: 1000 } },
+			{ content: ["Recovered answer"], usage: { input: 100 } },
+		],
+	});
+	settings.override("compaction.methodOrder", ["window", "shake"]);
+	settings.override("compaction.autoContinue", true);
+	await session.prompt("Complete this task");
+	await session.waitForIdle();
+	expect(frames).toHaveLength(2);
+	expect(session.messages.some(message => message.role === "assistant" && message.stopReason === "length")).toBe(
+		false,
+	);
+	expect(JSON.stringify(session.messages)).toContain("Recovered answer");
+}, 20000);

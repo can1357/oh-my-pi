@@ -2094,7 +2094,12 @@ export class SessionMaintenance {
 		const compactionEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		const errorIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime();
-		if (sameModel && !errorIsFromBeforeCompaction && assistantMessage.stopReason !== "error") {
+		if (
+			sameModel &&
+			!errorIsFromBeforeCompaction &&
+			assistantMessage.stopReason !== "error" &&
+			assistantMessage.stopReason !== "length"
+		) {
 			if (this.#observeContextWindow(assistantMessage)) {
 				return this.runAutoCompaction("threshold", false, false, allowDefer, { autoContinue });
 			}
