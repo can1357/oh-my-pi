@@ -17,6 +17,7 @@ import {
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonMonitorNotification,
+	type DaemonOutputSubscription,
 	type DaemonSpec,
 } from "../../src/launch/protocol";
 import { OutputSink } from "../../src/session/streaming-output";
@@ -396,6 +397,96 @@ process.stdin.once("data", () => {
 		} finally {
 			unregister?.();
 			await client.request({ op: "stop", name: "attach", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("reports live watchers on describe and list, updates them on republish, and drops them on unregister", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-watchers-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.once("data", () => process.exit(0));
+`,
+		);
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		let unregister: DaemonOutputUnregister | undefined;
+		try {
+			const started = await client.request({
+				op: "start",
+				spec: {
+					name: "watched",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			const unwatched = await client.request({ op: "describe", name: "watched" });
+			if (unwatched.op !== "describe") throw new Error("unexpected describe result");
+			expect(unwatched.monitors).toEqual([]);
+
+			const subscription: DaemonOutputSubscription = {
+				id: "watcher-monitor",
+				name: "watched",
+				owner: "watcher-session",
+				artifactPath: path.join(tempDir.path(), "watched-progress.log"),
+				delivery: "wake",
+				since: 1_700_000_000_000,
+				artifactId: "hub-progress-watched",
+			};
+			unregister = client.onOutput?.(subscription, () => {});
+			if (!unregister) throw new Error("Expected output monitoring support");
+			await unregister.ready;
+
+			const described = await client.request({ op: "describe", name: "watched" });
+			if (described.op !== "describe") throw new Error("unexpected describe result");
+			expect(described.monitors).toEqual([
+				{
+					name: "watched",
+					id: "watcher-monitor",
+					owner: "watcher-session",
+					delivery: "wake",
+					since: 1_700_000_000_000,
+					artifactId: "hub-progress-watched",
+					daemonId: started.daemon.id,
+					connected: true,
+				},
+			]);
+
+			// A retune mutates the advertised subscription and republishes; the
+			// broker must reflect the new mode on the same registration.
+			subscription.delivery = "ambient";
+			unregister.republish();
+			await client.request({ op: "ping" });
+			const listed = await client.request({ op: "list" });
+			if (listed.op !== "list") throw new Error("unexpected list result");
+			expect(listed.monitors).toEqual([expect.objectContaining({ id: "watcher-monitor", delivery: "ambient" })]);
+
+			unregister();
+			unregister = undefined;
+			await client.request({ op: "ping" });
+			const detached = await client.request({ op: "list" });
+			if (detached.op !== "list") throw new Error("unexpected list result");
+			expect(detached.monitors).toEqual([]);
+		} finally {
+			unregister?.();
+			await client.request({ op: "stop", name: "watched", timeoutMs: 2_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
