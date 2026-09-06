@@ -331,6 +331,10 @@
 - Fixed top-level errors overwriting the active composer before terminal restoration.
 - Fixed Enter being ignored during the first turn when omp starts with an initial prompt.
 
+### Fixed
+
+- Fixed vision requests failing with a request-size (413) error after a long session: outgoing image payloads are now bounded by a per-provider image-byte budget in addition to the existing image-count cap, dropping the oldest images so the combined base64 fits ([#10286](https://github.com/can1357/oh-my-pi/pull/10286) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ## [18.0.11] - 2026-08-29
 
 ### Added
