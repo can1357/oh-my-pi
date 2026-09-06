@@ -22,6 +22,7 @@
  *   shared root session and passed through verbatim
  */
 import type { ExtToRelayMessage, RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "./protocol";
+import { parse as parseBabel } from "@babel/parser";
 
 /** Transport-agnostic websocket surface the bridge writes to. */
 export interface RelaySocket {
@@ -87,10 +88,27 @@ function markPreloadApplication(source: unknown, marker: string): string {
 	// identifier here: even `Object` can be in the TDZ when the client preload
 	// declares `const Object`, which would prevent the preload body from running.
 	const markerStatement = `this[${JSON.stringify(marker)}] = true;`;
-	const prologue = source.match(
-		/^(?:#![^\r\n]*(?:\r?\n|$))?(?:(?:(?:[ \t\r\n\uFEFF]+|\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/))*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*(?:;[ \t]*(?:\r?\n)?|\r?\n|$))*/,
-	);
-	const offset = prologue?.[0].length ?? 0;
+	let offset = 0;
+	try {
+		const parsed = parseBabel(source, {
+			sourceType: "unambiguous",
+			allowAwaitOutsideFunction: true,
+			allowReturnOutsideFunction: true,
+		});
+		// Babel separates actual directive statements from the body, so a string
+		// expression continued on the next line (for example via `.method()`) is
+		// never mistaken for a directive merely because it starts with a literal.
+		offset = parsed.program.body[0]?.start ?? source.length;
+	} catch {
+		// Chrome remains authoritative for syntax Babel does not recognize. Keep
+		// the marker after prefixes that are only legal at the beginning instead
+		// of rejecting an otherwise valid preload in the relay.
+		offset = source.startsWith("\uFEFF") ? 1 : 0;
+		if (source.startsWith("#!", offset)) {
+			const newline = source.indexOf("\n", offset);
+			offset = newline === -1 ? source.length : newline + 1;
+		}
+	}
 	return `${source.slice(0, offset)}${markerStatement}\n${source.slice(offset)}`;
 }
 

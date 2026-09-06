@@ -3191,6 +3191,51 @@ describe("RelayBridge tab grouping", () => {
 		},
 	);
 
+	it("preserves an immediate preload whose leading string expression continues on the next line", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+		const source = '"abc"\n.toUpperCase(); this.__preloadRan = true;';
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source, runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "continued-expression recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(
+			() => ext2.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			"continued-expression preload replay",
+		);
+
+		const replay = ext2.rpcs("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		const replaySource = (replay?.params as { source?: string } | undefined)?.source;
+		expect(replaySource).toContain(source);
+		const replayContext: Record<string, unknown> = {};
+		vm.runInNewContext(replaySource!, replayContext);
+		expect(replayContext.__preloadRan).toBe(true);
+		expect(Object.keys(replayContext).some(key => key.startsWith("__ompRelayPreload"))).toBe(true);
+	});
+
 	it.each(["remove", "retry"] as const)(
 		"forces a fresh root when the navigation preload %s loses its result",
 		async interruptedMutation => {
