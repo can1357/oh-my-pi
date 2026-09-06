@@ -755,14 +755,17 @@ const streamOpenAICompletionsOnce = (
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
 				appliedStrictTools = builtParams.strictToolsApplied;
 				let params = builtParams.params;
-				const reasoningEffortFallbackKey = createOpenAIReasoningEffortFallbackKey(
-					"chat-completions",
-					trimmedBaseUrl,
-					params.model,
-				);
-				const requestReasoningEffortFallback = requestReasoningEffortFallbacks.has(reasoningEffortFallbackKey)
-					? requestReasoningEffortFallbacks.get(reasoningEffortFallbackKey)
-					: getOpenAIReasoningEffortFallback(providerSessionState, reasoningEffortFallbackKey);
+				// Tool-triggered suppression is a hard wire constraint; cached
+				// enabled-effort negotiation must not overwrite its `none`.
+				const reasoningEffortFallbackKey = builtParams.reasoningEffortFallbackAllowed
+					? createOpenAIReasoningEffortFallbackKey("chat-completions", trimmedBaseUrl, params.model)
+					: undefined;
+				const requestReasoningEffortFallback =
+					reasoningEffortFallbackKey === undefined
+						? undefined
+						: requestReasoningEffortFallbacks.has(reasoningEffortFallbackKey)
+							? requestReasoningEffortFallbacks.get(reasoningEffortFallbackKey)
+							: getOpenAIReasoningEffortFallback(providerSessionState, reasoningEffortFallbackKey);
 				if (requestReasoningEffortFallback !== undefined) {
 					applyOpenAIReasoningEffortFallback(params, requestReasoningEffortFallback);
 				}
@@ -1650,6 +1653,7 @@ function buildParams(
 	params: OpenAICompletionsParams;
 	toolStrictMode: AppliedToolStrictMode;
 	strictToolsApplied: boolean;
+	reasoningEffortFallbackAllowed: boolean;
 } {
 	const initialPolicy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 	const initialCompat = initialPolicy.compat as ResolvedOpenAICompat;
@@ -1844,7 +1848,12 @@ function buildParams(
 	});
 	applyOpenAIChatCompletionsPromptCachePolicy(params, model, options);
 
-	return { params, toolStrictMode, strictToolsApplied };
+	return {
+		params,
+		toolStrictMode,
+		strictToolsApplied,
+		reasoningEffortFallbackAllowed: finalPolicy.reasoning.disableReason !== "tools",
+	};
 }
 
 export function parseChunkUsage(

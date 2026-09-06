@@ -208,6 +208,21 @@ function createCompletionsModel(): Model<"openai-completions"> {
 	});
 }
 
+function createAzureAstraCompletionsModel(): Model<"openai-completions"> {
+	return buildModel({
+		id: "gpt-6-astra",
+		name: "GPT-6 Astra",
+		api: "openai-completions",
+		provider: "azure",
+		baseUrl: "https://resource.openai.azure.com/openai/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 128_000,
+	});
+}
+
 function createResponsesModel(): Model<"openai-responses"> {
 	return buildModel({
 		id: "fallback-responses-reasoner",
@@ -298,6 +313,52 @@ describe("OpenAI reasoning effort fallback retry", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(bodies.map(body => body.reasoning_effort)).toEqual(["xhigh", "max"]);
+	});
+
+	it("does not apply a cached enabled-effort fallback to tool-suppressed Azure Astra requests", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const body = parseJsonBody(init);
+				bodies.push(body);
+				return bodies.length === 1 ? invalidReasoningResponse("reasoning_effort", "max") : createChatSseResponse();
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const model = createAzureAstraCompletionsModel();
+
+		const first = await streamOpenAICompletions(model, testContext, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "max",
+			providerSessionState,
+		}).result();
+		expect(first.stopReason).toBe("stop");
+
+		const second = await streamOpenAICompletions(
+			model,
+			{
+				messages: testContext.messages,
+				tools: [
+					{
+						name: "read",
+						description: "Read a file",
+						parameters: { type: "object", properties: {} },
+					},
+				],
+			},
+			{
+				apiKey: "test-key",
+				fetch: fetchMock,
+				reasoning: "max",
+				providerSessionState,
+			},
+		).result();
+
+		expect(second.stopReason).toBe("stop");
+		expect(bodies.map(body => body.reasoning_effort)).toEqual(["max", "high", "none"]);
+		expect(bodies[2]!.tools).toHaveLength(1);
 	});
 
 	it("retries Responses xhigh as provider max and stores the successful fallback params", async () => {
