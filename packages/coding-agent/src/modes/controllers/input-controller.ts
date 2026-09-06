@@ -258,6 +258,12 @@ export class InputController {
 	}
 
 	#abortStreamingTurn(): void {
+		// A loop reminder sitting in the steering queue would defeat this Esc:
+		// `#canAutoContinueForFollowUp` resumes on *any* queued steer before it
+		// consults the user-interrupt suppression, so the abort's drain would
+		// immediately start a fresh continuation on the reminder. Drop it — the
+		// loop is still armed and steers again at its next interval.
+		this.ctx.dropQueuedLoopReminders();
 		void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 	}
 

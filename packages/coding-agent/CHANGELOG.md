@@ -33,6 +33,7 @@
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
+- A duration-limited `/loop` (e.g. `/loop 30m fix the tests`) now fires on that fixed interval instead of waiting for the agent to stop before re-prompting it: a turn that is still working gets the prompt steered in — so a long turn is nudged repeatedly as it runs, keeping its cached context — and once the agent has stopped, the same tick simply submits the prompt and it continues. Count-based loops (`/loop 5`) are unchanged.
 
 ## [18.1.10] - 2026-09-04
 

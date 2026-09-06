@@ -2,7 +2,7 @@ import { describe, expect, test, vi } from "bun:test";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
-	isLoopDurationExpired,
+	getLoopIntervalMs,
 	parseLoopLimitArgs,
 } from "@oh-my-pi/pi-coding-agent/modes/loop-limit";
 import type { BuiltinSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
@@ -84,6 +84,15 @@ describe("loop limit parsing", () => {
 		expect(parseLoopLimitArgs("-1")).toContain("Usage: /loop");
 		expect(parseLoopLimitArgs("10fortnights")).toBe("Loop duration unit must be seconds, minutes, or hours.");
 	});
+
+	test("rejects durations that would overflow setInterval's 32-bit delay and clamp to a near-immediate cadence", () => {
+		// 597h = 2,149,200,000ms, just above the 2,147,483,647ms signed-32-bit max — compact-duration path.
+		expect(parseLoopLimitArgs("597h")).toBe("Loop duration must not exceed 24 days (setInterval's 32-bit limit).");
+		// Space-separated "N minutes" form — exercises the bare-integer-plus-unit path instead.
+		expect(parseLoopLimitArgs("2147484 minutes")).toBe(
+			"Loop duration must not exceed 24 days (setInterval's 32-bit limit).",
+		);
+	});
 });
 
 describe("loop limit runtime", () => {
@@ -100,15 +109,16 @@ describe("loop limit runtime", () => {
 		expect(limit).toEqual({ kind: "iterations", initial: 3, remaining: 0 });
 	});
 
-	test("stops duration-limited loops at the configured deadline", () => {
+	test("treats a duration limit as a firing interval that never expires or consumes budget", () => {
 		const parsed = parseLoopLimitArgs("10m");
 		if (typeof parsed === "string" || !parsed.limit) throw new Error("expected parsed limit");
 		expect(parsed.limit).toEqual({ kind: "duration", durationMs: 600_000 });
 
-		const limit = createLoopLimitRuntime(parsed.limit, 1_000);
-		expect(consumeLoopLimitIteration(limit, 600_999)).toBe(true);
-		expect(isLoopDurationExpired(limit, 600_999)).toBe(false);
-		expect(consumeLoopLimitIteration(limit, 601_000)).toBe(false);
-		expect(isLoopDurationExpired(limit, 601_000)).toBe(true);
+		const limit = createLoopLimitRuntime(parsed.limit);
+		expect(getLoopIntervalMs(limit)).toBe(600_000);
+		// Cadence is owned by the interval timer, not this budget check: every
+		// tick is allowed, indefinitely.
+		expect(consumeLoopLimitIteration(limit)).toBe(true);
+		expect(consumeLoopLimitIteration(limit)).toBe(true);
 	});
 });
