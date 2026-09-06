@@ -1030,6 +1030,56 @@ describe("grokbot incomplete tool calls", () => {
 		expect(result.content.some(b => b.type === "toolCall" && Object.keys(b.arguments).length === 0)).toBe(true);
 	});
 
+	test("finalizes isComplete:false when args are already a complete JSON object", async () => {
+		mockAuth();
+		const incomplete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "c1", toolName: "Read", args: '{"path":"/tmp/x"}', isComplete: false },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(incomplete, trailer)) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([
+			expect.objectContaining({ type: "toolCall", id: "c1", name: "Read", arguments: { path: "/tmp/x" } }),
+		]);
+	});
+
+	test("drops a hanging leftover tool when a completed call and text already exist", async () => {
+		mockAuth();
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "Read",
+					args: '{"path":"/tmp/x"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const leftover = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "c2", toolName: "Write", args: '{"path":', isComplete: false },
+			}),
+		);
+		const text = frameConnectProto(
+			encodeInferenceStreamResponse({ textPart: { text: "tools-pong-read", isFinal: true } }),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(complete, leftover, text, trailer)) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content.filter(b => b.type === "toolCall")).toEqual([
+			expect.objectContaining({ type: "toolCall", id: "c1", name: "Read" }),
+		]);
+		expect(result.content.some(b => b.type === "text" && b.text.includes("tools-pong-read"))).toBe(true);
+	});
+
 	test("finalizes complete tool calls as toolUse", async () => {
 		mockAuth();
 		const complete = frameConnectProto(

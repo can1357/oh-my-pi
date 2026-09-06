@@ -6,6 +6,7 @@
  * a protobuf `toolCallPart`. The agent (and the catalog matrix) only execute
  * `type: "toolCall"` blocks — so a text dump is a failed tool turn.
  */
+import { GeminiInbandScanner } from "../../dialect/gemini";
 import { toOmpToolName, toSandField2Name } from "./product-wire";
 
 export type JsonTextToolCall = {
@@ -131,4 +132,34 @@ export function parseJsonTextToolCall(text: string, advertisedNames: Iterable<st
 	const args = asArgsObject(obj.arguments ?? obj.args ?? obj.parameters);
 	if (!args) return undefined;
 	return { name, arguments: args };
+}
+
+/**
+ * Promote Gemini ```tool_code / default_api.bash(...) dumps that sand leaves
+ * as thinking or text instead of toolCallPart (gemini-3-flash empty-body).
+ */
+export function parseGeminiInbandToolCall(
+	text: string,
+	advertisedNames: Iterable<string>,
+): JsonTextToolCall | undefined {
+	const advertised = advertisedNames instanceof Set ? advertisedNames : new Set(advertisedNames);
+	if (advertised.size === 0) return undefined;
+	const trimmed = text.trim();
+	if (!trimmed) return undefined;
+	const scanned = trimmed.includes("```tool_code")
+		? trimmed
+		: /(?:default_api\.)?\w+\s*\(/.test(trimmed)
+			? `\`\`\`tool_code\n${trimmed}\n\`\`\``
+			: trimmed;
+	const scanner = new GeminiInbandScanner({ parseThinking: true });
+	const events = [...scanner.feed(scanned), ...scanner.flush()];
+	for (const event of events) {
+		if (event.type !== "toolEnd") continue;
+		const name = resolveAdvertisedName(event.name, advertised);
+		if (!name) continue;
+		const args = asArgsObject(event.arguments);
+		if (!args) continue;
+		return { name, arguments: args };
+	}
+	return undefined;
 }

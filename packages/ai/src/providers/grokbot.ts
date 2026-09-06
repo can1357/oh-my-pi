@@ -42,6 +42,7 @@ import {
 import {
 	advertisedNamesForJsonTextToolCall,
 	assistantTextForJsonPromotion,
+	parseGeminiInbandToolCall,
 	parseJsonTextToolCall,
 } from "./grokbot/json-text-tool-call";
 import { nativeToolParametersForIdentity } from "./grokbot/tool-policy";
@@ -568,6 +569,38 @@ function applyUsage(output: AssistantMessage, usage: Record<string, unknown>) {
 	output.usage.cacheWrite = Number.isFinite(cacheWrite) ? cacheWrite : 0;
 }
 
+function canFinalizeIncompleteToolArgs(argsText: string, isGrammar: boolean): boolean {
+	if (isGrammar) return argsText.trim().length > 0;
+	const trimmed = argsText.trim();
+	if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return false;
+	try {
+		const parsed = JSON.parse(trimmed) as unknown;
+		return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed));
+	} catch {
+		return false;
+	}
+}
+
+type GrokbotToolState = {
+	key: string;
+	index: number;
+	block: ToolCall;
+	argsText: string;
+	ended: boolean;
+	isGrammar: boolean;
+};
+
+function uniqueToolStates(toolStates: Map<string, GrokbotToolState>): GrokbotToolState[] {
+	const seen = new Set<GrokbotToolState>();
+	const out: GrokbotToolState[] = [];
+	for (const state of toolStates.values()) {
+		if (seen.has(state)) continue;
+		seen.add(state);
+		out.push(state);
+	}
+	return out;
+}
+
 function firstPresent(obj: Record<string, unknown> | undefined, keys: string[]): unknown {
 	if (!obj) return undefined;
 	for (const key of keys) {
@@ -680,6 +713,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			const grammarTools = buildGrammarToolIndex(context.tools);
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
 			let emptyToolRetryUsed = false;
+			let incompleteToolRetryUsed = false;
+			let geminiProductRetryUsed = false;
 			let started = false;
 			let anthropicWire: AnthropicSandToolWireResult = {
 				requestedModel: { modelId: model.id },
@@ -690,18 +725,19 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			let routedResponseModel = "";
 
 			attempt: while (true) {
+				const replayToolTurn = emptyToolRetryUsed || incompleteToolRetryUsed || geminiProductRetryUsed;
 				const modelConfig = buildModelConfig(model, {
 					...options,
-					maxTokens: emptyToolRetryUsed ? Math.max(Number(options?.maxTokens) || 0, 4096) : options?.maxTokens,
+					maxTokens: replayToolTurn ? Math.max(Number(options?.maxTokens) || 0, 4096) : options?.maxTokens,
 				});
 				const reqModel = resolveGrokbotRequestedModel(model.id, {
 					effort: options?.effort,
 					effortMap: model.thinking?.effortMap,
 					fast: options?.fast,
-					thinking: emptyToolRetryUsed ? false : options?.thinking,
+					thinking: replayToolTurn ? false : options?.thinking,
 					context: options?.context,
 					sandParameterDefaults: model.sandParameterDefaults,
-					sandParameterIds: model.sandParameterIds,
+					sandParameterIds: replayToolTurn ? [] : model.sandParameterIds,
 					sandMaxMode: model.sandMaxMode,
 					canonicalModelId: model.requestModelId,
 					sandVariantStringRepresentation: model.sandVariantStringRepresentation,
@@ -714,10 +750,11 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					conversationId,
 				};
 				if (modelConfig) body.modelConfig = modelConfig;
+				const retrySandWire = geminiProductRetryUsed ? "keep-model" : model.sandToolsWire;
 				const resolvedWire = resolveAnthropicSandToolsWire(
 					typeof process !== "undefined" ? process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE : undefined,
 					options?.anthropicToolsWire,
-					{ modelId: model.id, toolCount: tools.length, sandToolsWire: model.sandToolsWire },
+					{ modelId: model.id, toolCount: tools.length, sandToolsWire: retrySandWire },
 				);
 				anthropicWire = applyAnthropicSandToolWire(
 					{
@@ -725,7 +762,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						tools,
 						modelId: model.id,
 						ompTools: context.tools,
-						sandToolsWire: model.sandToolsWire,
+						sandToolsWire: retrySandWire,
 					},
 					resolvedWire,
 				);
@@ -1157,10 +1194,45 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				}
 
 				closeOpen();
-				// Only finalize tools that received isComplete. Incomplete ToolCallPart
-				// states must not be parsed as {} / emitted as successful toolUse.
-				for (const state of toolStates.values()) {
-					if (!state.ended) {
+				// Finalize incomplete ToolCallParts that already have a complete JSON
+				// object (stream ended before isComplete). Drop leftover fragments
+				// when the turn already has a completed tool or visible text so a
+				// parent-chat Read/Write follow-up does not fail the whole id.
+				const states = uniqueToolStates(toolStates);
+				for (const state of states) {
+					if (!state.ended && canFinalizeIncompleteToolArgs(state.argsText, state.isGrammar)) {
+						finishTool(state);
+					}
+				}
+				const leftovers = states.filter(s => !s.ended);
+				if (leftovers.length > 0) {
+					const hasComplete = states.some(s => s.ended);
+					const hasText = output.content.some(
+						b => b.type === "text" && typeof b.text === "string" && b.text.trim().length > 0,
+					);
+					if (hasComplete || hasText) {
+						const drop = new Set(leftovers.map(s => s.index));
+						output.content = output.content.filter((_, i) => !drop.has(i));
+						for (const state of leftovers) state.ended = true;
+						logger.info("grokbot: dropped incomplete leftover tool call", {
+							count: leftovers.length,
+							wireMode: anthropicWire.wireMode,
+						});
+					} else if (!incompleteToolRetryUsed && tools.length > 0) {
+						incompleteToolRetryUsed = true;
+						output.content = [];
+						output.usage = {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						};
+						output.stopReason = "stop";
+						logger.info("grokbot: retrying incomplete tool turn", { modelId: model.id });
+						continue attempt;
+					} else {
 						throw new AIError.ProviderResponseError("Grok Bot stream ended with incomplete tool call", {
 							provider: model.provider,
 							kind: "incomplete-stream",
@@ -1170,11 +1242,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 
 				// sand-automation → cursor-grok-4.5-high often dumps a fenced
 				// `{"name":"Shell","arguments":{…}}` instead of toolCallPart.
-				// Gemini/GPT-mini thought-only turns hide the same JSON in thinking.
+				// Gemini/GPT-mini thought-only turns hide the same JSON in thinking,
+				// or emit ```tool_code / default_api.bash(...) instead.
 				if (!output.content.some(b => b.type === "toolCall")) {
 					const text = assistantTextForJsonPromotion(output.content);
 					const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
-					const promoted = parseJsonTextToolCall(text, advertised);
+					const promoted = parseJsonTextToolCall(text, advertised) ?? parseGeminiInbandToolCall(text, advertised);
 					if (promoted) {
 						output.content = output.content.filter(b => b.type !== "text" && b.type !== "thinking");
 						upsertTool({
@@ -1204,6 +1277,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					// cap is enough for native bash/read/write to appear.
 					if (!emptyToolRetryUsed && tools.length > 0) {
 						emptyToolRetryUsed = true;
+						if (
+							identity.class === "gemini" &&
+							anthropicWire.wireMode !== "keep-model" &&
+							anthropicWire.wireMode !== "parent-chat" &&
+							anthropicWire.wireMode !== "automation"
+						) {
+							geminiProductRetryUsed = true;
+						}
 						output.content = [];
 						output.usage = {
 							input: 0,
@@ -1217,6 +1298,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						logger.info("grokbot: retrying empty tool turn", {
 							modelId: model.id,
 							class: identity.class,
+							geminiProductRetry: geminiProductRetryUsed,
 						});
 						continue attempt;
 					}

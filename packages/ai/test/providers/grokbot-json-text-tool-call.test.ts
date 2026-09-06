@@ -5,6 +5,7 @@ import * as grokbotAuth from "../../src/providers/grokbot/auth";
 import {
 	advertisedNamesForJsonTextToolCall,
 	assistantTextForJsonPromotion,
+	parseGeminiInbandToolCall,
 	parseJsonTextToolCall,
 } from "../../src/providers/grokbot/json-text-tool-call";
 import {
@@ -51,6 +52,19 @@ describe("parseJsonTextToolCall", () => {
 				advertised,
 			),
 		).toEqual({ name: "bash", arguments: { command: "echo hi" } });
+	});
+
+	test("promotes Gemini default_api.bash tool_code (gemini-3-flash empty-body)", () => {
+		expect(
+			parseGeminiInbandToolCall(
+				'```tool_code\nprint(default_api.bash(command="echo tools-pong-gemini"))\n```',
+				advertised,
+			),
+		).toEqual({ name: "bash", arguments: { command: "echo tools-pong-gemini" } });
+		expect(
+			parseGeminiInbandToolCall('default_api.Shell(command="echo hi")', ["Shell", "bash"]),
+		).toEqual({ name: "Shell", arguments: { command: "echo hi" } });
+		expect(parseGeminiInbandToolCall("just thinking about files", advertised)).toBeUndefined();
 	});
 
 	test("assistantTextForJsonPromotion joins thinking so thought-only JSON can promote", () => {
@@ -172,6 +186,57 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 				type: "toolCall",
 				name: "bash",
 				arguments: { command: "echo tools-pong-think" },
+			}),
+		]);
+	});
+
+	test("promotes Gemini default_api tool_code hidden in thinking", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const thinking = frameConnectProto(
+			encodeInferenceStreamResponse({
+				thinkingPart: {
+					text: '```tool_code\ndefault_api.bash(command="echo tools-pong-flash")\n```',
+					isFinal: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(thinking, trailer)) as FetchImpl;
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+			sandToolsWire: "keep-model",
+		});
+		const context: Context = {
+			messages: [{ role: "user", content: "Use bash", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(gemini as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+		}).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				name: "bash",
+				arguments: { command: "echo tools-pong-flash" },
 			}),
 		]);
 	});
