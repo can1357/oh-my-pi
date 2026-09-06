@@ -1702,6 +1702,19 @@ function buildParams(
 		params.stop = seqs.length === 1 ? seqs[0] : seqs.slice(0, 4);
 	}
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
+	// `logit_bias`/`seed` are sampling parameters: several models (o-series,
+	// GPT-5 family) 400 on them, so they follow the same compatibility gate as
+	// temperature/penalties above instead of bypassing it.
+	if (options?.logitBias !== undefined && initialCompat.supportsSamplingParams) params.logit_bias = options.logitBias;
+	if (options?.responseFormat !== undefined) {
+		const responseFormat = options.responseFormat;
+		if (typeof responseFormat === "object" && responseFormat !== null) {
+			params.response_format = responseFormat as OpenAICompletionsParams["response_format"];
+		}
+	}
+	if (options?.user !== undefined) params.user = options.user;
+	if (options?.seed !== undefined && initialCompat.supportsSamplingParams) params.seed = options.seed;
+	if (options?.parallelToolCalls !== undefined) params.parallel_tool_calls = options.parallelToolCalls;
 
 	if (context.tools?.length) {
 		const builtTools = convertTools(context.tools, initialCompat, toolStrictModeOverride);
