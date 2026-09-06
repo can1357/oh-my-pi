@@ -183,6 +183,7 @@ Do not edit generated files.
 
 - It is read **only** at native locations: the active user agent directory and the nearest non-empty project `.omp/` directory selected by the cwd-to-repository-root walk. If that project directory has no `RULES.md`, OMP does not fall back to a farther `.omp/RULES.md`.
 - It is loaded as an **always-apply rule**, not as a context file, so it is re-attached near the current turn and keeps its hold across long sessions.
+- It is re-discovered from disk when a session starts and on session-scoped rebuilds such as `/clear` and `/new`, so creating or editing it while OMP is running takes effect at the next reset — no restart required.
 - It is **always sticky**: frontmatter cannot make it non-sticky. If you want conditional or opt-in behavior, write a normal rule file instead (see [Skills](./skills.md)).
 - Both top-level candidates are synthesized with the rule name `RULES`, and rule deduplication is name-based. In the usual case, a user `RULES.md` shadows the project `RULES.md`; they are not concatenated. Avoid naming a regular file under `.omp/rules/` or the user `rules/` directory `RULES.md`, because native regular rules load earlier and can shadow both sticky candidates.
 
