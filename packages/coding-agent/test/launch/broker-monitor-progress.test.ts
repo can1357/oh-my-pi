@@ -5,7 +5,11 @@ import * as net from "node:net";
 import * as path from "node:path";
 import { setProcessName, TempDir } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerStartOptions, startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
-import { createDaemonBrokerClient, type DaemonOutputUnregister } from "../../src/launch/client";
+import {
+	createDaemonBrokerClient,
+	type DaemonBrokerClient,
+	type DaemonOutputUnregister,
+} from "../../src/launch/client";
 import { daemonBrokerEndpoint } from "../../src/launch/paths";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -1547,7 +1551,12 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 20_000);
 
-	it("preserves an expired registration's artifact capture when the monitor republishes", async () => {
+	// A released registration leaves its capture on disk. A later subscription
+	// on the same artifact path continues that capture only when it acknowledges
+	// the size it already delivered (`artifactBytes`); otherwise the broker
+	// starts a fresh capture rather than appending behind bytes nobody vouched
+	// for.
+	async function republishCapture(continueCapture: boolean): Promise<void> {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-expire-");
 		const projectDir = path.join(tempDir.path(), "project");
 		const runtimeDir = path.join(tempDir.path(), "runtime");
@@ -1564,7 +1573,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		const firstClient = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const secondClient = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
-		const broker = startBroker(projectDir, runtimeDir, { outputReconnectGraceMs: 100 });
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 0 });
 		const firstNotifications: DaemonMonitorNotification[] = [];
 		const secondNotifications: DaemonMonitorNotification[] = [];
 		const completed = Promise.withResolvers<void>();
@@ -1594,14 +1603,24 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			});
 			await firstClient.request({ op: "send", name: "expire", data: "FIRST\n" });
 			await waitForOutputCount(firstNotifications, 1);
+			const first = firstNotifications.find(notification => notification.event === "daemon-output");
+			if (first?.event !== "daemon-output") throw new Error("Expected a delivered output batch");
+			// Every batch reports the artifact size it is backed by.
+			expect(first.artifactBytes).toBe("FIRST\n".length);
 			firstUnregister();
+			// The ping carries the emptied subscription list; its response proves
+			// the broker released the first registration before the daemon runs on.
+			await firstClient.request({ op: "ping" });
 			firstClient.close();
-			// Exceed the 100ms offline grace so the broker drops the registration
-			// while the daemon keeps running.
-			await Bun.sleep(400);
 
 			secondUnregister = secondClient.onOutput?.(
-				{ id: "expire-monitor", name: "expire", owner: "second-owner", artifactPath },
+				{
+					id: "expire-monitor",
+					name: "expire",
+					owner: "second-owner",
+					artifactPath,
+					...(continueCapture ? { artifactBytes: first.artifactBytes } : {}),
+				},
 				notification => {
 					secondNotifications.push(notification);
 					if (notification.event === "daemon-monitor-completed") completed.resolve();
@@ -1614,9 +1633,12 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			await secondClient.request({ op: "stop", name: "expire", timeoutMs: 2_000 });
 			await completed.promise;
 
-			// The republished sink appends: output captured before the expiry stays
-			// readable behind already-delivered artifact links.
-			expect(await Bun.file(artifactPath).text()).toBe("FIRST\nSECOND\n");
+			const second = secondNotifications.find(notification => notification.event === "daemon-output");
+			if (second?.event !== "daemon-output") throw new Error("Expected a delivered output batch");
+			const expected = continueCapture ? "FIRST\nSECOND\n" : "SECOND\n";
+			// Each range lands exactly once and the reported offset matches the file.
+			expect(await Bun.file(artifactPath).text()).toBe(expected);
+			expect(second.artifactBytes).toBe(expected.length);
 		} finally {
 			firstUnregister();
 			secondUnregister?.();
@@ -1627,6 +1649,14 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			await broker;
 			setProcessName(previousTitle);
 		}
+	}
+
+	it("continues a dropped registration's capture only past the artifact size the subscription acknowledges", async () => {
+		await republishCapture(true);
+	}, 20_000);
+
+	it("starts a fresh capture when a republished subscription acknowledges no artifact bytes", async () => {
+		await republishCapture(false);
 	}, 20_000);
 
 	it("replays unacknowledged output batches to a reconnecting subscription and honors cumulative acks", async () => {
@@ -2271,8 +2301,21 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 30_000);
 
-	it("expires a monitor whose unacknowledged delivery backlog reaches its bound", async () => {
-		using tempDir = TempDir.createSync("@omp-launch-monitor-backlog-");
+	interface EchoDaemonHarness {
+		client: DaemonBrokerClient;
+		broker: Promise<void>;
+		endpoint: string;
+		token: string;
+		artifactPath: string;
+		restoreTitle: () => void;
+	}
+
+	/** Start a broker plus one stdin-echo daemon named `name`, ready for raw monitor sockets. */
+	async function startEchoDaemon(
+		tempDir: TempDir,
+		name: string,
+		options: DaemonBrokerStartOptions,
+	): Promise<EchoDaemonHarness> {
 		const projectDir = path.join(tempDir.path(), "project");
 		const runtimeDir = path.join(tempDir.path(), "runtime");
 		await fs.mkdir(projectDir);
@@ -2284,20 +2327,304 @@ process.stdin.resume();
 process.stdin.on("data", chunk => process.stdout.write(chunk));
 `,
 		);
-		const artifactPath = path.join(tempDir.path(), "backlog.log");
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
-		const broker = startBroker(projectDir, runtimeDir, {
-			progressBatchIntervalMs: 0,
-			maxUnacknowledgedOutputNotifications: 3,
+		const broker = startBroker(projectDir, runtimeDir, options);
+		await client.request({
+			op: "start",
+			spec: {
+				name,
+				application: process.execPath,
+				args: [scriptPath],
+				env: {},
+				cwd: projectDir,
+				pty: false,
+				restart: "no",
+				persist: false,
+				detached: false,
+			},
 		});
-		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		return {
+			client,
+			broker,
+			endpoint: daemonBrokerEndpoint(projectDir, runtimeDir),
+			token: (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim(),
+			artifactPath: path.join(tempDir.path(), `${name}.log`),
+			restoreTitle: () => setProcessName(previousTitle),
+		};
+	}
+
+	async function stopEchoDaemon(harness: EchoDaemonHarness, name: string): Promise<void> {
+		await harness.client.request({ op: "stop", name, timeoutMs: 2_000 }).catch(() => undefined);
+		await harness.client.request({ op: "shutdown" }).catch(() => undefined);
+		harness.client.close();
+		await harness.broker;
+		harness.restoreTitle();
+	}
+
+	/**
+	 * The broker mirrors a chunk into the artifact as it arrives, so file
+	 * growth proves the broker consumed the echo. The batch timer then has 1 ms
+	 * granularity; a unix-socket round trip can finish inside it and fold the
+	 * next echo into the same batch, so wait past that window too. Fake timers
+	 * cannot drive the real broker socket loop here.
+	 */
+	async function waitForArtifactText(artifactPath: string, text: string): Promise<void> {
+		const deadline = Date.now() + 5_000;
+		while (Date.now() < deadline) {
+			if (
+				(
+					await Bun.file(artifactPath)
+						.text()
+						.catch(() => "")
+				).includes(text)
+			) {
+				await Bun.sleep(5);
+				return;
+			}
+			await Bun.sleep(10);
+		}
+		throw new Error(`Artifact never contained ${JSON.stringify(text)}`);
+	}
+
+	function outputSeqs(raw: RawBrokerSocket): number[] {
+		return raw.messages.filter(message => message.event === "daemon-output").map(message => Number(message.seq));
+	}
+
+	it("holds live output at the replay cap until acknowledgements reopen the window, then reports evictions as a gap", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-backlog-");
+		const harness = await startEchoDaemon(tempDir, "backlog", {
+			progressBatchIntervalMs: 0,
+			maxRetainedOutputBatches: 3,
+		});
+		const { client, endpoint, token, artifactPath } = harness;
+		const registration = {
+			id: "backlog-monitor",
+			registrationId: "backlog-registration",
+			name: "backlog",
+			owner: "raw-owner",
+			artifactPath,
+		};
+		const envelope = (id: string, ack?: { lastEpoch: string; lastSeq: number }): string =>
+			`${JSON.stringify({
+				id,
+				token,
+				outputSubscriptionId: "backlog-subscription",
+				outputSubscriptions: [{ ...registration, ...ack }],
+				operation: { op: "ping" },
+			})}\n`;
 		let raw: RawBrokerSocket | undefined;
 		try {
-			await client.request({
+			raw = await openRawBrokerSocket(endpoint);
+			raw.socket.write(envelope("register-backlog"));
+			await raw.waitFor(message => message.id === "register-backlog" && message.ok === true);
+			const send = async (index: number): Promise<void> => {
+				await client.request({ op: "send", name: "backlog", data: `LINE_${index}\n` });
+				await waitForArtifactText(artifactPath, `LINE_${index}\n`);
+			};
+			for (let index = 1; index <= 3; index++) {
+				await send(index);
+				await raw.waitFor(message => message.event === "daemon-output" && message.seq === index);
+			}
+			const first = raw.messages.find(message => message.event === "daemon-output");
+			const epoch = String(first?.epoch);
+			// Three unacknowledged batches are in flight: the fourth is retained but
+			// not written, and the monitor is not expired for falling behind.
+			await send(4);
+			raw.socket.write(envelope("probe-held"));
+			await raw.waitFor(message => message.id === "probe-held");
+			expect(outputSeqs(raw)).toEqual([1, 2, 3]);
+			expect(raw.messages.some(message => message.event === "daemon-monitor-expired")).toBeFalse();
+
+			// Acknowledging the in-flight prefix reopens the window for the held batch.
+			raw.socket.write(envelope("ack-3", { lastEpoch: epoch, lastSeq: 3 }));
+			const fourth = await raw.waitFor(message => message.event === "daemon-output" && message.seq === 4);
+			expect(fourth.replayGap).toBeUndefined();
+
+			// Two more fit the window; the rest are retained. Retention is capped at
+			// three, so the oldest retained batches — including one this socket
+			// never received — are evicted as output keeps arriving.
+			for (let index = 5; index <= 10; index++) await send(index);
+			raw.socket.write(envelope("probe-window"));
+			await raw.waitFor(message => message.id === "probe-window");
+			expect(outputSeqs(raw)).toEqual([1, 2, 3, 4, 5, 6]);
+
+			// The next ack surfaces the evicted, never-delivered batch (seq 7) as an
+			// explicit gap before the retained tail replays.
+			raw.socket.write(envelope("ack-6", { lastEpoch: epoch, lastSeq: 6 }));
+			const gap = await raw.waitFor(message => message.event === "daemon-output" && message.seq === 7);
+			expect(gap).toMatchObject({ text: "", replayGap: 1, suppressedEvents: 1, truncated: true });
+			await raw.waitFor(message => message.event === "daemon-output" && message.seq === 9);
+			raw.socket.write(envelope("ack-9", { lastEpoch: epoch, lastSeq: 9 }));
+			const tenth = await raw.waitFor(message => message.event === "daemon-output" && message.seq === 10);
+			expect(tenth).toMatchObject({ text: "LINE_10", artifactBytes: (await Bun.file(artifactPath).text()).length });
+			expect(outputSeqs(raw)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+			expect(raw.messages.some(message => message.event === "daemon-monitor-expired")).toBeFalse();
+			expect(await Bun.file(artifactPath).text()).toBe(
+				Array.from({ length: 10 }, (_, index) => `LINE_${index + 1}\n`).join(""),
+			);
+		} finally {
+			raw?.socket.destroy();
+			await stopEchoDaemon(harness, "backlog");
+		}
+	}, 20_000);
+
+	it("marks batches evicted by the count cap as a gap when a disconnected monitor reconnects", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-count-gap-");
+		const harness = await startEchoDaemon(tempDir, "count-gap", {
+			progressBatchIntervalMs: 0,
+			maxRetainedOutputBatches: 4,
+		});
+		const { client, endpoint, token, artifactPath } = harness;
+		const registration = {
+			id: "count-gap-monitor",
+			registrationId: "count-gap-registration",
+			name: "count-gap",
+			owner: "raw-owner",
+			artifactPath,
+		};
+		const envelope = (id: string, ack?: { lastEpoch: string; lastSeq: number }): string =>
+			`${JSON.stringify({
+				id,
+				token,
+				outputSubscriptionId: "count-gap-subscription",
+				outputSubscriptions: [{ ...registration, ...ack }],
+				operation: { op: "ping" },
+			})}\n`;
+		let first: RawBrokerSocket | undefined;
+		let second: RawBrokerSocket | undefined;
+		try {
+			first = await openRawBrokerSocket(endpoint);
+			first.socket.write(envelope("register-count-gap"));
+			await first.waitFor(message => message.id === "register-count-gap" && message.ok === true);
+			for (let index = 1; index <= 2; index++) {
+				await client.request({ op: "send", name: "count-gap", data: `LINE_${index}\n` });
+				await first.waitFor(message => message.event === "daemon-output" && message.seq === index);
+			}
+			const epoch = String(first.messages.find(message => message.event === "daemon-output")?.epoch);
+			first.socket.destroy();
+			// Six more batches against a four-deep buffer: seqs 1-4 are evicted.
+			for (let index = 3; index <= 8; index++) {
+				await client.request({ op: "send", name: "count-gap", data: `LINE_${index}\n` });
+				// Serializes echoes so each line is its own batch and seq.
+				await waitForArtifactText(artifactPath, `LINE_${index}\n`);
+			}
+			// Settlement drains every retained batch before the terminal notice is
+			// queued behind them, so the reconnect below observes a settled buffer.
+			await client.request({ op: "stop", name: "count-gap", timeoutMs: 2_000 });
+
+			// The client delivered seqs 1-2; evicted 3-4 are lost and must be
+			// announced, then the retained tail replays within the window (4) and
+			// the terminal notice waits behind the held batches.
+			second = await openRawBrokerSocket(endpoint);
+			second.socket.write(envelope("reconnect-count-gap", { lastEpoch: epoch, lastSeq: 2 }));
+			await second.waitFor(message => message.id === "reconnect-count-gap" && message.ok === true);
+			const gap = second.messages.find(message => message.event === "daemon-output");
+			expect(gap).toMatchObject({ seq: 4, text: "", replayGap: 2, suppressedEvents: 2, truncated: true });
+			expect(outputSeqs(second)).toEqual([4, 5, 6]);
+			expect(second.messages.some(message => message.event === "daemon-monitor-completed")).toBeFalse();
+			second.socket.write(envelope("ack-count-gap", { lastEpoch: epoch, lastSeq: 6 }));
+			await second.waitFor(message => message.event === "daemon-monitor-completed");
+			expect(outputSeqs(second)).toEqual([4, 5, 6, 7, 8]);
+			expect(second.messages.filter(message => "event" in message).at(-1)).toMatchObject({
+				event: "daemon-monitor-completed",
+			});
+			expect(second.messages.some(message => message.event === "daemon-monitor-expired")).toBeFalse();
+		} finally {
+			first?.socket.destroy();
+			second?.socket.destroy();
+			await stopEchoDaemon(harness, "count-gap");
+		}
+	}, 20_000);
+
+	it("bounds retained replay text by bytes and reports the evicted prefix on reconnect", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-byte-gap-");
+		// Each batch previews one 8-byte line; a 20-byte cap retains two.
+		const harness = await startEchoDaemon(tempDir, "byte-gap", {
+			progressBatchIntervalMs: 0,
+			maxRetainedOutputBytes: 20,
+		});
+		const { client, endpoint, token, artifactPath } = harness;
+		const registration = {
+			id: "byte-gap-monitor",
+			registrationId: "byte-gap-registration",
+			name: "byte-gap",
+			owner: "raw-owner",
+			artifactPath,
+		};
+		const envelope = (id: string): string =>
+			`${JSON.stringify({
+				id,
+				token,
+				outputSubscriptionId: "byte-gap-subscription",
+				outputSubscriptions: [registration],
+				operation: { op: "ping" },
+			})}\n`;
+		let first: RawBrokerSocket | undefined;
+		let second: RawBrokerSocket | undefined;
+		try {
+			first = await openRawBrokerSocket(endpoint);
+			first.socket.write(envelope("register-byte-gap"));
+			await first.waitFor(message => message.id === "register-byte-gap" && message.ok === true);
+			first.socket.destroy();
+			for (let index = 1; index <= 6; index++) {
+				await client.request({ op: "send", name: "byte-gap", data: `LINE_00${index}\n` });
+				await waitForArtifactText(artifactPath, `LINE_00${index}\n`);
+			}
+			await client.request({ op: "stop", name: "byte-gap", timeoutMs: 2_000 });
+
+			second = await openRawBrokerSocket(endpoint);
+			second.socket.write(envelope("reconnect-byte-gap"));
+			await second.waitFor(message => message.id === "reconnect-byte-gap" && message.ok === true);
+			const outputs = second.messages.filter(message => message.event === "daemon-output");
+			expect(outputs[0]).toMatchObject({ seq: 4, text: "", replayGap: 4, suppressedEvents: 4, truncated: true });
+			expect(outputs.slice(1)).toMatchObject([
+				{ seq: 5, text: "LINE_005" },
+				{ seq: 6, text: "LINE_006" },
+			]);
+			expect(second.messages.filter(message => "event" in message).at(-1)).toMatchObject({
+				event: "daemon-monitor-completed",
+			});
+			expect(await Bun.file(artifactPath).text()).toBe(
+				Array.from({ length: 6 }, (_, index) => `LINE_00${index + 1}\n`).join(""),
+			);
+		} finally {
+			first?.socket.destroy();
+			second?.socket.destroy();
+			await stopEchoDaemon(harness, "byte-gap");
+		}
+	}, 20_000);
+
+	it("lets a client without the output-monitor capability start and drive an unmonitored daemon", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-legacy-client-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.on("data", chunk => process.stdout.write(chunk));
+`,
+		);
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 0 });
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		let legacy: RawBrokerSocket | undefined;
+		try {
+			await client.request({ op: "ping" });
+			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
+			// A pre-v4 client never advertises outputSubscriptions/outputSubscriptionId.
+			legacy = await openRawBrokerSocket(endpoint);
+			const request = (id: string, operation: Record<string, unknown>): void => {
+				legacy?.socket.write(`${JSON.stringify({ id, token, operation })}\n`);
+			};
+			request("legacy-start", {
 				op: "start",
 				spec: {
-					name: "backlog",
+					name: "legacy",
 					application: process.execPath,
 					args: [scriptPath],
 					env: {},
@@ -2308,45 +2635,108 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 					detached: false,
 				},
 			});
-			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
-			const registration = {
-				id: "backlog-monitor",
-				registrationId: "backlog-registration",
-				name: "backlog",
-				owner: "raw-owner",
-				artifactPath,
-			};
-			raw = await openRawBrokerSocket(endpoint);
-			raw.socket.write(
-				`${JSON.stringify({
-					id: "register-backlog",
-					token,
-					outputSubscriptionId: "backlog-subscription",
-					outputSubscriptions: [registration],
-					operation: { op: "ping" },
-				})}\n`,
-			);
-			await raw.waitFor(message => message.id === "register-backlog" && message.ok === true);
-
-			for (let index = 1; index <= 3; index++) {
-				await client.request({ op: "send", name: "backlog", data: `LINE_${index}\n` });
-				await raw.waitFor(message => message.event === "daemon-output" && message.seq === index);
-			}
-			await client.request({ op: "send", name: "backlog", data: "LINE_4\n" });
-			await raw.waitFor(message => message.event === "daemon-monitor-expired");
-
-			expect(raw.messages.filter(message => message.event === "daemon-output")).toHaveLength(3);
-			expect(raw.messages.filter(message => message.event === "daemon-monitor-expired")).toHaveLength(1);
-			expect(await Bun.file(artifactPath).text()).toBe("LINE_1\nLINE_2\nLINE_3\nLINE_4\n");
+			const started = await legacy.waitFor(message => message.id === "legacy-start");
+			expect(started.ok).toBeTrue();
+			request("legacy-send", { op: "send", name: "legacy", data: "UNMONITORED\n" });
+			await legacy.waitFor(message => message.id === "legacy-send" && message.ok === true);
+			// Output reaches the daemon log, and a describe after it proves the
+			// socket stayed a plain RPC channel: no monitor frames, no error.
+			const waited = await client.request({
+				op: "wait",
+				name: "legacy",
+				for: "exit",
+				pattern: "UNMONITORED",
+				timeoutMs: 5_000,
+			});
+			if (waited.op !== "wait") throw new Error("unexpected wait result");
+			expect(waited.matched).toBe("UNMONITORED");
+			request("legacy-describe", { op: "describe", name: "legacy" });
+			const described = await legacy.waitFor(message => message.id === "legacy-describe");
+			expect(described.ok).toBeTrue();
+			expect(legacy.messages.some(message => "event" in message)).toBeFalse();
+			request("legacy-stop", { op: "stop", name: "legacy", timeoutMs: 2_000 });
+			const stopped = await legacy.waitFor(message => message.id === "legacy-stop");
+			expect(stopped.ok).toBeTrue();
 		} finally {
-			raw?.socket.destroy();
-			await client.request({ op: "stop", name: "backlog", timeoutMs: 2_000 }).catch(() => undefined);
+			legacy?.socket.destroy();
+			await client.request({ op: "stop", name: "legacy", timeoutMs: 2_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
 			setProcessName(previousTitle);
 		}
 	}, 20_000);
+
+	// The broker runs in-process here, so /proc/self/fd exposes every artifact
+	// descriptor it holds. Both release paths only log on failure; this checks
+	// the descriptor is really gone rather than trusting the log-and-continue.
+	it.skipIf(process.platform !== "linux")(
+		"releases the artifact descriptor when a monitor unregisters and when its daemon exits",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-launch-monitor-fd-");
+			const harness = await startEchoDaemon(tempDir, "fd-release", { progressBatchIntervalMs: 0 });
+			const { client, artifactPath } = harness;
+			const openDescriptors = async (): Promise<number> => {
+				let count = 0;
+				for (const entry of await fs.readdir("/proc/self/fd")) {
+					const target = await fs.readlink(`/proc/self/fd/${entry}`).catch(() => "");
+					if (target === artifactPath) count++;
+				}
+				return count;
+			};
+			const waitForRelease = async (): Promise<void> => {
+				const deadline = Date.now() + 5_000;
+				while (Date.now() < deadline) {
+					if ((await openDescriptors()) === 0) return;
+					await Bun.sleep(10);
+				}
+				throw new Error("artifact descriptor was never released");
+			};
+			let unregister: DaemonOutputUnregister | undefined;
+			let second: DaemonOutputUnregister | undefined;
+			try {
+				const notifications: DaemonMonitorNotification[] = [];
+				unregister = client.onOutput?.(
+					{ id: "fd-monitor", name: "fd-release", owner: "owner", artifactPath },
+					notification => {
+						notifications.push(notification);
+					},
+				);
+				if (!unregister) throw new Error("Expected output monitoring support");
+				await unregister.ready;
+				await client.request({ op: "send", name: "fd-release", data: "OPEN\n" });
+				await waitForOutputCount(notifications, 1);
+				expect(await openDescriptors()).toBe(1);
+
+				unregister();
+				await client.request({ op: "ping" });
+				await waitForRelease();
+
+				const completed = Promise.withResolvers<void>();
+				const later: DaemonMonitorNotification[] = [];
+				second = client.onOutput?.(
+					{ id: "fd-monitor-2", name: "fd-release", owner: "owner", artifactPath },
+					notification => {
+						later.push(notification);
+						if (notification.event === "daemon-monitor-completed") completed.resolve();
+					},
+				);
+				if (!second) throw new Error("Expected output monitoring support");
+				await second.ready;
+				await client.request({ op: "send", name: "fd-release", data: "AGAIN\n" });
+				await waitForOutputCount(later, 1);
+				expect(await openDescriptors()).toBe(1);
+				await client.request({ op: "stop", name: "fd-release", timeoutMs: 2_000 });
+				await completed.promise;
+				await waitForRelease();
+			} finally {
+				unregister?.();
+				second?.();
+				await stopEchoDaemon(harness, "fd-release");
+			}
+		},
+		20_000,
+	);
 
 	it("releases monitor sync tokens without reviving obsolete detached envelopes", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-sync-race-");
