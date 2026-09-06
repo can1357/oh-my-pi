@@ -6,7 +6,7 @@ import { ProgressLines } from "@oh-my-pi/pi-coding-agent/async/progress-lines";
 import { OutputSink } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { ToolAbortError, ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SETTINGS: Record<string, unknown> = {
@@ -382,6 +382,92 @@ describe("bash progress parameter", () => {
 		expect(events.at(-1)).toContain("completion:");
 		expect(events.at(-1)).toContain("stalled-line");
 		expect(events.at(-1)).toContain("after-stall");
+		await manager.dispose();
+	}, 10_000);
+
+	test("cancels instead of promoting when the tool is aborted during the drain", async () => {
+		using tempDir = TempDir.createSync("@omp-bash-drain-abort-");
+		const releasePath = path.join(tempDir.path(), "release");
+		const pidPath = path.join(tempDir.path(), "pid");
+		const artifact = { id: "drain-abort-progress", path: path.join(tempDir.path(), "output.txt") };
+		const manager = new AsyncJobManager({});
+		manager.registerProgressSink("Main", { deliver: () => {} });
+		manager.registerDeliverySink("Main", () => {});
+		const session = makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 100 });
+		session.allocateOutputArtifact = async () => artifact;
+		const tool = new BashTool(session);
+
+		// Same stall as above: the held mirror flush keeps the first chunk's
+		// barrier token pending, so promotion sits in its bounded drain window.
+		const releaseFlush = Promise.withResolvers<void>();
+		const flushHeld = Promise.withResolvers<void>();
+		const originalFlush = OutputSink.prototype.flushArtifact;
+		let held = false;
+		vi.spyOn(OutputSink.prototype, "flushArtifact").mockImplementation(async function (this: OutputSink) {
+			if (!held) {
+				held = true;
+				flushHeld.resolve();
+				await releaseFlush.promise;
+			}
+			return originalFlush.call(this);
+		});
+
+		const controller = new AbortController();
+		const execution = tool
+			.execute(
+				"drain-abort",
+				{
+					// The in-process shell's `$$` is the host pid; hold the loop in
+					// an external `sh` whose pid proves the command was killed.
+					command:
+						"printf 'stalled-line\\n'; " +
+						`sh -c 'echo $$ > "$PIDFILE"; while [ ! -f "$RELEASE" ]; do sleep 0.01; done'; ` +
+						"printf 'after-stall\\n'",
+					env: { RELEASE: releasePath, PIDFILE: pidPath },
+					async: "auto",
+					progress: "wake",
+				},
+				controller.signal,
+			)
+			.then(
+				result => ({ kind: "resolved" as const, result }),
+				(error: unknown) => ({ kind: "rejected" as const, error }),
+			);
+		await flushHeld.promise;
+		// Real delay: the grace and drain guard are wall-clock timers racing
+		// a live subprocess's I/O, and the drain start has no observable
+		// hook. 400 ms sits past the 100 ms grace and well inside the 1 s
+		// drain window on either side.
+		await Bun.sleep(400);
+		controller.abort();
+		const outcome = await execution;
+
+		expect(outcome.kind).toBe("rejected");
+		if (outcome.kind === "rejected") {
+			expect(outcome.error).toBeInstanceOf(ToolAbortError);
+		}
+		const [job] = manager.getAllJobs();
+		expect(job?.status).toBe("cancelled");
+
+		releaseFlush.resolve();
+		await manager.waitForAll();
+		const pid = Number.parseInt((await Bun.file(pidPath).text()).trim(), 10);
+		expect(Number.isInteger(pid)).toBe(true);
+		// The executor returns the cancelled result before the shell is reaped;
+		// poll the OS for the actual exit rather than guessing a delay.
+		const deadline = performance.now() + 5_000;
+		let alive = true;
+		while (alive && performance.now() < deadline) {
+			try {
+				process.kill(pid, 0);
+				await Bun.sleep(10);
+			} catch {
+				alive = false;
+			}
+		}
+		expect(alive).toBe(false);
+		expect(await Bun.file(releasePath).exists()).toBe(false);
+		expect(manager.getJob(job?.id ?? "")?.status).toBe("cancelled");
 		await manager.dispose();
 	}, 10_000);
 

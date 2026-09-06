@@ -404,6 +404,7 @@ type ManagedBashJobPromotion =
 			kind: "promoted";
 			foregroundPreview: string;
 	  }
+	| { kind: "aborted" }
 	| ManagedBashJobCompletion;
 
 interface ManagedBashJobHandle {
@@ -411,7 +412,12 @@ interface ManagedBashJobHandle {
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
 	stopUpdates: () => void;
-	promote: (delivery?: AsyncJobProgressDelivery) => Promise<ManagedBashJobPromotion>;
+	/**
+	 * Drain pre-promotion chunks and activate progress delivery. `signal` is
+	 * the tool's abort signal: a cancel that lands during the bounded drain
+	 * yields `aborted` instead of a promoted, still-live job.
+	 */
+	promote: (delivery?: AsyncJobProgressDelivery, signal?: AbortSignal) => Promise<ManagedBashJobPromotion>;
 }
 
 interface BashProgressDetails extends BashToolDetails {
@@ -1117,7 +1123,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			stopUpdates: () => {
 				forwardUpdates = false;
 			},
-			promote: async delivery => {
+			promote: async (delivery, signal) => {
+				if (signal?.aborted) return { kind: "aborted" };
 				// Mark the boundary before yielding. Chunks entering from this
 				// point receive the next sampler epoch, while a throttle-merged
 				// delivery keeps the stamp of its earliest pre-boundary byte.
@@ -1126,6 +1133,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				const prePromotionDeliveries = chunkDeliveryBarrier;
 				const drainGuard = Promise.withResolvers<"stalled">();
 				const drainTimer = setTimeout(() => drainGuard.resolve("stalled"), PROMOTION_DRAIN_TIMEOUT_MS);
+				const abortGuard = Promise.withResolvers<"aborted">();
+				const onAbort = (): void => abortGuard.resolve("aborted");
+				signal?.addEventListener("abort", onAbort, { once: true });
 				try {
 					// Mirror-mode artifact flushing and throttling can delay onChunk,
 					// which owns latestText. Drain those entry-time-stamped chunks
@@ -1134,17 +1144,20 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					// token even if artifact persistence fails; a delivery that still
 					// stalls past the guard cannot hold the turn: promote without it,
 					// and mark coverage gapped so completion keeps the terminal text
-					// that the preview never showed.
+					// that the preview never showed. A cancel that lands inside the
+					// drain window aborts instead of promoting a live job.
 					const drain = await Promise.race([
 						prePromotionDeliveries.then(() => "drained" as const),
 						completion.promise.then(() => "settled" as const),
 						drainGuard.promise,
+						abortGuard.promise,
 					]);
 					const foregroundPreview = latestText;
 					const previewComplete = drain !== "stalled";
 					pendingChunkDeliveries.length = 0;
 					nextChunkDelivery = 0;
 					if (settledCompletion) return settledCompletion;
+					if (drain === "aborted") return { kind: "aborted" };
 					if (delivery) {
 						const foregroundStreamProvenance = progressSampler?.resetDisplayAndCaptureProvenance();
 						manager.activateProgressDelivery(
@@ -1157,6 +1170,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					}
 					return { kind: "promoted", foregroundPreview };
 				} finally {
+					signal?.removeEventListener("abort", onAbort);
 					clearTimeout(drainTimer);
 					promotionRequested = false;
 				}
@@ -1401,12 +1415,18 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				throw new ToolAbortError(job.getLatestText() || "Command aborted");
 			}
 			job.stopUpdates();
-			const promotion = await job.promote(progress);
+			const promotion = await job.promote(progress, signal);
 			if (promotion.kind === "completed") {
 				return promotion.result;
 			}
 			if (promotion.kind === "failed") {
 				throw promotion.error;
+			}
+			if (promotion.kind === "aborted") {
+				// Same outcome as an abort before the drain: the job never
+				// becomes a background result the model would later poll.
+				autoBgManager.cancel(job.jobId);
+				throw new ToolAbortError(job.getLatestText() || "Command aborted");
 			}
 			autoBgManager.resumeDeliveries([job.jobId]);
 			// "steer": a queued user/peer message arrived mid-wait — background
