@@ -1189,10 +1189,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		if (executionMode !== "foreground" && !this.#asyncEnabled) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
 		}
-		const agentId = this.session.getAgentId?.();
-		if (executionMode !== "foreground" && agentId && this.session.agentRegistry?.get(agentId)?.kind === "advisor") {
-			throw new ToolError("Advisor sessions cannot run background Bash jobs; use foreground execution.");
-		}
 		if (progress && executionMode === "foreground") {
 			throw new ToolError(
 				'progress requires `async: true` or `async: "auto"`; foreground commands return their output directly.',

@@ -178,20 +178,28 @@ describe("bash progress parameter", () => {
 		);
 	});
 
-	test("rejects background execution for advisor sessions without delivery sinks", async () => {
-		const manager = new AsyncJobManager({});
+	test("keeps advisor sessions inline for explicit and implicit background modes", async () => {
+		// The SDK builds advisor tool sessions with the literal agent id
+		// "advisor" (never a registry owner) and no async job manager, because
+		// nothing would deliver a job's result to them.
 		const session = {
-			...makeSession(manager),
+			...makeSession(new AsyncJobManager({}), { "bash.autoBackground.enabled": true }),
+			asyncJobManager: undefined,
 			getAgentId: () => "advisor",
-			agentRegistry: { get: () => ({ kind: "advisor" }) },
+			agentRegistry: { get: () => undefined },
 		} as unknown as ToolSession;
 		const tool = new BashTool(session);
 
 		for (const asyncMode of [true, "auto"] as const) {
 			await expect(tool.execute("advisor-background", { command: "echo no", async: asyncMode })).rejects.toThrow(
-				"Advisor sessions cannot run background Bash jobs",
+				"job manager unavailable for this session",
 			);
 		}
+		const result = await tool.execute("advisor-foreground", { command: "printf 'advisor-inline\\n'" });
+		expect(result.details?.async).toBeUndefined();
+		expect(result.content).toContainEqual(
+			expect.objectContaining({ type: "text", text: expect.stringContaining("advisor-inline") }),
+		);
 	});
 
 	test("rejects PTY with async auto at the tool boundary", async () => {
