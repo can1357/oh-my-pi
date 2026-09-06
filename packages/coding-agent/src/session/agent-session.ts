@@ -119,6 +119,7 @@ import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { WorkPoolRegistry } from "../task/workpool";
 import { isScoutSpawnable } from "../task/spawn-policy";
+import { discoverAgents, getAgent } from "../task/discovery";
 import type { BashPtyOptions, BashResult } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -365,6 +366,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
 import type { PersonaRuntime } from "./persona-runtime";
 import type { SessionToolPolicy } from "./tool-policy";
+import { readPersistedAgentPersona } from "./persisted-persona";
 import { createDefaultPersonaModelHooks } from "./persona-model-hooks";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
@@ -2064,6 +2066,70 @@ export class AgentSession {
 	}
 
 	/**
+	 * j2n: session-level persona reconcile for headless surfaces (ACP/RPC/SDK).
+	 * The TUI installs a single-slot reconciler (#reconcilePersonaFromSession)
+	 * that owns this; when the slot is empty, switchSession calls THIS instead so
+	 * a switch to (or reload of) a persona session re-enters the persona from the
+	 * target journal, and a failed switch re-enters the SOURCE journal's persona.
+	 * Never journal-writes on success (the entry already exists); a persona the
+	 * journal names but discovery can no longer resolve degrades to unrestricted
+	 * with a warn log — matching the ACP load path, minus client notices.
+	 */
+	async #reconcilePersonaAfterSwitch(
+		sessionFile: string | undefined,
+		options: { fromRollback: boolean },
+	): Promise<void> {
+		const runtime = this.getPersonaRuntime();
+		if (!runtime) return;
+		const desired = readPersistedAgentPersona(this.sessionManager.getEntries());
+		if (!desired) {
+			// Target has no persona entry: the teardown before the switch already
+			// exited the source persona (and a rollback restored the source state,
+			// whose persona was ALSO exited by that same teardown — nothing to do).
+			if (options.fromRollback) {
+				logger.warn("Persona re-activation after switch rollback skipped: journal has no agent entry", {
+					sessionFile,
+				});
+			}
+			return;
+		}
+		try {
+			const { agents } = await discoverAgents(this.sessionManager.getCwd(), undefined, this.effectiveExtensionRoots);
+			const agent = getAgent(agents, desired.name);
+			if (!agent) {
+				logger.warn(`Session persona "${desired.name}" is no longer available; resuming without it`, {
+					sessionFile,
+				});
+				return;
+			}
+			// j2g: the journal's baseline (captured at the ORIGINAL enter) is the
+			// authoritative pre-persona state on resume.
+			const baselineOverride = desired.baseline
+				? {
+						model: desired.baseline.model
+							? this.modelRegistry
+									.getAvailable()
+									.find(candidate => `${candidate.provider}/${candidate.id}` === desired.baseline?.model)
+							: undefined,
+						thinkingLevel: desired.baseline.thinkingLevel
+							? parseConfiguredThinkingLevel(desired.baseline.thinkingLevel)
+							: undefined,
+					}
+				: undefined;
+			await runtime.reconcile(
+				{ agent, explicit: desired.explicit, baselineOverride },
+				createDefaultPersonaModelHooks(this),
+			);
+		} catch (error) {
+			logger.warn("Failed to reconcile persisted persona after session switch", {
+				sessionFile,
+				persona: desired.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	/**
 	 * Re-anchor mode state to the session a branch just minted. Branching mints a
 	 * new session id/file (see {@link SessionManager.createBranchedSession}), so
 	 * without this the interactive-mode reconciler keeps the pre-branch vibe owner
@@ -2074,7 +2140,13 @@ export class AgentSession {
 	 */
 	async #reconcileModeAfterBranch(): Promise<void> {
 		try {
-			await this.#sessionSwitchReconciler?.();
+			// j2n: headless surfaces get the session-level persona reconcile here
+			// too — a branch of a persona session keeps the persona active.
+			if (this.#sessionSwitchReconciler === undefined) {
+				await this.#reconcilePersonaAfterSwitch(this.sessionFile, { fromRollback: false });
+				return;
+			}
+			await this.#sessionSwitchReconciler();
 		} catch (error) {
 			logger.warn("Failed to reconcile session mode after branch", {
 				sessionFile: this.sessionFile,
@@ -7895,16 +7967,40 @@ export class AgentSession {
 			persist?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
-		return this.#models.setModel(model, role, options);
+		const result = await this.#models.setModel(model, role, options);
+		this.#noteUserModelChange();
+		return result;
 	}
 
 	/** Selects a model for this session without updating persisted model settings. */
-	setModelTemporary(
+	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
-		return this.#models.setModelTemporary(model, thinkingLevel, options);
+		// j2p: consult the re-entrancy flag BEFORE awaiting — the persona's own
+		// hooks.apply runs inside this same call stack when re-entering.
+		const personaApplying = this.#personaRuntime?.isApplyingPersonaModel ?? false;
+		try {
+			return await this.#models.setModelTemporary(model, thinkingLevel, options);
+		} finally {
+			if (!personaApplying) this.#noteUserModelChange();
+		}
+	}
+
+	/**
+	 * j2p: a model/thinking change landed OUTSIDE the persona's own apply (a
+	 * user /model pick, the picker, RPC set_model). While a persona is active,
+	 * re-root the runtime baseline so the persona's exit restores the user's
+	 * newer model instead of the stale pre-enter one. A deferred-flush restore
+	 * lands here too (TUI flushPendingModelSwitch → setModelTemporary); by then
+	 * the persona is already exited and #activeBaseline is empty, so this is a
+	 * no-op — exactly what that path needs.
+	 */
+	#noteUserModelChange(): void {
+		const runtime = this.#personaRuntime;
+		if (!runtime?.policy.isPersonaActive() || runtime.isApplyingPersonaModel) return;
+		runtime.noteUserModelChange();
 	}
 
 	/** Cycles the scoped model set, or all available models when no scope exists. */
@@ -9059,8 +9155,22 @@ export class AgentSession {
 				this.#clearSessionScopedToolState();
 			}
 			this.#reconnectToAgent();
+			// j2n: persona re-activation on headless surfaces. The TUI owns a
+			// single-slot reconciler (#reconcilePersonaFromSession); when it is
+			// installed the surface handles both persona and mode reconciliation.
+			// When it is NOT (ACP/RPC/SDK/embedder surfaces), the source persona's
+			// teardown above left nothing re-activating the TARGET journal's
+			// persona — and a FAILED switch's rollback must reinstate the SOURCE
+			// persona. The session-level reconcile covers both. Best-effort either
+			// way: a reconcile failure must not roll back an otherwise-successful
+			// switch (the helper swallows internally; the TUI reconciler's errors
+			// were swallowed here before j2n — keep that).
 			try {
-				await this.#sessionSwitchReconciler?.();
+				if (this.#sessionSwitchReconciler === undefined) {
+					await this.#reconcilePersonaAfterSwitch(sessionPath, { fromRollback: false });
+				} else {
+					await this.#sessionSwitchReconciler();
+				}
 			} catch (error) {
 				logger.warn("Failed to reconcile session mode after switch", {
 					targetSessionFile: sessionPath,
@@ -9147,8 +9257,15 @@ export class AgentSession {
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
 			this.#reconnectToAgent();
+			// j2n: a rolled-back switch reinstates the SOURCE session (the restored
+			// state above) — headless surfaces must re-enter its persona; the TUI
+			// reconciler already covers it when installed.
 			try {
-				await this.#sessionSwitchReconciler?.();
+				if (this.#sessionSwitchReconciler === undefined) {
+					await this.#reconcilePersonaAfterSwitch(previousSessionFile, { fromRollback: true });
+				} else {
+					await this.#sessionSwitchReconciler();
+				}
 			} catch (reconcileError) {
 				logger.warn("Failed to reconcile session mode after switch rollback", {
 					targetSessionFile: sessionPath,

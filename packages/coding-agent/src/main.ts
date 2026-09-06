@@ -41,6 +41,7 @@ import {
 	resolveCliModel,
 	resolveModelRoleValue,
 	resolveModelScope,
+	type ResolveCliModelResult,
 	type ScopedModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
@@ -1084,10 +1085,7 @@ export function applyResolvedSystemPromptInputs(
  * alone can match the same id on another provider; persisting the resolved
  * `provider/model` form keeps resume reconcile pinned to the requested provider.
  */
-function personaExplicitModelPattern(
-	parsed: Args,
-	resolved: ReturnType<typeof resolveCliModel> | undefined,
-): string | undefined {
+function personaExplicitModelPattern(parsed: Args, resolved: ResolveCliModelResult | undefined): string | undefined {
 	if (!parsed.model) return undefined;
 	if (!parsed.provider) return parsed.model;
 	return resolved?.model ? `${resolved.model.provider}/${resolved.model.id}` : `${parsed.provider}/${parsed.model}`;
@@ -1161,7 +1159,7 @@ export async function buildSessionOptions(
 	// createAgentSession's post-extension re-resolution (issue #6694); the
 	// scoped thinking-level seed below must be deferred along with the model.
 	let deferredDefaultRole = false;
-	let resolvedCliModel: ReturnType<typeof resolveCliModel> | undefined;
+	let resolvedCliModel: ResolveCliModelResult | undefined;
 	if (parsed.model) {
 		resolvedCliModel = resolveCliModel({
 			cliProvider: parsed.provider,

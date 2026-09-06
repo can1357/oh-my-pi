@@ -113,6 +113,7 @@ import { HistoryStorage } from "../session/history-storage";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { readPersistedAgentPersona, serializePersonaBaseline } from "../session/persisted-persona";
 import { createDefaultPersonaModelHooks, type PersonaModelApplyHooks } from "../session/persona-model-hooks";
+import type { PersonaExplicitOverrides } from "../session/tool-policy";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
@@ -5991,7 +5992,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showError(`Unknown agent: ${agentName}. Available: ${available}`);
 			return;
 		}
-		await this.#applyPersonaSwitch(agent);
+		// j2m: the CLI `--tools`/`--no-tools` ceiling is durable policy state the
+		// runtime does not know about — `enter` with empty explicit overrides would
+		// let a wider persona frontmatter widen the session past it. Serialize the
+		// ceiling into `explicit.tools` BEFORE enter so #computePersonaGrant's
+		// intersect path runs (cliGrant null → leave explicit.tools undefined).
+		const cliGrant = this.session.getToolPolicy()?.cliGrant ?? null;
+		const explicitOverrides: PersonaExplicitOverrides = cliGrant ? { tools: [...cliGrant] } : {};
+		await this.#applyPersonaSwitch(agent, explicitOverrides);
 		// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
 		// j2g: the runtime's captured pre-persona baseline rides the entry so a
 		// resume can re-enter with it as the authoritative exit baseline.
@@ -6000,6 +6008,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		this.sessionManager.appendModeChange("agent", {
 			name: agent.name,
+			...(Object.keys(explicitOverrides).length > 0 ? { explicit: explicitOverrides } : {}),
 			...(baseline ? { baseline } : {}),
 		});
 		this.showStatus(`Agent persona: ${agent.name}`);
@@ -6116,7 +6125,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Shared switch body: enter with TUI hooks, then refresh UI state. */
-	async #applyPersonaSwitch(agent: AgentDefinition): Promise<void> {
+	async #applyPersonaSwitch(agent: AgentDefinition, explicit: PersonaExplicitOverrides = {}): Promise<void> {
 		const runtime = this.session.getPersonaRuntime();
 		if (!runtime) return;
 		const hooks = this.#createPersonaModelHooks();
@@ -6124,7 +6133,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Plan-mode parity: a persona switch rebuilds the system prompt, which
 			// predictably invalidates the provider prompt cache (plan §9).
 			this.lastAssistantUsage = undefined;
-			await runtime.enter(agent, {}, hooks);
+			await runtime.enter(agent, explicit, hooks);
 			await this.#loadPersonaPickerAgents();
 			// The activation notice runs only on success — an enter failure
 			// surfaces as the error; a success notice on top would claim the

@@ -29,6 +29,8 @@ interface SessionStub {
 	enabledToolNames: string[];
 	mountedToolNames: string[];
 	activeToolNames: string[];
+	/** Simulated tool registry (registered ≠ enabled: dormant tools included). */
+	registeredToolNames: string[];
 	model: { provider: string; id: string } | undefined;
 	thinkingLevel: string | undefined;
 	// j2g: reconcile's baselineOverride carries a Model-shaped object; the stub
@@ -55,6 +57,7 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 		enabledToolNames: ["read", "grep", "glob", "write"],
 		mountedToolNames: ["xd://alpha"],
 		activeToolNames: ["read", "grep", "glob", "write"],
+		registeredToolNames: [...ALL_TOOLS],
 		model: undefined,
 		refreshBaseSystemPromptCalls: 0,
 		thinkingLevel: undefined,
@@ -77,6 +80,7 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 		getEnabledToolNames: () => [...stub.enabledToolNames],
 		getMountedXdevToolNames: () => [...stub.mountedToolNames],
 		getActiveToolNames: () => [...stub.activeToolNames],
+		getAllToolNames: () => [...stub.registeredToolNames],
 		get model() {
 			return stub.model;
 		},
@@ -135,10 +139,9 @@ function makeHooks(overrides: Partial<PersonaModelApplyHooks> = {}): PersonaMode
 		...overrides,
 	};
 }
-
-function makeRuntime(session: AgentSession, registryOverride?: ReadonlySet<string>): PersonaRuntime {
+function makeRuntime(session: AgentSession, stub?: SessionStub): PersonaRuntime {
 	const policy = new SessionToolPolicy({
-		registry: registryOverride ? () => registryOverride : () => ALL_TOOLS,
+		registry: () => (stub ? new Set(stub.registeredToolNames) : ALL_TOOLS),
 		isDefaultActive: () => true,
 	});
 	return new PersonaRuntime(policy, session);
@@ -167,6 +170,7 @@ describe("PersonaRuntime", () => {
 			"activePresentationSnapshot",
 			"appendPrompt",
 			"baseModelOverride",
+			"enterRegistryNames",
 			"mountedToolNames",
 			"policy",
 			"spawns",
@@ -653,7 +657,8 @@ describe("PersonaRuntime", () => {
 		});
 		// The mount name must be registry-visible (production: xd:// aliases live
 		// in the canonical registry) or the policy filter would deny it.
-		const runtime = makeRuntime(session, new Set([...ALL_TOOLS, "xd://alpha"]));
+		stub.registeredToolNames = [...ALL_TOOLS, "xd://alpha"];
+		const runtime = makeRuntime(session, stub);
 		await runtime.enter(makeAgent(), {}, makeHooks()); // unrestricted persona: everything stays granted
 
 		const last = stub.presentationCalls.at(-1);
@@ -675,6 +680,44 @@ describe("PersonaRuntime", () => {
 
 		const last = stub.presentationCalls.at(-1);
 		expect(last?.toolNames).toEqual(["read", "grep", "write"]); // glob stays OUT
+		expect(last?.mountedToolNames).toEqual(["xd://alpha"]);
+	});
+
+	// j2l merge regression: a tool REGISTERED while the persona was active is
+	// absent from the frozen pre-enter snapshot — a naive restore would drop it.
+	it("exit keeps tools registered mid-persona (j2l merge)", async () => {
+		const { stub, session } = makeSessionStub();
+		const runtime = makeRuntime(session, stub);
+		// Registry BEFORE enter: the built-ins, no extension tool yet; the
+		// pre-persona presentation has `glob` DEACTIVATED (in registry, not
+		// enabled) so the test also pins that the merge stays selective.
+		stub.registeredToolNames = ["read", "grep", "glob", "write", "edit", "bash", "task", "hub"];
+		stub.enabledToolNames = ["read", "grep", "write"];
+		await runtime.enter(makeAgent(), {}, makeHooks());
+		// Mid-persona: an extension registers a default-active tool; the funnel
+		// presents it (a null, registry-wide grant covers registered names).
+		stub.registeredToolNames = [...stub.registeredToolNames, "extension-tool"];
+		stub.enabledToolNames = [...stub.enabledToolNames, "extension-tool"];
+		await runtime.exit(makeHooks());
+
+		const last = stub.presentationCalls.at(-1);
+		// Post-exit: pre-persona tools restored AND the mid-persona registration
+		// survives (live registry ∩ post-exit effective set, not in the snapshot).
+		expect(last?.toolNames).toContain("extension-tool");
+		expect(last?.toolNames).toContain("write");
+	});
+
+	// j2l merge: the union must not resurrect a pre-entry deactivation — a name
+	// the user toggled OFF before the persona entered stays off after exit.
+	it("exit does not resurrect pre-entry deactivations via the merge (j2l)", async () => {
+		const { stub, session } = makeSessionStub();
+		const runtime = makeRuntime(session);
+		stub.enabledToolNames = ["read", "grep", "write"]; // `glob` deactivated pre-entry
+		await runtime.enter(makeAgent({ tools: ["read", "grep", "glob"] }), {}, makeHooks());
+		await runtime.exit(makeHooks());
+
+		const last = stub.presentationCalls.at(-1);
+		expect(last?.toolNames).not.toContain("glob");
 		expect(last?.mountedToolNames).toEqual(["xd://alpha"]);
 	});
 
@@ -744,6 +787,87 @@ describe("PersonaRuntime", () => {
 		expect(stub.thinkingLevel).toBe(Effort.High);
 		expect(stub.setThinkingCalls.at(-1)).toBe(Effort.High); // explicit restore ran
 		expect(stub.model).toEqual({ provider: "stub", id: "persona-model" });
+	});
+
+	// j2p: a user model/thinking change made while the persona is active
+	// re-roots the runtime baseline — the persona's exit restores the USER's
+	// newer model, not the stale pre-enter one.
+	it("noteUserModelChange re-roots the baseline; exit restores the user model (j2p)", async () => {
+		const { stub, session } = makeSessionStub();
+		const runtime = makeRuntime(session);
+		stub.model = { provider: "stub", id: "m0" };
+		stub.thinkingLevel = "low";
+		await runtime.enter(
+			makeAgent({ tools: ["read"] }),
+			{},
+			makeHooks({
+				apply: async () => {
+					stub.model = { provider: "stub", id: "persona-model" };
+					stub.thinkingLevel = Effort.High;
+				},
+			}),
+		);
+
+		// The user picks M1 mid-persona (session state mutated, then notified —
+		// the exact shape AgentSession.setModelTemporary produces).
+		stub.model = { provider: "stub", id: "m1" };
+		stub.thinkingLevel = Effort.Medium;
+		expect(runtime.isApplyingPersonaModel).toBe(false);
+		runtime.noteUserModelChange();
+
+		await runtime.exit(makeHooks());
+		expect(stub.model).toEqual({ provider: "stub", id: "m1" });
+		expect(stub.thinkingLevel).toBe(Effort.Medium);
+	});
+
+	// j2p: without a user pick, exit still restores the ORIGINAL baseline —
+	// noteUserModelChange is an opt-in re-root, not a live-capture on exit.
+	it("noteUserModelChange is not called by the persona's own apply (j2p)", async () => {
+		const { stub, session } = makeSessionStub();
+		const runtime = makeRuntime(session);
+		stub.model = { provider: "stub", id: "m0" };
+		await runtime.enter(
+			makeAgent({ tools: ["read"] }),
+			{},
+			makeHooks({
+				apply: async () => {
+					// hooks.apply runs with the re-entrancy flag set.
+					expect(runtime.isApplyingPersonaModel).toBe(true);
+					stub.model = { provider: "stub", id: "persona-model" };
+				},
+			}),
+		);
+		expect(runtime.isApplyingPersonaModel).toBe(false);
+
+		await runtime.exit(makeHooks());
+		expect(stub.model).toEqual({ provider: "stub", id: "m0" });
+	});
+
+	// j2p: a re-root with NO baseline captured (deferred enter) is a no-op —
+	// the surface queue owns the pending persona model; nothing to re-root.
+	it("noteUserModelChange without a captured baseline is a no-op (j2p)", async () => {
+		const { stub, session } = makeSessionStub({ isStreaming: true });
+		const runtime = makeRuntime(session);
+		await runtime.enter(
+			makeAgent({ tools: ["read"] }),
+			{},
+			makeHooks({
+				shouldDeferModelSwitch: () => true,
+				deferModelSwitchWhileStreaming: () => {},
+			}),
+		);
+		stub.model = { provider: "stub", id: "user-model" };
+		runtime.noteUserModelChange();
+
+		// Exit mid-turn: the (still absent) baseline queues nothing model-side;
+		// the surface queue owns the pending state.
+		await runtime.exit(
+			makeHooks({
+				shouldDeferModelSwitch: () => true,
+				deferModelRestoreWhileStreaming: () => {},
+			}),
+		);
+		expect(stub.model).toEqual({ provider: "stub", id: "user-model" });
 	});
 });
 describe("PersonaSwitchTransaction", () => {

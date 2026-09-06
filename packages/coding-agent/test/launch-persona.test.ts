@@ -8,6 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { readPersistedAgentPersona } from "@oh-my-pi/pi-coding-agent/session/persisted-persona";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { discoverAgents, getAgent } from "@oh-my-pi/pi-coding-agent/task";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { DiscoveredAgent } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
@@ -349,5 +350,69 @@ describe("--agent launch-as-switch", () => {
 			lines.map(line => JSON.parse(line) as { type: unknown; mode?: unknown; data?: unknown }),
 		);
 		expect(desired?.explicit?.tools).toEqual([]);
+	});
+
+	// j2m (PRRT_kwDOQxs0bc6ftJ2Z): a live /agent switch under a CLI tool ceiling
+	// must serialize the ceiling into explicit.tools BEFORE enter, so the journal
+	// entry carries it and a resume cannot widen the persona past it.
+	it("live persona switch under --tools persists the CLI ceiling as explicit.tools (j2m)", async () => {
+		await writeFixtureAgents({ name: "fixture-reader.md", content: READER_AGENT_MD });
+		// A persona with a WIDER frontmatter toolset than the CLI ceiling.
+		await writeFixtureAgents({
+			name: "fixture-wide.md",
+			content: `---
+name: fixture-wide
+description: Persona with a wide toolset
+tools: [read, write, bash]
+---
+
+You are the wide persona.`,
+		});
+
+		const launched = await launch({
+			args: ["--agent", "fixture-reader", "--tools", "read,write"],
+			extraOptions: {
+				sessionManager: SessionManager.create(workspace.path(), path.join(workspace.path(), "sessions")),
+			},
+		});
+		expect(launched.getPersonaRuntime()?.policy.isPersonaActive()).toBe(true);
+
+		// Live-switch to the WIDE persona — the CLI ceiling must ride the entry.
+		const runtime = launched.getPersonaRuntime()!;
+		const { agents } = await discoverAgents(workspace.path());
+		const wide = getAgent(agents, "fixture-wide");
+		expect(wide).toBeDefined();
+		// Enter the wide persona through the same seam the TUI/ACP handler uses:
+		// explicit overrides carrying the session's durable CLI ceiling.
+		const cliGrant = launched.getToolPolicy()?.cliGrant;
+		expect(cliGrant).not.toBeNull();
+		const explicitOverrides = cliGrant ? { tools: [...cliGrant] } : {};
+		await runtime.reconcile(
+			{ agent: wide!, explicit: explicitOverrides },
+			{ apply: async () => {}, restore: async () => {} },
+		);
+		launched.sessionManager.appendModeChange("agent", {
+			name: wide!.name,
+			...(Object.keys(explicitOverrides).length > 0 ? { explicit: explicitOverrides } : {}),
+		});
+
+		// bash was in the wide frontmatter but OUTSIDE the CLI ceiling: still denied.
+		const policy = launched.getToolPolicy()!;
+		expect(policy.isPersonaActive()).toBe(true);
+		expect(policy.effective("bash")).toBe(false);
+		expect(policy.effective("read")).toBe(true);
+		expect(policy.effective("write")).toBe(true);
+
+		// The journal entry carries the ceiling so a resume reconcile cannot widen.
+		await launched.sessionManager.ensureOnDisk();
+		await launched.sessionManager.flush();
+		const sessionFile = launched.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file for a persona launch");
+		const lines = (await fs.readFile(sessionFile, "utf-8")).split("\n").filter(line => line.trim() !== "");
+		const desired = readPersistedAgentPersona(
+			lines.map(line => JSON.parse(line) as { type: unknown; mode?: unknown; data?: unknown }),
+		);
+		expect(desired?.name).toBe("fixture-wide");
+		expect(desired?.explicit?.tools).toEqual(["read", "write"]);
 	});
 });

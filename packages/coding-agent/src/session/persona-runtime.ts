@@ -48,6 +48,8 @@ export interface PersonaSwitchSnapshot {
 	activeBaseline: ModelOverrideState | undefined;
 	/** Pre-enter presentation captured by the active persona's enter (j2l). */
 	activePresentationSnapshot: { tools: readonly string[]; mountedToolNames: readonly string[] } | undefined;
+	/** Tool-registry names at the active persona's enter (j2l merge). */
+	enterRegistryNames: ReadonlySet<string> | undefined;
 }
 
 /** The persona a `reconcile()` call wants active. */
@@ -98,6 +100,17 @@ export class PersonaRuntime {
 	 * surviving persona's own entry snapshot.
 	 */
 	#activePresentationSnapshot: { tools: readonly string[]; mountedToolNames: readonly string[] } | undefined;
+	/**
+	 * Tool registry names at enter time (j2l merge). The frozen pre-enter
+	 * presentation snapshot cannot contain tools REGISTERED while the persona was
+	 * active — exit would drop them. A name in the live registry but absent here
+	 * was registered mid-persona; exit unions it into the restored presentation
+	 * (the post-exit effective set already decides default-active/toggled state).
+	 * Cleared on exit and recaptured per enter; round-trips through
+	 * `snapshot()`/`restore()` so rollback reinstates the surviving persona's
+	 * own entry registry.
+	 */
+	#enterRegistryNames: ReadonlySet<string> | undefined;
 
 	/**
 	 * Pre-chain baseline (fr-vV): the pre-persona model/thinking carried across
@@ -254,6 +267,7 @@ export class PersonaRuntime {
 			spawns: this.session.getSessionSpawns(),
 			activeBaseline: this.#activeBaseline,
 			activePresentationSnapshot: this.#activePresentationSnapshot,
+			enterRegistryNames: this.#enterRegistryNames,
 		};
 	}
 
@@ -281,6 +295,7 @@ export class PersonaRuntime {
 					mountedToolNames: [...snap.activePresentationSnapshot.mountedToolNames],
 				}
 			: undefined;
+		this.#enterRegistryNames = snap.enterRegistryNames;
 		const { model, thinkingLevel } = snap.baseModelOverride;
 		// j2o: revert whenever the baseline CAPTURED a field — `undefined` there
 		// means "the session had no model / no configured thinking before the
@@ -353,6 +368,9 @@ export class PersonaRuntime {
 			tools: this.session.getEnabledToolNames(),
 			mountedToolNames: this.session.getMountedXdevToolNames(),
 		};
+		// j2l merge: the registry BEFORE the persona entered — exit unions names
+		// registered MID-persona back into the restored presentation.
+		this.#enterRegistryNames = new Set(this.session.getAllToolNames());
 		// Live presentation partition: keep only the currently-ENABLED tools the
 		// persona grant still covers (plan §5 — the cursor bridge reads the live
 		// partition, not a policy recomputation). The SOURCE set must be the full
@@ -369,7 +387,15 @@ export class PersonaRuntime {
 		if (deferModel) {
 			hooks.deferModelSwitchWhileStreaming?.(agent);
 		} else {
-			await hooks.apply(agent, explicit);
+			// j2p: mark the persona's OWN model apply so AgentSession's model
+			// setters can discriminate it from a user /model pick (which must
+			// re-root the baseline instead of being treated as persona state).
+			this.#applyingPersonaModel = true;
+			try {
+				await hooks.apply(agent, explicit);
+			} finally {
+				this.#applyingPersonaModel = false;
+			}
 		}
 		await this.session.refreshBaseSystemPrompt();
 	}
@@ -384,6 +410,34 @@ export class PersonaRuntime {
 	 */
 	onPendingModelRestoreFlushed(): void {
 		this.#rootBaseline = undefined;
+	}
+
+	/**
+	 * j2p: true while the persona's OWN model apply (hooks.apply inside
+	 * #enterInner) is running. AgentSession.setModel/setModelTemporary consult
+	 * this to tell the persona's self-applied model from a USER pick made under
+	 * the persona: a user pick re-roots #activeBaseline via
+	 * noteUserModelChange, so the persona's exit restores the user's newer
+	 * model instead of the stale pre-enter one.
+	 */
+	#applyingPersonaModel = false;
+
+	get isApplyingPersonaModel(): boolean {
+		return this.#applyingPersonaModel;
+	}
+
+	/**
+	 * j2p: a USER model/thinking change landed while this persona is active.
+	 * Re-roots the runtime-owned baseline: exit restores the user's model, not
+	 * the pre-enter one. Called by AgentSession's model setters (never by the
+	 * runtime's own apply — the #applyingPersonaModel guard discriminates).
+	 */
+	noteUserModelChange(): void {
+		if (this.#activeBaseline === undefined) return;
+		this.#activeBaseline = {
+			model: this.session.model,
+			thinkingLevel: this.session.configuredThinkingLevel(),
+		};
 	}
 
 	/**
@@ -403,16 +457,39 @@ export class PersonaRuntime {
 		this.policy.exitPersona();
 		this.session.setSessionSpawns(null);
 		this.session.applyPersonaAppendPrompt(undefined);
-		// j2l: restore the PRE-ENTER presentation captured by this persona's
-		// enter — the exact top-level vs mounted partition the session had before
-		// the persona narrowed it, including any user/extension deactivations the
+		// j2l: restore the PRE-ENTER presentation captured by this persona's enter —
+		// the exact top-level vs mounted partition the session had before the
+		// persona narrowed it, including any user/extension deactivations the
 		// post-exit policy derivation would collapse to the unrestricted default.
 		// Fallback to the post-exit derivation only when no entry captured a
 		// snapshot (defensive: every exit path follows an enter).
 		const snapshot = this.#activePresentationSnapshot;
 		this.#activePresentationSnapshot = undefined;
+		const enterRegistry = this.#enterRegistryNames;
+		this.#enterRegistryNames = undefined;
 		if (snapshot) {
-			await this.session.setActiveToolPresentation([...snapshot.tools], [...snapshot.mountedToolNames]);
+			// j2l merge: the frozen pre-enter snapshot must not discard tools
+			// REGISTERED while the persona was active — an extension that landed
+			// mid-persona would vanish at exit (the frozen list cannot contain it).
+			// A live-registry name ABSENT from the enter-registry snapshot was
+			// registered mid-persona; union it with the restored presentation. The
+			// post-exit effective set (policy already exited → the unrestricted
+			// baseline: registry ∩ cliGrant ∩ toggles, via the isDefaultActive seed)
+			// decides its default-active state, so a default-inactive registration
+			// stays dormant. A tool DEACTIVATED before the persona entered is in
+			// neither the snapshot nor the baseline and stays off.
+			const merged = [...snapshot.tools];
+			const mergedMounted = [...snapshot.mountedToolNames];
+			const baseline = this.policy.effectiveSet();
+			for (const name of baseline) {
+				if (!enterRegistry?.has(name) && !merged.includes(name)) merged.push(name);
+			}
+			for (const name of this.session.getMountedXdevToolNames()) {
+				if (baseline.has(name) && !enterRegistry?.has(name) && !mergedMounted.includes(name)) {
+					mergedMounted.push(name);
+				}
+			}
+			await this.session.setActiveToolPresentation(merged, mergedMounted);
 		} else {
 			const baseline = this.policy.effectiveSet();
 			await this.session.setActiveToolPresentation(

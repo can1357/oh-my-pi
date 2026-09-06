@@ -13,6 +13,7 @@ import type { AgentSession } from "../session/agent-session";
 import { createDefaultPersonaModelHooks } from "../session/persona-model-hooks";
 import { serializePersonaBaseline } from "../session/persisted-persona";
 import { discoverAgents, getAgent } from "../task";
+import type { PersonaExplicitOverrides } from "../session/tool-policy";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type {
@@ -707,8 +708,15 @@ async function handleAgentCommandSwitch(name: string, runtime: SlashCommandRunti
 		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
 		return usage(`Unknown agent: ${name}. Available: ${available}`, runtime);
 	}
+	// j2m: the CLI `--tools`/`--no-tools` ceiling is durable policy state the
+	// runtime does not know about — `enter` with empty explicit overrides would
+	// let a wider persona frontmatter widen the session past it. Serialize the
+	// ceiling into `explicit.tools` BEFORE enter so #computePersonaGrant's
+	// intersect path runs (cliGrant null → leave explicit.tools undefined).
+	const cliGrant = session.getToolPolicy()?.cliGrant ?? null;
+	const explicitOverrides: PersonaExplicitOverrides = cliGrant ? { tools: [...cliGrant] } : {};
 	try {
-		await personaRuntime.enter(agent, {}, createDefaultPersonaModelHooks(session));
+		await personaRuntime.enter(agent, explicitOverrides, createDefaultPersonaModelHooks(session));
 	} catch (error) {
 		return usage(`Persona switch failed: ${errorMessage(error)}`, runtime);
 	}
@@ -722,6 +730,7 @@ async function handleAgentCommandSwitch(name: string, runtime: SlashCommandRunti
 	);
 	session.sessionManager.appendModeChange("agent", {
 		name: agent.name,
+		...(Object.keys(explicitOverrides).length > 0 ? { explicit: explicitOverrides } : {}),
 		...(baseline ? { baseline } : {}),
 	});
 	await runtime.output(`Agent persona: ${agent.name}`);

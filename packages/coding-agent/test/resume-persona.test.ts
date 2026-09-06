@@ -31,6 +31,7 @@ import { SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { InteractiveMode } from "../src/modes/interactive-mode";
+import { discoverAgents, getAgent } from "../src/task";
 
 const READER_AGENT_MD = `---
 name: fixture-reader
@@ -91,7 +92,7 @@ describe("InteractiveMode persona resume reconcile", () => {
 	 * PersonaRuntime wired via setPersonaRuntime. `sessionManager` may be a
 	 * pre-built manager carrying the journal to resume.
 	 */
-	function createSession(sessionManager: SessionManager): AgentSession {
+	function createSession(sessionManager: SessionManager, options?: { vetoBeforeSwitch?: boolean }): AgentSession {
 		const readTool = {
 			name: "read",
 			label: "read",
@@ -132,6 +133,14 @@ describe("InteractiveMode persona resume reconcile", () => {
 				registry: () => new Set(["read", "write"]),
 				isDefaultActive: () => true,
 			}),
+			...(options?.vetoBeforeSwitch
+				? {
+						extensionRunner: {
+							hasHandlers: (eventType: string) => eventType === "session_before_switch",
+							emit: async () => ({ cancel: true }),
+						} as never,
+					}
+				: {}),
 		});
 		session = createdSession;
 		createdSession.setPersonaRuntime(new PersonaRuntime(createdSession.getToolPolicy()!, createdSession));
@@ -564,5 +573,127 @@ You are the fixture thinker persona.`,
 		expect(switchThinking).toBe(Effort.High); // thinking rides the queue
 		// The model is untouched: the queue forwarded the session's own model.
 		expect(switchModel).toBe(liveSession.model as Model);
+	});
+
+	it("user /model pick under a persona re-roots the exit baseline (j2p)", async () => {
+		// Enter persona (baseline M0 → persona model applied), then the user
+		// deliberately picks a DIFFERENT model through the session API. The
+		// persona's exit must restore the USER's model, not the pre-enter M0.
+		await writeFixtureAgent(
+			`---
+name: fixture-modeled
+description: Modeled fixture persona
+tools:
+  - read
+model:
+  - anthropic/claude-sonnet-4-5
+---
+
+You are the modeled fixture persona.`,
+			"fixture-modeled.md",
+		);
+
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+		const baselineModel = liveSession.model;
+		expect(baselineModel?.id).toBe("claude-sonnet-4-5"); // session default
+
+		await created.switchAgentPersona("fixture-modeled");
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+		expect(liveSession.model?.id).toBe("claude-sonnet-4-5");
+
+		// The user picks opus mid-persona (same channel the /model picker uses).
+		const opus = getBundledModel("anthropic", "claude-opus-4-5");
+		if (!opus) throw new Error("Expected built-in anthropic opus model to exist");
+		await liveSession.setModelTemporary(opus, Effort.High);
+		expect(liveSession.model?.id).toBe("claude-opus-4-5");
+
+		await created.exitAgentPersona();
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+		// The USER's pick survives the persona exit — not the pre-enter model.
+		expect(liveSession.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it("headless switchSession to a persona session re-enters the target persona (j2n)", async () => {
+		// ACP/SDK-shaped surface: NO InteractiveMode, so no reconciler slot is
+		// installed. switchSession must run the session-level persona reconcile
+		// — the target journal's persona becomes active after the switch.
+		const personaTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		personaTarget.appendMessage({ role: "user", content: "persona turn", timestamp: Date.now() });
+		personaTarget.appendModeChange("agent", { name: "fixture-reader" });
+		await personaTarget.ensureOnDisk();
+		await personaTarget.flush();
+		const personaFile = personaTarget.getSessionFile();
+		if (!personaFile) throw new Error("Expected session file");
+		await personaTarget.close();
+
+		const plainSource = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		plainSource.appendMessage({ role: "user", content: "plain", timestamp: Date.now() });
+		await plainSource.ensureOnDisk();
+		await plainSource.flush();
+		const plainFile = plainSource.getSessionFile();
+		if (!plainFile) throw new Error("Expected session file");
+		await plainSource.close();
+
+		await writeFixtureAgent(READER_AGENT_MD);
+
+		const sourceManager = await SessionManager.open(plainFile, path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(sourceManager);
+		// No InteractiveMode, no reconciler: the raw session IS the surface.
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+
+		const switched = await liveSession.switchSession(personaFile);
+		expect(switched).toBe(true);
+		const policy = liveSession.getPersonaRuntime()!.policy;
+		expect(policy.isPersonaActive()).toBe(true);
+		expect(liveSession.getPersonaAppendPrompt()).toContain("fixture reader persona");
+		expect(policy.effective("read")).toBe(true);
+		expect(policy.effective("write")).toBe(false);
+	});
+
+	it("failed headless switch restores the source persona from the rollback (j2n)", async () => {
+		// A FAILED switch rolls the session state back to the SOURCE session;
+		// its persona must be re-entered by the session-level reconcile —
+		// without this the rollback loses the persona (it was torn down before
+		// the switch attempt).
+		const sourcePersona = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		sourcePersona.appendMessage({ role: "user", content: "source turn", timestamp: Date.now() });
+		sourcePersona.appendModeChange("agent", { name: "fixture-reader" });
+		await sourcePersona.ensureOnDisk();
+		await sourcePersona.flush();
+		const sourceFile = sourcePersona.getSessionFile();
+		if (!sourceFile) throw new Error("Expected session file");
+		await sourcePersona.close();
+
+		const otherTarget = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		otherTarget.appendMessage({ role: "user", content: "other", timestamp: Date.now() });
+		await otherTarget.ensureOnDisk();
+		await otherTarget.flush();
+		const otherFile = otherTarget.getSessionFile();
+		if (!otherFile) throw new Error("Expected session file");
+		await otherTarget.close();
+
+		await writeFixtureAgent(READER_AGENT_MD);
+
+		const liveManager = await SessionManager.open(sourceFile, path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(liveManager, { vetoBeforeSwitch: true });
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+
+		// Enter the persona live (as a user /agent would have before switching).
+		const runtime = liveSession.getPersonaRuntime()!;
+		const { agents } = await discoverAgents(tempDir.path());
+		const agent = getAgent(agents, "fixture-reader");
+		if (!agent) throw new Error("Expected fixture persona to resolve");
+		await runtime.reconcile({ agent }, { apply: async () => {}, restore: async () => {} });
+		expect(runtime.policy.isPersonaActive()).toBe(true);
+
+		const switched = await liveSession.switchSession(otherFile);
+		expect(switched).toBe(false);
+
+		// Rollback reinstated the SOURCE persona.
+		expect(runtime.policy.isPersonaActive()).toBe(true);
+		expect(liveSession.getPersonaAppendPrompt()).toContain("fixture reader persona");
 	});
 });
