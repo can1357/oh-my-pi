@@ -120,11 +120,15 @@ export class AdvisorEmissionGuard {
 	#seen = new Set<string>();
 	/** Insertion-order log to drive FIFO eviction without an extra Map. */
 	#seenOrder: string[] = [];
-	#consumedThisUpdate = false;
+	#acceptedThisUpdate = 0;
+	readonly #budgetPerUpdate: number;
 	readonly #capacity: number;
 
-	constructor(opts: { capacity?: number } = {}) {
+	constructor(opts: { capacity?: number; budgetPerUpdate?: number } = {}) {
 		this.#capacity = opts.capacity ?? DEFAULT_HISTORY_CAPACITY;
+		const budget = opts.budgetPerUpdate;
+		this.#budgetPerUpdate =
+			typeof budget === "number" && Number.isFinite(budget) ? Math.max(1, Math.trunc(budget)) : 4;
 	}
 
 	/**
@@ -136,7 +140,7 @@ export class AdvisorEmissionGuard {
 	reset(): void {
 		this.#seen.clear();
 		this.#seenOrder.length = 0;
-		this.#consumedThisUpdate = false;
+		this.#acceptedThisUpdate = 0;
 	}
 
 	/**
@@ -145,7 +149,7 @@ export class AdvisorEmissionGuard {
 	 * cycle starts with a fresh budget of one advise.
 	 */
 	beginUpdate(): void {
-		this.#consumedThisUpdate = false;
+		this.#acceptedThisUpdate = 0;
 	}
 
 	/**
@@ -158,8 +162,8 @@ export class AdvisorEmissionGuard {
 		const key = normalizeAdvisorNote(note);
 		if (!key || SUPPRESSED_NORMALIZED_PHRASES[key]) return "suppressed_noise";
 		if (this.#seen.has(key)) return "duplicate";
-		if (severity !== "blocker" && this.#consumedThisUpdate) return "rate_limited";
-		this.#consumedThisUpdate = true;
+		if (severity !== "blocker" && this.#acceptedThisUpdate >= this.#budgetPerUpdate) return "rate_limited";
+		if (severity !== "blocker") this.#acceptedThisUpdate++;
 		this.#seen.add(key);
 		this.#seenOrder.push(key);
 		if (this.#seenOrder.length > this.#capacity) {

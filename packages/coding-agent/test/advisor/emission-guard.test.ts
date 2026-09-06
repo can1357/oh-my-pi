@@ -48,23 +48,55 @@ describe("AdvisorEmissionGuard", () => {
 		expect(guard.accept("Move retries into the queue, not the request path!")).toBe("duplicate");
 	});
 
-	it("rate-limits to one accepted advise per advisor update cycle", () => {
-		// The advisor system prompt says "at most one `advise` per update". Real
-		// models violate this; the guard enforces it at the boundary so the
-		// primary transcript never receives two advisories from one model cycle.
+	it("rate-limits non-blockers past the default budget of 4 per advisor update cycle", () => {
 		const guard = new AdvisorEmissionGuard();
+		expect(guard.accept("First concern: missing await in #handleRetry.")).toBe("accepted");
+		expect(guard.accept("Second concern: wrong env var name.")).toBe("accepted");
+		expect(guard.accept("Third concern: unhandled rejection.")).toBe("accepted");
+		expect(guard.accept("Fourth concern: missing validation.")).toBe("accepted");
+		expect(guard.accept("Fifth concern: unhandled error.")).toBe("rate_limited");
+		guard.beginUpdate();
+		// New cycle: budget reset.
+		expect(guard.accept("Fifth concern: unhandled error.")).toBe("accepted");
+	});
+
+	it("supports strict 1-note rate-limiting when budgetPerUpdate is set to 1", () => {
+		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
 		expect(guard.accept("First concern: missing await in #handleRetry.")).toBe("accepted");
 		expect(guard.accept("Second concern: wrong env var name.")).toBe("rate_limited");
 		guard.beginUpdate();
-		// New cycle: budget reset.
 		expect(guard.accept("Second concern: wrong env var name.")).toBe("accepted");
+	});
+
+	it("honors a configured budgetPerUpdate allowing multiple accepted non-blockers per cycle", () => {
+		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 3 });
+		expect(guard.accept("First concern: missing await in #handleRetry.", "concern")).toBe("accepted");
+		expect(guard.accept("Second concern: wrong env var name.", "concern")).toBe("accepted");
+		expect(guard.accept("Third nit: variable name could be clearer.", "nit")).toBe("accepted");
+		// Exceeds the configured budget of 3
+		expect(guard.accept("Fourth concern: missing error boundary.", "concern")).toBe("rate_limited");
+		// Blockers still bypass the budget
+		expect(guard.accept("Destructive migration will drop user data.", "blocker")).toBe("accepted");
+		// Reset on next cycle
+		guard.beginUpdate();
+		expect(guard.accept("Fourth concern: missing error boundary.", "concern")).toBe("accepted");
+	});
+
+	it("clamps non-positive budgetPerUpdate to at least 1", () => {
+		const guardZero = new AdvisorEmissionGuard({ budgetPerUpdate: 0 });
+		expect(guardZero.accept("First concern.", "concern")).toBe("accepted");
+		expect(guardZero.accept("Second concern.", "concern")).toBe("rate_limited");
+
+		const guardNegative = new AdvisorEmissionGuard({ budgetPerUpdate: -3 });
+		expect(guardNegative.accept("First concern.", "concern")).toBe("accepted");
+		expect(guardNegative.accept("Second concern.", "concern")).toBe("rate_limited");
 	});
 
 	it("exempts blockers from the per-update budget so they always interrupt", () => {
 		// A nit emitted first in an update must never rate-limit a blocker that
 		// follows it: blockers are the always-interrupt severity. Noise and dedupe
 		// still apply to blockers.
-		const guard = new AdvisorEmissionGuard();
+		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
 		expect(guard.accept("Minor naming nit.", "nit")).toBe("accepted");
 		expect(guard.accept("Destructive migration will drop user data.", "blocker")).toBe("accepted");
 		// A repeat blocker is still deduped, not waved through by the exemption.

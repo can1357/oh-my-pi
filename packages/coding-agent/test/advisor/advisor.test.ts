@@ -814,7 +814,7 @@ describe("advisor", () => {
 			// Preserve the one-note cap from #3520, but never claim a dropped note
 			// was deferred or duplicated: the advisor must know to retry it.
 			const delivered: string[] = [];
-			const guard = new AdvisorEmissionGuard();
+			const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
 			const tool = new AdviseTool(
 				note => delivered.push(note),
 				note => guard.accept(note),
@@ -839,6 +839,41 @@ describe("advisor", () => {
 
 			beginUpdate(false);
 			expect(delivered).toEqual(["First mid-turn concern."]);
+		});
+
+		it("reserves and flushes multiple deferred notes up to a configured budgetPerUpdate", async () => {
+			const delivered: string[] = [];
+			const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 3 });
+			const tool = new AdviseTool(
+				note => delivered.push(note),
+				(note, severity) => guard.accept(note, severity),
+			);
+			const beginUpdate = (inProgress: boolean) => {
+				tool.beginUpdate(inProgress);
+				guard.beginUpdate();
+			};
+
+			beginUpdate(true);
+			const note0 = await tool.execute("c-0", { note: "First concern: missing await.", severity: "concern" });
+			const note1 = await tool.execute("c-1", { note: "Second concern: unhandled rejection.", severity: "concern" });
+			const note2 = await tool.execute("c-2", { note: "Third nit: unused import.", severity: "nit" });
+			const note3 = await tool.execute("c-3", { note: "Fourth concern: memory leak.", severity: "concern" });
+
+			expect(JSON.stringify(note0.content)).toContain("Deferred");
+			expect(JSON.stringify(note1.content)).toContain("Deferred");
+			expect(JSON.stringify(note2.content)).toContain("Deferred");
+			expect(JSON.stringify(note3.content)).toContain("Rate limited");
+
+			// Nothing delivered yet while mid-turn
+			expect(delivered).toEqual([]);
+
+			// Primary completes turn: all 3 reserved notes flush in arrival order
+			beginUpdate(false);
+			expect(delivered).toEqual([
+				"First concern: missing await.",
+				"Second concern: unhandled rejection.",
+				"Third nit: unused import.",
+			]);
 		});
 
 		it("does not let a suppressed phrase burn the deferred slot ahead of a real concern", async () => {
@@ -867,10 +902,10 @@ describe("advisor", () => {
 			expect(delivered).toEqual(["The migration drops the users table without a backup."]);
 		});
 
-		it("still caps a single model turn spraying many distinct notes to one accepted note", async () => {
-			// Live path: notes emitted in one completed-turn update stay capped at one.
+		it("still caps a single model turn spraying many distinct notes when configured with budgetPerUpdate 1", async () => {
+			// Live path: notes emitted in one completed-turn update stay capped at one when budget is 1.
 			const delivered: string[] = [];
-			const guard = new AdvisorEmissionGuard();
+			const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
 			const tool = new AdviseTool(
 				note => delivered.push(note),
 				note => guard.accept(note),
@@ -885,6 +920,27 @@ describe("advisor", () => {
 			await tool.execute("s-1", { note: "Second distinct live concern.", severity: "concern" });
 			await tool.execute("s-2", { note: "Third distinct live concern.", severity: "concern" });
 			expect(delivered).toEqual(["First distinct live concern."]);
+		});
+
+		it("accepts up to the default budget of 4 distinct live notes per completed update", async () => {
+			const delivered: string[] = [];
+			const guard = new AdvisorEmissionGuard();
+			const tool = new AdviseTool(
+				note => delivered.push(note),
+				note => guard.accept(note),
+			);
+			const beginUpdate = (inProgress: boolean) => {
+				tool.beginUpdate(inProgress);
+				guard.beginUpdate();
+			};
+
+			beginUpdate(false);
+			await tool.execute("s-0", { note: "Note 0", severity: "concern" });
+			await tool.execute("s-1", { note: "Note 1", severity: "concern" });
+			await tool.execute("s-2", { note: "Note 2", severity: "concern" });
+			await tool.execute("s-3", { note: "Note 3", severity: "concern" });
+			await tool.execute("s-4", { note: "Note 4", severity: "concern" });
+			expect(delivered).toEqual(["Note 0", "Note 1", "Note 2", "Note 3"]);
 		});
 
 		it("delivers a blocker escalation of a reserved note live instead of dropping it as already seen", async () => {

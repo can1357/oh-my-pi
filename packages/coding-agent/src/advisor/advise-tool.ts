@@ -177,7 +177,7 @@ function advisorSeverityRank(severity: AdvisorSeverity | undefined): number {
 const ADVISOR_RESULT_TEXT: Record<AdvisorEmissionDecision, string> = {
 	accepted: "Recorded.",
 	duplicate: "Duplicate advice ignored.",
-	rate_limited: "Rate limited — only one note accepted per update. Re-raise this note on the next update.",
+	rate_limited: "Rate limited — update advice budget reached. Re-raise this note on the next update.",
 	suppressed_noise: "Ignored — advice is empty or non-actionable.",
 };
 

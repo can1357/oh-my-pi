@@ -215,6 +215,7 @@ export interface SessionAdvisorsOptions {
 	mcpResources?: CursorMcpResourceAdapter;
 	watchdogPrompt?: string;
 	sharedInstructions?: string;
+	sharedMaxNotesPerUpdate?: number;
 	contextPrompt?: string;
 	/** Active memory backend's developer instructions, wrapped for advisors. */
 	memoryPrompt?: string;
@@ -311,6 +312,7 @@ export class SessionAdvisors {
 	#advisorMcpResources: SessionAdvisorsOptions["mcpResources"];
 	#advisorWatchdogPrompt: string | undefined;
 	#advisorSharedInstructions: string | undefined;
+	#advisorSharedMaxNotesPerUpdate: number | undefined;
 	#advisorContextPrompt: string | undefined;
 	#advisorMemoryPrompt: string | undefined;
 	#advisorStreamFn: StreamFn | undefined;
@@ -348,6 +350,7 @@ export class SessionAdvisors {
 		this.#advisorMcpResources = options.mcpResources;
 		this.#advisorWatchdogPrompt = options.watchdogPrompt;
 		this.#advisorSharedInstructions = options.sharedInstructions;
+		this.#advisorSharedMaxNotesPerUpdate = options.sharedMaxNotesPerUpdate;
 		this.#advisorContextPrompt = options.contextPrompt;
 		this.#advisorMemoryPrompt = options.memoryPrompt;
 		this.#advisorConfigs = options.configs;
@@ -615,6 +618,21 @@ export class SessionAdvisors {
 		if (!Number.isFinite(immuneTurns) || immuneTurns <= 0) return 0;
 		return Math.trunc(immuneTurns);
 	}
+	#advisorMaxNotesPerUpdate(config?: AdvisorConfig): number {
+		const perAdvisor = config?.maxNotesPerUpdate;
+		if (typeof perAdvisor === "number" && Number.isFinite(perAdvisor) && perAdvisor >= 1) {
+			return Math.min(32, Math.trunc(perAdvisor));
+		}
+		const shared = this.#advisorSharedMaxNotesPerUpdate;
+		if (typeof shared === "number" && Number.isFinite(shared) && shared >= 1) {
+			return Math.min(32, Math.trunc(shared));
+		}
+		const setting = this.#host.settings.get("advisor.maxNotesPerUpdate") as number;
+		if (typeof setting === "number" && Number.isFinite(setting) && setting >= 1) {
+			return Math.min(32, Math.trunc(setting));
+		}
+		return 4;
+	}
 
 	#isAdvisorInterruptImmuneTurnActive(): boolean {
 		return isAdvisorInterruptImmuneTurnActive({
@@ -789,7 +807,8 @@ export class SessionAdvisors {
 	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
-		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions].join(
+		const budget = this.#advisorMaxNotesPerUpdate(config);
+		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions, budget].join(
 			"\u001f",
 		);
 	}
@@ -840,7 +859,8 @@ export class SessionAdvisors {
 				signature,
 			} = descriptor;
 
-			const emissionGuard = new AdvisorEmissionGuard();
+			const budgetPerUpdate = this.#advisorMaxNotesPerUpdate(config);
+			const emissionGuard = new AdvisorEmissionGuard({ budgetPerUpdate });
 			const adviseTool = new AdviseTool(
 				(note, severity) => this.#routeAdvice(advisorRef, note, severity),
 				(note, severity) => this.#acceptAdvice(advisorRef, note, severity),
@@ -1841,10 +1861,14 @@ export class SessionAdvisors {
 	 *
 	 * @returns the number of advisors active after the rebuild.
 	 */
-	applyAdvisorConfigs(advisors: AdvisorConfig[], sharedInstructions: string | undefined): number {
+	applyAdvisorConfigs(
+		advisors: AdvisorConfig[],
+		sharedInstructions: string | undefined,
+		sharedMaxNotesPerUpdate?: number,
+	): number {
 		this.#advisorConfigs = advisors;
 		this.#advisorSharedInstructions = sharedInstructions;
-		if (!this.#advisorEnabled) return 0;
+		this.#advisorSharedMaxNotesPerUpdate = sharedMaxNotesPerUpdate;
 		this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
 		return this.#advisors.length;

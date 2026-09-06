@@ -1066,4 +1066,53 @@ describe("AgentSession advisor toggle", () => {
 			vi.restoreAllMocks();
 		}
 	});
+
+	it("respects maxNotesPerUpdate configured per advisor through applyAdvisorConfigs", async () => {
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		session.applyAdvisorConfigs([{ name: "Security", maxNotesPerUpdate: 2 }], undefined);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent");
+		const adviseTool = advisor.state.tools?.find(tool => tool.name === "advise");
+		if (!(adviseTool instanceof advisorModule.AdviseTool)) throw new Error("Expected advise tool");
+
+		adviseTool.beginUpdate(true);
+		const r1 = await adviseTool.execute("1", { note: "First concern", severity: "concern" });
+		const r2 = await adviseTool.execute("2", { note: "Second concern", severity: "concern" });
+		const r3 = await adviseTool.execute("3", { note: "Third concern", severity: "concern" });
+
+		expect(JSON.stringify(r1.content)).toContain("Deferred");
+		expect(JSON.stringify(r2.content)).toContain("Deferred");
+		expect(JSON.stringify(r3.content)).toContain("Rate limited");
+	});
+
+	it("respects advisor.maxNotesPerUpdate from settings when no per-advisor budget is set", async () => {
+		session.settings.set("advisor.maxNotesPerUpdate", 3);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent");
+		const adviseTool = advisor.state.tools?.find(tool => tool.name === "advise");
+		if (!(adviseTool instanceof advisorModule.AdviseTool)) throw new Error("Expected advise tool");
+
+		adviseTool.beginUpdate(true);
+		const r1 = await adviseTool.execute("1", { note: "First concern", severity: "concern" });
+		const r2 = await adviseTool.execute("2", { note: "Second concern", severity: "concern" });
+		const r3 = await adviseTool.execute("3", { note: "Third concern", severity: "concern" });
+		const r4 = await adviseTool.execute("4", { note: "Fourth concern", severity: "concern" });
+
+		expect(JSON.stringify(r1.content)).toContain("Deferred");
+		expect(JSON.stringify(r2.content)).toContain("Deferred");
+		expect(JSON.stringify(r3.content)).toContain("Deferred");
+		expect(JSON.stringify(r4.content)).toContain("Rate limited");
+	});
+
+	it("rebuilds advisor runtime when maxNotesPerUpdate changes in settings", () => {
+		session.settings.set("advisor.maxNotesPerUpdate", 1);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor1 = session.getAdvisorAgent();
+
+		session.settings.set("advisor.maxNotesPerUpdate", 3);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor2 = session.getAdvisorAgent();
+		expect(advisor2).not.toBe(advisor1);
+	});
 });
