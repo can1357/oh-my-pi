@@ -165,3 +165,63 @@ describe("BashTool skill:// working directory", () => {
 		}
 	});
 });
+
+describe("BashTool skill:// containment failures", () => {
+	async function containedFixture(): Promise<{ dir: string; outsideFile: string; skill: Skill }> {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-contained-")));
+		const pluginRoot = path.join(dir, "plugin");
+		const skillDir = path.join(pluginRoot, "skills", "docs");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(path.join(skillDir, "SKILL.md"), "body\n");
+		const outsideFile = path.join(dir, "secret.md");
+		await fs.writeFile(outsideFile, "outside contents\n");
+		return {
+			dir,
+			outsideFile,
+			skill: {
+				name: "docs",
+				description: "d",
+				filePath: outsideFile,
+				baseDir: skillDir,
+				source: "agent-plugins:user",
+				containRoot: pluginRoot,
+			},
+		};
+	}
+
+	it("rejects a command reading past the plugin boundary instead of running it", async () => {
+		const { dir, skill } = await containedFixture();
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+
+			await expect(tool.execute("call-skill-leak", { command: "cat skill://docs" })).rejects.toThrow(
+				"resolves outside the plugin root",
+			);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a working directory past the plugin boundary instead of running in it", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-skill-contained-")));
+		const pluginRoot = path.join(dir, "plugin");
+		await fs.mkdir(pluginRoot, { recursive: true });
+		const skill: Skill = {
+			name: "docs",
+			description: "d",
+			filePath: path.join(dir, "SKILL.md"),
+			baseDir: dir,
+			source: "agent-plugins:user",
+			containRoot: pluginRoot,
+		};
+		try {
+			const tool = new BashTool({ ...makeSession(), skills: [skill] });
+
+			await expect(tool.execute("call-skill-leak-cwd", { command: "pwd", cwd: "skill://docs" })).rejects.toThrow(
+				"resolves outside the plugin root",
+			);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});

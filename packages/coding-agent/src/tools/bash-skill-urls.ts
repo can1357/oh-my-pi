@@ -10,6 +10,19 @@ import type { ImageAttachmentEntry } from ".";
 import { normalizeLocalScheme } from "./path-utils";
 import { ToolError } from "./tool-errors";
 
+/**
+ * A `skill://` URL that resolves outside its plugin root or to a missing target.
+ * Unlike other resolution failures, containment violations MUST fail closed:
+ * `expandInternalUrls` rethrows them instead of leaving the token for the
+ * shell (which would read it as a relative path).
+ */
+export class SkillContainmentError extends ToolError {
+	constructor(message: string) {
+		super(message);
+		this.name = "SkillContainmentError";
+	}
+}
+
 /** Regex to find skill:// tokens in command text. */
 const SKILL_URL_PATTERN = /'skill:\/\/[^'\s")`\\]+'|"skill:\/\/[^"\s')`\\]+"|skill:\/\/[^\s'")`\\;&|<>($]+/g;
 
@@ -101,10 +114,10 @@ export function resolveSkillUrlToPath(
 		if (skill.containRoot) {
 			const contained = resolveContainedPathSync(skill.containRoot, bareTarget);
 			if (contained.status === "outside") {
-				throw new ToolError(`skill:// path resolves outside the plugin root: ${url}`);
+				throw new SkillContainmentError(`skill:// path resolves outside the plugin root: ${url}`);
 			}
 			if (contained.status === "missing") {
-				throw new ToolError(`skill:// path does not exist: ${url}`);
+				throw new SkillContainmentError(`skill:// path does not exist: ${url}`);
 			}
 			return contained.realPath;
 		}
@@ -136,10 +149,10 @@ export function resolveSkillUrlToPath(
 	if (skill.containRoot) {
 		const contained = resolveContainedPathSync(skill.containRoot, resolvedPath);
 		if (contained.status === "outside") {
-			throw new ToolError(`skill:// path resolves outside the plugin root: ${url}`);
+			throw new SkillContainmentError(`skill:// path resolves outside the plugin root: ${url}`);
 		}
 		if (contained.status === "missing") {
-			throw new ToolError(`skill:// path does not exist: ${url}`);
+			throw new SkillContainmentError(`skill:// path does not exist: ${url}`);
 		}
 		return contained.realPath;
 	}
@@ -405,7 +418,11 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 				options.rules,
 				options.skillUrlForDirectory,
 			);
-		} catch {
+		} catch (error) {
+			// Containment violations fail closed: never hand the raw token to the
+			// shell, which would read it as a relative path. Other resolution
+			// failures keep the legacy pass-through behavior.
+			if (error instanceof SkillContainmentError) throw error;
 			continue;
 		}
 		const replacement = options.noEscape ? resolvedPath : shellEscape(resolvedPath);

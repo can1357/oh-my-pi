@@ -9,6 +9,7 @@ import type {
 	RpcHostToolCancelRequest,
 	RpcHostToolUpdate,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { toolReadsSkillUris } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempPaths: string[] = [];
@@ -114,7 +115,6 @@ describe("RpcHostToolBridge", () => {
 	});
 
 	it("exposes skill URI readability declared by the host tool", async () => {
-		const { toolReadsSkillUris } = await import("@oh-my-pi/pi-coding-agent/system-prompt");
 		const bridge = new RpcHostToolBridge(() => {});
 		const [tool] = bridge.setTools([
 			{
@@ -245,6 +245,57 @@ function handle(frame) {
 			expect(toolUpdate?.partialResult).toEqual({
 				content: [{ type: "text", text: "working:hello" }],
 			});
+		} finally {
+			await client.stop();
+		}
+	});
+	it("preserves skill URI readability across the host tool wire frame", async () => {
+		const scriptPath = path.join(os.tmpdir(), `omp-rpc-host-skill-${Date.now()}.js`);
+		const capturePath = `${scriptPath}.tools.json`;
+		tempPaths.push(scriptPath, capturePath);
+		await Bun.write(
+			scriptPath,
+			`
+			process.stdout.write(JSON.stringify({ type: "ready" }) + "\\n");
+			let buffer = "";
+			process.stdin.on("data", chunk => {
+				buffer += chunk.toString("utf8");
+				let index = buffer.indexOf("\\n");
+				while (index !== -1) {
+					const line = buffer.slice(0, index).trim();
+					buffer = buffer.slice(index + 1);
+					if (line) handle(JSON.parse(line));
+					index = buffer.indexOf("\\n");
+				}
+			});
+			function handle(frame) {
+				if (frame.type === "set_host_tools") {
+					require("fs").writeFileSync("${capturePath}", JSON.stringify(frame.tools));
+					process.stdout.write(JSON.stringify({ id: frame.id, type: "response", command: "set_host_tools", success: true, data: { toolNames: frame.tools.map(tool => tool.name) } }) + "\\n");
+				}
+			}
+			`,
+		);
+
+		const client = new RpcClient({
+			cliPath: scriptPath,
+			customTools: [
+				defineRpcClientTool({
+					name: "host_read",
+					description: "Reads files in the host process",
+					parameters: { type: "object", properties: {}, additionalProperties: false },
+					readsSkillUris: true,
+					async execute() {
+						return "ok";
+					},
+				}),
+			],
+		});
+
+		try {
+			await client.start();
+			const tools = await Bun.file(capturePath).json();
+			expect(tools).toMatchObject([{ name: "host_read", readsSkillUris: true }]);
 		} finally {
 			await client.stop();
 		}

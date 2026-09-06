@@ -5,7 +5,7 @@ import * as path from "node:path";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
-import { resolveSkillUrlToPath } from "@oh-my-pi/pi-coding-agent/tools/bash-skill-urls";
+import { expandInternalUrls, resolveSkillUrlToPath } from "@oh-my-pi/pi-coding-agent/tools/bash-skill-urls";
 
 let tempDir: string;
 let pluginRoot: string;
@@ -106,6 +106,20 @@ describe("bash skill:// expansion containment", () => {
 		const local: Skill = { ...pluginSkill(), containRoot: undefined };
 		const resolved = resolveSkillUrlToPath("skill://docs/references/leak.md", [local]);
 		expect(resolved).toBe(path.join(skillDir, "references", "leak.md"));
+	});
+
+	it("rejects escaping resources during command expansion instead of passing the token through", async () => {
+		await expect(
+			expandInternalUrls("cat skill://docs/references/leak.md", { skills: [pluginSkill()] }),
+		).rejects.toThrow("resolves outside the plugin root");
+	});
+
+	it("rejects escaping bare instruction files during command expansion", async () => {
+		const skill: Skill = { ...pluginSkill(), filePath: outsideFile };
+
+		await expect(expandInternalUrls("cat skill://docs", { skills: [skill] })).rejects.toThrow(
+			"resolves outside the plugin root",
+		);
 	});
 });
 
