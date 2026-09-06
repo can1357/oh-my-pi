@@ -29,11 +29,7 @@ import type {
 	ExtensionUISelectItem,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
-import type {
-	AwaitedDialogOptions,
-	InteractiveModeContext,
-	InteractiveSelectorDialogOptions,
-} from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: shared FakeWebSocket + InMemoryRelay harness (see
@@ -47,7 +43,7 @@ interface DialogStub {
 	title: string;
 	options?: ExtensionUISelectItem[];
 	prefill?: string;
-	dialogOptions?: (ExtensionUIDialogOptions | InteractiveSelectorDialogOptions) & AwaitedDialogOptions;
+	dialogOptions?: ExtensionUIDialogOptions | InteractiveSelectorDialogOptions;
 	/** Flipped when the guest dismissed the presentation via the abort signal. */
 	aborted: boolean;
 	whenAborted: Promise<void>;
@@ -249,12 +245,12 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		showHookSelector: (
 			title: string,
 			options: ExtensionUISelectItem[],
-			dialogOptions?: InteractiveSelectorDialogOptions & AwaitedDialogOptions,
+			dialogOptions?: InteractiveSelectorDialogOptions,
 		): Promise<string | undefined> => presentStub({ kind: "select", title, options, dialogOptions }),
 		showHookEditor: (
 			title: string,
 			prefill?: string,
-			dialogOptions?: ExtensionUIDialogOptions & AwaitedDialogOptions,
+			dialogOptions?: ExtensionUIDialogOptions,
 		): Promise<string | undefined> => presentStub({ kind: "editor", title, prefill, dialogOptions }),
 	} as unknown as InteractiveModeContext;
 
