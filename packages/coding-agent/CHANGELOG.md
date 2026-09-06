@@ -20,6 +20,7 @@
 - Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check, and gave each tunnel child a private temporary log directory so concurrent tunnels cannot share a log path.
 - Fixed a failed progress preview delivery leaving a mirrored output artifact unfinalized (open descriptor, missing capped tail).
 - Added Bash async: "auto": potentially slow finite commands run inline for a grace window and promote to a background job without restarting. At the background-job cap auto runs inline to completion with a notice (explicit `async: true` still errors), a command whose timeout cannot outlive the grace never promotes, and promotion waits at most one second for stalled output deliveries.
+- Added collapsible async progress in the transcript: progress blocks show the latest lines (bounded by rows and bytes) behind an "… N earlier lines" marker, expand with Ctrl+O, and completion rows report exit codes with failures in red that stay visible even while tool activity is hidden.
 
 ## [18.1.12] - 2026-09-06
 
@@ -650,7 +651,6 @@
 - Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues, and completion notices that carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
 - Added Hub process monitoring modes (wake, ambient, off) to attach, retune, or detach live progress delivery without changing process lifetime.
 - Added Bash async: "auto": potentially slow finite commands run inline for a grace window and promote to a background job without restarting.
-- Added collapsible async progress in the transcript: progress blocks show the latest lines behind an "… N earlier lines" marker, expand with Ctrl+O, and completion rows report exit codes with failures in red.
 
 ### Fixed
 
