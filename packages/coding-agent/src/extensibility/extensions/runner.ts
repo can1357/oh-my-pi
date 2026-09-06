@@ -19,6 +19,7 @@ import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
 import { publicAgentMessage } from "../../session/private-content";
+import { markJournaled, sessionEntryIdOf } from "../../session/session-entries";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
@@ -1641,6 +1642,12 @@ export class ExtensionRunner {
 		let currentMessages: AgentMessage[];
 		try {
 			currentMessages = structuredClone(publicMessages);
+			// structuredClone drops the non-enumerable journal id, so even a
+			// read-only handler would cost the Codex transform its `[id: …]` markers.
+			for (let index = 0; index < currentMessages.length; index++) {
+				const entryId = sessionEntryIdOf(messages[index]);
+				if (entryId) markJournaled(currentMessages[index], entryId);
+			}
 		} catch {
 			// Messages may contain non-cloneable objects (e.g. in ToolResultMessage.details
 			// or ProviderPayload). Fall back to a shallow array clone — extensions should

@@ -30,6 +30,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { markJournaled, sessionEntryIdOf } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -455,6 +456,34 @@ describe("ExtensionRunner", () => {
 			const command = runner.getCommand("deploy");
 			expect(command?.description).toBe("Explicit deploy");
 		});
+	});
+
+	it("keeps journal ids on the messages a read-only context handler observes", async () => {
+		await Bun.write(
+			path.join(extensionsDir, "read-only-context.ts"),
+			`
+			export default function(pi) {
+				pi.on("context", () => undefined);
+			}
+		`,
+		);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const journaled: AgentMessage = markJournaled(
+			{ role: "user", content: "Checkpoint this request", timestamp: 0 },
+			"entry-1",
+		);
+
+		const transformed = await runner.emitContext([journaled]);
+
+		expect(sessionEntryIdOf(transformed[0])).toBe("entry-1");
+		expect(JSON.stringify(transformed[0])).not.toContain("entry-1");
 	});
 
 	it("context hooks see public results while Codex replay retains private results", async () => {
