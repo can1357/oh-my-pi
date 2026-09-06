@@ -311,6 +311,9 @@ export async function submitInteractiveInput(
 		| "showError"
 		| "checkShutdownRequested"
 		| "skillCommands"
+		| "renderOptimisticSkillMessage"
+		| "clearOptimisticSkillMessage"
+		| "optimisticSkillMessagePending"
 	>,
 	session: Pick<AgentSession, "prompt" | "promptCustomMessage" | "isStreaming">,
 	input: SubmittedUserInput,
@@ -342,7 +345,12 @@ export async function submitInteractiveInput(
 		const skillHost = {
 			skillCommands: mode.skillCommands,
 			session,
-			showError: mode.showError,
+			showError: mode.showError.bind(mode),
+			renderOptimisticSkillMessage: mode.renderOptimisticSkillMessage.bind(mode),
+			clearOptimisticSkillMessage: mode.clearOptimisticSkillMessage.bind(mode),
+			get optimisticSkillMessagePending() {
+				return mode.optimisticSkillMessagePending;
+			},
 		};
 		if (input.customType) {
 			const message = {
@@ -369,6 +377,8 @@ export async function submitInteractiveInput(
 			// model receives a literal `/skill:` token.
 			await invokeSkillCommandFromText(skillHost, input.text, streamingBehavior, {
 				images: input.images,
+				imageLinks: input.imageLinks,
+				optimistic: true,
 				propagateErrors: true,
 			});
 		} else {

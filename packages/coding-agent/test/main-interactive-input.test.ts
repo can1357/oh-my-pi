@@ -71,15 +71,22 @@ describe("applyResolvedSystemPromptInputs", () => {
 	});
 });
 
+function createMode(options?: { pendingStart?: boolean; skillCommands?: Map<string, Skill> }) {
+	return {
+		markPendingSubmissionStarted: vi.fn(() => options?.pendingStart ?? true),
+		finishPendingSubmission: vi.fn(),
+		showError: vi.fn(),
+		checkShutdownRequested: vi.fn(async () => {}),
+		skillCommands: options?.skillCommands ?? new Map<string, Skill>(),
+		optimisticSkillMessagePending: false,
+		renderOptimisticSkillMessage: vi.fn(),
+		clearOptimisticSkillMessage: vi.fn(),
+	};
+}
+
 describe("submitInteractiveInput", () => {
 	it("routes already-started synthetic continue submissions to a hidden developer prompt", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => false),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-			skillCommands: new Map(),
-		};
+		const mode = createMode({ pendingStart: false });
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -96,13 +103,7 @@ describe("submitInteractiveInput", () => {
 	});
 
 	it("skips prompting when optimistic submission was cancelled before start", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => false),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-			skillCommands: new Map(),
-		};
+		const mode = createMode({ pendingStart: false });
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -119,13 +120,7 @@ describe("submitInteractiveInput", () => {
 	});
 
 	it("routes hidden custom submissions through promptCustomMessage with followUp queueing", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-			skillCommands: new Map(),
-		};
+		const mode = createMode();
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -152,13 +147,7 @@ describe("submitInteractiveInput", () => {
 	});
 
 	it("passes followUp on a plain idle submission so a racing turn queues instead of erroring", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-			skillCommands: new Map(),
-		};
+		const mode = createMode();
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -173,13 +162,7 @@ describe("submitInteractiveInput", () => {
 	});
 
 	it("honors a steer intent on the submission (normal Enter) instead of forcing followUp", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-			skillCommands: new Map(),
-		};
+		const mode = createMode();
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -197,13 +180,7 @@ describe("submitInteractiveInput", () => {
 	});
 
 	it("queues goal-continuation as followUp when streaming", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-			skillCommands: new Map(),
-		};
+		const mode = createMode();
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -228,13 +205,7 @@ describe("submitInteractiveInput", () => {
 	});
 
 	it("queues a plain submission as followUp when streaming", async () => {
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-			skillCommands: new Map(),
-		};
+		const mode = createMode();
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -256,13 +227,7 @@ describe("submitInteractiveInput", () => {
 		const skillPath = path.join(skillDir, "recap.md");
 		await fs.writeFile(skillPath, "---\nname: recap\n---\nSummarize recent changes.\n");
 		const skill: Skill = { name: "recap", description: "", filePath: skillPath, baseDir: skillDir, source: "test" };
-		const mode = {
-			markPendingSubmissionStarted: vi.fn(() => true),
-			finishPendingSubmission: vi.fn(),
-			showError: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => {}),
-			skillCommands: new Map([["skill:recap", skill]]),
-		};
+		const mode = createMode({ skillCommands: new Map([["skill:recap", skill]]) });
 		const session = {
 			prompt: vi.fn(async () => true),
 			promptCustomMessage: vi.fn(async () => true),
@@ -281,6 +246,16 @@ describe("submitInteractiveInput", () => {
 				details: expect.objectContaining({ name: "recap", args: "what changed" }),
 			}),
 			expect.objectContaining({ streamingBehavior: "followUp" }),
+		);
+		// The row paints before the awaited dispatch, so a slow preflight does not
+		// leave a loop iteration invisible (issue #8895).
+		expect(mode.renderOptimisticSkillMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				role: "custom",
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				attribution: "user",
+			}),
+			expect.anything(),
 		);
 		expect(mode.showError).not.toHaveBeenCalled();
 	});

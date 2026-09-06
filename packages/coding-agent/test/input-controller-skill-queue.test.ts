@@ -406,7 +406,7 @@ describe("compaction skill re-invocation", () => {
 		return call;
 	}
 
-	function createCompactionDrainContext(queuedMessages: CompactionQueuedMessage[]) {
+	function createCompactionDrainContext(queuedMessages: CompactionQueuedMessage[], loopModeEnabled = false) {
 		const promptCustomMessageCalled = Promise.withResolvers<void>();
 		const promptCustomMessage: PromptCustomMessage = vi.fn(async () => {
 			promptCustomMessageCalled.resolve();
@@ -414,9 +414,12 @@ describe("compaction skill re-invocation", () => {
 		const prompt = vi.fn(async (_text: string, _options?: { streamingBehavior?: "steer" | "followUp" }) => {});
 		const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 		const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
+		const armLoopAutoSubmit = vi.fn();
 		const ctx = {
 			skillCommands,
 			compactionQueuedMessages: queuedMessages,
+			loopModeEnabled,
+			armLoopAutoSubmit,
 			updatePendingMessagesDisplay: vi.fn(),
 			showError: vi.fn(),
 			isKnownSlashCommand: vi.fn(() => false),
@@ -430,7 +433,7 @@ describe("compaction skill re-invocation", () => {
 				clearQueue: vi.fn(),
 			},
 		} as unknown as InteractiveModeContext;
-		return { ctx, promptCustomMessage, promptCustomMessageCalled, prompt, steer, followUp };
+		return { ctx, promptCustomMessage, promptCustomMessageCalled, prompt, steer, followUp, armLoopAutoSubmit };
 	}
 
 	beforeEach(async () => {
@@ -442,6 +445,19 @@ describe("compaction skill re-invocation", () => {
 	afterEach(() => {
 		tempDir.removeSync();
 		vi.restoreAllMocks();
+	});
+
+	it("arms the loop after re-invoking a queued skill (regression: /loop never resubmitted after compaction)", async () => {
+		const { ctx, promptCustomMessageCalled, armLoopAutoSubmit } = createCompactionDrainContext(
+			[{ text: "/skill:test-skill arg1 arg2", mode: "steer" }],
+			true,
+		);
+		const uiHelpers = new UiHelpers(ctx);
+
+		await uiHelpers.flushCompactionQueue({ willRetry: false });
+		await promptCustomMessageCalled;
+
+		expect(armLoopAutoSubmit).toHaveBeenCalledTimes(1);
 	});
 
 	it("re-invokes a queued skill as a user-attributed skill prompt", async () => {
