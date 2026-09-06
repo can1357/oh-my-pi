@@ -590,6 +590,18 @@ type GrokbotToolState = {
 	isGrammar: boolean;
 };
 
+function contextHasToolResult(context: Context): boolean {
+	return (context.messages ?? []).some(msg => msg && typeof msg === "object" && msg.role === "toolResult");
+}
+
+/** Gemini/Cursor Write often emits `contents` instead of omp `content`. */
+function normalizeProductWriteArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
+	if (!/^(write|Write)$/i.test(name)) return args;
+	if (typeof args.content === "string") return args;
+	if (typeof args.contents === "string") return { ...args, content: args.contents };
+	return args;
+}
+
 function uniqueToolStates(toolStates: Map<string, GrokbotToolState>): GrokbotToolState[] {
 	const seen = new Set<GrokbotToolState>();
 	const out: GrokbotToolState[] = [];
@@ -919,7 +931,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					if (state.ended) return;
 					// Parse before marking ended so malformed JSON does not leave a
 					// "completed" state without a successful toolcall_end.
-					state.block.arguments = parseCompletedToolArgs(state.argsText, state.isGrammar);
+					state.block.arguments = normalizeProductWriteArgs(
+						state.block.name,
+						parseCompletedToolArgs(state.argsText, state.isGrammar),
+					);
 					clearStreamingPartialJson(state.block);
 					state.ended = true;
 					stream.push({
@@ -1301,6 +1316,16 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							geminiProductRetry: geminiProductRetryUsed,
 						});
 						continue attempt;
+					}
+					// gemini-3-flash keep-model often empty-stops after Write (bash/read
+					// already succeeded). The tool loop already completed; do not fail the turn.
+					if (contextHasToolResult(context)) {
+						logger.info("grokbot: accepting empty follow-up after tool result", {
+							modelId: model.id,
+							class: identity.class,
+							wireMode: anthropicWire.wireMode,
+						});
+						break;
 					}
 					throw new AIError.ProviderResponseError("Grok Bot stream completed with no text or tool call", {
 						provider: model.provider,

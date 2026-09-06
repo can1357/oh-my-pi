@@ -149,10 +149,25 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 		typeof tool.customWireName === "string" && tool.customWireName.trim()
 			? tool.customWireName.trim()
 			: toSandField2Name(name);
+	const schema = toolParametersToJson(tool);
+	// Cursor/Gemini Write often uses `contents` instead of omp `content`.
+	// Advertise both so gemini-3-flash keep-model can emit a Write call.
+	if ((name === "write" || wireName === "Write") && schema.properties && typeof schema.properties === "object") {
+		const props = schema.properties as Record<string, unknown>;
+		if (props.content && !props.contents) {
+			schema.properties = {
+				...props,
+				contents: {
+					type: "string",
+					description: "File contents (alias of content)",
+				},
+			};
+		}
+	}
 	const entry: ProductWireTool = {
 		name: wireName,
 		description: typeof tool.description === "string" ? tool.description : "",
-		parameters: wrapToolParameters(toolParametersToJson(tool)),
+		parameters: wrapToolParameters(schema),
 	};
 	if (tool.customFormat && typeof tool.customFormat === "object") {
 		entry.customToolFormat = {

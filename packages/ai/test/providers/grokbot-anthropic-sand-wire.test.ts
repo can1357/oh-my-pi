@@ -248,6 +248,27 @@ describe("product wire helpers", () => {
 		);
 	});
 
+	test("Write schema advertises contents as an alias of content", () => {
+		const tools = toProductField2Tools(
+			[
+				{
+					name: "write",
+					description: "write file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" }, content: { type: "string" } },
+						required: ["path", "content"],
+					},
+				},
+			],
+			"automation",
+		);
+		expect(tools[0]?.name).toBe("Write");
+		const schema = (tools[0]?.parameters as { jsonSchema?: { properties?: Record<string, unknown> } }).jsonSchema;
+		expect(schema?.properties).toHaveProperty("content");
+		expect(schema?.properties).toHaveProperty("contents");
+	});
+
 	test("parent profile injects SendToUser", () => {
 		const tools = toProductField2Tools([], "parent-chat");
 		expect(tools[0]?.name).toBe("SendToUser");

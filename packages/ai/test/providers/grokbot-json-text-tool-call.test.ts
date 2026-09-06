@@ -309,6 +309,95 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		]);
 	});
 
+	test("accepts an empty follow-up after a Write tool result (gemini-3-flash write)", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const thinkingOnly = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					thinkingPart: { text: "done writing", isFinal: true },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const fetchImpl = (async () => connectBody(thinkingOnly)) as FetchImpl;
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+			sandToolsWire: "keep-model",
+		});
+		const writeTool = {
+			name: "write",
+			description: "Write a file.",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" }, content: { type: "string" } },
+				required: ["path", "content"],
+			},
+		} as Tool;
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Write ping to /tmp/x", timestamp: 1 },
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "w1",
+							name: "write",
+							arguments: { path: "/tmp/x", content: "ping" },
+						},
+					],
+					api: "grokbot-sand",
+					provider: "grokbot",
+					model: "gemini-3-flash",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "w1",
+					toolName: "write",
+					content: [{ type: "text", text: "ping" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+			tools: [writeTool],
+		};
+
+		const result = await streamGrokBot(gemini as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+			maxTokens: 512,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
+	});
+
 	test("does not promote ordinary assistant text when tools were advertised", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
