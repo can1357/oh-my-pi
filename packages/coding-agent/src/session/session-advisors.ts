@@ -1210,7 +1210,7 @@ export class SessionAdvisors {
 	 *  AdviseTool can report the exact outcome instead of claiming every rejection
 	 *  is a duplicate. Accepted notes consume the current update's budget. */
 	#acceptAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): AdvisorEmissionDecision {
-		const decision = advisor.emissionGuard.accept(note);
+		const decision = advisor.emissionGuard.accept(note, severity);
 		if (decision !== "accepted")
 			logger.debug("advisor advice suppressed by emission guard", { decision, severity, advisor: advisor.name });
 		return decision;

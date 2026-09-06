@@ -60,6 +60,18 @@ describe("AdvisorEmissionGuard", () => {
 		expect(guard.accept("Second concern: wrong env var name.")).toBe("accepted");
 	});
 
+	it("exempts blockers from the per-update budget so they always interrupt", () => {
+		// A nit emitted first in an update must never rate-limit a blocker that
+		// follows it: blockers are the always-interrupt severity. Noise and dedupe
+		// still apply to blockers.
+		const guard = new AdvisorEmissionGuard();
+		expect(guard.accept("Minor naming nit.", "nit")).toBe("accepted");
+		expect(guard.accept("Destructive migration will drop user data.", "blocker")).toBe("accepted");
+		// A repeat blocker is still deduped, not waved through by the exemption.
+		expect(guard.accept("Destructive migration will drop user data.", "blocker")).toBe("duplicate");
+		expect(guard.accept("Stop.", "blocker")).toBe("suppressed_noise");
+	});
+
 	it("does not let a suppressed call consume the per-update budget", () => {
 		// A noise call like "Stop." must never displace a real concern that
 		// follows in the same advisor model cycle.

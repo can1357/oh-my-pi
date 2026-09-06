@@ -921,6 +921,41 @@ describe("advisor", () => {
 			expect(delivered).toEqual([{ note: escalatedNote, severity: "blocker" }]);
 		});
 
+		it("delivers a distinct blocker live after a non-blocker consumed the update budget", async () => {
+			// #11062 follow-up: a nit emitted first in an in-progress update reserves
+			// the one deferred slot. A distinct blocker that follows must still
+			// interrupt now instead of being rejected as rate-limited and dropped;
+			// the reserved nit stays queued and flushes when the turn completes.
+			const delivered: { note: string; severity?: string }[] = [];
+			const guard = new AdvisorEmissionGuard();
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				(note, severity) => guard.accept(note, severity),
+			);
+			const beginUpdate = (inProgress: boolean) => {
+				tool.beginUpdate(inProgress);
+				guard.beginUpdate();
+			};
+
+			beginUpdate(true);
+			const nit = await tool.execute("b-0", { note: "Minor naming nit.", severity: "nit" });
+			const blocker = await tool.execute("b-1", {
+				note: "Destructive migration will drop user data.",
+				severity: "blocker",
+			});
+
+			expect(JSON.stringify(nit.content)).toContain("Deferred");
+			expect(JSON.stringify(blocker.content)).toContain("Recorded.");
+			expect(delivered).toEqual([{ note: "Destructive migration will drop user data.", severity: "blocker" }]);
+
+			// The reserved nit still flushes at the completed boundary, after the blocker.
+			beginUpdate(false);
+			expect(delivered).toEqual([
+				{ note: "Destructive migration will drop user data.", severity: "blocker" },
+				{ note: "Minor naming nit.", severity: "nit" },
+			]);
+		});
+
 		it("validates parameters using ArkType", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);

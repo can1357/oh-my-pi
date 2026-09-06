@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Advisor notes now report rate limiting accurately and deferred notes flush when the primary run completes, including after advisor quota exhaustion ([#11062](https://github.com/can1357/oh-my-pi/issues/11062)).
+- Advisor notes now report rate limiting accurately, blockers always interrupt even after a lower-severity note in the same update, and deferred notes flush when the primary run completes, including after advisor quota exhaustion ([#11062](https://github.com/can1357/oh-my-pi/issues/11062)).
 
 ## [18.1.12] - 2026-09-06
 

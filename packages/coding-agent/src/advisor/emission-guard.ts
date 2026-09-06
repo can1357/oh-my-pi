@@ -17,6 +17,8 @@
  * actionable over-budget note is told to retry instead of being falsely recorded.
  */
 
+import type { AdvisorSeverity } from "./advise-tool";
+
 /**
  * Case-insensitive, punctuation-folded normalization. Collapses every run of
  * non-letter / non-digit characters into a single space and trims, so
@@ -106,7 +108,9 @@ export type AdvisorEmissionDecision = "accepted" | "duplicate" | "rate_limited" 
  * dedupe (FIFO-evicted at {@link DEFAULT_HISTORY_CAPACITY}), and a per-update
  * rate limit of one accepted note per advisor model prompt. Suppressed calls
  * never consume the per-update budget — a noise call doesn't burn the slot
- * for a real concern that follows in the same update.
+ * for a real concern that follows in the same update. A `blocker` is exempt
+ * from the budget: it must always interrupt, so a lower-severity note emitted
+ * earlier in the same update can never rate-limit it out.
  *
  * Reset on advisor reset (compaction, session switch, `/new`) via
  * {@link reset}. Per-update gate is cleared at the start of every advisor
@@ -147,12 +151,14 @@ export class AdvisorEmissionGuard {
 	/**
 	 * Classify and reserve a proposed note. Accepted notes consume the update
 	 * budget and enter the dedupe history; rejected notes leave both unchanged.
+	 * A `blocker` still runs the noise and dedupe filters but bypasses the
+	 * one-note-per-update budget so it always reaches the primary.
 	 */
-	accept(note: string): AdvisorEmissionDecision {
+	accept(note: string, severity?: AdvisorSeverity): AdvisorEmissionDecision {
 		const key = normalizeAdvisorNote(note);
 		if (!key || SUPPRESSED_NORMALIZED_PHRASES[key]) return "suppressed_noise";
 		if (this.#seen.has(key)) return "duplicate";
-		if (this.#consumedThisUpdate) return "rate_limited";
+		if (severity !== "blocker" && this.#consumedThisUpdate) return "rate_limited";
 		this.#consumedThisUpdate = true;
 		this.#seen.add(key);
 		this.#seenOrder.push(key);
