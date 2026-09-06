@@ -593,6 +593,8 @@ function stripBackgroundNotice(text: string, async: BashToolDetails["async"] | u
  */
 export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSchemaWithAsync, BashToolDetails> {
 	readonly name = "bash";
+	/** Bash resolves `skill://` URIs in commands and working directories. */
+	readonly readsSkillUris = true;
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawCommand = (args as Partial<BashToolInput>).command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
@@ -697,6 +699,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			hasGrep: isToolActive("grep", this.session.settings.get("grep.enabled")),
 			hasGlob: isToolActive("glob", this.session.settings.get("glob.enabled")),
 			hasRead: isToolActive("read", true),
+			hasSkills: (this.session.skills?.length ?? 0) > 0,
 			hasLaunch: isToolActive("hub", this.session.settings.get("launch.enabled")),
 			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
 			hasShellBuiltins: !shellBuiltinsDisabled(this.session.settings),
@@ -1084,8 +1087,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			: undefined;
 
 		// Resolve protocol URLs (skill://, agent://, etc.) in extracted cwd.
+		// Bare skill:// URIs resolve to the skill directory here: the result must
+		// pass the isDirectory check below.
 		if (cwd?.includes("://") || cwd?.includes("local:/")) {
-			cwd = await expandInternalUrls(cwd, { ...internalUrlOptions, noEscape: true });
+			cwd = await expandInternalUrls(cwd, { ...internalUrlOptions, noEscape: true, skillUrlForDirectory: true });
 		}
 
 		// Best-effort cache invalidation: drop github-cache rows for any issue/PR

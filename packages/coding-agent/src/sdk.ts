@@ -1021,6 +1021,7 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		defaultInactive: tool.hidden === true,
 		loadMode: defaultLoadModeForToolName(tool.name, tool.loadMode),
 		deferrable: tool.deferrable,
+		readsSkillUris: tool.readsSkillUris,
 		approval: typeof tool.approval === "function" ? tool.approval.bind(tool) : tool.approval,
 		// Preserved through RegisteredToolAdapter so MCP-backed tools' explicit
 		// `strict: false` (#4336/#4340) survives the custom-tool → definition bridge.
@@ -3159,9 +3160,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Owned/in-band tool dialects (non-native) require the full functions-
 			// namespace catalog; native tool calling lets the compact name list suffice.
 			const nativeTools = resolveDialect(settings.get("tools.format"), agent?.state.model ?? model) === undefined;
+			// Mounted xd:// readers stay out of the direct inventory, but their skill
+			// capability still drives catalog/URI guidance: project them into the
+			// compact metadata map (inventory rendering stays driven by `toolNames`).
+			const mountedPromptToolNames = toolSession.xdev ? xdevEntries(toolSession.xdev).map(entry => entry.name) : [];
 			const promptTools = projectSystemPromptToolMetadata(
 				tools,
-				nativeTools && !inlineToolDescriptors ? { mode: "compact", toolNames } : { mode: "full" },
+				nativeTools && !inlineToolDescriptors
+					? { mode: "compact", toolNames: [...toolNames, ...mountedPromptToolNames] }
+					: { mode: "full" },
 			);
 			if (options.appendSystemPrompt) {
 				appendPrompt = appendPrompt

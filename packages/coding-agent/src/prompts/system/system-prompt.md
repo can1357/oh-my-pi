@@ -54,7 +54,9 @@ Matching skill → MUST read `skill://<name>` first.
 
 # Internal URLs
 Most FS/bash tools auto-resolve these to FS paths.
+{{#if hasSkillUriAccess}}
 - `skill://<name>`: instructions; `/<path>`: its file
+{{/if}}
 - `rule://<name>`: details
   {{#if hasMemoryRoot}}
 - `memory://root`: project-memory summary

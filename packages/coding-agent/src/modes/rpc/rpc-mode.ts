@@ -587,6 +587,7 @@ function normalizeHostToolDefinitions(tools: RpcHostToolDefinition[]): RpcHostTo
 			parameters: tool.parameters,
 			hidden: tool.hidden === true,
 			loadMode: defaultLoadModeForToolName(name, tool.loadMode),
+			readsSkillUris: tool.readsSkillUris,
 		};
 	});
 }

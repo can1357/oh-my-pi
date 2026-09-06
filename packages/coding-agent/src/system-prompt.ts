@@ -515,6 +515,8 @@ export interface SystemPromptToolMetadata {
 	parameters?: TSchema;
 	/** Illustrative examples rendered into the verbose inventory. */
 	examples?: readonly ToolExample[];
+	/** Whether this concrete tool can read `skill://` instruction content. */
+	readsSkillUris?: boolean;
 }
 
 export type SystemPromptToolMetadataProjection =
@@ -535,6 +537,21 @@ export function buildSystemPromptToolMetadata(
 	return projectSystemPromptToolMetadata(tools, { mode: "full", overrides });
 }
 
+/** Whether a tool can read `skill://` instruction content.
+ *
+ * Shared by initial prompt construction and mid-session skill notices so both
+ * consult declared capability instead of the tool name. Accepts live tools
+ * (`AgentTool`, capability carried as an optional extra property) and
+ * projected metadata (`SystemPromptToolMetadata`). */
+export function toolReadsSkillUris(tool: unknown): boolean {
+	return (
+		typeof tool === "object" &&
+		tool !== null &&
+		"readsSkillUris" in tool &&
+		(tool as { readsSkillUris?: unknown }).readsSkillUris === true
+	);
+}
+
 /** Builds a mode-specific metadata snapshot for internal prompt assembly. */
 export function projectSystemPromptToolMetadata(
 	tools: Map<string, AgentTool>,
@@ -545,22 +562,21 @@ export function projectSystemPromptToolMetadata(
 		const override = projection.overrides?.[name];
 		const labelValue = override?.label ?? tool.label;
 		const wireNameValue = override?.wireName ?? tool.customWireName;
-		const label = typeof labelValue === "string" ? labelValue : "";
-		const wireName = typeof wireNameValue === "string" ? wireNameValue : undefined;
+		const metadataEntry: SystemPromptToolMetadata = {
+			label: typeof labelValue === "string" ? labelValue : "",
+			description: "",
+			wireName: typeof wireNameValue === "string" ? wireNameValue : undefined,
+		};
 
-		if (projection.mode === "compact") {
-			metadata.set(name, { label, description: "", wireName });
-			return;
+		if (projection.mode === "full") {
+			const descriptionValue = override?.description ?? tool.description;
+			metadataEntry.description = typeof descriptionValue === "string" ? descriptionValue : "";
+			metadataEntry.parameters = tool.parameters;
+			metadataEntry.examples = tool.examples;
 		}
+		if ((override?.readsSkillUris ?? toolReadsSkillUris(tool)) === true) metadataEntry.readsSkillUris = true;
 
-		const descriptionValue = override?.description ?? tool.description;
-		metadata.set(name, {
-			label,
-			description: typeof descriptionValue === "string" ? descriptionValue : "",
-			parameters: tool.parameters,
-			examples: tool.examples,
-			wireName,
-		});
+		metadata.set(name, metadataEntry);
 	};
 
 	if (projection.mode === "compact") {
@@ -966,10 +982,17 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			);
 
 	// Filter skills for the rendered system prompt:
-	// - require the `read` tool so the model can actually fetch skill content;
+	// - require an active tool that declares `skill://` read capability (any tool
+	//   name, not just `read`, so custom resolvers count once projected; mounted
+	//   xd:// tools count too when their metadata is projected);
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
-	const hasRead = toolNames.includes("read");
-	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const hasSkillReader =
+		tools === undefined
+			? toolNames.includes("read")
+			: toolNames.some(name => toolReadsSkillUris(tools.get(name))) ||
+				xdevTools.some(entry => toolReadsSkillUris(tools.get(entry.name)));
+	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
+	const filteredSkills = hasSkillReader ? skills.filter(skill => skill.hide !== true) : [];
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
@@ -999,6 +1022,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
+		hasSkillUriAccess,
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
