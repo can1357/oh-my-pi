@@ -6698,11 +6698,7 @@ export class AgentSession {
 		// vision description already done — reuse them instead of paying a second
 		// vision-model request for the same attachment.
 		const videoAttachmentNotices = this.#createVideoAttachmentNotices(images, timestamp ?? Date.now());
-		const normalizedImages = preprocessed
-			? preprocessed.images
-			: images
-				? await this.#normalizeImagesForModel(images)
-				: undefined;
+		const normalizedImages = preprocessed ? preprocessed.images : await this.#normalizeImagesForModel(images);
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
