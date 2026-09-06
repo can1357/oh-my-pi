@@ -48,7 +48,7 @@ describe("estate-role-runtime", () => {
 		expect(advisory).toContain("estate-terra");
 	});
 
-		test("loadTaskRoleCoordination reads registry from workspace settings", async () => {
+	test("loadTaskRoleCoordination reads registry from workspace settings", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-role-runtime-"));
 		const filePath = path.join(tmpDir, "estate-roles.json");
 		fs.writeFileSync(

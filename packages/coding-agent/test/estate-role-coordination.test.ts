@@ -49,8 +49,6 @@ describe("estate-role-coordination", () => {
 		);
 
 		const registry = loadWorkspaceEstateRoleCoordination(tmpDir);
-		expect(registry?.byThread.get("01a073f0-333d-7321-90b8-a2eae14d8a83")?.role).toBe(
-			"Transcript durability",
-		);
+		expect(registry?.byThread.get("01a073f0-333d-7321-90b8-a2eae14d8a83")?.role).toBe("Transcript durability");
 	});
 });

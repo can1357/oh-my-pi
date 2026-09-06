@@ -36,10 +36,7 @@ function model(provider: string, id: string): Model<Api> {
  * - `"served"` settles a real turn on it, which moves attribution.
  * - `"unproven"` errors on its first request, producing none of the run's work.
  */
-function createYieldingSession(
-	fallback: "served" | "unproven" = "served",
-	servedSelector?: string,
-): AgentSession {
+function createYieldingSession(fallback: "served" | "unproven" = "served", servedSelector?: string): AgentSession {
 	const listeners: Array<(event: { type: string; [key: string]: unknown }) => void> = [];
 	const session = {
 		agent: { state: { systemPrompt: ["test"] } },

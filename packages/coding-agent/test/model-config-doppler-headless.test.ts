@@ -12,8 +12,7 @@ import {
 	resolveDopplerToken,
 } from "../src/config/doppler-secret";
 
-const CORNELL_COMMAND =
-	"doppler secrets get LANE_DISPATCH_OPENCODE_GO_CORNELL_API_KEY -p personal -c dev --plain";
+const CORNELL_COMMAND = "doppler secrets get LANE_DISPATCH_OPENCODE_GO_CORNELL_API_KEY -p personal -c dev --plain";
 
 describe("doppler-secret headless resolver", () => {
 	test("parses models.yml doppler secrets get commands", () => {

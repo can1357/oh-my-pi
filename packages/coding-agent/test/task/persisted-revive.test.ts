@@ -264,11 +264,7 @@ describe("persisted subagent revival", () => {
 		});
 
 		const ref = createRef(sessionFile);
-		const reviver = await createFactory(
-			cwd,
-			undefined,
-			Settings.isolated({ "retry.modelFallback": false }),
-		)(ref);
+		const reviver = await createFactory(cwd, undefined, Settings.isolated({ "retry.modelFallback": false }))(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 

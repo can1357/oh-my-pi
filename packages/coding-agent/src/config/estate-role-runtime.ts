@@ -66,7 +66,10 @@ export function partitionSpawnFanIn(agents: readonly string[], itemBlocking: rea
  * Advisory for mixed implementation + reviewer batches: review runs alongside
  * delivery and fans findings back to the owning lead via hub, not serial relay.
  */
-export function buildReviewFanInAdvisory(partition: SpawnFanInPartition, agents: readonly string[]): string | undefined {
+export function buildReviewFanInAdvisory(
+	partition: SpawnFanInPartition,
+	agents: readonly string[],
+): string | undefined {
 	if (partition.reviewIndices.length === 0) return undefined;
 	const implementationIndices = agents
 		.map((_, index) => index)

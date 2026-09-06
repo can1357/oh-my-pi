@@ -75,9 +75,7 @@ export function resolveDopplerToken(
 ): string | undefined {
 	const envToken = $envExact("DOPPLER_TOKEN");
 	if (envToken) return envToken;
-	const tokens =
-		tokensOverride ??
-		readScopedDopplerTokens(configDir ?? path.join(os.homedir(), ".doppler"));
+	const tokens = tokensOverride ?? readScopedDopplerTokens(configDir ?? path.join(os.homedir(), ".doppler"));
 	return pickScopedDopplerToken(tokens, cwd);
 }
 

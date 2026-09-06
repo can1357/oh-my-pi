@@ -745,9 +745,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const policies = preflights.map(preflight => preflight.policy!);
 		const agentBlocking = this.session.settings.get("task.agentBlocking");
 		const roleCoordination = loadTaskRoleCoordination(this.session.settings, this.session.cwd);
-		const itemBlocking = policies.map(policy =>
-			resolveEffectiveAgentBlocking(policy.effectiveAgent, agentBlocking),
-		);
+		const itemBlocking = policies.map(policy => resolveEffectiveAgentBlocking(policy.effectiveAgent, agentBlocking));
 		const fanInPartition = partitionSpawnFanIn(resolvedAgents, itemBlocking);
 		const reviewFanInAdvisory = buildReviewFanInAdvisory(fanInPartition, resolvedAgents);
 		const coordinationAdvisory = buildCoordinationRegistryAdvisory(roleCoordination, resolvedAgents);
@@ -793,7 +791,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				signal,
 				onUpdate,
 			);
-			const combined = [advisory, reviewFanInAdvisory, coordinationAdvisory].filter(Boolean).join("\n\n") || undefined;
+			const combined =
+				[advisory, reviewFanInAdvisory, coordinationAdvisory].filter(Boolean).join("\n\n") || undefined;
 			if (!combined) return result;
 			let appended = false;
 			const content = result.content.map(part => {
@@ -827,7 +826,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// than mutating the caller's — task results are short-lived here, but an
 		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
 		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
-			const combined = [advisory, reviewFanInAdvisory, coordinationAdvisory].filter(Boolean).join("\n\n") || undefined;
+			const combined =
+				[advisory, reviewFanInAdvisory, coordinationAdvisory].filter(Boolean).join("\n\n") || undefined;
 			if (!combined) return result;
 			let appended = false;
 			const content = result.content.map(part => {
