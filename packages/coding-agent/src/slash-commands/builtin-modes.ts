@@ -611,25 +611,49 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "prewalk",
 		icon: "prewalk",
-		description: "Switch to a fast/cheap model at the next action (works even without --prewalk)",
-		acpDescription: "Prewalk at the next action",
-		handle: async (_command, runtime) => {
-			const rolePattern = expandRoleAlias("@smol", runtime.settings);
-			const resolved = resolveCliModel({
-				cliModel: rolePattern,
+		description: "Arm or restart a one-shot model handoff",
+		allowArgs: true,
+		acpDescription: "Arm or restart prewalk",
+		acpInputHint: "[restart]",
+		subcommands: [{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" }],
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (arg && arg !== "restart") return usage("Usage: /prewalk [restart]", runtime);
+			const targetPattern = expandRoleAlias("@smol", runtime.settings);
+			const target = resolveCliModel({
+				cliModel: targetPattern,
 				modelRegistry: runtime.session.modelRegistry,
 				preferences: getModelMatchPreferences(runtime.settings),
 			});
-			if (resolved.error || !resolved.model) {
-				return usage(resolved.error ?? `Model "${rolePattern}" not found`, runtime);
+			if (target.error || !target.model) {
+				return usage(target.error ?? `Model "${targetPattern}" not found`, runtime);
 			}
-			if (!runtime.session.modelRegistry.hasConfiguredAuth(resolved.model)) {
-				return usage(`No API key for ${resolved.model.provider}/${resolved.model.id}`, runtime);
+			if (!runtime.session.modelRegistry.hasConfiguredAuth(target.model)) {
+				return usage(`No API key for ${target.model.provider}/${target.model.id}`, runtime);
 			}
-			const armed = runtime.session.armPrewalk(resolved.model, resolved.thinkingLevel);
+			let restartSource: string | undefined;
+			if (arg === "restart") {
+				const sourcePattern = expandRoleAlias("@default", runtime.settings);
+				const source = resolveCliModel({
+					cliModel: sourcePattern,
+					modelRegistry: runtime.session.modelRegistry,
+					preferences: getModelMatchPreferences(runtime.settings),
+				});
+				if (source.error || !source.model) {
+					return usage(source.error ?? `Model "${sourcePattern}" not found`, runtime);
+				}
+				if (!runtime.session.modelRegistry.hasConfiguredAuth(source.model)) {
+					return usage(`No API key for ${source.model.provider}/${source.model.id}`, runtime);
+				}
+				await runtime.session.setModelTemporary(source.model, source.thinkingLevel, { ephemeral: true });
+				restartSource = `${source.model.provider}/${source.model.id}`;
+			}
+			const armed = runtime.session.armPrewalk(target.model, target.thinkingLevel);
 			if (armed) {
 				await runtime.output(
-					`Prewalk on: switching to ${resolved.model.provider}/${resolved.model.id} at the next edit/write (todo-gated).`,
+					arg === "restart"
+						? `Prewalk restarted: using @default (${restartSource}) for planning, then switching to @smol (${target.model.provider}/${target.model.id}) at the next edit/write (todo-gated).`
+						: `Prewalk on: switching to ${target.model.provider}/${target.model.id} at the next edit/write (todo-gated).`,
 				);
 			}
 			return commandConsumed();
