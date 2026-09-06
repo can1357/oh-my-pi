@@ -69,7 +69,7 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 		registry: () => ALL_TOOLS,
 		isDefaultActive: () => true,
 	});
-	let runtimeRef: PersonaRuntime | undefined;
+	const runtimeRef: { current: PersonaRuntime | undefined } = { current: undefined };
 	const modeChangeEntries: Array<{ mode: string; data?: Record<string, unknown> }> = [];
 	const sessionManagerStub = {
 		appendModeChange: (mode: string, data?: Record<string, unknown>) => {
@@ -106,14 +106,14 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 			stub.appendPromptCalls.push(text);
 		},
 		getPersonaAppendPrompt: () => stub.appendPrompt,
-		getPersonaRuntime: () => runtimeRef,
+		getPersonaRuntime: () => runtimeRef.current,
 		getToolPolicy: () => policy,
 		emitNotice: (level: string, message: string) => {
 			stub.noticeCalls.push({ level, message });
 		},
 	} as unknown as AgentSession;
 	const runtime = new PersonaRuntime(policy, session);
-	runtimeRef = runtime;
+	runtimeRef.current = runtime;
 	return { stub, session, policy, runtime, modeChangeEntries };
 }
 

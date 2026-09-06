@@ -17,12 +17,14 @@ const NO_EXPLICIT: PersonaExplicitOverrides = {};
 const ALL_TOOLS = new Set(["read", "grep", "glob", "write", "edit", "bash", "task", "hub", "lsp"]);
 const defaultActive = (name: string): boolean => name !== "lsp"; // lsp tools are defaultInactive
 
-function makePolicy(options: {
-	toolNames?: readonly string[];
-	restrictToolNames?: boolean;
-	lspReadOnly?: boolean;
-	registry?: ReadonlySet<string>;
-} = {}): SessionToolPolicy {
+function makePolicy(
+	options: {
+		toolNames?: readonly string[];
+		restrictToolNames?: boolean;
+		lspReadOnly?: boolean;
+		registry?: ReadonlySet<string>;
+	} = {},
+): SessionToolPolicy {
 	return new SessionToolPolicy({
 		toolNames: options.toolNames,
 		restrictToolNames: options.restrictToolNames,

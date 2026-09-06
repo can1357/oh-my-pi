@@ -1,10 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import {
-	PersonaRuntime,
-	PersonaSwitchError,
-	PersonaSwitchTransaction,
-} from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
+import { PersonaRuntime, PersonaSwitchError } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
 import type { PersonaModelApplyHooks } from "@oh-my-pi/pi-coding-agent/session/persona-model-hooks";
 import { type DiscoveredAgent, SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
 

@@ -1,7 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -47,16 +46,12 @@ You are the modeled persona.`;
 let workspace: TempDir;
 let authStorage: AuthStorage;
 let modelRegistry: ModelRegistry;
-let model: Model;
 
 beforeAll(() => {
 	workspace = TempDir.createSync("@omp-launch-persona-");
 	authStorage = createInMemoryAuthStorage();
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
 	modelRegistry = new ModelRegistry(authStorage);
-	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
-	if (!bundled) throw new Error("Expected built-in anthropic model to exist");
-	model = bundled;
 });
 
 afterAll(async () => {
@@ -102,7 +97,7 @@ async function launch({ args, extraOptions }: SessionOpts): Promise<AgentSession
 		contextFiles: [],
 		promptTemplates: [],
 		slashCommands: [],
-		...(extraOptions ?? {}),
+		...extraOptions,
 	});
 	const result = await createAgentSession(options as Parameters<typeof createAgentSession>[0]);
 	session = result.session;
