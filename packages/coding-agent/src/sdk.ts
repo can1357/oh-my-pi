@@ -3885,6 +3885,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 		hasSession = true;
 		await session.initializeCodexContext();
+		const checkpointRefresh = isSubagentSession ? codexCheckpointRefreshes.get(modelRegistry) : undefined;
+		const startupModel = session.model;
+		if (checkpointRefresh && startupModel && !getCodexContextWindowPolicy(startupModel)) {
+			const liveSession = session;
+			void checkpointRefresh
+				.then(async () => {
+					await liveSession.waitForIdle();
+					// A late catalog response must not undo a model switch or revive a disposed child.
+					if (liveSession.isDisposed || liveSession.model !== startupModel) return;
+					const discovered = modelRegistry.find(startupModel.provider, startupModel.id);
+					if (!discovered || !getCodexContextWindowPolicy(discovered)) return;
+					await liveSession.setModelTemporary(discovered, liveSession.configuredThinkingLevel, {
+						ephemeral: true,
+					});
+				})
+				.catch(error => logger.debug("Deferred Codex checkpoint activation unavailable", { error: String(error) }));
+		}
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the
 		// advisor transcript size (issue #9553).

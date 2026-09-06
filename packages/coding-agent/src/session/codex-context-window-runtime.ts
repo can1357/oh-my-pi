@@ -50,7 +50,7 @@ export class CodexContextWindowRuntime {
 	readonly backend: CodexHistoryNotesBackend;
 	readonly #host: RuntimeHost;
 	readonly #windowRequested: boolean;
-	readonly #notesRequested: boolean;
+	#notesRequested: boolean | undefined;
 	#sessionId?: string;
 	#available = false;
 	#threadHint?: string;
@@ -64,8 +64,7 @@ export class CodexContextWindowRuntime {
 		this.#windowRequested = host.settings.get("compaction.methodOrder").includes("window");
 		const notesMode = host.settings.get("providers.openai-codex.historyNotes");
 		this.#notesRequested =
-			notesMode === "on" ||
-			(notesMode === "auto" && getCodexContextWindowPolicy(host.model())?.useHistoryNotes === true);
+			notesMode === "auto" ? getCodexContextWindowPolicy(host.model())?.useHistoryNotes : notesMode === "on";
 		this.protocol = new CodexContextWindowProtocol(codexHistoryNotesAgentPath(host.agentIdentity));
 		this.backend = new CodexHistoryNotesBackend(async () => {
 			const model = host.model();
@@ -83,7 +82,7 @@ export class CodexContextWindowRuntime {
 		);
 	}
 	get notesActive(): boolean {
-		return this.#available && this.#notesRequested;
+		return this.#available && this.#notesRequested === true;
 	}
 	get policy(): CodexContextWindows | undefined {
 		return this.windowActive ? this.#policy : undefined;
@@ -114,6 +113,9 @@ export class CodexContextWindowRuntime {
 			setOpenAICodexHistoryIngestion(this.#host.providerSessionId(), this.#host.providerSessionState, undefined);
 		}
 		const model = this.#host.model();
+		// Freeze auto activation once catalog metadata exists, not while optional
+		// discovery is still pending during a non-blocking subagent startup.
+		this.#notesRequested ??= getCodexContextWindowPolicy(model)?.useHistoryNotes;
 		if ((!this.#windowRequested && !this.#notesRequested) || model?.api !== "openai-codex-responses") return;
 		try {
 			if (!canUseCodexHistoryNotes(await this.#host.resolveAuth(model))) return;
