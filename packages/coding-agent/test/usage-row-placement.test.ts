@@ -188,6 +188,56 @@ describe("ChatTranscriptBuilder Cursor task aliases", () => {
 		expect(rendered).toContain("AuthExplorer: Inspect auth");
 		expect(rendered).not.toContain("task=Inspect auth");
 	});
+
+	it("does not force the built-in renderer for an alias resolved to a custom task override", () => {
+		const taskTool = { name: "task", label: "Custom Task" } as unknown as AgentTool;
+		const builder = new ChatTranscriptBuilder({
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: process.cwd(),
+			requestRender: () => {},
+			getTool: name => (name === "task" ? taskTool : undefined),
+			isBuiltInTool: () => false,
+		});
+		const message = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "cursor-custom-task-alias",
+					name: "Subagent",
+					arguments: { prompt: "Inspect auth", resume: "old-agent", model: "custom-model" },
+				},
+			],
+			api: "openai-responses",
+			provider: "cursor",
+			model: "cursor-model",
+			stopReason: "toolUse",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 1_000,
+		} as unknown as AgentMessage;
+
+		builder.rebuild([
+			{
+				type: "message",
+				id: "cursor-custom-task-entry",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				message,
+			},
+		]);
+
+		const rendered = Bun.stripANSI(builder.container.render(120).join("\n"));
+		expect(rendered).toContain("prompt=Inspect auth");
+		expect(rendered).toContain("resume=old-agent");
+		expect(rendered).toContain("model=custom-model");
+	});
 });
 
 describe("ChatTranscriptBuilder token-usage row timestamp", () => {

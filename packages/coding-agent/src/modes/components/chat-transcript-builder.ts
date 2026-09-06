@@ -459,14 +459,13 @@ export class ChatTranscriptBuilder {
 			const isTaskAlias = message.provider === "cursor" && isCursorTaskMcpName(content.name);
 			const exactTool = this.deps.getTool?.(content.name);
 			const resolvedTool = exactTool ?? (isTaskAlias ? this.deps.getTool?.("task") : undefined);
-			const usesTaskAliasFallback = exactTool === undefined && isTaskAlias && resolvedTool?.name === "task";
 			const renderToolName = toolRenderName(content.name, resolvedTool);
+			const useBuiltInRenderer = this.deps.isBuiltInTool?.(renderToolName) ?? resolvedTool === undefined;
 			const component = new ToolExecutionComponent(
 				renderToolName,
 				content.arguments,
 				{
-					useBuiltInRenderer:
-						usesTaskAliasFallback || (this.deps.isBuiltInTool?.(content.name) ?? exactTool === undefined),
+					useBuiltInRenderer,
 					// Stable ids and Kitty placeholder cells keep images anchored
 					// while the transcript viewport scrolls and reflows.
 					showImages: settings.get("terminal.showImages"),
