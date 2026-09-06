@@ -107,7 +107,7 @@ function makeSessionStub(overrides: Partial<SessionStub> = {}): {
 				mountedToolNames: [...mountedToolNames],
 			});
 		},
-		clearInheritedProviderPromptCacheKey: () => { },
+		clearInheritedProviderPromptCacheKey: () => {},
 		getSessionSpawns: () => stub.spawnsOverride ?? "*",
 		setSessionSpawns: (spawns: string[] | "*" | null) => {
 			stub.spawnsOverride = spawns;
@@ -148,14 +148,14 @@ function makeAgentSlashHarness(session: AgentSession): {
 			output: (text: string) => {
 				output.push(text);
 			},
-			refreshCommands: () => { },
-			reloadPlugins: async () => { },
+			refreshCommands: () => {},
+			reloadPlugins: async () => {},
 		},
 	};
 }
 
 function makePersonaHooks(): PersonaModelApplyHooks {
-	return { apply: async () => { }, restore: async () => { } };
+	return { apply: async () => {}, restore: async () => {} };
 }
 
 const discoverySpies: Array<Mock<typeof taskDiscovery.discoverAgents>> = [];
@@ -283,10 +283,10 @@ describe("persona switch deferral", () => {
 		const { runtime } = makeSessionStub({ isStreaming: true });
 		const queued: Array<ModelBaseline> = [];
 		const hooks: PersonaModelApplyHooks = {
-			apply: async () => { },
-			restore: async () => { },
+			apply: async () => {},
+			restore: async () => {},
 			shouldDeferModelSwitch: () => true,
-			deferModelSwitchWhileStreaming: () => { },
+			deferModelSwitchWhileStreaming: () => {},
 			deferModelRestoreWhileStreaming: baseline => {
 				queued.push(baseline);
 			},
