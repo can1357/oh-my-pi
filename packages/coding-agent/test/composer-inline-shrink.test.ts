@@ -101,4 +101,34 @@ describe("composer inline shrink (#11007)", () => {
 
 		h.composer.stop();
 	});
+
+	it("keeps the below-chrome baseline across a height resize while inline chrome is expanded", async () => {
+		const shorter = ROWS - 10;
+		const h = makeHarness();
+		await h.scheduler.settle(h.terminal);
+
+		// Expand, resize the terminal height *while still expanded*, then keep
+		// rendering before shrinking. The retirement baseline must not adopt the
+		// expanded peak at the resize, or the frames before the shrink retire
+		// rows the shrink cannot reclaim and the editor is stranded again.
+		h.widget.expanded = true;
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+		h.terminal.resize(COLUMNS, shorter);
+		await h.scheduler.advance(h.terminal, 300);
+		for (let frame = 0; frame < 5; frame++) {
+			h.composer.ui.requestRender();
+			await h.scheduler.settle(h.terminal);
+		}
+		h.widget.expanded = false;
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+
+		const after = h.terminal.getViewport().map(row => Bun.stripANSI(row).trimEnd());
+		expect(after.findIndex(row => row.includes("EDITOR"))).toBe(shorter - 1);
+		const lastContent = after.reduce((last, row, i) => (row.length > 0 ? i : last), -1);
+		expect(lastContent).toBe(shorter - 1);
+
+		h.composer.stop();
+	});
 });

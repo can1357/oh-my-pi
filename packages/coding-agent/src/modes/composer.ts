@@ -195,10 +195,13 @@ export class Composer implements TerminalFrameProvider {
 	#resizeRetiredHeaderStart: number | undefined;
 	#lastNormalRows = 0;
 	// Smallest below-transcript chrome height (editor + status + any transient
-	// inline dialog) seen at the current terminal height. Retirement is billed
-	// against this persistent baseline, never the transient peak, so a dialog or
-	// tall editor that later shrinks never leaves committed transcript rows the
-	// live viewport cannot reclaim (#11007). Reset when the height changes.
+	// inline dialog) seen since mount. Retirement is billed against this
+	// persistent baseline, never the transient peak, so a dialog or tall editor
+	// that later shrinks never leaves committed transcript rows the live viewport
+	// cannot reclaim (#11007). The baseline is terminal-height independent — the
+	// editor and status floors do not scale with rows — so it is retained across
+	// resizes rather than rediscovered from whatever chrome is expanded at the
+	// moment the height changes.
 	#retirementBelowFloor: number | undefined;
 	#lastInterruptAt = 0;
 	#started = false;
@@ -262,7 +265,6 @@ export class Composer implements TerminalFrameProvider {
 			this.#retiredHeaderStart = this.#resizeRetiredHeaderStart;
 			this.#resizeRetiredHeaderStart = undefined;
 		}
-		if (rows !== this.#lastNormalRows) this.#retirementBelowFloor = undefined;
 		this.#lastNormalRows = rows;
 		const roots = this.#runtimeMounted
 			? [...this.#runtimeChildren, this.#statusHost]
