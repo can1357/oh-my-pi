@@ -10,7 +10,7 @@
  * in the session), deterministic per `(date, cwd)`, so the bytes are stable
  * for the lifetime of a session/day and refresh automatically at midnight.
  */
-import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
+import type { Context, DeveloperMessage, Message, OpenAIResponsesHistoryPayload, UserMessage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import dateCwdReminderTemplate from "../prompts/system/date-cwd-reminder.md" with { type: "text" };
 import nowReminderTemplate from "../prompts/system/now-reminder.md" with { type: "text" };
@@ -155,6 +155,13 @@ export function renderNowStamp(now: Date = new Date()): string {
  * A pasted or echoed `Now:` block carrying any other value does not suppress
  * the stamp; the derived one is injected alongside it deterministically.
  *
+ * Messages carrying an openaiResponsesHistory providerPayload (notably the
+ * compaction-summary message created after OpenAI remote compaction) are
+ * replayed by the Responses serializers from that payload's items, which
+ * skip the generic content; the stamp is appended to the payload as an
+ * ordinary user message item so the provider sees it, byte-stably, there
+ * as well.
+ *
  * The stamp value is computed, never held in a process-global structure:
  * two distinct turns in the same second share the correct instant rather
  * than a value leaked from another turn's request. The only memo is the
@@ -185,6 +192,33 @@ function finalMessageText(content: Message["content"]): string | undefined {
 	return undefined;
 }
 
+/** The native Responses replay payload of a message, when it carries one. */
+function responsesHistoryPayload(message: UserMessage | DeveloperMessage): OpenAIResponsesHistoryPayload | undefined {
+	const payload = message.providerPayload;
+	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return undefined;
+	return payload;
+}
+
+/** A replay item carrying the stamp as an ordinary user message. */
+function responsesHistoryStampItem(stamp: string): Record<string, unknown> {
+	return { type: "message", role: "user", content: [{ type: "input_text", text: stamp }] };
+}
+
+/** True when the payload's final item already carries the stamp, byte for byte. */
+function responsesHistoryTailIsStamp(items: Array<Record<string, unknown>>, stamp: string): boolean {
+	const last = items[items.length - 1];
+	if (!last || last.type !== "message" || last.role !== "user") return false;
+	const content = last.content;
+	if (!Array.isArray(content) || content.length === 0) return false;
+	const part = content[content.length - 1];
+	return (
+		typeof part === "object" &&
+		part !== null &&
+		(part as Record<string, unknown>).type === "input_text" &&
+		(part as Record<string, unknown>).text === stamp
+	);
+}
+
 export function injectNowStamp(messages: Message[]): Message[] {
 	let out: Message[] | undefined;
 	for (let i = 0; i < messages.length; i++) {
@@ -205,12 +239,31 @@ export function injectNowStamp(messages: Message[]): Message[] {
 		// an already-applied stamp. A pasted or echoed Now block carrying any
 		// other value must not suppress it.
 		const tail = finalMessageText(message.content);
-		if (tail !== undefined && tail.endsWith(stamp)) continue;
-		const content =
-			typeof message.content === "string"
+		const contentStamped = tail !== undefined && tail.endsWith(stamp);
+		// The Responses serializers replay a user message's authoritative
+		// providerPayload.items and skip its generic content (notably the
+		// compaction-summary message after OpenAI remote compaction), so the
+		// stamp must reach the payload or the provider never sees it.
+		const history = responsesHistoryPayload(message);
+		const historyStamped = history !== undefined && responsesHistoryTailIsStamp(history.items, stamp);
+		if (contentStamped && (history === undefined || historyStamped)) continue;
+		const content = contentStamped
+			? message.content
+			: typeof message.content === "string"
 				? `${message.content}\n\n${stamp}`
 				: ([...message.content, { type: "text", text: stamp }] as Message["content"]);
-		const stamped = { ...message, content } as Message;
+		const stamped = {
+			...message,
+			content,
+			...(history !== undefined && !historyStamped
+				? {
+						providerPayload: {
+							...history,
+							items: [...history.items, responsesHistoryStampItem(stamp)],
+						},
+					}
+				: {}),
+		} as Message;
 		nowStampCache.set(message, stamped);
 		(out ??= messages.slice())[i] = stamped;
 	}

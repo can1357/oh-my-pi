@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import type { Api, Context, Message, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import type { Api, Context, Message, Model, ModelSpec, UserMessage } from "@oh-my-pi/pi-ai";
 import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -229,8 +229,7 @@ describe("date-cwd-reminder", () => {
 
 			const out = injectNowStamp(messages);
 
-			expect(out).toBe(messages);
-			expect(out[0]!).toBe(stamped);
+			expect(textOf(out[0]!)).toBe(textOf(stamped));
 			expect(textOf(out[0]!).match(/Now: /g)).toHaveLength(1);
 		});
 
@@ -248,16 +247,6 @@ describe("date-cwd-reminder", () => {
 			expect(textOf(out)).toBe(`quote this verbatim\n\n${pasted}\n\n${derived}`);
 		});
 
-		it("re-stamps the same pristine message with the same stamped object across requests", () => {
-			const t = Date.parse("2026-08-30T02:51:16Z");
-			const pristine: Message = { role: "user", content: "hi", timestamp: t };
-
-			const first = injectNowStamp([pristine])[0]!;
-			expect(first).not.toBe(pristine);
-			const second = injectNowStamp([pristine])[0]!;
-			expect(second).toBe(first);
-		});
-
 		it("keeps byte-identical wire bytes when a previously-stamped user message slides out of last position", () => {
 			// The append-only log re-hands the pristine messages each request; a
 			// user message stamped in an earlier request must keep its exact wire
@@ -272,7 +261,6 @@ describe("date-cwd-reminder", () => {
 
 			const out = injectNowStamp([first, assistant, second]);
 
-			expect(out[0]).toBe(firstStamped);
 			expect(out[1]).toBe(assistant);
 			expect(out[2]).not.toBe(second);
 			expect(textOf(out[0]!)).toBe(textOf(firstStamped));
@@ -346,6 +334,59 @@ describe("date-cwd-reminder", () => {
 			expect(textOf(outA)).toBe(`hi\n\n${renderNowStamp(new Date(tA))}`);
 			expect(textOf(outA)).not.toBe(textOf(outB));
 			expect(textOf(outARecreated)).toBe(textOf(outA));
+		});
+
+		it("appends the stamp to the authoritative openaiResponsesHistory replay payload", () => {
+			// A user message carrying an openaiResponsesHistory providerPayload —
+			// notably the compaction-summary message created after OpenAI remote
+			// compaction — is replayed by the Responses serializers from
+			// providerPayload.items, which skip the generic content (see
+			// convertConversationMessages in openai-shared.ts). The stamp must
+			// reach the payload or the provider never sees it.
+			const t = Date.parse("2026-08-30T05:30:00Z");
+			const stamp = renderNowStamp(new Date(t));
+			const content = "<system-reminder>\nCompaction summary: compacted\n</system-reminder>";
+			const historyItems: Array<Record<string, unknown>> = [
+				{ type: "compaction", encrypted_content: "enc", summary: [{ type: "summary_text", text: "compacted" }] },
+			];
+			const makeSummary = (): UserMessage => ({
+				role: "user",
+				content,
+				attribution: "agent",
+				historyRewriteAt: t,
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					provider: "openai",
+					items: [
+						{
+							type: "compaction",
+							encrypted_content: "enc",
+							summary: [{ type: "summary_text", text: "compacted" }],
+						},
+					],
+				},
+				timestamp: t,
+			});
+
+			const out = injectNowStamp([makeSummary()])[0] as UserMessage;
+
+			const payload = out.providerPayload;
+			expect(payload?.type).toBe("openaiResponsesHistory");
+			if (payload?.type !== "openaiResponsesHistory") throw new Error("expected openaiResponsesHistory payload");
+			expect(payload.items).toEqual([
+				...historyItems,
+				{ type: "message", role: "user", content: [{ type: "input_text", text: stamp }] },
+			]);
+			// The generic content is still stamped for providers without native
+			// replay, and the input payload is never mutated.
+			expect(textOf(out)).toBe(`${content}\n\n${stamp}`);
+			expect(historyItems).toHaveLength(1);
+
+			// Byte-stable re-derivation: a rehydrated copy (fresh objects, same
+			// persisted bytes) yields identical provider-visible wire bytes.
+			const rederived = injectNowStamp([makeSummary()])[0] as UserMessage;
+			expect(JSON.stringify(rederived.providerPayload)).toBe(JSON.stringify(payload));
+			expect(textOf(rederived)).toBe(textOf(out));
 		});
 
 		it("returns the input unchanged when there is no user message or no messages", () => {
