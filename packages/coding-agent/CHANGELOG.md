@@ -3,6 +3,10 @@
 ## [Unreleased]
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
+### Added
+
+- Added `compaction.v2TimeoutMs` to tune slow V2 remote compaction requests without changing normal model-turn timeouts; the default remains 180,000 ms ([#10937](https://github.com/can1357/oh-my-pi/issues/10937)).
+
 ### Changed
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.

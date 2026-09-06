@@ -190,6 +190,8 @@ export interface CompactionSettings {
 	remoteEnabled?: boolean;
 	remoteEndpoint?: string;
 	remoteStreamingV2Enabled?: boolean;
+	/** Absolute V2 request deadline in milliseconds; defaults to 180,000. */
+	v2TimeoutMs?: number;
 	v2RetainedMessageBudget?: number;
 }
 
@@ -1709,6 +1711,7 @@ export async function compact(
 					key =>
 						requestCompactionV2Streaming(model, key, request, signal, {
 							fetch: summaryOptions.fetch,
+							timeoutMs: settings.v2TimeoutMs,
 							providerSessionState: summaryOptions.providerSessionState,
 							preferWebsockets: summaryOptions.preferWebsockets,
 							codexCompaction: summaryOptions.codexCompaction,

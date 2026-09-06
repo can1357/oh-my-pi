@@ -1002,6 +1002,46 @@ describe("requestCompactionV2Streaming", () => {
 		expect(attempts).toBe(2);
 	});
 
+	test("does not retry an expired V2 deadline after receiving compaction progress", async () => {
+		const deadline = new AbortController();
+		vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+		const model = makeOpenAiModel({
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		const request = buildCompactionV2Request(model, [], "instructions");
+		const fetchMock: FetchImpl = vi.fn(async (_input, init) => {
+			const signal = init?.signal;
+			if (!signal) throw new Error("Expected a compaction deadline");
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(
+						new TextEncoder().encode(
+							'data: {"type":"response.output_item.added","item":{"type":"compaction"}}\n\n',
+						),
+					);
+					const abort = () => controller.error(signal.reason);
+					signal.addEventListener("abort", abort, { once: true });
+					if (signal.aborted) abort();
+					else queueMicrotask(() => deadline.abort(new DOMException("The operation timed out.", "TimeoutError")));
+				},
+			});
+			return new Response(body, { headers: { "content-type": "text/event-stream" } });
+		});
+
+		const error = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+			fetch: fetchMock,
+			retryWait: async () => {},
+		}).catch(cause => cause);
+
+		expect(error).toHaveProperty("name", "TimeoutError");
+		expect(AIError.is(AIError.classify(error), AIError.Flag.Timeout)).toBe(true);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
 	test("does not retry and preserves auth_unavailable from V2 HTTP failures", async () => {
 		const model = makeOpenAiModel({
 			remoteCompaction: {
@@ -1110,6 +1150,49 @@ describe("Responses Lite remote compaction", () => {
 			},
 		];
 	}
+
+	test.each(["deadline", "cancellation"] as const)(
+		"preserves WebSocket compaction %s without retrying",
+		async kind => {
+			const deadline = new AbortController();
+			const caller = new AbortController();
+			const reason =
+				kind === "deadline"
+					? new DOMException("The operation timed out.", "TimeoutError")
+					: new DOMException("The operation was aborted.", "AbortError");
+			vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+			const fixture = installCodexCompactionWebSocket({
+				respond(socket) {
+					socket.emit({ type: "response.output_item.added", item: { type: "compaction" } });
+					queueMicrotask(() => (kind === "deadline" ? deadline : caller).abort(reason));
+				},
+			});
+			const model = makeCodexLiteModel({ preferWebsockets: true });
+			const request = buildCompactionV2Request(model, [], "instructions", {
+				sessionId: "codex-compaction-deadline",
+			});
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const fetchMock = vi.fn(async () => {
+				throw new Error("A deadline must not open another transport");
+			});
+			try {
+				const error = await requestCompactionV2Streaming(model, CODEX_RESIDENCY_TOKEN, request, caller.signal, {
+					fetch: fetchMock,
+					preferWebsockets: true,
+					providerSessionState,
+					retryWait: async () => {},
+				}).catch(cause => cause);
+
+				expect(error).toBe(reason);
+				expect(AIError.is(AIError.classify(error), AIError.Flag.Timeout)).toBe(kind === "deadline");
+				expect(fixture.sockets.flatMap(socket => socket.sent)).toHaveLength(1);
+				expect(fetchMock).not.toHaveBeenCalled();
+			} finally {
+				for (const state of providerSessionState.values()) state.close();
+				fixture.restore();
+			}
+		},
+	);
 
 	test("V1 compaction sends the lite header and input-item instructions", async () => {
 		const model = makeCodexLiteModel();

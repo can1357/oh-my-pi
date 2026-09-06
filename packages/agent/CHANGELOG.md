@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `CompactionSettings.v2TimeoutMs` to configure the absolute V2 streaming compaction request deadline.
+
+### Fixed
+
+- Preserve V2 compaction timeout and cancellation reasons across Codex WebSocket transport errors, and stop retrying exhausted request deadlines ([#10937](https://github.com/can1357/oh-my-pi/issues/10937)).
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed

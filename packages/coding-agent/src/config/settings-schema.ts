@@ -2657,6 +2657,8 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.remoteEndpoint": { type: "string", default: undefined },
 
+	// Absolute V2 request deadline, not an idle timeout or the whole recovery budget.
+	"compaction.v2TimeoutMs": { type: "number", default: 180000 },
 	"compaction.v2RetainedMessageBudget": { type: "number", default: 64000 },
 
 	// Idle compaction
@@ -6172,6 +6174,7 @@ export interface CompactionSettings {
 	autoContinue: boolean;
 	remoteEndpoint: string | undefined;
 	remoteStreamingV2Enabled: boolean;
+	v2TimeoutMs: number;
 	v2RetainedMessageBudget: number;
 	idleEnabled: boolean;
 	idleThresholdTokens: number;

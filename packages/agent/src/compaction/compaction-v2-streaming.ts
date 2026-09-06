@@ -302,8 +302,11 @@ export async function requestCompactionV2Streaming(
 				preferWebsockets: options?.preferWebsockets,
 			});
 		} catch (err) {
+			// The Codex WebSocket transport wraps aborts as generic transport
+			// errors. Recover the caller/deadline reason before classifying retries;
+			// an exhausted request deadline must not start another full attempt.
+			timeoutSignal?.throwIfAborted();
 			const error = err instanceof Error ? err : new Error(String(err));
-			if (signal?.aborted) throw error;
 
 			if (isRetryableCompactionError(error) && attempt < V2_COMPACTION_MAX_RETRIES) {
 				lastError = error;
