@@ -382,6 +382,7 @@
 
 ### Fixed
 
+- Fixed the Nerd Font statusline brand icon rendering as an axis-rotation symbol instead of pi.
 - Fixed edit-tool parsing of `－`-prefixed MATCH lines so they correctly represent whole-line deletions and can be replaced by a following `＋` run.
 - Fixed interrupted and failed Python evaluation cells being reported as successful results instead of errors, improving model handling, telemetry, retries, and background-job failure reporting.
 - Fixed native-extension imports such as `numpy` hanging indefinitely in the Python evaluation tool on Windows.
