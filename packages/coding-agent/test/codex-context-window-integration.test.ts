@@ -321,3 +321,35 @@ test("session_stop hooks receive public results without changing the journal or 
 	expect(JSON.stringify(manager.getEntries())).toContain("opaque-result");
 	expect(JSON.stringify(frames[1].messages)).toContain("opaque-result");
 });
+
+test("exhaustion rejects new_context without a checkpoint and uses the next compaction method", async () => {
+	vi.spyOn(compaction, "compact").mockImplementation(async preparation => ({
+		summary: "Recovered task checkpoint",
+		firstKeptEntryId: preparation.firstKeptEntryId,
+		tokensBefore: preparation.tokensBefore,
+	}));
+	const { session, manager, frames } = await harness(true, {
+		responses: [
+			{ content: [{ type: "toolCall", name: "work", arguments: {} }], usage: { input: 8500 } },
+			{ content: [{ type: "toolCall", name: "new_context", arguments: {} }], usage: { input: 9000 } },
+			{ content: ["Finished"], usage: { input: 100 } },
+		],
+	});
+	await session.prompt("Keep this task unless it has been checkpointed");
+	await session.waitForIdle();
+	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(false);
+	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "soft")).toBe(true);
+	expect(JSON.stringify(frames.at(-1)?.messages)).toContain("Recovered task checkpoint");
+});
+
+test("intentional new_context before exhaustion does not require a checkpoint", async () => {
+	const { session, manager } = await harness(true, {
+		responses: [
+			{ content: [{ type: "toolCall", name: "new_context", arguments: {} }], usage: { input: 100 } },
+			{ content: ["Fresh context"], usage: { input: 100 } },
+		],
+	});
+	await session.prompt("Start over intentionally");
+	await session.waitForIdle();
+	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(true);
+});

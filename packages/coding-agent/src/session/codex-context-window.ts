@@ -66,6 +66,9 @@ export class CodexContextWindowProtocol {
 	get fallbackFailed(): boolean {
 		return this.#fallbackFailed;
 	}
+	get resetAllowed(): boolean {
+		return !this.#fallbackDelivered || (!this.#fallbackFailed && this.#fallbackResponses === 2);
+	}
 
 	reset(identity: CodexContextWindowIdentity): void {
 		if (this.#windowId === identity.windowId) return;
@@ -93,7 +96,13 @@ export class CodexContextWindowProtocol {
 			const calls = message.content.filter(block => block.type === "toolCall");
 			const writesCheckpoint =
 				calls.length === 1 && (calls[0].name === "notes.write_file" || calls[0].name === "notes.append_to_file");
-			if (this.#fallbackResponses > 1 || !writesCheckpoint) this.#fallbackFailed = true;
+			const resetsWindow = calls.length === 1 && calls[0].name === "new_context";
+			if (
+				(this.#fallbackResponses === 1 && !writesCheckpoint) ||
+				(this.#fallbackResponses === 2 && !resetsWindow) ||
+				this.#fallbackResponses > 2
+			)
+				this.#fallbackFailed = true;
 		}
 		return this.observeInputTokens(calculatePromptTokens(message.usage), effectiveLimit, policy);
 	}

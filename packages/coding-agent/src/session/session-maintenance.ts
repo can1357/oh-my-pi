@@ -1910,19 +1910,22 @@ export class SessionMaintenance {
 		)
 			return;
 
-		if (this.#contextWindowResetRequested) {
-			if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
-			await this.#commitContextWindowReset();
-			const replacement = this.#host.agent.state.messages;
-			if (replacement !== activeMessages) activeMessages.splice(0, activeMessages.length, ...replacement);
-			return;
-		}
 		if (this.contextWindows.windowActive) {
 			if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
 			const assistant = activeMessages.findLast(
 				(message): message is AssistantMessage => message.role === "assistant",
 			);
-			if (assistant && this.#observeContextWindow(assistant, activeMessages)) {
+			const checkpointFailed = assistant ? this.#observeContextWindow(assistant, activeMessages) : false;
+			if (this.#contextWindowResetRequested) {
+				if (this.contextWindows.protocol.resetAllowed) {
+					await this.#commitContextWindowReset();
+					const replacement = this.#host.agent.state.messages;
+					if (replacement !== activeMessages) activeMessages.splice(0, activeMessages.length, ...replacement);
+					return;
+				}
+				this.#contextWindowResetRequested = undefined;
+			}
+			if (checkpointFailed) {
 				await this.runAutoCompaction("threshold", false, false, false, {
 					autoContinue: false,
 					suppressContinuation: true,
