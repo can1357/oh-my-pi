@@ -1,5 +1,5 @@
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { formatBytes, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatBytes, logger, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../utils/sixel";
 
 // =============================================================================
@@ -1374,10 +1374,15 @@ export class OutputSink {
 		}
 		const noticeLine = notice ? `[${notice}]\n` : "";
 
-		await this.#settleChunkDelivery();
+		// A rejected mirror delivery still surfaces to the caller, but the
+		// artifact descriptor must close first — otherwise one preview failure
+		// leaks the fd and the tail replay never lands.
+		try {
+			await this.#settleChunkDelivery();
+		} finally {
+			await this.#finalizeFile();
+		}
 		const totalLines = this.#sawData ? this.#totalLines + 1 : 0;
-
-		await this.#finalizeFile();
 
 		// Compose the visible output. With head retention, splice head + marker
 		// + tail when content was elided. Otherwise return the rolling buffer.
@@ -1482,8 +1487,18 @@ export class OutputSink {
 	 * leaked until a later unrelated read hits `EMFILE` (issue #6463).
 	 */
 	async dispose(): Promise<void> {
-		await this.#settleChunkDelivery();
-		await this.#finalizeFile();
+		try {
+			await this.#settleChunkDelivery();
+		} catch (error) {
+			// Progress delivery is best-effort; dispose() runs from `finally`
+			// blocks and must not replace the caller's original error.
+			logger.warn("Mirror chunk delivery failed during output sink disposal", {
+				artifactId: this.#artifactId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		} finally {
+			await this.#finalizeFile();
+		}
 	}
 
 	/** Make mirrored bytes readable without closing the stable artifact. */
