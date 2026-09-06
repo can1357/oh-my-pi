@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added git upstream divergence counts (⇡ ahead / ⇣ behind) to the status line git segment, toggleable via `statusLine.segmentOptions.git.showAheadBehind`.
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
 ### Changed

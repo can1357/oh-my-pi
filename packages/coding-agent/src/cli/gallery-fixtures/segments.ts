@@ -169,6 +169,16 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 					context: { git: { branch: "main", status: { staged: 0, unstaged: 0, untracked: 0 }, pr: null } },
 				},
 				{ label: "dirty" },
+				{
+					label: "upstream divergence",
+					context: {
+						git: {
+							branch: "main",
+							status: { staged: 1, unstaged: 2, untracked: 0, ahead: 3, behind: 1 },
+							pr: null,
+						},
+					},
+				},
 			];
 		case "cost":
 			return [

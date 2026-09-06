@@ -22,7 +22,13 @@ export interface CollabStatus {
 export interface StatusLineSegmentOptions {
 	model?: { showThinkingLevel?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
-	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
+	git?: {
+		showBranch?: boolean;
+		showStaged?: boolean;
+		showUnstaged?: boolean;
+		showUntracked?: boolean;
+		showAheadBehind?: boolean;
+	};
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
 }
 
@@ -144,7 +150,7 @@ export interface SegmentContext {
 	brandFgAnsi?: string;
 	git: {
 		branch: string | null;
-		status: { staged: number; unstaged: number; untracked: number } | null;
+		status: { staged: number; unstaged: number; untracked: number; ahead?: number; behind?: number } | null;
 		pr: { number: number; url: string } | null;
 	};
 	/**

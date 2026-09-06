@@ -2875,6 +2875,13 @@ export interface VcsStatusSummary {
   staged: number
   unstaged: number
   untracked: number
+  /**
+   * Commits ahead of the upstream tracking branch; absent for jj or
+   * branches without an upstream.
+   */
+  ahead?: number
+  /** Commits behind the upstream tracking branch; same absence rules. */
+  behind?: number
 }
 
 /** Validate hunk selections. */
