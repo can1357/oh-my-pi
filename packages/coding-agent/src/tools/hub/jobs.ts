@@ -398,9 +398,10 @@ export async function executeCancel(
  * turn, then release it from the lifecycle (dispose session + unregister). This
  * is the only kill path for a keep-alive subagent that was budget-aborted, went
  * `idle`/`parked`, and outlived its job row — otherwise it is unstoppable short
- * of a broker restart (issue #6315). Scoped to the caller's own descendants so
- * cross-agent kills stay impossible; a bare test/SDK caller (no owner id) may
- * target any sub. Never touches Main, the caller, or advisor transcripts.
+ * of a broker restart (issue #6315). Scoped to the caller's descendant tree so
+ * cross-agent kills stay impossible; any strict descendant in the parentId chain
+ * may be cancelled (not only direct spawns). Releasing the target also retires
+ * its descendant subtree via AgentLifecycleManager.release cascade.
  */
 async function cancelAgentRegistration(
 	session: ToolSession,
@@ -415,8 +416,12 @@ async function cancelAgentRegistration(
 	if (id === ownerId) {
 		return { id, status: "not_found", message: `Cannot cancel yourself (${id}).` };
 	}
-	if (ownerId && ref.parentId !== ownerId) {
-		return { id, status: "not_found", message: `Agent ${id} was not spawned by you and cannot be cancelled.` };
+	if (ownerId && !registry.isDescendantOf(id, ownerId)) {
+		return {
+			id,
+			status: "not_found",
+			message: `Agent ${id} is not in your descendant tree and cannot be cancelled.`,
+		};
 	}
 	const lifecycle = session.agentLifecycle?.();
 	try {
@@ -424,10 +429,16 @@ async function cancelAgentRegistration(
 			await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 		}
 		if (lifecycle) {
-			await lifecycle.release(id);
+			await lifecycle.release(id, ref);
 		} else {
+			for (const descendantId of registry.listDescendantSubIds(id)) {
+				const descendant = registry.get(descendantId);
+				if (!descendant || descendant.kind !== "sub") continue;
+				await descendant.session?.dispose();
+				registry.unregister(descendantId, descendant);
+			}
 			await ref.session?.dispose();
-			registry?.unregister(id);
+			registry.unregister(id, ref);
 		}
 	} catch (error) {
 		return {

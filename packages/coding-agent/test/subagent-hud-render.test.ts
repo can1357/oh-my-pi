@@ -382,12 +382,15 @@ describe("InteractiveMode subagent observer UI sync", () => {
 	});
 
 	afterEach(async () => {
-		mode?.stop();
+		try {
+			mode?.stop();
+		} finally {
+			vi.useRealTimers();
+			vi.restoreAllMocks();
+		}
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.removeSync();
-		vi.useRealTimers();
-		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
 
@@ -413,5 +416,6 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(hud).toContain("BurstAgent5: Burst job 5");
 		expect(rebuildHud).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+		vi.useRealTimers();
 	});
 });
