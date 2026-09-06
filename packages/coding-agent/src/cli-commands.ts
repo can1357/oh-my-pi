@@ -17,6 +17,7 @@ import {
 	STRING_VALUE_FLAGS,
 	VALUELESS_FLAGS,
 } from "./cli/flag-tables";
+import Attach from "./commands/attach";
 import { launchHelp } from "./commands/launch-help";
 
 export const commands: CommandEntry[] = [
@@ -28,7 +29,7 @@ export const commands: CommandEntry[] = [
 	},
 	{
 		name: "attach",
-		load: () => import("./commands/attach").then(m => m.default),
+		load: () => Promise.resolve(Attach),
 		help: commandHelp.attachHelp,
 	},
 	{

@@ -1,15 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	$env,
-	isBunTestRuntime,
-	isCompiledBinary,
-	logger,
-	postmortem,
-	stripWindowsExtendedLengthPathPrefix,
-	workerHostEntry,
-} from "@oh-my-pi/pi-utils";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import { stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils/path";
+import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import { isBunTestRuntime, isCompiledBinary, workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
 import type { Subprocess } from "bun";
 
 /**
@@ -150,7 +145,7 @@ export function resolveWorkerSpawnCmd(workerArg: string): WorkerSpawnCommand {
  * `overlay` (e.g. the tiny-model device/dtype vars) wins over inherited keys.
  */
 export function workerEnvFromParent(overlay?: Record<string, string>): Record<string, string> {
-	const base = $env as Record<string, string | undefined>;
+	const base = Bun.env as Record<string, string | undefined>;
 	const merged: Record<string, string> = {};
 	for (const key in base) {
 		const value = base[key];
@@ -191,7 +186,7 @@ export function nativeLibraryPathOverlay(
  * loader search path of arbitrary user commands risks a `GLIBCXX` mismatch.
  */
 export function inferenceWorkerEnv(overlay?: Record<string, string>): Record<string, string> {
-	return workerEnvFromParent({ ...nativeLibraryPathOverlay($env, process.platform), ...overlay });
+	return workerEnvFromParent({ ...nativeLibraryPathOverlay(Bun.env, process.platform), ...overlay });
 }
 
 /**

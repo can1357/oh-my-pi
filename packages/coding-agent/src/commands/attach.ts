@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import { getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli";
 import { attachHelp as commandHelp } from "../cli/command-help";
 import { listLiveAttachSessions, sendLiveSessionMessage } from "../session/live-attach";

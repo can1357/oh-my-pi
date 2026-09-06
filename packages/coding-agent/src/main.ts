@@ -2069,12 +2069,10 @@ export async function runRootCommand(
 						process.exit(0);
 					}
 				}
-				const liveSessionRegistration = session.sessionFile
-					? await startLiveSessionRegistration(session).catch(error => {
-							notifs.push({ kind: "warn", message: `Live session attach unavailable: ${String(error)}` });
-							return undefined;
-						})
-					: undefined;
+				const liveSessionRegistration = await startLiveSessionRegistration(session).catch(error => {
+					notifs.push({ kind: "warn", message: `Live session attach unavailable: ${String(error)}` });
+					return undefined;
+				});
 				const startupLease = takeStartupComposerLease();
 				try {
 					stopStartupWatchdog();
