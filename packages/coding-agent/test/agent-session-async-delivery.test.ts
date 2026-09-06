@@ -914,6 +914,7 @@ describe("AgentSession owner-routed async delivery", () => {
 				live.queueLaunchCompletion(notification, epoch),
 			setLaunchMonitorActive: (monitorId: string, delivery: "wake" | "ambient", active: boolean, epoch: number) =>
 				live.setLaunchMonitorActive(monitorId, delivery, active, epoch),
+			discardLaunchProgress: (monitorId: string, epoch: number) => live.discardLaunchProgress(monitorId, epoch),
 			registerDisposeCallback: () => () => {},
 			registerContextBoundaryCallback: (callback: (boundary: LaunchContextBoundary) => void) =>
 				live.registerContextBoundaryCallback(callback),
