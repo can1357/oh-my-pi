@@ -9,6 +9,7 @@ from robomp.github_events import (
     extract_mention,
     is_implementation_authorizer,
     is_maintainer,
+    normalize_review_to_comment,
     rate_limit_cap,
     route,
     verify_signature,
@@ -975,6 +976,194 @@ def test_route_non_directive_comment_carries_no_pragmas() -> None:
     )
     assert decision.directive is False
     assert decision.directive_pragmas == ()
+
+
+# ---- normalize_review_to_comment ----
+
+
+def test_normalize_review_to_comment_forgejo_payload() -> None:
+    """Forgejo payload with review.content produces a comment-shaped dict."""
+    payload = {
+        "review": {"content": "Looks good", "id": 42},
+        "sender": {"login": "alice"},
+    }
+    result = normalize_review_to_comment(payload)
+    assert result["body"] == "Looks good"
+    assert result["user"]["login"] == "alice"
+    assert result["id"] == 42
+
+
+def test_normalize_review_to_comment_github_payload() -> None:
+    """GitHub payload with comment is returned as-is."""
+    payload = {
+        "comment": {"body": "Looking sharp", "user": {"login": "bob"}, "id": 7},
+    }
+    result = normalize_review_to_comment(payload)
+    assert result["body"] == "Looking sharp"
+    assert result["user"]["login"] == "bob"
+    assert result["id"] == 7
+
+
+def test_normalize_review_to_comment_empty() -> None:
+    """Empty payload returns an empty dict."""
+    assert normalize_review_to_comment({}) == {}
+
+
+def test_normalize_review_to_comment_both_sources_github_wins() -> None:
+    """When both comment and review are present, GitHub's comment takes precedence."""
+    payload = {
+        "comment": {"body": "Comment body", "user": {"login": "bob"}, "id": 7},
+        "review": {"content": "Review body", "id": 42},
+        "sender": {"login": "alice"},
+    }
+    result = normalize_review_to_comment(payload)
+    assert result["body"] == "Comment body"
+    assert result["user"]["login"] == "bob"
+    assert result["id"] == 7
+
+
+# ---- Forgejo event routing ----
+
+
+def test_route_pull_request_comment_reviewed_forgejo() -> None:
+    """Forgejo sends pull_request_comment with action=reviewed, routes to handle_review."""
+    decision = route(
+        "pull_request_comment",
+        {
+            "action": "reviewed",
+            "review": {"content": "LGTM", "id": 1},
+            "sender": {"login": "alice"},
+            "pull_request": {"number": 5, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_review"
+
+
+def test_route_pull_request_rejected_reviewed_forgejo() -> None:
+    """Forgejo 'request changes' verdicts arrive as pull_request_rejected.
+
+    Regression: these were skipped as 'pull_request_rejected.reviewed not
+    handled', so review bodies (with no inline comments) never reached the bot.
+    """
+    decision = route(
+        "pull_request_rejected",
+        {
+            "action": "reviewed",
+            "number": 1686,
+            "review": {
+                "type": "pull_request_review_rejected",
+                "id": 553,
+                "content": "## Verdict: changes requested\n\nThe patch is not mergeable because ...",
+            },
+            "sender": {"login": "alice"},
+            "pull_request": {"number": 1686, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_review"
+    assert decision.issue_key == "octo/widget#1686"
+    assert decision.submitter == "alice"
+
+
+def test_route_pull_request_approved_reviewed_forgejo() -> None:
+    """Forgejo 'approve' verdicts arrive as pull_request_approved and must route too."""
+    decision = route(
+        "pull_request_approved",
+        {
+            "action": "reviewed",
+            "number": 7,
+            "review": {
+                "type": "pull_request_review_approved",
+                "id": 42,
+                "content": "Nice, the bounds hold now.",
+            },
+            "sender": {"login": "alice"},
+            "pull_request": {"number": 7, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_review"
+    assert decision.submitter == "alice"
+
+
+def test_route_pull_request_rejected_from_bot_is_skipped() -> None:
+    """Self-submitted verdicts stay ignored on the new event types too."""
+    decision = route(
+        "pull_request_rejected",
+        {
+            "action": "reviewed",
+            "number": 7,
+            "review": {"type": "pull_request_review_rejected", "id": 9, "content": "self"},
+            "sender": {"login": BOT},
+            "pull_request": {"number": 7, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert not decision.should_queue
+
+
+def test_route_pull_request_review_comment_created_github() -> None:
+    """GitHub's pull_request_review_comment with action=created still routes to handle_review."""
+    decision = route(
+        "pull_request_review_comment",
+        {
+            "action": "created",
+            "comment": {"body": "Needs work", "user": {"login": "alice"}, "id": 1},
+            "pull_request": {"number": 5, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_review"
+
+
+def test_route_review_comment_edited_retriggers_followup() -> None:
+    """An edited review comment re-drives the followup."""
+    decision = route(
+        "pull_request_review_comment",
+        {
+            "action": "edited",
+            "comment": {"body": "updated finding", "user": {"login": "mira"}, "id": 42},
+            "pull_request": {"number": 50, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_review"
+
+
+def test_route_review_comment_deleted_does_not_queue() -> None:
+    """Deleted review comments must NOT re-drive a followup."""
+    decision = route(
+        "pull_request_review_comment",
+        {
+            "action": "deleted",
+            "comment": {"body": "", "user": {"login": "mira"}, "id": 42},
+            "pull_request": {"number": 50, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+    )
+    assert not decision.should_queue
 
 
 def _release_workflow_payload(

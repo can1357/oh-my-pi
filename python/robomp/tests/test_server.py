@@ -518,7 +518,7 @@ def test_trigger_triage_fetches_and_enqueues(env, monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.parametrize("state", ["queued", "running"])
 def test_trigger_triage_conflicts_when_manual_delivery_is_active(
-    env, monkeypatch: pytest.MonkeyPatch, state: str
+    env, monkeypatch: pytest.MonkeyPatch, state: str, stub_dispatch
 ) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()  # type: ignore[call-arg]
@@ -560,7 +560,9 @@ def test_trigger_triage_conflicts_when_manual_delivery_is_active(
 
 
 @pytest.mark.parametrize("state", ["done", "failed", "skipped"])
-def test_trigger_triage_replaces_inactive_manual_delivery(env, monkeypatch: pytest.MonkeyPatch, state: str) -> None:
+def test_trigger_triage_replaces_inactive_manual_delivery(
+    env, monkeypatch: pytest.MonkeyPatch, state: str, stub_dispatch
+) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()  # type: ignore[call-arg]
     cfg.ensure_paths()
@@ -702,6 +704,7 @@ def test_trigger_retry_by_delivery_rejects_active_events(
     env,
     monkeypatch: pytest.MonkeyPatch,
     state: str,
+    stub_dispatch,
 ) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()  # type: ignore[call-arg]
@@ -746,7 +749,7 @@ def test_trigger_triage_surfaces_github_failure(env, monkeypatch: pytest.MonkeyP
     assert "github error" in resp.json()["detail"]
 
 
-def test_trigger_retry_by_delivery_id_requeues(env, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_trigger_retry_by_delivery_id_requeues(env, monkeypatch: pytest.MonkeyPatch, stub_dispatch) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()  # type: ignore[call-arg]
     cfg.ensure_paths()
@@ -782,7 +785,9 @@ def test_trigger_retry_by_delivery_id_requeues(env, monkeypatch: pytest.MonkeyPa
     close_database()
 
 
-def test_trigger_retry_by_issue_finds_latest_non_skipped_event(env, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_trigger_retry_by_issue_finds_latest_non_skipped_event(
+    env, monkeypatch: pytest.MonkeyPatch, stub_dispatch
+) -> None:
     token = _enable_replay(monkeypatch)
     cfg = Settings()  # type: ignore[call-arg]
     cfg.ensure_paths()
@@ -1102,6 +1107,108 @@ def test_webhook_delivery_populates_issue_index(settings: Settings) -> None:
     close_database()
     assert [e.number for e in by_body] == [501]
     assert [e.number for e in pr_row] == [502]
+
+
+def test_webhook_gitea_delivery_records_forgejo_platform(settings: Settings, stub_dispatch) -> None:
+    """A request carrying X-Gitea-Delivery must be recorded with platform 'forgejo'."""
+    app = create_app(settings)
+    with TestClient(app) as client:
+        payload = {
+            "action": "opened",
+            "issue": {"number": 601, "user": {"login": "alice"}, "author_association": "NONE"},
+            "repository": {"full_name": "octo/widget"},
+        }
+        body = json.dumps(payload).encode()
+        sig = hmac.new(b"test-webhook-secret", body, hashlib.sha256).hexdigest()
+        resp = client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-GitHub-Event": "issues",
+                "X-Gitea-Delivery": "gitea-delivery-1",
+                "X-Hub-Signature-256": f"sha256={sig}",
+                "Content-Type": "application/json",
+            },
+        )
+        assert resp.status_code == 202
+        db = get_database(settings.sqlite_path)
+        event = db.get_event("gitea-delivery-1")
+    close_database()
+    assert event is not None
+    assert event.platform == "forgejo"
+
+
+def test_webhook_forgejo_delivery_records_forgejo_platform(settings: Settings, stub_dispatch) -> None:
+    """X-Forgejo-Delivery is an alias for the same platform detection."""
+    app = create_app(settings)
+    with TestClient(app) as client:
+        payload = {
+            "action": "opened",
+            "issue": {"number": 602, "user": {"login": "alice"}, "author_association": "NONE"},
+            "repository": {"full_name": "octo/widget"},
+        }
+        body = json.dumps(payload).encode()
+        sig = hmac.new(b"test-webhook-secret", body, hashlib.sha256).hexdigest()
+        resp = client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-GitHub-Event": "issues",
+                "X-Forgejo-Delivery": "forgejo-delivery-1",
+                "X-Hub-Signature-256": f"sha256={sig}",
+                "Content-Type": "application/json",
+            },
+        )
+        assert resp.status_code == 202
+        db = get_database(settings.sqlite_path)
+        event = db.get_event("forgejo-delivery-1")
+    close_database()
+    assert event is not None
+    assert event.platform == "forgejo"
+
+
+def test_webhook_github_delivery_records_github_platform(settings: Settings, stub_dispatch) -> None:
+    """A classic X-GitHub-Delivery request is recorded with platform 'github'."""
+    app = create_app(settings)
+    with TestClient(app) as client:
+        payload = {
+            "action": "opened",
+            "issue": {"number": 603, "user": {"login": "alice"}, "author_association": "NONE"},
+            "repository": {"full_name": "octo/widget"},
+        }
+        body = json.dumps(payload).encode()
+        resp = client.post(
+            "/webhook/github",
+            content=body,
+            headers=_signed_headers("test-webhook-secret", body, event="issues", delivery="gh-delivery-1"),
+        )
+        assert resp.status_code == 202
+        db = get_database(settings.sqlite_path)
+        event = db.get_event("gh-delivery-1")
+    close_database()
+    assert event is not None
+    assert event.platform == "github"
+
+
+def test_webhook_missing_delivery_header_returns_400(settings: Settings, stub_dispatch) -> None:
+    """A validly-signed request with no delivery-id header at all must be rejected 400."""
+    app = create_app(settings)
+    with TestClient(app) as client:
+        payload = {
+            "action": "opened",
+            "issue": {"number": 604, "user": {"login": "alice"}, "author_association": "NONE"},
+            "repository": {"full_name": "octo/widget"},
+        }
+        body = json.dumps(payload).encode()
+        headers = _signed_headers("test-webhook-secret", body, event="issues", delivery="ignored")
+        del headers["X-GitHub-Delivery"]  # simulate a headerless delivery
+        resp = client.post(
+            "/webhook/github",
+            content=body,
+            headers=headers,
+        )
+    close_database()
+    assert resp.status_code == 400
 
 
 def test_webhook_contributor_gets_higher_cap(rate_limited_settings: Settings) -> None:
@@ -1782,6 +1889,7 @@ class _RecordingSandbox:
         author_name: str = "",
         author_email: str = "",
         slot_uid: int | None = None,
+        transport=None,
     ):
         self.ensure_calls.append(
             {
@@ -1830,6 +1938,24 @@ def stub_run_task(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 
     monkeypatch.setattr(tasks_module, "run_task", _stub)
     return captured
+
+
+@pytest.fixture
+def stub_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the WorkerPool dispatcher from claiming events.
+
+    ``create_app`` starts a live dispatch loop that steals freshly-``queued``
+    rows (moves them to ``running``) on a background thread. Tests that record
+    an event and then inspect or claim it race against that loop, flaking on
+    the event's observed state. Adopt this fixture in tests that exercise only
+    API/DB logic (not delivery) so state assertions are deterministic.
+    """
+    from robomp import queue as queue_module
+
+    async def _never_claim(self) -> None:
+        return None
+
+    monkeypatch.setattr(queue_module.WorkerPool, "_claim_next_unique", _never_claim)
 
 
 async def test_handle_pr_conversation_unmapped_bot_pr_uses_pr_branch(

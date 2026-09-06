@@ -79,13 +79,20 @@ if event_type == "pull_request" and action in ("opened", "reopened", "ready_for_
         return RouteDecision("skip", None, repo, None, "draft PR")
     pr_user = pr.get("user") or {}
     if _is_bot_account(pr_user, bot_login):
-        return RouteDecision("skip", None, repo, None, "bot-authored PR")   # our own farm PRs
+        return RouteDecision("skip", None, repo, None, "bot-authored PR")  # our own farm PRs
     number = pr.get("number")
     if not isinstance(number, int):
         return RouteDecision("skip", None, repo, None, "PR missing number")
-    login, assoc = _submitter_info(pr)           # PR author = rate-limit subject
-    return RouteDecision("queue", "review_pr", repo, issue_key(repo, number),
-                         f"pull_request.{action}", submitter=login, association=assoc)
+    login, assoc = _submitter_info(pr)  # PR author = rate-limit subject
+    return RouteDecision(
+        "queue",
+        "review_pr",
+        repo,
+        issue_key(repo, number),
+        f"pull_request.{action}",
+        submitter=login,
+        association=assoc,
+    )
 ```
 
 Use the PR's **own** key (`issue_key(repo, number)`), not `_resolve_pr_key` — an incoming PR
@@ -142,15 +149,16 @@ New entry point — structurally `triage_issue` (fresh worktree) crossed with `h
 for an originating issue (the PR is the unit).
 
 ```python
-async def review_pr(*, settings, db, github, sandbox, git_transport,
-                    payload, delivery_id, attempts=0, slot_uid=None) -> None:
+async def review_pr(
+    *, settings, db, github, sandbox, git_transport, payload, delivery_id, attempts=0, slot_uid=None
+) -> None:
     pr_node = payload.get("pull_request") or {}
     pr_number = int(pr_node.get("number") or 0)
     repo_full = str((payload.get("repository") or {}).get("full_name") or "")
     if pr_number <= 0 or not repo_full:
         return
     repo = await github.get_repo(repo_full)
-    issue = await github.get_issue(repo_full, pr_number)   # PR-as-issue → title/body/labels
+    issue = await github.get_issue(repo_full, pr_number)  # PR-as-issue → title/body/labels
     pr = await github.get_pull_request(repo_full, pr_number)
 
     # idempotency: already triaged? bail (see §3)
@@ -158,18 +166,39 @@ async def review_pr(*, settings, db, github, sandbox, git_transport,
     db.upsert_issue(key=key, repo=repo_full, number=pr_number, state="reviewing", pr_number=pr_number)
 
     workspace = sandbox.ensure_workspace(
-        repo=repo.full_name, number=pr_number, title=issue.title,
-        clone_url=repo.clone_url, default_branch=repo.default_branch,
-        pr_head=pr_number,                       # ← NEW: check out the PR head (see §6)
-        author_name=settings.resolved_author_name, author_email=settings.git_author_email,
+        repo=repo.full_name,
+        number=pr_number,
+        title=issue.title,
+        clone_url=repo.clone_url,
+        default_branch=repo.default_branch,
+        pr_head=pr_number,  # ← NEW: check out the PR head (see §6)
+        author_name=settings.resolved_author_name,
+        author_email=settings.git_author_email,
         slot_uid=slot_uid,
     )
-    db.upsert_issue(key=key, repo=repo_full, number=pr_number, state="reviewing",
-                    branch=workspace.branch, session_dir=str(workspace.session_dir), pr_number=pr_number)
+    db.upsert_issue(
+        key=key,
+        repo=repo_full,
+        number=pr_number,
+        state="reviewing",
+        branch=workspace.branch,
+        session_dir=str(workspace.session_dir),
+        pr_number=pr_number,
+    )
 
-    inputs = TaskInputs(settings=settings, db=db, github=github, git_transport=git_transport,
-                        repo=repo, issue=issue, workspace=workspace, delivery_id=delivery_id,
-                        attempts=attempts, slot_uid=slot_uid, natives_cache=sandbox.natives_cache)
+    inputs = TaskInputs(
+        settings=settings,
+        db=db,
+        github=github,
+        git_transport=git_transport,
+        repo=repo,
+        issue=issue,
+        workspace=workspace,
+        delivery_id=delivery_id,
+        attempts=attempts,
+        slot_uid=slot_uid,
+        natives_cache=sandbox.natives_cache,
+    )
     await run_task(task_kind="review_pr", inputs=inputs, pr_number=pr_number)
 ```
 

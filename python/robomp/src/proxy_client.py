@@ -111,11 +111,13 @@ class GitHubProxyClient:
         hmac_key: str | bytes,
         transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
         timeout: float = 30.0,
+        platform: str = "github",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._key = hmac_key.encode("utf-8") if isinstance(hmac_key, str) else hmac_key
         self._transport = transport
         self._timeout = httpx.Timeout(timeout, connect=10.0)
+        self._platform = platform
 
     def _async_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -139,10 +141,13 @@ class GitHubProxyClient:
         for attempt, delay in enumerate((*self._TRANSIENT_RETRY_DELAYS, None)):
             try:
                 async with self._async_client() as client:
+                    merged_params = dict(params or {})
+                    if self._platform and self._platform != "github":
+                        merged_params["platform"] = self._platform
                     req = client.build_request(
                         method,
                         path,
-                        params=params,
+                        params=merged_params if merged_params else None,
                         content=body_bytes if json_body is not None else None,
                     )
                     target = req.url.path
@@ -277,6 +282,17 @@ class GitHubProxyClient:
             params={"repo": repo, "pr_number": pr_number},
         )
         return [_review_comment_from(item) for item in (data.get("items") if isinstance(data, dict) else None) or []]
+
+    async def get_review_comment(self, repo: str, comment_id: int, pr_number: int | None = None) -> ReviewCommentInfo:
+        params: dict[str, Any] = {"repo": repo, "comment_id": comment_id}
+        if pr_number is not None:
+            params["pr_number"] = pr_number
+        data = await self._request(
+            "GET",
+            "/gh/v1/get_review_comment",
+            params=params,
+        )
+        return _review_comment_from(data)
 
     async def list_pr_reviews(self, repo: str, pr_number: int) -> list[PullRequestReviewInfo]:
         data = await self._request(
@@ -428,7 +444,7 @@ class ProxyGitTransport:
     bridge with a one-shot sync request per call.
     """
 
-    __slots__ = ("_base_url", "_key", "_transport", "_timeout")
+    __slots__ = ("_base_url", "_key", "_transport", "_timeout", "_platform")
 
     def __init__(
         self,
@@ -437,11 +453,13 @@ class ProxyGitTransport:
         hmac_key: str | bytes,
         transport: httpx.BaseTransport | None = None,
         timeout: float = 120.0,
+        platform: str = "github",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._key = hmac_key.encode("utf-8") if isinstance(hmac_key, str) else hmac_key
         self._transport = transport
         self._timeout = httpx.Timeout(timeout, connect=10.0)
+        self._platform = platform
 
     def _client(self) -> httpx.Client:
         return httpx.Client(
@@ -457,10 +475,19 @@ class ProxyGitTransport:
         last_exc: Exception | None = None
         for attempt, delay in enumerate((*self._TRANSIENT_RETRY_DELAYS, None)):
             try:
-                headers = _signed_headers("POST", path, body_bytes, self._key)
+                # Merge platform into query params so the HMAC covers it
+                query_parts: list[str] = []
+                if self._platform and self._platform != "github":
+                    query_parts.append(f"platform={self._platform}")
+                target = path
+                if query_parts:
+                    query_str = "&".join(query_parts)
+                    target = f"{path}?{query_str}"
+                headers = _signed_headers("POST", target, body_bytes, self._key)
                 headers["Content-Type"] = "application/json"
                 with self._client() as client:
-                    resp = client.request("POST", path, content=body_bytes, headers=headers)
+                    url = target
+                    resp = client.request("POST", url, content=body_bytes, headers=headers)
                 if resp.status_code >= 400:
                     raise _decode_error(resp)
                 if resp.status_code == 204 or not resp.content:

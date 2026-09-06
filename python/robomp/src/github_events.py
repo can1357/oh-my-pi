@@ -47,6 +47,24 @@ def verify_signature(secret: str, body: bytes, signature_header: str | None) -> 
     return hmac.compare_digest(expected, provided)
 
 
+def normalize_review_to_comment(payload: dict) -> dict:
+    """Normalize Forgejo's payload.review to a comment-compatible dict.
+
+    GitHub sends comment body in payload.comment; Forgejo/Gitea uses
+    payload.review.content. This normalizes the latter to the former shape
+    so downstream code handles both transparently.
+    """
+    comment = payload.get("comment") or {}
+    if not comment and "review" in payload:
+        review = payload.get("review") or {}
+        comment = {
+            "body": review.get("content") or "",
+            "user": payload.get("sender") or {},
+            "id": review.get("id"),
+        }
+    return comment
+
+
 def _repo_full_name(payload: Mapping[str, Any]) -> str | None:
     repo = payload.get("repository")
     if isinstance(repo, dict):
@@ -321,7 +339,7 @@ def route(
 
     if event_type == "issues":
         issue = payload.get("issue") or {}
-        if "pull_request" in issue:
+        if issue.get("pull_request") is not None:
             return RouteDecision("skip", None, repo, None, "issue is a pull request")
         number = issue.get("number")
         if not isinstance(number, int):
@@ -349,7 +367,7 @@ def route(
         number = issue.get("number")
         if not isinstance(number, int):
             return RouteDecision("skip", None, repo, None, "comment missing issue number")
-        if "pull_request" in issue:
+        if issue.get("pull_request") is not None:
             # Conversation comments on incoming contributor PRs are intentionally
             # ignored for now: the one-shot review runs on open, and re-review
             # directives are not wired yet. Only bot-authored PRs resume a live
@@ -391,8 +409,28 @@ def route(
         pr = payload.get("pull_request") or {}
         return _pr_review_pr(pr, repo, action, bot_login)
 
-    if event_type == "pull_request_review_comment" and action == "created":
-        comment = payload.get("comment") or {}
+    # GitHub sends "pull_request_review_comment" for inline review comments.
+    # Forgejo/Gitea send several event types here (action=reviewed, body in
+    # payload.review.content):
+    #   - "pull_request_comment"  for comment-verdict reviews and inline
+    #     review comments (Event() maps HookEventPullRequestReviewComment to
+    #     "pull_request_comment", NOT "pull_request_review_comment")
+    #   - "pull_request_approved" / "pull_request_rejected" for
+    #     approve/reject verdicts (webhook/deliver.go pullRequestReview)
+    # Accept all of these so review submissions route on both platforms.
+    if event_type in (
+        "pull_request_review_comment",
+        "pull_request_comment",
+        "pull_request_approved",
+        "pull_request_rejected",
+    ) and action in (
+        "created",
+        "reviewed",
+        "edited",
+    ):
+        # GitHub sends payload.comment with body/user/path/line.
+        # Forgejo sends payload.review with content, and sender as the author.
+        comment = normalize_review_to_comment(payload)
         rb_login = _reviewer_bot_login(comment.get("user"))
         if rb_login is None and _is_bot_account(comment.get("user"), bot_login):
             return RouteDecision("skip", None, repo, None, "bot/self review comment")
@@ -411,7 +449,7 @@ def route(
             "handle_review",
             repo,
             key,
-            "pull_request_review_comment.created",
+            f"{event_type}.{action}",
             submitter=login,
             association=assoc,
             **_directive_kwargs(comment, login, assoc),

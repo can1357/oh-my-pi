@@ -48,6 +48,7 @@ _PRE_PR_TEST_COMMAND = ("bun", "run", "test")
 _BUN_INSTALL_COMMAND = ("bun", "install", "--frozen-lockfile", "--ignore-scripts")
 _BUN_INSTALL_TIMEOUT_SECONDS = 300.0
 _REPO_COMMAND_SCRUBBED_ENV_KEYS: tuple[str, ...] = (
+    "FORGEJO_TOKEN",
     "GITHUB_TOKEN",
     "GITHUB_WEBHOOK_SECRET",
     "ROBOMP_REPLAY_TOKEN",
@@ -131,9 +132,14 @@ class ToolBindings:
     # — the originating issue has already been classified and the PR
     # itself does not carry triage labels.
     inbound_is_pr: bool = False
-    # True only for incoming-PR review tasks. Review tools require it; mutating
-    # branch/PR publication tools reject when it is set.
+    # True for incoming-PR review tasks. Review tools require it; git push / PR
+    # publication tools check block_git_push instead (separate flag so handle_review
+    # can access review tools without blocking push).
     review_mode: bool = False
+    # True when git push / PR publication should be refused (e.g. review_pr tasks).
+    # Separated from review_mode because handle_review needs review tools but must
+    # still be able to push fixes in response to inline review feedback.
+    block_git_push: bool = False
     # Current task is driven by an allowlist/OWNER maintainer directive that
     # authorizes implementation. Gates first-PR creation on non-bug/doc issues.
     impl_authorized: bool = False
@@ -854,7 +860,7 @@ def _repair_commit_message_escapes(bindings: ToolBindings, args: Mapping[str, An
 
 
 def _guarded_push_branch(bindings: ToolBindings, args: Mapping[str, Any], tool_name: str, branch: str) -> str:
-    if bindings.review_mode:
+    if bindings.block_git_push:
         msg = "refusing to push: PR review worktrees are read-only."
         _audit(bindings, tool_name, args, error=msg)
         _raise_command(msg)
@@ -1229,7 +1235,7 @@ def _build_release_retag(bindings: ToolBindings) -> HostTool[Any, Any]:
 # ---------- gh_push_branch ----------
 def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
-        if bindings.review_mode:
+        if bindings.block_git_push:
             msg = "refusing to push: PR review worktrees are read-only."
             _audit(bindings, "gh_push_branch", args, error=msg)
             _raise_command(msg)
@@ -1274,7 +1280,7 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
 # ---------- gh_open_pr ----------
 def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
-        if bindings.review_mode:
+        if bindings.block_git_push:
             msg = "refusing to open PR: PR review tasks are read-only."
             _audit(bindings, "gh_open_pr", args, error=msg)
             _raise_command(msg)

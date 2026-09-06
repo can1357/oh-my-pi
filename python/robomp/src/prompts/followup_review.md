@@ -2,6 +2,12 @@
 
 Review comment on PR you opened.
 
+## Prior conversation
+
+{{thread}}
+
+---
+
 ## @{{comment.author}} — `{{comment.path}}`{{comment.line_range}}
 
 {{comment.body}}

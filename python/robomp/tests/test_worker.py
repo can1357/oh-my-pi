@@ -258,6 +258,7 @@ async def test_run_rpc_omits_continue_when_session_empty(
     assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ()
     client_kwargs = _FakeRpcClient.instances[0].kwargs
     assert client_kwargs["env"]["HOME"] == str(agent_home)
+    assert client_kwargs["env"]["FORGEJO_TOKEN"] == ""
     assert client_kwargs["env"]["GITHUB_TOKEN"] == ""
     assert client_kwargs["env"]["GITHUB_WEBHOOK_SECRET"] == ""
     assert client_kwargs["env"]["ROBOMP_REPLAY_TOKEN"] == ""
