@@ -2,6 +2,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { isImplementationActionResult } from "../../session/implementation-action";
 import type { ToolSession } from "../../tools";
 import { ToolError } from "../../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
@@ -139,7 +140,14 @@ function normalizeAgentToolResult(
 	);
 	const text = textBlocks.map(block => block.text).join("");
 	const hasError = toolResultHasError(result);
-	options.emitStatus?.(summarizeToolResult(name, args, result, text, hasError));
+	const statusEvent = summarizeToolResult(name, args, result, text, hasError);
+	// Code Mode routes edit/write through this bridge, so the turn-level result
+	// is `eval`. Flag a nested workspace-mutating action here so the prewalk
+	// coordinator can recognize it from the eval result (issue #11018).
+	if (!hasError && isImplementationActionResult({ toolName: name, details: result.details })) {
+		statusEvent.implementationAction = true;
+	}
+	options.emitStatus?.(statusEvent);
 	if (result.details === undefined && imageBlocks.length === 0 && !hasError) {
 		return text;
 	}

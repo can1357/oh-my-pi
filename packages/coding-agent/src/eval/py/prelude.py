@@ -139,7 +139,10 @@ if "__omp_prelude_loaded__" not in globals():
         p = _resolve_omp_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
-        _emit_status("write", path=str(p), chars=len(content))
+        # A write() prelude call mutates the workspace like tool.write, so flag
+        # it as a prewalk implementation action (issue #11018). The camelCase key
+        # matches the marker prewalk reads on the JS side.
+        _emit_status("write", path=str(p), chars=len(content), implementationAction=True)
         return p
 
     def output(

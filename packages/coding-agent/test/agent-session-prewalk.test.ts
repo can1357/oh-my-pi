@@ -5,6 +5,7 @@ import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -105,6 +106,42 @@ describe("AgentSession prewalk", () => {
 
 	function toolCall(id: string, name: string): MockResponse {
 		return { content: [{ type: "toolCall", id, name, arguments: {} }], stopReason: "toolUse" };
+	}
+
+	const evalToolSchema = type({});
+	function makeEvalTool(
+		statusEvents: Array<Record<string, unknown>>,
+		options?: { isError?: boolean },
+	): AgentTool<typeof evalToolSchema, { statusEvents: Array<Record<string, unknown>> }> {
+		return {
+			name: "eval",
+			label: "Eval",
+			description: "Run an eval cell",
+			parameters: evalToolSchema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "ran cell" }],
+					details: { statusEvents },
+					isError: options?.isError,
+				};
+			},
+		};
+	}
+
+	function registerBackgroundEvalStatus(
+		manager: AsyncJobManager,
+		ownerId: string,
+		statusEvent: Record<string, unknown>,
+	): string {
+		return manager.register(
+			"eval",
+			"background eval",
+			async ({ reportProgress }) => {
+				await reportProgress("eval completed", { statusEvents: [statusEvent] });
+				return "done";
+			},
+			{ ownerId },
+		);
 	}
 
 	it("prewalks at the first edit/write after the todo gate opens; bash and todo don't trigger", async () => {
@@ -500,6 +537,187 @@ describe("AgentSession prewalk", () => {
 		]);
 		expect(session.model?.id).toBe(target.id);
 	});
+
+	for (const evalIsError of [false, true]) {
+		const outcome = evalIsError ? "later fails" : "completes";
+		it(`prewalks when an eval cell writes and then ${outcome} (issue #11018)`, async () => {
+			const primary = modelOrThrow("claude-sonnet-4-5");
+			const target = modelOrThrow("claude-sonnet-4-6");
+
+			// Code Mode removes edit/write from the direct surface and runs them
+			// through the eval bridge, so the turn-level result is named `eval`.
+			// The successful nested write must hand off even if a later statement
+			// makes the enclosing cell fail; failed nested calls never receive the
+			// implementation-action marker. Turn 1 (todo) opens the gate, turn 2
+			// mutates through eval, and turn 3 runs on the target.
+			const evalWrite = makeEvalTool([{ op: "write", path: "example.txt", chars: 7, implementationAction: true }], {
+				isError: evalIsError,
+			});
+			const mock = createMockModel({
+				responses: [toolCall("t1", "todo"), toolCall("t2", "eval"), { content: ["done"] }],
+			});
+			const requested: string[] = [];
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: primary,
+					systemPrompt: ["Test"],
+					tools: [todoTool as AgentTool, evalWrite as AgentTool],
+					messages: [],
+					thinkingLevel: Effort.Medium,
+				},
+				convertToLlm,
+				streamFn: (model, context, options) => {
+					requested.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map([
+					[todoTool.name, todoTool as AgentTool],
+					[evalWrite.name, evalWrite as AgentTool],
+				]),
+				prewalk: { target },
+			});
+
+			await session.prompt("implement via eval");
+
+			expect(requested).toEqual([
+				`${primary.provider}/${primary.id}`,
+				`${primary.provider}/${primary.id}`,
+				`${target.provider}/${target.id}`,
+			]);
+			expect(session.model?.id).toBe(target.id);
+		});
+	}
+
+	it("does not switch on a read-only eval cell (issue #11018 keeps the #7312 exclusion)", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+
+		// A read-only eval cell (or a read-tier `xd://` device op) carries no
+		// implementation-action marker, so the model keeps reasoning on the strong
+		// model. Mirrors the #7312 read-only device flow: one continuation, four
+		// turns, all primary, then a clean stop.
+		const evalRead = makeEvalTool([{ op: "read", path: "example.txt", chars: 10 }]);
+		const mock = createMockModel({
+			responses: [
+				toolCall("t1", "record"),
+				toolCall("t2", "eval"),
+				{ content: [{ type: "text", text: "Still planning." }], stopReason: "stop" },
+				{ content: [{ type: "text", text: "Done planning." }], stopReason: "stop" },
+			],
+		});
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [recordTool as AgentTool, evalRead as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			toolRegistry: new Map([
+				[recordTool.name, recordTool as AgentTool],
+				[evalRead.name, evalRead as AgentTool],
+			]),
+			prewalk: { target },
+		});
+
+		await session.prompt("investigate via eval");
+
+		expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
+		expect(session.model?.id).toBe(primary.id);
+	});
+
+	const backgroundEvalCases: Array<{
+		title: string;
+		todoGate: boolean;
+		statusEvent: Record<string, unknown>;
+		switches: boolean;
+	}> = [
+		{
+			title: "prewalks on a write completed after Eval backgrounds before the async-result follow-up",
+			todoGate: false,
+			statusEvent: { op: "write", path: "example.txt", implementationAction: true },
+			switches: true,
+		},
+		{
+			title: "prewalks on a write completed after Eval backgrounds after the todo gate opens",
+			todoGate: true,
+			statusEvent: { op: "write", path: "example.txt", implementationAction: true },
+			switches: true,
+		},
+		{
+			title: "does not prewalk on a read-only background Eval job",
+			todoGate: false,
+			statusEvent: { op: "read", path: "example.txt" },
+			switches: false,
+		},
+	];
+	for (const { title, todoGate, statusEvent, switches } of backgroundEvalCases) {
+		it(`${title} (issue #11018)`, async () => {
+			const primary = modelOrThrow("claude-sonnet-4-5");
+			const target = modelOrThrow("claude-sonnet-4-6");
+			const responses: MockResponse[] = todoGate
+				? [toolCall("t1", "todo"), { content: ["done"] }]
+				: [{ content: ["done"] }];
+			const mock = createMockModel({ responses });
+			const requested: string[] = [];
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: primary,
+					systemPrompt: ["Test"],
+					tools: todoGate ? [todoTool as AgentTool] : [],
+					messages: [],
+					thinkingLevel: Effort.Medium,
+				},
+				convertToLlm,
+				streamFn: (model, context, options) => {
+					requested.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			const manager = new AsyncJobManager({});
+			const ownerId = "PrewalkBackgroundEval";
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map(todoGate ? [[todoTool.name, todoTool as AgentTool]] : []),
+				prewalk: { target },
+				agentId: ownerId,
+				ownedAsyncJobManager: manager,
+			});
+
+			registerBackgroundEvalStatus(manager, ownerId, statusEvent);
+			await session.settleAsyncWork();
+
+			const primaryId = `${primary.provider}/${primary.id}`;
+			const targetId = `${target.provider}/${target.id}`;
+			const expected = todoGate ? [primaryId, targetId] : switches ? [targetId] : [primaryId, primaryId];
+			expect(requested).toEqual(expected);
+			expect(session.model?.id).toBe(switches ? target.id : primary.id);
+		});
+	}
 
 	it("re-arms continuation after tool progress between prose turns", async () => {
 		// Regression: a normal prewalk can split planning across several turns:
