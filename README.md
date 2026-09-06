@@ -206,6 +206,8 @@ Get a clear verdict on whether the change ships, with every issue ranked P0 thro
 
 Perfect edits, fewer tokens. The model points at anchors instead of retyping the lines it wants to change, so whitespace battles and string-not-found loops just stop happening. Edit a stale file and the anchors diverge — we reject the patch before it corrupts anything. Grok 4 Fast spends 61% fewer output tokens on the same work.
 
+Some models still rewrite files from a code cell instead of calling `edit`. That is a model prior, not a harness fault — [measure it and switch it off](docs/edit-tool-adherence.md).
+
 ### 12 · GitHub is just another filesystem
 
 Other harnesses bolt on gh_issue_view, gh_pr_view, gh_search — each with its own parameters the agent has to learn and you have to debug. We skipped that. read already handles paths; PRs are paths. One interface to teach the model, one surface to keep correct.

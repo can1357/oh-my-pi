@@ -12,6 +12,7 @@ scripts/session-stats/
   sync.py          # walks ~/.omp/agent/sessions/ and populates ss_* tables
   analyze.py       # tools | edits | followups subcommands over the synced db
   audit.ts         # LLM-assisted token-usage audit (no sync needed)
+  edit_adherence.py # per-model edit-tool use vs read-replace-write cells (no sync needed)
   audit-prompt.md  # system prompt for the audit classifier
 ```
 
@@ -63,9 +64,11 @@ bun run stats:edits                        # edit-tool reliability audit
 bun run stats:edits -- --since w           # edit sub-types over the last week
 bun run stats:followups                    # five hashline-edit detectors
 bun run stats:followups -- --max-fix 2 --min-dup 8 --show 20
+bun run stats:adherence                    # per-model edit tool vs file-surgery cells
+bun run stats:adherence -- <sessions_dir>  # scan another corpus
 ```
 
-All three accept `-n N` / `--folder SUBSTR` to scope the query, plus
+`tools`, `edits`, and `followups` accept `-n N` / `--folder SUBSTR` to scope the query, plus
 `--since <h|d|w|m|Nh|Nd|Nw>` to keep only calls newer than a time window
 (per-call `timestamp`, so it slices long sessions precisely). The `edits`
 audit reads each call's `is_error` flag as the authoritative success/failure

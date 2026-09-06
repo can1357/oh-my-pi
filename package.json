@@ -131,6 +131,7 @@
 		"stats:tools": "python3 scripts/session-stats/analyze.py tools",
 		"stats:edits": "python3 scripts/session-stats/analyze.py edits",
 		"stats:followups": "python3 scripts/session-stats/analyze.py followups",
+		"stats:adherence": "python3 scripts/session-stats/edit_adherence.py",
 		"stats:audit": "bun scripts/session-stats/audit.ts",
 		"test:py": "python3 -m pytest -x python/omp-rpc/tests && python3 -m pytest -x python/robomp/tests",
 		"robomp:install": "pip install -e 'python/robomp[dev]'",
