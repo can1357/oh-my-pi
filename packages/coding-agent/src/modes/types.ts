@@ -160,6 +160,13 @@ export interface InteractiveModeContext {
 	lspServers?: LspStartupServerInfo[];
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
+	/**
+	 * True while a `/join` is syncing the host snapshot, before `collabGuest`
+	 * is installed. During this window the session is still the guest's own
+	 * local replica: prompts must be held rather than run against the guest's
+	 * local model/credentials (issue #11067).
+	 */
+	collabJoining?: boolean;
 	eventController: EventController;
 	eventBus?: EventBus;
 	/** Root-scoped bus carrying this session tree's `task:subagent:*` frames. */

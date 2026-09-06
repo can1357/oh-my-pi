@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a collab TUI guest running prompts against its own local model (failing with "No API key found") when typed before the host snapshot finished syncing; such prompts are now held until the join completes ([#11067](https://github.com/can1357/oh-my-pi/issues/11067)).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

@@ -262,6 +262,14 @@ export class CollabGuestLink {
 
 		this.#returnSessionFile = this.#ctx.sessionManager.getSessionFile() ?? null;
 
+		// Mark the join in flight so the input controller holds locally-typed
+		// prompts until `collabGuest` is installed below. Without this, a prompt
+		// submitted during the snapshot sync runs on the guest's own local
+		// session and model, failing with a "No API key" error for the guest's
+		// default provider (issue #11067). Cleared in the `finally` — on both
+		// success (collabGuest takes over) and failure.
+		this.#ctx.collabJoining = true;
+
 		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
 		this.#socket = socket;
 
@@ -362,6 +370,7 @@ export class CollabGuestLink {
 			this.#socket = null;
 			throw err;
 		} finally {
+			this.#ctx.collabJoining = false;
 			this.#joinReject = null;
 			this.#clearWelcomeTimer();
 			this.#clearSnapshotProgressTimer();

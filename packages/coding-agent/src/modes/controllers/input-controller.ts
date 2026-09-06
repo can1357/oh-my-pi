@@ -828,6 +828,19 @@ export class InputController {
 				}
 			}
 
+			// Collab guest join still syncing: `ctx.collabGuest` is not installed
+			// until the host snapshot finishes replicating, so a prompt submitted
+			// during that window would otherwise run on the guest's own local
+			// session and model — resolving credentials the guest doesn't have and
+			// failing with "No API key found" (issue #11067). Hold the input and
+			// keep the text so the user can resend once the join completes.
+			if (this.ctx.collabJoining && !this.ctx.collabGuest) {
+				if (text || (inputImages?.length ?? 0) > 0) {
+					this.ctx.showStatus("Joining collab session — wait for the sync to finish, then resend.");
+				}
+				return;
+			}
+
 			// Collab guest: prompts execute on the host; local slash/skill/bash/
 			// python execution is host-only (builtins are gated inside
 			// executeBuiltinSlashCommand, which already consumed allowed ones).
