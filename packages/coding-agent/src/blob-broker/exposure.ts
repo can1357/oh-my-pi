@@ -9,8 +9,7 @@
 
 import * as fs from "node:fs";
 import * as os from "node:os";
-import * as path from "node:path";
-import { $which, getSafeProjectCwd, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, getSafeProjectCwd, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { credentialString, type DestinationRuntimeConfig, optionString } from "./uploader-runtime";
 
 /** User-selectable exposure strategy. */
@@ -258,12 +257,15 @@ async function spawnUrlTunnel(
 	options: SpawnUrlTunnelOptions = {},
 ): Promise<SpawnedUrlTunnel> {
 	const { readyPattern, recoverPostExitUrl = false, signal } = options;
-	const logPath = path.join(os.tmpdir(), `omp-blob-tunnel-${Date.now().toString(36)}-${process.pid}.log`);
+	// A private mkdtemp directory per spawn: a name derived from time and pid
+	// collides when several tunnels start in the same process concurrently.
+	const logDir = await TempDir.create("@omp-blob-tunnel-");
+	const logPath = logDir.join("tunnel.log");
 	const removeLogBestEffort = async (): Promise<void> => {
 		try {
-			await removeWithRetries(logPath);
+			await logDir.remove();
 		} catch (error) {
-			logger.warn("blob-broker: failed to remove temporary tunnel log", { path: logPath, error });
+			logger.warn("blob-broker: failed to remove temporary tunnel log", { path: logDir.path(), error });
 		}
 	};
 	const fd = fs.openSync(logPath, "w");
