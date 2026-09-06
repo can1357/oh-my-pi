@@ -44,6 +44,8 @@ export interface Options {
 	runs: number;
 	warmups: number;
 	python?: string;
+	coldRuns?: number;
+	direnv?: string;
 }
 
 export function parseOptions(args: string[]): Options {
@@ -53,7 +55,13 @@ export function parseOptions(args: string[]): Options {
 		const value = args[i + 1];
 		if (!value || value.startsWith("--")) throw new Error(`Missing value for ${flag}`);
 		if (flag === "--python") options.python = value;
-		else if (flag === "--runs" || flag === "--warmups") {
+		else if (flag === "--direnv") options.direnv = value;
+		else if (flag === "--cold-runs") {
+			const number = Number(value);
+			if (!Number.isInteger(number) || number < 1 || number > 30)
+				throw new Error("--cold-runs must be an integer from 1 to 30");
+			options.coldRuns = number;
+		} else if (flag === "--runs" || flag === "--warmups") {
 			const number = Number(value);
 			if (!Number.isInteger(number) || number < (flag === "--runs" ? 1 : 0) || number > 1000) {
 				throw new Error(`${flag} must be an integer from ${flag === "--runs" ? 1 : 0} to 1000`);

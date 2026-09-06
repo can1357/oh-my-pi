@@ -13,6 +13,8 @@ import { disposePyToolBridge } from "../../src/eval/py/tool-bridge";
 import type { ToolSession } from "../../src/tools";
 import { GrepTool } from "../../src/tools/grep";
 import { ReadTool } from "../../src/tools/read";
+import { measureColdKernels } from "./cold-kernels";
+import { measureDirenv } from "./direnv";
 import { measure, parseOptions, type Samples } from "./sampling";
 import nativePackage from "../../../natives/package.json" with { type: "json" };
 
@@ -189,6 +191,9 @@ try {
 		await record(route, { name: "four-delays-parallel", tool: "latency_probe", args: {} }, "probe-complete", 4, true);
 	}
 	const repo = vcs.git(path.resolve(import.meta.dir, "../../../.."));
+	const coldKernels = options.coldRuns ? await measureColdKernels(options.coldRuns, fixture, options.python) : [];
+	const direnv = options.direnv ? await measureDirenv(fixture, options.runs, options.warmups) : null;
+
 	const pythonInfo = options.python
 		? await executePython("import sys; print(sys.version)", {
 				cwd: fixture,
@@ -216,14 +221,16 @@ try {
 				},
 				options,
 				fixtures: { smallBytes: Buffer.byteLength(small), largeBytes: Buffer.byteLength(large), largeLines: 40000 },
-				scope: "Real read/grep tools and eval kernels with an isolated ToolSession. Excludes model, outer agent loop, approvals, hooks, shell, direnv and UI rendering. JS/Python include JSON serialization and kernel output. First-call samples exclude module startup and canonical fixture validation; only the first cell per language includes kernel startup.",
+				scope: "Real read/grep tools and eval kernels with an isolated ToolSession. Excludes model, outer agent loop, user approvals/hooks, shell and UI rendering. Optional direnv rows use only generated fixtures. JS/Python include JSON serialization and kernel output. Main-row first-call samples exclude module startup and canonical fixture validation; only the first cell per language includes kernel startup. Optional coldKernels rows use fresh host processes: firstCell excludes host imports, secondCell reuses the kernel, process includes host startup, both cells and teardown.",
 				rows,
+				coldKernels,
+				direnv,
 			},
 			null,
 			2,
 		),
 	);
-	if (rows.some(row => row.errors.length > 0)) process.exitCode = 1;
+	if ([...rows, ...coldKernels, ...(direnv?.rows ?? [])].some(row => row.errors.length > 0)) process.exitCode = 1;
 } finally {
 	try {
 		await disposeAllVmContexts();

@@ -27,5 +27,8 @@ it("rejects invalid sample budgets and unknown options before starting workloads
 	expect(() => parseOptions(["--runs", "0"])).toThrow("--runs must be an integer");
 	expect(() => parseOptions(["--warmups", "1001"])).toThrow("--warmups must be an integer");
 	expect(() => parseOptions(["--python"])).toThrow("Missing value");
+	expect(() => parseOptions(["--cold-runs", "0"])).toThrow("--cold-runs must be an integer");
+	expect(() => parseOptions(["--cold-runs", "31"])).toThrow("--cold-runs must be an integer");
+	expect(() => parseOptions(["--direnv"])).toThrow("Missing value");
 	expect(() => parseOptions(["--command", "echo"])).toThrow("Unknown option");
 });
