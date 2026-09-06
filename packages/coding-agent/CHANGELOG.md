@@ -33,6 +33,10 @@
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.
 
+### Fixed
+
+- Queue shorthand (`->`/`=>`) submitted on an idle session with an existing transcript now delivers items one per yield in order, instead of draining the whole queue at once and sending item 2 before item 1 ([#10802](https://github.com/can1357/oh-my-pi/issues/10802)).
+
 ## [18.1.10] - 2026-09-04
 
 ### Changed

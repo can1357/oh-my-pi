@@ -2030,6 +2030,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const preserveDraft = this.#pendingSubmissionPreservesDraft;
 
 		submission.cancelled = true;
+		// A cancelled first item never starts a turn; unblock a queue-shorthand
+		// dispatch waiting on it so the rest still flush (issue #10802).
+		submission.onSettled?.();
 		this.#pendingSubmittedInput = undefined;
 		this.#pendingSubmissionPreservesDraft = false;
 		this.clearOptimisticUserMessage();
@@ -2111,6 +2114,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#stopLoadingAnimation(true);
 			}
 		}
+		// Unblock a queue-shorthand dispatch waiting on this submission's turn to start
+		// (issue #10802). Idempotent — resolving an already-settled promise is a no-op.
+		input.onSettled?.();
 	}
 
 	#computeEditorMaxHeight(): number {
@@ -5099,7 +5105,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	showError(message: string): void {
+		const submission = this.#pendingSubmittedInput;
 		this.#pendingSubmittedInput = undefined;
+		// Dispatch failed before a turn started; unblock a queue-shorthand dispatch
+		// waiting on this submission (issue #10802).
+		submission?.onSettled?.();
 		this.#pendingSubmissionPreservesDraft = false;
 		this.clearOptimisticUserMessage();
 		this.#pendingWorkingMessage = undefined;

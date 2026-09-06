@@ -73,6 +73,12 @@ export type SubmittedUserInput = {
 	streamingBehavior?: "steer" | "followUp";
 	cancelled: boolean;
 	started: boolean;
+	/** Resolved once dispatch settles — the run loop's `session.prompt()` for this
+	 *  submission has started its turn (session now streaming), the submission was
+	 *  cancelled, or dispatch errored. Queue-shorthand (`->`/`=>`) awaits this before
+	 *  enqueuing the remaining follow-ups so their idle queue-drain cannot start a
+	 *  turn from item 2 before item 1 is in flight (issue #10802). */
+	onSettled?: () => void;
 };
 
 export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";

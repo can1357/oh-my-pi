@@ -1368,14 +1368,24 @@ export class InputController {
 		try {
 			if (startImmediately && this.ctx.onInputCallback) {
 				const first = messages[0] ?? "";
+				const dispatched = Promise.withResolvers<void>();
 				const submission = this.ctx.startPendingSubmission({
 					text: first,
 					images,
 					imageLinks,
 					streamingBehavior: "followUp",
 				});
+				submission.onSettled = dispatched.resolve;
 				this.ctx.onInputCallback(submission);
 				queuedCount = 1;
+				// onInputCallback only resolves the run loop's input promise; the
+				// session.prompt() for the first item runs later, so the session is still
+				// idle here. Enqueuing the remaining follow-ups now would let the idle
+				// queue-drain start a turn from item 2 before item 1 is in flight —
+				// inverting delivery order on a mid-session transcript (issue #10802).
+				// Wait until the first item's turn has actually started (or its dispatch
+				// settled) so the follow-ups queue behind a streaming session instead.
+				await dispatched.promise;
 			}
 			while (queuedCount < messages.length) {
 				const message = messages[queuedCount] ?? "";
