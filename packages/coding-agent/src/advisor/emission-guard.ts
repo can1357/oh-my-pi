@@ -98,9 +98,11 @@ const SUPPRESSED_NORMALIZED_PHRASES: Record<string, true> = {
  */
 const DEFAULT_HISTORY_CAPACITY = 4096;
 
+/** Maximum non-blocker advise notes allowed per update cycle across all configurations. */
+export const ADVISOR_MAX_BUDGET_PER_UPDATE = 32;
+
 /** Why an advisor note was accepted or rejected by the emission policy. */
 export type AdvisorEmissionDecision = "accepted" | "duplicate" | "rate_limited" | "suppressed_noise";
-
 /**
  * Decides whether an advisor `advise()` call should reach the primary agent.
  *
@@ -128,7 +130,9 @@ export class AdvisorEmissionGuard {
 		this.#capacity = opts.capacity ?? DEFAULT_HISTORY_CAPACITY;
 		const budget = opts.budgetPerUpdate;
 		this.#budgetPerUpdate =
-			typeof budget === "number" && Number.isFinite(budget) ? Math.max(1, Math.trunc(budget)) : 4;
+			typeof budget === "number" && Number.isFinite(budget)
+				? Math.min(ADVISOR_MAX_BUDGET_PER_UPDATE, Math.max(1, Math.trunc(budget)))
+				: 4;
 	}
 
 	/**

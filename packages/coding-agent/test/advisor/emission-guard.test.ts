@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { AdvisorEmissionGuard, normalizeAdvisorNote } from "../../src/advisor/emission-guard";
+import {
+	ADVISOR_MAX_BUDGET_PER_UPDATE,
+	AdvisorEmissionGuard,
+	normalizeAdvisorNote,
+} from "../../src/advisor/emission-guard";
 
 describe("normalizeAdvisorNote", () => {
 	it("collapses punctuation, casing, and surrounding whitespace into one canonical key", () => {
@@ -90,6 +94,14 @@ describe("AdvisorEmissionGuard", () => {
 		const guardNegative = new AdvisorEmissionGuard({ budgetPerUpdate: -3 });
 		expect(guardNegative.accept("First concern.", "concern")).toBe("accepted");
 		expect(guardNegative.accept("Second concern.", "concern")).toBe("rate_limited");
+	});
+
+	it("clamps budgetPerUpdate to at most ADVISOR_MAX_BUDGET_PER_UPDATE (32)", () => {
+		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 100 });
+		for (let i = 0; i < ADVISOR_MAX_BUDGET_PER_UPDATE; i++) {
+			expect(guard.accept(`Note ${i}`, "concern")).toBe("accepted");
+		}
+		expect(guard.accept("Note 33", "concern")).toBe("rate_limited");
 	});
 
 	it("exempts blockers from the per-update budget so they always interrupt", () => {

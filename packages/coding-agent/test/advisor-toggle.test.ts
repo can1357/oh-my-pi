@@ -1115,4 +1115,48 @@ describe("AgentSession advisor toggle", () => {
 		const advisor2 = session.getAdvisorAgent();
 		expect(advisor2).not.toBe(advisor1);
 	});
+
+	it("enforces precedence: per-advisor > shared WATCHDOG.yml > settings > default", async () => {
+		session.settings.set("advisor.maxNotesPerUpdate", 2);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		// 1. Per-advisor (5) overrides shared (3) and settings (2)
+		session.applyAdvisorConfigs([{ name: "Specific", maxNotesPerUpdate: 5 }], undefined, 3);
+		let advisor = session.getAdvisorAgent();
+		let tool = advisor?.state.tools?.find(t => t.name === "advise");
+		if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Expected advise tool");
+		tool.beginUpdate(true);
+		for (let i = 1; i <= 5; i++) {
+			const res = await tool.execute(`s-${i}`, { note: `Specific note ${i}`, severity: "concern" });
+			expect(JSON.stringify(res.content)).toContain("Deferred");
+		}
+		const s6 = await tool.execute("s-6", { note: "Specific note 6", severity: "concern" });
+		expect(JSON.stringify(s6.content)).toContain("Rate limited");
+
+		// 2. Shared (3) overrides settings (2) when per-advisor is undefined
+		session.applyAdvisorConfigs([{ name: "Inheriting" }], undefined, 3);
+		advisor = session.getAdvisorAgent();
+		tool = advisor?.state.tools?.find(t => t.name === "advise");
+		if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Expected advise tool");
+		tool.beginUpdate(true);
+		for (let i = 1; i <= 3; i++) {
+			const res = await tool.execute(`h-${i}`, { note: `Inheriting note ${i}`, severity: "concern" });
+			expect(JSON.stringify(res.content)).toContain("Deferred");
+		}
+		const h4 = await tool.execute("h-4", { note: "Inheriting note 4", severity: "concern" });
+		expect(JSON.stringify(h4.content)).toContain("Rate limited");
+
+		// 3. Settings (2) overrides default (4) when shared and per-advisor are undefined
+		session.applyAdvisorConfigs([{ name: "SettingsOnly" }], undefined, undefined);
+		advisor = session.getAdvisorAgent();
+		tool = advisor?.state.tools?.find(t => t.name === "advise");
+		if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Expected advise tool");
+		tool.beginUpdate(true);
+		for (let i = 1; i <= 2; i++) {
+			const res = await tool.execute(`set-${i}`, { note: `Settings note ${i}`, severity: "concern" });
+			expect(JSON.stringify(res.content)).toContain("Deferred");
+		}
+		const set3 = await tool.execute("set-3", { note: "Settings note 3", severity: "concern" });
+		expect(JSON.stringify(set3.content)).toContain("Rate limited");
+	});
 });
