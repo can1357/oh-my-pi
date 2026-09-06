@@ -46,6 +46,9 @@
 
 - Fixed Codex V2 remote compaction rebuilding the request prefix differently from normal turns, restoring prompt-cache reuse ([#10786](https://github.com/can1357/oh-my-pi/issues/10786)).
 - Restored mouse clicks, hover, and wheel scrolling in Plan Review.
+### Added
+
+- Added opt-in (off by default) mouse-drag selection for visible CLI transcript rows via `tui.mouseSelection`: selected rows are copied automatically and a transient `Copied` indicator appears in the bottom-right corner. Terminal scrollback and editor/chrome regions remain outside the selection surface.
 
 ## [18.1.9] - 2026-09-04
 

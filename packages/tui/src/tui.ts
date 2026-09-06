@@ -80,13 +80,17 @@ const PAINT_BEGIN = `${HIDE_CURSOR}${SYNC_OUTPUT_BEGIN}${DISABLE_AUTOWRAP}`;
 const PAINT_END = `${ENABLE_AUTOWRAP}${SYNC_OUTPUT_END}`;
 const PAINT_BEGIN_NO_SYNC = `${HIDE_CURSOR}${DISABLE_AUTOWRAP}`;
 const PAINT_END_NO_SYNC = ENABLE_AUTOWRAP;
-// Mouse reporting is scoped to fullscreen overlays that opt into pointer
-// interaction. 1000h = button click tracking, 1003h = any-motion tracking for
-// hover targets, and 1006h = SGR extended coordinates past column/row 223.
-// Selection-first overlays leave these modes disabled so the terminal retains
-// native text selection.
+// Mouse reporting is disabled by default. Hosts may explicitly opt the normal
+// buffer in (using button-motion mode 1002), while fullscreen overlays can
+// independently enable any-motion mode 1003. SGR 1006 provides extended
+// coordinates beyond the legacy 223-column limit.
 const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
+
+// Normal-buffer selection only needs button-motion reports; unlike 1003h, 1002h
+// does not emit an event for every idle pointer movement.
+const NORMAL_MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const NORMAL_MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
 type InputListenerResult = { consume?: boolean; data?: string } | undefined;
 type InputListener = (data: string) => InputListenerResult;
@@ -104,6 +108,8 @@ export interface RenderScheduler {
 
 export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
+	/** Enable SGR mouse reports on the normal buffer for an explicit host opt-in. */
+	mouseTracking?: boolean;
 }
 /** Physical terminal dimensions supplied to a frame provider. */
 export interface ViewportSize {
@@ -366,6 +372,12 @@ export interface OverlayOptions {
 	 * Called each render cycle with current terminal dimensions.
 	 */
 	visible?: (termWidth: number, termHeight: number) => boolean;
+
+	/**
+	 * Keep the current focused component when showing a passive overlay such as
+	 * a transient notification. Defaults to true for interactive overlays.
+	 */
+	focus?: boolean;
 
 	// === Fullscreen ===
 	/**
@@ -801,6 +813,9 @@ export class TUI extends Container {
 	#forceViewportRepaintOnNextRender = false;
 	#hasEverRendered = false;
 	#stopped = false;
+	#started = false;
+	#mouseTrackingEnabled = false;
+	#normalMouseTrackingActive = false;
 	#cancelPostmortemRestore?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
@@ -841,11 +856,50 @@ export class TUI extends Container {
 		this.terminal = terminal;
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
+		this.#mouseTrackingEnabled = options?.mouseTracking === true;
 		this.#watchdog = new LoopWatchdog();
 	}
 	static #initialResizeScrollbackMode(): ResizeScrollbackMode {
 		const mode = Bun.env.PI_TUI_RESIZE_SCROLLBACK;
 		return mode === "append" || mode === "rebuild" || mode === "preserve" ? mode : "preserve";
+	}
+
+	/**
+	 * Opt a host into SGR mouse reports on the normal buffer. The default stays
+	 * off so ordinary TUI users retain native terminal text selection.
+	 */
+	setMouseTracking(enabled: boolean): void {
+		if (this.#mouseTrackingEnabled === enabled) return;
+		this.#mouseTrackingEnabled = enabled;
+		this.#syncMouseTracking();
+	}
+
+	getMouseTracking(): boolean {
+		return this.#mouseTrackingEnabled;
+	}
+
+	/** Screen row where the current provider viewport begins. */
+	getProviderViewportTop(): number {
+		return this.#providerViewportTop;
+	}
+
+	#syncMouseTracking(): void {
+		const hasBlockingOverlay = this.overlayStack.some(
+			entry => this.#isOverlayVisible(entry) && entry.options?.focus !== false,
+		);
+		const wanted =
+			this.#started &&
+			!this.#stopped &&
+			!this.#inputDeferred &&
+			this.#mouseTrackingEnabled &&
+			!hasBlockingOverlay &&
+			!this.#altActive &&
+			!this.#resizeAltActive &&
+			!this.#resizeProbe &&
+			!this.#pendingAltExit.length;
+		if (wanted === this.#normalMouseTrackingActive) return;
+		this.terminal.write(wanted ? NORMAL_MOUSE_TRACKING_ON : NORMAL_MOUSE_TRACKING_OFF);
+		this.#normalMouseTrackingActive = wanted;
 	}
 
 	/** Install the product-owned bounded frame provider. */
@@ -997,8 +1051,10 @@ export class TUI extends Container {
 		component.setIgnoreTight?.(true);
 		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false };
 		this.overlayStack.push(entry);
-		// Only focus if overlay is actually visible
-		if (this.#isOverlayVisible(entry)) {
+		this.#syncMouseTracking();
+		// Only focus interactive overlays that are actually visible. Passive
+		// overlays (notifications/toasts) paint without stealing editor input.
+		if (options?.focus !== false && this.#isOverlayVisible(entry)) {
 			this.setFocus(component);
 		}
 		this.terminal.hideCursor();
@@ -1011,6 +1067,7 @@ export class TUI extends Container {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
 					this.overlayStack.splice(index, 1);
+					this.#syncMouseTracking();
 					// Restore focus if this overlay or one of its owned targets had focus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
 						const topVisible = this.#getTopmostVisibleOverlay();
@@ -1026,6 +1083,7 @@ export class TUI extends Container {
 			setHidden: (hidden: boolean) => {
 				if (entry.hidden === hidden) return;
 				entry.hidden = hidden;
+				this.#syncMouseTracking();
 				// Update focus when hiding/showing
 				if (hidden) {
 					// If this overlay or one of its owned targets had focus, move focus to next visible or preFocus
@@ -1052,6 +1110,7 @@ export class TUI extends Container {
 		// Find topmost visible overlay, or fall back to preFocus
 		const topVisible = this.#getTopmostVisibleOverlay();
 		this.setFocus(topVisible?.component ?? overlay.preFocus);
+		this.#syncMouseTracking();
 		if (this.overlayStack.length === 0) {
 			this.terminal.hideCursor();
 			this.#recordHardwareCursorHidden();
@@ -1089,7 +1148,9 @@ export class TUI extends Container {
 	}
 
 	start(options?: TUIStartOptions): void {
+		this.#started = true;
 		this.#stopped = false;
+		this.#normalMouseTrackingActive = false;
 		this.#debugPaint = undefined;
 		this.#debugServer?.stop();
 		this.#debugServer = undefined;
@@ -1140,6 +1201,7 @@ export class TUI extends Container {
 		);
 		if (this.#stopped) return;
 		this.#cancelPostmortemRestore?.();
+		this.#syncMouseTracking();
 		this.#cancelPostmortemRestore = postmortem.register("tui-restore", () => this.stop());
 		for (const listener of this.#startListeners) {
 			try {
@@ -1175,6 +1237,7 @@ export class TUI extends Container {
 		this.#geometryEpoch++;
 		if (!this.#resizeAltActive) {
 			this.#resizeAltActive = true;
+			this.#syncMouseTracking();
 			setAltScreenActive(true);
 			this.#altPreviousLines = [];
 			this.#forgetHardwareCursorState();
@@ -1252,8 +1315,8 @@ export class TUI extends Container {
 			this.#suppressResizeUntil = this.#renderScheduler.now() + 100;
 			this.terminal.write(`${this.#keyboardEnhancementExit()}\x1b[?1049l`);
 			setAltScreenActive(false);
-			this.#altPreviousLines = [];
 			this.#beginResizeAnchorProbe();
+			this.#syncMouseTracking();
 		}, TUI.#RESIZE_VIEWPORT_SETTLE_MS);
 		this.requestRender(true);
 	}
@@ -1459,6 +1522,7 @@ export class TUI extends Container {
 		if (!this.#inputDeferred || this.#stopped) return;
 		this.#inputDeferred = false;
 		this.terminal.enableInput?.();
+		this.#syncMouseTracking();
 		this.#querySixelSupport();
 		this.#queryCellSize();
 	}
@@ -1634,6 +1698,8 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		this.#started = false;
+		this.#syncMouseTracking();
 		this.#cancelPostmortemRestore?.();
 		this.#cancelPostmortemRestore = undefined;
 		this.#debugServer?.stop();
@@ -2562,6 +2628,7 @@ export class TUI extends Container {
 		this.#forceViewportRepaintOnNextRender = false;
 		this.#hasEverRendered = true;
 		this.#resizeReplaySize = undefined;
+		this.#syncMouseTracking();
 		if (history !== undefined) {
 			this.#acceptedHistoryBatchId = history.id;
 			provider?.acknowledgeHistory(history.id);
@@ -2597,9 +2664,11 @@ export class TUI extends Container {
 			// modified-key reporting sequence on the freshly entered alternate
 			// screen, or Esc/modified keys revert to legacy encoding inside
 			// fullscreen overlays (Ghostty/kitty/iTerm2).
+			const normalMouseExit = this.#normalMouseTrackingActive ? NORMAL_MOUSE_TRACKING_OFF : "";
 			const mouseEnter = wantMouseTracking ? MOUSE_TRACKING_ON : "";
-			this.terminal.write(`\x1b[?1049h${this.#keyboardEnhancementEnter()}${mouseEnter}`);
+			this.terminal.write(`${normalMouseExit}\x1b[?1049h${this.#keyboardEnhancementEnter()}${mouseEnter}`);
 			setAltScreenActive(true);
+			this.#normalMouseTrackingActive = false;
 			this.terminal.hideCursor();
 			this.#forgetHardwareCursorState();
 			this.#recordHardwareCursorHidden();
@@ -2637,6 +2706,7 @@ export class TUI extends Container {
 				}
 				this.#forceViewportRepaintOnNextRender = true;
 			}
+			this.#syncMouseTracking();
 		} else if (wantMouseTracking !== this.#altMouseTrackingActive) {
 			this.terminal.write(wantMouseTracking ? MOUSE_TRACKING_ON : MOUSE_TRACKING_OFF);
 			this.#altMouseTrackingActive = wantMouseTracking;

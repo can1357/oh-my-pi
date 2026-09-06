@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in normal-buffer SGR mouse tracking with low-noise button-motion reports and passive bottom-right overlays for hosts that need application-owned pointer interactions.
+
 ### Fixed
 
 - Avoid inserting a trailing space when auto-completing directory paths with `@`, and keep autocomplete open when accepting a directory with Tab or Enter.

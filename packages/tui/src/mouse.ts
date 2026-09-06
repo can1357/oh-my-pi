@@ -1,11 +1,10 @@
 /**
  * SGR mouse report parsing (`\x1b[<button;col;rowM` / `…m`).
  *
- * Mouse tracking is enabled only while a fullscreen overlay holds the
- * alternate screen (see tui.ts MOUSE_TRACKING_ON), so consumers are
- * fullscreen components hit-testing against their own rendered frame:
- * the frame paints from screen row 0, hence `row`/`col` are exposed
- * 0-based for direct indexing into rendered lines.
+ * Mouse tracking is disabled by default. Hosts may explicitly enable it for
+ * normal-buffer pointer interaction; fullscreen overlays can also enable it
+ * while holding the alternate screen (see tui.ts MOUSE_TRACKING_ON). Consumers
+ * hit-test against their own rendered frame, whose coordinates are 0-based.
  */
 
 /** A decoded SGR mouse report. */

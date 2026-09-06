@@ -421,7 +421,7 @@ export function emergencyTerminalRestore(): void {
 					"\x1b[?5522l" + // Disable enhanced paste notifications
 					"\x1b[<u" + // Pop kitty keyboard protocol
 					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
-					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
+					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking
 					// Leave the alternate screen only when a fullscreen overlay
 					// actually holds it — on Windows, DECRST 1049 on the main
 					// buffer homes the cursor (unconditional CursorRestoreState
@@ -1733,9 +1733,8 @@ export class ProcessTerminal implements Terminal {
 		this.#safeWrite("\x1b[?2004l");
 		this.#safeWrite("\x1b[?5522l");
 
-		// Disable mouse tracking (enabled only by fullscreen overlays; safe
-		// no-ops otherwise). Covers crash paths that reach stop() without the
-		// TUI's own overlay teardown running.
+		// Disable mouse tracking. Covers crash paths that reach stop() without
+		// the TUI's own normal-buffer or fullscreen-overlay teardown running.
 		this.#safeWrite("\x1b[?1006l\x1b[?1003l\x1b[?1000l");
 
 		// Disable Mode 2031 appearance change notifications

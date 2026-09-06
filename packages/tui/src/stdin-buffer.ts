@@ -33,9 +33,9 @@ const KITTY_PRINTABLE_DEDUP_WINDOW_MS = 25;
 // An SGR mouse report prefix is unambiguous: no keyboard sequence starts with
 // `\x1b[<`, so a buffer still matching this is always the head of a split
 // mouse report. Flushing it on timeout would deliver the tail as literal
-// typed text to whatever component is focused (fullscreen overlays enable
-// any-motion tracking, so report floods plus render stalls make the split
-// routine — see the settings search leaking `[<35;8;16M`).
+// typed text to whatever component is focused (any-motion tracking can enable
+// report floods, so split handling must stay bounded — see the settings search
+// leaking `[<35;8;16M`).
 const SGR_MOUSE_PARTIAL = /^\x1b\[<[\d;]*$/;
 // Upper bound on how long an unambiguous partial is held past the flush
 // timeout before being delivered raw anyway (terminal died mid-sequence).

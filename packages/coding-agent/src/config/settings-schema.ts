@@ -1175,6 +1175,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.mouseSelection": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Mouse Transcript Selection",
+			description:
+				"Let omp own mouse drag selection for visible transcript text, copy it automatically, and show a Copied indicator. Disables native terminal selection and scrollback wheel while enabled.",
+		},
+	},
+
 	"terminal.showProgress": {
 		type: "boolean",
 		default: false,

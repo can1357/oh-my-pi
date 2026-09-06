@@ -4,6 +4,7 @@ import {
 	extractSegments,
 	sliceWithWidth,
 	truncateToWidth,
+	stripAnsiPreservingOsc66,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui/utils";
 
@@ -101,6 +102,11 @@ describe("text utils", () => {
 		expect(visibleWidth(`A${"\x1b]66;s=2;Hi\x1b\\"}Z`)).toBe(1 + 4 + 1);
 		const family = "👨‍👩‍👧‍👦";
 		expect(visibleWidth(encodeTextSized(family, { scale: 2, widthCells: 2 }))).toBe(4);
+	});
+
+	it("preserves OSC 66 payloads when stripping ANSI", () => {
+		expect(stripAnsiPreservingOsc66("\x1b]66;s=2;Hi\x1b\\")).toBe("Hi");
+		expect(stripAnsiPreservingOsc66("\x1b[31mred\x1b[0m")).toBe("red");
 	});
 
 	it("slices and truncates OSC 66 spans atomically", () => {
