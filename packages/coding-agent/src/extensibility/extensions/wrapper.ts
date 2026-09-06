@@ -9,7 +9,7 @@ import type {
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, Static, TSchema } from "@oh-my-pi/pi-ai";
-import { publicToolContent } from "@oh-my-pi/pi-ai/utils/private-content";
+import { publicToolProjection } from "@oh-my-pi/pi-ai/utils/private-content";
 import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
@@ -371,8 +371,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 
 		// Emit tool_result event - extensions can modify the result and error status
 		if (this.runner.hasHandlers("tool_result")) {
-			const content = publicToolContent(result.content, this.tool.modelOnly);
-			const privateResult = content !== result.content;
+			const { content, isPrivate } = publicToolProjection(result.content, this.tool.modelOnly);
 			const resultResult = await this.runner.emitToolResult({
 				type: "tool_result",
 				toolName: this.tool.name,
@@ -382,11 +381,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
 				),
 				content,
-				details: privateResult ? undefined : result.details,
+				details: isPrivate ? undefined : result.details,
 				isError: !!executionError,
 			});
 
-			if (resultResult && !privateResult) {
+			if (resultResult && !isPrivate) {
 				const modifiedContent: AgentToolResult["content"] = resultResult.content ?? result.content;
 				const modifiedDetails = (resultResult.details ?? result.details) as TDetails;
 

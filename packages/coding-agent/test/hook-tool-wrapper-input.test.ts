@@ -30,9 +30,9 @@ describe("HookToolWrapper tool_call input override", () => {
 		sharedTempDir.removeSync();
 	});
 
-	function makeHook(handler: (event: unknown) => unknown): LoadedHook {
+	function makeHook(handler: (event: unknown) => unknown, event = "tool_call"): LoadedHook {
 		const handlers = new Map<string, ((event: unknown, ctx: unknown) => Promise<unknown>)[]>();
-		handlers.set("tool_call", [async (event: unknown) => handler(event)]);
+		handlers.set(event, [async (event: unknown) => handler(event)]);
 		return {
 			path: "test-hook",
 			resolvedPath: "/test/test-hook.ts",
@@ -91,5 +91,35 @@ describe("HookToolWrapper tool_call input override", () => {
 		await wrapped.execute("call-3", { command: "echo original" } as never);
 
 		expect(executed).toEqual([{ command: "echo original" }]);
+	});
+
+	it("keeps a private result replayable when a tool_result hook echoes the public projection", async () => {
+		const events: unknown[] = [];
+		const runner = makeRunner(
+			makeHook(event => {
+				events.push(event);
+				const { content } = event as { content: unknown[] };
+				return { content: [...content, { type: "text", text: "hook annotation" }], details: { patched: true } };
+			}, "tool_result"),
+		);
+		const notes: AgentTool = {
+			name: "notes.read_file",
+			label: "notes.read_file",
+			description: "Private model-only tool",
+			parameters: Type.Object({}),
+			modelOnly: true,
+			execute: async () => ({
+				content: [{ type: "encrypted", encryptedContent: "replay-ciphertext" }],
+				details: { secret: "private-details" },
+			}),
+		} as unknown as AgentTool;
+
+		const result = await new HookToolWrapper(notes, runner).execute("call-private", {} as never);
+
+		expect(result.content).toEqual([{ type: "encrypted", encryptedContent: "replay-ciphertext" }]);
+		expect(result.details).toEqual({ secret: "private-details" });
+		expect(JSON.stringify(events)).not.toContain("replay-ciphertext");
+		expect(JSON.stringify(events)).not.toContain("private-details");
+		expect(JSON.stringify(events)).toContain("[private model-only result]");
 	});
 });

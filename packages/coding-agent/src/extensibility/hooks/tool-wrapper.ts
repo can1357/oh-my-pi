@@ -3,7 +3,7 @@
  */
 import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Static, TSchema } from "@oh-my-pi/pi-ai";
-import { publicToolContent } from "@oh-my-pi/pi-ai/utils/private-content";
+import { publicToolProjection } from "@oh-my-pi/pi-ai/utils/private-content";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { HookRunner } from "./runner";
@@ -81,6 +81,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 
 			// Emit tool_result event - hooks can modify the result
 			if (this.hookRunner.hasHandlers("tool_result")) {
+				const projected = publicToolProjection(result.content, this.tool.modelOnly);
 				const resultResult = (await this.hookRunner.emit({
 					type: "tool_result",
 					toolName: this.tool.name,
@@ -89,13 +90,13 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 						this.tool.name,
 						resolveToolEventInput(this.tool, effectiveParams as Record<string, unknown>),
 					),
-					content: publicToolContent(result.content, this.tool.modelOnly),
-					details: this.tool.modelOnly ? undefined : result.details,
+					content: projected.content,
+					details: projected.isPrivate ? undefined : result.details,
 					isError: false,
 				})) as ToolResultEventResult | undefined;
 
 				// Apply modifications if any
-				if (resultResult) {
+				if (resultResult && !projected.isPrivate) {
 					return {
 						content: resultResult.content ?? result.content,
 						details: (resultResult.details ?? result.details) as TDetails,

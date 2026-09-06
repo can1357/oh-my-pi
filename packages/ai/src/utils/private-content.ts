@@ -11,6 +11,21 @@ export function publicToolContent(
 }
 
 /**
+ * Public projection of a tool result plus whether the payload was private.
+ * Hook wrappers need both: a private result must be redacted on the event and
+ * its replayable original must survive any patch the handler returns — echoing
+ * the redacted content back would otherwise destroy the ciphertext Codex
+ * replays.
+ */
+export function publicToolProjection(
+	content: (TextContent | ImageContent | EncryptedContent)[],
+	modelOnly = false,
+): { content: (TextContent | ImageContent)[]; isPrivate: boolean } {
+	const projected = publicToolContent(content, modelOnly);
+	return { content: projected, isPrivate: projected !== content };
+}
+
+/**
  * Redact private payloads without changing the replayable stored message.
  * Only results are private: the backend returns them as ciphertext. Tool-call
  * arguments stay public — the schema-flagged fields are already encrypted on
