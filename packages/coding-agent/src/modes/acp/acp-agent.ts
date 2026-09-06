@@ -1384,6 +1384,12 @@ export class AcpAgent implements Agent {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
 		);
+		const forkNotices: string[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "notice") {
+				forkNotices.push(event.message);
+			}
+		});
 		try {
 			const success = await session.switchSession(sourcePath);
 			if (!success) {
@@ -1394,17 +1400,14 @@ export class AcpAgent implements Agent {
 				throw new Error(`ACP session fork failed: ${params.sessionId}`);
 			}
 		} catch (error) {
+			unsubscribe();
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		// Fork of a persona session re-activates the persona on the new journal.
-		// Reconcile runs BEFORE registration so the fork response carries the
-		// persona's toolset/modes; notice text is buffered and flushed after
-		// registration (see #registerPreparedSession).
-		const forkNotices: string[] = [];
 		await reconcileAcpSessionPersona(session, text => {
 			forkNotices.push(text);
 		});
+		unsubscribe();
 		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext, forkNotices);
 	}
 
@@ -1419,22 +1422,26 @@ export class AcpAgent implements Agent {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
 		);
+		const openNotices: string[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "notice") {
+				openNotices.push(event.message);
+			}
+		});
 		try {
 			const success = await session.switchSession(sessionPath);
 			if (!success) {
 				throw new Error(`ACP session load was cancelled: ${sessionId}`);
 			}
 		} catch (error) {
+			unsubscribe();
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		// Session load/resume: re-activate the persisted persona before
-		// registration so the load response reflects it; notice text is buffered
-		// and flushed after registration (see #registerPreparedSession).
-		const openNotices: string[] = [];
 		await reconcileAcpSessionPersona(session, text => {
 			openNotices.push(text);
 		});
+		unsubscribe();
 		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, openNotices);
 	}
 

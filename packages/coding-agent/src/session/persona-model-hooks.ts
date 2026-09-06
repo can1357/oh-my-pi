@@ -45,6 +45,15 @@ export interface PersonaModelApplyHooks {
 	 */
 	deferModelRestoreWhileStreaming?(baseline: ModelBaseline): void;
 	/**
+	 * The runtime rolled a persona switch/exits back after the surface's
+	 * defer channels ran (queue mutation, notice). Surfaces that queued a
+	 * pending model mutation on behalf of the failed transaction clear it
+	 * here — otherwise the turn-end flush would apply a model switch
+	 * belonging to a switch that no longer exists. Absent on the default
+	 * hooks (no queue to clear).
+	 */
+	onPersonaSwitchFailed?(): void;
+	/**
 	 * Whether a persona model switch should be deferred right now (e.g. the
 	 * session is streaming). Absent on the default hooks.
 	 */
@@ -87,10 +96,19 @@ export function createDefaultPersonaModelHooks(session: AgentSession): PersonaMo
 
 			const explicitThinking =
 				explicit?.thinking !== undefined ? parseConfiguredThinkingLevel(explicit.thinking) : undefined;
+			// fw2QC: a thinking suffix on the EXPLICIT model selector
+			// (`--model provider/model:high`) is itself an explicit CLI
+			// override — it outranks the persona's frontmatter thinking, same
+			// as `--thinking` does.
+			const explicitModelThinking = explicitModelPattern ? resolvedThinking[0] : undefined;
 			const thinking: ConfiguredThinkingLevel | undefined =
 				explicitThinking ??
-				(agent.thinkingLevel !== undefined ? agent.thinkingLevel : undefined) ??
-				resolvedThinking[0];
+				explicitModelThinking ??
+				(agent.thinkingLevel !== undefined
+					? agent.thinkingLevel
+					: explicitModelPattern
+						? undefined // explicit path already considered above
+						: resolvedThinking[0]);
 			if (thinking !== undefined) {
 				session.setThinkingLevel(thinking);
 			}

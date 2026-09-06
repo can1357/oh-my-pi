@@ -491,7 +491,15 @@ export interface CreateAgentSessionOptions {
 	 *
 	 * @internal
 	 */
-	extensionRoots?: () => EffectiveExtensionRoots;
+	extensionRoots?: (sessionCwd?: string) => EffectiveExtensionRoots;
+	/**
+	 * Async per-workspace re-derivation of the persona discovery roots (the
+	 * CLI computes it once launch options are built; ACP hosts use it per
+	 * client workspace). Absent on subagent sessions.
+	 *
+	 * @internal
+	 */
+	rederivePersonaExtensionRoots?: (sessionCwd: string, sessionSettings?: Settings) => Promise<EffectiveExtensionRoots>;
 	/**
 	 * Pre-loaded extensions (skips file discovery and the per-session factory
 	 * call). Used by the CLI when extensions are loaded early to parse custom
@@ -3885,18 +3893,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agentKind,
 			providerSessionId: options.providerSessionId,
 			// Host spawn-policy fallback for AgentSession.getSessionSpawns (persona
-			// override wins when set). String = CLI `--spawns`; `null` = unrestricted
-			// per the ToolSession contract.
-			getSessionSpawns: () => (options.spawns ? options.spawns : null),
+			// override wins when set). `""` is a DELIBERATE deny-all
+			// (persisted-revive passes `init.spawns ?? ""` so legacy revived
+			// subagents cannot re-spawn); only null/undefined mean unrestricted.
+			getSessionSpawns: () => options.spawns ?? null,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
 			// Same per-call `grep` seam the primary bridge gets, built against the
 			// advisor's own tool session so a `pi_grep` frame's context width and
 			// match cap are honored there too.
-			advisorCreateGrepTool: createBridgeGrepFactory(advisorToolSession, extensionRunner),
-			// Same `replace`-mode requirement as the primary bridge; the advisor
-			// path gates it on the advisor's own `edit` grant.
+			// Same per-call `edit` seam; the pi_edit approval and read-only
 			advisorCreateEditTool: () => createBridgeEditTool(advisorToolSession, extensionRunner),
 			// The advisor's bridge tools are wrapped for approval, but the wrapper
 			// reads the mode and per-tool policies only from the execute-time
@@ -4047,20 +4054,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (toolPolicy) {
 			const personaRuntime = new PersonaRuntime(toolPolicy, session);
 			session.setPersonaRuntime(personaRuntime);
-			// j2r: a user model/thinking pick under an active persona re-roots the
-			// runtime baseline; persist the reroot so a resume re-enters with the
-			// user's baseline. The LAST `mode_change agent` entry wins, so the
-			// append carries the same persona name/explicit with the UPDATED
-			// baseline.
-			personaRuntime.setBaselineRerootCallback(() => {
-				const active = personaRuntime.policy.snapshot().persona;
-				if (!active || personaRuntime.getActiveBaseline() === undefined) return;
-				appendPersonaJournalEntry(session, {
-					name: active.agent.name,
-					explicit: active.explicit,
-					baseline: personaRuntime.getActiveBaseline(),
-				});
-			});
 			if (options.pendingPersonaAgent) {
 				// fvInv: `--agent X --resume` re-enters the CLI persona over a stored
 				// journal. The persisted persona's baseline (the pre-persona state

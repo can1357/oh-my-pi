@@ -3005,6 +3005,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #applyPlanModeModel(): Promise<void> {
 		const resolved = this.session.resolveRoleModelWithThinking("plan");
 		if (!resolved.model) return;
+		// fwkeR: a mid-turn persona exit queued its pre-persona restore in
+		// #pendingModelSwitch. Plan mode's transition would overwrite the slot
+		// (and capture the still-live persona model as its previous state),
+		// losing the restore forever. Flush the queue FIRST so the base-session
+		// model lands before plan's own capture. A plan-queued switch owns the
+		// slot already and is left alone.
+		if (this.#pendingModelSwitch && !this.#pendingPlanModelSwitch) {
+			await this.flushPendingModelSwitch();
+		}
 
 		const currentModel = this.session.model;
 		// Capture the pre-plan model so #exitPlanMode can restore it. Only the
@@ -3088,9 +3097,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingModelSwitch = undefined;
 		this.#pendingPlanModelSwitch = false;
 		if (!pending) return;
-		// A deferred persona model-restore has now landed: the persona
-		// runtime's bridged root baseline is spent — a later deferred enter
-		// must baseline from the live session, not this flushed snapshot.
 		this.session.getPersonaRuntime()?.onPendingModelRestoreFlushed();
 		try {
 			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
@@ -6095,11 +6101,19 @@ export class InteractiveMode implements InteractiveModeContext {
 			// queue it for the same flush that pending model switches use, so the
 			// restore survives the turn boundary.
 			deferModelRestoreWhileStreaming: baseline => {
-				if (!baseline.model) return;
+				const model = baseline.model ?? this.session.model;
+				if (!model) return;
 				this.#pendingModelSwitch = {
-					model: baseline.model,
+					model,
 					thinkingLevel: baseline.thinkingLevel,
 				};
+				this.#pendingPlanModelSwitch = false;
+			},
+			// Rollback safety: the deferred queue mutation must be undone when
+			// the runtime rolls the transaction back — otherwise agent_end would
+			// apply a model switch belonging to a switch that failed.
+			onPersonaSwitchFailed: () => {
+				this.#pendingModelSwitch = undefined;
 				this.#pendingPlanModelSwitch = false;
 			},
 		};

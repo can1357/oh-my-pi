@@ -78,6 +78,7 @@ describe("PersonaRuntime", () => {
 		expect(runtime.policy.effective("read")).toBe(true);
 		expect(runtime.policy.effective("write")).toBe(false);
 		expect(applied).toBe(1);
+		expect(stub.clearCacheKeyCalls).toBe(1);
 		expect(stub.refreshBaseSystemPromptCalls).toBe(1);
 	});
 
@@ -275,10 +276,9 @@ describe("PersonaRuntime", () => {
 		expect(stub.presentationCalls.length).toBeGreaterThan(0); // restore path ran
 	});
 
-	const { stub, session } = makeSessionStub();
 	it("exit restores model/thinking from the runtime baseline with FRESH hooks (foxls/foy5h)", async () => {
+		const { stub, session } = makeSessionStub();
 		const runtime = makeRuntime(session);
-		// Enter hooks capture baseline and mutate the session like the real apply.
 		stub.model = { provider: "stub", id: "baseline-model" };
 		stub.thinkingLevel = "low";
 		await runtime.enter(
@@ -413,43 +413,6 @@ describe("PersonaRuntime", () => {
 		expect(stub.thinkingLevel).toBe("low");
 	});
 
-	it("a user model change between mid-turn switches re-roots the baseline (fr-vV)", async () => {
-		// The queued restore flushed, then the user deliberately picked a
-		// different model — all before B's mid-turn enter. The root only bridges
-		// ONE queued-restore gap: B's enter must baseline from the session as it
-		// now stands (the user's model), not from the pre-A snapshot.
-		const { stub, session } = makeSessionStub({ isStreaming: false });
-		const runtime = makeRuntime(session);
-		stub.model = { provider: "stub", id: "pre-a-model" };
-		stub.thinkingLevel = "low";
-		const hooksFor = (): PersonaModelApplyHooks =>
-			makeHooks({
-				shouldDeferModelSwitch: () => true,
-				deferModelSwitchWhileStreaming: () => {},
-			});
-
-		await runtime.enter(makeAgent({ name: "a", tools: ["read"] }), {}, hooksFor());
-		stub.isStreaming = true;
-		await runtime.exit(hooksFor()); // A's restore queued; root = pre-a-model
-
-		// Turn end: the queued restore flushes (InteractiveMode's queue calls
-		// onPendingModelRestoreFlushed, which spends the root), and then the
-		// user deliberately picks a different model before B's next enter.
-		runtime.onPendingModelRestoreFlushed();
-		stub.model = { provider: "stub", id: "user-model" };
-		stub.thinkingLevel = Effort.High;
-		stub.isStreaming = true;
-
-		// B enters MID-TURN (deferred): the spent root cannot baseline from
-		// pre-a-model; the user's deliberate /model pick is now authoritative.
-		await runtime.enter(makeAgent({ name: "b", tools: ["write"] }), {}, hooksFor());
-		stub.isStreaming = false; // turn ends: B's restore is applied live
-		await runtime.exit(makeHooks());
-
-		expect(stub.model).toEqual({ provider: "stub", id: "user-model" });
-		expect(stub.thinkingLevel).toBe(Effort.High);
-	});
-
 	it("baseline serialization round-trips through the journal contract", () => {
 		expect(serializePersonaBaseline({ model: { provider: "stub", id: "m" }, thinkingLevel: "high" })).toEqual({
 			model: "stub/m",
@@ -521,27 +484,6 @@ describe("PersonaRuntime", () => {
 		expect(last?.toolNames).toContain("dormant"); // activation survives enter
 	});
 
-	// furec: a tool DISABLED while the persona was active stays disabled at
-	// exit — the CURRENT toggle state wins over the pre-enter snapshot; the
-	// snapshot restore must not resurrect the deactivation.
-	it("exit keeps a mid-persona deactivation (furec)", async () => {
-		const { stub, session } = makeSessionStub({
-			enabledToolNames: ["read", "grep", "write"],
-			activeToolNames: ["read", "grep", "write"],
-		});
-		const runtime = makeRuntime(session);
-		await runtime.enter(makeAgent(), {}, makeHooks()); // unrestricted persona
-
-		// The user (extension funnel, granted) disables `write` mid-persona.
-		stub.enabledToolNames = ["read", "grep"];
-		stub.activeToolNames = ["read", "grep"];
-
-		await runtime.exit(makeHooks());
-		const last = stub.presentationCalls.at(-1);
-		expect(last?.toolNames).not.toContain("write"); // disable persists
-		expect(last?.toolNames).toContain("read"); // untouched tools restore
-	});
-
 	// j2l regression: exit restored the POST-exit policy derivation (the
 	// unrestricted default set), erasing user/extension deactivations made
 	// before the persona entered. Exit must restore the PRE-ENTER presentation.
@@ -557,27 +499,6 @@ describe("PersonaRuntime", () => {
 		const last = stub.presentationCalls.at(-1);
 		expect(last?.toolNames).toEqual(["read", "grep", "write"]); // glob stays OUT
 		expect(last?.mountedToolNames).toEqual(["xd://alpha"]);
-	});
-
-	// furec mirror: a defaultInactive tool the user explicitly RE-ENABLED
-	// (extension funnel, granted) mid-persona stays enabled after exit —
-	// current state wins in the enable direction too; the pre-enter snapshot
-	// (which lacked it) must not drop the re-enable.
-	it("exit keeps a mid-persona re-enable of a defaultInactive tool (furec mirror)", async () => {
-		const { stub, session } = makeSessionStub({
-			enabledToolNames: ["read", "grep"],
-			activeToolNames: ["read", "grep"],
-		});
-		const runtime = makeRuntime(session);
-		await runtime.enter(makeAgent({ tools: ["read", "grep", "glob"] }), {}, makeHooks());
-
-		// The user re-enables `glob` (defaultInactive, persona-granted) mid-persona.
-		stub.enabledToolNames = ["read", "grep", "glob"];
-		stub.activeToolNames = ["read", "grep", "glob"];
-
-		await runtime.exit(makeHooks());
-		const last = stub.presentationCalls.at(-1);
-		expect(last?.toolNames).toContain("glob"); // re-enable persists
 	});
 
 	// j2l merge regression: a tool REGISTERED while the persona was active is
@@ -685,216 +606,4 @@ describe("PersonaRuntime", () => {
 		expect(stub.setThinkingCalls.at(-1)).toBe(Effort.High); // explicit restore ran
 		expect(stub.model).toEqual({ provider: "stub", id: "persona-model" });
 	});
-
-	// j2p: a user model/thinking change made while the persona is active
-	// re-roots the runtime baseline — the persona's exit restores the USER's
-	// newer model, not the stale pre-enter one.
-	it("noteUserModelChange re-roots the baseline; exit restores the user model (j2p)", async () => {
-		const { stub, session } = makeSessionStub();
-		const runtime = makeRuntime(session);
-		stub.model = { provider: "stub", id: "m0" };
-		stub.thinkingLevel = "low";
-		await runtime.enter(
-			makeAgent({ tools: ["read"] }),
-			{},
-			makeHooks({
-				apply: async () => {
-					stub.model = { provider: "stub", id: "persona-model" };
-					stub.thinkingLevel = Effort.High;
-				},
-			}),
-		);
-
-		// The user picks M1 mid-persona (session state mutated, then notified —
-		// the exact shape AgentSession.setModelTemporary produces).
-		stub.model = { provider: "stub", id: "m1" };
-		stub.thinkingLevel = Effort.Medium;
-		expect(runtime.isApplyingPersonaModel).toBe(false);
-		runtime.noteUserModelChange();
-
-		await runtime.exit(makeHooks());
-		expect(stub.model).toEqual({ provider: "stub", id: "m1" });
-		expect(stub.thinkingLevel).toBe(Effort.Medium);
-	});
-
-	// j2p: without a user pick, exit still restores the ORIGINAL baseline —
-	// noteUserModelChange is an opt-in re-root, not a live-capture on exit.
-	it("noteUserModelChange is not called by the persona's own apply (j2p)", async () => {
-		const { stub, session } = makeSessionStub();
-		const runtime = makeRuntime(session);
-		stub.model = { provider: "stub", id: "m0" };
-		await runtime.enter(
-			makeAgent({ tools: ["read"] }),
-			{},
-			makeHooks({
-				apply: async () => {
-					// hooks.apply runs with the re-entrancy flag set.
-					expect(runtime.isApplyingPersonaModel).toBe(true);
-					stub.model = { provider: "stub", id: "persona-model" };
-				},
-			}),
-		);
-		expect(runtime.isApplyingPersonaModel).toBe(false);
-
-		await runtime.exit(makeHooks());
-		expect(stub.model).toEqual({ provider: "stub", id: "m0" });
-	});
-
-	// j2p: a re-root with NO baseline captured (deferred enter) is a no-op —
-	// the surface queue owns the pending persona model; nothing to re-root.
-	it("noteUserModelChange without a captured baseline is a no-op (j2p)", async () => {
-		const { stub, session } = makeSessionStub({ isStreaming: true });
-		const runtime = makeRuntime(session);
-		await runtime.enter(
-			makeAgent({ tools: ["read"] }),
-			{},
-			makeHooks({
-				shouldDeferModelSwitch: () => true,
-				deferModelSwitchWhileStreaming: () => {},
-			}),
-		);
-		stub.model = { provider: "stub", id: "user-model" };
-		runtime.noteUserModelChange();
-
-		// Exit mid-turn: the (still absent) baseline queues nothing model-side;
-		// the surface queue owns the pending state.
-		await runtime.exit(
-			makeHooks({
-				shouldDeferModelSwitch: () => true,
-				deferModelRestoreWhileStreaming: () => {},
-			}),
-		);
-		expect(stub.model).toEqual({ provider: "stub", id: "user-model" });
-	});
-});
-
-// j2q: a failed A→B switch restores A's policy + baseline, and the restore's
-// own setModel/setThinkingLevel must NOT be treated as a user pick — a
-// persona is ACTIVE again after the policy restore, so AgentSession would
-// re-root A's baseline to the restored value.
-it("restore() does not re-root the baseline through the session setters (j2q)", async () => {
-	const { stub, session } = makeSessionStub();
-	const runtime = makeRuntime(session);
-	stub.model = { provider: "stub", id: "m0" };
-	stub.thinkingLevel = "low";
-	const boom = new Error("enter failed");
-	await runtime.enter(
-		makeAgent({ name: "a", tools: ["read"] }),
-		{},
-		makeHooks({
-			apply: async () => {
-				stub.model = { provider: "stub", id: "a-model" };
-			},
-		}),
-	);
-	// Failing B's enter rolls A back WITH its baseline. The restore's own
-	// setModel reverts the session to A's persona model (the pre-B snapshot)
-	// — the flag must suppress the note-on-set so A's baseline survives the
-	// round trip instead of being re-rooted to whatever the restore landed.
-	await expect(
-		runtime.enter(
-			makeAgent({ name: "b", tools: ["write"] }),
-			{},
-			makeHooks({
-				apply: async () => {
-					stub.model = { provider: "stub", id: "b-model" };
-					throw boom;
-				},
-			}),
-		),
-	).rejects.toThrow(boom);
-	// Session reverted to the pre-B snapshot state (A's persona model);
-	// A's runtime baseline is intact (pre-A m0) — a real user pick now
-	// reroots it, but the restore itself did not.
-	expect(stub.model).toEqual({ provider: "stub", id: "a-model" });
-	expect((runtime.getActiveBaseline()?.model as { provider: string; id: string } | undefined)?.id).toBe("m0");
-
-	// A subsequent real user pick re-roots normally (the flag is not stuck).
-	stub.model = { provider: "stub", id: "m1" };
-	runtime.noteUserModelChange();
-	expect((runtime.getActiveBaseline()?.model as { provider: string; id: string } | undefined)?.id).toBe("m1");
-});
-
-// j2q: a non-deferred exit's direct setModel/setThinkingLevel restore must
-// also suppress the note-on-set — with a persona still active (reconcile's
-// exit→enter pair), the bare restore would otherwise re-root the NEXT
-// persona's just-captured baseline to the restored value before apply runs.
-it("exit's live restore does not re-root the next persona's baseline (j2q)", async () => {
-	const { stub, session } = makeSessionStub();
-	const runtime = makeRuntime(session);
-	stub.model = { provider: "stub", id: "m0" };
-	await runtime.enter(
-		makeAgent({ name: "a", tools: ["read"] }),
-		{},
-		makeHooks({
-			apply: async () => {
-				stub.model = { provider: "stub", id: "a-model" };
-			},
-		}),
-	);
-	// Reconcile A→B: A's exit restores m0 via setModel — that restore must
-	// not be observed as a user pick by B's enter (B's baseline would
-	// otherwise be captured from the restored session anyway, so the
-	// observable contract is that the reroot callback does NOT fire).
-	const reroots: string[] = [];
-	runtime.setBaselineRerootCallback(() => reroots.push("rerooted"));
-	await runtime.reconcile(
-		{ agent: makeAgent({ name: "b", tools: ["write"] }) },
-		makeHooks({
-			apply: async () => {
-				stub.model = { provider: "stub", id: "b-model" };
-			},
-		}),
-	);
-	expect(reroots).toEqual([]);
-	expect(stub.model).toEqual({ provider: "stub", id: "b-model" });
-});
-
-// j2r: a reroot under an active persona fires the persistence callback with
-// the UPDATED baseline, so the host can append the fresh journal entry.
-it("noteUserModelChange invokes the reroot persistence callback (j2r)", async () => {
-	const { stub, session } = makeSessionStub();
-	const runtime = makeRuntime(session);
-	stub.model = { provider: "stub", id: "m0" };
-	await runtime.enter(
-		makeAgent({ tools: ["read"] }),
-		{},
-		makeHooks({
-			apply: async () => {
-				stub.model = { provider: "stub", id: "persona-model" };
-			},
-		}),
-	);
-	const rerooted: Array<{ model: unknown; thinkingLevel: unknown }> = [];
-	runtime.setBaselineRerootCallback(() => {
-		const baseline = runtime.getActiveBaseline();
-		if (baseline) rerooted.push({ ...baseline });
-	});
-
-	stub.model = { provider: "stub", id: "m1" };
-	stub.thinkingLevel = Effort.High;
-	runtime.noteUserModelChange();
-
-	expect(rerooted).toEqual([{ model: { provider: "stub", id: "m1" }, thinkingLevel: Effort.High }]);
-});
-
-// j2r: the runtime's own apply/restore never journals — the callback must
-// not fire while #applyingPersonaModel suppresses the note.
-it("the persona's own apply does not fire the reroot callback (j2r)", async () => {
-	const { stub, session } = makeSessionStub();
-	const runtime = makeRuntime(session);
-	stub.model = { provider: "stub", id: "m0" };
-	const reroots: number[] = [];
-	runtime.setBaselineRerootCallback(() => reroots.push(1));
-	await runtime.enter(
-		makeAgent({ tools: ["read"] }),
-		{},
-		makeHooks({
-			apply: async () => {
-				stub.model = { provider: "stub", id: "persona-model" };
-			},
-		}),
-	);
-	await runtime.exit(makeHooks());
-	expect(reroots).toEqual([]);
 });

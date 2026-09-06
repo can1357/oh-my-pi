@@ -133,9 +133,11 @@ export interface AgentSessionConfig {
 	/**
 	 * Live extension-root policy inherited from the owning session. Subagents use
 	 * this provider so explicit roots, discovery mode, configured roots, and
-	 * provenance survive recursive task discovery.
+	 * provenance survive recursive task discovery. The optional session cwd lets
+	 * multi-workspace hosts (ACP) rebase relative extension spellings per
+	 * client workspace; an omitted argument resolves against the launch cwd.
 	 */
-	extensionRoots?: () => EffectiveExtensionRoots;
+	extensionRoots?: (sessionCwd?: string) => EffectiveExtensionRoots;
 	/**
 	 * Parent-imported extension factories rebound to this session's own
 	 * ExtensionAPI. Forwarded by session forks (e.g. `/tan`) so the child

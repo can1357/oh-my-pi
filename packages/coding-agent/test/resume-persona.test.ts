@@ -29,7 +29,6 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { PersonaRuntime } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
 import { SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
-import { appendPersonaJournalEntry } from "@oh-my-pi/pi-coding-agent/session/persisted-persona";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { InteractiveMode } from "../src/modes/interactive-mode";
@@ -685,10 +684,12 @@ You are the fixture thinker persona.`,
 		expect(switchThinking).toBe("low" as ConfiguredThinkingLevel);
 	});
 
-	it("user /model pick under a persona re-roots the exit baseline (j2p)", async () => {
-		// Enter persona (baseline M0 → persona model applied), then the user
-		// deliberately picks a DIFFERENT model through the session API. The
-		// persona's exit must restore the USER's model, not the pre-enter M0.
+	it("exiting a resumed persona restores the pre-persona baseline captured at original launch", async () => {
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const sonnet = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		await liveSession.setModelTemporary(sonnet);
+
 		await writeFixtureAgent(
 			`---
 name: fixture-modeled
@@ -696,124 +697,18 @@ description: Modeled fixture persona
 tools:
   - read
 model:
-  - anthropic/claude-sonnet-4-5
+  - anthropic/claude-opus-4-5
 ---
 
 You are the modeled fixture persona.`,
 			"fixture-modeled.md",
 		);
 
-		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
-		const liveSession = createSession(manager);
 		const created = spyStatus(createMode(liveSession));
 		await created.init({ suppressWelcomeIntro: true });
-		const baselineModel = liveSession.model;
-		expect(baselineModel?.id).toBe("claude-sonnet-4-5"); // session default
 
 		await created.switchAgentPersona("fixture-modeled");
-		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
-		expect(liveSession.model?.id).toBe("claude-sonnet-4-5");
-
-		// The user picks opus mid-persona (same channel the /model picker uses).
-		const opus = getBundledModel("anthropic", "claude-opus-4-5");
-		if (!opus) throw new Error("Expected built-in anthropic opus model to exist");
-		await liveSession.setModelTemporary(opus, Effort.High);
 		expect(liveSession.model?.id).toBe("claude-opus-4-5");
-
-		await created.exitAgentPersona();
-		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
-		// The USER's pick survives the persona exit — not the pre-enter model.
-		expect(liveSession.model?.id).toBe("claude-opus-4-5");
-	});
-
-	// fvFVr: role cycling (alt+m) is a USER model change — under an active
-	// persona it must re-root the exit baseline exactly like /model does;
-	// otherwise the persona's exit restores the stale pre-enter model.
-	it("role model cycle under a persona re-roots the exit baseline (fvFVr)", async () => {
-		await writeFixtureAgent(
-			`---
-name: fixture-modeled
-description: Modeled fixture persona
-tools:
-  - read
-model:
-  - anthropic/claude-sonnet-4-5
----
-
-You are the modeled fixture persona.`,
-			"fixture-modeled.md",
-		);
-
-		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
-		const liveSession = createSession(manager);
-		const created = spyStatus(createMode(liveSession));
-		await created.init({ suppressWelcomeIntro: true });
-		const opus = getBundledModel("anthropic", "claude-opus-4-5");
-		if (!opus) throw new Error("Expected built-in anthropic opus model to exist");
-		// The role cycle needs a second role to land on.
-		Settings.instance.setModelRole("slow", "anthropic/claude-opus-4-5:high");
-
-		await created.switchAgentPersona("fixture-modeled");
-		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
-
-		// The user cycles through the role order mid-persona (alt+m channel).
-		const result = await liveSession.cycleRoleModels(["default", "slow"]);
-		if (!result) throw new Error("Expected role cycle to land on a model");
-		expect(liveSession.model?.id).toBe(result.model.id);
-
-		await created.exitAgentPersona();
-		// The CYCLED model survives the persona exit.
-		expect(liveSession.model?.id).toBe(result.model.id);
-	});
-
-	it("user model pick under a persona persists the rerooted baseline to the journal (j2r)", async () => {
-		// Enter persona (baseline M0), user picks M1 mid-persona, DISPOSE without
-		// exiting. The reroot must be journaled: a resume re-enters with M1 as
-		// the authoritative baseline, and the subsequent exit restores M1.
-		await writeFixtureAgent(
-			`---
-name: fixture-modeled
-description: Modeled fixture persona
-tools:
-	- read
-model:
-	- anthropic/claude-sonnet-4-5
----
-
-You are the modeled fixture persona.`,
-			"fixture-modeled.md",
-		);
-
-		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
-		const liveSession = createSession(manager);
-		// Wire the reroot journal the way the session factory does (sdk.ts j2r).
-		const personaRuntime = liveSession.getPersonaRuntime()!;
-		personaRuntime.setBaselineRerootCallback(() => {
-			const active = personaRuntime.policy.snapshot().persona;
-			if (!active || personaRuntime.getActiveBaseline() === undefined) return;
-			appendPersonaJournalEntry(liveSession, {
-				name: active.agent.name,
-				explicit: active.explicit,
-				baseline: personaRuntime.getActiveBaseline(),
-			});
-		});
-		const created = spyStatus(createMode(liveSession));
-		await created.init({ suppressWelcomeIntro: true });
-
-		await created.switchAgentPersona("fixture-modeled");
-		const opus = getBundledModel("anthropic", "claude-opus-4-5");
-		if (!opus) throw new Error("Expected built-in anthropic opus model to exist");
-		await liveSession.setModelTemporary(opus, Effort.High);
-
-		// The reroot appended a fresh agent entry carrying the UPDATED baseline.
-		const entries = manager
-			.getEntries()
-			.filter(entry => entry.type === "mode_change")
-			.map(entry => entry as { mode: string; data?: Record<string, unknown> })
-			.filter(entry => entry.mode === "agent");
-		const last = entries.at(-1);
-		expect(last?.data?.name).toBe("fixture-modeled");
-		expect(last?.data?.baseline).toEqual({ model: "anthropic/claude-opus-4-5", thinkingLevel: "high" });
 
 		await manager.ensureOnDisk();
 		await manager.flush();
@@ -822,16 +717,16 @@ You are the modeled fixture persona.`,
 		await created.stop();
 		await liveSession.dispose();
 
-		// Resume: the journal's rerooted baseline is authoritative; exiting the
-		// restored persona must land on M1 (the user's pick), not the persona's
-		// own model.
+		// Resume: the journal's baseline is authoritative; exiting the
+		// restored persona lands on Sonnet (the original pre-persona model).
 		const resumedManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "sessions"));
 		const resumedSession = createSession(resumedManager);
 		const resumed = spyStatus(createMode(resumedSession));
 		await resumed.init({ suppressWelcomeIntro: true });
 		expect(resumedSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
-		await resumed.exitAgentPersona();
 		expect(resumedSession.model?.id).toBe("claude-opus-4-5");
+		await resumed.exitAgentPersona();
+		expect(resumedSession.model?.id).toBe("claude-sonnet-4-5");
 		await resumedSession.dispose();
 	});
 

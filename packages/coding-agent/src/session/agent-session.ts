@@ -7735,14 +7735,38 @@ export class AgentSession {
 		// transcript/context clear so the outgoing session's journal still records
 		// the persona exit while the state belongs to it.
 		const personaRuntime = this.getPersonaRuntime();
+		// Pre-transition failure recovery: capture the persona-complete state
+		// before the exit — if the following flush fails, restore it so the
+		// surviving session matches what its journal records.
+		const personaSnapshot =
+			personaRuntime && this.toolPolicy?.isPersonaActive() ? await personaRuntime.snapshot() : undefined;
 		if (personaRuntime && this.toolPolicy?.isPersonaActive()) {
-			await personaRuntime.exit(createDefaultPersonaModelHooks(this));
+			try {
+				await personaRuntime.exit(createDefaultPersonaModelHooks(this));
+			} catch (error) {
+				// The failed exit already rolled the runtime back to the active
+				// persona; reconnect the agent event pipeline (the disconnect above
+				// severed it) before propagating so the surviving session stays
+				// fully alive — persistence and events must not be dead while the
+				// user keeps working in it.
+				this.#reconnectToAgent();
+				throw error;
+			}
 		}
 		this.#cancelOwnAsyncJobs();
 		this.#closeAllProviderSessions("new session");
-		await this.#bash.flushPending();
+		try {
+			await this.#bash.flushPending();
+		} catch (error) {
+			this.#reconnectToAgent();
+			if (personaRuntime && personaSnapshot) {
+				await personaRuntime.restore(personaSnapshot);
+			}
+			throw error;
+		}
 		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 		let sessionTransitioned = false;
+		let personaRestoreDone = false;
 		try {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
@@ -7830,6 +7854,23 @@ export class AgentSession {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
+			}
+			if (!sessionTransitioned && !personaRestoreDone) {
+				// fwdEZ: the transition failed before committing — the old session
+				// survives, so its journaled persona must too. The pre-transition
+				// exit cleared it; restore the captured snapshot and reconnect the
+				// agent pipeline the disconnect severed.
+				personaRestoreDone = true;
+				if (personaRuntime && personaSnapshot && !this.toolPolicy?.isPersonaActive()) {
+					try {
+						await personaRuntime.restore(personaSnapshot);
+					} catch (restoreError) {
+						logger.error("Failed to restore the persona after a failed new-session transition", {
+							error: String(restoreError),
+						});
+					}
+				}
+				this.#reconnectToAgent();
 			}
 		}
 	}
@@ -7948,9 +7989,7 @@ export class AgentSession {
 			persist?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
-		const result = await this.#models.setModel(model, role, options);
-		this.#noteUserModelChange();
-		return result;
+		return await this.#models.setModel(model, role, options);
 	}
 
 	/** Selects a model for this session without updating persisted model settings. */
@@ -7959,43 +7998,14 @@ export class AgentSession {
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
-		// j2p: consult the re-entrancy flag BEFORE awaiting — the persona's own
-		// hooks.apply runs inside this same call stack when re-entering.
-		const personaApplying = this.#personaRuntime?.isApplyingPersonaModel ?? false;
-		// j2s: note only on SUCCESS — a rejected set (no API key for the target)
-		// leaves the live model unchanged, and noting that would re-root an
-		// active persona's baseline to itself: harmless but mis-attributed.
 		await this.#models.setModelTemporary(model, thinkingLevel, options);
-		if (!personaApplying) this.#noteUserModelChange();
-	}
-
-	/**
-	 * j2p: a model/thinking change landed OUTSIDE the persona's own apply (a
-	 * user /model pick, the picker, RPC set_model). While a persona is active,
-	 * re-root the runtime baseline so the persona's exit restores the user's
-	 * newer model instead of the stale pre-enter one. A deferred-flush restore
-	 * lands here too (TUI flushPendingModelSwitch → setModelTemporary); by then
-	 * the persona is already exited and #activeBaseline is empty, so this is a
-	 * no-op — exactly what that path needs.
-	 */
-	#noteUserModelChange(): void {
-		const runtime = this.#personaRuntime;
-		if (!runtime?.policy.isPersonaActive() || runtime.isApplyingPersonaModel) return;
-		runtime.noteUserModelChange();
 	}
 
 	/**
 	 * Cycles the scoped model set, or all available models when no scope exists.
-	 * fvFVr: a user cycle lands OUTSIDE the persona's own apply, so it routes
-	 * through the same reroot funnel as setModel/setModelTemporary — with the
-	 * runtime-applying suppression so the persona's self-applied model (which
-	 * also flows through ModelControls) is never mis-attributed as a user pick.
 	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		const personaApplying = this.#personaRuntime?.isApplyingPersonaModel ?? false;
-		const result = await this.#models.cycleModel(direction);
-		if (!personaApplying) this.#noteUserModelChange();
-		return result;
+		return await this.#models.cycleModel(direction);
 	}
 
 	/** Resolves configured role models and the currently active role index. */
@@ -8004,29 +8014,20 @@ export class AgentSession {
 	}
 
 	/**
-	 * Applies a resolved role model without changing global settings. fvFVr:
-	 * same reroot funnel as the other user-driven model changes (suppressed
-	 * while the persona runtime itself is applying).
+	 * Applies a resolved role model without changing global settings.
 	 */
 	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		const personaApplying = this.#personaRuntime?.isApplyingPersonaModel ?? false;
 		await this.#models.applyRoleModel(entry);
-		if (!personaApplying) this.#noteUserModelChange();
 	}
 
 	/**
-	 * Cycles the configured role models in the supplied order. fvFVr: the apply
-	 * runs through #models.applyRoleModel, so the note fires ONCE here (with
-	 * the runtime-applying suppression, same as setModelTemporary).
+	 * Cycles the configured role models in the supplied order.
 	 */
 	async cycleRoleModels(
 		roleOrder: readonly string[],
 		direction: "forward" | "backward" = "forward",
 	): Promise<RoleModelCycleResult | undefined> {
-		const personaApplying = this.#personaRuntime?.isApplyingPersonaModel ?? false;
-		const result = await this.#models.cycleRoleModels(roleOrder, direction);
-		if (!personaApplying) this.#noteUserModelChange();
-		return result;
+		return await this.#models.cycleRoleModels(roleOrder, direction);
 	}
 
 	/** Lists available models after applying the configured enabled-model filter. */
@@ -8037,13 +8038,7 @@ export class AgentSession {
 	/** Selects the session thinking level and optionally persists it as the default. */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		this.#models.setThinkingLevel(level, persist);
-		// j2t: a thinking-only change under an active persona re-roots the
-		// runtime baseline just like a model pick does — setThinkingLevel also
-		// runs inside the persona's own apply/restore, so the same re-entrancy
-		// guard discriminates: the note fires only for a USER change.
-		this.#noteUserModelChange();
 	}
-
 	/** Advances through the thinking selectors supported by the active model. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
 		return this.#models.cycleThinkingLevel();
@@ -8945,6 +8940,11 @@ export class AgentSession {
 		// model and journal over it. Surface-agnostic (TUI, ACP, RPC) since
 		// the reconciler slot is single-tenant.
 		const runtime = this.getPersonaRuntime();
+		// Post-teardown failure recovery: capture the persona-complete state
+		// BEFORE the exit runs — if a later flush fails, this snapshot restores
+		// the persona the journal still records instead of stranding a
+		// persona-cleared session.
+		const personaSnapshot = runtime && this.toolPolicy?.isPersonaActive() ? await runtime.snapshot() : undefined;
 		if (runtime && this.toolPolicy?.isPersonaActive()) {
 			try {
 				await runtime.exit(createDefaultPersonaModelHooks(this));
@@ -8967,13 +8967,28 @@ export class AgentSession {
 				return false;
 			}
 		}
-		await this.#sessionBeforeSwitchReconciler?.();
-
-		await this.#bash.flushPending();
-		// Flush pending writes before switching so restore snapshots reflect committed state.
-		await this.sessionManager.flush();
-		const previousSessionState = this.sessionManager.captureState();
+		// Post-teardown failures (reconciler, bash flush, journal flush) must
+		// not strand the source session either: reconnect the agent pipeline
+		// and restore the captured persona state before propagating, so the
+		// source session keeps its recorded persona alive.
+		try {
+			await this.#sessionBeforeSwitchReconciler?.();
+			await this.#bash.flushPending();
+			// Flush pending writes before switching so restore snapshots reflect committed state.
+			await this.sessionManager.flush();
+		} catch (error) {
+			logger.warn("Session switch failed after persona teardown", {
+				sessionFile: this.sessionFile,
+				error: String(error),
+			});
+			this.#reconnectToAgent();
+			if (runtime && personaSnapshot) {
+				await runtime.restore(personaSnapshot);
+			}
+			throw error;
+		}
 		const bashTransition = this.#bash.beginSessionTransition();
+		const previousSessionState = this.sessionManager.captureState();
 		// Only same-session reloads compare against the prior context to detect
 		// rollback edits (`#didSessionMessagesChange` below). Building it for a
 		// different-session switch is a pure waste — and on huge pre-fix sessions
