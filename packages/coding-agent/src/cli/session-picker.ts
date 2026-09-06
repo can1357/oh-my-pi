@@ -1,10 +1,11 @@
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
+import { KeybindingsManager } from "../config/keybindings";
 import { SessionSelectorComponent } from "../modes/components/session-selector";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionInfo } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
-import { loadPinnedSessionIds } from "../session/session-pins";
+import { loadPinnedSessionIds, setSessionPinned } from "../session/session-pins";
 import { FileSessionStorage } from "../session/session-storage";
 
 /** Presentation and capability controls for the standalone session picker. */
@@ -16,6 +17,7 @@ export interface SessionPickerOptions {
 	allowDelete?: boolean;
 	allowGlobalScope?: boolean;
 	historySearch?: boolean;
+	allowPin?: boolean;
 	pinnedIds?: ReadonlySet<string>;
 }
 
@@ -29,6 +31,7 @@ export async function selectSession(
 	sessions: SessionInfo[],
 	options: SessionPickerOptions = {},
 ): Promise<SessionInfo | null> {
+	KeybindingsManager.create();
 	const { promise, resolve } = Promise.withResolvers<SessionInfo | null>();
 	const ui = new TUI(new ProcessTerminal());
 	let resolved = false;
@@ -82,6 +85,10 @@ export async function selectSession(
 								return true;
 							},
 				historyMatcher,
+				onSetPinned:
+					options.allowPin === false
+						? undefined
+						: async (session, isPinned) => setSessionPinned(session.id, isPinned),
 				loadAllSessions: options.allowGlobalScope === false ? undefined : () => SessionManager.listAll(storage),
 				allSessions: options.allSessions,
 				getTerminalRows: () => ui.terminal.rows,

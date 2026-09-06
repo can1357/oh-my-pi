@@ -55,14 +55,18 @@ interface Harness {
 	renders: () => number;
 }
 
-function makeHarness(sessions: SessionInfo[], historyMatcher?: (query: string) => string[]): Harness {
+function makeHarness(
+	sessions: SessionInfo[],
+	historyMatcher?: (query: string) => string[],
+	pinnedIds: ReadonlySet<string> = new Set(),
+): Harness {
 	let renders = 0;
 	const selector = new SessionSelectorComponent(
 		sessions,
 		() => {},
 		() => {},
 		() => {},
-		historyMatcher ? { historyMatcher } : {},
+		{ historyMatcher, pinnedIds },
 	);
 	selector.setOnRequestRender(() => renders++);
 	const list = selector.getSessionList();
@@ -162,6 +166,23 @@ describe("session picker incremental search", () => {
 		// History match leads the ranking and the merge requested a re-render.
 		expect(harness.filtered()[0]!.id).toBe("s-105");
 		expect(harness.renders()).toBeGreaterThan(rendersBefore);
+	});
+
+	it("keeps pinned matches first after prompt-history ranking merges", () => {
+		const pinned = makeSession("pinned", {
+			firstMessage: "shared marker",
+			modified: new Date("2024-01-01T00:00:00Z"),
+		});
+		const historyLeader = makeSession("history-leader", {
+			firstMessage: "shared marker",
+			modified: new Date("2024-01-03T00:00:00Z"),
+		});
+		const harness = makeHarness([historyLeader, pinned], () => [historyLeader.id], new Set([pinned.id]));
+
+		harness.type("shared");
+		vi.advanceTimersByTime(150);
+
+		expect(ids(harness.filtered())).toEqual([pinned.id, historyLeader.id]);
 	});
 
 	it("skips the history merge after the user moves the selection", () => {

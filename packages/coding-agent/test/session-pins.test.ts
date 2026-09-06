@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import {
 	loadPinnedSessionIds,
+	setSessionPinned,
 	sortPinnedFirst,
 	toggleSessionPin,
 } from "@oh-my-pi/pi-coding-agent/session/session-pins";
@@ -57,6 +58,18 @@ describe("session-pins", () => {
 		expect(loaded.has(id1)).toBe(false);
 		expect(loaded.has(id2)).toBe(true);
 		expect(loaded.size).toBe(1);
+	});
+
+	it("sets pin state idempotently for separate pin and unpin actions", async () => {
+		const id = "session-explicit-state";
+
+		await setSessionPinned(id, true, tempDir);
+		await setSessionPinned(id, true, tempDir);
+		expect(await loadPinnedSessionIds(tempDir)).toEqual(new Set([id]));
+
+		await setSessionPinned(id, false, tempDir);
+		await setSessionPinned(id, false, tempDir);
+		expect(await loadPinnedSessionIds(tempDir)).toEqual(new Set());
 	});
 
 	it("sorts pinned sessions first while preserving relative recency order", () => {

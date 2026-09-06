@@ -2,6 +2,7 @@ import {
 	type Component,
 	Container,
 	FuzzyText,
+	getKeybindings,
 	Input,
 	matchesKey,
 	padding,
@@ -14,9 +15,11 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
+import { formatKeyHints } from "../../config/keybindings";
 import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
 import type { SessionInfo, SessionStatus } from "../../session/session-listing";
+import { sortPinnedFirst } from "../../session/session-pins";
 import { shortenPath } from "../../tools/render-utils";
 import { HookSelectorComponent } from "./hook-selector";
 import { bottomBorder, OverlayPanel, row, topBorder } from "./overlay-box";
@@ -95,6 +98,10 @@ function compareSessionRecency(a: SessionInfo, b: SessionInfo): number {
 	return b.modified.getTime() - a.modified.getTime();
 }
 
+function sortSessionRecency(sessions: SessionInfo[]): SessionInfo[] {
+	return [...sessions].sort(compareSessionRecency);
+}
+
 const MIN_PURE_FUZZY_TOKEN_SCORE = -20;
 
 /** One ranked search hit; `index` is the session's position in the unfiltered list (recency order). */
@@ -161,9 +168,13 @@ function compareFuzzyRank(a: RankedSessionMatch, b: RankedSessionMatch): number 
  * This is the synchronous reference implementation; {@link SessionList} runs
  * the same primitives incrementally so huge listings never block a keystroke.
  */
-export function rankSessionSearchMatches(allSessions: SessionInfo[], query: string): SessionInfo[] {
+export function rankSessionSearchMatches(
+	allSessions: SessionInfo[],
+	query: string,
+	pinnedIds: ReadonlySet<string> = new Set(),
+): SessionInfo[] {
 	const tokens = tokenizeSessionQuery(query);
-	if (tokens.length === 0) return allSessions;
+	if (tokens.length === 0) return sortPinnedFirst(allSessions, pinnedIds);
 
 	const literal: RankedSessionMatch[] = [];
 	const fuzzyMatches: RankedSessionMatch[] = [];
@@ -183,7 +194,7 @@ export function rankSessionSearchMatches(allSessions: SessionInfo[], query: stri
 	const out: SessionInfo[] = [];
 	for (const match of literal) out.push(match.session);
 	for (const match of fuzzyMatches) out.push(match.session);
-	return out;
+	return sortPinnedFirst(out, pinnedIds);
 }
 
 /**
@@ -273,6 +284,7 @@ class SessionList implements Component {
 	onCancel?: () => void;
 	onExit: () => void = () => {};
 	onToggleScope?: () => void;
+	onSetPinned?: (session: SessionInfo, isPinned: boolean) => Promise<boolean>;
 	// Snapshot of the live terminal-row getter; the visible window is derived
 	// from it per render so the picker fits the viewport (and adapts to resize).
 	readonly #getTerminalRows: () => number;
@@ -306,6 +318,7 @@ class SessionList implements Component {
 	 * only append below the literal group, which never shifts existing rows.)
 	 */
 	#selectionMoved = false;
+	#pinUpdatePending = false;
 
 	constructor(
 		sessions: SessionInfo[],
@@ -315,11 +328,11 @@ class SessionList implements Component {
 		pinnedIds: ReadonlySet<string> = new Set(),
 	) {
 		this.#getTerminalRows = getTerminalRows;
-		this.#allSessions = sessions;
+		this.#allSessions = sortSessionRecency(sessions);
 		this.#showCwd = showCwd;
 		this.#pinnedIds = pinnedIds;
 		this.#historyMatcher = historyMatcher;
-		this.#filteredSessions = sessions;
+		this.#filteredSessions = sortPinnedFirst(this.#allSessions, pinnedIds);
 		this.#searchInput = new Input();
 
 		// Handle Enter in search input - select current item
@@ -356,7 +369,7 @@ class SessionList implements Component {
 
 	/** Replace the visible dataset, e.g. when toggling folder/all-projects scope. */
 	setSessions(sessions: SessionInfo[], showCwd: boolean, pinnedIds?: ReadonlySet<string>): void {
-		this.#allSessions = sessions;
+		this.#allSessions = sortSessionRecency(sessions);
 		this.#showCwd = showCwd;
 		if (pinnedIds !== undefined) this.#pinnedIds = pinnedIds;
 		this.#selectedIndex = 0;
@@ -376,7 +389,7 @@ class SessionList implements Component {
 
 		const tokens = tokenizeSessionQuery(query);
 		if (tokens.length === 0) {
-			this.#filteredSessions = this.#allSessions;
+			this.#filteredSessions = sortPinnedFirst(this.#allSessions, this.#pinnedIds);
 			this.#selectedIndex = Math.min(this.#selectedIndex, Math.max(0, this.#filteredSessions.length - 1));
 			this.#scheduleHistoryMerge(query);
 			return;
@@ -444,9 +457,31 @@ class SessionList implements Component {
 		const base: SessionInfo[] = [];
 		for (const match of this.#literalRanked) base.push(match.session);
 		for (const match of this.#fuzzyRanked) base.push(match.session);
-		this.#filteredSessions =
+		const ranked =
 			this.#historyIds.length > 0 ? mergeSessionRanking(this.#allSessions, base, this.#historyIds) : base;
+		this.#filteredSessions = sortPinnedFirst(ranked, this.#pinnedIds);
 		this.#selectedIndex = Math.min(this.#selectedIndex, Math.max(0, this.#filteredSessions.length - 1));
+	}
+
+	async #setSelectedPinned(isPinned: boolean): Promise<void> {
+		const selected = this.#filteredSessions[this.#selectedIndex];
+		if (!selected || !this.onSetPinned || this.#pinnedIds.has(selected.id) === isPinned || this.#pinUpdatePending) {
+			return;
+		}
+		this.#pinUpdatePending = true;
+		try {
+			if (!(await this.onSetPinned(selected, isPinned))) return;
+			const pinnedIds = new Set(this.#pinnedIds);
+			if (isPinned) pinnedIds.add(selected.id);
+			else pinnedIds.delete(selected.id);
+			this.#pinnedIds = pinnedIds;
+			this.#filterSessions(this.#searchInput.getValue());
+			const selectedIndex = this.#filteredSessions.findIndex(session => session.path === selected.path);
+			if (selectedIndex >= 0) this.#selectedIndex = selectedIndex;
+			this.onRequestRender?.();
+		} finally {
+			this.#pinUpdatePending = false;
+		}
 	}
 
 	/**
@@ -683,6 +718,15 @@ class SessionList implements Component {
 	}
 
 	handleInput(keyData: string): void {
+		const keybindings = getKeybindings();
+		if (this.onSetPinned && keybindings.matches(keyData, "app.session.pin")) {
+			void this.#setSelectedPinned(true);
+			return;
+		}
+		if (this.onSetPinned && keybindings.matches(keyData, "app.session.unpin")) {
+			void this.#setSelectedPinned(false);
+			return;
+		}
 		// Delete key — or Backspace on an empty search query — request delete
 		// confirmation from the parent. macOS laptops have no dedicated Forward
 		// Delete key: Fn+Backspace is the only way to send \e[3~, and many macOS
@@ -782,6 +826,8 @@ export interface SessionSelectorOptions {
 	fillHeight?: boolean;
 	/** Set of pinned session ids to display with a pin indicator. */
 	pinnedIds?: ReadonlySet<string>;
+	/** Persist an explicit pin state for the selected session. */
+	onSetPinned?: (session: SessionInfo, isPinned: boolean) => Promise<void>;
 }
 
 /**
@@ -819,6 +865,7 @@ export class SessionSelectorComponent extends OverlayPanel {
 	readonly #fillHeight: boolean;
 	readonly #title: string;
 	readonly #scopeLabel: string | false | undefined;
+	readonly #pinningEnabled: boolean;
 
 	constructor(
 		sessions: SessionInfo[],
@@ -838,6 +885,7 @@ export class SessionSelectorComponent extends OverlayPanel {
 		this.#fillHeight = options.fillHeight ?? false;
 		this.#title = options.title ?? "Resume Session";
 		this.#scopeLabel = options.scopeLabel;
+		this.#pinningEnabled = options.onSetPinned !== undefined;
 		this.title = this.#headerLabel();
 		// One spacer of breathing room; OverlayPanel supplies the two outer
 		// border rows and the horizontal inset.
@@ -871,6 +919,20 @@ export class SessionSelectorComponent extends OverlayPanel {
 		this.#sessionList.onDeleteRequest = (session: SessionInfo) => {
 			this.#showDeleteConfirmation(session);
 		};
+		const onSetPinned = options.onSetPinned;
+		if (onSetPinned) {
+			this.#sessionList.onSetPinned = async (session, isPinned) => {
+				this.#clearError();
+				try {
+					await onSetPinned(session, isPinned);
+					return true;
+				} catch (err) {
+					this.#showError(err instanceof Error ? err.message : String(err));
+					this.#onRequestRender?.();
+					return false;
+				}
+			};
+		}
 		if (this.#loadAllSessions || this.#globalSessions) {
 			this.#sessionList.onToggleScope = () => {
 				void this.#toggleScope();
@@ -1023,7 +1085,16 @@ export class SessionSelectorComponent extends OverlayPanel {
 	/** Blank · keybinding hint · bottom border. Rendered by {@link render}. */
 	#footerLines(width: number): string[] {
 		const scopeHint = this.#scope === "all" ? "current folder" : "all projects";
-		const hint = theme.fg("muted", `[Del/⌫ delete · Enter select · Tab ${scopeHint} · Esc cancel]`);
+		const pinActions: string[] = [];
+		if (this.#pinningEnabled) {
+			const keybindings = getKeybindings();
+			const pinKey = formatKeyHints(keybindings.getKeys("app.session.pin"));
+			const unpinKey = formatKeyHints(keybindings.getKeys("app.session.unpin"));
+			if (pinKey) pinActions.push(`${pinKey} pin`);
+			if (unpinKey) pinActions.push(`${unpinKey} unpin`);
+		}
+		const pinHint = pinActions.length > 0 ? `${pinActions.join(" · ")} · ` : "";
+		const hint = theme.fg("muted", `[${pinHint}Del/⌫ delete · Enter select · Tab ${scopeHint} · Esc cancel]`);
 		return [row("", width), row(hint, width), row("", width), bottomBorder(width)];
 	}
 

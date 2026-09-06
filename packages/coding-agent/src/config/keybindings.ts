@@ -45,6 +45,8 @@ interface AppKeybindings {
 	"app.session.fork": true;
 	"app.session.resume": true;
 	"app.session.observe": true;
+	"app.session.pin": true;
+	"app.session.unpin": true;
 	"app.session.togglePath": true;
 	"app.session.toggleSort": true;
 	"app.session.rename": true;
@@ -193,6 +195,14 @@ export const KEYBINDINGS = {
 	"app.session.observe": {
 		defaultKeys: "ctrl+s",
 		description: "Open the agent hub",
+	},
+	"app.session.pin": {
+		defaultKeys: "alt+k",
+		description: "Pin selected session",
+	},
+	"app.session.unpin": {
+		defaultKeys: "alt+shift+k",
+		description: "Unpin selected session",
 	},
 	"app.session.togglePath": {
 		defaultKeys: "ctrl+p",

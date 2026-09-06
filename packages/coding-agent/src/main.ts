@@ -1658,6 +1658,7 @@ export async function runRootCommand(
 							allowDelete: false,
 							allowGlobalScope: false,
 							historySearch: false,
+							allowPin: false,
 						},
 					);
 				} finally {
