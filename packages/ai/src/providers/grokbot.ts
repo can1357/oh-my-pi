@@ -7,6 +7,7 @@ import * as AIError from "../error";
 import type {
 	Api,
 	AssistantMessage,
+	AssistantMessageEvent,
 	Context,
 	ImageContent,
 	Model,
@@ -590,8 +591,15 @@ type GrokbotToolState = {
 	isGrammar: boolean;
 };
 
-function contextHasToolResult(context: Context): boolean {
-	return (context.messages ?? []).some(msg => msg && typeof msg === "object" && msg.role === "toolResult");
+/** True when the immediately preceding message is a toolResult (current tool turn). */
+function contextEndsWithToolResult(context: Context): boolean {
+	const messages = context.messages ?? [];
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (!msg || typeof msg !== "object") continue;
+		return msg.role === "toolResult";
+	}
+	return false;
 }
 
 /** Gemini/Cursor Write often emits `contents` instead of omp `content`. */
@@ -735,6 +743,27 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			};
 			let body: Record<string, unknown> = {};
 			let routedResponseModel = "";
+			/** Buffer first tool-enabled attempt until text/tool appears (or accept), so empty retries do not leak thinking_delta. */
+			let attemptEventBuffer: AssistantMessageEvent[] = [];
+			let attemptStreamingLive = false;
+			const shouldBufferAttemptEvents = () =>
+				tools.length > 0 && !emptyToolRetryUsed && !incompleteToolRetryUsed;
+			const emitAttemptEvent = (event: AssistantMessageEvent) => {
+				if (attemptStreamingLive || !shouldBufferAttemptEvents()) {
+					stream.push(event);
+					return;
+				}
+				attemptEventBuffer.push(event);
+			};
+			const flushAttemptEvents = () => {
+				for (const event of attemptEventBuffer) stream.push(event);
+				attemptEventBuffer = [];
+				attemptStreamingLive = true;
+			};
+			const discardAttemptEvents = () => {
+				attemptEventBuffer = [];
+				attemptStreamingLive = false;
+			};
 
 			attempt: while (true) {
 				const replayToolTurn = emptyToolRetryUsed || incompleteToolRetryUsed || geminiProductRetryUsed;
@@ -867,7 +896,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				}
 
 				if (!started) {
-					stream.push({ type: "start", partial: output });
+					emitAttemptEvent({ type: "start", partial: output });
 					started = true;
 				}
 
@@ -883,7 +912,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				const closeOpen = () => {
 					if (openKind === "text" && openIndex >= 0) {
 						const block = output.content[openIndex] as TextContent;
-						stream.push({
+						emitAttemptEvent({
 							type: "text_end",
 							contentIndex: openIndex,
 							content: block?.text || "",
@@ -891,7 +920,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						});
 					} else if (openKind === "thinking" && openIndex >= 0) {
 						const block = output.content[openIndex] as ThinkingContent;
-						stream.push({
+						emitAttemptEvent({
 							type: "thinking_end",
 							contentIndex: openIndex,
 							content: block?.thinking || "",
@@ -908,7 +937,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					openIndex = output.content.length;
 					output.content.push({ type: "text", text: "" });
 					openKind = "text";
-					stream.push({ type: "text_start", contentIndex: openIndex, partial: output });
+					flushAttemptEvents();
+					emitAttemptEvent({ type: "text_start", contentIndex: openIndex, partial: output });
 					return openIndex;
 				};
 
@@ -918,7 +948,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					openIndex = output.content.length;
 					output.content.push({ type: "thinking", thinking: "" });
 					openKind = "thinking";
-					stream.push({ type: "thinking_start", contentIndex: openIndex, partial: output });
+					emitAttemptEvent({ type: "thinking_start", contentIndex: openIndex, partial: output });
 					return openIndex;
 				};
 
@@ -938,7 +968,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					);
 					clearStreamingPartialJson(state.block);
 					state.ended = true;
-					stream.push({
+					flushAttemptEvents();
+					emitAttemptEvent({
 						type: "toolcall_end",
 						contentIndex: state.index,
 						toolCall: state.block,
@@ -959,7 +990,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						if (delta) {
 							const idx = ensureText();
 							(output.content[idx] as TextContent).text += delta;
-							stream.push({ type: "text_delta", contentIndex: idx, delta, partial: output });
+							emitAttemptEvent({ type: "text_delta", contentIndex: idx, delta, partial: output });
 						}
 					}
 					if (part.isComplete ?? part.is_complete) closeOpen();
@@ -1008,7 +1039,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						toolStates.set(key, state);
 						if (id) toolStates.set(id, state);
 						if (idxKey) toolStates.set(idxKey, state);
-						stream.push({ type: "toolcall_start", contentIndex: index, partial: output });
+						flushAttemptEvents();
+						emitAttemptEvent({ type: "toolcall_start", contentIndex: index, partial: output });
 					} else {
 						if (id) toolStates.set(id, state);
 						if (idxKey) toolStates.set(idxKey, state);
@@ -1034,7 +1066,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						setStreamingPartialJson(state.block, argsText);
 						state.block.arguments = state.isGrammar ? { input: argsText } : parseToolArgs(argsText, false);
 						if (delta) {
-							stream.push({
+							emitAttemptEvent({
 								type: "toolcall_delta",
 								contentIndex: state.index,
 								delta,
@@ -1147,7 +1179,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 								const block = output.content[idx] as ThinkingContent;
 								if (delta) {
 									block.thinking += delta;
-									stream.push({ type: "thinking_delta", contentIndex: idx, delta, partial: output });
+									emitAttemptEvent({ type: "thinking_delta", contentIndex: idx, delta, partial: output });
 								}
 								if (signature) block.thinkingSignature = signature;
 							}
@@ -1163,7 +1195,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						if (textDelta) {
 							const idx = ensureText();
 							(output.content[idx] as TextContent).text += textDelta;
-							stream.push({ type: "text_delta", contentIndex: idx, delta: textDelta, partial: output });
+							emitAttemptEvent({ type: "text_delta", contentIndex: idx, delta: textDelta, partial: output });
 						}
 						if (textPart && (textPart.isFinal || textPart.is_final)) closeOpen();
 
@@ -1236,6 +1268,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						});
 					} else if (!incompleteToolRetryUsed && tools.length > 0) {
 						incompleteToolRetryUsed = true;
+						discardAttemptEvents();
 						output.content = [];
 						output.usage = {
 							input: 0,
@@ -1301,6 +1334,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						) {
 							geminiProductRetryUsed = true;
 						}
+						discardAttemptEvents();
 						output.content = [];
 						output.usage = {
 							input: 0,
@@ -1319,13 +1353,16 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						continue attempt;
 					}
 					// Some Gemini turns empty-stop after Write (bash/read already
-					// succeeded). The tool loop already completed; do not fail the turn.
-					if (contextHasToolResult(context)) {
+					// succeeded). Only accept when this request is the immediate
+					// follow-up to a toolResult — not when an older result sits
+					// earlier in an otherwise unanswered user turn.
+					if (identity.class === "gemini" && contextEndsWithToolResult(context)) {
 						logger.info("grokbot: accepting empty follow-up after tool result", {
 							modelId: model.id,
 							class: identity.class,
 							wireMode: anthropicWire.wireMode,
 						});
+						flushAttemptEvents();
 						break;
 					}
 					throw new AIError.ProviderResponseError("Grok Bot stream completed with no text or tool call", {
@@ -1333,6 +1370,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						kind: "empty-body",
 					});
 				}
+				flushAttemptEvents();
 				break;
 			}
 			const hasToolCall = output.content.some(b => b.type === "toolCall");

@@ -11,6 +11,7 @@ import * as path from "node:path";
 
 export const GROKBOT_BACKEND = "https://api2.cursor.sh";
 export const GROKBOT_RENEWAL_PATH = "/sand-box/inference-credential";
+export const GROKBOT_AVAILABLE_MODELS_PATH = "/aiserver.v1.AiService/AvailableModels";
 export const GROKBOT_CLIENT_TYPE = "sand";
 export const GROKBOT_STAMPED_CLIENT_VERSION = "0.30.0-pre.16";
 export const GROKBOT_DEFAULT_NAMESPACE = "prod";
@@ -77,4 +78,75 @@ export function loadGrokbotConfig() {
 		namespace,
 		clientVersion: resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION, explicitVersion),
 	};
+}
+
+/** Sand client identity headers — mirrors catalog/ai grokbotClientHeaders. */
+export function grokbotClientHeaders(cfg) {
+	return {
+		"x-cursor-client-type": GROKBOT_CLIENT_TYPE,
+		"x-cursor-client-version": cfg.clientVersion,
+		"x-sand-box-namespace": cfg.namespace,
+	};
+}
+
+function enhancedObfuscate(bytes) {
+	let lastByte = 165;
+	for (let i = 0; i < bytes.length; i++) {
+		bytes[i] = (bytes[i] ^ lastByte) + (i % 256);
+		lastByte = bytes[i];
+	}
+	return bytes;
+}
+
+/** Wire checksum — mirrors catalog/ai createGrokbotChecksum (no pi-utils). */
+export function createGrokbotChecksum(machineId, nowMs = Date.now()) {
+	const uks = Math.floor(nowMs / 1e6);
+	const bytes = Uint8Array.from([
+		(uks >> 8) & 255,
+		uks & 255,
+		(uks >> 24) & 255,
+		(uks >> 16) & 255,
+		(uks >> 8) & 255,
+		uks & 255,
+	]);
+	const checksum = Buffer.from(enhancedObfuscate(bytes)).toString("base64url");
+	return `${checksum}${machineId}`;
+}
+
+export function joinGrokbotBackendUrl(baseUrl, p) {
+	const normalized = (baseUrl?.trim() || GROKBOT_BACKEND).replace(/\/+$/, "") || GROKBOT_BACKEND;
+	const suffix = p.startsWith("/") ? p : `/${p}`;
+	return new URL(`${normalized}${suffix}`);
+}
+
+export function getAccessTokenExpiryMs(token) {
+	try {
+		const payloadB64 = token.split(".")[1];
+		if (!payloadB64) return null;
+		const json = Buffer.from(payloadB64, "base64url").toString("utf8");
+		const payload = JSON.parse(json);
+		return typeof payload.exp === "number" && Number.isFinite(payload.exp) ? payload.exp * 1000 : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Mint a sand JWT — mirrors catalog mint without caching (probes are one-shot). */
+export async function mintGrokbotAccessToken(cfg, fetchImpl = fetch) {
+	if (!cfg.renewal) {
+		throw new Error(`Grok Bot renewer missing (GROKBOT_RENEWAL_CREDENTIAL env or ${grokbotSecretsPath()})`);
+	}
+	const response = await fetchImpl(joinGrokbotBackendUrl(GROKBOT_BACKEND, GROKBOT_RENEWAL_PATH), {
+		method: "POST",
+		headers: { "content-type": "application/json", ...grokbotClientHeaders(cfg) },
+		body: JSON.stringify({ credential: cfg.renewal }),
+	});
+	if (!response.ok) {
+		const body = await response.text().catch(() => "");
+		throw new Error(`Grok Bot token renew failed (HTTP ${response.status}): ${body.slice(0, 200)}`);
+	}
+	const parsed = await response.json();
+	const accessToken = typeof parsed.accessToken === "string" ? parsed.accessToken : "";
+	if (!accessToken) throw new Error("Grok Bot token renew returned no accessToken");
+	return accessToken;
 }

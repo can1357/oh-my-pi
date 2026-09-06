@@ -16,9 +16,10 @@ import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 // Regression: `--no-tools` must not leak ambient custom tools (`.omp/tools/tui`),
 // MCP-shaped tools (`mcp__node_repl_js*`), or xdev-mounted MCP devices onto the
-// provider wire. Before restrictToolNames was wired from the CLI, an empty
-// toolNames whitelist still force-activated custom/MCP tools via alwaysInclude
-// and xdev presentation, breaking text-only grokbot requests (HTTP 400).
+// provider wire. An empty `toolNames` whitelist skips alwaysInclude in sdk.ts
+// without the broader `restrictToolNames` lockdown (which also disables
+// extensions/LSP). `restrictToolNames: true` remains available for callers that
+// want the full lockdown.
 describe("--no-tools leak prevention", () => {
 	let registryDir: string;
 	let authStorage: AuthStorage;
@@ -76,7 +77,7 @@ describe("--no-tools leak prevention", () => {
 		return session.getActiveToolNames();
 	}
 
-	it("sets restrictToolNames from --no-tools in buildSessionOptions", async () => {
+	it("sets an empty toolNames whitelist from --no-tools without restrictToolNames", async () => {
 		const options = await buildSessionOptions(
 			parseArgs(["--no-tools"]),
 			[],
@@ -84,7 +85,7 @@ describe("--no-tools leak prevention", () => {
 			modelRegistry,
 			Settings.isolated(),
 		);
-		expect(options.restrictToolNames).toBe(true);
+		expect(options.restrictToolNames).toBeUndefined();
 		expect(options.toolNames).toEqual([]);
 	});
 
@@ -92,6 +93,30 @@ describe("--no-tools leak prevention", () => {
 		const names = await restrictedActiveToolNames([customTool("tui")]);
 		expect(names).toEqual([]);
 		expect(names).not.toContain("tui");
+	});
+
+	it("excludes ambient custom tools with an empty whitelist without restrictToolNames", async () => {
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.xdev": true, "plan.enabled": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			enableMCP: false,
+			enableLsp: false,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			rules: [],
+			toolNames: [],
+			customTools: [customTool("tui"), customTool("mcp__node_repl_js", true)],
+		});
+		sessions.push(session);
+		expect(session.getActiveToolNames()).toEqual([]);
+		expect(session.getXdevToolEntries()).toEqual([]);
 	});
 
 	it("excludes MCP-shaped custom tools from the active wire set", async () => {

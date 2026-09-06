@@ -155,10 +155,12 @@ export function applyAnthropicSandToolWire(
 	if (profile) {
 		const anthropic = isAnthropicSandModelId(modelId);
 		const catalogOwns = input.sandToolsWire === wire;
-		if (profile === "automation" && !anthropic && !catalogOwns && modelId !== "sand-automation") {
+		// Non-Anthropic rows need an explicit catalog `sand-tools-wire` match —
+		// do not special-case router ids in TypeScript (KDL owns that policy).
+		if (profile === "automation" && !anthropic && !catalogOwns) {
 			return input;
 		}
-		if (profile === "parent-chat" && !anthropic && !catalogOwns && modelId !== "sand-default") {
+		if (profile === "parent-chat" && !anthropic && !catalogOwns) {
 			return input;
 		}
 		const automationModel = resolveGrokbotRequestedModel("sand-automation", {
@@ -170,7 +172,7 @@ export function applyAnthropicSandToolWire(
 			// thinking/effort/fast — the historical working automation probe
 			// used a bare `{ modelId: "sand-automation" }`. Extra params pin
 			// cursor-grok-4.5-high into a JSON-as-text dump instead of toolCallPart.
-			const keepRouter = !anthropic && (catalogOwns || modelId === "sand-automation");
+			const keepRouter = !anthropic && catalogOwns;
 			return applyProductWire(input, profile, wire, {
 				requestedModel: keepRouter ? { modelId: input.requestedModel.modelId } : automationModel,
 				subagentType: "generalPurpose",

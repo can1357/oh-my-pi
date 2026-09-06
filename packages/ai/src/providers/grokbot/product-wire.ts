@@ -152,14 +152,20 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 	const schema = toolParametersToJson(tool);
 	// Cursor/Gemini Write often uses `contents` instead of omp `content`.
 	// Advertise both so product Write calls populate omp `content`.
+	// Clone before augmenting — `toolWireSchema` may return a memoized object
+	// shared with native-wire / other providers.
+	let parametersSchema = schema;
 	if ((name === "write" || wireName === "Write") && schema.properties && typeof schema.properties === "object") {
 		const props = schema.properties as Record<string, unknown>;
 		if (props.content && !props.contents) {
-			schema.properties = {
-				...props,
-				contents: {
-					type: "string",
-					description: "File contents (alias of content)",
+			parametersSchema = {
+				...schema,
+				properties: {
+					...props,
+					contents: {
+						type: "string",
+						description: "File contents (alias of content)",
+					},
 				},
 			};
 		}
@@ -167,7 +173,7 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 	const entry: ProductWireTool = {
 		name: wireName,
 		description: typeof tool.description === "string" ? tool.description : "",
-		parameters: wrapToolParameters(schema),
+		parameters: wrapToolParameters(parametersSchema),
 	};
 	if (tool.customFormat && typeof tool.customFormat === "object") {
 		entry.customToolFormat = {

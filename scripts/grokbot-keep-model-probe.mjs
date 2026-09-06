@@ -2,8 +2,9 @@
 /**
  * Live empirical probe: keep-model wire for Anthropic-labeled grokbot models.
  *
- * Self-contained — inlines auth to avoid the @oh-my-pi/pi-utils barrel
- * (which pulls in pi_natives). Imports wire/proto logic directly from source.
+ * Auth helpers live in `grokbot-probe-config.mjs` (dependency-neutral mirror of
+ * catalog/ai auth) so probes stay off the `@oh-my-pi/pi-utils` barrel.
+ * Imports wire/proto logic directly from source.
  *
  * Tests:
  *  1. keep-model on claude-fable-5, claude-opus-5, claude-sonnet-5, claude-haiku-4-5
@@ -37,73 +38,12 @@ import {
 
 import {
 	GROKBOT_BACKEND,
-	GROKBOT_RENEWAL_PATH,
-	GROKBOT_CLIENT_TYPE,
-	grokbotSecretsPath,
 	loadGrokbotConfig,
+	grokbotClientHeaders,
+	createGrokbotChecksum,
+	joinGrokbotBackendUrl,
+	mintGrokbotAccessToken,
 } from "./grokbot-probe-config.mjs";
-
-
-function grokbotClientHeaders(cfg) {
-	return {
-		"x-cursor-client-type": GROKBOT_CLIENT_TYPE,
-		"x-cursor-client-version": cfg.clientVersion,
-		"x-sand-box-namespace": cfg.namespace,
-	};
-}
-
-function enhancedObfuscate(bytes) {
-	let lastByte = 165;
-	for (let i = 0; i < bytes.length; i++) {
-		bytes[i] = (bytes[i] ^ lastByte) + (i % 256);
-		lastByte = bytes[i];
-	}
-	return bytes;
-}
-
-function createGrokbotChecksum(machineId, nowMs = Date.now()) {
-	const uks = Math.floor(nowMs / 1e6);
-	const bytes = Uint8Array.from([
-		(uks >> 8) & 255, (uks) & 255,
-		(uks >> 24) & 255, (uks >> 16) & 255,
-		(uks >> 8) & 255, (uks) & 255,
-	]);
-	const checksum = Buffer.from(enhancedObfuscate(bytes)).toString("base64url");
-	return `${checksum}${machineId}`;
-}
-
-function joinGrokbotBackendUrl(baseUrl, p) {
-	const normalized = (baseUrl.trim() || GROKBOT_BACKEND).replace(/\/+$/, "") || GROKBOT_BACKEND;
-	const suffix = p.startsWith("/") ? p : `/${p}`;
-	return new URL(`${normalized}${suffix}`);
-}
-
-function getAccessTokenExpiryMs(token) {
-	try {
-		const payloadB64 = token.split(".")[1];
-		if (!payloadB64) return null;
-		const json = Buffer.from(payloadB64, "base64url").toString("utf8");
-		const payload = JSON.parse(json);
-		return typeof payload.exp === "number" && Number.isFinite(payload.exp) ? payload.exp * 1000 : null;
-	} catch { return null; }
-}
-
-async function mintGrokbotAccessToken(cfg) {
-	if (!cfg.renewal) throw new Error(`Grok Bot renewer missing (GROKBOT_RENEWAL_CREDENTIAL env or ${grokbotSecretsPath()})`);
-	const response = await fetch(joinGrokbotBackendUrl(GROKBOT_BACKEND, GROKBOT_RENEWAL_PATH), {
-		method: "POST",
-		headers: { "content-type": "application/json", ...grokbotClientHeaders(cfg) },
-		body: JSON.stringify({ credential: cfg.renewal }),
-	});
-	if (!response.ok) {
-		const body = await response.text().catch(() => "");
-		throw new Error(`Grok Bot token renew failed (HTTP ${response.status}): ${body.slice(0, 200)}`);
-	}
-	const parsed = await response.json();
-	const accessToken = typeof parsed.accessToken === "string" ? parsed.accessToken : "";
-	if (!accessToken) throw new Error("Grok Bot token renew returned no accessToken");
-	return accessToken;
-}
 
 // ─── Proto stream helpers ───
 

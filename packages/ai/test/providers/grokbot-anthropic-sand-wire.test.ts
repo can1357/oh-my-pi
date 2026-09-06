@@ -200,6 +200,51 @@ describe("anthropic sand tool wire", () => {
 		expect(applyAnthropicSandToolWire(input, "keep-model")).toEqual(input);
 	});
 
+	test("automation/parent-chat without catalog sandToolsWire is a no-op for non-anthropic ids", () => {
+		const automationModel = resolveGrokbotRequestedModel("sand-automation", {
+			sandParameterIds: [],
+		});
+		const parentModel = resolveGrokbotRequestedModel("sand-default", {
+			sandParameterIds: [],
+		});
+		const tools = [{ name: "bash", description: "shell", parameters: { type: "object", properties: {} } }];
+		expect(
+			applyAnthropicSandToolWire(
+				{ requestedModel: automationModel, tools, modelId: "sand-automation" },
+				"automation",
+			),
+		).toEqual({ requestedModel: automationModel, tools, modelId: "sand-automation" });
+		expect(
+			applyAnthropicSandToolWire({ requestedModel: parentModel, tools, modelId: "sand-default" }, "parent-chat"),
+		).toEqual({ requestedModel: parentModel, tools, modelId: "sand-default" });
+	});
+
+	test("automation wire keeps sand-automation when catalog owns the wire", () => {
+		const requestedModel = resolveGrokbotRequestedModel("sand-automation", {
+			sandParameterIds: ["effort"],
+		});
+		const tools = [
+			{
+				name: "bash",
+				description: "shell",
+				parameters: { type: "object", properties: { command: { type: "string" } } },
+			},
+		];
+		const wired = applyAnthropicSandToolWire(
+			{
+				requestedModel,
+				tools,
+				modelId: "sand-automation",
+				ompTools: tools,
+				sandToolsWire: "automation",
+			},
+			"automation",
+		);
+		expect(wired.wireMode).toBe("automation");
+		expect(wired.requestedModel).toEqual({ modelId: "sand-automation" });
+		expect(wired.subagentType).toBe("generalPurpose");
+	});
+
 	test("sand-default-fallback rewrites requested model and keeps tools", () => {
 		const requestedModel = resolveGrokbotRequestedModel("claude-opus-5", {
 			effort: "low",
@@ -293,7 +338,11 @@ describe("product wire helpers", () => {
 		const writes = product.filter(t => t.name === "Write");
 		expect(writes).toHaveLength(1);
 		expect(writes[0]?.description).toBe("write file");
-		expect(writes[0]?.parameters).toEqual(wrapToolParameters(writeSchema));
+		const schema = (writes[0]?.parameters as { jsonSchema?: { properties?: Record<string, unknown> } }).jsonSchema;
+		expect(schema?.properties).toHaveProperty("content");
+		expect(schema?.properties).toHaveProperty("contents");
+		// Original tool schema must stay unmutated for later native-wire reuse.
+		expect(writeSchema.properties).not.toHaveProperty("contents");
 
 		const index = new Map<
 			string,
