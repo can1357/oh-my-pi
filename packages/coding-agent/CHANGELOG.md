@@ -21,6 +21,10 @@
 - Fixed the fullscreen `/copy` and esc-esc rewind selectors repainting the whole frame for a wheel notch that cannot move the viewport; because both open scrolled to the newest turn, wheeling down there made the frame twitch.
 
 ## [18.1.11] - 2026-09-05
+### Fixed
+
+- Fixed failed Termux clipboard copies falling through to a synchronous native helper that could freeze the TUI.
+- Android/Termux builds now produce a runnable bundled launcher instead of a Bun-compiled executable that crashes on startup.
 
 ### Added
 

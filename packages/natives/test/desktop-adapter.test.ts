@@ -51,6 +51,11 @@ describe("legacy DesktopSession adapter", () => {
 		expect(adapted).toBe(CurrentDesktopSession);
 	});
 
+	it("passes unavailable native DesktopSession bindings through unchanged", () => {
+		const adapted = adaptDesktopSession(undefined);
+		expect(adapted).toBeUndefined();
+	});
+
 	it("fills conservative capabilities and translates default foreground input", async () => {
 		const DesktopSession = adaptDesktopSession(LegacyDesktopSession);
 		const session = new DesktopSession({ display: "all" });

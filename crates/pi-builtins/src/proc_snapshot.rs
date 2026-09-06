@@ -41,7 +41,7 @@ pub(crate) fn sanitize_process_command(command: String) -> String {
 		.collect()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 mod proc_snapshot {
 	use std::{
 		fs,
@@ -208,12 +208,7 @@ mod proc_snapshot {
 		}
 
 		pub fn age(&self) -> Option<Duration> {
-			let uptime = fs::read_to_string("/proc/uptime")
-				.ok()?
-				.split_whitespace()
-				.next()?
-				.parse::<f64>()
-				.ok()?;
+			let uptime = uptime_seconds()?;
 			let ticks = clock_ticks()? as f64;
 			Some(Duration::from_secs_f64((uptime - self.stat.start_time as f64 / ticks).max(0.0)))
 		}
@@ -240,6 +235,21 @@ mod proc_snapshot {
 				return read_stat(self.pid).is_some_and(|stat| stat.start_time == self.stat.start_time);
 			}
 			let Some(pidfd) = open_pidfd(self.pid) else {
+				#[cfg(target_os = "android")]
+				{
+					if queue.is_some() {
+						return false;
+					}
+					let Some(stat) = read_stat(self.pid) else {
+						return false;
+					};
+					if stat.start_time != self.stat.start_time || stat.state == 'Z' {
+						return false;
+					}
+					// SAFETY: kill takes scalar arguments and no pointers.
+					return unsafe { libc::kill(self.pid, signal) == 0 };
+				}
+				#[cfg(target_os = "linux")]
 				return false;
 			};
 			if read_stat(self.pid).is_none_or(|stat| stat.start_time != self.stat.start_time) {
@@ -335,6 +345,29 @@ mod proc_snapshot {
 			.skip(1)
 			.filter_map(|value| value.parse().ok());
 		Some((ids.next()?, ids.next()?))
+	}
+
+	#[cfg(target_os = "linux")]
+	fn uptime_seconds() -> Option<f64> {
+		fs::read_to_string("/proc/uptime")
+			.ok()?
+			.split_whitespace()
+			.next()?
+			.parse()
+			.ok()
+	}
+
+	#[cfg(target_os = "android")]
+	fn uptime_seconds() -> Option<f64> {
+		let mut uptime = libc::timespec {
+			tv_sec:  0,
+			tv_nsec: 0,
+		};
+		// SAFETY: clock_gettime writes one initialized timespec to a valid pointer.
+		if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &raw mut uptime) } != 0 {
+			return None;
+		}
+		Some(uptime.tv_sec as f64 + uptime.tv_nsec as f64 / 1_000_000_000.0)
 	}
 
 	fn clock_ticks() -> Option<u64> {
@@ -1080,7 +1113,7 @@ mod proc_snapshot {
 	}
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use proc_snapshot::ProcInfo;
 
 /// The processes a signal must never reach: this one and its ancestors.
@@ -1104,7 +1137,7 @@ pub use proc_snapshot::ProcInfo;
 ///
 /// Listing is unaffected: `pgrep` still reports ancestors and `ps` still shows
 /// them. Only signalling consults this.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) struct HostProcesses {
 	/// This process and its ancestors, nearest first.
 	pub pids:  smallvec::SmallVec<[i32; 16]>,
@@ -1117,17 +1150,17 @@ pub(crate) struct HostProcesses {
 /// Keeping the walk over this rather than over [`ProcInfo`] lets the recycling
 /// cases — which are otherwise only reachable by winning a race against the OS —
 /// be tested with a synthetic tree.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy)]
 struct ChainNode {
 	ppid:  Option<i32>,
 	pgid:  Option<i32>,
-	/// Platform start time. Monotonic on all three supported platforms, so a
-	/// larger value means the process started later.
+	/// Platform start time. Monotonic on every supported platform, so a larger
+	/// value means the process started later.
 	start: u64,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl HostProcesses {
 	/// Walks the parent chain from the current process, taking one process-table
 	/// snapshot.

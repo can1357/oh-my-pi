@@ -640,6 +640,7 @@ pub(crate) fn signal_number(value: &str) -> Option<i32> {
 		.strip_prefix("SIG")
 		.or_else(|| value.strip_prefix("sig"))
 		.unwrap_or(value);
+	#[cfg(not(target_os = "android"))]
 	if let Ok(number) = value.parse::<i32>() {
 		#[cfg(target_os = "linux")]
 		return (0..=libc::SIGRTMAX()).contains(&number).then_some(number);

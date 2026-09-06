@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import * as fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { compileCodingAgent } from "./compile-binary";
@@ -73,6 +74,45 @@ async function runCommand(
 	}
 }
 
+async function buildAndroidLauncher(outputPath: string): Promise<void> {
+	await runCommand(["bun", "run", "gen:bundle"]);
+	const launcher = `#!/data/data/com.termux/files/usr/bin/sh
+set -e
+
+self=$0
+while [ -L "$self" ]; do
+	link=$(readlink "$self")
+	case $link in
+	/*) self=$link ;;
+	*) self=$(dirname "$self")/$link ;;
+	esac
+done
+
+dist_dir=$(CDPATH='' cd -- "$(dirname -- "$self")" && pwd -P)
+package_dir=$(CDPATH='' cd -- "$dist_dir/.." && pwd -P)
+cli=$dist_dir/cli.js
+preload=$package_dir/scripts/omp.ts
+if [ ! -r "$cli" ]; then
+	echo "omp: missing bundled CLI: $cli" >&2
+	exit 127
+fi
+if [ ! -r "$preload" ]; then
+	echo "omp: missing launch preload: $preload" >&2
+	exit 127
+fi
+
+launch_dir=\${OMP_DEV_LAUNCH_DIR:-\${HOME}/.omp/.dev-cwd}
+mkdir -p "$launch_dir"
+
+OMP_LAUNCH_CWD=$PWD
+export OMP_LAUNCH_CWD
+cd "$launch_dir"
+exec bun --preload "$preload" "$cli" "$@"
+`;
+	await Bun.write(outputPath, launcher);
+	await fs.chmod(outputPath, 0o755);
+}
+
 async function main(): Promise<void> {
 	const crossBuild = resolveCrossBuild(Bun.env.CROSS_TARGET);
 	const shouldAdhocSign = process.platform === "darwin" && !crossBuild && Bun.env.BUN_NO_CODESIGN_MACHO_BINARY !== "1";
@@ -92,18 +132,22 @@ async function main(): Promise<void> {
 			crossBuild ? { ...Bun.env, TARGET_PLATFORM: crossBuild.platform, TARGET_ARCH: crossBuild.arch } : Bun.env,
 		);
 		try {
-			await compileCodingAgent({
-				repoRoot,
-				entrypoint: path.join(packageDir, "src", "cli.ts"),
-				outfile: outputPath,
-				transformersVersion,
-				target: crossBuild?.target,
-				executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
-				skipBuiltinCodesign: shouldAdhocSign,
-			});
+			if (process.platform === "android" && !crossBuild) {
+				await buildAndroidLauncher(outputPath);
+			} else {
+				await compileCodingAgent({
+					repoRoot,
+					entrypoint: path.join(packageDir, "src", "cli.ts"),
+					outfile: outputPath,
+					transformersVersion,
+					target: crossBuild?.target,
+					executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
+					skipBuiltinCodesign: shouldAdhocSign,
+				});
 
-			if (shouldAdhocSign) {
-				await runCommand(["codesign", "--force", "--sign", "-", outputPath]);
+				if (shouldAdhocSign) {
+					await runCommand(["codesign", "--force", "--sign", "-", outputPath]);
+				}
 			}
 		} finally {
 			await runCommand(["bun", "--cwd=../natives", "run", "gen:native:reset"]);

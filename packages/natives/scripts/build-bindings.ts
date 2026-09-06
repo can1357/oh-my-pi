@@ -21,6 +21,12 @@ import { generateEnumExports } from "./gen-enums";
 // static build so the local addon never retains host Homebrew paths.
 process.env.PCRE2_SYS_STATIC ??= "1";
 
+// Termux ships a stable Rust compiler, while xutf and pi-natives use features
+// enabled by the repository's pinned nightly. Scope the bootstrap escape hatch.
+if (process.platform === "android") {
+	process.env.RUSTC_BOOTSTRAP ??= "xutf,pi_natives";
+}
+
 // Windows: cc-rs and rustc auto-locate cl.exe/link.exe through the VS
 // registry, but the cmake crate (audiopus_sys' bundled opus) needs cmake —
 // and its Ninja generator needs ninja — on PATH. VS Build Tools ships both
