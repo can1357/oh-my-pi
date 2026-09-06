@@ -1,8 +1,7 @@
-export const PROGRESS_BATCH_INTERVAL_MS = 200;
-export const PROGRESS_RATE_LIMIT_BURST = 10;
-export const PROGRESS_RATE_LIMIT_REFILL_MS = 2_000;
-export const PROGRESS_CHATTY_REMINDER_INTERVAL = 5;
+import { PROGRESS_LIMITS } from "./progress-limits";
+
 const PROGRESS_RATE_LIMIT_EPSILON = 1e-9;
+const CHATTY_REMINDER_SCHEDULE: readonly number[] = PROGRESS_LIMITS.CHATTY_REMINDER_SCHEDULE;
 
 export type ProgressBatchKind = "progress" | "artifact-only" | "suppression-summary";
 export type ProgressReminder = "chatty-monitor";
@@ -25,7 +24,7 @@ export interface ProgressBatcherOptions<T> {
 	 * middle value that falls out of the bounded representation.
 	 */
 	mergeDisplacedMetadata?: (kept: T, displaced: T) => T;
-	/** Collection window before delivery. Defaults to {@link PROGRESS_BATCH_INTERVAL_MS}. */
+	/** Collection window before delivery. Defaults to {@link PROGRESS_LIMITS.BATCH_INTERVAL_MS}. */
 	intervalMs?: number;
 }
 
@@ -42,10 +41,12 @@ interface ProgressBatchState<T> {
 }
 
 /**
- * Ordered per-source delivery: complete events collect in 200 ms windows, then
- * a ten-event token bucket meters model notifications and regains one permit
- * every two seconds. Rate-limited windows retain only their outer values for
- * the next permitted or terminal batch.
+ * Ordered per-source delivery: complete events collect in
+ * {@link PROGRESS_LIMITS.BATCH_INTERVAL_MS} windows, then a
+ * {@link PROGRESS_LIMITS.RATE_LIMIT_BURST}-event token bucket meters model
+ * notifications and regains one permit every
+ * {@link PROGRESS_LIMITS.RATE_LIMIT_REFILL_MS}. Rate-limited windows retain
+ * only their outer values for the next permitted or terminal batch.
  */
 export class ProgressBatcher<T> {
 	readonly #states = new Map<string, ProgressBatchState<T>>();
@@ -61,7 +62,7 @@ export class ProgressBatcher<T> {
 		this.#deliver = deliver;
 		this.#merge = options.merge;
 		this.#mergeDisplacedMetadata = options.mergeDisplacedMetadata;
-		this.#intervalMs = options.intervalMs ?? PROGRESS_BATCH_INTERVAL_MS;
+		this.#intervalMs = options.intervalMs ?? PROGRESS_LIMITS.BATCH_INTERVAL_MS;
 	}
 
 	push(id: string, value: T): void {
@@ -70,7 +71,7 @@ export class ProgressBatcher<T> {
 			state = {
 				pending: [],
 				seq: 0,
-				tokens: PROGRESS_RATE_LIMIT_BURST,
+				tokens: PROGRESS_LIMITS.RATE_LIMIT_BURST,
 				lastRefillAt: Date.now(),
 				suppressedEvents: 0,
 				suppressedValues: [],
@@ -228,13 +229,23 @@ export class ProgressBatcher<T> {
 		const now = Date.now();
 		const elapsedMs = Math.max(0, now - state.lastRefillAt);
 		state.lastRefillAt = now;
-		state.tokens = Math.min(PROGRESS_RATE_LIMIT_BURST, state.tokens + elapsedMs / PROGRESS_RATE_LIMIT_REFILL_MS);
+		state.tokens = Math.min(
+			PROGRESS_LIMITS.RATE_LIMIT_BURST,
+			state.tokens + elapsedMs / PROGRESS_LIMITS.RATE_LIMIT_REFILL_MS,
+		);
 	}
 
+	/**
+	 * Repeat the chatty-monitor guidance only at the counts in
+	 * {@link PROGRESS_LIMITS.CHATTY_REMINDER_SCHEDULE}: a producer that keeps
+	 * being rate-limited hears it a few times with growing spacing, then never
+	 * again, so a long-lived chatty source does not turn every batch into a
+	 * lecture.
+	 */
 	#suppressionReminder(state: ProgressBatchState<T>, suppressedEvents: number): { reminder?: ProgressReminder } {
 		if (suppressedEvents === 0) return {};
 		state.suppressionReports += 1;
-		if (state.suppressionReports % PROGRESS_CHATTY_REMINDER_INTERVAL !== 0) return {};
+		if (!CHATTY_REMINDER_SCHEDULE.includes(state.suppressionReports)) return {};
 		return { reminder: "chatty-monitor" };
 	}
 

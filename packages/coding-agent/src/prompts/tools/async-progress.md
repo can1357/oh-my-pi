@@ -1,6 +1,7 @@
 <system-notice>
 {{#each jobs}}<job-progress id="{{escapeXml jobId}}"{{#if type}} type="{{type}}"{{/if}} elapsed="{{elapsed}}">
-{{#if head}}<output>
+{{#if artifactId}}Full output: artifact://{{artifactId}}
+{{/if}}{{#if head}}<output>
 <head>
 {{head}}
 </head>

@@ -3,7 +3,8 @@
 
 {{else}}Background job {{escapeXml jobs.[0].jobId}}{{#if jobs.[0].label}} ({{escapeXml jobs.[0].label}}){{/if}} {{#if jobs.[0].failed}}failed{{else}}completed{{/if}}{{#if jobs.[0].bash}}{{#if jobs.[0].hasExitCode}} with exit code {{jobs.[0].exitCode}}{{else}}{{#if jobs.[0].failed}} without an exit code{{#if jobs.[0].timedOut}} (timed out){{/if}}{{/if}}{{/if}}{{/if}}. Resume your work using the result below.
 {{/if}}{{#each jobs}}{{#if @root.multiple}}── Job {{escapeXml this.jobId}}{{#if this.label}} ({{escapeXml this.label}}){{/if}}: {{#if this.failed}}failed{{else}}completed{{/if}}{{#if this.bash}}{{#if this.hasExitCode}}, exit {{this.exitCode}}{{else}}{{#if this.failed}}, no exit code{{#if this.timedOut}} (timed out){{/if}}{{/if}}{{/if}}{{/if}} ──
-{{/if}}{{#if this.progressSummarized}}{{#if this.hasLeftover}}<output>
+{{/if}}{{#if this.progressSummarized}}Full output: artifact://{{this.artifactId}}{{#if this.hasLeftover}}
+<output>
 {{#if this.leftoverHead}}<head>
 {{this.leftoverHead}}
 </head>
@@ -15,7 +16,8 @@
 {{else}}{{this.leftoverText}}{{#if this.leftoverTruncated}}
 <suppressed reason="preview-limit" full-output="artifact://{{this.artifactId}}" />{{/if}}
 {{/if}}</output>
-Remaining output since the last progress update; earlier output was already delivered. Full output: artifact://{{this.artifactId}}{{else}}All output was already delivered as progress updates. Full output: artifact://{{this.artifactId}}{{/if}}{{#if this.terminalText}}
+Remaining output since the last progress update; earlier output was already delivered.{{else}}
+All output was already delivered as progress updates.{{/if}}{{#if this.terminalText}}
 <result>
 {{this.terminalText}}
 </result>{{/if}}{{else}}{{this.result}}{{/if}}{{#if this.schemaStatus}}

@@ -167,6 +167,89 @@ describe("AsyncJobManager model progress", () => {
 		await manager.waitForAll();
 	});
 
+	test("rate-limited windows never reach the owner sink and only advance the artifact pointer", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({});
+		const recorder = recordingSink();
+		manager.registerProgressSink("Main", recorder.sink);
+		const gate = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<(text: string, info?: AsyncJobProgressInfo) => void>();
+		const jobId = manager.register(
+			"bash",
+			"chatty",
+			async ({ reportAgentProgress }) => {
+				started.resolve(reportAgentProgress);
+				await gate.promise;
+				return "done";
+			},
+			{ ownerId: "Main", progressDelivery: "wake" },
+		);
+		const report = await started.promise;
+
+		// Burst of 11 permitted windows, then 9 suppressed windows: those must
+		// not produce any sink call (an artifact-only batch has no model-facing
+		// representation), while metadata they carry still lands on the job.
+		for (let event = 1; event <= 20; event++) {
+			report(`event-${event}`, { artifactId: `artifact-${event}` });
+			vi.advanceTimersByTime(200);
+		}
+		const job = manager.getJob(jobId)!;
+		expect(recorder.seen.map(item => item.seq)).toEqual(Array.from({ length: 11 }, (_, index) => index + 1));
+		expect(job.progressDeliveredCount).toBe(11);
+		expect(job.progressArtifactId).toBe("artifact-20");
+
+		// The next permitted batch is the first the sink hears about the gap.
+		vi.advanceTimersByTime(2_000);
+		report("event-21", { artifactId: "artifact-21" });
+		vi.advanceTimersByTime(200);
+		expect(recorder.seen).toHaveLength(12);
+		expect(recorder.seen.at(-1)).toMatchObject({ seq: 21, suppressedEvents: 9, truncated: true });
+		expect(recorder.seen.every(item => item.seq <= 11 || item.seq === 21)).toBe(true);
+
+		gate.resolve();
+		await manager.waitForAll();
+	});
+
+	test("an artifact-backed job folds its terminal suppression summary into the completion instead of a message", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({});
+		const recorder = recordingSink();
+		manager.registerProgressSink("Main", recorder.sink);
+		const gate = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<(text: string, info?: AsyncJobProgressInfo) => void>();
+		const jobId = manager.register(
+			"bash",
+			"chatty then done",
+			async ({ reportAgentProgress }) => {
+				started.resolve(reportAgentProgress);
+				await gate.promise;
+				return "done";
+			},
+			{ ownerId: "Main", progressDelivery: "ambient" },
+		);
+		const report = await started.promise;
+		for (let event = 1; event <= 14; event++) {
+			report(`event-${event}`, { artifactId: "artifact" });
+			vi.advanceTimersByTime(200);
+		}
+		expect(recorder.seen).toHaveLength(11);
+
+		gate.resolve();
+		await manager.waitForAll();
+
+		// No suppression-summary progress message: the three suppressed
+		// windows become the completion's leftover, next to the artifact link.
+		expect(recorder.seen).toHaveLength(11);
+		const job = manager.getJob(jobId)!;
+		expect(job.status).toBe("completed");
+		expect(job.completionLeftover).toEqual({
+			head: "event-12",
+			tail: "event-14",
+			truncated: true,
+			suppressedEvents: 3,
+		});
+	});
+
 	test("routes ambient events to the owning queue while idle and respects wait/ack suppression", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({});
