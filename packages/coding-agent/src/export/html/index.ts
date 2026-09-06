@@ -302,11 +302,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw err;
 	}
 
-	const sessionData: SessionData = {
-		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
-		leafId: sm.getLeafId(),
-	};
+	const sessionData = buildSessionData(sm);
 	if (opts.includeSubSessions !== false) {
 		const subSessions = await collectSubSessions(inputPath);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
