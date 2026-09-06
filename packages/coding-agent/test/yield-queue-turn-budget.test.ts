@@ -213,9 +213,76 @@ describe("YieldQueue idle turn budget", () => {
 		vi.advanceTimersByTime(1_000);
 		expect(harness.scheduled).toHaveLength(0);
 	});
+
+	test("a free ride that drains held entries releases the deferred retry", async () => {
+		vi.useFakeTimers();
+		const harness = createHarness();
+		let acquires = 0;
+		harness.queue.register<Entry>("wake", {
+			idleTurnBudget: {
+				tryAcquire: () => {
+					acquires += 1;
+					return PROGRESS_LIMITS.WAKE_TURN_REFILL_MS;
+				},
+			},
+			build: buildMessage,
+		});
+		harness.queue.register<Entry>("result", { build: buildMessage });
+
+		harness.queue.enqueue<Entry>("wake", { text: "progress" });
+		await harness.runScheduled();
+		expect(harness.queue.has("wake")).toBe(true);
+		expect(acquires).toBe(1);
+
+		// A completion starts the turn and carries the held progress along.
+		harness.queue.enqueue<Entry>("result", { text: "done" });
+		await harness.runScheduled();
+		expect(harness.prompts).toEqual([["progress", "done"]]);
+		expect(harness.queue.has("wake")).toBe(false);
+
+		// Nothing is held any more: settle now, not after the refill interval.
+		let settled = false;
+		void harness.queue.idleFlushSettled().then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(true);
+		vi.advanceTimersByTime(PROGRESS_LIMITS.WAKE_TURN_REFILL_MS);
+		expect(harness.scheduled).toHaveLength(0);
+		expect(acquires).toBe(1);
+	});
+
+	test("a streaming-boundary drain of held entries releases the deferred retry", async () => {
+		vi.useFakeTimers();
+		const harness = createHarness();
+		harness.queue.register<Entry>("wake", {
+			idleTurnBudget: { tryAcquire: () => 30_000 },
+			build: buildMessage,
+		});
+		harness.queue.enqueue<Entry>("wake", { text: "held" });
+		await harness.runScheduled();
+
+		harness.setStreaming(true);
+		harness.queue.flush("streaming");
+		expect(harness.queue.has("wake")).toBe(false);
+		harness.setStreaming(false);
+
+		let settled = false;
+		void harness.queue.idleFlushSettled().then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(true);
+		vi.advanceTimersByTime(30_000);
+		expect(harness.scheduled).toHaveLength(0);
+	});
 });
 
 describe("YieldQueue undelivered entries", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
 	test("a failed idle dispatch keeps receipt-less entries for the next flush and rejects receipts", async () => {
 		const harness = createHarness();
 		harness.queue.register<Entry>("progress", { build: buildMessage });
@@ -236,6 +303,50 @@ describe("YieldQueue undelivered entries", () => {
 		harness.queue.enqueue<Entry>("result", { text: "result again" });
 		await harness.runScheduled();
 		expect(harness.prompts).toEqual([["progress", "result again"]]);
+	});
+
+	test("a rejected idle dispatch retries restored receipt-less entries on its own", async () => {
+		vi.useFakeTimers();
+		const harness = createHarness();
+		harness.queue.register<Entry>("progress", { build: buildMessage });
+
+		harness.queue.enqueue<Entry>("progress", { text: "stranded?" });
+		harness.failNextInject(new Error("agent busy"));
+		await harness.runScheduled();
+		expect(harness.prompts).toEqual([]);
+		expect(harness.queue.has("progress")).toBe(true);
+		// Not a spin: the retry waits on a timer instead of rescheduling at once.
+		expect(harness.scheduled).toHaveLength(0);
+
+		vi.advanceTimersByTime(1_000);
+		await harness.runScheduled();
+		expect(harness.prompts).toEqual([["stranded?"]]);
+		expect(harness.queue.has("progress")).toBe(false);
+		await expect(harness.queue.idleFlushSettled()).resolves.toBeUndefined();
+	});
+
+	test("rejected idle dispatches stop retrying after a bounded number of attempts", async () => {
+		vi.useFakeTimers();
+		const harness = createHarness();
+		harness.queue.register<Entry>("progress", { build: buildMessage });
+		harness.queue.enqueue<Entry>("progress", { text: "unlucky" });
+
+		let attempts = 0;
+		for (;;) {
+			harness.failNextInject(new Error("agent busy"));
+			await harness.runScheduled();
+			attempts += 1;
+			vi.advanceTimersByTime(1_000);
+			if (harness.scheduled.length === 0) break;
+			if (attempts > 10) throw new Error("idle retry never stopped");
+		}
+		expect(attempts).toBe(4);
+		expect(harness.queue.has("progress")).toBe(true);
+		// Given up on timed retries, but the entry still rides along with the next arrival.
+		await expect(harness.queue.idleFlushSettled()).resolves.toBeUndefined();
+		harness.queue.enqueue<Entry>("progress", { text: "later" });
+		await harness.runScheduled();
+		expect(harness.prompts).toEqual([["unlucky\nlater"]]);
 	});
 
 	test("restored entries keep their order ahead of later arrivals", async () => {
