@@ -1086,15 +1086,20 @@ describe("Cursor MCP task tool adapter", () => {
 		expect(getCursorTaskUnsupportedModel({ prompt: "work" })).toBeUndefined();
 	});
 
-	it("detects unsupported computer-use subagent types from top-level and batch task payloads", () => {
-		expect(getCursorTaskUnsupportedSubagentType({ prompt: "browse", subagent_type: "computer_use" })).toBe(
-			"computer_use",
-		);
+	it("detects unsupported computer-use subagent types across Cursor wire spellings", () => {
+		for (const subagentType of ["computer_use", "computerUse", "computer-use", "computer use"]) {
+			expect(getCursorTaskUnsupportedSubagentType({ prompt: "browse", subagent_type: subagentType })).toBe(
+				"computer_use",
+			);
+		}
 		expect(
 			getCursorTaskUnsupportedSubagentType({
-				tasks: [{ prompt: "part 1" }, { prompt: "part 2", subagent_type: { case: "computer_use", value: {} } }],
+				tasks: [{ prompt: "part 1" }, { prompt: "part 2", subagent_type: { case: "computerUse", value: {} } }],
 			}),
 		).toBe("computer_use");
+		expect(getCursorTaskUnsupportedSubagentType({ prompt: "browse", subagent_type: { computerUse: {} } })).toBe(
+			"computer_use",
+		);
 		expect(getCursorTaskUnsupportedSubagentType({ prompt: "search", subagent_type: "explore" })).toBeUndefined();
 	});
 

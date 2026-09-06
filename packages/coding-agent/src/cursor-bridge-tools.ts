@@ -251,24 +251,28 @@ export function getCursorTaskUnsupportedModel(args: Record<string, unknown>): st
 }
 
 /** Return a Cursor subagent type that OMP cannot faithfully execute. */
+function normalizeCursorSubagentTypeName(value: string): string {
+	return value
+		.trim()
+		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+		.replace(/[\s-]+/g, "_")
+		.toLowerCase();
+}
+
+function hasCursorSubagentTypeKey(record: Record<string, unknown>, typeName: string): boolean {
+	return Object.keys(record).some(key => normalizeCursorSubagentTypeName(key) === typeName);
+}
+
 export function getCursorTaskUnsupportedSubagentType(args: Record<string, unknown>): string | undefined {
 	const check = (value: unknown): string | undefined => {
 		if (typeof value === "string") {
-			const normalized = value
-				.trim()
-				.toLowerCase()
-				.replace(/[\s-]+/g, "_");
-			return normalized === "computer_use" ? "computer_use" : undefined;
+			return normalizeCursorSubagentTypeName(value) === "computer_use" ? "computer_use" : undefined;
 		}
 		if (!value || typeof value !== "object") return undefined;
 		const record = value as Record<string, unknown>;
-		if (record.computer_use !== undefined || record.computerUse !== undefined) return "computer_use";
-		if (typeof record.case === "string") {
-			const normalizedCase = record.case
-				.trim()
-				.toLowerCase()
-				.replace(/[\s-]+/g, "_");
-			if (normalizedCase === "computer_use" || normalizedCase === "computeruse") return "computer_use";
+		if (hasCursorSubagentTypeKey(record, "computer_use")) return "computer_use";
+		if (typeof record.case === "string" && normalizeCursorSubagentTypeName(record.case) === "computer_use") {
+			return "computer_use";
 		}
 		return undefined;
 	};
@@ -295,16 +299,17 @@ export function getCursorTaskUnsupportedSubagentType(args: Record<string, unknow
  */
 function resolveSubagentTypeToAgent(typeVal: unknown): string | undefined {
 	if (typeof typeVal === "string") {
-		const normalized = typeVal
-			.trim()
-			.toLowerCase()
-			.replace(/[\s-]+/g, "_");
-		if (normalized === "explore") return "scout";
+		if (normalizeCursorSubagentTypeName(typeVal) === "explore") return "scout";
 		return undefined;
 	}
 	if (typeVal && typeof typeVal === "object") {
 		const rec = typeVal as Record<string, unknown>;
-		if (rec.explore !== undefined || rec.case === "explore") return "scout";
+		if (
+			hasCursorSubagentTypeKey(rec, "explore") ||
+			(typeof rec.case === "string" && normalizeCursorSubagentTypeName(rec.case) === "explore")
+		) {
+			return "scout";
+		}
 		if (rec.custom && typeof rec.custom === "object") {
 			const customRec = rec.custom as Record<string, unknown>;
 			if (typeof customRec.name === "string" && customRec.name.trim()) {
