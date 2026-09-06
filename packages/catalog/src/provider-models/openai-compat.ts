@@ -1151,7 +1151,9 @@ function reRouteDigitalOceanThinking(id: string, thinking: ThinkingConfig | unde
 	return {
 		...thinking,
 		effortRouting: Object.fromEntries(
-			Object.entries(thinking.effortRouting).map(([effort, wireId]) => [effort, `${prefix}${wireId}`]),
+			Object.entries(thinking.effortRouting).map(([effort, wireId]) =>
+				wireId.startsWith(prefix) ? [effort, wireId] : [effort, `${prefix}${wireId}`],
+			),
 		) as ThinkingConfig["effortRouting"],
 	};
 }

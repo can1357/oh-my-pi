@@ -180,6 +180,7 @@ describe("DigitalOcean Serverless Inference provider", () => {
 		expect(routeEntries.length).toBeGreaterThan(0);
 		for (const [effort, wireId] of routeEntries) {
 			expect(wireId, `effort "${effort}"`).toMatch(/^anthropic-/);
+			expect(wireId, `effort "${effort}"`).not.toMatch(/^anthropic-anthropic-/);
 		}
 
 		expect(seen.urls).toContain("https://inference.do-ai.run/v1/models");
