@@ -2782,7 +2782,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						})();
 						codexCheckpointRefreshes.set(modelRegistry, refresh);
 					}
-					// Optional metadata discovery must not hold up a subagent spawn.
 					if (!isSubagentSession) await refresh;
 					refreshedModel = modelRegistry.find(selectedModel.provider, selectedModel.id) ?? selectedModel;
 				}

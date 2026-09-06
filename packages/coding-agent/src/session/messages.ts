@@ -42,7 +42,6 @@ import { formatOutputNotice } from "../tools/output-meta";
 import { markJournaled, sessionEntryIdOf } from "./session-entries";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
 
-/** Preserve the private journal identity when projecting a message for another consumer. */
 export function cloneJournaled<T extends AgentMessage>(message: T, patch: Partial<T>): T {
 	const cloned = { ...message, ...patch };
 	const entryId = sessionEntryIdOf(message);

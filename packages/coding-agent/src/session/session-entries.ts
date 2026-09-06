@@ -358,7 +358,6 @@ export function sessionEntryIdOf(message: object): string | undefined {
 	return typeof id === "string" ? id : undefined;
 }
 
-/** Keep provider history references aligned with the owning journal entry, including forks. */
 export function attachSessionEntryId(entry: SessionEntry): void {
 	if (entry.type !== "message") return;
 	const message = entry.message;

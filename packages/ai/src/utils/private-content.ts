@@ -2,7 +2,6 @@ import type { EncryptedContent, ImageContent, Message, TextContent } from "../ty
 
 export const PRIVATE_MODEL_RESULT = "[private model-only result]";
 
-/** Public surfaces must never receive opaque inference-only content. */
 export function publicToolContent(
 	content: (TextContent | ImageContent | EncryptedContent)[],
 	modelOnly = false,

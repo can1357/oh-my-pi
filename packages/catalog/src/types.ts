@@ -204,7 +204,6 @@ export interface CodexContextWindows {
  * Use this to override URL-based auto-detection for custom providers.
  */
 export interface OpenAICompat {
-	/** Model-owned context-window protocol. Absent when discovery does not advertise it. */
 	contextWindows?: CodexContextWindows;
 	/** Whether the provider supports the `store` field. Default: auto-detected from URL. */
 	supportsStore?: boolean;

@@ -850,7 +850,7 @@ export interface ToolCall {
 	name: string;
 	/** Codex namespace required to replay a namespaced function call. */
 	namespace?: string;
-	/** Private invocation: persist/replay, but redact arguments from public surfaces. */
+	/** Marks a provider-owned tool call whose paired result is redacted from public projections. */
 	modelOnly?: boolean;
 	arguments: Record<string, unknown>;
 	[kStreamingPartialJson]?: string;
@@ -1040,7 +1040,6 @@ export interface ToolResultMessage<TDetails = unknown> {
 	role: "toolResult";
 	toolCallId: string;
 	toolName: string;
-	/** Private result, including any attached images and textual fallback. */
 	modelOnly?: boolean;
 	content: (TextContent | ImageContent | EncryptedContent)[];
 	details?: TDetails;
@@ -1303,7 +1302,7 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	/** Codex function namespace; name remains fully qualified inside the agent. */
 	namespace?: string;
 	namespaceDescription?: string;
-	/** Exclude from programmatic execution and public argument/result surfaces. */
+	/** Exclude from Code Mode and redact results from public projections; arguments remain visible. */
 	modelOnly?: boolean;
 	description: string;
 	parameters: TParameters;

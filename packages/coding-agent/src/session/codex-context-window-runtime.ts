@@ -44,7 +44,6 @@ interface RuntimeHost {
 	agentIdentity: HistoryNotesAgentIdentity;
 }
 
-/** Owns frozen activation, live route availability, backend access and persisted window identity. */
 export class CodexContextWindowRuntime {
 	readonly protocol: CodexContextWindowProtocol;
 	readonly backend: CodexHistoryNotesBackend;

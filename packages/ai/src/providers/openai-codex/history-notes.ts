@@ -45,7 +45,6 @@ export interface HistoryNotesAgentIdentity {
 	readonly id: string;
 }
 
-/** Translate caller identity to the backend's absolute, lowercase agent namespace. */
 export function codexHistoryNotesAgentPath(agent: HistoryNotesAgentIdentity): string {
 	switch (agent.kind) {
 		case "main":

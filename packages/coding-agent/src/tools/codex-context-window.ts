@@ -4,7 +4,6 @@ import remainingDescription from "../prompts/tools/get-context-remaining.md" wit
 import resetDescription from "../prompts/tools/new-context.md" with { type: "text" };
 import { createPrivateToolRenderer } from "./codex-history-notes";
 
-/** Built-in cards for the window-control tools, keyed by tool name. */
 export const codexContextWindowToolRenderers = {
 	new_context: createPrivateToolRenderer("New context window", undefined),
 	get_context_remaining: createPrivateToolRenderer("Context remaining", undefined),

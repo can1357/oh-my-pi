@@ -64,7 +64,6 @@ export interface SessionToolsHost {
 	localProtocolOptions(): LocalProtocolOptions;
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
 	setCodeModeNamespacesInfo?(info: unknown): void;
-	/** Provider context-window tools (notes, history, window controls) for the current model; empty when unavailable. */
 	contextWindowTools?(): Promise<AgentTool[]>;
 }
 
@@ -609,11 +608,6 @@ export class SessionTools {
 		this.#installedVibeToolNames.clear();
 	}
 
-	/**
-	 * Reconciles the provider context-window tools against the registry for
-	 * the current model and returns the names that must stay active. Runs
-	 * inside the registry lock via `#applyActiveToolsByName`.
-	 */
 	async #syncContextWindowTools(signal?: AbortSignal): Promise<string[]> {
 		const tools = this.#host.contextWindowTools ? await untilAborted(signal, this.#host.contextWindowTools()) : [];
 		const desired = new Set(tools.map(tool => tool.name));
@@ -661,8 +655,6 @@ export class SessionTools {
 
 	/** Rebuilds model-dependent tool prompts after a model change. */
 	async syncAfterModelChange(previousEditMode: EditMode): Promise<void> {
-		// The context-window tool set is model-scoped: reapplying the enabled
-		// set lets `#applyActiveToolsByName` reconcile it for the new model.
 		await this.reconcileCodeMode();
 		const currentEditMode = this.resolveActiveEditMode();
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
@@ -860,8 +852,6 @@ export class SessionTools {
 
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
-		// Context-window tools are always active while the model offers them;
-		// stale names dropped from the registry fall out of `selectedTools` below.
 		toolNames = normalizeToolNames([...toolNames, ...(await this.#syncContextWindowTools(signal))]);
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",

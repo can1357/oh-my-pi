@@ -183,9 +183,6 @@ test("checkpoint then new_context cuts history at a paired-tool boundary and sur
 	expect(backendCalls.mock.calls.map(([route, , context]) => [route, context.sessionId, context.agentName])).toEqual([
 		["alpha/notes/v2/write_file", wireIdentity.sessionId, "/root"],
 	]);
-	// Results are backend ciphertext and stay redacted on every public surface;
-	// the arguments the model sent (plaintext except schema-encrypted fields,
-	// which are already ciphertext on the wire) are visible like any tool call.
 	expect(events.filter(event => event.includes("opaque-result")).map(event => event.slice(0, 100))).toEqual([]);
 	expect(events.join("\n")).toContain("[private model-only result]");
 	expect(events.some(event => event.includes("opaque-argument"))).toBe(true);
@@ -270,7 +267,6 @@ test.each([false, true])(
 		});
 		await session.prompt("Prior task");
 		await session.waitForIdle();
-		// The pending prompt crosses the configured threshold, but fits after the reset.
 		session.agent.appendMessage({ role: "user", content: "Old context ".repeat(4000), timestamp: Date.now() });
 		await session.prompt(pending);
 		await session.waitForIdle();

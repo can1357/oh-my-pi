@@ -117,8 +117,6 @@ test("does not force catalog discovery when both features are disabled", async (
 
 test("context-window tools resolve through the registry, survive selection changes, and leave with the model", async () => {
 	const { session, auth } = await start("notes");
-	// The TUI, ACP gating, and hasBuiltInTool all look tools up by name; built-in
-	// cards come from the renderer registry, not from hooks on the tool object.
 	expect(session.getToolByName("notes.write_file")?.name).toBe("notes.write_file");
 	expect(toolRenderers["notes.write_file"]).toBeDefined();
 	expect(session.hasBuiltInTool("notes.read_file")).toBe(true);

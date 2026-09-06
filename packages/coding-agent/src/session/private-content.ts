@@ -4,7 +4,6 @@ import { publicMessage } from "@oh-my-pi/pi-ai/utils/private-content";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionEntry } from "./session-entries";
 
-/** Public projections never mutate journal messages needed for provider replay. */
 export function publicAgentMessage(message: AgentMessage): AgentMessage {
 	return message.role === "assistant" || message.role === "toolResult" ? publicMessage(message) : message;
 }
@@ -22,7 +21,6 @@ function publicAssistantEvent(event: AssistantMessageEvent): AssistantMessageEve
 	return partial === event.partial ? event : { ...event, partial };
 }
 
-/** External subscribers and hooks receive the same model-only redaction. */
 export function publicSessionEvent(event: AgentSessionEvent): AgentSessionEvent {
 	switch (event.type) {
 		case "message_start":

@@ -25,12 +25,7 @@ function deepFreeze<T>(value: T): T {
 	return value;
 }
 
-/**
- * Built-in card for the model-only tools: one status line with the operation
- * and the arguments the model sent. Fields the schema marks `encrypted` arrive
- * as backend ciphertext and are elided; results are always ciphertext, so the
- * card reports only completion or the error.
- */
+/** Schema-encrypted arguments and ciphertext results must never appear on the rendered card. */
 export function createPrivateToolRenderer(title: string, operation: string | undefined, encryptedKeys: string[] = []) {
 	const line = (icon: "pending" | "done" | "error", args: unknown, uiTheme: Theme, spinnerFrame?: number): Component =>
 		new WidthAwareText(
@@ -72,7 +67,6 @@ export function createPrivateToolRenderer(title: string, operation: string | und
 	};
 }
 
-/** Renderers keyed by tool name for the notes/history tool set. */
 export const codexHistoryNotesToolRenderers = Object.fromEntries(
 	CODEX_HISTORY_NOTES_ROUTES.map(route => {
 		const spec = protocol[route];
@@ -103,11 +97,6 @@ export function createCodexHistoryNotesTools(
 			namespace: spec.namespace,
 			namespaceDescription: spec.namespaceDescription,
 			description: spec.description,
-			// The backend validates reserved schemas byte-for-byte and wire
-			// post-processing rewrites schemas in place, so each tool gets a
-			// deep-frozen copy: the module-level protocol JSON can never be altered,
-			// and a serializer that lost the model-only flags throws instead of
-			// silently corrupting the bytes on the wire.
 			parameters: deepFreeze(structuredClone(spec.parameters)),
 			label: `${spec.namespace}.${spec.name}`,
 			summary: PRIVATE_MODEL_RESULT,

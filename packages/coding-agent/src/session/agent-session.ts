@@ -1122,7 +1122,6 @@ export class AgentSession {
 		return this.#maintenance.contextWindows.transform(context);
 	}
 
-	/** Resolves frozen Codex activation after the session and tool coordinators exist. */
 	async initializeCodexContext(): Promise<void> {
 		await this.#tools.syncAfterModelChange(this.#tools.resolveActiveEditMode());
 	}
