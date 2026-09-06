@@ -491,7 +491,12 @@ export class SessionMaintenance {
 					customInstructions: undefined,
 					signal: controller.signal,
 				})) as SessionBeforeCompactResult | undefined;
-				if (hook?.cancel) return;
+				if (hook?.cancel) {
+					const notice = this.contextWindows.protocol.resetCancelled();
+					this.#host.sessionManager.appendMessage(notice);
+					this.#host.agent.appendMessage(notice);
+					return;
+				}
 			}
 			result = await compact(preparation, model, "", undefined, controller.signal, {
 				contextWindow: {

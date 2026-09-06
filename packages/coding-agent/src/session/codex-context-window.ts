@@ -14,6 +14,7 @@ import { compile } from "@oh-my-pi/pi-utils/prompt";
 import remainingTemplate from "../prompts/system/codex-context-remaining.md" with { type: "text" };
 import contextTemplate from "../prompts/system/codex-context-window.md" with { type: "text" };
 import guidanceTemplate from "../prompts/system/codex-context-window-guidance.md" with { type: "text" };
+import cancelledText from "../prompts/system/new-context-cancelled.md" with { type: "text" };
 
 const renderRemaining = compile(remainingTemplate);
 const renderContext = compile(contextTemplate);
@@ -117,6 +118,17 @@ export class CodexContextWindowProtocol {
 				this.#fallbackFailed = true;
 		}
 		return this.observeInputTokens(calculatePromptTokens(message.usage), effectiveLimit, policy);
+	}
+
+	/**
+	 * A vetoed reset must reach the model: `new_context` already reported that a
+	 * fresh window would start, and the exhausted window is still in force. The
+	 * protocol also yields, so the next boundary summarizes instead of waiting
+	 * for another checkpoint sequence that cannot commit.
+	 */
+	resetCancelled(): DeveloperMessage {
+		this.#fallbackFailed = true;
+		return { role: "developer", content: cancelledText.trimEnd(), timestamp: Date.now(), synthetic: true };
 	}
 
 	observeInputTokens(inputTokens: number, effectiveLimit: number, policy: CodexContextWindows): DeveloperMessage[] {

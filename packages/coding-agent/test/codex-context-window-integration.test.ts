@@ -663,3 +663,30 @@ test("a clone with a new backend session starts a fresh lineage instead of adopt
 	expect(persisted.data.windowId).toBe(runtime.identity.windowId);
 	expect(persisted.data.sessionId).toBe(runtime.identity.sessionId);
 }, 20000);
+
+test("a vetoed window reset tells the model the window still stands", async () => {
+	const extensionRunner = {
+		emit: async (event: { type: string }) => (event.type === "session_before_compact" ? { cancel: true } : undefined),
+		emitBeforeAgentStart: async () => undefined,
+		hasHandlers: (event: string) => event === "session_before_compact",
+		emitSessionStop: async () => undefined,
+		consumeToolCallEmitted: () => false,
+		runScoped: <T>(run: () => T): T => run(),
+	} as unknown as ExtensionRunner;
+	vi.spyOn(compaction, "compact").mockImplementation(async preparation => ({
+		summary: "Summarized after the veto",
+		firstKeptEntryId: preparation.firstKeptEntryId,
+		tokensBefore: preparation.tokensBefore,
+	}));
+	const { session, manager } = await harness(true, { extensionRunner });
+	const before = getOpenAICodexContextWindow(session.sessionId, session.providerSessionState);
+
+	await session.prompt("Work until the window is exhausted");
+	await session.waitForIdle();
+
+	// The reset tool already reported a fresh window, so the veto must be visible
+	// to the model, keep the current window, and hand the turn to summarization.
+	expect(JSON.stringify(manager.getEntries())).toContain("The new context window was cancelled");
+	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(false);
+	expect(getOpenAICodexContextWindow(session.sessionId, session.providerSessionState).windowId).toBe(before.windowId);
+}, 20000);
