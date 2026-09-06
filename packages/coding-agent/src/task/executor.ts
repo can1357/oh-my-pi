@@ -2817,6 +2817,7 @@ export interface FollowUpTurnOptions {
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
+	parentAgentId?: string;
 	/**
 	 * When set, a turn that produces a `yield` result (re)writes `<artifactsDir>/<id>.md`
 	 * so `agent://<id>` tracks the latest completion. A yield-less turn (e.g. a hub

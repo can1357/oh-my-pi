@@ -882,7 +882,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					agent: agentType,
 					agentSource,
 					modelRole: policy.modelRole,
-					parentAgentId: this.session.getAgentId?.(),
+					parentAgentId: this.session.getAgentId?.() ?? undefined,
 					requestedModelPatterns: policy.modelOverride
 						? Array.isArray(policy.modelOverride)
 							? policy.modelOverride

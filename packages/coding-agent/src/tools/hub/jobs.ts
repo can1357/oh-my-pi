@@ -409,7 +409,10 @@ async function cancelAgentRegistration(
 	id: string,
 ): Promise<CancelOutcome> {
 	const registry = session.agentRegistry;
-	const ref = registry?.get(id);
+	if (!registry) {
+		return { id, status: "not_found", message: `Background job not found: ${id}` };
+	}
+	const ref = registry.get(id);
 	if (ref?.kind !== "sub") {
 		return { id, status: "not_found", message: `Background job not found: ${id}` };
 	}
