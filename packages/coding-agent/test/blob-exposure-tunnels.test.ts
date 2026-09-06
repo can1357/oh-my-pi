@@ -133,13 +133,39 @@ async function stopAndObserve(exposure: ActiveExposure, invocation: FakeInvocati
 	expect(fs.readFileSync(invocation.signalsFile, "utf8")).toContain("SIGTERM");
 }
 
-function currentProcessTunnelLogs(): string[] {
-	const prefix = "omp-blob-tunnel-";
-	const suffix = `-${process.pid}.log`;
+/** Temporary tunnel log directories whose log mentions `banner`. */
+function tunnelLogDirsContaining(banner: string): string[] {
 	return fs
 		.readdirSync(os.tmpdir())
-		.filter(name => name.startsWith(prefix) && name.endsWith(suffix))
-		.map(name => path.join(os.tmpdir(), name));
+		.filter(name => name.startsWith("omp-blob-tunnel-"))
+		.map(name => path.join(os.tmpdir(), name))
+		.filter(dir => {
+			try {
+				return fs.readFileSync(path.join(dir, "tunnel.log"), "utf8").includes(banner);
+			} catch {
+				return false;
+			}
+		});
+}
+
+/**
+ * Log removal is scheduled after `exited` settles (and may back off on
+ * transient Windows errors), so wait for the directory to disappear rather
+ * than asserting right after exit.
+ */
+async function waitForRemoval(target: string): Promise<void> {
+	if (!fs.existsSync(target)) return;
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const listener = (): void => {
+		if (!fs.existsSync(target)) resolve();
+	};
+	fs.watchFile(target, { interval: 25, persistent: false }, listener);
+	listener();
+	try {
+		await promise;
+	} finally {
+		fs.unwatchFile(target, listener);
+	}
 }
 
 beforeAll(() => {
@@ -221,17 +247,34 @@ describe("startExposure tunnel adapters", () => {
 		await stopAndObserve(active, invocation);
 	});
 
-	it("removes its file-backed tunnel log after stop completes", async () => {
-		const existingLogs = new Set(currentProcessTunnelLogs());
-		const invocation = prepareFake('{"type":"registered","domain":"cleanup-owl.lhr.life"}');
+	it("removes its file-backed tunnel log directory after stop completes", async () => {
+		const banner = "cleanup-owl.lhr.life";
+		const invocation = prepareFake(`{"type":"registered","domain":"${banner}"}`);
 		const active = await startExposure(exposure("localhost-run"), PORT);
 		activeExposures.push(active);
-		const createdLogs = currentProcessTunnelLogs().filter(logPath => !existingLogs.has(logPath));
-		expect(createdLogs).toHaveLength(1);
-		expect(fs.readFileSync(createdLogs[0], "utf8")).toContain("cleanup-owl.lhr.life");
+		const createdLogDirs = tunnelLogDirsContaining(banner);
+		expect(createdLogDirs).toHaveLength(1);
 
 		await stopAndObserve(active, invocation);
-		expect(createdLogs.filter(logPath => fs.existsSync(logPath))).toEqual([]);
+		await waitForRemoval(createdLogDirs[0]);
+	});
+
+	it("gives concurrently started tunnels distinct log directories", async () => {
+		// One fake serves both children (prepareFake() owns PATH), so the banner
+		// is shared and only the per-spawn mkdtemp keeps the logs apart.
+		const banner = "twin-owl.lhr.life";
+		const invocation = prepareFake(`{"type":"registered","domain":"${banner}"}`);
+		const started = await Promise.all([
+			startExposure(exposure("localhost-run"), PORT),
+			startExposure(exposure("localhost-run"), PORT),
+		]);
+		activeExposures.push(...started);
+		// readdir entries are distinct by construction: two hits means two directories.
+		const logDirs = tunnelLogDirsContaining(banner);
+		expect(logDirs).toHaveLength(2);
+
+		await Promise.all(started.map(active => stopAndObserve(active, invocation)));
+		await Promise.all(logDirs.map(dir => waitForRemoval(dir)));
 	});
 
 	it("never reconnects a free Pinggy tunnel behind a different published hostname", async () => {
