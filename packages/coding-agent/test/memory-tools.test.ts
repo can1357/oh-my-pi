@@ -1271,6 +1271,48 @@ describe("Mnemopi backend lifecycle", () => {
 		});
 	});
 
+	it("redacts credentials in saved content and metadata context before they reach the bank", async () => {
+		const config = makeMnemopiConfig({ bank: "project-alpha", retainBank: "project-alpha" });
+		const state = registerMnemopiState(config, { cwd: "/work/project-alpha" });
+		const session = state.session;
+		setMnemopiSessionState(session, state);
+		const dbPath = state.memory.dbPath;
+		if (!dbPath) throw new Error("Expected a file-backed Mnemopi database");
+
+		const token = `npm_${"aB3dEfGh1JkLmN0pQrStUvWxYz2345678901".slice(0, 36)}`;
+		const save = await mnemopiBackend.save!(
+			{ agentDir: path.dirname(config.dbPath), cwd: "/work/project-alpha", session },
+			{
+				content: `publish the package with ${token}`,
+				source: "test-source",
+				context: `registry auth uses ${token}`,
+				importance: 0.8,
+			},
+		);
+		expect(save).toMatchObject({ backend: "mnemopi", stored: 1 });
+
+		const db = new Database(dbPath, { readonly: true });
+		const row = db
+			.prepare<{ content: string; embed_text: string | null; metadata_json: string | null }, []>(`
+				SELECT content, embed_text, metadata_json
+				FROM working_memory
+				WHERE source = 'test-source'
+			`)
+			.get();
+		const ftsHits = db
+			.prepare<{ count: number }, [string]>(`
+				SELECT COUNT(*) AS count FROM fts_working WHERE fts_working MATCH ?
+			`)
+			.get(token);
+		db.close();
+
+		expect(row).toBeDefined();
+		expect(row?.content).toBe("publish the package with [REDACTED]");
+		expect(row?.embed_text ?? "").not.toContain("npm_");
+		expect(JSON.parse(row?.metadata_json ?? "{}").context).toBe("registry auth uses [REDACTED]");
+		expect(ftsHits?.count ?? 0).toBe(0);
+	});
+
 	it("reports aborted searches and save-without-id failures", async () => {
 		const state = registerMnemopiState();
 		const session = state.session;
