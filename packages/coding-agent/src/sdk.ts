@@ -3676,6 +3676,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const id = sessionManager.getSessionId?.();
 				return id ? `${id}-advisor` : null;
 			},
+			// Advisors own no async delivery or progress sink (their agent id is
+			// the literal "advisor", never a registry owner), so any managed job
+			// they started would dead-letter its result. Without a manager, bash
+			// and eval reject explicit background modes and run unmarked calls
+			// inline instead of auto-backgrounding them.
+			asyncJobManager: undefined,
 			queueLaunchCompletion: notification =>
 				session?.queueLaunchCompletion(notification) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
