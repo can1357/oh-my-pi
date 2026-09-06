@@ -18,6 +18,7 @@ import {
 	type LiveSessionInfo,
 	type LiveSessionRegistration,
 } from "../launch/protocol";
+import { SessionManager } from "./session-manager";
 
 interface AttachSession {
 	readonly sessionManager: {
@@ -260,18 +261,20 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 	const cwdChanges = new Set<() => void>();
 	const titleChanges = new Set<() => void>();
 	const deliveries: Array<{ message: string; sessionId: string }> = [];
-	let cwd = projectA;
+	const sessionManager = SessionManager.inMemory(projectA);
 	let sessionId = "smoke-session-a";
 	let title: string | undefined = "Broker smoke";
 	const session: AttachSession = {
 		sessionManager: {
-			getCwd: () => cwd,
+			getCwd: () => sessionManager.getCwd(),
 			getSessionId: () => sessionId,
 			getSessionName: () => title,
 			onCwdChanged(callback) {
 				cwdChanges.add(callback);
+				const unsubscribe = sessionManager.onCwdChanged(callback);
 				return () => {
 					cwdChanges.delete(callback);
+					unsubscribe();
 				};
 			},
 			onSessionNameChanged(callback) {
@@ -366,8 +369,7 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 			"live session identity update was not listed",
 		);
 
-		cwd = projectB;
-		notify(cwdChanges);
+		await sessionManager.moveTo(projectB);
 		await waitForSmokeSessions(
 			clientB,
 			sessions =>
@@ -382,6 +384,23 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 			"live session repository migration remained listed in the old broker",
 		);
 		await send(clientB, "smoke message b");
+
+		sessionManager.setCwdWithoutRelocation(projectA);
+		await sessionManager.moveTo(projectA);
+		await waitForSmokeSessions(
+			clientA,
+			sessions =>
+				sessions.length === 1 &&
+				sessions[0]?.endpointId === registration?.endpointId &&
+				sessions[0]?.sessionId === sessionId,
+			"live session rollback was not republished in the original broker",
+		);
+		await waitForSmokeSessions(
+			clientB,
+			sessions => sessions.length === 0,
+			"live session rollback remained listed in the rejected broker",
+		);
+		await send(clientA, "smoke message after rollback");
 
 		await registration.close();
 		registration = undefined;
