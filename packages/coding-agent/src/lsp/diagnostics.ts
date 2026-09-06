@@ -202,6 +202,14 @@ interface WaitForDiagnosticsOptions {
 	 * publish be superseded by the fresh one.
 	 */
 	settleMs?: number;
+	/**
+	 * Last-known published diagnostics for the URI, captured before the caller's
+	 * `refreshFile` dropped the cache. When a push-only server (no pull capability)
+	 * never re-publishes within the budget, this is returned instead of a false
+	 * `OK`, so servers that publish once (e.g. clice on didOpen) are not silently
+	 * dropped (#10787). A fresh publish, even empty, always supersedes it.
+	 */
+	fallbackDiagnostics?: Diagnostic[];
 }
 
 /**
@@ -244,7 +252,14 @@ export async function waitForDiagnostics(
 	uri: string,
 	options: WaitForDiagnosticsOptions = {},
 ): Promise<Diagnostic[]> {
-	const { timeoutMs = 3000, signal, minVersion, expectedDocumentVersion, settleMs = DIAGNOSTICS_SETTLE_MS } = options;
+	const {
+		timeoutMs = 3000,
+		signal,
+		minVersion,
+		expectedDocumentVersion,
+		settleMs = DIAGNOSTICS_SETTLE_MS,
+		fallbackDiagnostics,
+	} = options;
 	const deadline = Date.now() + timeoutMs;
 	let pullAttempted = false;
 	let pullResultPromise: Promise<PullDiagnosticsOutcome> | undefined;
@@ -317,6 +332,21 @@ export async function waitForDiagnostics(
 		// let it collapse into a clean empty result the caller renders as "OK".
 		if (pullFailure !== undefined) {
 			throw pullFailure instanceof Error ? pullFailure : new Error(String(pullFailure));
+		}
+		// A push-only server that never re-published within the budget leaves no
+		// fresh cache entry. Surface the last-known publish rather than a false
+		// "OK" (#10787). A fresh publish — even empty — would have been returned
+		// above and left `client.diagnostics` populated, so it supersedes this.
+		if (
+			fallbackDiagnostics !== undefined &&
+			!supportsDocumentDiagnostics(client) &&
+			client.diagnostics.get(uri) === undefined
+		) {
+			// Restore the publish so later queries still snapshot it as a fallback;
+			// otherwise the fix survives only one refresh. Kept unversioned so a
+			// genuine fresh publish still supersedes it via the paths above.
+			client.diagnostics.set(uri, { diagnostics: fallbackDiagnostics, version: null });
+			return fallbackDiagnostics;
 		}
 		return [];
 	}

@@ -404,6 +404,12 @@ export interface LspTransport {
 export interface OpenFile {
 	version: number;
 	languageId: string;
+	/**
+	 * Hash of the content last sent to the server (didOpen/didChange). Lets a
+	 * refresh detect out-of-band disk edits so previously published diagnostics
+	 * are not reused as a fallback for content the server never analyzed (#10787).
+	 */
+	contentHash?: string;
 }
 
 export interface PendingRequest {

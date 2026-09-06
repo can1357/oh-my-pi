@@ -1223,7 +1223,7 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 			signal,
 		);
 
-		client.openFiles.set(uri, { version: 1, languageId });
+		client.openFiles.set(uri, { version: 1, languageId, contentHash: String(Bun.hash(content)) });
 		client.lastActivity = Date.now();
 	})();
 
@@ -1295,12 +1295,13 @@ export async function syncContent(
 				},
 				signal,
 			);
-			client.openFiles.set(uri, { version: 1, languageId });
+			client.openFiles.set(uri, { version: 1, languageId, contentHash: String(Bun.hash(content)) });
 			client.lastActivity = Date.now();
 			return;
 		}
 
 		const version = ++info.version;
+		info.contentHash = String(Bun.hash(content));
 		throwIfAborted(signal);
 		await sendNotification(
 			client,
@@ -1401,10 +1402,17 @@ export async function notifyWorkspaceWatchedFiles(
 }
 
 /**
- * Refresh a file in the LSP client.
- * Increments version, sends didChange and didSave notifications.
+ * Refresh a file in the LSP client: increment the version and send didChange +
+ * didSave. Returns whether the on-disk content differs from what the server was
+ * last sent, so callers can decide whether previously published diagnostics
+ * still describe the current content (#10787). A file that was not open (or has
+ * since vanished) is reported as changed so no stale fallback is reused.
  */
-export async function refreshFile(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
+export async function refreshFile(
+	client: LspClient,
+	filePath: string,
+	signal?: AbortSignal,
+): Promise<{ contentChanged: boolean }> {
 	throwIfAborted(signal);
 	const uri = fileToUri(filePath);
 	const lockKey = `${client.name}:${uri}`;
@@ -1414,6 +1422,9 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 		await untilAborted(signal, () => existingLock);
 	}
 
+	// Default to "changed" so the not-open and missing-file branches never let a
+	// caller reuse diagnostics for content the server did not just analyze.
+	let contentChanged = true;
 	const refreshPromise = (async () => {
 		throwIfAborted(signal);
 		// Drop cached diagnostics for this URI before asking the server to recompute.
@@ -1435,6 +1446,9 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 			if (isEnoent(err)) return;
 			throw err;
 		}
+		const contentHash = String(Bun.hash(content));
+		contentChanged = info.contentHash !== contentHash;
+		info.contentHash = contentHash;
 		const version = ++info.version;
 		throwIfAborted(signal);
 
@@ -1468,6 +1482,7 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 	} finally {
 		fileOperationLocks.delete(lockKey);
 	}
+	return { contentChanged };
 }
 
 async function waitForExit(client: LspClient, timeoutMs: number): Promise<boolean> {

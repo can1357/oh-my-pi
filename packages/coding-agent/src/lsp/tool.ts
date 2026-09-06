@@ -350,7 +350,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							throwIfAborted(signal);
 						}
 						const minVersion = client.diagnosticsVersion;
-						await refreshFile(client, resolved, signal);
+						// Capture the last-known publish before refreshFile clears it, so a
+						// push-only server that will not re-publish still surfaces (#10787).
+						const lastPublished = client.diagnostics.get(uri)?.diagnostics;
+						const { contentChanged } = await refreshFile(client, resolved, signal);
 						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
 						// Project-aware servers (Roslyn, tsserver, …) compute pull diagnostics
 						// on demand; their first response routinely overruns the 3s single-file
@@ -366,6 +369,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							signal,
 							minVersion,
 							expectedDocumentVersion,
+							// Only reuse the snapshot when the refresh did not change the
+							// document; otherwise it describes content the server no longer
+							// has and could report a since-fixed error indefinitely.
+							fallbackDiagnostics: contentChanged ? undefined : lastPublished,
 						});
 						allDiagnostics.push(...diagnostics);
 						succeededServers++;

@@ -1769,6 +1769,150 @@ describe("lsp regressions", () => {
 		);
 	}
 
+	it("surfaces published diagnostics for a push-only server that stops re-publishing on refresh (#10787)", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-push-only-");
+		try {
+			const targetFile = path.join(tempDir.path(), "main.cpp");
+			await Bun.write(targetFile, "int main() { UnknownType x; return 0; }\n");
+			const uri = fileToUri(targetFile);
+			const diagnostic: Diagnostic = {
+				message: "unknown type name 'UnknownType'",
+				severity: 1,
+				code: "undeclared_type",
+				source: "clice",
+				range: { start: { line: 0, character: 13 }, end: { line: 0, character: 24 } },
+			};
+
+			// Push-only server: advertises no diagnosticProvider and never registers
+			// textDocument/diagnostic, so a pull is a hard -32601. It publishes once on
+			// didOpen and stays silent on the didChange/didSave that `refreshFile` emits
+			// (mirrors clice recompiling only when a translation unit first opens).
+			const fakeServer = installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+					// Resolve project load immediately so the test does not pay the 15s
+					// PROJECT_LOAD_TIMEOUT_MS fallback on the first query.
+					server.send({
+						jsonrpc: "2.0",
+						method: "$/progress",
+						params: { token: "workspace", value: { kind: "begin" } },
+					});
+					server.send({
+						jsonrpc: "2.0",
+						method: "$/progress",
+						params: { token: "workspace", value: { kind: "end" } },
+					});
+				} else if (message.method === "textDocument/didOpen") {
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri, diagnostics: [diagnostic] },
+					});
+				} else if (message.method === "textDocument/diagnostic") {
+					server.send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "method not found" } });
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+
+			const serverConfig: ServerConfig = { command: "clice", fileTypes: ["cpp"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { clice: serverConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["clice", serverConfig]]);
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			// First query opens the file; the didOpen publish is surfaced directly.
+			const first = await tool.execute("push-1", { action: "diagnostics", file: targetFile, timeout: 15 });
+			expect(textResult(first)).toContain("unknown type name 'UnknownType'");
+			// Second query: the file is already open, so `refreshFile` sends
+			// didChange/didSave and the server never re-publishes. The last published
+			// diagnostic must still surface instead of collapsing to a false "OK".
+			const second = await tool.execute("push-2", { action: "diagnostics", file: targetFile, timeout: 15 });
+			expect(textResult(second)).not.toBe("OK");
+			expect(textResult(second)).toContain("unknown type name 'UnknownType'");
+			// Third query: the re-surfaced publish must have been re-cached, so a
+			// still-silent server keeps returning it instead of decaying to "OK".
+			const third = await tool.execute("push-3", { action: "diagnostics", file: targetFile, timeout: 15 });
+			expect(textResult(third)).not.toBe("OK");
+			expect(textResult(third)).toContain("unknown type name 'UnknownType'");
+			expect(fakeServer.received.map(m => m.method)).not.toContain("textDocument/diagnostic");
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	}, 45_000);
+
+	it("drops the push-only fallback after the file content changes out of band (#10787)", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-push-only-stale-");
+		try {
+			const targetFile = path.join(tempDir.path(), "main.cpp");
+			await Bun.write(targetFile, "int main() { UnknownType x; return 0; }\n");
+			const uri = fileToUri(targetFile);
+			const diagnostic: Diagnostic = {
+				message: "unknown type name 'UnknownType'",
+				severity: 1,
+				code: "undeclared_type",
+				source: "clice",
+				range: { start: { line: 0, character: 13 }, end: { line: 0, character: 24 } },
+			};
+
+			// Push-only server that publishes only on didOpen and never re-publishes.
+			const fakeServer = installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+					server.send({
+						jsonrpc: "2.0",
+						method: "$/progress",
+						params: { token: "workspace", value: { kind: "begin" } },
+					});
+					server.send({
+						jsonrpc: "2.0",
+						method: "$/progress",
+						params: { token: "workspace", value: { kind: "end" } },
+					});
+				} else if (message.method === "textDocument/didOpen") {
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri, diagnostics: [diagnostic] },
+					});
+				} else if (message.method === "textDocument/diagnostic") {
+					server.send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "method not found" } });
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+
+			const serverConfig: ServerConfig = { command: "clice", fileTypes: ["cpp"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { clice: serverConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["clice", serverConfig]]);
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			// First query opens the file and surfaces the didOpen publish.
+			const first = await tool.execute("stale-1", { action: "diagnostics", file: targetFile, timeout: 15 });
+			expect(textResult(first)).toContain("unknown type name 'UnknownType'");
+			// The error is fixed on disk out of band; refreshFile sees new content and
+			// the silent server never re-publishes, so the stale diagnostic must NOT
+			// be resurrected — a since-fixed error would otherwise stick forever.
+			await Bun.write(targetFile, "int main() { return 0; }\n");
+			const second = await tool.execute("stale-2", { action: "diagnostics", file: targetFile, timeout: 15 });
+			expect(textResult(second)).not.toContain("unknown type name 'UnknownType'");
+			expect(textResult(second)).toBe("OK");
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	}, 45_000);
+
 	it("does not reuse stale file diagnostics after another URI publishes", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-stale-diags-");
 		try {
