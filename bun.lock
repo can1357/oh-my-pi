@@ -31,7 +31,7 @@
     },
     "packages/agent": {
       "name": "@pk-nerdsaver-ai/pi-agent-core",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "dependencies": {
         "@opentelemetry/api": "catalog:",
         "@pk-nerdsaver-ai/pi-ai": "catalog:",
@@ -49,7 +49,7 @@
     },
     "packages/ai": {
       "name": "@pk-nerdsaver-ai/pi-ai",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "dependencies": {
         "@bufbuild/protobuf": "catalog:",
         "@pk-nerdsaver-ai/pi-catalog": "catalog:",
@@ -65,7 +65,7 @@
     },
     "packages/catalog": {
       "name": "@pk-nerdsaver-ai/pi-catalog",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "dependencies": {
         "@bufbuild/protobuf": "catalog:",
         "@pk-nerdsaver-ai/pi-utils": "catalog:",
@@ -79,7 +79,7 @@
     },
     "packages/clips-extension": {
       "name": "@pk-nerdsaver-ai/clips-extension",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "dependencies": {
         "@pk-nerdsaver-ai/pi-ai": "workspace:*",
         "@pk-nerdsaver-ai/pi-coding-agent": "workspace:*",
@@ -94,7 +94,7 @@
     },
     "packages/coding-agent": {
       "name": "@pk-nerdsaver-ai/pi-coding-agent",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "bin": {
         "oh-my-pk": "src/cli.ts",
         "ompk": "src/cli.ts",
@@ -197,7 +197,7 @@
     },
     "packages/deep-research": {
       "name": "@pk-nerdsaver-ai/pi-deep-research",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "dependencies": {
         "@pk-nerdsaver-ai/pi-ai": "catalog:",
         "@pk-nerdsaver-ai/pi-catalog": "catalog:",
@@ -209,7 +209,7 @@
     },
     "packages/desktop-tag": {
       "name": "@pk-nerdsaver-ai/pi-desktop-tag",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "bin": {
         "ompk-tag": "src/cli.ts",
       },
@@ -226,7 +226,7 @@
     },
     "packages/hashline": {
       "name": "@pk-nerdsaver-ai/hashline",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "dependencies": {
         "diff": "catalog:",
         "lru-cache": "catalog:",
@@ -247,7 +247,7 @@
     },
     "packages/mnemopi": {
       "name": "@pk-nerdsaver-ai/pi-mnemopi",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "bin": {
         "mnemopi": "src/cli.ts",
       },
@@ -273,7 +273,7 @@
     },
     "packages/natives": {
       "name": "@pk-nerdsaver-ai/pi-natives",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "devDependencies": {
         "@napi-rs/cli": "catalog:",
         "@types/bun": "catalog:",
@@ -290,7 +290,7 @@
     },
     "packages/remote-workspace": {
       "name": "@pk-nerdsaver-ai/pi-remote-workspace",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "bin": {
         "ompk-remote": "./src/cli.ts",
       },
@@ -315,7 +315,7 @@
     },
     "packages/snapcompact": {
       "name": "@pk-nerdsaver-ai/snapcompact",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "dependencies": {
         "@pk-nerdsaver-ai/pi-ai": "catalog:",
         "@pk-nerdsaver-ai/pi-natives": "catalog:",
@@ -328,7 +328,7 @@
     },
     "packages/stats": {
       "name": "@pk-nerdsaver-ai/omp-stats",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "bin": {
         "omp-stats": "./src/index.ts",
       },
@@ -354,7 +354,7 @@
     },
     "packages/swarm-extension": {
       "name": "@pk-nerdsaver-ai/swarm-extension",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "bin": {
         "omp-swarm": "src/cli.ts",
       },
@@ -380,7 +380,7 @@
     },
     "packages/tui": {
       "name": "@pk-nerdsaver-ai/pi-tui",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "dependencies": {
         "@pk-nerdsaver-ai/pi-natives": "catalog:",
         "@pk-nerdsaver-ai/pi-utils": "catalog:",
@@ -421,7 +421,7 @@
     },
     "packages/utils": {
       "name": "@pk-nerdsaver-ai/pi-utils",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "dependencies": {
         "@pk-nerdsaver-ai/pi-natives": "catalog:",
         "handlebars": "catalog:",
@@ -434,7 +434,7 @@
     },
     "packages/verifier-extension": {
       "name": "@pk-nerdsaver-ai/verifier-extension",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "dependencies": {
         "@pk-nerdsaver-ai/pi-ai": "workspace:*",
         "@pk-nerdsaver-ai/pi-coding-agent": "workspace:*",
@@ -449,7 +449,7 @@
     },
     "packages/wire": {
       "name": "@pk-nerdsaver-ai/pi-wire",
-      "version": "16.4.14",
+      "version": "16.4.15",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
@@ -493,19 +493,19 @@
     "@opentelemetry/resources": "^2.7.1",
     "@opentelemetry/sdk-trace-base": "^2.7.1",
     "@opentelemetry/sdk-trace-node": "^2.7.1",
-    "@pk-nerdsaver-ai/hashline": "16.4.14",
-    "@pk-nerdsaver-ai/omp-stats": "16.4.14",
-    "@pk-nerdsaver-ai/pi-agent-core": "16.4.14",
-    "@pk-nerdsaver-ai/pi-ai": "16.4.14",
-    "@pk-nerdsaver-ai/pi-catalog": "16.4.14",
-    "@pk-nerdsaver-ai/pi-coding-agent": "16.4.14",
-    "@pk-nerdsaver-ai/pi-deep-research": "16.4.14",
-    "@pk-nerdsaver-ai/pi-mnemopi": "16.4.14",
-    "@pk-nerdsaver-ai/pi-natives": "16.4.14",
-    "@pk-nerdsaver-ai/pi-tui": "16.4.14",
-    "@pk-nerdsaver-ai/pi-utils": "16.4.14",
-    "@pk-nerdsaver-ai/pi-wire": "16.4.14",
-    "@pk-nerdsaver-ai/snapcompact": "16.4.14",
+    "@pk-nerdsaver-ai/hashline": "16.4.15",
+    "@pk-nerdsaver-ai/omp-stats": "16.4.15",
+    "@pk-nerdsaver-ai/pi-agent-core": "16.4.15",
+    "@pk-nerdsaver-ai/pi-ai": "16.4.15",
+    "@pk-nerdsaver-ai/pi-catalog": "16.4.15",
+    "@pk-nerdsaver-ai/pi-coding-agent": "16.4.15",
+    "@pk-nerdsaver-ai/pi-deep-research": "16.4.15",
+    "@pk-nerdsaver-ai/pi-mnemopi": "16.4.15",
+    "@pk-nerdsaver-ai/pi-natives": "16.4.15",
+    "@pk-nerdsaver-ai/pi-tui": "16.4.15",
+    "@pk-nerdsaver-ai/pi-utils": "16.4.15",
+    "@pk-nerdsaver-ai/pi-wire": "16.4.15",
+    "@pk-nerdsaver-ai/snapcompact": "16.4.15",
     "@puppeteer/browsers": "^3.0.4",
     "@tailwindcss/node": "^4.3.0",
     "@tailwindcss/vite": "^4.3.0",

@@ -4,7 +4,7 @@ exclude = ["crates/brush-core-vendored", "crates/brush-builtins-vendored", "crat
 resolver = "3"
 
 [workspace.package]
-version = "16.4.14"
+version = "16.4.15"
 edition = "2024"
 license = "MIT"
 authors = ["Can Boluk"]

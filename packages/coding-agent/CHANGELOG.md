@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.15] - 2026-09-06
+
 ### Fixed
 
 - Preserved the tested third-party dependency lock during release version bumps instead of upgrading unrelated packages, and updated model-selector and SDK regression coverage for the current registry and distinct `max` tier.
