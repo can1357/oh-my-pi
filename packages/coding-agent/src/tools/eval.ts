@@ -470,7 +470,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			cells[0].timeoutMs === 0
 				? undefined
 				: clampTimeout("eval", cells[0].timeoutMs / 1000, session.settings.get("tools.maxTimeout")) * 1000;
-		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs);
+		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs, "runtime");
 		const startBackgrounded = autoBackgroundWaitMs === 0;
 
 		const rawLabel = params.title?.trim() || params.code.trim().split("\n", 1)[0] || "eval cell";

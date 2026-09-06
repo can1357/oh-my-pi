@@ -9,8 +9,7 @@
 
 import * as fs from "node:fs";
 import * as os from "node:os";
-import * as path from "node:path";
-import { $which, getSafeProjectCwd, logger } from "@oh-my-pi/pi-utils";
+import { $which, getSafeProjectCwd, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { credentialString, type DestinationRuntimeConfig, optionString } from "./uploader-runtime";
 
 /** User-selectable exposure strategy. */
@@ -222,7 +221,7 @@ function killTunnelProcess(proc: Bun.Subprocess): void {
 /**
  * Spawn a tunnel process with its output redirected to a temp log file and
  * poll the file until `extract` yields the public URL. Kills the child and
- * throws on exit or timeout.
+ * throws on exit, timeout, or abort.
  *
  * Deliberately avoids piped stdio: a piped subprocess with an active reader
  * spuriously settles `proc.exited` after `unref()` (observed on Bun 1.3.14,
@@ -230,58 +229,152 @@ function killTunnelProcess(proc: Bun.Subprocess): void {
  * eventually block — or SIGPIPE-kill — the Go tunnel binaries. A file sink
  * has neither failure mode, so `exited` remains a trustworthy death signal.
  */
+interface SpawnUrlTunnelOptions {
+	/** Hold a scanned URL until this marker also appears in the log. */
+	readyPattern?: RegExp;
+	/**
+	 * Accept a URL published by a child that already exited. Only supervised
+	 * callers can recover a dead tunnel (their supervisor respawns it);
+	 * unsupervised adapters must reject immediately so the broker falls back
+	 * instead of health-probing a dead tunnel.
+	 */
+	recoverPostExitUrl?: boolean;
+	/** Abort readiness and terminate the spawned tunnel process. */
+	signal?: AbortSignal;
+}
+
+type SpawnedUrlTunnelLifecycle = "running" | "exited-after-ready";
+
+interface SpawnedUrlTunnel {
+	proc: Bun.Subprocess;
+	baseUrl: string;
+	lifecycle: SpawnedUrlTunnelLifecycle;
+}
+
 async function spawnUrlTunnel(
 	argv: string[],
 	extract: (line: string) => string | null,
-	readyPattern?: RegExp,
-): Promise<{ proc: Bun.Subprocess; baseUrl: string }> {
-	const logPath = path.join(os.tmpdir(), `omp-blob-tunnel-${Date.now().toString(36)}-${process.pid}.log`);
+	options: SpawnUrlTunnelOptions = {},
+): Promise<SpawnedUrlTunnel> {
+	const { readyPattern, recoverPostExitUrl = false, signal } = options;
+	// A private mkdtemp directory per spawn: a name derived from time and pid
+	// collides when several tunnels start in the same process concurrently.
+	const logDir = await TempDir.create("@omp-blob-tunnel-");
+	const logPath = logDir.join("tunnel.log");
+	const removeLogBestEffort = async (): Promise<void> => {
+		try {
+			await logDir.remove();
+		} catch (error) {
+			logger.warn("blob-broker: failed to remove temporary tunnel log", { path: logDir.path(), error });
+		}
+	};
 	const fd = fs.openSync(logPath, "w");
 	let proc: Bun.Subprocess;
 	try {
-		proc = Bun.spawn(argv, { env: process.env, stdin: "ignore", stdout: fd, stderr: fd, cwd: getSafeProjectCwd() });
-	} finally {
-		fs.closeSync(fd);
+		try {
+			proc = Bun.spawn(argv, {
+				env: process.env,
+				stdin: "ignore",
+				stdout: fd,
+				stderr: fd,
+				cwd: getSafeProjectCwd(),
+			});
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch (error) {
+		await removeLogBestEffort();
+		throw error;
 	}
+	let logCleaned: Promise<void> | undefined;
+	const cleanupLogAfterExit = (): Promise<void> => {
+		logCleaned ??= proc.exited.then(() => removeLogBestEffort());
+		return logCleaned;
+	};
+	let lifecycleHandedOff = false;
+
+	const aborted = Promise.withResolvers<void>();
+	const abort = (): void => {
+		killTunnelProcess(proc);
+		aborted.resolve();
+	};
+	signal?.addEventListener("abort", abort, { once: true });
+	if (signal?.aborted) abort();
 
 	const deadline = Date.now() + READY_TIMEOUT_MS;
 	let scanned = 0;
 	let baseUrl: string | undefined;
-	while (Date.now() < deadline) {
-		// Capture exit before reading: a process observed dead here cannot write
-		// after the read below, so that read sees its final output. Checking exit
-		// after the read races a fast tunnel that prints its URL and then exits.
-		const exitCode = proc.exitCode;
-		let text = "";
-		try {
-			text = await Bun.file(logPath).text();
-		} catch {
-			// Log file not flushed yet; keep polling.
-		}
-		if (text.length > scanned) {
-			if (baseUrl === undefined) {
-				for (const line of text.slice(scanned).split("\n")) {
-					const url = extract(line);
-					if (url) {
-						baseUrl = normalizeBaseUrl(url);
-						break;
-					}
+	const scanLog = (text: string): string | undefined => {
+		if (text.length > scanned && baseUrl === undefined) {
+			for (const line of text.slice(scanned).split("\n")) {
+				const url = extract(line);
+				if (url) {
+					baseUrl = normalizeBaseUrl(url);
+					break;
 				}
-				scanned = text.lastIndexOf("\n") + 1;
 			}
-			// The URL banner can precede edge registration (cloudflared prints the
-			// hostname before any connection is live); wait for the ready marker.
-			if (baseUrl !== undefined && (!readyPattern || readyPattern.test(text))) {
-				return { proc, baseUrl };
+			scanned = text.lastIndexOf("\n") + 1;
+		}
+		// The URL banner can precede edge registration (cloudflared prints the
+		// hostname before any connection is live); wait for the ready marker.
+		return baseUrl !== undefined && (!readyPattern || readyPattern.test(text)) ? baseUrl : undefined;
+	};
+
+	try {
+		while (Date.now() < deadline) {
+			if (signal?.aborted) {
+				await proc.exited;
+				signal.throwIfAborted();
 			}
+			// Capture exit before reading so a process already dead here cannot
+			// race its final log write against the readiness scan.
+			const exitCode = proc.exitCode;
+			let text = "";
+			try {
+				text = await Bun.file(logPath).text();
+			} catch {
+				// Log file not flushed yet; keep polling.
+			}
+			let readyUrl = scanLog(text);
+			if (exitCode !== null || proc.exitCode !== null) {
+				// exitCode may become visible after the poll's read but before the
+				// child descriptor is fully drained. Read once more after exit so a
+				// valid URL is not mistaken for a missing banner.
+				await proc.exited;
+				signal?.throwIfAborted();
+				try {
+					text = await Bun.file(logPath).text();
+				} catch {
+					// The diagnostic below remains authoritative when no log exists.
+				}
+				readyUrl = scanLog(text);
+				if (recoverPostExitUrl && readyUrl) {
+					lifecycleHandedOff = true;
+					void cleanupLogAfterExit();
+					return {
+						proc,
+						baseUrl: readyUrl,
+						lifecycle: "exited-after-ready",
+					};
+				}
+				const exitTiming = readyUrl ? "after reporting a tunnel URL" : "before reporting a tunnel URL";
+				throw new Error(`${argv[0]} exited with code ${proc.exitCode} ${exitTiming}`);
+			}
+			if (readyUrl) {
+				lifecycleHandedOff = true;
+				void cleanupLogAfterExit();
+				return { proc, baseUrl: readyUrl, lifecycle: "running" };
+			}
+			await (signal ? Promise.race([Bun.sleep(150), aborted.promise]) : Bun.sleep(150));
 		}
-		if (exitCode !== null) {
-			throw new Error(`${argv[0]} exited with code ${exitCode} before reporting a tunnel URL`);
+		throw new Error(`${argv[0]} did not report a tunnel URL within ${READY_TIMEOUT_MS / 1000}s`);
+	} finally {
+		signal?.removeEventListener("abort", abort);
+		if (!lifecycleHandedOff) {
+			if (proc.exitCode === null) killTunnelProcess(proc);
+			await cleanupLogAfterExit();
 		}
-		await Bun.sleep(150);
 	}
-	killTunnelProcess(proc);
-	throw new Error(`${argv[0]} did not report a tunnel URL within ${READY_TIMEOUT_MS / 1000}s`);
 }
 
 function processExposure(kind: ExposureKind, baseUrl: string, proc: Bun.Subprocess): ActiveExposure {
@@ -294,43 +387,95 @@ function processExposure(kind: ExposureKind, baseUrl: string, proc: Bun.Subproce
 	};
 }
 
+/** A supervised tunnel exiting sooner than this after (re)spawn counts as a quick exit. */
+const PINGGY_QUICK_EXIT_WINDOW_MS = 5_000;
+const PINGGY_RESTART_BACKOFF_MS = 250;
+const PINGGY_RESTART_BACKOFF_MAX_MS = 5_000;
+/** Consecutive quick exits before supervision gives up instead of respawning. */
+const PINGGY_MAX_CONSECUTIVE_QUICK_EXITS = 5;
+
 /**
  * Keep an authenticated Pinggy tunnel behind its configured stable hostname.
  * Random-hostname modes deliberately return their child exit to the broker:
  * restarting those would silently invalidate every already-published URL.
  */
-function restartingPinggyExposure(baseUrl: string, argv: string[], initialProc: Bun.Subprocess): ActiveExposure {
-	let proc = initialProc;
+async function restartingPinggyExposure(
+	baseUrl: string,
+	argv: string[],
+	initial: SpawnedUrlTunnel,
+): Promise<ActiveExposure> {
+	let { proc } = initial;
 	let stopping = false;
+	const startup = Promise.withResolvers<void>();
+	if (initial.lifecycle === "running" && proc.exitCode === null) startup.resolve();
+	let restartController: AbortController | undefined;
 	proc.unref();
 	const exited = (async () => {
+		let spawnedAt = Date.now();
+		let quickExits = 0;
 		while (true) {
 			await proc.exited;
 			if (stopping) return;
+			// A persistently failing tunnel (for example rejected auth) can print
+			// its URL and exit immediately, which would otherwise hot-loop this
+			// supervisor: back off between respawns and give up after repeated
+			// quick exits. A run that survives the window earns a fresh budget.
+			if (Date.now() - spawnedAt < PINGGY_QUICK_EXIT_WINDOW_MS) {
+				quickExits += 1;
+				if (quickExits >= PINGGY_MAX_CONSECUTIVE_QUICK_EXITS) {
+					const message = "blob-broker: authenticated Pinggy tunnel keeps exiting right after startup; giving up";
+					logger.warn(message);
+					startup.reject(new Error(message));
+					return;
+				}
+				const backoff = Math.min(PINGGY_RESTART_BACKOFF_MS << (quickExits - 1), PINGGY_RESTART_BACKOFF_MAX_MS);
+				await Bun.sleep(backoff);
+				if (stopping) return;
+			} else {
+				quickExits = 0;
+			}
+			const controller = new AbortController();
+			restartController = controller;
 			try {
-				const restarted = await spawnUrlTunnel(argv, parsePinggyUrl);
+				const restarted = await spawnUrlTunnel(argv, parsePinggyUrl, {
+					recoverPostExitUrl: true,
+					signal: controller.signal,
+				});
 				if (stopping) {
 					killTunnelProcess(restarted.proc);
 					await restarted.proc.exited;
 					return;
 				}
+				// Measure the quick-exit window from readiness, matching the initial
+				// child: including the spawnUrlTunnel() wait would misclassify a
+				// slow-to-publish child that dies right after publishing as long-lived.
+				spawnedAt = Date.now();
 				proc = restarted.proc;
 				proc.unref();
-			} catch {
-				logger.warn("blob-broker: authenticated Pinggy tunnel failed to reconnect");
+				if (restarted.lifecycle === "running" && proc.exitCode === null) startup.resolve();
+			} catch (error) {
+				if (!stopping) {
+					logger.warn("blob-broker: authenticated Pinggy tunnel failed to reconnect");
+					startup.reject(error);
+				}
 				return;
+			} finally {
+				if (restartController === controller) restartController = undefined;
 			}
 		}
 	})();
-	return {
+	const exposure: ActiveExposure = {
 		kind: "pinggy",
 		baseUrl,
 		exited,
 		stop: () => {
 			stopping = true;
+			restartController?.abort();
 			killTunnelProcess(proc);
 		},
 	};
+	await startup.promise;
+	return exposure;
 }
 
 /**
@@ -348,7 +493,7 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 			const { proc, baseUrl } = await spawnUrlTunnel(
 				[binary, "tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${port}`],
 				parseCloudflaredUrl,
-				/Registered tunnel connection/,
+				{ readyPattern: /Registered tunnel connection/ },
 			);
 			return processExposure("cloudflared", baseUrl, proc);
 		}
@@ -425,11 +570,14 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 						`0:127.0.0.1:${port}`,
 						"free.pinggy.io",
 					];
-			const { proc, baseUrl } = await spawnUrlTunnel(argv, parsePinggyUrl);
+			const supervised = Boolean(token && config.publicBaseUrl);
+			const spawned = await spawnUrlTunnel(argv, parsePinggyUrl, {
+				recoverPostExitUrl: supervised,
+			});
 			if (token && config.publicBaseUrl) {
-				return restartingPinggyExposure(normalizeBaseUrl(config.publicBaseUrl), argv, proc);
+				return restartingPinggyExposure(normalizeBaseUrl(config.publicBaseUrl), argv, spawned);
 			}
-			return processExposure("pinggy", baseUrl, proc);
+			return processExposure("pinggy", spawned.baseUrl, spawned.proc);
 		}
 		case "devtunnel": {
 			const binary = requireBinary("devtunnel");
@@ -477,11 +625,9 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 				argv = [binary, "tunnel", "--no-autoupdate", "--config", configFile, "run", tunnelName];
 			}
 			const baseUrl = normalizeBaseUrl(config.publicBaseUrl);
-			const { proc } = await spawnUrlTunnel(
-				argv,
-				() => baseUrl,
-				/Registered tunnel connection|Connection [a-z0-9-]+ registered/i,
-			);
+			const { proc } = await spawnUrlTunnel(argv, () => baseUrl, {
+				readyPattern: /Registered tunnel connection|Connection [a-z0-9-]+ registered/i,
+			});
 			return processExposure("named-cloudflared", baseUrl, proc);
 		}
 		case "ssh": {
