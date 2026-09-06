@@ -100,6 +100,58 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 		expect(payload.reasoning).toBeUndefined();
 	});
 
+	it("sends reasoning_effort none for Azure Astra only when function tools are present", async () => {
+		const model = buildModel({
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			api: "openai-completions",
+			provider: "azure",
+			baseUrl: "https://resource.openai.azure.com/openai/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 128_000,
+		});
+		const { promise, resolve } = Promise.withResolvers<Record<string, unknown>>();
+		streamOpenAICompletions(
+			model,
+			{
+				messages: testContext.messages,
+				tools: [
+					{
+						name: "read",
+						description: "Read a file",
+						parameters: { type: "object", properties: {} },
+					},
+				],
+			},
+			{
+				apiKey: "test-key",
+				fetch: createMockFetchForQwen(resolve),
+				reasoning: "high",
+			},
+		);
+
+		const payload = await promise;
+		expect(payload.tools).toHaveLength(1);
+		expect(payload.reasoning_effort).toBe("none");
+
+		const { promise: noToolsPromise, resolve: resolveNoTools } = Promise.withResolvers<Record<string, unknown>>();
+		streamOpenAICompletions(model, testContext, {
+			apiKey: "test-key",
+			fetch: createMockFetchForQwen(resolveNoTools),
+			reasoning: "high",
+		});
+
+		const noToolsPayload = await noToolsPromise;
+		expect(noToolsPayload.tools).toBeUndefined();
+		expect(noToolsPayload.reasoning_effort).toBe("high");
+
+		const disabledPayload = await captureDisableReasoningPayload(model);
+		expect(disabledPayload.reasoning_effort).toBe("none");
+	});
+
 	// Additional requested tests for applyChatCompletionsReasoningParams dialect / behavior verification
 	it("sets OpenRouter thinking disabled when disableReasoning: true", async () => {
 		const model = buildModel({
@@ -280,7 +332,7 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 	});
 });
 
-function createMockFetchForQwen(resolve: (value: unknown) => void): FetchImpl {
+function createMockFetchForQwen(resolve: (value: Record<string, unknown>) => void): FetchImpl {
 	const fetchMock: FetchImpl = Object.assign(
 		async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 			const payload = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;

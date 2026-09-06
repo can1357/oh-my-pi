@@ -7335,6 +7335,22 @@
 				}
 			},
 			{
+				"source": "providers/azure.kdl:21",
+				"providers": [
+					"azure"
+				],
+				"models": [
+					{
+						"kind": "glob",
+						"value": "gpt-6-astra*"
+					}
+				],
+				"wire": {
+					"disableReasoningWithTools": true,
+					"reasoningDisableMode": "none-effort"
+				}
+			},
+			{
 				"source": "providers/baseten.kdl:7",
 				"providers": [
 					"baseten"
