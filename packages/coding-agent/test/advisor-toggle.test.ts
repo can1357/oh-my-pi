@@ -971,7 +971,9 @@ describe("AgentSession advisor toggle", () => {
 		}
 	});
 	it("marks structurally classified advisor usage limits", async () => {
-		const mock = createMockModel({ responses: [{ content: ["primary complete"] }] });
+		const mock = createMockModel({
+			responses: [{ content: ["primary complete"] }, { content: ["primary still complete"] }],
+		});
 		const primaryAgent = new Agent({
 			initialState: {
 				model,
@@ -1022,6 +1024,28 @@ describe("AgentSession advisor toggle", () => {
 			// failed batch stays requeued (the quota latch makes yielded true).
 			await advisorYielded.promise;
 			unsubscribe();
+
+			const adviseTool = advisorAgent.state.tools.find(tool => tool.name === "advise");
+			if (!(adviseTool instanceof advisorModule.AdviseTool)) throw new Error("Expected advisor advise tool");
+			adviseTool.beginUpdate(true);
+			const deferred = await adviseTool.execute("deferred-before-quota", {
+				note: "The final result still needs a regression test.",
+				severity: "nit",
+			});
+			expect(JSON.stringify(deferred.content)).toContain("Deferred");
+
+			// The quota latch prevents another advisor dispatch. Primary turn
+			// completion must still release the note into its delivery queue.
+			await quotaSession.prompt("Complete another primary turn");
+			await quotaSession.waitForIdle();
+			expect(
+				quotaSession.messages.some(
+					message =>
+						message.role === "custom" &&
+						typeof message.content === "string" &&
+						message.content.includes("The final result still needs a regression test."),
+				),
+			).toBe(true);
 		} finally {
 			await quotaSession.dispose();
 			vi.restoreAllMocks();

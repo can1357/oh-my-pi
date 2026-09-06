@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Advisor notes now report rate limiting accurately and deferred notes flush when the primary turn completes, including after advisor quota exhaustion ([#11062](https://github.com/can1357/oh-my-pi/issues/11062)).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
