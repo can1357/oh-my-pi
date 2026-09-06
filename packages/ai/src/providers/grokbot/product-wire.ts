@@ -151,7 +151,7 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 			: toSandField2Name(name);
 	const schema = toolParametersToJson(tool);
 	// Cursor/Gemini Write often uses `contents` instead of omp `content`.
-	// Advertise both so gemini-3-flash keep-model can emit a Write call.
+	// Advertise both so product Write calls populate omp `content`.
 	if ((name === "write" || wireName === "Write") && schema.properties && typeof schema.properties === "object") {
 		const props = schema.properties as Record<string, unknown>;
 		if (props.content && !props.contents) {

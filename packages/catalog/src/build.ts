@@ -83,6 +83,10 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	) {
 		model.sandToolsWire = sandToolsWire;
 	}
+	const sandWireModelId = catalog.sandWireModelId;
+	if (typeof sandWireModelId === "string" && sandWireModelId.trim() && model.sandWireModelId === undefined) {
+		model.sandWireModelId = sandWireModelId.trim();
+	}
 }
 
 /**

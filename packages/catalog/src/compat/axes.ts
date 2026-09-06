@@ -314,6 +314,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		values: SAND_TOOLS_WIRES,
 	},
 	/**
+	 * Reviewed Grok Bot requestedModel rewrite. Discovery/seeds keep the listed
+	 * AvailableModels id; the stream sends this bare wire id (same pattern as
+	 * Auto → sand-default). Used when a listed slug is a broken peer of a
+	 * working live id (`gemini-3-flash` → `gemini-3.8-flash`).
+	 */
+	"sand-wire-model-id": { key: "sandWireModelId", set: "catalog", shape: "scalar" },
+	/**
 	 * Reviewed reasoning capability. Applied as a correction so synthetic
 	 * discovery/seed rows can stay neutral (`reasoning: false`) while KDL
 	 * upgrades specific routers (e.g. sand-default) without id compares in TS.

@@ -8917,7 +8917,7 @@
 					}
 				],
 				"catalog": {
-					"sandToolsWire": "keep-model"
+					"sandWireModelId": "gemini-3.8-flash"
 				}
 			},
 			{

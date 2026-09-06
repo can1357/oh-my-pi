@@ -231,6 +231,29 @@ describe("grokbot proto", () => {
 });
 
 describe("grokbot requested model mapping", () => {
+	test("sand-wire-model-id rewrite is a bare requestedModel (gemini-3-flash → 3.8-flash)", () => {
+		const rewritten = resolveGrokbotRequestedModel("gemini-3-flash", {
+			effort: "low",
+			sandParameterIds: ["effort", "fast"],
+			sandVariantStringRepresentation: true,
+			canonicalModelId: "gemini-3-flash",
+			sandWireModelId: "gemini-3.8-flash",
+		});
+		expect(rewritten).toEqual({ modelId: "gemini-3.8-flash" });
+		const variant = resolveGrokbotRequestedModel("gemini-3-flash[]", {
+			effort: "low",
+			sandParameterIds: ["effort"],
+			sandVariantStringRepresentation: true,
+			canonicalModelId: "gemini-3-flash",
+			sandWireModelId: "gemini-3.8-flash",
+		});
+		expect(variant).toEqual({ modelId: "gemini-3.8-flash" });
+		expect(resolveGrokbotRequestedModel("gemini-3.8-flash", { sandParameterIds: ["effort"], effort: "low" })).toEqual({
+			modelId: "gemini-3.8-flash",
+			parameters: [{ id: "effort", value: "low" }],
+		});
+	});
+
 	test("sand-default stays bare with no maxMode or parameters", () => {
 		const sand = resolveGrokbotRequestedModel("sand-default");
 		expect(sand).toEqual({ modelId: "sand-default" });
@@ -1461,6 +1484,69 @@ describe("grokbot request headers", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(result.upstreamModel).toBe("claude-4.6-sonnet");
 		expect(result.responseId).toBe("resp-1");
+	});
+
+	test("gemini-3-flash catalog rewrite sends bare gemini-3.8-flash on the wire", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } }));
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () =>
+			new Response(Buffer.concat([text, trailer]), {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			})) as FetchImpl;
+
+		for (const spec of [
+			{ id: "gemini-3-flash" },
+			{
+				id: "gemini-3-flash[]",
+				requestModelId: "gemini-3-flash",
+				sandVariantStringRepresentation: true,
+				sandParameterIds: ["effort"] as const,
+			},
+		]) {
+			const gemini = buildModel({
+				id: spec.id,
+				name: spec.id,
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 100_000,
+				maxTokens: 8_000,
+				...(spec.requestModelId ? { requestModelId: spec.requestModelId } : {}),
+				...(spec.sandVariantStringRepresentation ? { sandVariantStringRepresentation: true } : {}),
+				...(spec.sandParameterIds ? { sandParameterIds: [...spec.sandParameterIds] } : {}),
+			});
+			expect(gemini.id).toBe(spec.id);
+			expect(gemini.sandWireModelId).toBe("gemini-3.8-flash");
+			expect(gemini.sandToolsWire).toBeUndefined();
+
+			let requested: unknown;
+			await streamGrokBot(
+				gemini as Model<"grokbot-sand">,
+				{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+				{
+					apiKey: "renew",
+					fetch: fetchImpl,
+					effort: "low",
+					onPayload: body => {
+						requested = (body as { requestedModel?: unknown }).requestedModel;
+						return body;
+					},
+				},
+			).result();
+			expect(requested).toEqual({ modelId: "gemini-3.8-flash" });
+		}
 	});
 
 	test("replaces reserved headers case-insensitively so Authorization is not comma-joined", async () => {

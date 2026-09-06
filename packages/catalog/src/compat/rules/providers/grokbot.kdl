@@ -30,11 +30,11 @@ provider "grokbot" {
 	models "default" "default[]" "auto" "auto[]" {
 		sand-tools-wire "parent-chat"
 	}
-	// gemini-3-flash native field-2 tools complete with an empty body. Product
-	// keep-model (Shell/Read/Write + jsonSchema, original requestedModel) is
-	// the same shape Anthropic uses; the stream also promotes ```tool_code.
+	// Live AvailableModels still lists gemini-3-flash / gemini-3-flash[], but
+	// that slug empty-bodies on tools. The working peer is gemini-3.8-flash
+	// (and its effort variants). Rewrite requestedModel to a bare 3.8-flash.
 	models "gemini-3-flash" "gemini-3-flash[]" {
-		sand-tools-wire "keep-model"
+		sand-wire-model-id "gemini-3.8-flash"
 	}
 	models "sand-default" "sand-cua" "sand-automation" "default" "default[]" "auto" "auto[]" {
 		context-window-floor 200000

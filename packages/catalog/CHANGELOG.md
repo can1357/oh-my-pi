@@ -6,7 +6,7 @@
 
 - Grok Bot `sand-cua` now has catalog `sand-tools-wire=parent-chat` so router tools use the product field-2 wire.
 - Grok Bot Auto routers (`default`, `default[]`, `auto`) now use catalog `sand-tools-wire=parent-chat` so tools stay off the grok-4.5 native 422 path.
-- Grok Bot `gemini-3-flash` / `gemini-3-flash[]` now use catalog `sand-tools-wire=keep-model` so native empty-body tool turns get product Shell/Read/Write.
+- Grok Bot `gemini-3-flash` / `gemini-3-flash[]` now rewrite `requestedModel` to bare `gemini-3.8-flash` (`sand-wire-model-id`) so tools use the working peer while AvailableModels still lists the old slug.
 
 ### Fixed
 - Fixed Grok Bot file-backed model caches to scope by the real renewer instead of the shared `<authenticated>` sentinel.

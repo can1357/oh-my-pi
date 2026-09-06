@@ -54,6 +54,12 @@ export type GrokbotRequestedModelOptions = {
 	canonicalModelId?: string;
 	/** When true, set `isVariantStringRepresentation` on the sand requestedModel wire. */
 	sandVariantStringRepresentation?: boolean;
+	/**
+	 * Catalog `sand-wire-model-id` rewrite. When set, the request is a bare
+	 * `{ modelId }` (no thinking/effort/variant flags) — same shape as Auto →
+	 * sand-default.
+	 */
+	sandWireModelId?: string;
 };
 
 /**
@@ -93,6 +99,10 @@ export function resolveGrokbotRequestedModel(
 ): GrokbotRequestedModel {
 	const raw = typeof modelId === "string" ? modelId : "sand-default";
 	const slug = raw.startsWith("grokbot/") ? raw.slice("grokbot/".length) : raw;
+	const rewrite = options?.sandWireModelId?.trim();
+	if (rewrite) {
+		return { modelId: rewrite };
+	}
 	const wireId = options?.canonicalModelId?.trim() || slug;
 
 	// Bare-wire routing is a catalog fact: empty/absent `sandParameterIds` means

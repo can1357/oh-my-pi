@@ -1134,6 +1134,11 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	sandToolsWire?: "parent-chat" | "automation" | "keep-model" | "error" | "sand-default-fallback";
 	/**
+	 * Reviewed Grok Bot `requestedModel.modelId` rewrite (KDL `sand-wire-model-id`).
+	 * Catalog id stays the AvailableModels slug; the stream sends this bare id.
+	 */
+	sandWireModelId?: string;
+	/**
 	 * Default Grok Bot `requestedModel.parameters` values from live AvailableModels
 	 * variants (e.g. default `context` tier). Wire mapping prefers explicit request
 	 * options, then these defaults, then reviewed fallbacks.
