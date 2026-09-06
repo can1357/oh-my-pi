@@ -82,12 +82,7 @@ interface PreservedPreloadScript {
 	sequence: number;
 }
 
-function markPreloadApplication(source: unknown, marker: string): string {
-	if (typeof source !== "string") throw new Error("preload source must be a string");
-	// `this` cannot be shadowed by top-level lexical bindings. Avoid every global
-	// identifier here: even `Object` can be in the TDZ when the client preload
-	// declares `const Object`, which would prevent the preload body from running.
-	const markerStatement = `this[${JSON.stringify(marker)}] = true;`;
+function preloadDirectiveEnd(source: string): number {
 	let offset = 0;
 	try {
 		const parsed = parseBabel(source, {
@@ -96,20 +91,35 @@ function markPreloadApplication(source: unknown, marker: string): string {
 			allowReturnOutsideFunction: true,
 		});
 		// Babel separates actual directive statements from the body, so a string
-		// expression continued on the next line (for example via `.method()`) is
-		// never mistaken for a directive merely because it starts with a literal.
+		// expression continued on the next line is never mistaken for a directive.
 		offset = parsed.program.body[0]?.start ?? source.length;
 	} catch {
 		// Chrome remains authoritative for syntax Babel does not recognize. Keep
-		// the marker after prefixes that are only legal at the beginning instead
-		// of rejecting an otherwise valid preload in the relay.
+		// recovery guards after prefixes that are only legal at the beginning.
 		offset = source.startsWith("\uFEFF") ? 1 : 0;
 		if (source.startsWith("#!", offset)) {
 			const newline = source.indexOf("\n", offset);
 			offset = newline === -1 ? source.length : newline + 1;
 		}
 	}
+	return offset;
+}
+
+function markPreloadApplication(source: unknown, marker: string): string {
+	if (typeof source !== "string") throw new Error("preload source must be a string");
+	// `this` cannot be shadowed by top-level lexical bindings. Avoid every global
+	// identifier here: even `Object` can be in the TDZ when the client preload
+	// declares `const Object`, which would prevent the preload body from running.
+	const markerStatement = `this[${JSON.stringify(marker)}] = true;`;
+	const offset = preloadDirectiveEnd(source);
 	return `${source.slice(0, offset)}${markerStatement}\n${source.slice(offset)}`;
+}
+
+function suppressMarkedPreloadApplication(source: unknown, marker: string): string {
+	if (typeof source !== "string") throw new Error("preload source must be a string");
+	const offset = preloadDirectiveEnd(source);
+	const markerAccess = `this[${JSON.stringify(marker)}]`;
+	return `${source.slice(0, offset)}if (${markerAccess} === true) { delete ${markerAccess}; } else {\n${source.slice(offset)}\n}`;
 }
 
 function subscriptionKey(method: string): string {
@@ -3236,6 +3246,7 @@ export class RelayBridge {
 						method: "Page.addScriptToEvaluateOnNewDocument",
 						params: {
 							...originalParams,
+							source: suppressMarkedPreloadApplication(originalParams.source, applicationMarker),
 							runImmediately: navigationNeedsInvocation && !appliedToCurrentDocument,
 						},
 					})) as Record<string, unknown> | undefined;

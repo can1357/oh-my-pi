@@ -3290,14 +3290,14 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
-	it("removes the recovery marker from the lasting preload registration", async () => {
+	it("runs a preload once when navigation lands during registration handoff", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
-		const source = "window.__relayInjected = true;";
+		const source = "this.__preloadRuns = (this.__preloadRuns ?? 0) + 1;";
 
 		bridge.cdpMessage(
 			connId,
@@ -3322,6 +3322,7 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		const marked = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		ack(bridge, ext2, "send", { identifier: "root-script-with-marker" });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
@@ -3329,13 +3330,24 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { result: { value: true } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		const lasting = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
-		expect(lasting?.params).toMatchObject({ source, runImmediately: false });
-		expect((lasting?.params as { source?: string } | undefined)?.source).not.toContain("__ompRelayPreload");
+		expect(lasting?.params).toMatchObject({ runImmediately: false });
+		const markedSource = (marked?.params as { source?: string } | undefined)?.source;
+		const lastingSource = (lasting?.params as { source?: string } | undefined)?.source;
+		const overlapDocument: Record<string, unknown> = {};
+		vm.runInNewContext(markedSource!, overlapDocument);
+		vm.runInNewContext(lastingSource!, overlapDocument);
+		expect(overlapDocument.__preloadRuns).toBe(1);
+		expect(Object.keys(overlapDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 		ack(bridge, ext2, "send", { identifier: "root-script-clean" });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		ack(bridge, ext2, "send", { result: { value: false } });
+		const laterDocument: Record<string, unknown> = {};
+		laterDocument.window = laterDocument;
+		vm.runInNewContext(lastingSource!, laterDocument);
+		expect(laterDocument.__preloadRuns).toBe(1);
+		expect(Object.keys(laterDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 	});
 
 	it.each(["remove", "retry"] as const)(
@@ -3544,10 +3556,12 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { result: { value: false } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		const cleanReplay = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
-		expect(cleanReplay?.params).toMatchObject({
-			source: "window.__relayInjected = true;",
-			runImmediately: false,
-		});
+		expect(cleanReplay?.params).toMatchObject({ runImmediately: false });
+		const cleanSource = (cleanReplay?.params as { source?: string } | undefined)?.source;
+		const laterDocument: Record<string, unknown> = {};
+		laterDocument.window = laterDocument;
+		vm.runInNewContext(cleanSource!, laterDocument);
+		expect(laterDocument.__relayInjected).toBe(true);
 		ack(bridge, ext2, "send", { identifier: "root-script-clean" });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
@@ -3700,10 +3714,12 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { result: { value: false } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		const cleanReplay = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
-		expect(cleanReplay?.params).toMatchObject({
-			source: "window.__relayInjected = true;",
-			runImmediately: false,
-		});
+		expect(cleanReplay?.params).toMatchObject({ runImmediately: false });
+		const cleanSource = (cleanReplay?.params as { source?: string } | undefined)?.source;
+		const laterDocument: Record<string, unknown> = {};
+		laterDocument.window = laterDocument;
+		vm.runInNewContext(cleanSource!, laterDocument);
+		expect(laterDocument.__relayInjected).toBe(true);
 		ack(bridge, ext2, "send", { identifier: "root-script-clean" });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
