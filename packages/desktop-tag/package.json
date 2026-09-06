@@ -1,6 +1,6 @@
 {
 	"name": "@pk-nerdsaver-ai/pi-desktop-tag",
-	"version": "16.4.13",
+	"version": "16.4.14",
 	"description": "Oh My Pi extension: trigger and manage agents from the desktop using screenshots, selected text, and screen regions",
 	"type": "module",
 	"main": "src/index.ts",

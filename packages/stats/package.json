@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@pk-nerdsaver-ai/omp-stats",
-	"version": "16.4.13",
+	"version": "16.4.14",
 	"description": "Local observability dashboard for pi AI usage statistics",
 	"homepage": "https://github.com/kingkillery/oh-my-pk",
 	"author": "Can Boluk",

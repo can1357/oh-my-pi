@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.14] - 2026-09-06
+
 ### Added
 
 - Added distinct `max` reasoning and capability-driven Astra reasoning mappings for OpenAI and Codex requests, including local OpenAI-compatible gateways.

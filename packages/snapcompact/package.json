@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@pk-nerdsaver-ai/snapcompact",
-	"version": "16.4.13",
+	"version": "16.4.14",
 	"description": "Bitmap-frame context compression for vision-capable LLMs",
 	"homepage": "https://github.com/kingkillery/oh-my-pk",
 	"author": "Can Boluk",

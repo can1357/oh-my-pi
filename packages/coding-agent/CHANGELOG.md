@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.14] - 2026-09-06
+
 ### Added
 
 - Added Ultra mode for proactive task delegation and a separate `max` reasoning selection for Astra, with CLI, settings, model selector, and custom-model configuration support.
