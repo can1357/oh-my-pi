@@ -353,7 +353,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 	}
 
 	#isBareDefaultDoc(doc: WatchdogConfigDoc): boolean {
-		if (doc.advisors.length !== 1 || doc.instructions?.trim()) return false;
+		if (doc.advisors.length !== 1 || doc.instructions?.trim() || doc.maxNotesPerUpdate !== undefined) return false;
 		const advisor = doc.advisors[0];
 		if (!advisor) return false;
 		return (
@@ -361,7 +361,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 			!advisor.model?.trim() &&
 			advisor.tools === undefined &&
 			!advisor.instructions?.trim() &&
-			advisor.enabled !== false
+			advisor.enabled !== false &&
+			advisor.maxNotesPerUpdate === undefined
 		);
 	}
 

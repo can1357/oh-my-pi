@@ -33,6 +33,8 @@ import { getThemeByName, setThemeInstance } from "../../src/modes/theme/theme";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
 import { formatSessionHistoryMarkdown } from "../../src/session/session-history-format";
 import { YieldQueue } from "../../src/session/yield-queue";
+import { prompt } from "@oh-my-pi/pi-utils";
+import advisorSystemPrompt from "../../src/prompts/advisor/system.md" with { type: "text" };
 
 /** Poll until the drain loop reaches the asserted state — waitForCatchup
  *  releases IMMEDIATELY on advisor failure (the primary must never park on a
@@ -810,12 +812,11 @@ describe("advisor", () => {
 			expect(delivered).toEqual(concerns);
 		});
 
-		it("caps a single in-progress prompt spraying distinct notes to one deferred note", async () => {
-			// A single in-progress advisor prompt that emits several distinct notes
-			// spends the update's one budget slot on the first; the rest are dropped
-			// at emission, so the flush cannot deliver an unbounded batch (#3520).
+		it("reports over-budget deferred notes and blockers as rate limited", async () => {
+			// Preserve the one-note cap from #3520, but never claim a dropped note
+			// was deferred or duplicated: the advisor must know to retry it.
 			const delivered: string[] = [];
-			const guard = new AdvisorEmissionGuard();
+			const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
 			const tool = new AdviseTool(
 				note => delivered.push(note),
 				note => guard.accept(note),
@@ -826,11 +827,55 @@ describe("advisor", () => {
 			};
 
 			beginUpdate(true);
-			await tool.execute("x-0", { note: "First mid-turn concern.", severity: "concern" });
-			await tool.execute("x-1", { note: "Second mid-turn concern.", severity: "concern" });
-			await tool.execute("x-2", { note: "Third mid-turn concern.", severity: "concern" });
+			const accepted = await tool.execute("x-0", { note: "First mid-turn concern.", severity: "concern" });
+			const concern = await tool.execute("x-1", { note: "Second mid-turn concern.", severity: "concern" });
+			const blocker = await tool.execute("x-2", {
+				note: "A destructive migration will drop user data.",
+				severity: "blocker",
+			});
+
+			expect(JSON.stringify(accepted.content)).toContain("Deferred");
+			expect(JSON.stringify(concern.content)).toContain("Rate limited");
+			expect(JSON.stringify(blocker.content)).toContain("Rate limited");
+			expect(JSON.stringify(blocker.content)).not.toContain("Duplicate");
+
 			beginUpdate(false);
 			expect(delivered).toEqual(["First mid-turn concern."]);
+		});
+
+		it("reserves and flushes multiple deferred notes up to a configured budgetPerUpdate", async () => {
+			const delivered: string[] = [];
+			const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 3 });
+			const tool = new AdviseTool(
+				note => delivered.push(note),
+				(note, severity) => guard.accept(note, severity),
+			);
+			const beginUpdate = (inProgress: boolean) => {
+				tool.beginUpdate(inProgress);
+				guard.beginUpdate();
+			};
+
+			beginUpdate(true);
+			const note0 = await tool.execute("c-0", { note: "First concern: missing await.", severity: "concern" });
+			const note1 = await tool.execute("c-1", { note: "Second concern: unhandled rejection.", severity: "concern" });
+			const note2 = await tool.execute("c-2", { note: "Third nit: unused import.", severity: "nit" });
+			const note3 = await tool.execute("c-3", { note: "Fourth concern: memory leak.", severity: "concern" });
+
+			expect(JSON.stringify(note0.content)).toContain("Deferred");
+			expect(JSON.stringify(note1.content)).toContain("Deferred");
+			expect(JSON.stringify(note2.content)).toContain("Deferred");
+			expect(JSON.stringify(note3.content)).toContain("Rate limited");
+
+			// Nothing delivered yet while mid-turn
+			expect(delivered).toEqual([]);
+
+			// Primary completes turn: all 3 reserved notes flush in arrival order
+			beginUpdate(false);
+			expect(delivered).toEqual([
+				"First concern: missing await.",
+				"Second concern: unhandled rejection.",
+				"Third nit: unused import.",
+			]);
 		});
 
 		it("does not let a suppressed phrase burn the deferred slot ahead of a real concern", async () => {
@@ -859,10 +904,10 @@ describe("advisor", () => {
 			expect(delivered).toEqual(["The migration drops the users table without a backup."]);
 		});
 
-		it("still caps a single model turn spraying many distinct notes to one accepted note", async () => {
-			// Live path: notes emitted in one completed-turn update stay capped at one.
+		it("still caps a single model turn spraying many distinct notes when configured with budgetPerUpdate 1", async () => {
+			// Live path: notes emitted in one completed-turn update stay capped at one when budget is 1.
 			const delivered: string[] = [];
-			const guard = new AdvisorEmissionGuard();
+			const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 1 });
 			const tool = new AdviseTool(
 				note => delivered.push(note),
 				note => guard.accept(note),
@@ -877,6 +922,35 @@ describe("advisor", () => {
 			await tool.execute("s-1", { note: "Second distinct live concern.", severity: "concern" });
 			await tool.execute("s-2", { note: "Third distinct live concern.", severity: "concern" });
 			expect(delivered).toEqual(["First distinct live concern."]);
+		});
+
+		it("accepts up to the default budget of 4 distinct live notes per completed update", async () => {
+			const delivered: string[] = [];
+			const guard = new AdvisorEmissionGuard();
+			const tool = new AdviseTool(
+				note => delivered.push(note),
+				note => guard.accept(note),
+			);
+			const beginUpdate = (inProgress: boolean) => {
+				tool.beginUpdate(inProgress);
+				guard.beginUpdate();
+			};
+
+			beginUpdate(false);
+			await tool.execute("s-0", { note: "Note 0", severity: "concern" });
+			await tool.execute("s-1", { note: "Note 1", severity: "concern" });
+			await tool.execute("s-2", { note: "Note 2", severity: "concern" });
+			await tool.execute("s-3", { note: "Note 3", severity: "concern" });
+			await tool.execute("s-4", { note: "Note 4", severity: "concern" });
+			expect(delivered).toEqual(["Note 0", "Note 1", "Note 2", "Note 3"]);
+		});
+
+		it("renders max_notes_per_update into the advisor system prompt", () => {
+			const renderedDefault = prompt.render(advisorSystemPrompt, { max_notes_per_update: 4 });
+			expect(renderedDefault).toContain("max 4 non-blockers/update (`blocker` exempt)");
+
+			const renderedStrict = prompt.render(advisorSystemPrompt, { max_notes_per_update: 1 });
+			expect(renderedStrict).toContain("max 1 non-blockers/update (`blocker` exempt)");
 		});
 
 		it("delivers a blocker escalation of a reserved note live instead of dropping it as already seen", async () => {
@@ -911,6 +985,41 @@ describe("advisor", () => {
 			// The consumed reservation is not re-delivered as a stale concern at flush.
 			beginUpdate(false);
 			expect(delivered).toEqual([{ note: escalatedNote, severity: "blocker" }]);
+		});
+
+		it("delivers a distinct blocker live after a non-blocker consumed the update budget", async () => {
+			// #11062 follow-up: a nit emitted first in an in-progress update reserves
+			// the one deferred slot. A distinct blocker that follows must still
+			// interrupt now instead of being rejected as rate-limited and dropped;
+			// the reserved nit stays queued and flushes when the turn completes.
+			const delivered: { note: string; severity?: string }[] = [];
+			const guard = new AdvisorEmissionGuard();
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				(note, severity) => guard.accept(note, severity),
+			);
+			const beginUpdate = (inProgress: boolean) => {
+				tool.beginUpdate(inProgress);
+				guard.beginUpdate();
+			};
+
+			beginUpdate(true);
+			const nit = await tool.execute("b-0", { note: "Minor naming nit.", severity: "nit" });
+			const blocker = await tool.execute("b-1", {
+				note: "Destructive migration will drop user data.",
+				severity: "blocker",
+			});
+
+			expect(JSON.stringify(nit.content)).toContain("Deferred");
+			expect(JSON.stringify(blocker.content)).toContain("Recorded.");
+			expect(delivered).toEqual([{ note: "Destructive migration will drop user data.", severity: "blocker" }]);
+
+			// The reserved nit still flushes at the completed boundary, after the blocker.
+			beginUpdate(false);
+			expect(delivered).toEqual([
+				{ note: "Destructive migration will drop user data.", severity: "blocker" },
+				{ note: "Minor naming nit.", severity: "nit" },
+			]);
 		});
 
 		it("validates parameters using ArkType", () => {
@@ -6238,6 +6347,34 @@ describe("advisor", () => {
 			expect(text).toContain("○ Disabled");
 			// The preview of the highlighted (first) advisor shows its enabled status.
 			expect(text).toContain("● on");
+		});
+
+		it("preserves top-level maxNotesPerUpdate without stripping to an empty roster on save", async () => {
+			let savedDoc: WatchdogConfigDoc | undefined;
+			const overlay = new AdvisorConfigOverlayComponent(
+				{} as unknown as TUI,
+				{ ...deps },
+				"project",
+				{ maxNotesPerUpdate: 3, advisors: [] },
+				{
+					...callbacks,
+					save: async (_scope, doc) => {
+						savedDoc = doc;
+					},
+				},
+			);
+			overlay.render(200);
+			// Arrow down 4 times to "Save & apply" (advisor:0, add, shared, scope, save)
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\x1b[B");
+			overlay.handleInput("\r");
+			await Promise.resolve();
+			expect(savedDoc).toBeDefined();
+			expect(savedDoc?.maxNotesPerUpdate).toBe(3);
+			expect(savedDoc?.advisors).toHaveLength(1);
+			expect(savedDoc?.advisors[0]?.name).toBe("default");
 		});
 	});
 });
