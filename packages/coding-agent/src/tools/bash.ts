@@ -20,6 +20,7 @@ import {
 	resolveAutoBackgroundWaitMs,
 } from "../async";
 import { ProgressLines } from "../async/progress-lines";
+import { PROGRESS_LIMITS } from "../async/progress-limits";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -77,8 +78,7 @@ const DEFAULT_ASYNC_AUTO_INLINE_GRACE_MS = 1_000;
  * healthy mirror flush or throttle settles far sooner, so anything slower
  * is a stalled delivery that must not hold the foreground turn.
  */
-// TODO(restack): replace with PROGRESS_LIMITS.BATCH_INTERVAL_MS * 5 from ../async/progress-limits
-const PROMOTION_DRAIN_TIMEOUT_MS = 1_000;
+const PROMOTION_DRAIN_TIMEOUT_MS = PROGRESS_LIMITS.BATCH_INTERVAL_MS * 5;
 const AUTO_AT_CAPACITY_NOTICE =
 	"Background job limit reached; ran inline to completion instead of promoting to a background job.";
 const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
