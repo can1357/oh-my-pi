@@ -27,6 +27,14 @@ function content(message: { content: unknown } | null): string {
 	return message.content;
 }
 
+// Routing markers, not prose: the label frame that opens each surface's
+// chatty clause plus the Hub-only retune parameter literal. Copy edits to the
+// guidance sentences never fail these tests; a Hub clause leaking into a Bash
+// reminder (or vice versa) does.
+const BASH_CHATTY_MARKER = "\nBash:";
+const HUB_CHATTY_MARKER = "\nHub:";
+const HUB_RETUNE_MARKER = 'op: "monitor"';
+
 describe("async progress messages", () => {
 	test("preserves every permitted event while batching updates by job", () => {
 		const longEvent = "x".repeat(500);
@@ -88,9 +96,9 @@ describe("async progress messages", () => {
 			'<output>\n<suppressed reason="rate-limit" events="9" full-output="artifact://chatty-output" />\n</output>',
 		);
 		expect(xml).toContain("<system-reminder>");
-		expect(xml).toContain("Chatty progress → lower source verbosity");
-		expect(xml).toContain("Bash: progress cannot be retuned");
-		expect(xml).not.toContain("Hub: retune");
+		expect(xml).toContain(BASH_CHATTY_MARKER);
+		expect(xml).not.toContain(HUB_CHATTY_MARKER);
+		expect(xml).not.toContain(HUB_RETUNE_MARKER);
 		expect(xml).toEndWith("</system-reminder>");
 	});
 
@@ -108,8 +116,9 @@ describe("async progress messages", () => {
 		const xml = content(message);
 
 		expect(xml).toContain("<system-reminder>");
-		expect(xml).toContain("Hub: retune the monitor to `ambient` or `off`");
-		expect(xml).not.toContain("Bash: progress cannot be retuned");
+		expect(xml).toContain(HUB_CHATTY_MARKER);
+		expect(xml).toContain(HUB_RETUNE_MARKER);
+		expect(xml).not.toContain(BASH_CHATTY_MARKER);
 	});
 
 	test("does not emit an empty chatty reminder for unsupported progress sources", () => {

@@ -1,10 +1,17 @@
 <async-progress>
-{{#if bash}}Finite commands → `{{toolRefs.bash}}` with `async: "auto"`, `progress: "wake"` (quick stays inline). NEVER use `async: true` unless the user explicitly requests immediate background.{{/if}}
-{{#if hub}}Actionable process output → `{{toolRefs.hub}}`, `progress: "wake"` (`op: "start"` new; `op: "monitor"` existing).{{/if}}
-{{#if bash}}{{#if hub}}Verbose producer? Capture full logs unmonitored; filter one async Bash monitor.{{/if}}{{/if}}
-{{#if bash}}Existing condition? One sleeping async `until` loop; NEVER repeat tool polls.{{/if}}
-Progress uses 200 ms batches and a 10-event burst, then regains one rate-limit permit every 2 seconds. Suppressed inline events remain in the full artifact.
+{{#if bash}}
+Finite commands: SHOULD use `{{toolRefs.bash}}` with `async: "auto"`, `progress: "wake"` — quick returns inline, slow promotes to a background job. Known long-running? `async: true` MAY background immediately.
+{{/if}}
+{{#if hub}}
+Process output that may need action: `{{toolRefs.hub}}` with `progress: "wake"` (`op: "start"` new; `op: "monitor"` existing). `wait` with `name` + `pattern`/`for`/`timeout` MAY block for readiness or exit.
+{{/if}}
+{{#ifAll bash hub}}
+Verbose producer? Capture full logs unmonitored; filter one async Bash monitor.
+{{/ifAll}}
+{{#if bash}}
+Waiting on a condition? One sleeping async `until` loop; AVOID repeated tool polls.
+{{/if}}
+Progress: 200 ms batches, 10-event burst, then 1 permit/2 s; suppressed events stay in the full artifact. Truncated batches show bounded `<head>`/`<tail>` and link `artifact://<id>`.
 {{chattyGuidance}}
-Truncated progress shows bounded `<head>`/`<tail>` previews and links its complete capture as `artifact://<id>`.
-{{#if hub}}NEVER call `hub wait`, follow logs, or block to receive progress or keep the turn alive; use async progress and end the turn instead.{{/if}}
+Progress is pushed while you are idle. NEVER hold the turn open to receive it — no polling{{#if hub}} (`logs`, `ps`, short `wait` loops){{/if}}, no tailing files; end the turn.
 </async-progress>
