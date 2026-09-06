@@ -61,7 +61,7 @@ async function start(mode: "notes" | "window" | "off", offline = false) {
 		sessionManager: manager,
 		model: stale,
 		settings: Settings.isolated({
-			"providers.openai-codex.historyNotes": mode === "notes" ? "on" : "off",
+			"providers.openai-codex.historyNotes": mode === "off" ? "off" : "on",
 			"compaction.methodOrder": mode === "window" ? ["window", "remote"] : ["remote"],
 			"compaction.asyncEnabled": false,
 			"todo.enabled": false,

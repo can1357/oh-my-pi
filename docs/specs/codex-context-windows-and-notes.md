@@ -155,7 +155,7 @@ Decision: **split by concern, one new key on each tab.**
 ```
 
 - `auto` = catalog `token_budget.use_history_notes_extension` (currently `false` everywhere; mirrors codex-rs `apply_model_defaults`).
-- Independent of `window`: notes are useful with ordinary compaction too (the catalog guidance says "for tasks that may span context windows"), and `window` without notes is still a valid (harsh) mode. When both are on, the reminder/fallback prompts reference the tools that actually exist.
+- Notes can be used independently with ordinary compaction, including `remote`. With compaction enabled, `compaction.methodOrder` containing `window` requires `providers.openai-codex.historyNotes: "on"`. Startup and runtime settings changes reject other values with a settings-validation error naming both keys and the required correction; the invalid combination never silently falls through to another method.
 - Resolved once at session start and frozen for the session (codex-rs freezes both activation flags per thread). A model switch mid-session re-evaluates availability, not the setting.
 
 Docs: `docs/settings.md` rows for both; `docs/provider-quirks.md` OpenAI Codex section gets a "Context windows and notes" subsection carrying §1.
@@ -221,8 +221,9 @@ contextWindows?: {
 |---|---|---|
 | no | off | today's behaviour |
 | no | on | tools + thread hint + guidance injected; compaction unchanged. Model can keep notes across snapcompact/remote compactions. |
-| yes | off | meter/reminder/fallback + `new_context`; model must survive on its own (harsh; allowed) |
-| yes | on | the codex-rs Astra configuration |
+| yes (compaction enabled) | off or auto | settings-validation error: enable notes with `on` or remove `window` |
+| yes (compaction enabled) | on | the codex-rs Astra configuration |
+| yes (compaction disabled) | off, on, or auto | no window tools, protocol, or reset; notes activation remains independent |
 
 Off-Codex model selected mid-session: both features go dormant (tools unregistered, no injections); window ids kept for when the session returns to Codex.
 

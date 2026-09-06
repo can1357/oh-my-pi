@@ -89,6 +89,32 @@ describe("Settings", () => {
 		await tempDir?.remove();
 	});
 
+	describe("Codex window settings validation", () => {
+		it("rejects persisted window mode without checkpoint notes at startup", async () => {
+			await writeSettings({ compaction: { methodOrder: ["window", "remote"] } });
+			await expect(Settings.loadIsolated({ cwd: projectDir, agentDir })).rejects.toThrow(
+				/compaction\.methodOrder.*providers\.openai-codex\.historyNotes/,
+			);
+		});
+
+		it("rejects invalid runtime changes without retaining the rejected value", () => {
+			const settings = Settings.isolated();
+			expect(() => settings.set("compaction.methodOrder", ["window"])).toThrow(
+				/providers\.openai-codex\.historyNotes/,
+			);
+			settings.set("providers.openai-codex.historyNotes", "on");
+			settings.set("compaction.methodOrder", ["window"]);
+			expect(() => settings.override("providers.openai-codex.historyNotes", "off")).toThrow(
+				/compaction\.methodOrder/,
+			);
+			expect(settings.get("providers.openai-codex.historyNotes")).toBe("on");
+			settings.override("compaction.enabled", false);
+			settings.override("providers.openai-codex.historyNotes", "off");
+			expect(() => settings.clearOverride("compaction.enabled")).toThrow(/compaction\.methodOrder/);
+			expect(settings.get("compaction.enabled")).toBe(false);
+		});
+	});
+
 	describe("main config file selection", () => {
 		it("loads and updates an existing config.yaml without creating config.yml", async () => {
 			const yamlConfigPath = path.join(agentDir, "config.yaml");

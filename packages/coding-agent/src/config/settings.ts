@@ -660,6 +660,7 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		this.#validateWindowSettingChange(path, value, "global");
 		const prev = this.get(path);
 		const segments = path.split(".");
 		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
@@ -682,6 +683,7 @@ export class Settings {
 	 * Apply runtime overrides (not persisted).
 	 */
 	override<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		this.#validateWindowSettingChange(path, value, "override");
 		if (path === "modelRoles") {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
@@ -696,6 +698,7 @@ export class Settings {
 	 * Clear a runtime override.
 	 */
 	clearOverride(path: SettingPath): void {
+		this.#validateWindowSettingChange(path, undefined, "clear");
 		if (path === "modelRoles") {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
@@ -2955,10 +2958,50 @@ export class Settings {
 		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
 	}
 
+	#validateWindowSettings(raw: RawSettings): void {
+		const enabled = getByPath(raw, ["compaction", "enabled"]) ?? getDefault("compaction.enabled");
+		const methods = getByPath(raw, ["compaction", "methodOrder"]) ?? getDefault("compaction.methodOrder");
+		const notes = getByPath(raw, ["providers", "openai-codex", "historyNotes"]);
+		if (enabled && Array.isArray(methods) && methods.includes("window") && notes !== "on") {
+			throw new Error(
+				'Invalid settings: compaction.methodOrder containing "window" requires providers.openai-codex.historyNotes: "on". Enable notes or remove "window" from compaction.methodOrder.',
+			);
+		}
+	}
+
+	#validateWindowSettingChange(path: SettingPath, value: unknown, mode: "global" | "override" | "clear"): void {
+		if (
+			path !== "compaction.enabled" &&
+			path !== "compaction.methodOrder" &&
+			path !== "providers.openai-codex.historyNotes"
+		)
+			return;
+		const segments = SETTING_PATH_SEGMENTS[path];
+		const effective =
+			mode === "override"
+				? value
+				: mode === "clear"
+					? (getByPath(this.#configOverlay, segments) ??
+						getByPath(this.#project, segments) ??
+						getByPath(this.#global, segments))
+					: (getByPath(this.#overrides, segments) ??
+						getByPath(this.#configOverlay, segments) ??
+						getByPath(this.#project, segments) ??
+						value);
+		const candidate: RawSettings = {
+			compaction: { enabled: this.get("compaction.enabled"), methodOrder: this.get("compaction.methodOrder") },
+			providers: { "openai-codex": { historyNotes: this.get("providers.openai-codex.historyNotes") } },
+		};
+		setByPath(candidate, segments, effective);
+		this.#validateWindowSettings(candidate);
+	}
+
 	#rebuildMerged(): void {
-		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
-		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
-		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
+		let merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
+		merged = this.#deepMerge(merged, this.#configOverlay);
+		merged = this.#deepMerge(merged, this.#overrides);
+		this.#validateWindowSettings(merged);
+		this.#merged = merged;
 		this.#resolvedCache.clear();
 		this.#editVariantCache = undefined;
 	}

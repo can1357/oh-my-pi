@@ -111,7 +111,7 @@ providers:
     historyNotes: on
 ```
 
-The options are independent. `window` enables the remaining-token meter, catalog reminders, and model-driven window reset. `historyNotes` enables private history and notes tools plus the server's thread hint; it defaults to `off`, while `auto` follows the catalog's notes flag. Notes can be used with ordinary compaction. A window reset is also allowed with notes off, but then the model has no checkpoint tools to preserve its work. Both activation options are captured at session creation; start a new session after changing them.
+`window` enables the remaining-token meter, catalog reminders, and model-driven window reset. `historyNotes` enables private history and notes tools plus the server's thread hint; it defaults to `off`, while `auto` follows the catalog's notes flag. Notes can be used with ordinary compaction, including `remote`. With compaction enabled, `compaction.methodOrder` containing `window` requires `providers.openai-codex.historyNotes: "on"`; startup and runtime settings changes reject any other value. Enable notes before adding `window`, or remove `window` before disabling notes. Both activation options are captured at session creation; start a new session after changing them.
 
 To use checkpoint-and-reset instead of summarization, also put `window` first in `compaction.methodOrder`. Window resets require the model catalog's context-window policy. Requested checkpoint features make at most one optional discovery attempt per shared model registry when that metadata is missing. Main-session startup can await the attempt; subagent creation uses available metadata without waiting for the network. Refresh failures do not prevent startup, and omp never substitutes its own guidance text.
 
