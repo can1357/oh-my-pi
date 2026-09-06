@@ -75,7 +75,7 @@ export interface LimitsMeta {
 	matchLimit?: { reached: number; suggestion: number };
 	resultLimit?: { reached: number; suggestion: number };
 	headLimit?: { reached: number; suggestion: number };
-	columnTruncated?: { maxColumn: number };
+	columnTruncated?: { maxColumn: number; artifactId?: string };
 }
 
 /**
@@ -236,7 +236,7 @@ export class OutputMetaBuilder {
 		// notice rather than a "Showing lines X-Y … limit" range. This runs even
 		// when the output is otherwise complete (`truncated === false`).
 		if (summary.columnMax != null && summary.columnMax > 0 && (summary.columnTruncatedLines ?? 0) > 0) {
-			this.columnTruncated(summary.columnMax);
+			this.columnTruncated(summary.columnMax, summary.artifactId);
 		}
 		if (!summary.truncated) return this;
 
@@ -381,10 +381,16 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add column truncation notice. No-op if maxColumn <= 0. */
-	columnTruncated(maxColumn: number): this {
+	/**
+	 * Add column truncation notice. No-op if maxColumn <= 0.
+	 *
+	 * When `artifactId` is supplied the sink mirrored the raw, uncapped stream
+	 * into that artifact; the rendered notice then advertises it as a recovery
+	 * pointer (see {@link formatOutputNotice}), matching the tail-truncation notice.
+	 */
+	columnTruncated(maxColumn: number, artifactId?: string): this {
 		if (maxColumn <= 0) return this;
-		this.#meta.limits = { ...this.#meta.limits, columnTruncated: { maxColumn } };
+		this.#meta.limits = { ...this.#meta.limits, columnTruncated: { maxColumn, artifactId } };
 		return this;
 	}
 
@@ -577,7 +583,12 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 		parts.push(`${l.reached} results limit reached. Use limit=${l.suggestion} for more`);
 	}
 	if (meta.limits?.columnTruncated) {
-		parts.push(`Some lines truncated to ${meta.limits.columnTruncated.maxColumn} chars`);
+		const c = meta.limits.columnTruncated;
+		let columnNotice = `Some lines truncated to ${c.maxColumn} chars`;
+		if (c.artifactId != null) {
+			columnNotice += `. ${formatFullOutputReference(c.artifactId)}`;
+		}
+		parts.push(columnNotice);
 	}
 
 	// Diagnostics
