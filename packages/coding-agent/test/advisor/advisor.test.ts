@@ -712,33 +712,35 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenNthCalledWith(3, note, "blocker");
 		});
 
-		it("defers non-blockers per update and flushes the backlog on the next completed update", async () => {
+		it("defers only nits per update; concerns and blockers route immediately", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 			const note = "The result still needs a focused regression test.";
 
 			tool.beginUpdate(true);
-			const deferred = await tool.execute("tc-1", { note, severity: "concern" });
+			const recorded = await tool.execute("tc-1", { note, severity: "concern" });
 			await tool.execute("tc-2", { note: "A destructive command is running.", severity: "blocker" });
 
-			// Deferred notes are NOT delivered mid-turn; blocker still goes through.
-			expect(onAdvice).toHaveBeenCalledTimes(1);
-			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker");
-			// The tool tells the advisor the note is deferred, not silently "Recorded.".
+			// Concerns and blockers are NOT withheld mid-turn; both route at once.
+			expect(onAdvice).toHaveBeenCalledTimes(2);
+			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "concern");
+			expect(onAdvice).toHaveBeenNthCalledWith(2, "A destructive command is running.", "blocker");
+			// The live path tells the advisor the note reached the primary.
+			expect(JSON.stringify(recorded.content)).toContain("Recorded.");
+
+			// A nit in a later in-progress update is withheld instead.
+			tool.beginUpdate(true);
+			const deferred = await tool.execute("tc-3", { note: "Minor naming cleanup.", severity: "nit" });
+			expect(onAdvice).toHaveBeenCalledTimes(2);
 			expect(JSON.stringify(deferred.content)).toContain("Deferred");
 
-			// A second distinct concern in a later in-progress update queues its own slot.
-			tool.beginUpdate(true);
-			await tool.execute("tc-3", { note: "Minor naming cleanup.", severity: "nit" });
-
-			// Completing the turn deterministically flushes both withheld notes,
-			// oldest first — no reliance on the advisor model re-raising them.
+			// Completing the turn deterministically flushes the withheld nit — no
+			// reliance on the advisor model re-raising it.
 			tool.beginUpdate(false);
 			expect(onAdvice).toHaveBeenCalledTimes(3);
-			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "concern");
 			expect(onAdvice).toHaveBeenNthCalledWith(3, "Minor naming cleanup.", "nit");
 
-			// A later explicit re-raise of the same note is deduped (already delivered).
+			// A later explicit re-raise of the delivered concern is deduped.
 			await tool.execute("tc-4", { note, severity: "concern" });
 			expect(onAdvice).toHaveBeenCalledTimes(3);
 		});
@@ -749,17 +751,17 @@ describe("advisor", () => {
 			const note = "Same point raised repeatedly.";
 
 			tool.beginUpdate(true);
-			await tool.execute("tc-1", { note, severity: "concern" });
-			await tool.execute("tc-2", { note, severity: "concern" });
-			await tool.execute("tc-3", { note, severity: "concern" });
+			await tool.execute("tc-1", { note, severity: "nit" });
+			await tool.execute("tc-2", { note, severity: "nit" });
+			await tool.execute("tc-3", { note, severity: "nit" });
 
 			tool.beginUpdate(false);
-			// Identical note queued once, flushed once.
+			// Identical nit queued once, flushed once.
 			expect(onAdvice).toHaveBeenCalledTimes(1);
-			expect(onAdvice).toHaveBeenCalledWith(note, "concern");
+			expect(onAdvice).toHaveBeenCalledWith(note, "nit");
 		});
 
-		it("retains the highest severity when duplicate deferred advice escalates", async () => {
+		it("a concern that escalates a queued nit routes at once and empties the nit's slot", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 
@@ -767,15 +769,19 @@ describe("advisor", () => {
 			await tool.execute("tc-1", { note: "Same point raised repeatedly.", severity: "nit" });
 			await tool.execute("tc-2", { note: "Same   point raised repeatedly.", severity: "concern" });
 
+			// The concern takes the live path immediately, consuming the nit's reservation.
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith("Same   point raised repeatedly.", "concern");
+
+			// The flush no longer holds the nit: its slot was emptied by the escalation.
 			tool.beginUpdate(false);
 			expect(onAdvice).toHaveBeenCalledTimes(1);
-			expect(onAdvice).toHaveBeenCalledWith("Same point raised repeatedly.", "concern");
 		});
 
-		it("flushes one deferred concern per update past the per-update emission budget on a late catch-up", async () => {
+		it("flushes one deferred nit per update past the per-update emission budget on a late catch-up", async () => {
 			// Regression for #10271 ("The Advisor is Late"): in yolo mode the primary
 			// is continuously mid-turn, so the advisor runs many in-progress updates
-			// (one concern each) and the whole backlog is replayed in a single catch-up
+			// (one nit each) and the whole backlog is replayed in a single catch-up
 			// flush. Each note cleared the emission guard when it was emitted, so the
 			// flush must deliver the full backlog instead of collapsing it to one note.
 			const delivered: string[] = [];
@@ -790,24 +796,32 @@ describe("advisor", () => {
 				tool.beginUpdate(inProgress);
 				guard.beginUpdate();
 			};
-			const concerns = [
+			const nits = [
 				"Bare `location` cannot work outside the page; inspect with `await page.url()`.",
 				"Scope navigation to the visualizer's own `.viz-container`.",
 				'BFS uses `progressType="bar"`, so it has no `.viz-pill` controls.',
 				"Tab switching delegates from a trusted click; a dispatched KeyboardEvent is untrusted.",
 			];
+			const concern = "The migration drops the users table without a backup.";
 
-			// Each concern arrives in its own in-progress advisor update.
-			for (const [i, note] of concerns.entries()) {
+			// Each nit arrives in its own in-progress advisor update.
+			for (const [i, note] of nits.entries()) {
 				beginUpdate(true);
-				await tool.execute(`c-${i}`, { note, severity: "concern" });
+				await tool.execute(`c-${i}`, { note, severity: "nit" });
 			}
 			// All withheld mid-turn — nothing reaches the primary yet.
 			expect(delivered).toEqual([]);
 
-			// Turn completes: the deferred backlog flushes, oldest first, in full.
+			// A concern raised in a later in-progress update routes immediately,
+			// ahead of the still-withheld nit backlog.
+			beginUpdate(true);
+			await tool.execute("c-4", { note: concern, severity: "concern" });
+			expect(delivered).toEqual([concern]);
+
+			// Turn completes: the deferred nit backlog flushes, oldest first, in full,
+			// after the already-delivered concern.
 			beginUpdate(false);
-			expect(delivered).toEqual(concerns);
+			expect(delivered).toEqual([concern, ...nits]);
 		});
 
 		it("caps a single in-progress prompt spraying distinct notes to one deferred note", async () => {
@@ -826,18 +840,18 @@ describe("advisor", () => {
 			};
 
 			beginUpdate(true);
-			await tool.execute("x-0", { note: "First mid-turn concern.", severity: "concern" });
-			await tool.execute("x-1", { note: "Second mid-turn concern.", severity: "concern" });
-			await tool.execute("x-2", { note: "Third mid-turn concern.", severity: "concern" });
+			await tool.execute("x-0", { note: "First mid-turn nit.", severity: "nit" });
+			await tool.execute("x-1", { note: "Second mid-turn nit.", severity: "nit" });
+			await tool.execute("x-2", { note: "Third mid-turn nit.", severity: "nit" });
 			beginUpdate(false);
-			expect(delivered).toEqual(["First mid-turn concern."]);
+			expect(delivered).toEqual(["First mid-turn nit."]);
 		});
 
-		it("does not let a suppressed phrase burn the deferred slot ahead of a real concern", async () => {
-			// P1 review regression: a noise phrase emitted before a substantive concern
+		it("does not let a suppressed phrase burn the deferred slot ahead of a real nit", async () => {
+			// P1 review regression: a noise phrase emitted before a substantive nit
 			// in the same in-progress update must not consume the update's slot. The
 			// emission guard filters it out at emission without spending the budget, so
-			// the following concern is still reserved and flushed.
+			// the following nit is still reserved and flushed.
 			const delivered: string[] = [];
 			const guard = new AdvisorEmissionGuard();
 			const tool = new AdviseTool(
@@ -850,10 +864,10 @@ describe("advisor", () => {
 			};
 
 			beginUpdate(true);
-			await tool.execute("n-0", { note: "Stop.", severity: "concern" });
+			await tool.execute("n-0", { note: "Stop.", severity: "nit" });
 			await tool.execute("n-1", {
 				note: "The migration drops the users table without a backup.",
-				severity: "concern",
+				severity: "nit",
 			});
 			beginUpdate(false);
 			expect(delivered).toEqual(["The migration drops the users table without a backup."]);
@@ -880,11 +894,11 @@ describe("advisor", () => {
 		});
 
 		it("delivers a blocker escalation of a reserved note live instead of dropping it as already seen", async () => {
-			// P1 review regression: a note reserved as a nit/concern during an
-			// in-progress update, then escalated to blocker before the backlog flushes,
-			// even with casing/punctuation changed, must reuse its normalized reservation,
-			// and interrupt at blocker severity now — not be rejected as already-seen
-			// and arrive late at the lower deferred severity.
+			// P1 review regression: a nit reserved during an in-progress update, then
+			// escalated to blocker before the backlog flushes, even with casing or
+			// punctuation changed, must reuse its normalized reservation, and
+			// interrupt at blocker severity now — not be rejected as already-seen and
+			// arrive late at the lower deferred severity.
 			const delivered: { note: string; severity?: string }[] = [];
 			const guard = new AdvisorEmissionGuard();
 			const tool = new AdviseTool(
@@ -899,7 +913,7 @@ describe("advisor", () => {
 			const escalatedNote = "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!";
 
 			beginUpdate(true);
-			await tool.execute("e-0", { note, severity: "concern" });
+			await tool.execute("e-0", { note, severity: "nit" });
 			// Reserved, not delivered.
 			expect(delivered).toEqual([]);
 
@@ -5948,6 +5962,12 @@ describe("advisor", () => {
 	// window (`streaming: false`) a suppressed note must `preserve`, never `steer`,
 	// or it strands and #drainStrandedQueuedMessages auto-resumes it. Do not swap
 	// the call site back to session `isStreaming`.
+	//
+	// Delivery channels: an aside is only routed while the loop is live
+	// (streaming and not aborting) — that is the only window in which the loop
+	// polls getAsideMessages again. Once the loop is idle, a nit (and an
+	// immune-window idle concern) is preserved as a visible card instead of
+	// parking a note nothing will ever drain.
 	describe("resolveAdvisorDeliveryChannel", () => {
 		it("preserves every severity when a headless drain forbids primary turns", () => {
 			for (const severity of [undefined, "nit", "concern", "blocker"] as const) {
@@ -5974,50 +5994,84 @@ describe("advisor", () => {
 					preserveOnly: true,
 				}),
 			).toBe("aside");
-			for (const severity of ["concern", "blocker"] as const) {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: false,
+					preserveOnly: true,
+				}),
+			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: false,
+					preserveOnly: true,
+				}),
+			).toBe("steer");
+		});
+
+		it("routes a nit as an aside only while the loop is live, preserving it otherwise", () => {
+			for (const severity of [undefined, "nit"] as const) {
 				expect(
 					resolveAdvisorDeliveryChannel({
 						severity,
 						autoResumeSuppressed: false,
 						streaming: true,
 						aborting: false,
-						preserveOnly: true,
 					}),
-				).toBe("steer");
+				).toBe("aside");
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: true,
+						streaming: true,
+						aborting: true,
+					}),
+				).toBe("preserve");
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: false,
+						streaming: false,
+						aborting: false,
+					}),
+				).toBe("preserve");
 			}
 		});
 
-		it("routes a non-interrupting nit to the aside queue regardless of state", () => {
+		it("a concern raised against a streaming primary never steers", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
-					severity: "nit",
-					autoResumeSuppressed: true,
-					streaming: true,
-					aborting: true,
-				}),
-			).toBe("aside");
-			expect(
-				resolveAdvisorDeliveryChannel({
-					severity: undefined,
+					severity: "concern",
 					autoResumeSuppressed: false,
-					streaming: false,
+					streaming: true,
 					aborting: false,
 				}),
 			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: false,
+				}),
+			).toBe("steer");
 		});
 
-		it("steers concern/blocker when no user interrupt is in effect", () => {
+		it("an idle mid-work concern or blocker steers a triggered turn", () => {
 			for (const severity of ["concern", "blocker"] as const) {
-				for (const streaming of [true, false]) {
-					expect(
-						resolveAdvisorDeliveryChannel({
-							severity,
-							autoResumeSuppressed: false,
-							streaming,
-							aborting: false,
-						}),
-					).toBe("steer");
-				}
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: false,
+						streaming: false,
+						aborting: false,
+					}),
+				).toBe("steer");
 			}
 		});
 
@@ -6045,7 +6099,7 @@ describe("advisor", () => {
 			).toBe("steer");
 		});
 
-		it("downgrades concern to aside during immune turns, but still steers a blocker (#5628)", () => {
+		it("preserves an idle concern during immune turns, keeps a streaming one on the aside queue, and still steers a blocker (#5628)", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "concern",
@@ -6055,6 +6109,15 @@ describe("advisor", () => {
 					interruptImmuneTurnActive: true,
 				}),
 			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					interruptImmuneTurnActive: true,
+				}),
+			).toBe("preserve");
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "blocker",
@@ -6074,6 +6137,18 @@ describe("advisor", () => {
 				}),
 			).toBe("preserve");
 		});
+
+		it("steers a concern during abort teardown when no user interrupt is in effect", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: true,
+				}),
+			).toBe("steer");
+		});
+
 		it("preserves an interrupting note while suppressed AND idle (no auto-resume of a stopped run)", () => {
 			for (const severity of ["concern", "blocker"] as const) {
 				expect(
@@ -6100,17 +6175,23 @@ describe("advisor", () => {
 			).toBe("preserve");
 		});
 
-		it("steers an interrupting note while suppressed once a turn is streaming again and not aborting (the fix)", () => {
-			for (const severity of ["concern", "blocker"] as const) {
-				expect(
-					resolveAdvisorDeliveryChannel({
-						severity,
-						autoResumeSuppressed: true,
-						streaming: true,
-						aborting: false,
-					}),
-				).toBe("steer");
-			}
+		it("delivers a suppressed note once a turn is streaming again and not aborting instead of stranding it (the fix)", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: true,
+					streaming: true,
+					aborting: false,
+				}),
+			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: true,
+					streaming: true,
+					aborting: false,
+				}),
+			).toBe("steer");
 		});
 	});
 	describe("advisor transcript filenames", () => {

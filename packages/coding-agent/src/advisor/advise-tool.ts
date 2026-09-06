@@ -67,10 +67,11 @@ export function formatAdvisorBatchContent(notes: readonly AdvisorNote[]): string
 }
 
 /**
- * Whether advice at this severity should interrupt the running agent (delivered
- * via the steering channel, aborting in-flight tools) rather than ride the
- * non-interrupting aside queue that lands at the next step boundary. `concern`
- * and `blocker` interrupt; a plain `nit` queues.
+ * Whether a note at this severity may wake or interrupt the primary. A
+ * `blocker` steers even into a streaming turn; a `concern` only wakes an idle
+ * mid-work primary and is subject to the immune-turn window; a plain `nit`
+ * never does. A streaming primary receives concerns and nits as next-step
+ * asides.
  */
 export function isInterruptingSeverity(severity: AdvisorSeverity | undefined): boolean {
 	return severity === "concern" || severity === "blocker";
@@ -93,28 +94,33 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *
  * - A `preserveOnly` caller records every note that arrives while the primary
  *   is idle as a visible card and never starts a new primary turn.
- * - A non-interrupting `nit` always rides the non-interrupting aside queue.
- * - An interrupting `concern`/`blocker` is normally steered into the agent: into
- *   the live turn while one is streaming, or (when idle) a triggered turn so the
- *   advice is acted on immediately.
- * - If the primary tail is already a terminal text answer and there is no queued
- *   work, a late `concern` is preserved as a visible card instead of waking the
- *   primary to restate completion. A `blocker` is the exception: it means the
- *   agent handed off broken or unexercised work, so it still steers a triggered
- *   turn to force the primary to acknowledge and continue before the turn is
- *   considered done (#5628) — deferring it to the next user turn is the bug.
- * - After a deliberate user interrupt (`autoResumeSuppressed`) the advisor must
- *   not auto-resume the stopped run. While the agent is idle — or still tearing
- *   the interrupted turn down (`aborting`) — the note is preserved as a visible
- *   card instead of restarting the run. But once a turn is actively streaming
- *   again (a resume the user already drove), steering the note in does NOT
- *   auto-resume anything, so it is delivered live. Parking it during an active
- *   run instead strands it (it never reaches the running agent) and the withheld
- *   notes dump as one burst at the next user prompt — the bug this guards.
- * - During the post-interrupt immune-turn window, further `concern` notes are
- *   downgraded to asides; preservation still wins. A `blocker` is exempt: it
- *   means the agent handed off broken or unexercised work, so it still steers a
- *   triggered turn even right after a prior interrupt (#5628).
+ * - The aside channel is only used while the primary loop is live — streaming
+ *   and not aborting — because that is the only time the loop polls
+ *   `getAsideMessages` again; a note parked any other time would strand. A
+ *   live loop therefore receives a `nit` or a `concern` as a next-step aside
+ *   and is never interrupted by a concern; only a `blocker` still steers into
+ *   the live turn.
+ * - Once the loop is idle a `nit` is preserved as a visible card. A `concern`
+ *   after a terminal answer with no queued work is preserved instead of waking
+ *   the primary to restate completion; a `concern` after a mid-work yield
+ *   steers a triggered turn so the advice is acted on immediately. A `blocker`
+ *   always steers a triggered turn: it means the agent handed off broken or
+ *   unexercised work, so the primary must acknowledge and continue before the
+ *   turn is considered done (#5628) — deferring it to the next user turn is
+ *   the bug.
+ * - The user-interrupt guard is unchanged: after a deliberate user interrupt
+ *   (`autoResumeSuppressed`) the advisor must not auto-resume the stopped run.
+ *   While the agent is idle — or still tearing the interrupted turn down
+ *   (`aborting`) — the note is preserved as a visible card instead of
+ *   restarting the run. But once a turn is actively streaming again (a resume
+ *   the user already drove), steering the note in does NOT auto-resume
+ *   anything, so it is delivered live. Parking it during an active run instead
+ *   strands it (it never reaches the running agent) and the withheld notes
+ *   dump as one burst at the next user prompt — the bug this guards.
+ * - During the post-interrupt immune-turn window an idle `concern` is
+ *   preserved as a visible card instead of triggering a turn (a streaming one
+ *   still rides the aside queue); a `blocker` remains exempt and still steers
+ *   a triggered turn even right after a prior interrupt (#5628).
  */
 export function resolveAdvisorDeliveryChannel(opts: {
 	severity: AdvisorSeverity | undefined;
@@ -126,11 +132,13 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	preserveOnly?: boolean;
 }): AdvisorDeliveryChannel {
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
-	if (!isInterruptingSeverity(opts.severity)) return "aside";
+	const live = opts.streaming && !opts.aborting;
+	if (!isInterruptingSeverity(opts.severity)) return live ? "aside" : "preserve";
 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
+	if (live && opts.severity !== "blocker") return "aside";
 	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
 		return "preserve";
-	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
+	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "preserve";
 	return "steer";
 }
 
@@ -186,11 +194,11 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *  by retagging the same text at a lower or equal severity. */
 	#deliveredNoteSeverities = new Map<string, number>();
 	#inProgressUpdate = false;
-	/** Notes withheld while the primary was mid-turn, in arrival order. Flushed
-	 *  deterministically on the first `beginUpdate(false)` so delivery does not
-	 *  depend on the advisor model choosing to re-raise (it may not, since the
-	 *  tool previously returned "Recorded." for a note that was never routed).
-	 *  Cleared on `resetDeliveredNotes` alongside the delivered-rank map. */
+	/** Nits withheld while the primary was mid-turn, in arrival order. A concern
+	 *  never enters this queue: it takes the live path and routing delivers it to
+	 *  a streaming primary as a next-step aside. Flushed deterministically on the
+	 *  first `beginUpdate(false)`; cleared on `resetDeliveredNotes` alongside the
+	 *  delivered-rank map. */
 	#deferredNotes: { key: string; note: string; severity?: AdviseDetails["severity"] }[] = [];
 
 	/**
@@ -209,8 +217,8 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 
 	/**
 	 * Mark whether the next advisor prompt reviews an in-progress primary turn.
-	 * Non-blockers are withheld until a completed update so partial work does
-	 * not interrupt the primary before it can finish its planned steps.
+	 * Nits are withheld until a completed update so partial work is not
+	 * nitpicked; concerns and blockers are always routed immediately.
 	 */
 	beginUpdate(inProgress: boolean): void {
 		const wasInProgress = this.#inProgressUpdate;
@@ -240,19 +248,14 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		_onUpdate?: AgentToolUpdateCallback<AdviseDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<AdviseDetails>> {
-		if (this.#inProgressUpdate && args.severity !== "blocker") {
-			// Withheld, not delivered: queue for the deterministic flush on the next
-			// completed update. Skip if an identical note is already pending so a
-			// long mid-turn can't pile up 20 copies of the same advice. Tell the
-			// advisor the truth — the previous "Recorded." made it believe the note
-			// reached the primary, so it never re-raised and the advice was lost.
+		if (this.#inProgressUpdate && advisorSeverityRank(args.severity) === ADVISOR_SEVERITY_RANK.nit) {
+			// Withheld, not delivered: only nits queue here, for the deterministic
+			// flush on the next completed update. Skip if an identical nit is
+			// already pending so a long mid-turn can't pile up 20 copies of the
+			// same advice.
 			const key = advisorNoteDedupeKey(args.note);
 			const pending = this.#deferredNotes.find(item => item.key === key);
-			if (pending) {
-				// Escalating an already-queued note reuses its slot; never a new one.
-				if (advisorSeverityRank(args.severity) > advisorSeverityRank(pending.severity))
-					pending.severity = args.severity;
-			} else if (this.accept(args.note)) {
+			if (!pending && this.accept(args.note)) {
 				// Reserve the update's one slot now (the emission guard filters noise
 				// and enforces the per-update budget at the moment the note is emitted,
 				// exactly like the live path); hold it for the flush. A suppressed or
@@ -270,11 +273,11 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 				useless: true,
 			};
 		}
-		// Live path (completed update, or a blocker that must interrupt now). If the
+		// Live path (completed update, or a mid-turn concern or blocker). If the
 		// note already holds a deferred reservation, it cleared the emission guard
 		// when reserved — pull it from the backlog and deliver without re-accepting,
-		// so a blocker escalation of a still-queued nit/concern interrupts at its
-		// blocker severity instead of being rejected as already-seen and arriving
+		// so a concern or blocker escalation of a still-queued nit interrupts at
+		// its higher severity instead of being rejected as already-seen and arriving
 		// late at the lower deferred severity.
 		const key = advisorNoteDedupeKey(args.note);
 		const reservedIndex = this.#deferredNotes.findIndex(item => item.key === key);

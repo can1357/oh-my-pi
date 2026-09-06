@@ -8,6 +8,7 @@ import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { isAdvisorCard } from "@oh-my-pi/pi-coding-agent/session/queued-messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -321,6 +322,57 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		// compact()'s finally re-drained the stranded queue after reconnecting.
 		expect(continueSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("preserves advisor advice queued while manual compaction is disconnected", async () => {
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+		const compactPromise = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+
+		session.yieldQueue.enqueue("advisor", {
+			note: "compaction boundary fixture note",
+			severity: "concern",
+		});
+		expect(session.yieldQueue.has("advisor")).toBe(true);
+
+		gate.resolve();
+		await compactPromise;
+		await session.waitForIdle();
+
+		const cards = session.agent.state.messages.filter(isAdvisorCard);
+		expect(cards).toHaveLength(1);
+		expect(cards[0].content).toContain("compaction boundary fixture note");
+		expect(session.yieldQueue.has("advisor")).toBe(false);
+		const persistedCards = sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message" && entry.customType === "advisor");
+		expect(persistedCards).toHaveLength(1);
 	});
 
 	it("cancels an in-flight auto-compaction when manual compact startup aborts", async () => {

@@ -245,6 +245,7 @@ export interface SessionAdvisorsHost {
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	isDisposed(): boolean;
 	abortInProgress(): boolean;
+	isAgentConnected(): boolean;
 	allowAgentInitiatedTurns(): boolean;
 	planModeState(): PlanModeState | undefined;
 	clientBridge(): ClientBridge | undefined;
@@ -602,6 +603,21 @@ export class SessionAdvisors {
 	/** Waits for all advisor-card persistence handlers currently in flight. */
 	async waitForPendingCardEvents(): Promise<void> {
 		await Promise.allSettled(this.#pendingAdvisorCardEvents);
+	}
+
+	/** Remove every queued advisor aside, built into one card, for a caller that preserves it itself (the user-interrupt abort). */
+	drainQueuedAdvice(): CustomMessage[] {
+		const card = this.#host.yieldQueue.drainKind("advisor");
+		return card && isAdvisorCard(card) ? [card] : [];
+	}
+
+	/** Re-record advisor asides that missed the loop's last poll as visible cards.
+	 *  No-op while the loop still runs, while an abort is tearing it down, or while
+	 *  the session is disconnected from agent events (`/compact`), because a card
+	 *  emitted then has no subscriber to persist it. */
+	preserveQueuedAdvice(): void {
+		if (this.#host.agent.state.isStreaming || this.#host.abortInProgress() || !this.#host.isAgentConnected()) return;
+		for (const card of this.drainQueuedAdvice()) this.#host.preserveAdvisorCard(card);
 	}
 
 	// Advisor runtime lifecycle
@@ -1084,7 +1100,7 @@ export class SessionAdvisors {
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();
-					// Flush the deferred backlog (notes already cleared the emission guard
+					// Flush the deferred nit backlog (notes already cleared the emission guard
 					// when reserved), then reset the guard's per-update budget for this
 					// prompt's live notes.
 					advisorRef.adviseTool.beginUpdate(inProgress);
@@ -1159,7 +1175,7 @@ export class SessionAdvisors {
 		}
 
 		// One shared non-blocking aside channel for all advisors; the build callback
-		// aggregates every advisor's queued nits into one card (each entry already
+		// aggregates every advisor's queued nits and concerns into one card (each entry already
 		// carries its own `advisor` name).
 		if (this.#advisors.length > 0 && !this.#advisorYieldQueueUnsubscribe) {
 			this.#advisorYieldQueueUnsubscribe = this.#host.yieldQueue.register<AdvisorNote>("advisor", {
@@ -1183,15 +1199,17 @@ export class SessionAdvisors {
 	}
 
 	/**
-	 * Route one accepted advice note from `advisor` to the primary. Concern and
-	 * blocker interrupt the running agent through the steering channel; once the
-	 * loop has yielded, `triggerTurn` resumes it. After a terminal text answer with
-	 * no queued work, a concern is preserved as a visible advisor card, while a
-	 * blocker wakes the primary to acknowledge work it handed off incorrectly.
-	 * After a deliberate user interrupt auto-resume is suppressed while idle/unwinding
-	 * (the note becomes a preserved card re-entering on resume); a live-streaming turn is
-	 * steered in directly. A plain nit always rides the non-interrupting YieldQueue
-	 * aside. Suppression by the per-advisor emission guard drops the note silently —
+	 * Route one accepted advice note from `advisor` to the primary. A blocker
+	 * interrupts a running agent through the steering channel; a concern or nit
+	 * raised against a running agent rides the non-interrupting YieldQueue aside
+	 * and lands at the next model step. Once the loop is idle, a concern after a
+	 * terminal answer is preserved as a visible advisor card, a concern after a
+	 * mid-work yield triggers a turn, a blocker wakes the primary to acknowledge
+	 * work it handed off incorrectly, and any nit is preserved as a visible card
+	 * because nothing would poll the aside queue. After a deliberate user interrupt
+	 * auto-resume is suppressed while idle/unwinding (the note becomes a preserved
+	 * card re-entering on resume); a live-streaming turn is steered in directly.
+	 * Suppression by the per-advisor emission guard drops the note silently —
 	 * the model still saw `Recorded.`, so it isn't tempted to rephrase the same note
 	 * past the dedupe.
 	 */
