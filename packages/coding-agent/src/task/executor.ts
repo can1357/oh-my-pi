@@ -1009,6 +1009,7 @@ interface RunMonitorArgs {
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
+	parentAgentId?: string;
 	detached?: boolean;
 	sessionFile?: string;
 	/** Soft assistant-request budget; 0 disables the guard. */
@@ -1121,6 +1122,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		durationMs: 0,
 		modelOverride: args.modelOverride,
 		modelRole: args.modelRole,
+		parentAgentId: args.parentAgentId,
 	};
 
 	const outputChunks: string[] = [];
@@ -2210,6 +2212,7 @@ interface FinalizeRunArgs {
 	artifactsDir?: string;
 	eventBus?: EventBus;
 	subagentEventBus?: EventBus;
+	parentAgentId?: string;
 	parentToolCallId?: string;
 	detached?: boolean;
 	/**
@@ -2383,6 +2386,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		id,
 		agent: agent.name,
 		parentToolCallId: args.parentToolCallId,
+		parentAgentId: args.parentAgentId,
 		detached: args.detached,
 		agentSource: agent.source,
 		description: progress.description,
@@ -2570,6 +2574,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			eventBus: options.eventBus,
 			subagentEventBus: options.subagentEventBus,
 			parentToolCallId: options.parentToolCallId,
+			parentAgentId: options.parentAgentId,
 			detached: true,
 			sessionFile,
 			softRequestBudget: 0,
@@ -2581,6 +2586,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			id,
 			agent: agent.name,
 			parentToolCallId: options.parentToolCallId,
+			parentAgentId: options.parentAgentId,
 			detached: true,
 			agentSource: agent.source,
 			description: options.description,
@@ -2635,6 +2641,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					eventBus: options.eventBus,
 					subagentEventBus: options.subagentEventBus,
 					parentToolCallId: options.parentToolCallId,
+					parentAgentId: options.parentAgentId,
 					detached: true,
 					followUpTurn: true,
 					sessionFile,
@@ -2843,6 +2850,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		eventBus: options.eventBus,
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
+		parentAgentId: options.parentAgentId,
 		detached: true,
 		sessionFile,
 		softRequestBudget: 0,
@@ -2854,6 +2862,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		id,
 		agent: agent.name,
 		parentToolCallId: options.parentToolCallId,
+		parentAgentId: options.parentAgentId,
 		detached: true,
 		agentSource: agent.source,
 		description: options.description,
@@ -2896,6 +2905,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		eventBus: options.eventBus,
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
+		parentAgentId: options.parentAgentId,
 		detached: true,
 		followUpTurn: true,
 		sessionFile,
@@ -3058,6 +3068,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		eventBus: options.eventBus,
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
+		parentAgentId: options.parentAgentId,
 		detached: options.detached,
 		sessionFile: subtaskSessionFile,
 		softRequestBudget,
@@ -3172,7 +3183,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelPatterns,
 					options.parentActiveModelPattern,
 					modelRegistry,
-					settings,
+					subagentSettings,
 					id,
 				),
 			);
@@ -3337,7 +3348,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				model,
 				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 				modelPatternAuthFallback:
-					model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+					model || modelOverride === undefined || subagentSettings.get("retry.modelFallback") === false
+						? undefined
+						: options.parentActiveModelPattern,
 				modelPatternFallbackRole:
 					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
 				modelPatternDefaultFallbackChain:
@@ -3488,6 +3501,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				id,
 				agent: agent.name,
 				parentToolCallId: options.parentToolCallId,
+				parentAgentId: options.parentAgentId,
 				detached: options.detached,
 				agentSource: agent.source,
 				description: options.description,
@@ -3527,6 +3541,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
+				parentAgentId: options.parentAgentId,
+				requestedModelPatterns: configuredModelPatterns.length > 0 ? configuredModelPatterns : modelPatterns,
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
@@ -3812,6 +3828,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		eventBus: options.eventBus,
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
+		parentAgentId: options.parentAgentId,
 		detached: options.detached,
 		sessionFile: subtaskSessionFile,
 		startTime,

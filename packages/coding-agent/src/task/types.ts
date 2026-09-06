@@ -71,6 +71,7 @@ export interface SubagentProgressPayload {
 	agentSource: AgentSource;
 	task: string;
 	parentToolCallId?: string;
+	parentAgentId?: string;
 	assignment?: string;
 	progress: AgentProgress;
 	sessionFile?: string;
@@ -93,6 +94,8 @@ export interface SubagentLifecyclePayload {
 	status: "started" | "completed" | "failed" | "aborted";
 	sessionFile?: string;
 	parentToolCallId?: string;
+	/** Registry id of the spawning parent agent. */
+	parentAgentId?: string;
 	index: number;
 	/**
 	 * Spawn runs as a detached background job: the parent turn keeps working
@@ -449,6 +452,8 @@ export interface AgentProgress {
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
+	/** Registry id of the spawning parent agent. */
+	parentAgentId?: string;
 	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Undefined when the model could not be resolved. */
 	resolvedModel?: string;
 	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */

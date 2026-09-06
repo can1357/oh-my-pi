@@ -15,7 +15,7 @@ import {
 	type ObservableSession,
 	SessionObserverRegistry,
 } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getSymbolTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -208,6 +208,27 @@ describe("subagent HUD lines", () => {
 		expect(multiLineDesc).toContain("ReviewShell");
 		expect(multiLineDesc).toContain("First line ↵ Second line");
 		expect(multiLineDesc).not.toContain("\nSecond line");
+	});
+
+	it("shows live route, token, request, and retry state in the anchored HUD", () => {
+		const out = render([
+			makeSession({
+				id: "TopoCoverage",
+				description: "Read the topology source corpus",
+				progress: makeProgress({
+					id: "TopoCoverage",
+					resolvedModel: "opencode-zen/muse-spark-1.3-contributor-free",
+					tokens: 12_345,
+					requests: 3,
+					retryState: { attempt: 1, maxAttempts: 2, delayMs: 500, errorMessage: "overloaded", startedAtMs: 1 },
+				}),
+			}),
+		]);
+		expect(out).toContain("muse-spark-1.3");
+		expect(out).toContain("12K tok");
+		expect(out).toContain("3 req");
+		expect(out).toContain("retrying");
+		expect(getSymbolTheme().spinnerFrames.some(frame => out.includes(frame))).toBe(true);
 	});
 	it("hides non-detached spawns: sync task calls and eval agent() helpers", () => {
 		// Sync task spawn (parent blocked on the call) and eval `agent()` spawn

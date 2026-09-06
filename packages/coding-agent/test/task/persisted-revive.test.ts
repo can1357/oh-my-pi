@@ -126,7 +126,7 @@ async function createPersistedSession(
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus) {
+function createFactory(cwd: string, eventBus?: EventBus, settings: Settings = Settings.isolated()) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
@@ -140,7 +140,7 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 		session: parentSession,
 		authStorage: {} as never,
 		modelRegistry: { authStorage: {} } as ModelRegistry,
-		settings: Settings.isolated(),
+		settings,
 		enableLsp: true,
 		eventBus,
 	});
@@ -252,6 +252,28 @@ describe("persisted subagent revival", () => {
 
 		expect(capturedOptions?.toolNames).toEqual(["read", "write", "yield"]);
 		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
+	});
+
+	it("does not restore a parent auth fallback when fallback is disabled", async () => {
+		const cwd = makeTempDir("@pi-revive-no-auth-fallback-");
+		const sessionFile = await createPersistedSession(cwd, undefined, "muse");
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(
+			cwd,
+			undefined,
+			Settings.isolated({ "retry.modelFallback": false }),
+		)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.modelPattern).toEqual(["@muse", "anthropic/claude-sonnet-4-5"]);
+		expect(capturedOptions?.modelPatternAuthFallback).toBeUndefined();
 	});
 
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {

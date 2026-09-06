@@ -736,7 +736,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
-		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
+		const agentBlocking = this.session.settings.get("task.agentBlocking");
+		const itemBlocking = policies.map(
+			policy => policy.effectiveAgent.blocking === true || agentBlocking[policy.agentName] === true,
+		);
 
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its

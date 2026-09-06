@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type ModelLookupRegistry,
 	resolveModelOverrideWithAuthFallback,
@@ -103,6 +104,24 @@ describe("issue #985: subagent dispatch auth fallback", () => {
 			["qwen3.6-plus-free"],
 			"deepseek/deepseek-v4-pro",
 			registry,
+		);
+
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.provider).toBe("opencode-zen");
+		expect(result.model?.id).toBe("qwen3.6-plus-free");
+	});
+
+	test("does not substitute the parent model when retry fallback is disabled", async () => {
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["qwen3.6-plus-free"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+			Settings.isolated({ "retry.modelFallback": false }),
 		);
 
 		expect(result.authFallbackUsed).toBe(false);

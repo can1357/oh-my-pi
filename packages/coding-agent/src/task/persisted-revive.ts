@@ -131,7 +131,9 @@ export function createPersistedSubagentReviverFactory(
 				subagentEventBus: ctx.subagentEventBus,
 				modelRegistry: ctx.modelRegistry,
 				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
-				modelPatternAuthFallback: init.resolvedModel,
+				...(subagentSettings.get("retry.modelFallback") !== false && init.resolvedModel
+					? { modelPatternAuthFallback: init.resolvedModel }
+					: undefined),
 				settings: subagentSettings,
 				sessionManager: reopened,
 				agentId: ref.id,
