@@ -2802,6 +2802,7 @@ export class RelayBridge {
 		let refreshedRoot = false;
 		let forceFreshRoot = false;
 		const contextGenerationBeforeRecovery = tab.contextGeneration;
+		const navigationGenerationBeforeRecovery = tab.mainFrameNavigationGeneration;
 		const urlBeforeRecovery = tab.recoveryStartUrl ?? tab.url;
 		const restoring = (async () => {
 			let ok: boolean;
@@ -2878,8 +2879,11 @@ export class RelayBridge {
 						keepPageSessions,
 						ext,
 						refreshedRoot &&
-							(tab.contextGeneration !== contextGenerationBeforeRecovery || tab.url !== urlBeforeRecovery),
+							(tab.contextGeneration !== contextGenerationBeforeRecovery ||
+								tab.mainFrameNavigationGeneration !== navigationGenerationBeforeRecovery ||
+								tab.url !== urlBeforeRecovery),
 						tab.recoveryStartLoaderId,
+						navigationGenerationBeforeRecovery,
 					);
 				} catch (err) {
 					// A replacement keeps the journal pending. Its hello restarts the
@@ -3015,6 +3019,7 @@ export class RelayBridge {
 		expectedExt: RelaySocket | null,
 		runImmediatePreloads: boolean,
 		recoveryLoaderId?: string,
+		recoveryNavigationGeneration?: number,
 	): Promise<void> {
 		const refs: SessionRef[] = [];
 		for (const conn of conns) {
@@ -3095,11 +3100,14 @@ export class RelayBridge {
 		const [, currentLoaderId] = await Promise.all([enablePageEvents, currentLoaderPromise]);
 		for (const script of preloadScripts) {
 			this.#assertExtensionCurrent(expectedExt);
+			const navigationGenerationBeforeRegistration = tab.mainFrameNavigationGeneration;
 			const runImmediately =
 				script.params?.runImmediately === true &&
 				(recoveryLoaderId !== undefined && currentLoaderId !== undefined
 					? recoveryLoaderId !== currentLoaderId
-					: runImmediatePreloads);
+					: runImmediatePreloads ||
+						(recoveryNavigationGeneration !== undefined &&
+							tab.mainFrameNavigationGeneration !== recoveryNavigationGeneration));
 			const applicationMarker =
 				script.params?.runImmediately === true && !runImmediately && typeof script.params.source === "string"
 					? `__ompRelayPreload${tab.tabId}_${++this.#sessionSeq}`
@@ -3141,6 +3149,8 @@ export class RelayBridge {
 				throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
 			}
 			let rootIdentifier = identifier;
+			let appliedToCurrentDocument = false;
+			let navigationDuringRegistration = false;
 			if (script.params?.runImmediately === true && !runImmediately) {
 				const loaderAfterRegistration = await this.#mainFrameLoaderId(tab.tabId).catch(err => {
 					if (isExtensionTransportInterrupted(err)) {
@@ -3149,17 +3159,16 @@ export class RelayBridge {
 					}
 					return undefined;
 				});
-				if (
+				navigationDuringRegistration =
 					currentLoaderId !== undefined &&
 					loaderAfterRegistration !== undefined &&
-					loaderAfterRegistration !== currentLoaderId
-				) {
+					loaderAfterRegistration !== currentLoaderId;
+				if (navigationDuringRegistration) {
 					// Command replies and Page events travel through separate queues, so
 					// their relay-side order is not application evidence. The probe was
 					// registered after the real script: seeing it in this document proves
 					// the real registration covered the navigation. Otherwise replace the
 					// ambiguous registration with an immediate one for the missed document.
-					let appliedToCurrentDocument = false;
 					if (applicationMarker !== undefined) {
 						try {
 							appliedToCurrentDocument = await this.#preloadApplicationMarker(
@@ -3203,6 +3212,47 @@ export class RelayBridge {
 						}
 						rootIdentifier = retry.identifier;
 					}
+				}
+			}
+			if (applicationMarker !== undefined && rootIdentifier === identifier) {
+				const originalParams = script.params;
+				if (!originalParams) throw new Error("preload replay parameters are missing");
+				try {
+					await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						method: "Page.removeScriptToEvaluateOnNewDocument",
+						params: { identifier: rootIdentifier },
+					});
+					// The marker is recovery-only. Probe once more after removal both to
+					// observe a navigation that raced the first check and to delete the
+					// temporary property from the current document. The replacement is
+					// always registered from the caller's original source.
+					const appliedAfterRemoval = await this.#preloadApplicationMarker(
+						tab.tabId,
+						applicationMarker,
+						originalParams.worldName,
+					);
+					appliedToCurrentDocument = appliedToCurrentDocument || appliedAfterRemoval;
+					const navigationNeedsInvocation =
+						navigationDuringRegistration ||
+						tab.mainFrameNavigationGeneration !== navigationGenerationBeforeRegistration;
+					const clean = (await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						method: "Page.addScriptToEvaluateOnNewDocument",
+						params: {
+							...originalParams,
+							runImmediately: navigationNeedsInvocation && !appliedToCurrentDocument,
+						},
+					})) as Record<string, unknown> | undefined;
+					if (typeof clean?.identifier !== "string") {
+						throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
+					}
+					rootIdentifier = clean.identifier;
+				} catch (err) {
+					if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
+					throw err;
 				}
 			}
 			const current = this.#preloadScript(tab, script.ownerSessionId, script.clientIdentifier);
