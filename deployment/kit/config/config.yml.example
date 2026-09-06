@@ -1,0 +1,30 @@
+# omp user settings template — copy to ~/.omp/agent/config.yml
+# Full settings reference: docs/settings.md in the oh-my-pi repository,
+# or https://omp.sh/docs
+#
+# Precedence: defaults < global (~/.omp/agent) < project (<repo>/.omp)
+#             < PI_CONFIG_FILES < --config overlays < runtime.
+
+# Which model answers normal turns. Formats: "provider/model-id" or a
+# configured role. Pick interactively with `/model` or run `omp setup`.
+modelRoles:
+  default: anthropic/claude-sonnet-4-5
+  # smol: cheap model for subagent fan-out
+  # slow: deep-reasoning model
+  # plan: plan-mode model
+
+# Redact secret-shaped values before anything is sent to providers.
+# Off by default; recommended ON on shared servers (see secrets.yml.example).
+secrets:
+  enabled: false
+
+# Approval behavior: "always-ask" (default), "write", or "yolo".
+# Keep interactive defaults on shared servers; scripts opt in explicitly
+# via --approval-mode / --yolo flags.
+# tools:
+#   approvalMode: always-ask
+
+# Fallback chain when the primary model hits 429/quota (optional):
+# retry:
+#   fallbackChains:
+#     - [anthropic/claude-sonnet-4-5, openai/gpt-5.2]
