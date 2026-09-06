@@ -33,6 +33,9 @@
 ### Fixed
 
 - Improved agent performance by reducing redundant tool-schema processing during repeated model calls and optimizing streamed tool-call argument parsing.
+### Added
+
+- Exposed `Agent.deadline` so session recovery can bound retries and stream watchdogs to `--max-time`.
 
 ## [18.2.1] - 2026-09-15
 
