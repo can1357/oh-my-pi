@@ -13,6 +13,7 @@ import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../config/settings";
 import {
 	type AnyUiMetadata,
+	CONDITION_SPECS,
 	getDefault,
 	getEnumValues,
 	getPathsForTab,
@@ -95,66 +96,30 @@ export type SettingDef =
 // Condition Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-const CONDITIONS: Record<string, () => boolean> = {
-	macOS: () => process.platform === "darwin",
-	hasImageProtocol: () => !!TERMINAL.imageProtocol,
-	advisorEnabled: () => {
-		try {
-			return Settings.instance.get("advisor.enabled") === true;
-		} catch {
-			return false;
-		}
-	},
-	hindsightActive: () => {
-		try {
-			return Settings.instance.get("memory.backend") === "hindsight";
-		} catch {
-			return false;
-		}
-	},
-	mnemopiActive: () => {
-		try {
-			return Settings.instance.get("memory.backend") === "mnemopi";
-		} catch {
-			return false;
-		}
-	},
-	autolearnActive: () => {
-		try {
-			return Settings.instance.get("autolearn.enabled") === true;
-		} catch {
-			return false;
-		}
-	},
-	autoThinkingActive: () => {
-		try {
-			return Settings.instance.get("defaultThinkingLevel") === "auto";
-		} catch {
-			return false;
-		}
-	},
-	usageAwareFallbackEnabled: () => {
-		try {
-			return Settings.instance.get("retry.usageAwareFallback") === true;
-		} catch {
-			return false;
-		}
-	},
-	planModeEnabled: () => {
-		try {
-			return Settings.instance.get("plan.enabled");
-		} catch {
-			return false;
-		}
-	},
-	unexpectedStopSmart: () => {
-		try {
-			return Settings.instance.get("features.unexpectedStopDetection") === "smart";
-		} catch {
-			return false;
-		}
-	},
-};
+/**
+ * Derived from {@link CONDITION_SPECS} so the declarative table and the
+ * runtime predicates cannot drift: each closure re-reads its spec and
+ * dispatches on `kind` when called, rather than a duplicate mapping.
+ */
+const CONDITIONS: Record<string, () => boolean> = Object.fromEntries(
+	Object.entries(CONDITION_SPECS).map(([name, spec]) => [
+		name,
+		() => {
+			switch (spec.kind) {
+				case "platform":
+					return process.platform === spec.platform;
+				case "terminal":
+					return spec.capability === "imageProtocol" && !!TERMINAL.imageProtocol;
+				case "setting":
+					try {
+						return Settings.instance.get(spec.dependsOn) === spec.equals;
+					} catch {
+						return false;
+					}
+			}
+		},
+	]),
+);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Schema to UI Conversion

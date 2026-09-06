@@ -7,6 +7,7 @@
 
 import { APP_NAME, getAgentDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import packageJson from "../../package.json" with { type: "json" };
 import {
 	getDefault,
 	getEnumValues,
@@ -19,7 +20,16 @@ import {
 	settings,
 	validateProviderMaxInFlightRequests,
 } from "../config/settings";
-import { SETTINGS_SCHEMA } from "../config/settings-schema";
+import {
+	CONDITION_SPECS,
+	type ConditionSpec,
+	SETTING_TABS,
+	SETTINGS_SCHEMA,
+	type SettingTab,
+	type SubmenuOption,
+	TAB_GROUPS,
+	TAB_METADATA,
+} from "../config/settings-schema";
 import { theme } from "../modes/theme/theme";
 import { initXdg } from "./commands/init-xdg";
 
@@ -27,7 +37,7 @@ import { initXdg } from "./commands/init-xdg";
 // Types
 // =============================================================================
 
-export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg";
+export type ConfigAction = "list" | "get" | "set" | "reset" | "unset" | "schema" | "path" | "init-xdg";
 
 export interface ConfigCommandArgs {
 	action: ConfigAction;
@@ -78,7 +88,7 @@ function getSettingValues(def: CliSettingDef): readonly string[] | undefined {
 // Argument Parser
 // =============================================================================
 
-const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg"];
+const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "unset", "schema", "path", "init-xdg"];
 
 /**
  * Parse config subcommand arguments.
@@ -256,6 +266,12 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 		case "reset":
 			await handleReset(cmd.key, cmd.flags);
 			break;
+		case "unset":
+			await handleUnset(cmd.key, cmd.flags);
+			break;
+		case "schema":
+			await handleSchema(cmd.flags);
+			break;
 		case "path":
 			handlePath();
 			break;
@@ -421,6 +437,131 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 	}
 }
 
+async function handleUnset(key: string | undefined, flags: { json?: boolean }): Promise<void> {
+	if (!key) {
+		console.error(chalk.red(`Usage: ${APP_NAME} config unset <key>`));
+		console.error(chalk.dim(`\nRun '${APP_NAME} config list' to see available keys`));
+		process.exit(1);
+	}
+
+	const def = findSettingDef(key);
+	if (!def) {
+		console.error(chalk.red(`Unknown setting: ${key}`));
+		console.error(chalk.dim(`\nRun '${APP_NAME} config list' to see available keys`));
+		process.exit(1);
+	}
+
+	try {
+		settings.unset(def.path);
+		await settings.flush();
+	} catch (err) {
+		console.error(chalk.red(String(err)));
+		process.exit(1);
+	}
+
+	const defaultValue = settings.get(def.path);
+
+	if (flags.json) {
+		console.log(JSON.stringify({ key: def.path, value: defaultValue }));
+	} else {
+		console.log(chalk.green(`${theme.status.success} Unset ${def.path} (now ${formatValue(defaultValue)})`));
+	}
+}
+
+// =============================================================================
+// Schema Export
+// =============================================================================
+
+interface SchemaTabEntry {
+	id: SettingTab;
+	label: string;
+	groups: readonly string[];
+}
+
+interface SchemaEntry {
+	key: SettingPath;
+	type: "boolean" | "string" | "number" | "enum" | "array" | "record";
+	default: unknown;
+	values: readonly string[] | null;
+	tab: SettingTab | null;
+	group: string | null;
+	label: string | null;
+	description: string | null;
+	warning: string | null;
+	options: ReadonlyArray<SubmenuOption> | "runtime" | null;
+	ordered: boolean;
+	secret: boolean;
+	condition: ConditionSpec | null;
+}
+
+interface SchemaEnvelope {
+	version: string;
+	tabs: SchemaTabEntry[];
+	settings: SchemaEntry[];
+}
+
+/**
+ * Every setting in {@link SETTINGS_SCHEMA}, UI-visible or not, with a
+ * declarative `condition` (never an evaluated boolean) so consumers that
+ * cannot run the CLI's own predicates — the GUI settings panel, `config
+ * schema --json` readers — can still gate visibility correctly.
+ */
+function buildSchemaEnvelope(): SchemaEnvelope {
+	const tabs: SchemaTabEntry[] = SETTING_TABS.map(tab => ({
+		id: tab,
+		label: TAB_METADATA[tab].label,
+		groups: TAB_GROUPS[tab],
+	}));
+
+	const settingsList: SchemaEntry[] = ALL_SETTING_PATHS.map(path => {
+		const ui = getUi(path);
+		const schemaType = getType(path);
+		const defaultValue = getDefault(path);
+		let condition: ConditionSpec | null = null;
+		if (ui?.condition) {
+			const spec = CONDITION_SPECS[ui.condition];
+			if (!spec) throw new Error(`Setting "${path}" declares unknown condition "${ui.condition}"`);
+			condition = spec;
+		}
+		return {
+			key: path,
+			type: schemaType,
+			default: defaultValue === undefined ? null : defaultValue,
+			values: schemaType === "enum" ? (getEnumValues(path) ?? []) : null,
+			tab: ui?.tab ?? null,
+			group: ui?.group ?? null,
+			label: ui?.label ?? null,
+			description: ui?.description ?? null,
+			warning: ui?.warning ?? null,
+			options: ui?.options ?? null,
+			ordered: ui?.ordered === true,
+			secret: isCredential(path),
+			condition,
+		};
+	});
+
+	return { version: packageJson.version, tabs, settings: settingsList };
+}
+
+async function handleSchema(flags: { json?: boolean }): Promise<void> {
+	const envelope = buildSchemaEnvelope();
+
+	if (flags.json) {
+		await writeStdout(`${JSON.stringify(envelope, null, 2)}\n`);
+		return;
+	}
+
+	console.log(chalk.bold(`Settings Schema — ${APP_NAME}/${envelope.version} (${envelope.settings.length} keys)\n`));
+	for (const entry of envelope.settings) {
+		const location = entry.tab ? `${entry.tab}${entry.group ? `/${entry.group}` : ""}` : "internal";
+		console.log(
+			`  ${chalk.white(entry.key)} ${chalk.dim(`(${entry.type})`)} ${chalk.dim(`[${location}]`)}${
+				entry.condition ? chalk.dim(` condition:${entry.condition.kind}`) : ""
+			}`,
+		);
+	}
+}
+
 function handlePath(): void {
 	console.log(getAgentDir());
 }
@@ -437,6 +578,8 @@ ${chalk.bold("Commands:")}
   get <key>          Get a specific setting value
   set <key> <value>  Set a setting value
   reset <key>        Reset a setting to its default value
+  unset <key>        Remove a setting's explicit value, restoring its default
+  schema             Print every setting's key, type, default, and UI metadata
   path               Print the config directory path
   init-xdg           Initialize XDG Base Directory structure
 
@@ -450,7 +593,9 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} config set compaction.enabled false
   ${APP_NAME} config set defaultThinkingLevel medium
   ${APP_NAME} config reset steeringMode
+  ${APP_NAME} config unset steeringMode
   ${APP_NAME} config list --json
+  ${APP_NAME} config schema --json
   ${APP_NAME} config init-xdg
 
 ${chalk.bold("Boolean Values:")}

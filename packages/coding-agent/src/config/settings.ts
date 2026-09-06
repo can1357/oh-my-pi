@@ -194,6 +194,41 @@ function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
 }
 
 /**
+ * Whether a nested key is explicitly present in an object by path segments
+ * (distinct from its resolved value being `undefined`: a leaf explicitly set
+ * to `undefined` still counts as present).
+ */
+function hasByPath(obj: RawSettings, segments: readonly string[]): boolean {
+	let current: unknown = obj;
+	for (let i = 0; i < segments.length - 1; i++) {
+		if (current === null || typeof current !== "object" || !Object.hasOwn(current as object, segments[i])) {
+			return false;
+		}
+		current = (current as Record<string, unknown>)[segments[i]];
+	}
+	if (current === null || typeof current !== "object") return false;
+	return Object.hasOwn(current as object, segments[segments.length - 1]);
+}
+
+/**
+ * Remove a nested key from an object by path segments, pruning any
+ * intermediate objects the deletion leaves empty behind it.
+ */
+function deleteByPath(obj: RawSettings, segments: readonly string[]): void {
+	if (segments.length === 1) {
+		delete obj[segments[0]];
+		return;
+	}
+	const [head, ...rest] = segments;
+	const child = obj[head];
+	if (child === null || typeof child !== "object" || Array.isArray(child)) return;
+	deleteByPath(child as RawSettings, rest);
+	if (Object.keys(child as RawSettings).length === 0) {
+		delete obj[head];
+	}
+}
+
+/**
  * Dotted-path prefixes that name settings groups (e.g. "tui" for "tui.*").
  * A prefix may simultaneously be a schema leaf; those accept their declared
  * value shape and are excluded from shadow detection.
@@ -671,6 +706,31 @@ export class Settings {
 		this.#queueSave();
 
 		// Trigger hook if exists
+		const hook = SETTING_HOOKS[path];
+		if (hook) {
+			hook(next, prev);
+		}
+		this.#fireEffectiveSettingChanged(path, next, prev);
+	}
+
+	/**
+	 * Remove a setting's explicit value from the global config layer (sync),
+	 * restoring the schema default on the next {@link get}. Updates global
+	 * settings and queues a background save exactly like {@link set}; a
+	 * subsequent save deletes the key from `config.yml` rather than writing
+	 * `null`, so future releases' defaults take over automatically.
+	 */
+	unset(path: SettingPath): void {
+		const prev = this.get(path);
+		const segments = path.split(".");
+		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
+		deleteByPath(this.#global, segments);
+		this.#persistedMutationGeneration++;
+		this.#modified.add(path);
+		this.#rebuildMerged();
+		const next = this.get(path);
+		this.#queueSave();
+
 		const hook = SETTING_HOOKS[path];
 		if (hook) {
 			hook(next, prev);
@@ -2750,8 +2810,11 @@ export class Settings {
 						});
 						continue;
 					}
-					const value = getByPath(this.#global, segments);
-					setByPath(current, segments, value);
+					if (hasByPath(this.#global, segments)) {
+						setByPath(current, segments, getByPath(this.#global, segments));
+					} else {
+						deleteByPath(current, segments);
+					}
 					shouldWrite = true;
 				}
 
