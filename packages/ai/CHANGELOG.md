@@ -4,6 +4,8 @@
 
 ### Added
 
+- Codex requests support namespaced tools and opaque model-only tool results, including replay across session resumes.
+- Codex clients can access server-side history and encrypted checkpoint notes with ChatGPT OAuth.
 - Added Muse Code subscription sign-in, credential refresh, inference, and quota reporting in `/usage`, with durable rate-limit backoff so quota refresh recovers instead of repeatedly retrying.
 
 ## [18.1.11] - 2026-09-05

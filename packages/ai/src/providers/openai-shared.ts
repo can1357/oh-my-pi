@@ -103,6 +103,7 @@ import type {
 	ResponseCreateParamsStreaming,
 	ResponseCustomToolCall,
 	ResponseFunctionToolCall,
+	ResponseFunctionCallOutputItem,
 	ResponseInput,
 	ResponseInputContent,
 	ResponseInputImage,
@@ -2274,7 +2275,11 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			type: "function_call",
 			...(itemId ? { id: itemId } : {}),
 			call_id: normalized.callId,
-			name: functionName,
+			name:
+				block.namespace && functionName.startsWith(`${block.namespace}.`)
+					? functionName.slice(block.namespace.length + 1)
+					: functionName,
+			...(block.namespace ? { namespace: block.namespace } : {}),
 			arguments: stringifyJson(block.arguments) ?? "null",
 		});
 	}
@@ -2313,7 +2318,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
  * cannot carry the native output array.
  */
 export interface ResponsesToolResultOutputEncoding {
-	output: string | ResponseInputContent[];
+	output: string | (ResponseInputContent | ResponseFunctionCallOutputItem)[];
 	outputText: string;
 }
 
@@ -2329,6 +2334,18 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 	supportsImageDetailOriginal: boolean,
 ): ResponsesToolResultOutputEncoding {
 	const supportsImages = model.input.includes("image");
+	if (model.api === "openai-codex-responses" && toolResult.content.some(block => block.type === "encrypted")) {
+		return {
+			output: toolResult.content.flatMap((block): ResponseFunctionCallOutputItem[] => {
+				if (block.type === "encrypted")
+					return [{ type: "encrypted_content", encrypted_content: block.encryptedContent }];
+				if (block.type === "image")
+					return supportsImages ? [convertResponsesInputImage(block, supportsImageDetailOriginal)] : [];
+				return [{ type: "input_text", text: block.text }];
+			}),
+			outputText: "[private model-only result]",
+		};
+	}
 	const textResult = toolResult.content
 		.filter((block): block is TextContent => block.type === "text")
 		.map(block => block.text)
@@ -2351,14 +2368,16 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 	const outputText = escapeControlTokens ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
 	const output: string | ResponseInputContent[] =
 		hasImages && supportsImages
-			? toolResult.content.map((block): ResponseInputContent => {
-					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
-					const text = block.text.toWellFormed();
-					return {
-						type: "input_text",
-						text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
-					};
-				})
+			? toolResult.content
+					.filter(block => block.type !== "encrypted")
+					.map((block): ResponseInputContent => {
+						if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
+						const text = block.text.toWellFormed();
+						return {
+							type: "input_text",
+							text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
+						};
+					})
 			: outputText;
 	return { output, outputText };
 }

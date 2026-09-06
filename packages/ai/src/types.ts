@@ -848,6 +848,10 @@ export interface ToolCall {
 	type: "toolCall";
 	id: string;
 	name: string;
+	/** Codex namespace required to replay a namespaced function call. */
+	namespace?: string;
+	/** Private invocation: persist/replay, but redact arguments from public surfaces. */
+	modelOnly?: boolean;
 	arguments: Record<string, unknown>;
 	[kStreamingPartialJson]?: string;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
@@ -898,6 +902,8 @@ export interface ProviderInputTransformation {
 
 export interface UserMessage {
 	role: "user";
+	/** Stable journal entry id used by provider history references. */
+	sessionEntryId?: string;
 	content: string | (TextContent | ImageContent)[];
 	/** True if the message was injected by the system (e.g., auto-continue). */
 	synthetic?: boolean;
@@ -914,6 +920,8 @@ export interface UserMessage {
 
 export interface DeveloperMessage {
 	role: "developer";
+	/** Stable journal entry id used by provider history references. */
+	sessionEntryId?: string;
 	content: string | (TextContent | ImageContent)[];
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
@@ -1026,11 +1034,21 @@ export interface AssistantMessage {
 	completedAt?: number;
 }
 
+/** Opaque inference-only tool output. Never decode, display, or index this value. */
+export interface EncryptedContent {
+	type: "encrypted";
+	encryptedContent: string;
+}
+
 export interface ToolResultMessage<TDetails = unknown> {
 	role: "toolResult";
+	/** Stable journal entry id used by provider history references. */
+	sessionEntryId?: string;
 	toolCallId: string;
 	toolName: string;
-	content: (TextContent | ImageContent)[]; // Supports text and images
+	/** Private result, including any attached images and textual fallback. */
+	modelOnly?: boolean;
+	content: (TextContent | ImageContent | EncryptedContent)[];
 	details?: TDetails;
 	isError: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -1288,6 +1306,11 @@ export type ToolExample<TArgs = Record<string, unknown>> =
 
 export interface Tool<TParameters extends TSchema = TSchema> {
 	name: string;
+	/** Codex function namespace; name remains fully qualified inside the agent. */
+	namespace?: string;
+	namespaceDescription?: string;
+	/** Exclude from programmatic execution and public argument/result surfaces. */
+	modelOnly?: boolean;
 	description: string;
 	parameters: TParameters;
 	/** If true, tool is strictly typed and validated against the parameters schema before execution */

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added context-window compaction that starts fresh context without generating a summary.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed

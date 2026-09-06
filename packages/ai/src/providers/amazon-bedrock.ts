@@ -1,3 +1,4 @@
+import { publicToolContent } from "../utils/private-content";
 /**
  * Amazon Bedrock Converse Stream provider.
  *
@@ -1026,7 +1027,7 @@ function convertMessages(
 				toolResults.push({
 					toolResult: {
 						toolUseId: normalizeToolCallId(m.toolCallId),
-						content: m.content.map(c =>
+						content: publicToolContent(m.content).map(c =>
 							c.type === "image"
 								? { image: createImageBlock(c.mimeType, c.data) }
 								: { text: c.text.toWellFormed() },
@@ -1041,7 +1042,7 @@ function convertMessages(
 					toolResults.push({
 						toolResult: {
 							toolUseId: normalizeToolCallId(nextMsg.toolCallId),
-							content: nextMsg.content.map(c =>
+							content: publicToolContent(nextMsg.content).map(c =>
 								c.type === "image"
 									? { image: createImageBlock(c.mimeType, c.data) }
 									: { text: c.text.toWellFormed() },

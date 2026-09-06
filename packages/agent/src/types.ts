@@ -5,14 +5,12 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	Effort,
-	ImageContent,
 	Message,
 	Model,
 	ServiceTier,
 	SimpleStreamOptions,
 	Static,
 	streamSimple,
-	TextContent,
 	Tool,
 	ToolCallProviderMetadata,
 	ToolChoice,
@@ -591,7 +589,7 @@ export interface BeforeToolCallResult {
  */
 export interface AfterToolCallResult {
 	/** If provided, replaces the tool result content array in full. */
-	content?: (TextContent | ImageContent)[];
+	content?: ToolResultMessage["content"];
 	/** If provided, replaces the tool result details payload in full. */
 	details?: unknown;
 	/** If provided, replaces the provider-native result metadata in full. */
@@ -659,7 +657,10 @@ export interface CustomAgentMessages {
  * This abstraction allows apps to add custom message types while maintaining
  * type safety and compatibility with the base LLM messages.
  */
-export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessages];
+export type AgentMessage = (Message | CustomAgentMessages[keyof CustomAgentMessages]) & {
+	/** Owning journal entry used for stable provider-side history references. */
+	sessionEntryId?: string;
+};
 
 /**
  * Agent state containing all configuration and conversation data.
@@ -679,7 +680,7 @@ export interface AgentState {
 
 export interface AgentToolResult<T = any, _TInput = unknown> {
 	// Content blocks supporting text and images
-	content: (TextContent | ImageContent)[];
+	content: ToolResultMessage["content"];
 	// Details to be displayed in a UI or logged
 	details?: T;
 	// Marks a non-throwing failure (e.g. an aggregator catching per-entry errors).

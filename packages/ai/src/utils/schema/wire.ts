@@ -601,10 +601,18 @@ export function arkToWireSchema(schema: Type): Record<string, unknown> {
 export function toolWireSchema(tool: Tool): Record<string, unknown> {
 	const params: TSchema = tool.parameters;
 	if (isArkSchema(params)) return arkToWireSchema(params);
+	// Private namespaces carry server-reserved JSON schemas, not client-authored
+	// schemas that can be upgraded or normalized before transport.
+	if (tool.modelOnly && tool.namespace) return params as Record<string, unknown>;
 	return stamp(params as Record<string, unknown>, kJsonWireSchema, p => {
 		const raw = isArkJsonAst(p) ? arkJsonAstToWire(p) : p;
-		const upgraded = upgradeJsonSchemaTo202012(raw) as Record<string, unknown>;
-		return postProcessJsonSchema(upgraded);
+		// The upgrade returns its input untouched when nothing needs upgrading and
+		// the post-processing passes rewrite in place, so work on a copy: the
+		// caller's schema object may be shared with a tool whose bytes must reach
+		// the provider verbatim.
+		const upgraded = upgradeJsonSchemaTo202012(raw);
+		const owned = upgraded === raw ? structuredClone(raw) : upgraded;
+		return postProcessJsonSchema(owned as Record<string, unknown>);
 	});
 }
 

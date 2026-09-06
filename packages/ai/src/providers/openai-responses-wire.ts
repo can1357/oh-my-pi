@@ -2301,6 +2301,7 @@ export interface ResponseFunctionCallArgumentsDoneEvent {
  * A piece of message content, such as text, an image, or a file.
  */
 export type ResponseFunctionCallOutputItem =
+	| { type: "encrypted_content"; encrypted_content: string }
 	| ResponseInputTextContent
 	| ResponseInputImageContent
 	| ResponseInputFileContent;
