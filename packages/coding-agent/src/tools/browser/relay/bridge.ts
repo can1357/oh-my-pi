@@ -83,10 +83,10 @@ interface PreservedPreloadScript {
 
 function markPreloadApplication(source: unknown, marker: string): string {
 	if (typeof source !== "string") throw new Error("preload source must be a string");
-	// `this` cannot be shadowed by a top-level lexical binding, unlike a global
-	// identifier such as `globalThis`. Keep the marker in the same registration
-	// as the client source so its execution is atomic with the preload.
-	const markerStatement = `Object.defineProperty(this, ${JSON.stringify(marker)}, { value: true, configurable: true });`;
+	// `this` cannot be shadowed by top-level lexical bindings. Avoid every global
+	// identifier here: even `Object` can be in the TDZ when the client preload
+	// declares `const Object`, which would prevent the preload body from running.
+	const markerStatement = `this[${JSON.stringify(marker)}] = true;`;
 	const prologue = source.match(
 		/^(?:#![^\r\n]*(?:\r?\n|$))?(?:(?:(?:[ \t\r\n]+|\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/))*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')[ \t]*(?:;[ \t]*(?:\r?\n)?|\r?\n|$))*/,
 	);

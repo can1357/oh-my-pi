@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
+import * as vm from "node:vm";
 import type {
 	RelayRpcRequest,
 	RelayToExtMessage,
@@ -3137,7 +3138,8 @@ describe("RelayBridge tab grouping", () => {
 				sessionId: pageSession,
 				method: "Page.addScriptToEvaluateOnNewDocument",
 				params: {
-					source: '#!/usr/bin/env node\n"use strict";\nthrow new Error("boom");',
+					source:
+						'#!/usr/bin/env node\n"use strict";\nconst Object = {}; const globalThis = {}; this.__preloadRan = true;',
 					runImmediately: true,
 				},
 			}),
@@ -3168,8 +3170,11 @@ describe("RelayBridge tab grouping", () => {
 		const replay = ext2.rpcs("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(replay?.params).toMatchObject({ runImmediately: false });
 		const replaySource = (replay?.params as { source?: string } | undefined)?.source;
-		expect(replaySource).toStartWith('#!/usr/bin/env node\n"use strict";\nObject.defineProperty');
-		expect(replaySource).toContain('configurable: true });\nthrow new Error("boom");');
+		expect(replaySource).toStartWith('#!/usr/bin/env node\n"use strict";\nthis[');
+		const replayContext: Record<string, unknown> = {};
+		vm.runInNewContext(replaySource!, replayContext);
+		expect(replayContext.__preloadRan).toBe(true);
+		expect(Object.keys(replayContext).some(key => key.startsWith("__ompRelayPreload"))).toBe(true);
 	});
 
 	it.each(["remove", "retry"] as const)(
