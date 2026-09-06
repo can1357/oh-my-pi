@@ -47,7 +47,7 @@ describe("issue 3555 Ollama usage registration", () => {
 				limits: [],
 				metadata: { email: "cloud@example.test" },
 			});
-			expect(report?.notes?.[0]).toContain("does not expose a standalone quota usage API");
+			expect(report?.notes?.[0]).toContain("requires an API-key credential");
 		} finally {
 			storage.close();
 		}
