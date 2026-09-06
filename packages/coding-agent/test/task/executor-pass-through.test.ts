@@ -201,8 +201,34 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(emptyResult.exitCode).toBe(0);
 		expect(absentResult.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield", "hub"]);
+		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield"]);
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
+	});
+
+	it("does not inject hub into read-only subagents", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const readOnlyResult = await runSubprocess({
+			...baseOptions,
+			id: "read-only-child",
+			agent: { ...baseAgent, tools: ["read", "grep", "glob"] },
+		});
+		const writableResult = await runSubprocess({
+			...baseOptions,
+			id: "writable-child",
+			agent: { ...baseAgent, tools: ["read", "write"] },
+		});
+
+		expect(readOnlyResult.exitCode).toBe(0);
+		expect(writableResult.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
+		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "hub"]);
+
+		const readOnlyPrompt = spy.mock.calls[0]?.[0]?.systemPrompt?.(["default"])?.join("\n") ?? "";
+		const writablePrompt = spy.mock.calls[1]?.[0]?.systemPrompt?.(["default"])?.join("\n") ?? "";
+		expect(readOnlyPrompt.includes("# Peers")).toBe(false);
+		expect(writablePrompt.includes("# Peers")).toBe(true);
 	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
