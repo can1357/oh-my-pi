@@ -137,7 +137,9 @@ describe("daemon presence session identity field", () => {
 		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
 		const parsed = parseArgs([]);
 		parsed.cwd = projectDir;
-		parsed.sessionDir = path.join(projectDir, "sessions");
+		// Leave parsed.sessionDir undefined so createSessionManager returns undefined,
+		// exercising the default launch path where the session is created by the SDK.
+		process.env.PI_AGENT_DIR = path.join(projectDir, "agent");
 		parsed.noExtensions = true;
 		parsed.noSkills = true;
 		parsed.noRules = true;
