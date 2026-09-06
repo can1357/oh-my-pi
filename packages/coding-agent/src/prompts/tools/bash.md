@@ -9,7 +9,8 @@ Use ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort
 - Order-dependent commands use `&&` in one call; independent calls may run concurrently.
 - Internal URIs (`skill://`, `agent://`, …) auto-resolve to paths.
 {{#if hasShellBuiltins}}- aux utils available: mkdir, wc, sort, comm, diff, uniq, base64, cmp, md5sum, sha{1,224,256,384,512}sum, b2sum, basename, dirname, readlink, realpath, touch, stat, date, mktemp, seq, yes, printenv, truncate, tac, nproc, uname, whoami, hostname, which, ps, pgrep, pkill, pidwait, top, cut, tee, tr, paste, sed, xargs, jq, rm, mv, ln, ts, sponge, ifne, isutf8, combine{{#unless isWindows}}, errno{{/unless}}{{/if}}
-{{#if asyncEnabled}}- `async: "auto"` backgrounds the same process after brief inline grace; `true` backgrounds immediately.
+{{#if asyncEnabled}}- `async: "auto"` (default for finite commands): inline for a {{asyncAutoInlineGraceMs}} ms grace, then the same process promotes to a background job if still running. `timeout` ≤ grace + 1 s → always inline. Tune via `bash.asyncAuto.inlineGraceMs` (`0` = promote immediately). At the job cap: auto runs inline with a notice; `true` errors.
+- `async: true`: background immediately; use when the command is known long-running.
 - `progress` emits complete lines after backgrounding: `wake` starts idle follow-up; `ambient` waits for active turn.
 - Truncated/suppressed progress links complete output at `artifact://<id>`.{{/if}}
 </instruction>

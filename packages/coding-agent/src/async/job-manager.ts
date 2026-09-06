@@ -144,7 +144,7 @@ export interface AsyncJob {
 	 */
 	terminalTextProvenance?: "progress" | "terminal";
 }
-type ProgressDeliveryCoverage = "continuous" | "gapped";
+export type ProgressDeliveryCoverage = "continuous" | "gapped";
 
 interface ManagedAsyncJob extends AsyncJob {
 	/** Manager-local generation key; rotated whenever progress suppression ends. */
@@ -848,12 +848,15 @@ export class AsyncJobManager {
 	 * Lift only model-facing progress suppression for a running job after a
 	 * caller-managed foreground phase. Completion remains suppressed until
 	 * `resumeDeliveries`. `foregroundStreamProvenance` records raw output
-	 * already returned inline so terminal settlement does not deliver it again.
+	 * already returned inline so terminal settlement does not deliver it again;
+	 * `coverage: "gapped"` records that the foreground phase lost output the
+	 * caller could not return, so completion keeps the terminal text.
 	 */
 	activateProgressDelivery(
 		jobId: string,
 		delivery: AsyncJobProgressDelivery,
 		foregroundStreamProvenance?: ProgressStreamProvenance,
+		coverage: ProgressDeliveryCoverage = "continuous",
 	): boolean {
 		const job = this.#jobs.get(jobId);
 		if (job?.status !== "running") return false;
@@ -861,7 +864,7 @@ export class AsyncJobManager {
 		this.#suppressedProgressDeliveries.delete(jobId);
 		this.#resumeAgentProgress(job);
 		job.foregroundStreamProvenance = foregroundStreamProvenance;
-		job.progressDeliveryCoverage = "continuous";
+		job.progressDeliveryCoverage = coverage;
 		if (foregroundStreamProvenance) {
 			job.progressDeliveredCount = Math.max(job.progressDeliveredCount ?? 0, 1);
 		}

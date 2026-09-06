@@ -26,7 +26,7 @@
 | `timeout` | `number` | No | Timeout in seconds. Default `300`. `0` disables the deadline. Positive values are capped by `tools.maxTimeout` when that setting is positive, then clamped to the Bash range `1..3600`. |
 | `cwd` | `string` | No | Working directory, resolved against `session.cwd` via `resolveToCwd`. Must exist and be a directory. |
 | `pty` | `boolean` | No | Request PTY mode. Default `false`. PTY is used only when `pty: true`, `PI_NO_PTY !== "1"`, and the tool context has a UI. |
-| `async` | `boolean \| "auto"` | No | `true` starts a background job immediately. `"auto"` starts inline, waits for `bash.asyncAuto.inlineGraceMs` (default one second), then promotes the same process if it is still running. Present only when `async.enabled` is true. Neither mode changes the command deadline, including `timeout: 0`. |
+| `async` | `boolean \| "auto"` | No | `true` starts a background job immediately. `"auto"` starts inline, waits for `bash.asyncAuto.inlineGraceMs` (default one second), then promotes the same process if it is still running; a `timeout` at or below the grace plus a 1 s buffer never promotes and runs inline to completion. Present only when `async.enabled` is true. Neither mode changes the command deadline, including `timeout: 0`. |
 | `progress` | `"ambient" \| "wake"` | No | With `async: true` or `async: "auto"`, deliver complete non-empty output-line events to the model. In auto mode, delivery activates only after promotion: earlier output appears in the foreground/background-start result instead. `wake` pushes a follow-up turn while idle; `ambient` delivers only during an active turn. Lines collect into trailing 200 ms events. A token bucket permits a 10-event burst and refills one event permit every two seconds; this is a rate-limiter permit, not an LLM token. Suppressed inline events remain in the full artifact. Oversized lines retain their first and last 250 characters. A model-facing preview retains at most 3,000 UTF-8 bytes per job, split between its head and tail, and links the complete capture as `artifact://<id>`. |
 
 ## Outputs
@@ -135,8 +135,8 @@ Choose the setting by the desired outcome:
 7. `timeout: 0` disables the deadline. Otherwise `clampTimeout("bash", requestedTimeoutSec, tools.maxTimeout)` applies a positive global ceiling (when configured), then `TOOL_TIMEOUTS.bash` (`min: 1`, `max: 3600`). When clamped, `#buildCompletedResult()` / `#buildBackgroundStartResult()` append a notice line.
 8. Execution path splits:
    1. `async: true` -> `#startManagedBashJob()` registers a session async job and returns immediately.
-   2. `async: "auto"` -> starts a managed job, waits up to the configured `bash.asyncAuto.inlineGraceMs` (capped to `timeoutMs - 1000` when a deadline exists), returns completed work inline, or promotes the same process and activates requested progress delivery. The explicit mode works independently of `bash.autoBackground.enabled` and errors rather than degrading at the job limit.
-   3. Non-PTY with `bash.autoBackground.enabled`, an async job manager below its running-job cap, and no client-terminal bridge available (the bridge wins when both apply) -> applies the same inline-then-promote lifecycle to unmarked foreground calls, without model-facing progress.
+   2. `async: "auto"` -> starts a managed job, waits up to the configured `bash.asyncAuto.inlineGraceMs`, returns completed work inline, or promotes the same process and activates requested progress delivery. When the command's deadline is at or below the grace plus a 1 s buffer (`resolveAutoBackgroundWaitMs` returns `undefined`), no job is registered and the call runs inline to completion. The explicit mode works independently of `bash.autoBackground.enabled`. At the running-job cap it runs inline to completion and appends `Background job limit reached; ran inline to completion instead of promoting to a background job.` to the result, whereas `async: true` at the cap throws `ToolError`.
+   3. Non-PTY with `bash.autoBackground.enabled`, an async job manager below its running-job cap, and no client-terminal bridge available (the bridge wins when both apply) -> applies the same inline-then-promote lifecycle (and the same deadline rule) to unmarked foreground calls, without model-facing progress.
    4. Non-PTY client-terminal bridge, when the session advertises terminal capability and `pty` is false -> creates a remote terminal, streams/polls current output, and releases the terminal after completion.
    5. Otherwise runs foreground execution.
 9. Foreground non-PTY without client terminal calls `executeBash()` from `packages/coding-agent/src/exec/bash-executor.ts`; that path performs direnv/devenv preflight itself.
@@ -165,8 +165,9 @@ Choose the setting by the desired outcome:
    - Requires `async: true` and `async.enabled`.
    - Registers a job with `session.asyncJobManager` and returns `{ state: "running", jobId }` immediately. `timeout: 0` leaves the job without a tool-imposed deadline.
 5. Explicit auto job
-   - Requires `async: "auto"`, `async.enabled`, and an async job manager below its running-job cap.
-   - Starts inline, returns short work directly, and activates progress only if it outlives the wait window and becomes a background job.
+   - Requires `async: "auto"` and `async.enabled`; a missing job manager throws.
+   - Starts inline, returns short work directly, and activates progress only if it outlives the grace window and becomes a background job. Promotion first drains chunk deliveries still in flight into the inline preview, bounded to five progress batch windows (1 s); a delivery stalled past that bound (or a preview that outgrew its 50 KiB tail) promotes anyway with progress coverage marked gapped, so the completion keeps the terminal text instead of claiming it was already shown.
+   - At the running-job cap, or when the deadline cannot outlive the grace, runs inline to completion (the cap case appends a notice).
 6. Settings-driven auto-backgrounded non-PTY job
    - Requires `bash.autoBackground.enabled`, no PTY/client-terminal bridge, and an async job manager below its running-job cap.
    - Applies the same promotion lifecycle to unmarked calls; at capacity, Bash falls back to direct foreground execution.
@@ -200,7 +201,7 @@ Choose the setting by the desired outcome:
 - Default timeout: `300s` (`TOOL_TIMEOUTS.bash.default` in `packages/coding-agent/src/tools/tool-timeouts.ts`).
 - `timeout: 0` disables the command deadline.
 - Positive timeout clamp: `tools.maxTimeout` is an optional global ceiling (`0` means no global ceiling), followed by the Bash `1..3600s` range.
-- Auto-background default threshold: `60_000ms` (`DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS` in `packages/coding-agent/src/tools/bash.ts`), further capped to `timeoutMs - 1000` when a deadline exists; a disabled deadline leaves the threshold uncapped.
+- Auto-background default threshold: `60_000ms` (`DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS` in `packages/coding-agent/src/async/auto-background.ts`); explicit-auto grace default `1_000ms` (`bash.asyncAuto.inlineGraceMs`). A deadline at or below the threshold plus `AUTO_BACKGROUND_TIMEOUT_BUFFER_MS` (1 s) disables backgrounding for that call; a disabled deadline never does.
 - Non-PTY executor with a deadline arms a host-side timer at `max(1_000, timeoutMs)` and passes the same positive timeout to the native run; `timeout: 0` passes no deadline. A timed-out persistent shell session is quarantined (`packages/coding-agent/src/exec/bash-executor.ts`).
 - In-memory output tail cap: `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/coding-agent/src/session/streaming-output.ts`). Once exceeded, the sink keeps only the tail window in memory.
 - Streaming callback throttle in `executeBash()`: `50ms` between `onChunk` calls when streaming is enabled.

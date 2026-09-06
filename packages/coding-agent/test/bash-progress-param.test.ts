@@ -235,6 +235,174 @@ describe("bash progress parameter", () => {
 		await manager.dispose();
 	});
 
+	test("runs auto inline with a notice at the running-job cap while explicit async errors", async () => {
+		using tempDir = TempDir.createSync("@omp-bash-auto-at-capacity-");
+		const releasePath = path.join(tempDir.path(), "release");
+		const manager = new AsyncJobManager({ maxRunningJobs: 1 });
+		const progress = collectProgress(manager);
+		const completions: string[] = [];
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			completions.push(text);
+		});
+		const tool = new BashTool(makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 50 }));
+		await tool.execute("occupy-slot", {
+			command: 'while [ ! -f "$RELEASE" ]; do sleep 0.01; done; printf "slot-released\\n"',
+			env: { RELEASE: releasePath },
+			async: true,
+		});
+		expect(manager.atCapacity).toBe(true);
+
+		const explicit = tool.execute("explicit-at-capacity", { command: "echo no", async: true });
+		await expect(explicit).rejects.toBeInstanceOf(ToolError);
+		await expect(explicit).rejects.toThrow("Background job limit reached");
+
+		const register = vi.spyOn(manager, "register");
+		// Outlives the 50 ms grace, so without the cap it would have promoted.
+		const result = await tool.execute("auto-at-capacity", {
+			command: "sleep 0.2; printf 'inline-at-cap\\n'",
+			async: "auto",
+			progress: "wake",
+		});
+		const resultText = result.content.find(block => block.type === "text")?.text ?? "";
+
+		expect(register).not.toHaveBeenCalled();
+		expect(result.details?.async).toBeUndefined();
+		expect(resultText).toContain("inline-at-cap");
+		expect(resultText).toContain("Background job limit reached; ran inline to completion");
+		expect(progress).toEqual([]);
+
+		await Bun.write(releasePath, "");
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 10 });
+		expect(completions).toHaveLength(1);
+		expect(completions[0]).toContain("slot-released");
+		await manager.dispose();
+	}, 10_000);
+
+	test("never promotes an auto command whose deadline cannot outlive the grace", async () => {
+		const manager = new AsyncJobManager({});
+		const progress = collectProgress(manager);
+		const tool = new BashTool(makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 100 }));
+		const register = vi.spyOn(manager, "register");
+
+		// 1 s deadline <= 100 ms grace + 1 s buffer: outliving the grace must
+		// still resolve inline instead of promoting a job about to expire.
+		const completed = await tool.execute("auto-tiny-timeout", {
+			command: "sleep 0.4; printf 'tiny-timeout-inline\\n'",
+			async: "auto",
+			progress: "wake",
+			timeout: 1,
+		});
+		expect(register).not.toHaveBeenCalled();
+		expect(completed.details?.async).toBeUndefined();
+		expect(completed.content).toContainEqual(
+			expect.objectContaining({ type: "text", text: expect.stringContaining("tiny-timeout-inline") }),
+		);
+
+		// The deadline itself also expires inline rather than as a dead job.
+		const expired = await tool.execute("auto-tiny-timeout-expired", {
+			command: "sleep 5",
+			async: "auto",
+			timeout: 1,
+		});
+		expect(register).not.toHaveBeenCalled();
+		expect(expired.details?.async).toBeUndefined();
+		expect(expired.details?.timedOut).toBe(true);
+		expect(progress).toEqual([]);
+		await manager.dispose();
+	}, 10_000);
+
+	test("promotes past a stalled pre-promotion delivery and keeps the terminal text", async () => {
+		using tempDir = TempDir.createSync("@omp-bash-stalled-promotion-");
+		const releasePath = path.join(tempDir.path(), "release");
+		const artifact = { id: "stalled-progress", path: path.join(tempDir.path(), "output.txt") };
+		const manager = new AsyncJobManager({});
+		const events: string[] = [];
+		manager.registerProgressSink("Main", {
+			deliver: (_jobId, text) => {
+				events.push(`progress:${text}`);
+			},
+		});
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			events.push(`completion:${text}`);
+		});
+		const session = makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 100 });
+		session.allocateOutputArtifact = async () => artifact;
+		const tool = new BashTool(session);
+
+		// Mirror mode flushes the artifact before each onChunk; hold the first
+		// flush so the inline line's delivery (and its barrier token) never
+		// settles while the grace elapses.
+		const releaseFlush = Promise.withResolvers<void>();
+		const originalFlush = OutputSink.prototype.flushArtifact;
+		let held = false;
+		vi.spyOn(OutputSink.prototype, "flushArtifact").mockImplementation(async function (this: OutputSink) {
+			if (!held) {
+				held = true;
+				await releaseFlush.promise;
+			}
+			return originalFlush.call(this);
+		});
+
+		const startedAt = performance.now();
+		const result = await tool.execute("stalled-auto-promote", {
+			command:
+				"printf 'stalled-line\\n'; " +
+				'while [ ! -f "$RELEASE" ]; do sleep 0.01; done; ' +
+				"printf 'after-stall\\n'",
+			env: { RELEASE: releasePath },
+			async: "auto",
+			progress: "wake",
+		});
+		const elapsedMs = performance.now() - startedAt;
+		const resultText = result.content.find(block => block.type === "text")?.text ?? "";
+
+		expect(held).toBe(true);
+		expect(result.details?.async?.state).toBe("running");
+		expect(resultText).not.toContain("stalled-line");
+		// Grace (100 ms) + drain guard (1 s), not the command's lifetime.
+		expect(elapsedMs).toBeLessThan(5_000);
+
+		releaseFlush.resolve();
+		await Bun.write(releasePath, "");
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 10 });
+
+		const completedJob = manager.getJob(result.details?.async?.jobId ?? "");
+		expect(completedJob?.terminalTextProvenance).toBe("terminal");
+		expect(events.filter(event => event.startsWith("progress:"))).toEqual(["progress:after-stall"]);
+		expect(events.at(-1)).toContain("completion:");
+		expect(events.at(-1)).toContain("stalled-line");
+		expect(events.at(-1)).toContain("after-stall");
+		await manager.dispose();
+	}, 10_000);
+
+	test("keeps terminal text when the inline preview could not hold the foreground stream", async () => {
+		const manager = new AsyncJobManager({});
+		const progress = collectProgress(manager);
+		const tool = new BashTool(makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 200 }));
+
+		// 60 KB before the grace outgrows the 50 KB preview tail; the bytes it
+		// dropped were never returned, so completion must not treat the
+		// foreground provenance as already shown.
+		const result = await tool.execute("auto-promote-oversized-preview", {
+			command: "yes x | head -c 60000; printf '\\n'; sleep 0.5",
+			async: "auto",
+			progress: "wake",
+		});
+		const resultText = result.content.find(block => block.type === "text")?.text ?? "";
+
+		expect(result.details?.async?.state).toBe("running");
+		expect(resultText.length).toBeLessThan(60_000);
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 10 });
+
+		const completedJob = manager.getJob(result.details?.async?.jobId ?? "");
+		expect(completedJob?.terminalTextProvenance).toBe("terminal");
+		expect(progress).toEqual([]);
+		await manager.dispose();
+	}, 10_000);
+
 	test("promotes a slow auto command and delivers only later lines before completion", async () => {
 		const manager = new AsyncJobManager({});
 		const events: string[] = [];
@@ -487,8 +655,8 @@ describe("bash progress parameter", () => {
 			deliveriesResumed.resolve();
 		};
 		const activateProgressDelivery = manager.activateProgressDelivery.bind(manager);
-		manager.activateProgressDelivery = (jobId, delivery, foregroundStreamProvenance) => {
-			const activated = activateProgressDelivery(jobId, delivery, foregroundStreamProvenance);
+		manager.activateProgressDelivery = (jobId, delivery, foregroundStreamProvenance, coverage) => {
+			const activated = activateProgressDelivery(jobId, delivery, foregroundStreamProvenance, coverage);
 			queueMicrotask(() => {
 				postBoundaryCallbackRan = true;
 				void reportPreview?.("foreground\npost-boundary\n");
