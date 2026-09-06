@@ -362,6 +362,11 @@ function computeFingerprint(systemPrompt: string[], tools: Tool[], options: Buil
 			s: t.strict,
 			cf: t.customFormat,
 			cw: t.customWireName,
+			// Namespace grouping and model-only privacy change the emitted tool
+			// definition (and model-only schemas skip generic normalization).
+			ns: t.namespace,
+			nsd: t.namespaceDescription,
+			mo: t.modelOnly,
 		})),
 		i: options.intentTracing,
 		pd: options.pruneToolDescriptions,

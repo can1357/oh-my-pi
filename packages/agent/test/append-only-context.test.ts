@@ -93,6 +93,20 @@ describe("StablePrefix", () => {
 		expect(changed).toBe(true);
 	});
 
+	it("returns true when wire-affecting namespace or privacy fields change", () => {
+		const namespaced = (overrides: Partial<AgentTool>): AgentContext =>
+			makeContext({ tools: [{ ...makeTool("read_item", "Read"), ...overrides } as AgentTool] });
+		for (const overrides of [
+			{ namespace: "history" },
+			{ namespace: "history", namespaceDescription: "Private history" },
+			{ namespace: "history", namespaceDescription: "Private history", modelOnly: true },
+		]) {
+			const p = new StablePrefix();
+			p.build(namespaced({}), BUILD_OPTS);
+			expect(p.build(namespaced(overrides), BUILD_OPTS)).toBe(true);
+		}
+	});
+
 	it("invalidate forces rebuild", () => {
 		const p = new StablePrefix();
 		const ctx = makeContext({ systemPrompt: ["Stable"] });
