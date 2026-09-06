@@ -3226,6 +3226,8 @@ describe("RelayBridge tab grouping", () => {
 			);
 			if (interruptedMutation === "retry") {
 				ack(bridge, ext2, "send");
+				await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
+				ack(bridge, ext2, "send", { result: { value: false } });
 				await waitFor(() =>
 					ext2
 						.pending("send")
@@ -3382,7 +3384,7 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(1);
 	});
 
-	it("refreshes the root when navigation precedes registration but its event is delivered afterward", async () => {
+	it("rechecks a navigation preload after removal before invoking it immediately", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -3427,17 +3429,21 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-after-navigation" } } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		const markerProbe = ext2.pending("send").find(rpc => rpc.method === "Runtime.evaluate");
-		expect((markerProbe?.params as { expression?: string } | undefined)?.expression).toContain("Object.hasOwn");
+		const markerExpression = (markerProbe?.params as { expression?: string } | undefined)?.expression;
+		expect(markerExpression).toContain("this[");
+		expect(markerExpression).not.toContain("globalThis");
 		ack(bridge, ext2, "send", { result: { value: false } });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
+		ack(bridge, ext2, "send", { result: { value: true } });
 		await waitFor(() =>
 			ext2
 				.pending("send")
 				.some(
 					rpc =>
 						rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
-						(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === true,
+						(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === false,
 				),
 		);
 		expect(
@@ -3448,7 +3454,7 @@ describe("RelayBridge tab grouping", () => {
 						rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
 						(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === true,
 				),
-		).toHaveLength(1);
+		).toHaveLength(0);
 	});
 
 	it("observes preload navigation without client Page or Runtime domains", async () => {

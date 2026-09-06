@@ -3163,11 +3163,18 @@ export class RelayBridge {
 								method: "Page.removeScriptToEvaluateOnNewDocument",
 								params: { identifier: rootIdentifier },
 							});
+							// A navigation can commit after the first marker probe but
+							// before Chrome applies the removal. Recheck after removal so
+							// an invocation from that registration is not followed by an
+							// immediate duplicate in the same document.
+							appliedToCurrentDocument =
+								applicationMarker !== undefined &&
+								(await this.#preloadApplicationMarker(tab.tabId, applicationMarker, script.params.worldName));
 							retry = (await this.#rpc({
 								op: "send",
 								tabId: tab.tabId,
 								method: "Page.addScriptToEvaluateOnNewDocument",
-								params: { ...script.params, runImmediately: true },
+								params: { ...script.params, runImmediately: !appliedToCurrentDocument },
 							})) as Record<string, unknown> | undefined;
 						} catch (err) {
 							if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
@@ -3229,7 +3236,7 @@ export class RelayBridge {
 			tabId,
 			method: "Runtime.evaluate",
 			params: {
-				expression: `(() => { const present = Object.hasOwn(globalThis, ${JSON.stringify(marker)}); delete globalThis[${JSON.stringify(marker)}]; return present; })()`,
+				expression: `(() => { const present = this[${JSON.stringify(marker)}] === true; delete this[${JSON.stringify(marker)}]; return present; })()`,
 				returnByValue: true,
 				...(contextId !== undefined ? { contextId } : {}),
 			},
