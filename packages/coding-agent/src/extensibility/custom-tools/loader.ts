@@ -50,6 +50,48 @@ function invalidToolError(path: string, index: number, source: ToolLoadError["so
 }
 
 /**
+ * Engine wording for an exhausted call stack. V8 and JSC both say "Maximum
+ * call stack size exceeded"; SpiderMonkey says "too much recursion".
+ */
+const STACK_EXHAUSTION_PATTERN = /maximum call stack size exceeded|stack overflow|too much recursion/i;
+
+/**
+ * A blown stack surfaces as a bare `RangeError` whose stack is empty or
+ * collapsed onto the recursive frame, so the raw message names neither the
+ * module nor the cause.
+ *
+ * The dominant trigger is a custom tool that *value*-imports the agent
+ * package: `@oh-my-pi/pi-coding-agent` maps its `"."` export to the agent's
+ * own entry module, so importing it from a tool re-enters the agent module
+ * graph while custom tools are still being loaded. See #8900.
+ */
+const SELF_IMPORT_HINT =
+	'This usually means the module re-entered the agent while it was still loading. Import "@oh-my-pi/pi-coding-agent" with `import type` only (type imports are erased at runtime) and take runtime values from the `pi` argument passed to the factory.';
+
+function isStackExhaustion(err: unknown): boolean {
+	return err instanceof Error && STACK_EXHAUSTION_PATTERN.test(err.message);
+}
+
+/**
+ * Build the user-facing text for a tool module that failed to load.
+ *
+ * Always names the file that actually failed: the configured `toolPath` may be
+ * relative or `~`-prefixed, so the resolved absolute path is appended whenever
+ * it differs. Without it the only record of the offending file is
+ * `~/.omp/logs/omp*.log`, which is unreachable advice unless the reader
+ * already knows the failure is tool-related (#8900).
+ *
+ * Exported for tests.
+ */
+export function describeToolLoadFailure(err: unknown, toolPath: string, resolvedPath: string): string {
+	const location = resolvedPath === toolPath ? toolPath : `${toolPath} (resolved to ${resolvedPath})`;
+	const raw = err instanceof Error ? err.message : String(err);
+	const detail = raw.trim().length > 0 ? raw : `${err instanceof Error ? err.name : typeof err} with no message`;
+	const hint = isStackExhaustion(err) ? ` ${SELF_IMPORT_HINT}` : "";
+	return `Failed to load tool ${location}: ${detail}${hint}`;
+}
+
+/**
  * Load a single tool module using native Bun import.
  */
 async function loadTool(
@@ -103,8 +145,10 @@ async function loadTool(
 
 		return { tools: loadedTools, errors };
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		return { tools: [], errors: [{ path: toolPath, error: `Failed to load tool: ${message}`, source }] };
+		return {
+			tools: [],
+			errors: [{ path: toolPath, error: describeToolLoadFailure(err, toolPath, resolvedPath), source }],
+		};
 	}
 }
 
