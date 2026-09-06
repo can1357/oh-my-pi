@@ -36,7 +36,7 @@ async function start(
 		...stale,
 		compat: {
 			contextWindows: {
-				enabled: false,
+				enabled: true,
 				useHistoryNotes: true,
 				reminderThresholdTokens: 1000,
 				reminderMessageTemplate: "Remaining: {n_remaining}",

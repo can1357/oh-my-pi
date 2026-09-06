@@ -26,7 +26,7 @@ test.each(["window", "auto"] as const)(
 			...stale,
 			compat: {
 				contextWindows: {
-					enabled: false,
+					enabled: true,
 					useHistoryNotes: true,
 					reminderThresholdTokens: 1000,
 					reminderMessageTemplate: "Checkpoint in {n_remaining} tokens",

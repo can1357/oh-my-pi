@@ -29,7 +29,7 @@ afterEach(async () => {
 });
 const token = `header.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "account" } })).toString("base64url")}.signature`;
 const policy = {
-	enabled: false,
+	enabled: true,
 	useHistoryNotes: false,
 	reminderThresholdTokens: 1000,
 	reminderMessageTemplate: "Checkpoint in {n_remaining} tokens",
@@ -37,14 +37,14 @@ const policy = {
 	autoCompactFallbackPrompt: "Write a checkpoint, then call new_context",
 	autoCompactFallbackBufferTokens: 2000,
 };
-function fixtureModel(): Model<"openai-codex-responses"> {
+function fixtureModel(catalogEnabled = true): Model<"openai-codex-responses"> {
 	const base = getBundledModel("openai-codex", "gpt-5.4");
 	if (!base) throw new Error("Codex test model unavailable");
 	return buildModel<"openai-codex-responses">({
 		...base,
 		api: "openai-codex-responses",
 		remoteCompaction: undefined,
-		compat: { contextWindows: policy },
+		compat: { contextWindows: { ...policy, enabled: catalogEnabled } },
 	});
 }
 async function harness(
@@ -56,6 +56,7 @@ async function harness(
 		responses?: MockResponse[];
 		windowOnly?: boolean;
 		extensionRunner?: ExtensionRunner;
+		catalogEnabled?: boolean;
 		extraTools?: AgentTool[];
 	} = {},
 ) {
@@ -65,7 +66,7 @@ async function harness(
 	cleanups.push(() => auth.close());
 	auth.setRuntimeApiKey("openai-codex", token);
 	const modelRegistry = new ModelRegistry(auth, undefined, { ignoreLocalModelConfig: true });
-	const model = fixtureModel();
+	const model = fixtureModel(options.catalogEnabled);
 	const settings = Settings.isolated({
 		"compaction.methodOrder": options.windowOnly ? ["window"] : ["window", "soft"],
 		"compaction.enabled": options.enabled ?? true,
@@ -156,6 +157,21 @@ test("disabled compaction exposes no reset protocol and cannot clear history", a
 	expect(manager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
 	expect(JSON.stringify(frames.at(-1)?.messages)).toContain("Keep this task");
 });
+
+test("a catalog flag of enabled:false keeps window mode off even when configured", async () => {
+	const { session, manager, frames } = await harness(true, { catalogEnabled: false, windowOnly: true });
+	expect(session.getActiveToolNames()).not.toContain("new_context");
+	expect(session.getActiveToolNames()).not.toContain("get_context_remaining");
+
+	await session.prompt("Original task must survive");
+	await session.waitForIdle();
+
+	expect(manager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
+	const journal = JSON.stringify(manager.getEntries());
+	expect(journal).not.toContain(policy.autoCompactFallbackPrompt);
+	expect(journal).not.toContain("tokens left in this context window");
+	expect(JSON.stringify(frames.at(-1)?.messages)).toContain("Original task must survive");
+}, 20000);
 
 test("checkpoint then new_context cuts history at a paired-tool boundary and survives resume", async () => {
 	const { session, manager, frames, settings, model, backendCalls } = await harness(true);

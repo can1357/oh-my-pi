@@ -81,7 +81,7 @@ export class CodexContextWindowRuntime {
 			this.#host.settings.get("compaction.enabled") &&
 			this.#available &&
 			this.#windowRequested &&
-			this.#policy !== undefined
+			this.#policy?.enabled === true
 		);
 	}
 
