@@ -371,6 +371,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 
 		// Emit tool_result event - extensions can modify the result and error status
 		if (this.runner.hasHandlers("tool_result")) {
+			const content = publicToolContent(result.content, this.tool.modelOnly);
+			const privateResult = content !== result.content;
 			const resultResult = await this.runner.emitToolResult({
 				type: "tool_result",
 				toolName: this.tool.name,
@@ -379,12 +381,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					this.tool.name,
 					resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
 				),
-				content: publicToolContent(result.content, this.tool.modelOnly),
-				details: this.tool.modelOnly ? undefined : result.details,
+				content,
+				details: privateResult ? undefined : result.details,
 				isError: !!executionError,
 			});
 
-			if (resultResult) {
+			if (resultResult && !privateResult) {
 				const modifiedContent: AgentToolResult["content"] = resultResult.content ?? result.content;
 				const modifiedDetails = (resultResult.details ?? result.details) as TDetails;
 

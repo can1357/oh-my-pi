@@ -1386,6 +1386,29 @@ describe("ExtensionRunner", () => {
 			return new ExtensionRunner(result.extensions, result.runtime, tempDir.path(), sessionManager, modelRegistry);
 		};
 
+		it("keeps encrypted replay output when a result hook echoes its public projection", async () => {
+			const runner = await runnerFor(`
+				export default function(pi) {
+					pi.on("tool_result", event => ({
+						content: [...event.content, { type: "text", text: "public annotation" }],
+						details: { replaced: true },
+					}));
+				}
+			`);
+			const tool: AgentTool = {
+				...okTool,
+				modelOnly: true,
+				execute: async () => ({
+					content: [{ type: "encrypted", encryptedContent: "replay-ciphertext" }],
+					details: { original: true },
+				}),
+			};
+			const wrapper = new ExtensionToolWrapper(tool, runner);
+			const result = await wrapper.execute("private-call", {}, undefined, undefined, undefined);
+			expect(result.content).toEqual([{ type: "encrypted", encryptedContent: "replay-ciphertext" }]);
+			expect(result.details).toEqual({ original: true });
+		});
+
 		it("surfaces replacement content while keeping the call an error", async () => {
 			const runner = await runnerFor(`
 				export default function(pi) {
