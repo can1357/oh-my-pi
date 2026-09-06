@@ -2527,6 +2527,20 @@ export const SETTINGS_SCHEMA = {
 				"Use larger context windows where supported; may incur premium pricing. Off keeps default or standard-pricing windows",
 		},
 	},
+	// Per-turn time stamp: each user message carries a Now: stamp of its own
+	// turn (derived from its persisted timestamp, byte-stable across
+	// requests and session resumes; toggle with /time).
+	"prompt.nowStamp": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "General",
+			label: "Per-turn Time Stamp",
+			description:
+				"Append a Now: timestamp of its own turn to each user message so the model always knows the current time (toggle with /time)",
+		},
+	},
 
 	// Compaction
 	"compaction.enabled": {

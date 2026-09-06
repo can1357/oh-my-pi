@@ -99,6 +99,27 @@ function applyExtendedContextCommand(settings: Settings, args: string): string |
 	return undefined;
 }
 
+/** Applies a `/time` argument and returns its operator feedback. */
+function applyNowStampCommand(settings: Settings, args: string): string | undefined {
+	const arg = args.trim().toLowerCase();
+	const current = settings.get("prompt.nowStamp");
+	if (!arg || arg === "toggle") {
+		const enabled = !current;
+		settings.set("prompt.nowStamp", enabled);
+		return `Per-turn time stamp ${enabled ? "enabled" : "disabled"}.`;
+	}
+	if (arg === "on") {
+		settings.set("prompt.nowStamp", true);
+		return "Per-turn time stamp enabled.";
+	}
+	if (arg === "off") {
+		settings.set("prompt.nowStamp", false);
+		return "Per-turn time stamp disabled.";
+	}
+	if (arg === "status") return `Per-turn time stamp is ${current ? "on" : "off"}.`;
+	return undefined;
+}
+
 /** Detailed, session-effective `/computer status` diagnostics. */
 function formatComputerUseStatus(session: AgentSession): string {
 	const enabled = session.settings.get("computer.enabled");
@@ -560,6 +581,33 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const output = applyExtendedContextCommand(runtime.ctx.settings, command.args);
 			refreshStatusLine(runtime.ctx);
 			runtime.ctx.showStatus(output ?? "Usage: /extended-context [on|off|status]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "time",
+		icon: "gauge",
+		description: "Toggle the per-turn Now: time stamp on user messages",
+		acpDescription: "Toggle per-turn time stamp",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Enable the per-turn Now: time stamp" },
+			{ name: "off", description: "Disable the per-turn Now: time stamp" },
+			{ name: "status", description: "Show time stamp status" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			`Time stamp: ${runtime.ctx.settings.get("prompt.nowStamp") ? "on" : "off"}`,
+		handle: async (command, runtime) => {
+			const output = applyNowStampCommand(runtime.settings, command.args);
+			if (!output) return usage("Usage: /time [on|off|status]", runtime);
+			await runtime.output(output);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			const output = applyNowStampCommand(runtime.ctx.settings, command.args);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(output ?? "Usage: /time [on|off|status]");
 			runtime.ctx.editor.setText("");
 		},
 	},

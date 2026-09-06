@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a per-turn `Now:` timestamp stamp (UTC ISO instant plus local clock, timezone short name, and numeric UTC offset, e.g. `Now: 2026-08-30T02:51:16Z (20:51 CDT, UTC-05:00)`) appended to each user message and each user-initiated developer continuation turn, derived deterministically from that message's own turn timestamp, so re-stamped history stays byte-identical across requests, tool-call loops, and same-host session resumes (the parenthesized local part of the stamp renders in the host timezone and locale), and the prompt-cache prefix is preserved. A prompt that already ends in a `Now:` block carrying a different value is re-stamped with the derived one rather than left stale. Toggle with `/time` (persisted `prompt.nowStamp` setting, default on).
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

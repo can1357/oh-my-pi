@@ -159,7 +159,7 @@ import {
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
-import { DateCwdReminderInjector } from "./session/date-cwd-reminder";
+import { DateCwdReminderInjector, applyNowStamp } from "./session/date-cwd-reminder";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import { recoverInlineSloppyEdit } from "./session/inline-edit-recovery";
 import {
@@ -3461,11 +3461,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Keep per-request volatility out of the system prompt: the date/cwd
 			// reminder rides on the first user turn so open-weight providers keep
 			// their tool-schema prefix cache (#7404).
-			return dateCwdReminder.transform(
+			transformed = dateCwdReminder.transform(
 				transformed,
 				formatLocalCalendarDate(),
 				normalizePromptPath(sessionManager.getCwd()),
 			);
+			return settings.get("prompt.nowStamp") ? applyNowStamp(transformed) : transformed;
 		};
 		const onPayload = async (payload: unknown, model?: Model) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload, model);
@@ -4152,11 +4153,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 						transformed = await dropUnreadableContextImages(transformed, transformModel);
 						if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
-						return captureDateCwdReminder.transform(
+						transformed = captureDateCwdReminder.transform(
 							transformed,
 							formatLocalCalendarDate(),
 							normalizePromptPath(sessionManager.getCwd()),
 						);
+						return settings.get("prompt.nowStamp") ? applyNowStamp(transformed) : transformed;
 					},
 					thinkingBudgets: agent.thinkingBudgets,
 					temperature: agent.temperature,
