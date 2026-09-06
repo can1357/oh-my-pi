@@ -5,6 +5,7 @@ import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -125,6 +126,22 @@ describe("AgentSession prewalk", () => {
 				};
 			},
 		};
+	}
+
+	function registerBackgroundEvalStatus(
+		manager: AsyncJobManager,
+		ownerId: string,
+		statusEvent: Record<string, unknown>,
+	): string {
+		return manager.register(
+			"eval",
+			"background eval",
+			async ({ reportProgress }) => {
+				await reportProgress("eval completed", { statusEvents: [statusEvent] });
+				return "done";
+			},
+			{ ownerId },
+		);
 	}
 
 	it("prewalks at the first edit/write after the todo gate opens; bash and todo don't trigger", async () => {
@@ -628,6 +645,79 @@ describe("AgentSession prewalk", () => {
 		expect(requested).toEqual(Array(4).fill(`${primary.provider}/${primary.id}`));
 		expect(session.model?.id).toBe(primary.id);
 	});
+
+	const backgroundEvalCases: Array<{
+		title: string;
+		todoGate: boolean;
+		statusEvent: Record<string, unknown>;
+		switches: boolean;
+	}> = [
+		{
+			title: "prewalks on a write completed after Eval backgrounds before the async-result follow-up",
+			todoGate: false,
+			statusEvent: { op: "write", path: "example.txt", implementationAction: true },
+			switches: true,
+		},
+		{
+			title: "prewalks on a write completed after Eval backgrounds after the todo gate opens",
+			todoGate: true,
+			statusEvent: { op: "write", path: "example.txt", implementationAction: true },
+			switches: true,
+		},
+		{
+			title: "does not prewalk on a read-only background Eval job",
+			todoGate: false,
+			statusEvent: { op: "read", path: "example.txt" },
+			switches: false,
+		},
+	];
+	for (const { title, todoGate, statusEvent, switches } of backgroundEvalCases) {
+		it(`${title} (issue #11018)`, async () => {
+			const primary = modelOrThrow("claude-sonnet-4-5");
+			const target = modelOrThrow("claude-sonnet-4-6");
+			const responses: MockResponse[] = todoGate
+				? [toolCall("t1", "todo"), { content: ["done"] }]
+				: [{ content: ["done"] }];
+			const mock = createMockModel({ responses });
+			const requested: string[] = [];
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: primary,
+					systemPrompt: ["Test"],
+					tools: todoGate ? [todoTool as AgentTool] : [],
+					messages: [],
+					thinkingLevel: Effort.Medium,
+				},
+				convertToLlm,
+				streamFn: (model, context, options) => {
+					requested.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			const manager = new AsyncJobManager({});
+			const ownerId = "PrewalkBackgroundEval";
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map(todoGate ? [[todoTool.name, todoTool as AgentTool]] : []),
+				prewalk: { target },
+				agentId: ownerId,
+				ownedAsyncJobManager: manager,
+			});
+
+			registerBackgroundEvalStatus(manager, ownerId, statusEvent);
+			await session.settleAsyncWork();
+
+			const primaryId = `${primary.provider}/${primary.id}`;
+			const targetId = `${target.provider}/${target.id}`;
+			const expected = todoGate ? [primaryId, targetId] : switches ? [targetId] : [primaryId, primaryId];
+			expect(requested).toEqual(expected);
+			expect(session.model?.id).toBe(switches ? target.id : primary.id);
+		});
+	}
 
 	it("re-arms continuation after tool progress between prose turns", async () => {
 		// Regression: a normal prewalk can split planning across several turns:

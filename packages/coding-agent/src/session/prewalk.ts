@@ -2,6 +2,7 @@ import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
+import type { AsyncJob } from "../async";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
@@ -42,11 +43,17 @@ const PLAN_YOLO_HANDOFF_MESSAGE_TYPE = "plan-yolo-handoff";
 function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
 	if (isImplementationActionResult(result)) return true;
 	if (result.toolName !== "eval") return false;
-	const details = result.details;
-	if (!isRecord(details) || !Array.isArray(details.statusEvents)) return false;
-	return details.statusEvents.some(event => isRecord(event) && event[EVAL_IMPLEMENTATION_ACTION_MARKER] === true);
+	return evalImplementationActionName(result.details) !== undefined;
 }
 
+function evalImplementationActionName(details: unknown): string | undefined {
+	if (!isRecord(details) || !Array.isArray(details.statusEvents)) return undefined;
+	const event = details.statusEvents.find(
+		candidate => isRecord(candidate) && candidate[EVAL_IMPLEMENTATION_ACTION_MARKER] === true,
+	);
+	if (!isRecord(event)) return undefined;
+	return typeof event.op === "string" ? event.op : "eval implementation";
+}
 /** Capabilities the prewalk coordinator borrows from its owning session. */
 export interface PrewalkCoordinatorHost {
 	agent: Agent;
@@ -86,6 +93,8 @@ export class PrewalkCoordinator {
 	#planInjected = false;
 	#continuePending = false;
 	#todoSeen = false;
+	#asyncImplementationName: string | undefined;
+	#handoffPromise: Promise<void> | undefined;
 	#planYolo: PlanYolo | undefined;
 	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[] } | undefined;
 	#planYoloArmed = false;
@@ -116,11 +125,16 @@ export class PrewalkCoordinator {
 		);
 	}
 
+	#todoGateOpen(): boolean {
+		return this.#todoSeen || !this.#host.getActiveToolNames().includes("todo");
+	}
+
 	#clearPrewalkState(): void {
 		this.#prewalk = undefined;
 		this.#planInjected = false;
 		this.#continuePending = false;
 		this.#todoSeen = false;
+		this.#asyncImplementationName = undefined;
 	}
 
 	#disarmNoop(prewalk: Prewalk): void {
@@ -136,6 +150,10 @@ export class PrewalkCoordinator {
 	async advanceAtTurnEnd(liveMessages: AgentMessage[], context: AgentTurnEndContext | undefined): Promise<void> {
 		const prewalk = this.#prewalk;
 		if (!prewalk || context?.message.role !== "assistant") return;
+		if (this.#handoffPromise) {
+			await this.#handoffPromise;
+			return;
+		}
 		if (this.#isNoop(prewalk)) {
 			this.#scrubPlanNudge(liveMessages);
 			this.#disarmNoop(prewalk);
@@ -158,11 +176,12 @@ export class PrewalkCoordinator {
 			});
 		}
 
-		const todoGateOpen = this.#todoSeen || !this.#host.getActiveToolNames().includes("todo");
+		const todoGateOpen = this.#todoGateOpen();
 		const action = todoGateOpen
 			? context.toolResults.find(result => isPrewalkImplementationAction(result))
 			: undefined;
-		if (!action) {
+		const actionName = action?.toolName ?? (todoGateOpen ? this.#asyncImplementationName : undefined);
+		if (!actionName) {
 			if (!this.#planInjected) {
 				this.#planInjected = true;
 				this.#continuePending = true;
@@ -179,10 +198,59 @@ export class PrewalkCoordinator {
 			return;
 		}
 
-		await this.#host.waitForSessionMessagePersistence(context.message);
-		for (const toolResult of context.toolResults) {
-			await this.#host.waitForSessionMessagePersistence(toolResult);
+		await this.#handoff(prewalk, liveMessages, actionName, async () => {
+			await this.#host.waitForSessionMessagePersistence(context.message);
+			for (const toolResult of context.toolResults) {
+				await this.#host.waitForSessionMessagePersistence(toolResult);
+			}
+		});
+	}
+
+	/**
+	 * Records an implementation action completed by a background Eval job and,
+	 * once the todo gate is open, switches before its `async-result` follow-up.
+	 */
+	async advanceAtAsyncJobEnd(job: AsyncJob | undefined): Promise<void> {
+		const prewalk = this.#prewalk;
+		if (!prewalk || job?.type !== "eval") return;
+		const actionName = evalImplementationActionName(job.latestDetails);
+		if (!actionName) return;
+		this.#asyncImplementationName = actionName;
+		if (!this.#todoGateOpen()) return;
+		if (this.#isNoop(prewalk)) {
+			this.#scrubPlanNudge(this.#host.agent.state.messages);
+			this.#disarmNoop(prewalk);
+			return;
 		}
+		await this.#handoff(prewalk, this.#host.agent.state.messages, actionName);
+	}
+
+	async #handoff(
+		prewalk: Prewalk,
+		liveMessages: AgentMessage[],
+		actionName: string,
+		waitForPersistence?: () => Promise<void>,
+	): Promise<void> {
+		if (this.#handoffPromise) {
+			await this.#handoffPromise;
+			return;
+		}
+		const handoff = this.#completeHandoff(prewalk, liveMessages, actionName, waitForPersistence);
+		this.#handoffPromise = handoff;
+		try {
+			await handoff;
+		} finally {
+			if (this.#handoffPromise === handoff) this.#handoffPromise = undefined;
+		}
+	}
+
+	async #completeHandoff(
+		prewalk: Prewalk,
+		liveMessages: AgentMessage[],
+		actionName: string,
+		waitForPersistence?: () => Promise<void>,
+	): Promise<void> {
+		await waitForPersistence?.();
 		this.#scrubPlanNudge(liveMessages);
 		const target = prewalk.target;
 		if (this.#isNoop(prewalk)) {
@@ -193,7 +261,7 @@ export class PrewalkCoordinator {
 		this.#clearPrewalkState();
 		this.#host.emitNotice(
 			"info",
-			`Prewalk: switched to ${target.provider}/${target.id} after first ${action.toolName} call.`,
+			`Prewalk: switched to ${target.provider}/${target.id} after first ${actionName} call.`,
 			"prewalk",
 		);
 		this.#host.agent.steer({
