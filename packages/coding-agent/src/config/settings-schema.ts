@@ -2337,8 +2337,9 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "interaction",
 			group: "Notifications",
-			label: "Ask Notification",
-			description: "Notify when the ask tool is waiting for input",
+			label: "Waiting Notification",
+			description:
+				"Notify when the agent is waiting on you: an ask, a tool approval, or a confirm/input dialog it raised",
 		},
 	},
 

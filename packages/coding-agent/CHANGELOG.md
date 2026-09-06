@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Prompts the agent is waiting on now announce themselves, not just the `ask` tool: tool approvals and the coding-plan reserve question ("switch to the fallback model?"). Such a prompt raised while the pane sits in the background used to be invisible — the turn simply stopped. Dialogs the human opens mid-turn (the large-paste menu, slash-command pickers, user-run extension commands) stay silent, and the `ask.notify` switch governs these too.
 	- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
 - Subagent `yield` no longer rejects a valid `data` payload because a non-strict OpenAI-compatible backend filled the optional `error` field with `""`; previously the worker retried the identical call until the invalid-yield cap and the parent received nothing.
 - Fixed fullscreen `/copy` outlining only a lazily created grouped Read card, so Enter copies the assistant yield instead of tool output.

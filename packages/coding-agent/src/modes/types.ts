@@ -110,7 +110,6 @@ export interface AgentHubOpenOptions {
 	armCloseTap?: boolean;
 	initialSection?: "agents" | "activity";
 }
-
 export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;

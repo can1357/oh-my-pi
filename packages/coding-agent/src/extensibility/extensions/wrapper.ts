@@ -330,7 +330,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					: basePrompt;
 			let choice: string | undefined;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				// The turn cannot proceed until this is answered, so it announces itself
+				// even when the pane sits in the background.
+				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"], { announce: true });
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				throw err;

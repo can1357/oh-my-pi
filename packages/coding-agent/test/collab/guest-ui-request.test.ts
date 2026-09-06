@@ -43,7 +43,7 @@ interface DialogStub {
 	title: string;
 	options?: ExtensionUISelectItem[];
 	prefill?: string;
-	dialogOptions?: ExtensionUIDialogOptions;
+	dialogOptions?: ExtensionUIDialogOptions | InteractiveSelectorDialogOptions;
 	/** Flipped when the guest dismissed the presentation via the abort signal. */
 	aborted: boolean;
 	whenAborted: Promise<void>;
@@ -325,6 +325,10 @@ describe("collab TUI guest ui-request handling (#4049)", () => {
 		expect(dialog.dialogOptions?.checkedIndices).toEqual([0]);
 		expect(dialog.dialogOptions?.markableCount).toBe(2);
 		expect(dialog.dialogOptions?.helpText).toBe("pick one");
+		// The `ui-request` frame carries no announcement intent, so the guest cannot
+		// tell a blocked host apart from a dialog the host's user opened; it stays
+		// silent rather than toasting every mirrored dialog.
+		expect(dialog.dialogOptions?.announce).toBeUndefined();
 
 		dialog.settle("Yes");
 		expect(await h.nextUiResponse()).toEqual({ reqId: 1, value: "Yes" });
