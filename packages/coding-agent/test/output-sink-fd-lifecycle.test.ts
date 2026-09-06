@@ -85,6 +85,21 @@ describe("OutputSink fd lifecycle", () => {
 		expect(content).not.toContain("y".repeat(64));
 	});
 
+	test("a fresh sink truncates an existing capture at its path before mirroring", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "fresh.txt");
+		await Bun.write(artifactPath, "prior capture tail\n");
+		const sink = new OutputSink({ artifactPath, artifactId: "fresh", artifactWriteMode: "mirror" });
+		sink.push("new\n");
+		await sink.flushArtifact();
+		// Bun.file(path).writer() overwrites in place without truncating; a
+		// shorter capture must not keep the old capture's tail behind it.
+		expect(await Bun.file(artifactPath).text()).toBe("new\n");
+
+		await sink.dispose();
+		expect(await Bun.file(artifactPath).text()).toBe("new\n");
+	});
+
 	test("dispose() closes the descriptor even when the capped tail replay write throws", async () => {
 		const dir = await createTempDir();
 		const artifactPath = path.join(dir, "capped.txt");

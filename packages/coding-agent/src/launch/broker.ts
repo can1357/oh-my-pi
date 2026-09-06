@@ -1258,11 +1258,16 @@ class DaemonBroker {
 					}
 					const replaced = this.#outputRegistrations.get(key);
 					if (replaced) this.#disposeOutputRegistration(key, replaced);
+					if (replaced && replaced.artifactPath === subscription.artifactPath) {
+						// The new sink truncates or appends to the file the replaced sink
+						// still owns. Settle that sink first so its buffered writes and
+						// in-flight end() cannot land inside the new capture, and so an
+						// acknowledged size is measured at the real append point.
+						await this.#disposeOutputArtifact(replaced);
+						if (!current()) return;
+					}
 					let existingArtifactBytes: number | undefined;
 					if (subscription.artifactBytes !== undefined) {
-						// Continue a capture the client already acknowledged: settle the
-						// replaced sink first so the measured size is the real append point.
-						if (replaced) await this.#disposeOutputArtifact(replaced);
 						existingArtifactBytes = await this.#artifactSize(subscription.artifactPath);
 						if (!current()) return;
 					}

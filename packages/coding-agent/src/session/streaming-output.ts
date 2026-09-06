@@ -1227,16 +1227,21 @@ export class OutputSink {
 	async #createFileSink(): Promise<void> {
 		if (!this.#artifactPath || this.#fileReady) return;
 		try {
+			// Bun.file(path).writer() overwrites an existing file in place: it
+			// neither truncates (oven-sh/bun#25968) nor appends. Both fixes run
+			// synchronously so creation stays atomic with the buffer replay below —
+			// an await here would let new pushes land in both #buffer and
+			// #pendingFileWrites and duplicate them on drain.
 			let sink: Bun.FileSink;
 			if (this.#artifactAppend) {
-				// Bun.file(path).writer() truncates; append via an "a" descriptor.
-				// Opened synchronously so creation stays atomic with the buffer
-				// replay below — an await here would let new pushes land in both
-				// #buffer and #pendingFileWrites and duplicate them on drain. The
-				// fd writer does not take ownership; #finalizeFile closes it.
+				// Append via an "a" descriptor. The fd writer does not take
+				// ownership; #finalizeFile closes it.
 				this.#appendFd = fs.openSync(this.#artifactPath, "a", 0o600);
 				sink = Bun.file(this.#appendFd).writer();
 			} else {
+				// Start the capture empty so a shorter capture never keeps a stale
+				// tail from whatever previously lived at this path.
+				fs.writeFileSync(this.#artifactPath, "", { mode: 0o600 });
 				sink = Bun.file(this.#artifactPath).writer();
 			}
 			this.#file = { path: this.#artifactPath, artifactId: this.#artifactId, sink };

@@ -1664,6 +1664,128 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		await republishCapture(false);
 	}, 20_000);
 
+	it("settles a replaced same-path sink before the replacement truncates the capture", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-replace-same-path-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.on("data", chunk => process.stdout.write(chunk));
+`,
+		);
+		const artifactPath = path.join(tempDir.path(), "same-path.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		// Drives the daemon while `client`'s socket is held by its pending publication.
+		const driver = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 0 });
+		const firstNotifications: DaemonMonitorNotification[] = [];
+		const secondNotifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		const secondOutput = Promise.withResolvers<void>();
+		const firstUnregister = client.onOutput?.(
+			{ id: "same-path-monitor", name: "same-path", owner: "first-owner", artifactPath },
+			notification => {
+				firstNotifications.push(notification);
+			},
+		);
+		if (!firstUnregister) throw new Error("Expected output monitoring support");
+		// The replaced sink's dispose() is held open: a write that was still
+		// buffered when the client re-registered lands during its in-flight end().
+		const disposeStarted = Promise.withResolvers<void>();
+		const releaseDispose = Promise.withResolvers<void>();
+		const originalDispose = OutputSink.prototype.dispose;
+		const disposeSpy = vi
+			.spyOn(OutputSink.prototype, "dispose")
+			.mockImplementationOnce(async function (this: OutputSink): Promise<void> {
+				disposeStarted.resolve();
+				await releaseDispose.promise;
+				this.push("STALE\n");
+				return originalDispose.call(this);
+			});
+		let secondUnregister: DaemonOutputUnregister | undefined;
+		try {
+			await firstUnregister.ready;
+			await client.request({
+				op: "start",
+				spec: {
+					name: "same-path",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			await client.request({ op: "send", name: "same-path", data: "FIRST\n" });
+			await waitForOutputCount(firstNotifications, 1);
+			expect(await Bun.file(artifactPath).text()).toBe("FIRST\n");
+
+			// Same id and path, no `artifactBytes` acknowledgement: the broker must
+			// start a fresh capture at `artifactPath` behind the replaced sink.
+			secondUnregister = client.onOutput?.(
+				{ id: "same-path-monitor", name: "same-path", owner: "second-owner", artifactPath },
+				notification => {
+					secondNotifications.push(notification);
+					if (notification.event === "daemon-output") secondOutput.resolve();
+					if (notification.event === "daemon-monitor-completed") completed.resolve();
+				},
+			);
+			if (!secondUnregister) throw new Error("Expected output monitoring support");
+			await disposeStarted.promise;
+			expect(disposeSpy).toHaveBeenCalledTimes(1);
+			// While the old sink is still closing, the broker has not created the
+			// replacement sink: bytes the daemon emits now must not truncate the file
+			// the old sink is still flushing into. `wait` returns once the broker
+			// has appended the echo to the daemon log, i.e. after it fanned it out.
+			await driver.request({ op: "send", name: "same-path", data: "SECOND\n" });
+			const echoed = await driver.request({
+				op: "wait",
+				name: "same-path",
+				for: "exit",
+				pattern: "SECOND",
+				timeoutMs: 5_000,
+			});
+			if (echoed.op !== "wait") throw new Error("unexpected wait result");
+			expect(echoed.timedOut).toBeFalse();
+			expect(secondNotifications).toHaveLength(0);
+			expect(await Bun.file(artifactPath).text()).toBe("FIRST\n");
+
+			releaseDispose.resolve();
+			await secondUnregister.ready;
+			// The old capture absorbed its late write before the replacement opened;
+			// the replacement's capture starts at its own attach point.
+			expect(await Bun.file(artifactPath).text()).toBe("FIRST\nSTALE\n");
+			await client.request({ op: "send", name: "same-path", data: "THIRD\n" });
+			await secondOutput.promise;
+			await client.request({ op: "stop", name: "same-path", timeoutMs: 2_000 });
+			await completed.promise;
+
+			const second = secondNotifications.find(notification => notification.event === "daemon-output");
+			if (second?.event !== "daemon-output") throw new Error("Expected a delivered output batch");
+			expect(await Bun.file(artifactPath).text()).toBe("THIRD\n");
+			expect(second.artifactBytes).toBe("THIRD\n".length);
+		} finally {
+			releaseDispose.resolve();
+			disposeSpy.mockRestore();
+			firstUnregister();
+			secondUnregister?.();
+			await client.request({ op: "stop", name: "same-path", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			driver.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
 	it("replays unacknowledged output batches to a reconnecting subscription and honors cumulative acks", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-replay-");
 		const projectDir = path.join(tempDir.path(), "project");
