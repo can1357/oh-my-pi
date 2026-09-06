@@ -28,7 +28,7 @@ import { DEFAULT_MAX_BYTES } from "./streaming-output";
 const identitySchema = type({
 	threadId: "string",
 	firstWindowId: "string",
-	"previousWindowId?": "string",
+	"previousWindowId?": "string | undefined",
 	windowId: "string",
 	windowNumber: "number.integer > 0",
 	"agentPath?": "string",
@@ -90,7 +90,16 @@ export class CodexContextWindowRuntime {
 	get effectiveLimit(): number {
 		return resolveThresholdTokens(this.#host.model()?.contextWindow ?? 0, this.#host.settings.getGroup("compaction"));
 	}
+	invalidateIdentity(): void {
+		this.#sessionId = undefined;
+		this.#lastIdentity = undefined;
+		this.#threadHint = undefined;
+		this.#initialized = false;
+	}
+
 	get identity(): CodexContextWindowIdentity {
+		const sessionId = this.#host.providerSessionId();
+		if (this.#sessionId !== sessionId) this.#restoreIdentity(sessionId);
 		const identity = getOpenAICodexContextWindow(this.#host.providerSessionId(), this.#host.providerSessionState);
 		if (
 			this.#lastIdentity &&
@@ -128,8 +137,16 @@ export class CodexContextWindowRuntime {
 		if (this.notesActive) {
 			setOpenAICodexHistoryIngestion(sessionId, this.#host.providerSessionState, this.protocol.agentName);
 		}
-		if (this.#sessionId === sessionId && this.#initialized) return;
+		if (this.#sessionId !== sessionId) this.#restoreIdentity(sessionId);
+		if (this.#initialized) return;
+		this.#initialized = true;
+		await this.refreshThreadHint();
+	}
+
+	#restoreIdentity(sessionId: string): void {
 		this.#lastIdentity = undefined;
+		this.#threadHint = undefined;
+		this.#initialized = false;
 		this.#sessionId = sessionId;
 		const branch = this.#host.sessionManager.getBranch();
 		let restored = false;
@@ -154,13 +171,14 @@ export class CodexContextWindowRuntime {
 				...this.identity,
 				agentPath: this.protocol.agentName,
 			});
-		this.#initialized = true;
 		this.protocol.reset(this.identity);
-		await this.refreshThreadHint();
 	}
 
 	async refreshThreadHint(): Promise<void> {
-		this.#threadHint = this.notesActive ? await this.backend.threadHint(this.#backendContext()) : undefined;
+		const identity = this.identity;
+		const sessionId = this.#sessionId;
+		const hint = this.notesActive ? await this.backend.threadHint(this.#backendContext()) : undefined;
+		if (this.#sessionId === sessionId && this.#lastIdentity?.windowId === identity.windowId) this.#threadHint = hint;
 	}
 
 	#backendContext() {

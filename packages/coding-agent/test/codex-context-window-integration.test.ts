@@ -377,3 +377,37 @@ test("aborting after new_context cancels the reset before a later prompt", async
 	expect(manager.getBranch().some(entry => entry.type === "compaction" && entry.method === "window")).toBe(false);
 	expect(JSON.stringify(frames.at(-1)?.messages)).toContain("Keep this later task");
 });
+
+test.each(["tree", "branch", "switch"] as const)(
+	"rehydrates the active branch window identity after %s",
+	async boundary => {
+		const { session, manager } = await harness(true);
+		let expected = getOpenAICodexContextWindow(session.sessionId, session.providerSessionState);
+		await session.prompt("Original branch task");
+		await session.waitForIdle();
+		expect(getOpenAICodexContextWindow(session.sessionId, session.providerSessionState).windowNumber).toBe(2);
+		const original = manager.getBranch().find(entry => entry.type === "message" && entry.message.role === "user");
+		if (!original) throw new Error("Missing original user turn");
+		if (boundary === "switch") {
+			const other = SessionManager.create(manager.getCwd(), manager.getSessionDir());
+			cleanups.push(() => other.close());
+			expected = getOpenAICodexContextWindow(other.getSessionId(), new Map());
+			other.appendCustomEntry("codex.context-window", { ...expected, agentPath: "/root" });
+			await other.ensureOnDisk();
+			const file = other.getSessionFile();
+			if (!file) throw new Error("Missing target session file");
+			expect(await session.switchSession(file)).toBe(true);
+		} else if (boundary === "branch") {
+			expect((await session.branch(original.id)).cancelled).toBe(false);
+		} else {
+			expect((await session.navigateTree(original.id, { summarize: false })).cancelled).toBe(false);
+		}
+		const projected = session.transformCodexContext({ messages: [] });
+		const actual = getOpenAICodexContextWindow(session.sessionId, session.providerSessionState);
+		expect(actual.threadId).toBe(expected.threadId);
+		expect(actual.windowId).toBe(expected.windowId);
+		expect(actual.windowNumber).toBe(1);
+		expect(JSON.stringify(projected.messages)).toContain(expected.windowId);
+	},
+	20000,
+);

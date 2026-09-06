@@ -4680,6 +4680,7 @@ export class AgentSession {
 	}
 
 	#closeAllProviderSessions(reason: string): void {
+		this.#maintenance.contextWindows.invalidateIdentity();
 		for (const [providerKey, state] of this.#providerSessionState) {
 			try {
 				state.close();
@@ -8282,6 +8283,7 @@ export class AgentSession {
 	}
 
 	#closeCodexProviderSessionsForHistoryRewrite(): void {
+		this.#maintenance.contextWindows.invalidateIdentity();
 		const currentModel = this.model;
 		if (currentModel?.api !== "openai-codex-responses") return;
 		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
