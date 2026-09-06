@@ -16,10 +16,12 @@ import { restoreEnvValue } from "./helpers/settings-test-state";
 const originalProjectDir = getProjectDir();
 const originalOmpProfile = process.env.OMP_PROFILE;
 const originalPiProfile = process.env.PI_PROFILE;
+const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 function restoreProfileEnvironment(): void {
 	restoreEnvValue("OMP_PROFILE", originalOmpProfile);
 	restoreEnvValue("PI_PROFILE", originalPiProfile);
+	restoreEnvValue("PI_CODING_AGENT_DIR", originalPiCodingAgentDir);
 	__resetDirsFromEnvForTests();
 }
 
