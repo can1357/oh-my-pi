@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { convertAnthropicMessages } from "../src/providers/anthropic";
+import { transformMessages } from "../src/providers/transform-messages";
+import type { AssistantMessage, Message, ToolResultMessage } from "../src/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	convertCodexResponsesMessages,
@@ -215,5 +218,66 @@ describe("Codex private tool wire contract", () => {
 			call_id: "call_notes",
 			output: [{ type: "encrypted_content", encrypted_content: "opaque-ciphertext" }],
 		});
+	});
+});
+
+describe("leaving the Codex protocol", () => {
+	const anthropic = buildModel<"anthropic-messages">({
+		...getBundledModel("anthropic", "claude-sonnet-4-5"),
+		api: "anthropic-messages",
+	});
+	const privateExchange = (): Message[] => {
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			content: [
+				{ type: "text", text: "Recovering my checkpoint" },
+				{
+					type: "toolCall",
+					id: "call_notes",
+					name: "notes.read_file",
+					namespace: "notes",
+					modelOnly: true,
+					arguments: {},
+				},
+			],
+			stopReason: "toolUse",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 0,
+		};
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_notes",
+			toolName: "notes.read_file",
+			modelOnly: true,
+			content: [{ type: "encrypted", encryptedContent: "opaque-ciphertext" }],
+			isError: false,
+			timestamp: 1,
+		};
+		return [{ role: "user", content: "Continue", timestamp: 0 }, assistant, result];
+	};
+
+	test("drops the namespaced call with its private result so no dotted name reaches the wire", () => {
+		const transformed = transformMessages(privateExchange(), anthropic);
+		const wire = JSON.stringify(convertAnthropicMessages(transformed, anthropic, false));
+		expect(wire).not.toContain("notes.read_file");
+		expect(wire).not.toContain("call_notes");
+		expect(wire).not.toContain("opaque-ciphertext");
+		// Public assistant prose from the same turn survives the boundary.
+		expect(wire).toContain("Recovering my checkpoint");
+	});
+	test("keeps the private exchange intact for Codex requests", () => {
+		const transformed = transformMessages(privateExchange(), model);
+		expect(JSON.stringify(transformed)).toContain("opaque-ciphertext");
+		expect(JSON.stringify(transformed)).toContain("notes.read_file");
 	});
 });

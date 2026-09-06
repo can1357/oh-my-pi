@@ -11,7 +11,7 @@ import type {
 	UserMessage,
 } from "../types";
 import { isDemotedThinking, kDemotedThinking } from "../utils/block-symbols";
-import { stripEncryptedToolResults } from "../utils/private-content";
+import { dropModelOnlyToolExchanges } from "../utils/private-content";
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -596,8 +596,8 @@ export function transformMessages<TApi extends Api>(
 	targetCompat: Model<TApi>["compat"] = model.compat,
 ): Message[] {
 	if (model.api !== "openai-codex-responses") {
-		const stripped = stripEncryptedToolResults(messages);
-		if (stripped !== messages) logger.warn("Removed private Codex tool output from a non-Codex request");
+		const stripped = dropModelOnlyToolExchanges(messages);
+		if (stripped !== messages) logger.warn("Removed private Codex tool exchanges from a non-Codex request");
 		messages = stripped;
 	}
 	// Redact sensitive credential-like patterns from all outbound messages when

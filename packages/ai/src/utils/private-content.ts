@@ -32,14 +32,43 @@ export function publicMessage<T extends Message>(message: T): T {
 }
 
 /**
- * Remove private payloads when switching away from the Codex protocol.
+ * Remove private model-only exchanges when a request leaves the Codex
+ * protocol. Replacing only the result is not enough: the paired assistant call
+ * keeps its namespaced name (`notes.read_file`), and providers that constrain
+ * function names to alphanumerics, underscores, and hyphens reject the dot, so
+ * every later request fails. Public content in the same assistant turn stays.
  * Returns the input array untouched when nothing was private.
  */
-export function stripEncryptedToolResults(messages: Message[]): Message[] {
-	let result: Message[] | undefined;
-	for (let index = 0; index < messages.length; index++) {
-		const projected = publicMessage(messages[index]);
-		if (projected !== messages[index]) (result ??= messages.slice())[index] = projected;
+export function dropModelOnlyToolExchanges(messages: Message[]): Message[] {
+	let privateCallIds: Set<string> | undefined;
+	for (const message of messages) {
+		if (message.role === "assistant") {
+			for (const block of message.content) {
+				if (block.type === "toolCall" && block.modelOnly === true) (privateCallIds ??= new Set()).add(block.id);
+			}
+			continue;
+		}
+		if (
+			message.role === "toolResult" &&
+			(message.modelOnly === true || message.content.some(block => block.type === "encrypted"))
+		) {
+			(privateCallIds ??= new Set()).add(message.toolCallId);
+		}
 	}
-	return result ?? messages;
+	if (!privateCallIds) return messages;
+	const kept: Message[] = [];
+	for (const message of messages) {
+		if (message.role === "toolResult") {
+			if (!privateCallIds.has(message.toolCallId)) kept.push(message);
+			continue;
+		}
+		if (message.role !== "assistant") {
+			kept.push(message);
+			continue;
+		}
+		const content = message.content.filter(block => !(block.type === "toolCall" && privateCallIds.has(block.id)));
+		if (content.length === message.content.length) kept.push(message);
+		else if (content.length > 0) kept.push({ ...message, content });
+	}
+	return kept;
 }
