@@ -17,13 +17,23 @@ import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/p
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { ChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext, StrippedToolCallsMarker } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { type Component, Container, Image, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Container,
+	Image,
+	ImageProtocol,
+	setTerminalImageProtocol,
+	TERMINAL,
+	type TUI,
+} from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 beforeAll(() => {
@@ -613,6 +623,16 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 				display: true,
 				timestamp: 3,
 			},
+			{
+				role: "custom",
+				customType: "async-progress",
+				content: "",
+				display: true,
+				details: {
+					jobs: [{ jobId: "bg_hidden", type: "bash", elapsedMs: 1_000, text: "ASYNC_PROGRESS_MARKER" }],
+				},
+				timestamp: 4,
+			},
 		]);
 
 		const hidden = makeRenderCtx(transcript, true, true);
@@ -621,6 +641,7 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 		expect(hiddenRender).not.toContain("ASYNC_JOB_MARKER");
 		expect(hiddenRender).not.toContain("LATE_DIAGNOSTIC_MARKER");
 		expect(hiddenRender).not.toContain("LAUNCH_COMPLETION_MARKER");
+		expect(hiddenRender).not.toContain("ASYNC_PROGRESS_MARKER");
 
 		const visible = makeRenderCtx(transcript, true, false);
 		await new UiHelpers(visible.ctx).renderInitialMessages();
@@ -628,6 +649,74 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 		expect(visibleRender).toContain("ASYNC_JOB_MARKER");
 		expect(visibleRender).toContain("LATE_DIAGNOSTIC_MARKER");
 		expect(visibleRender).toContain("LAUNCH_COMPLETION_MARKER");
+		expect(visibleRender).toContain("ASYNC_PROGRESS_MARKER");
+	});
+
+	it("keeps failed background completions visible while successful ones hide with tool activity", async () => {
+		const transcript = transcriptWith([
+			{
+				role: "custom",
+				customType: "async-result",
+				content: "",
+				display: true,
+				details: {
+					jobs: [
+						{ jobId: "bg_ok", type: "bash", exitCode: 0, status: "completed" },
+						{ jobId: "bg_exit", type: "bash", exitCode: 2, status: "completed" },
+						{ jobId: "bg_timeout", type: "task", timedOut: true },
+						{ jobId: "bg_failed", type: "task", status: "failed" },
+					],
+				},
+				timestamp: 1,
+			},
+			{
+				role: "custom",
+				customType: "launch-completion",
+				content: "",
+				display: true,
+				details: {
+					daemons: [
+						{
+							name: "web_ok",
+							id: "d1",
+							state: "exited",
+							exitCode: 0,
+							createdAt: 1,
+							restartCount: 0,
+							outputBytes: 0,
+						},
+						{
+							name: "web_crash",
+							id: "d2",
+							state: "failed",
+							exitCode: 1,
+							createdAt: 1,
+							restartCount: 0,
+							outputBytes: 0,
+						},
+					],
+				},
+				timestamp: 2,
+			},
+		]);
+
+		const hidden = makeRenderCtx(transcript, true, true);
+		await new UiHelpers(hidden.ctx).renderInitialMessages();
+		const hiddenRender = Bun.stripANSI(hidden.chatContainer.render(120).join("\n"));
+		expect(hiddenRender).not.toContain("bg_ok");
+		expect(hiddenRender).not.toContain("web_ok");
+		expect(hiddenRender).toContain("Background command failed bg_exit (exit 2)");
+		expect(hiddenRender).toContain("Background task failed bg_timeout (timed out)");
+		expect(hiddenRender).toContain("Background task failed bg_failed");
+		expect(hiddenRender).toContain("Supervised process failed web_crash (exit 1)");
+
+		// Revealing tool activity live restores the successful rows in place.
+		hidden.chatContainer.setToolActivityVisible(true);
+		const revealed = Bun.stripANSI(hidden.chatContainer.render(120).join("\n")).split("\n");
+		expect(revealed.findIndex(row => row.includes("bg_ok"))).toBeLessThan(
+			revealed.findIndex(row => row.includes("bg_exit")),
+		);
+		expect(revealed.some(row => row.includes("Supervised process completed web_ok (exit 0)"))).toBe(true);
 	});
 
 	it("keeps normal warnings visible and hides warnings tied to tool activity", () => {
@@ -669,6 +758,117 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 		expect(Bun.stripANSI(hidden.chatContainer.render(120).join("\n"))).toContain(
 			"2 tool calls elided — no result on this branch",
 		);
+	});
+});
+
+describe("async progress transcript rendering", () => {
+	it("uses the expandable informational block on live and reusable transcript paths", async () => {
+		const progressLines = [
+			"first hidden",
+			"second hidden",
+			...Array.from({ length: 10 }, (_, index) => `visible ${index + 1}`),
+		];
+		const progressText = progressLines.join("\n");
+		const progressMessage = {
+			role: "custom",
+			customType: "async-progress",
+			content: `<system-notice><job-progress id="job_42" type="process" elapsed="17m55s"><output>${progressText}</output></job-progress></system-notice>`,
+			display: true,
+			attribution: "agent",
+			details: {
+				jobs: [
+					{
+						jobId: "job_42",
+						type: "process",
+						elapsedMs: 1_075_000,
+						text: progressText,
+					},
+				],
+			},
+			timestamp: 1,
+		} as AgentMessage;
+
+		const live = makeRenderCtx(transcriptWith([progressMessage]));
+		await new UiHelpers(live.ctx).renderInitialMessages();
+		const liveRender = Bun.stripANSI(live.chatContainer.render(120).join("\n"));
+
+		const reusable = new ChatTranscriptBuilder({
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: process.cwd(),
+			requestRender: () => {},
+		});
+		reusable.rebuild([
+			{
+				type: "message",
+				id: "m1",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				message: progressMessage,
+			},
+		]);
+		const reusableRender = Bun.stripANSI(reusable.container.render(120).join("\n"));
+
+		for (const rendered of [liveRender, reusableRender]) {
+			expect(rendered).toContain("Background process progress job_42 (17m55s)");
+			expect(rendered).not.toContain("first hidden");
+			expect(rendered).toContain("visible 10");
+			expect(rendered).toContain("… 3 earlier lines");
+			expect(rendered).toContain("Ctrl+O");
+			expect(rendered).not.toContain("<system-notice>");
+			expect(rendered).not.toContain("<job-progress");
+			expect(rendered).not.toContain("async-progress");
+		}
+
+		const expandedLive = makeRenderCtx(transcriptWith([progressMessage]));
+		expandedLive.ctx.toolOutputExpanded = true;
+		await new UiHelpers(expandedLive.ctx).renderInitialMessages();
+		const expandedLiveRender = Bun.stripANSI(expandedLive.chatContainer.render(120).join("\n"));
+		reusable.setExpanded(true);
+		const expandedReusableRender = Bun.stripANSI(reusable.container.render(120).join("\n"));
+		for (const rendered of [expandedLiveRender, expandedReusableRender]) {
+			expect(rendered).toContain("first hidden");
+			expect(rendered).not.toContain("earlier lines");
+			expect(rendered).not.toContain("Ctrl+O");
+		}
+	});
+
+	it("honors Ctrl+O on a progress block rebuilt from a persisted session", async () => {
+		using tempDir = TempDir.createSync("@pi-render-initial-progress-expand-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		const progressLines = ["first hidden", ...Array.from({ length: 10 }, (_, index) => `visible ${index + 1}`)];
+		session.appendMessage({
+			role: "custom",
+			customType: "async-progress",
+			content: "",
+			display: true,
+			attribution: "agent",
+			details: { jobs: [{ jobId: "bg_resumed", type: "bash", elapsedMs: 5_000, text: progressLines.join("\n") }] },
+			timestamp: 1,
+		});
+		await session.ensureOnDisk();
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		const reloaded = await SessionManager.open(sessionFile);
+		const { ctx, chatContainer } = makeRenderCtx(reloaded.buildSessionContext({ transcript: true }));
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		const collapsed = Bun.stripANSI(chatContainer.render(120).join("\n"));
+		expect(collapsed).toContain("Background command progress bg_resumed");
+		expect(collapsed).toContain("… 2 earlier lines");
+		expect(collapsed).not.toContain("first hidden");
+
+		const controller = new InputController(ctx);
+		controller.toggleToolOutputExpansion();
+		expect(ctx.toolOutputExpanded).toBe(true);
+		const expanded = Bun.stripANSI(chatContainer.render(120).join("\n"));
+		expect(expanded).toContain("first hidden");
+		expect(expanded).not.toContain("earlier lines");
+
+		controller.toggleToolOutputExpansion();
+		expect(ctx.toolOutputExpanded).toBe(false);
+		const recollapsed = Bun.stripANSI(chatContainer.render(120).join("\n"));
+		expect(recollapsed).toContain("… 2 earlier lines");
+		expect(recollapsed).not.toContain("first hidden");
 	});
 });
 

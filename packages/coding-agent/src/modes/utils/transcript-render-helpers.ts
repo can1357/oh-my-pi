@@ -5,10 +5,15 @@
  * here keeps the two byte-for-byte identical.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
+import { type Component, Text, TruncatedText } from "@oh-my-pi/pi-tui";
+import { formatBytes, formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJobType } from "../../async";
 import type { DaemonSnapshot } from "../../launch/protocol";
+import {
+	ASYNC_PROGRESS_MESSAGE_TYPE,
+	type AsyncProgressDetails,
+	type AsyncResultDetails,
+} from "../../session/async-job-delivery";
 import {
 	type CustomMessage,
 	type FileMentionMessage,
@@ -16,30 +21,103 @@ import {
 	shouldRenderAbortReason,
 } from "../../session/messages";
 import { createIrcMessageCard } from "../../tools/hub";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { formatStyledArtifactReference } from "../../tools/output-meta";
+import {
+	capPreviewLines,
+	DEFAULT_TERMINAL_PREVIEW_LINES,
+	PREVIEW_LIMITS,
+	replaceTabs,
+	shortenEmbeddedPaths,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "../../tools/render-utils";
+import { renderStatusLine } from "../../tui/status-line";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { ToolActivityContainer } from "../components/tool-activity";
 import { TranscriptBlock } from "../components/transcript-container";
 import { theme } from "../theme/theme";
 
 type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
-type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
+
+function sanitizeAsyncProgressDisplayText(text: string): string {
+	return truncateAsyncProgressDisplayLines(shortenEmbeddedPaths(replaceTabs(text)));
+}
+
+function truncateAsyncProgressDisplayLines(text: string): string {
+	return text
+		.split("\n")
+		.map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE))
+		.join("\n");
+}
 
 /**
- * Render an `async-result` custom message (a completed background bash/task job,
- * or a batch of them) as a transcript block of one "Background job completed"
- * row per job.
+ * Build the display-only copy of an async progress message. The persisted/model
+ * payload remains byte-identical; both transcript surfaces pass this copy to the
+ * existing custom-message renderer.
+ */
+export function buildAsyncProgressDisplayMessage(message: CustomOrHookMessage): CustomOrHookMessage {
+	if (message.customType !== ASYNC_PROGRESS_MESSAGE_TYPE || typeof message.content !== "string") return message;
+	const content = sanitizeAsyncProgressDisplayText(message.content);
+	return content === message.content ? message : { ...message, content };
+}
+
+type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
+type BackgroundWorkType = AsyncJobType | "process";
+
+function backgroundWorkNoun(type: BackgroundWorkType | undefined): "command" | "task" | "process" | "job" {
+	switch (type) {
+		case "bash":
+			return "command";
+		case "task":
+			return "task";
+		case "process":
+			return "process";
+		default:
+			return "job";
+	}
+}
+
+/**
+ * Header-safe form of a background-work name. Hub names are model-supplied
+ * arbitrary text: fold it to one line, sanitize like preview lines, and bound
+ * it so it can neither add transcript rows nor overflow the status line.
+ */
+function formatBackgroundWorkName(name: string | undefined, fallback: "unknown" | "unnamed"): string {
+	const normalized = shortenEmbeddedPaths(replaceTabs(sanitizeText((name ?? "").replace(/[\r\n]+/g, " ")))).trim();
+	return truncateToWidth(normalized || fallback, TRUNCATE_LENGTHS.TITLE);
+}
+
+/** Terminal-state row for one completed background job or supervised process. */
+function backgroundWorkCompletionRow(options: {
+	failed: boolean;
+	noun: string;
+	name: string;
+	exitCode?: number;
+	timedOut?: boolean;
+	durationMs?: number;
+}): Text {
+	const duration = typeof options.durationMs === "number" ? formatDuration(options.durationMs) : undefined;
+	const line = [
+		options.failed
+			? theme.fg("error", `${theme.status.error} ${options.noun} failed`)
+			: theme.fg("success", `${theme.status.done} ${options.noun} completed`),
+		theme.fg("accent", options.name),
+		options.exitCode !== undefined ? theme.fg("dim", `(exit ${options.exitCode})`) : undefined,
+		options.timedOut === true && options.exitCode === undefined ? theme.fg("dim", "(timed out)") : undefined,
+		duration ? theme.fg("dim", `(${duration})`) : undefined,
+	]
+		.filter(Boolean)
+		.join(" ");
+	return new Text(line, 1, 0);
+}
+
+/**
+ * Render an `async-result` custom message as one terminal background-work row
+ * per job, with failure state and Bash exit code when available. Failed rows
+ * stay visible while tool activity is hidden.
  */
 export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivityContainer {
-	const details = (
-		message as CustomMessage<{
-			jobId?: string;
-			type?: AsyncJobType;
-			label?: string;
-			durationMs?: number;
-			jobs?: Array<{ jobId?: string; type?: AsyncJobType; label?: string; durationMs?: number }>;
-		}>
-	).details;
+	const details = (message as CustomMessage<AsyncResultDetails & Partial<AsyncResultDetails["jobs"][number]>>).details;
 	const jobs =
 		details?.jobs && details.jobs.length > 0
 			? details.jobs
@@ -49,57 +127,130 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 						type: details?.type,
 						label: details?.label,
 						durationMs: details?.durationMs,
+						status: details?.status,
+						exitCode: details?.exitCode,
+						timedOut: details?.timedOut,
 					},
 				];
-	const block = new TranscriptBlock();
+	const container = new ToolActivityContainer([]);
 	for (const job of jobs) {
-		const jobId = job.jobId ?? "unknown";
-		const typeLabel = job.type ? `[${job.type}]` : "[job]";
-		const duration = typeof job.durationMs === "number" ? formatDuration(job.durationMs) : undefined;
-		const line = [
-			theme.fg("success", `${theme.status.done} Background job completed`),
-			theme.fg("dim", typeLabel),
-			theme.fg("accent", jobId),
-			duration ? theme.fg("dim", `(${duration})`) : undefined,
-		]
-			.filter(Boolean)
-			.join(" ");
-		block.addChild(new Text(line, 1, 0));
+		const failed =
+			job.status === "failed" || job.timedOut === true || (job.exitCode !== undefined && job.exitCode !== 0);
+		const row = backgroundWorkCompletionRow({
+			failed,
+			noun: `Background ${backgroundWorkNoun(job.type)}`,
+			name: formatBackgroundWorkName(job.jobId, "unknown"),
+			exitCode: job.exitCode,
+			timedOut: job.timedOut,
+			durationMs: job.durationMs,
+		});
+		if (failed) container.pin(row);
+		else container.addChild(row);
 	}
-	return new ToolActivityContainer(block);
+	return container;
+}
+
+/** Expandable transcript visualization for bounded progress from background work. */
+export class AsyncProgressMessageComponent extends TranscriptBlock {
+	#expanded = false;
+
+	constructor(private readonly message: CustomOrHookMessage) {
+		super();
+		this.#rebuild();
+	}
+
+	setExpanded(expanded: boolean): void {
+		if (this.#expanded === expanded) return;
+		this.#expanded = expanded;
+		this.#rebuild();
+	}
+
+	#rebuild(): void {
+		this.clear();
+		const details = (this.message as CustomMessage<AsyncProgressDetails>).details;
+		for (const job of details?.jobs ?? []) {
+			const jobId = formatBackgroundWorkName(job.jobId, "unknown");
+			const elapsed = typeof job.elapsedMs === "number" ? formatDuration(job.elapsedMs) : undefined;
+			const header = renderStatusLine(
+				{
+					iconOverride: theme.fg("accent", theme.status.running),
+					title: `Background ${backgroundWorkNoun(job.type)} progress ${jobId}`,
+					meta: elapsed ? [`(${elapsed})`] : undefined,
+				},
+				theme,
+			);
+			this.addChild(new Text(header, 1, 0));
+			if (typeof job.suppressedEvents === "number" && job.suppressedEvents > 0) {
+				this.addChild(
+					new Text(theme.fg("dim", `  … ${job.suppressedEvents} progress events suppressed (rate limit)`), 1, 0),
+				);
+			}
+			// A fitting source-truncated window has no head/tail split: its text is
+			// already the complete retained representation - render it verbatim. The
+			// marker only belongs between an actual head/tail byte-split pair.
+			const preview =
+				job.truncated && (job.head !== undefined || job.tail !== undefined)
+					? [job.head, "[…progress truncated…]", job.tail].filter(part => part !== undefined).join("\n")
+					: (job.text ?? "");
+			const outputLines = preview.split("\n").filter(line => line.trim().length > 0);
+			const rendered = outputLines.map(line =>
+				theme.fg("dim", `  ${shortenEmbeddedPaths(replaceTabs(sanitizeText(line)))}`),
+			);
+			const visibleLines = capPreviewLines(rendered, theme, {
+				max: DEFAULT_TERMINAL_PREVIEW_LINES,
+				maxBytes: PREVIEW_LIMITS.PROGRESS_COLLAPSED_BYTES,
+				expanded: this.#expanded,
+				prefix: "  ",
+			});
+			for (const line of visibleLines) {
+				this.addChild(new TruncatedText(line, 1, 0));
+			}
+			if ((job.truncated || (job.suppressedEvents ?? 0) > 0) && job.artifactId) {
+				this.addChild(new Text(`  ${formatStyledArtifactReference(job.artifactId, theme)}`, 1, 0));
+			}
+		}
+	}
+}
+
+/**
+ * Render an `async-progress` custom message (bounded live output from
+ * background jobs) as a collapsible transcript block: latest lines behind an
+ * "… N earlier lines" marker, expandable with ctrl+o, hidden with the rest of
+ * tool activity when `display.hideToolActivity` is enabled.
+ */
+export function buildAsyncProgressBlock(message: CustomOrHookMessage): ToolActivityContainer {
+	return new ToolActivityContainer(new AsyncProgressMessageComponent(message));
 }
 
 /**
  * Render a `launch-completion` custom message (terminal supervised-process
  * exits from the launch broker) as a transcript block of one compact
  * "Supervised process ..." row per daemon, matching background-job rows.
+ * Failed rows stay visible while tool activity is hidden.
  */
 export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolActivityContainer {
 	const details = (message as CustomMessage<{ daemons?: DaemonSnapshot[] }>).details;
-	const block = new TranscriptBlock();
+	const container = new ToolActivityContainer([]);
 	const daemons = details?.daemons ?? [];
 	if (daemons.length === 0 && typeof message.content === "string") {
-		block.addChild(new Text(theme.fg("dim", `${theme.status.done} ${message.content}`), 1, 0));
+		container.addChild(new Text(theme.fg("dim", `${theme.status.done} ${message.content}`), 1, 0));
 	}
 	for (const daemon of daemons) {
 		const failed = daemon.state === "failed" || (daemon.exitCode !== undefined && daemon.exitCode !== 0);
-		const duration =
-			daemon.exitedAt !== undefined && daemon.startedAt !== undefined
-				? formatDuration(daemon.exitedAt - daemon.startedAt)
-				: undefined;
-		const line = [
-			failed
-				? theme.fg("error", `${theme.status.error} Supervised process failed`)
-				: theme.fg("success", `${theme.status.done} Supervised process completed`),
-			theme.fg("accent", daemon.name),
-			daemon.exitCode !== undefined ? theme.fg("dim", `(exit ${daemon.exitCode})`) : undefined,
-			duration ? theme.fg("dim", `(${duration})`) : undefined,
-		]
-			.filter(Boolean)
-			.join(" ");
-		block.addChild(new Text(line, 1, 0));
+		const row = backgroundWorkCompletionRow({
+			failed,
+			noun: "Supervised process",
+			name: formatBackgroundWorkName(daemon.name, "unnamed"),
+			exitCode: daemon.exitCode,
+			durationMs:
+				daemon.exitedAt !== undefined && daemon.startedAt !== undefined
+					? daemon.exitedAt - daemon.startedAt
+					: undefined,
+		});
+		if (failed) container.pin(row);
+		else container.addChild(row);
 	}
-	return new ToolActivityContainer(block);
+	return container;
 }
 
 /**

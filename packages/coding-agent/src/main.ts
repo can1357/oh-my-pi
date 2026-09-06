@@ -171,6 +171,7 @@ const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"async.maxJobs",
 	"bash.autoBackground.enabled",
 	"bash.autoBackground.thresholdMs",
+	"bash.asyncAuto.inlineGraceMs",
 	"eval.autoBackground.enabled",
 	"eval.autoBackground.thresholdMs",
 ];

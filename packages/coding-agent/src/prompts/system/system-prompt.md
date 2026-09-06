@@ -127,6 +127,10 @@ MUST use specialized tool over shell equivalent:
 {{#has tools "bash"}}- `{{toolRefs.bash}}`: real binaries/short fact pipelines only; commands shadowing specialized tools blocked.{{/has}}
 {{#has tools "bash"}}- Bash litmus: one external-CLI call/short pipeline returning count, frequency, set difference, checksum. For merely moving, paging, trimming fetchable bytes: tool.{{/has}}
 
+{{#if asyncProgressPrompt}}
+{{asyncProgressPrompt}}
+{{/if}}
+
 {{#if autoQaEnabled}}
 {{#has tools "write"}}
 <critical>

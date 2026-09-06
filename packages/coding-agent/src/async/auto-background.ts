@@ -13,15 +13,55 @@ export function formatBackgroundNotice(jobId: string): string {
 }
 
 /**
- * How long a tool foreground-waits before backgrounding. Bounded by the call's
- * own timeout minus a small buffer so a deadline expiry resolves inline instead
- * of backgrounding moments before it fires. `0` means background immediately.
+ * Slack between the foreground-wait threshold and a call's own timeout: the
+ * wait ends at least this long before a deadline so an expiry resolves inline
+ * rather than backgrounding a job that dies moments later.
  */
-export function resolveAutoBackgroundWaitMs(thresholdMs: number, timeoutMs: number | undefined): number {
+export const AUTO_BACKGROUND_TIMEOUT_BUFFER_MS = 1_000;
+
+/**
+ * What a tool's `timeoutMs` bounds.
+ * - `wall-clock`: the process is killed at the deadline (bash). A deadline at
+ *   or below the threshold plus the buffer cannot meaningfully outlive the
+ *   wait, so the call runs inline to completion instead.
+ * - `runtime`: the budget pauses while the cell waits on agents or tool
+ *   bridges (eval), so wall time can legitimately exceed it — exactly what
+ *   backgrounding exists for. The wait is clamped to just before the budget.
+ */
+export type AutoBackgroundTimeoutKind = "wall-clock" | "runtime";
+
+/**
+ * How long a tool foreground-waits before backgrounding: `0` backgrounds
+ * immediately (a threshold of `0` always does), `undefined` runs inline to
+ * completion. See {@link AutoBackgroundTimeoutKind} for how `timeoutMs` is read.
+ */
+export function resolveAutoBackgroundWaitMs(
+	thresholdMs: number,
+	timeoutMs: number | undefined,
+	timeoutKind: "runtime",
+): number;
+export function resolveAutoBackgroundWaitMs(
+	thresholdMs: number,
+	timeoutMs: number | undefined,
+	timeoutKind: "wall-clock",
+): number | undefined;
+export function resolveAutoBackgroundWaitMs(
+	thresholdMs: number,
+	timeoutMs: number | undefined,
+	timeoutKind: AutoBackgroundTimeoutKind,
+): number | undefined;
+export function resolveAutoBackgroundWaitMs(
+	thresholdMs: number,
+	timeoutMs: number | undefined,
+	timeoutKind: AutoBackgroundTimeoutKind,
+): number | undefined {
 	if (thresholdMs <= 0) return 0;
 	if (timeoutMs === undefined) return thresholdMs;
-	const timeoutBufferMs = 1_000;
-	return Math.max(0, Math.min(thresholdMs, timeoutMs - timeoutBufferMs));
+	if (timeoutKind === "runtime") {
+		return Math.max(0, Math.min(thresholdMs, timeoutMs - AUTO_BACKGROUND_TIMEOUT_BUFFER_MS));
+	}
+	if (timeoutMs <= thresholdMs + AUTO_BACKGROUND_TIMEOUT_BUFFER_MS) return undefined;
+	return thresholdMs;
 }
 
 /** Non-settled outcomes of {@link raceJobSettlement}. */

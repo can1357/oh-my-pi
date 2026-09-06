@@ -10,6 +10,8 @@ export function isToolActivityComponent(component: Component): component is Comp
 
 export class ToolActivityContainer extends Container implements ToolActivityComponent {
 	#visible = true;
+	/** Children that keep rendering while tool activity is hidden (failure rows punch through). */
+	#pinned = new Container();
 
 	constructor(component: Component | Component[]) {
 		super();
@@ -18,6 +20,12 @@ export class ToolActivityContainer extends Container implements ToolActivityComp
 		} else {
 			this.addChild(component);
 		}
+	}
+
+	/** Add a child that stays visible when tool activity is hidden. */
+	pin(component: Component): void {
+		this.addChild(component);
+		this.#pinned.addChild(component);
 	}
 
 	setToolActivityVisible(visible: boolean): void {
@@ -38,8 +46,12 @@ export class ToolActivityContainer extends Container implements ToolActivityComp
 		}
 	}
 
+	override invalidate(): void {
+		super.invalidate();
+		this.#pinned.invalidate();
+	}
+
 	override render(width: number): readonly string[] {
-		if (!this.#visible) return [];
-		return super.render(width);
+		return this.#visible ? super.render(width) : this.#pinned.render(width);
 	}
 }

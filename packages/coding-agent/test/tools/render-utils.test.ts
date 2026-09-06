@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { KeybindingsManager, setKeyHintPlatform } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { getThemeByName, initTheme, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
+	capPreviewLines,
 	dedupeParseErrors,
 	expandKeyHint,
 	formatCodeFrameLine,
@@ -12,6 +13,7 @@ import {
 	formatExpandHint,
 	formatParseErrors,
 	formatScreenshot,
+	shortenEmbeddedPaths,
 	shortenPath,
 	truncateDiffByHunk,
 } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
@@ -119,6 +121,36 @@ describe("formatScreenshot", () => {
 		const home = String.raw`C:\Users\me`;
 		const sibling = String.raw`C:\Users\me2\projects\demo`;
 		expect(shortenPath(sibling, home)).toBe(sibling);
+	});
+
+	it("shortens closing-delimited homes without matching longer path components", () => {
+		const home = "/Users/alice";
+		expect(shortenEmbeddedPaths(`{"cwd":"${home}","next":1}`, home)).toBe('{"cwd":"~","next":1}');
+		expect(shortenEmbeddedPaths(`{"cwd":"${home}.backup","next":1}`, home)).toBe(`{"cwd":"${home}.backup","next":1}`);
+		expect(shortenEmbeddedPaths(`prefix${home}/report`, home)).toBe(`prefix${home}/report`);
+	});
+
+	it("keeps shortened home paths inside file URLs syntactically valid", () => {
+		const home = "/home/alice";
+		const shortened = shortenEmbeddedPaths(`file://${home}/project/output.log`, home);
+
+		expect(shortened).toBe("file:///~/project/output.log");
+		expect(new URL(shortened).protocol).toBe("file:");
+	});
+
+	it("keeps shortened UNC homes inside file URLs syntactically valid", () => {
+		const home = String.raw`\\server\share`;
+		const shortened = shortenEmbeddedPaths("file://server/share/project/output.log", home);
+
+		expect(shortened).toBe("file:///~/project/output.log");
+		expect(new URL(shortened).protocol).toBe("file:");
+	});
+
+	it("preserves non-file URI paths when shortening embedded homes", () => {
+		const home = "/home/alice";
+
+		expect(shortenEmbeddedPaths(`https://example.com${home}/report`, home)).toBe("https://example.com/~/report");
+		expect(shortenEmbeddedPaths(`vscode://file${home}/report`, home)).toBe("vscode://file/~/report");
 	});
 
 	it("formats non-home path without tilde", () => {
@@ -426,5 +458,48 @@ describe("formatExpandHint / expandKeyHint", () => {
 		setKeybindings(KeybindingsManager.inMemory());
 		expect(formatExpandHint(plainTheme, true, true)).toBe("");
 		expect(formatExpandHint(plainTheme, false, false)).toBe("");
+	});
+});
+
+describe("capPreviewLines byte cap", () => {
+	const plainTheme = {
+		fg: (_color: unknown, text: string) => text,
+		format: { bracketLeft: "[", bracketRight: "]" },
+	} as unknown as Theme;
+
+	it("drops earlier max-width lines so the collapsed window stays within maxBytes", () => {
+		// 10 rows fit the line cap but weigh 5 KB; a 2 KB byte cap keeps the 4
+		// newest rows and reports the rest (not just the line overflow) as hidden.
+		const lines = Array.from(
+			{ length: 12 },
+			(_, index) => `\x1b[2m${String(index).padStart(3, "0")}${"x".repeat(497)}\x1b[0m`,
+		);
+		const capped = capPreviewLines(lines, plainTheme, { max: 10, maxBytes: 2_000, expandHint: false });
+
+		expect(capped[0]).toBe("… 8 earlier lines");
+		expect(capped.slice(1)).toEqual(lines.slice(8));
+		const visibleBytes = capped.slice(1).reduce((sum, line) => sum + Buffer.byteLength(Bun.stripANSI(line)), 0);
+		expect(visibleBytes).toBeLessThanOrEqual(2_000);
+	});
+
+	it("leaves short output alone and keeps the newest line even when it alone exceeds the cap", () => {
+		const short = ["one", "two", "three"];
+		expect(capPreviewLines(short, plainTheme, { max: 10, maxBytes: 2_000 })).toBe(short);
+
+		const huge = ["old", "y".repeat(3_000)];
+		const capped = capPreviewLines(huge, plainTheme, { max: 10, maxBytes: 2_000, expandHint: false });
+		expect(capped).toEqual(["… 1 earlier line", huge[1]!]);
+	});
+
+	it("counts visible bytes, not ANSI styling, and multi-byte characters by UTF-8 length", () => {
+		// 4 rows of 300 visible bytes = 1.2 KB of text; the escape codes around
+		// them must not count, and the 3-byte glyph rows must.
+		const styled = Array.from({ length: 4 }, () => `\x1b[38;5;240m${"a".repeat(300)}\x1b[0m`);
+		expect(capPreviewLines(styled, plainTheme, { max: 10, maxBytes: 1_200 })).toBe(styled);
+
+		const wide = Array.from({ length: 4 }, () => "€".repeat(300));
+		const capped = capPreviewLines(wide, plainTheme, { max: 10, maxBytes: 1_200, expandHint: false });
+		expect(capped[0]).toBe("… 3 earlier lines");
+		expect(capped).toHaveLength(2);
 	});
 });

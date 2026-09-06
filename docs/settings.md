@@ -547,6 +547,8 @@ Computer settings and the active model's coordinate-safe image limits are read f
 bash:
   enabled: true
   allowCompoundCommands: false
+  asyncAuto:
+    inlineGraceMs: 1000
   autoBackground:
     enabled: true
     thresholdMs: 60000
@@ -571,9 +573,10 @@ lsp:
 | --------------------------------- | ------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bash.enabled`                    | boolean | `true`    | Enable the bash tool.                                                                                                                                       |
 | `bash.allowCompoundCommands`      | boolean | `false`   | Evaluate flat, literal `&&` chains per segment; unmatched segments inherit normal bash approval policy and mode.                                            |
+| `bash.asyncAuto.inlineGraceMs`    | number  | `1000`    | How long explicit `async: "auto"` calls stay inline before the same process promotes to a background job. Commands finishing within the grace return inline; longer ones promote and any `progress` delivery starts then. `0` promotes immediately. A command `timeout` at or below the grace plus a 1 s buffer never promotes (it runs inline to completion). Raise it (e.g. `5000`) when typical builds/tests finish in a few seconds and you prefer inline results; lower it when turns should never block. |
 | `launch.enabled`                  | boolean | `true`    | Enable the launch tool for shared long-running project processes.                                                                                           |
 | `bash.autoBackground.enabled`     | boolean | `true`   | Auto-background long-running commands.                                                                                                                      |
-| `bash.autoBackground.thresholdMs` | number  | `60000`   | Threshold before auto-backgrounding.                                                                                                                        |
+| `bash.autoBackground.thresholdMs` | number  | `60000`   | Threshold before auto-backgrounding unmarked Bash calls.                                                                                                    |
 | `eval.py`                         | boolean | `true`    | Python eval backend. `PI_PY=0` disables for the process.                                                                                                    |
 | `eval.js`                         | boolean | `true`    | JavaScript eval backend. `PI_JS=0` disables for the process.                                                                                                |
 | `eval.tools.enabled`              | boolean | `true`    | Expose kernel-defined `@tool` / `tool(fn)` functions to `task`, `agent()`, and `workpool()` subagents.                                                      |

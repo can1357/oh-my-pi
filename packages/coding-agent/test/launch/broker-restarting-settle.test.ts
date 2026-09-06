@@ -14,6 +14,7 @@ import {
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
+	type DaemonMonitorNotification,
 	type DaemonSnapshot,
 } from "../../src/launch/protocol";
 
@@ -77,7 +78,23 @@ describe("daemon broker restart settling", () => {
 			restartBackoffBaseMs: RESTART_BACKOFF_BASE_MS,
 		});
 		const name = "crash-loop";
+		const monitorNotifications: DaemonMonitorNotification[] = [];
+		const monitorCompleted = Promise.withResolvers<void>();
+		const unregisterMonitor = client.onOutput?.(
+			{
+				id: "crash-monitor",
+				name,
+				owner: "owner",
+				artifactPath: path.join(tempDir.path(), "restart-progress.log"),
+			},
+			notification => {
+				monitorNotifications.push(notification);
+				if (notification.event === "daemon-monitor-completed") monitorCompleted.resolve();
+			},
+		);
+		if (!unregisterMonitor) throw new Error("Expected output monitoring support");
 		try {
+			await client.request({ op: "ping" });
 			const started = await client.request({
 				op: "start",
 				spec: {
@@ -111,6 +128,11 @@ describe("daemon broker restart settling", () => {
 			const stopped = await client.request({ op: "stop", name, timeoutMs: 2_000 });
 			if (stopped.op !== "stop") throw new Error(`unexpected result: ${stopped.op}`);
 			expect(stopped.daemon.state).toBe("exited");
+			await monitorCompleted.promise;
+			expect(monitorNotifications.at(-1)).toMatchObject({
+				event: "daemon-monitor-completed",
+				daemon: { name, state: "exited" },
+			});
 
 			// Cross the configured initial backoff where a leaked timer would fire #launch.
 			await Bun.sleep(INITIAL_RESTART_DELAY_MS + RESTART_SETTLE_MARGIN_MS);
@@ -119,6 +141,7 @@ describe("daemon broker restart settling", () => {
 			expect(afterStop.pid).toBeUndefined();
 			expect(afterStop.restartCount).toBe(baseline);
 		} finally {
+			unregisterMonitor?.();
 			await client.request({ op: "stop", name, timeoutMs: 2_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
