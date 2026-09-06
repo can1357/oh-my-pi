@@ -441,7 +441,7 @@ async function registerOutputSink(
 	const id = crypto.randomUUID();
 	const artifactId = artifact.id;
 	let unregisterDispose: (() => void) | void;
-	let unregisterSessionChange: (() => void) | void;
+	let unregisterContextBoundary: (() => void) | void;
 	let outputUnregister: DaemonOutputUnregister | undefined;
 	let cleanupPromise: Promise<void> | undefined;
 	const registration: OutputRegistration = {
@@ -460,14 +460,18 @@ async function registerOutputSink(
 		cleanup: () => {
 			if (cleanupPromise) return cleanupPromise;
 			registration.active = false;
+			// Fence synchronous re-entry before unregistering broker/session
+			// callbacks; every underlying resource must be released at most once.
+			cleanupPromise = Promise.resolve();
 			session.setLaunchMonitorActive?.(id, registration.delivery, false, registration.epoch);
 			outputUnregister?.();
 			unregisterDispose?.();
-			unregisterSessionChange?.();
-			monitors.delete(name);
-			if (monitors.size === 0) clients.delete(client);
-			if (clients.size === 0) outputRegistrations.delete(session);
-			cleanupPromise = Promise.resolve();
+			unregisterContextBoundary?.();
+			if (monitors.get(name) === registration) monitors.delete(name);
+			if (monitors.size === 0 && clients.get(client) === monitors) clients.delete(client);
+			if (clients.size === 0 && outputRegistrations.get(session) === clients) {
+				outputRegistrations.delete(session);
+			}
 			return cleanupPromise;
 		},
 		retune: next => {
@@ -675,7 +679,7 @@ async function registerOutputSink(
 		claimOutputRegistrationGeneration(session, client, name, id);
 		session.setLaunchMonitorActive?.(id, delivery, true, registration.epoch);
 		unregisterDispose = session.registerDisposeCallback?.(() => void registration.cleanup());
-		unregisterSessionChange = session.registerSessionChangeCallback?.(() => void registration.cleanup());
+		unregisterContextBoundary = session.registerContextBoundaryCallback?.(() => void registration.cleanup());
 		return bindOperation(registration.acquirePendingStart(delivery));
 	}
 	operation.markInstalled();
@@ -683,7 +687,7 @@ async function registerOutputSink(
 	claimOutputRegistrationGeneration(session, client, name, id);
 	session.setLaunchMonitorActive?.(id, delivery, true, registration.epoch);
 	unregisterDispose = session.registerDisposeCallback?.(() => void registration.cleanup());
-	unregisterSessionChange = session.registerSessionChangeCallback?.(() => void registration.cleanup());
+	unregisterContextBoundary = session.registerContextBoundaryCallback?.(() => void registration.cleanup());
 	let retained = false;
 	const lease: OutputLease = {
 		registration,
@@ -748,21 +752,28 @@ function registerCompletionSink(
 		// oxlint-disable-next-line prefer-const -- read by the cleanup closure before assignment
 		let unregisterDispose: (() => void) | void;
 		// oxlint-disable-next-line prefer-const -- read by the cleanup closure before assignment
-		let unregisterSessionChange: (() => void) | void;
+		let unregisterContextBoundary: (() => void) | void;
 		const cleanup = (preservePending = false): void => {
 			if (!registration?.active) return;
 			registration.active = false;
 			unregister({ preservePending });
 			unregisterDispose?.();
-			unregisterSessionChange?.();
+			unregisterContextBoundary?.();
 			owners.delete(owner);
 			if (owners.size === 0) clients.delete(client);
 			if (clients.size === 0) completionRegistrations.delete(session);
 		};
 		registration = { inFlight: 0, retained: false, active: true, cleanup };
 		owners.set(owner, registration);
+		// Disposal (CLI exit, subagent release) leaves the conversation resumable,
+		// so the broker keeps this owner's completions for replay on reconnect.
 		unregisterDispose = session.registerDisposeCallback?.(() => cleanup(true));
-		unregisterSessionChange = session.registerSessionChangeCallback?.(() => cleanup(true));
+		// A switch also leaves the outgoing conversation resumable. A same-ID
+		// reset or a new session does not: a completion retained there would
+		// replay into the emptied conversation on the next Hub call re-registering
+		// this owner (reset) or sit unacknowledged and block same-name restarts
+		// (new), so those boundaries discard it.
+		unregisterContextBoundary = session.registerContextBoundaryCallback?.(boundary => cleanup(boundary === "switch"));
 	}
 	registration.inFlight++;
 	let settled = false;
