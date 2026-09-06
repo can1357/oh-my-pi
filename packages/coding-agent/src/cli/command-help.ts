@@ -4,6 +4,10 @@ export const acpHelp = {
 	description: "Run Oh My Pi as an ACP (Agent Client Protocol) server over stdio",
 } satisfies CommandMetadata;
 
+export const attachHelp = {
+	description: "List live OMP sessions or send an attached editor review comment",
+} satisfies CommandMetadata;
+
 export const agentsHelp = { description: "Manage bundled task agents" } satisfies CommandMetadata;
 
 export const authBrokerHelp = {

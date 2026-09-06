@@ -97,6 +97,7 @@ import {
 	persistForeignSession,
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
+import { startLiveAttachServer } from "./session/live-attach";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
@@ -2068,6 +2069,12 @@ export async function runRootCommand(
 						process.exit(0);
 					}
 				}
+				const liveAttachServer = session.sessionFile
+					? await startLiveAttachServer(session).catch(error => {
+							notifs.push({ kind: "warn", message: `Live session attach unavailable: ${String(error)}` });
+							return undefined;
+						})
+					: undefined;
 				const startupLease = takeStartupComposerLease();
 				try {
 					stopStartupWatchdog();
@@ -2094,6 +2101,9 @@ export async function runRootCommand(
 						startupLease,
 					);
 				} finally {
+					await liveAttachServer
+						?.close()
+						.catch(error => logger.warn("Live session attach cleanup failed", { error: String(error) }));
 					startupLease?.dispose();
 				}
 			} else {
