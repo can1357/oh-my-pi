@@ -57,6 +57,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createGetContextRemainingTool, createNewContextTool } from "../tools/codex-context-window";
 import { CodexContextWindowRuntime } from "./codex-context-window-runtime";
 import { publicMessage } from "@oh-my-pi/pi-ai/utils/private-content";
+import { publicAgentMessages, publicCompactionPreparation, publicSessionEntries } from "./private-content";
 import { createFileOps } from "@oh-my-pi/pi-agent-core/compaction";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
@@ -486,12 +487,7 @@ export class SessionMaintenance {
 						...preparation,
 						messagesToSummarize: convertToLlm(preparation.messagesToSummarize).map(publicMessage),
 					},
-					branchEntries: branch.map(entry =>
-						entry.type === "message" &&
-						(entry.message.role === "assistant" || entry.message.role === "toolResult")
-							? { ...entry, message: publicMessage(entry.message) }
-							: entry,
-					),
+					branchEntries: publicSessionEntries(branch),
 					customInstructions: undefined,
 					signal: controller.signal,
 				})) as SessionBeforeCompactResult | undefined;
@@ -1034,8 +1030,8 @@ export class SessionMaintenance {
 			if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) {
 				const result = (await this.#host.extensionRunner.emit({
 					type: "session_before_compact",
-					preparation,
-					branchEntries: pathEntries,
+					preparation: publicCompactionPreparation(preparation),
+					branchEntries: publicSessionEntries(pathEntries),
 					customInstructions,
 					signal: compactionAbortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
@@ -2649,7 +2645,7 @@ export class SessionMaintenance {
 			const result = (await this.#host.extensionRunner.emit({
 				type: "session.compacting",
 				sessionId: this.#host.sessionId(),
-				messages: compactMessages,
+				messages: publicAgentMessages(compactMessages),
 			})) as { context?: string[]; prompt?: string; preserveData?: Record<string, unknown> } | undefined;
 
 			hookContext = result?.context;
@@ -3591,8 +3587,8 @@ export class SessionMaintenance {
 			if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) {
 				const hookResult = (await this.#host.extensionRunner.emit({
 					type: "session_before_compact",
-					preparation,
-					branchEntries: pathEntriesForCompaction,
+					preparation: publicCompactionPreparation(preparation),
+					branchEntries: publicSessionEntries(pathEntriesForCompaction),
 					customInstructions: undefined,
 					signal: autoCompactionSignal,
 				})) as SessionBeforeCompactResult | undefined;

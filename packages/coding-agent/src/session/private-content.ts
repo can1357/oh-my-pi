@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessageEvent } from "@oh-my-pi/pi-ai";
 import { publicMessage } from "@oh-my-pi/pi-ai/utils/private-content";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -12,6 +13,39 @@ export function publicSessionEntry(entry: SessionEntry): SessionEntry {
 	if (entry.type !== "message") return entry;
 	const message = publicAgentMessage(entry.message);
 	return message === entry.message ? entry : { ...entry, message };
+}
+
+export function publicAgentMessages(messages: AgentMessage[]): AgentMessage[] {
+	let projected: AgentMessage[] | undefined;
+	for (let index = 0; index < messages.length; index++) {
+		const message = publicAgentMessage(messages[index]);
+		if (message !== messages[index]) (projected ??= messages.slice())[index] = message;
+	}
+	return projected ?? messages;
+}
+
+export function publicSessionEntries(entries: SessionEntry[]): SessionEntry[] {
+	let projected: SessionEntry[] | undefined;
+	for (let index = 0; index < entries.length; index++) {
+		const entry = publicSessionEntry(entries[index]);
+		if (entry !== entries[index]) (projected ??= entries.slice())[index] = entry;
+	}
+	return projected ?? entries;
+}
+
+/** Public view of a compaction preparation for `session_before_compact` handlers. */
+export function publicCompactionPreparation(preparation: CompactionPreparation): CompactionPreparation {
+	const messagesToSummarize = publicAgentMessages(preparation.messagesToSummarize);
+	const turnPrefixMessages = publicAgentMessages(preparation.turnPrefixMessages);
+	const recentMessages = publicAgentMessages(preparation.recentMessages);
+	if (
+		messagesToSummarize === preparation.messagesToSummarize &&
+		turnPrefixMessages === preparation.turnPrefixMessages &&
+		recentMessages === preparation.recentMessages
+	) {
+		return preparation;
+	}
+	return { ...preparation, messagesToSummarize, turnPrefixMessages, recentMessages };
 }
 
 function publicAssistantEvent(event: AssistantMessageEvent): AssistantMessageEvent {

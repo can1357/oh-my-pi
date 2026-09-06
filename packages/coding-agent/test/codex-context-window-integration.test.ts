@@ -495,3 +495,49 @@ test("a failed checkpoint write blocks the exhausted-window reset", async () => 
 	expect(manager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
 	expect(JSON.stringify(frames.at(-1)?.messages)).toContain("Original task must survive a failed checkpoint");
 }, 20000);
+
+test("ordinary compaction hooks receive public payloads while the journal keeps replay data", async () => {
+	const emitted: string[] = [];
+	const handled: Record<string, true> = { session_before_compact: true, "session.compacting": true };
+	const extensionRunner = {
+		emit: async (event: { type: string }) => {
+			emitted.push(JSON.stringify(event));
+			return undefined;
+		},
+		emitBeforeAgentStart: async () => undefined,
+		hasHandlers: (event: string) => handled[event] === true,
+		emitSessionStop: async () => undefined,
+		consumeToolCallEmitted: () => false,
+		runScoped: <T>(run: () => T): T => run(),
+	} as unknown as ExtensionRunner;
+	vi.spyOn(compaction, "compact").mockImplementation(async preparation => ({
+		summary: "Soft summary",
+		firstKeptEntryId: preparation.firstKeptEntryId,
+		tokensBefore: preparation.tokensBefore,
+	}));
+	const { session, manager, settings } = await harness(true, {
+		extensionRunner,
+		responses: [
+			{
+				content: [{ type: "toolCall", name: "notes.read_file", arguments: { path: "checkpoint" } }],
+				usage: { input: 100 },
+			},
+			{ content: ["Recovered"], usage: { input: 100 } },
+		],
+	});
+	settings.override("compaction.methodOrder", ["soft"]);
+	settings.override("compaction.keepRecentTokens", 1);
+	await session.prompt("Recover saved work");
+	await session.waitForIdle();
+	await session.compact();
+
+	const compactionHooks = emitted.filter(
+		event => event.includes("session_before_compact") || event.includes("session.compacting"),
+	);
+	expect(compactionHooks.length).toBeGreaterThan(0);
+	for (const event of compactionHooks) {
+		expect(event).not.toContain("opaque-result");
+		expect(event).toContain("[private model-only result]");
+	}
+	expect(JSON.stringify(manager.getEntries())).toContain("opaque-result");
+}, 20000);
