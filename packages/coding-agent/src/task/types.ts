@@ -75,6 +75,8 @@ export interface SubagentProgressPayload {
 	assignment?: string;
 	progress: AgentProgress;
 	sessionFile?: string;
+	/** Requested model patterns before resolution (role aliases and explicit selectors). */
+	requestedModelPatterns?: string[];
 	/** See {@link SubagentLifecyclePayload.detached}. */
 	detached?: boolean;
 }
@@ -104,6 +106,8 @@ export interface SubagentLifecyclePayload {
 	 * unset — surfaces like the subagent HUD only list detached spawns.
 	 */
 	detached?: boolean;
+	/** Requested model patterns before resolution. */
+	requestedModelPatterns?: string[];
 }
 
 /** Display cap for a normalized one-line label (roster line, registry `displayName`, prompt field). */
@@ -454,6 +458,8 @@ export interface AgentProgress {
 	modelRole?: string;
 	/** Registry id of the spawning parent agent. */
 	parentAgentId?: string;
+	/** Requested model patterns before resolution (role aliases and explicit selectors). */
+	requestedModelPatterns?: string[];
 	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Undefined when the model could not be resolved. */
 	resolvedModel?: string;
 	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */

@@ -1010,6 +1010,7 @@ interface RunMonitorArgs {
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
 	parentAgentId?: string;
+	requestedModelPatterns?: string[];
 	detached?: boolean;
 	sessionFile?: string;
 	/** Soft assistant-request budget; 0 disables the guard. */
@@ -1123,6 +1124,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		modelOverride: args.modelOverride,
 		modelRole: args.modelRole,
 		parentAgentId: args.parentAgentId,
+		requestedModelPatterns: args.requestedModelPatterns,
 	};
 
 	const outputChunks: string[] = [];
@@ -1351,6 +1353,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			agentSource: agent.source,
 			task,
 			parentToolCallId: args.parentToolCallId,
+			parentAgentId: args.parentAgentId,
+			requestedModelPatterns: progress.requestedModelPatterns,
 			detached: args.detached,
 			assignment,
 			progress: { ...progress },
@@ -2387,6 +2391,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		agent: agent.name,
 		parentToolCallId: args.parentToolCallId,
 		parentAgentId: args.parentAgentId,
+		requestedModelPatterns: progress.requestedModelPatterns,
 		detached: args.detached,
 		agentSource: agent.source,
 		description: progress.description,
@@ -2587,6 +2592,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			agent: agent.name,
 			parentToolCallId: options.parentToolCallId,
 			parentAgentId: options.parentAgentId,
+			requestedModelPatterns: turnMonitor.progress.requestedModelPatterns,
 			detached: true,
 			agentSource: agent.source,
 			description: options.description,
@@ -2863,6 +2869,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		agent: agent.name,
 		parentToolCallId: options.parentToolCallId,
 		parentAgentId: options.parentAgentId,
+		requestedModelPatterns: monitor.progress.requestedModelPatterns,
 		detached: true,
 		agentSource: agent.source,
 		description: options.description,
@@ -3164,6 +3171,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			checkAbort();
 
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
+			progress.requestedModelPatterns = configuredModelPatterns.length > 0 ? configuredModelPatterns : modelPatterns;
 			const inheritedRetryFallbackChain =
 				configuredModelPatterns.length === 1
 					? resolveSubagentInheritedRetryFallbackChain(
@@ -3502,6 +3510,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agent: agent.name,
 				parentToolCallId: options.parentToolCallId,
 				parentAgentId: options.parentAgentId,
+				requestedModelPatterns: progress.requestedModelPatterns,
 				detached: options.detached,
 				agentSource: agent.source,
 				description: options.description,

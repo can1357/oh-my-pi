@@ -28,6 +28,13 @@ import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
+import {
+	buildCoordinationRegistryAdvisory,
+	buildReviewFanInAdvisory,
+	loadTaskRoleCoordination,
+	partitionSpawnFanIn,
+	resolveEffectiveAgentBlocking,
+} from "../config/estate-role-runtime";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
@@ -737,9 +744,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
 		const agentBlocking = this.session.settings.get("task.agentBlocking");
-		const itemBlocking = policies.map(
-			policy => policy.effectiveAgent.blocking === true || agentBlocking[policy.agentName] === true,
+		const roleCoordination = loadTaskRoleCoordination(this.session.settings, this.session.cwd);
+		const itemBlocking = policies.map(policy =>
+			resolveEffectiveAgentBlocking(policy.effectiveAgent, agentBlocking),
 		);
+		const fanInPartition = partitionSpawnFanIn(resolvedAgents, itemBlocking);
+		const reviewFanInAdvisory = buildReviewFanInAdvisory(fanInPartition, resolvedAgents);
+		const coordinationAdvisory = buildCoordinationRegistryAdvisory(roleCoordination, resolvedAgents);
 
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
@@ -782,16 +793,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				signal,
 				onUpdate,
 			);
-			if (!advisory) return result;
+			const combined = [advisory, reviewFanInAdvisory, coordinationAdvisory].filter(Boolean).join("\n\n") || undefined;
+			if (!combined) return result;
 			let appended = false;
 			const content = result.content.map(part => {
 				if (!appended && part.type === "text" && typeof part.text === "string") {
 					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
+					return { ...part, text: `${part.text}\n\n${combined}` };
 				}
 				return part;
 			});
-			if (!appended) content.push({ type: "text", text: advisory });
+			if (!appended) content.push({ type: "text", text: combined });
 			return { ...result, content };
 		}
 
@@ -815,16 +827,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// than mutating the caller's — task results are short-lived here, but an
 		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
 		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
-			if (!advisory) return result;
+			const combined = [advisory, reviewFanInAdvisory, coordinationAdvisory].filter(Boolean).join("\n\n") || undefined;
+			if (!combined) return result;
 			let appended = false;
 			const content = result.content.map(part => {
 				if (!appended && part.type === "text" && typeof part.text === "string") {
 					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
+					return { ...part, text: `${part.text}\n\n${combined}` };
 				}
 				return part;
 			});
-			if (!appended) content.push({ type: "text", text: advisory });
+			if (!appended) content.push({ type: "text", text: combined });
 			return { ...result, content };
 		};
 		if (asyncItems.length === 0) {
@@ -872,6 +885,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					agent: agentType,
 					agentSource,
 					modelRole: policy.modelRole,
+					parentAgentId: this.session.getAgentId?.(),
+					requestedModelPatterns: policy.modelOverride
+						? Array.isArray(policy.modelOverride)
+							? policy.modelOverride
+							: [policy.modelOverride]
+						: undefined,
 					status: "pending",
 					task: renderSubagentUserPrompt(assignment),
 					assignment,

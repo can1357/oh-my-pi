@@ -58,6 +58,7 @@ import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { formatKeyHint, KeybindingsManager } from "../config/keybindings";
+import { formatRequestedModelRoute } from "../config/estate-role-runtime";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
@@ -528,6 +529,10 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 				let line = `${indicator} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
 				const progress = session.progress;
 				const metaParts: string[] = [];
+				if (progress?.resolvedModelIsFallback && progress.requestedModelPatterns?.length) {
+					const requested = formatRequestedModelRoute(progress.requestedModelPatterns);
+					if (requested) metaParts.push(`${requested}→`);
+				}
 				if (progress?.resolvedModel) metaParts.push(truncateToWidth(progress.resolvedModel, 28));
 				if (progress && progress.tokens > 0) metaParts.push(`${formatNumber(progress.tokens)} tok`);
 				if (progress && progress.requests > 0) metaParts.push(`${progress.requests} req`);
