@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Independent subagents no longer share one eval kernel: each child executes under its own kernel identity, so two siblings that both name `results` in a `py`/`js` cell cannot silently overwrite each other's analysis state. Set the new `task.shareEvalSession` setting (or pass `shareEvalSession: true`) when a child is meant to continue the parent's kernel. The `eval` tool description no longer tells the model that state persists across `task` subagents.
+- A subagent that produced output and then failed now hands the parent that artifact and its real exit status instead of a bare error string; the temporary artifacts directory survives the failure, and nothing about the salvaged output reports the run as successful.
+- An unknown agent name now fails preflight with the loaded roster and every directory the loader read, in precedence order, with what each one yielded, instead of only a flat `Available:` list.
+- Read-only subagents retain their declared tool limits; dispatch no longer adds `task` or `hub`, and restricted sessions exclude extension, MCP, custom-tool, and device-write capabilities. Reviewers consume patches supplied by their caller.
+- SDK custom-tool discovery now honors the session’s `agentDir` for the native user tools directory.
+
 ## [18.1.11] - 2026-09-05
 
 ### Added

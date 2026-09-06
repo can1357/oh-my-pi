@@ -1200,8 +1200,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
 					// A missing result means the sync path failed at the tool level
-					// (results: []) — treat it as a failure, not success.
-					const resultFailed = !singleResult || (singleResult.aborted ?? false) || singleResult.exitCode !== 0;
+					// (results: []) — treat it as a failure, not success. `isError`
+					// covers the case the exit code cannot: a child that settled
+					// cleanly whose post-settle step (isolation merge, nested patch
+					// apply) failed, whose salvaged result carries `exitCode: 0`.
+					const resultFailed =
+						result.isError === true ||
+						!singleResult ||
+						(singleResult.aborted ?? false) ||
+						singleResult.exitCode !== 0;
 					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
 					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
 					progress.tokens = singleResult?.tokens ?? 0;
@@ -1330,6 +1337,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const merged = mergeSyncPayloads(spawns, payloads);
 		return {
 			content: [{ type: "text", text: merged.contentParts.join("\n\n") }],
+			// One failed item fails the call: the merged payload is the only thing
+			// the caller sees, so a per-item failure has to survive the merge.
+			...(payloads.some(payload => payload?.isError === true) ? { isError: true } : {}),
 			details: {
 				projectAgentsDir: merged.projectAgentsDir,
 				results: merged.results,
@@ -1407,6 +1417,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						text: `Task ${item.name?.trim() || `#${spawns[position].index + 1}`} failed: ${message}`,
 					},
 				],
+				isError: true,
 				details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
 			};
 		});
@@ -1518,12 +1529,28 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		} catch (error) {
 			const message = error instanceof StructuredSubagentError ? error.message : String(error);
+			// A settled child's exit status, usage, and artifact still reach the
+			// caller; the text stays a failure so nothing reads as done. The
+			// salvaged result can carry `exitCode: 0` (the child settled, a
+			// post-settle step like the isolation merge is what failed), so the
+			// failure travels the two ways consumers already understand:
+			// `isError` on the wire, and `SingleResult.error` beside the kept
+			// exit code — the pair the renderer reads as "merge failed" rather
+			// than counting the row as a success.
+			const settled = error instanceof StructuredSubagentError ? error.result : undefined;
+			const cause = error instanceof StructuredSubagentError ? error.cause : undefined;
+			const salvaged = settled
+				? { ...settled, error: settled.error ?? (cause instanceof Error ? cause.message : message) }
+				: undefined;
 			return {
 				content: [{ type: "text", text: `Task execution failed: ${message}` }],
+				isError: true,
 				details: {
 					projectAgentsDir: null,
-					results: [],
+					results: salvaged ? [salvaged] : [],
 					totalDurationMs: Date.now() - startTime,
+					...(salvaged?.usage ? { usage: salvaged.usage } : {}),
+					...(salvaged?.outputPath ? { outputPaths: [salvaged.outputPath] } : {}),
 					...(latestProgress ? { progress: [latestProgress] } : {}),
 				},
 			};

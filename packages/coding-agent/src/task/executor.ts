@@ -3003,23 +3003,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 	const ircEnabled = options.enableIrc !== false && isIrcEnabled(subagentSettings, childDepth);
 
-	// Add tools if specified
+	// A declared tool list is the child's entire grant: the orchestrator never
+	// widens it. An agent that must delegate declares `task`; one that must
+	// coordinate declares `hub`. Appending either behind the author's back
+	// handed a read-only reviewer an exec channel (`hub` resolves to exec
+	// approval for start/stop/restart and process-stdin `send`), which is why
+	// `hub` is absent from READ_ONLY_TOOL_NAMES in the first place.
 	let toolNames: string[] | undefined;
 	if (agent.tools) {
 		toolNames = agent.tools;
-		// Auto-include task tool if spawns defined but task not in tools
-		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
-			toolNames = [...toolNames, "task"];
-		}
 	}
 
 	if (atMaxDepth && toolNames?.includes("task")) {
 		toolNames = toolNames.filter(name => name !== "task");
-	}
-	// Ordinary agents retain the host's always-on collaboration capability.
-	// Restricted sessions must not widen their explicit host tool list with hub.
-	if (toolNames && !options.restrictToolNames && !toolNames.includes("hub")) {
-		toolNames = [...toolNames, "hub"];
 	}
 	if (toolNames?.includes("exec")) {
 		const backends = resolveEvalBackends({ settings } as ToolSession);
@@ -3275,7 +3271,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 
-			const restrictToolNames = options.restrictToolNames === true;
+			// A read-only roster is enforced, not merely labelled in
+			// `session_init.readOnly`: the same flag the commit and compaction
+			// sessions already use keeps MCP servers, extensions, SDK custom
+			// tools, and the `xd://` device transport out of this child, so it
+			// cannot reach an exec-capable device the author never granted.
+			const restrictToolNames = options.restrictToolNames === true || isReadOnlyAgent(agent);
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 			const mcpManager = enableMCP ? options.mcpManager : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
@@ -3347,7 +3348,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				toolNames,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
-				restrictToolNames: options.restrictToolNames,
+				restrictToolNames: restrictToolNames || undefined,
 				requireYieldTool: true,
 				contextFiles: options.contextFiles,
 				skills: options.skills,

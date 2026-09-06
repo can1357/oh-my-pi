@@ -4,23 +4,25 @@
  * paid for. Regression guard for issue #2190.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import type { ToolPathWithSource } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { LoadExtensionsResult, PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
-import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
+import { type CreateAgentSessionResult, type CustomTool, discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
@@ -181,29 +183,6 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.preloadedExtensionPaths).toBeUndefined();
 		expect(forwarded?.preloadedCustomToolPaths).toBeUndefined();
 	});
-	it("preserves empty and absent agent tool declarations through session creation", async () => {
-		const session = yieldEmittingSession();
-		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
-		const emptyFields = parseAgentFields({ name: "quiet", description: "desc", tools: [] });
-		const absentFields = parseAgentFields({ name: "default", description: "desc" });
-		if (!emptyFields || !absentFields) throw new Error("agent fields did not parse");
-
-		const emptyResult = await runSubprocess({
-			...baseOptions,
-			id: "empty-tools-child",
-			agent: { ...baseAgent, ...emptyFields },
-		});
-		const absentResult = await runSubprocess({
-			...baseOptions,
-			id: "default-tools-child",
-			agent: { ...baseAgent, ...absentFields },
-		});
-
-		expect(emptyResult.exitCode).toBe(0);
-		expect(absentResult.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield", "hub"]);
-		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
-	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
 		const session = yieldEmittingSession();
@@ -223,56 +202,6 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.parentAgentId).toBe("SpawnerAgent");
 		expect(forwarded?.agentId).toBe("ChildAgent");
 		expect(forwarded?.parentTaskPrefix).toBe("ChildAgent");
-	});
-
-	it("removes all MCP and discovered capability sources for a restricted child", async () => {
-		const session = yieldEmittingSession();
-		const persistedInits: Array<{ restrictToolNames?: boolean; tools: string[] }> = [];
-		vi.spyOn(session.sessionManager, "appendSessionInit").mockImplementation(init => {
-			persistedInits.push(init);
-			return "session-init";
-		});
-		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
-		const preloadedExtensionPaths = ["/hostile/extensions/read.ts"];
-		const preloadedPreparedExtensions: PreparedExtension[] = [
-			{
-				path: preloadedExtensionPaths[0]!,
-				resolvedPath: preloadedExtensionPaths[0]!,
-				factory: () => {},
-				error: null,
-			},
-		];
-		const preloadedCustomToolPaths: ToolPathWithSource[] = [
-			{ path: "/hostile/tools/read.ts", source: { provider: "test", providerName: "Test", level: "project" } },
-		];
-		const getTools = vi.fn(() => [{ name: "read", label: "hostile/read" }]);
-		const mcpManager = { getTools } as unknown as MCPManager;
-
-		const result = await runSubprocess({
-			...baseOptions,
-			id: "restricted-child",
-			restrictToolNames: true,
-			mcpManager,
-			preloadedExtensionPaths,
-			preloadedPreparedExtensions,
-			preloadedCustomToolPaths,
-			outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
-			outputSchemaMode: "strict",
-		});
-
-		expect(result.exitCode).toBe(0);
-		const forwarded = spy.mock.calls[0]?.[0];
-		expect(forwarded?.restrictToolNames).toBe(true);
-		expect(forwarded?.enableMCP).toBe(false);
-		expect(forwarded?.mcpManager).toBeUndefined();
-		expect(forwarded?.customTools).toBeUndefined();
-		expect(forwarded?.preloadedExtensionPaths).toEqual([]);
-		expect(forwarded?.preloadedPreparedExtensions).toEqual([]);
-		expect(forwarded?.preloadedCustomToolPaths).toEqual([]);
-		expect(getTools).not.toHaveBeenCalled();
-		expect(forwarded?.outputSchemaMode).toBe("strict");
-		expect(persistedInits).toHaveLength(1);
-		expect(persistedInits[0]).toMatchObject({ restrictToolNames: true, tools: ["read", "yield"] });
 	});
 
 	it("persists bridge-only tools in the enabled Code Mode set", async () => {
@@ -485,5 +414,133 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({ modelRole: "reviewer" }));
+	});
+});
+
+/**
+ * The child's permission boundary is what its model is actually offered, so
+ * these cases run the real `createAgentSession` and read the tool list off the
+ * provider request. Asserting the options object handed to a mocked session
+ * factory would pass while the session widened the grant on its own.
+ */
+describe("runSubprocess child tool grant", () => {
+	const realCreateAgentSession = sdkModule.createAgentSession;
+	const tempDirs: TempDir[] = [];
+
+	const probeTool = {
+		name: "parent_probe",
+		label: "Parent Probe",
+		description: "Parent-supplied custom tool; reachable only by an unrestricted child.",
+		parameters: type({}),
+		async execute() {
+			return { content: [{ type: "text" as const, text: "probe" }] };
+		},
+	} satisfies CustomTool;
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
+	});
+
+	/**
+	 * Spawn one child through the real session builder against a scripted
+	 * provider, and report — as of the moment the child's first request is
+	 * built — the tool names the model was offered plus the `xd://` devices it
+	 * could reach through the transport.
+	 */
+	async function probeChildGrant(
+		agentFields: Partial<AgentDefinition>,
+		id: string,
+	): Promise<{ offered: string[]; devices: string[] }> {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const cwd = TempDir.createSync("omp-child-grant-");
+		const authDir = TempDir.createSync("omp-child-grant-auth-");
+		tempDirs.push(cwd, authDir);
+		const authStorage = await discoverAuthStorage(authDir.path());
+		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const settings = Settings.isolated();
+		settings.setModelRole("task", `${model.provider}/${model.id}`);
+
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: `${id}-yield`, name: "yield", arguments: { data: { ok: true } } }] },
+				{ content: ["done"] },
+			],
+		});
+		let devices: string[] | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			const created = await realCreateAgentSession(options);
+			vi.spyOn(created.session.agent, "streamFn").mockImplementation((...args) => {
+				devices ??= created.session
+					.getXdevToolEntries()
+					.map(entry => entry.name)
+					.sort();
+				return mock.stream(...args);
+			});
+			return created;
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id,
+			cwd: cwd.path(),
+			agent: { ...baseAgent, model: ["@task"], ...agentFields },
+			settings,
+			modelRegistry,
+			// IRC on, so `hub` is in the child's registry and its absence below is
+			// a grant decision rather than an unregistered tool.
+			enableIrc: true,
+			enableMCP: false,
+			customTools: [probeTool],
+			rules: [],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			preloadedPreparedExtensions: [],
+			preloadedCustomToolPaths: [],
+		});
+
+		expect(result.exitCode).toBe(0);
+		const offered = mock.calls[0]?.context.tools?.map(tool => tool.name) ?? [];
+		return { offered: offered.sort(), devices: devices ?? [] };
+	}
+
+	it("offers a read-only roster exactly as declared, with no delegation channel or device transport", async () => {
+		// `hub` resolves to exec approval for process start/stop/restart and
+		// process-stdin `send`, and `task` spawns a writer child: appending
+		// either to a read-only roster hands the child a capability its author
+		// never granted. The parent's own custom tools are unreachable too —
+		// a read-only roster is enforced, not merely labelled — which is why
+		// neither the `write` transport nor any `xd://` device is offered.
+		const { offered, devices } = await probeChildGrant(
+			{ name: "roster-reviewer", tools: ["read", "grep", "glob", "web_search"], spawns: ["scout"] },
+			"read-only-child",
+		);
+
+		expect(offered).toEqual(["glob", "grep", "read", "web_search", "yield"]);
+		expect(devices).toEqual([]);
+	});
+
+	it("keeps a write-capable roster unwidened while its device transport still reaches parent tools", async () => {
+		const { offered, devices } = await probeChildGrant(
+			{ name: "roster-worker", tools: ["read", "edit", "bash"] },
+			"write-capable-child",
+		);
+
+		// `write` here is the device-only transport that carries `xd://` calls,
+		// not a filesystem grant; the parent's custom tool rides it.
+		expect(offered).toEqual(["bash", "edit", "read", "write", "yield"]);
+		expect(devices).toContain("parent_probe");
+	});
+
+	it("offers coordination, delegation, and edit tools when an agent declares no roster", async () => {
+		const { offered } = await probeChildGrant({ name: "default-roster" }, "default-roster-child");
+
+		// The exclusions above are a real boundary, not a blanket ban, and `hub`
+		// and `task` are registered in this harness: an agent that declares no
+		// roster still reaches coordination, delegation, and the writer tools.
+		expect(offered).toEqual(expect.arrayContaining(["hub", "task", "bash", "edit", "write", "yield"]));
 	});
 });

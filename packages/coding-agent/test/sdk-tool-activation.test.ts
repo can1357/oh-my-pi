@@ -2566,4 +2566,40 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			}
 		});
 	});
+
+	it("discovers user custom tools from the session's agentDir, not the process-global one", async () => {
+		const withTool = makeTempDir();
+		const withoutTool = makeTempDir();
+		fs.mkdirSync(path.join(withTool, "tools"), { recursive: true });
+		fs.writeFileSync(
+			path.join(withTool, "tools", "scoped_user_tool.ts"),
+			[
+				"export default api => ({",
+				'\tname: "scoped_user_tool",',
+				'\tdescription: "fixture user-level custom tool",',
+				"\tparameters: api.arktype({}),",
+				"\tasync execute() {",
+				'\t\treturn { content: [{ type: "text", text: "ok" }] };',
+				"\t},",
+				"});",
+			].join("\n"),
+		);
+
+		// `withTool` is only ever this session's `agentDir`; it is never the
+		// process-global agent dir, so the fixture tool can reach the session
+		// only through that option.
+		const scoped = await createAgentSession(baseOptions(withTool));
+		try {
+			expect(scoped.session.getAllToolNames()).toContain("scoped_user_tool");
+		} finally {
+			await scoped.session.dispose();
+		}
+
+		const unscoped = await createAgentSession(baseOptions(withoutTool));
+		try {
+			expect(unscoped.session.getAllToolNames()).not.toContain("scoped_user_tool");
+		} finally {
+			await unscoped.session.dispose();
+		}
+	});
 });

@@ -37,6 +37,14 @@ export interface LoadContext {
 	/** Git repository root (directory containing .git), or null if not in a repo */
 	repoRoot: string | null;
 	/**
+	 * Native user config dir for this load (`~/.omp/agent`, or the active
+	 * profile's). Set by a caller that owns an explicit agent dir — an SDK
+	 * session created with `agentDir` must discover user-level items from *that*
+	 * dir, the same way its settings, models, sessions, and prompt templates
+	 * already do. Unset falls back to the process-global `getAgentDir()`.
+	 */
+	agentDir?: string;
+	/**
 	 * Session-local extension roots for sub-discovery. When set, extension
 	 * discovery uses these lanes instead of the invocation-scoped snapshot or
 	 * the process defaults, so post-startup reloads stay byte-identical to the
@@ -102,6 +110,8 @@ export interface LoadOptions<T = unknown> {
 	excludeProviders?: string[];
 	/** Custom cwd. Default: getProjectDir() */
 	cwd?: string;
+	/** Native user config dir. Default: process-global `getAgentDir()`. */
+	agentDir?: string;
 	/** Include items even if they fail validation. Default: false */
 	includeInvalid?: boolean;
 	/** Include items disabled via settings. Default: false */

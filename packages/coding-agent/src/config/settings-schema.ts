@@ -5053,6 +5053,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.shareEvalSession": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Share Eval Kernel With Subagents",
+			description:
+				"Run subagent eval cells in this session's kernel instead of a private one per subagent. Off by default: independent subagents would otherwise share one variable namespace and silently overwrite each other's analysis state. Enable only when a child is meant to continue this session's kernel.",
+		},
+	},
+
 	"task.maxRecursionDepth": {
 		type: "number",
 		default: 2,

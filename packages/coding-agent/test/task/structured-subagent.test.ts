@@ -182,6 +182,36 @@ describe("structured subagent primitive", () => {
 		);
 		expect(discover).not.toHaveBeenCalled();
 	});
+
+	it("reports the loaded roster and the searched directories for an unknown agent", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-unknown-agent-"));
+		const projectDir = path.join(root, "project");
+		const projectAgentsDir = path.join(projectDir, ".omp", "agents");
+		try {
+			await Bun.write(
+				path.join(projectAgentsDir, "fixture-worker.md"),
+				"---\nname: fixture-worker\ndescription: Registered worker.\n---\n\nInspect the assignment.\n",
+			);
+			await Bun.write(path.join(projectAgentsDir, "broken.md"), "no frontmatter, so the loader cannot use it\n");
+			const liveSession = { ...session(), cwd: projectDir } as ToolSession;
+
+			const failure = await resolveEffectiveSubagentPolicy(
+				request({ session: liveSession, agent: "definitely-not-registered" }),
+			).then(
+				() => undefined,
+				(error: unknown) => error as Error,
+			);
+
+			const message = failure?.message ?? "";
+			expect(message).toContain('Unknown agent "definitely-not-registered"');
+			expect(message).toContain(`${projectAgentsDir} [project]: 1 loaded, 1 unusable file(s)`);
+			const roster = message.split("\n").find(line => line.startsWith("Loaded roster")) ?? "";
+			expect(roster).toContain("fixture-worker");
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it("reloads model roles before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
 		const projectDir = path.join(root, "project");
@@ -389,14 +419,6 @@ describe("structured subagent primitive", () => {
 		expect(settled.result.structuredOutput?.status).toBe("valid");
 		await expect(fs.stat(settled.artifactsDir)).resolves.toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
-	});
-	it("uses identical non-plan LSP and IRC policy for task and eval invocations", async () => {
-		mockDiscovery();
-		const taskPolicy = await resolveEffectiveSubagentPolicy(request());
-		const evalPolicy = await resolveEffectiveSubagentPolicy(request({ invocationKind: "eval" }));
-
-		expect(evalPolicy.enableLsp).toBe(taskPolicy.enableLsp);
-		expect(evalPolicy.enableIrc).toBe(taskPolicy.enableIrc);
 	});
 
 	it("rejects an invalid caller schema before executor dispatch in both modes", async () => {

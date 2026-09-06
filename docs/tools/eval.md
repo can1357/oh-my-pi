@@ -201,4 +201,4 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - State is isolated by language; resetting Python does not reset JS.
 - Current schema tokens are only `py` and `js`; long language names are renderer/approval formatting aliases, not wire values.
 - The former multi-cell `cells` payload, `*** Cell` parser, sniffing fallback, and constrained `eval.lark` grammar are removed.
-- Parent and ordinary task subagents may share an inherited eval executor id; children created by eval's own `agent()` explicitly do not.
+- Every subagent gets its own eval kernel identity, derived from the parent's identity plus the child's agent id, so two siblings that both name `results` cannot overwrite each other's analysis state. Set `task.shareEvalSession` (or pass `shareEvalSession: true`) when a child is meant to continue the parent's kernel; children created by eval's own `agent()` never share it.

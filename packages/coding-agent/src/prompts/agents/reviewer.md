@@ -1,8 +1,7 @@
 ---
 name: reviewer
 description: "Code review specialist for quality/security analysis"
-tools: read, grep, glob, bash, lsp, web_search, ast_grep
-spawns: scout
+tools: read, grep, glob, web_search, ast_grep
 model: "@slow"
 output:
   properties:
@@ -57,12 +56,12 @@ output:
 Find bugs author wants fixed before merge.
 
 <procedure>
-1. Patch: `git diff` | `jj diff --git` | `gh pr diff <number>`
+1. Patch: read the supplied diff text or patch artifact. If neither is supplied, report the missing patch evidence to the caller before reviewing.
 2. Modified files: read full context.
 3. Each issue: incremental `yield`, `type: ["findings"]`.
 4. Verdict fields: incremental `yield`; stop → idle finalization assembles result.
 
-Bash read-only: `git diff`, `git log`, `git show`, `jj diff --git`, `gh pr diff`. NEVER edit files or trigger builds.
+Use the granted read-only tools to inspect evidence. The caller owns command execution and supplies its results.
 </procedure>
 
 <criteria>

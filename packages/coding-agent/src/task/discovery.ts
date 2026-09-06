@@ -35,13 +35,29 @@ const TASK_AGENT_CONFIG_SOURCE = ".omp";
 export interface DiscoveryResult {
 	agents: AgentDefinition[];
 	projectAgentsDir: string | null;
+	/** Every directory read this pass, in precedence order, with its yield. */
+	searched?: AgentSearchPath[];
 }
 
-/**
- * Load agents from a directory.
- */
-async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<AgentDefinition[]> {
-	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+/** One directory the agent loader read, and what it yielded. */
+export interface AgentSearchPath {
+	dir: string;
+	source: AgentSource;
+	/** False when the directory is absent or unreadable. */
+	readable: boolean;
+	/** Agent definitions parsed from this directory. */
+	loaded: number;
+	/** `.md` files present that could not be read or parsed. */
+	unusable: number;
+}
+
+/** Load agents from a directory, reporting what that directory yielded. */
+async function loadAgentsFromDir(
+	dir: string,
+	source: AgentSource,
+): Promise<{ agents: AgentDefinition[]; searched: AgentSearchPath }> {
+	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => null);
+	if (!entries) return { agents: [], searched: { dir, source, readable: false, loaded: 0, unusable: 0 } };
 	const files = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
 		.sort((a, b) => a.name.localeCompare(b.name))
@@ -56,7 +72,27 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
 				});
 		});
 
-	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
+	const parsed = await Promise.all(files);
+	const agents = parsed.filter(Boolean) as AgentDefinition[];
+	return {
+		agents,
+		searched: { dir, source, readable: true, loaded: agents.length, unusable: parsed.length - agents.length },
+	};
+}
+
+/** Render the directories the loader read, for a missing-agent diagnostic. */
+export function formatAgentSearchPaths(searched: AgentSearchPath[] | undefined): string {
+	if (!searched || searched.length === 0) return "  (no agent directories were searched)";
+	return searched
+		.map(entry => {
+			const state = !entry.readable
+				? "not readable - absent or permission denied"
+				: entry.unusable > 0
+					? `${entry.loaded} loaded, ${entry.unusable} unusable file(s)`
+					: `${entry.loaded} loaded`;
+			return `  - ${entry.dir} [${entry.source}]: ${state}`;
+		})
+		.join("\n");
 }
 
 /**
@@ -120,9 +156,10 @@ export async function discoverAgents(
 		orderedDirs.push({ dir: agentsDir, source: plugin.scope === "project" ? "project" : "user" });
 	}
 
+	const loads = await Promise.all(orderedDirs.map(({ dir, source }) => loadAgentsFromDir(dir, source)));
 	const seen = new Set<string>();
-	const loadedAgents = (await Promise.all(orderedDirs.map(({ dir, source }) => loadAgentsFromDir(dir, source))))
-		.flat()
+	const loadedAgents = loads
+		.flatMap(load => load.agents)
 		.filter(agent => {
 			if (seen.has(agent.name)) return false;
 			seen.add(agent.name);
@@ -137,7 +174,11 @@ export async function discoverAgents(
 
 	const projectAgentsDir = projectDirs.length > 0 ? projectDirs[0].path : null;
 
-	return { agents: [...loadedAgents, ...bundledAgents], projectAgentsDir };
+	return {
+		agents: [...loadedAgents, ...bundledAgents],
+		projectAgentsDir,
+		searched: loads.map(load => load.searched),
+	};
 }
 
 /**

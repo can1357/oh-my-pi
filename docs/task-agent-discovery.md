@@ -192,7 +192,7 @@ Lookup is exact-name linear search:
 5. checks `task.disabledAgents`
 6. resolves plan-mode restrictions, output schema, model policy, and isolation policy
 
-A missing name fails preflight with `Unknown agent "...". Available: ...`; no subprocess runs.
+A missing name fails preflight without running a subprocess. The error names the loaded roster and every directory the loader read this pass, in precedence order. Each directory reports its loaded count (including zero), any unusable files, or that it was not readable. The message identifies where to register the missing agent.
 
 ### Description vs execution-time discovery
 
