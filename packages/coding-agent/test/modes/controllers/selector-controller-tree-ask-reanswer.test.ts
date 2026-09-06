@@ -79,16 +79,27 @@ function createEditorSlot(): EditorSlot {
 	};
 }
 
-function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { cancelled: false }) {
+function createCtx(
+	leafEntry: SessionEntry,
+	navigateTreeResult: unknown = { cancelled: false },
+	archivedRootId?: string,
+) {
 	const tree: SessionTreeNode[] = [{ entry: leafEntry, children: [] }];
-	const navigateTree = vi.fn(async () => navigateTreeResult as never);
+	const order: string[] = [];
+	const navigateTree = vi.fn(async () => {
+		order.push("navigate");
+		return navigateTreeResult as never;
+	});
+	const restoreArchived = vi.fn(async () => {
+		order.push("restore");
+		return 1;
+	});
 	const showStatus = vi.fn();
 	const showError = vi.fn();
 	const editorContainer = createEditorSlot();
 	// Records the order of UI-rebuild vs agent-resume so a test can prove the
 	// re-answer continuation is deferred until after the transcript rebuild
 	// (issue #6483).
-	const order: string[] = [];
 	const renderInitialMessages = vi.fn(() => {
 		order.push("render");
 	});
@@ -105,8 +116,9 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 			getTree: () => tree,
 			getLeafId: () => leafEntry.id,
 			getEntry: (id: string) => (id === leafEntry.id ? leafEntry : undefined),
+			getArchivedRootId: (id: string) => (id === leafEntry.id ? archivedRootId : undefined),
 		},
-		session: { navigateTree, resumeAfterAskReanswer },
+		session: { navigateTree, restoreArchived, resumeAfterAskReanswer },
 		ui: {
 			setFocus: vi.fn(),
 			requestRender: vi.fn(),
@@ -124,7 +136,7 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 		// itself (already covered at the session level).
 		getToolUIContext: () => undefined,
 	} as unknown as InteractiveModeContext;
-	return { ctx, editorContainer, navigateTree, showStatus, showError, resumeAfterAskReanswer, order };
+	return { ctx, editorContainer, navigateTree, restoreArchived, showStatus, showError, resumeAfterAskReanswer, order };
 }
 
 /** Grabs the `TreeSelectorComponent` mounted by the most recent `showTreeSelector()` call and fires its onSelect as if the user pressed Enter on `entryId`. */
@@ -174,6 +186,24 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 		expect(navigateTree).toHaveBeenCalledWith("leaf-ask", expect.objectContaining({ allowAskReopen: true }));
 		expect(showError).toHaveBeenCalledWith("Ask tool UI is not ready");
 		expect(showStatus).toHaveBeenCalledWith("Re-answer cancelled");
+	});
+
+	it("restores a revealed archived row after navigating to it", async () => {
+		const entry = plainUserEntry("archived-entry");
+		const { ctx, editorContainer, navigateTree, restoreArchived, showStatus, order } = createCtx(
+			entry,
+			{ cancelled: false },
+			"archived-root",
+		);
+		const controller = new SelectorController(ctx);
+
+		controller.showTreeSelector({ includeArchived: true });
+		await pickEntry(editorContainer, entry.id);
+
+		expect(restoreArchived).toHaveBeenCalledWith(entry.id);
+		expect(navigateTree).toHaveBeenCalledWith(entry.id, expect.objectContaining({ allowAskReopen: true }));
+		expect(order.slice(0, 2)).toEqual(["navigate", "restore"]);
+		expect(showStatus).not.toHaveBeenCalledWith("Already at this point");
 	});
 
 	it("resumes the agent only after rebuilding the transcript when navigateTree reports a committed re-answer", async () => {

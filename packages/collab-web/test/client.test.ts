@@ -52,6 +52,10 @@ function messageEntry(id: string, message: WireMessage): SessionEntry {
 	return { type: "message", id, parentId: null, timestamp: "2026-06-12T00:00:01Z", message };
 }
 
+function archiveEntry(id: string, parentId: string, targetId: string, archived: boolean): SessionEntry {
+	return { type: "archive", id, parentId, timestamp: "2026-06-12T00:00:02Z", targetId, archived };
+}
+
 function welcomeFrame(entryCount = 0, readOnly?: boolean): HostFrame {
 	return { t: "welcome", proto: COLLAB_PROTO, header: HEADER, state: STATE, agents: AGENTS, entryCount, readOnly };
 }
@@ -84,6 +88,37 @@ describe("GuestClient frame apply", () => {
 		expect(snap.working).toBe(false);
 		expect(snap.stream).toBeNull();
 		expect(snap.activeTools.size).toBe(0);
+	});
+
+	it("hides archived subtrees and reveals them when the host restores the branch", () => {
+		const root = messageEntry("root", { role: "user", content: "root", timestamp: 1 });
+		const hiddenPrompt = {
+			...messageEntry("hidden-prompt", { role: "user", content: "private branch", timestamp: 2 }),
+			parentId: root.id,
+		};
+		const hiddenReply = {
+			...messageEntry("hidden-reply", assistantMessage("private reply")),
+			parentId: hiddenPrompt.id,
+		};
+		const visibleReply = {
+			...messageEntry("visible-reply", assistantMessage("kept reply")),
+			parentId: root.id,
+		};
+		const archived = archiveEntry("archive-hidden", visibleReply.id, hiddenPrompt.id, true);
+		const client = liveClient([root, hiddenPrompt, hiddenReply, visibleReply, archived]);
+
+		expect(client.getSnapshot().entries.map(entry => entry.id)).toEqual([root.id, visibleReply.id]);
+
+		client.applyFrameForTest({
+			t: "entry",
+			entry: archiveEntry("restore-hidden", archived.id, hiddenPrompt.id, false),
+		});
+		expect(client.getSnapshot().entries.map(entry => entry.id)).toEqual([
+			root.id,
+			hiddenPrompt.id,
+			hiddenReply.id,
+			visibleReply.id,
+		]);
 	});
 
 	it("welcome readOnly flag lands in the snapshot", () => {

@@ -3,6 +3,15 @@
 ## [Unreleased]
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
+### Breaking Changes
+
+- Upgraded collaboration sessions to protocol version 4 so guests receive archived branch state.
+
+### Added
+
+- Added `/prune` to archive conversation branches with no completed assistant reply, with `/prune delete` available for permanent removal.
+- Added `/unarchive` and tree controls for revealing, archiving, and restoring branches; exports and shares omit archived content by default.
+
 ### Changed
 
 - Ranged reads of text without bracket characters skip unnecessary lexical context scanning.
@@ -12,6 +21,7 @@
 ### Fixed
 
 	- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
+- Archived branches retain the ancestry and active bookkeeping needed for safe pruning, nested restoration, branched-session copying, committed navigation, live collaboration resynchronization, and efficient leak-free exports.
 
 ### Fixed
 

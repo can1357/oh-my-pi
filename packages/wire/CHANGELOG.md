@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Upgraded the collaboration protocol to version 4 so archive-state entries are replicated; older guests are rejected during the handshake.
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

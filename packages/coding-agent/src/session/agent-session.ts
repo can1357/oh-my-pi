@@ -5251,6 +5251,32 @@ export class AgentSession {
 		void this.#maintenance.abortCompaction(reason);
 	}
 
+	/** Prune all empty branches (ones with no AI assistant messages) from the session history. */
+	async pruneEmptyBranches(): Promise<number> {
+		// SessionManager rewrites the session file itself when it prunes anything.
+		return this.sessionManager.pruneEmptyBranches();
+	}
+
+	/** Hide every empty branch behind an archive record instead of deleting it. */
+	async archiveEmptyBranches(): Promise<{ branches: number; entries: number }> {
+		return this.sessionManager.archiveEmptyBranches();
+	}
+
+	/** Hide one branch by id, whatever is in it. Returns how many entries it hid. */
+	async archiveBranch(targetId: string): Promise<number> {
+		return this.sessionManager.archiveBranch(targetId);
+	}
+
+	/** Bring archived branches back into view; omit the id to restore them all. */
+	async restoreArchived(targetId?: string): Promise<number> {
+		return this.sessionManager.restoreArchived(targetId);
+	}
+
+	/** Roots of the branches currently hidden by an archive record. */
+	getArchivedRootIds(): string[] {
+		return this.sessionManager.getArchivedRootIds();
+	}
+
 	/** Trigger idle compaction through the automatic maintenance flow. */
 	async runIdleCompaction(): Promise<void> {
 		await this.#maintenance.runIdleCompaction();

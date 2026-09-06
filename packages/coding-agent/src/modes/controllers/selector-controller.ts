@@ -1459,8 +1459,9 @@ export class SelectorController {
 		this.ctx.ui.requestRender();
 	}
 
-	showTreeSelector(): void {
-		const tree = this.ctx.sessionManager.getTree();
+	showTreeSelector(options: { includeArchived?: boolean } = {}): void {
+		const includeArchived = options.includeArchived ?? false;
+		const tree = this.ctx.sessionManager.getTree({ includeArchived });
 		const realLeafId = this.ctx.sessionManager.getLeafId();
 
 		if (tree.length === 0) {
@@ -1474,11 +1475,12 @@ export class SelectorController {
 				realLeafId,
 				this.ctx.ui.terminal.rows,
 				async (entryId, options) => {
+					const archivedRoot = this.ctx.sessionManager.getArchivedRootId(entryId);
 					// Selecting the current leaf is normally a no-op (already there) —
 					// unless it's an `ask` toolResult, in which case the re-answer flow
 					// must still be allowed to reopen the picker even though the leaf
 					// doesn't move (chatgpt-codex review on #5895).
-					if (entryId === realLeafId) {
+					if (entryId === realLeafId && !archivedRoot) {
 						const currentEntry = this.ctx.sessionManager.getEntry(entryId);
 						const currentIsAskResult =
 							currentEntry?.type === "message" &&
@@ -1589,6 +1591,8 @@ export class SelectorController {
 							this.ctx.showStatus("Navigation cancelled");
 							return;
 						}
+						// Restore every archive covering the committed branch.
+						if (archivedRoot) await this.ctx.session.restoreArchived(entryId);
 
 						// Update UI — rebuild the display transcript for the new leaf (the
 						// context from navigateTree is the LLM context, not the transcript).
@@ -1635,6 +1639,36 @@ export class SelectorController {
 					this.ctx.ui.requestRender();
 				},
 				settings.get("treeFilterMode"),
+				{
+					showing: includeArchived,
+					// Archived branches were filtered out before the component saw the
+					// tree, so revealing them means fetching a new one — the same
+					// rebuild Escape already does.
+					onToggle: () => {
+						done();
+						this.showTreeSelector({ includeArchived: !includeArchived });
+					},
+					// Archive or restore whatever is highlighted, then rebuild: hiding a
+					// branch removes it from the tree the component is holding, and
+					// restoring one is only reachable while archived rows are showing.
+					onArchiveToggle: async (entryId: string) => {
+						const archivedRoot = this.ctx.sessionManager.getArchivedRootId(entryId);
+						try {
+							if (archivedRoot) {
+								await this.ctx.session.restoreArchived(entryId);
+							} else {
+								const hidden = await this.ctx.session.archiveBranch(entryId);
+								if (hidden === 0) return;
+							}
+						} catch (error) {
+							this.ctx.showError(error instanceof Error ? error.message : String(error));
+							return;
+						}
+						done();
+						this.showTreeSelector({ includeArchived });
+						this.ctx.showStatus(archivedRoot ? "Branch restored" : "Branch archived");
+					},
+				},
 			);
 			return { component: selector, focus: selector };
 		});

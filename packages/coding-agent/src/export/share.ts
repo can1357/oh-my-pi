@@ -76,6 +76,8 @@ export interface ShareSessionOptions {
 	 * undefined to skip redaction entirely.
 	 */
 	obfuscator?: SecretObfuscator;
+	/** Include archived branches, hidden by default so a shared snapshot never leaks them. */
+	includeArchived?: boolean;
 }
 
 export interface ShareSessionResult {
@@ -91,7 +93,7 @@ export interface ShareSessionResult {
 
 /** Build the snapshot that gets sealed and uploaded, redacted when an obfuscator is provided. */
 export function buildShareSnapshot(sm: SessionManager, options?: ShareSessionOptions): SessionData {
-	const data = buildSessionData(sm, options?.state);
+	const data = buildSessionData(sm, options?.state, options);
 	return options?.obfuscator?.hasSecrets() ? redactSessionDataForShare(options.obfuscator, data) : data;
 }
 
