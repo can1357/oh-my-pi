@@ -73,7 +73,12 @@ export class SessionToolPolicy {
 		/** Declared spawns that cannot spawn (e.g. `spawns: []`) — `task` stays off even under a null (registry-wide) grant. */
 		spawnsBroken: boolean;
 	} | null;
-	#sessionToggles: Map<string, boolean>; // sparse-delta; !has = default
+	// Sparse-delta layer captured and reinstated by snapshot()/restore() so a
+	// rolled-back switch restores the pre-switch toggle state byte-for-byte.
+	// Live tool activation/deactivation flows through the granted() funnel (the
+	// PERMISSION question) rather than mutating this layer — the toggles map is
+	// policy-owned transaction state, not a user-input mirror.
+	#sessionToggles: Map<string, boolean>;
 	#isDefaultActive: (name: string) => boolean;
 
 	constructor(options: {
@@ -214,7 +219,11 @@ export class SessionToolPolicy {
 	}
 
 	#toggledOnOrDefault(name: string): boolean {
-		return this.#sessionToggles.get(name) ?? this.#isDefaultActive(name);
+		// An explicit CLI grant of a defaultInactive tool IS its activation: the
+		// user named it on the command line, which is a stronger statement than
+		// the registry's default. Session toggles still override both ways.
+		if (this.#sessionToggles.has(name)) return this.#sessionToggles.get(name)!;
+		return this.#isDefaultActive(name) || (this.cliGrant !== null && this.cliGrant.has(name));
 	}
 	/** Baseline layer of {@link effective}: registry ∩ cliGrant ∩ sessionToggles — persona grant/spawnsBroken conjuncts removed. */
 	#baselineEffective(name: string): boolean {

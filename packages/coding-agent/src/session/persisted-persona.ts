@@ -4,7 +4,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import { parseConfiguredThinkingLevel } from "../thinking";
 import type { AgentSession } from "./agent-session";
 import type { PersonaModelApplyHooks } from "./persona-model-hooks";
-import type { ModelOverrideState } from "./persona-runtime";
+import type { ModelOverrideState, PersonaRuntime } from "./persona-runtime";
 import { discoverAgents, getAgent } from "../task/discovery";
 
 import type { PersonaExplicitOverrides } from "./tool-policy";
@@ -172,7 +172,9 @@ export async function reconcileSessionPersona(
 	session: AgentSession,
 	hooks: ReconcileSessionPersonaHooks,
 ): Promise<{ entered: boolean }> {
-	const runtime = session.getPersonaRuntime();
+	const runtime = (
+		session as AgentSession & Partial<Record<"getPersonaRuntime", () => PersonaRuntime | undefined>>
+	).getPersonaRuntime?.();
 	const desired = readPersistedAgentPersona(session.sessionManager.getEntries());
 	if (!runtime || !desired) {
 		return { entered: false };

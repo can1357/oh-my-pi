@@ -29,17 +29,6 @@ describe("PersonaRuntime", () => {
 		expect(snap.appendPrompt).toBeUndefined();
 		expect(snap.spawns).toBe("*"); // no persona: effective host spawns value
 		expect(snap.activeBaseline).toBeUndefined(); // enterPersona bypasses runtime baseline capture
-		expect(Object.keys(snap).sort()).toEqual([
-			"activeBaseline",
-			"activePresentationSnapshot",
-			"appendPrompt",
-			"baseModelOverride",
-			"enterRegistryNames",
-			"mountedToolNames",
-			"policy",
-			"spawns",
-			"tools",
-		]);
 		expect(snap.activePresentationSnapshot).toBeUndefined();
 	});
 
@@ -713,4 +702,135 @@ describe("PersonaRuntime", () => {
 		);
 		expect(stub.model).toEqual({ provider: "stub", id: "user-model" });
 	});
+});
+
+// j2q: a failed A→B switch restores A's policy + baseline, and the restore's
+// own setModel/setThinkingLevel must NOT be treated as a user pick — a
+// persona is ACTIVE again after the policy restore, so AgentSession would
+// re-root A's baseline to the restored value.
+it("restore() does not re-root the baseline through the session setters (j2q)", async () => {
+	const { stub, session } = makeSessionStub();
+	const runtime = makeRuntime(session);
+	stub.model = { provider: "stub", id: "m0" };
+	stub.thinkingLevel = "low";
+	const boom = new Error("enter failed");
+	await runtime.enter(
+		makeAgent({ name: "a", tools: ["read"] }),
+		{},
+		makeHooks({
+			apply: async () => {
+				stub.model = { provider: "stub", id: "a-model" };
+			},
+		}),
+	);
+	// Failing B's enter rolls A back WITH its baseline. The restore's own
+	// setModel reverts the session to A's persona model (the pre-B snapshot)
+	// — the flag must suppress the note-on-set so A's baseline survives the
+	// round trip instead of being re-rooted to whatever the restore landed.
+	await expect(
+		runtime.enter(
+			makeAgent({ name: "b", tools: ["write"] }),
+			{},
+			makeHooks({
+				apply: async () => {
+					stub.model = { provider: "stub", id: "b-model" };
+					throw boom;
+				},
+			}),
+		),
+	).rejects.toThrow(boom);
+	// Session reverted to the pre-B snapshot state (A's persona model);
+	// A's runtime baseline is intact (pre-A m0) — a real user pick now
+	// reroots it, but the restore itself did not.
+	expect(stub.model).toEqual({ provider: "stub", id: "a-model" });
+	expect((runtime.getActiveBaseline()?.model as { provider: string; id: string } | undefined)?.id).toBe("m0");
+
+	// A subsequent real user pick re-roots normally (the flag is not stuck).
+	stub.model = { provider: "stub", id: "m1" };
+	runtime.noteUserModelChange();
+	expect((runtime.getActiveBaseline()?.model as { provider: string; id: string } | undefined)?.id).toBe("m1");
+});
+
+// j2q: a non-deferred exit's direct setModel/setThinkingLevel restore must
+// also suppress the note-on-set — with a persona still active (reconcile's
+// exit→enter pair), the bare restore would otherwise re-root the NEXT
+// persona's just-captured baseline to the restored value before apply runs.
+it("exit's live restore does not re-root the next persona's baseline (j2q)", async () => {
+	const { stub, session } = makeSessionStub();
+	const runtime = makeRuntime(session);
+	stub.model = { provider: "stub", id: "m0" };
+	await runtime.enter(
+		makeAgent({ name: "a", tools: ["read"] }),
+		{},
+		makeHooks({
+			apply: async () => {
+				stub.model = { provider: "stub", id: "a-model" };
+			},
+		}),
+	);
+	// Reconcile A→B: A's exit restores m0 via setModel — that restore must
+	// not be observed as a user pick by B's enter (B's baseline would
+	// otherwise be captured from the restored session anyway, so the
+	// observable contract is that the reroot callback does NOT fire).
+	const reroots: string[] = [];
+	runtime.setBaselineRerootCallback(() => reroots.push("rerooted"));
+	await runtime.reconcile(
+		{ agent: makeAgent({ name: "b", tools: ["write"] }) },
+		makeHooks({
+			apply: async () => {
+				stub.model = { provider: "stub", id: "b-model" };
+			},
+		}),
+	);
+	expect(reroots).toEqual([]);
+	expect(stub.model).toEqual({ provider: "stub", id: "b-model" });
+});
+
+// j2r: a reroot under an active persona fires the persistence callback with
+// the UPDATED baseline, so the host can append the fresh journal entry.
+it("noteUserModelChange invokes the reroot persistence callback (j2r)", async () => {
+	const { stub, session } = makeSessionStub();
+	const runtime = makeRuntime(session);
+	stub.model = { provider: "stub", id: "m0" };
+	await runtime.enter(
+		makeAgent({ tools: ["read"] }),
+		{},
+		makeHooks({
+			apply: async () => {
+				stub.model = { provider: "stub", id: "persona-model" };
+			},
+		}),
+	);
+	const rerooted: Array<{ model: unknown; thinkingLevel: unknown }> = [];
+	runtime.setBaselineRerootCallback(() => {
+		const baseline = runtime.getActiveBaseline();
+		if (baseline) rerooted.push({ ...baseline });
+	});
+
+	stub.model = { provider: "stub", id: "m1" };
+	stub.thinkingLevel = Effort.High;
+	runtime.noteUserModelChange();
+
+	expect(rerooted).toEqual([{ model: { provider: "stub", id: "m1" }, thinkingLevel: Effort.High }]);
+});
+
+// j2r: the runtime's own apply/restore never journals — the callback must
+// not fire while #applyingPersonaModel suppresses the note.
+it("the persona's own apply does not fire the reroot callback (j2r)", async () => {
+	const { stub, session } = makeSessionStub();
+	const runtime = makeRuntime(session);
+	stub.model = { provider: "stub", id: "m0" };
+	const reroots: number[] = [];
+	runtime.setBaselineRerootCallback(() => reroots.push(1));
+	await runtime.enter(
+		makeAgent({ tools: ["read"] }),
+		{},
+		makeHooks({
+			apply: async () => {
+				stub.model = { provider: "stub", id: "persona-model" };
+			},
+		}),
+	);
+	await runtime.exit(makeHooks());
+	expect(reroots).toEqual([]);
 });

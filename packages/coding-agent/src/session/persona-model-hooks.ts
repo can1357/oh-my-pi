@@ -65,23 +65,32 @@ export interface ModelBaseline {
 export function createDefaultPersonaModelHooks(session: AgentSession): PersonaModelApplyHooks {
 	return {
 		async apply(agent: DiscoveredAgent, explicit?: PersonaExplicitOverrides): Promise<void> {
+			// j2v: the resolved pattern can carry a THINKING level too (an
+			// explicit `:level` suffix on the pattern, or a configured role whose
+			// value ends in `:level`). Capture it and adopt it below when the
+			// persona's own frontmatter declared none.
+			const resolvedThinking: Array<ConfiguredThinkingLevel | undefined> = [];
 			const explicitModelPattern = explicit?.model?.trim();
 			if (explicitModelPattern) {
 				const resolved = resolveModelOverride([explicitModelPattern], session.modelRegistry, session.settings);
 				if (resolved.model) {
 					await session.setModel(resolved.model);
+					resolvedThinking.push(resolved.thinkingLevel);
 				}
 			} else if (agent.model && agent.model.length > 0) {
 				const resolved = resolveModelOverride(agent.model, session.modelRegistry, session.settings);
 				if (resolved.model) {
 					await session.setModel(resolved.model);
+					resolvedThinking.push(resolved.thinkingLevel);
 				}
 			}
 
 			const explicitThinking =
 				explicit?.thinking !== undefined ? parseConfiguredThinkingLevel(explicit.thinking) : undefined;
 			const thinking: ConfiguredThinkingLevel | undefined =
-				explicitThinking ?? (agent.thinkingLevel !== undefined ? agent.thinkingLevel : undefined);
+				explicitThinking ??
+				(agent.thinkingLevel !== undefined ? agent.thinkingLevel : undefined) ??
+				resolvedThinking[0];
 			if (thinking !== undefined) {
 				session.setThinkingLevel(thinking);
 			}

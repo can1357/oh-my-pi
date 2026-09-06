@@ -301,9 +301,13 @@ persona. `/agent` with no arguments exits an active persona and returns the
 session to the plain main-agent setup, or opens the interactive agent picker
 when no persona is active (TUI only). A switch is applied atomically: tool
 grant, system prompt, model/thinking selection, and spawn policy all flip
-together, and the previous state is restored when you switch away. While
-streaming, the tool grant and prompt change immediately and the model change
-is queued for turn end.
+together, and the previous state is restored when you switch away — with two
+preservations: tools registered while the persona was active (extension or
+MCP registrations) stay available after exit, and a model/thinking you
+picked while the persona was active is kept (only persona-set values
+revert). While streaming, the tool grant and prompt change immediately and
+the model change is queued for turn end.
 
 The persona choice persists in the session record, so `--resume` restores
-it; run `/agent` after resuming to drop the persona.
+it (including a model you picked while the persona was active); run
+`/agent` after resuming to drop the persona.

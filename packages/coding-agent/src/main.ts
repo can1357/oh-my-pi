@@ -5,6 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 import * as fsSync from "node:fs";
+import * as path from "node:path";
 import * as os from "node:os";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -1407,15 +1408,59 @@ export async function buildSessionOptions(
 			options.disableExtensionDiscovery = true;
 		}
 	}
-	const agentResolutionRoots = buildEffectiveExtensionRoots({
-		additionalExtensionPaths:
-			trustedExtensionCount > 0
-				? options.additionalExtensionPaths
-				: [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])],
-		disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
-		configured: activeSettings.get("extensions") ?? [],
-		configuredLevel: activeSettings.extensionsSourceLevel(),
-	});
+	// j2u: a FILE-form `--trusted-extension /pkg/index.ts` must also contribute
+	// its PACKAGE root to `--agent` discovery: the module file loads as an
+	// extension, but agent discovery needs the package directory (the
+	// `agents/` sub-tree lives at the package root, not beside the module).
+	// Derive the nearest package.json ancestor for each file path and union it
+	// into the explicit roots; listOmpExtensionRoots' directory filter drops
+	// the file path itself while the package directory scans.
+	const agentExtensionRoots: string[] =
+		trustedExtensionCount > 0
+			? (options.additionalExtensionPaths ?? [])
+			: [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
+	const packageRoots: string[] = [];
+	for (const extensionPath of agentExtensionRoots) {
+		try {
+			if (!fsSync.statSync(extensionPath).isFile()) continue;
+		} catch {
+			continue;
+		}
+		let dir = path.dirname(path.resolve(extensionPath));
+		while (true) {
+			if (fsSync.existsSync(path.join(dir, "package.json"))) {
+				packageRoots.push(dir);
+				break;
+			}
+			const parent = path.dirname(dir);
+			if (parent === dir) break;
+			dir = parent;
+		}
+	}
+	// The package root rides ONLY the discovery roots: the trusted loader
+	// validates that every explicit path is a module FILE (loadTrustedSessionExtensions),
+	// while agent discovery needs the package directory (the `agents/` subtree
+	// lives at the package root, not beside the module). `options.extensionRoots`
+	// carries the merged view for rediscovery/subagent inheritance; the module
+	// file stays the sole `additionalExtensionPaths` entry the loader loads.
+	const explicitRootsWithPackages = [...agentExtensionRoots, ...packageRoots];
+	if (packageRoots.length > 0) {
+		options.extensionRoots = () =>
+			buildEffectiveExtensionRoots({
+				additionalExtensionPaths: explicitRootsWithPackages,
+				disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
+				configured: activeSettings.get("extensions") ?? [],
+				configuredLevel: activeSettings.extensionsSourceLevel(),
+			});
+	}
+	const agentResolutionRoots = options.extensionRoots
+		? options.extensionRoots()
+		: buildEffectiveExtensionRoots({
+				additionalExtensionPaths: agentExtensionRoots,
+				disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
+				configured: activeSettings.get("extensions") ?? [],
+				configuredLevel: activeSettings.extensionsSourceLevel(),
+			});
 
 	// `--agent <name>`: resolve the persona BEFORE the session is built so its
 	// definition can enter through the PersonaRuntime seam (CreateAgentSessionOptions

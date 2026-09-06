@@ -204,3 +204,60 @@ describe("PersonaModelApplyHooks", () => {
 		expect(stub.state.model?.id).toBe("claude-explicit");
 	});
 });
+
+// j2v: a pattern with an explicit `:level` suffix carries a thinking level
+// through resolveModelOverride — apply() must adopt it when the persona's
+// own frontmatter declared none.
+test("apply adopts the pattern's thinking suffix when frontmatter declares none", async () => {
+	const stub = makeStubSession({
+		model: BASELINE_MODEL,
+		thinkingLevel: ThinkingLevel.Medium,
+	});
+	const hooks = createDefaultPersonaModelHooks(stubRegistry(stub.session));
+	await hooks.apply(makeAgent({ model: ["stub/claude-persona:high"] }));
+	expect(stub.state.model).toBe(PERSONA_MODEL);
+	expect(stub.state.thinkingLevel).toBe(ThinkingLevel.High);
+});
+
+// j2v precedence: an explicit override model pattern with a thinking suffix
+// loses to the persona's own declared thinkingLevel.
+test("apply keeps frontmatter thinking over the resolved pattern suffix", async () => {
+	const stub = makeStubSession({
+		model: BASELINE_MODEL,
+		thinkingLevel: ThinkingLevel.Medium,
+	});
+	const hooks = createDefaultPersonaModelHooks(stubRegistry(stub.session));
+	await hooks.apply(makeAgent({ model: ["stub/claude-persona:high"], thinkingLevel: ThinkingLevel.Low }));
+	expect(stub.state.model).toBe(PERSONA_MODEL);
+	expect(stub.state.thinkingLevel).toBe(ThinkingLevel.Low);
+});
+
+// j2v: an explicit override's pattern suffix adopts when nothing else
+// declared a level.
+test("apply adopts the explicit override pattern's thinking suffix", async () => {
+	const stub = makeStubSession({
+		model: BASELINE_MODEL,
+		thinkingLevel: ThinkingLevel.Medium,
+	});
+	const hooks = createDefaultPersonaModelHooks(
+		stubRegistry(stub.session, [PERSONA_MODEL, { provider: "stub", id: "claude-explicit" } as Model]),
+	);
+	await hooks.apply(makeAgent({ model: ["stub/claude-persona"] }), {
+		model: "stub/claude-explicit:max",
+	});
+	expect(stub.state.model?.id).toBe("claude-explicit");
+	expect(stub.state.thinkingLevel).toBe(ThinkingLevel.Max);
+});
+
+// j2v: no pattern suffix and no frontmatter thinking leaves the level alone.
+test("apply without any thinking source leaves the level untouched", async () => {
+	const stub = makeStubSession({
+		model: BASELINE_MODEL,
+		thinkingLevel: ThinkingLevel.Medium,
+	});
+	const hooks = createDefaultPersonaModelHooks(stubRegistry(stub.session));
+	await hooks.apply(makeAgent({ model: ["stub/claude-persona"] }));
+	expect(stub.state.model).toBe(PERSONA_MODEL);
+	expect(stub.state.thinkingLevel).toBe(ThinkingLevel.Medium);
+	expect(stub.calls.filter(call => call.op === "setThinkingLevel")).toHaveLength(0);
+});

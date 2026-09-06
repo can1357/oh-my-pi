@@ -467,10 +467,13 @@ export interface ExecutorOptions {
 	 */
 	restrictToolNames?: boolean;
 	/**
-	 * The parent session's effective tool grant (`SessionToolPolicy.effectiveSet()`)
-	 * when the parent is restricted; `undefined`/`null` for unrestricted parents.
-	 * Caps the child's tool list (spawn inheritance) — the child never widens
-	 * past what the parent itself may run.
+	 * The parent session's BASELINE tool grant (`SessionToolPolicy.baselineEffectiveSet()`:
+	 * registry ∩ cliGrant ∩ toggles) when the parent is CLI/session-restricted;
+	 * `undefined`/`null` for unrestricted parents. Caps the child's tool list
+	 * (spawn inheritance). The persona layer is deliberately EXCLUDED — the
+	 * persona scopes the main agent's own behavior; it does not cage spawned
+	 * descendants (maintainer ruling): a child is bounded by the original
+	 * main's restriction state plus its own frontmatter.
 	 */
 	parentEffectiveGrant?: ReadonlySet<string> | null;
 	signal?: AbortSignal;

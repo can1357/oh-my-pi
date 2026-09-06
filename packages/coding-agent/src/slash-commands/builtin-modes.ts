@@ -684,6 +684,9 @@ async function handleAgentCommandNoName(runtime: SlashCommandRuntime): Promise<S
 		// persona (TUI exitAgentPersona mirrors this).
 		await session.getPersonaRuntime()?.exit(createDefaultPersonaModelHooks(session));
 		clearPersonaJournalEntry(session);
+		// Exit reverts the model/thinking/toolset to the pre-persona baseline;
+		// ACP and text-mode clients must see the reverted configuration.
+		await runtime.notifyConfigChanged?.();
 		await runtime.output("Agent persona cleared.");
 		return commandConsumed();
 	}

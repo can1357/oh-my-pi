@@ -6056,13 +6056,22 @@ export class InteractiveMode implements InteractiveModeContext {
 				// and `flushPendingModelSwitch` forwards both to
 				// `setModelTemporary`, which applies a thinking-only change
 				// without touching the model (fo80k).
+				// j2w: when a pending entry ALREADY exists (a persona A exit queued
+				// its pre-persona model restore mid-turn), B's thinking-only switch
+				// must MERGE into it — overwrite the thinking level, keep the queued
+				// restore model. Replacing the entry wholesale would replace A's
+				// baseline restore with A's live persona model.
 				if (!agent.model || agent.model.length === 0) {
 					if (agent.thinkingLevel !== undefined) {
-						this.#pendingModelSwitch = {
-							model: this.session.model as Model,
-							thinkingLevel: agent.thinkingLevel,
-						};
-						this.#pendingPlanModelSwitch = false;
+						if (this.#pendingModelSwitch) {
+							this.#pendingModelSwitch.thinkingLevel = agent.thinkingLevel;
+						} else {
+							this.#pendingModelSwitch = {
+								model: this.session.model as Model,
+								thinkingLevel: agent.thinkingLevel,
+							};
+							this.#pendingPlanModelSwitch = false;
+						}
 					}
 					return;
 				}

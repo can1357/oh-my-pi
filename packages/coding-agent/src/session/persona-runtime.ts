@@ -7,6 +7,7 @@
  * policy/presentation/model restore composition; no partial restores survive a
  * failed switch.
  */
+import { logger } from "@oh-my-pi/pi-utils";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSession } from "./agent-session";
@@ -180,14 +181,13 @@ export class PersonaRuntime {
 	}
 
 	/**
-	 *
 	 * Model baseline ownership lives HERE, not in the hooks instance: exit
 	 * builds a fresh hooks object (its `restore()` would be a no-op), so the
-	 * runtime captures the pre-apply model/thinking itself and restores from
-	 * `#activeBaseline` in `#exitInner` and `restore()`. A deferred enter never
-	 * captured a baseline (the model stays until the surface flushes), so the
-	 * runtime baseline is simply absent for that persona — a later exit restores
-	 * nothing and the surface queue owns the pending persona model.
+	 * runtime captures the pre-apply model/thinking itself — UNCONDITIONALLY,
+	 * including deferred enters (P2-6: a persona entered mid-turn still needs
+	 * the pre-enter baseline for its later exit) — and restores from
+	 * `#activeBaseline` in `#exitInner` and `restore()`.
+	 *
 	 *
 	 * Symmetric teardown of `enter`: snapshot the persona-active state, tear down,
 	 * rollback on failure. Mid-turn semantics mirror `enter`: policy/prompt/
@@ -248,8 +248,12 @@ export class PersonaRuntime {
 	}
 
 	/**
-	 * Captures all persona-switchable state. Public: plan/goal/vibe modes capture
-	 * the persona pre-partition and restore it on mode exit (plan §4).
+	 * Captures all persona-switchable state. Public: plan/goal/vibe modes and
+	 * the session-level switch teardown capture the CURRENT persona state
+	 * before their own teardown; mode entry and persona switching are mutually
+	 * exclusive (each side refuses while the other is active — the recovery
+	 * path is the always-available persona exit), so a captured snapshot
+	 * describes the pre-transition state, restored on rollback.
 	 */
 	async snapshot(): Promise<PersonaSwitchSnapshot> {
 		return {
@@ -300,11 +304,20 @@ export class PersonaRuntime {
 		// means "the session had no model / no configured thinking before the
 		// switch" and must be restored to that, not skipped (a truthiness guard
 		// leaks the persona's model/thinking into the restored session).
-		if (model !== undefined && this.session.model !== model) {
-			await this.session.setModel(model);
-		}
-		if (this.session.configuredThinkingLevel() !== thinkingLevel) {
-			this.session.setThinkingLevel(thinkingLevel);
+		// j2q: the revert is runtime-driven, not a user pick — the persona may be
+		// REINSTATED at this point (a failed A→B switch restores A's policy), so
+		// AgentSession's setters would otherwise see an active persona and re-root
+		// #activeBaseline to the reverted value, mis-attributing the restore.
+		this.#applyingPersonaModel = true;
+		try {
+			if (model !== undefined && this.session.model !== model) {
+				await this.session.setModel(model);
+			}
+			if (this.session.configuredThinkingLevel() !== thinkingLevel) {
+				this.session.setThinkingLevel(thinkingLevel);
+			}
+		} finally {
+			this.#applyingPersonaModel = false;
 		}
 		// oeb: setActiveToolPresentation only rebuilds the system prompt when the
 		// tool SIGNATURE changed; the append prompt / model / thinking restores
@@ -421,8 +434,22 @@ export class PersonaRuntime {
 	 */
 	#applyingPersonaModel = false;
 
+	/**
+	 * j2r: invoked by `noteUserModelChange` after a successful re-root, so the
+	 * host can persist the rerooted baseline (append a fresh `mode_change
+	 * agent` journal entry — the reader takes the LAST entry). Wired once by
+	 * the session factory via `setBaselineRerootCallback`; absent on test
+	 * stubs and persona-incapable sessions.
+	 */
+	#onBaselineRerooted: (() => void) | undefined;
+
 	get isApplyingPersonaModel(): boolean {
 		return this.#applyingPersonaModel;
+	}
+
+	/** j2r: wires the journal-persistence callback (session factory). */
+	setBaselineRerootCallback(callback: () => void): void {
+		this.#onBaselineRerooted = callback;
 	}
 
 	/**
@@ -430,6 +457,13 @@ export class PersonaRuntime {
 	 * Re-roots the runtime-owned baseline: exit restores the user's model, not
 	 * the pre-enter one. Called by AgentSession's model setters (never by the
 	 * runtime's own apply — the #applyingPersonaModel guard discriminates).
+	 *
+	 * j2r: the reroot is PERSISTED through `#onBaselineRerooted` so a resume
+	 * re-enters with the user's baseline: the callback (wired by the session
+	 * factory) appends a fresh `mode_change agent` journal entry carrying the
+	 * updated baseline — the reader takes the LAST entry. Only fires when the
+	 * re-root actually captured a baseline; a deferred enter (no baseline)
+	 * stays callback-free, and the runtime's own restore/apply never journals.
 	 */
 	noteUserModelChange(): void {
 		if (this.#activeBaseline === undefined) return;
@@ -437,8 +471,18 @@ export class PersonaRuntime {
 			model: this.session.model,
 			thinkingLevel: this.session.configuredThinkingLevel(),
 		};
+		// The model switch already landed; a throwing persistence callback must
+		// not turn a successful switch into an error or skip the caller's
+		// trailing prompt refresh. Journal appends are non-throwing today; the
+		// guard is for future callback shapes.
+		try {
+			this.#onBaselineRerooted?.();
+		} catch (error) {
+			logger.warn("Failed to persist a rerooted persona baseline", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
-
 	/**
 	 * Teardown body shared by `exit` and `reconcile`. `deferModel` is the
 	 * caller's pre-computed mid-turn deferral decision.
@@ -453,12 +497,6 @@ export class PersonaRuntime {
 		this.policy.exitPersona();
 		this.session.setSessionSpawns(null);
 		this.session.applyPersonaAppendPrompt(undefined);
-		// j2l: restore the PRE-ENTER presentation captured by this persona's enter —
-		// the exact top-level vs mounted partition the session had before the
-		// persona narrowed it, including any user/extension deactivations the
-		// post-exit policy derivation would collapse to the unrestricted default.
-		// Fallback to the post-exit derivation only when no entry captured a
-		// snapshot (defensive: every exit path follows an enter).
 		const snapshot = this.#activePresentationSnapshot;
 		this.#activePresentationSnapshot = undefined;
 		const enterRegistry = this.#enterRegistryNames;
@@ -509,11 +547,20 @@ export class PersonaRuntime {
 		} else {
 			// j2o: restore even when the baseline field is `undefined` — that is
 			// the state the session was in before the persona applied its model.
-			if (model !== undefined && this.session.model !== model) {
-				await this.session.setModel(model);
-			}
-			if (this.session.configuredThinkingLevel() !== thinkingLevel) {
-				this.session.setThinkingLevel(thinkingLevel);
+			// j2q: runtime-driven, so the re-entrancy flag must suppress
+			// AgentSession's note-on-set (same suppression #enterInner's apply
+			// path uses): without it the persona's own restore would be treated
+			// as a user pick and re-root the just-consumed baseline.
+			this.#applyingPersonaModel = true;
+			try {
+				if (model !== undefined && this.session.model !== model) {
+					await this.session.setModel(model);
+				}
+				if (this.session.configuredThinkingLevel() !== thinkingLevel) {
+					this.session.setThinkingLevel(thinkingLevel);
+				}
+			} finally {
+				this.#applyingPersonaModel = false;
 			}
 		}
 		await this.session.refreshBaseSystemPrompt();

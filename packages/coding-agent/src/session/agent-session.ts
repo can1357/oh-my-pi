@@ -7952,11 +7952,11 @@ export class AgentSession {
 		// j2p: consult the re-entrancy flag BEFORE awaiting — the persona's own
 		// hooks.apply runs inside this same call stack when re-entering.
 		const personaApplying = this.#personaRuntime?.isApplyingPersonaModel ?? false;
-		try {
-			return await this.#models.setModelTemporary(model, thinkingLevel, options);
-		} finally {
-			if (!personaApplying) this.#noteUserModelChange();
-		}
+		// j2s: note only on SUCCESS — a rejected set (no API key for the target)
+		// leaves the live model unchanged, and noting that would re-root an
+		// active persona's baseline to itself: harmless but mis-attributed.
+		await this.#models.setModelTemporary(model, thinkingLevel, options);
+		if (!personaApplying) this.#noteUserModelChange();
 	}
 
 	/**
@@ -8005,6 +8005,11 @@ export class AgentSession {
 	/** Selects the session thinking level and optionally persists it as the default. */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		this.#models.setThinkingLevel(level, persist);
+		// j2t: a thinking-only change under an active persona re-roots the
+		// runtime baseline just like a model pick does — setThinkingLevel also
+		// runs inside the persona's own apply/restore, so the same re-entrancy
+		// guard discriminates: the note fires only for a USER change.
+		this.#noteUserModelChange();
 	}
 
 	/** Advances through the thinking selectors supported by the active model. */

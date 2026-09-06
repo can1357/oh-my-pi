@@ -4043,6 +4043,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (toolPolicy) {
 			const personaRuntime = new PersonaRuntime(toolPolicy, session);
 			session.setPersonaRuntime(personaRuntime);
+			// j2r: a user model/thinking pick under an active persona re-roots the
+			// runtime baseline; persist the reroot so a resume re-enters with the
+			// user's baseline. The LAST `mode_change agent` entry wins, so the
+			// append carries the same persona name/explicit with the UPDATED
+			// baseline.
+			personaRuntime.setBaselineRerootCallback(() => {
+				const active = personaRuntime.policy.snapshot().persona;
+				if (!active || personaRuntime.getActiveBaseline() === undefined) return;
+				appendPersonaJournalEntry(session, {
+					name: active.agent.name,
+					explicit: active.explicit,
+					baseline: personaRuntime.getActiveBaseline(),
+				});
+			});
 			if (options.pendingPersonaAgent) {
 				await personaRuntime.enter(
 					options.pendingPersonaAgent,
@@ -4058,7 +4072,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				});
 			}
 		}
-
 		// Attach the live session to the pre-registered ref so peers can route IRC
 		// messages here. Refresh sessionFile in case it was unavailable at pre-register
 		// time. The dispose wrapper below unregisters on teardown (unless parked).

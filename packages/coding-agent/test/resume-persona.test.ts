@@ -20,6 +20,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -28,6 +29,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { PersonaRuntime } from "@oh-my-pi/pi-coding-agent/session/persona-runtime";
 import { SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
+import { appendPersonaJournalEntry } from "@oh-my-pi/pi-coding-agent/session/persisted-persona";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { InteractiveMode } from "../src/modes/interactive-mode";
@@ -575,6 +577,71 @@ You are the fixture thinker persona.`,
 		expect(switchModel).toBe(liveSession.model as Model);
 	});
 
+	it("thinking-only persona B merges into persona A's queued restore (j2w)", async () => {
+		// A (modeled persona) exits mid-turn: its PRE-persona model restore is
+		// queued. B (thinking-only, no model) then enters mid-turn: the queue
+		// must MERGE — keep A's queued restore model, adopt B's thinking —
+		// instead of replacing the entry with A's live persona model.
+		await writeFixtureAgent(
+			`---
+name: fixture-modeled
+description: Modeled fixture persona
+tools:
+	- read
+model:
+	- anthropic/claude-sonnet-4-5
+---
+
+You are the modeled fixture persona.`,
+			"fixture-modeled.md",
+		);
+		await writeFixtureAgent(
+			`---
+name: fixture-thinker
+description: Thinking-only persona
+tools:
+	- read
+thinkingLevel: low
+---
+
+You are the fixture thinker persona.`,
+			"fixture-thinker.md",
+		);
+
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+
+		// Pre-persona baseline: the session's default (sonnet).
+		const prePersonaModel = liveSession.model;
+		expect(prePersonaModel?.id).toBe("claude-sonnet-4-5");
+
+		// A enters BETWEEN turns (model applied), then the turn starts.
+		await created.switchAgentPersona("fixture-modeled");
+		expect(liveSession.model?.id).toBe("claude-sonnet-4-5");
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => true });
+
+		// A exits mid-turn: the pre-persona restore is QUEUED.
+		await created.exitAgentPersona();
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
+
+		// B enters mid-turn (thinking-only): must merge into the queued restore.
+		const setModelSpy = vi.spyOn(liveSession, "setModelTemporary").mockResolvedValue(undefined);
+		await created.switchAgentPersona("fixture-thinker");
+		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+
+		// Turn ends → flush: the queued entry carries A's restore model + B's
+		// thinking — NOT A's live persona model (identical here, but the queue
+		// must never hold the live model when a restore was queued).
+		Object.defineProperty(liveSession, "isStreaming", { configurable: true, get: () => false });
+		await created.flushPendingModelSwitch();
+		expect(setModelSpy).toHaveBeenCalledTimes(1);
+		const [switchModel, switchThinking] = setModelSpy.mock.calls[0] ?? [];
+		expect(switchModel).toBe(prePersonaModel as Model);
+		expect(switchThinking).toBe("low" as ConfiguredThinkingLevel);
+	});
+
 	it("user /model pick under a persona re-roots the exit baseline (j2p)", async () => {
 		// Enter persona (baseline M0 → persona model applied), then the user
 		// deliberately picks a DIFFERENT model through the session API. The
@@ -614,6 +681,75 @@ You are the modeled fixture persona.`,
 		expect(liveSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(false);
 		// The USER's pick survives the persona exit — not the pre-enter model.
 		expect(liveSession.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it("user model pick under a persona persists the rerooted baseline to the journal (j2r)", async () => {
+		// Enter persona (baseline M0), user picks M1 mid-persona, DISPOSE without
+		// exiting. The reroot must be journaled: a resume re-enters with M1 as
+		// the authoritative baseline, and the subsequent exit restores M1.
+		await writeFixtureAgent(
+			`---
+name: fixture-modeled
+description: Modeled fixture persona
+tools:
+	- read
+model:
+	- anthropic/claude-sonnet-4-5
+---
+
+You are the modeled fixture persona.`,
+			"fixture-modeled.md",
+		);
+
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const liveSession = createSession(manager);
+		// Wire the reroot journal the way the session factory does (sdk.ts j2r).
+		const personaRuntime = liveSession.getPersonaRuntime()!;
+		personaRuntime.setBaselineRerootCallback(() => {
+			const active = personaRuntime.policy.snapshot().persona;
+			if (!active || personaRuntime.getActiveBaseline() === undefined) return;
+			appendPersonaJournalEntry(liveSession, {
+				name: active.agent.name,
+				explicit: active.explicit,
+				baseline: personaRuntime.getActiveBaseline(),
+			});
+		});
+		const created = spyStatus(createMode(liveSession));
+		await created.init({ suppressWelcomeIntro: true });
+
+		await created.switchAgentPersona("fixture-modeled");
+		const opus = getBundledModel("anthropic", "claude-opus-4-5");
+		if (!opus) throw new Error("Expected built-in anthropic opus model to exist");
+		await liveSession.setModelTemporary(opus, Effort.High);
+
+		// The reroot appended a fresh agent entry carrying the UPDATED baseline.
+		const entries = manager
+			.getEntries()
+			.filter(entry => entry.type === "mode_change")
+			.map(entry => entry as { mode: string; data?: Record<string, unknown> })
+			.filter(entry => entry.mode === "agent");
+		const last = entries.at(-1);
+		expect(last?.data?.name).toBe("fixture-modeled");
+		expect(last?.data?.baseline).toEqual({ model: "anthropic/claude-opus-4-5", thinkingLevel: "high" });
+
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		await created.stop();
+		await liveSession.dispose();
+
+		// Resume: the journal's rerooted baseline is authoritative; exiting the
+		// restored persona must land on M1 (the user's pick), not the persona's
+		// own model.
+		const resumedManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "sessions"));
+		const resumedSession = createSession(resumedManager);
+		const resumed = spyStatus(createMode(resumedSession));
+		await resumed.init({ suppressWelcomeIntro: true });
+		expect(resumedSession.getPersonaRuntime()!.policy.isPersonaActive()).toBe(true);
+		await resumed.exitAgentPersona();
+		expect(resumedSession.model?.id).toBe("claude-opus-4-5");
+		await resumedSession.dispose();
 	});
 
 	it("headless switchSession to a persona session re-enters the target persona (j2n)", async () => {
