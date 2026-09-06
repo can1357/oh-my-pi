@@ -100,6 +100,7 @@ function createStubInputControllerContext(opts: {
 	const clearOptimisticSkillMessage = vi.fn();
 	const queueCompactionMessage = vi.fn((_text: string, _mode: "steer" | "followUp", _images?: ImageContent[]) => {});
 	const setLoopPrompt = vi.fn((_prompt: string) => {});
+	const armLoopAutoSubmit = vi.fn();
 	const ctx = {
 		editor,
 		ui: { requestRender },
@@ -124,6 +125,7 @@ function createStubInputControllerContext(opts: {
 		isPythonMode: false,
 		loopModeEnabled: opts.loopModeEnabled ?? false,
 		setLoopPrompt,
+		armLoopAutoSubmit,
 		compactionQueuedMessages: [],
 		locallySubmittedUserSignatures: new Set<string>(),
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
@@ -148,6 +150,7 @@ function createStubInputControllerContext(opts: {
 		reconcileOptimisticSkillMessage,
 		clearOptimisticSkillMessage,
 		setLoopPrompt,
+		armLoopAutoSubmit,
 	};
 }
 
@@ -202,7 +205,7 @@ describe("InputController skill queue chip metadata", () => {
 	});
 
 	it("captures the loop prompt for a /skill: submission (regression: /loop never resubmitted a skill prompt)", async () => {
-		const { ctx, editor, promptCustomMessage, setLoopPrompt } = createStubInputControllerContext({
+		const { ctx, editor, promptCustomMessage, setLoopPrompt, armLoopAutoSubmit } = createStubInputControllerContext({
 			skillCommands,
 			isStreaming: false,
 			loopModeEnabled: true,
@@ -215,6 +218,7 @@ describe("InputController skill queue chip metadata", () => {
 
 		expect(setLoopPrompt).toHaveBeenCalledWith("/skill:test-skill arg1 arg2");
 		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+		expect(armLoopAutoSubmit).toHaveBeenCalledTimes(1);
 	});
 
 	it("captures the loop prompt for a /skill: submission queued during compaction", async () => {

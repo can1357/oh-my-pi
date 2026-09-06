@@ -1835,6 +1835,16 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
+	 * Schedule the next auto-resubmit for a submission that never reached
+	 * {@link getUserInput}. A `/skill:` command dispatches inline from the
+	 * submit handler, leaving `onInputCallback` unresolved, so the run loop
+	 * never re-enters `getUserInput` to arm the following iteration.
+	 */
+	armLoopAutoSubmit(): void {
+		this.#scheduleLoopAutoSubmit();
+	}
+
+	/**
 	 * Pause the loop without exiting it: drops the captured prompt and any
 	 * pending auto-resubmit. Loop mode stays enabled — the next prompt the
 	 * user submits becomes the new loop prompt and resumes iteration.
@@ -1992,7 +2002,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		this.#pendingSubmittedInput = submission;
 		this.#pendingSubmissionPreservesDraft = options?.preserveDraft === true;
-		if (!submission.customType) {
+		// `submitInteractiveInput` dispatches known `/skill:` text as a custom
+		// message, and EventController appends that canonical row on its own. An
+		// ordinary optimistic user row would survive as a duplicate, so mirror the
+		// dispatch condition here.
+		if (!submission.customType && !isKnownSkillCommand(this, submission.text)) {
 			this.#resetGoalContinuationSuppression();
 			const imageCount = submission.images?.length ?? 0;
 			this.optimisticUserMessageSignature = `${submission.text}\u0000${imageCount}`;

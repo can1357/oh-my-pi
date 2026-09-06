@@ -863,6 +863,12 @@ export class InputController {
 					return;
 				}
 				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
+					// The dispatch above ran the turn inline without resolving the input
+					// callback, so nothing re-enters `getUserInput` to arm the next
+					// iteration. Arm it here, now that the turn has settled.
+					if (this.ctx.loopModeEnabled) {
+						this.ctx.armLoopAutoSubmit();
+					}
 					return;
 				}
 			}
