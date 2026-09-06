@@ -6981,6 +6981,11 @@ export class AgentSession {
 	): void {
 		if (this.#isDisposed) throw new Error("Session disposed before launch progress delivery");
 		if (this.#launchProgressBoundaryDepth > 0 || epoch !== this.#launchProgressEpoch) return;
+		// The broker sends artifact-only batches while a monitor's rate limit is
+		// exhausted so the client can advance artifact delivery; they carry no
+		// model-facing text, so (like AsyncJobManager for managed jobs) they never
+		// become a progress entry, spend a wake permit, or start an idle turn.
+		if (notification.batchKind === "artifact-only") return;
 		const queueKind = delivery === "wake" ? ASYNC_PROGRESS_WAKE_QUEUE_KIND : ASYNC_PROGRESS_MESSAGE_TYPE;
 		this.yieldQueue.enqueue<AsyncProgressEntry>(queueKind, {
 			jobId: notification.name,
