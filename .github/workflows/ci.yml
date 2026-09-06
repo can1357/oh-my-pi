@@ -6,6 +6,9 @@ on:
       paths:
          - "packages/**"
          - "crates/**"
+         - "**/*.md"
+         - "**/*.mdx"
+         - "**/*.markdown"
          - "scripts/**"
          - "bazel/**"
          - "MODULE.bazel"
@@ -18,6 +21,7 @@ on:
          - "Cargo.lock"
          - "deny.toml"
          - "about.toml"
+         - "lychee.toml"
          - "LICENSE"
          - "THIRD-PARTY-NOTICES.txt"
          - "rust-toolchain.toml"
@@ -35,6 +39,9 @@ on:
       paths:
          - "packages/**"
          - "crates/**"
+         - "**/*.md"
+         - "**/*.mdx"
+         - "**/*.markdown"
          - "scripts/**"
          - "bazel/**"
          - "MODULE.bazel"
@@ -47,6 +54,7 @@ on:
          - "Cargo.lock"
          - "deny.toml"
          - "about.toml"
+         - "lychee.toml"
          - "LICENSE"
          - "THIRD-PARTY-NOTICES.txt"
          - "rust-toolchain.toml"
@@ -144,7 +152,7 @@ jobs:
               } >> "$GITHUB_OUTPUT"
 
    check:
-      name: Lint, type check & web build
+      name: Lint, type check, link check & web build
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       steps:
          - uses: actions/checkout@v4
@@ -162,6 +170,10 @@ jobs:
               cargo deny --locked --offline check licenses sources
          - name: Type check workspace
            run: bun run ci:check:full
+         - name: Check Markdown links
+           uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+           with:
+              args: .
          - name: Build collab web
            run: bun run collab:web:build
 
