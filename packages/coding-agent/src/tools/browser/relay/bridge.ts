@@ -92,7 +92,8 @@ function markPreloadApplication(source: unknown, marker: string): string {
 	// relay-private state. Insert after any hashbang/directive prologue so their
 	// syntax and semantics stay intact, while leaving caller declarations at the
 	// top level. `this` cannot be shadowed by top-level lexical bindings.
-	const markerStatement = `Object.defineProperty(this, ${JSON.stringify(marker)}, { value: true, configurable: true });`;
+	const markerAccess = `this[${JSON.stringify(marker)}]`;
+	const markerStatement = `if (${markerAccess} === true) throw undefined; ({}).constructor.defineProperty(this, ${JSON.stringify(marker)}, { value: true, configurable: true });`;
 	const program = parse(source, {
 		sourceType: "script",
 		allowAwaitOutsideFunction: true,
@@ -3194,6 +3195,7 @@ export class RelayBridge {
 			let cleanupRootIdentifier: string | undefined;
 			let appliedToCurrentDocument = false;
 			let navigationDuringRegistration = false;
+			let finalizedLoaderId = currentLoaderId;
 			if (script.params?.runImmediately === true && !runImmediately) {
 				const loaderAfterRegistration = await this.#mainFrameLoaderId(tab.tabId).catch(err => {
 					if (isExtensionTransportInterrupted(err)) {
@@ -3202,6 +3204,7 @@ export class RelayBridge {
 					}
 					return undefined;
 				});
+				if (loaderAfterRegistration !== undefined) finalizedLoaderId = loaderAfterRegistration;
 				navigationDuringRegistration =
 					currentLoaderId !== undefined &&
 					loaderAfterRegistration !== undefined &&
@@ -3225,39 +3228,36 @@ export class RelayBridge {
 						}
 					}
 					if (!appliedToCurrentDocument) {
-						let retry: Record<string, unknown> | undefined;
 						try {
+							const producerIdentifier = rootIdentifier;
+							// Install the replacement before removing the producer. Chrome
+							// atomically makes an immediate registration cover both existing
+							// contexts and later documents, so a navigation cannot fall into
+							// an uncovered remove -> probe -> add interval.
+							const retry = (await this.#rpc({
+								op: "send",
+								tabId: tab.tabId,
+								method: "Page.addScriptToEvaluateOnNewDocument",
+								params: { ...replayParams, runImmediately: true },
+							})) as Record<string, unknown> | undefined;
+							if (typeof retry?.identifier !== "string") {
+								throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
+							}
+							rootIdentifier = retry.identifier;
 							await this.#rpc({
 								op: "send",
 								tabId: tab.tabId,
 								method: "Page.removeScriptToEvaluateOnNewDocument",
-								params: { identifier: rootIdentifier },
+								params: { identifier: producerIdentifier },
 							});
-							// A navigation can commit after the first marker probe but
-							// before Chrome applies the removal. Recheck after removal so
-							// an invocation from that registration is not followed by an
-							// immediate duplicate in the same document.
-							appliedToCurrentDocument =
-								applicationMarker !== undefined &&
-								(await this.#preloadApplicationMarker(tab.tabId, applicationMarker, script.params.worldName));
-							retry = (await this.#rpc({
-								op: "send",
-								tabId: tab.tabId,
-								method: "Page.addScriptToEvaluateOnNewDocument",
-								params: { ...script.params, runImmediately: !appliedToCurrentDocument },
-							})) as Record<string, unknown> | undefined;
 						} catch (err) {
 							if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
 							throw err;
 						}
-						if (typeof retry?.identifier !== "string") {
-							throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
-						}
-						rootIdentifier = retry.identifier;
 					}
 				}
 			}
-			if (applicationMarker !== undefined && rootIdentifier === identifier) {
+			if (applicationMarker !== undefined) {
 				const originalParams = script.params;
 				if (!originalParams) throw new Error("preload replay parameters are missing");
 				try {
@@ -3295,7 +3295,17 @@ export class RelayBridge {
 			}
 			current.rootIdentifier = rootIdentifier;
 			current.cleanupRootIdentifier = cleanupRootIdentifier;
-			if (currentLoaderId !== undefined) current.loaderId = currentLoaderId;
+			if (navigationDuringRegistration && rootIdentifier !== identifier) {
+				const loaderAfterReplay = await this.#mainFrameLoaderId(tab.tabId).catch(err => {
+					if (isExtensionTransportInterrupted(err)) {
+						tab.forceFreshRootBeforeReplay = true;
+						throw err;
+					}
+					return undefined;
+				});
+				if (loaderAfterReplay !== undefined) finalizedLoaderId = loaderAfterReplay;
+			}
+			if (finalizedLoaderId !== undefined) current.loaderId = finalizedLoaderId;
 		}
 		if (temporarilyObserveNavigations) {
 			try {

@@ -3489,6 +3489,44 @@ describe("RelayBridge tab grouping", () => {
 		expect(Object.getOwnPropertyDescriptor(document, marker!)?.enumerable).toBe(false);
 	});
 
+	it("marks a preload without resolving its lexical Object binding", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "this.__preloadRan = true; const Object = null;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		const marked = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		const markedSource = (marked?.params as { source?: string } | undefined)?.source ?? "";
+		const document: Record<string, unknown> = {};
+		vm.runInNewContext(markedSource, document);
+		expect(document.__preloadRan).toBe(true);
+		expect(Object.keys(document).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
+	});
+
 	it.each(["remove", "retry"] as const)(
 		"forces a fresh root when the navigation preload %s loses its result",
 		async interruptedMutation => {
@@ -3538,20 +3576,18 @@ describe("RelayBridge tab grouping", () => {
 			await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 			ack(bridge, ext2, "send", { result: { value: false } });
 			await waitFor(() =>
-				ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"),
+				ext2
+					.pending("send")
+					.some(
+						rpc =>
+							rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
+							(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === true,
+					),
 			);
-			if (interruptedMutation === "retry") {
-				ack(bridge, ext2, "send");
-				await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
-				ack(bridge, ext2, "send", { result: { value: false } });
+			if (interruptedMutation === "remove") {
+				ack(bridge, ext2, "send", { identifier: "root-script-immediate" });
 				await waitFor(() =>
-					ext2
-						.pending("send")
-						.some(
-							rpc =>
-								rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
-								(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === true,
-						),
+					ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"),
 				);
 			}
 			bridge.extClosed(ext2);
@@ -3723,7 +3759,7 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(2);
 	});
 
-	it("rechecks a navigation preload after removal before invoking it immediately", async () => {
+	it("keeps navigation coverage while replacing a missed preload", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -3771,10 +3807,18 @@ describe("RelayBridge tab grouping", () => {
 		expect(markerExpression).toContain("this[");
 		expect(markerExpression).not.toContain("globalThis");
 		ack(bridge, ext2, "send", { result: { value: false } });
+		await waitFor(() =>
+			ext2
+				.pending("send")
+				.some(
+					rpc =>
+						rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
+						(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === true,
+				),
+		);
+		ack(bridge, ext2, "send", { identifier: "root-script-immediate" });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send");
-		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
-		ack(bridge, ext2, "send", { result: { value: true } });
 		await waitFor(() =>
 			ext2
 				.pending("send")
@@ -3792,7 +3836,7 @@ describe("RelayBridge tab grouping", () => {
 						rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
 						(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === true,
 				),
-		).toHaveLength(0);
+		).toHaveLength(1);
 	});
 
 	it("observes preload navigation without client Page or Runtime domains", async () => {
