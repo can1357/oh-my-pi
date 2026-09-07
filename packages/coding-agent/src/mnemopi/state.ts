@@ -15,6 +15,7 @@ import {
 	truncateRecallQuery,
 } from "../hindsight/content";
 import { extractMessages } from "../hindsight/transcript";
+import { redactMemorySecrets, redactRememberWrite } from "../memory-backend/redact";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { MnemopiBackendConfig, MnemopiScoping } from "./config";
 import { mnemopiEmbedClient } from "./embed-client";
@@ -350,7 +351,10 @@ export class MnemopiSessionState {
 				continue;
 			}
 			if (op === "update") {
-				if (target.memory.update(id, options.content ?? null, options.importance ?? null)) {
+				// `update` writes replacement content straight to the row, bypassing
+				// `rememberInScope`, so it needs the same redaction.
+				const content = options.content === undefined ? null : redactMemorySecrets(options.content);
+				if (target.memory.update(id, content, options.importance ?? null)) {
 					return { status: "updated", ...resultContext };
 				}
 				ineligible ??= { status: "not_found", ...resultContext };
@@ -449,7 +453,8 @@ export class MnemopiSessionState {
 
 	rememberInScope(memory: MnemopiRememberInput, options: MnemopiRememberOptions = {}): string | undefined {
 		try {
-			return this.scoped.retain.memory.remember(memory, options);
+			const [scrubbed, scrubbedOptions] = redactRememberWrite(memory, options);
+			return this.scoped.retain.memory.remember(scrubbed, scrubbedOptions);
 		} catch (error) {
 			logger.warn("Mnemopi: retain failed", {
 				bank: this.scoped.retain.bank,
