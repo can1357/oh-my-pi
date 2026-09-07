@@ -317,8 +317,8 @@ describe("session header on the Anthropic transport", () => {
 	});
 });
 
-describe("usage fetch does not carry x-opencode-session", () => {
-	it("omits the session header on usage polls", async () => {
+describe("usage fetch carries attribution headers", () => {
+	it("sends User-Agent and a stable x-opencode-session on usage polls", async () => {
 		const seen: Array<Record<string, string>> = [];
 		const window = { status: "ok", percent: 10, resetsAt: new Date().toISOString() };
 		const fetchMock = async (_url: string | URL | Request, init?: RequestInit) => {
@@ -336,6 +336,11 @@ describe("usage fetch does not carry x-opencode-session", () => {
 
 		expect(report?.provider).toBe("opencode-go");
 		expect(seen).toHaveLength(1);
-		expect(seen[0]?.[OPENCODE_SESSION_HEADER]).toBeUndefined();
+		// Background poll outside any conversation: stable install id keeps
+		// OpenCode attribution working (required from 09/06), and omp's UA
+		// replaces Bun's default.
+		expect(seen[0]?.["user-agent"]).toBe(USER_AGENT);
+		expect(typeof seen[0]?.[OPENCODE_SESSION_HEADER]).toBe("string");
+		expect(seen[0]?.[OPENCODE_SESSION_HEADER]?.length).toBeGreaterThan(0);
 	});
 });

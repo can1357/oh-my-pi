@@ -725,6 +725,18 @@ describe("YieldTool", () => {
 		);
 	});
 
+	it("accepts data alongside an empty-string error (non-strict OpenAI-compatible backends)", async () => {
+		const tool = new YieldTool(createSession());
+		const result = await tool.execute("call-empty-error", { type: "result", data: { ok: true }, error: "" } as never);
+		expect(result.details?.status).toBe("success");
+		expect(result.details?.data).toEqual({ ok: true });
+		expect(result.details?.error).toBeUndefined();
+
+		const failure = await tool.execute("call-only-empty-error", { error: "" } as never).catch(err => err);
+		expect(failure).toBeInstanceOf(Error);
+		expect(String(failure.message)).toContain("yield must contain either `data` or `error`");
+	});
+
 	it("aborts instead of throwing forever after repeated untyped empty results", async () => {
 		const tool = new YieldTool(createSession());
 		const expectedGuidance =

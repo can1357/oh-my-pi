@@ -276,7 +276,7 @@ auth "anthropic" {
         credential {
             access "access_token"                // dot path; `claim="a|b"` reads JWT claims; `literal="…"` pins a value
             refresh "refresh_token"
-            expires "seconds" path="expires_in" from="created_at" skew-ms=300000   // or `expires "jwt" fallback-ms=N` / `expires "never"`
+            expires "seconds" path="expires_in" from="created_at" skew-ms=300000 fallback-ms=3600000   // or `expires "jwt" fallback-ms=N` / `expires "never"`
             email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url
         }
         userinfo url="https://…/userinfo" email="email" account-id="sub"

@@ -87,7 +87,19 @@ export async function refreshOAuthToken(
 	return def.refreshToken ? def.refreshToken(credentials, signal) : credentials;
 }
 const JWT_EXPIRY_SKEW_MS = 5 * 60_000;
+export function normalizeOAuthCredentialExpiry<T extends OAuthCredentials>(provider: string, credentials: T): T {
+	if (authPolicyFor(provider)?.expiry !== "jwt-or-never") return credentials;
 
+	// Trust a JWT expiry claim when present; otherwise treat providers with
+	// non-expiring sessions as such rather than honoring stale stored expiry
+	// timestamps written by older login implementations.
+	const normalizedExpires =
+		credentials.expires > 0 && credentials.expires < 10_000_000_000
+			? credentials.expires * 1000
+			: credentials.expires;
+	const expires = jwtExpiryMs(credentials.access, JWT_EXPIRY_SKEW_MS) ?? Math.max(normalizedExpires, NEVER_EXPIRES);
+	return expires === credentials.expires ? credentials : ({ ...credentials, expires } as T);
+}
 /**
  * Build API-key bytes for a provider from an already-fresh OAuth credential.
  *
@@ -110,20 +122,7 @@ export async function getOAuthApiKey(
 	}
 
 	const policy = authPolicyFor(provider);
-	const jwtOrNever = policy?.expiry === "jwt-or-never";
-	if (jwtOrNever) {
-		// Session JWTs (Perplexity) usually omit `exp` (server-side sessions).
-		// Trust the JWT claim when present; otherwise treat the credential as
-		// non-expiring rather than honoring a stale stored `expires` (older
-		// logins wrote loginTime+1h).
-		const normalizedExpires =
-			creds.expires > 0 && creds.expires < 10_000_000_000 ? creds.expires * 1000 : creds.expires;
-		const jwtExpiry = jwtExpiryMs(creds.access, JWT_EXPIRY_SKEW_MS);
-		const expires = jwtExpiry ?? Math.max(normalizedExpires, NEVER_EXPIRES);
-		if (expires !== creds.expires) {
-			creds = { ...creds, expires };
-		}
-	}
+	creds = normalizeOAuthCredentialExpiry(provider, creds);
 	// Refresh is the sole responsibility of `AuthStorage` (which calls
 	// `refreshOAuthToken` directly with broker-aware single-flighting). If we
 	// reach here with an expired credential, the outer pipeline failed to
@@ -132,13 +131,6 @@ export async function getOAuthApiKey(
 	// trigger a `__remote__`-against-real-provider failure that gets classified
 	// as `invalid_grant` and disables the row. Refuse loudly instead.
 	if (Date.now() >= creds.expires) {
-		if (jwtOrNever) {
-			const jwtExpiry = jwtExpiryMs(creds.access, JWT_EXPIRY_SKEW_MS);
-			if (jwtExpiry && Date.now() < jwtExpiry) {
-				const fallbackCredentials = { ...creds, expires: jwtExpiry };
-				return { newCredentials: fallbackCredentials, apiKey: fallbackCredentials.access };
-			}
-		}
 		throw new AIError.OAuthError(
 			`OAuth credential for ${provider} is expired and must be refreshed via AuthStorage before getOAuthApiKey is called`,
 			{ kind: "validation", provider },
