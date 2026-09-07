@@ -1,5 +1,7 @@
+import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort } from "@oh-my-pi/pi-ai";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
 	Container,
@@ -25,12 +27,18 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ShapeTarget } from "@oh-my-pi/snapcompact";
 import {
 	getDefault,
 	getType,
+	isCredential,
+	isSettingsInitialized,
 	normalizeProviderMaxInFlightRequests,
+	onProjectSettingsReconciled,
 	type SettingPath,
+	Settings,
+	type SettingsScope,
 	settings,
 	validateProviderMaxInFlightRequests,
 } from "../../config/settings";
@@ -42,7 +50,14 @@ import type {
 	StatusLineSeparatorStyle,
 } from "../../config/settings-schema";
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
-import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
+import {
+	detectTerminalAppearance,
+	getCurrentThemeName,
+	getSelectListTheme,
+	getSettingsListTheme,
+	type SymbolPreset,
+	theme,
+} from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import { getTabBarTheme } from "../shared";
 import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
@@ -404,6 +419,7 @@ class ProviderLimitsSubmenu extends Container {
 
 	constructor(
 		private readonly providers: readonly string[],
+		private readonly getLimits: () => Record<string, number>,
 		private readonly onChange: (value: Record<string, number>) => void,
 		private readonly onCancel: () => void,
 		private readonly requestRender?: () => void,
@@ -413,7 +429,7 @@ class ProviderLimitsSubmenu extends Container {
 	}
 
 	#providerIds(): string[] {
-		const limits = normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"));
+		const limits = this.getLimits();
 		return [...new Set([...this.providers, ...Object.keys(limits)])].sort((a, b) => a.localeCompare(b));
 	}
 
@@ -433,7 +449,7 @@ class ProviderLimitsSubmenu extends Container {
 		);
 		this.addChild(new Spacer(1));
 
-		const limits = normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"));
+		const limits = this.getLimits();
 		const providerItems = this.#providerIds().map((provider): SelectItem => {
 			const limit = limits[provider];
 			return {
@@ -450,7 +466,6 @@ class ProviderLimitsSubmenu extends Container {
 		this.#selectList = new SelectList(items, Math.min(Math.max(items.length, 1), 12), getSelectListTheme());
 		this.#selectList.onSelect = item => {
 			if (item.value === "__clear_all") {
-				settings.set("providers.maxInFlightRequests", {});
 				this.onChange({});
 				this.#showProviderList();
 				this.requestRender?.();
@@ -465,7 +480,7 @@ class ProviderLimitsSubmenu extends Container {
 	}
 
 	#showProviderEditor(provider: string): void {
-		const limits = normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"));
+		const limits = this.getLimits();
 		this.clear();
 		this.#selectList = undefined;
 		this.addChild(
@@ -485,7 +500,6 @@ class ProviderLimitsSubmenu extends Container {
 						next[provider] = Math.max(1, Math.floor(limit));
 					}
 					const normalized = validateProviderMaxInFlightRequests(next);
-					settings.set("providers.maxInFlightRequests", normalized);
 					this.onChange(normalized);
 					this.#showProviderList();
 					this.requestRender?.();
@@ -569,16 +583,22 @@ export interface StatusLinePreviewSettings {
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];
 	separator?: StatusLineSeparatorStyle;
+	showHookStatus?: boolean;
 	sessionAccent?: boolean;
 	transparent?: boolean;
 	compactThinkingLevel?: boolean;
+	segmentOptions?: Record<string, unknown>;
+}
+export interface ThemePreviewOptions {
+	symbolPreset?: SymbolPreset;
+	colorBlindMode?: boolean;
 }
 
 export interface SettingsCallbacks {
 	/** Called when any setting value changes */
 	onChange: (path: SettingPath, newValue: unknown) => void;
 	/** Called for theme preview while browsing */
-	onThemePreview?: (theme: string) => void | Promise<void>;
+	onThemePreview?: (theme: string, options?: ThemePreviewOptions) => void | Promise<void>;
 	/** Called for status line preview while configuring */
 	onStatusLinePreview?: (settings: StatusLinePreviewSettings) => void;
 	/** Get current rendered status line for inline preview */
@@ -599,6 +619,7 @@ export class SettingsSelectorComponent implements Component {
 	#searchList: SettingsList | null = null;
 	#pluginComponent: PluginSettingsComponent | null = null;
 	#currentTabId: SettingTab | "plugins" = "appearance";
+	#scope: SettingsScope;
 	#preSearchTabId: SettingTab | "plugins" = "appearance";
 	#searchQuery = "";
 	/** Single-line editor backing the search banner (cursor, word ops, paste). */
@@ -608,6 +629,11 @@ export class SettingsSelectorComponent implements Component {
 	#searchFirstMatch = new Map<string, string>();
 	#textInputActive = false;
 	#hasSectionJump = false;
+	#unsubscribeProjectSettings?: () => void;
+	/** Cached overlay title for project scope; VCS discovery is not render-safe. */
+	#projectLabel: string;
+	/** Live theme before the first scoped preview; close restores this if the effective name cannot load. */
+	#themeBeforePreview: string | undefined;
 	// Frame geometry from the last render, for mouse hit-testing (the
 	// fullscreen overlay paints from screen row 0, so mouse rows map 1:1).
 	#tabRowStart = 0;
@@ -619,6 +645,9 @@ export class SettingsSelectorComponent implements Component {
 		private readonly context: SettingsRuntimeContext,
 		private readonly callbacks: SettingsCallbacks,
 	) {
+		this.#themeBeforePreview = getCurrentThemeName();
+		this.#projectLabel = settingsProjectLabel(this.context.cwd);
+		this.#scope = settings.hasProjectConfig() ? "project" : "global";
 		// No label prefix (the frame title already says Settings) and no
 		// "(tab to cycle)" hint (folded into the footer hint line).
 		this.#tabBar = new TabBar("", getSettingsTabs(), getTabBarTheme());
@@ -633,9 +662,14 @@ export class SettingsSelectorComponent implements Component {
 			}
 			this.#switchToTab(tabId);
 		};
-
-		// Initialize with first tab
+		// Initialize with first tab and preview the selected scope's
+		// appearance so an overlay cannot pin the live theme/status.
 		this.#switchToTab("appearance");
+		this.#previewAppearanceForScope();
+		this.#unsubscribeProjectSettings = onProjectSettingsReconciled((paths, source) => {
+			if (!isSettingsInitialized() || source !== Settings.instance) return;
+			this.#resyncItemsFromSettings(paths);
+		});
 	}
 
 	invalidate(): void {
@@ -666,16 +700,17 @@ export class SettingsSelectorComponent implements Component {
 
 	#footerHintText(): string {
 		if (this.#searchList) {
-			return "Enter to change · Tab to jump tabs · Esc to exit search";
+			return "Enter to change · Tab to jump tabs · Alt+S to switch scope · Esc to exit search";
 		}
 		if (this.#currentTabId === "plugins") {
 			return "Tab to switch tabs · Esc to close";
 		}
+		const scope = this.#scope === "project" ? "Alt+S to switch scope · Del to inherit" : "Alt+S to switch scope";
 		if (this.#currentList?.sectionFocused) {
-			return "↑/↓ to jump sections · Tab/Enter to settings · ←/→ to switch tabs · Esc to close";
+			return `↑/↓ to jump sections · Tab/Enter to settings · ←/→ to switch tabs · ${scope} · Esc to close`;
 		}
 		const nav = this.#hasSectionJump ? "Tab to jump sections · ←/→ to switch tabs" : "Tab to switch tabs";
-		return `Enter/Space to change · ${nav} · Type to search · Esc to close`;
+		return `Enter/Space to change · ${nav} · ${scope} · Type to search · Esc to close`;
 	}
 
 	/** Single-line search banner: accent icon, editable query with live cursor, right-aligned match count. */
@@ -722,7 +757,7 @@ export class SettingsSelectorComponent implements Component {
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, "Settings"));
+		out.push(topBorder(width, this.#title()));
 		this.#tabRowStart = out.length;
 		this.#tabRowCount = tabLines.length;
 		for (const line of tabLines) {
@@ -825,7 +860,7 @@ export class SettingsSelectorComponent implements Component {
 			10,
 			getSettingsListTheme(),
 			(id, newValue) => this.#onSearchSettingChange(id as SettingPath, newValue),
-			() => this.callbacks.onCancel(),
+			() => this.#close(),
 			{
 				layout: "flat",
 				typeToSearch: false,
@@ -959,15 +994,15 @@ export class SettingsSelectorComponent implements Component {
 		if (!def) return;
 		if (def.type === "boolean") {
 			const boolValue = newValue === "true";
-			settings.set(path, boolValue as never);
-			this.callbacks.onChange(path, boolValue);
+			this.#persistSetting(path, boolValue);
 		} else if (def.type === "enum") {
-			settings.set(path, newValue as never);
-			this.callbacks.onChange(path, newValue);
+			this.#persistSetting(path, newValue);
 		}
 		// Submenu/text types already persisted inside their own done callbacks.
+		// Reapply the full scoped appearance so a shadowed global theme commit
+		// cannot leave the live theme on the project-effective mapping.
 		if (def.tab === "appearance") {
-			this.#triggerStatusLinePreview();
+			this.#previewAppearanceForScope();
 		}
 		// Values feed the searchable text and condition gates may have flipped:
 		// recompute results in place (selection is preserved by item id).
@@ -979,7 +1014,7 @@ export class SettingsSelectorComponent implements Component {
 	 */
 	#defToItem(def: SettingDef): SettingItem | null {
 		// Check condition: applies to every variant — booleans, enums, submenus, text inputs.
-		if (def.condition && !def.condition()) {
+		if (def.condition && !def.condition(this.#scope)) {
 			return null;
 		}
 
@@ -1030,10 +1065,20 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	/**
+	 * Value shown and edited for a setting in the active persistence scope:
+	 * the global-layer value in global scope, or global plus project sources
+	 * in project scope. Overlays and runtime overrides are excluded so a
+	 * `--config` pin cannot freeze the row while edits write below it.
+	 */
+	#scopedValue(path: SettingPath): unknown {
+		return this.#scope === "global" ? settings.getGlobalValue(path) : settings.getProjectScopedValue(path);
+	}
+
+	/**
 	 * Get the current value for a setting.
 	 */
 	#getCurrentValue(def: SettingDef): unknown {
-		return settings.get(def.path);
+		return this.#scopedValue(def.path);
 	}
 
 	#isChanged(def: SettingDef, currentValue: unknown): boolean {
@@ -1086,20 +1131,25 @@ export class SettingsSelectorComponent implements Component {
 		let onPreviewCancel: (() => void) | undefined;
 		let footer: Component | undefined;
 
-		const activeThemeBeforePreview = getCurrentThemeName() ?? currentValue;
 		if (def.path === "theme.dark" || def.path === "theme.light") {
 			onPreview = value => {
-				return this.callbacks.onThemePreview?.(value);
+				return this.callbacks.onThemePreview?.(
+					value,
+					this.#themePreviewOptions(this.#scopedValue("symbolPreset"), this.#scopedValue("colorBlindMode")),
+				);
 			};
 			onPreviewCancel = () => {
-				this.callbacks.onThemePreview?.(activeThemeBeforePreview);
+				this.#triggerThemePreview(
+					this.#loadableScopedThemeName(),
+					this.#themePreviewOptions(this.#scopedValue("symbolPreset"), this.#scopedValue("colorBlindMode")),
+				);
 			};
 		} else if (def.path === "statusLine.preset") {
 			onPreview = value => {
 				const presetDef = getPreset(
 					value as "default" | "minimal" | "compact" | "full" | "nerd" | "ascii" | "custom",
 				);
-				this.callbacks.onStatusLinePreview?.({
+				this.#triggerStatusLinePreview({
 					preset: value as StatusLinePreset,
 					leftSegments: presetDef.leftSegments,
 					rightSegments: presetDef.rightSegments,
@@ -1107,29 +1157,21 @@ export class SettingsSelectorComponent implements Component {
 				});
 			};
 			onPreviewCancel = () => {
-				const currentPreset = settings.get("statusLine.preset");
-				const presetDef = getPreset(currentPreset);
-				this.callbacks.onStatusLinePreview?.({
-					preset: currentPreset,
-					leftSegments: presetDef.leftSegments,
-					rightSegments: presetDef.rightSegments,
-					separator: presetDef.separator,
-				});
+				this.#triggerStatusLinePreview();
 			};
 		} else if (def.path === "statusLine.separator") {
 			onPreview = value => {
-				this.callbacks.onStatusLinePreview?.({ separator: value as StatusLineSeparatorStyle });
+				this.#triggerStatusLinePreview({ separator: value as StatusLineSeparatorStyle });
 			};
 			onPreviewCancel = () => {
-				const separator = settings.get("statusLine.separator");
-				this.callbacks.onStatusLinePreview?.({ separator });
+				this.#triggerStatusLinePreview();
 			};
 		} else if (def.path === "statusLine.contextLine") {
 			onPreview = value => {
-				this.callbacks.onStatusLinePreview?.({ contextLine: value as ContextLineMode });
+				this.#triggerStatusLinePreview({ contextLine: value as ContextLineMode });
 			};
 			onPreviewCancel = () => {
-				this.callbacks.onStatusLinePreview?.({ contextLine: settings.get("statusLine.contextLine") });
+				this.#triggerStatusLinePreview();
 			};
 		} else if (def.path === "snapcompact.shape") {
 			const shapePreview = new SnapcompactShapePreview(currentValue, {
@@ -1158,8 +1200,7 @@ export class SettingsSelectorComponent implements Component {
 			currentValue,
 			value => {
 				this.#setSettingValue(def.path, value);
-				this.callbacks.onChange(def.path, value);
-				done(value);
+				done(this.#getSubmenuCurrentValue(def.path, this.#scopedValue(def.path)));
 			},
 			() => {
 				onPreviewCancel?.();
@@ -1187,14 +1228,13 @@ export class SettingsSelectorComponent implements Component {
 		return new TextInputSubmenu(
 			def.label,
 			def.description,
-			this.#formatTextInputEditValue(def.path, settings.get(def.path)),
+			this.#formatTextInputEditValue(def.path, this.#scopedValue(def.path)),
 			def.secret,
 			value => {
 				// Empty string clears the setting; undefined-typed string settings
 				// store "" which the browser.ts expandPath ignores (no-op fallback).
 				this.#setSettingValue(def.path, value);
-				this.callbacks.onChange(def.path, settings.get(def.path));
-				wrappedDone(this.#formatTextInputValue(def, settings.get(def.path)));
+				wrappedDone(this.#formatTextInputValue(def, this.#scopedValue(def.path)));
 			},
 			() => wrappedDone(),
 		);
@@ -1203,9 +1243,10 @@ export class SettingsSelectorComponent implements Component {
 	#createProviderLimitsInput(done: (value?: string) => void): Container {
 		return new ProviderLimitsSubmenu(
 			this.context.providers,
+			() => normalizeProviderMaxInFlightRequests(this.#scopedValue("providers.maxInFlightRequests")),
 			value => {
-				this.callbacks.onChange("providers.maxInFlightRequests", value);
-				done(this.#formatProviderLimitsValue(value));
+				this.#persistRecordScopeSetting("providers.maxInFlightRequests", value);
+				done(this.#formatProviderLimitsValue(this.#scopedValue("providers.maxInFlightRequests")));
 			},
 			() => done(),
 			this.context.requestRender,
@@ -1221,14 +1262,14 @@ export class SettingsSelectorComponent implements Component {
 
 	#getMultiSelectOptions(def: SettingDef & { type: "multiselect" }) {
 		if (def.path !== "providers.webSearchOrder") return def.options;
-		const excluded: unknown = settings.get("providers.webSearchExclude");
+		const excluded: unknown = this.#scopedValue("providers.webSearchExclude");
 		if (!Array.isArray(excluded)) return def.options;
 		return def.options.filter(option => !excluded.includes(option.value));
 	}
 
 	#createMultiSelect(def: SettingDef & { type: "multiselect" }, done: (value?: string) => void): Container {
 		const options = this.#getMultiSelectOptions(def);
-		const current: unknown = settings.get(def.path);
+		const current: unknown = this.#scopedValue(def.path);
 		const initial = Array.isArray(current)
 			? current.filter((entry): entry is string => typeof entry === "string")
 			: [];
@@ -1239,10 +1280,9 @@ export class SettingsSelectorComponent implements Component {
 			initial,
 			def.ordered,
 			value => {
-				settings.set(def.path, value as never);
-				this.callbacks.onChange(def.path, value);
+				this.#persistSetting(def.path, value);
 			},
-			() => done(this.#formatMultiSelectValue(def, settings.get(def.path))),
+			() => done(this.#formatMultiSelectValue(def, this.#scopedValue(def.path))),
 		);
 	}
 
@@ -1271,16 +1311,88 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	/**
+	 * Persist a setting in the selected scope and return the recomputed merged
+	 * effective value. Row display reads {@link #scopedValue} separately, while
+	 * runtime callbacks must stay aligned with the active project configuration.
+	 * Shadowed-scope writes that leave the merged value unchanged skip the live
+	 * callback so session/editor side effects are not reapplied.
+	 */
+	#persistSetting(path: SettingPath, value: unknown): unknown {
+		if (this.#scope === "project" && isCredential(path)) {
+			const inherited = settings.getProjectInheritedValue(path);
+			if (Bun.deepEquals(value, inherited) && Bun.deepEquals(this.#scopedValue(path), inherited)) {
+				return settings.get(path);
+			}
+		}
+		const previous = settings.get(path);
+		settings.set(path, value as never, this.#scope);
+		return this.#notifyLiveChange(path, previous, settings.get(path));
+	}
+	/**
+	 * Persist a record setting in the selected scope. Editors submit the full
+	 * effective map; write only keys that differ from the inherited (global +
+	 * non-native project) layer, plus `null` tombstones for cleared keys.
+	 * Existing native overrides that still differ are kept.
+	 */
+	#persistRecordScopeSetting(path: SettingPath, value: Record<string, unknown>): unknown {
+		const previous = settings.get(path);
+		if (this.#scope === "global") {
+			settings.set(path, value as never, "global");
+			return this.#notifyLiveChange(path, previous, settings.get(path));
+		}
+		if (path === "providers.maxInFlightRequests") {
+			const inherited = normalizeProviderMaxInFlightRequests(settings.getProjectInheritedValue(path));
+			const limits = normalizeProviderMaxInFlightRequests(value);
+			const next: Record<string, number | null> = {};
+			for (const provider of new Set([...Object.keys(inherited), ...Object.keys(limits)])) {
+				const nextLimit = limits[provider];
+				if (nextLimit === undefined) {
+					next[provider] = null;
+					continue;
+				}
+				if (nextLimit !== inherited[provider]) next[provider] = nextLimit;
+			}
+			settings.set(path, next as never, "project");
+			return this.#notifyLiveChange(path, previous, settings.get(path));
+		}
+		const inheritedRaw = settings.getProjectInheritedValue(path);
+		const inherited =
+			inheritedRaw && typeof inheritedRaw === "object" && !Array.isArray(inheritedRaw)
+				? (inheritedRaw as Record<string, unknown>)
+				: {};
+		const next: Record<string, unknown> = {};
+		for (const key of new Set([...Object.keys(inherited), ...Object.keys(value)])) {
+			const nextValue = value[key];
+			if (nextValue === undefined) {
+				next[key] = null;
+				continue;
+			}
+			if (!Bun.deepEquals(nextValue, inherited[key])) next[key] = nextValue;
+		}
+		settings.set(path, next as never, "project");
+		return this.#notifyLiveChange(path, previous, settings.get(path));
+	}
+
+	#notifyLiveChange(path: SettingPath, previous: unknown, next: unknown): unknown {
+		if (!Bun.deepEquals(previous, next)) {
+			this.callbacks.onChange(path, next);
+		}
+		return next;
+	}
+
+	/**
 	 * Set a setting value, handling type conversion.
 	 */
-	#setSettingValue(path: SettingPath, value: string): void {
+	#setSettingValue(path: SettingPath, value: string): unknown {
 		const currentValue = settings.get(path);
 		const schemaType = getType(path);
 		if (path === "compaction.thresholdPercent" && value === "default") {
-			settings.set(path, -1 as never);
-		} else if (path === "compaction.thresholdTokens" && value === "default") {
-			settings.set(path, -1 as never);
-		} else if (schemaType === "record") {
+			return this.#persistSetting(path, -1);
+		}
+		if (path === "compaction.thresholdTokens" && value === "default") {
+			return this.#persistSetting(path, -1);
+		}
+		if (schemaType === "record") {
 			let parsed: unknown;
 			try {
 				parsed = JSON.parse(value || "{}");
@@ -1293,14 +1405,15 @@ export class SettingsSelectorComponent implements Component {
 			if (path === "providers.maxInFlightRequests") {
 				parsed = validateProviderMaxInFlightRequests(parsed);
 			}
-			settings.set(path, parsed as never);
-		} else if (typeof currentValue === "number") {
-			settings.set(path, Number(value) as never);
-		} else if (typeof currentValue === "boolean") {
-			settings.set(path, (value === "true") as never);
-		} else {
-			settings.set(path, value as never);
+			return this.#persistRecordScopeSetting(path, parsed as Record<string, unknown>);
 		}
+		if (typeof currentValue === "number") {
+			return this.#persistSetting(path, Number(value));
+		}
+		if (typeof currentValue === "boolean") {
+			return this.#persistSetting(path, value === "true");
+		}
+		return this.#persistSetting(path, value);
 	}
 
 	/**
@@ -1328,24 +1441,24 @@ export class SettingsSelectorComponent implements Component {
 
 				if (def.type === "boolean") {
 					const boolValue = newValue === "true";
-					settings.set(path, boolValue as never);
-					this.callbacks.onChange(path, boolValue);
-
-					if (tabId === "appearance") {
-						this.#triggerStatusLinePreview();
-					}
+					this.#persistSetting(path, boolValue);
 				} else if (def.type === "enum") {
-					settings.set(path, newValue as never);
-					this.callbacks.onChange(path, newValue);
+					this.#persistSetting(path, newValue);
 				}
 				// Submenu/text types already persisted the value inside their own
-				// done callbacks before SettingsList re-dispatches here. Re-run the
-				// definition-to-item mapping so condition-gated settings (e.g. the
-				// Hindsight cluster guarded by memory.backend) appear/disappear
-				// immediately instead of waiting for the next tab switch.
+				// done callbacks before SettingsList re-dispatches here. Boolean
+				// appearance edits and search-mode edits already reapply the scoped
+				// preview; do the same here so a global submenu commit cannot leave
+				// the live theme or status line on the project-effective mapping.
+				if (tabId === "appearance") {
+					this.#previewAppearanceForScope();
+				}
+				// Re-run the definition-to-item mapping so condition-gated settings
+				// (e.g. the Hindsight cluster guarded by memory.backend) appear or
+				// disappear immediately instead of waiting for the next tab switch.
 				this.#refreshCurrentTabItems(defs);
 			},
-			() => this.callbacks.onCancel(),
+			() => this.#close(),
 			// The selector owns type-to-search and the footer hint; pin the
 			// split sidebar width so the divider never jumps between tabs.
 			{ typeToSearch: false, hint: "", sidebarWidth: settingsSidebarWidth() },
@@ -1379,6 +1492,52 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	/**
+	 * Rebuild the visible list after a project save adopts disk values so a
+	 * skipped same-key edit cannot leave stale item snapshots on screen.
+	 * Open submenus are recreated only in project scope when their backing
+	 * setting (or a setting they filter by) was adopted: SettingsList leaves
+	 * them untouched across setItems, an unrelated sibling adoption must not
+	 * discard in-progress text or select cursor state, and a global editor
+	 * is backed by the global layer so a project adoption cannot change it.
+	 */
+	#resyncItemsFromSettings(adoptedPaths: readonly SettingPath[]): void {
+		const list = this.#searchList ?? this.#currentList;
+		const openSubmenuId = list?.getOpenSubmenuItemId() ?? null;
+		if (this.#searchList) {
+			this.#setSearchQuery(this.#searchQuery);
+		} else if (this.#currentTabId !== "plugins") {
+			const selectedId = this.#currentList?.getSelectedItem()?.id;
+			this.#refreshCurrentTabItems(getSettingsForTab(this.#currentTabId));
+			if (selectedId) this.#currentList?.selectItem(selectedId);
+		}
+		const shouldRefreshOpenSubmenu =
+			this.#scope === "project" &&
+			openSubmenuId !== null &&
+			list !== null &&
+			(!list.hasItem(openSubmenuId) || this.#openSubmenuDependsOnAdoptedPaths(openSubmenuId, adoptedPaths));
+		if (shouldRefreshOpenSubmenu && list) {
+			const refreshed = list.refreshOpenSubmenu();
+			if (!refreshed && this.#textInputActive && !list.hasOpenSubmenu()) {
+				this.#textInputActive = false;
+			}
+		}
+		// Adopted theme/status/symbol/color-blind values first apply the
+		// project-effective appearance through setting hooks. Reassert the
+		// selected scope even when the current tab or search result is not an
+		// appearance editor; otherwise global-scope rows keep rendering the
+		// project-effective preview until the next scope/tab action.
+		if (adoptedPaths.some(path => getSettingDef(path)?.tab === "appearance")) {
+			this.#previewAppearanceForScope();
+		}
+		this.context.requestRender?.();
+	}
+
+	#openSubmenuDependsOnAdoptedPaths(itemId: string, adoptedPaths: readonly SettingPath[]): boolean {
+		if (adoptedPaths.includes(itemId as SettingPath)) return true;
+		return itemId === "providers.webSearchOrder" && adoptedPaths.includes("providers.webSearchExclude");
+	}
+
+	/**
 	 * Get the status line preview string.
 	 */
 	#getStatusPreviewString(): string {
@@ -1391,24 +1550,151 @@ export class SettingsSelectorComponent implements Component {
 	/**
 	 * Trigger status line preview with current settings.
 	 */
-	#triggerStatusLinePreview(): void {
+	#triggerStatusLinePreview(overrides?: StatusLinePreviewSettings): void {
 		const statusLineSettings: StatusLinePreviewSettings = {
-			preset: settings.get("statusLine.preset"),
-			leftSegments: settings.get("statusLine.leftSegments"),
-			rightSegments: settings.get("statusLine.rightSegments"),
-			separator: settings.get("statusLine.separator"),
-			sessionAccent: settings.get("statusLine.sessionAccent"),
-			transparent: settings.get("statusLine.transparent"),
+			preset: this.#scopedValue("statusLine.preset") as StatusLinePreset,
+			leftSegments: this.#scopedValue("statusLine.leftSegments") as StatusLineSegmentId[],
+			rightSegments: this.#scopedValue("statusLine.rightSegments") as StatusLineSegmentId[],
+			separator: this.#scopedValue("statusLine.separator") as StatusLineSeparatorStyle,
+			showHookStatus: this.#scopedValue("statusLine.showHookStatus") as boolean,
+			sessionAccent: this.#scopedValue("statusLine.sessionAccent") as boolean,
+			transparent: this.#scopedValue("statusLine.transparent") as boolean,
+			compactThinkingLevel: this.#scopedValue("statusLine.compactThinkingLevel") as boolean,
+			contextLine: this.#scopedValue("statusLine.contextLine") as ContextLineMode,
+			segmentOptions: this.#scopedValue("statusLine.segmentOptions") as Record<string, unknown>,
+			...overrides,
 		};
 		this.callbacks.onStatusLinePreview?.(statusLineSettings);
 	}
 
 	#showPluginsTab(): void {
 		this.#pluginComponent = new PluginSettingsComponent(this.context.cwd, {
-			onClose: () => this.callbacks.onCancel(),
+			onClose: () => this.#close(),
 			onPluginChanged: () => this.callbacks.onPluginsChanged?.(),
 			requestRender: this.context.requestRender,
 		});
+	}
+
+	#title(): string {
+		if (this.#currentTabId === "plugins") return "Settings";
+		if (this.#scope === "global") return "Settings · global";
+		return `Settings · ${this.#projectLabel}`;
+	}
+
+	#switchScope(): void {
+		this.#scope = this.#scope === "project" ? "global" : "project";
+		if (this.#searchList) {
+			this.#setSearchQuery(this.#searchQuery);
+		} else if (this.#currentTabId !== "plugins") {
+			const selectedId = this.#currentList?.getSelectedItem()?.id;
+			this.#switchToTab(this.#currentTabId);
+			if (selectedId) this.#currentList?.selectItem(selectedId);
+		}
+		this.#previewAppearanceForScope();
+		this.context.requestRender?.();
+	}
+
+	#previewAppearanceForScope(): void {
+		this.#triggerThemePreview(
+			this.#loadableScopedThemeName(),
+			this.#themePreviewOptions(this.#scopedValue("symbolPreset"), this.#scopedValue("colorBlindMode")),
+		);
+		this.#triggerStatusLinePreview();
+	}
+
+	#scopedThemeName(): string | undefined {
+		return this.#themeName(this.#scopedValue("theme.dark"), this.#scopedValue("theme.light"));
+	}
+
+	#loadableScopedThemeName(): string | undefined {
+		const name = this.#scopedThemeName();
+		if (name && this.context.availableThemes.includes(name)) return name;
+		// Deleted or overlay-only names must not keep the previous scope's
+		// preview. Startup falls back to dark when this mapping is effective.
+		return name ? "dark" : undefined;
+	}
+
+	#effectiveThemeName(): string | undefined {
+		return this.#themeName(settings.get("theme.dark"), settings.get("theme.light"));
+	}
+
+	#themePreviewOptions(symbolPreset: unknown, colorBlindMode: unknown): ThemePreviewOptions {
+		return {
+			symbolPreset:
+				symbolPreset === "unicode" || symbolPreset === "nerd" || symbolPreset === "ascii"
+					? symbolPreset
+					: undefined,
+			colorBlindMode: typeof colorBlindMode === "boolean" ? colorBlindMode : undefined,
+		};
+	}
+
+	#themeName(dark: unknown, light: unknown): string | undefined {
+		const preferred = detectTerminalAppearance() === "light" ? light : dark;
+		if (typeof preferred === "string" && preferred.length > 0) return preferred;
+		if (typeof dark === "string" && dark.length > 0) return dark;
+		if (typeof light === "string" && light.length > 0) return light;
+		return undefined;
+	}
+
+	#triggerThemePreview(themeName: string | undefined, options: ThemePreviewOptions): void {
+		if (themeName) void this.callbacks.onThemePreview?.(themeName, options);
+	}
+
+	/**
+	 * Prefer a theme the selector can load. Deleted custom names and overlay
+	 * paths that never made `availableThemes` restore the live fallback captured
+	 * before the first scoped preview, then `dark`.
+	 */
+	#loadableThemeName(name: string | undefined): string | undefined {
+		if (name && this.context.availableThemes.includes(name)) return name;
+		return this.#themeBeforePreview ?? (name ? "dark" : undefined);
+	}
+
+	/**
+	 * Close the selector. Alt+S previews the selected layer's theme and
+	 * status line; reload the effective appearance so closing does not keep
+	 * rendering a scope that was never persisted. If the effective name
+	 * cannot load (deleted custom theme, overlay pointing at a missing file),
+	 * restore the live fallback captured before the first scoped preview.
+	 */
+	#close(): void {
+		this.#unsubscribeProjectSettings?.();
+		this.#unsubscribeProjectSettings = undefined;
+		this.#triggerThemePreview(
+			this.#loadableThemeName(this.#effectiveThemeName()),
+			this.#themePreviewOptions(settings.get("symbolPreset"), settings.get("colorBlindMode")),
+		);
+		this.#triggerEffectiveStatusLinePreview();
+		this.callbacks.onCancel();
+	}
+
+	#triggerEffectiveStatusLinePreview(): void {
+		this.callbacks.onStatusLinePreview?.({
+			preset: settings.get("statusLine.preset"),
+			leftSegments: settings.get("statusLine.leftSegments"),
+			rightSegments: settings.get("statusLine.rightSegments"),
+			separator: settings.get("statusLine.separator"),
+			showHookStatus: settings.get("statusLine.showHookStatus"),
+			sessionAccent: settings.get("statusLine.sessionAccent"),
+			transparent: settings.get("statusLine.transparent"),
+			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+			contextLine: settings.get("statusLine.contextLine"),
+			segmentOptions: settings.get("statusLine.segmentOptions"),
+		});
+	}
+
+	#inheritSelectedSetting(): void {
+		const item = this.#currentList?.getSelectedItem();
+		const def = item ? getSettingDef(item.id as SettingPath) : undefined;
+		if (!def) return;
+		const previous = settings.get(def.path);
+		if (!settings.clearProject(def.path)) return;
+		this.#notifyLiveChange(def.path, previous, settings.get(def.path));
+		if (def.tab === "appearance") {
+			this.#previewAppearanceForScope();
+		}
+		this.#refreshCurrentTabItems(getSettingsForTab(def.tab));
+		this.context.requestRender?.();
 	}
 
 	handleInput(data: string): void {
@@ -1430,6 +1716,15 @@ export class SettingsSelectorComponent implements Component {
 		// An open submenu owns input entirely — Tab/arrows/typing belong to it.
 		if (activeList?.hasOpenSubmenu()) {
 			activeList.handleInput(data);
+			return;
+		}
+
+		if (this.#currentTabId !== "plugins" && matchesKey(data, "alt+s")) {
+			this.#switchScope();
+			return;
+		}
+		if (!this.#searchList && this.#scope === "project" && matchesKey(data, "delete")) {
+			this.#inheritSelectedSetting();
 			return;
 		}
 
@@ -1500,4 +1795,19 @@ export class SettingsSelectorComponent implements Component {
 		const value = this.#searchInput.getValue();
 		if (value !== this.#searchQuery) this.#setSearchQuery(value);
 	}
+}
+
+function settingsProjectLabel(cwd: string): string {
+	let primary: string | null = null;
+	try {
+		primary = vcs.repo(cwd)?.primaryRoot() ?? null;
+	} catch {
+		primary = null;
+	}
+	const base = path.basename(primary ?? cwd);
+	const name = base.endsWith(".git") ? base.slice(0, -4) : base;
+	const cleaned = replaceTabs(sanitizeText(name))
+		.replace(/[\r\n]+/g, " ")
+		.trim();
+	return cleaned || "project";
 }

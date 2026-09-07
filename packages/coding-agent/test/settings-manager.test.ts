@@ -9,9 +9,12 @@ import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stre
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	__physicalTargetSegmentsForTesting,
+	normalizeProviderMaxInFlightRequests,
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
+	onConversationFlowChanged,
 	onModelRolesChanged,
+	onSessionRuntimeChanged,
 	onStatusLineSessionAccentChanged,
 	resetSettingsForTest,
 	type SettingPath,
@@ -149,6 +152,1728 @@ describe("Settings", () => {
 			const content = await Bun.file(getConfigPath()).text();
 			expect(content).not.toMatch(/: +$/m);
 			expect(YAML.parse(content)).toEqual({ custom, theme: { dark: "titanium" } });
+		});
+	});
+
+	describe("project setting scope", () => {
+		it("persists scoped edits to the native project config without modifying the global layer", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ theme: { dark: "dark-one" }, ask: { enabled: true }, custom: { keep: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.hasProjectConfig()).toBe(true);
+			settings.set("theme.dark", "titanium", "project");
+			settings.set("ask.enabled", false, "project");
+			expect(settings.get("theme.dark")).toBe("titanium");
+			expect(settings.get("ask.enabled")).toBe(false);
+			await settings.flush();
+
+			expect(await readSettings()).toEqual({});
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				theme: { dark: "titanium" },
+				ask: { enabled: false },
+				custom: { keep: true },
+			});
+		});
+		it("resolves the global layer independently of a shadowing project override", async () => {
+			await writeSettings({ ask: { enabled: false } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			// Effective view is the project override; the global getter ignores it.
+			expect(settings.get("ask.enabled")).toBe(true);
+			expect(settings.getGlobalValue("ask.enabled")).toBe(false);
+
+			settings.set("ask.enabled", true, "global");
+			expect(settings.getGlobalValue("ask.enabled")).toBe(true);
+			expect(settings.get("ask.enabled")).toBe(true);
+			await settings.flush();
+
+			expect(await readSettings()).toEqual({ ask: { enabled: true } });
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({ ask: { enabled: true } });
+		});
+
+		it("removes a project override and immediately restores the global fallback", async () => {
+			await writeSettings({ ask: { enabled: false } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ theme: { dark: "dark-one" }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("ask.enabled")).toBe(true);
+			expect(settings.clearProject("ask.enabled")).toBe(true);
+			expect(settings.get("ask.enabled")).toBe(false);
+			expect(settings.clearProject("ask.enabled")).toBe(false);
+			await settings.flush();
+
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				theme: { dark: "dark-one" },
+			});
+			expect(await readSettings()).toEqual({ ask: { enabled: false } });
+		});
+
+		it("keeps native .omp/config.yml winning over another project source after reload", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ ask: { enabled: true } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: false } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("ask.enabled")).toBe(false);
+
+			settings.set("ask.enabled", false, "project");
+			await settings.flush();
+			const reloaded = await Settings.init({ cwd: projectDir, agentDir });
+			expect(reloaded.get("ask.enabled")).toBe(false);
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({ ask: { enabled: false } });
+		});
+
+		it("does not treat the native project config as inherited when cwd is relative", async () => {
+			await writeSettings({ ask: { enabled: false } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: true } }, null, 2));
+			const previousCwd = process.cwd();
+			try {
+				process.chdir(projectDir);
+				const settings = await Settings.init({ cwd: ".", agentDir });
+				expect(settings.getCwd()).toBe(path.resolve(projectDir));
+				expect(settings.get("ask.enabled")).toBe(true);
+				expect(settings.getProjectInheritedValue("ask.enabled")).toBe(false);
+				expect(settings.clearProject("ask.enabled")).toBe(true);
+				expect(settings.get("ask.enabled")).toBe(false);
+				await settings.flush();
+			} finally {
+				process.chdir(previousCwd);
+			}
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+			expect(await readSettings()).toEqual({ ask: { enabled: false } });
+		});
+
+		it("attributes an invalid native shellPath to .omp/config.yml when another project source also sets it", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			const missingShell = tempDir.join("missing-native-bash");
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ shellPath: tempDir.join("missing-claude-bash") }, null, 2)}
+`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ shellPath: missingShell }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(() => settings.getShellConfig()).toThrow(`Please update shellPath in ${projectConfigPath}`);
+		});
+
+		it("attributes a live project-scope shellPath edit to .omp/config.yml", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ shellPath: tempDir.join("missing-claude-bash") }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const nativeShell = tempDir.join("missing-native-bash");
+
+			settings.set("shellPath", nativeShell, "project");
+			expect(() => settings.getShellConfig()).toThrow(`Please update shellPath in ${projectConfigPath}`);
+
+			settings.clearProject("shellPath");
+			expect(() => settings.getShellConfig()).toThrow(
+				`Please update shellPath in ${path.join(projectDir, ".claude", "settings.json")}`,
+			);
+		});
+
+		it("lets a project null tombstone mask a globally capped provider", async () => {
+			await writeSettings({ providers: { maxInFlightRequests: { anthropic: 3, openai: 5 } } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			settings.set("providers.maxInFlightRequests", { openai: 5, anthropic: null } as never, "project");
+			expect(settings.get("providers.maxInFlightRequests")).toEqual({ openai: 5 });
+			expect(settings.getGlobalValue("providers.maxInFlightRequests")).toEqual({
+				anthropic: 3,
+				openai: 5,
+			});
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				providers: { maxInFlightRequests: { openai: 5, anthropic: null } },
+			});
+		});
+
+		it("lets a project null tombstone mask a non-native project provider cap", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ providers: { maxInFlightRequests: { anthropic: 3 } } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("providers.maxInFlightRequests")).toEqual({ anthropic: 3 });
+
+			settings.set("providers.maxInFlightRequests", { anthropic: null } as never, "project");
+			expect(normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"))).toEqual({});
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				providers: { maxInFlightRequests: { anthropic: null } },
+			});
+		});
+
+		it("keeps a non-native provider cap live after a sibling native override", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ providers: { maxInFlightRequests: { anthropic: 3 } } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			settings.set("providers.maxInFlightRequests", { openai: 9 }, "project");
+			expect(settings.get("providers.maxInFlightRequests")).toEqual({ anthropic: 3, openai: 9 });
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				providers: { maxInFlightRequests: { openai: 9 } },
+			});
+		});
+
+		it("keeps a pending project model role across an unrelated native set", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ custom: { keep: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.setProjectModelRole("smol", "new/smol");
+			settings.set("ask.enabled", false, "project");
+			expect(settings.get("modelRoles")).toEqual(expect.objectContaining({ smol: "new/smol" }));
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				custom: { keep: true },
+				ask: { enabled: false },
+				modelRoles: { smol: "new/smol" },
+			});
+		});
+
+		it("keeps migrated native settings after an unrelated project edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ queueMode: "one-at-a-time" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+			settings.set("ask.enabled", true, "project");
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+		});
+
+		it("lets a native queueMode alias win over a non-native steeringMode", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ steeringMode: "all" }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ queueMode: "one-at-a-time" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+			settings.set("ask.enabled", true, "project");
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+		});
+
+		it("migrates a native mnemosyne object before writing a canonical mnemopi path", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ mnemosyne: { dbPath: "/tmp/old.db", embeddingModel: "legacy-embed" } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/old.db");
+			expect(settings.get("mnemopi.embeddingModel")).toBe("legacy-embed");
+			settings.set("mnemopi.dbPath", "/tmp/new.db", "project");
+			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/new.db");
+			expect(settings.get("mnemopi.embeddingModel")).toBe("legacy-embed");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				mnemopi: { dbPath: "/tmp/new.db", embeddingModel: "legacy-embed" },
+			});
+		});
+
+		it("preserves sibling mnemosyne fields when inheriting one canonical mnemopi path", async () => {
+			await writeSettings({
+				mnemopi: { dbPath: "/tmp/global.db", embeddingVariant: "en" },
+			});
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ mnemosyne: { dbPath: "/tmp/old.db", embeddingVariant: "multilingual" } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/old.db");
+			expect(settings.get("mnemopi.embeddingVariant")).toBe("multilingual");
+			expect(settings.clearProject("mnemopi.dbPath")).toBe(true);
+			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/global.db");
+			expect(settings.get("mnemopi.embeddingVariant")).toBe("multilingual");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				mnemopi: { embeddingVariant: "multilingual" },
+			});
+		});
+
+		it("resolves project-scope values without config overlays", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: false } }, null, 2));
+			const overlayPath = tempDir.join("overlay.yml");
+			await Bun.write(overlayPath, YAML.stringify({ ask: { enabled: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir, configFiles: [overlayPath] });
+			expect(settings.get("ask.enabled")).toBe(true);
+			expect(settings.getProjectScopedValue("ask.enabled")).toBe(false);
+		});
+
+		it("persists a native null when clearing a non-native project model role", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ modelRoles: { smol: "claude/smol" } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.getProjectModelRole("smol")).toBe("claude/smol");
+			settings.clearProjectModelRole("smol");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				modelRoles: { smol: null },
+			});
+		});
+
+		it("clears a migrated native queueMode via the steeringMode path", async () => {
+			await writeSettings({ steeringMode: "all" });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ queueMode: "one-at-a-time" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+			expect(settings.clearProject("steeringMode")).toBe(true);
+			expect(settings.get("steeringMode")).toBe("all");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
+
+		it("clears migrated native changelog and inspect_image timeout aliases on inherit", async () => {
+			await writeSettings({
+				"startup.changelogMode": "summary",
+				"images.questionTimeoutMs": 300_000,
+			});
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ collapseChangelog: false, inspect_image: { timeoutMs: 42 } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("startup.changelogMode")).toBe("expanded");
+			expect(settings.get("images.questionTimeoutMs")).toBe(42);
+			expect(settings.clearProject("startup.changelogMode")).toBe(true);
+			expect(settings.clearProject("images.questionTimeoutMs")).toBe(true);
+			expect(settings.get("startup.changelogMode")).toBe("summary");
+			expect(settings.get("images.questionTimeoutMs")).toBe(300_000);
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
+
+		it("clears remaining migrated native aliases on inherit", async () => {
+			await writeSettings({
+				"task.isolation.enabled": false,
+				"isolation.backend": "auto",
+				"compaction.methodOrder": ["soft"],
+				"memory.backend": "off",
+			});
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						task: { isolation: { mode: "reflink" } },
+						compaction: { strategy: "handoff", remoteEnabled: false },
+						memories: { enabled: true },
+					},
+					null,
+					2,
+				),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("task.isolation.enabled")).toBe(true);
+			expect(settings.get("isolation.backend")).toBe("reflink");
+			expect(settings.get("compaction.methodOrder")).toEqual(["handoff", "soft"]);
+			expect(settings.get("memory.backend")).toBe("local");
+			expect(settings.clearProject("task.isolation.enabled")).toBe(true);
+			expect(settings.clearProject("isolation.backend")).toBe(true);
+			expect(settings.clearProject("compaction.methodOrder")).toBe(true);
+			expect(settings.clearProject("memory.backend")).toBe(true);
+			expect(settings.get("task.isolation.enabled")).toBe(false);
+			expect(settings.get("isolation.backend")).toBe("auto");
+			expect(settings.get("compaction.methodOrder")).toEqual(["soft"]);
+			expect(settings.get("memory.backend")).toBe("off");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
+
+		it("clears migrated search and find aliases on inherit", async () => {
+			await writeSettings({
+				grep: { enabled: true, contextBefore: 0, contextAfter: 0 },
+				glob: { enabled: true },
+			});
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						search: { enabled: false, contextBefore: 2, contextAfter: 5 },
+						"find.enabled": false,
+					},
+					null,
+					2,
+				),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("grep.enabled")).toBe(false);
+			expect(settings.get("grep.contextBefore")).toBe(2);
+			expect(settings.get("grep.contextAfter")).toBe(5);
+			expect(settings.get("glob.enabled")).toBe(false);
+			expect(settings.clearProject("grep.enabled")).toBe(true);
+			expect(settings.clearProject("grep.contextBefore")).toBe(true);
+			expect(settings.clearProject("grep.contextAfter")).toBe(true);
+			expect(settings.clearProject("glob.enabled")).toBe(true);
+			expect(settings.get("grep.enabled")).toBe(true);
+			expect(settings.get("grep.contextBefore")).toBe(0);
+			expect(settings.get("grep.contextAfter")).toBe(0);
+			expect(settings.get("glob.enabled")).toBe(true);
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
+
+		it("clears a migrated native flat theme via the nested theme path", async () => {
+			await writeSettings({ theme: { light: "paper" } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ theme: "alabaster" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("theme.light")).toBe("alabaster");
+			expect(settings.clearProject("theme.light")).toBe(true);
+			expect(settings.get("theme.light")).toBe("paper");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
+
+		it("clears a quoted-dotted unexpected-stop alias on inherit", async () => {
+			await writeSettings({ features: { unexpectedStopDetection: "mechanical" } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, '"features.unexpectedStopDetection": false\n');
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("features.unexpectedStopDetection")).toBe("none");
+			expect(settings.clearProject("features.unexpectedStopDetection")).toBe(true);
+			expect(settings.get("features.unexpectedStopDetection")).toBe("mechanical");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
+
+		it("clears migrated native power aliases on inherit", async () => {
+			await writeSettings({ power: { sleepPrevention: "idle" } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						power: {
+							preventIdleSleep: false,
+							preventSystemSleep: false,
+							declareUserActive: false,
+							preventDisplaySleep: false,
+						},
+					},
+					null,
+					2,
+				),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("power.sleepPrevention")).toBe("off");
+			expect(settings.clearProject("power.sleepPrevention")).toBe(true);
+			expect(settings.get("power.sleepPrevention")).toBe("idle");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
+
+		it("clears migrated provider preference aliases on inherit", async () => {
+			await writeSettings({
+				providers: { webSearchOrder: ["exa"], imageOrder: ["openai-codex"] },
+			});
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ providers: { webSearch: "brave", image: "openai" } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("providers.webSearchOrder")).toEqual([
+				"brave",
+				...SEARCH_PROVIDER_ORDER.filter(id => id !== "brave"),
+			]);
+			expect(settings.get("providers.imageOrder")).toEqual([
+				"openai",
+				...AUTO_IMAGE_PROVIDER_ORDER.filter(id => id !== "openai"),
+			]);
+			expect(settings.clearProject("providers.webSearchOrder")).toBe(true);
+			expect(settings.clearProject("providers.imageOrder")).toBe(true);
+			expect(settings.get("providers.webSearchOrder")).toEqual(["exa"]);
+			expect(settings.get("providers.imageOrder")).toEqual(["openai-codex"]);
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
+
+		it("clears migrated nested-leaf and service-tier aliases on inherit", async () => {
+			await writeSettings({
+				todo: { remindersMax: 5 },
+				dev: { autoqaConsent: "granted" },
+				tier: { openai: "none", anthropic: "none", google: "none", subagent: "inherit", advisor: "none" },
+			});
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						todo: { reminders: { max: 1 } },
+						dev: { autoqa: { consent: "denied" } },
+						serviceTier: "priority",
+						serviceTierSubagent: "flex",
+						serviceTierAdvisor: "priority",
+					},
+					null,
+					2,
+				),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("todo.remindersMax")).toBe(1);
+			expect(settings.get("dev.autoqaConsent")).toBe("denied");
+			expect(settings.get("tier.openai")).toBe("priority");
+			expect(settings.get("tier.anthropic")).toBe("priority");
+			expect(settings.get("tier.google")).toBe("priority");
+			expect(settings.get("tier.subagent")).toBe("flex");
+			expect(settings.get("tier.advisor")).toBe("priority");
+			expect(settings.clearProject("todo.remindersMax")).toBe(true);
+			expect(settings.clearProject("dev.autoqaConsent")).toBe(true);
+			expect(settings.clearProject("tier.openai")).toBe(true);
+			expect(settings.clearProject("tier.subagent")).toBe(true);
+			expect(settings.clearProject("tier.advisor")).toBe(true);
+			expect(settings.get("todo.remindersMax")).toBe(5);
+			expect(settings.get("dev.autoqaConsent")).toBe("granted");
+			expect(settings.get("tier.openai")).toBe("none");
+			expect(settings.get("tier.anthropic")).toBe("priority");
+			expect(settings.get("tier.google")).toBe("priority");
+			expect(settings.get("tier.subagent")).toBe("inherit");
+			expect(settings.get("tier.advisor")).toBe("none");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				tier: { anthropic: "priority", google: "priority" },
+			});
+			expect(settings.clearProject("tier.anthropic")).toBe(true);
+			expect(settings.clearProject("tier.google")).toBe(true);
+			expect(settings.get("tier.anthropic")).toBe("none");
+			expect(settings.get("tier.google")).toBe("none");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
+
+		it("clears migrated mnemosyne, hindsight, and exa aliases on inherit", async () => {
+			await writeSettings({
+				mnemopi: { dbPath: "/tmp/global.db" },
+				hindsight: { scoping: "global", bankId: "global-bank" },
+				exa: { enabled: true },
+			});
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						mnemosyne: { dbPath: "/tmp/old.db" },
+						hindsight: { dynamicBankId: true, agentName: "ada-cli" },
+						exa: { enableSearch: false },
+					},
+					null,
+					2,
+				),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/old.db");
+			expect(settings.get("hindsight.scoping")).toBe("per-project");
+			expect(settings.get("hindsight.bankId")).toBe("ada-cli");
+			expect(settings.get("exa.enabled")).toBe(false);
+			expect(settings.clearProject("mnemopi.dbPath")).toBe(true);
+			expect(settings.clearProject("hindsight.scoping")).toBe(true);
+			expect(settings.clearProject("hindsight.bankId")).toBe(true);
+			expect(settings.clearProject("exa.enabled")).toBe(true);
+			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/global.db");
+			expect(settings.get("hindsight.scoping")).toBe("global");
+			expect(settings.get("hindsight.bankId")).toBe("global-bank");
+			expect(settings.get("exa.enabled")).toBe(true);
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
+
+		it("preserves a newer alias-backed project value when a migrated clear is stale", async () => {
+			await writeSettings({ steeringMode: "all" });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ queueMode: "one-at-a-time" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+			expect(settings.clearProject("steeringMode")).toBe(true);
+			await Bun.write(projectConfigPath, YAML.stringify({ queueMode: "all" }, null, 2));
+			await settings.flush();
+			expect(settings.get("steeringMode")).toBe("all");
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				queueMode: "all",
+			});
+		});
+
+		it("exposes an external sibling project edit after a locked native save", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ theme: { dark: "dark-one" }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("theme.dark")).toBe("dark-one");
+			settings.set("ask.enabled", false, "project");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ theme: { dark: "titanium" }, ask: { enabled: true } }, null, 2),
+			);
+			await settings.flush();
+			expect(settings.get("theme.dark")).toBe("titanium");
+			expect(settings.get("ask.enabled")).toBe(false);
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				theme: { dark: "titanium" },
+				ask: { enabled: false },
+			});
+		});
+
+		it("keeps a second same-key project edit when a sibling disk edit lands during debounce", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ theme: { dark: "dark-one" }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("theme.dark", "titanium", "project");
+			settings.set("theme.dark", "alabaster", "project");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ theme: { dark: "dark-one" }, ask: { enabled: false } }, null, 2),
+			);
+			await settings.flush();
+			expect(settings.get("theme.dark")).toBe("alabaster");
+			expect(settings.get("ask.enabled")).toBe(false);
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				theme: { dark: "alabaster" },
+				ask: { enabled: false },
+			});
+		});
+
+		it("reapplies a later same-key project edit after an overlapping stale save", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ defaultThinkingLevel: "low" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ level: "auto" | Effort; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ level: settings.get("defaultThinkingLevel"), paths: [...paths] });
+			});
+			const firstSaveEntered = Promise.withResolvers<void>();
+			const releaseFirstSave = Promise.withResolvers<void>();
+			const withFileLock = fileLock.withFileLock;
+			let holdingFirstSave = true;
+			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
+				return await withFileLock(
+					filePath,
+					async () => {
+						if (holdingFirstSave) {
+							holdingFirstSave = false;
+							firstSaveEntered.resolve();
+							await releaseFirstSave.promise;
+						}
+						return await fn();
+					},
+					options,
+				);
+			});
+			vi.useFakeTimers();
+			try {
+				settings.set("defaultThinkingLevel", Effort.High, "project");
+				vi.advanceTimersByTime(100);
+				await firstSaveEntered.promise;
+				await Bun.write(projectConfigPath, YAML.stringify({ defaultThinkingLevel: Effort.Medium }, null, 2));
+				settings.set("defaultThinkingLevel", Effort.Low, "project");
+				vi.advanceTimersByTime(100);
+				releaseFirstSave.resolve();
+				await settings.flush();
+				expect(settings.get("defaultThinkingLevel")).toBe(Effort.Low);
+				expect(received.at(-1)).toEqual({ level: Effort.Low, paths: ["defaultThinkingLevel"] });
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					defaultThinkingLevel: Effort.Low,
+				});
+			} finally {
+				releaseFirstSave.resolve();
+				unsubscribe();
+				vi.useRealTimers();
+			}
+		});
+
+		it("persists a later project edit after an overlapping save rejects", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ defaultThinkingLevel: "low" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const firstSaveEntered = Promise.withResolvers<void>();
+			const releaseFirstSave = Promise.withResolvers<void>();
+			const withFileLock = fileLock.withFileLock;
+			let failFirstSave = true;
+			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
+				return await withFileLock(
+					filePath,
+					async () => {
+						if (failFirstSave) {
+							failFirstSave = false;
+							firstSaveEntered.resolve();
+							await releaseFirstSave.promise;
+							throw new Error("project save lock failed");
+						}
+						return await fn();
+					},
+					options,
+				);
+			});
+			vi.useFakeTimers();
+			try {
+				settings.set("defaultThinkingLevel", Effort.High, "project");
+				vi.advanceTimersByTime(100);
+				await firstSaveEntered.promise;
+				settings.set("defaultThinkingLevel", Effort.Low, "project");
+				vi.advanceTimersByTime(100);
+				releaseFirstSave.resolve();
+				await settings.flush();
+				expect(settings.get("defaultThinkingLevel")).toBe(Effort.Low);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					defaultThinkingLevel: Effort.Low,
+				});
+			} finally {
+				releaseFirstSave.resolve();
+				vi.useRealTimers();
+			}
+		});
+
+		it("preserves a same-key external project edit made after a local save was queued", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ theme: { dark: "dark-one" } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("theme.dark", "titanium", "project");
+			await Bun.write(projectConfigPath, YAML.stringify({ theme: { dark: "alabaster" } }, null, 2));
+			await settings.flush();
+			expect(settings.get("theme.dark")).toBe("alabaster");
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				theme: { dark: "alabaster" },
+			});
+		});
+
+		it("fires conversation-flow hooks after skipping a stale project queue-mode write", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: string[] = [];
+			const unsubscribe = onConversationFlowChanged(() => {
+				received.push(settings.get("steeringMode"));
+			});
+			try {
+				settings.set("steeringMode", "all", "project");
+				expect(received).toEqual(["all"]);
+				await Bun.write(projectConfigPath, YAML.stringify({ steeringMode: "one-at-a-time" }, null, 2));
+				await settings.flush();
+				expect(settings.get("steeringMode")).toBe("one-at-a-time");
+				expect(received).toEqual(["all", "one-at-a-time"]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					steeringMode: "one-at-a-time",
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("does not fire conversation-flow hooks for a shadowed global queue-mode write", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ steeringMode: "one-at-a-time" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: string[] = [];
+			const unsubscribe = onConversationFlowChanged(() => {
+				received.push(settings.get("steeringMode"));
+			});
+			try {
+				expect(settings.get("steeringMode")).toBe("one-at-a-time");
+				settings.set("steeringMode", "all");
+				expect(settings.get("steeringMode")).toBe("one-at-a-time");
+				expect(received).toEqual([]);
+				await settings.flush();
+				expect(YAML.parse(await Bun.file(getConfigPath()).text())).toEqual({
+					steeringMode: "all",
+				});
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					steeringMode: "one-at-a-time",
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("does not attribute a clone's conversation-flow event to another Settings instance", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ steeringMode: "one-at-a-time" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const otherDir = tempDir.join("other-project");
+			fs.mkdirSync(path.join(otherDir, ".omp"), { recursive: true });
+			await Bun.write(
+				path.join(otherDir, ".omp", "config.yml"),
+				YAML.stringify({ steeringMode: "one-at-a-time" }, null, 2),
+			);
+			const cloned = await settings.cloneForCwd(otherDir);
+			const received: Settings[] = [];
+			const unsubscribe = onConversationFlowChanged((_path, source) => {
+				received.push(source);
+			});
+			try {
+				cloned.set("steeringMode", "all", "project");
+				expect(cloned.get("steeringMode")).toBe("all");
+				expect(settings.get("steeringMode")).toBe("one-at-a-time");
+				expect(received).toEqual([cloned]);
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after skipping a stale project thinking write", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ defaultThinkingLevel: "low" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ level: "auto" | Effort; paths: string[]; source: Settings }> = [];
+			const unsubscribe = onSessionRuntimeChanged((paths, source) => {
+				received.push({ level: settings.get("defaultThinkingLevel"), paths: [...paths], source });
+			});
+			try {
+				settings.set("defaultThinkingLevel", Effort.High, "project");
+				expect(received).toEqual([]);
+				await Bun.write(projectConfigPath, YAML.stringify({ defaultThinkingLevel: Effort.Medium }, null, 2));
+				await settings.flush();
+				expect(settings.get("defaultThinkingLevel")).toBe(Effort.Medium);
+				expect(received).toEqual([{ level: Effort.Medium, paths: ["defaultThinkingLevel"], source: settings }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					defaultThinkingLevel: Effort.Medium,
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("does not attribute a clone's session-runtime event to another Settings instance", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ defaultThinkingLevel: "low" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const otherDir = tempDir.join("other-project");
+			fs.mkdirSync(path.join(otherDir, ".omp"), { recursive: true });
+			await Bun.write(
+				path.join(otherDir, ".omp", "config.yml"),
+				YAML.stringify({ defaultThinkingLevel: "low" }, null, 2),
+			);
+			const cloned = await settings.cloneForCwd(otherDir);
+			const received: Settings[] = [];
+			const unsubscribe = onSessionRuntimeChanged((_paths, source) => {
+				received.push(source);
+			});
+			try {
+				cloned.set("defaultThinkingLevel", Effort.High, "project");
+				await Bun.write(
+					path.join(otherDir, ".omp", "config.yml"),
+					YAML.stringify({ defaultThinkingLevel: Effort.Medium }, null, 2),
+				);
+				await cloned.flush();
+				expect(cloned.get("defaultThinkingLevel")).toBe(Effort.Medium);
+				expect(settings.get("defaultThinkingLevel")).toBe(Effort.Low);
+				expect(received).toEqual([cloned]);
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after skipping a stale project memory-backend write", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ memory: { backend: "builtin" } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ backend: string; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ backend: settings.get("memory.backend"), paths: [...paths] });
+			});
+			try {
+				settings.set("memory.backend", "hindsight", "project");
+				expect(received).toEqual([]);
+				await Bun.write(projectConfigPath, YAML.stringify({ memory: { backend: "off" } }, null, 2));
+				await settings.flush();
+				expect(settings.get("memory.backend")).toBe("off");
+				expect(received).toEqual([{ backend: "off", paths: ["memory.backend"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					memory: { backend: "off" },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after skipping a stale project autocompleteMaxVisible write", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ autocompleteMaxVisible: 10 }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ value: number; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ value: settings.get("autocompleteMaxVisible"), paths: [...paths] });
+			});
+			try {
+				settings.set("autocompleteMaxVisible", 20, "project");
+				expect(received).toEqual([]);
+				await Bun.write(projectConfigPath, YAML.stringify({ autocompleteMaxVisible: 7 }, null, 2));
+				await settings.flush();
+				expect(settings.get("autocompleteMaxVisible")).toBe(7);
+				expect(received).toEqual([{ value: 7, paths: ["autocompleteMaxVisible"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					autocompleteMaxVisible: 7,
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after skipping a stale project temperature write", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ temperature: 0.2 }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ value: number; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ value: settings.get("temperature"), paths: [...paths] });
+			});
+			try {
+				settings.set("temperature", 0.8, "project");
+				expect(received).toEqual([]);
+				await Bun.write(projectConfigPath, YAML.stringify({ temperature: 0.4 }, null, 2));
+				await settings.flush();
+				expect(settings.get("temperature")).toBe(0.4);
+				expect(received).toEqual([{ value: 0.4, paths: ["temperature"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					temperature: 0.4,
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting a sibling omitThinking disk edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ omitThinking: false, ask: { enabled: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ value: boolean; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ value: settings.get("omitThinking"), paths: [...paths] });
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(projectConfigPath, YAML.stringify({ omitThinking: true, ask: { enabled: true } }, null, 2));
+				await settings.flush();
+				expect(settings.get("omitThinking")).toBe(true);
+				expect(received).toEqual([{ value: true, paths: ["omitThinking"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					omitThinking: true,
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting a sibling compaction.enabled disk edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ compaction: { enabled: true }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ value: boolean; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ value: settings.get("compaction.enabled"), paths: [...paths] });
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify({ compaction: { enabled: false }, ask: { enabled: true } }, null, 2),
+				);
+				await settings.flush();
+				expect(settings.get("compaction.enabled")).toBe(false);
+				expect(received).toEqual([{ value: false, paths: ["compaction.enabled"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					compaction: { enabled: false },
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting a sibling compaction.methodOrder disk edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ compaction: { enabled: true, methodOrder: ["soft"] }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ value: string[]; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ value: [...settings.get("compaction.methodOrder")], paths: [...paths] });
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify({ compaction: { enabled: true, methodOrder: [] }, ask: { enabled: true } }, null, 2),
+				);
+				await settings.flush();
+				expect(settings.get("compaction.methodOrder")).toEqual([]);
+				expect(received).toEqual([{ value: [], paths: ["compaction.methodOrder"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					compaction: { enabled: true, methodOrder: [] },
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting a sibling providers.webSearchExclude disk edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ providers: { webSearchExclude: [] }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ value: string[]; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ value: [...settings.get("providers.webSearchExclude")], paths: [...paths] });
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify({ providers: { webSearchExclude: ["exa"] }, ask: { enabled: true } }, null, 2),
+				);
+				await settings.flush();
+				expect(settings.get("providers.webSearchExclude")).toEqual(["exa"]);
+				expect(received).toEqual([{ value: ["exa"], paths: ["providers.webSearchExclude"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					providers: { webSearchExclude: ["exa"] },
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting a sibling display.hideToolActivity disk edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ display: { hideToolActivity: false }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ value: boolean; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ value: settings.get("display.hideToolActivity"), paths: [...paths] });
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify({ display: { hideToolActivity: true }, ask: { enabled: true } }, null, 2),
+				);
+				await settings.flush();
+				expect(settings.get("display.hideToolActivity")).toBe(true);
+				expect(received).toEqual([{ value: true, paths: ["display.hideToolActivity"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					display: { hideToolActivity: true },
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting sibling display setting disk edits", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						terminal: { showImages: true },
+						hideThinkingBlock: false,
+						proseOnlyThinking: true,
+						display: {
+							cacheMissMarker: false,
+							collapseCompacted: true,
+							showTokenUsage: false,
+							showTurnTime: false,
+						},
+						ask: { enabled: true },
+					},
+					null,
+					2,
+				),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{
+				showImages: boolean;
+				hideThinkingBlock: boolean;
+				proseOnlyThinking: boolean;
+				cacheMissMarker: boolean;
+				collapseCompacted: boolean;
+				showTokenUsage: boolean;
+				showTurnTime: boolean;
+				paths: string[];
+			}> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({
+					showImages: settings.get("terminal.showImages"),
+					hideThinkingBlock: settings.get("hideThinkingBlock"),
+					proseOnlyThinking: settings.get("proseOnlyThinking"),
+					cacheMissMarker: settings.get("display.cacheMissMarker"),
+					collapseCompacted: settings.get("display.collapseCompacted"),
+					showTokenUsage: settings.get("display.showTokenUsage"),
+					showTurnTime: settings.get("display.showTurnTime"),
+					paths: [...paths],
+				});
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify(
+						{
+							terminal: { showImages: false },
+							hideThinkingBlock: true,
+							proseOnlyThinking: false,
+							display: {
+								cacheMissMarker: true,
+								collapseCompacted: false,
+								showTokenUsage: true,
+								showTurnTime: true,
+							},
+							ask: { enabled: true },
+						},
+						null,
+						2,
+					),
+				);
+				await settings.flush();
+				expect(settings.get("terminal.showImages")).toBe(false);
+				expect(settings.get("hideThinkingBlock")).toBe(true);
+				expect(settings.get("proseOnlyThinking")).toBe(false);
+				expect(settings.get("display.cacheMissMarker")).toBe(true);
+				expect(settings.get("display.collapseCompacted")).toBe(false);
+				expect(settings.get("display.showTokenUsage")).toBe(true);
+				expect(settings.get("display.showTurnTime")).toBe(true);
+				expect(received).toEqual([
+					{
+						showImages: false,
+						hideThinkingBlock: true,
+						proseOnlyThinking: false,
+						cacheMissMarker: true,
+						collapseCompacted: false,
+						showTokenUsage: true,
+						showTurnTime: true,
+						paths: [
+							"display.cacheMissMarker",
+							"display.collapseCompacted",
+							"display.showTokenUsage",
+							"display.showTurnTime",
+							"hideThinkingBlock",
+							"proseOnlyThinking",
+							"terminal.showImages",
+						],
+					},
+				]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					terminal: { showImages: false },
+					hideThinkingBlock: true,
+					proseOnlyThinking: false,
+					display: {
+						cacheMissMarker: true,
+						collapseCompacted: false,
+						showTokenUsage: true,
+						showTurnTime: true,
+					},
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting a sibling mcp.notifications disk edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ mcp: { notifications: false }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ value: boolean; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ value: settings.get("mcp.notifications"), paths: [...paths] });
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify({ mcp: { notifications: true }, ask: { enabled: true } }, null, 2),
+				);
+				await settings.flush();
+				expect(settings.get("mcp.notifications")).toBe(true);
+				expect(received).toEqual([{ value: true, paths: ["mcp.notifications"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					mcp: { notifications: true },
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting sibling composer, spelling, and tui disk edits", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						composer: { shape: "band" },
+						spelling: { typoDetection: true, autocomplete: true, autocorrect: false },
+						tui: { tight: false, resizeScrollback: "rebuild", renderMermaid: true },
+						ask: { enabled: true },
+					},
+					null,
+					2,
+				),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{
+				composerShape: string;
+				typoDetection: boolean;
+				autocomplete: boolean;
+				autocorrect: boolean;
+				tight: boolean;
+				resizeScrollback: string;
+				renderMermaid: boolean;
+				paths: string[];
+			}> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({
+					composerShape: settings.get("composer.shape") ?? "band",
+					typoDetection: settings.get("spelling.typoDetection"),
+					autocomplete: settings.get("spelling.autocomplete"),
+					autocorrect: settings.get("spelling.autocorrect"),
+					tight: settings.get("tui.tight"),
+					resizeScrollback: settings.get("tui.resizeScrollback"),
+					renderMermaid: settings.get("tui.renderMermaid"),
+					paths: [...paths],
+				});
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify(
+						{
+							composer: { shape: "box" },
+							spelling: { typoDetection: false, autocomplete: false, autocorrect: true },
+							tui: { tight: true, resizeScrollback: "preserve", renderMermaid: false },
+							ask: { enabled: true },
+						},
+						null,
+						2,
+					),
+				);
+				await settings.flush();
+				expect(settings.get("composer.shape")).toBe("box");
+				expect(settings.get("spelling.typoDetection")).toBe(false);
+				expect(settings.get("spelling.autocomplete")).toBe(false);
+				expect(settings.get("spelling.autocorrect")).toBe(true);
+				expect(settings.get("tui.tight")).toBe(true);
+				expect(settings.get("tui.resizeScrollback")).toBe("preserve");
+				expect(settings.get("tui.renderMermaid")).toBe(false);
+				expect(received).toEqual([
+					{
+						composerShape: "box",
+						typoDetection: false,
+						autocomplete: false,
+						autocorrect: true,
+						tight: true,
+						resizeScrollback: "preserve",
+						renderMermaid: false,
+						paths: [
+							"composer.shape",
+							"spelling.autocomplete",
+							"spelling.autocorrect",
+							"spelling.typoDetection",
+							"tui.renderMermaid",
+							"tui.resizeScrollback",
+							"tui.tight",
+						],
+					},
+				]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					composer: { shape: "box" },
+					spelling: { typoDetection: false, autocomplete: false, autocorrect: true },
+					tui: { tight: true, resizeScrollback: "preserve", renderMermaid: false },
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting a sibling tui.hyperlinks disk edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ tui: { hyperlinks: "off" }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ value: string; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ value: settings.get("tui.hyperlinks"), paths: [...paths] });
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify({ tui: { hyperlinks: "always" }, ask: { enabled: true } }, null, 2),
+				);
+				await settings.flush();
+				expect(settings.get("tui.hyperlinks")).toBe("always");
+				expect(received).toEqual([{ value: "always", paths: ["tui.hyperlinks"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					tui: { hyperlinks: "always" },
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting sibling status-line disk edits", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						statusLine: {
+							preset: "minimal",
+							separator: "pipe",
+							showHookStatus: true,
+							transparent: false,
+							compactThinkingLevel: true,
+							contextLine: "off",
+							leftSegments: ["pi"],
+							rightSegments: ["git"],
+							segmentOptions: { path: { abbreviate: true } },
+							sessionAccent: true,
+						},
+						ask: { enabled: true },
+					},
+					null,
+					2,
+				),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{
+				preset: string;
+				separator: string;
+				showHookStatus: boolean;
+				transparent: boolean;
+				compactThinkingLevel: boolean;
+				contextLine: string;
+				leftSegments: string[];
+				rightSegments: string[];
+				sessionAccent: boolean;
+				paths: string[];
+			}> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({
+					preset: settings.get("statusLine.preset"),
+					separator: settings.get("statusLine.separator"),
+					showHookStatus: settings.get("statusLine.showHookStatus"),
+					transparent: settings.get("statusLine.transparent"),
+					compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+					contextLine: settings.get("statusLine.contextLine"),
+					leftSegments: settings.get("statusLine.leftSegments"),
+					rightSegments: settings.get("statusLine.rightSegments"),
+					sessionAccent: settings.get("statusLine.sessionAccent"),
+					paths: [...paths],
+				});
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify(
+						{
+							statusLine: {
+								preset: "full",
+								separator: "slash",
+								showHookStatus: false,
+								transparent: true,
+								compactThinkingLevel: false,
+								contextLine: "embedded",
+								leftSegments: ["model"],
+								rightSegments: ["cost"],
+								segmentOptions: { path: { abbreviate: false } },
+								sessionAccent: false,
+							},
+							ask: { enabled: true },
+						},
+						null,
+						2,
+					),
+				);
+				await settings.flush();
+				expect(settings.get("statusLine.preset")).toBe("full");
+				expect(settings.get("statusLine.separator")).toBe("slash");
+				expect(settings.get("statusLine.showHookStatus")).toBe(false);
+				expect(settings.get("statusLine.transparent")).toBe(true);
+				expect(settings.get("statusLine.compactThinkingLevel")).toBe(false);
+				expect(settings.get("statusLine.contextLine")).toBe("embedded");
+				expect(settings.get("statusLine.leftSegments")).toEqual(["model"]);
+				expect(settings.get("statusLine.rightSegments")).toEqual(["cost"]);
+				expect(settings.get("statusLine.sessionAccent")).toBe(false);
+				expect(received).toEqual([
+					{
+						preset: "full",
+						separator: "slash",
+						showHookStatus: false,
+						transparent: true,
+						compactThinkingLevel: false,
+						contextLine: "embedded",
+						leftSegments: ["model"],
+						rightSegments: ["cost"],
+						sessionAccent: false,
+						paths: [
+							"statusLine.compactThinkingLevel",
+							"statusLine.contextLine",
+							"statusLine.leftSegments",
+							"statusLine.preset",
+							"statusLine.rightSegments",
+							"statusLine.segmentOptions",
+							"statusLine.separator",
+							"statusLine.sessionAccent",
+							"statusLine.showHookStatus",
+							"statusLine.transparent",
+						],
+					},
+				]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					statusLine: {
+						preset: "full",
+						separator: "slash",
+						showHookStatus: false,
+						transparent: true,
+						compactThinkingLevel: false,
+						contextLine: "embedded",
+						leftSegments: ["model"],
+						rightSegments: ["cost"],
+						segmentOptions: { path: { abbreviate: false } },
+						sessionAccent: false,
+					},
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting a sibling git.enabled disk edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ git: { enabled: false }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ value: boolean; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ value: settings.get("git.enabled"), paths: [...paths] });
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify({ git: { enabled: true }, ask: { enabled: true } }, null, 2),
+				);
+				await settings.flush();
+				expect(settings.get("git.enabled")).toBe(true);
+				expect(received).toEqual([{ value: true, paths: ["git.enabled"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					git: { enabled: true },
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks after adopting a sibling advisor.enabled disk edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ advisor: { enabled: false }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ value: boolean; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ value: settings.get("advisor.enabled"), paths: [...paths] });
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify({ advisor: { enabled: true }, ask: { enabled: true } }, null, 2),
+				);
+				await settings.flush();
+				expect(settings.get("advisor.enabled")).toBe(true);
+				expect(received).toEqual([{ value: true, paths: ["advisor.enabled"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					advisor: { enabled: true },
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires effective-change listeners after adopting sibling browser.enabled and computer.enabled disk edits", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{ browser: { enabled: false }, computer: { enabled: false }, ask: { enabled: true } },
+					null,
+					2,
+				),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ path: string; value: unknown }> = [];
+			const unsubscribe = settings.onEffectiveChange((path, value) => {
+				if (path === "browser.enabled" || path === "computer.enabled") {
+					received.push({ path, value });
+				}
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify(
+						{ browser: { enabled: true }, computer: { enabled: true }, ask: { enabled: true } },
+						null,
+						2,
+					),
+				);
+				await settings.flush();
+				expect(settings.get("browser.enabled")).toBe(true);
+				expect(settings.get("computer.enabled")).toBe(true);
+				expect(received).toEqual([
+					{ path: "browser.enabled", value: true },
+					{ path: "computer.enabled", value: true },
+				]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					browser: { enabled: true },
+					computer: { enabled: true },
+					ask: { enabled: false },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires runtime hooks for an adopted sibling project edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ theme: { dark: "dark-one" }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: string[] = [];
+			const unsubscribe = onAppendOnlyModeChanged(value => {
+				received.push(value);
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify(
+						{
+							theme: { dark: "dark-one" },
+							ask: { enabled: true },
+							provider: { appendOnlyContext: "off" },
+						},
+						null,
+						2,
+					),
+				);
+				await settings.flush();
+				expect(settings.get("provider.appendOnlyContext")).toBe("off");
+				expect(received).toEqual(["off"]);
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("adopts a newer same-key project role instead of keeping the rejected runtime override", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ modelRoles: { smol: "old/smol" } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.override("modelRoleStorage", "project");
+			settings.overrideModelRoles({ smol: "runtime/smol" });
+			settings.setProjectModelRole("smol", "local/smol");
+			expect(settings.getModelRole("smol")).toBe("local/smol");
+			expect(settings.isProjectModelRoleRuntimeOverrideActive("smol")).toBe(true);
+
+			let roleSignals = 0;
+			const unsubscribe = onModelRolesChanged(() => {
+				roleSignals += 1;
+			});
+			try {
+				await Bun.write(projectConfigPath, YAML.stringify({ modelRoles: { smol: "disk/smol" } }, null, 2));
+				await settings.flush();
+				expect(settings.getModelRole("smol")).toBe("disk/smol");
+				expect(settings.getProjectModelRole("smol")).toBe("disk/smol");
+				expect(settings.getModelRoleProvenance("smol")).toBe("runtime");
+				expect(settings.isProjectModelRoleRuntimeOverrideActive("smol")).toBe(true);
+				expect(roleSignals).toBeGreaterThan(0);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					modelRoles: { smol: "disk/smol" },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("fires session-runtime hooks for an adopted sibling project edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ ask: { enabled: true }, memory: { backend: "builtin" } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const received: Array<{ backend: string; paths: string[] }> = [];
+			const unsubscribe = onSessionRuntimeChanged(paths => {
+				received.push({ backend: settings.get("memory.backend"), paths: [...paths] });
+			});
+			try {
+				settings.set("ask.enabled", false, "project");
+				expect(received).toEqual([]);
+				await Bun.write(
+					projectConfigPath,
+					YAML.stringify({ ask: { enabled: true }, memory: { backend: "hindsight" } }, null, 2),
+				);
+				await settings.flush();
+				expect(settings.get("memory.backend")).toBe("hindsight");
+				expect(received).toEqual([{ backend: "hindsight", paths: ["memory.backend"] }]);
+				expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+					ask: { enabled: false },
+					memory: { backend: "hindsight" },
+				});
+			} finally {
+				unsubscribe();
+			}
+		});
+
+		it("restores the original runtime role after an adopted project-role clear", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ modelRoles: { smol: "old/smol" } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.override("modelRoleStorage", "project");
+			settings.overrideModelRoles({ smol: "runtime/smol" });
+			settings.setProjectModelRole("smol", "local/smol");
+			expect(settings.getModelRole("smol")).toBe("local/smol");
+
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			await settings.flush();
+
+			expect(settings.getProjectModelRole("smol")).toBeUndefined();
+			expect(settings.getModelRole("smol")).toBe("runtime/smol");
+			expect(settings.isProjectModelRoleRuntimeOverrideActive("smol")).toBe(false);
+			const cloned = await settings.cloneForCwd(tempDir.join("other-project"));
+			expect(cloned.getModelRole("smol")).toBe("runtime/smol");
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
+
+		it("clears project-config existence after adopting a deleted native file", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.hasProjectConfig()).toBe(true);
+
+			settings.set("ask.enabled", false, "project");
+			await fs.promises.unlink(projectConfigPath);
+			await settings.flush();
+
+			expect(settings.hasProjectConfig()).toBe(false);
+			expect(await Bun.file(projectConfigPath).exists()).toBe(false);
+		});
+
+		it("attributes an adopted non-native shellPath after a sibling locked save", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			const claudeShell = tempDir.join("missing-claude-bash");
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ shellPath: claudeShell }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			const nativeShell = tempDir.join("missing-native-bash");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ shellPath: nativeShell, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(() => settings.getShellConfig()).toThrow(`Please update shellPath in ${projectConfigPath}`);
+
+			settings.set("ask.enabled", false, "project");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: true } }, null, 2));
+			await settings.flush();
+
+			expect(settings.get("shellPath")).toBe(claudeShell);
+			expect(() => settings.getShellConfig()).toThrow(
+				`Please update shellPath in ${path.join(projectDir, ".claude", "settings.json")}`,
+			);
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				ask: { enabled: false },
+			});
 		});
 	});
 

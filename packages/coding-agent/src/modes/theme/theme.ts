@@ -45,7 +45,7 @@ function shouldUseMacOSAppearanceFallback(): boolean {
 	return process.platform === "darwin" && !!Bun.env.ZELLIJ;
 }
 
-function detectTerminalBackground(): "dark" | "light" {
+export function detectTerminalAppearance(): "dark" | "light" {
 	// Tier 1: terminal-reported appearance from OSC 11 luminance.
 	if (!shouldUseMacOSAppearanceFallback() && terminalReportedAppearance) {
 		return terminalReportedAppearance;
@@ -71,7 +71,7 @@ function detectTerminalBackground(): "dark" | "light" {
 }
 
 function getDefaultTheme(): string {
-	const bg = detectTerminalBackground();
+	const bg = detectTerminalAppearance();
 	return bg === "light" ? autoLightTheme : autoDarkTheme;
 }
 
@@ -94,6 +94,10 @@ export function fgOrPlain(color: ThemeColor, text: string, styledText: string = 
 export interface ThemeChangeEvent {
 	/** Preview/presentation-only changes should repaint live UI without replacing native scrollback. */
 	ephemeral?: boolean;
+	/** Preview-only glyph override; omitted keeps the current preset. */
+	symbolPreset?: SymbolPreset;
+	/** Preview-only color-blind override; omitted keeps the current mode. */
+	colorBlindMode?: boolean;
 }
 
 var currentSymbolPresetOverride: SymbolPreset | undefined;
@@ -220,6 +224,12 @@ export async function previewTheme(
 	name: string,
 	event: ThemeChangeEvent = { ephemeral: true },
 ): Promise<{ success: boolean; error?: string }> {
+	if (event.symbolPreset !== undefined) {
+		currentSymbolPresetOverride = event.symbolPreset;
+	}
+	if (event.colorBlindMode !== undefined) {
+		currentColorBlindMode = event.colorBlindMode;
+	}
 	const requestId = ++themeLoadRequestId;
 	try {
 		const loadedTheme = await loadTheme(name, getCurrentThemeOptions());

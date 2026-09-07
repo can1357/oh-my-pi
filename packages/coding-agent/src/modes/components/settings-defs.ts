@@ -10,7 +10,7 @@
  */
 
 import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { Settings } from "../../config/settings";
+import { type SettingValue as SchemaSettingValue, Settings, type SettingsScope } from "../../config/settings";
 import {
 	type AnyUiMetadata,
 	getDefault,
@@ -46,7 +46,7 @@ interface BaseSettingDef {
 	 * setting is hidden from the UI. Applies to every variant — booleans,
 	 * enums, submenus, and text inputs.
 	 */
-	condition?: () => boolean;
+	condition?: (scope?: SettingsScope) => boolean;
 }
 
 export interface BooleanSettingDef extends BaseSettingDef {
@@ -95,65 +95,28 @@ export type SettingDef =
 // Condition Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-const CONDITIONS: Record<string, () => boolean> = {
+function readSetting<P extends SettingPath>(path: P, scope?: SettingsScope): SchemaSettingValue<P> | undefined {
+	try {
+		const sm = Settings.instance;
+		if (scope === "global") return sm.getGlobalValue(path);
+		if (scope === "project") return sm.getProjectScopedValue(path);
+		return sm.get(path);
+	} catch {
+		return undefined;
+	}
+}
+
+const CONDITIONS: Record<string, (scope?: SettingsScope) => boolean> = {
 	macOS: () => process.platform === "darwin",
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
-	advisorEnabled: () => {
-		try {
-			return Settings.instance.get("advisor.enabled") === true;
-		} catch {
-			return false;
-		}
-	},
-	hindsightActive: () => {
-		try {
-			return Settings.instance.get("memory.backend") === "hindsight";
-		} catch {
-			return false;
-		}
-	},
-	mnemopiActive: () => {
-		try {
-			return Settings.instance.get("memory.backend") === "mnemopi";
-		} catch {
-			return false;
-		}
-	},
-	autolearnActive: () => {
-		try {
-			return Settings.instance.get("autolearn.enabled") === true;
-		} catch {
-			return false;
-		}
-	},
-	autoThinkingActive: () => {
-		try {
-			return Settings.instance.get("defaultThinkingLevel") === "auto";
-		} catch {
-			return false;
-		}
-	},
-	usageAwareFallbackEnabled: () => {
-		try {
-			return Settings.instance.get("retry.usageAwareFallback") === true;
-		} catch {
-			return false;
-		}
-	},
-	planModeEnabled: () => {
-		try {
-			return Settings.instance.get("plan.enabled");
-		} catch {
-			return false;
-		}
-	},
-	unexpectedStopSmart: () => {
-		try {
-			return Settings.instance.get("features.unexpectedStopDetection") === "smart";
-		} catch {
-			return false;
-		}
-	},
+	advisorEnabled: scope => readSetting("advisor.enabled", scope) === true,
+	hindsightActive: scope => readSetting("memory.backend", scope) === "hindsight",
+	mnemopiActive: scope => readSetting("memory.backend", scope) === "mnemopi",
+	autolearnActive: scope => readSetting("autolearn.enabled", scope) === true,
+	autoThinkingActive: scope => readSetting("defaultThinkingLevel", scope) === "auto",
+	usageAwareFallbackEnabled: scope => readSetting("retry.usageAwareFallback", scope) === true,
+	planModeEnabled: scope => readSetting("plan.enabled", scope) === true,
+	unexpectedStopSmart: scope => readSetting("features.unexpectedStopDetection", scope) === "smart",
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

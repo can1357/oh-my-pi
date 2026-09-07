@@ -214,8 +214,12 @@ export class SelectorController {
 				},
 				{
 					onChange: (id, value) => this.handleSettingChange(id, value),
-					onThemePreview: async themeName => {
-						const result = await previewTheme(themeName);
+					onThemePreview: async (themeName, presentation) => {
+						const result = await previewTheme(themeName, {
+							ephemeral: true,
+							symbolPreset: presentation?.symbolPreset,
+							colorBlindMode: presentation?.colorBlindMode,
+						});
 						if (result.success) {
 							this.ctx.statusLine.invalidate();
 							this.ctx.ui.invalidate();
@@ -264,6 +268,7 @@ export class SelectorController {
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+							segmentOptions: settings.get("statusLine.segmentOptions"),
 							contextLine: settings.get("statusLine.contextLine"),
 						});
 						this.ctx.ui.requestRender();
@@ -528,17 +533,17 @@ export class SelectorController {
 				this.ctx.ui.requestRender();
 				break;
 			case "steeringMode":
-				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time");
+				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time", false);
 				break;
 			case "followUpMode":
-				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time");
+				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time", false);
 				break;
 			case "interruptMode":
-				this.ctx.session.setInterruptMode(value as "immediate" | "wait");
+				this.ctx.session.setInterruptMode(value as "immediate" | "wait", false);
 				break;
 			case "thinkingLevel":
 			case "defaultThinkingLevel":
-				this.ctx.session.setThinkingLevel(value as ConfiguredThinkingLevel, true);
+				this.ctx.session.setThinkingLevel(value as ConfiguredThinkingLevel);
 				this.ctx.statusLine.invalidate();
 				this.ctx.updateEditorBorderColor();
 				break;
@@ -740,6 +745,10 @@ export class SelectorController {
 			case "statusLine.sessionAccent":
 			case "statusLine.transparent":
 			case "statusLine.compactThinkingLevel":
+			case "statusLine.contextLine":
+			case "statusLine.leftSegments":
+			case "statusLine.rightSegments":
+			case "statusLine.segmentOptions":
 			case "statusLineSegments":
 			case "statusLineModelThinking":
 			case "statusLinePathAbbreviate":
@@ -761,6 +770,7 @@ export class SelectorController {
 					transparent: settings.get("statusLine.transparent"),
 					segmentOptions: settings.get("statusLine.segmentOptions"),
 					compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+					contextLine: settings.get("statusLine.contextLine"),
 				};
 				this.ctx.statusLine.updateSettings(statusLineSettings);
 				this.ctx.ui.requestRender();

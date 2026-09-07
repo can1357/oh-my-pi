@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/settings` leaving the project-effective appearance after adopting a theme or status-line edit while previewing another scope.
+- Fixed `/settings` keeping the previous scope's theme after Alt+S onto an unloadable Dark/Light mapping.
+- Fixed `/settings` leaving a hovered theme after canceling an unloadable Dark/Light Theme submenu.
+- Fixed `/settings` previewing project glyphs and color-blind colors while browsing a different scope.
+- Fixed `/settings` dropping custom status-line segment options when closing the overlay.
+- Fixed `/settings` leaving a stale live theme or status preview after adopting a search-mode appearance submenu edit.
+- Fixed project saves leaving live browser and computer tools on the rejected local value after adopting a newer disk edit.
+- Fixed project-cleared provider request limits leaking `null` tombstones through `Settings.get()` and `omp config get --json`.
+- Fixed project saves leaving the live advisor status-line indicator stale after adopting an `advisor.enabled` disk edit.
+- Fixed conversation-flow setting signals reapplying queue modes onto unrelated Settings clones.
+- Fixed `SettingsManager.create()` missing a loaded instance when `cwd` or `agentDir` is relative.
+- Fixed persisted queue-mode changes restoring unrelated live-only conversation modes.
+- Fixed shadowed global queue-mode writes resetting the live session back to the project override.
+- Fixed `/settings` leaving a scoped theme preview after close when the effective theme name cannot load.
+- Fixed `/settings` trapping Tab and Alt+S after an adopted disk edit hid an open text editor.
+- Fixed project saves leaving already-rendered OSC 8 links on a rejected `tui.hyperlinks` value.
+- Fixed `/settings` discarding an in-progress global editor after adopting a project disk edit.
+- Fixed `/settings` discarding in-progress editors after adopting an unrelated disk edit.
+- Fixed `/settings` keeping a stale multi-select submenu after adopting a newer disk edit.
+- Fixed `/settings` resetting an open multi-select cursor after an ordinary project save.
+- Fixed project inherit treating the native `.omp/config.yml` as a non-native source when cwd is relative.
+- Fixed `/settings` copying an unchanged inherited credential into `.omp/config.yml`.
+- Fixed `/settings` project-scope record edits copying inherited keys, inheriting only a subset of migrated aliases, skipping the initial appearance preview, and re-persisting queue-mode choices globally.
+- Fixed `/settings` rendering unsanitized repository names in the project-scope title.
+- Fixed project saves leaving live git-status TUI state on the rejected local value after adopting a newer disk edit.
+- Fixed overlapping project saves dropping a later edit after the in-flight save rejected.
+- Fixed overlapping project saves leaving live session state on an adopted disk value after a later same-key edit persisted.
+- Fixed project saves discarding a second same-key edit when a sibling disk edit landed during debounce.
+- Fixed `/settings` scoped status-line previews omitting segment options from the selected layer.
+- Fixed `/settings` leaving a scoped status-line preview after close, and project saves overwriting newer same-key disk edits without firing adopted-change hooks.
+- Fixed project saves keeping a rejected local model-role override or blaming `.omp/config.yml` after adopting a newer on-disk role or inherited `shellPath`.
+- Fixed project inherit leaving a legacy flat `theme` override, and project saves treating an alias-backed clear as unconflicted when a newer legacy alias landed on disk.
+- Fixed project inherit leaving a quoted-dotted `features.unexpectedStopDetection` alias, and skipped project queue-mode saves leaving the live session on the rejected local value.
+- Fixed skipped project thinking and memory saves leaving the live session on the rejected local value.
+- Fixed project inherit leaving mnemosyne, hindsight, and Exa aliases, and skipped autocompleteMaxVisible saves leaving the editor on the rejected local value.
+- Fixed project saves leaving live session/editor state, original runtime model roles, or a stale project-config flag after adopting a sibling disk edit, role clear, or deleted `.omp/config.yml`.
+- Fixed project saves resetting a temporary `/thinking` level when adopting an unrelated session-runtime sibling edit.
+- Fixed project edits to a renamed native object dropping sibling legacy fields.
+- Fixed project inherit of one renamed native field dropping sibling legacy fields.
+- Fixed adopted project settings reapplying live session state across Settings clones, and `/settings` keeping stale row snapshots after a skipped project save.
+- Fixed project saves leaving live sampling parameters on the rejected local value after adopting a newer disk edit.
+- Fixed project saves leaving live omit-thinking and auto-compact session state on the rejected local value after adopting a newer disk edit.
+- Fixed project saves leaving the live auto-compact status indicator stale after adopting a `compaction.methodOrder` disk edit.
+- Fixed project saves leaving live web-search eligibility, tool-activity visibility, remaining display toggles, MCP notification subscriptions, composer shape, spelling, and TUI tightness/scrollback/mermaid state on the rejected local value after adopting a newer disk edit.
+- Fixed `/settings` shadowed global theme submenu commits snapping the live theme back to the project-effective mapping.
+- Fixed project saves leaving live status-line cached settings on the rejected local value after adopting a newer disk edit.
+- Fixed `/settings` shadowed global edits reapplying live session state when the effective value did not change.
+- Fixed `/settings` silently writing project-shadowed edits to the global profile by adding explicit project/global scopes and project override inheritance. ([#8208](https://github.com/can1357/oh-my-pi/issues/8208))
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
