@@ -762,7 +762,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			let attemptEventBuffer: AssistantMessageEvent[] = [];
 			let attemptStreamingLive = false;
 			const pendingToolEventBuffers = new Map<number, AssistantMessageEvent[]>();
-			const shouldBufferAttemptEvents = () => tools.length > 0 && !emptyToolRetryUsed && !incompleteToolRetryUsed;
+			const shouldBufferAttemptEvents = () =>
+				// Keep buffering while either empty or incomplete retry is still
+				// available — sequential retries must not publish abandoned events.
+				tools.length > 0 && (!emptyToolRetryUsed || !incompleteToolRetryUsed);
 			const isToolcallEvent = (
 				event: AssistantMessageEvent,
 			): event is Extract<AssistantMessageEvent, { type: "toolcall_start" | "toolcall_delta" | "toolcall_end" }> =>

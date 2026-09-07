@@ -22,6 +22,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { fetchGrokbotAvailableModels } from "@oh-my-pi/pi-catalog/discovery/grokbot";
 import { loadGrokbotConfig } from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { prompt } from "@oh-my-pi/pi-utils";
 import { streamGrokBot } from "../packages/ai/src/providers/grokbot.ts";
 import type { Api } from "@oh-my-pi/pi-catalog/types";
 import type { AssistantMessage, Context, Model, Tool, ToolCall } from "../packages/ai/src/types.ts";
@@ -30,6 +31,15 @@ import {
 	resolveGrokbotSandToolPolicy,
 	selectGrokbotMatrixIds,
 } from "../packages/ai/src/providers/grokbot/tool-policy.ts";
+import textSystemPrompt from "./grokbot-catalog-matrix/text-system.md" with { type: "text" };
+import textUserPrompt from "./grokbot-catalog-matrix/text-user.md" with { type: "text" };
+import toolsSystemPrompt from "./grokbot-catalog-matrix/tools-system.md" with { type: "text" };
+import toolsFollowupSystemPrompt from "./grokbot-catalog-matrix/tools-followup-system.md" with { type: "text" };
+import toolBashUserPrompt from "./grokbot-catalog-matrix/tool-bash-user.md" with { type: "text" };
+import toolReadUserPrompt from "./grokbot-catalog-matrix/tool-read-user.md" with { type: "text" };
+import toolWriteUserPrompt from "./grokbot-catalog-matrix/tool-write-user.md" with { type: "text" };
+import ompToolsUserPrompt from "./grokbot-catalog-matrix/omp-tools-user.md" with { type: "text" };
+import ompTextUserPrompt from "./grokbot-catalog-matrix/omp-text-user.md" with { type: "text" };
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const TEXT_TOKEN = "pong42";
@@ -210,11 +220,11 @@ async function runText(model: Model<Api>): Promise<{
 	detail?: string;
 }> {
 	const result = await streamOnce(model, {
-		systemPrompt: ["You are a concise assistant."],
+		systemPrompt: [prompt.render(textSystemPrompt).trim()],
 		messages: [
 			{
 				role: "user",
-				content: `Reply with exactly: ${TEXT_TOKEN}. Do not call tools.`,
+				content: prompt.render(textUserPrompt, { token: TEXT_TOKEN }).trim(),
 				timestamp: Date.now(),
 			},
 		],
@@ -265,12 +275,12 @@ function isWriteLikeCall(call: ToolCall): boolean {
 function toolSmokePrompt(kind: ToolSmokeKind, ping: string, id: string): string {
 	const safe = idSafe(id);
 	if (kind === "bash") {
-		return `Use the bash or Shell tool to run exactly: echo ${ping}. Do not explain. Call the tool now.`;
+		return prompt.render(toolBashUserPrompt, { ping }).trim();
 	}
 	if (kind === "read") {
-		return `Use the read or Read tool to read the file /tmp/grokbot-read-${safe}.txt. Do not explain. Call the tool now.`;
+		return prompt.render(toolReadUserPrompt, { safeId: safe }).trim();
 	}
-	return `Use the write or Write tool to write exactly ${ping} to /tmp/grokbot-write-${safe}.txt. Do not explain. Call the tool now.`;
+	return prompt.render(toolWriteUserPrompt, { ping, safeId: safe }).trim();
 }
 
 async function runOneTool(
@@ -289,7 +299,7 @@ async function runOneTool(
 	const turn1 = await streamOnce(
 		model,
 		{
-			systemPrompt: ["You are a coding agent. Prefer the named file/shell tool when asked."],
+			systemPrompt: [prompt.render(toolsSystemPrompt).trim()],
 			messages: [{ role: "user", content: userText, timestamp: Date.now() }],
 			tools: OMP_TOOLS,
 		},
@@ -322,7 +332,7 @@ async function runOneTool(
 	const turn2 = await streamOnce(
 		model,
 		{
-			systemPrompt: ["You are a coding agent. After a tool result, reply with the exact result text."],
+			systemPrompt: [prompt.render(toolsFollowupSystemPrompt).trim()],
 			messages: [
 				{ role: "user", content: userText, timestamp: Date.now() },
 				turn1,
@@ -457,9 +467,9 @@ function ompCommand(args: string[]): string[] {
 
 function runOmp(model: string, { tools }: { tools: boolean }): { pass: boolean; status: number; out: string } {
 	const ping = `tools-pong-${idSafe(model)}`;
-	const prompt = tools
-		? `Use the bash tool to run: echo ${TEXT_TOKEN}. Then reply with exactly: ${TEXT_TOKEN}`
-		: `Reply with exactly: ${TEXT_TOKEN}. Do not call tools.`;
+	const promptText = tools
+		? prompt.render(ompToolsUserPrompt, { token: TEXT_TOKEN }).trim()
+		: prompt.render(ompTextUserPrompt, { token: TEXT_TOKEN }).trim();
 	const args = [
 		"-p",
 		"--no-session",
@@ -472,7 +482,7 @@ function runOmp(model: string, { tools }: { tools: boolean }): { pass: boolean; 
 		`grokbot/${model}`,
 		"--thinking",
 		"low",
-		prompt,
+		promptText,
 	];
 	const r = Bun.spawnSync(ompCommand(args), {
 		cwd: ROOT,

@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { buildModel } from "../src/build";
 import { normalizeGrokbotAvailableModels } from "../src/discovery/grokbot";
 import {
@@ -401,29 +404,37 @@ describe("grokbot AvailableModels normalize", () => {
 	});
 
 	test("live non-reasoning grok-4.6 is not OR-upgraded by static seed reasoning", async () => {
-		const staticModels = buildGrokbotStaticSeed().map(seed => buildModel(seed));
-		expect(staticModels.find(m => m.id === "grok-4.6")?.reasoning).toBe(true);
-		expect(staticModels.find(m => m.id === "sand-default")?.reasoning).toBe(true);
-		const live: ModelSpec<"grokbot-sand"> = {
-			id: "grok-4.6",
-			name: "Grok 4.6",
-			api: "grokbot-sand",
-			provider: "grokbot",
-			baseUrl: "https://api2.cursor.sh",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: null,
-			maxTokens: null,
-		};
-		const result = await resolveProviderModels({
-			providerId: "grokbot",
-			staticModels,
-			dynamicModelsAuthoritative: true,
-			fetchDynamicModels: async () => [live],
-		});
-		const merged = result.models.find(m => m.id === "grok-4.6");
-		expect(merged?.reasoning).toBe(false);
-		expect(merged?.thinking).toBeUndefined();
+		// Isolate the model cache: a warm ~/.omp cache would short-circuit the
+		// fetch and re-surface seed reasoning:true, hiding the merge contract.
+		const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-reasoning-"));
+		try {
+			const staticModels = buildGrokbotStaticSeed().map(seed => buildModel(seed));
+			expect(staticModels.find(m => m.id === "grok-4.6")?.reasoning).toBe(true);
+			expect(staticModels.find(m => m.id === "sand-default")?.reasoning).toBe(true);
+			const live: ModelSpec<"grokbot-sand"> = {
+				id: "grok-4.6",
+				name: "Grok 4.6",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: null,
+				maxTokens: null,
+			};
+			const result = await resolveProviderModels({
+				providerId: "grokbot",
+				staticModels,
+				dynamicModelsAuthoritative: true,
+				cacheDbPath: path.join(cacheDir, "models.db"),
+				fetchDynamicModels: async () => [live],
+			});
+			const merged = result.models.find(m => m.id === "grok-4.6");
+			expect(merged?.reasoning).toBe(false);
+			expect(merged?.thinking).toBeUndefined();
+		} finally {
+			await fs.rm(cacheDir, { recursive: true, force: true });
+		}
 	});
 });

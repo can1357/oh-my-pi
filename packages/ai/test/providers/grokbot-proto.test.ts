@@ -1113,6 +1113,76 @@ describe("grokbot incomplete tool calls", () => {
 		]);
 	});
 
+	test("keeps sequential empty and incomplete retries buffered until accepted", async () => {
+		// After an incomplete retry, empty-tool retry must still buffer — otherwise
+		// abandoned start/thinking from the second attempt leak before the third.
+		mockAuth();
+		const incomplete = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					toolCallPart: { toolCallId: "c-bad", toolName: "Read", args: '{"path":', isComplete: false },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const thinkingOnly = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					thinkingPart: { text: "abandoned-plan", isFinal: true },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const complete = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					toolCallPart: {
+						toolCallId: "c-ok",
+						toolName: "Read",
+						args: '{"path":"/tmp/x"}',
+						isComplete: true,
+					},
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		let calls = 0;
+		const fetchImpl = (async () => {
+			calls += 1;
+			if (calls === 1) return connectBody(incomplete);
+			if (calls === 2) return connectBody(thinkingOnly);
+			return connectBody(complete);
+		}) as FetchImpl;
+		const toolsContext: Context = {
+			messages: [{ role: "user", content: "call", timestamp: 1 }],
+			tools: [
+				{
+					name: "Read",
+					description: "read file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" } },
+						required: ["path"],
+					},
+				},
+			],
+		};
+
+		const stream = streamGrokBot(model, toolsContext, { apiKey: "renew", fetch: fetchImpl });
+		const starts: string[] = [];
+		const thinking: string[] = [];
+		for await (const event of stream) {
+			if (event.type === "start") starts.push("start");
+			if (event.type === "thinking_delta") thinking.push(event.delta);
+		}
+		const result = await stream.result();
+		expect(calls).toBe(3);
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([expect.objectContaining({ type: "toolCall", id: "c-ok", name: "Read" })]);
+		expect(starts).toHaveLength(1);
+		expect(thinking.some(t => t.includes("abandoned-plan"))).toBe(false);
+	});
+
 	test("drops a hanging leftover tool when a completed call and text already exist", async () => {
 		mockAuth();
 		const complete = frameConnectProto(

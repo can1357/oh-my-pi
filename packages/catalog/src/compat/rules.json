@@ -8960,7 +8960,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:44",
+				"source": "providers/grokbot.kdl:48",
 				"providers": [
 					"grokbot"
 				],
@@ -8988,7 +8988,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:51",
+				"source": "providers/grokbot.kdl:55",
 				"providers": [
 					"grokbot"
 				],

@@ -34,6 +34,9 @@ export const GROKBOT_MODEL_SEEDS: readonly GrokbotModelSeed[] = [
 	{ id: "sand-automation", name: "sand-automation (routed)", reasoning: false },
 	{ id: "default", name: "Auto", reasoning: false },
 	{ id: "auto", name: "auto", reasoning: false },
+	// Offline-only: live AvailableModels owns reasoning for this id. Seed must
+	// stay true so KDL thinking-efforts resolve; putting reasoning in KDL would
+	// overwrite live reasoning:false via applyCatalogCorrections.
 	{ id: "grok-4.6", name: "Grok 4.6 (sand)", reasoning: true },
 ];
 
