@@ -23,10 +23,12 @@ import { logger, prompt, toError } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { expandRoleAlias, getModelMatchPreferences, resolveModelFromString } from "../config/model-resolver";
+import { type ServiceTierOverrides } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../internal-urls";
 import describeUserPrompt from "../prompts/tools/image-attachment-describe.md" with { type: "text" };
 import describeSystemPrompt from "../prompts/tools/image-attachment-describe-system.md" with { type: "text" };
+import { resolveVisionRequestServiceTier } from "./image-question";
 
 /** Telemetry tag for the oneshot vision-description calls. */
 const ONESHOT_KIND = "image_attachment_describe";
@@ -52,6 +54,8 @@ export interface DescribeAttachedImagesDeps {
 	activeModelString?: string;
 	telemetryConfig?: AgentTelemetryConfig;
 	sessionId?: string;
+	/** Explicit live per-family service-tier selections (override or explicit off) from the source host. */
+	serviceTierOverrides?: ServiceTierOverrides;
 	/** Test seam: overrides the underlying completeSimple call. */
 	completeImpl?: typeof completeSimple;
 }
@@ -142,7 +146,17 @@ async function describeImage(
 					},
 				],
 			},
-			{ apiKey: deps.modelRegistry.resolver(visionModel, deps.sessionId), signal },
+			{
+				apiKey: deps.modelRegistry.resolver(visionModel, deps.sessionId),
+				signal,
+				// Description requests send no reasoning, so effort-scoped rules do not match.
+				serviceTier: resolveVisionRequestServiceTier(
+					visionModel,
+					undefined,
+					deps.settings.get("tier.modelOverrides"),
+					deps.serviceTierOverrides,
+				),
+			},
 			{ telemetry, oneshotKind: ONESHOT_KIND, completeImpl: deps.completeImpl },
 		);
 		if (response.stopReason === "error" || response.stopReason === "aborted") {

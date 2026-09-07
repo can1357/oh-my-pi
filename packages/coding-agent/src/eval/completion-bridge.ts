@@ -25,6 +25,7 @@ import {
 	getModelMatchPreferences,
 	resolveModelFromString,
 } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
@@ -162,6 +163,14 @@ async function executeCompletion(
 			]
 		: undefined;
 	const telemetry = resolveTelemetry(session.getTelemetry?.(), session.getSessionId?.() ?? undefined);
+	const reasoning = reasoningForTier(finalTier, model);
+	// completion() runs outside the agent loop: match the actual effort and keep
+	// nonmatching requests untiered.
+	const tierResolution = resolveModelServiceTierOverride(
+		session.settings.get("tier.modelOverrides"),
+		model,
+		reasoning,
+	);
 	const systemPrompt = system ? [system] : ["You are a helpful assistant."];
 	const response = await instrumentedCompleteSimple(
 		model,
@@ -173,7 +182,8 @@ async function executeCompletion(
 		{
 			apiKey: registry.resolver(model, session.getSessionId?.() ?? undefined),
 			signal,
-			reasoning: reasoningForTier(finalTier, model),
+			reasoning,
+			serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 			toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
 		},
 		{ telemetry, oneshotKind: "eval_completion" },

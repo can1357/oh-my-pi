@@ -1,4 +1,4 @@
-import type { ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
+import type { ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai/types";
 import type { SubmenuOption } from "./settings-schema";
 
 /**
@@ -28,7 +28,7 @@ export function isServiceTierFamily(value: unknown): value is ServiceTierFamily 
 
 /** Whether a runtime value is a supported service tier for one provider family. */
 export function isServiceTierForFamily(family: string, tier: unknown): tier is ServiceTier {
-	if (typeof tier !== "string" || tier === "none") return false;
+	if (!isServiceTierValue(tier)) return false;
 	let values: readonly string[];
 	switch (family) {
 		case "openai":
@@ -101,7 +101,7 @@ export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTi
 /** Map a per-family setting value to a wire {@link ServiceTier}, or `undefined` to omit. */
 export function serviceTierSettingToTier(value: string): ServiceTier | undefined {
 	if (value === "none" || value === "" || value === "inherit") return undefined;
-	return value as ServiceTier;
+	return isServiceTierValue(value) ? value : undefined;
 }
 
 /** Assemble the live per-family tier map from the three `tier.*` setting values. */
@@ -143,4 +143,53 @@ export function serviceTierForAllFamilies(tier: ServiceTier | undefined): Servic
 export function resolveSubagentServiceTier(setting: string, inherited: ServiceTierByFamily): ServiceTierByFamily {
 	if (setting === "inherit") return inherited;
 	return serviceTierForAllFamilies(serviceTierSettingToTier(setting));
+}
+
+/** Absent keys inherit policy; null explicitly disables the family tier. */
+export type ServiceTierOverrides = Partial<Record<ServiceTierFamily, ServiceTier | null>>;
+export const SERVICE_TIER_OVERRIDE_VALUES = SERVICE_TIER_OPENAI_VALUES;
+
+export type ServiceTierOverrideSettingValue = (typeof SERVICE_TIER_OVERRIDE_VALUES)[number];
+export function isServiceTierValue(value: unknown): value is ServiceTier {
+	return value !== "none" && isServiceTierOverrideValue(value);
+}
+export function isServiceTierOverrideValue(value: unknown): value is ServiceTierOverrideSettingValue {
+	return SERVICE_TIER_OVERRIDE_VALUES.some(tier => tier === value);
+}
+
+/**
+ * Validate selector syntax only. Colons may belong to a literal model ID;
+ * resolution derives effort candidates from the model, not by splitting keys.
+ */
+export function isValidServiceTierOverrideKey(key: string): boolean {
+	if (key.length === 0 || /\s/.test(key)) return false;
+	if (key.includes("*") || key.includes("?")) return false;
+	const slash = key.indexOf("/");
+	return slash > 0 && slash < key.length - 1;
+}
+
+/** Validate selector syntax and tier values without requiring catalog entries. */
+export function validateServiceTierOverrides(
+	value: unknown,
+	onInvalid?: (invalid: readonly string[]) => void,
+): Record<string, string> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const invalid: string[] = [];
+	const validated: Record<string, string> = {};
+	for (const [key, tier] of Object.entries(value)) {
+		if (typeof tier !== "string" || !isServiceTierOverrideValue(tier)) {
+			invalid.push(`${key} (value must be one of: ${SERVICE_TIER_OVERRIDE_VALUES.join(", ")})`);
+			continue;
+		}
+		if (!isValidServiceTierOverrideKey(key)) {
+			invalid.push(`${key} (key must be an exact "provider/model" or "provider/model:effort")`);
+			continue;
+		}
+		validated[key] = tier;
+	}
+	if (invalid.length > 0) {
+		if (onInvalid) onInvalid(invalid);
+		else throw new Error(`Invalid tier.modelOverrides entries — ${invalid.join("; ")}`);
+	}
+	return validated;
 }

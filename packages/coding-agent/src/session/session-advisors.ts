@@ -26,6 +26,7 @@ import type {
 	AssistantMessage,
 	CodexCompactionContext,
 	Context,
+	Effort,
 	Message,
 	Model,
 	ProviderSessionState,
@@ -68,6 +69,7 @@ import {
 	resolveModelOverride,
 } from "../config/model-resolver";
 import { MODEL_ROLES } from "../config/model-roles";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
 import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "../cursor";
@@ -256,7 +258,8 @@ export interface SessionAdvisorsHost {
 	preserveAdvisorCard(card: CustomMessage): void;
 	hasPendingNextTurnMessages(): boolean;
 	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
-	effectiveServiceTier(model: Model): ServiceTier | undefined;
+	/** Uses the advisor's final reasoning options; omitted effort never inherits the parent's. */
+	effectiveServiceTier(model: Model, reasoning?: Effort, disableReasoning?: boolean): ServiceTier | undefined;
 	resolveContextPromotionTarget(
 		currentModel: Model,
 		contextWindow: number,
@@ -821,10 +824,22 @@ export class SessionAdvisors {
 			advisorTierSetting === "inherit"
 				? undefined
 				: serviceTierForAllFamilies(serviceTierSettingToTier(advisorTierSetting));
-		const advisorServiceTierResolver = (model: Model): ServiceTier | undefined =>
-			advisorTierSetting === "inherit"
-				? this.#host.effectiveServiceTier(model)
-				: resolveModelServiceTier(advisorTierMap, model);
+		const advisorServiceTierResolver = (
+			model: Model,
+			reasoning: Effort | undefined,
+			disableReasoning?: boolean,
+		): ServiceTier | undefined => {
+			if (advisorTierSetting === "inherit") {
+				return this.#host.effectiveServiceTier(model, reasoning, disableReasoning);
+			}
+			const exactOverride = resolveModelServiceTierOverride(
+				this.#host.settings.get("tier.modelOverrides"),
+				model,
+				disableReasoning ? undefined : reasoning,
+			);
+			if (exactOverride.matched) return exactOverride.tier;
+			return resolveModelServiceTier(advisorTierMap, model);
+		};
 
 		for (const descriptor of descriptors) {
 			const {
@@ -1697,6 +1712,7 @@ export class SessionAdvisors {
 					signal,
 					{
 						thinkingLevel: advisorCompactionThinkingLevel,
+						serviceTierResolver: agent.serviceTierResolver,
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						telemetry,
 						tools: agent.state.tools,

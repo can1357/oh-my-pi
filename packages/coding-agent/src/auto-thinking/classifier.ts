@@ -27,6 +27,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
 import type { Settings } from "../config/settings";
 import difficultySystemPrompt from "../prompts/system/auto-thinking-difficulty.md" with { type: "text" };
 import difficultyLocalPrompt from "../prompts/system/auto-thinking-difficulty-local.md" with { type: "text" };
@@ -103,7 +104,9 @@ export interface ClassifierUsage {
 	model: string;
 	usage: Usage;
 	stopReason: AssistantMessage["stopReason"];
+	serviceTier?: AssistantMessage["serviceTier"];
 	errorMessage?: string;
+	disabledFeatures?: AssistantMessage["disabledFeatures"];
 }
 
 /**
@@ -142,6 +145,7 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceili
 	// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 	const metadata = deps.metadataResolver?.(model.provider);
 	const maxTokens = ONLINE_REASONING_SAFE_MAX_TOKENS;
+	const tierResolution = resolveModelServiceTierOverride(deps.settings.get("tier.modelOverrides"), model, undefined);
 
 	const response = await retryTransientCompletion(
 		() =>
@@ -156,6 +160,7 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceili
 					sessionId: deps.sessionId,
 					maxTokens,
 					disableReasoning: true,
+					serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 					metadata,
 					signal: deps.signal,
 					onAttempt: attempt =>
@@ -165,14 +170,15 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceili
 							provider: attempt.provider,
 							model: attempt.model,
 							usage: attempt.usage,
+							serviceTier: attempt.serviceTier ?? null,
 							stopReason: attempt.stopReason,
 							errorMessage: attempt.errorMessage,
+							disabledFeatures: attempt.disabledFeatures,
 						}),
 				},
 			),
 		{ signal: deps.signal },
 	);
-
 	if (response.stopReason === "error") {
 		throw new Error(`auto-thinking: online classification failed: ${response.errorMessage ?? "unknown error"}`);
 	}

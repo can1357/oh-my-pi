@@ -9,6 +9,7 @@ import type { DiagnosticSummary } from "@oh-my-pi/pi-mnemopi/diagnose";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
 import type {
 	MemoryBackend,
 	MemoryBackendSaveInput,
@@ -579,6 +580,12 @@ async function resolveMnemopiProviderOptions(
 					});
 					return null;
 				}
+				// This side request sends no reasoning, so effort-scoped rules do not match.
+				const tierResolution = resolveModelServiceTierOverride(
+					settings.get("tier.modelOverrides"),
+					model,
+					undefined,
+				);
 				const message = await retryTransientCompletion(() =>
 					completeSimple(
 						model,
@@ -591,6 +598,7 @@ async function resolveMnemopiProviderOptions(
 							sessionId,
 							maxTokens: opts?.maxTokens,
 							temperature: opts?.temperature,
+							serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 						},
 					),
 				);

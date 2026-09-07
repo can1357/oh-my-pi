@@ -69,6 +69,7 @@ import type {
 	Model,
 	OptionsForApi,
 	ProviderSessionState,
+	ServiceTier,
 	SimpleStreamOptions,
 	StreamOptions,
 	ThinkingBudgets,
@@ -871,24 +872,63 @@ export function listProvidersWithEnvKey(): string[] {
 	return Object.keys(serviceProviderMap);
 }
 
+/**
+ * Stamp the caller-requested tier — never a provider-granted echo — onto every
+ * message a raw `stream`/`streamSimple` pipeline delivers, including events
+ * already buffered by synchronous or retrying providers.
+ */
+function withRequestedServiceTier(
+	inner: AssistantMessageEventStream,
+	serviceTier: ServiceTier | null,
+): AssistantMessageEventStream {
+	const outer = new AssistantMessageEventStream();
+	outer.forwardLocalWorkFrom(inner);
+	void (async () => {
+		try {
+			for await (const event of inner) {
+				if (event.type === "done") event.message.serviceTier = serviceTier;
+				else if (event.type === "error") event.error.serviceTier = serviceTier;
+				else event.partial.serviceTier = serviceTier;
+				outer.push(event);
+				if (outer.done) return;
+			}
+			if (!outer.done) {
+				const result = await inner.result();
+				result.serviceTier = serviceTier;
+				outer.end(result);
+			}
+		} catch (error) {
+			outer.fail(error);
+		}
+	})();
+	return outer;
+}
+
 export function stream<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	const requestedTier = options?.serviceTier ?? null;
 	if (!model.requiresGlyphTokenization) {
-		return withThinkingLoopGuard(model, options, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
+		return withRequestedServiceTier(
+			withThinkingLoopGuard(model, options, opts =>
+				withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
+			),
+			requestedTier,
 		);
 	}
 	const codec = applyGlyphCodec(context);
 	const execHandlers = options?.execHandlers;
 	const wireOptions: OptionsForApi<TApi> | undefined =
 		execHandlers === undefined ? options : { ...options, execHandlers: codec.wrapCursorExecHandlers(execHandlers) };
-	return codec.wrap(
-		withThinkingLoopGuard(model, wireOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, codec.context, opts)),
+	return withRequestedServiceTier(
+		codec.wrap(
+			withThinkingLoopGuard(model, wireOptions, opts =>
+				withProviderInFlightLimit(model, opts, () => streamDispatch(model, codec.context, opts)),
+			),
 		),
+		requestedTier,
 	);
 }
 
@@ -1060,6 +1100,8 @@ async function resolveWithThinkingLoopRetries(
 	onAttempt?: (message: AssistantMessage) => void,
 ): Promise<AssistantMessage> {
 	const dispatchAttempt = async (): Promise<AssistantMessage> => {
+		// dispatch stamps the requested tier on every delivered message (see
+		// withRequestedServiceTier), so attempt hooks observe it immediately.
 		const message = await dispatch().result();
 		onAttempt?.(message);
 		return message;
@@ -1443,8 +1485,12 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
+	const requestedTier = options?.serviceTier ?? null;
 	if (!model.requiresGlyphTokenization) {
-		return streamSimpleWithAnthropicCacheRefresh(model, context, sessionOptions);
+		return withRequestedServiceTier(
+			streamSimpleWithAnthropicCacheRefresh(model, context, sessionOptions),
+			requestedTier,
+		);
 	}
 	const codec = applyGlyphCodec(context);
 	const execHandlers = sessionOptions.cursorExecHandlers ?? sessionOptions.execHandlers;
@@ -1457,7 +1503,10 @@ export function streamSimple<TApi extends Api>(
 					execHandlers: wrappedExecHandlers,
 					cursorExecHandlers: wrappedExecHandlers,
 				};
-	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, wireOptions));
+	return withRequestedServiceTier(
+		codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, wireOptions)),
+		requestedTier,
+	);
 }
 
 /**

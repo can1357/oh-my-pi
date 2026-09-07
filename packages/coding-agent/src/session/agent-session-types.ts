@@ -24,6 +24,7 @@ import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async"
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
+import type { ServiceTierOverrides } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
 import type { CursorMcpResourceAdapter } from "../cursor";
 import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
@@ -168,8 +169,10 @@ export interface AgentSessionConfig {
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
 	planYolo?: PlanYolo;
-	/** Initial per-family service tiers for the live session. */
+	/** Configured per-family service-tier baseline for the live session (from the `tier.*` settings). */
 	serviceTierByFamily?: ServiceTierByFamily;
+	/** Saved/launch overrides, kept separate so configured defaults do not become manual choices. */
+	serviceTierOverrides?: ServiceTierOverrides;
 	/** Prompt templates for expansion. */
 	promptTemplates?: PromptTemplate[];
 	/** File-based slash commands for expansion. */

@@ -49,7 +49,15 @@ import {
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	CodexCompactionContext,
+	Effort,
+	Message,
+	Model,
+	ProviderSessionState,
+	ServiceTier,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -260,6 +268,12 @@ function handoffSummaryFromDocument(
 export interface SessionMaintenanceHost {
 	agent: Agent;
 	sessionManager: SessionManager;
+	/** Resolve the effective service tier for a concrete side-request model/effort. */
+	effectiveServiceTier?(
+		model: Model,
+		reasoning: Effort | undefined,
+		disableReasoning?: boolean,
+	): ServiceTier | undefined;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	extensionRunner: ExtensionRunner | undefined;
@@ -2311,6 +2325,12 @@ export class SessionMaintenance {
 						// via resolveCompactionEffort so unsupported-effort models
 						// (xai-oauth/grok-build) don't trip requireSupportedEffort.
 						thinkingLevel: this.#host.thinkingLevel(),
+						...(this.#host.effectiveServiceTier
+							? {
+									serviceTierResolver: (model, reasoning, disableReasoning) =>
+										this.#host.effectiveServiceTier?.(model, reasoning, disableReasoning),
+								}
+							: {}),
 						tools: this.#host.agent.state.tools,
 						sessionId: this.#host.sessionId(),
 						promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
@@ -3597,6 +3617,12 @@ export class SessionMaintenance {
 									// site. Clamped per-model inside compact() via
 									// resolveCompactionEffort.
 									thinkingLevel: this.#host.thinkingLevel(),
+									...(this.#host.effectiveServiceTier
+										? {
+												serviceTierResolver: (model, reasoning, disableReasoning) =>
+													this.#host.effectiveServiceTier?.(model, reasoning, disableReasoning),
+											}
+										: {}),
 									tools: this.#host.agent.state.tools,
 									sessionId: this.#host.sessionId(),
 									promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,

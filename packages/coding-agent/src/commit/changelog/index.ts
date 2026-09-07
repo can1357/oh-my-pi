@@ -34,6 +34,7 @@ export interface ChangelogFlowInput {
 	model: Model<Api>;
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
+	modelServiceTierOverrides?: Readonly<Record<string, string>>;
 	stagedFiles: string[];
 	dryRun: boolean;
 	maxDiffChars?: number;
@@ -59,6 +60,7 @@ export async function runChangelogFlow({
 	model,
 	apiKey,
 	thinkingLevel,
+	modelServiceTierOverrides,
 	stagedFiles,
 	dryRun,
 	maxDiffChars,
@@ -92,6 +94,7 @@ export async function runChangelogFlow({
 			model,
 			apiKey,
 			sessionId,
+			modelServiceTierOverrides,
 			thinkingLevel,
 			changelogPath: boundary.changelogPath,
 			isPackageChangelog,

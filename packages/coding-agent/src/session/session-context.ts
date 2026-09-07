@@ -6,6 +6,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import type { ServiceTierOverrides } from "../config/service-tier";
 import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
@@ -17,7 +18,12 @@ import {
 	PREWALK_PLAN_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
-import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import {
+	type CompactionEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	type SessionEntry,
+	serviceTierChangeOverrides,
+} from "./session-entries";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
 // ~306k archive chars, and ~1.5M truncated chars. Current snapcompact frames
@@ -71,6 +77,8 @@ export interface SessionContext {
 	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
 	configuredThinkingLevel?: string;
 	serviceTier?: ServiceTierByFamily;
+	/** Per-family override selections from the latest change; absent = inherit policy, `null` = explicit off. */
+	serviceTierOverrides?: ServiceTierOverrides;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
 	/** Names of TTSR rules that have been injected this session */
@@ -199,6 +207,7 @@ export function buildSessionContext(
 			messages: [],
 			thinkingLevel: "off",
 			serviceTier: undefined,
+			serviceTierOverrides: undefined,
 			models: {},
 			injectedTtsrRules: [],
 			mode: "none",
@@ -217,6 +226,7 @@ export function buildSessionContext(
 			messages: [],
 			thinkingLevel: "off",
 			serviceTier: undefined,
+			serviceTierOverrides: undefined,
 			models: {},
 			injectedTtsrRules: [],
 			mode: "none",
@@ -239,6 +249,7 @@ export function buildSessionContext(
 	let thinkingLevel: string | undefined = "off";
 	let configuredThinkingLevel: string | undefined;
 	let serviceTier: ServiceTierByFamily | undefined;
+	let serviceTierOverrides: ServiceTierOverrides | undefined;
 	const models: Record<string, string> = {};
 	let compaction: CompactionEntry | null = null;
 	const injectedTtsrRulesSet = new Set<string>();
@@ -268,6 +279,7 @@ export function buildSessionContext(
 			}
 		} else if (entry.type === "service_tier_change") {
 			serviceTier = coerceServiceTierByFamily(entry.serviceTier);
+			serviceTierOverrides = serviceTierChangeOverrides(entry);
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			// Legacy fallback: infer default model from assistant messages only
 			// when no explicit `model_change` (role=default) entry has been
@@ -606,5 +618,6 @@ export function buildSessionContext(
 		injectedTtsrRules,
 		mode,
 		modeData,
+		serviceTierOverrides,
 	};
 }

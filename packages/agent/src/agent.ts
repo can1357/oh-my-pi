@@ -50,6 +50,7 @@ import type {
 	AgentToolContext,
 	AgentTurnEndContext,
 	AsideMessage,
+	ServiceTierResolver,
 	StreamFn,
 	ToolCallContext,
 	ToolChoiceDirective,
@@ -209,13 +210,10 @@ export interface AgentOptions {
 	presencePenalty?: number;
 	repetitionPenalty?: number;
 	serviceTier?: ServiceTier;
-	/**
-	 * Per-call effective service-tier resolver. When set, it authoritatively
-	 * supplies the request's tier (replacing the static `serviceTier` and its
-	 * telemetry) per model — used to scope a provider/model into a priority
-	 * serving path without mutating the shared session `serviceTier`.
-	 */
-	serviceTierResolver?: (model: Model) => ServiceTier | undefined;
+	/** Overrides serviceTier per request; an undefined result explicitly omits it. */
+	serviceTierResolver?: ServiceTierResolver;
+	/** Resolve external-scratchpad reasoning suppression before request policies. */
+	forceReasoningOffResolver?: (model: Model) => boolean;
 	/**
 	 * If true, request that the underlying provider omit reasoning/thinking summaries
 	 * from the response. The model still reasons internally; only the human-readable
@@ -392,7 +390,8 @@ export class Agent {
 	#presencePenalty?: number;
 	#repetitionPenalty?: number;
 	#serviceTier?: ServiceTier;
-	#serviceTierResolver?: (model: Model) => ServiceTier | undefined;
+	#serviceTierResolver?: ServiceTierResolver;
+	#forceReasoningOffResolver?: (model: Model) => boolean;
 	#hideThinkingSummary?: boolean;
 	#maxRetryDelayMs?: number;
 	#getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
@@ -481,6 +480,7 @@ export class Agent {
 		this.#repetitionPenalty = opts.repetitionPenalty;
 		this.#serviceTier = opts.serviceTier;
 		this.#serviceTierResolver = opts.serviceTierResolver;
+		this.#forceReasoningOffResolver = opts.forceReasoningOffResolver;
 		this.#hideThinkingSummary = opts.hideThinkingSummary;
 		this.#maxRetryDelayMs = opts.maxRetryDelayMs;
 		this.getApiKey = opts.getApiKey;
@@ -693,11 +693,11 @@ export class Agent {
 		this.#serviceTier = value;
 	}
 
-	get serviceTierResolver(): ((model: Model) => ServiceTier | undefined) | undefined {
+	get serviceTierResolver(): ServiceTierResolver | undefined {
 		return this.#serviceTierResolver;
 	}
 
-	set serviceTierResolver(value: ((model: Model) => ServiceTier | undefined) | undefined) {
+	set serviceTierResolver(value: ServiceTierResolver | undefined) {
 		this.#serviceTierResolver = value;
 	}
 
@@ -1483,6 +1483,7 @@ export class Agent {
 			getModel: () => this.#state.model ?? model,
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,
+			getForceReasoningOff: this.#forceReasoningOffResolver,
 			getServiceTier: this.#serviceTierResolver,
 			getSteeringMessages: async signal => {
 				if (skipInitialSteeringPoll) {

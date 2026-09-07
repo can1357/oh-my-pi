@@ -9,6 +9,7 @@ import { getAgentDbPath, getMemoriesDir, isEnoent, logger, parseJsonlLenient, pr
 
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
 import type { Settings } from "../config/settings";
 import type { MemoryBackendSaveInput, MemoryBackendSaveResult } from "../memory-backend/types";
 import consolidationTemplate from "../prompts/memories/consolidation.md" with { type: "text" };
@@ -406,6 +407,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 				sessionId: session.sessionId,
 				modelMaxTokens: computeModelTokenBudget(phase1Model, config),
 				config,
+				modelServiceTierOverrides: options.settings.get("tier.modelOverrides"),
 				metadata: session.agent?.metadataForProvider(phase1Model.provider),
 			});
 			if (!isMemoryStartupActive(options)) return;
@@ -567,6 +569,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				model: phase2Model,
 				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
 				sessionId: session.sessionId,
+				modelServiceTierOverrides: options.settings.get("tier.modelOverrides"),
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
 			});
 			if (!isMemoryStartupActive(options)) return;
@@ -728,6 +731,7 @@ async function runStage1Job(options: {
 	sessionId: string;
 	modelMaxTokens: number;
 	config: MemoryRuntimeConfig;
+	modelServiceTierOverrides: Readonly<Record<string, string>>;
 	metadata?: Record<string, unknown>;
 }): Promise<
 	| {
@@ -753,6 +757,8 @@ async function runStage1Job(options: {
 			response_items_json: truncatedItems,
 		});
 
+		const reasoning = clampThinkingLevelForModel(model, Effort.Low);
+		const tierResolution = resolveModelServiceTierOverride(options.modelServiceTierOverrides, model, reasoning);
 		const response = await retryTransientCompletion(() =>
 			completeSimple(
 				model,
@@ -765,7 +771,8 @@ async function runStage1Job(options: {
 					sessionId: options.sessionId,
 					metadata: options.metadata,
 					maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
-					reasoning: clampThinkingLevelForModel(model, Effort.Low),
+					reasoning,
+					serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 				},
 			),
 		);
@@ -874,6 +881,7 @@ async function runConsolidationModel(options: {
 	model: Model;
 	apiKey: ApiKey;
 	sessionId: string;
+	modelServiceTierOverrides: Readonly<Record<string, string>>;
 	metadata?: Record<string, unknown>;
 }): Promise<{
 	memoryMd: string;
@@ -894,6 +902,8 @@ async function runConsolidationModel(options: {
 		rollout_summaries: truncateByApproxTokens(rolloutSummaries, 12_000),
 	});
 
+	const reasoning = clampThinkingLevelForModel(model, Effort.Medium);
+	const tierResolution = resolveModelServiceTierOverride(options.modelServiceTierOverrides, model, reasoning);
 	const response = await retryTransientCompletion(() =>
 		completeSimple(
 			model,
@@ -906,7 +916,8 @@ async function runConsolidationModel(options: {
 				sessionId: options.sessionId,
 				metadata: options.metadata,
 				maxTokens: 8192,
-				reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+				reasoning,
+				serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 			},
 		),
 	);

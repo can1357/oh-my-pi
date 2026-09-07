@@ -41,7 +41,9 @@ advisor:
 
 Model selectors use normal role/model resolution, including provider-prefixed ids, canonical ids, fallback lists, and optional thinking suffixes.
 
-`tier.advisor` controls service tier for all advisors. It defaults to `none` (standard processing); `inherit` follows the primary's live per-family tier, including `/fast` changes. Concrete values (`auto`, `default`, `flex`, `scale`, `priority`) are applied only when the advisor model's provider family supports them.
+`tier.advisor` supplies the baseline for advisor requests. It defaults to `none` (standard processing); `inherit` follows the primary's live per-family selection, including `/fast` changes. `tier.modelOverrides` is checked against each advisor model's actual final request effort before the concrete advisor baseline, and unsupported-family values are inert.
+
+An advisor's request never inherits the parent's thinking effort for model-rule matching: `off`/absent effort has no suffix. With `tier.advisor: inherit`, the primary's explicit family override/null (including restored legacy state) wins over the exact rule and family baseline. A concrete `tier.advisor` value does not inherit the primary's live family choices: its exact model rule wins over its independent advisor baseline.
 
 ### Headless runs
 

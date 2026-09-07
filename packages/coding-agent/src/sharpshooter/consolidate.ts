@@ -6,6 +6,7 @@ import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking"
 import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
 import type { Settings } from "../config/settings";
 import { truncateApproxTokens } from "../mnemopi/config";
 import consolidateInputTemplate from "../prompts/memories/sharpshooter-consolidate-input.md" with { type: "text" };
@@ -153,6 +154,9 @@ async function consolidateLocked(
 			maxFileLines: SHARPSHOOTER_MAX_FILE_LINES,
 		});
 
+		const reasoning = clampThinkingLevelForModel(model, Effort.Medium);
+		const tierOverrides = options.settings.get("tier.modelOverrides");
+		const tierResolution = resolveModelServiceTierOverride(tierOverrides, model, reasoning);
 		const response = await retryTransientCompletion(() =>
 			completeSimple(
 				model,
@@ -165,7 +169,8 @@ async function consolidateLocked(
 					apiKey: options.modelRegistry.resolver(model, options.sessionId),
 					sessionId: options.sessionId,
 					maxTokens: 8192,
-					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+					reasoning,
+					serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 					toolChoice: "required",
 				},
 			),

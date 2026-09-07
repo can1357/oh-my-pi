@@ -85,6 +85,8 @@ providers:
             controller: mlx
 ```
 
+The `models.yml` provider `modelOverrides` block changes catalog metadata only. It is separate from `tier.modelOverrides` in `config.yml`, whose exact `provider/model[:effort]` keys select service tiers; see [Settings](./settings.md#per-model-service-tier-rules).
+
 ### Compaction options
 
 - `compactionModel` (per model, including `modelOverrides`) — selector for the model used to summarize/compact context when this model's session is compacted, instead of the model itself.

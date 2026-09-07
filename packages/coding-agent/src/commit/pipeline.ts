@@ -79,6 +79,7 @@ async function updateChangelog(cwd: string, args: CommitCommandArgs): Promise<vo
 		model: primary.model,
 		apiKey: primary.apiKey,
 		thinkingLevel: primary.thinkingLevel,
+		modelServiceTierOverrides: settings.get("tier.modelOverrides"),
 		stagedFiles: await vcs.requireGit(cwd).changedFiles({ cached: true }),
 		dryRun: false,
 		maxDiffChars: commitSettings.changelogMaxDiffChars,

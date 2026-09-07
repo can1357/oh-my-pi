@@ -359,6 +359,8 @@ The corresponding `get_state` result reports the same computed state:
 }
 ```
 
+On a family-aware model, `/fast off` records a `null` explicit family override. That explicit off shadows a matching `tier.modelOverrides` rule and the family baseline for later requests; `/fast on` replaces it with an explicit tier. This is separate from Fireworks' provider-level priority path, which remains authoritative for Fireworks models.
+
 ### `set_todos` payload
 
 Replaces the in-memory todo state for the current session and returns the normalized phase list:

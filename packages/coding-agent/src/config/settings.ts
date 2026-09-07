@@ -44,6 +44,7 @@ import { replaceFileAtomically } from "../utils/atomic-file";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
 import { stringifyYamlConfig } from "./config-file";
+import { validateServiceTierOverrides } from "./service-tier";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -660,10 +661,11 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		const normalizedValue = path === "tier.modelOverrides" ? validateServiceTierOverrides(value) : value;
 		const prev = this.get(path);
 		const segments = path.split(".");
 		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
-		setByPath(this.#global, segments, value);
+		setByPath(this.#global, segments, normalizedValue);
 		this.#persistedMutationGeneration++;
 		this.#modified.add(path);
 		this.#rebuildMerged();
@@ -685,9 +687,10 @@ export class Settings {
 		if (path === "modelRoles") {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
+		const normalizedValue = path === "tier.modelOverrides" ? validateServiceTierOverrides(value) : value;
 		const prev = this.get(path);
 		const segments = path.split(".");
-		setByPath(this.#overrides, segments, value);
+		setByPath(this.#overrides, segments, normalizedValue);
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
 	}
@@ -2627,6 +2630,24 @@ export class Settings {
 			}
 		}
 		delete raw["computer.backend"];
+
+		const tier = isRecord(raw.tier) ? raw.tier : undefined;
+		const warnInvalidTierOverrides = (invalid: readonly string[]): void => {
+			logger.warn("Settings: ignoring invalid tier.modelOverrides entries", { entries: invalid });
+		};
+		if (tier && Object.hasOwn(tier, "modelOverrides")) {
+			tier.modelOverrides = validateServiceTierOverrides(tier.modelOverrides, warnInvalidTierOverrides);
+		}
+		if (Object.hasOwn(raw, "tier.modelOverrides")) {
+			if (tier && !Object.hasOwn(tier, "modelOverrides")) {
+				tier.modelOverrides = validateServiceTierOverrides(raw["tier.modelOverrides"], warnInvalidTierOverrides);
+			} else if (!tier) {
+				raw.tier = {
+					modelOverrides: validateServiceTierOverrides(raw["tier.modelOverrides"], warnInvalidTierOverrides),
+				};
+			}
+			delete raw["tier.modelOverrides"];
+		}
 
 		return raw;
 	}

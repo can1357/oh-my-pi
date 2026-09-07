@@ -1804,6 +1804,9 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Config-only: no per-model /settings editor.
+	"tier.modelOverrides": { type: "record", default: EMPTY_STRING_RECORD },
+
 	// Retries
 	"retry.enabled": { type: "boolean", default: true },
 

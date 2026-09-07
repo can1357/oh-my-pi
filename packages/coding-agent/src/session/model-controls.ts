@@ -22,6 +22,8 @@ import {
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { getKnownRoleIds } from "../config/model-roles";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
+import type { ServiceTierOverrides } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsUltrathink } from "../modes/ultrathink";
 import {
@@ -72,6 +74,9 @@ export class ModelControls {
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
+	#serviceTierOverrides: ServiceTierOverrides;
+	/** Per-session (model, tier) rejections; see {@link suppressServiceTier}. */
+	#suppressedServiceTiers = new Map<string, Set<ServiceTier>>();
 
 	constructor(
 		host: ModelControlsHost,
@@ -80,11 +85,13 @@ export class ModelControls {
 			thinkingLevel?: ConfiguredThinkingLevel;
 			thinkingLevelCeiling?: Effort;
 			serviceTierByFamily?: ServiceTierByFamily;
+			serviceTierOverrides?: ServiceTierOverrides;
 		},
 	) {
 		this.#host = host;
 		this.#scopedModels = options.scopedModels ?? [];
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
+		this.#serviceTierOverrides = { ...options.serviceTierOverrides };
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
 		if (options.thinkingLevel === AUTO_THINKING) {
 			// Keep auto pending until the first turn while exposing a valid wire effort.
@@ -148,9 +155,19 @@ export class ModelControls {
 		this.#scopedModels = scopedModels;
 	}
 
-	/** Live per-provider-family service-tier selection. */
-	get serviceTierByFamily(): ServiceTierByFamily {
+	/** Configured per-family baseline, before explicit live overrides are applied. */
+	get configuredServiceTierByFamily(): ServiceTierByFamily {
 		return this.#serviceTierByFamily;
+	}
+
+	/** Configured per-family baseline merged with explicit live overrides (never the model rule). */
+	get serviceTierByFamily(): ServiceTierByFamily {
+		return this.#effectiveServiceTierByFamily();
+	}
+
+	/** Explicit live per-family overrides; absent = inherit policy, null = explicitly off. */
+	get serviceTierOverrides(): ServiceTierOverrides {
+		return this.#serviceTierOverrides;
 	}
 
 	/** Restores thinking state from a transcript without persisting a new entry. */
@@ -180,8 +197,9 @@ export class ModelControls {
 	}
 
 	/** Restores service tiers without persisting a duplicate transcript entry. */
-	restoreServiceTiers(tiers: ServiceTierByFamily): void {
+	restoreServiceTiers(tiers: ServiceTierByFamily, overrides?: ServiceTierOverrides): void {
 		this.#serviceTierByFamily = tiers;
+		this.#serviceTierOverrides = { ...overrides };
 	}
 	resolveRoleModel(role: string): Model | undefined {
 		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model)
@@ -665,29 +683,28 @@ export class ModelControls {
 		});
 	}
 
-	/**
-	 * True when the currently selected model's family is set to `priority` — the
-	 * `/fast` on/off state for the active model. Returns false when no model is
-	 * selected or the model exposes no service-tier family (e.g. Fireworks, which
-	 * has its own Providers › Fireworks Tier toggle).
-	 *
-	 * For "is priority actually applied to the next request?" use
-	 * {@link isFastModeActive} instead.
-	 */
+	/** Whether the selected family-aware model resolves to priority; see isFastModeActive for provider support. */
 	isFastModeEnabled(): boolean {
-		const family = this.#model ? serviceTierFamily(this.#model) : undefined;
-		return family ? this.#serviceTierByFamily[family] === "priority" : false;
+		const model = this.#model;
+		if (!model || !serviceTierFamily(model)) return false;
+		return (
+			this.effectiveServiceTier(model, this.#thinkingLevel, shouldDisableReasoning(this.#thinkingLevel)) ===
+			"priority"
+		);
 	}
 
-	/**
-	 * True when `priority` is actually realized on the wire for the currently
-	 * selected model (OpenAI/Google `service_tier`, direct Anthropic fast mode,
-	 * or Fireworks priority). Returns false for tiers the active model can't
-	 * realize and when no model is selected.
-	 */
+	/** Whether the selected model can realize priority, including provider fallback state and Fireworks. */
 	isFastModeActive(): boolean {
 		const model = this.#model;
-		if (!model || !realizesPriorityServiceTier(this.effectiveServiceTier(model), model)) return false;
+		if (
+			!model ||
+			!realizesPriorityServiceTier(
+				this.effectiveServiceTier(model, this.#thinkingLevel, shouldDisableReasoning(this.#thinkingLevel)),
+				model,
+			)
+		) {
+			return false;
+		}
 		if (model.provider === "anthropic") {
 			return !isAnthropicFastModeFallbackDisabled(this.#host.providerSessionState, model);
 		}
@@ -695,53 +712,138 @@ export class ModelControls {
 	}
 
 	/**
-	 * Effective wire service-tier for a request to `model`. Fireworks models take
-	 * the Priority serving path only when the Providers › Fireworks Tier setting
-	 * is `"priority"` (and never for `-fast` variants, whose Fast serving path is
-	 * mutually exclusive with Priority). Every other model resolves the live
-	 * per-family tier map down to the entry for its family.
+	 * With no arguments, use the active UI model/effort. Explicit calls never
+	 * inherit an omitted effort; disableReasoning forces it off.
+	 * Precedence: explicit family override (including null), model rule, family
+	 * baseline. Rejected model/tier pairs stay suppressed until explicitly rearmed.
 	 */
-	effectiveServiceTier(model: Model | undefined = this.#model): ServiceTier | undefined {
-		if (model?.provider === "fireworks") {
-			return this.#host.settings.get("providers.fireworksTier") === "priority" && !isFireworksFastModelId(model.id)
+	effectiveServiceTier(
+		model: Model | undefined = this.#model,
+		reasoning?: ThinkingLevel,
+		disableReasoning?: boolean,
+	): ServiceTier | undefined {
+		const isUiCall = arguments.length === 0;
+		const targetModel = isUiCall ? this.#model : model;
+		if (targetModel?.provider === "fireworks") {
+			return this.#host.settings.get("providers.fireworksTier") === "priority" &&
+				!isFireworksFastModelId(targetModel.id)
 				? "priority"
 				: undefined;
 		}
-		if (!model) return undefined;
-		return resolveModelServiceTier(this.#serviceTierByFamily, model);
+		if (!targetModel) return undefined;
+		const family = serviceTierFamily(targetModel);
+		if (!family) return undefined;
+		if (Object.hasOwn(this.#serviceTierOverrides, family)) {
+			const explicitTier = this.#serviceTierOverrides[family] ?? undefined;
+			return explicitTier !== undefined && this.#isServiceTierSuppressed(targetModel, explicitTier)
+				? undefined
+				: explicitTier;
+		}
+
+		const matchingLevel = isUiCall
+			? shouldDisableReasoning(this.#thinkingLevel)
+				? undefined
+				: this.#thinkingLevel
+			: disableReasoning
+				? undefined
+				: reasoning;
+		const configuredOverride = resolveModelServiceTierOverride(
+			this.#host.settings.get("tier.modelOverrides"),
+			targetModel,
+			matchingLevel,
+		);
+		if (configuredOverride.matched) {
+			return configuredOverride.tier !== undefined &&
+				this.#isServiceTierSuppressed(targetModel, configuredOverride.tier)
+				? undefined
+				: configuredOverride.tier;
+		}
+
+		const baseline = resolveModelServiceTier(this.#serviceTierByFamily, targetModel);
+		return baseline !== undefined && this.#isServiceTierSuppressed(targetModel, baseline) ? undefined : baseline;
 	}
 
-	/** The live per-family tier map, or `null` when empty (for session persistence). */
+	/** The effective family map (configured baseline plus explicit overrides), or null when empty. */
 	serviceTierEntry(): ServiceTierByFamily | null {
-		return Object.keys(this.#serviceTierByFamily).length > 0 ? this.#serviceTierByFamily : null;
+		const snapshot = this.#effectiveServiceTierByFamily();
+		return Object.keys(snapshot).length > 0 ? snapshot : null;
 	}
 
-	/** Set one family's tier (or clear it with `undefined`); persists the change. */
+	/** Undefined clears the explicit override, restoring model rules and the configured family baseline. */
 	setServiceTierFamily(family: ServiceTierFamily, tier: ServiceTier | undefined): void {
-		if (this.#serviceTierByFamily[family] === tier) return;
-		const next: ServiceTierByFamily = { ...this.#serviceTierByFamily };
-		if (tier) next[family] = tier;
-		else delete next[family];
-		this.#applyServiceTierByFamily(next);
+		if (tier === undefined) {
+			if (!Object.hasOwn(this.#serviceTierOverrides, family)) return;
+			const next = { ...this.#serviceTierOverrides };
+			delete next[family];
+			this.#serviceTierOverrides = next;
+			this.#persistServiceTierChange();
+			return;
+		}
+		this.#setExplicitServiceTier(family, tier);
 	}
 
-	/** Replace the whole per-family tier map; persists + re-arms Anthropic fast mode. */
-	#applyServiceTierByFamily(next: ServiceTierByFamily): void {
-		// Re-arming Anthropic priority clears the per-session fast-mode auto-disable
-		// so the next request actually carries `speed: "fast"` again.
-		if (next.anthropic === "priority" && this.#serviceTierByFamily.anthropic !== "priority") {
+	#setExplicitServiceTier(family: ServiceTierFamily, tier: ServiceTier | null): void {
+		if (Object.hasOwn(this.#serviceTierOverrides, family) && this.#serviceTierOverrides[family] === tier) {
+			if (tier !== null) this.#rearmExplicitTier(family, tier);
+			return;
+		}
+		this.#serviceTierOverrides = { ...this.#serviceTierOverrides, [family]: tier };
+		if (tier !== null) this.#rearmExplicitTier(family, tier);
+		this.#persistServiceTierChange();
+	}
+
+	#persistServiceTierChange(): void {
+		this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry(), { ...this.#serviceTierOverrides });
+	}
+
+	/** Re-arm only the active model/tier; other rejected pairs remain suppressed. */
+	#rearmExplicitTier(family: ServiceTierFamily, tier: ServiceTier): void {
+		if (family === "anthropic" && tier === "priority") {
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
-		this.#serviceTierByFamily = next;
-		this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry());
+		const model = this.#model;
+		if (model && serviceTierFamily(model) === family) {
+			this.#suppressedServiceTiers.get(this.#suppressionKey(model))?.delete(tier);
+		}
 	}
 
-	/**
-	 * `/fast on|off` targets the family of the currently selected model: it sets
-	 * (or clears) that family's `priority` tier. Returns `false` when the model
-	 * has no service-tier family, so callers can report that fast mode is
-	 * unavailable instead of claiming success.
-	 */
+	/** Prevent automatic retries of a rejected model/tier; return whether a new suppression was added. */
+	suppressServiceTier(model: Model, tier: ServiceTier): boolean {
+		const key = this.#suppressionKey(model);
+		let suppressed = this.#suppressedServiceTiers.get(key);
+		if (!suppressed) {
+			suppressed = new Set<ServiceTier>();
+			this.#suppressedServiceTiers.set(key, suppressed);
+		}
+		if (suppressed.has(tier)) return false;
+		suppressed.add(tier);
+		return true;
+	}
+
+	/** Forget service-tier rejections when a new session takes ownership. */
+	resetSuppressedServiceTiers(): void {
+		this.#suppressedServiceTiers.clear();
+	}
+
+	#suppressionKey(model: Model): string {
+		return model.provider + "/" + model.id;
+	}
+
+	#isServiceTierSuppressed(model: Model, tier: ServiceTier): boolean {
+		return this.#suppressedServiceTiers.get(this.#suppressionKey(model))?.has(tier) ?? false;
+	}
+
+	#effectiveServiceTierByFamily(): ServiceTierByFamily {
+		const snapshot: ServiceTierByFamily = { ...this.#serviceTierByFamily };
+		for (const family of ["openai", "anthropic", "google"] as const) {
+			const tier = this.#serviceTierOverrides[family];
+			if (tier === null) delete snapshot[family];
+			else if (tier !== undefined) snapshot[family] = tier;
+		}
+		return snapshot;
+	}
+
+	/** Off records null so model rules cannot re-enable priority. Returns false for models without a tier family. */
 	setFastMode(enabled: boolean): boolean {
 		const family = this.#model ? serviceTierFamily(this.#model) : undefined;
 		if (!family) {
@@ -752,14 +854,7 @@ export class ModelControls {
 			);
 			return false;
 		}
-		if (!enabled) {
-			if (this.#serviceTierByFamily[family] === "priority") this.setServiceTierFamily(family, undefined);
-			return true;
-		}
-		if (family === "anthropic" && this.#serviceTierByFamily.anthropic === "priority") {
-			clearAnthropicFastModeFallback(this.#host.providerSessionState);
-		}
-		this.setServiceTierFamily(family, "priority");
+		this.#setExplicitServiceTier(family, enabled ? "priority" : null);
 		return true;
 	}
 

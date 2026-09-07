@@ -5,6 +5,7 @@ import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking"
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue, resolveRoleSelection } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
 import type { Settings } from "../config/settings";
 import extractInputTemplate from "../prompts/memories/sharpshooter-extract-input.md" with { type: "text" };
 import extractSystemTemplate from "../prompts/memories/sharpshooter-extract-system.md" with { type: "text" };
@@ -212,6 +213,8 @@ async function runSharpshooterExtraction(
 	if (!model || session.isDisposed) return;
 
 	const input = prompt.render(extractInputTemplate, { ...envelope });
+	const reasoning = clampThinkingLevelForModel(model, Effort.Low);
+	const tierResolution = resolveModelServiceTierOverride(settings.get("tier.modelOverrides"), model, reasoning);
 	const response = await retryTransientCompletion(() =>
 		completeSimple(
 			model,
@@ -224,7 +227,8 @@ async function runSharpshooterExtraction(
 				apiKey: modelRegistry.resolver(model, session.sessionId),
 				sessionId: session.sessionId,
 				maxTokens: 2048,
-				reasoning: clampThinkingLevelForModel(model, Effort.Low),
+				reasoning,
+				serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 				toolChoice: "required",
 			},
 		),

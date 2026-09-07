@@ -473,7 +473,13 @@ function buildExecutorOptions(
 		parentTelemetry: session.getTelemetry?.(),
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
-		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+		// The composed getter is only a fallback for legacy ToolSession implementations.
+		parentServiceTier: session.getConfiguredServiceTierByFamily
+			? (session.getConfiguredServiceTierByFamily() ?? null)
+			: session.getServiceTierByFamily
+				? (session.getServiceTierByFamily() ?? null)
+				: undefined,
+		parentServiceTierOverrides: session.getServiceTierOverrides?.(),
 	};
 }
 

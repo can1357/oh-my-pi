@@ -419,6 +419,11 @@ export interface StreamOptions {
 	apiKey?: string;
 	cacheRetention?: CacheRetention;
 	/**
+	 * Requested tier; unsupported providers ignore it. Completion entry points
+	 * record this value in {@link AssistantMessage.serviceTier}.
+	 */
+	serviceTier?: ServiceTier;
+	/**
 	 * Keep Anthropic's 5-minute prompt cache warm across bounded idle gaps.
 	 *
 	 * This is an ownership flag, not a general provider default: exactly one
@@ -1007,6 +1012,12 @@ export interface AssistantMessage {
 	errorStatus?: number;
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
+	/**
+	 * Requested tier, not the session setting or server-granted tier. Null
+	 * records no tier; undefined marks legacy messages. Provider-side drops
+	 * are reported separately in disabledFeatures.
+	 */
+	serviceTier?: ServiceTier | null;
 	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection

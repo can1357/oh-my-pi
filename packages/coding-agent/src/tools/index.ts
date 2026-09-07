@@ -6,6 +6,7 @@ import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { EvalPreludeDefinition } from "../eval/preludes";
+import type { ServiceTierOverrides } from "../config/service-tier";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
@@ -332,8 +333,12 @@ export interface ToolSession {
 	getActiveModelString?: () => string | undefined;
 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
 	getActiveModel?: () => Model | undefined;
-	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
+	/** Effective family tiers after live overrides; excludes model rules. */
 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
+	/** Get the configured per-family tier baseline, excluding explicit live/saved overrides. */
+	getConfiguredServiceTierByFamily?: () => ServiceTierByFamily | undefined;
+	/** Explicit source state, kept separate from the configured baseline for inheriting children. */
+	getServiceTierOverrides?: () => ServiceTierOverrides | undefined;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: import("../session/auth-storage").AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */

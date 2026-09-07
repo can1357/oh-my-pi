@@ -331,6 +331,7 @@ This is startup-only behavior; there is no interactive `/continue` slash command
 7. Replace agent messages, reset advisor state, and synchronize todos. Close cached provider sessions for a different file, or for a same-file reload whose replay messages changed.
 8. Restore an available persisted model. If the loaded branch ended with an interrupted turn, append its synthetic abort message and rebuild context.
 9. Restore configured/effective thinking and per-family service tiers, falling back to current settings when the target branch has no corresponding entries.
+   Restored service-tier state keeps the effective family snapshot separate from raw explicit overrides. A persisted legacy all-off, scalar, or family-map entry remains authoritative; when no entry exists, current settings provide the baseline and `tier.modelOverrides` resolves at each request's actual model/effort. Clearing an explicit override restores that current policy.
 10. For a different transcript, reset memory context; for any conversation rewrite, clear session-scoped tool state.
 11. Reconnect agent events, run the optional session-switch reconciler (interactive mode uses it to re-enter persisted modes such as plan), and best-effort refresh the workspace-root system-prompt block. Reconciler/prompt-refresh errors are logged rather than rolling back the committed switch.
 12. Restore target advisor cost state, finish the bash transition, notify session-change callbacks when the session id changed, and return `true`.

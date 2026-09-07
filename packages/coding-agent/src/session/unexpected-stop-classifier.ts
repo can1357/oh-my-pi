@@ -3,6 +3,7 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
 import type { Settings } from "../config/settings";
 import unexpectedStopClassifierPrompt from "../prompts/system/unexpected-stop-classifier.md" with { type: "text" };
 import { isTinyMemoryLocalModelKey, ONLINE_MEMORY_MODEL_KEY } from "../tiny/models";
@@ -96,6 +97,7 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 	}
 	const metadata = deps.metadataResolver?.(model.provider);
 	const maxTokens = ONLINE_REASONING_SAFE_MAX_TOKENS;
+	const tierResolution = resolveModelServiceTierOverride(deps.settings.get("tier.modelOverrides"), model, undefined);
 
 	const response = await retryTransientCompletion(
 		() =>
@@ -110,6 +112,7 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 					sessionId: deps.sessionId,
 					maxTokens,
 					disableReasoning: true,
+					serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 					metadata,
 					signal: deps.signal,
 				},

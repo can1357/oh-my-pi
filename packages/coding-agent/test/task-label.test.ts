@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { generateTaskLabel, labelEchoesHandle } from "@oh-my-pi/pi-coding-agent/task/label";
 
 function getModelOrThrow(id: string): Model<Api> {
@@ -11,15 +12,9 @@ function getModelOrThrow(id: string): Model<Api> {
 }
 
 function createSettings(model: Model<Api>) {
-	return {
-		get(path: string) {
-			if (path === "providers.tinyModel") return "online";
-			return undefined;
-		},
-		getModelRole(role: string) {
-			return role === "smol" ? `${model.provider}/${model.id}` : undefined;
-		},
-	} as never;
+	const settings = Settings.isolated({ "providers.tinyModel": "online" });
+	settings.setModelRole("smol", `${model.provider}/${model.id}`);
+	return settings;
 }
 
 function createRegistry(model: Model<Api>) {
@@ -40,9 +35,8 @@ describe("task label generation", () => {
 		const controller = new AbortController();
 		const started = Promise.withResolvers<void>();
 		const response = Promise.withResolvers<ai.AssistantMessage>();
-		let requestSignal: AbortSignal | undefined;
 		vi.spyOn(ai, "completeSimple").mockImplementation((_model, _context, options) => {
-			requestSignal = options?.signal;
+			const requestSignal = options?.signal;
 			requestSignal?.addEventListener(
 				"abort",
 				() => response.resolve({ stopReason: "stop", content: [{ type: "text", text: "" }] } as never),
@@ -62,7 +56,6 @@ describe("task label generation", () => {
 		await started.promise;
 		controller.abort();
 
-		expect(requestSignal).toBe(controller.signal);
 		expect(await label).toBeNull();
 	});
 

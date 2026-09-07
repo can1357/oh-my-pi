@@ -434,7 +434,43 @@ A value of `-1` means "use the provider/model default" — `omp` does not send t
 | `tier.google`       | enum   | `none`    | `none`, `flex`, `priority`. Gemini API sends it in the body; Vertex sends `priority` via header (`flex` is a no-op on Vertex).                                                                                                                                                 |
 | `tier.subagent`     | enum   | `inherit` | `inherit`, `none`, `auto`, `default`, `flex`, `scale`, `priority`. Applied to the spawned model's family; `inherit` tracks the main agent.                                                                                                                                     |
 | `tier.advisor`      | enum   | `none`    | `inherit`, `none`, `auto`, `default`, `flex`, `scale`, `priority`. Applied to the advisor model's family.                                                                                                                                                                      |
+| `tier.modelOverrides` | record | `{}` | Exact per-model rules keyed by `provider/model` or `provider/model:effort`; values are `none`, `auto`, `default`, `flex`, `scale`, or `priority`. The effort-specific key wins over the base key; no aliases or globs. Unsupported-family values are inert. |
 | `personality`       | enum   | `default` | `default`, `friendly`, `pragmatic`, `none`. A user-level `<agent dir>/PERSONALITY.md` replaces the selected preset's text; `none` still omits the block. See [system-prompt-customization](./system-prompt-customization.md).                                                  |
+
+#### Per-model service-tier rules
+
+`tier.modelOverrides` is evaluated only after a concrete model is selected and on each provider request:
+
+- Keys are exact `provider/model` or `provider/model:effort` identities. Unknown model names remain inert; aliases, `*`, and `?` globs are not accepted.
+- The resolver derives candidates from the actual request model and final effort, trying the effort key before the bare model key. `inherit`, `off`, and an absent effort bind no suffix, including native reasoning forced off by external thinking. There is no parent-effort inheritance, and a configured rule never invents an effort such as `max`.
+- `none` is explicit off for a matching model: it returns no service tier and shadows the family baseline. A value unsupported by the resolved model's provider family is inert and falls through to the next candidate/baseline; models without a service-tier family do not match these rules.
+- Precedence is explicit family override/null (CLI `--service-tier`, `/fast`, extension `setServiceTier`, or restored legacy state) > exact configured policy > the existing per-consumer baseline (`tier.openai`, `tier.anthropic`, `tier.google`, `tier.subagent`, or `tier.advisor`).
+
+For example, this effort-specific rule targets the literal `openai-codex/gpt-5.6-luna` model when its actual request effort is `max`:
+
+```yaml
+tier:
+  openai: none
+  anthropic: none
+  google: none
+  modelOverrides:
+    openai-codex/gpt-5.6-luna:max: priority
+```
+
+Manage this record in YAML or with `omp config`; the interactive `/settings` panel does not expose a per-model rule editor. `omp config set` replaces the whole record in the global config, so include any existing rules you want to retain:
+
+```bash
+omp config set tier.modelOverrides '{"openai-codex/gpt-5.6-luna:max":"priority","openai-codex/gpt-5.6-sol":"none"}'
+omp config get tier.modelOverrides --json
+```
+
+Configured policy is not a manual session choice: a new config-only session does not persist a tier entry merely because `tier.*` or `tier.modelOverrides` is present. Legacy all-off (`null`), scalar, and family-map service-tier entries remain authoritative when restored. Clearing an explicit family override restores the current exact model rule or family baseline. A `null` `tier.modelOverrides` root is normalized to an empty record; use `none`, not `null`, for individual rules.
+
+When loading YAML settings, malformed model-tier entries are ignored with a warning while valid rules remain active. Loading does not rewrite the source file. Explicit settings mutations still reject malformed entries without replacing the existing rule map.
+
+Parent choices seed inheriting subagents only at launch; a revived child keeps its saved choices. Pinned advisors and their tools do not inherit the primary session's manual tier overrides. Their own exact model rules still apply, and advisor compaction uses the advisor's resolver. Previously untiered helpers such as image questions still omit unmatched family baselines.
+
+Rejected model/tier pairs remain suppressed within the current session. Successful switches to another session and new branches clear that suppression; same-session reloads and failed switches preserve it. Explicitly selecting the rejected tier again re-arms it.
 
 ### Retry and fallback
 

@@ -13,7 +13,8 @@ describe("SpeechEnhancer rewriting", () => {
 		if (!baseModel) throw new Error("Expected bundled Claude Sonnet 4.5 model");
 		const model = { ...baseModel, reasoning: false };
 		const settings = {
-			get() {
+			get(path: string) {
+				if (path === "tier.modelOverrides") return {};
 				return undefined;
 			},
 			getModelRole(role: string) {

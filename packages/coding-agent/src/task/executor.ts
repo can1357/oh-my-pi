@@ -25,7 +25,11 @@ import {
 	resolveModelOverrideWithAuthFallback,
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
-import { buildServiceTierByFamily, resolveSubagentServiceTier } from "../config/service-tier";
+import {
+	buildServiceTierByFamily,
+	resolveSubagentServiceTier,
+	type ServiceTierOverrides,
+} from "../config/service-tier";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -512,12 +516,12 @@ export interface ExecutorOptions {
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
 	/**
-	 * Parent session's live per-family service tiers, the source of truth for a
-	 * subagent whose `tier.subagent` is `"inherit"`. `null` = the parent
-	 * explicitly has no tier (e.g. `/fast off`); omitted = no live session, so
-	 * inherit falls back to the subagent's configured `tier.*` settings.
+	 * Configured parent baseline, excluding live overrides so clearing one in the
+	 * child cannot resurrect it. Null means no tier; undefined uses child settings.
 	 */
 	parentServiceTier?: ServiceTierByFamily | null;
+	/** Parent overrides for inheriting children only; model rules re-resolve against each child's request. */
+	parentServiceTierOverrides?: ServiceTierOverrides;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
@@ -947,10 +951,7 @@ export function createSubagentSettings(
 	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		snapshot[key] = baseSettings.get(key);
 	}
-	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
-	// match the parent's live tiers when a live session supplied them, else the
-	// subagent's own configured tier.* settings). The result is stamped back onto
-	// the snapshot so createAgentSession's tier.* reads pick it up.
+	// Keep live overrides out of the baseline so children can clear them independently.
 	const inheritedTiers =
 		inheritedServiceTier === undefined
 			? buildServiceTierByFamily(
@@ -2984,6 +2985,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		},
 		options.parentServiceTier,
 	);
+	// Pinned children ignore parent choices; empty maps must not create manual transcript entries.
+	const inheritedServiceTierOverrides =
+		options.parentServiceTierOverrides !== undefined &&
+		Object.keys(options.parentServiceTierOverrides).length > 0 &&
+		subagentSettings.get("tier.subagent") === "inherit"
+			? options.parentServiceTierOverrides
+			: undefined;
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
 	const maxRuntimeMs = Math.max(
 		0,
@@ -3320,10 +3328,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// live peer rows scoped to it, so a session switch hides stale parked trees.
 			let ircRootSessionFile: string | undefined;
 
-			// Captured by the lifecycle reviver: rebuilding an equivalent session from
-			// the same JSONL file re-invokes createAgentSession with the exact options
-			// of the original run (same agent id, tools, model, system prompt,
-			// artifacts dir) — only the SessionManager differs.
 			const buildSubagentSessionOptions = (
 				sessionManagerForRun: SessionManager,
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
@@ -3426,7 +3430,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				);
 			}
 
-			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
+			const sessionPromise = createAgentSession({
+				...buildSubagentSessionOptions(sessionManager, null),
+				// Only the initial launch inherits the parent's live overrides.
+				...(inheritedServiceTierOverrides ? { serviceTierOverrides: inheritedServiceTierOverrides } : {}),
+			});
 			let session: AgentSession;
 			try {
 				({ session } = await awaitAbortable(sessionPromise));

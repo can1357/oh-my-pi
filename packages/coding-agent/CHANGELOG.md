@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tier.modelOverrides` for exact `provider/model` or `provider/model:effort` service-tier rules, resolved from each request's selected model and final reasoning state.
+
+### Changed
+
+- Persist explicit per-family tier choices separately from configured policy, including `/fast off`, and retain a child's own choices when it is revived.
+- Apply exact tier rules to auxiliary requests and advisor compaction while keeping pinned advisors isolated from the primary session's manual choices. Unmatched auxiliary requests retain their existing no-tier behavior.
+- Record each request's service tier in assistant messages and model-usage entries, preserving provider-disabled features and failed-attempt errors through auxiliary usage persistence; `null` records an omitted tier and absent metadata remains legacy.
+- Scope rejected tier suppression to one session: successful session changes and branches clear it, while reloads and failed switches retain it.
+
+### Fixed
+
+- Keep service-tier settings and session listing independent of provider runtime imports so CLI startup preserves lazy native loading and profile environment initialization.
+- Load valid model-tier rules even when neighboring entries are malformed, warning about ignored entries without rewriting the source YAML; explicit settings mutations remain strict.
+- Share tier value validation between settings and session persistence while retaining their distinct off representations.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

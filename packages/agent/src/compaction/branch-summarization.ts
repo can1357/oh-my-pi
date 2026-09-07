@@ -10,7 +10,7 @@ import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
 import { Tokenizer } from "../tokenizer";
-import type { AgentMessage } from "../types";
+import type { AgentMessage, ServiceTierResolver } from "../types";
 import type { ReadonlySessionManager, SessionEntry } from "./entries";
 import {
 	type ConvertToLlm,
@@ -84,6 +84,7 @@ export interface GenerateBranchSummaryOptions {
 	metadata?: Record<string, unknown>;
 	/** Convert app-specific messages before serializing the branch summary prompt. */
 	convertToLlm?: ConvertToLlm;
+	serviceTierResolver?: ServiceTierResolver;
 	/**
 	 * Optional telemetry handle. When provided, the branch summary LLM call is
 	 * wrapped in an OTEL chat span tagged with `pi.gen_ai.oneshot.kind = "branch_summary"`.
@@ -346,7 +347,15 @@ export async function generateBranchSummary(
 		response = await instrumentedCompleteSimple(
 			model,
 			{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
-			{ apiKey, signal, maxTokens: 2048, metadata },
+			{
+				apiKey,
+				signal,
+				maxTokens: 2048,
+				metadata,
+				...(options.serviceTierResolver
+					? { serviceTier: options.serviceTierResolver(model, undefined, undefined) }
+					: {}),
+			},
 			{ telemetry: options.telemetry, oneshotKind: "branch_summary", completeImpl: options.completeImpl, retry: {} },
 		);
 	} catch (error) {

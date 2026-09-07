@@ -1762,6 +1762,8 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 						getResponseHeaders: () => capturedHeaders,
 					})
 				: await runOnce();
+			// Custom completeImpl transports bypass completeSimple; stamp their result before telemetry.
+			message.serviceTier = options.serviceTier ?? null;
 			await finishChatSpan(telemetry, chatSpan, message, {
 				stepNumber,
 				serviceTier: options.serviceTier,

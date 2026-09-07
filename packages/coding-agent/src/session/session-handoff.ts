@@ -9,7 +9,7 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import { generateHandoffFromContext, renderHandoffPrompt } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import { type Effort, type Message, type Model, type ServiceTier, type SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -51,7 +51,12 @@ export interface SessionHandoffHost {
 	deobfuscateFromProvider(text: string): string;
 	convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]>;
 	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider?: string): SimpleStreamOptions;
-	effectiveServiceTier(model: Model | undefined): ServiceTier | undefined;
+	/** Uses the handoff's final reasoning options, not the parent's active effort. */
+	effectiveServiceTier(
+		model: Model | undefined,
+		reasoning?: Effort,
+		disableReasoning?: boolean,
+	): ServiceTier | undefined;
 }
 
 /** Generates handoff documents with a cache-friendly oneshot LLM call. */
@@ -161,7 +166,6 @@ export class SessionHandoff {
 					sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
 					promptCacheKey: handoffPromptCacheKey,
 					preferWebsockets: false,
-					serviceTier: this.#host.effectiveServiceTier(model),
 					hideThinkingSummary: this.#host.agent.hideThinkingSummary,
 					initiatorOverride: "agent",
 					signal: handoffSignal,
@@ -173,6 +177,8 @@ export class SessionHandoff {
 				model,
 				{
 					streamOptions: handoffStreamOptions,
+					serviceTierResolver: (requestModel, reasoning, disableReasoning) =>
+						this.#host.effectiveServiceTier(requestModel, reasoning, disableReasoning),
 					completeImpl: async (requestModel, requestContext, requestOptions) => {
 						const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
 						return stream.result();

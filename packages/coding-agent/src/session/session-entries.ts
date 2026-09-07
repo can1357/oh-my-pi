@@ -1,12 +1,18 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { coerceServiceTierByFamily } from "@oh-my-pi/pi-ai/types";
 import type {
+	AssistantMessage,
 	ImageContent,
 	MessageAttribution,
+	ServiceTier,
 	ServiceTierByFamily,
+	ServiceTierFamily,
 	StopReason,
 	TextContent,
 	Usage,
-} from "@oh-my-pi/pi-ai";
+} from "@oh-my-pi/pi-ai/types";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { isServiceTierValue, type ServiceTierOverrides } from "../config/service-tier";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import type { CompactionMethod } from "./compaction-methods";
 
@@ -84,7 +90,10 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	api: string;
 	provider: string;
 	model: string;
+	/** Concrete service tier requested for this call; null records an explicit no-tier request. */
+	serviceTier?: ServiceTier | null;
 	usage: Usage;
+	disabledFeatures?: AssistantMessage["disabledFeatures"];
 	stopReason: StopReason;
 	errorMessage?: string;
 }
@@ -112,7 +121,50 @@ export interface ModelChangeEntry extends SessionEntryBase {
 
 export interface ServiceTierChangeEntry extends SessionEntryBase {
 	type: "service_tier_change";
+	/** Effective family snapshot; legacy entries may contain a bare scalar. */
 	serviceTier: ServiceTierByFamily | null;
+	/** Absent on legacy entries; {} clears all overrides, and a null family explicitly disables its tier. */
+	overrides?: ServiceTierOverrides;
+}
+
+const SERVICE_TIER_FAMILIES: readonly ServiceTierFamily[] = ["openai", "anthropic", "google"];
+
+/** Drop invalid families/values; non-records return undefined. */
+export function coerceServiceTierOverrides(value: unknown): ServiceTierOverrides | undefined {
+	if (!isRecord(value)) return undefined;
+	const out: ServiceTierOverrides = {};
+	for (const family of SERVICE_TIER_FAMILIES) {
+		const tier = value[family];
+		if (tier === null) out[family] = null;
+		else if (isServiceTierValue(tier)) out[family] = tier;
+	}
+	return out;
+}
+
+/**
+ * Expand a legacy scalar/map into authoritative overrides, with missing families
+ * explicitly off. Null is all-off; corrupt or unknown values return undefined.
+ */
+export function serviceTierSnapshotToOverrides(serviceTier: unknown): ServiceTierOverrides | undefined {
+	if (serviceTier === null) return { openai: null, anthropic: null, google: null };
+	if (typeof serviceTier !== "string" && !isRecord(serviceTier)) return undefined;
+	const snapshot = coerceServiceTierByFamily(serviceTier);
+	// Unknown scalars are absent, but empty maps are authoritative all-off snapshots.
+	if (snapshot === undefined && !isRecord(serviceTier)) return undefined;
+	const out: ServiceTierOverrides = {};
+	for (const family of SERVICE_TIER_FAMILIES) {
+		out[family] = snapshot?.[family] ?? null;
+	}
+	return out;
+}
+
+/** Read explicit overrides, falling back to the legacy authoritative snapshot. */
+export function serviceTierChangeOverrides(entry: ServiceTierChangeEntry): ServiceTierOverrides | undefined {
+	if (entry.overrides !== undefined && entry.overrides !== null) {
+		const coerced = coerceServiceTierOverrides(entry.overrides);
+		if (coerced !== undefined) return coerced;
+	}
+	return serviceTierSnapshotToOverrides(entry.serviceTier);
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {

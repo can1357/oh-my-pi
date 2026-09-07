@@ -15,6 +15,7 @@ import {
 	completeSimple,
 	type Model,
 	retryTransientCompletion,
+	type ServiceTier,
 } from "@oh-my-pi/pi-ai";
 import type { VcsHunkSelection } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -23,6 +24,7 @@ import { parseFileDiffs, parseFileHunks } from "../../commit/git/diff";
 import type { FileDiff } from "../../commit/types";
 import { ModelRegistry } from "../../config/model-registry";
 import { resolveRoleSelection } from "../../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../../config/model-service-tier";
 import { Settings } from "../../config/settings";
 import filesPromptTemplate from "../../prompts/system/git-ai-stage-files.md" with { type: "text" };
 import hunkPromptTemplate from "../../prompts/system/git-ai-stage-hunk.md" with { type: "text" };
@@ -89,7 +91,14 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 		const sessionId = Bun.randomUUIDv7();
 		if (!(await registry.getApiKey(model, sessionId)))
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
-		const complete = createCompleter(model, registry.resolver(model, sessionId), sessionId, signal);
+		const tierResolution = resolveModelServiceTierOverride(settings.get("tier.modelOverrides"), model, undefined);
+		const complete = createCompleter(
+			model,
+			registry.resolver(model, sessionId),
+			sessionId,
+			tierResolution.matched ? tierResolution.tier : undefined,
+			signal,
+		);
 
 		const rawDiff = tracked.length > 0 ? await repo.diffText({ files: tracked.map(file => file.path) }, signal) : "";
 		const fileDiffs = new Map(parseFileDiffs(rawDiff).map(entry => [entry.filename, entry]));
@@ -222,6 +231,7 @@ function createCompleter(
 	model: Model<Api>,
 	apiKey: ApiKey,
 	sessionId: string,
+	serviceTier: ServiceTier | undefined,
 	signal?: AbortSignal,
 ): (userPrompt: string) => Promise<string> {
 	return async userPrompt => {
@@ -230,7 +240,15 @@ function createCompleter(
 				completeSimple(
 					model,
 					{ messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }] },
-					{ apiKey, sessionId, maxTokens: SAFE_MAX_TOKENS, temperature: 0, disableReasoning: true, signal },
+					{
+						apiKey,
+						sessionId,
+						maxTokens: SAFE_MAX_TOKENS,
+						temperature: 0,
+						disableReasoning: true,
+						serviceTier,
+						signal,
+					},
 				),
 			{ signal },
 		);

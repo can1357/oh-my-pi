@@ -91,9 +91,11 @@ Argument handling:
 | `--api-key <key>` | API key (defaults to env vars). |
 | `--provider-session-id <id>` | Reuse a specific provider-side session id for continuity and cache scoping. |
 | `--prompt-cache-key <key>` | Override the provider prompt-cache key for this session. |
-| `--service-tier <tier>` | OpenAI service tier for this session (`none` omits `service_tier`). |
+| `--service-tier <tier>` | OpenAI service tier for this session; `none` explicitly turns it off. An explicit flag takes precedence over saved/configured tiers and is persisted as a manual session choice. |
 
 See [providers](./providers.md) and [models](./models.md) for model resolution.
+
+The flag controls the OpenAI family only. Use `tier.modelOverrides` in [Settings](./settings.md#per-model-service-tier-rules) for exact per-model or per-effort rules; those rules are evaluated against the actual request effort. Configuration alone does not create a manual tier entry in the session.
 
 #### Thinking and reasoning
 
