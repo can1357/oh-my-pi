@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.17] - 2026-09-07
+
 ### Fixed
 
 - Show the `ultra` reasoning label in the bottom status line when Ultra mode is active, across all symbol presets.
