@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+## [18.1.14] - 2026-09-07
+
+### Fixed
 
 - Exported shared `TRUNCATE_LENGTHS` and `PREVIEW_LIMITS` display budgets for consumers outside coding-agent (e.g. provider status sanitization).
 - `extractMarkdownLinks()` now returns one-row visible labels for formatted and multiline links ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).
