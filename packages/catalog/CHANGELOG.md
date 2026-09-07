@@ -61,6 +61,7 @@
 - Bundled Grok Bot router rows now include `sandToolsWire` from KDL so cold starts without AvailableModels still use product parent-chat/automation wires.
 - Grok Bot Auto routers bake catalog `sand-wire-model-id=sand-default` so parent-chat rewrite no longer special-cases `sand-cua` in TypeScript.
 - Grok Bot auth is only advertised when both the renewer and machine id are present, so models are not selectable before streaming can succeed.
+- Grok Bot exports `resolveGrokbotMachineId` so CLI credential overrides can require the same machine-id pair as env auth.
 - Fixed Codex Astra using its larger window without opt-in; its default is 272K and Extended Context enables at least the documented 1.05M window.
 
 
