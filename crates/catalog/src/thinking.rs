@@ -1,6 +1,6 @@
 //! Typed reasoning effort, budget, display, and wire-routing policies.
 
-#![allow(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
+#![expect(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
 use std::collections::{BTreeMap, btree_map};
 
 use omp_core::Str;
