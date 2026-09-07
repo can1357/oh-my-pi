@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
+import type { AgentRegistry } from "../registry/agent-registry";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { ToolAbortError, ToolError } from "./tool-errors";
 
@@ -1510,6 +1511,9 @@ export interface ToolScopeOptions {
 	rules?: readonly Rule[];
 	/** Calling session's session file — lets history:///agent:// resolve against the caller's root. */
 	sessionFile?: string;
+	/** Calling session's stable session-manager id — binds memory:// to the caller that has no session file. */
+	sessionId?: string;
+	agentRegistry?: AgentRegistry;
 	/** Materialize readable external URLs to local text files before scope derivation. */
 	resolveExternalUrl?: (rawPath: string) => Promise<ResolvedExternalSearchUrl | undefined>;
 }
@@ -1598,6 +1602,8 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 			settings: opts.settings,
 			signal: opts.signal,
 			sessionFile: opts.sessionFile,
+			sessionId: opts.sessionId,
+			agentRegistry: opts.agentRegistry,
 			localProtocolOptions: opts.localProtocolOptions,
 			skills: opts.skills,
 			rules: opts.rules,

@@ -155,7 +155,7 @@ behavior {
 	api-routes provider="github-copilot" default="openai-completions" {
 		route "anthropic-messages" glob="claude-haiku-*" glob="claude-sonnet-*" glob="claude-opus-*" \
 			glob="claude-fable-*" glob="claude-mythos-*"
-		route "openai-responses" exact="grok-4.5" exact="grok-4.6" prefix="gpt-5" prefix="oswe" prefix="mai-"
+		route "openai-responses" exact="grok-4.5" exact="grok-4.6" prefix="gpt-5" prefix="gpt-6" prefix="oswe" prefix="mai-"
 	}
 	// ZenMux fronts Anthropic ids on a dedicated Messages endpoint; every
 	// other namespace stays on chat completions.
