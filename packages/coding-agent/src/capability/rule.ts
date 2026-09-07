@@ -17,6 +17,14 @@ const CONDITION_GLOB_SCOPE_TOOLS = ["edit", "write"] as const;
  */
 export const BUILTIN_DEFAULTS_PROVIDER_ID = "builtin-defaults";
 
+/** An ast-grep pattern string or structured rule object. */
+export type AstCondition = string | Record<string, unknown>;
+
+export interface SerializedAstConditions {
+	patterns: string[];
+	ruleConfigs: string[];
+}
+
 /**
  * Parsed frontmatter from rule files.
  */
@@ -28,8 +36,8 @@ export interface RuleFrontmatter {
 	alwaysApply?: boolean;
 	/** New key for TTSR match conditions. */
 	condition?: string | string[];
-	/** TTSR match condition(s) expressed as ast-grep patterns (edit/write streams only). */
-	astCondition?: string | string[];
+	/** TTSR match condition(s) expressed as ast-grep patterns or rule objects (edit/write streams only). */
+	astCondition?: AstCondition | AstCondition[];
 	/** New key for TTSR stream scope. */
 	scope?: string | string[];
 	/** Agent-name globs this rule applies to; absent = every agent. `main` targets the top-level session. */
@@ -57,8 +65,8 @@ export interface Rule {
 	description?: string;
 	/** Regex condition(s) that can trigger TTSR interruption. */
 	condition?: string[];
-	/** ast-grep pattern condition(s) that can trigger TTSR interruption (edit/write streams only). */
-	astCondition?: string[];
+	/** ast-grep pattern or structured rule condition(s) that can trigger TTSR interruption. */
+	astCondition?: AstCondition[];
 	/** Optional stream scope tokens (for example: text, thinking, tool:edit(*.ts)). */
 	scope?: string[];
 	/** Lowercased agent-name globs this rule applies to (absent = every agent). */
@@ -87,6 +95,45 @@ function normalizeRuleField(value: unknown): string[] | undefined {
 	}
 
 	return Array.from(new Set(tokens));
+}
+
+function isAstRuleObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeAstCondition(value: unknown): AstCondition[] | undefined {
+	const values = Array.isArray(value) ? value : [value];
+	const conditions: AstCondition[] = [];
+	for (const item of values) {
+		if (typeof item === "string") {
+			const pattern = item.trim();
+			if (pattern.length > 0 && !conditions.includes(pattern)) conditions.push(pattern);
+		} else if (isAstRuleObject(item)) {
+			conditions.push(item);
+		}
+	}
+	return conditions.length > 0 ? conditions : undefined;
+}
+
+/** Split normalized conditions into the two representations accepted by the native matcher. */
+export function serializeAstConditions(conditions: readonly AstCondition[]): SerializedAstConditions {
+	const patterns: string[] = [];
+	const ruleConfigs: string[] = [];
+	for (const condition of conditions) {
+		if (typeof condition === "string") {
+			patterns.push(condition);
+			continue;
+		}
+		// A full rule core can carry `constraints`/`utils`; otherwise the object is
+		// the rule itself and is wrapped in ast-grep's required top-level `rule` key.
+		const core = Object.hasOwn(condition, "rule") ? condition : { rule: condition };
+		ruleConfigs.push(JSON.stringify(core));
+	}
+	return { patterns, ruleConfigs };
+}
+
+export function formatAstCondition(condition: AstCondition): string {
+	return typeof condition === "string" ? condition : JSON.stringify(condition);
 }
 
 function splitScopeTokens(value: string): string[] {
@@ -246,14 +293,14 @@ function isLikelyFileGlob(value: string): boolean {
  * - legacy `ttsr_trigger` / `ttsrTrigger` are accepted as a `condition` fallback
  * - condition tokens that look like file globs become scope shorthands:
  *   `*.rs` => `tool:edit(*.rs)`, `tool:write(*.rs)` and a catch-all condition `.*`
- * - `astCondition` holds ast-grep patterns and is kept verbatim (no glob inference)
+ * - `astCondition` holds ast-grep patterns or structured rules (no glob inference)
  */
 export function parseRuleConditionAndScope(
 	frontmatter: RuleFrontmatter,
 ): Pick<Rule, "condition" | "astCondition" | "scope"> {
 	const rawCondition = frontmatter.condition ?? frontmatter.ttsr_trigger ?? frontmatter.ttsrTrigger;
 	const parsedCondition = normalizeRuleField(rawCondition);
-	const astCondition = normalizeRuleField(frontmatter.astCondition);
+	const astCondition = normalizeAstCondition(frontmatter.astCondition);
 	const parsedScope = normalizeScopeField(frontmatter.scope);
 
 	const inferredScope: string[] = [];

@@ -402,6 +402,9 @@ jj-lib = { version = "0.44", default-features = false, features = ["git"] }
 ast-grep-core = { version = "0.39", default-features = false, features = [
    "tree-sitter",
 ] }
+ast-grep-config = { version = "0.39", default-features = false, features = [
+   "tree-sitter",
+] }
 tree-sitter = "0.25"
 tree-sitter-astro = { version = "0.1.1", package = "tree-sitter-astro-next" }
 tree-sitter-bash = "0.25"

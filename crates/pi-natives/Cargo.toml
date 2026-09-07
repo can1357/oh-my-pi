@@ -26,6 +26,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 arboard.workspace = true
 ast-grep-core.workspace = true
+ast-grep-config.workspace = true
 base64.workspace = true
 clap.workspace = true
 globset.workspace = true

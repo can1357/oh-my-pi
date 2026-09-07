@@ -8,7 +8,7 @@
 import * as path from "node:path";
 import { AstMatchStrictness, astMatch } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
-import { compileRuleCondition, type Rule } from "../capability/rule";
+import { compileRuleCondition, serializeAstConditions, type AstCondition, type Rule } from "../capability/rule";
 import type { TtsrSettings } from "../config/settings";
 
 export type TtsrMatchSource = "text" | "thinking" | "tool";
@@ -40,8 +40,8 @@ interface TtsrScope {
 interface TtsrEntry {
 	rule: Rule;
 	conditions: RegExp[];
-	/** ast-grep pattern strings; matched only against edit/write tool snapshots. */
-	astConditions: string[];
+	/** ast-grep patterns or structured rules; matched only against edit/write tool snapshots. */
+	astConditions: AstCondition[];
 	scope: TtsrScope;
 	globalPathGlobs?: Bun.Glob[];
 }
@@ -310,7 +310,7 @@ export class TtsrManager {
 		}
 
 		const conditions = this.#compileConditions(rule);
-		const astConditions = (rule.astCondition ?? []).map(pattern => pattern.trim()).filter(p => p.length > 0);
+		const astConditions = rule.astCondition ?? [];
 		if (conditions.length === 0 && astConditions.length === 0) {
 			return false;
 		}
@@ -448,10 +448,12 @@ export class TtsrManager {
 		return matches;
 	}
 
-	async #astConditionsMatch(patterns: string[], source: string, lang: string): Promise<boolean> {
+	async #astConditionsMatch(conditions: AstCondition[], source: string, lang: string): Promise<boolean> {
+		const { patterns, ruleConfigs } = serializeAstConditions(conditions);
 		try {
 			const result = await astMatch({
 				patterns,
+				ruleConfigs,
 				source,
 				lang,
 				strictness: AstMatchStrictness.Smart,
@@ -460,7 +462,7 @@ export class TtsrManager {
 			return result.totalMatches > 0;
 		} catch (error) {
 			logger.warn("TTSR ast match failed, treating as no match", {
-				patterns,
+				conditions,
 				lang,
 				error: error instanceof Error ? error.message : String(error),
 			});

@@ -732,7 +732,7 @@ export interface AstFindResult {
 export declare function astGrep(options: AstFindOptions): Promise<AstFindResult>
 
 /**
- * Match ast-grep patterns against an in-memory source string; returns a
+ * Match ast-grep patterns or structured rule cores against an in-memory source string; returns a
  * promise resolved on a worker thread.
  *
  * This is the file-free counterpart to [`ast_grep`]: callers that already hold
@@ -743,7 +743,7 @@ export declare function astGrep(options: AstFindOptions): Promise<AstFindResult>
 export declare function astMatch(options: AstMatchOptions): Promise<AstMatchResult>
 
 /**
- * Options for `astMatch`: run ast-grep patterns against an in-memory source
+ * Options for `astMatch`: run ast-grep patterns or structured rules against an in-memory source
  * string instead of files on disk.
  */
 export interface AstMatchOptions {
@@ -751,8 +751,10 @@ export interface AstMatchOptions {
   source: string
   /** Language of `source` (required; e.g. "ts", "tsx", "rust", "python"). */
   lang: string
-  /** ast-grep patterns to search for (OR across patterns). */
+  /** Shorthand ast-grep patterns to search for (OR with `ruleConfigs`). */
   patterns: Array<string>
+  /** Serialized ast-grep rule cores to search for (OR with `patterns`). */
+  ruleConfigs?: Array<string>
   /** Rule selector for multi-rule ast-grep configurations. */
   selector?: string
   /** Pattern strictness; defaults to smart matching when omitted. */
@@ -777,7 +779,7 @@ export interface AstMatchResult {
   totalMatches: number
   /** True when results were truncated by `limit`. */
   limitReached: boolean
-  /** Non-fatal parse or pattern-compile errors collected during the run. */
+  /** Non-fatal parse or condition-compile errors collected during the run. */
   parseErrors?: Array<string>
 }
 
