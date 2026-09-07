@@ -31,6 +31,7 @@ import {
 import { applyQueryConstraints, parseSearchQuery } from "./query";
 import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "./render";
 import {
+	DEFAULT_WEB_SEARCH_FANOUT,
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
 	SearchProviderError,
@@ -134,16 +135,44 @@ interface ExecuteSearchOptions {
 	signal?: AbortSignal;
 }
 
-/** Execute web search */
-async function executeSearch(
+/** Candidate plus its resolver outcome: `resolvedProvider` skips the availability check; `availabilityError` is rethrown as that provider's failure. */
+interface SearchProviderAttempt extends SearchProviderCandidate {
+	resolvedProvider?: SearchProvider;
+	availabilityError?: unknown;
+}
+
+/** Resolve availability: `undefined` means implicit unavailable (skip); throw means explicit unavailable or load failure. */
+async function resolveAvailableSearchProvider(
+	candidate: SearchProviderCandidate,
+	authStorage: AuthStorage,
+): Promise<SearchProvider | undefined> {
+	const provider = await getSearchProvider(candidate.id);
+	const available = candidate.explicit
+		? await provider.isExplicitlyAvailable(authStorage)
+		: await provider.isAvailable(authStorage);
+	if (!available && !candidate.explicit) return undefined;
+	if (!available) {
+		throw new SearchProviderError(
+			provider.id,
+			`${provider.label} web search is unavailable. Configure its credentials or select the automatic provider chain.`,
+		);
+	}
+	return provider;
+}
+
+/** Execute one web search using the existing sequential provider fallback. */
+async function executeSearchSequential(
 	_toolCallId: string,
 	params: SearchQueryParams,
 	options: ExecuteSearchOptions,
+	candidateOverride?: SearchProviderAttempt,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
 	const { authStorage, modelRegistry, sessionId, signal } = options;
 	const explicitProvider = params.provider;
-	let candidates: SearchProviderCandidate[];
-	if (explicitProvider && explicitProvider !== "auto") {
+	let candidates: SearchProviderAttempt[];
+	if (candidateOverride) {
+		candidates = [candidateOverride];
+	} else if (explicitProvider && explicitProvider !== "auto") {
 		candidates = [{ id: explicitProvider, explicit: true }];
 	} else {
 		// `--provider auto` and the default both walk the configured chain;
@@ -184,21 +213,13 @@ async function executeSearch(
 	let availableProviderCount = 0;
 	let lastProvider: Pick<SearchProvider, "id" | "label"> | undefined;
 	for (const candidate of candidates) {
-		let provider: SearchProvider | undefined;
+		let provider: SearchProvider | undefined = candidate.resolvedProvider;
 		const providerMeta = { id: candidate.id, label: getSearchProviderLabel(candidate.id) };
 		lastProvider = providerMeta;
 		try {
-			provider = await getSearchProvider(candidate.id);
-			const available = candidate.explicit
-				? await provider.isExplicitlyAvailable(authStorage)
-				: await provider.isAvailable(authStorage);
-			if (!available && !candidate.explicit) continue;
-			if (!available && candidate.explicit) {
-				throw new SearchProviderError(
-					provider.id,
-					`${provider.label} web search is unavailable. Configure its credentials or select the automatic provider chain.`,
-				);
-			}
+			if ("availabilityError" in candidate) throw candidate.availabilityError;
+			provider ??= await resolveAvailableSearchProvider(candidate, authStorage);
+			if (!provider) continue;
 			availableProviderCount++;
 			lastProvider = provider;
 
@@ -278,6 +299,93 @@ async function executeSearch(
 			response: { provider: lastFailure?.provider.id ?? lastProvider?.id ?? "none", sources: [] },
 			error: message,
 		},
+	};
+}
+
+function getWebSearchFanout(): number {
+	let configured: number;
+	try {
+		configured = settings.get("providers.webSearchFanout");
+	} catch {
+		return DEFAULT_WEB_SEARCH_FANOUT;
+	}
+	if (!Number.isFinite(configured)) return DEFAULT_WEB_SEARCH_FANOUT;
+	// No upper bound: the effective provider order is the only ceiling, and
+	// selectFanoutCandidates stops when the candidates run out.
+	return Math.max(DEFAULT_WEB_SEARCH_FANOUT, Math.trunc(configured));
+}
+
+/** Fill up to `limit` fan-out slots from the ordered candidates, skipping unavailable implicit providers. */
+async function selectFanoutCandidates(
+	candidates: readonly SearchProviderCandidate[],
+	limit: number,
+	authStorage: AuthStorage,
+): Promise<SearchProviderAttempt[]> {
+	const selected: SearchProviderAttempt[] = [];
+	for (const candidate of candidates) {
+		if (candidate.explicit) {
+			selected.push(candidate);
+		} else {
+			try {
+				const resolvedProvider = await resolveAvailableSearchProvider(candidate, authStorage);
+				if (!resolvedProvider) continue;
+				selected.push({ ...candidate, resolvedProvider });
+			} catch (cause) {
+				selected.push({ ...candidate, availabilityError: cause });
+			}
+		}
+		if (selected.length >= limit) break;
+	}
+	return selected;
+}
+
+/** Execute web search: forced/1 -> sequential fallback, >1 -> concurrent per-provider sections. */
+async function executeSearch(
+	toolCallId: string,
+	params: SearchQueryParams,
+	options: ExecuteSearchOptions,
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
+	if (params.provider && params.provider !== "auto") {
+		return executeSearchSequential(toolCallId, params, options);
+	}
+
+	const configuredFanout = getWebSearchFanout();
+	if (configuredFanout <= DEFAULT_WEB_SEARCH_FANOUT) {
+		return executeSearchSequential(toolCallId, params, options);
+	}
+
+	const candidates = resolveProviderCandidates();
+	const selected = await selectFanoutCandidates(candidates, configuredFanout, options.authStorage);
+	throwIfAborted(options.signal);
+	if (selected.length === 0) {
+		// Preserve the existing no-provider result when fan-out cannot fill any slot.
+		return executeSearchSequential(toolCallId, params, options);
+	}
+
+	if (selected.length === 1) {
+		return executeSearchSequential(toolCallId, params, options, selected[0]);
+	}
+
+	const results = await Promise.all(
+		selected.map(candidate => executeSearchSequential(toolCallId, params, options, candidate)),
+	);
+	const sections = results.map(
+		(result, index) => `## ${selected[index]!.id}\n${result.content.map(block => block.text).join("\n")}`,
+	);
+	const firstSuccess = results.find(result => !result.details.error);
+	if (firstSuccess) {
+		return {
+			content: [{ type: "text", text: sections.join("\n\n") }],
+			details: { response: firstSuccess.details.response, results },
+		};
+	}
+
+	const failures = results.map((result, index) => `${selected[index]!.id}: ${result.details.error}`);
+	const message = `All web search providers failed: ${failures.join("; ")}`;
+	const lastResponse = results[results.length - 1]!.details.response;
+	return {
+		content: [{ type: "text", text: `Error: ${message}\n\n${sections.join("\n\n")}` }],
+		details: { response: lastResponse, error: message, results },
 	};
 }
 

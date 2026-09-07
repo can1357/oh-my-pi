@@ -48,6 +48,7 @@ import {
 } from "../tts/models";
 import { EDIT_MODES } from "../utils/edit-mode";
 import {
+	DEFAULT_WEB_SEARCH_FANOUT,
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
 	SEARCH_PROVIDER_CHOICES,
@@ -5324,6 +5325,28 @@ export const SETTINGS_SCHEMA = {
 				"Prioritized providers for the web_search tool; unlisted providers retain their default order afterward",
 			options: SEARCH_PROVIDER_CHOICES,
 			ordered: true,
+		},
+	},
+	"providers.webSearchFanout": {
+		type: "number",
+		default: DEFAULT_WEB_SEARCH_FANOUT,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Web Search Fan-out",
+			description:
+				"Number of eligible web-search providers queried concurrently from the effective provider order. No ceiling beyond the provider list; `omp config set providers.webSearchFanout <n>` accepts any other value",
+			options: [
+				{ value: "1", label: "1 provider" },
+				{ value: "2", label: "2 providers" },
+				{ value: "3", label: "3 providers" },
+				{ value: "5", label: "5 providers" },
+				{
+					value: String(SEARCH_PROVIDER_CHOICES.length),
+					label: "Every eligible provider",
+					description: `Fill as many slots as the provider list allows (${SEARCH_PROVIDER_CHOICES.length} providers exist)`,
+				},
+			],
 		},
 	},
 	"providers.webSearchExclude": {

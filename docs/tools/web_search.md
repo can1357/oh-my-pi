@@ -1,6 +1,8 @@
 # web_search
 
 > Run one web query through the first available search provider and return LLM-formatted answer, source URLs, and optional citations.
+>
+> With `providers.webSearchFanout > 1`, query the first N eligible providers concurrently and return their results separately.
 
 ## Source
 - Entry: `packages/coding-agent/src/web/search/index.ts`
@@ -59,6 +61,7 @@ The tool returns a single text content block plus structured `details`.
 - `details`: `SearchRenderDetails` from `packages/coding-agent/src/web/search/render.ts`
   - `response: SearchResponse`
   - `error?: string`
+  - `results?: SearchRenderResult[]` — ordered per-provider results when at least two fan-out slots are filled.
 
 `text` is produced by `formatForLLM()` in `packages/coding-agent/src/web/search/index.ts`. Notes about relaxed query constraints are emitted first:
 
@@ -71,24 +74,33 @@ The tool returns a single text content block plus structured `details`.
 - If related questions exist, a `## Related` bullet list follows.
 - If search queries exist, a `Search queries: <n>` section follows, capped to the first 3 queries and 120 chars each.
 
+When at least two slots are filled with `providers.webSearchFanout > 1`, the same `formatForLLM()` output is wrapped in an ordered `## <provider-id>` section for each selected provider. Sections are never merged. A failed provider contributes its normal `Error: ...` text under its heading without hiding successful peers. The TUI stacks the existing provider result cards in the same order.
+
 Failure output is not thrown at the tool boundary when providers are unavailable or provider attempts fail. Instead the tool returns:
 
 - `content[0].text = "Error: ..."`
 - `details.response.provider = <last attempted provider> | "none"`
 - `details.error = ...`
 
+In fan-out mode, `details.error` is set only when every selected provider fails. Partial failures remain in `details.results` and in their provider sections while the top-level result stays successful.
+
 Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `executeSearch()`, and `executeSearch()` passes it to providers. If the signal is aborted during fallback handling, `throwIfAborted(signal)` rethrows the cancellation instead of returning an `"Error: ..."` text result.
 
 Each provider search transport receives a hard timeout from `providers.webSearchTimeoutSeconds` (default `60`, maximum `300`). When that transport exceeds the ceiling, the automatic chain records the provider failure and advances to the next candidate. The setting is not a whole-chain deadline, and providers may impose shorter upstream, retry, or aggregate limits. Set a positive number of seconds, for example `omp config set providers.webSearchTimeoutSeconds 180` for slower model-backed search.
 
+In fan-out mode, a provider timeout becomes that provider's error section without hiding successful peers; the timeout remains per transport, not a whole-request deadline.
+
 ## Flow
+
+### Sequential mode (`providers.webSearchFanout = 1`)
+
 1. `WebSearchTool.execute()` in `packages/coding-agent/src/web/search/index.ts` delegates directly to `executeSearch()`.
-2. `executeSearch()` parses `query` once with `parseSearchQuery()`, then computes ordered provider candidates without eagerly loading their modules:
+2. `executeSearchSequential()` parses `query` once with `parseSearchQuery()`, then computes ordered provider candidates without eagerly loading their modules:
    - if internal `params.provider` is set and not `"auto"`, that provider is the only candidate and is treated as explicit;
    - otherwise it uses the configured candidate order. Entries explicitly listed in `providers.webSearchOrder` use `isExplicitlyAvailable()`; ordinary fallback entries use `isAvailable()`.
 3. `resolveProviderCandidates()` prioritizes valid first-occurrence IDs from `providers.webSearchOrder`, then appends unlisted providers in `SEARCH_PROVIDER_ORDER`. An empty list preserves built-in order. `providers.webSearchExclude` removes providers from the automatic/configured chain and from Public Web fan-out. Internal per-request forced providers bypass that configured chain.
-4. If no candidate is available (for example, settings exclude every credential-free engine and no keyed/OAuth provider is configured), `executeSearch()` returns `Error: No web search provider configured.` with `details.response.provider = "none"`.
-5. For each provider in order, `executeSearch()` calls `provider.search()` with:
+4. If no candidate is available (for example, settings exclude every credential-free engine and no keyed/OAuth provider is configured), `executeSearchSequential()` returns `Error: No web search provider configured.` with `details.response.provider = "none"`.
+5. For each provider in order, `executeSearchSequential()` calls `provider.search()` with:
    - `query`,
    - `limit`, `recency`, `temperature`, `maxOutputTokens`, `numSearchResults`,
    - `timeoutMs`, derived from `providers.webSearchTimeoutSeconds`,
@@ -96,19 +108,27 @@ Each provider search transport receives a hard timeout from `providers.webSearch
    - the parsed structured query, including recognized directives and date/domain/title/URL/filetype constraints.
 6. After a provider responds, `applyQueryConstraints()` leniently post-filters its sources for constraints not guaranteed upstream. It applies each filterable dimension in turn; any dimension that would eliminate every remaining result is relaxed and a leading `Note: no results matched ...` is emitted. Answer/citation text is not rewritten.
 7. A `SearchResponse` with no renderable content (`hasRenderableSearchContent()` returns false) is rejected as a `SearchProviderError` (status `204`) so the loop advances to the next provider. On the first renderable response, `formatForLLM()` renders notes, answer, sources, citations, related questions, and search queries into one text block.
-8. If a provider throws, `executeSearch()` records the error and tries the next provider. There is no provider-level parallel fan-out; fallback is sequential.
+8. If a provider throws, `executeSearchSequential()` records the error and tries the next provider. Fallback is sequential.
 9. After all candidates fail, `formatSearchProviderFailure()` normalizes each error:
    - Anthropic `404` becomes `Anthropic web search returned 404 (model or endpoint not found).`
    - `401`/`403` become `<Provider> authorization failed ...` except Z.AI, which preserves its raw message.
    - other `SearchProviderError`s surface `error.message`.
 10. If more than one provider failed, the final message is `All web search providers failed: <provider/error>; ...`; otherwise it is just the normalized last error.
 
+### Fan-out mode (`providers.webSearchFanout > 1`)
+
+1. A non-`auto` internal `params.provider` remains a single explicit provider and bypasses fan-out.
+2. `executeSearch()` truncates the configured value to an integer with a floor of `1`, then lazily walks the effective order until it fills N slots or runs out of candidates; the provider list is the only ceiling. Implicit candidates that return `false` from `isAvailable()` are skipped; an implicit candidate whose availability check throws is selected and reported as an error section. Every provider explicitly listed in `providers.webSearchOrder` occupies a slot. If its `isExplicitlyAvailable()` check returns `false`, that slot appears as an `<Provider> web search is unavailable` error section.
+3. The selected candidates run concurrently through `Promise.all()`. Provider failures use the same parameters, query filtering, `formatForLLM()`, and error normalization as sequential mode; aborts and unexpected programming errors propagate.
+4. If fewer than two candidates are eligible, the tool returns normal single-provider output without provider headings or `details.results`. Otherwise it emits each selected result in list order and sets a top-level error only when all selected providers fail.
+
 ## Modes / Variants
 - **Provider selection**
   - **Forced provider**: internal callers may pass `provider`; a non-`auto` value is the only attempted provider and uses `isExplicitlyAvailable()`, while `auto` (or omitting it) walks the configured chain. This field is not in the model-facing schema.
   - **Configured order**: `setSearchProviderOrder()` prioritizes valid, first-occurrence provider IDs in `providers.webSearchOrder`; omitted providers follow in built-in relative order. Listed providers are explicit selections and resolve through `isExplicitlyAvailable()`, so Perplexity, Exa, and Firecrawl can use their unauthenticated/keyless paths.
   - **Excluded providers**: `setExcludedSearchProviders()` removes providers from the automatic/configured chain and Public Web fan-out. Wired from `providers.webSearchExclude` through `packages/coding-agent/src/config/provider-globals.ts`.
-  - **Default auto chain order** (23 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). `public` is explicit-only: its `isAvailable()` returns `false`, so the auto chain never fans out implicitly.
+  - **Default auto chain order** (23 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). `public` is explicit-only: its `isAvailable()` returns `false`, so the automatic chain never selects it implicitly.
+- **Provider fan-out**: `providers.webSearchFanout` defaults to `1`, preserving sequential first-success behavior and output. Values are truncated to an integer with a floor of `1`; there is no upper bound beyond the provider list itself. Values above `1` query the first N eligible candidates concurrently. A value larger than the number of configured providers keeps walking the built-in order, so credential-free scrapers such as Startpage and DuckDuckGo can fill the remaining slots. Implicit candidates that report unavailable are skipped, implicit availability checks that throw become error sections, and explicitly configured candidates keep explicit-selection semantics. Results remain unmerged and ordered. If fewer than two candidates are eligible, the tool returns the normal single-provider output. Each selected provider can incur its normal API usage and cost.
 - **Provider timeout**: `providers.webSearchTimeoutSeconds` supplies the hard ceiling for each provider's search transport before the automatic chain advances. It defaults to `60`; invalid non-positive values fall back to that default and values above `300` are capped, while provider-specific upstream or aggregate limits may still be shorter.
 - **Provider adapters**
   - **Perplexity** — `packages/coding-agent/src/web/search/providers/perplexity.ts`
