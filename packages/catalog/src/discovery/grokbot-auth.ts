@@ -214,6 +214,10 @@ export function resolveGrokbotEnvApiKey(): string | undefined {
  * Renewal credential used for model-cache scoping. Expands the shared
  * `<authenticated>` sentinel (and empty/missing keys) to the resolved env or
  * secrets-file renewer so file-backed accounts do not collapse onto one cache.
+ *
+ * Prefer {@link resolveGrokbotCacheCredentialAsync} (or a precomputed
+ * `cacheCredential` on model-manager options) on catalog-refresh paths so the
+ * TUI does not sync-read `secrets/grokbot.env`.
  */
 export function resolveGrokbotCacheCredential(apiKey?: string): string {
 	const trimmed = apiKey?.trim();
@@ -221,6 +225,16 @@ export function resolveGrokbotCacheCredential(apiKey?: string): string {
 	const fromEnv = $env.GROKBOT_RENEWAL_CREDENTIAL || $env.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
 	if (fromEnv) return fromEnv;
 	const file = loadGrokbotSecretFileSync();
+	return file.GROKBOT_RENEWAL_CREDENTIAL || file.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
+}
+
+/** Async counterpart of {@link resolveGrokbotCacheCredential} for catalog refresh. */
+export async function resolveGrokbotCacheCredentialAsync(apiKey?: string): Promise<string> {
+	const trimmed = apiKey?.trim();
+	if (trimmed && trimmed !== GROKBOT_AUTHENTICATED_SENTINEL) return trimmed;
+	const fromEnv = $env.GROKBOT_RENEWAL_CREDENTIAL || $env.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
+	if (fromEnv) return fromEnv;
+	const file = await loadGrokbotSecretFile();
 	return file.GROKBOT_RENEWAL_CREDENTIAL || file.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
 }
 

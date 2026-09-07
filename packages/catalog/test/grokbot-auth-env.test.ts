@@ -11,6 +11,7 @@ import {
 	loadGrokbotConfig,
 	GROKBOT_AUTHENTICATED_SENTINEL,
 	resolveGrokbotCacheCredential,
+	resolveGrokbotCacheCredentialAsync,
 	resolveGrokbotEnvApiKey,
 	resolveGrokbotMachineId,
 	loadGrokbotSecretFile,
@@ -368,6 +369,26 @@ describe("grokbot secrets dotenv parsing", () => {
 					namespace: "prod",
 					clientVersion: "0.30.0",
 				}),
+			).toBe(cacheA);
+			// Precomputed cacheCredential matches the expanded sentinel and skips
+			// a second secrets-file read (catalog refresh passes this after async prep).
+			expect(await resolveGrokbotCacheCredentialAsync(GROKBOT_AUTHENTICATED_SENTINEL)).toBe("file-renewal-a");
+			expect(
+				resolveModelCacheProviderId("grokbot", {
+					apiKey: GROKBOT_AUTHENTICATED_SENTINEL,
+					cacheCredential: "file-renewal-a",
+					baseUrl: "https://api2.cursor.sh",
+					namespace: "prod",
+					clientVersion: "0.30.0",
+				}),
+			).toBe(cacheA);
+			expect(
+				grokbotModelManagerOptions({
+					apiKey: GROKBOT_AUTHENTICATED_SENTINEL,
+					namespace: "prod",
+					clientVersion: "0.30.0",
+					cacheCredential: "file-renewal-a",
+				}).cacheProviderId,
 			).toBe(cacheA);
 		} finally {
 			setAgentDir(previousAgentDir);

@@ -21,7 +21,8 @@ export type GrokbotRequestedModelOptions = {
 	effortMap?: Partial<Record<string, string>>;
 	/**
 	 * sand `fast` parameter; only sent when the model lists `fast`.
-	 * Default: `false` when `thinking` is also advertised (Cursor Anthropic defaults),
+	 * Default: explicit `fast`, then `sandParameterDefaults.fast`, then
+	 * `false` when `thinking` is also advertised (Cursor Anthropic defaults),
 	 * otherwise `true` (Cursor composer / Grok defaults).
 	 * Note: Grok models reject `fast=false` with tools (sand HTTP 422); keep the default.
 	 */
@@ -148,8 +149,15 @@ export function resolveGrokbotRequestedModel(
 			}
 		}
 		if (allowed.has("fast")) {
-			const defaultFast = !allowed.has("thinking");
-			const fast = options?.fast !== undefined ? options.fast : defaultFast;
+			const discoveredFast = defaults?.fast?.trim();
+			const fast =
+				options?.fast !== undefined
+					? options.fast
+					: discoveredFast === "true"
+						? true
+						: discoveredFast === "false"
+							? false
+							: !allowed.has("thinking");
 			parameters.push({ id: "fast", value: fast ? "true" : "false" });
 		}
 	}

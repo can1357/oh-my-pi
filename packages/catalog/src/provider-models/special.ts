@@ -416,6 +416,11 @@ export interface GrokbotModelManagerConfig {
 	clientVersion?: string;
 	/** Caller/model headers forwarded to AvailableModels mint + request. */
 	headers?: Record<string, string>;
+	/**
+	 * Pre-expanded renewer for model-cache scoping. Catalog refresh should pass
+	 * the async-resolved value so construction never sync-reads secrets.
+	 */
+	cacheCredential?: string;
 }
 
 export function grokbotModelManagerOptions(
@@ -441,6 +446,7 @@ export function grokbotModelManagerOptions(
 			namespace: identity.namespace,
 			clientVersion: identity.clientVersion,
 			headers,
+			...(config.cacheCredential !== undefined ? { cacheCredential: config.cacheCredential } : undefined),
 		}),
 		staticModels: buildGrokbotStaticSeed(baseUrl),
 		...(apiKey

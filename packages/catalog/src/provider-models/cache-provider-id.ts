@@ -14,6 +14,12 @@ export interface ModelCacheProviderIdOptions {
 	clientVersion?: string;
 	/** Grok Bot: configured discovery/proxy headers that select the catalog. */
 	headers?: Record<string, string>;
+	/**
+	 * Grok Bot: pre-expanded renewer for cache scoping. When set (including after
+	 * async secrets load), skips the synchronous secrets-file read that would
+	 * otherwise expand `<authenticated>`.
+	 */
+	cacheCredential?: string;
 }
 
 /** Stable fingerprint of header bag for cache scoping (sorted key=value). */
@@ -140,8 +146,12 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 						});
 			const headerScope = fingerprintModelCacheHeaders(options.headers);
 			// Expand `<authenticated>` to the real renewer so secrets-file accounts
-			// do not share one authoritative cache namespace.
-			const credential = resolveGrokbotCacheCredential(options.apiKey);
+			// do not share one authoritative cache namespace. Prefer a precomputed
+			// cacheCredential from async catalog prep to avoid sync agent-dir I/O.
+			const credential =
+				options.cacheCredential !== undefined
+					? options.cacheCredential
+					: resolveGrokbotCacheCredential(options.apiKey);
 			const scope = `${credential}\u0000${baseUrl}\u0000${identity.namespace}\u0000${identity.clientVersion}\u0000${headerScope}`;
 			return `grokbot:models-v4:${Bun.hash(scope).toString(36)}`;
 		}

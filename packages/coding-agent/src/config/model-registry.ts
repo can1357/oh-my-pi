@@ -19,6 +19,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { resolveMaxContextWindow } from "@oh-my-pi/pi-catalog/compat/context-window";
 import {
+	resolveGrokbotCacheCredentialAsync,
 	resolveGrokbotDiscoveryIdentity,
 	resolveGrokbotDiscoveryIdentityAsync,
 	resolveGrokbotMachineId,
@@ -1928,9 +1929,9 @@ export class ModelRegistry {
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
 					discoveryConfig;
-				// Grok Bot cache scope needs secrets-file identity; load it async
-				// once here so createModelManagerOptions never sync-reads the file.
-				// Forward configured provider headers for reverse-proxy discovery.
+				// Grok Bot cache scope needs secrets-file identity + renewer; load
+				// both async once here so createModelManagerOptions never sync-reads
+				// the file. Forward configured provider headers for reverse-proxy discovery.
 				const grokbotHeaders =
 					descriptor.providerId === "grokbot" ? this.#resolveProviderOverrideHeaders("grokbot") : undefined;
 				const managerConfig =
@@ -1938,6 +1939,9 @@ export class ModelRegistry {
 						? {
 								...preparedConfig,
 								...(await resolveGrokbotDiscoveryIdentityAsync()),
+								cacheCredential: await resolveGrokbotCacheCredentialAsync(
+									typeof preparedConfig.apiKey === "string" ? preparedConfig.apiKey : undefined,
+								),
 								...(grokbotHeaders ? { headers: grokbotHeaders } : {}),
 							}
 						: preparedConfig;

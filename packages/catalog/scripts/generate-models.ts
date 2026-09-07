@@ -22,7 +22,10 @@ import { collapseVariants } from "../src/compat/collapse";
 import { resolveModelPolicy } from "../src/compat/resolve";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { buildGitLabDuoWorkflowFallbackModel } from "../src/discovery/gitlab-duo-workflow";
-import { resolveGrokbotDiscoveryIdentityAsync } from "../src/discovery/grokbot-auth";
+import {
+	resolveGrokbotCacheCredentialAsync,
+	resolveGrokbotDiscoveryIdentityAsync,
+} from "../src/discovery/grokbot-auth";
 import { createModelManager } from "../src/model-manager";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import { toModelSpec } from "../src/provider-models/bundled-references";
@@ -193,7 +196,13 @@ async function fetchProviderModelsFromCatalog(
 			getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ?? discoveryConfig;
 		const managerConfig =
 			descriptor.providerId === "grokbot"
-				? { ...preparedConfig, ...(await resolveGrokbotDiscoveryIdentityAsync()) }
+				? {
+						...preparedConfig,
+						...(await resolveGrokbotDiscoveryIdentityAsync()),
+						cacheCredential: await resolveGrokbotCacheCredentialAsync(
+							typeof preparedConfig.apiKey === "string" ? preparedConfig.apiKey : undefined,
+						),
+					}
 				: preparedConfig;
 		const managerOptions = descriptor.createModelManagerOptions(managerConfig);
 		const manager = createModelManager(managerOptions);

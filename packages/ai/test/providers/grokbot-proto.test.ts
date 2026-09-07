@@ -314,7 +314,7 @@ describe("grokbot requested model mapping", () => {
 			modelId: "grok-4.6",
 			parameters: [
 				{ id: "effort", value: "high" },
-				{ id: "fast", value: "true" },
+				{ id: "fast", value: "false" },
 			],
 		});
 		expect(
@@ -325,8 +325,21 @@ describe("grokbot requested model mapping", () => {
 		).toEqual([
 			{ id: "context", value: "272k" },
 			{ id: "reasoning", value: "medium" },
-			{ id: "fast", value: "true" },
+			{ id: "fast", value: "false" },
 		]);
+	});
+
+	test("honors discovered fast=false on composer-like variant rows", () => {
+		expect(
+			resolveGrokbotRequestedModel("composer-2", {
+				sandParameterIds: ["fast"],
+				sandParameterDefaults: { fast: "false" },
+				canonicalModelId: "composer-2.5",
+			}),
+		).toEqual({
+			modelId: "composer-2.5",
+			parameters: [{ id: "fast", value: "false" }],
+		});
 	});
 
 	test("sets isVariantStringRepresentation for variant-string catalog rows", () => {

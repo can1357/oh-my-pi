@@ -21,6 +21,7 @@
 - Grok Bot AvailableModels trims whitespace from model ids before catalog storage and alias filtering.
 - Grok Bot AvailableModels preserves variant default sand parameter values (including `context` tiers) on catalog rows.
 - Grok Bot AvailableModels copies `sandParameterDefaults` only from variants marked `isDefaultMaxConfig` / `isDefaultNonMaxConfig` (no first-variant fallback).
+- Grok Bot catalog refresh expands the `<authenticated>` renewer asynchronously and threads `cacheCredential` into model-cache scoping (no sync secrets reread on the TUI loop).
 - Grok Bot AvailableModels leaves native tool support unset; KDL forces `supportsTools: false` for grok-4.5 (sand HTTP 422 with tools).
 - Grok Bot legacy max/non-max variant rows recompute `contextWindow` for their own sandMaxMode.
 - Grok Bot live discovery reasoning is authoritative on merge (static seed reasoning is not OR-upgraded).
