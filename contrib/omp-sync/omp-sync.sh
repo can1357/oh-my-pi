@@ -6,6 +6,11 @@
 # command fails. User config (settings, sessions, auth, plugins) is never
 # deleted or rewritten by this script.
 #
+# Restore is the resolved file currently selected by PATH (symlink targets are
+# followed at restore time). That fully reverts standalone-binary and
+# shim-takeover installs. bun/npm managed updates rewrite node_modules, so
+# restoring the launcher entry there is partial — see contrib/omp-sync/README.md.
+#
 # This is an optional contrib. It does not change core `omp update` behavior.
 set -eu
 
@@ -40,11 +45,12 @@ Actions:
   --list               List snapshots (newest last)
   --help               Show this help
 
-Extra arguments after `--` are forwarded to `omp update` on --apply:
+Extra arguments after `--` are forwarded to `omp update` and to the apply
+preflight (`omp update --check`), preserving argument boundaries:
   omp-sync.sh --apply -- --canary
 
 Environment:
-  HOME                 Used to resolve ~/.omp (never hard-coded user paths)
+  HOME                 Used to resolve ~/.omp when the sync root is relative
   OMP_HOME             If set, snapshots live under $OMP_HOME/sync
   PI_CONFIG_DIR        Official config-dir name or absolute path (default .omp)
   OMP_SYNC_DIR         Snapshot root override (takes precedence)
@@ -54,10 +60,15 @@ Environment:
                        `omp plugin link` after a successful apply
   OMP_SYNC_SMOKE_CMD   Optional shell command run after apply; failure rolls back
 
+HOME is required only when the sync root is derived from a relative
+PI_CONFIG_DIR (default ~/.omp/sync). Absolute OMP_SYNC_DIR, OMP_HOME, or
+PI_CONFIG_DIR is enough without HOME.
+
 Exit codes:
   0  success / already up to date
   1  usage error
-  2  network / registry failure (no binary change)
+  2  network / registry failure (existing binary left in place; apply
+     restores the snapshot if the updater had already started)
   3  apply failed; previous binary restored when a snapshot existed
   4  rollback failed
   5  another omp-sync holds the lock
@@ -77,11 +88,31 @@ die() {
 	exit "$_rc"
 }
 
+# Single-quote a string so eval keeps the original argument boundaries.
+quote_shell() {
+	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 is_abs() {
 	case "$1" in
 		/*) return 0 ;;
 		*) return 1 ;;
 	esac
+}
+
+# True when config_root/sync_root would expand $HOME.
+sync_root_needs_home() {
+	if [ -n "${OMP_SYNC_DIR:-}" ]; then
+		return 1
+	fi
+	if [ -n "${OMP_HOME:-}" ]; then
+		return 1
+	fi
+	_cfg=${PI_CONFIG_DIR:-.omp}
+	if is_abs "$_cfg"; then
+		return 1
+	fi
+	return 0
 }
 
 config_root() {
@@ -134,6 +165,13 @@ release_lock() {
 	LOCK_KIND=""
 }
 
+exit_on_signal() {
+	_num=$1
+	release_lock
+	trap - EXIT INT TERM HUP
+	exit $((128 + _num))
+}
+
 acquire_lock() {
 	_root=$(sync_root)
 	mkdir -p "$_root" || die "$EX_IO" "could not create sync root $_root"
@@ -141,8 +179,10 @@ acquire_lock() {
 	LOCK_DIR=$_root/omp-sync.lock.d
 
 	if command -v flock >/dev/null 2>&1; then
+		# Expand $LOCK_FILE at eval time so a quote/backtick in the path
+		# cannot break the redirect or run as shell source.
 		# shellcheck disable=SC2094
-		eval "exec ${LOCK_FD}>\"$LOCK_FILE\""
+		eval "exec ${LOCK_FD}>\"\$LOCK_FILE\""
 		if flock -n "$LOCK_FD"; then
 			LOCK_KIND=flock
 			return 0
@@ -240,14 +280,21 @@ is_snapshot_id() {
 	printf '%s\n' "$1" | grep -Eq '^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9._-]+$'
 }
 
+snapshot_is_complete() {
+	_sdir=$1
+	[ -d "$_sdir" ] && [ -f "$_sdir/omp" ] && [ -f "$_sdir/meta" ]
+}
+
 write_meta() {
 	_meta=$1
 	_version=$2
 	_source=$3
 	_sha=$4
+	_launcher=${5:-}
 	{
 		printf 'version=%s\n' "$_version"
 		printf 'source=%s\n' "$_source"
+		printf 'launcher=%s\n' "$_launcher"
 		printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 		printf 'sha256=%s\n' "$_sha"
 	} >"$_meta"
@@ -261,32 +308,46 @@ read_meta_field() {
 
 snapshot_current() {
 	_omp_cmd=$(resolve_omp)
+	_launcher=$_omp_cmd
 	_source=$(resolve_file "$_omp_cmd")
 	_version=$(omp_version "$_omp_cmd")
 	_stamp=$(date -u +%Y%m%dT%H%M%SZ)
 	_id=${_stamp}-$(sanitize_id_part "$_version")-$$
-	_dir=$(snapshots_dir)/$_id
-	mkdir -p "$_dir" || die "$EX_IO" "could not create snapshot $_dir"
-	if ! cp -p "$_source" "$_dir/omp"; then
-		rm -rf "$_dir"
+	_snaps=$(snapshots_dir)
+	_staging=$_snaps/.tmp-$_id
+	_dir=$_snaps/$_id
+	rm -rf "$_staging"
+	mkdir -p "$_staging" || die "$EX_IO" "could not create snapshot $_staging"
+	if ! cp -p "$_source" "$_staging/omp"; then
+		rm -rf "$_staging"
 		die "$EX_IO" "could not copy $_source into snapshot"
 	fi
-	_sha=$(file_sha256 "$_dir/omp")
-	write_meta "$_dir/meta" "$_version" "$_source" "$_sha"
+	_sha=$(file_sha256 "$_staging/omp")
+	write_meta "$_staging/meta" "$_version" "$_source" "$_sha" "$_launcher"
+	if ! mv "$_staging" "$_dir"; then
+		rm -rf "$_staging"
+		die "$EX_IO" "could not finalize snapshot $_dir"
+	fi
 	printf '%s\n' "$_id"
 }
 
 restore_snapshot() {
 	_id=$1
 	_dir=$(snapshots_dir)/$_id
-	if [ ! -d "$_dir" ] || [ ! -f "$_dir/omp" ]; then
-		die "$EX_ROLLBACK" "snapshot not found: $_id"
+	if ! snapshot_is_complete "$_dir"; then
+		die "$EX_ROLLBACK" "snapshot not found or incomplete: $_id"
 	fi
-	_source=$(read_meta_field "$_dir/meta" source)
-	if [ -z "$_source" ]; then
-		_omp_cmd=$(resolve_omp)
-		_source=$(resolve_file "$_omp_cmd")
+	_want=$(read_meta_field "$_dir/meta" sha256)
+	if [ -n "$_want" ]; then
+		_got=$(file_sha256 "$_dir/omp")
+		if [ -n "$_got" ] && [ "$_got" != "$_want" ]; then
+			die "$EX_ROLLBACK" "snapshot $_id checksum mismatch"
+		fi
 	fi
+	# Overwrite the file PATH currently resolves to, not the possibly stale
+	# source recorded at snapshot time (an update may have retargeted a symlink).
+	_omp_cmd=$(resolve_omp)
+	_source=$(resolve_file "$_omp_cmd")
 	_parent=$(dirname "$_source")
 	if [ ! -d "$_parent" ]; then
 		die "$EX_ROLLBACK" "restore target directory missing: $_parent"
@@ -314,6 +375,7 @@ latest_snapshot_id() {
 		[ -d "$_name" ] || continue
 		_id=$(basename "$_name")
 		is_snapshot_id "$_id" || continue
+		snapshot_is_complete "$_name" || continue
 		_last=$_id
 	done
 	if [ -z "$_last" ]; then
@@ -337,6 +399,11 @@ prune_snapshots() {
 		[ -d "$_name" ] || continue
 		_id=$(basename "$_name")
 		is_snapshot_id "$_id" || continue
+		if ! snapshot_is_complete "$_name"; then
+			rm -rf "$_name"
+			log "omp-sync: removed incomplete snapshot $_id"
+			continue
+		fi
 		_list="$_list $_id"
 		_n=$((_n + 1))
 	done
@@ -374,9 +441,21 @@ run_omp_update() {
 	cat "$_log" || true
 }
 
+# Invoke run_omp_update with eval-quoted extra args from PASS_THROUGH.
+omp_update_with_pass_through() {
+	_bin=$(quote_shell "$1")
+	shift
+	_pre=""
+	while [ "$#" -gt 0 ]; do
+		_pre="$_pre $(quote_shell "$1")"
+		shift
+	done
+	eval "run_omp_update ${_bin}${_pre}${PASS_THROUGH}"
+}
+
 cmd_check() {
 	_omp=$(resolve_omp)
-	run_omp_update "$_omp" --check
+	omp_update_with_pass_through "$_omp" --check
 	_log=$(cat "$(sync_root)/last-run.log" 2>/dev/null || true)
 	if [ "$LAST_UPDATE_RC" -eq 0 ]; then
 		exit "$EX_OK"
@@ -401,8 +480,16 @@ relink_extensions() {
 	IFS=$_oldifs
 	for _path in "$@"; do
 		[ -n "$_path" ] || continue
+		# Quoted/escaped tilde so a literal ~/ prefix is not expanded to $HOME
+		# by the case pattern (which would skip values such as ~/src/plugin).
 		case "$_path" in
-			~/*) _path=$HOME/${_path#~/} ;;
+			'~/'* | \~/*)
+				if [ -z "${HOME:-}" ]; then
+					log "omp-sync: skip relink, cannot expand ~ without HOME: $_path"
+					continue
+				fi
+				_path="${HOME}/${_path#~/}"
+				;;
 		esac
 		if [ ! -e "$_path" ]; then
 			log "omp-sync: skip relink, path does not exist: $_path"
@@ -428,13 +515,14 @@ run_smoke() {
 restore_and_fail() {
 	_id=$1
 	_msg=$2
+	_rc=${3:-$EX_APPLY}
 	if [ -n "$_id" ]; then
 		restore_snapshot "$_id" || die "$EX_APPLY" "update failed and restore of $_id also failed: $_msg"
 		log "omp-sync: $_msg; previous binary restored"
 	else
 		log "omp-sync: $_msg; no snapshot to restore"
 	fi
-	exit "$EX_APPLY"
+	exit "$_rc"
 }
 
 cmd_apply() {
@@ -442,8 +530,9 @@ cmd_apply() {
 	_source=$(resolve_file "$_omp")
 	_before=$(omp_version "$_omp")
 
-	# Probe first so a registry outage never replaces the binary.
-	run_omp_update "$_omp" --check
+	# Probe first so a registry outage never replaces the binary. Forward
+	# --canary/--stable/--force so a channel switch is not skipped as current.
+	omp_update_with_pass_through "$_omp" --check
 	_check_log=$(cat "$(sync_root)/last-run.log" 2>/dev/null || true)
 	if [ "$LAST_UPDATE_RC" -ne 0 ]; then
 		if looks_like_network_error "$_check_log"; then
@@ -460,18 +549,13 @@ cmd_apply() {
 	_id=$(snapshot_current)
 	log "omp-sync: snapshot $_id of $_source ($_before)"
 
-	# Re-resolve in case PATH/env changed; still the official updater.
-	set +e
-	# shellcheck disable=SC2086
-	"$_omp" update $PASS_THROUGH >"$(sync_root)/last-run.log" 2>&1
-	_upd_rc=$?
-	set -e
-	cat "$(sync_root)/last-run.log" >&2 || true
+	omp_update_with_pass_through "$_omp"
+	_upd_rc=$LAST_UPDATE_RC
 	_upd_log=$(cat "$(sync_root)/last-run.log" 2>/dev/null || true)
 
 	if [ "$_upd_rc" -ne 0 ]; then
 		if looks_like_network_error "$_upd_log"; then
-			restore_and_fail "$_id" "network failure during apply"
+			restore_and_fail "$_id" "network failure during apply" "$EX_NETWORK"
 		fi
 		restore_and_fail "$_id" "omp update failed (exit $_upd_rc)"
 	fi
@@ -520,6 +604,7 @@ cmd_list() {
 		[ -d "$_dir" ] || continue
 		_id=$(basename "$_dir")
 		is_snapshot_id "$_id" || continue
+		snapshot_is_complete "$_dir" || continue
 		_any=1
 		_ver=$(read_meta_field "$_dir/meta" version)
 		_src=$(read_meta_field "$_dir/meta" source)
@@ -575,7 +660,11 @@ parse_args() {
 				;;
 			--)
 				shift
-				PASS_THROUGH=$*
+				PASS_THROUGH=""
+				while [ "$#" -gt 0 ]; do
+					PASS_THROUGH="$PASS_THROUGH $(quote_shell "$1")"
+					shift
+				done
 				break
 				;;
 			*)
@@ -591,11 +680,14 @@ parse_args() {
 
 main() {
 	parse_args "$@"
-	if [ -z "${HOME:-}" ]; then
+	if sync_root_needs_home && [ -z "${HOME:-}" ]; then
 		die "$EX_USAGE" "HOME is not set"
 	fi
 	ensure_sync_dirs
-	trap release_lock EXIT INT TERM HUP
+	trap release_lock EXIT
+	trap 'exit_on_signal 2' INT
+	trap 'exit_on_signal 15' TERM
+	trap 'exit_on_signal 1' HUP
 	acquire_lock
 	case "$ACTION" in
 		check) cmd_check ;;
