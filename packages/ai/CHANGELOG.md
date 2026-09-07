@@ -25,6 +25,8 @@
 - Grok Bot keeps stream events buffered while either an empty-tool or incomplete-tool retry remains available, so sequential retries do not leak abandoned start/thinking events.
 - Grok Bot re-enters buffered mode when a later incomplete tool opens after the attempt went live, so subsequent text/thinking keep correct content indices after drop/remap.
 - Grok Bot discards buffered thinking/text events when promoting JSON-as-text into a tool call, so ACP does not receive the discarded JSON as reasoning.
+- Grok Bot keeps JSON / tool_code fallback text buffered until end-of-stream promotion, and only promotes unfenced Gemini calls when the reply is solely a call expression.
+- Grok Bot parent-chat intercepts SendToUser as display text only when the synthetic helper owns that wire name — extension tools named SendToUser are dispatched.
 - Grok Bot automation/parent-chat product wire for non-Anthropic routers requires catalog `sand-tools-wire` (no raw `sand-automation` / `sand-default` id exceptions).
 - Grok Bot keep-model probes share checksum/JWT/auth helpers via `scripts/grokbot-probe-config.mjs`.
 - Grok Bot `sand-automation` now promotes grok-4.5-high fenced `{"name":"Shell",…}` text into a real Shell/bash tool call, and native-family matrix rows report `wire: native` instead of the internal `error` sentinel.

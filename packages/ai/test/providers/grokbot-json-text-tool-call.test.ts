@@ -5,6 +5,7 @@ import * as grokbotAuth from "../../src/providers/grokbot/auth";
 import {
 	advertisedNamesForJsonTextToolCall,
 	assistantTextForJsonPromotion,
+	looksLikePromotableToolText,
 	parseGeminiInbandToolCall,
 	parseJsonTextToolCall,
 } from "../../src/providers/grokbot/json-text-tool-call";
@@ -66,6 +67,21 @@ describe("parseJsonTextToolCall", () => {
 			arguments: { command: "echo hi" },
 		});
 		expect(parseGeminiInbandToolCall("just thinking about files", advertised)).toBeUndefined();
+	});
+
+	test("rejects prose that merely mentions a call-shaped expression", () => {
+		expect(
+			parseGeminiInbandToolCall('You can run bash(command="echo hi") to list files', ["bash", "Shell"]),
+		).toBeUndefined();
+		expect(
+			parseGeminiInbandToolCall(
+				'Here is an example:\n```tool_code\ndefault_api.bash(command="echo hi")\n```\n',
+				advertised,
+			),
+		).toBeUndefined();
+		expect(looksLikePromotableToolText('{"name":"Shell","arguments":{}}')).toBe(true);
+		expect(looksLikePromotableToolText("```json\n{")).toBe(true);
+		expect(looksLikePromotableToolText("pong42")).toBe(false);
 	});
 
 	test("assistantTextForJsonPromotion joins thinking so thought-only JSON can promote", () => {
@@ -143,7 +159,14 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 			tools: [bashTool],
 		};
 
-		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		const stream = streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl });
+		const textEvents: string[] = [];
+		for await (const event of stream) {
+			if (event.type === "text_start" || event.type === "text_delta" || event.type === "text_end") {
+				textEvents.push(event.type);
+			}
+		}
+		const result = await stream.result();
 		expect(result.stopReason).toBe("toolUse");
 		expect(result.upstreamModel).toBe("cursor-grok-4.5-high");
 		expect(result.content.some(b => b.type === "text")).toBe(false);
@@ -154,6 +177,8 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 				arguments: { command: "echo tools-pong-sand-automation" },
 			}),
 		]);
+		// Promotable JSON must stay buffered until classification — no leaked text lifecycle.
+		expect(textEvents).toEqual([]);
 	});
 
 	test("promotes JSON-as-text hidden in a thinking-only turn", async () => {
@@ -696,5 +721,119 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "pong42" })]);
+	});
+
+	test("synthetic parent-chat SendToUser becomes assistant text", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const parent = buildModel({
+			id: "sand-default",
+			name: "sand-default",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandToolsWire: "parent-chat",
+			sandParameterIds: [],
+		});
+		const call = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu1",
+					toolName: "SendToUser",
+					args: '{"type":"text","content":"hello-visible"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(call, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(parent as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "hello-visible" })]);
+	});
+
+	test("extension-owned SendToUser is dispatched as a tool call", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const parent = buildModel({
+			id: "sand-default",
+			name: "sand-default",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandToolsWire: "parent-chat",
+			sandParameterIds: [],
+		});
+		const extensionSendToUser = {
+			name: "SendToUser",
+			description: "Extension-owned SendToUser",
+			parameters: {
+				type: "object",
+				properties: {
+					type: { type: "string" },
+					content: { type: "string" },
+				},
+				required: ["type", "content"],
+			},
+		} as Tool;
+		const call = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu-ext",
+					toolName: "SendToUser",
+					args: '{"type":"text","content":"should-dispatch"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(call, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [bashTool, extensionSendToUser],
+		};
+
+		const result = await streamGrokBot(parent as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+		}).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				name: "SendToUser",
+				arguments: { type: "text", content: "should-dispatch" },
+			}),
+		]);
 	});
 });

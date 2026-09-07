@@ -139,7 +139,7 @@ async function runTurn(
 
 async function main() {
 	console.log(`model: ${model.id} api=${model.api} provider=${model.provider}`);
-	console.log(`tools: ${tools.map((t) => t.name).join(", ")}`);
+	console.log(`tools: ${tools.map(t => t.name).join(", ")}`);
 	console.log(`identity: class=${model.identity.class} family=${model.identity.family}`);
 
 	// ─── Turn 1: ask model to call Shell ───
@@ -153,7 +153,7 @@ async function main() {
 	];
 
 	const turn1 = await runTurn(turn1Messages);
-	const t1Calls = turn1.toolCalls.map((tc) => `${tc.name}(${tc.id})`);
+	const t1Calls = turn1.toolCalls.map(tc => `${tc.name}(${tc.id})`);
 	console.log(`  toolCalls: [${t1Calls.join(", ")}]`);
 	console.log(`  stopReason: ${turn1.assistant.stopReason}`);
 	console.log(`  model: ${turn1.assistant.model}`);
@@ -165,7 +165,7 @@ async function main() {
 		return;
 	}
 
-	const shellCall = turn1.toolCalls.find((tc) => tc.name === "Shell" || tc.name === "bash");
+	const shellCall = turn1.toolCalls.find(tc => tc.name === "Shell" || tc.name === "bash");
 	if (!shellCall) {
 		console.log(`\nPIPELINE_PROBE_FAIL: no Shell/bash tool call in turn1`);
 		console.log(`  calls were: ${t1Calls.join(", ")}`);
@@ -198,13 +198,13 @@ async function main() {
 
 	const turn2 = await runTurn(turn2Messages);
 	const t2Text = turn2.assistant.content
-		.filter((c) => c.type === "text")
-		.map((c) => (c as { text: string }).text)
+		.filter(c => c.type === "text")
+		.map(c => (c as { text: string }).text)
 		.join("");
 	console.log(`  stopReason: ${turn2.assistant.stopReason}`);
 	console.log(`  model: ${turn2.assistant.model}`);
 	console.log(`  text: "${t2Text.slice(0, 200)}"`);
-	console.log(`  toolCalls: [${turn2.toolCalls.map((tc) => tc.name).join(", ")}]`);
+	console.log(`  toolCalls: [${turn2.toolCalls.map(tc => tc.name).join(", ")}]`);
 	console.log(`  error: ${turn2.error || "-"}`);
 
 	if (turn2.error) {
@@ -229,7 +229,7 @@ async function main() {
 	];
 
 	const turn3 = await runTurn(turn3Messages);
-	const t3Calls = turn3.toolCalls.map((tc) => `${tc.name}(${tc.id})`);
+	const t3Calls = turn3.toolCalls.map(tc => `${tc.name}(${tc.id})`);
 	console.log(`  toolCalls: [${t3Calls.join(", ")}]`);
 	console.log(`  stopReason: ${turn3.assistant.stopReason}`);
 	console.log(`  model: ${turn3.assistant.model}`);
@@ -241,7 +241,7 @@ async function main() {
 		return;
 	}
 
-	const readCall = turn3.toolCalls.find((tc) => tc.name === "Read" || tc.name === "read");
+	const readCall = turn3.toolCalls.find(tc => tc.name === "Read" || tc.name === "read");
 	console.log(`  Read call: ${readCall ? `✓ id=${readCall.id}` : "✗"}`);
 
 	// ─── Summary ───

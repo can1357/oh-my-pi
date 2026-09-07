@@ -317,7 +317,8 @@ async function runOneTool(
 	}
 	const calls = toolCallsOf(turn1);
 	const names = calls.map(c => c.name);
-	const match = kind === "write" ? calls.find(c => isWriteLikeCall(c)) : calls.find(c => TOOL_NAME_RE[kind].test(c.name));
+	const match =
+		kind === "write" ? calls.find(c => isWriteLikeCall(c)) : calls.find(c => TOOL_NAME_RE[kind].test(c.name));
 	if (!match) {
 		const body = textOf(turn1);
 		return {

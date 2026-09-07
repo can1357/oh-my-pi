@@ -43,6 +43,7 @@ import {
 import {
 	advertisedNamesForJsonTextToolCall,
 	assistantTextForJsonPromotion,
+	looksLikePromotableToolText,
 	parseGeminiInbandToolCall,
 	parseJsonTextToolCall,
 } from "./grokbot/json-text-tool-call";
@@ -844,7 +845,11 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					(event.type === "text_delta" || event.type === "text_end") &&
 					!hasEarlierIncompleteTool(event.contentIndex)
 				) {
-					flushAttemptEvents();
+					// Hold JSON / tool_code fallback text until end-of-stream
+					// promotion — early flush cannot retract published deltas.
+					const block = output.content[event.contentIndex];
+					const text = block?.type === "text" && typeof block.text === "string" ? block.text : "";
+					if (!looksLikePromotableToolText(text)) flushAttemptEvents();
 				}
 			};
 
@@ -1299,7 +1304,17 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 									(toolPart as Record<string, unknown>).tool_name ||
 									"",
 							);
-							if (wireToolName === SEND_TO_USER_WIRE_NAME) {
+							// Only intercept the synthetic parent-chat helper. When an
+							// extension owns the SendToUser wire name, dispatch it.
+							const ompOwnsSendToUser =
+								Array.isArray(context.tools) &&
+								context.tools.some(tool => {
+									if (!tool || typeof tool !== "object") return false;
+									const name = typeof tool.name === "string" ? tool.name.trim() : "";
+									const custom = typeof tool.customWireName === "string" ? tool.customWireName.trim() : "";
+									return name === SEND_TO_USER_WIRE_NAME || custom === SEND_TO_USER_WIRE_NAME;
+								});
+							if (wireToolName === SEND_TO_USER_WIRE_NAME && !ompOwnsSendToUser) {
 								handleSendToUser(toolPart as Record<string, unknown>);
 							} else {
 								upsertTool(toolPart as Record<string, unknown>);

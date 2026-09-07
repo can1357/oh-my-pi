@@ -134,6 +134,89 @@ export function parseJsonTextToolCall(text: string, advertisedNames: Iterable<st
 	return { name, arguments: args };
 }
 
+/** Index of the `)` matching `(` at openIndex, skipping Python string contents. */
+function matchParen(body: string, openIndex: number): number {
+	let depth = 0;
+	let i = openIndex;
+	const n = body.length;
+	while (i < n) {
+		const ch = body[i]!;
+		if (ch === '"' || ch === "'") {
+			const quote = ch;
+			const triple = quote + quote + quote;
+			if (body.startsWith(triple, i)) {
+				const close = body.indexOf(triple, i + 3);
+				i = close === -1 ? n : close + 3;
+				continue;
+			}
+			i++;
+			while (i < n) {
+				const c = body[i]!;
+				if (c === "\\") {
+					i += 2;
+					continue;
+				}
+				if (c === quote) {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		if (ch === "(") depth++;
+		else if (ch === ")" && --depth === 0) return i;
+		i++;
+	}
+	return -1;
+}
+
+/**
+ * True when text is solely a Gemini call expression (optional `print(...)`
+ * wrapper) — not prose that merely mentions `bash(...)`.
+ */
+export function isStandaloneGeminiCallExpression(text: string): boolean {
+	const trimmed = text.trim();
+	if (!trimmed) return false;
+	let body = trimmed;
+	const printHead = /^print\s*\(/i.exec(body);
+	if (printHead) {
+		const open = printHead[0].length - 1;
+		const close = matchParen(body, open);
+		if (close === -1) return false;
+		if (body.slice(close + 1).trim()) return false;
+		body = body.slice(open + 1, close).trim();
+	}
+	const callHead = /^(?:default_api\.)?[A-Za-z_]\w*\s*\(/.exec(body);
+	if (!callHead) return false;
+	const openIdx = body.indexOf("(", callHead[0].length - 1);
+	const closeIdx = matchParen(body, openIdx);
+	if (closeIdx === -1) return false;
+	return body.slice(closeIdx + 1).trim().length === 0;
+}
+
+/** Body of a sole ```tool_code fence, or undefined when prose surrounds it. */
+function stripSoleToolCodeFence(text: string): string | undefined {
+	const trimmed = text.trim();
+	const fenced = /^```tool_code\s*\r?\n?([\s\S]*?)\r?\n?```$/i.exec(trimmed);
+	return fenced?.[1]?.trim();
+}
+
+/**
+ * True when accumulated assistant text still looks like a JSON / tool_code
+ * fallback that end-of-stream promotion may convert into a tool call. Used to
+ * keep those deltas buffered so ACP never sees the raw dump before promotion.
+ */
+export function looksLikePromotableToolText(text: string): boolean {
+	const t = text.trim();
+	if (!t) return false;
+	if (t.startsWith("{")) return true;
+	if (/^```(?:json|jsonc|javascript|js|tool_code)?\b/i.test(t)) return true;
+	// Incomplete unfenced call still streaming, or a complete standalone call.
+	if (/^(?:print\s*\(\s*)?(?:default_api\.)?[A-Za-z_]\w*\s*\(/.test(t)) return true;
+	return false;
+}
+
 /**
  * Promote Gemini ```tool_code / default_api.bash(...) dumps that sand leaves
  * as thinking or text instead of toolCallPart (gemini-3-flash empty-body).
@@ -146,11 +229,10 @@ export function parseGeminiInbandToolCall(
 	if (advertised.size === 0) return undefined;
 	const trimmed = text.trim();
 	if (!trimmed) return undefined;
-	const scanned = trimmed.includes("```tool_code")
-		? trimmed
-		: /(?:default_api\.)?\w+\s*\(/.test(trimmed)
-			? `\`\`\`tool_code\n${trimmed}\n\`\`\``
-			: trimmed;
+	const fencedBody = stripSoleToolCodeFence(trimmed);
+	const body = fencedBody !== undefined ? fencedBody : isStandaloneGeminiCallExpression(trimmed) ? trimmed : undefined;
+	if (body === undefined) return undefined;
+	const scanned = `\`\`\`tool_code\n${body}\n\`\`\``;
 	const scanner = new GeminiInbandScanner({ parseThinking: true });
 	const events = [...scanner.feed(scanned), ...scanner.flush()];
 	for (const event of events) {
