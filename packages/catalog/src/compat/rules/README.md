@@ -271,12 +271,12 @@ auth "anthropic" {
         state "hex"                              // hex | uuid | none
         authorize-params { code "true" }         // standard=#false drops client_id/response_type/redirect_uri/scope/PKCE/state
         instructions "Complete login in your browser…"
-        callback port=54545 path="/callback" hostname="localhost" redirect-uri="…" redirect-uri-env="VAR" port-fallback=#true manual-only=#false
+        callback port=54545 path="/callback" hostname="localhost" redirect-uri="…" redirect-uri-env="VAR" port-fallback=#true manual-only=#false native-scheme=#false
         token url="https://api.anthropic.com/v1/oauth/token" body="json" { params { state "{state}" } headers { X "y" } }
         credential {
             access "access_token"                // dot path; `claim="a|b"` reads JWT claims; `literal="…"` pins a value
             refresh "refresh_token"
-            expires "seconds" path="expires_in" from="created_at" skew-ms=300000   // or `expires "jwt" fallback-ms=N` / `expires "never"`
+            expires "seconds" path="expires_in" from="created_at" skew-ms=300000 fallback-ms=3600000   // or `expires "jwt" fallback-ms=N` / `expires "never"`
             email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url
         }
         userinfo url="https://…/userinfo" email="email" account-id="sub"

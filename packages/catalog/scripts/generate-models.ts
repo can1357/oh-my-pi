@@ -49,6 +49,7 @@ import {
 	isKimiK27CodeModelId,
 	kimiCodeMaxTokens,
 	META_MUSE_STATIC_MODELS,
+	MUSE_CODE_STATIC_MODELS,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
 	OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS,
@@ -681,6 +682,9 @@ async function generateModels() {
 	// default must resolve synchronously at boot, before credential-scoped
 	// runtime discovery replaces the seed with the account's live catalog.
 	allModels.push(...DEVIN_STATIC_MODELS);
+	// Muse Code discovery is scoped to the signed-in subscription. Bundle the
+	// documented seed, then replace it with the account's live roster at runtime.
+	allModels.push(...MUSE_CODE_STATIC_MODELS);
 	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
 	// not enumerated by the serverless control-plane list, so discovery never
 	// surfaces them; the seed projects each base entry into a fast variant.

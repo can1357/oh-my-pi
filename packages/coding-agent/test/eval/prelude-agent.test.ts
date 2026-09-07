@@ -31,7 +31,9 @@ describe("eval js agent() handle", () => {
 			seenArgs = args as Record<string, unknown>;
 			return { id: "abc123", agent: "task" };
 		});
-		const handle = (await (sandbox.agent as AgentHelper)("say hi", { label: "Greeter" })) as Record<string, unknown>;
+		const handle = (await (sandbox.agent as AgentHelper)("say hi", {
+			label: "Greeter",
+		})) as Record<string, unknown>;
 		expect(seenName).toBe("__agent__");
 		expect(seenArgs).toEqual({ prompt: "say hi", label: "Greeter" });
 		expect(handle.kind).toBe("agent");
@@ -74,7 +76,7 @@ describe("eval js agent() handle", () => {
 	});
 
 	it("parses wait() text as JSON only when a schema was given", async () => {
-		const sandbox = loadPrelude(async (name, args) => {
+		const sandbox = loadPrelude(async name => {
 			if (name === "__agent__") return { id: "id-9", agent: "task" };
 			if (name === "__wait__") return { items: [{ status: "completed", text: '{"k":1}' }] };
 			throw new Error(`unexpected bridge call ${name}`);
@@ -84,7 +86,9 @@ describe("eval js agent() handle", () => {
 		})) as { wait(): Promise<unknown> };
 		expect(await withSchema.wait()).toEqual({ k: 1 });
 
-		const plain = (await (sandbox.agent as AgentHelper)("emit")) as { wait(): Promise<unknown> };
+		const plain = (await (sandbox.agent as AgentHelper)("emit")) as {
+			wait(): Promise<unknown>;
+		};
 		expect(await plain.wait()).toBe('{"k":1}');
 	});
 });

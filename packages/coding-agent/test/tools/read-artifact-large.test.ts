@@ -8,6 +8,7 @@ import {
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { formatTruncationMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -37,6 +38,14 @@ function largeArtifactText(): string {
 		{ length: 400 },
 		(_, index) => `line-${String(index + 1).padStart(3, "0")} ${"x".repeat(256)}`,
 	).join("\n");
+}
+
+function oversizedSelectedLineArtifact(): string {
+	return ["leading-context", `oversized-${"x".repeat(70_000)}-end`, "trailing-one", "trailing-two"].join("\n");
+}
+
+function byteLimitedRangeArtifact(): string {
+	return Array.from({ length: 100 }, (_, index) => `line-${index + 1} ${"x".repeat(1_016)}`).join("\n");
 }
 
 describe("read tool large artifact handling", () => {
@@ -108,6 +117,66 @@ describe("read tool large artifact handling", () => {
 		const result = await tool.execute("call-raw-tail", { path: "artifact://0:raw:301-" });
 
 		expect(result.details?.totalLines).toBe(400);
+	});
+
+	it("keeps the continuation when the byte budget stops inside requested artifact content", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), byteLimitedRangeArtifact());
+
+		const result = await tool.execute("call-byte-limited-range", { path: "artifact://0:1-100" });
+		const output = getTextOutput(result);
+		const truncation = result.details?.meta?.truncation;
+
+		expect(output).not.toContain("could not fit after preceding context");
+		expect(output).not.toContain("to read that line without context");
+		expect(truncation).toBeDefined();
+		if (!truncation) throw new Error("expected truncation metadata");
+		const shownRange = truncation.shownRange;
+		expect(shownRange).toBeDefined();
+		if (!shownRange) throw new Error("expected shown range");
+		expect(truncation.nextOffset).toBe(shownRange.end + 1);
+		expect(formatTruncationMetaNotice(truncation)).toContain(`Use :${truncation.nextOffset} to continue`);
+	});
+
+	it("reports an oversized selected line instead of sending a looping continuation selector", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), oversizedSelectedLineArtifact());
+
+		const result = await tool.execute("call-oversized-selected", { path: "artifact://0:2-2" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("leading-context");
+		expect(output).toContain("Line 2 is 68.4KB");
+		expect(output).toContain("50.0KB read budget");
+		expect(output).toContain("artifact://0:raw:2-2");
+		const truncation = result.details?.meta?.truncation;
+		expect(truncation?.totalBytes).toBeGreaterThan(70_000);
+		expect(truncation?.nextOffset).toBeUndefined();
+		if (!truncation) throw new Error("expected truncation metadata");
+		expect(formatTruncationMetaNotice(truncation)).not.toContain("Use :2 to continue");
+	});
+
+	it("still returns the oversized selected line when a wider range raises the byte budget", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), oversizedSelectedLineArtifact());
+
+		const result = await tool.execute("call-wide-oversized-selected", { path: "artifact://0:2-142" });
+		const output = getTextOutput(result);
+
+		expect(output).toContain("oversized-");
+		expect(output).toContain("trailing-two");
+		expect(output).not.toContain("could not fit after preceding context");
+		expect(result.details?.meta?.truncation).toBeUndefined();
+	});
+
+	it("keeps raw oversized-line reads context-free and byte-capped", async () => {
+		await Bun.write(path.join(artifactDir, "0.mcp.log"), oversizedSelectedLineArtifact());
+
+		const result = await tool.execute("call-raw-oversized-selected", { path: "artifact://0:raw:2-2" });
+		const output = getTextOutput(result);
+
+		expect(output).toStartWith("oversized-");
+		expect(output).not.toContain("leading-context");
+		expect(output).not.toContain("trailing-one");
+		expect(result.details?.meta?.truncation?.partialLine).toBe(true);
+		expect(result.details?.meta?.truncation?.shownRange).toEqual({ start: 2, end: 2 });
 	});
 
 	it("tails an artifact with :-N by counting lines first, then streaming only that window", async () => {

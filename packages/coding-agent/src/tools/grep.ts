@@ -28,6 +28,7 @@ import type { InternalResource, ResolveContext } from "../internal-urls/types";
 import type { Theme } from "../modes/theme/theme";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead, truncateLine } from "../session/streaming-output";
+import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import {
 	Ellipsis,
@@ -780,6 +781,8 @@ async function resolveInternalSearchInputs(opts: {
 	skills?: ResolveContext["skills"];
 	rules?: ResolveContext["rules"];
 	sessionFile?: string;
+	sessionId?: string;
+	agentRegistry?: ResolveContext["agentRegistry"];
 }): Promise<InternalSearchInputResolution> {
 	const internalRouter = InternalUrlRouter.instance();
 	const paths = opts.resolvedPaths.slice();
@@ -793,6 +796,8 @@ async function resolveInternalSearchInputs(opts: {
 		settings: opts.settings,
 		signal: opts.signal,
 		sessionFile: opts.sessionFile,
+		sessionId: opts.sessionId,
+		agentRegistry: opts.agentRegistry,
 		localProtocolOptions: opts.localProtocolOptions,
 		skills: opts.skills,
 		rules: opts.rules,
@@ -928,6 +933,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		return prompt.render(grepDescription, {
 			IS_HL_MODE: displayMode.hashLines,
 			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
+			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,
 				this.session.getSessionSpawns?.() ?? "*",
@@ -1007,6 +1013,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					skills: this.session.skills,
 					rules: this.session.activeRules,
 					sessionFile: this.session.getSessionFile() ?? undefined,
+					sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
+					agentRegistry: this.session.agentRegistry,
 				});
 				const searchablePaths = internalResolution.paths;
 				const { virtualResources, virtualPathSet, virtualInputIndexes } = internalResolution;
@@ -1050,6 +1058,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						skills: this.session.skills,
 						rules: this.session.activeRules,
 						sessionFile: this.session.getSessionFile() ?? undefined,
+						sessionId:
+							this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
+						agentRegistry: this.session.agentRegistry,
 						resolveExternalUrl: materializeExternalUrlForSearch,
 						trackImmutableSources: true,
 						surfaceExactFilePaths: true,

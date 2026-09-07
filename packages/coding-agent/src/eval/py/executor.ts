@@ -15,6 +15,7 @@ import {
 	waitForPromiseWithCancellation,
 } from "../executor-base";
 import type { JsStatusEvent } from "../js/shared/types";
+import { getEnabledEvalPreludes } from "../preludes";
 import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import {
 	createKernelSessionRegistry,
@@ -32,6 +33,7 @@ import {
 	type KernelExecuteResult,
 	type KernelShutdownResult,
 	PythonKernel,
+	type PythonPreludeSource,
 } from "./kernel";
 import { resolveExplicitPythonRuntime } from "./runtime";
 import { ensurePyToolBridge, registerPyToolBridge } from "./tool-bridge";
@@ -125,6 +127,11 @@ export interface PythonExecutorOptions {
 
 export interface PythonKernelExecutor {
 	execute: (code: string, options?: KernelExecuteOptions) => Promise<KernelExecuteResult>;
+	syncPreludes?: (
+		preludes: readonly PythonPreludeSource[],
+		signal: AbortSignal | undefined,
+		timeoutMs: number,
+	) => Promise<void>;
 }
 
 export interface PythonResult {
@@ -326,11 +333,26 @@ async function acquireLiveSessionKernel(
 // Execution
 // ---------------------------------------------------------------------------
 
+function pythonPreludeSources(session: ToolSession | undefined): PythonPreludeSource[] {
+	const definitions = getEnabledEvalPreludes(session?.getEvalPreludes?.() ?? []);
+	return definitions.flatMap(definition =>
+		definition.python.trim().length === 0
+			? []
+			: [{ name: definition.name, exports: [...definition.exports], source: definition.python }],
+	);
+}
+
 async function executeWithKernel(
 	kernel: PythonKernelExecutor,
 	code: string,
 	options: PythonExecutorOptions | undefined,
 ): Promise<PythonResult> {
+	const remainingMs = getRemainingTimeoutMs(options?.deadlineMs);
+	await kernel.syncPreludes?.(
+		pythonPreludeSources(options?.toolSession),
+		options?.signal,
+		Math.max(1, remainingMs ?? 10_000),
+	);
 	return executeWithKernelBase<PythonExecutorOptions>({
 		kernel,
 		code,

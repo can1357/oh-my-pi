@@ -104,6 +104,14 @@ export interface StructuredSubagentRequest {
 	blockedAgent?: string;
 	/** Preserve a completed temporary artifacts directory for an agent:// handle. */
 	retainArtifacts?: boolean;
+	/**
+	 * Invoked instead of immediate cleanup when a temporary artifacts
+	 * directory is retained (`retainArtifacts`). Callers that outlive this
+	 * call — e.g. an async job body — take ownership of the returned
+	 * disposal closure and MUST eventually run it once the retained handle
+	 * is no longer needed, or the directory leaks for the process lifetime.
+	 */
+	onArtifactsRetained?: (cleanup: () => Promise<void>) => void;
 	/** Task UI agents keep live registry references; eval one-shots normally do not. */
 	keepAlive?: boolean;
 	/** Task subagents share their parent's eval kernel; eval bridge children must not. */
@@ -571,6 +579,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	let mergeSummary = "";
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
+	let hasValidStructuredOutput = false;
 	let deferredCleanup: Promise<void> | undefined;
 	const onSubprocessResult =
 		request.invocationKind === "eval"
@@ -618,6 +627,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			});
 		}
 		attachStructuredOutputMetadata(result, policy.schema);
+		hasValidStructuredOutput = result.structuredOutput?.status === "valid";
 		requiresRecoveryArtifacts =
 			policy.isIsolated &&
 			(result.exitCode !== 0 || result.error !== undefined || result.aborted === true) &&
@@ -679,14 +689,15 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		);
 	} finally {
 		const shouldRetainArtifacts =
-			(request.retainArtifacts && completedSuccessfully) ||
+			request.detached === true ||
+			(request.retainArtifacts && (completedSuccessfully || hasValidStructuredOutput)) ||
 			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
+		const cleanupArtifacts = async (): Promise<void> => {
+			await fs.rm(lease.artifactsDir, { recursive: true, force: true });
+			lease.unregister?.();
+		};
 		if (shouldCleanup) {
-			const cleanupArtifacts = async (): Promise<void> => {
-				await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-				lease.unregister?.();
-			};
 			if (deferredCleanup) {
 				trackLateCleanup(deferredCleanup.then(cleanupArtifacts), {
 					resource: "artifacts",
@@ -695,6 +706,11 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			} else {
 				await cleanupArtifacts();
 			}
+		} else if (lease.temporary && request.onArtifactsRetained) {
+			// Retained rather than cleaned up now: the caller (e.g. an async
+			// job body) owns disposing it once the retained handle is no
+			// longer needed, instead of it leaking for the process lifetime.
+			request.onArtifactsRetained(cleanupArtifacts);
 		}
 	}
 }

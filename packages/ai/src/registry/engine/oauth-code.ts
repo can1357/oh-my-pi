@@ -1,6 +1,6 @@
 /**
  * `login "oauth-code"` engine: authorization-code grant (optionally PKCE)
- * through the loopback callback server, followed by the declared token
+ * through the configured callback transport, followed by the declared token
  * exchange, credential projection, userinfo enrichment and after-exchange hook.
  */
 import type { CompiledAuthProvider, CompiledCallback, CompiledOAuthCodeLogin } from "@oh-my-pi/pi-catalog/compat/types";
@@ -42,6 +42,7 @@ export async function resolveCallbackOptions(
 		callbackHostname: callback.hostname,
 		allowPortFallback: callback.portFallback,
 		manualInputOnly: callback.manualOnly,
+		nativeScheme: callback.nativeScheme,
 	};
 	if (!callback.redirectUri) return base;
 	const redirectUri = await resolveValue(callback.redirectUri, signal);
@@ -79,6 +80,7 @@ export async function resolveCallbackOptions(
 		redirectUri,
 		allowPortFallback: false,
 		manualInputOnly: callback.manualOnly,
+		nativeScheme: callback.nativeScheme,
 	};
 }
 

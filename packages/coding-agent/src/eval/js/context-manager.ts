@@ -9,6 +9,7 @@ import type { ToolSession } from "../../tools";
 import { ToolAbortError, ToolError } from "../../tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
+import { getEnabledEvalPreludes } from "../preludes";
 import {
 	attachSessionOwner,
 	EvalKernelNotRunningError,
@@ -22,6 +23,7 @@ import { WorkerCore } from "./worker-core";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
 import type {
+	EvalPreludeSource,
 	JsDisplayOutput,
 	JsToolRequest,
 	RunErrorPayload,
@@ -362,6 +364,15 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 	}
 }
 
+function javascriptPreludeSources(session: ToolSession): EvalPreludeSource[] {
+	const definitions = getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []);
+	return definitions.flatMap(definition =>
+		definition.javascript.trim().length === 0
+			? []
+			: [{ name: definition.name, exports: [...definition.exports], source: definition.javascript }],
+	);
+}
+
 async function runOnce(
 	session: JsSession,
 	options: {
@@ -422,7 +433,12 @@ async function runOnce(
 			runId,
 			code: options.code,
 			filename: options.filename,
-			snapshot: { cwd: options.cwd, sessionId: options.sessionId, localRoots: options.localRoots },
+			snapshot: {
+				cwd: options.cwd,
+				sessionId: options.sessionId,
+				localRoots: options.localRoots,
+				preludes: javascriptPreludeSources(options.session),
+			},
 		});
 		return await promise;
 	} finally {

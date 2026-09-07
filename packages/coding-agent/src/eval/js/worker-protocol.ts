@@ -2,6 +2,12 @@ import type { JsDisplayOutput } from "./shared/types";
 
 export type { JsDisplayOutput } from "./shared/types";
 
+export interface EvalPreludeSource {
+	name: string;
+	exports: string[];
+	source: string;
+}
+
 export interface SessionSnapshot {
 	cwd: string;
 	sessionId: string;
@@ -11,6 +17,8 @@ export interface SessionSnapshot {
 	 * accept `local://…` paths instead of writing a literal `local:/` directory.
 	 */
 	localRoots?: Record<string, string>;
+	/** Enabled host-capability snippets projected for this JavaScript cell. */
+	preludes?: EvalPreludeSource[];
 }
 
 export interface RunErrorPayload {

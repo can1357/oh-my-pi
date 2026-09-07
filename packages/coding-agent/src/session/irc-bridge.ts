@@ -164,7 +164,7 @@ export class IrcBridge {
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
 		// agent and mid-turn asides have no such relay.
-		const relayOnStop = !streaming && !planModeIdle && msg.to !== MAIN_AGENT_ID;
+		const relayOnStop = !streaming && !planModeIdle && msg.to !== MAIN_AGENT_ID && msg.wakeRelay !== true;
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:incoming",
@@ -177,7 +177,13 @@ export class IrcBridge {
 				relayOnStop,
 			}),
 			display: true,
-			details: { id: msg.id, from: msg.from, message: msg.body, ...(msg.replyTo ? { replyTo: msg.replyTo } : {}) },
+			details: {
+				id: msg.id,
+				from: msg.from,
+				message: msg.body,
+				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
+				...(msg.wakeRelay ? { wakeRelay: true } : {}),
+			},
 			attribution: "agent",
 			timestamp: msg.ts,
 		};

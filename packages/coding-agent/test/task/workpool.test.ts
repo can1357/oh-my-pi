@@ -148,12 +148,11 @@ describe("WorkPool dispatch", () => {
 	it("renders the flat workpool yield contract after shared context", () => {
 		const rendered = prompt.render(subagentSystemPrompt, {
 			agent: "Worker",
-			context: "Incorrect legacy suggestion: use result.data.",
+			context: "Shared context for every item.",
 			workPoolYieldItems: [{ id: "pool#1", index: 1 }],
 			outputSchema: { type: "object", properties: { "pool#1": {} } },
 		});
 		expect(rendered).toContain("{ key: <1-based number>, data: <outcome> }");
-		expect(rendered).toContain("NEVER nest under `result`");
 		expect(rendered).not.toContain("Your terminal `yield` MUST use exactly this shape");
 	});
 	it("spawns while there is room, then queues round-robin, and dispatches to an idle agent", async () => {

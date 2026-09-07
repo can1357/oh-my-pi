@@ -1658,6 +1658,17 @@ describe("Settings", () => {
 		});
 	});
 	describe("migrations", () => {
+		it("moves the legacy image question timeout and removes its tool settings", async () => {
+			await writeSettings({ inspect_image: { mode: "on", timeoutMs: 42 } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("images.questionTimeoutMs")).toBe(42);
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			expect((await readSettings()).inspect_image).toBeUndefined();
+		});
+
 		it("migrates nested task isolation mode none to disabled", async () => {
 			await writeSettings({ task: { isolation: { mode: "none" } } });
 

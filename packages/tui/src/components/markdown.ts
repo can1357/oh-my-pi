@@ -1346,6 +1346,15 @@ export interface HighlightStreamSession {
 	push(chunk: string): string;
 }
 
+/** Collect distinct hyperlink destinations using the renderer's Markdown grammar, excluding images and code. */
+export function getMarkdownLinkUrls(text: string): string[] {
+	const urls = new Set<string>();
+	markdownParser.walkTokens(markdownParser.lexer(text), token => {
+		if (token.type === "link" && typeof token.href === "string") urls.add(token.href);
+	});
+	return [...urls];
+}
+
 /**
  * Theme functions for markdown elements.
  * Each function takes text and returns styled text with ANSI codes.
@@ -1354,6 +1363,8 @@ export interface MarkdownTheme {
 	heading: (text: string) => string;
 	link: (text: string) => string;
 	linkUrl: (text: string) => string;
+	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
+	resolveLink?: (href: string) => string | undefined;
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
 	codeBlockBorder: (text: string) => string;
@@ -3208,7 +3219,8 @@ export class Markdown implements Component {
 					const linkText = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const href = typeof token.href === "string" ? token.href : "";
-					const clickableLinkText = formatHyperlink(styledLinkText, href);
+					const target = (href && this.#theme.resolveLink?.(href)) || href;
+					const clickableLinkText = formatHyperlink(styledLinkText, target);
 					// If link text matches href, only show the link once. A missing
 					// href (malformed/partial link token) renders as plain link text
 					// instead of crashing the renderer or emitting an empty "()"
@@ -3221,7 +3233,7 @@ export class Markdown implements Component {
 						result += clickableLinkText + stylePrefix;
 					else {
 						const styledLinkUrl = this.#theme.linkUrl(`(${href})`);
-						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, href)}${stylePrefix}`;
+						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, target)}${stylePrefix}`;
 					}
 					break;
 				}

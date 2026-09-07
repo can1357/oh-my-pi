@@ -212,6 +212,8 @@ function expiry(node: KdlNodeView): CompiledCredentialExpiry {
 				if (!from) malformed(node);
 				result.fromPath = from;
 			}
+			const fallback = propInt(node, "fallback-ms");
+			if (fallback !== undefined) result.fallbackMs = fallback;
 			return result;
 		}
 		case "jwt": {
@@ -385,6 +387,7 @@ function callback(node: KdlNodeView): CompiledCallback {
 		"redirect-uri-env",
 		"port-fallback",
 		"manual-only",
+		"native-scheme",
 	]);
 	if (node.args.length > 0 || node.children) malformed(node);
 	const port = propInt(node, "port");
@@ -395,6 +398,7 @@ function callback(node: KdlNodeView): CompiledCallback {
 		hostname: propString(node, "hostname") ?? "localhost",
 		portFallback: propBool(node, "port-fallback") ?? true,
 		manualOnly: propBool(node, "manual-only") ?? false,
+		nativeScheme: propBool(node, "native-scheme") ?? false,
 	};
 	const redirectUri = propString(node, "redirect-uri");
 	const redirectUriEnv = propString(node, "redirect-uri-env");

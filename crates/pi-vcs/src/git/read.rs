@@ -1190,7 +1190,7 @@ fn parse_commit_details(raw: &str) -> CommitDetails {
 		.to_owned();
 	CommitDetails { sha, parents, author: CommitAuthor { name, email, date }, message }
 }
-fn literal_pathspec(path: &str) -> String {
+pub(crate) fn literal_pathspec(path: &str) -> String {
 	format!(":(literal){path}")
 }
 

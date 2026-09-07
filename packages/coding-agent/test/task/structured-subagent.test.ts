@@ -366,6 +366,30 @@ describe("structured subagent primitive", () => {
 		expect(path.basename(settled.artifactsDir)).toStartWith("omp-task-");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+
+	it("retains temporary artifacts when the run failed but yielded schema-valid structured output", async () => {
+		// Regression: a task can produce schema-valid data and then fail (or
+		// exceed its runtime limit). The async notice still advertises the
+		// full payload at `agent://<id>` for schema-valid output, so
+		// retention must not require `exitCode === 0` too — otherwise the
+		// directory is already gone by the time the model follows that URL
+		// (PR #10625 review).
+		mockDiscovery();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => {
+			return {
+				...result(),
+				exitCode: 1,
+				error: "runtime limit exceeded",
+				structuredOutput: { source: "agent", mode: "permissive", status: "valid", data: { ok: true } },
+			};
+		});
+
+		const settled = await runStructuredSubagent(request({ retainArtifacts: true }));
+		expect(settled.result.exitCode).toBe(1);
+		expect(settled.result.structuredOutput?.status).toBe("valid");
+		await expect(fs.stat(settled.artifactsDir)).resolves.toBeDefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
 	it("uses identical non-plan LSP and IRC policy for task and eval invocations", async () => {
 		mockDiscovery();
 		const taskPolicy = await resolveEffectiveSubagentPolicy(request());
@@ -608,6 +632,28 @@ describe("structured subagent primitive", () => {
 
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 		await expect(fs.stat(artifactsDir ?? "")).rejects.toThrow();
+	});
+
+	it("retains a detached task's artifacts on failure even without valid structured output", async () => {
+		// Regression: a detached (async) task job that fails with schema
+		// status "invalid" (not "valid") previously had its temp dir wiped
+		// immediately, breaking the "failed agent stays interrogable"
+		// invariant (task/index.ts) — the model could no longer read the
+		// failure via agent://<id> or history://<id> (PR #10625 review).
+		mockDiscovery();
+		let artifactsDir: string | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			artifactsDir = options.artifactsDir;
+			return { ...result(), exitCode: 1, error: "agent failed" };
+		});
+
+		const settled = await runStructuredSubagent(request({ retainArtifacts: true, detached: true }));
+
+		expect(settled.result.exitCode).toBe(1);
+		expect(settled.result.structuredOutput?.status).toBe("invalid");
+		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
+		await expect(fs.stat(artifactsDir ?? "")).resolves.toBeDefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("retains isolated failure artifacts needed for recovery", async () => {
