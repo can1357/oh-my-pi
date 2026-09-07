@@ -399,6 +399,96 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
 	});
 
+	test("accepts an empty follow-up after a product-wire edit tool result", async () => {
+		// edit is advertised as Write on the product wire but decoded back to omp `edit`.
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const thinkingOnly = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					thinkingPart: { text: "done editing", isFinal: true },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const fetchImpl = (async () => connectBody(thinkingOnly)) as FetchImpl;
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+			sandToolsWire: "keep-model",
+		});
+		const editTool = {
+			name: "edit",
+			description: "Edit a file.",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } },
+				required: ["path", "oldText", "newText"],
+			},
+		} as Tool;
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Edit /tmp/x", timestamp: 1 },
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "e1",
+							name: "edit",
+							arguments: { path: "/tmp/x", oldText: "a", newText: "b" },
+						},
+					],
+					api: "grokbot-sand",
+					provider: "grokbot",
+					model: "gemini-3-flash",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "e1",
+					toolName: "edit",
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+			tools: [editTool],
+		};
+
+		const result = await streamGrokBot(gemini as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+			maxTokens: 512,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
+	});
+
 	test("rejects empty follow-up after a non-Write tool result", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",

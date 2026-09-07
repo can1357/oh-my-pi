@@ -54,6 +54,7 @@ import {
 	rewriteInferenceMessagesForProductWire,
 	SEND_TO_USER_WIRE_NAME,
 	shouldClaimSandWireName,
+	toSandField2Name,
 } from "./grokbot/product-wire";
 import {
 	CONNECT_END_STREAM_FLAG,
@@ -608,14 +609,15 @@ function contextEndsWithWriteToolResult(context: Context): boolean {
 		if (!msg || typeof msg !== "object") continue;
 		if (msg.role !== "toolResult") return false;
 		const name = typeof msg.toolName === "string" ? msg.toolName : "";
-		return /^(write|Write)$/i.test(name);
+		// Product wire advertises edit as Write; decoded history keeps omp `edit`.
+		return toSandField2Name(name) === "Write" || /^(write|Write)$/i.test(name);
 	}
 	return false;
 }
 
 /** Gemini/Cursor Write often emits `contents` instead of omp `content`. */
 function normalizeProductWriteArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
-	if (!/^(write|Write)$/i.test(name)) return args;
+	if (toSandField2Name(name) !== "Write" && !/^(write|Write|edit)$/i.test(name)) return args;
 	if (typeof args.content === "string") return args;
 	if (typeof args.contents === "string") return { ...args, content: args.contents };
 	return args;
@@ -754,27 +756,77 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			};
 			let body: Record<string, unknown> = {};
 			let routedResponseModel = "";
-			/** Buffer first tool-enabled attempt until text/tool appears (or accept), so empty retries do not leak thinking_delta. */
+			/** Buffer until a block is accepted (completed tool / visible text), so empty
+			 * retries can discard thinking without freezing successful live streams.
+			 * Incomplete sibling toolcall_* stay in a per-index buffer until end or drop. */
 			let attemptEventBuffer: AssistantMessageEvent[] = [];
 			let attemptStreamingLive = false;
+			const pendingToolEventBuffers = new Map<number, AssistantMessageEvent[]>();
 			const shouldBufferAttemptEvents = () => tools.length > 0 && !emptyToolRetryUsed && !incompleteToolRetryUsed;
+			const isToolcallEvent = (
+				event: AssistantMessageEvent,
+			): event is Extract<AssistantMessageEvent, { type: "toolcall_start" | "toolcall_delta" | "toolcall_end" }> =>
+				event.type === "toolcall_start" || event.type === "toolcall_delta" || event.type === "toolcall_end";
+			const flushAttemptEvents = () => {
+				for (const event of attemptEventBuffer) stream.push(event);
+				attemptEventBuffer = [];
+				// Publish completed tool buffers in index order; leave incomplete siblings pending.
+				for (const index of [...pendingToolEventBuffers.keys()].sort((a, b) => a - b)) {
+					const buffered = pendingToolEventBuffers.get(index);
+					if (buffered?.some(event => event.type === "toolcall_end")) {
+						flushToolEventBuffer(index);
+					}
+				}
+				attemptStreamingLive = true;
+			};
+			const flushToolEventBuffer = (contentIndex: number) => {
+				const buffered = pendingToolEventBuffers.get(contentIndex);
+				if (!buffered) return;
+				for (const event of buffered) stream.push(event);
+				pendingToolEventBuffers.delete(contentIndex);
+			};
+			const discardAttemptEvents = () => {
+				attemptEventBuffer = [];
+				pendingToolEventBuffers.clear();
+				attemptStreamingLive = false;
+				// Buffered `start` was never published — re-arm so the retry emits it.
+				started = false;
+			};
+			const hasEarlierIncompleteTool = (contentIndex: number) => {
+				for (const [index, buffered] of pendingToolEventBuffers) {
+					if (index < contentIndex && !buffered.some(event => event.type === "toolcall_end")) {
+						return true;
+					}
+				}
+				return false;
+			};
 			const emitAttemptEvent = (event: AssistantMessageEvent) => {
-				if (attemptStreamingLive || !shouldBufferAttemptEvents()) {
+				if (!shouldBufferAttemptEvents()) {
+					stream.push(event);
+					return;
+				}
+				if (isToolcallEvent(event)) {
+					const index = event.contentIndex;
+					const buf = pendingToolEventBuffers.get(index) ?? [];
+					buf.push(event);
+					pendingToolEventBuffers.set(index, buf);
+					if (event.type === "toolcall_end") {
+						// Defer live publish while an earlier incomplete sibling could still
+						// force content compaction — otherwise flushed contentIndex drifts.
+						if (hasEarlierIncompleteTool(index)) return;
+						if (!attemptStreamingLive) flushAttemptEvents();
+						else flushToolEventBuffer(index);
+					}
+					return;
+				}
+				if (attemptStreamingLive) {
 					stream.push(event);
 					return;
 				}
 				attemptEventBuffer.push(event);
-			};
-			const flushAttemptEvents = () => {
-				for (const event of attemptEventBuffer) stream.push(event);
-				attemptEventBuffer = [];
-				attemptStreamingLive = true;
-			};
-			const discardAttemptEvents = () => {
-				attemptEventBuffer = [];
-				attemptStreamingLive = false;
-				// Buffered `start` was never published — re-arm so the retry emits it.
-				started = false;
+				if (event.type === "text_delta" || event.type === "text_end") {
+					flushAttemptEvents();
+				}
 			};
 
 			attempt: while (true) {
@@ -983,9 +1035,6 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					);
 					clearStreamingPartialJson(state.block);
 					state.ended = true;
-					// Do not flush here — sibling incomplete toolcall_* events may still
-					// be in the buffer and must not publish until the attempt is accepted
-					// (or dropped) as a whole.
 					emitAttemptEvent({
 						type: "toolcall_end",
 						contentIndex: state.index,
@@ -1056,8 +1105,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						toolStates.set(key, state);
 						if (id) toolStates.set(id, state);
 						if (idxKey) toolStates.set(idxKey, state);
-						// Keep buffering until toolcall_end — incomplete calls may still
-						// be discarded by the empty/incomplete retry path.
+						// Keep incomplete toolcall_* in the per-index buffer until
+						// toolcall_end accepts that call (or leftovers drop it).
 						emitAttemptEvent({ type: "toolcall_start", contentIndex: index, partial: output });
 					} else {
 						if (id) toolStates.set(id, state);
@@ -1313,6 +1362,23 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							remappedEvents.push({ ...event, contentIndex: mapped } as AssistantMessageEvent);
 						}
 						attemptEventBuffer = remappedEvents;
+						// Drop unpublished incomplete sibling tool buffers (never flushed).
+						for (const index of drop) pendingToolEventBuffers.delete(index);
+						if (pendingToolEventBuffers.size > 0) {
+							const remappedTools = new Map<number, AssistantMessageEvent[]>();
+							for (const [index, events] of pendingToolEventBuffers) {
+								const mapped = oldToNew.get(index);
+								if (mapped === undefined) continue;
+								remappedTools.set(
+									mapped,
+									events.map(event =>
+										mapped === index ? event : ({ ...event, contentIndex: mapped } as AssistantMessageEvent),
+									),
+								);
+							}
+							pendingToolEventBuffers.clear();
+							for (const [index, events] of remappedTools) pendingToolEventBuffers.set(index, events);
+						}
 						logger.info("grokbot: dropped incomplete leftover tool call", {
 							count: leftovers.length,
 							wireMode: anthropicWire.wireMode,

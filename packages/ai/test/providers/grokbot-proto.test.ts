@@ -1212,6 +1212,73 @@ describe("grokbot incomplete tool calls", () => {
 		]);
 	});
 
+	test("publishes toolcall events live before the connect trailer arrives", async () => {
+		// Tool-enabled attempts must not hold every event until stream end — TUI/ACP
+		// need pending tool previews while the response is still open.
+		mockAuth();
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "Read",
+					args: '{"path":"/tmp/x"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const gate = Promise.withResolvers<void>();
+		let sawLiveToolcall = false;
+		const fetchImpl = (async () => {
+			const body = new ReadableStream<Uint8Array>({
+				async start(controller) {
+					controller.enqueue(new Uint8Array(complete));
+					await gate.promise;
+					controller.enqueue(new Uint8Array(trailer));
+					controller.close();
+				},
+			});
+			return new Response(body, {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			});
+		}) as FetchImpl;
+		const toolsContext: Context = {
+			messages: [{ role: "user", content: "call", timestamp: 1 }],
+			tools: [
+				{
+					name: "Read",
+					description: "read file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" } },
+						required: ["path"],
+					},
+				},
+			],
+		};
+
+		const stream = streamGrokBot(model, toolsContext, { apiKey: "renew", fetch: fetchImpl });
+		const timeout = Bun.sleep(5_000).then(() => {
+			gate.resolve();
+			throw new Error("timed out waiting for live toolcall_end before trailer");
+		});
+		const consume = (async () => {
+			for await (const event of stream) {
+				if (event.type === "toolcall_end") {
+					sawLiveToolcall = true;
+					gate.resolve();
+				}
+			}
+		})();
+		await Promise.race([consume, timeout]);
+		await consume;
+		const result = await stream.result();
+		expect(sawLiveToolcall).toBe(true);
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([expect.objectContaining({ type: "toolCall", id: "c1", name: "Read" })]);
+	});
+
 	test("finalizes complete tool calls as toolUse", async () => {
 		mockAuth();
 		const complete = frameConnectProto(
