@@ -29,6 +29,7 @@ function assistantEntry(opts: {
 	provider: string;
 	api?: string;
 	premiumRequests?: number;
+	serviceTier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
 }): Record<string, unknown> {
 	return {
 		type: "message",
@@ -41,6 +42,7 @@ function assistantEntry(opts: {
 			api: opts.api ?? "openai-responses",
 			provider: opts.provider,
 			model: "gpt-5.4",
+			...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
 			stopReason: "stop",
 			timestamp: Date.now(),
 			usage: {
@@ -93,6 +95,76 @@ describe("priority service-tier premium-request backfill", () => {
 
 		const request = getRecentRequests(1)[0];
 		expect(request?.usage.premiumRequests).toBeCloseTo(0.33, 6);
+	});
+	it("uses an assistant message's recorded priority without a family snapshot", async () => {
+		const sessionFile = await writeSession("--tmp--proj", "per-request.jsonl", {
+			lines: [
+				{ type: "session", version: 1, id: "per-request", timestamp: new Date().toISOString(), cwd: "/tmp/proj" },
+				assistantEntry({ id: "direct-priority", provider: "openai", serviceTier: "priority" }),
+			],
+		});
+
+		const result = await parseSessionFile(sessionFile);
+		expect(result.stats).toHaveLength(1);
+		expect(result.stats[0]?.usage.premiumRequests).toBe(1);
+	});
+
+	it("does not let explicit request tiers inherit a legacy family priority", async () => {
+		const sessionFile = await writeSession("--tmp--proj", "explicit-off.jsonl", {
+			lines: [
+				{ type: "session", version: 1, id: "explicit-off", timestamp: new Date().toISOString(), cwd: "/tmp/proj" },
+				{
+					type: "service_tier_change",
+					id: "legacy-priority",
+					timestamp: new Date().toISOString(),
+					serviceTier: "priority",
+				},
+				assistantEntry({ id: "explicit-null", provider: "openai", serviceTier: null }),
+				assistantEntry({ id: "explicit-flex", provider: "openai", serviceTier: "flex" }),
+			],
+		});
+
+		const result = await parseSessionFile(sessionFile);
+		expect(result.stats.map(stat => stat.usage.premiumRequests ?? 0)).toEqual([0, 0]);
+	});
+
+	it("uses the recorded tier when extracting model_usage entries", async () => {
+		const sessionFile = await writeSession("--tmp--proj", "model-usage-priority.jsonl", {
+			lines: [
+				{
+					type: "session",
+					version: 1,
+					id: "model-usage-priority",
+					timestamp: new Date().toISOString(),
+					cwd: "/tmp/proj",
+				},
+				{
+					type: "model_usage",
+					id: "model-usage-priority",
+					parentId: null,
+					timestamp: new Date().toISOString(),
+					purpose: "auto-thinking",
+					api: "openai-responses",
+					provider: "openai",
+					model: "gpt-5.4",
+					serviceTier: "priority",
+					stopReason: "stop",
+					usage: {
+						input: 10,
+						output: 5,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 15,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				},
+			],
+		});
+
+		const result = await parseSessionFile(sessionFile);
+		expect(result.stats).toHaveLength(1);
+		expect(result.stats[0]?.entryId).toBe("model-usage-priority");
+		expect(result.stats[0]?.usage.premiumRequests).toBe(1);
 	});
 
 	it("re-derives premium_requests on re-sync via UPSERT for sessions ingested before the fix", async () => {

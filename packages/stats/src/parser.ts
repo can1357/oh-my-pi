@@ -186,7 +186,13 @@ function extractStats(
 		api: msg.api,
 		identity: classifyModel(msg.provider, msg.model, { lenient: true }),
 	};
-	const tier = resolveModelServiceTier(currentServiceTier, model);
+	// New entries carry the concrete tier chosen for this request. Its presence
+	// is authoritative, including null (an explicit no-tier request), so an old
+	// family-level snapshot cannot leak into a request written by a newer
+	// producer. Legacy messages omit the field and use the session snapshot.
+	const tier = Object.prototype.hasOwnProperty.call(msg, "serviceTier")
+		? msg.serviceTier
+		: resolveModelServiceTier(currentServiceTier, model);
 	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(tier, model);
 	const wellFormed =
 		typeof rawUsage.input === "number" &&
@@ -234,6 +240,18 @@ function extractModelUsageStats(
 	agentType: AgentType,
 ): MessageStats | null {
 	const timestamp = Date.parse(entry.timestamp);
+	const message: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: entry.api,
+		provider: entry.provider,
+		model: entry.model,
+		usage: entry.usage,
+		stopReason: entry.stopReason ?? "stop",
+		errorMessage: entry.errorMessage,
+		timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+		...(entry.serviceTier !== undefined ? { serviceTier: entry.serviceTier } : {}),
+	};
 	return extractStats(
 		sessionFile,
 		folder,
@@ -242,17 +260,7 @@ function extractModelUsageStats(
 			id: entry.id,
 			parentId: entry.parentId,
 			timestamp: entry.timestamp,
-			message: {
-				role: "assistant",
-				content: [],
-				api: entry.api,
-				provider: entry.provider,
-				model: entry.model,
-				usage: entry.usage,
-				stopReason: entry.stopReason ?? "stop",
-				errorMessage: entry.errorMessage,
-				timestamp: Number.isFinite(timestamp) ? timestamp : 0,
-			},
+			message,
 		},
 		undefined,
 		agentType,

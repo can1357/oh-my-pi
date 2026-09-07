@@ -85,6 +85,8 @@ export interface SessionModelUsageEntry {
 	api: string;
 	provider: string;
 	model: string;
+	/** Concrete service tier requested for this call; null records an explicit no-tier request. */
+	serviceTier?: ServiceTier | null;
 	usage: Usage;
 	stopReason?: StopReason;
 	errorMessage?: string;
