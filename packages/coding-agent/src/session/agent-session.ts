@@ -3620,10 +3620,10 @@ export class AgentSession {
 	}
 
 	#extractTtsrRuleNames(details: unknown): string[] {
-		if (!details || typeof details !== "object" || Array.isArray(details)) {
+		if (!details || typeof details !== "object" || Array.isArray(details) || !("rules" in details)) {
 			return [];
 		}
-		const rules = (details as { rules?: unknown }).rules;
+		const rules = details.rules;
 		if (!Array.isArray(rules)) {
 			return [];
 		}
