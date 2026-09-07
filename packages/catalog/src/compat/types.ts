@@ -382,7 +382,7 @@ export interface CompiledCredentialField {
 
 /** Expiry derivation for a token response. */
 export type CompiledCredentialExpiry =
-	| { mode: "seconds"; path: string; fromPath?: string; skewMs: number }
+	| { mode: "seconds"; path: string; fromPath?: string; skewMs: number; fallbackMs?: number }
 	| { mode: "jwt"; skewMs: number; fallbackMs?: number }
 	| { mode: "never" };
 
