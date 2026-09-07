@@ -19,6 +19,7 @@
 - Hindsight last-turn close no longer duplicates a retained window after a failed `/resume` with no retain in flight.
 - Hindsight delayed startup now rebases the close-retain baseline after `/new`, `/clear`, `/resume`, or `/tree` instead of skipping the post-switch turn.
 - Hindsight now retains a below-cadence tail when leaving a conversation through `/new`, `/clear`, `/resume`, fork, or branch, and when bank routing rebuilds mid-session.
+- Hindsight leave-path retain now waits for delayed backend startup before treating a missing live state as having nothing pending.
 - Hindsight no longer duplicates a retained tail after `/fresh` or a same-file reload.
 - Hindsight close retain now waits through the configured retain timeout during dispose instead of the 5s event-drain deadline.
 - Hindsight close retain now gets a full retain-timeout budget after any in-flight cadence retain settles, instead of sharing one deadline with queued work.

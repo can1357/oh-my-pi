@@ -51,6 +51,19 @@ export class SessionMemory {
 		this.#createMemoryTools = options.createMemoryTools;
 	}
 
+	/**
+	 * Chain a backend start onto the serialized memory transition so leave-path
+	 * drains and dispose wait for delayed Hindsight installation instead of
+	 * treating a missing live state as having nothing pending.
+	 */
+	trackBackendStart(start: Promise<unknown>): void {
+		const transition = this.#memoryBackendTransition.then(() => start);
+		this.#memoryBackendTransition = transition.then(
+			() => undefined,
+			() => undefined,
+		);
+	}
+
 	/** Current serialized backend transition, used by prompt and disposal drains. */
 	get transition(): Promise<void> {
 		return this.#memoryBackendTransition;
@@ -116,6 +129,7 @@ export class SessionMemory {
 
 	/** Flush a below-cadence Hindsight tail while the current transcript is still loaded. */
 	async drainHindsightPendingRetain(): Promise<void> {
+		await this.#memoryBackendTransition;
 		const hindsight = this.#host.getHindsightSessionState();
 		if (!hindsight) return;
 		try {

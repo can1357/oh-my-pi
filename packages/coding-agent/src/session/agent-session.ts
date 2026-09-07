@@ -5316,6 +5316,11 @@ export class AgentSession {
 		this.#memory.endLocalMemoryStartup(signal);
 	}
 
+	/** Track a delayed memory-backend start so leave-path drains wait for it. */
+	trackMemoryBackendStart(start: Promise<unknown>): void {
+		this.#memory.trackBackendStart(start);
+	}
+
 	/** Applies the selected memory backend to runtime state, tools, and prompt. */
 	applyMemoryBackend(): Promise<void> {
 		return this.#memory.applyMemoryBackend();

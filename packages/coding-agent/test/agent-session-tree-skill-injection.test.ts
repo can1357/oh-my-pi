@@ -276,6 +276,51 @@ describe("AgentSession Hindsight leave-path retain", () => {
 		}
 	});
 
+	it("awaits delayed Hindsight startup before /new drains a below-cadence tail", async () => {
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		const retain = vi.spyOn(HindsightApi.prototype, "retain").mockResolvedValue({} as never);
+		const ctx = await createTestSession({
+			inMemory: true,
+			settingsOverrides: {
+				"memory.backend": "hindsight",
+				"hindsight.apiUrl": "http://localhost:8888",
+				"hindsight.retainEveryNTurns": 5,
+				"hindsight.retainOverlapTurns": 0,
+			},
+		});
+		try {
+			const { session, sessionManager } = ctx;
+			sessionManager.appendMessage(userMsg("leave-path turn has enough text"));
+			sessionManager.appendMessage(assistantMsg("leave-path reply has enough text"));
+			session.hindsightCloseRetainBaselineTurns = 0;
+
+			const gate = Promise.withResolvers<void>();
+			const start = (async () => {
+				await gate.promise;
+				await hindsightBackend.start({
+					session,
+					settings: session.settings,
+					modelRegistry: {} as never,
+					agentDir: ctx.tempDir,
+					taskDepth: 0,
+					hindsightCloseRetainBaselineTurns: 0,
+				});
+			})();
+			session.trackMemoryBackendStart(start);
+
+			const leaving = session.newSession();
+			await Promise.resolve();
+			expect(retain).not.toHaveBeenCalled();
+			expect(session.getHindsightSessionState()).toBeUndefined();
+			gate.resolve();
+			expect(await leaving).toBe(true);
+			expect(retain).toHaveBeenCalledTimes(1);
+			expect(String(retain.mock.calls[0]?.[1])).toContain("leave-path turn has enough text");
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
 	it("does not duplicate a retained tail after /fresh", async () => {
 		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
 		const retain = vi.spyOn(HindsightApi.prototype, "retain").mockResolvedValue({} as never);
