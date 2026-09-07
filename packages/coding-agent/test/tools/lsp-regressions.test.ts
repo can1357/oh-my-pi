@@ -6160,6 +6160,105 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("cancelled overlapping reload re-evaluates a restored shared client", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-reload-abort-overlapping-shared-");
+		try {
+			const nestedRoot = path.join(tempDir.path(), "subproject");
+			fs.mkdirSync(nestedRoot);
+			const sharedConfig: ServerConfig = {
+				command: "shared-overlapping-reload-lsp",
+				args: ["--mode", "old"],
+				fileTypes: ["ts"],
+				rootMarkers: [],
+				resolvedRoot: tempDir.path(),
+			};
+			const pendingConfig: ServerConfig = {
+				command: "pending-overlapping-reload-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+				resolvedRoot: nestedRoot,
+			};
+			const sharedServer = installHandshakeLsp();
+			const reloadingOwner = lspClient.createLspClientOwner();
+			const overlappingOwner = lspClient.createLspClientOwner();
+			const sharedClient = await lspClient.getOrCreateClient(
+				sharedConfig,
+				tempDir.path(),
+				1_000,
+				undefined,
+				reloadingOwner,
+			);
+			await lspClient.getOrCreateClient(sharedConfig, tempDir.path(), 1_000, undefined, overlappingOwner);
+			const pendingServer = installFakeLsp((message, server) => {
+				if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const pending = lspClient.getOrCreateClient(
+				pendingConfig,
+				tempDir.path(),
+				undefined,
+				undefined,
+				reloadingOwner,
+			);
+			const initialize = await pendingServer.waitFor(message => message.method === "initialize");
+			const controller = new AbortController();
+			const firstReload = lspClient.shutdownStaleClients(
+				tempDir.path(),
+				[],
+				controller.signal,
+				[tempDir.path()],
+				reloadingOwner,
+			);
+			const secondReload = lspClient.shutdownStaleClients(
+				tempDir.path(),
+				[],
+				undefined,
+				[tempDir.path()],
+				reloadingOwner,
+			);
+			controller.abort(new Error("reload cancelled"));
+			await expect(firstReload).rejects.toBeInstanceOf(ToolAbortError);
+			pendingServer.send({ jsonrpc: "2.0", id: initialize.id, result: { capabilities: {} } });
+			await expect(pending).rejects.toThrow("superseded during initialization");
+			await secondReload;
+
+			expect(lspClient.getActiveClients(reloadingOwner).map(client => client.name)).not.toContain(
+				"shared-overlapping-reload-lsp",
+			);
+			expect(lspClient.getActiveClients(overlappingOwner).map(client => client.name)).toContain(
+				"shared-overlapping-reload-lsp",
+			);
+			await expect(
+				lspClient.getOrCreateClient(sharedConfig, tempDir.path(), 1_000, undefined, reloadingOwner),
+			).rejects.toThrow("superseded during reload");
+			expect(
+				await lspClient.getActiveOrPendingClient(sharedConfig, tempDir.path(), undefined, overlappingOwner),
+			).toBe(sharedClient);
+			expect(sharedServer.received.some(message => message.method === "shutdown")).toBe(false);
+
+			const replacementServer = installHandshakeLsp();
+			const replacement = await lspClient.getOrCreateClient(
+				{ ...sharedConfig, args: ["--mode", "new"] },
+				tempDir.path(),
+				1_000,
+				undefined,
+				reloadingOwner,
+			);
+			expect(replacement).not.toBe(sharedClient);
+			expect(replacement.config.args).toEqual(["--mode", "new"]);
+			expect(replacementServer.received.map(message => message.method)).toContain("initialize");
+			expect(
+				await lspClient.getActiveOrPendingClient(sharedConfig, tempDir.path(), undefined, overlappingOwner),
+			).toBe(sharedClient);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("workspace reload blocks a nested client that was not in the snapshot", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-nested-reload-unseen-root-");
 		try {

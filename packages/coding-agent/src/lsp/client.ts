@@ -1238,14 +1238,18 @@ export function shutdownStaleClients(
 			!cwds.some(cwd => retainClient?.(cwd))
 		);
 	};
-	const relevantPending = Array.from(clientLocks.entries()).filter(([key, pending]) => {
-		const owners = clientOwners.get(key);
-		return (!owner || !owners || owners.has(owner)) && isRelevant(key, pending);
-	});
-	const relevantClients = Array.from(clients.entries()).filter(([key, client]) => {
-		const owners = clientOwners.get(key);
-		return (!owner || !owners || owners.has(owner)) && isRelevant(key, client);
-	});
+	const collectRelevantEntries = () => {
+		const nextPending = Array.from(clientLocks.entries()).filter(([key, pending]) => {
+			const owners = clientOwners.get(key);
+			return (!owner || !owners || owners.has(owner)) && isRelevant(key, pending);
+		});
+		const nextClients = Array.from(clients.entries()).filter(([key, client]) => {
+			const owners = clientOwners.get(key);
+			return (!owner || !owners || owners.has(owner)) && isRelevant(key, client);
+		});
+		return { relevantPending: nextPending, relevantClients: nextClients };
+	};
+	let { relevantPending, relevantClients } = collectRelevantEntries();
 	const staleOwnedKeys = new Set([
 		...relevantPending.filter(([key]) => !fresh.has(key)).map(([key]) => key),
 		...relevantClients.filter(([key]) => !fresh.has(key)).map(([key]) => key),
@@ -1303,8 +1307,8 @@ export function shutdownStaleClients(
 	const retainedOwnedKeys = owner
 		? new Set(Array.from(staleOwnedKeys).filter(key => !unownedStaleKeys.has(key)))
 		: new Set<string>();
-	const stalePending = relevantPending.filter(([key]) => unownedStaleKeys.has(key));
-	const staleClients = relevantClients.filter(([key]) => unownedStaleKeys.has(key));
+	let stalePending = relevantPending.filter(([key]) => unownedStaleKeys.has(key));
+	let staleClients = relevantClients.filter(([key]) => unownedStaleKeys.has(key));
 	// Barrier the roots this cleanup actually covers while teardown is in
 	// flight. `/remove-dir` passes the retained session cwd as `cwd` while
 	// `workspaceRoots` is the removed directory; including `cwd` here would
@@ -1362,6 +1366,53 @@ export function shutdownStaleClients(
 					throwIfAborted(signal);
 					// A later explicit reload retries teardown after an earlier one
 					// failed; ordinary client creation remains blocked in between.
+				}
+			}
+			// An earlier overlapping reload can restore this owner after this
+			// cleanup snapshotted relevance. Re-evaluate before teardown so a
+			// cancelled predecessor cannot leave us attached to a superseded
+			// client while we start the replacement.
+			if (owner) {
+				({ relevantPending, relevantClients } = collectRelevantEntries());
+				for (const key of [
+					...relevantPending.filter(([ownedKey]) => !fresh.has(ownedKey)).map(([ownedKey]) => ownedKey),
+					...relevantClients.filter(([ownedKey]) => !fresh.has(ownedKey)).map(([ownedKey]) => ownedKey),
+				]) {
+					if (staleOwnedKeys.has(key)) continue;
+					staleOwnedKeys.add(key);
+					releasedOwnerRoots.set(key, Array.from(ownerClientRoots.get(owner)?.get(key) ?? []));
+					if (thisReloadGeneration !== undefined) {
+						let released = ownerReleasedKeyGenerations.get(owner);
+						if (!released) {
+							released = new Map();
+							ownerReleasedKeyGenerations.set(owner, released);
+						}
+						previousReleasedGenerations.set(key, released.get(key));
+						released.set(key, thisReloadGeneration);
+					}
+					if (releaseClientOwnerKey(key, owner)) unownedStaleKeys.add(key);
+					else retainedOwnedKeys.add(key);
+				}
+				stalePending = relevantPending.filter(([key]) => unownedStaleKeys.has(key));
+				staleClients = relevantClients.filter(([key]) => unownedStaleKeys.has(key));
+				const cleanupPromise = cleanupHolder.promise;
+				for (const [key, pending] of stalePending) {
+					for (const workspaceCwd of clientWorkspaceCwds(key, pending, owner)) barrierRoots.add(workspaceCwd);
+					leftoverKeys.add(clientServerRootKey(pending.config, pending.cwd));
+				}
+				for (const [key, client] of staleClients) {
+					for (const workspaceCwd of clientWorkspaceCwds(key, client, owner)) barrierRoots.add(workspaceCwd);
+					leftoverKeys.add(clientServerRootKey(client.config, client.cwd));
+				}
+				if (cleanupPromise) {
+					for (const root of barrierRoots) {
+						if (!clientReloadBarriers.has(root)) clientReloadBarriers.set(root, cleanupPromise);
+					}
+					for (const leftoverKey of leftoverKeys) {
+						if (!clientIdentityReloadBarriers.has(leftoverKey)) {
+							clientIdentityReloadBarriers.set(leftoverKey, cleanupPromise);
+						}
+					}
 				}
 			}
 			for (const key of fresh) invalidatedClientKeys.delete(key);
