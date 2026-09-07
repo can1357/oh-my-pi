@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Compaction now explains when a model's context window is capped by `extendedContext` being off, and `omp models` marks capped rows so the smaller window is not mistaken for the model's real limit.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

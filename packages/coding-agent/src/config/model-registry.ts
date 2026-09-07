@@ -273,7 +273,6 @@ export class ModelRegistry {
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
 	#settings: Settings | undefined;
-
 	#captureCatalogMetrics(models: readonly Model<Api>[], replace: boolean): void {
 		if (replace) {
 			const incoming = new CatalogMetricsIndex(models);
@@ -2146,7 +2145,19 @@ export class ModelRegistry {
 			if (!extendedContext && model.provider !== "xai-oauth") {
 				const threshold = model.cost.longContext?.inputThreshold;
 				if (threshold !== undefined && model.contextWindow !== null && model.contextWindow > threshold) {
+					const full = model.contextWindow;
 					model = applyModelOverride(model, { contextWindow: threshold });
+					// The pre-clamp window is otherwise unrecoverable, and the shrink is
+					// invisible without it: a 1M Codex window silently reports 272K and
+					// compaction starts firing. Record it on the model rather than in a
+					// `provider\u0000id` map — a bundled and a discovered model can share
+					// that key with different windows, and the map would keep whichever
+					// source was processed last instead of the one that wins composition.
+					// `maxContextWindow` is already what the `extendedContext: true` branch
+					// above reads, so this states exactly what the setting would restore.
+					if ((resolveMaxContextWindow(model) ?? 0) < full) {
+						model = { ...model, maxContextWindow: full };
+					}
 				}
 			}
 			if (model.provider === "ollama-cloud" && model.omitMaxOutputTokens !== true) {
@@ -2374,6 +2385,53 @@ export class ModelRegistry {
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+	}
+
+	/**
+	 * Whether an explicit per-model `contextWindow` override owns this model's
+	 * final window. Overrides reapply after the long-context clamp and win over
+	 * it in both settings states, so the clamp is never the reason a model with
+	 * one reports the window it does — not even when the override happens to
+	 * name the clamp's own value.
+	 */
+	#contextWindowPinnedByOverride(model: Pick<Model<Api>, "provider" | "id">): boolean {
+		const providerOverrides = this.#modelOverrides.get(model.provider);
+		if (!providerOverrides) return false;
+		const override = resolveModelOverrideWithAliases(
+			providerOverrides,
+			model as Model<Api>,
+			(provider, id) => this.find(provider, id) !== undefined,
+		);
+		return override?.contextWindow !== undefined;
+	}
+
+	/**
+	 * Context window `extendedContext: true` would unlock for this model, or
+	 * `undefined` when the setting is not currently capping it.
+	 *
+	 * Derived from the model handed in, so it always describes the model that
+	 * won composition rather than whichever same-named source a policy pass
+	 * happened to visit last. The clamp is the cause only while it still owns
+	 * the final window: a smaller window is not proof of that, and neither is a
+	 * window equal to the clamp's, because an explicit per-model `contextWindow`
+	 * override reapplies after the cap and wins over it — whether it names 500K
+	 * on a 1M model or exactly the 272K the clamp would have installed. Both
+	 * stay put when the setting flips, so promising an unlock there would
+	 * advertise a restore that cannot happen.
+	 */
+	cappedExtendedContextWindow(
+		model: Pick<Model<Api>, "provider" | "id" | "contextWindow" | "cost" | "maxContextWindow">,
+	): number | undefined {
+		if (isExtendedContextEnabledFromSettings(this.#settings)) return undefined;
+		// Mirrors the clamp's own guards: the SuperGrok tier is an estimate that
+		// never constrains the runtime window, so nothing there is capped.
+		if (model.provider === "xai-oauth") return undefined;
+		const threshold = model.cost.longContext?.inputThreshold;
+		if (threshold === undefined || model.contextWindow === null) return undefined;
+		if (model.contextWindow !== threshold) return undefined;
+		if (this.#contextWindowPinnedByOverride(model)) return undefined;
+		const full = resolveMaxContextWindow(model as Model<Api>);
+		return full !== undefined && full > model.contextWindow ? full : undefined;
 	}
 
 	/**
