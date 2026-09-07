@@ -59,6 +59,27 @@ function emptyStartupSelection(persistCurrentVersion: boolean): StartupChangelog
 	};
 }
 
+/** Bucket for release bullets written above any `###` category heading, so the breakdown never loses them. */
+const UNCATEGORIZED_CHANGELOG_CATEGORY = "Other";
+
+/** Leading indent columns of a line. Tabs advance to the next 4-column stop. */
+function changelogLineIndent(line: string): number {
+	let indent = 0;
+	for (const char of line) {
+		if (char === " ") indent += 1;
+		else if (char === "\t") indent += 4 - (indent % 4);
+		else break;
+	}
+	return indent;
+}
+
+/** Indent columns of a Markdown list bullet, or undefined when the line opens no list item. Tabs advance to the next 4-column stop. */
+function changelogBulletIndent(line: string): number | undefined {
+	const match = line.match(/^([ \t]*)[-+*][ \t]+\S/);
+	if (!match) return undefined;
+	return changelogLineIndent(match[1] ?? "");
+}
+
 function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 	changeCount: number;
 	categoryCounts: Record<string, number>;
@@ -67,14 +88,33 @@ function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 	let changeCount = 0;
 
 	for (const entry of entries) {
-		let category: string | undefined;
+		let category = UNCATEGORIZED_CHANGELOG_CATEGORY;
+		// Indent of the first item of the open list block. The renderer absorbs every
+		// whitespace-indented line into the open item, so only an unindented line
+		// (paragraph, heading, fence, ...) closes the block. Blank lines never do.
+		let listIndent: number | undefined;
 		for (const line of entry.content.split("\n")) {
 			const heading = line.match(/^###\s+(.+?)\s*$/);
 			if (heading) {
-				category = heading[1];
+				category = heading[1] ?? UNCATEGORIZED_CHANGELOG_CATEGORY;
+				listIndent = undefined;
 				continue;
 			}
-			if (!category || !/^-\s+\S/.test(line)) continue;
+			const indent = changelogBulletIndent(line);
+			if (indent === undefined) {
+				// An unindented block boundary ends the open item, so a later indented
+				// bullet opens a new top-level list instead of nesting under the old one.
+				if (!/^\s*$/.test(line) && changelogLineIndent(line) === 0) listIndent = undefined;
+				continue;
+			}
+			if (listIndent === undefined) {
+				// With no list open, four columns of indent is an indented code block, not a list item.
+				if (indent >= 4) continue;
+				listIndent = indent;
+			} else if (indent > listIndent) {
+				// Deeper than the block's first item: absorbed into the item above, not a separate change.
+				continue;
+			}
 			categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
 			changeCount++;
 		}
