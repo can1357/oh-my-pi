@@ -2567,5 +2567,8 @@ export class StatusLineComponent implements Component {
  */
 export function renderHookStatusRow(status: HookStatusEntry, width: number): string {
 	const sanitized = sanitizeStatusText(status.text);
-	return truncateToWidth(status.color ? theme.fg(status.color, sanitized) : sanitized, width);
+	// A token the active theme omits would make `theme.fg` throw, so the row
+	// falls back to plain text — its appearance before colours existed.
+	const color = status.color !== undefined && theme.hasFg(status.color) ? status.color : undefined;
+	return truncateToWidth(color ? theme.fg(color, sanitized) : sanitized, width);
 }

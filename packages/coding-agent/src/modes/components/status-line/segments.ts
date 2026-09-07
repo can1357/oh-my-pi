@@ -191,7 +191,11 @@ const statusSegment: StatusLineSegment = {
 			if (!sanitized) continue;
 			// Entries without a requested colour keep the session-accent look they
 			// have always had; a requested theme token wins over the accent.
-			parts.push(status.color ? theme.fg(status.color, sanitized) : accentFg(ctx, "accent", sanitized));
+			// `hasFg` is re-checked here, not only when the entry was stored: the
+			// token may be optional in the schema, and the user may have switched
+			// to a theme that omits it since.
+			const color = status.color !== undefined && theme.hasFg(status.color) ? status.color : undefined;
+			parts.push(color ? theme.fg(color, sanitized) : accentFg(ctx, "accent", sanitized));
 		}
 		return {
 			content: parts.join(theme.sep.dot),

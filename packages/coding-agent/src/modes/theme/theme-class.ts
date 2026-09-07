@@ -290,6 +290,18 @@ export class Theme {
 		};
 	}
 
+	/**
+	 * Whether this theme defines a foreground for `color`.
+	 *
+	 * Some tokens are optional in the schema (`thinkingMax`), so a name that
+	 * passes {@link isValidThemeColor} can still be absent here and make
+	 * {@link Theme.fg} throw. Callers holding a colour chosen elsewhere — a
+	 * setting, an extension — must check this before painting with it.
+	 */
+	hasFg(color: ThemeColor): boolean {
+		return this.#fgColors[color] !== undefined;
+	}
+
 	fg(color: ThemeColor, text: string): string {
 		const ansi = this.#fgColors[color];
 		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
@@ -418,7 +430,7 @@ export class Theme {
 				return (str: string) => this.fg("thinkingXhigh", str);
 			case "max":
 				// thinkingMax is optional; themes without it resolve to the xhigh color.
-				return (str: string) => this.fg(this.#fgColors.thinkingMax ? "thinkingMax" : "thinkingXhigh", str);
+				return (str: string) => this.fg(this.hasFg("thinkingMax") ? "thinkingMax" : "thinkingXhigh", str);
 			default:
 				return (str: string) => this.fg("thinkingOff", str);
 		}

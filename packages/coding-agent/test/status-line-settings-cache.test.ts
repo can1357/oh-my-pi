@@ -6,7 +6,7 @@ import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
-import { initTheme, theme, type ThemeColor } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, isValidThemeColor, theme, type ThemeColor } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -287,6 +287,34 @@ describe("StatusLineComponent effective settings cache", () => {
 		component.setHookStatus("cache", "cache cold", { color: "banana" as ThemeColor });
 
 		expect(component.render(80)).toEqual(["cache cold"]);
+	});
+
+	it("falls back when a valid token is absent from the active theme", () => {
+		// `thinkingMax` passes isValidThemeColor but is optional in the schema and
+		// undefined in the shipped themes, so painting with it would throw.
+		expect(isValidThemeColor("thinkingMax")).toBe(true);
+		expect(theme.hasFg("thinkingMax")).toBe(false);
+
+		const row = makeComponent({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: [],
+			separator: "none",
+			showHookStatus: true,
+		});
+		row.setHookStatus("cache", "cache cold", { color: "thinkingMax" });
+		expect(row.render(80)).toEqual(["cache cold"]);
+
+		const segment = makeComponent({
+			preset: "custom",
+			leftSegments: ["status"],
+			rightSegments: [],
+			separator: "none",
+			showHookStatus: false,
+			sessionAccent: false,
+		});
+		segment.setHookStatus("cache", "cache cold", { color: "thinkingMax" });
+		expect(segment.getTopBorder(120).content).toContain(theme.fg("accent", "cache cold"));
 	});
 
 	it("does not mutate shared preset segment options during narrow renders", () => {
