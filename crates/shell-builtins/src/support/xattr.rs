@@ -250,11 +250,11 @@ mod tests {
 		let mut expected: FastHashMap<Vec<u8>, Vec<u8>> = FastHashMap::default();
 		expected.insert(b"user.omp.test".to_vec(), b"value".to_vec());
 
-		apply_xattrs(src.path(), expected.clone())?;
+		apply_xattrs(src.path(), expected)?;
 		copy_xattrs(src.path(), dst.path())?;
 
 		let found = retrieve_xattrs(dst.path())?;
-		assert_eq!(found.get(b"user.omp.test".as_slice()), expected.get(b"user.omp.test".as_slice()));
+		assert_eq!(found.get(b"user.omp.test".as_slice()).map(Vec::as_slice), Some(b"value".as_slice()));
 		Ok(())
 	}
 }
