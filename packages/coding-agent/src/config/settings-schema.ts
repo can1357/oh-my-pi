@@ -3415,6 +3415,18 @@ export const SETTINGS_SCHEMA = {
 	"hindsight.retainEveryNTurns": { type: "number", default: 3 },
 	"hindsight.retainOverlapTurns": { type: "number", default: 2 },
 	"hindsight.retainContext": { type: "string", default: "omp" },
+	"hindsight.retainStrategy": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Retain Strategy",
+			description:
+				"Named Hindsight extraction strategy sent as the per-item strategy field. Leave empty to use the bank default.",
+			condition: "hindsightActive",
+		},
+	},
 
 	"hindsight.recallBudget": {
 		type: "enum",

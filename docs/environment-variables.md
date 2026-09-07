@@ -484,6 +484,7 @@ one of the listed lowercase values; invalid values are ignored.
 | `HINDSIGHT_BANK_ID`                | `hindsight.bankId`              | Non-empty string; unset by default, so the selected scoping mode derives the bank |
 | `HINDSIGHT_BANK_MISSION`           | `hindsight.bankMission`         | Non-empty string; default empty string                                            |
 | `HINDSIGHT_RETAIN_MODE`            | `hindsight.retainMode`          | `full-session` or `last-turn`; default `full-session`                             |
+| `HINDSIGHT_RETAIN_STRATEGY`        | `hindsight.retainStrategy`      | Non-empty strategy; unset omits the request field and uses the bank default       |
 | `HINDSIGHT_RECALL_BUDGET`          | `hindsight.recallBudget`        | `low`, `mid`, or `high`; default `mid`                                            |
 | `HINDSIGHT_AUTO_RECALL`            | `hindsight.autoRecall`          | Boolean; default `true`                                                           |
 | `HINDSIGHT_AUTO_RETAIN`            | `hindsight.autoRetain`          | Boolean; default `true`                                                           |
