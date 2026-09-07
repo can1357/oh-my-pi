@@ -46,6 +46,7 @@ import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
+	RpcClearQueueResult,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -58,6 +59,7 @@ import type {
 	RpcHostUriCancelRequest,
 	RpcHostUriRequest,
 	RpcHostUriResult,
+	RpcReadyFrame,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
@@ -116,6 +118,16 @@ export type RpcSessionChangeResult =
 	| { type: "branch"; data: { text: string; cancelled: boolean } };
 
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
+
+export type RpcAbortSession = Pick<AgentSession, "abort">;
+
+/** Delegate queue ownership to abort so late enqueues are cleared before its final drain. */
+export async function handleRpcAbort(session: RpcAbortSession, clearQueue: boolean): Promise<void> {
+	await session.abort({
+		reason: USER_INTERRUPT_LABEL,
+		...(clearQueue ? { clearQueue: true } : {}),
+	});
+}
 
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
 export type RpcSkillCommandResult = { agentInvoked: true };
@@ -260,8 +272,8 @@ export class RpcExtensionUserMessageTracker {
 
 	#trackAgentMessageTaskForScope(scope: RpcExtensionUserMessageScope, task: Promise<unknown>): void {
 		const scopedTask = task.then(
-			() => {
-				scope.hasAgentMessageTask = true;
+			agentInvoked => {
+				if (agentInvoked !== false) scope.hasAgentMessageTask = true;
 			},
 			() => {},
 		);
@@ -797,15 +809,17 @@ export async function runRpcMode(
 			// stdout gone (host exited) — nothing left to deliver; keep the queue alive.
 			.catch(() => {});
 	};
-	writeFrames(
-		frameEncoder.encodeFrames({
-			type: "ready",
-			protocolVersion: 1,
-			supportedProtocolVersions: [1, 2],
-			maxFrameBytes: MAX_RPC_FRAME_BYTES,
-			maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
-		}),
-	);
+	const readyFrame: RpcReadyFrame = {
+		type: "ready",
+		protocolVersion: 1,
+		supportedProtocolVersions: [1, 2],
+		maxFrameBytes: MAX_RPC_FRAME_BYTES,
+		maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
+		// Capability values are exact integers, not booleans: bumping one is how a
+		// semantic change to an already-shipped capability is announced.
+		features: { activeTurnSteering: 1 },
+	};
+	writeFrames(frameEncoder.encodeFrames(readyFrame));
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		writeFrames(frameEncoder.encodeFrames(obj));
 		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true)
@@ -1154,9 +1168,16 @@ export async function runRpcMode(
 				return success(id, "prompt");
 			}
 
+			// `activeTurnOnly` means "interrupt the run happening right now". Without
+			// it, a steer that arrives just after the turn ended lands on the idle
+			// queue and auto-drains into a fresh turn — a surprise the host cannot
+			// undo. With it the session rejects, leaving both queues untouched, and
+			// the host decides whether to send a normal prompt instead.
 			case "steer": {
-				await session.steer(command.message, command.images);
-				return success(id, "steer");
+				const accepted = await session.steer(command.message, command.images, {
+					activeTurnOnly: command.activeTurnOnly === true,
+				});
+				return success(id, "steer", { accepted });
 			}
 
 			case "follow_up": {
@@ -1164,8 +1185,19 @@ export async function runRpcMode(
 				return success(id, "follow_up");
 			}
 
+			// Standalone clearing remains useful for editor restore. A final interrupt
+			// uses `abort.clearQueue` instead: separate commands leave a round-trip gap
+			// where extensions can enqueue work that abort's stranded-queue drain restarts.
+			case "clear_queue": {
+				const cleared = session.clearQueue({ forInterrupt: command.forInterrupt === true });
+				return success(id, "clear_queue", {
+					steering: cleared.steering.length,
+					followUp: cleared.followUp.length,
+				} satisfies RpcClearQueueResult);
+			}
+
 			case "abort": {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await handleRpcAbort(session, command.clearQueue === true);
 				return success(id, "abort");
 			}
 

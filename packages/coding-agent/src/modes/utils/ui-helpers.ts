@@ -1127,10 +1127,11 @@ export class UiHelpers {
 		}
 		await this.ctx.withLocalSubmission(
 			message.text,
-			() =>
-				message.mode === "followUp"
-					? this.ctx.session.followUp(message.text, message.images)
-					: this.ctx.session.steer(message.text, message.images),
+			async () => {
+				// steer() reports whether it enqueued; this path always enqueues.
+				if (message.mode === "followUp") await this.ctx.session.followUp(message.text, message.images);
+				else await this.ctx.session.steer(message.text, message.images);
+			},
 			{ imageCount: message.images?.length ?? 0 },
 		);
 	}

@@ -31,9 +31,10 @@ export type RpcCommand =
 
 	// Prompting
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
-	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
+	| { id?: string; type: "steer"; message: string; images?: ImageContent[]; activeTurnOnly?: true }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
-	| { id?: string; type: "abort" }
+	| { id?: string; type: "clear_queue"; forInterrupt?: boolean }
+	| { id?: string; type: "abort"; clearQueue?: true }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
@@ -141,12 +142,27 @@ export interface RpcPromptResultFrame {
 	agentInvoked: boolean;
 }
 
+/** Opt-in server capabilities advertised in the ready frame.
+ *
+ *  Each key is versioned by an integer so a host gates on an exact value rather
+ *  than mere presence. Capabilities are independent of the transport protocol
+ *  version: the ready frame is always v1, so a client that never negotiates v2
+ *  still reads them.
+ *
+ *  - `activeTurnSteering: 1` — `steer` honors `activeTurnOnly` and answers with
+ *    `data.accepted`; `abort` accepts `clearQueue: true`; and `clear_queue` is
+ *    available with `forInterrupt`. */
+export interface RpcServerFeatures {
+	activeTurnSteering?: 1;
+}
+
 export interface RpcReadyFrame {
 	type: "ready";
 	protocolVersion: 1;
 	supportedProtocolVersions: [1, 2];
 	maxFrameBytes: number;
 	maxReassembledFrameBytes: number;
+	features?: RpcServerFeatures;
 }
 
 export interface RpcChunkFrame {
@@ -156,6 +172,14 @@ export interface RpcChunkFrame {
 	count: number;
 	byteLength: number;
 	data: string;
+}
+
+/** Result of `clear_queue`: how many user-authored messages left each queue.
+ *  Non-user queued messages (advisor cards, hidden companions) are not counted;
+ *  what survives is decided by `forInterrupt`. */
+export interface RpcClearQueueResult {
+	steering: number;
+	followUp: number;
 }
 
 export interface RpcHandoffResult {
@@ -205,8 +229,9 @@ export type RpcResponse =
 
 	// Prompting (async - events follow)
 	| { id?: string; type: "response"; command: "prompt"; success: true; data?: { agentInvoked: boolean } }
-	| { id?: string; type: "response"; command: "steer"; success: true }
+	| { id?: string; type: "response"; command: "steer"; success: true; data?: { accepted: boolean } }
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
+	| { id?: string; type: "response"; command: "clear_queue"; success: true; data: RpcClearQueueResult }
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }

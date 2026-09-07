@@ -126,6 +126,8 @@
 - Fixed bracketed hashline edit targets being reported as undefined to extension path allowlists.
 - Fixed MCP tools discovered during startup disappearing after plan-mode approval or when leaving default-on plan mode.
 - Fixed ACP clients receiving invalid file locations or updates for released terminals, preventing invalid worktree scans and terminal errors on Windows.
+- Fixed user-scope marketplace plugins installed through `omp` losing their skills unless the Claude plugin source was separately enabled ([#10662](https://github.com/can1357/oh-my-pi/issues/10662)).
+- RPC hosts can now steer only a live turn and make an interrupt final. The ready frame advertises `features.activeTurnSteering: 1`; `steer` accepts `activeTurnOnly: true` and answers `data.accepted`, rejecting without touching the queues when no turn is running at the enqueue boundary; `abort` accepts `clearQueue: true` to clear interrupt queues at abort startup and again before its final stranded-queue drain; and the new standalone `clear_queue` command supports queue inspection and editor restore. Hosts that omit the new fields keep the previous behavior.
 
 ## [18.1.6] - 2026-09-03
 

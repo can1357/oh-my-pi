@@ -872,6 +872,18 @@ class FastModeResult:
 
 
 @dataclass(slots=True, frozen=True)
+class ClearQueueResult:
+    """How many user-authored messages left each queue.
+
+    Non-user queued messages (advisor cards, hidden companions) are not counted;
+    whether they survive is decided by the request's `for_interrupt`.
+    """
+
+    steering: int
+    follow_up: int
+
+
+@dataclass(slots=True, frozen=True)
 class CompactionResult:
     summary: str
     first_kept_entry_id: str
@@ -934,11 +946,31 @@ class SessionStats:
 
 
 @dataclass(slots=True, frozen=True)
+class ServerFeatures:
+    """Opt-in server capabilities advertised in the ready frame.
+
+    Each capability is versioned by an exact integer. Parsing keeps only values
+    it recognizes, so a field is either the exact supported version or None: a
+    server advertising a bumped (and therefore differently behaving) capability,
+    or a malformed value, reads as absent. Capabilities are independent of the
+    transport protocol version: the ready frame is always v1, so a client that
+    never negotiates v2 still reads them.
+
+    `active_turn_steering == 1`: `steer` honors `active_turn_only` and answers
+    with `accepted`; `abort` accepts `clear_queue=True`; and `clear_queue` is
+    available with `for_interrupt`.
+    """
+
+    active_turn_steering: Literal[1] | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class ReadyEvent:
     protocol_version: int | None = None
     supported_protocol_versions: tuple[int, ...] | None = None
     max_frame_bytes: int | None = None
     max_reassembled_frame_bytes: int | None = None
+    features: ServerFeatures = ServerFeatures()
     type: Literal["ready"] = "ready"
 
 
@@ -1462,6 +1494,13 @@ def parse_fast_mode_result(payload: JsonObject) -> FastModeResult:
     )
 
 
+def parse_clear_queue_result(payload: JsonObject) -> ClearQueueResult:
+    return ClearQueueResult(
+        steering=int(payload.get("steering", 0)),
+        follow_up=int(payload.get("followUp", 0)),
+    )
+
+
 def parse_compaction_result(payload: JsonObject) -> CompactionResult:
     return CompactionResult(
         summary=str(payload.get("summary", "")),
@@ -1632,6 +1671,25 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
             ):
                 raise ValueError("ready.supportedProtocolVersions must be integers")
             supported_versions = tuple(raw_versions)
+        raw_features = payload.get("features")
+        # Never fail the ready frame over capabilities: the reader would record a
+        # protocol error, never publish `ready`, and `start()` would time out
+        # against an otherwise usable server. Anything unrecognized reads as
+        # absent. Values match exactly, so a bumped capability (changed
+        # semantics) also reads as absent instead of as version 1.
+        raw_steering = (
+            raw_features.get("activeTurnSteering")
+            if isinstance(raw_features, dict)
+            else None
+        )
+        advertises_active_turn_steering = (
+            isinstance(raw_steering, int)
+            and not isinstance(raw_steering, bool)
+            and raw_steering == 1
+        )
+        features = ServerFeatures(
+            active_turn_steering=1 if advertises_active_turn_steering else None
+        )
         return ReadyEvent(
             protocol_version=_optional_int(payload, "protocolVersion"),
             supported_protocol_versions=supported_versions,
@@ -1639,6 +1697,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
             max_reassembled_frame_bytes=_optional_int(
                 payload, "maxReassembledFrameBytes"
             ),
+            features=features,
         )
     if event_type == "extension_ui_request":
         return parse_extension_ui_request(payload)

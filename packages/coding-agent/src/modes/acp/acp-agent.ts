@@ -935,10 +935,13 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	#trackExtensionUserMessage(record: ManagedSessionRecord, task: Promise<void>): void {
-		const tracked = task.catch((error: unknown) => {
-			logger.warn("ACP extension sendUserMessage failed", { error });
-		});
+	#trackExtensionUserMessage(record: ManagedSessionRecord, task: Promise<unknown>): void {
+		const tracked = task.then(
+			() => undefined,
+			(error: unknown) => {
+				logger.warn("ACP extension sendUserMessage failed", { error });
+			},
+		);
 		record.extensionUserMessageTasks.add(tracked);
 		void tracked.finally(() => {
 			record.extensionUserMessageTasks.delete(tracked);
