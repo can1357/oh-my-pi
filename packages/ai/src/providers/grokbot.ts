@@ -743,6 +743,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		let firstTokenTime: number | undefined;
 
 		try {
 			const cfg = await loadGrokbotConfig();
@@ -822,6 +823,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				attemptEventBuffer = [];
 				pendingToolEventBuffers.clear();
 				attemptStreamingLive = false;
+				firstTokenTime = undefined;
 				// Buffered `start` was never published — re-arm so the retry emits it.
 				started = false;
 			};
@@ -864,6 +866,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				return false;
 			};
 			const emitAttemptEvent = (event: AssistantMessageEvent) => {
+				if (
+					event.type === "text_delta" ||
+					event.type === "thinking_delta" ||
+					event.type === "toolcall_delta" ||
+					event.type === "toolcall_start"
+				) {
+					if (firstTokenTime === undefined) firstTokenTime = performance.now();
+				}
 				if (!shouldBufferAttemptEvents()) {
 					pushConsumerEvent(event);
 					return;
@@ -1663,6 +1673,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				output.stopReason = hasToolCall ? "toolUse" : "stop";
 			}
 			output.duration = Math.round(performance.now() - startTime);
+			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
 			calculateCost(model, output.usage);
 			logger.debug("grokbot: stream done", {
 				stopReason: output.stopReason,
@@ -1691,6 +1702,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			output.errorId = result.id;
 			output.errorMessage = result.message;
 			output.duration = Math.round(performance.now() - startTime);
+			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
 			const httpMatch = /HTTP (\d{3})/.exec(output.errorMessage);
 			if (httpMatch && output.errorStatus === undefined) {
 				output.errorStatus = Number(httpMatch[1]);

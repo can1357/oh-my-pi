@@ -28,10 +28,16 @@ export type GrokbotSandToolPolicy = {
 	reason?: string;
 };
 
-/** Sand / Auto routers — product wire ids, not versioned model lines. */
-function isGrokbotRouterId(id: string): boolean {
-	const base = id.split("[")[0]?.trim().toLowerCase() ?? "";
-	return base === "default" || base === "auto" || base.startsWith("sand-");
+/** Catalog row shape needed to pick representative matrix samples. */
+export type GrokbotMatrixModelRef = {
+	id: string;
+	/** Reviewed catalog `sand-tools-wire` — parent-chat/automation mark routers. */
+	sandToolsWire?: string;
+};
+
+/** Product-wire routers from catalog policy (not id spelling). */
+function isGrokbotRouter(model: GrokbotMatrixModelRef): boolean {
+	return model.sandToolsWire === "parent-chat" || model.sandToolsWire === "automation";
 }
 
 /** Prefer non-parameterized, shorter catalog ids when choosing a class sample. */
@@ -132,8 +138,13 @@ export function advertisedSandToolNames(ompToolNames: readonly string[], policy:
 	return out;
 }
 
-export function selectGrokbotMatrixIds(liveIds: readonly string[], slice: "representative" | "all"): string[] {
+export function selectGrokbotMatrixIds(
+	liveModels: readonly GrokbotMatrixModelRef[],
+	slice: "representative" | "all",
+): string[] {
+	const liveIds = liveModels.map(model => model.id);
 	if (slice === "all") return [...liveIds];
+	const byId = new Map(liveModels.map(model => [model.id, model]));
 	const live = new Set(liveIds);
 	const picked: string[] = [];
 	const seen = new Set<string>();
@@ -143,9 +154,9 @@ export function selectGrokbotMatrixIds(liveIds: readonly string[], slice: "repre
 		picked.push(id);
 	};
 
-	// Routers first (product wire ids — not versioned model lines).
-	for (const id of liveIds) {
-		if (isGrokbotRouterId(id)) take(id);
+	// Routers first — catalog sand-tools-wire parent-chat/automation, not id tokens.
+	for (const model of liveModels) {
+		if (isGrokbotRouter(model)) take(model.id);
 	}
 
 	// One live row per classifyModel identity bucket so renamed catalog ids still gate.
@@ -173,7 +184,12 @@ export function selectGrokbotMatrixIds(liveIds: readonly string[], slice: "repre
 		take(sorted[0]!);
 	}
 	// One unclassified product row (e.g. composer) — shortest non-router.
-	const unknownSorted = unknown.filter(id => !isGrokbotRouterId(id)).sort(preferMatrixId);
+	const unknownSorted = unknown
+		.filter(id => {
+			const model = byId.get(id);
+			return !model || !isGrokbotRouter(model);
+		})
+		.sort(preferMatrixId);
 	if (unknownSorted[0]) take(unknownSorted[0]);
 
 	return picked;

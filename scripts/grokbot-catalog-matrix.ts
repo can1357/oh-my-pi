@@ -186,7 +186,7 @@ async function runText(model: Model<Api>): Promise<{
 		};
 	}
 	const body = textOf(result);
-	const pass = body.includes(TEXT_TOKEN) || /pong/i.test(body);
+	const pass = body.includes(TEXT_TOKEN);
 	return {
 		pass,
 		routedModel: result.upstreamModel,
@@ -451,7 +451,7 @@ async function main() {
 		selected = resolved.selected;
 	} else {
 		selected = selectGrokbotMatrixIds(
-			specs.map(s => s.id),
+			specs.map(s => ({ id: s.id, sandToolsWire: s.sandToolsWire })),
 			args.slice,
 		);
 	}

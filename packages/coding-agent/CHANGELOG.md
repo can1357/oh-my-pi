@@ -2,16 +2,11 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- `--api-key` early binding skips multi-provider `--models` scopes (single shared provider only)
-
 ### Added
 
 - Added `/grokbot` to show Grok Bot provider status (credentials/client; no secrets). Distinct from Cursor (`/login cursor`) and xAI / Grok CLI (`xai`, `xai-oauth`), with independent usage allowances. `/login grokbot` surfaces the host-install prompt for the Grok Bot system. Model lookup resolves Grok Bot `idAliases` (e.g. `grokbot/composer` → live `composer-2.5`) without separate catalog rows.
 - Documented Grok Bot one-shot text and tools probes, per-family tool wire, and the live AvailableModels matrix (`docs/grokbot.md`, `scripts/grokbot-catalog-matrix.ts`).
 - Grok Bot catalog matrix now smokes bash + read + write and retries HTTP 502/504 gateway flakes.
-## [18.1.14] - 2026-09-07
 
 ### Fixed
 
@@ -28,6 +23,12 @@
 - Grok Bot catalog matrix reports `wire: native` for grok/gpt/gemini families (was the internal `error` sentinel). `sand-automation` JSON-as-text Shell dumps are promoted to real tool calls.
 - Grok Bot catalog matrix accepts tool smokes only when the call targets the expected path/token/payload (not tool name alone).
 - `--no-tools` keeps an empty provider tool whitelist without `restrictToolNames`, so extension commands and LSP remain available unless `--no-extensions` / `--no-lsp` are set.
+- `--api-key` early binding skips multi-provider `--models` scopes and any bare (unqualified) selector (single shared qualified provider only).
+- Grok Bot catalog matrix text probes require the exact expected token (no loose `pong` match).
+
+## [18.1.14] - 2026-09-07
+
+### Fixed
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.
 - Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence.
 - Fixed explicit Codex context-window overrides widening past the server-honored maximum; they now clamp to the documented ceiling like upstream Codex ([#11157](https://github.com/can1357/oh-my-pi/pull/11157) by [@H4vC](https://github.com/H4vC)).
@@ -38,7 +39,6 @@
 - Fixed Ask custom answers requiring another submission after paste or remaining on the same multi-select question; pending clipboard text is preserved before submission, and single-question multi-select answers still go through review ([#11099](https://github.com/can1357/oh-my-pi/pull/11099) by [@camjac251](https://github.com/camjac251)).
 - The startup update notice no longer counts standalone `* * *` and `- - -` separator lines as changes.
 - Fixed `/loop` replacing the repeating prompt with a mid-turn interjection; steering while the agent runs is now one-off, and only an idle submission becomes the new loop body ([#11159](https://github.com/can1357/oh-my-pi/pull/11159) by [@H4vC](https://github.com/H4vC)).
-
 
 ## [18.1.13] - 2026-09-07
 

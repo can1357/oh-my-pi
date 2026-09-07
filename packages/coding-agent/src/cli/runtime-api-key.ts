@@ -7,8 +7,9 @@ import { parseModelString } from "../config/model-resolver";
  * cache id; installing the override after model resolution leaves only offline
  * seeds and `--provider X --model <live-only-id>` exits with "Model not found".
  *
- * Multi-provider `--models` scopes are intentionally unbound here: the first
- * selector is not a safe key owner before the session picks a concrete model.
+ * Multi-provider `--models` scopes and any bare (unqualified) selector are
+ * intentionally unbound: ownership is indeterminate until a concrete model is
+ * selected.
  */
 export function resolveCliRuntimeApiKeyProvider(
 	parsed: Pick<Args, "provider" | "model" | "models">,
@@ -20,8 +21,12 @@ export function resolveCliRuntimeApiKeyProvider(
 	}
 	const providers = new Set<string>();
 	for (const pattern of parsed.models ?? []) {
-		const parsedModel = parseModelString(pattern.trim());
-		if (parsedModel?.provider) providers.add(parsedModel.provider);
+		const trimmed = pattern.trim();
+		if (!trimmed) continue;
+		const parsedModel = parseModelString(trimmed);
+		// Bare selectors (no provider/) make early key ownership indeterminate.
+		if (!parsedModel?.provider) return undefined;
+		providers.add(parsedModel.provider);
 	}
 	if (providers.size === 1) {
 		const [only] = providers;
