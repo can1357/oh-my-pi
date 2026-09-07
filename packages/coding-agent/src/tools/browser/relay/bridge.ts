@@ -21,6 +21,7 @@
  * - real child session ids (OOPIFs, workers) — created by Chrome under the
  *   shared root session and passed through verbatim
  */
+import { parse } from "@babel/parser";
 import type { ExtToRelayMessage, RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "./protocol";
 
 /** Transport-agnostic websocket surface the bridge writes to. */
@@ -85,11 +86,21 @@ interface PreservedPreloadScript {
 
 function markPreloadApplication(source: unknown, marker: string): string {
 	if (typeof source !== "string") throw new Error("preload source must be a string");
-	// Run the caller source before exposing the marker. Prepending it makes global
-	// enumeration and feature detection observe relay-private state while the
-	// preload runs. `this` also cannot be shadowed by top-level lexical bindings.
-	const markerStatement = `this[${JSON.stringify(marker)}] = true;`;
-	return `${source}\n${markerStatement}`;
+	// Record entry before caller code so a preload that performs side effects and
+	// then throws is still recognized as applied. Keep the random recovery key
+	// non-enumerable so ordinary global enumeration in the caller cannot observe
+	// relay-private state. Insert after any hashbang/directive prologue so their
+	// syntax and semantics stay intact, while leaving caller declarations at the
+	// top level. `this` cannot be shadowed by top-level lexical bindings.
+	const markerStatement = `Object.defineProperty(this, ${JSON.stringify(marker)}, { value: true, configurable: true });`;
+	const program = parse(source, {
+		sourceType: "script",
+		allowAwaitOutsideFunction: true,
+		allowReturnOutsideFunction: true,
+	}).program;
+	const insertionOffset =
+		program.directives.at(-1)?.end ?? program.interpreter?.end ?? (source.charCodeAt(0) === 0xfeff ? 1 : 0);
+	return `${source.slice(0, insertionOffset)}\n${markerStatement}\n${source.slice(insertionOffset)}`;
 }
 
 function clearPreloadApplicationMarker(marker: string): string {

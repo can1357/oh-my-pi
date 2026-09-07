@@ -5,6 +5,17 @@ export function noteAttachmentStateChange(
 	epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
 }
 
+export function hasUsableRelaySocket(
+	socket: { readyState: number } | null,
+	openReadyState: number,
+	connectingReadyState: number,
+): boolean {
+	return (
+		socket !== null &&
+		(socket.readyState === openReadyState || socket.readyState === connectingReadyState)
+	);
+}
+
 export function noteDebuggerDetach(
 	attachmentEpochs: Map<number, number>,
 	loaderGenerations: Map<number, number>,

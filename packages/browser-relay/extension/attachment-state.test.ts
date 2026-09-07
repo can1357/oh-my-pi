@@ -8,6 +8,7 @@ import {
 	detachWithRecoveryLoaderObservation,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
+	hasUsableRelaySocket,
 	isAttachmentStateCurrent,
 	noteAttachmentStateChange,
 	noteDebuggerDetach,
@@ -21,6 +22,14 @@ import {
 } from "./attachment-state";
 
 describe("attachment-state", () => {
+	it("recognizes only open or connecting relay sockets as usable", () => {
+		expect(hasUsableRelaySocket(null, 1, 0)).toBe(false);
+		expect(hasUsableRelaySocket({ readyState: 0 }, 1, 0)).toBe(true);
+		expect(hasUsableRelaySocket({ readyState: 1 }, 1, 0)).toBe(true);
+		expect(hasUsableRelaySocket({ readyState: 2 }, 1, 0)).toBe(false);
+		expect(hasUsableRelaySocket({ readyState: 3 }, 1, 0)).toBe(false);
+	});
+
 	it("keeps a main-frame navigation observed before detach as the recovery baseline", () => {
 		const loaderIds = new Map([[1, "loader-before"]]);
 		const generations = new Map([[1, 1]]);

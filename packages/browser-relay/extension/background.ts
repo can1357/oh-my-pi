@@ -24,6 +24,7 @@ import {
 	detachWithRecoveryLoaderObservation,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
+	hasUsableRelaySocket,
 	isAttachmentStateCurrent,
 	noteAttachmentStateChange,
 	noteDebuggerDetach,
@@ -1149,16 +1150,20 @@ async function reconcileOrphans(): Promise<void> {
 const ensureStartupReconciled = createRetryableLoader(reconcileOrphans);
 
 async function connect(): Promise<void> {
-	if (
-		ws &&
-		(ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
-	)
-		return;
+	if (hasUsableRelaySocket(ws, WebSocket.OPEN, WebSocket.CONNECTING)) return;
 	const settings = await loadSettings();
+	// Another connect() can win while settings are loading. Do not create a
+	// second socket whose later onopen callback could initialize global relay
+	// state for the already-current connection.
+	if (hasUsableRelaySocket(ws, WebSocket.OPEN, WebSocket.CONNECTING)) return;
 	const url = `ws://127.0.0.1:${settings.port}/ext${settings.token ? `?token=${encodeURIComponent(settings.token)}` : ""}`;
 	const socket = new WebSocket(url);
 	ws = socket;
 	socket.onopen = () => {
+		if (ws !== socket) {
+			socket.close();
+			return;
+		}
 		reconnectDelay = RECONNECT_MIN_MS;
 		void setBadge(true);
 		// Do not mark the guard connected or clear the persisted orphan-sweep

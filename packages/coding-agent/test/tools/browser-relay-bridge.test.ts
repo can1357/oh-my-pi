@@ -3192,11 +3192,11 @@ describe("RelayBridge tab grouping", () => {
 		const replay = ext2.rpcs("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(replay?.params).toMatchObject({ runImmediately: false });
 		const replaySource = (replay?.params as { source?: string } | undefined)?.source;
-		expect(replaySource).toStartWith(source);
+		expect(replaySource).toContain(source.slice(source.indexOf("this.__preloadRan")));
 		const replayContext: Record<string, unknown> = {};
 		vm.runInNewContext(replaySource!, replayContext);
 		expect(replayContext.__preloadRan).toBe(true);
-		expect(Object.keys(replayContext).some(key => key.startsWith("__ompRelayPreload"))).toBe(true);
+		expect(Object.keys(replayContext).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 	});
 
 	it("preserves an immediate preload whose leading string expression continues on the next line", async () => {
@@ -3240,7 +3240,7 @@ describe("RelayBridge tab grouping", () => {
 		const replayContext: Record<string, unknown> = {};
 		vm.runInNewContext(replaySource!, replayContext);
 		expect(replayContext.__preloadRan).toBe(true);
-		expect(Object.keys(replayContext).some(key => key.startsWith("__ompRelayPreload"))).toBe(true);
+		expect(Object.keys(replayContext).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 	});
 
 	it("records the loader after an initial immediate preload registration", async () => {
@@ -3442,6 +3442,51 @@ describe("RelayBridge tab grouping", () => {
 		expect(cleanupRemoval?.params).toEqual({ identifier: "root-script-marker-only" });
 		ack(bridge, ext2, "send");
 		await flush();
+	});
+
+	it("records an immediate preload that throws after mutating the document", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: {
+					source: "this.__preloadRuns = (this.__preloadRuns ?? 0) + 1; throw new Error('boom');",
+					runImmediately: true,
+				},
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		const marked = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		const markedSource = (marked?.params as { source?: string } | undefined)?.source ?? "";
+		const document: Record<string, unknown> = {};
+		vm.createContext(document);
+		expect(() => vm.runInContext(markedSource, document)).toThrow("boom");
+		expect(document.__preloadRuns).toBe(1);
+		expect(Object.keys(document).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
+		const marker = Object.getOwnPropertyNames(document).find(key => key.startsWith("__ompRelayPreload"));
+		expect(marker).toBeDefined();
+		expect(Object.getOwnPropertyDescriptor(document, marker!)?.enumerable).toBe(false);
 	});
 
 	it.each(["remove", "retry"] as const)(

@@ -86,6 +86,9 @@ class AttachmentGuard {
 function noteAttachmentStateChange(epochs, tabId) {
   epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
 }
+function hasUsableRelaySocket(socket, openReadyState, connectingReadyState) {
+  return socket !== null && (socket.readyState === openReadyState || socket.readyState === connectingReadyState);
+}
 function noteDebuggerDetach(attachmentEpochs, loaderGenerations, tabId) {
   noteAttachmentStateChange(attachmentEpochs, tabId);
   noteAttachmentStateChange(loaderGenerations, tabId);
@@ -924,13 +927,19 @@ async function reconcileOrphans() {
 }
 var ensureStartupReconciled = createRetryableLoader(reconcileOrphans);
 async function connect() {
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
+  if (hasUsableRelaySocket(ws, WebSocket.OPEN, WebSocket.CONNECTING))
     return;
   const settings = await loadSettings();
+  if (hasUsableRelaySocket(ws, WebSocket.OPEN, WebSocket.CONNECTING))
+    return;
   const url = `ws://127.0.0.1:${settings.port}/ext${settings.token ? `?token=${encodeURIComponent(settings.token)}` : ""}`;
   const socket = new WebSocket(url);
   ws = socket;
   socket.onopen = () => {
+    if (ws !== socket) {
+      socket.close();
+      return;
+    }
     reconnectDelay = RECONNECT_MIN_MS;
     setBadge(true);
     refreshHello(() => {
