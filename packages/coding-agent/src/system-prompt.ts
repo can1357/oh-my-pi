@@ -443,6 +443,8 @@ export interface BuildSystemPromptOptions {
 	fusionSidekick?: boolean;
 	/** Fusion `escalate` mode: add the cheap-first / escalate-hard-work guidance. */
 	fusionEscalate?: boolean;
+	/** Fusion token savings mode: inject the token savings delegation and model policy. */
+	fusionTokenSavings?: boolean;
 	/** Sidekick model selector advertised in the fusion delegation policy. */
 	sidekickModel?: string;
 	/** Allocated IRC id of the warm sidekick (may be "Sidekick-2" on a resumed session). */
@@ -503,6 +505,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		taskBatch = true,
 		fusionSidekick = false,
 		fusionEscalate = false,
+		fusionTokenSavings = false,
 		sidekickModel = "pi/smol",
 		sidekickId = "Sidekick",
 		secretsEnabled = false,
@@ -774,6 +777,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		taskBatch,
 		fusionSidekick,
 		fusionEscalate,
+		fusionTokenSavings,
 		sidekickModel,
 		sidekickId,
 		secretsEnabled,

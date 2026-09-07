@@ -32,6 +32,7 @@
 
 import {
 	canonicalizeRoleSelector,
+	isSessionInheritedAgentPattern,
 	type ModelLookupRegistry,
 	resolveAgentModelPatterns,
 	resolveConfiguredModelPatterns,
@@ -44,6 +45,7 @@ import {
 	resolveSubagentModelAlias,
 	type SubagentAliasRegistry,
 } from "../config/subagent-model-aliases";
+import { isTokenSavingsFusionActive } from "../session/fusion-router";
 
 /** Independent difficulty vocabulary for a fresh subagent spawn. Never aliased to {@link AgentTier}. */
 export type SubagentTaskDifficulty = "low" | "medium" | "high";
@@ -66,7 +68,8 @@ export type SubagentModelSelectionSource =
 	| "agent-override"
 	| "agent-definition"
 	| "parent-active"
-	| "session-default";
+	| "session-default"
+	| "fusion-token-savings";
 
 /**
  * Machine-readable provenance for a resolved (or attempted) subagent model
@@ -322,6 +325,129 @@ function resolveFallbackRoute(request: SubagentModelRoutingRequest): SubagentMod
 	};
 }
 
+/** Whether the agent name indicates a browser worker. */
+export function isBrowserAgent(agentName: string | undefined): boolean {
+	if (!agentName) return false;
+	const lower = agentName.toLowerCase();
+	return lower.includes("browser");
+}
+
+/** Whether the agent name indicates a planning or high-intelligence specialist. */
+export function isPlanningOrIntelligenceAgent(agentName: string | undefined): boolean {
+	if (!agentName) return false;
+	const lower = agentName.toLowerCase();
+	return (
+		lower === "plan" ||
+		lower === "oracle" ||
+		lower === "tot-reasoner" ||
+		lower === "synthesize" ||
+		lower === "falsify" ||
+		lower === "reviewer" ||
+		lower === "audit"
+	);
+}
+
+/** Whether the agent is a low-key context-gathering or tool-less worker. */
+export function isLowKeyOrContextAgent(agentName: string | undefined): boolean {
+	if (!agentName) return false;
+	const lower = agentName.toLowerCase();
+	return lower === "explore" || lower === "mr-worker" || lower === "quick_task";
+}
+
+/** Whether a model pattern or role represents a thinking / max-intelligence model. */
+export function isThinkingOrMaxIntelligencePattern(pattern: string | undefined, settings?: Settings): boolean {
+	if (!pattern) return false;
+	const lower = pattern.toLowerCase();
+	if (
+		lower === "pi/slow" ||
+		lower === "slow" ||
+		lower === "pi/max-intelligence" ||
+		lower === "max-intelligence" ||
+		lower === "pi/plan" ||
+		lower === "plan" ||
+		lower === "pi/advisor" ||
+		lower === "advisor"
+	) {
+		return true;
+	}
+	if (settings) {
+		const slow = settings.getModelRole("slow")?.toLowerCase();
+		const maxInt = settings.getModelRole("max-intelligence")?.toLowerCase();
+		const plan = settings.getModelRole("plan")?.toLowerCase();
+		if (slow && (lower === slow || lower.includes(slow))) return true;
+		if (maxInt && (lower === maxInt || lower.includes(maxInt))) return true;
+		if (plan && (lower === plan || lower.includes(plan))) return true;
+	}
+	return false;
+}
+
+/**
+ * In explicit Token Savings Mode:
+ * - The default model is restricted to two calls and simple tasks (never used for subagents).
+ * - Planning and intelligence route to thinking (pi/slow) and max-intelligence (pi/max-intelligence).
+ * - Tasks/work delegated by those models (or general delegated tasks) go to the task model (pi/task).
+ * - Browser work goes to browser models (pi/browser-control / pi/browser-operation).
+ * - Low-key context gathering or tool-less work goes to the SMOL fast model (pi/smol).
+ */
+function resolveTokenSavingsFallbackRoute(request: SubagentModelRoutingRequest): SubagentModelRoutingResult {
+	const { agentName, agentModelDefault, settings, parentActiveModelPattern } = request;
+	const settingsOverride = agentName ? settings.get("task.agentModelOverrides")[agentName] : undefined;
+	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
+	if (overridePatterns.length > 0) {
+		return {
+			ok: true,
+			decision: Object.freeze({
+				source: "agent-override",
+				candidateSelectors: freezeList(overridePatterns),
+			}),
+			modelPatterns: freezeList(overridePatterns),
+		};
+	}
+
+	let targetSelectors: string[];
+	if (isBrowserAgent(agentName)) {
+		// Browser work goes to browser models
+		targetSelectors = ["pi/browser-control", "pi/browser-operation"];
+	} else if (isPlanningOrIntelligenceAgent(agentName)) {
+		// Any actual planning or intelligence comes from thinking and max-intelligence models
+		targetSelectors = ["pi/slow", "pi/max-intelligence", "pi/plan"];
+	} else if (isLowKeyOrContextAgent(agentName)) {
+		// Anything super low-key, like context gathering or tool-less, uses SMOL fast model
+		targetSelectors = ["pi/smol"];
+	} else if (isThinkingOrMaxIntelligencePattern(parentActiveModelPattern, settings)) {
+		// Tasks/work delegated by thinking/max-intelligence models goes to task model
+		targetSelectors = ["pi/task"];
+	} else {
+		const agentModelPattern = normalizeAgentModelDefault(agentModelDefault);
+		const agentPatterns = resolveConfiguredModelPatterns(agentModelPattern, settings);
+		const single = Array.isArray(agentModelPattern) ? agentModelPattern[0] : agentModelPattern;
+		if (agentPatterns.length > 0 && single && !isSessionInheritedAgentPattern(single)) {
+			return {
+				ok: true,
+				decision: Object.freeze({
+					source: "agent-definition",
+					candidateSelectors: freezeList(agentPatterns),
+				}),
+				modelPatterns: freezeList(agentPatterns),
+			};
+		}
+		// General delegated work goes to the task model
+		targetSelectors = ["pi/task"];
+	}
+
+	const resolved = targetSelectors.flatMap(sel => resolveConfiguredModelPatterns(sel, settings));
+	const candidateSelectors = resolved.length > 0 ? resolved : targetSelectors;
+
+	return {
+		ok: true,
+		decision: Object.freeze({
+			source: "fusion-token-savings",
+			candidateSelectors: freezeList(candidateSelectors),
+		}),
+		modelPatterns: freezeList(targetSelectors),
+	};
+}
+
 /**
  * Resolve one subagent spawn's model route. Pure and synchronous; performs no
  * allocation. `requestedModel` wins over `requestedDifficulty`, which wins
@@ -341,6 +467,10 @@ export function resolveSubagentModelRouting(request: SubagentModelRoutingRequest
 
 	if (requestedDifficulty) {
 		return resolveDifficultyRoute(requestedDifficulty, settings, modelRegistry);
+	}
+
+	if (isTokenSavingsFusionActive(settings)) {
+		return resolveTokenSavingsFallbackRoute(request);
 	}
 
 	return resolveFallbackRoute(request);

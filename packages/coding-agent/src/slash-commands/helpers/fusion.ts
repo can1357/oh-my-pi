@@ -12,7 +12,7 @@ import { resolutionNote } from "./fusion-resolution";
 import { commandConsumed, parseSubcommand, usage } from "./parse";
 
 /** Valid `fusion.mode` values, mirrored from the settings schema enum. */
-const FUSION_MODES = ["off", "delegate", "escalate"] as const;
+const FUSION_MODES = ["off", "delegate", "escalate", "token-savings", "savings"] as const;
 type FusionModeValue = (typeof FUSION_MODES)[number];
 
 function isFusionMode(value: string): value is FusionModeValue {
@@ -185,8 +185,7 @@ export function disableFusion(runtime: SlashCommandRuntime): string {
 }
 
 export const FUSION_USAGE =
-	"Usage: /fusion [on|off|status|mode <off|delegate|escalate>|routing <on|off>|sidekick <model>|strong <model|clear>|compact <model|clear>|pool <list|set|remove|clear>]";
-
+	"Usage: /fusion [on|off|status|mode <off|delegate|escalate|token-savings>|routing <on|off>|sidekick <model>|strong <model|clear>|compact <model|clear>|pool <list|set|remove|clear>]";
 /**
  * Text/ACP handler for `/fusion`. Bare invocation prints status (the TUI
  * dispatcher intercepts bare `/fusion` earlier and shows the menu instead).
@@ -216,15 +215,16 @@ export async function handleFusionCommand(
 			const value = rest.trim().toLowerCase();
 			if (!value) {
 				await runtime.output(
-					`fusion.mode is "${runtime.settings.get("fusion.mode")}". Usage: /fusion mode <off|delegate|escalate>`,
+					`fusion.mode is "${runtime.settings.get("fusion.mode")}". Usage: /fusion mode <off|delegate|escalate|token-savings>`,
 				);
 				return commandConsumed();
 			}
 			if (!isFusionMode(value)) {
-				return usage("Usage: /fusion mode <off|delegate|escalate>", runtime);
+				return usage("Usage: /fusion mode <off|delegate|escalate|token-savings>", runtime);
 			}
-			runtime.settings.set("fusion.mode", value);
-			await runtime.output(`fusion.mode set to "${value}".`);
+			const canonicalValue = value === "savings" ? "token-savings" : value;
+			runtime.settings.set("fusion.mode", canonicalValue);
+			await runtime.output(`fusion.mode set to "${canonicalValue}".`);
 			return commandConsumed();
 		}
 		case "routing": {

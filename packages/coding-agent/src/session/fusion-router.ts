@@ -23,6 +23,19 @@ import routeClassifierPoolPrompt from "../prompts/fusion/route-classifier-pool.m
 
 export type FusionRoute = "cheap" | "frontier" | number;
 
+/** Whether the given mode string indicates explicit token savings mode. */
+export function isTokenSavingsFusionMode(mode: string | undefined): boolean {
+	return mode === "token-savings" || mode === "savings";
+}
+
+/** Whether fusion token savings mode is active on the given settings. */
+export function isTokenSavingsFusionActive(settings: { get(key: string): unknown }): boolean {
+	return (
+		settings.get("fusion.enabled") === true &&
+		isTokenSavingsFusionMode(settings.get("fusion.mode") as string | undefined)
+	);
+}
+
 /** One tier of the routing pool. Tier 1 = most powerful … 5 = least intelligent. */
 export interface FusionPoolTier {
 	tier: number;

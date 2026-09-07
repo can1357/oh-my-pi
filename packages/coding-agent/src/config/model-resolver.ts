@@ -924,7 +924,7 @@ function normalizeModelPatternList(value: string | string[] | undefined): string
 	return patterns.map(pattern => pattern.trim()).filter(Boolean);
 }
 
-function isSessionInheritedAgentPattern(value: string): boolean {
+export function isSessionInheritedAgentPattern(value: string): boolean {
 	return value === DEFAULT_MODEL_ROLE || value === `${PREFIX_MODEL_ROLE}${DEFAULT_MODEL_ROLE}` || value === "pi/task";
 }
 

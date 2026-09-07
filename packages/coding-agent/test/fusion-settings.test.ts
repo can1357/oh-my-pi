@@ -16,10 +16,17 @@ describe("fusion settings schema", () => {
 		// Decoupled sidekick tier routing and failure-streak escalation are opt-in.
 		expect(SETTINGS_SCHEMA["fusion.sidekickStrongModel"].default).toBe("");
 		expect(SETTINGS_SCHEMA["fusion.escalateFailureStreak"].default).toBe(3);
+		expect(SETTINGS_SCHEMA["fusion.tokenSavingsDefaultCallLimit"].default).toBe(2);
 	});
 
-	it("exposes off/delegate/escalate modes", () => {
-		expect(SETTINGS_SCHEMA["fusion.mode"].values).toEqual(["off", "delegate", "escalate"]);
+	it("exposes off/delegate/escalate/token-savings modes", () => {
+		expect(SETTINGS_SCHEMA["fusion.mode"].values).toEqual([
+			"off",
+			"delegate",
+			"escalate",
+			"token-savings",
+			"savings",
+		]);
 	});
 
 	it("gates the fusion sub-settings on fusionEnabled", () => {
@@ -32,6 +39,7 @@ describe("fusion settings schema", () => {
 			"fusion.dynamicRouting",
 			"fusion.sidekickStrongModel",
 			"fusion.escalateFailureStreak",
+			"fusion.tokenSavingsDefaultCallLimit",
 		] as const) {
 			expect(SETTINGS_SCHEMA[key].ui?.condition).toBe("fusionEnabled");
 		}

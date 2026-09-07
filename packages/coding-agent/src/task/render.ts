@@ -91,6 +91,7 @@ const ROUTING_SOURCE_LABEL: Partial<Record<SubagentModelSelectionSource, string>
 	"agent-override": "override",
 	"agent-definition": "agent-default",
 	"parent-active": "parent",
+	"fusion-token-savings": "fusion-savings",
 };
 
 function formatRoutingBadgeContext(routing: SubagentModelRoutingDecision): string | undefined {

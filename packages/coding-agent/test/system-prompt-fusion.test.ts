@@ -30,6 +30,7 @@ describe("system prompt fusion sidekick policy", () => {
 	async function render(opts: {
 		fusionSidekick?: boolean;
 		fusionEscalate?: boolean;
+		fusionTokenSavings?: boolean;
 		sidekickModel?: string;
 		toolNames?: string[];
 	}): Promise<string> {
@@ -42,6 +43,7 @@ describe("system prompt fusion sidekick policy", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			fusionSidekick: opts.fusionSidekick,
 			fusionEscalate: opts.fusionEscalate,
+			fusionTokenSavings: opts.fusionTokenSavings,
 			sidekickModel: opts.sidekickModel,
 		});
 		return systemPrompt.join("\n\n");
@@ -72,5 +74,20 @@ describe("system prompt fusion sidekick policy", () => {
 	it("omits the sidekick policy when the task tool is unavailable", async () => {
 		const rendered = await render({ fusionSidekick: true, toolNames: [] });
 		expect(rendered).not.toContain("Sidekick (cost mode)");
+	});
+	it("injects token savings mode instructions when fusionTokenSavings is true", async () => {
+		const rendered = await render({ fusionTokenSavings: true });
+		expect(rendered).toContain("Token Savings Mode (Fusion)");
+		expect(rendered).toContain("at most two calls and simple tasks");
+		expect(rendered).toContain("pi/slow");
+		expect(rendered).toContain("pi/max-intelligence");
+		expect(rendered).toContain("pi/task");
+		expect(rendered).toContain("pi/browser-control");
+		expect(rendered).toContain("pi/smol");
+	});
+
+	it("omits token savings mode instructions when fusionTokenSavings is false", async () => {
+		const rendered = await render({ fusionTokenSavings: false });
+		expect(rendered).not.toContain("Token Savings Mode (Fusion)");
 	});
 });

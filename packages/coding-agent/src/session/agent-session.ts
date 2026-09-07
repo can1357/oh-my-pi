@@ -356,6 +356,7 @@ import {
 	classifyFusionRoute,
 	type FusionPoolTier,
 	type FusionRoute,
+	isTokenSavingsFusionMode,
 	parseFusionPoolEntries,
 	resolveEffectiveFusionRoute,
 	resolveSidekickRoute,
@@ -1298,6 +1299,10 @@ export class AgentSession {
 	#fusionRoutingDisabled = false;
 	/** Consecutive failed tool results on this session; fuels the Fusion failure-streak escalation. */
 	#fusionToolFailureStreak = 0;
+	/** Consecutive default-model calls for the current prompt in Fusion Token Savings mode. */
+	#fusionTokenSavingsDefaultCalls = 0;
+	/** Model saved before an automated token-savings switch, restored on the next root prompt. */
+	#fusionTokenSavingsSavedModel: Model | undefined;
 	#advisorRuntime?: AdvisorRuntime;
 	#cacheAttribution = new CacheAttributionTracker({
 		onTrace: trace => {
@@ -1830,6 +1835,7 @@ export class AgentSession {
 			}
 			await this.#maybeApplyRewindMidRun(messages, signal, context);
 			await this.#maybeCompactMidTurn(messages, signal, context);
+			await this.#maybeApplyFusionTokenSavingsLimit(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
@@ -2085,6 +2091,8 @@ export class AgentSession {
 		this.#fusionRoutingDisabled = false;
 		this.#fusionLastAutoModel = undefined;
 		this.#fusionToolFailureStreak = 0;
+		this.#fusionTokenSavingsDefaultCalls = 0;
+		this.#fusionTokenSavingsSavedModel = undefined;
 	}
 
 	#buildAdvisorRuntime(seedToCurrent = false): boolean {
@@ -6660,8 +6668,15 @@ export class AgentSession {
 		const userInitiated = options?.userInitiated ?? !options?.synthetic;
 		if (!this.isStreaming && userInitiated) {
 			await this.#resetTurnDiscoveredTools();
+			if (this.#fusionTokenSavingsSavedModel && this.#agentKind === "main") {
+				const current = this.model;
+				if (current && this.#fusionLastAutoModel && modelsAreEqual(current, this.#fusionLastAutoModel)) {
+					await this.setModelTemporary(this.#fusionTokenSavingsSavedModel, undefined, { ephemeral: true });
+				}
+				this.#fusionTokenSavingsSavedModel = undefined;
+			}
+			this.#fusionTokenSavingsDefaultCalls = 0;
 		}
-
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {
 			const handled = await this.#tryExecuteExtensionCommand(text);
@@ -10666,6 +10681,128 @@ export class AgentSession {
 			});
 		} catch (error) {
 			logger.warn("Fusion failure-streak escalation failed", { error: String(error) });
+		}
+	}
+	/**
+	 * Fusion Token Savings Mode:
+	 * The default model is restricted to at most two calls and simple tasks.
+	 * If the turn is continuing past that limit (tools executed, willContinue, or queued messages),
+	 * automatically transition to the task model (pi/task) and steer remaining work.
+	 */
+	async #maybeApplyFusionTokenSavingsLimit(
+		messages: AgentMessage[],
+		signal?: AbortSignal,
+		context?: AgentTurnEndContext,
+	): Promise<void> {
+		try {
+			if (signal?.aborted) return;
+			if (this.#agentKind !== "main") return;
+			if (this.settings.get("fusion.enabled") !== true) return;
+			if (!isTokenSavingsFusionMode(this.settings.get("fusion.mode"))) return;
+			if (this.#fusionRoutingDisabled) return;
+
+			const currentModel = this.model;
+			if (!currentModel) return;
+
+			if (this.#fusionLastAutoModel && !modelsAreEqual(this.#fusionLastAutoModel, currentModel)) {
+				this.#fusionRoutingDisabled = true;
+				logger.debug("Fusion token savings dynamic routing disabled after manual model switch");
+				return;
+			}
+
+			const limit = Math.max(0, Number(this.settings.get("fusion.tokenSavingsDefaultCallLimit") ?? 2) || 0);
+			if (limit <= 0) return;
+
+			const availableModels = this.#modelRegistry.getAvailable();
+			const resolveSelector = (sel: string): Model | undefined => {
+				if (availableModels.length === 0) return undefined;
+				return (
+					resolveModelRoleValue(sel, availableModels, {
+						settings: this.settings,
+						matchPreferences: getModelMatchPreferences(this.settings),
+						modelRegistry: this.#modelRegistry,
+					}).model ?? resolveModelOverride([sel], this.#modelRegistry, this.settings).model
+				);
+			};
+
+			const defaultSelector = this.settings.getModelRole("default") || "";
+			const defaultModel = defaultSelector ? resolveSelector(defaultSelector) : undefined;
+			const isDefault = defaultModel
+				? modelsAreEqual(currentModel, defaultModel)
+				: this.#fusionBaseModel
+					? modelsAreEqual(currentModel, this.#fusionBaseModel)
+					: true;
+
+			if (!isDefault) return;
+
+			this.#fusionTokenSavingsDefaultCalls++;
+			logger.debug("Fusion token savings default call count", {
+				count: this.#fusionTokenSavingsDefaultCalls,
+				limit,
+			});
+
+			if (this.#fusionTokenSavingsDefaultCalls < limit) return;
+
+			// Check if the turn is continuing (tool calls executed or queued messages)
+			const lastMsg = messages[messages.length - 1];
+			const hasToolCalls =
+				(context?.toolResults && context.toolResults.length > 0) ||
+				context?.willContinue === true ||
+				(lastMsg &&
+					lastMsg.role === "assistant" &&
+					Array.isArray(lastMsg.content) &&
+					lastMsg.content.some(c => c.type === "toolCall"));
+			const isContinuing = hasToolCalls || this.agent.hasQueuedMessages();
+
+			if (!isContinuing) return;
+
+			// Default model call limit reached on a continuing step: switch to task model
+			const taskSelector = this.settings.getModelRole("task") || "pi/task";
+			const taskModel = resolveSelector(taskSelector);
+
+			if (
+				taskModel &&
+				!modelsAreEqual(taskModel, currentModel) &&
+				this.#modelRegistry.hasConfiguredAuth(taskModel)
+			) {
+				this.#fusionTokenSavingsSavedModel ??= currentModel;
+				this.#fusionBaseModel ??= currentModel;
+				await this.setModelTemporary(taskModel, undefined, { ephemeral: true });
+				this.#fusionLastAutoModel = this.model ?? taskModel;
+				logger.debug("Fusion token savings limit reached; switched to task model", {
+					from: `${currentModel.provider}/${currentModel.id}`,
+					to: `${taskModel.provider}/${taskModel.id}`,
+					calls: this.#fusionTokenSavingsDefaultCalls,
+					limit,
+				});
+
+				const reminder = [
+					"<system-reminder>",
+					`Fusion Token Savings: The default model call limit (${limit} calls for simple tasks) has been reached.`,
+					`The active model has transitioned to the task model (${taskModel.provider}/${taskModel.id}).`,
+					"Continue remaining execution with this model, or delegate planning/intelligence to thinking (pi/slow) / max-intelligence (pi/max-intelligence), browser work to browser models, or low-key context gathering to smol (pi/smol).",
+					"</system-reminder>",
+				].join("\n");
+				this.agent.steer({
+					role: "user",
+					content: reminder,
+					timestamp: Date.now(),
+				});
+			} else {
+				const reminder = [
+					"<system-reminder>",
+					`Fusion Token Savings: The default model call limit (${limit} calls for simple tasks) has been reached.`,
+					"You must delegate remaining work to the task model (pi/task), planning/intelligence to thinking (pi/slow) / max-intelligence (pi/max-intelligence), browser work to browser models, or low-key context gathering to smol (pi/smol).",
+					"</system-reminder>",
+				].join("\n");
+				this.agent.steer({
+					role: "user",
+					content: reminder,
+					timestamp: Date.now(),
+				});
+			}
+		} catch (error) {
+			logger.warn("Fusion token savings limit check failed", { error: String(error) });
 		}
 	}
 

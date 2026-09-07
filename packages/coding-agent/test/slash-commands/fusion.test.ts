@@ -124,6 +124,15 @@ describe("/fusion verbs", () => {
 		expect(invalid.store.get("fusion.mode")).toBe("escalate");
 		expect(invalid.outputs.join(" ")).toContain("Usage: /fusion mode");
 	});
+	test("mode supports token-savings and savings alias", async () => {
+		const tokenSavings = runFusion("mode token-savings", { "fusion.mode": "escalate" });
+		await tokenSavings.result;
+		expect(tokenSavings.store.get("fusion.mode")).toBe("token-savings");
+
+		const savingsAlias = runFusion("mode savings", { "fusion.mode": "escalate" });
+		await savingsAlias.result;
+		expect(savingsAlias.store.get("fusion.mode")).toBe("token-savings");
+	});
 
 	test("TUI mode changes repaint the live status-line footer", async () => {
 		const { ctx, store, outputs, repaint } = makeTuiContext({

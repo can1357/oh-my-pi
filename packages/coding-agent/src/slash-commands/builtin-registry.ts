@@ -765,7 +765,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "on", description: "Enable fusion (spawns the sidekick)" },
 			{ name: "off", description: "Disable fusion" },
 			{ name: "status", description: "Show fusion status and assignments" },
-			{ name: "mode", description: "Set fusion mode", usage: "<off|delegate|escalate>" },
+			{ name: "mode", description: "Set fusion mode", usage: "<off|delegate|escalate|token-savings>" },
 			{ name: "routing", description: "Toggle dynamic routing", usage: "<on|off>" },
 			{ name: "sidekick", description: "Assign the sidekick model", usage: "<model-or-alias>" },
 			{ name: "strong", description: "Assign the strong sidekick model", usage: "<model-or-alias|clear>" },

@@ -909,13 +909,13 @@ export const SETTINGS_SCHEMA = {
 
 	"fusion.mode": {
 		type: "enum",
-		values: ["off", "delegate", "escalate"] as const,
+		values: ["off", "delegate", "escalate", "token-savings", "savings"] as const,
 		default: "escalate",
 		ui: {
 			tab: "interaction",
 			group: "Fusion",
 			label: "Fusion Mode",
-			description: "How aggressively to route work to the sidekick.",
+			description: "How aggressively to route work to the sidekick or token-efficient models.",
 			options: [
 				{ value: "off", label: "Off", description: "Fusion disabled at the mode layer (overrides enabled=true)." },
 				{
@@ -927,6 +927,12 @@ export const SETTINGS_SCHEMA = {
 					value: "escalate",
 					label: "Escalate",
 					description: "Delegate + difficulty-gated routing: cheap-first, escalate hard work to the frontier.",
+				},
+				{
+					value: "token-savings",
+					label: "Token Savings",
+					description:
+						"Explicit token savings: default model limited to two calls/simple tasks, planning to thinking/max-intelligence, delegated work to task, browser to browser models, and context gathering to smol.",
 				},
 			],
 			condition: "fusionEnabled",
@@ -1042,6 +1048,25 @@ export const SETTINGS_SCHEMA = {
 			group: "Fusion",
 			label: "Show Savings Estimate",
 			description: "Show an estimated frontier-vs-sidekick token-cost savings figure in the status line and /usage.",
+			condition: "fusionEnabled",
+		},
+	},
+
+	"fusion.tokenSavingsDefaultCallLimit": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "interaction",
+			group: "Fusion",
+			label: "Token Savings Default Model Call Limit",
+			description:
+				"Maximum calls the default model can make for a turn/simple task in token-savings mode before switching or delegating (0 = unlimited, default = 2).",
+			options: [
+				{ value: "0", label: "Unlimited" },
+				{ value: "1", label: "1 call" },
+				{ value: "2", label: "2 calls (default)" },
+				{ value: "3", label: "3 calls" },
+			],
 			condition: "fusionEnabled",
 		},
 	},
@@ -5654,6 +5679,7 @@ export interface FusionSettings {
 	compactModel: string;
 	sidekickRequestBudget: number;
 	showSavings: boolean;
+	tokenSavingsDefaultCallLimit?: number;
 }
 
 /** Fusion mode identifier (derived from settings schema). */

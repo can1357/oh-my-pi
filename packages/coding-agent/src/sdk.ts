@@ -139,7 +139,7 @@ import { AgentSession } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import type { ClientBridge } from "./session/client-bridge";
-import { parseFusionPoolEntries } from "./session/fusion-router";
+import { isTokenSavingsFusionMode, parseFusionPoolEntries } from "./session/fusion-router";
 import {
 	type CustomMessage,
 	convertToLlm,
@@ -2535,6 +2535,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					settings.get("fusion.enabled") === true &&
 					settings.get("fusion.mode") === "escalate" &&
 					sidekickId !== undefined,
+				fusionTokenSavings:
+					agentKind === "main" &&
+					settings.get("fusion.enabled") === true &&
+					isTokenSavingsFusionMode(settings.get("fusion.mode")),
 				sidekickModel: settings.get("fusion.sidekickModel") || "pi/smol",
 				sidekickId,
 				secretsEnabled,

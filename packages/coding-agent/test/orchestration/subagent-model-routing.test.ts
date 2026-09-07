@@ -356,3 +356,144 @@ describe("resolveSubagentModelRouting — immutability", () => {
 		expect(result.decision.requestedModel).toEqual(["anthropic/claude-haiku", "openai/gpt-4o"]);
 	});
 });
+describe("resolveSubagentModelRouting — token savings mode", () => {
+	test("routes browser work to browser models", () => {
+		const settings = Settings.isolated({
+			"fusion.enabled": true,
+			"fusion.mode": "token-savings",
+		});
+		const result = resolveSubagentModelRouting({
+			agentName: "browser-operation",
+			settings,
+			modelRegistry: registry,
+		});
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.decision.source).toBe("fusion-token-savings");
+		expect(result.modelPatterns).toEqual(["pi/browser-control", "pi/browser-operation"]);
+	});
+
+	test("routes planning and intelligence work to thinking and max-intelligence models", () => {
+		const settings = Settings.isolated({
+			"fusion.enabled": true,
+			"fusion.mode": "token-savings",
+		});
+		const result = resolveSubagentModelRouting({
+			agentName: "plan",
+			settings,
+			modelRegistry: registry,
+		});
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.decision.source).toBe("fusion-token-savings");
+		expect(result.modelPatterns).toEqual(["pi/slow", "pi/max-intelligence", "pi/plan"]);
+	});
+
+	test("routes low-key context gathering to smol fast model", () => {
+		const settings = Settings.isolated({
+			"fusion.enabled": true,
+			"fusion.mode": "token-savings",
+		});
+		const result = resolveSubagentModelRouting({
+			agentName: "explore",
+			settings,
+			modelRegistry: registry,
+		});
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.decision.source).toBe("fusion-token-savings");
+		expect(result.modelPatterns).toEqual(["pi/smol"]);
+	});
+
+	test("routes tasks delegated by thinking models to task model instead of inheriting parent", () => {
+		const settings = Settings.isolated({
+			"fusion.enabled": true,
+			"fusion.mode": "token-savings",
+		});
+		const result = resolveSubagentModelRouting({
+			agentName: "task",
+			parentActiveModelPattern: "pi/slow",
+			settings,
+			modelRegistry: registry,
+		});
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.decision.source).toBe("fusion-token-savings");
+		expect(result.modelPatterns).toEqual(["pi/task"]);
+	});
+
+	test("routes general delegated tasks to task model", () => {
+		const settings = Settings.isolated({
+			"fusion.enabled": true,
+			"fusion.mode": "token-savings",
+		});
+		const result = resolveSubagentModelRouting({
+			agentName: "task",
+			parentActiveModelPattern: "anthropic/claude-sonnet-4-5",
+			sessionDefaultModelPattern: "anthropic/claude-sonnet-4-5",
+			settings,
+			modelRegistry: registry,
+		});
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.decision.source).toBe("fusion-token-savings");
+		expect(result.modelPatterns).toEqual(["pi/task"]);
+	});
+
+	test("explicit model still wins over token savings mode", () => {
+		const settings = Settings.isolated({
+			"fusion.enabled": true,
+			"fusion.mode": "token-savings",
+		});
+		const result = resolveSubagentModelRouting({
+			requestedModel: "openai/gpt-4o",
+			agentName: "plan",
+			settings,
+			modelRegistry: registry,
+		});
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.decision.source).toBe("explicit");
+		expect(result.modelPatterns).toEqual(["openai/gpt-4o"]);
+	});
+
+	test("savings alias activates token savings routing", () => {
+		const settings = Settings.isolated({
+			"fusion.enabled": true,
+			"fusion.mode": "savings",
+		});
+		const result = resolveSubagentModelRouting({
+			agentName: "browser-operation",
+			settings,
+			modelRegistry: registry,
+		});
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.decision.source).toBe("fusion-token-savings");
+	});
+
+	test("disabled fusion preserves standard fallback routing", () => {
+		const settings = Settings.isolated({
+			"fusion.enabled": false,
+			"fusion.mode": "token-savings",
+		});
+		const result = resolveSubagentModelRouting({
+			agentName: "task",
+			parentActiveModelPattern: "openai/gpt-4o",
+			settings,
+			modelRegistry: registry,
+		});
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.decision.source).toBe("parent-active");
+		expect(result.modelPatterns).toEqual(["openai/gpt-4o"]);
+	});
+});

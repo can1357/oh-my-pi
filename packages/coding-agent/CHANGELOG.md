@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Fusion token-savings mode (`fusion.mode=token-savings` or `/fusion token-savings`): the default model handles only the first two calls and simple turns; planning and intelligence steer to the thinking/max-intelligence models, delegated task work routes to the task model, browser work to the browser models, and low-key context gathering to the smol fast model. Root sessions auto-switch at most once per turn, restore the saved model at the next user prompt, and disable steering after a manual model switch; subagent routing and task-ledger rendering follow the same savings route.
+
 ### Fixed
 
 - Fixed Windows `vault://` CLI operations failing with exit code 255 by selecting Obsidian's console launcher and normalizing its executable path for Bun.

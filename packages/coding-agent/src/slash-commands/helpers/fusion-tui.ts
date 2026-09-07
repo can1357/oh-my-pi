@@ -80,6 +80,11 @@ async function pickFusionMode(ctx: InteractiveModeContext): Promise<string | und
 	return ctx.showHookSelector("Fusion mode", [
 		{ label: "escalate", description: "Downgrade at compaction, escalate back when work turns hard (default)" },
 		{ label: "delegate", description: "Sidekick delegation only; the main model never downgrades" },
+		{
+			label: "token-savings",
+			description:
+				"Token savings: default model for 2 calls/simple tasks, planning to thinking/max-int, delegated to task, browser to browser, context to smol",
+		},
 		{ label: "off", description: "Disable fusion behavior while keeping settings" },
 	]);
 }
@@ -146,7 +151,7 @@ export async function showFusionMenu(ctx: InteractiveModeContext): Promise<void>
 		const pool = parseFusionPoolEntries(cfg.get("fusion.modelPool") ?? []);
 		const items: ExtensionUISelectItem[] = [
 			{ label: `Fusion: ${enabled ? "ON" : "OFF"}`, description: "Toggle cost mode (fusion.enabled)" },
-			{ label: `Mode: ${cfg.get("fusion.mode")}`, description: "escalate | delegate | off" },
+			{ label: `Mode: ${cfg.get("fusion.mode")}`, description: "escalate | delegate | token-savings | off" },
 			{
 				label: `Sidekick model: ${cfg.get("fusion.sidekickModel") || "pi/smol"}`,
 				description: "Cheap warm subagent for menial work",
