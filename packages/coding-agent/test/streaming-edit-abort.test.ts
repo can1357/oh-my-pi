@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Agent, AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { EditTool, getEditStore } from "@oh-my-pi/pi-coding-agent/edit";
 import { StreamingEditGuard } from "@oh-my-pi/pi-coding-agent/session/stream-guards";
+import { formatHashlineHeader } from "@oh-my-pi/pi-coding-agent/tools/hashline-format";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -48,6 +49,51 @@ function previewEvent(
 		update: { generation: 1, streaming, files },
 	};
 }
+
+describe("streamed edit revisions", () => {
+	test("executes revised arguments instead of the cached streamed edit", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "stream-revision-"));
+		try {
+			const filePath = path.join(cwd, "sample.jl");
+			const initial = "value = original\n";
+			await Bun.write(filePath, initial);
+			const settings = Settings.isolated({ "edit.mode": "hashline" });
+			const toolSession = {
+				cwd,
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				enableLsp: false,
+				settings,
+				getArtifactsDir: () => null,
+				getSessionId: () => null,
+				getPlanModeState: () => undefined,
+			} as unknown as ToolSession;
+			const tool = new EditTool(toolSession, "hashline");
+			const tag = getEditStore(toolSession).recordSnapshot(filePath, initial);
+			const header = formatHashlineHeader("sample.jl", tag);
+			const original = { input: `${header}\nPUT 1-1:\n+value = condition ? left : right` };
+			const revised = {
+				input: `${header}\nPUT 1-1:\n+value = if condition\n+    left\n+else\n+    right\n+end`,
+			};
+			const stream = tool.openArgStream({
+				toolCallId: "revised-edit",
+				toolName: "edit",
+				emit() {},
+			});
+			const encoded = JSON.stringify(original);
+			for (let offset = 0; offset < encoded.length; offset += 7) stream.push(encoded.slice(offset, offset + 7));
+			stream.end(original);
+
+			const result = await tool.execute("revised-edit", revised);
+
+			expect(result.isError).not.toBe(true);
+			expect(await Bun.file(filePath).text()).toBe("value = if condition\n    left\nelse\n    right\nend\n");
+		} finally {
+			await removeWithRetries(cwd);
+		}
+	});
+});
 
 describe("streaming edit abort", () => {
 	test("aborts from a final preview emitted by EditTool.openArgStream", async () => {

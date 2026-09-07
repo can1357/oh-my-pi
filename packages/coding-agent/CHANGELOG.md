@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Pre-execution extensions that rewrite a streamed edit now execute the rewritten edit instead of the original input.
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
