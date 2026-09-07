@@ -1471,9 +1471,17 @@ describe("AgentSession user undo/redo", () => {
 		// belongs to the turn that follows it and must be rewound together
 		// with that turn, even though its customType is not on the legacy
 		// whitelist.
-		sessionManager.appendCustomMessageEntry("plan-mode-context", "plan context A", false, undefined, "agent", undefined, {
-			promptPrelude: true,
-		});
+		sessionManager.appendCustomMessageEntry(
+			"plan-mode-context",
+			"plan context A",
+			false,
+			undefined,
+			"agent",
+			undefined,
+			{
+				promptPrelude: true,
+			},
+		);
 		sessionManager.appendMessage(userMessage("fourth"));
 		sessionManager.appendMessage(assistantMessage("OK fourth"));
 

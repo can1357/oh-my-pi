@@ -3930,42 +3930,42 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 								AgentRegistry.global().get(MAIN_AGENT_ID)?.sessionFile,
 						);
 					}
-				// The factory can reject before constructing an AgentSession
-				// (e.g. expected registry generation gone), and its error path
-				// does not dispose an externally supplied manager — close the
-				// reopened manager so its live-pid owner claim does not pin
-				// the session against undo-tail gc in the parent.
-				let revived: AgentSession;
-				try {
-					({ session: revived } = await createAgentSession(
-						buildSubagentSessionOptions(reopened, expectedAgentRef, true),
-					));
-				} catch (err) {
-					void reopened.close().catch(() => {});
-					throw err;
-				}
-				// Post-factory wiring can still reject before the caller
-				// receives the session; on failure nobody disposes it, so
-				// guard the setup interval and dispose the constructed
-				// session (dispose closes the reopened manager).
-				try {
-					// Re-run the executor's extension wiring on the rebuilt session.
-					// Skipping it leaves the runner pre-init, so a `tool_call` handler
-					// touching a runtime action trips the fail-closed gate and blocks
-					// every tool (including `yield`) in the revived agent (issue #8824).
-					await initializeExtensions(session, {
-						reportSendError: (action, err) =>
-							logger.error("Extension send failed", { action, error: err.message }),
-						reportRuntimeError: err =>
-							logger.error("Extension error", { path: err.extensionPath, error: err.error }),
-					});
-				} catch (err) {
-					void session.dispose().catch(() => {});
-					throw err;
-				}
-					AgentRegistry.global().syncSessionStatus(id, session);
-					installIrcWakeTurnMonitor(session);
-					return session;
+					// The factory can reject before constructing an AgentSession
+					// (e.g. expected registry generation gone), and its error path
+					// does not dispose an externally supplied manager — close the
+					// reopened manager so its live-pid owner claim does not pin
+					// the session against undo-tail gc in the parent.
+					let revived: AgentSession;
+					try {
+						({ session: revived } = await createAgentSession(
+							buildSubagentSessionOptions(reopened, expectedAgentRef, true),
+						));
+					} catch (err) {
+						void reopened.close().catch(() => {});
+						throw err;
+					}
+					// Post-factory wiring can still reject before the caller
+					// receives the session; on failure nobody disposes it, so
+					// guard the setup interval and dispose the constructed
+					// session (dispose closes the reopened manager).
+					try {
+						// Re-run the executor's extension wiring on the rebuilt session.
+						// Skipping it leaves the runner pre-init, so a `tool_call` handler
+						// touching a runtime action trips the fail-closed gate and blocks
+						// every tool (including `yield`) in the revived agent (issue #8824).
+						await initializeExtensions(revived, {
+							reportSendError: (action, err) =>
+								logger.error("Extension send failed", { action, error: err.message }),
+							reportRuntimeError: err =>
+								logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+						});
+					} catch (err) {
+						void revived.dispose().catch(() => {});
+						throw err;
+					}
+					AgentRegistry.global().syncSessionStatus(id, revived);
+					installIrcWakeTurnMonitor(revived);
+					return revived;
 				};
 			}
 

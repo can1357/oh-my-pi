@@ -403,7 +403,7 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
-import { SessionTools, type SessionToolsHost, type XdevMountNoticeDetails } from "./session-tools";
+import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";

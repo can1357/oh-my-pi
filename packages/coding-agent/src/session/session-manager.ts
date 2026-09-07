@@ -4302,7 +4302,7 @@ export class SessionManager {
 
 		// Reachability from the current leaf (active path + its ancestors).
 		const reachable = new Set<string>();
-		for (let id = this.getLeafId(); id; ) {
+		for (let id = this.getLeafId(); id;) {
 			reachable.add(id);
 			id = this.#index.get(id)?.parentId ?? null;
 		}
