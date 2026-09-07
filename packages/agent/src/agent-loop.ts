@@ -13,6 +13,7 @@ import {
 	type Model,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
+	type ServiceTier,
 	streamSimple,
 	stripSchemaDescriptions,
 	type ToolCallProviderMetadata,
@@ -1662,12 +1663,21 @@ async function streamAssistantResponse(
 
 	const streamFunction = streamFn || streamSimple;
 
-	const dynamicReasoning = config.getReasoning?.();
-	const dynamicDisableReasoning = config.getDisableReasoning?.();
+	// Concrete request values for reasoning are resolved once and shared by
+	// the stream options, telemetry, and the service-tier resolver below.
+	const effectiveReasoning = config.getReasoning?.() ?? config.reasoning;
+	const effectiveDisableReasoning = config.getDisableReasoning?.() ?? config.disableReasoning;
 	// `getServiceTier` is authoritative when present (replaces the static tier
 	// for both the wire request and telemetry), so callers can scope priority
-	// per model without touching the shared session `serviceTier`.
-	const effectiveServiceTier = config.getServiceTier ? config.getServiceTier(model) : config.serviceTier;
+	// per model — and per concrete request — without touching the shared
+	// session `serviceTier`.
+	const effectiveServiceTier = config.getServiceTier
+		? config.getServiceTier(model, effectiveReasoning, effectiveDisableReasoning)
+		: config.serviceTier;
+	// The message-level fact records what THIS request asked for: the resolved
+	// tier, or `null` for an authoritative no-tier request. `undefined` stays
+	// reserved for legacy messages written before the field existed.
+	const requestServiceTier: ServiceTier | null = effectiveServiceTier ?? null;
 	const harmonyMitigationEnabled = isHarmonyLeakMitigationTarget(model);
 	const harmonyAbortController = harmonyMitigationEnabled ? new AbortController() : undefined;
 	const requestSignal = harmonyAbortController
@@ -1701,8 +1711,6 @@ async function streamAssistantResponse(
 		harmonyRetryAttempt > 0 && config.temperature !== undefined ? config.temperature + 0.05 : config.temperature;
 	// Owned tool calling sends no native tools, so any tool_choice would error.
 	const effectiveToolChoice = ownedDialect ? undefined : (hostToolChoice ?? forcedToolChoice ?? config.toolChoice);
-	const effectiveReasoning = dynamicReasoning ?? config.reasoning;
-	const effectiveDisableReasoning = dynamicDisableReasoning ?? config.disableReasoning;
 	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
 	const effectiveCwd = config.getCwd?.() ?? config.cwd;
@@ -1807,6 +1815,7 @@ async function streamAssistantResponse(
 					config,
 					stream,
 					requestSignal,
+					requestServiceTier,
 				);
 				await finishChat(aborted);
 				return aborted;
@@ -1848,6 +1857,9 @@ async function streamAssistantResponse(
 							retainCompletedToolCalls(await response.result(), completedToolCallIds),
 							context.tools ?? [],
 						);
+						// Stamp before the snapshot: the `message_end` payload, the
+						// context/persisted copy, and telemetry all fan out from it.
+						finalMessage.serviceTier = requestServiceTier;
 						if (harmonyMitigationEnabled) {
 							const detection = detectHarmonyLeakInAssistantMessage(finalMessage);
 							if (detection) {
@@ -1858,6 +1870,7 @@ async function streamAssistantResponse(
 										partialMessage,
 										stream,
 										`Discarded after GPT-5 Harmony protocol leakage (${signalListLabel(detection.signals)})`,
+										requestServiceTier,
 									);
 									context.messages.pop();
 									addedPartial = false;
@@ -2009,6 +2022,7 @@ async function streamAssistantResponse(
 			}
 
 			let trailing = await response.result();
+			trailing.serviceTier = requestServiceTier;
 			if (harmonyMitigationEnabled) {
 				const detection = detectHarmonyLeakInAssistantMessage(trailing);
 				if (detection) {
@@ -2019,6 +2033,7 @@ async function streamAssistantResponse(
 							partialMessage,
 							stream,
 							`Discarded after GPT-5 Harmony protocol leakage (${signalListLabel(detection.signals)})`,
+							requestServiceTier,
 						);
 						context.messages.pop();
 						addedPartial = false;
@@ -2122,11 +2137,12 @@ function emitDiscardedHarmonyPartial(
 	partialMessage: AssistantMessage | null,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	errorMessage: string,
+	serviceTier: ServiceTier | null,
 ): void {
 	if (!partialMessage) return;
 	stream.push({
 		type: "message_end",
-		message: snapshotAssistantMessage({ ...partialMessage, stopReason: "error", errorMessage }),
+		message: snapshotAssistantMessage({ ...partialMessage, stopReason: "error", errorMessage, serviceTier }),
 	});
 }
 
@@ -2183,6 +2199,7 @@ function emitAbortedAssistantMessage(
 	config: AgentLoopConfig,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	requestSignal: AbortSignal | undefined,
+	serviceTier: ServiceTier | null,
 ): AssistantMessage {
 	const model = config.getModel?.() ?? config.model;
 	const errorMessage = abortReasonText(requestSignal);
@@ -2191,7 +2208,7 @@ function emitAbortedAssistantMessage(
 			? AIError.create(AIError.Flag.Abort)
 			: AIError.classify(requestSignal?.reason) || undefined;
 	const base: AssistantMessage = partialMessage
-		? { ...partialMessage, stopReason: "aborted", errorMessage, errorId }
+		? { ...partialMessage, stopReason: "aborted", errorMessage, errorId, serviceTier }
 		: {
 				role: "assistant",
 				content: [],
@@ -2209,6 +2226,7 @@ function emitAbortedAssistantMessage(
 				stopReason: "aborted",
 				errorMessage,
 				errorId,
+				serviceTier,
 				timestamp: Date.now(),
 			};
 	// Only tool calls that reached `toolcall_end` survive abort/error replay. A

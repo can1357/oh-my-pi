@@ -142,6 +142,19 @@ export interface SteeringQueueState {
 }
 
 /**
+ * Authoritative per-request service-tier resolver. Receives the model being
+ * requested plus that request's concrete effective reasoning effort and
+ * disable-reasoning flag (the same values passed to the provider stream), so
+ * the tier can be scoped per provider/model and per request without mutating
+ * the shared session `serviceTier`.
+ */
+export type ServiceTierResolver = (
+	model: Model,
+	reasoning: Effort | undefined,
+	disableReasoning?: boolean,
+) => ServiceTier | undefined;
+
+/**
  * Configuration for the agent loop.
  */
 export interface AgentLoopConfig extends SimpleStreamOptions {
@@ -452,12 +465,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Per-call effective service-tier resolver. Unlike {@link getReasoning},
 	 * this is *authoritative*: when set, its return value (including
 	 * `undefined`) fully replaces the static `serviceTier` for the request and
-	 * its telemetry. The resolver receives the model being requested so the
-	 * caller can scope the tier per provider/model without mutating the shared
-	 * session `serviceTier` (e.g. opting a Fireworks model into the Priority
-	 * serving path while leaving the OpenAI/Anthropic tier untouched).
+	 * its telemetry. The resolver receives the model being requested together
+	 * with that request's concrete effective reasoning effort and
+	 * disable-reasoning flag (the same values passed to the provider stream),
+	 * so the caller can scope the tier per provider/model and per request
+	 * without mutating the shared session `serviceTier` (e.g. opting a
+	 * Fireworks model into the Priority serving path while leaving the
+	 * OpenAI/Anthropic tier untouched).
 	 */
-	getServiceTier?: (model: Model) => ServiceTier | undefined;
+	getServiceTier?: ServiceTierResolver;
 
 	/**
 	 * Per-call working-directory resolver, read once per LLM call. When set, its

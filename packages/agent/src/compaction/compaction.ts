@@ -13,6 +13,7 @@ import {
 	type Context,
 	Effort,
 	type FetchImpl,
+	type ServiceTier,
 	type Message,
 	type MessageAttribution,
 	type Model,
@@ -41,7 +42,7 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
 import { ThinkingLevel } from "../thinking";
 import { Tokenizer } from "../tokenizer";
-import type { AgentMessage } from "../types";
+import type { AgentMessage, ServiceTierResolver } from "../types";
 import {
 	buildCompactionV2Request,
 	buildCompactionV2RequestFromBody,
@@ -637,6 +638,22 @@ function resolveCompactionEffort(model: Model, level: ThinkingLevel | undefined)
 }
 
 /**
+ * Resolve the tier for one compaction provider call from the same concrete
+ * reasoning values sent to that call. A resolver is authoritative when set,
+ * including when it deliberately returns undefined; this mirrors the agent
+ * loop's per-request service-tier contract.
+ */
+function resolveCompactionServiceTier(
+	model: Model,
+	reasoning: Effort | undefined,
+	options: SummaryOptions | undefined,
+): ServiceTier | undefined {
+	const resolver = options?.serviceTierResolver;
+	if (!resolver) return undefined;
+	return resolver(model, reasoning, options?.thinkingLevel === ThinkingLevel.Off);
+}
+
+/**
  * Build the error thrown when an LLM summarization call ends with
  * `stopReason === "error"`. Carries the provider's HTTP `errorStatus`
  * onto a top-level `.status` field so callers (notably
@@ -687,6 +704,13 @@ export interface SummaryOptions {
 	 * `resolveCompactionEffort` for the conversion contract.
 	 */
 	thinkingLevel?: ThinkingLevel;
+	/**
+	 * Optional per-request service-tier resolver. When present it is authoritative
+	 * (replacing any static tier) and receives the candidate model together with
+	 * the concrete effort sent on that provider call. A ThinkingLevel.Off request
+	 * passes undefined effort and disableReasoning=true.
+	 */
+	serviceTierResolver?: ServiceTierResolver;
 	/** Session routing key for remote compaction transports with sticky provider sessions. */
 	sessionId?: string;
 	/** Prompt-cache key for remote compaction transports that support provider prefix caching. */
@@ -986,6 +1010,7 @@ async function summarizeConversationWindow(
 		return remote.summary;
 	}
 
+	const reasoning = resolveCompactionEffort(model, options?.thinkingLevel);
 	const response = await instrumentedCompleteSimple(
 		model,
 		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
@@ -993,7 +1018,10 @@ async function summarizeConversationWindow(
 			maxTokens,
 			signal,
 			apiKey,
-			reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
+			reasoning,
+			...(options?.serviceTierResolver
+				? { serviceTier: resolveCompactionServiceTier(model, reasoning, options) }
+				: {}),
 			initiatorOverride: options?.initiatorOverride,
 			metadata: options?.metadata,
 			fetch: options?.fetch,
@@ -1047,6 +1075,8 @@ export interface HandoffOptions {
 	 * `resolveCompactionEffort` for the conversion contract.
 	 */
 	thinkingLevel?: ThinkingLevel;
+	/** Optional authoritative per-request service-tier resolver. */
+	serviceTierResolver?: ServiceTierResolver;
 }
 
 export function renderHandoffPrompt(customInstructions?: string): string {
@@ -1077,6 +1107,8 @@ export interface HandoffFromContextOptions {
 	telemetry?: AgentTelemetry;
 	/** See {@link HandoffOptions.thinkingLevel}. */
 	thinkingLevel?: ThinkingLevel;
+	/** Optional authoritative per-request service-tier resolver. */
+	serviceTierResolver?: ServiceTierResolver;
 }
 
 /**
@@ -1097,9 +1129,14 @@ export async function generateHandoffFromContext(
 	model: Model,
 	options: HandoffFromContextOptions,
 ): Promise<string> {
+	const reasoning = resolveCompactionEffort(model, options.thinkingLevel);
+	const disableReasoning = options.thinkingLevel === ThinkingLevel.Off;
 	const requestOptions = {
 		...options.streamOptions,
-		reasoning: resolveCompactionEffort(model, options.thinkingLevel),
+		reasoning,
+		...(options.serviceTierResolver
+			? { serviceTier: options.serviceTierResolver(model, reasoning, disableReasoning) }
+			: {}),
 		toolChoice: "none" as const,
 	};
 	let response = await instrumentedCompleteSimple(model, context, requestOptions, {
@@ -1112,7 +1149,13 @@ export async function generateHandoffFromContext(
 		response = await instrumentedCompleteSimple(
 			model,
 			context,
-			{ ...requestOptions, toolChoice: "auto" },
+			{
+				...requestOptions,
+				...(options.serviceTierResolver
+					? { serviceTier: options.serviceTierResolver(model, reasoning, disableReasoning) }
+					: {}),
+				toolChoice: "auto",
+			},
 			{ telemetry: options.telemetry, oneshotKind: "handoff", completeImpl: options.completeImpl, retry: {} },
 		);
 	}
@@ -1157,6 +1200,7 @@ export async function generateHandoff(
 			},
 			telemetry: options.telemetry,
 			thinkingLevel: options.thinkingLevel,
+			serviceTierResolver: options.serviceTierResolver,
 		},
 	);
 }
@@ -1197,6 +1241,7 @@ async function generateShortSummary(
 		return remote.summary;
 	}
 
+	const reasoning = resolveCompactionEffort(model, options?.thinkingLevel);
 	const response = await instrumentedCompleteSimple(
 		model,
 		{
@@ -1207,7 +1252,10 @@ async function generateShortSummary(
 			maxTokens,
 			signal,
 			apiKey,
-			reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
+			reasoning,
+			...(options?.serviceTierResolver
+				? { serviceTier: resolveCompactionServiceTier(model, reasoning, options) }
+				: {}),
 			initiatorOverride: options?.initiatorOverride,
 			metadata: options?.metadata,
 			fetch: options?.fetch,
@@ -1577,6 +1625,7 @@ export async function compact(
 		// silently falls back to Effort.High — the same defect e07b47ee4 fixed
 		// at the call sites, leaked back in here. See resolveCompactionEffort.
 		thinkingLevel: options?.thinkingLevel,
+		serviceTierResolver: options?.serviceTierResolver,
 		sessionId: options?.sessionId,
 		promptCacheKey: options?.promptCacheKey,
 		providerSessionState: options?.providerSessionState,
@@ -1623,6 +1672,7 @@ export async function compact(
 		let codexBody: OpenAICodexCompactionBody | undefined;
 		let remoteHistory: Array<Record<string, unknown>>;
 		if (isCodexResponsesModel(model)) {
+			const codexReasoning = resolveCompactionEffort(model, summaryOptions.thinkingLevel);
 			const previousCodexInput: CodexInputItem[] = [];
 			for (const item of previousReplacementHistory ?? []) {
 				if (!isCodexInputItem(item)) {
@@ -1634,7 +1684,10 @@ export async function compact(
 				model,
 				{ systemPrompt: remoteSystemPrompt, messages, tools: summaryOptions.tools },
 				{
-					reasoning: resolveCompactionEffort(model, summaryOptions.thinkingLevel),
+					reasoning: codexReasoning,
+					...(summaryOptions.serviceTierResolver
+						? { serviceTier: resolveCompactionServiceTier(model, codexReasoning, summaryOptions) }
+						: {}),
 					forceReasoningOff: summaryOptions.thinkingLevel === ThinkingLevel.Off,
 					responsesLite: model.useResponsesLite,
 					sessionId: summaryOptions.sessionId,
@@ -1897,6 +1950,7 @@ async function generateTurnPrefixSummary(
 		},
 	];
 
+	const reasoning = resolveCompactionEffort(model, options?.thinkingLevel);
 	const response = await instrumentedCompleteSimple(
 		model,
 		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
@@ -1904,7 +1958,10 @@ async function generateTurnPrefixSummary(
 			maxTokens,
 			signal,
 			apiKey,
-			reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
+			reasoning,
+			...(options?.serviceTierResolver
+				? { serviceTier: resolveCompactionServiceTier(model, reasoning, options) }
+				: {}),
 			initiatorOverride: options?.initiatorOverride,
 			metadata: options?.metadata,
 			fetch: options?.fetch,

@@ -69,6 +69,7 @@ import type {
 	Model,
 	OptionsForApi,
 	ProviderSessionState,
+	ServiceTier,
 	SimpleStreamOptions,
 	StreamOptions,
 	ThinkingBudgets,
@@ -1057,10 +1058,14 @@ function isRetryableThinkingLoop(message: AssistantMessage): boolean {
 async function resolveWithThinkingLoopRetries(
 	signal: AbortSignal | undefined,
 	dispatch: () => AssistantMessageEventStream,
+	serviceTier: ServiceTier | null,
 	onAttempt?: (message: AssistantMessage) => void,
 ): Promise<AssistantMessage> {
 	const dispatchAttempt = async (): Promise<AssistantMessage> => {
 		const message = await dispatch().result();
+		// Stamp the per-request tier fact before any consumer — `onAttempt`
+		// hooks (model_usage recording) or the returned result — observes it.
+		message.serviceTier = serviceTier;
 		onAttempt?.(message);
 		return message;
 	};
@@ -1085,7 +1090,11 @@ export async function complete<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): Promise<AssistantMessage> {
-	return resolveWithThinkingLoopRetries(options?.signal, () => stream(model, context, options));
+	return resolveWithThinkingLoopRetries(
+		options?.signal,
+		() => stream(model, context, options),
+		options?.serviceTier ?? null,
+	);
 }
 
 type AuthRetryFailure = {
@@ -1743,6 +1752,7 @@ export async function completeSimple<TApi extends Api>(
 	return resolveWithThinkingLoopRetries(
 		options?.signal,
 		() => streamSimple(model, context, sessionOptions),
+		options?.serviceTier ?? null,
 		onAttempt,
 	);
 }

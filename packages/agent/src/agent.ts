@@ -50,6 +50,7 @@ import type {
 	AgentToolContext,
 	AgentTurnEndContext,
 	AsideMessage,
+	ServiceTierResolver,
 	StreamFn,
 	ToolCallContext,
 	ToolChoiceDirective,
@@ -212,10 +213,12 @@ export interface AgentOptions {
 	/**
 	 * Per-call effective service-tier resolver. When set, it authoritatively
 	 * supplies the request's tier (replacing the static `serviceTier` and its
-	 * telemetry) per model — used to scope a provider/model into a priority
+	 * telemetry) per model and per request — the resolver receives the model
+	 * together with that request's concrete effective reasoning effort and
+	 * disable-reasoning flag, so a provider/model can be scoped into a priority
 	 * serving path without mutating the shared session `serviceTier`.
 	 */
-	serviceTierResolver?: (model: Model) => ServiceTier | undefined;
+	serviceTierResolver?: ServiceTierResolver;
 	/**
 	 * If true, request that the underlying provider omit reasoning/thinking summaries
 	 * from the response. The model still reasons internally; only the human-readable
@@ -392,7 +395,7 @@ export class Agent {
 	#presencePenalty?: number;
 	#repetitionPenalty?: number;
 	#serviceTier?: ServiceTier;
-	#serviceTierResolver?: (model: Model) => ServiceTier | undefined;
+	#serviceTierResolver?: ServiceTierResolver;
 	#hideThinkingSummary?: boolean;
 	#maxRetryDelayMs?: number;
 	#getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
@@ -693,11 +696,11 @@ export class Agent {
 		this.#serviceTier = value;
 	}
 
-	get serviceTierResolver(): ((model: Model) => ServiceTier | undefined) | undefined {
+	get serviceTierResolver(): ServiceTierResolver | undefined {
 		return this.#serviceTierResolver;
 	}
 
-	set serviceTierResolver(value: ((model: Model) => ServiceTier | undefined) | undefined) {
+	set serviceTierResolver(value: ServiceTierResolver | undefined) {
 		this.#serviceTierResolver = value;
 	}
 

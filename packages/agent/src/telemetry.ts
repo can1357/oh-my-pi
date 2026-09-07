@@ -1762,6 +1762,12 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 						getResponseHeaders: () => capturedHeaders,
 					})
 				: await runOnce();
+			// Stamp the per-request tier fact on the message itself before the
+			// span hooks and the caller observe it. A custom `completeImpl`
+			// bypasses `completeSimple`, so this is the one funnel point that
+			// covers every attempt of every transport; re-stamping the default
+			// transport's already-stamped message is an idempotent no-op.
+			message.serviceTier = options.serviceTier ?? null;
 			await finishChatSpan(telemetry, chatSpan, message, {
 				stepNumber,
 				serviceTier: options.serviceTier,

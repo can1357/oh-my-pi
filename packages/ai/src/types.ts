@@ -419,6 +419,13 @@ export interface StreamOptions {
 	apiKey?: string;
 	cacheRetention?: CacheRetention;
 	/**
+	 * Service tier requested for this request (`flex`/`priority`, …). Providers
+	 * that expose the knob forward it per family (`shouldSendServiceTier`);
+	 * others ignore it. The resolved request fact is stamped onto the resulting
+	 * `AssistantMessage.serviceTier` by the completion entry points.
+	 */
+	serviceTier?: ServiceTier;
+	/**
 	 * Keep Anthropic's 5-minute prompt cache warm across bounded idle gaps.
 	 *
 	 * This is an ownership flag, not a general provider default: exactly one
@@ -1007,6 +1014,15 @@ export interface AssistantMessage {
 	errorStatus?: number;
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
+	/**
+	 * Service tier requested for this concrete request, as the caller resolved
+	 * it and passed it to the provider (`"priority"`, `"flex"`, …). `null`
+	 * records an authoritative no-tier request; `undefined` marks legacy
+	 * messages written before this field existed. This is the per-request
+	 * request fact — never the session setting and never the server-granted
+	 * serving tier (server-side tier drops surface via `disabledFeatures`).
+	 */
+	serviceTier?: ServiceTier | null;
 	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection
