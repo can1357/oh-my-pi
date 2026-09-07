@@ -39,6 +39,22 @@ const SAND_FIELD2_PREFERRED_OMP: Readonly<Record<string, string>> = {
 	Glob: "glob",
 };
 
+/**
+ * Deterministic collision policy for a shared sand wire name: vacant slots are
+ * claimable; preferred omp owners replace non-preferred occupants; otherwise
+ * the first claimant wins. Advertisement and decode indexes must use the same
+ * rule or a call generated against one schema is dispatched as another tool.
+ */
+export function shouldClaimSandWireName(
+	sandName: string,
+	candidateOmp: string,
+	currentOmp: string | undefined,
+): boolean {
+	if (currentOmp === undefined || currentOmp === candidateOmp) return true;
+	const preferred = SAND_FIELD2_PREFERRED_OMP[sandName];
+	return preferred !== undefined && preferred === candidateOmp;
+}
+
 /** Field 9 allowlist from capture-1 / automation worker. */
 export const FIELD9_ALLOWLIST_AUTOMATION = [
 	"Task",
@@ -225,9 +241,8 @@ export function toProductField2Tools(tools: Context["tools"], profile: ProductWi
 		const mapped = mapOmpToolToProduct(tool);
 		if (!mapped || !ompName) continue;
 		const previousOmp = seen.get(mapped.name);
+		if (!shouldClaimSandWireName(mapped.name, ompName, previousOmp)) continue;
 		if (previousOmp !== undefined) {
-			const preferred = SAND_FIELD2_PREFERRED_OMP[mapped.name];
-			if (preferred !== ompName) continue;
 			const idx = out.findIndex(entry => entry.name === mapped.name);
 			if (idx >= 0) out[idx] = mapped;
 			seen.set(mapped.name, ompName);
@@ -273,11 +288,7 @@ export function augmentToolIndexForProductWire(
 		const wired: ProductWireToolIndexMeta = { ...meta, productWireName: sandName };
 		index.set(name, wired);
 		const existing = index.get(sandName);
-		const preferred = SAND_FIELD2_PREFERRED_OMP[sandName];
-		if (existing && preferred && preferred !== name && existing.name === preferred) {
-			// Keep the preferred omp owner on the shared sand name.
-			continue;
-		}
+		if (!shouldClaimSandWireName(sandName, name, existing?.name)) continue;
 		index.set(sandName, wired);
 	}
 }

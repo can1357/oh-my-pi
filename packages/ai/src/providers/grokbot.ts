@@ -53,6 +53,7 @@ import {
 	type ProductWireToolIndexMeta,
 	rewriteInferenceMessagesForProductWire,
 	SEND_TO_USER_WIRE_NAME,
+	shouldClaimSandWireName,
 } from "./grokbot/product-wire";
 import {
 	CONNECT_END_STREAM_FLAG,
@@ -240,8 +241,16 @@ function buildGrammarToolIndex(tools: Context["tools"]): Map<string, ProductWire
 			typeof tool.customWireName === "string" && tool.customWireName.trim() ? tool.customWireName.trim() : undefined;
 		const isGrammar = Boolean(tool.customFormat && typeof tool.customFormat === "object");
 		const meta: ProductWireToolIndexMeta = { name, customWireName, isGrammar };
-		index.set(name, meta);
-		if (customWireName) index.set(customWireName, meta);
+		// Same collision policy as toProductField2Tools: first wire-name claimant
+		// wins unless a preferred omp owner replaces it.
+		if (shouldClaimSandWireName(name, name, index.get(name)?.name)) {
+			index.set(name, meta);
+		}
+		if (customWireName && customWireName !== name) {
+			if (shouldClaimSandWireName(customWireName, name, index.get(customWireName)?.name)) {
+				index.set(customWireName, meta);
+			}
+		}
 	}
 	return index;
 }

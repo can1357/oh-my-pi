@@ -404,6 +404,59 @@ describe("product wire helpers", () => {
 		expect(index.get("Shell")).toEqual({ name: "bash", productWireName: "Shell", isGrammar: false });
 	});
 
+	test("keeps the same first owner for generic customWireName collisions", () => {
+		// foo advertised first; bar aliases as foo — advertise and decode must both
+		// keep foo, or a call against foo's schema is dispatched as bar.
+		const tools = [
+			{ name: "foo", description: "first", parameters: { type: "object", properties: { a: { type: "string" } } } },
+			{
+				name: "bar",
+				description: "second",
+				parameters: { type: "object", properties: { b: { type: "number" } } },
+				customWireName: "foo",
+			},
+		];
+		const product = toProductField2Tools(tools as never, "automation");
+		const foos = product.filter(tool => tool.name === "foo");
+		expect(foos).toHaveLength(1);
+		expect(foos[0]?.description).toBe("first");
+
+		const index = new Map<
+			string,
+			{ name: string; customWireName?: string; productWireName?: string; isGrammar: boolean }
+		>([
+			["foo", { name: "foo", isGrammar: false }],
+			["bar", { name: "bar", customWireName: "foo", isGrammar: false }],
+		]);
+		// Simulate buildGrammarToolIndex first-wins on the shared wire name.
+		index.set("foo", { name: "foo", isGrammar: false });
+		augmentToolIndexForProductWire(index, tools as never);
+		expect(index.get("foo")?.name).toBe("foo");
+
+		const reversed = [
+			{
+				name: "bar",
+				description: "second",
+				parameters: { type: "object", properties: { b: { type: "number" } } },
+				customWireName: "foo",
+			},
+			{ name: "foo", description: "first", parameters: { type: "object", properties: { a: { type: "string" } } } },
+		];
+		const productReversed = toProductField2Tools(reversed as never, "automation");
+		expect(productReversed.filter(tool => tool.name === "foo")).toEqual([
+			expect.objectContaining({ name: "foo", description: "second" }),
+		]);
+		const indexReversed = new Map<
+			string,
+			{ name: string; customWireName?: string; productWireName?: string; isGrammar: boolean }
+		>([
+			["bar", { name: "bar", customWireName: "foo", isGrammar: false }],
+			["foo", { name: "bar", customWireName: "foo", isGrammar: false }],
+		]);
+		augmentToolIndexForProductWire(indexReversed, reversed as never);
+		expect(indexReversed.get("foo")?.name).toBe("bar");
+	});
+
 	test("maps edit to Write when write is absent", () => {
 		const product = toProductField2Tools(
 			[{ name: "edit", description: "patch only", parameters: { type: "object", properties: {} } }],
