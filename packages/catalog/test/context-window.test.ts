@@ -14,30 +14,37 @@ function bundledAstra() {
 	return astra;
 }
 
-test("prefers a live maximum over a previously resolved rule fallback", () => {
+test("prefers a live maximum when no rule fallback owns one", () => {
 	const astra = bundledAstra();
-	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: undefined })).toBe(872_000);
-	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: 640_000 })).toBe(640_000);
-	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: undefined })).toBe(872_000);
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: 872_000 })).toBe(872_000);
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: undefined })).toBeUndefined();
 });
 
-test("uses the policy fallback when a model maximum is not finite", () => {
+test("ignores non-positive cached maxima without a rule fallback", () => {
 	const astra = bundledAstra();
-	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: Number.NaN })).toBe(872_000);
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: Number.NaN })).toBeUndefined();
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: 0 })).toBeUndefined();
 });
 
-test("uses the policy fallback when cached maxima are non-positive", () => {
+test("floors stale Astra windows to the documented 1.05M at build time", () => {
 	const now = 1_000_000;
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-context-window-"));
 	const dbPath = path.join(tempDir, "models.db");
 	try {
-		writeModelCache("openai-codex", now, [{ ...bundledAstra(), maxContextWindow: 0 }], true, "", dbPath);
+		writeModelCache(
+			"openai-codex",
+			now,
+			[{ ...bundledAstra(), contextWindow: 272_000, maxContextWindow: 0 }],
+			true,
+			"",
+			dbPath,
+		);
 		const cachedSpec = readModelCache("openai-codex", 1_000, () => now, dbPath)?.models.find(
 			model => model.id === "gpt-6-astra",
 		);
 		if (!cachedSpec) throw new Error("Expected cached Astra model");
 
-		expect(resolveMaxContextWindow(buildModel(cachedSpec))).toBe(872_000);
+		expect(buildModel(cachedSpec).contextWindow).toBe(1_050_000);
 	} finally {
 		removeSyncWithRetries(tempDir);
 	}
