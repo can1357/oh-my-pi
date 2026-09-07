@@ -231,6 +231,7 @@ describe("TanCommandController", () => {
 				suppressBreadcrumb: true,
 				sessionFile: expect.stringMatching(/Tan-.+\.jsonl$/),
 				resetInheritedCost: true,
+				repairInterruptedTail: true,
 			},
 		);
 		expect(harness.register).toHaveBeenCalledWith("task", "/tan write the release note", expect.any(Function), {

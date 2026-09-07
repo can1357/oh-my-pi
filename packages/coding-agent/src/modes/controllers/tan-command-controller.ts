@@ -129,6 +129,11 @@ export class TanCommandController {
 				// context; its cost must reflect its own work, not the parent's
 				// accumulated spend that session cost is otherwise derived from.
 				resetInheritedCost: true,
+				// The parent may be mid-turn: pair any tool call it left unresolved
+				// with a synthetic aborted result so the clone inherits a terminal
+				// transcript instead of rendering the parent's in-flight call as its
+				// own pending work (issue #11118).
+				repairInterruptedTail: true,
 			});
 
 			jobId = manager.register(
