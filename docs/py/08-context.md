@@ -31,7 +31,7 @@ do: its entire behaviour is the definition of `omp.SlotClass`.
 ```mermaid
 flowchart TB
     J[("transcript journal<br/>append-only, durable truth")]
-    J -->|Log::live splices Reset / Compact / Rewind| P["projection<br/>project_journal()"]
+    J -->|"live_chain folds prior links; compaction@1 bounds the tail"| P["projection<br/>project_journal()"]
     P --> T["canonical thread<br/>omp.thread.v1.Item[]"]
     T -->|"MessageRef[] metadata only"| H["extension host<br/>@omp.hook('thread_projection')"]
     H -->|ContextPatch| A["patch application<br/>agent-side, working copy"]
@@ -47,9 +47,11 @@ turn from the same inputs, so it is a pure function of the thread, and a host cr
 means the unpatched thread goes out.
 
 Compaction is the exception, and deliberately so: a compaction verdict is durable. It
-appends `Kind::Compact { summary, short, first_kept, tokens_before, warning }`, which
-`Log::live` already honours by splicing the live event list — the summary event replaces
-everything before `first_kept`. A compaction survives restart; a context patch does not.
+appends a `compaction@1` entry — `KindName::Compaction` (`crates/journal/src/kind.rs:32-33`)
+— carrying the typed payload `data::Compaction` (`crates/journal/src/data.rs:757-781`):
+`{summary, boundary, method, tokens, warning, frames}`. The session fold
+(`crates/session/src/fold.rs:516-528`) turns it into a `Compaction` node that hides
+everything before `boundary`. A compaction survives restart; a context patch does not.
 That is the whole distinction between the two hooks.
 
 ### Why full-history re-serialization is banned
@@ -1042,10 +1044,12 @@ refused — `omp.CompactionRefused` — because there is no next rung and the ex
 choosing a dead session. `reason` is journaled and shown in the TUI.
 
 **`CustomSummary`** — Replace the tier's work with a summary you computed. Exact effects: the
-agent appends `Kind::Compact { summary, short, first_kept, tokens_before, warning }` — the
-same event the built-in path writes — where `first_kept` resolves from `first_kept_id`.
-`Log::live` then splices: the summary event becomes the head of the live chain and everything
-before `first_kept` leaves it. The epoch increments. `details` is stored alongside for the
+agent appends `compaction@1` (`crates/journal/src/kind.rs:32-33`) with the typed payload
+`data::Compaction` (`crates/journal/src/data.rs:757-781`) — the same event the built-in
+path writes — where `boundary` resolves from `first_kept_id`. The session fold
+(`crates/session/src/fold.rs:516-528`) then installs the `Compaction` node: the summary
+becomes the head of the live projection and everything before `boundary` leaves it. The
+epoch increments. `details` is stored alongside for the
 extension's own later queries; `preserve` is returned verbatim as `previous_preserve` on the
 next compaction, which is how an extension keeps a running index across many compactions
 without a side file. No summarizer model call is made, so this is also the cheap path:
@@ -1891,14 +1895,15 @@ fix (`docs/py/02-verdicts.md`); until it lands, extensions should treat `is_erro
 
 ### Prompt-slot assembly
 
-**What exists.** `crates/agent/src/prompt.rs` is already most of the way there and is the
-strongest existing foundation in this document's scope. It has `PromptSource` (synchronous,
-`&WorkspaceInput` in, `Vec<Item>` out), `render_prompt` invoking the source **twice** and
-comparing byte-for-byte, `PromptHash` as a BLAKE3 over canonical items, and
-`PromptError::Volatile` for the mismatch case. `loop.rs:679-715` already re-renders on change
-and rewrites the durable head through `journal.rewrite_prompt_head`, and `Log::live` already
-resolves `PromptRewriteIntent` / `Stage` / `Commit` into a live head. The volatility check
-that makes `omp.VolatilePrompt` enforceable is *already shipped*.
+**What exists.** `crates/agent/src/prompt/` (`mod.rs`, `slots.rs`) is already most of the way
+there and is the strongest existing foundation in this document's scope. It has `PromptSource`
+— `system_items(&Dom) -> Result<Vec<Item>, PromptError>` (`crates/agent/src/loop.rs:74`) —
+`CanonicalPromptSource::banded_render` (`crates/agent/src/prompt/mod.rs:52`) over per-band
+`BandHash`es, and `PromptError::VolatileSource` for the mismatch case. The double-render
+volatility check that
+makes `omp.VolatilePrompt` enforceable is *already shipped*
+(`crates/agent/src/prompt/slots.rs:315-318`); the durable-head rewrite is not — no
+`rewrite_prompt_head` and no `Log::live` head-splice survives in the tree (reported gap).
 
 **What is missing.** `PromptSource` produces a whole head from one implementation. Slots need
 composition:
@@ -2191,7 +2196,8 @@ The rest are genuine open questions.
 1. **Item identity across compaction.** `omp.thread.v1.Item` has no id field — only `seq`
    (tag 1) — so `MessageRef.id` must be derived, and it must stay stable across a compaction
    or a pin captured before it is worthless. The transcript event index is the obvious
-   source: append-only, never reused, and already what `Log::live` manipulates. Two cases
+   source: append-only, never reused, and already what `live_chain` walks
+   (`crates/journal/src/chain.rs:12-15`). Two cases
    resist it. A `Compact` event's summary item has no pre-existing item event to derive from
    (its own event index would work, but that makes summary ids a different shape from every
    other id, which invites bugs). And optimistically appended items sit at `seq = 0` until

@@ -1669,17 +1669,18 @@ neither has a job.
 
 ### `crates/journal` — the durable layer
 
-**Exists and is directly reusable.** `Kind::Custom { kind, data, context, display }`
-(`src/transcript/event.rs:334-343`) is already the three-projection shape this
-document specifies, already stores `data` as `Box<RawValue>` for verbatim
-round-trip, and already encodes/decodes through `codec.rs:292-298` and
-`codec.rs:462-467`. `Writer` reuses one `BytesMut` line buffer and rolls back a
-partial append, distinguishing clean failure from indeterminate durability
-(`writer.rs:20`, `codec::Error::AppendRollback`). `Log::live()` folds the live
-chain in one forward pass with no parent map (`reader.rs:69-177`). `BlobStore`
-gives BLAKE3 addressing, idempotent writes, `put_reader` streaming, atomic
-placement, and `verify` (`blob.rs:128-332`). This is the majority of the work,
-already done.
+**Exists and is directly reusable.** The durable format is the closed revision-1 kind set
+over single-line JSON payloads (`crates/journal/src/entry.rs:68-83`), framed by the SSE
+line codec in `crates/journal/src/sse.rs` with unknown kinds rejected at parse
+(`crates/journal/src/sse.rs:276-279`) and at open (`crates/journal/src/lib.rs:423-425`).
+`Journal::open` (`crates/journal/src/lib.rs:95-119`) recovers committed entries and
+physically truncates bytes after the last committing blank line, exposing the removed
+count through the `recovered_tail_bytes` accessor — clean failure versus indeterminate
+durability is decided at open, not by a rollback buffer. `live_chain` / `abandoned`
+(`crates/journal/src/chain.rs:12-27`) fold the tail-selected chain in one forward pass.
+`BlobStore` (`crates/journal/src/blob.rs:367-371`) gives content-addressed storage with
+streaming `put_reader` writes (`crates/journal/src/blob.rs:562`) and `verify`
+(`crates/journal/src/blob.rs:680`). This is the majority of the work, already done.
 
 **Mostly exists: revision attribution.** Lesson #8's machinery is already
 implemented, and this document must not present it as novel. `omp_tool::Rev`
@@ -1739,14 +1740,15 @@ the largest, box it as `Custom(Box<CustomEntry>)`, matching the newer
 `TurnInput(TurnInputItem)` style. Every `Kind` move pays for the largest variant,
 and events move through the append path once per entry.
 
-**New: a kind-filtered reader, and a liveness primitive under it.** `Log` has no
-query surface at all — it exposes `get`, `len`, `is_empty`, and `live`. The naive
-addition is one `filter_map` over `self.live()`, and it is wrong for a reason
-worth stating rather than deferring: `Log::live` (`reader.rs:81`, contract at
-`:69-79`) returns a freshly allocated `Vec<u64>` and is called **once per
-projection**. A kind-filtered reader layered on top of it would allocate that
-index vector again on every read, and `omp.journal.fold` invites exactly that
-read pattern.
+**New: a kind-filtered reader, and a liveness primitive under it.** The journal has no
+query surface at all — `Journal` exposes `create`, `open`, `scan`, `append`, `path`, and
+a `recovered_tail_bytes` accessor; branch liveness is the free function `live_chain`
+(`crates/journal/src/chain.rs:12-15`), which yields `&Entry` through a lazily computed
+iterator — there is no `Vec<u64>` index to hand out or reuse. The naive kind-filtered
+reader is one `filter_map` over `live_chain(&entries)`, and its honest cost is not the
+yield but the recomputation: `chain_indices` rebuilds the id map and re-walks the chain
+on every call (`crates/journal/src/chain.rs:29-35`), and `omp.journal.fold` invites
+exactly that repeated walk.
 
 The observation that fixes it: a kind filter does not need the ordered index
 *list*, it needs the ordered *events* plus a liveness predicate. Physical order
@@ -2258,21 +2260,20 @@ transcription is cheaper than a CONTROL round trip for a pure parse. `schemes()`
 must come from Rust, because which schemes resolve depends on the deployment.
 
 And `schemes()` needs no new change-detection mechanism, only the right one.
-`Registry::live_hash() -> [u8; 32]` (`crates/tool/src/registry.rs:458-467`) already
-gives the live registry a content-derived blake3 identity, which is the shape of
+`Registry::device_hash() -> Hash32` (`crates/tool/src/registry.rs:2654`) already
+gives the mounted device set a content-derived blake3 identity — mounted
+availability plus claimant-qualified reachability, exactly the shape of
 the "did the reachable capability set change" question — so a host that caches
 `schemes()` invalidates on that identity rather than growing a parallel version
 counter, and two hosts agreeing on the identity agree on the table, which is what
 makes the thin-client / remote-workspace split checkable instead of hopeful.
 
-The caveat matters, though: `live_hash` today is **one** digest over all live
-identities, so it changes when anything changes. Cache invalidation is the benign
-use — an over-eager invalidation costs a recompute. Prompt-cache identity is the
-use that would break, because a device appearing would move a digest the prompt
-prefix depends on and thereby falsify the availability-as-notification property.
-`schemes()` must therefore bind to the device-side digest of the `slot_hash` /
-`device_hash` split in `docs/py/01-devices.md`, not to the undifferentiated hash as
-it stands. Same primitive, correct half of it.
+The caveat the earlier revision carried is already paid: the undifferentiated
+`live_hash` it warned about is gone from `crates/tool`, and the split exists as
+shipped methods — `slot_hash()` (`registry.rs:2623`) for the prompt-cache
+identity, `device_hash()` (`registry.rs:2654`) for availability. `schemes()`
+binds to the device-side half directly; a device appearing moves
+`device_hash()` and never the prompt prefix. Same primitive, correct half of it.
 
 ### Feature-map reconciliation
 

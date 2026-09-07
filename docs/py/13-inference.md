@@ -2669,9 +2669,16 @@ overlay wiring (item 1 above) is a prerequisite and belongs earlier.
    idle unloading (`crates/ai/src/local/runtime.rs:235-330`). The shipped adapter seam is
    speech — `SpeechToTextAdapter` (`crates/ai/src/local/stt.rs:168`) with typed
    `TranscriptionOptions` (`stt.rs:116`) and its own idle unloading (`stt.rs:251`). A
-   text-side adapter — `TextAdapter::generate`, `GenerationOptions`, `TextCapabilities` —
-   has no on-disk home under `crates/ai/src/local/`; that is the reported gap this seam
-   names, not a dropped implementation.
+   text-side adapter exists where the platform provides one: Apple Foundation Models
+   generation (`crates/ai/src/local/applefm.rs:428-452`: `generate`, `complete`,
+   `stream`) plus the GGUF tiny-title artifacts — registry wired to the CLI
+   (`crates/ai/src/local/tiny_catalog.rs:100-101`, surfaced by
+   `crates/app/src/tiny_models_cmd.rs:41`) — and the validation-only title-output contract
+   (`crates/ai/src/local/title.rs:1`, no production callers). The reported gap this seam
+   names is therefore
+   narrower: a cross-platform GGUF `TextAdapter` — `TextAdapter::generate`,
+   `GenerationOptions`, `TextCapabilities` — under `crates/ai/src/local/`, not text
+   generation as such.
    The blogpost's "Extra: Use local models!" argues for exactly this,
    and `FEATURES.md:356-360` shows omp already doing it in Rust for auto-thinking difficulty
    classification: "online backend: tiny model, allowMax variant, 5-level output, earliest-match

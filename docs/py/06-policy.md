@@ -2477,13 +2477,19 @@ granting an execution capability". `advertise` needs the same `route` predicate 
 already apply. Until it does, a policy extension cannot honestly claim it registers nothing
 with the model.
 
-**3. `live_hash` is one digest over every live identity** (`:450-467`, blake3 over the
-`BTreeMap` order). It is the right primitive for "did the live registry change" and the wrong
-one for "did the model-facing tool array change", and the difference matters to the
-`resources_discover` gate in this document: a policy that hides a device from discovery must not
-invalidate the prompt prefix cache, and with a single digest it would. The split — a slot hash
-over model-facing entries and a device hash over everything else — is `docs/py/01-devices.md`'s
-to specify; recorded here because the discovery gate's cost claim depends on it.
+**3. The registry's identity digests are split, not single.** `slot_hash()`
+(`registry.rs:2623`, blake3 over the policy-resolved model-visible slots),
+`device_hash()` (`registry.rs:2654`, mounted device availability and
+claimant-qualified reachability), and `projection_hash()` (`registry.rs:2690`,
+every registered revision plus its projection code) are the shipped surface. The
+one-digest-over-every-live-identity primitive this item described — right for
+"did the live registry change", wrong for "did the model-facing tool array
+change" — no longer exists, and that is what the `resources_discover` gate in
+this document needs: a policy that keeps a device out of the model-visible slot
+set cannot move the prompt-cache identity, because `slot_hash()` hashes only
+`Presentation::Slot` entries with model-callable routes. The split that
+`docs/py/01-devices.md` was to specify is in the registry; recorded here because
+the discovery gate's cost claim depends on it.
 
 **4. `Abort` has no `POLICY_DENIED` kind or `PolicyDenied` payload**, restated from the
 `crates/tool` subsection above because it is the one additive change that must land before a

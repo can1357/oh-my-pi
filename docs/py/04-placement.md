@@ -1863,13 +1863,14 @@ need to inspect `route` before granting an execution capability." `advertise` si
 does not use it. One `filter` on `entry.route() == ToolRoute::Native` closes it.
 
 A second, related caution for anyone building on registry identity:
-`live_hash` (`registry.rs:458-467`) is one blake3 digest over *all* live identities,
-so it cannot serve as prompt-cache identity once devices exist — adding a device
-would change it and falsify the availability-as-notification property. The split
-into a slot-facing hash and a device-facing hash belongs to `docs/py/01-devices.md`.
-Placement's own requirement — that moving a device between `place=` values change the
-*device-facing* identity, because it changes where effects happen — attaches to that
-split, not to `live_hash` as it stands.
+the slot-facing and device-facing digests are shipped: `slot_hash`
+(`registry.rs:2623-2650`) hashes the policy-resolved model-visible slots, so
+prompt-cache identity is structurally immune to a device appearing, and
+`device_hash` (`registry.rs:2654-2686`) hashes mounted availability plus
+claimant-qualified reachability. Placement's own requirement — that moving a
+device between `place=` values change the *device-facing* identity, because it
+changes where effects happen — attaches to `device_hash`, not to anything
+slot-facing.
 
 ### What already exists to build on
 

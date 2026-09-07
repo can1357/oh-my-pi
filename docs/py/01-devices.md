@@ -1732,9 +1732,11 @@ adjacent lift steps toward the live revision, falling back to
 constraint lowering with explicit `Adjustment` receipts is written
 (`:648-712`), against real catalog bitsets — `ToolFeatureBits::STRICT_SCHEMA`,
 `GrammarBits::{LARK, REGEX, EBNF}`, `ToolCapabilities::maximum_tools`
-(`crates/catalog/src/capability.rs`). `live_hash()` already produces a
-stable blake3 digest over the ordered live identities, registration-order
-independent (`registry.rs:458-467`).
+(`crates/catalog/src/capability.rs`). The registry already ships stable SHA-256
+identity digests: `slot_hash()` over the policy-resolved model-visible slots,
+`device_hash()` over mounted availability and claimant-qualified reachability,
+and `projection_hash()` over every registered `(name, rev)` and its projection
+code, registration-order independent (`crates/tool/src/registry.rs:2623-2711`).
 
 Three of those are contracts with nothing behind them yet, and one of the three
 has a defect underneath it. This document's claims depend on closing exactly
@@ -1766,11 +1768,15 @@ these gaps rather than on inventing replacements:
   of the host process, this one keeps oversized verdicts out of the
   environment's heap. Reported as a known defect; this document does not
   describe the current behaviour as correct.
-- `live_hash()` is one digest over every live identity, which is correct only
-  while everything live is also advertised. The moment devices exist, that
-  digest changes when a device mounts, and using it as the prompt-cache identity
-  would make this document's central claim false. Splitting it is not a new
-  mechanism; it is finishing this one. Detailed below.
+- The one of those three that has since closed in the code: the split is
+  shipped. `slot_hash()` (`registry.rs:2623-2650`) digests the policy-resolved
+  model-visible slots — the digest the request and the prompt cache care about
+  — and `device_hash()` (`registry.rs:2654-2686`) digests mounted device
+  availability and claimant-qualified reachability, so a device mounting moves
+  the availability digest and cannot move the prompt-cache identity. The
+  central claim is a checkable invariant today, and the test this document
+  wanted exists: `crates/tool/tests/contracts.rs:443-505` mounts and unmounts
+  a device and asserts `slot_hash()` is unchanged. Detailed below.
 
 The Python worker path exists end to end, over a real wire contract. `omp/toolhost/v1`
 defines `WorkerHello`, `RegisterTools`, `ToolDecl`, `ToolConstraint`,
@@ -1931,14 +1937,15 @@ order; equal precedence returns a new
 right here: shadowing is usually zero or one deep, and this map is read on
 every dispatch.
 
-**3. Two hashes, not one.** `live_hash` currently blake3s every live identity
-in `BTreeMap` order (`registry.rs:458-467`). Split it: `slot_hash()` over
-`Presentation::Slot` entries only — that is the digest the request and the
-prefix cache care about — and `device_hash()` over device entries, which feeds
-the availability notification and nothing else. Without this split, "device
-availability does not disturb the prompt cache" is an aspiration; with it, it
-is a checkable invariant, and worth a test that mounts and unmounts a device
-and asserts `slot_hash()` is unchanged.
+**3. Two hashes, not one — shipped.** `slot_hash()`
+(`crates/tool/src/registry.rs:2623-2650`) hashes the policy-resolved
+model-visible slots in `BTreeMap` order — that is the digest the request and
+the prefix cache care about — and `device_hash()` (`:2654-2686`) digests
+mounted device entries; the shipped consumer is the device catalog hash
+(`crates/envd/src/devices_host.rs:107`). "Device availability does not
+disturb the prompt cache" is a checkable invariant, and the test this item
+asked for exists: `crates/tool/tests/contracts.rs:443-505` mounts and
+unmounts a device and asserts `slot_hash()` is unchanged.
 
 **One thing Revision 1 could not resolve is now decided, ratified, and
 recorded here.** `ToolWorkerSupervisor` is documented as a "One-worker warm
@@ -2127,7 +2134,12 @@ even though it is additive in encoding.
 
 The availability notice is a `thread::Item` with `Role::System`, which
 `system_item` already builds (`jobs.rs:341-350`), delivered as an `Interrupt`
-with `class: TurnBoundary` (`mailbox.rs:64-71`) — never `Immediate`, because a
+with turn-boundary delivery semantics — real vocabulary: `enum InterruptClass` with
+`INTERRUPT_CLASS_TURN_BOUNDARY` (`crates/proto/proto/omp/env/v1/env.proto:145-156`), Python
+`omp.events.InterruptClass` (`crates/py/python/omp/events.py:162-167`) — but no in-tree
+mailbox supplies the class-driven drain dispatch (`DrainPoint` survives only in Python,
+`events.py:170-175`); reported gap — never
+`Immediate`, because a
 device appearing mid-tool-call must not preempt the call. `Immediate |
 TurnBoundary | Idle` in one flume mailbox is D6's own vocabulary,
 so this needs no new mechanism. The item text names

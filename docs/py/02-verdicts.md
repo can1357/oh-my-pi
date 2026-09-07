@@ -1530,9 +1530,11 @@ following are load-bearing and shipped:
   walk documented above is `registry.rs:558-575` verbatim.
 - Harness-owned `Args`/`Aborted` projection, with `useless` forced false for both
   (`registry.rs:339-348`, `render_arg_issue` at `:603-632`, `render_abort` at `:634-646`).
-- `live_hash()` — a BLAKE3 digest over ordered live `(name, family, n)` identities, order
-  independent of registration (`registry.rs:458-467`). This is already the right primitive
-  for detecting when the advertised set changed.
+- `slot_hash()` — a BLAKE3-256 digest over the policy-resolved model-visible slots
+  (`registry.rs:2623-2650`), hashing only `Presentation::Slot` entries with
+  model-callable routes. This is already the right primitive for detecting when
+  the advertised set changed; `projection_hash()` (`registry.rs:2690-2711`) is the
+  registered-revision identity behind the projection cache.
 
 **`crates/session`** — the projection-side wiring.
 
@@ -1559,18 +1561,15 @@ following are load-bearing and shipped:
   `patch@1` (`crates/journal/src/kind.rs:93`, `crates/journal/src/data.rs:742-747`); and
   content-addressed `BlobRef` throughout (`crates/journal/src/blob.rs:47`).
   `Kind::ToolBatchAuthorized` has no surviving implementation in the tree.
-- **The transcript patch protocol already ships**, and it is `Log::live() -> Vec<u64>`
-  (`transcript/reader.rs:69-177`) — one forward fold splicing `Reset` / `Rewind` / `Compact`
-  over the physical event-index list, replacing what the doc comment records as 6.1 million
-  explicit parent pointers across 5,257 rewinds in the measured corpus. Note for anyone
-  building on this: it is *not* `transcript/patch.rs`, which is `Patch<T>` — a tri-state
-  unchanged/set/clear **field** patch for partial record updates, unrelated to rewriting a
-  message list.
-- `AmendPatch::{Prune { keep_blocks }, RetryRecovery { … }, Seq { seq }}`
-  (`transcript/types.rs:203-228`) is the append-only field-level correction vocabulary, and
-  `Entry::{Ok, Tombstone}` (`reader.rs:15-19`) plus `Kind::Unknown(Box<RawValue>)`
-  (`event.rs:344-345`) are how unrecognized and malformed journal data stay addressable
-  instead of failing a load.
+- **The transcript branch protocol already ships.** `live_chain` / `abandoned`
+  (`crates/journal/src/chain.rs:12-27`) fold the tail-selected chain forward from `prior`
+  links — an absent `prior` selects the preceding entry, an explicit one walks to that
+  identity, and a missing target or cycle ends the walk rather than inventing ancestry.
+  Field-level correction is the `patch@1` entry — `KindName::Patch`
+  (`crates/journal/src/kind.rs:93`) carrying serialized DOM operations in `data::Patch`
+  (`crates/journal/src/data.rs:742-747`). Unrecognized kinds are rejected at frame parse
+  and at open (`crates/journal/src/sse.rs:276-279`, `crates/journal/src/lib.rs:423-425`)
+  rather than preserved as addressable tombstones.
 
 **`crates/tools`** — the reference implementations. `edit@hl.1` is the worked case:
 `SectionPayload` carries `old_revision`, `new_revision`, `applied_ops`, `rebased`, exact
@@ -1726,12 +1725,13 @@ execution capability" (`:439-443`). `advertise` simply does not follow the conve
 neighbours do. Filter it to `ToolRoute::Native`, and correct the doc comment to say what the
 body does.
 
-One consequence for this document's own claims: `live_hash` (`registry.rs:458-467`) is a single
-digest over *all* live identities, so it cannot serve as the prompt-cache identity while worker
-entries share that map — a device toggling would change the hash even though the advertised
-array should be byte-identical. Build item 6 keys the projection cache on
-`projection_hash`, which is a separate digest and unaffected; the advertised-slot identity
-needs the split `docs/py/01-devices.md` specifies. Do not reuse `live_hash` for both.
+One consequence for this document's own claims: the prompt-cache identity is the slot
+digest — `slot_hash` (`registry.rs:2623-2650`), SHA-256 over the policy-resolved
+model-visible slots — so a device toggling moves `device_hash` (`registry.rs:2654-2686`)
+and cannot touch it, while the slot-presented worker declarations the defect above
+describes do move it until its route filter lands. Build item 6 keys the projection
+cache on `projection_hash` (`registry.rs:2690-2711`), a separate digest over every
+registered `(name, rev)` plus its projection code. Do not reuse one hash for both.
 
 Cache sizing: bound by total cached part bytes, not entry count — a `SparseMap` keyed by a
 dense worker-local device id at the outer level, an LRU of
@@ -1956,7 +1956,7 @@ What does not hold yet, in dependency order:
    not order-stable. Without this, `blake3(verdict)` is not a valid cache key and re-running
    a lift produces different bytes for the same input.
 2. **Projection is not fingerprinted.** Add `Registry::projection_hash(&self) -> [u8; 32]`
-   alongside `live_hash` (`registry.rs:458-467`), digesting `(name, rev, projection code
+   — shipped as `projection_hash() -> Hash32` (`registry.rs:2690-2711`) — digesting `(name, rev, projection code
    identity)` for every registered revision. For native tools the code identity is the crate
    build id; for Python devices it is the content hash of the module the projection came
    from, which `crates/py`'s frozen-module machinery already computes. Store the hash in the

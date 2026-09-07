@@ -166,7 +166,7 @@ shadow VCS.
 ```mermaid
 flowchart LR
     subgraph thread["Thread (Agent Core, exists today)"]
-        J[("journal<br/>append-only")] -->|"Kind::Rewind { to }"| L["live chain<br/>truncated by one fold"]
+        J[("journal<br/>append-only")] -->|"Session::rewind: next entry prior"| L["live chain<br/>truncated by one fold"]
     end
     subgraph ws["Workspace (Environment, NEW)"]
         G[("generation store<br/>content-addressed")] -->|"restore(generation)"| W["working tree"]
@@ -175,11 +175,14 @@ flowchart LR
     R --> ws
 ```
 
-The thread half is *already real*: `Journal::rewind` appends a `Kind::Rewind`
-event and `Log::live()` folds it forward by truncating the working chain
-(`crates/journal/src/chain.rs:12-15`). Nothing is deleted; a rewind is
-a fact appended to an append-only log, which is why redo is free and why two
-agents rewinding the same session do not corrupt each other.
+The thread half is *already real*: `Session::rewind(target)`
+(`crates/session/src/session.rs:937-961`) selects the target by canonical prefix replay
+and stages it as the next entry's `prior`; `live_chain`
+(`crates/journal/src/chain.rs:12-15`) folds the tail-selected chain and `abandoned`
+(`crates/journal/src/chain.rs:17-27`) keeps unreachable entries inspectable. Nothing is
+deleted — the rewind lands as the next entry's `prior` link in an append-only log, which
+is why redo is free and why two agents rewinding the same session do not corrupt each
+other.
 
 The workspace half is new environment capability, stated plainly:
 `crates/env/` has no snapshot or restore operation today, and neither does
@@ -1316,7 +1319,9 @@ its `/rewind` selector and had to implement the workspace arm itself.
 - **Raises** `RewindPending` while a durable turn lacks its terminal receipt —
   the Core's own precondition (`JournalError::RewindWhilePending`). Cancel or
   await the turn first.
-- Rewinding is an *append*: a `Kind::Rewind` event. Nothing is deleted, redo is
+- Rewinding is an *append*: the target becomes the next entry's `prior` link
+  (`Session::rewind`, `crates/session/src/session.rs:937-961`) — the journal's
+  closed kind vocabulary has no rewind kind. Nothing is deleted, redo is
   another rewind forward, and a rewind is visible to every observer of the
   journal.
 - Detached job facts survive a rewind; a background child that was already
@@ -1949,12 +1954,13 @@ nothing below reads as a confident fiction.
   that callers must inspect `route` before granting execution
   (`registry.rs:439-440`). `advertise` simply needs the same check.
   This document depends on the fix but does not own it — see
-  `docs/py/01-devices.md`. Related: `live_hash` (`registry.rs:458-467`) is one
-  digest over *all* live identities, so it cannot serve as prompt-cache identity
-  once devices exist; the slot-versus-device hash split is
-  `docs/py/01-devices.md`'s correction, and my earlier note that `live_hash`
-  answers "did the reachable capability set change" holds only for the
-  model-advertised subset once that split lands.
+  `docs/py/01-devices.md`. Related: the registry's identity surface is the split
+  already — `slot_hash()` (`registry.rs:2623`) digests the policy-resolved
+  model-visible slots, `device_hash()` (`registry.rs:2654`) the mounted device
+  availability and claimant-qualified reachability, and `projection_hash()`
+  (`registry.rs:2690`) every registered revision plus its projection code. No
+  single live-identity digest is left to misuse as prompt-cache identity, and
+  "did the reachable capability set change" is `device_hash()`'s question.
 
 ### What already exists to build on
 
@@ -1986,7 +1992,7 @@ More than the assignment implies, which changes the shape of the work from
   (`crates/py/python/omp/agents.py:1363`) drives the same journal selection, and `RewindPending`
   (`crates/py/python/omp/agents.py:98-103`) is the pending-turn precondition this document
   surfaces. The `Agent::rewind` / `Agent::rewind_targets` methods
-  (`crates/agent/src/loop.rs:235,251`) and the `RewindWhilePending` precondition have no
+  and the `RewindWhilePending` precondition have no
   surviving Rust implementation; the loop's Rust rewinds run through `session.rewind(target)` in
   `retry_tool_tail` (`crates/agent/src/loop.rs:1062`) and the checkpoint path
   (`crates/agent/src/dispatch.rs:673`).
@@ -2047,8 +2053,9 @@ More than the assignment implies, which changes the shape of the work from
   `crates/session/src/projection.rs:167-176` and read back at
   `projection.rs:188-203`. `Firing` records, continuation
   refusals, and rewind reports use it rather than a parallel stamp; likewise
-  `Registry::live_hash()` (`registry.rs:458`, blake3) is the existing stable
-  identity for the ordered live registry, so nothing new is needed to answer
+  `Registry::projection_hash()` (`crates/tool/src/registry.rs:2688-2711`, blake3) is the
+  existing stable identity for the registered revisions and their projections, so nothing
+  new is needed to answer
   "did the reachable capability set change" — with the caveat recorded above
   that it currently digests *all* live identities, so it becomes a
   model-advertised-subset identity only once the device split in
@@ -2732,8 +2739,12 @@ worktree capability.
   matters, the answer is the `paths` filter or design 3's CoW capture, not a
   cheaper hash.
 - **A rewind pays one projection, and must not add a second.**
-  `live_chain` (`crates/journal/src/chain.rs:12-15`) walks the live chain as an iterator over
-  `&Entry`, and the projection consumes it per pass. No field-patch module exists in the
+  `live_chain` (`crates/journal/src/chain.rs:12-15`) walks the live chain as an iterator
+  over `&Entry`; its real consumers each take it once per pass — journal GC
+  (`crates/journal/src/gc.rs:275`), the app's session ops
+  (`crates/app/src/chat_services/session_ops.rs:175`) and transcript renderer
+  (`crates/app/src/render_cmd.rs:345`), and envd's blob scanner
+  (`crates/envd/src/blobs.rs:548`). No field-patch module exists in the
   journal to cite as precedent (reported gap). `omp.agents.rewind` appends one event and lets the
   existing fold do the work; it must not build a parallel index or re-walk the
   chain to compute `RewindReport.dropped_items`, which is a length difference

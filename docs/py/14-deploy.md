@@ -2941,7 +2941,7 @@ resolution, integrity, trust, CLI — is missing. Verified before writing this s
 | Supervisor mailboxes | `flume::unbounded()` (`worker.rs:248`), RAII cancel on `WorkerInvocation::drop` (`worker.rs:220-229`) | **exists** |
 | Content-addressed store | `omp_journal::BlobStore` — BLAKE3-256 `BlobRef { hash: [u8;32], size }` (`crates/journal/src/blob.rs:36-41`), `put_reader` streaming at 64 KiB (`:179`), `has`, `verify`, `path` | **exists** |
 | Blob transport | `crates/proto/proto/omp/blob/v1` — `Blob` service with `Stat`/`Get`(stream)/`Put`(stream)/`Delete` | **exists** |
-| Live-set identity | `crates/tool/src/registry.rs:458` `live_hash() -> [u8; 32]` via blake3 | **exists, but see §6.0.2** |
+| Registry identity digests | `crates/tool/src/registry.rs` — `slot_hash()` `:2623` (model-visible slots), `device_hash()` `:2654` (device availability), `projection_hash()` `:2690` (registered revisions + projection code), all blake3 | **exists**; §6.0.2 records the notification gap |
 | Rev stamping | `crates/tool/src/lib.rs:46` `TOOL_REV_PROP = "omp/tool-rev"` | **exists** |
 | `uv`-driven install | `crates/py/scripts/fetch-python.sh` shells `uv pip install --link-mode=copy --python … --target …` and rejects native output | **exists** |
 
@@ -2995,15 +2995,17 @@ cost the user explicitly bought.
 
 #### 6.0.2 `live_hash` is not the availability identity
 
-I was going to write "reuse `live_hash()` for the availability-changed notification, do not
-invent anything". That is wrong. `live_hash` (`registry.rs:458-467`) is **one digest over all
-live identities**, worker declarations included (`:424`). Because installing or enabling an
-extension changes it, using it as the prompt-cache identity would make every extension
-change look like a prompt-prefix change — falsifying the availability-as-notification
-property this document's §2.3 relies on. The correct shape is the `slot_hash`/`device_hash`
-split specified in [`01-devices.md`](01-devices.md): a digest over what the model actually
-sees, separate from a digest over the device set. My install/enable/disable operations key
-their notification on the device digest. Two deliberate exceptions exist since Revision
+The live-hash question this section was written against is settled: `live_hash`
+no longer exists in `crates/tool`, and the registry ships exactly the split
+argued for here — `slot_hash()` (`registry.rs:2623`) is the BLAKE3 digest of the
+policy-resolved model-visible slots, `device_hash()` (`registry.rs:2654`) the
+digest of mounted device availability and claimant-qualified reachability.
+Installing or enabling an extension moves only the device digest, so an install
+can no longer masquerade as a prompt-prefix change — which is exactly the
+availability-as-notification property §2.3 relies on, now structural instead of
+aspirational. What still has no home in the tree is the notification itself;
+install, uninstall, enable, and disable key it on `device_hash()`. Two
+deliberate exceptions exist since Revision
 2.1: granting or enabling a **hard tool** (§3.1.5 `hard`, §3.9.2 `tools.hard`) changes the
 advertised slot set and therefore the slot digest — by design, because the claim is named
 in the consent digest, so the prompt-cache identity moves exactly when a human consented
@@ -3148,10 +3150,11 @@ refusal. §2.3's version-skew row and `E-LOCK-PYTHON` are grounded on these, not
 new. The gap is only that the check is per-worker today and must become per-host-child with
 the delta surfaced as `W-API-SKEW` (§3.13.10).
 
-**5. Do not invent an availability identity, but do not reuse `live_hash` either.** See
-§6.0.2: `live_hash` (`registry.rs:458-467`) covers every live identity including worker
-declarations, so keying the availability notification on it would make every install look
-like a prompt-prefix change. Install, uninstall, enable, disable, and a workspace layer
+**5. The availability digest exists; the notification does not.** See
+§6.0.2: the device-side digest is `device_hash()` (`registry.rs:2654`, mounted
+device availability and claimant-qualified reachability), and the undifferentiated
+`live_hash` it replaced is gone, so no digest is left that could make an install
+look like a prompt-prefix change. Install, uninstall, enable, disable, and a workspace layer
 appearing or vanishing key their notification on the **device** digest of
 [`01-devices.md`](01-devices.md)'s `slot_hash`/`device_hash` split. Nothing in this namespace
 touches the slot digest except the consented changes named in §6.0.2: admitting a hard

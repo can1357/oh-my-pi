@@ -752,16 +752,18 @@ digest, layer, trust tier, and host generation ride every durable record per the
 - `schema_rev: str` — the wire schema revision (`omp_proto::SCHEMA_REV`).
 - `prompt: PromptFingerprint` — the initial prompt fingerprint. `changed` is empty here by
   definition.
-- `registry_hash: str` — hex of `omp_tool::Registry::live_hash()`
-  (`crates/tool/src/registry.rs:458-467`): a BLAKE3 digest over the ordered live `(name, family, n)`
-  identities, domain-separated by `b"omp-tool/live/v1\0"` and registration-order independent because
-  the live map is a `BTreeMap`. Its scope must be stated carefully: it covers **every** live identity,
-  worker declarations included, so it is *not* a prompt-cache identity and enabling a device changes
-  it even when the advertised array should be byte-identical. Availability-as-notification needs the
-  narrower advertised-slot digest that `docs/py/01-devices.md` specifies; this field is the wider one.
-  What it is good for is exactly one thing: two sessions with equal `registry_hash` ran against
-  byte-identical tool identities, which makes a cross-session `rev_metrics` comparison sound rather
-  than approximate.
+- `registry_hash: str` — registry identity at session start. The field is wired
+  end to end (`telemetry.proto:53`, the Rust firehose envelope, this binding),
+  but nothing computes it yet, and its old definition — hex of
+  a digest over ordered live identities — has
+  no referent: `crates/tool` has no `live_hash`. The registry's identity
+  primitives are `slot_hash()` (`crates/tool/src/registry.rs:2623`), the
+  policy-resolved model-visible slots; `device_hash()` (`registry.rs:2654`),
+  mounted device availability and claimant-qualified reachability; and
+  `projection_hash()` (`registry.rs:2690`), every registered revision plus its
+  projection code. Until the exporter picks one, two sessions with equal
+  `registry_hash` assert nothing, and the cross-session `rev_metrics` comparison
+  this field was to make sound is a gap, not a shipped guarantee.
 
 ### `class SessionEnd(Envelope)`
 
@@ -2047,7 +2049,7 @@ impl Firehose {
 `.await` appears at an emit site. `Subscription::offer` is `flume::bounded(queue).try_send` plus an
 `AtomicU64` drop counter — copying the mailbox's nonblocking enqueue
 pattern but **bounded**, because that mailbox is deliberately unbounded (`flume::unbounded`,
-`mailbox.rs:114`) and an unbounded firehose behind a wedged Python host is a heap leak with a
+`crates/agent/src/loop.rs:424`) and an unbounded firehose behind a wedged Python host is a heap leak with a
 timestamp on it.
 
 New bounded vocabularies go through the existing `vocab!` macro (`semconv.rs:19-58`). That macro
@@ -2188,10 +2190,13 @@ reads it back (`crates/session/src/projection.rs:188-196`); `crates/serve/src/in
 stamps it onto the outbound device request. Telemetry reads that property. Proposing a second
 stamp would have created exactly the divergence Lesson #8 warns about.
 
-`Registry::live_hash()` (`crates/tool/src/registry.rs:458-467`) similarly already answers "did the
-reachable identity set change": BLAKE3 over the ordered live `(name, family, n)` triples with
-`b"omp-tool/live/v1\0"` domain separation and length-delimited fields, registration-order independent
-via `BTreeMap`. `SessionStart.registry_hash` is that digest in hex, not a new identity scheme.
+`Registry::projection_hash()` (`crates/tool/src/registry.rs:2688-2711`) similarly already answers "did the
+reachable identity set change": BLAKE3 with the `b"omp-tool/projections/v1\0"` domain separator over
+every registered `(name, rev)` identity plus its `projection_code` — the schema and description
+digest — registration-order independent via `BTreeMap`. `SessionStart.registry_hash`
+(`crates/observability/src/firehose.rs:227`, `telemetry.proto:53`) is the reserved hex slot —
+its doc comment still names `Registry::live_hash()`, and no in-tree producer computes the value
+yet (reported gap) — not a new identity scheme.
 
 **Verdicts, lift, and verdict spill are implemented too.** `omp_tool::Verdict<P, F>`
 (`lib.rs:251-260`) is the four-branch durable truth; `ArgIssue` (`lib.rs:292-303`) already carries
@@ -2375,7 +2380,7 @@ still churning. Pulling it forward is a sequencing recommendation, not a design 
   (512), `TruncationResult`, `SpilledText`, and `append_blob_truncation_notice`. It needs one
   `publish` call and the BLAKE3 digest it already has from the blob store.
 - `crates/tool` already retains revision and lift behaviour and "advertises only the live revision"
-  (`crates/tool/README.md`). `Registry::live_hash()`, `Registry::project`, `project_verdict`, and
+  (`crates/tool/README.md`). `Registry::projection_hash()`, `Registry::project`, `project_verdict`, and
   `Tool::lift` all exist, so telemetry needs **no** new rev plumbing here — correcting an earlier
   claim in this document that the loop needed a `rev()` accessor added. It already stamps
   `TOOL_REV_PROP`. What `layer="verdict"` needs is an environment implementation of the existing
