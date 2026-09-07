@@ -282,8 +282,10 @@ async function walkPhysicalSegments(filePath: string, acc: string, segments: rea
 			// A cycle among dangling links (`a -> b`, `b -> a`) never
 			// reaches the outer chain check, which only counts hops of
 			// the FINAL component. Bound this walk's follows and surface
-			// a bounded ELOOP instead of splicing forever.
-			if (++linkHops >= MAX_SYMLINK_HOPS) {
+			// a bounded ELOOP instead of splicing forever. Forty follows
+			// are permitted and only the forty-first rejected, matching
+			// the outer chain loop and Linux's MAXSYMLINKS.
+			if (++linkHops > MAX_SYMLINK_HOPS) {
 				const cyclic = new Error(
 					`ELOOP: symlink chain for ${filePath} exceeds ${MAX_SYMLINK_HOPS} hops (possible cycle)`,
 				) as Error & { code?: string };
@@ -330,10 +332,11 @@ function enotDir(message: string): Error & { code?: string } {
  * rename cannot EXDEV across mounts); its mode takes only the OWNER bits of
  * the referent's current mode — credential-bearing configs drop group/world
  * bits exactly like an unconditional 0o600 did, while stricter-than-600 owner
- * modes survive, and a new file falls back to owner-only — and is chmod'd
- * explicitly because creation modes pass through umask. The rename itself goes
- * through {@link replaceFileAtomically}, so Windows `EPERM`/`EEXIST`
- * replacement failures recover instead of failing the write.
+ * modes survive, and a new file, or a referent with no owner bits at all,
+ * falls back to owner-only — and is chmod'd explicitly because creation modes
+ * pass through umask. The rename itself goes through {@link
+ * replaceFileAtomically}, so Windows `EPERM`/`EEXIST` replacement failures
+ * recover instead of failing the write.
  */
 export async function publishSerializedConfig(writePath: string, content: string): Promise<void> {
 	const dir = path.dirname(writePath);
@@ -341,7 +344,12 @@ export async function publishSerializedConfig(writePath: string, content: string
 
 	let mode = 0o600;
 	try {
-		mode = (await fs.promises.stat(writePath)).mode & 0o700;
+		const referentMode = (await fs.promises.stat(writePath)).mode & 0o700;
+		// A referent whose access comes only from group/world bits or an ACL
+		// masks to 0 — publishing mode 0 would leave the replacement config
+		// unreadable even by its owner, where these writers previously
+		// created 0o600. Keep the owner-only default instead.
+		if (referentMode !== 0) mode = referentMode;
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}

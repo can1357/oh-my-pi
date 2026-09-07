@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { addMCPServer, readDisabledServers, readMCPConfigFile, setServerDisabled } from "../../src/mcp/config-writer";
-import { withConfigFileLock } from "../../src/utils/atomic-file";
+import { publishSerializedConfig, withConfigFileLock } from "../../src/utils/atomic-file";
 
 describe("config-writer concurrent mutations", () => {
 	let dir: string;
@@ -104,6 +104,23 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 
 		await setServerDisabled(linkB, "alpha", true);
 		expect((await fs.stat(ownerReadOnly)).mode & 0o777).toBe(0o400);
+	});
+
+	it("falls back to owner-only mode when the referent has no owner bits", async () => {
+		// A referent whose access comes only from group/world bits or an ACL
+		// masks to mode 0 — publishing that would leave the config unreadable
+		// even by its owner, where the writers previously created 0o600. The
+		// full read-modify-write cannot exercise this (reading a 0o060
+		// referent fails with EACCES before the publisher runs), so the
+		// shared publisher's own contract is asserted directly.
+		const target = path.join(dir, "group-only.json");
+		await fs.writeFile(target, JSON.stringify({ mcpServers: {} }));
+		await fs.chmod(target, 0o060);
+
+		await publishSerializedConfig(target, JSON.stringify({ mcpServers: { alpha: { type: "stdio", command: "a" } } }));
+
+		expect((await fs.stat(target)).mode & 0o777).toBe(0o600);
+		expect(JSON.parse(await fs.readFile(target, "utf8")).mcpServers?.alpha).toBeDefined();
 	});
 
 	it("follows a directory symlink inside a dangling relative target before applying ..", async () => {
@@ -245,6 +262,36 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		expect((await fs.lstat(linkDir)).isSymbolicLink()).toBe(true);
 		const config = await readMCPConfigFile(path.join(dir, "missing", "dotfiles", "mcp.json"));
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
+	});
+
+	it("permits exactly forty ancestor symlink hops and rejects the forty-first", async () => {
+		// Linux MAXSYMLINKS resolves forty symlink traversals and fails on
+		// the forty-first; the dangling-ancestor walk must match that
+		// boundary so a maximally deep (but legal) chain still recreates its
+		// referent instead of surfacing ELOOP one hop early.
+		const hopChain = async (base: string, links: number): Promise<string> => {
+			for (let i = 0; i < links; i++) {
+				// a0 -> a1 -> …; the last link names the missing directory
+				// the write must recreate through the chain.
+				const target = i + 1 < links ? `a${i + 1}` : "missing-dir";
+				await fs.symlink(target, path.join(base, `a${i}`));
+			}
+			return path.join(base, "a0", "mcp.json");
+		};
+
+		const forty = path.join(dir, "forty");
+		await fs.mkdir(forty);
+		await addMCPServer(await hopChain(forty, 40), "alpha", { type: "stdio", command: "a" });
+		const config = await readMCPConfigFile(path.join(forty, "a0", "mcp.json"));
+		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
+
+		const fortyOne = path.join(dir, "forty-one");
+		await fs.mkdir(fortyOne);
+		await expect(
+			addMCPServer(await hopChain(fortyOne, 41), "alpha", { type: "stdio", command: "a" }),
+		).rejects.toMatchObject({
+			code: "ELOOP",
+		});
 	});
 
 	it("walks an alias and .. in a missing leaf path physically, not lexically", async () => {
