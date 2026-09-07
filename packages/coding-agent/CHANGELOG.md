@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence.
+- Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence ([#11094](https://github.com/can1357/oh-my-pi/pull/11094) by [@camjac251](https://github.com/camjac251)).
 
 ## [18.1.12] - 2026-09-06
 
