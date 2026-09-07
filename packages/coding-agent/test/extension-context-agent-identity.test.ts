@@ -4,19 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
-import { ExtensionRunner, type ExtensionRunnerIdentityInput } from "../src/extensibility/extensions/runner";
+import { ExtensionRunner } from "../src/extensibility/extensions/runner";
+import type { AgentIdentity } from "../src/extensibility/extensions/types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../src/registry/agent-registry";
-import { createAgentSession } from "../src/sdk";
+import type { AgentSession } from "../src/session/agent-session";
+import { createAgentSession, type CreateAgentSessionOptions } from "../src/sdk";
 import { AuthStorage } from "../src/session/auth-storage";
 
-/**
- * Minimal construction matching test/extension-context-async-jobs.test.ts;
- * the trailing identity input is optional, so the omission test omits it entirely.
- *
- * The host (sdk.ts) resolves `parentChain` eagerly from the registry; these
- * helpers mirror that walk directly instead of involving a registry.
- */
-function makeRunner(identity?: ExtensionRunnerIdentityInput): ExtensionRunner {
+function makeRunner(identity?: AgentIdentity): ExtensionRunner {
 	return new ExtensionRunner(
 		[],
 		{} as never,
@@ -31,31 +26,91 @@ function makeRunner(identity?: ExtensionRunnerIdentityInput): ExtensionRunner {
 	);
 }
 
+async function withTestSession(
+	customOptions: Partial<CreateAgentSessionOptions>,
+	fn: (session: AgentSession, registry: AgentRegistry) => Promise<void>,
+): Promise<void> {
+	const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-identity-sdk-"));
+	const registry = (customOptions.agentRegistry as AgentRegistry | undefined) ?? new AgentRegistry();
+	const authStorage = await AuthStorage.create(":memory:");
+	try {
+		const { session } = await createAgentSession({
+			cwd: path.join(tempDir, "project"),
+			agentDir: path.join(tempDir, "agent"),
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage),
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			toolNames: [],
+			enableMCP: false,
+			enableLsp: false,
+			...customOptions,
+			agentRegistry: registry,
+		});
+		try {
+			await fn(session, registry);
+		} finally {
+			await session.dispose();
+		}
+	} finally {
+		authStorage.close();
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	}
+}
+
+describe("AgentRegistry.resolveParentChain", () => {
+	it("returns an empty chain for undefined parent or Main", () => {
+		const registry = new AgentRegistry();
+		expect(registry.resolveParentChain(undefined, "Worker")).toEqual([]);
+		expect(registry.resolveParentChain(MAIN_AGENT_ID, "Worker")).toEqual([]);
+	});
+
+	it("resolves multi-level ancestor chain nearest-first and stops at Main", () => {
+		const registry = new AgentRegistry();
+		registry.register({ id: MAIN_AGENT_ID, displayName: "Main", kind: "main", session: null });
+		registry.register({ id: "P1", displayName: "p1", kind: "sub", parentId: MAIN_AGENT_ID, session: null });
+		registry.register({ id: "P2", displayName: "p2", kind: "sub", parentId: "P1", session: null });
+
+		expect(registry.resolveParentChain("P2", "Worker")).toEqual(["P2", "P1"]);
+		expect(registry.resolveParentChain("P1", "P2")).toEqual(["P1"]);
+	});
+
+	it("terminates on cyclic parent links and never includes the self id", () => {
+		const registry = new AgentRegistry();
+		registry.register({ id: MAIN_AGENT_ID, displayName: "Main", kind: "main", session: null });
+		registry.register({ id: "B", displayName: "bee", kind: "sub", parentId: "A", session: null });
+		registry.register({ id: "A", displayName: "ay", kind: "sub", parentId: "B", session: null });
+
+		// For A: parent is B, B's parent is A (self) -> loop terminates, chain is ["B"]
+		expect(registry.resolveParentChain("B", "A")).toEqual(["B"]);
+		// For B: parent is A, A's parent is B (self) -> loop terminates, chain is ["A"]
+		expect(registry.resolveParentChain("A", "B")).toEqual(["A"]);
+	});
+
+	it("handles a self-referential parent without infinite loop", () => {
+		const registry = new AgentRegistry();
+		registry.register({ id: "SelfLoop", displayName: "self", kind: "sub", parentId: "SelfLoop", session: null });
+
+		expect(registry.resolveParentChain("SelfLoop", "SelfLoop")).toEqual([]);
+	});
+
+	it("stops when a parent link is missing from the registry", () => {
+		const registry = new AgentRegistry();
+		registry.register({ id: "P1", displayName: "p1", kind: "sub", parentId: "MissingParent", session: null });
+
+		expect(registry.resolveParentChain("P1", "Worker")).toEqual(["P1", "MissingParent"]);
+	});
+});
+
 describe("ExtensionContext agentIdentity", () => {
 	it("reports undefined identity when constructed without one (no fabricated Main)", () => {
 		const runner = makeRunner();
 
 		expect(runner.createContext().agentIdentity).toBeUndefined();
-	});
-
-	it("reports a subagent's direct parentId but excludes Main from the parent chain", () => {
-		const runner = makeRunner({
-			kind: "sub",
-			depth: 1,
-			agentId: "C1",
-			displayName: "researcher",
-			parentId: MAIN_AGENT_ID,
-			parentChain: [],
-		});
-
-		expect(runner.createContext().agentIdentity).toEqual({
-			kind: "sub",
-			depth: 1,
-			agentId: "C1",
-			displayName: "researcher",
-			parentId: MAIN_AGENT_ID,
-			parentChain: [],
-		});
 	});
 
 	it("omits the parentId key for a top-level session", () => {
@@ -67,7 +122,13 @@ describe("ExtensionContext agentIdentity", () => {
 			parentChain: [],
 		}).createContext().agentIdentity;
 
-		expect(identity).toEqual({ kind: "main", depth: 0, agentId: "Main", displayName: "Main", parentChain: [] });
+		expect(identity).toEqual({
+			kind: "main",
+			depth: 0,
+			agentId: MAIN_AGENT_ID,
+			displayName: "Main",
+			parentChain: [],
+		});
 		// Key absence, not undefined-valued key: toEqual cannot tell them apart,
 		// but consumers checking `"parentId" in identity` (or Object.keys) can.
 		expect(Object.hasOwn(identity ?? {}, "parentId")).toBe(false);
@@ -94,22 +155,6 @@ describe("ExtensionContext agentIdentity", () => {
 		expect(runner.createContext().agentIdentity?.parentChain).toEqual(["P1", "GP"]);
 	});
 
-	it("terminates on cyclic parent links and never includes the agent's own id", () => {
-		// The cycle A -> B -> A is cut by seeding the walk with A's own id: the
-		// chain is the true ancestors reached before the loop closes ("B"), not
-		// `["B", "A"]` with A reappearing in its own ancestry.
-		const identity = makeRunner({
-			kind: "sub",
-			depth: 1,
-			agentId: "A",
-			displayName: "a",
-			parentId: "B",
-			parentChain: ["B"],
-		}).createContext().agentIdentity;
-
-		expect(identity?.parentChain).toEqual(["B"]);
-	});
-
 	it("hands handlers an immutable identity so one extension cannot corrupt it for others", () => {
 		const runner = makeRunner({
 			kind: "sub",
@@ -133,30 +178,16 @@ describe("ExtensionContext agentIdentity", () => {
 	});
 
 	it("classifies a parentAgentId-only SDK caller by the pre-existing gate inputs (additive)", async () => {
-		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-identity-sdk-link-"));
 		const registry = new AgentRegistry();
 		registry.register({ id: "P1", displayName: "planner", kind: "sub", parentId: MAIN_AGENT_ID, session: null });
-		const authStorage = await AuthStorage.create(":memory:");
-		try {
-			const { session } = await createAgentSession({
-				cwd: path.join(tempDir, "project"),
-				agentDir: path.join(tempDir, "agent"),
-				authStorage,
-				modelRegistry: new ModelRegistry(authStorage),
-				settings: Settings.isolated(),
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				toolNames: [],
-				enableMCP: false,
-				enableLsp: false,
+
+		await withTestSession(
+			{
 				agentRegistry: registry,
 				agentId: "C1",
 				parentAgentId: "P1",
-			});
-			try {
+			},
+			async session => {
 				const identity = session.extensionRunner?.createContext().agentIdentity;
 				// Identity strictly observes the pre-existing classification
 				// (`taskDepth > 0 || parentTaskPrefix`): a parentAgentId-only
@@ -168,45 +199,23 @@ describe("ExtensionContext agentIdentity", () => {
 				// Registry registration keeps the pre-PR classification too.
 				expect(registry.get("C1")?.kind).toBe("main");
 				expect(registry.get("C1")?.displayName).toBe("main");
-			} finally {
-				await session.dispose();
-			}
-		} finally {
-			authStorage.close();
-			await fsp.rm(tempDir, { recursive: true, force: true });
-		}
+			},
+		);
 	});
 
 	it("reports the documented /tan fork identity through the public SDK path", async () => {
-		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-identity-sdk-tan-"));
 		const registry = new AgentRegistry();
 		registry.register({ id: MAIN_AGENT_ID, displayName: "Main", kind: "main", session: null });
-		const authStorage = await AuthStorage.create(":memory:");
-		try {
-			// Options mirror TanCommandController.start(): parentTaskPrefix is
-			// always truthy, taskDepth is never set, the owning main session is
-			// the parentAgentId.
-			const { session } = await createAgentSession({
-				cwd: path.join(tempDir, "project"),
-				agentDir: path.join(tempDir, "agent"),
-				authStorage,
-				modelRegistry: new ModelRegistry(authStorage),
-				settings: Settings.isolated(),
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				toolNames: [],
-				enableMCP: false,
-				enableLsp: false,
+
+		await withTestSession(
+			{
 				agentRegistry: registry,
 				agentId: "Tan-1",
 				agentDisplayName: "tan",
 				parentTaskPrefix: "Tan-1",
 				parentAgentId: MAIN_AGENT_ID,
-			});
-			try {
+			},
+			async session => {
 				const identity = session.extensionRunner?.createContext().agentIdentity;
 				// Documented special tan-fork identity: classified "sub" by the
 				// pre-existing parentTaskPrefix input, depth 0 (no taskDepth),
@@ -220,46 +229,23 @@ describe("ExtensionContext agentIdentity", () => {
 					parentChain: [],
 				});
 				expect(registry.get("Tan-1")?.kind).toBe("sub");
-			} finally {
-				await session.dispose();
-			}
-		} finally {
-			authStorage.close();
-			await fsp.rm(tempDir, { recursive: true, force: true });
-		}
+			},
+		);
 	});
 
 	it("walks a cyclic agent registry to termination, self-exclusion, and nearest-first order through the public SDK path", async () => {
-		// Regression guard for the sdk.ts parent-chain walk: the registry holds a
-		// genuine A -> B -> A cycle, so a `seen`-less walk would loop forever and
-		// an unseeded one would emit ["B", "A"]. The walk must cut at A's own id,
-		// exclude "Main", and report the pre-cycle ancestors nearest-first.
-		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-identity-sdk-cycle-"));
 		const registry = new AgentRegistry();
 		registry.register({ id: MAIN_AGENT_ID, displayName: "Main", kind: "main", session: null });
 		registry.register({ id: "B", displayName: "bee", kind: "sub", parentId: "A", session: null });
 		registry.register({ id: "A", displayName: "ay", kind: "sub", parentId: "B", session: null });
-		const authStorage = await AuthStorage.create(":memory:");
-		try {
-			const { session } = await createAgentSession({
-				cwd: path.join(tempDir, "project"),
-				agentDir: path.join(tempDir, "agent"),
-				authStorage,
-				modelRegistry: new ModelRegistry(authStorage),
-				settings: Settings.isolated(),
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				toolNames: [],
-				enableMCP: false,
-				enableLsp: false,
+
+		await withTestSession(
+			{
 				agentRegistry: registry,
 				agentId: "A",
 				parentAgentId: "B",
-			});
-			try {
+			},
+			async session => {
 				const identity = session.extensionRunner?.createContext().agentIdentity;
 				// A's parent chain: B (parent), then B's parent A — the agent's own
 				// id, already seeded into `seen`, so the cycle terminates and A
@@ -267,44 +253,23 @@ describe("ExtensionContext agentIdentity", () => {
 				expect(identity?.agentId).toBe("A");
 				expect(identity?.parentId).toBe("B");
 				expect(identity?.parentChain).toEqual(["B"]);
-			} finally {
-				await session.dispose();
-			}
-		} finally {
-			authStorage.close();
-			await fsp.rm(tempDir, { recursive: true, force: true });
-		}
+			},
+		);
 	});
 
 	it("reports a task-subagent identity for an ordinary taskDepth spawn through the public SDK path", async () => {
-		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-identity-sdk-depth-"));
 		const registry = new AgentRegistry();
 		registry.register({ id: MAIN_AGENT_ID, displayName: "Main", kind: "main", session: null });
-		const authStorage = await AuthStorage.create(":memory:");
-		try {
-			// The ordinary executor subagent shape: taskDepth > 0 supplied
-			// without parentTaskPrefix, so only the taskDepth gate marks it.
-			const { session } = await createAgentSession({
-				cwd: path.join(tempDir, "project"),
-				agentDir: path.join(tempDir, "agent"),
-				authStorage,
-				modelRegistry: new ModelRegistry(authStorage),
-				settings: Settings.isolated(),
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				toolNames: [],
-				enableMCP: false,
-				enableLsp: false,
+
+		await withTestSession(
+			{
 				agentRegistry: registry,
 				agentId: "S1",
 				agentDisplayName: "researcher",
 				parentAgentId: MAIN_AGENT_ID,
 				taskDepth: 1,
-			});
-			try {
+			},
+			async session => {
 				const identity = session.extensionRunner?.createContext().agentIdentity;
 				expect(identity).toEqual({
 					kind: "sub",
@@ -315,12 +280,7 @@ describe("ExtensionContext agentIdentity", () => {
 					parentChain: [],
 				});
 				expect(registry.get("S1")?.kind).toBe("sub");
-			} finally {
-				await session.dispose();
-			}
-		} finally {
-			authStorage.close();
-			await fsp.rm(tempDir, { recursive: true, force: true });
-		}
+			},
+		);
 	});
 });

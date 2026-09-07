@@ -434,24 +434,6 @@ interface ToolRegistrationScope {
 	closed: boolean;
 }
 
-/**
- * Identity of the agent a runner serves, resolved by the host at construction
- * so extension contexts can expose {@link AgentIdentity}. Unlike `AgentRef`,
- * `kind` is the narrowed `"main" | "sub"` — a runner always fronts a live
- * session, so the registry-only `advisor` kind is unreachable here. The host
- * resolves `parentChain` eagerly (registry links exist before the child is
- * created), so identity is fixed at session creation — no first-access timing.
- * `parentId` is omitted for the top-level session.
- */
-export interface ExtensionRunnerIdentityInput {
-	kind: "main" | "sub";
-	depth: number;
-	agentId: string;
-	displayName: string;
-	parentId?: string;
-	parentChain: readonly string[];
-}
-
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
 	#mode: ExtensionMode = "print";
@@ -627,7 +609,7 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
-		agentIdentity?: ExtensionRunnerIdentityInput,
+		agentIdentity?: AgentIdentity,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;

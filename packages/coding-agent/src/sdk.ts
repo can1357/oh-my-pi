@@ -2805,16 +2805,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// coupling inside the runner. Walk stops at "Main", is self-seeded
 		// (a registry cycle looping back through this agent ends before the
 		// self id enters the chain), and reports nearest-first.
-		const agentParentChain: string[] = [];
-		{
-			const seen = new Set<string>([resolvedAgentId]);
-			let cursor = options.parentAgentId;
-			while (cursor !== undefined && cursor !== MAIN_AGENT_ID && !seen.has(cursor)) {
-				agentParentChain.push(cursor);
-				seen.add(cursor);
-				cursor = agentRegistry.get(cursor)?.parentId;
-			}
-		}
+		const agentParentChain = agentRegistry.resolveParentChain(options.parentAgentId, resolvedAgentId);
 		const extensionRunner: ExtensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
 			extensionsResult.runtime,
