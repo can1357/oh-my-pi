@@ -12,6 +12,7 @@
 - Fixed Grok Bot file-backed model caches to scope by the real renewer instead of the shared `<authenticated>` sentinel.
 - Fixed Grok Bot file-only auth so the authenticated sentinel is never used as a renewal credential override, and added `sand-tools-wire` for router tool-wire policy.
 - Bundled Grok Bot router rows now include `sandToolsWire` from KDL so cold starts without AvailableModels still use product parent-chat/automation wires.
+- Grok Bot auth is only advertised when both the renewer and machine id are present, so models are not selectable before streaming can succeed.
 ### Fixed
 
 - Fixed Codex Astra using its larger window without opt-in; its default is 272K and Extended Context enables at least the documented 1.05M window.

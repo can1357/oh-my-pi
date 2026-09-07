@@ -203,6 +203,7 @@ describe("grokbot secrets dotenv parsing", () => {
 		const previousAgentDir = getAgentDir();
 		const previousGrokbot = process.env.GROKBOT_RENEWAL_CREDENTIAL;
 		const previousSand = process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+		const previousMachine = process.env.GROKBOT_MACHINE_ID;
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-env-sentinel-"));
 		dirs.push(agentDir);
 		await fs.mkdir(path.join(agentDir, "secrets"), { recursive: true });
@@ -213,6 +214,7 @@ describe("grokbot secrets dotenv parsing", () => {
 		try {
 			delete process.env.GROKBOT_RENEWAL_CREDENTIAL;
 			delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+			delete process.env.GROKBOT_MACHINE_ID;
 			setAgentDir(agentDir);
 			expect(resolveGrokbotEnvApiKey()).toBe("<authenticated>");
 			const cfg = await loadGrokbotConfig();
@@ -223,6 +225,68 @@ describe("grokbot secrets dotenv parsing", () => {
 			else process.env.GROKBOT_RENEWAL_CREDENTIAL = previousGrokbot;
 			if (previousSand === undefined) delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
 			else process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL = previousSand;
+			if (previousMachine === undefined) delete process.env.GROKBOT_MACHINE_ID;
+			else process.env.GROKBOT_MACHINE_ID = previousMachine;
+		}
+	});
+
+	test("renewal without machine id does not advertise Grok Bot auth", async () => {
+		// Incomplete pairs must stay unavailable so ModelRegistry cannot select a
+		// model that streamGrokBot will always reject with "machine id missing".
+		const previousAgentDir = getAgentDir();
+		const previousGrokbot = process.env.GROKBOT_RENEWAL_CREDENTIAL;
+		const previousSand = process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+		const previousMachine = process.env.GROKBOT_MACHINE_ID;
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-env-no-machine-"));
+		dirs.push(agentDir);
+		await fs.mkdir(path.join(agentDir, "secrets"), { recursive: true });
+		await Bun.write(path.join(agentDir, "secrets", "grokbot.env"), "GROKBOT_RENEWAL_CREDENTIAL=file-only-renewal\n");
+		try {
+			delete process.env.GROKBOT_RENEWAL_CREDENTIAL;
+			delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+			delete process.env.GROKBOT_MACHINE_ID;
+			setAgentDir(agentDir);
+			expect(resolveGrokbotEnvApiKey()).toBeUndefined();
+
+			process.env.GROKBOT_RENEWAL_CREDENTIAL = "env-renewal";
+			expect(resolveGrokbotEnvApiKey()).toBeUndefined();
+
+			process.env.GROKBOT_MACHINE_ID = "env-machine";
+			expect(resolveGrokbotEnvApiKey()).toBe("env-renewal");
+		} finally {
+			setAgentDir(previousAgentDir);
+			if (previousGrokbot === undefined) delete process.env.GROKBOT_RENEWAL_CREDENTIAL;
+			else process.env.GROKBOT_RENEWAL_CREDENTIAL = previousGrokbot;
+			if (previousSand === undefined) delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+			else process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL = previousSand;
+			if (previousMachine === undefined) delete process.env.GROKBOT_MACHINE_ID;
+			else process.env.GROKBOT_MACHINE_ID = previousMachine;
+		}
+	});
+
+	test("env renewal pairs with secrets-file machine id to advertise auth", async () => {
+		const previousAgentDir = getAgentDir();
+		const previousGrokbot = process.env.GROKBOT_RENEWAL_CREDENTIAL;
+		const previousSand = process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+		const previousMachine = process.env.GROKBOT_MACHINE_ID;
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-env-pair-"));
+		dirs.push(agentDir);
+		await fs.mkdir(path.join(agentDir, "secrets"), { recursive: true });
+		await Bun.write(path.join(agentDir, "secrets", "grokbot.env"), "GROKBOT_MACHINE_ID=file-machine\n");
+		try {
+			delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+			delete process.env.GROKBOT_MACHINE_ID;
+			process.env.GROKBOT_RENEWAL_CREDENTIAL = "env-renewal";
+			setAgentDir(agentDir);
+			expect(resolveGrokbotEnvApiKey()).toBe("env-renewal");
+		} finally {
+			setAgentDir(previousAgentDir);
+			if (previousGrokbot === undefined) delete process.env.GROKBOT_RENEWAL_CREDENTIAL;
+			else process.env.GROKBOT_RENEWAL_CREDENTIAL = previousGrokbot;
+			if (previousSand === undefined) delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+			else process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL = previousSand;
+			if (previousMachine === undefined) delete process.env.GROKBOT_MACHINE_ID;
+			else process.env.GROKBOT_MACHINE_ID = previousMachine;
 		}
 	});
 
@@ -252,11 +316,11 @@ describe("grokbot secrets dotenv parsing", () => {
 		}
 	});
 
-
 	test("file-backed cache ids expand the authenticated sentinel to the renewer", async () => {
 		const previousAgentDir = getAgentDir();
 		const previousGrokbot = process.env.GROKBOT_RENEWAL_CREDENTIAL;
 		const previousSand = process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+		const previousMachine = process.env.GROKBOT_MACHINE_ID;
 		const agentDirA = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-cache-a-"));
 		const agentDirB = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-cache-b-"));
 		dirs.push(agentDirA, agentDirB);
@@ -273,6 +337,7 @@ describe("grokbot secrets dotenv parsing", () => {
 		try {
 			delete process.env.GROKBOT_RENEWAL_CREDENTIAL;
 			delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+			delete process.env.GROKBOT_MACHINE_ID;
 			setAgentDir(agentDirA);
 			expect(resolveGrokbotEnvApiKey()).toBe(GROKBOT_AUTHENTICATED_SENTINEL);
 			expect(resolveGrokbotCacheCredential(GROKBOT_AUTHENTICATED_SENTINEL)).toBe("file-renewal-a");
@@ -307,9 +372,10 @@ describe("grokbot secrets dotenv parsing", () => {
 			else process.env.GROKBOT_RENEWAL_CREDENTIAL = previousGrokbot;
 			if (previousSand === undefined) delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
 			else process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL = previousSand;
+			if (previousMachine === undefined) delete process.env.GROKBOT_MACHINE_ID;
+			else process.env.GROKBOT_MACHINE_ID = previousMachine;
 		}
 	});
-
 });
 
 describe("grokbot backend URL join", () => {
@@ -520,5 +586,4 @@ describe("grokbot AvailableModels headers", () => {
 		// Without clearing on 401, the second call would reuse tok-1 and never remint.
 		expect(mintCount).toBe(2);
 	});
-
 });

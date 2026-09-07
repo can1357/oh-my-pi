@@ -325,7 +325,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * discovery/seed rows can stay neutral (`reasoning: false`) while KDL
 	 * upgrades specific routers (e.g. sand-default) without id compares in TS.
 	 */
-	"reasoning": { key: "reasoning", set: "catalog", shape: "scalar" },
+	reasoning: { key: "reasoning", set: "catalog", shape: "scalar" },
 	/** Reviewed native tool-calling support. Live discovery may leave unset; KDL can force false. */
 	"supports-tools": { key: "supportsTools", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },

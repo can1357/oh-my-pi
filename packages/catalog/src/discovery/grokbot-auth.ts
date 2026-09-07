@@ -173,7 +173,6 @@ export async function resolveGrokbotDiscoveryIdentityAsync(overrides?: {
 	};
 }
 
-/** Sync resolver for registry `envKeys` / AuthStorage availability. */
 /**
  * Sync resolver for registry `envKeys` / AuthStorage availability.
  *
@@ -182,13 +181,21 @@ export async function resolveGrokbotDiscoveryIdentityAsync(overrides?: {
  * that auth is available via the shared `<authenticated>` sentinel — migrate
  * skips that sentinel, so a file-backed renewer is never uploaded without the
  * paired machine id.
+ *
+ * Both halves of the auth pair are required: a renewer without
+ * `GROKBOT_MACHINE_ID` (env or secrets file) must not advertise availability,
+ * or ModelRegistry would expose models that `streamGrokBot` always rejects.
  */
 export function resolveGrokbotEnvApiKey(): string | undefined {
 	const fromEnv = $env.GROKBOT_RENEWAL_CREDENTIAL || $env.SAND_INFERENCE_RENEWAL_CREDENTIAL || undefined;
-	if (fromEnv) return fromEnv;
+	const machineFromEnv = $env.GROKBOT_MACHINE_ID?.trim() || undefined;
+	if (fromEnv && machineFromEnv) return fromEnv;
+
 	const file = loadGrokbotSecretFileSync();
-	const fromFile = file.GROKBOT_RENEWAL_CREDENTIAL || file.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
-	return fromFile ? GROKBOT_AUTHENTICATED_SENTINEL : undefined;
+	const renewal = fromEnv || file.GROKBOT_RENEWAL_CREDENTIAL || file.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
+	const machineId = machineFromEnv || file.GROKBOT_MACHINE_ID || "";
+	if (!renewal.trim() || !machineId.trim()) return undefined;
+	return fromEnv ? fromEnv : GROKBOT_AUTHENTICATED_SENTINEL;
 }
 
 /**
@@ -202,11 +209,7 @@ export function resolveGrokbotCacheCredential(apiKey?: string): string {
 	const fromEnv = $env.GROKBOT_RENEWAL_CREDENTIAL || $env.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
 	if (fromEnv) return fromEnv;
 	const file = loadGrokbotSecretFileSync();
-	return (
-		file.GROKBOT_RENEWAL_CREDENTIAL ||
-		file.SAND_INFERENCE_RENEWAL_CREDENTIAL ||
-		""
-	);
+	return file.GROKBOT_RENEWAL_CREDENTIAL || file.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
 }
 
 export async function loadGrokbotConfig(renewalOverride?: string): Promise<GrokbotConfig> {
@@ -215,8 +218,7 @@ export async function loadGrokbotConfig(renewalOverride?: string): Promise<Grokb
 	const explicitVersion = $env.GROKBOT_CLIENT_VERSION || file.GROKBOT_CLIENT_VERSION || undefined;
 	// ModelRegistry may forward the env-hook sentinel as apiKey; never mint with it.
 	const override = renewalOverride?.trim();
-	const effectiveOverride =
-		override && override !== GROKBOT_AUTHENTICATED_SENTINEL ? override : undefined;
+	const effectiveOverride = override && override !== GROKBOT_AUTHENTICATED_SENTINEL ? override : undefined;
 	return {
 		renewal:
 			effectiveOverride ||
