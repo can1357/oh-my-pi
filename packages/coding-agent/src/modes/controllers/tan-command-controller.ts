@@ -193,14 +193,45 @@ export class TanCommandController {
 								timestamp: Date.now(),
 							});
 						};
-						// Compaction summarizes the fork notice away with the rest of the
-						// history, after which the clone re-adopts the parent's task as its
-						// own (the summary blends both). Re-inject after every successful
-						// compaction so the fork boundary survives summarization.
+						// The fork's request enters the transcript only once the initial
+						// prompt dispatches (its first `agent_start`). Compaction that
+						// fires before then is the pre-prompt pass on the inherited
+						// context: the pending request has not been appended yet and the
+						// dispatch adds it immediately after, so restoring it here would
+						// send the assignment twice — re-inject only the notice above it.
+						// Once the request is in history, restore the notice and request
+						// together only when summarization actually dropped the request:
+						// the notice must never claim a request that no longer follows it,
+						// and a request the summarizer kept (a recent turn within
+						// `compaction.keepRecentTokens`, or a prior re-injection still
+						// live) must not be duplicated onto the tail, which would present
+						// the same assignment again and risk restarting completed work.
+						let requestDispatched = false;
 						const unsubscribeCompaction = clone.subscribe(event => {
-							if (event.type === "auto_compaction_end" && event.result && !event.aborted) {
-								injectContextSwitch();
+							if (event.type === "agent_start") {
+								requestDispatched = true;
+								return;
 							}
+							if (event.type !== "auto_compaction_end" || !event.result || event.aborted) return;
+							if (!requestDispatched) {
+								injectContextSwitch();
+								return;
+							}
+							const requestRetained = (clone?.agent.state.messages ?? []).some(message => {
+								if (message.role !== "user") return false;
+								const content = message.content;
+								return typeof content === "string"
+									? content === trimmedWork
+									: content.some(part => part.type === "text" && part.text === trimmedWork);
+							});
+							if (requestRetained) return;
+							injectContextSwitch();
+							clone?.agent.appendMessage({
+								role: "user",
+								content: [{ type: "text", text: trimmedWork }],
+								attribution: "user",
+								timestamp: Date.now(),
+							});
 						});
 						try {
 							if (signal.aborted) {
