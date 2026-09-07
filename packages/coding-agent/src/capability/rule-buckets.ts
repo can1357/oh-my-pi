@@ -9,7 +9,7 @@
  *   1. disabledRules  — dropped before any bucket assignment
  *   2. builtin drop   — `builtinRules === false` drops `builtin-defaults` rules
  *   3. agents scope   — rules whose `agents` globs do not match `options.agentName` are dropped
- *   4. TTSR           — non-empty `condition`/`astCondition` that `TtsrManager.addRule` accepts
+ *   4. TTSR           — non-empty `condition`/`astCondition` the manager already tracks or newly accepts
  *   5. always         — `alwaysApply === true`
  *   6. rulebook       — has a `description`
  */
@@ -32,6 +32,8 @@ export interface BucketRulesOptions {
 	 * from every bucket. Omit to disable agent scoping (CLI inventory listings).
 	 */
 	agentName?: string;
+	/** Replace existing TTSR registrations before bucketing this complete rule snapshot. */
+	replaceTtsrRules?: boolean;
 }
 
 /**
@@ -51,17 +53,22 @@ export function bucketRules(
 		if (name.length > 0) disabled.add(name);
 	}
 
-	const rulebookRules: Rule[] = [];
-	const alwaysApplyRules: Rule[] = [];
-
+	const includedRules: Rule[] = [];
 	for (const rule of rules) {
 		if (disabled.has(rule.name)) continue;
 		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) continue;
 		if (!ruleAppliesToAgent(rule, options.agentName)) continue;
+		includedRules.push(rule);
+	}
 
+	const replacedTtsrNames = options.replaceTtsrRules ? ttsrManager.replaceRules(includedRules) : undefined;
+	const rulebookRules: Rule[] = [];
+	const alwaysApplyRules: Rule[] = [];
+
+	for (const rule of includedRules) {
 		const hasTtsrCondition =
 			(rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
-		const isTtsrRule = hasTtsrCondition ? ttsrManager.addRule(rule) : false;
+		const isTtsrRule = hasTtsrCondition ? (replacedTtsrNames?.has(rule.name) ?? ttsrManager.addRule(rule)) : false;
 		if (isTtsrRule) continue;
 		if (rule.alwaysApply === true) {
 			alwaysApplyRules.push(rule);

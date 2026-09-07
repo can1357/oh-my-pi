@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, prompt } from "@oh-my-pi/pi-utils";
+import { invalidate as invalidateCapabilityCache } from "../../capability";
 import type { Rule } from "../../capability/rule";
 import omfgUserPrompt from "../../prompts/system/omfg-user.md" with { type: "text" };
 import { shortenPath } from "../../tools/render-utils";
@@ -234,6 +235,14 @@ export class OmfgController {
 
 			request.component.setStatus("saving", `Saving ${candidate.rule.name}…`);
 			await Bun.write(target.filePath, candidate.fileContent);
+			// Drop the cached directory snapshot the discovery layer reads, so the next
+			// session-scoped rebuild's rule rediscovery observes this new file instead of
+			// a stale listing that would make `replaceTtsrRules` evict the live rule
+			// registered below (issue #10940 review). Invalidating the file clears its
+			// parent (rules dir); invalidating that dir clears its parent (the config dir)
+			// so a first-ever rule in a freshly created `.omp/rules` is still discovered.
+			invalidateCapabilityCache(target.filePath);
+			invalidateCapabilityCache(path.dirname(target.filePath));
 			if (!this.#isActiveRequest(request)) return { kind: "aborted" };
 
 			const savedRule = buildOmfgRuleForPath(

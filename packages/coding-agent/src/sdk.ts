@@ -1660,27 +1660,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
-	const { ttsrManager, rulebookRules, alwaysApplyRules, allRules } = await logger.time(
-		"discoverTtsrRules",
-		async () => {
-			const { TtsrManager } = await import("./export/ttsr");
-			const ttsrSettings = settings.getGroup("ttsr");
-			const ttsrManager = new TtsrManager(ttsrSettings);
-			const rulesResult =
-				options.rules !== undefined
-					? { items: options.rules, warnings: undefined }
-					: await loadCapability<Rule>(ruleCapability.id, { cwd });
-			const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
-				builtinRules: ttsrSettings.builtinRules,
-				disabledRules: ttsrSettings.disabledRules,
-				agentName: resolvedAgentName,
-			});
-			if (existingSession.injectedTtsrRules.length > 0) {
-				ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
-			}
-			return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
-		},
-	);
+	const discovered = await logger.time("discoverTtsrRules", async () => {
+		const { TtsrManager } = await import("./export/ttsr");
+		const ttsrSettings = settings.getGroup("ttsr");
+		const ttsrManager = new TtsrManager(ttsrSettings);
+		const rulesResult =
+			options.rules !== undefined
+				? { items: options.rules, warnings: undefined }
+				: await loadCapability<Rule>(ruleCapability.id, { cwd });
+		const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
+			builtinRules: ttsrSettings.builtinRules,
+			disabledRules: ttsrSettings.disabledRules,
+			agentName: resolvedAgentName,
+		});
+		if (existingSession.injectedTtsrRules.length > 0) {
+			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
+		}
+		return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
+	});
+	const { ttsrManager, allRules } = discovered;
+	// Mutable so the mid-session prompt rebuild (on /clear and /new) can re-discover
+	// rules from disk, mirroring the context-file refresh below (issue #10940). The
+	// same `ttsrManager` is reused, so restored TTSR injection state survives.
+	let rulebookRules = discovered.rulebookRules;
+	let alwaysApplyRules = discovered.alwaysApplyRules;
 
 	// Resolve contextFiles up-front (it's needed before tool creation). The
 	// workspace tree scan is slow on large repos and we MUST NOT block startup on
@@ -3094,6 +3097,37 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				]);
 				toolSession.contextFiles = contextFiles;
 				session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
+			}
+			// Re-discover rules from disk on every session-scoped rebuild, mirroring the
+			// context-file refresh above. The rule buckets are otherwise frozen at
+			// session creation, so a `RULES.md` (or any rule) created or edited while omp
+			// runs never reaches the prompt on /clear or /new until restart (issue #10940).
+			// resetCapabilities() clears the fs cache at those boundaries, so this observes
+			// the current file. TTSR registrations are replaced from the new snapshot while
+			// injection state is retained only for rule names that remain registered.
+			if (hasSession && options.rules === undefined) {
+				const ttsrSettings = settings.getGroup("ttsr");
+				const rulesResult = await logger.time("rediscoverRules", () =>
+					loadCapability<Rule>(ruleCapability.id, { cwd: promptCwd }),
+				);
+				const buckets = bucketRules(rulesResult.items, ttsrManager, {
+					builtinRules: ttsrSettings.builtinRules,
+					disabledRules: ttsrSettings.disabledRules,
+					agentName: resolvedAgentName,
+					replaceTtsrRules: true,
+				});
+				rulebookRules = buckets.rulebookRules;
+				alwaysApplyRules = buckets.alwaysApplyRules;
+				const nextActiveRules = [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()];
+				// Refresh the session-local snapshots too: `rule://` resolution reads
+				// `toolSession.activeRules` and spawned subagents inherit `toolSession.rules`,
+				// so leaving the construction-time arrays would advertise a new `rule://<name>`
+				// the read tool rejects and hand children the stale set.
+				toolSession.rules = rulesResult.items;
+				toolSession.activeRules = nextActiveRules;
+				if (!options.parentTaskPrefix) {
+					setActiveRules(nextActiveRules);
+				}
 			}
 			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend

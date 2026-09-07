@@ -10,6 +10,7 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { Container, type TUI } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { clearCache, readDirEntries } from "@oh-my-pi/pi-coding-agent/capability/fs";
 
 const PROJECT_OPTION = "This project (.omp/rules)";
 
@@ -130,6 +131,7 @@ beforeAll(async () => {
 
 afterEach(async () => {
 	vi.restoreAllMocks();
+	clearCache();
 	while (tempRoots.length > 0) {
 		const root = tempRoots.pop();
 		if (root) {
@@ -172,5 +174,47 @@ describe("OmfgController", () => {
 		expect(signal?.aborted).toBe(true);
 		expect(controller.hasActiveRequest()).toBe(false);
 		expect(await Bun.file(path.join(harness.projectDir, ".omp", "rules", "ts-no-any.md")).exists()).toBe(false);
+	});
+
+	it("invalidates the discovery cache after saving so rediscovery observes the new rule", async () => {
+		clearCache();
+		const runEphemeralTurn = vi.fn<RunEphemeralTurn>(async () => ({
+			replyText: JSON.stringify({
+				name: "ts-no-any",
+				description: "No any in TS edits",
+				condition: ": any",
+				scope: ["tool:edit(*.ts)", "tool:write(*.ts)"],
+				body: "Use `unknown` instead.",
+			}),
+			assistantMessage: createAssistantMessage([{ type: "text", text: "done" }]),
+		}));
+		const harness = await createHarness({
+			runEphemeralTurn,
+			messages: createMatchingMessages(),
+			selectorChoice: PROJECT_OPTION,
+		});
+		const rulesDir = path.join(harness.projectDir, ".omp", "rules");
+
+		// Warm the discovery cache with the pre-save (absent) directory snapshot, the
+		// state the mid-session rule rediscovery would read on the next prompt rebuild.
+		expect(await readDirEntries(rulesDir)).toHaveLength(0);
+
+		// #registerLive() calls ttsrManager.addRule right after the write + cache
+		// invalidation, so resolving on it awaits the real save signal (no timers).
+		const registered = Promise.withResolvers<void>();
+		harness.ttsrAddRule.mockImplementation(() => {
+			registered.resolve();
+			return true;
+		});
+
+		await new OmfgController(harness.ctx).start("stop using any");
+		await registered.promise;
+
+		const savedRuleFile = path.join(rulesDir, "ts-no-any.md");
+		expect(await Bun.file(savedRuleFile).exists()).toBe(true);
+		expect(harness.ttsrAddRule).toHaveBeenCalled();
+		// Without the post-write invalidation the cache would still serve the empty
+		// snapshot, and `replaceTtsrRules` would evict the freshly registered rule.
+		expect((await readDirEntries(rulesDir)).map(entry => entry.name)).toContain("ts-no-any.md");
 	});
 });
