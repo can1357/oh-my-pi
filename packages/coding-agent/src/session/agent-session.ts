@@ -153,6 +153,7 @@ import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
+import { countRetainableUserTurns, extractMessages, hindsightDocumentIdForSession } from "../hindsight/transcript";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
@@ -795,6 +796,34 @@ export class AgentSession {
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
+	/**
+	 * User turns present when this AgentSession was constructed. Hindsight
+	 * close-tail last-turn resume uses this as the pre-activity baseline so a
+	 * delayed backend start cannot treat an in-progress first prompt as old
+	 * history.
+	 */
+	readonly loadedUserTurnCount: number;
+	/**
+	 * Close-retain baseline for delayed Hindsight startup. Starts as the
+	 * construction snapshot and rebases on `/new`, `/clear`, `/resume`, fork,
+	 * and `/tree` because those switches have no live Hindsight state yet.
+	 */
+	hindsightCloseRetainBaselineTurns: number | undefined;
+	/**
+	 * Retainable-message count for delayed Hindsight startup. Rebases with
+	 * {@link hindsightCloseRetainBaselineTurns} so `/tree` ask re-answers keep
+	 * the pre-continuation boundary instead of treating a later assistant
+	 * reply as loaded history. Left undefined while Hindsight is off so a later
+	 * enable can derive the live transcript instead of treating zero as loaded.
+	 */
+	hindsightLoadedMessageCount: number | undefined;
+	/**
+	 * Retention document overlay for in-place context resets. `/clear` keeps the
+	 * persisted session-manager id, so the overlay is `sessionId:resetBoundaryId`
+	 * reconstructed from the latest persisted reset boundary. Identity-changing
+	 * switches resync it so a branch or resume cannot reuse the source document.
+	 */
+	hindsightDocumentId: string | undefined;
 	readonly #memory: SessionMemory;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
 
@@ -1152,6 +1181,17 @@ export class AgentSession {
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		if (this.settings.get("memory.backend") === "hindsight") {
+			const loaded = extractMessages(this.sessionManager);
+			this.loadedUserTurnCount = loaded.filter(message => message.role === "user").length;
+			this.hindsightCloseRetainBaselineTurns = this.loadedUserTurnCount;
+			this.hindsightLoadedMessageCount = loaded.length;
+		} else {
+			this.loadedUserTurnCount = 0;
+			this.hindsightCloseRetainBaselineTurns = undefined;
+			this.hindsightLoadedMessageCount = undefined;
+		}
+		this.#syncHindsightDocumentId();
 		this.#modelRegistry = config.modelRegistry;
 		this.#extensionRoots =
 			config.extensionRoots ??
@@ -1361,6 +1401,9 @@ export class AgentSession {
 			},
 			refreshBaseSystemPrompt: () => this.#tools.refreshBaseSystemPrompt(),
 			replaceMemoryTools: tools => this.#tools.replaceMemoryTools(tools),
+			rebaseHindsightCloseRetainBaseline: closeRetainBaselineTurns => {
+				this.#rebaseHindsightCloseRetainBaseline(closeRetainBaselineTurns);
+			},
 		};
 		this.#memory = new SessionMemory(memoryHost, {
 			memoryAgentDir: config.memoryAgentDir,
@@ -1853,6 +1896,26 @@ export class AgentSession {
 		void this.#revalidateFallbackChainsAfterModelDiscovery();
 		if (config.rebindModelAfterDiscovery) void this.#rebindActiveModelAfterModelDiscovery();
 	}
+
+	#rebaseHindsightCloseRetainBaseline(closeRetainBaselineTurns?: number): void {
+		if (this.settings.get("memory.backend") !== "hindsight") {
+			this.#clearHindsightDelayedBaselines();
+			return;
+		}
+		const loaded = extractMessages(this.sessionManager);
+		this.hindsightCloseRetainBaselineTurns =
+			closeRetainBaselineTurns ?? loaded.filter(message => message.role === "user").length;
+		this.hindsightLoadedMessageCount = loaded.length;
+	}
+
+	#syncHindsightDocumentId(): void {
+		this.hindsightDocumentId = hindsightDocumentIdForSession(this.sessionManager.getSessionId(), this.sessionManager);
+	}
+
+	#clearHindsightDelayedBaselines(): void {
+		this.hindsightCloseRetainBaselineTurns = undefined;
+		this.hindsightLoadedMessageCount = undefined;
+	}
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this.#modelRegistry;
@@ -2008,6 +2071,10 @@ export class AgentSession {
 	setHindsightSessionState(state: HindsightSessionState | undefined): HindsightSessionState | undefined {
 		const previous = this.#hindsightSessionState;
 		this.#hindsightSessionState = state;
+		// Drop delayed-startup snapshots when the live backend goes away so a
+		// later re-enable derives the current transcript instead of replaying
+		// already-drained construction-time history.
+		if (!state) this.#clearHindsightDelayedBaselines();
 		return previous;
 	}
 
@@ -4536,7 +4603,6 @@ export class AgentSession {
 			shutdownTinyTitleClient(),
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
-			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
 			sharpshooterFlushed,
 		]);
@@ -4553,8 +4619,6 @@ export class AgentSession {
 		this.#movedFromEmptySessionFile = undefined;
 		this.#closeAllProviderSessions("dispose");
 		this.#maintenance.cancelSpeculation();
-		this.setHindsightSessionState(undefined);
-		hindsightState?.dispose();
 		this.#disconnectFromAgent();
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();
@@ -4605,6 +4669,59 @@ export class AgentSession {
 		} catch (error) {
 			logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
 		}
+
+		// Drain Hindsight after persistence handlers have had a chance to append
+		// the terminal assistant message. Doing this in the earlier parallel
+		// teardown can snapshot a user-only tail. Wait for any in-flight cadence
+		// retain to settle first, then give close drain its own budget.
+		// `drainOnClose()` may flush a tool `retainBatch` and then a session
+		// retain; each can consume `retainTimeoutMs`. First-use close may also
+		// PUT the bank (`requestTimeoutMs`) before consolidating, so the drain
+		// deadline covers both retains plus bank setup. RPC shutdown exits as
+		// soon as dispose() returns, which would otherwise kill an in-flight
+		// synchronous retain and drop the below-cadence tail.
+		const retainTimeoutMs = hindsightState?.config?.retainTimeoutMs;
+		const requestTimeoutMs = hindsightState?.config?.requestTimeoutMs;
+		const hindsightRetainTimeoutMs =
+			typeof retainTimeoutMs === "number" && Number.isFinite(retainTimeoutMs)
+				? retainTimeoutMs
+				: (options.drainTimeoutMs ?? POST_PROMPT_DRAIN_TIMEOUT_MS);
+		const hindsightRequestTimeoutMs =
+			typeof requestTimeoutMs === "number" && Number.isFinite(requestTimeoutMs) ? requestTimeoutMs : 0;
+		const hindsightDrainTimeoutMs = hindsightRetainTimeoutMs * 2 + hindsightRequestTimeoutMs;
+		if (hindsightState) {
+			try {
+				await withTimeout(
+					hindsightState.waitForSessionRetainIdle(),
+					hindsightRetainTimeoutMs,
+					"Timed out waiting for in-flight Hindsight retain on dispose",
+				);
+			} catch (error) {
+				logger.warn("Hindsight retain still in flight at dispose deadline", { error: String(error) });
+			}
+		}
+		try {
+			await withTimeout(
+				hindsightState?.drainOnClose() ?? Promise.resolve(),
+				hindsightDrainTimeoutMs,
+				"Timed out draining Hindsight retain on dispose",
+			);
+		} catch (error) {
+			logger.warn("Hindsight retain still draining at dispose deadline", { error: String(error) });
+			try {
+				await withTimeout(
+					hindsightState?.flushRetainQueue() ?? Promise.resolve(),
+					hindsightDrainTimeoutMs,
+					"Timed out flushing Hindsight retain queue on dispose",
+				);
+			} catch (queueError) {
+				logger.warn("Hindsight retain queue still flushing at dispose deadline", {
+					error: String(queueError),
+				});
+			}
+		}
+		this.setHindsightSessionState(undefined);
+		hindsightState?.dispose();
 
 		// Event handlers can reopen the append writer while they persist their
 		// terminal message; that pipeline has drained (or hit the deadline).
@@ -4745,6 +4862,7 @@ export class AgentSession {
 		// newSession()).
 		this.#clearCheckpointRuntimeState();
 		this.#clearSessionScopedToolState();
+		await this.#memory.drainHindsightPendingRetain();
 
 		// Rotate provider-side session state so a provider that keeps conversation
 		// history server-side starts a brand-new exchange rather than resuming the
@@ -4752,7 +4870,6 @@ export class AgentSession {
 		this.#closeAllProviderSessions("reset context");
 		this.#freshProviderSessionId = Bun.randomUUIDv7();
 		this.#syncAgentSessionId();
-		this.#memory.rekeyForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
 
 		// Re-arm the approved-plan reference: the reset dropped the plan-approved
@@ -4766,15 +4883,16 @@ export class AgentSession {
 		// Re-prime the advisors across the conversation boundary and undo any
 		// memory promotion so the next turn rebuilds from the base system prompt.
 		this.#advisors.resetSessionState();
-		await this.#memory.resetContextForNewTranscript();
 
-		// Record a durable boundary on the persisted branch. The collapsed live
-		// transcript and the model-context rebuild start emission after the latest
-		// boundary, so a rebuild across a `/clear` (theme change, focus attach,
-		// on-disk record and the plain `transcript:true` export path keep the full
-		// pre-reset history.
+		// Record a durable boundary on the persisted branch before snapshotting
+		// Hindsight close-tracking. extractMessages starts after this marker, so
+		// the live conversation is empty at reset and only post-clear turns are
+		// treated as a below-cadence tail. The boundary id is the durable overlay
+		// epoch so resume can reconstruct the post-clear document identity.
 		this.sessionManager.appendResetBoundary();
-
+		this.#syncHindsightDocumentId();
+		this.#memory.rekeyForCurrentSessionId();
+		await this.#memory.resetContextForNewTranscript();
 		resetCapabilities();
 		await this.refreshBaseSystemPrompt();
 
@@ -5196,6 +5314,11 @@ export class AgentSession {
 	/** Releases the local startup slot if `signal` still owns it. */
 	endLocalMemoryStartup(signal: AbortSignal): void {
 		this.#memory.endLocalMemoryStartup(signal);
+	}
+
+	/** Track a delayed memory-backend start so leave-path drains wait for it. */
+	trackMemoryBackendStart(start: Promise<unknown>): void {
+		this.#memory.trackBackendStart(start);
 	}
 
 	/** Applies the selected memory backend to runtime state, tools, and prompt. */
@@ -7584,6 +7707,7 @@ export class AgentSession {
 		this.#cancelOwnAsyncJobs();
 		this.#closeAllProviderSessions("new session");
 		await this.#bash.flushPending();
+		await this.#memory.drainHindsightPendingRetain();
 		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 		let sessionTransitioned = false;
 		try {
@@ -7620,6 +7744,7 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			this.#syncHindsightDocumentId();
 			// Drop the frozen system-prompt/tool snapshot and synced message bytes
 			// (mirrors freshSession()/resetSessionContext()): without this the first
 			// post-/new turns keep sending the previous session's StablePrefix, and
@@ -7711,6 +7836,7 @@ export class AgentSession {
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
 		await this.sessionManager.flush();
+		await this.#memory.drainHindsightPendingRetain();
 		let advisorRecordersDetached = false;
 		try {
 			advisorRecordersDetached = true;
@@ -7743,6 +7869,7 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			this.#syncHindsightDocumentId();
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
@@ -8735,6 +8862,9 @@ export class AgentSession {
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
+		if (switchingToDifferentSession) {
+			await this.#memory.drainHindsightPendingRetain();
+		}
 		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
@@ -8768,7 +8898,9 @@ export class AgentSession {
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
-
+		const previousHindsightConversationTracking = this.#memory.captureHindsightConversationTracking();
+		const previousHindsightCloseRetainBaselineTurns = this.hindsightCloseRetainBaselineTurns;
+		const previousHindsightLoadedMessageCount = this.hindsightLoadedMessageCount;
 		// Snapshot the full checkpoint runtime state: the success path calls
 		// #rehydrateCheckpointRewindState(), which clears and rebuilds all four
 		// fields from the target branch. On rollback every one must be restored,
@@ -8830,6 +8962,7 @@ export class AgentSession {
 				this.#adoptInheritedProviderPromptCacheKey();
 			}
 			this.#syncAgentSessionId(undefined, false);
+			this.#syncHindsightDocumentId();
 			this.#memory.rekeyForCurrentSessionId();
 
 			let sessionContext = this.buildDisplaySessionContext();
@@ -8978,7 +9111,11 @@ export class AgentSession {
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
+			this.#syncHindsightDocumentId();
 			this.#memory.rekeyForCurrentSessionId();
+			this.#memory.restoreHindsightConversationTracking(previousHindsightConversationTracking);
+			this.hindsightCloseRetainBaselineTurns = previousHindsightCloseRetainBaselineTurns;
+			this.hindsightLoadedMessageCount = previousHindsightLoadedMessageCount;
 			this.agent.setTools(previousTools);
 			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
 			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
@@ -9106,6 +9243,7 @@ export class AgentSession {
 		await this.#bash.flushPending();
 		// Flush pending writes before branching
 		await this.sessionManager.flush();
+		await this.#memory.drainHindsightPendingRetain();
 		const bashTransition = this.#bash.beginSessionTransition();
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();
@@ -9137,6 +9275,7 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			this.#syncHindsightDocumentId();
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -9234,6 +9373,7 @@ export class AgentSession {
 		this.#usagePreflightReadyForNextModelCall = false;
 		await this.#bash.flushPending();
 		await this.sessionManager.flush();
+		await this.#memory.drainHindsightPendingRetain();
 		const bashTransition = this.#bash.beginSessionTransition();
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();
@@ -9259,6 +9399,10 @@ export class AgentSession {
 			this.#clearSessionScopedToolState();
 
 			this.#rehydrateCheckpointRewindState();
+			// Capture retainable history before promoting the /btw exchange so
+			// the close-path baseline does not treat the unanswered (no agent_end)
+			// promoted question as already retained.
+			const closeRetainBaselineTurns = countRetainableUserTurns(this.sessionManager);
 			this.sessionManager.appendMessage({
 				role: "user",
 				content: [{ type: "text", text: question }],
@@ -9268,8 +9412,9 @@ export class AgentSession {
 			this.#todo.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
+			this.#syncHindsightDocumentId();
 			this.#memory.rekeyForCurrentSessionId();
-			await this.#memory.resetContextForNewTranscript();
+			await this.#memory.resetContextForNewTranscript({ closeRetainBaselineTurns });
 
 			const sessionContext = this.buildDisplaySessionContext();
 
@@ -9566,6 +9711,11 @@ export class AgentSession {
 			newLeafId = targetId;
 		}
 
+		// Drain while the outgoing branch is still the active transcript.
+		// extractMessages() reads getBranch(), so a later rebase cannot recover
+		// a below-cadence suffix after resetLeaf()/branch().
+		await this.#memory.drainHindsightPendingRetain();
+
 		// Switch leaf (with or without summary)
 		// Summary is attached at the navigation target position (newLeafId), not the old branch
 		const bashTransition = this.#bash.beginSessionTransition();
@@ -9614,6 +9764,7 @@ export class AgentSession {
 		// Emit session_tree event; only handlers can mutate session entries, so skip
 		// the emit and the context rebuild when no handlers are registered (mirrors
 		// the session_before_tree guard above).
+		let sessionContext = stateContext;
 		if (this.#extensionRunner?.hasHandlers("session_tree")) {
 			await this.#extensionRunner.emit({
 				type: "session_tree",
@@ -9622,22 +9773,31 @@ export class AgentSession {
 				summaryEntry,
 				fromExtension: summaryText ? fromExtension : undefined,
 			});
-			const rawContext = this.sessionManager.buildSessionContext();
-			return {
-				editorText,
-				editorImages,
-				cancelled: false,
-				summaryEntry,
-				sessionContext: rawContext,
-				askReanswerCommitted: isAskReanswerCompletion,
-			};
+			sessionContext = this.sessionManager.buildSessionContext();
+		}
+		// Delayed Hindsight install still reads these construction-time fields.
+		// Rebase the pending close baseline onto the active branch instead of
+		// skipping a below-cadence replacement turn. Ask re-answers keep this
+		// pre-continue message boundary: the new answer is a toolResult, so the
+		// later assistant reply must stay a pending tail rather than loaded
+		// history. Live state also resyncs the post-clear overlay so a pre-reset
+		// leaf cannot replace the drained post-clear document. Rekeying that
+		// overlay clears the retained prefix but used to keep lastRetainedTurn,
+		// so cadence skipped until the shorter branch caught up.
+		this.#rebaseHindsightCloseRetainBaseline();
+		const previousHindsightDocumentId = this.hindsightDocumentId ?? this.sessionManager.getSessionId();
+		this.#syncHindsightDocumentId();
+		this.#memory.rekeyForCurrentSessionId();
+		const nextHindsightDocumentId = this.hindsightDocumentId ?? this.sessionManager.getSessionId();
+		if (previousHindsightDocumentId !== nextHindsightDocumentId) {
+			await this.#memory.resetContextForNewTranscript();
 		}
 		return {
 			editorText,
 			editorImages,
 			cancelled: false,
 			summaryEntry,
-			sessionContext: stateContext,
+			sessionContext,
 			askReanswerCommitted: isAskReanswerCompletion,
 		};
 	}

@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `hindsight.retainUpdateMode` (`replace` | `append`, default `replace`) so full-session retain can append only newly accumulated turns to the same session document.
+
+### Changed
+
+- Hindsight now retains any remaining below-cadence session tail on clean close (`AgentSession.dispose` / session-memory teardown), independent of `retainUpdateMode`.
+
+### Fixed
+
+- Hindsight full-session retain now waits for server-side processing before advancing the append cursor, so a failed consolidation is retried instead of omitted.
+- Hindsight session retain now starts from the latest `/clear` boundary instead of re-sending the cleared conversation.
+- A failed Hindsight append retain now rebuilds the canonical session document on retry instead of duplicating the unconfirmed delta.
+- Hindsight now flushes subagent retain/learn queues on close instead of dropping them with the alias state.
+- Hindsight last-turn close no longer duplicates a retained window after a failed `/resume` with no retain in flight.
+- Hindsight delayed startup now rebases the close-retain baseline after `/new`, `/clear`, `/resume`, or `/tree` instead of skipping the post-switch turn.
+- Hindsight now retains a below-cadence tail when leaving a conversation through `/new`, `/clear`, `/resume`, `/tree`, fork, or branch, and when bank routing rebuilds mid-session.
+- Hindsight leave-path retain now waits for delayed backend startup before treating a missing live state as having nothing pending.
+- Hindsight no longer duplicates a retained tail after `/fresh` or a same-file reload.
+- Hindsight close retain now waits through the configured retain timeout during dispose instead of the 5s event-drain deadline.
+- Hindsight close retain now gets a full retain-timeout budget after any in-flight cadence retain settles, instead of sharing one deadline with queued work.
+- Hindsight close drain now budgets bank creation plus retain so a first-use `createBank` cannot starve the close retain.
+- Hindsight close drain now budgets a tool-retain batch plus the session retain so a slow `retainBatch` cannot starve the close tail.
+- Hindsight delayed startup now keeps a `/tree` ask re-answer as a pending tail instead of treating the later assistant reply as loaded history.
+- Hindsight `/clear` now retains post-reset turns under a new document instead of replacing the drained conversation.
+- Hindsight delayed startup now derives loaded history when enabling mid-session instead of treating an off-backend zero as already retained activity.
+- Hindsight delayed startup now restores the loaded-message baseline when a `/resume` rolls back, so idle close does not re-retain the original transcript.
+- Hindsight `/clear` now reconstructs the post-reset document identity from the persisted reset boundary, and branch/fork after `/clear` no longer retain into the source document.
+- Hindsight delayed startup now drops construction baselines when the backend is torn down, so re-enabling does not duplicate already drained history.
+- Hindsight now resets retain cadence after `branch` and `/btw` so a shorter branch cannot inherit the source session's last retained turn.
+- Hindsight `/tree` now resyncs the post-clear document overlay so a pre-reset leaf cannot overwrite the drained post-clear document.
+- Hindsight now resets retain cadence when `/tree` changes the post-clear document overlay, so a shorter pre-reset branch cannot inherit the source last retained turn.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
