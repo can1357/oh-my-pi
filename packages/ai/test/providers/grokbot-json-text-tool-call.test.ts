@@ -82,9 +82,11 @@ describe("parseJsonTextToolCall", () => {
 		).toBeUndefined();
 		expect(looksLikePromotableToolText('{"name":"Shell","arguments":{}}')).toBe(true);
 		expect(looksLikePromotableToolText("```json\n{")).toBe(true);
+		expect(looksLikePromotableToolText("```\n{")).toBe(true);
 		expect(looksLikePromotableToolText("pong42")).toBe(false);
 		expect(shouldHoldPromotableToolText("")).toBe(true);
 		expect(shouldHoldPromotableToolText("```")).toBe(true);
+		expect(shouldHoldPromotableToolText("```\n{")).toBe(true);
 		expect(shouldHoldPromotableToolText("pong42")).toBe(false);
 	});
 

@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Grok Bot omits `thinking` from streamSimple/completeSimple when effort is unset so discovered `sandParameterDefaults` apply
+- Buffer unlabeled `JSON fences (for example`\\n{) until end-of-stream promotion
+- Remint and replay once after a rejected Grok Bot JWT (HTTP 401 / Connect unauthenticated)
 - Catalog matrix Write empty-stop follow-up acceptance is Gemini-class only and requires the row's exact ping
 - Catalog matrix omp tools smoke uses `--mode json` and requires bash `tool_execution_end` / toolResult evidence (assistant prose alone fails)
 - Grok Bot representative matrix slice picks OpenAI samples by classifyModel class/family/revision buckets (no luna/terra/sol id substrings)
@@ -97,6 +100,7 @@
 - Grok Bot remaps retained SendToUser event indices when promoting thinking JSON to a tool call, and holds flush while promotable thinking remains.
 - Grok Bot catalog matrix rejects unknown `--ids` and counts text failures on tool-gated (supportsTools=false) rows.
 - Grok Bot catalog matrix fails tool probes that omit the follow-up ping (Write empty-stop excepted), fails authenticated AvailableModels errors, and includes `--omp` smoke failures in the exit status.
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
@@ -109,7 +113,6 @@
 ### Added
 
 - Added Muse Code subscription sign-in, credential refresh, inference, and quota reporting in `/usage`, with durable rate-limit backoff so quota refresh recovers instead of repeatedly retrying.
-
 
 - Fixed Codex compaction timeouts triggering prolonged retries instead of advancing to the next compaction method.
 

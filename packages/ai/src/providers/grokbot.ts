@@ -756,13 +756,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			}
 			const authCfg = { ...cfg, renewal };
 			const fetchImpl = options?.fetch ?? fetch;
-			const accessToken = await mintGrokbotAccessToken(
+			let accessToken = await mintGrokbotAccessToken(
 				authCfg,
 				fetchImpl,
 				model.baseUrl || GROKBOT_BACKEND,
 				options?.signal,
 				{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
 			);
+			let jwtRemintUsed = false;
 			const messages = toInferenceMessages(context);
 			const identity = classifyModel("grokbot", model.id, { lenient: true });
 			const tools = toInferenceTools(context.tools, identity);
@@ -817,6 +818,34 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				attemptStreamingLive = false;
 				// Buffered `start` was never published — re-arm so the retry emits it.
 				started = false;
+			};
+			const remintAfterUnauthorized = async (): Promise<boolean> => {
+				if (jwtRemintUsed || attemptStreamingLive) return false;
+				jwtRemintUsed = true;
+				clearGrokbotTokenCache();
+				accessToken = await mintGrokbotAccessToken(
+					authCfg,
+					fetchImpl,
+					model.baseUrl || GROKBOT_BACKEND,
+					options?.signal,
+					{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
+				);
+				discardAttemptEvents();
+				clearAbandonedAttemptMetadata();
+				output.content = [];
+				output.usage = {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				};
+				output.stopReason = "stop";
+				delete output.errorStatus;
+				delete output.errorMessage;
+				logger.info("grokbot: reminting JWT after unauthorized", { modelId: model.id });
+				return true;
 			};
 			const hasEarlierIncompleteTool = (contentIndex: number) => {
 				for (const [index, buffered] of pendingToolEventBuffers) {
@@ -1015,7 +1044,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				await notifyProviderResponse(options, response, model, response.headers.get("x-request-id"));
 
 				if (!response.ok || !response.body) {
-					if (response.status === 401) clearGrokbotTokenCache();
+					if (response.status === 401) {
+						if (await remintAfterUnauthorized()) continue attempt;
+						clearGrokbotTokenCache();
+					}
 					output.errorStatus = response.status;
 					const errText = await response.text().catch(() => "");
 					throw new Error(
@@ -1261,6 +1293,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 								// Connect often reports revoked JWTs as end-stream
 								// `unauthenticated` on HTTP 200; treat like HTTP 401.
 								if (code === "unauthenticated") {
+									if (await remintAfterUnauthorized()) continue attempt;
 									clearGrokbotTokenCache();
 									throw new Error(`${formatGrokbotConnectTrailerError(parsedEnd)} (HTTP 401)`);
 								}

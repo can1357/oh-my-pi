@@ -2446,12 +2446,19 @@ function mapOptionsForApi<TApi extends Api>(
 					effort = requireSupportedEffort(grokbotModel, options.reasoning);
 				}
 			}
+			// Only pin thinking when the caller chose an effort or disabled reasoning.
+			// Omitting it lets resolveGrokbotRequestedModel apply sandParameterDefaults
+			// (discovered thinking=true + default effort) instead of forcing thinking=false.
+			const thinkingOption =
+				allowed.includes("thinking") && (disableThinking || effort !== undefined)
+					? { thinking: !disableThinking }
+					: {};
 			return castApi<"grokbot-sand">({
 				...base,
 				conversationId: options?.sessionId,
 				stopSequences: options?.stopSequences,
 				effort,
-				...(allowed.includes("thinking") ? { thinking: !disableThinking && Boolean(effort) } : {}),
+				...thinkingOption,
 			});
 		}
 		default:

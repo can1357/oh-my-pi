@@ -213,7 +213,10 @@ export function looksLikePromotableToolText(text: string): boolean {
 	const t = text.trim();
 	if (!t) return false;
 	if (t.startsWith("{")) return true;
-	if (/^```(?:json|jsonc|javascript|js|tool_code)?\b/i.test(t)) return true;
+	// Labeled fences use a word boundary; unlabeled ```\n{ has no \b between `
+	// and newline, but stripMarkdownFence still promotes those at end-of-stream.
+	if (/^```(?:json|jsonc|javascript|js|tool_code)\b/i.test(t)) return true;
+	if (/^```(?:\s|$|\{)/i.test(t)) return true;
 	// Incomplete unfenced call still streaming, or a complete standalone call.
 	if (/^(?:print\s*\(\s*)?(?:default_api\.)?[A-Za-z_]\w*\s*\(/.test(t)) return true;
 	return false;

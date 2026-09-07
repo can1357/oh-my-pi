@@ -1981,14 +1981,14 @@ describe("grokbot request headers", () => {
 		expect(result.errorMessage).toBeUndefined();
 	});
 
-	test("treats Connect unauthenticated end-stream as HTTP 401 and clears the token cache", async () => {
+	test("treats Connect unauthenticated end-stream as HTTP 401, remints once, then fails", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
 			machineId: "machine",
 			namespace: "prod",
 			clientVersion: "0.30.0",
 		});
-		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+		const mintSpy = spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
 		const clearSpy = spyOn(grokbotAuth, "clearGrokbotTokenCache").mockImplementation(() => {});
 
 		const trailer = frameConnectProto(
@@ -2005,7 +2005,49 @@ describe("grokbot request headers", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(401);
 		expect(result.errorMessage).toMatch(/unauthenticated|jwt expired/i);
+		expect(mintSpy).toHaveBeenCalledTimes(2);
 		expect(clearSpy).toHaveBeenCalled();
+	});
+
+	test("replays the stream after reminting a rejected JWT", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		const mintSpy = spyOn(grokbotAuth, "mintGrokbotAccessToken")
+			.mockResolvedValueOnce("stale-jwt")
+			.mockResolvedValueOnce("fresh-jwt");
+		spyOn(grokbotAuth, "clearGrokbotTokenCache").mockImplementation(() => {});
+
+		const unauthorized = frameConnectProto(
+			Buffer.from(JSON.stringify({ error: { code: "unauthenticated", message: "jwt expired" } })),
+			CONNECT_END_STREAM_FLAG,
+		);
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } }));
+		const okTrailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		let calls = 0;
+		const fetchImpl = (async () => {
+			calls += 1;
+			if (calls === 1) {
+				return new Response(unauthorized, {
+					status: 200,
+					headers: { "content-type": "application/connect+proto" },
+				});
+			}
+			return new Response(Buffer.concat([text, okTrailer]), {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			});
+		}) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "ok" }]);
+		expect(mintSpy).toHaveBeenCalledTimes(2);
+		expect(calls).toBe(2);
 	});
 });
 
@@ -2064,5 +2106,60 @@ describe("grokbot disableReasoning effort floor", () => {
 		).result();
 
 		expect(capturedEffort).toBe("low");
+	});
+
+	test("omitted reasoning leaves thinking unset so discovered sandParameterDefaults apply", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		let capturedThinking: string | undefined;
+		let capturedEffort: string | undefined;
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } }));
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () =>
+			new Response(Buffer.concat([text, trailer]), {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			})) as FetchImpl;
+
+		const model: Model<"grokbot-sand"> = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] },
+			sandParameterIds: ["thinking", "context", "effort", "fast"],
+			sandParameterDefaults: { thinking: "true", context: "200k", effort: "high", fast: "false" },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+
+		await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: "renew",
+				fetch: fetchImpl,
+				onPayload: body => {
+					const params = (body as { requestedModel?: { parameters?: Array<{ id: string; value: string }> } })
+						.requestedModel?.parameters;
+					capturedThinking = params?.find(p => p.id === "thinking")?.value;
+					capturedEffort = params?.find(p => p.id === "effort")?.value;
+					return body;
+				},
+			},
+		).result();
+
+		expect(capturedThinking).toBe("true");
+		expect(capturedEffort).toBe("high");
 	});
 });
