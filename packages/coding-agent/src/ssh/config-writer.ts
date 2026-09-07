@@ -4,7 +4,6 @@
  * Utilities for reading/writing ssh.json files at user or project level.
  */
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { publishSerializedConfig, resolveSymlinkWriteTarget, withConfigFileLock } from "../utils/atomic-file";
 
