@@ -62,7 +62,11 @@ export function isSttBackend(value: string): value is SttBackend {
 
 export const STT_BACKEND_OPTIONS = [
 	{ value: "local", label: "Local", description: "On-device Whisper/Parakeet. Private, no network." },
-	{ value: "cloud", label: "Cloud", description: "OpenAI transcription on release. Needs OPENAI_API_KEY." },
+	{
+		value: "cloud",
+		label: "Cloud",
+		description: "OpenAI transcription on release. Subscription first, else API key.",
+	},
 ] as const satisfies ReadonlyArray<{ value: SttBackend; label: string; description: string }>;
 
 export interface CloudSttStreamOptions extends SttStreamOptions {

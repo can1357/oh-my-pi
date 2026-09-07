@@ -2596,7 +2596,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Speech",
 			label: "Speech Backend",
 			description:
-				"Local runs on-device Whisper/Parakeet with no network. cloud records mic audio and transcribes it with OpenAI on release (needs OPENAI_API_KEY, no live preview) and falls back to local without credentials.",
+				"Local runs on-device Whisper/Parakeet with no network. cloud records mic audio and transcribes it with OpenAI on release (ChatGPT subscription first, then API key; no live preview) and falls back to local without credentials.",
 			options: STT_BACKEND_OPTIONS,
 		},
 	},

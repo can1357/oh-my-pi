@@ -38,6 +38,23 @@ interface CaptureHandle {
 }
 type CaptureFactory = (onAudio: (error: Error | null, samples: Float32Array) => void) => CaptureHandle;
 
+/** Minimal registry surface for cloud credential resolution (real ModelRegistry satisfies this). */
+export interface SttKeyRegistry {
+	getApiKeyForProvider(provider: string, sessionId?: string): Promise<string | undefined>;
+}
+
+/**
+ * Resolve the cloud STT credential: ChatGPT subscription first (no metered
+ * spend — the token is accepted on the transcription endpoint), then the
+ * `openai` chain (OPENAI_API_KEY, stored keys, models.yml, broker).
+ */
+export async function resolveSttCloudKey(registry: SttKeyRegistry, sessionId?: string): Promise<string | undefined> {
+	return (
+		(await registry.getApiKeyForProvider("openai-codex", sessionId)) ??
+		(await registry.getApiKeyForProvider("openai", sessionId))
+	);
+}
+
 /** Test seam: resolves the OpenAI key for the cloud backend. Defaults to env. */
 export interface SttControllerDeps {
 	resolveCloudKey?: () => Promise<string | undefined>;
@@ -136,7 +153,7 @@ export class STTController {
 			});
 		}
 		options.showWarning(
-			"No OpenAI credentials for cloud speech-to-text. Set OPENAI_API_KEY — falling back to the local model.",
+			"No OpenAI credentials for cloud speech-to-text (API key or ChatGPT subscription) — falling back to the local model.",
 		);
 		return null;
 	}
