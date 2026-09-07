@@ -8,6 +8,9 @@ import { createMockModel, type MockResponseSource, registerMockApi } from "@oh-m
 import { $ } from "bun";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
+import type { CreateAgentSessionResult } from "../../src/sdk";
+import * as sdkModule from "../../src/sdk";
+import * as securityModule from "../../src/security";
 import {
 	createNativeSecurityProvenance,
 	DEFAULT_SECURITY_GIT_ADAPTER,
@@ -17,6 +20,8 @@ import {
 	SecurityStore,
 } from "../../src/security";
 import { SessionManager } from "../../src/session/session-manager";
+import type { ToolSession } from "../../src/tools";
+import { SecurityScanTool } from "../../src/tools/security-scan";
 
 const MOCK_SOURCE_ID = "security-coordinator-test";
 let temporaryRoot = "";
@@ -378,5 +383,85 @@ describe("native security coordinator", () => {
 			error: "Security scan was interrupted by a process restart",
 		});
 		expect((await restarted.listOperations()).map(operation => operation.operationId)).toContain(operationId);
+	});
+
+	test("propagates the host isolation marker into scan session creation", async () => {
+		// A security scan started by a session that itself runs inside an
+		// isolation worktree executes in that same worktree (executionRoot).
+		// The scan session must be created with `isIsolated: true` — its `task`
+		// spawns (security-reviewer) would otherwise re-expose `isolated` and
+		// bypass the task.isolation.allowNested gate.
+		for (const hostIsIsolated of [true, false]) {
+			const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+			const coordinator = new SecurityCoordinator(
+				{
+					cwd: repositoryRoot,
+					settings,
+					authStorage,
+					modelRegistry,
+					activeModel: mock.model,
+					sessionId: "parent-session",
+					isIsolated: hostIsIsolated,
+				},
+				{ openStore: storeFactory, gitAdapter },
+			);
+			let sessionOptionsIsIsolated: boolean | undefined;
+			const spy = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+				sessionOptionsIsIsolated = options?.isIsolated;
+				return {
+					session: {
+						sessionFile: path.join(stateRoot, "fixture-session.jsonl"),
+						waitForIdle: async () => undefined,
+						prompt: async () => true,
+						abort: async () => undefined,
+						dispose: async () => undefined,
+					},
+					extensionsResult: {},
+				} as unknown as CreateAgentSessionResult;
+			});
+			try {
+				const plan = await coordinator.preflight({ credentialId, model: mock.model });
+				const started = await coordinator.start({ planId: plan.id });
+				const terminal = await coordinator.wait(started.operationId);
+				expect(terminal.phase).toBe("partial"); // mocked session never publishes
+				expect(sessionOptionsIsIsolated).toBe(hostIsIsolated);
+			} finally {
+				spy.mockRestore();
+			}
+		}
+	});
+	test("SecurityScanTool forwards the session isolation marker into the coordinator host", async () => {
+		// The tool-side entry point must populate SecurityCoordinatorHost
+		// with the session's isolation marker; dropping the field would
+		// silently revert scan sessions to non-isolated (the regression this
+		// round fixes). The spy sits at the host factory, past the session's
+		// own ToolSession surface.
+		for (const isIsolated of [true, false]) {
+			const session = {
+				cwd: repositoryRoot,
+				settings,
+				authStorage,
+				modelRegistry,
+				getActiveModel: () => createMockModel({ id: "security-mock", provider: "openai-codex" }).model,
+				getSessionId: () => `fixture-${isIsolated}`,
+				getAgentId: () => "Main",
+				asyncJobManager: undefined,
+				isIsolated,
+			} as unknown as ToolSession;
+			const seen: boolean[] = [];
+			const spy = vi.spyOn(securityModule, "getSecurityCoordinator").mockImplementation(host => {
+				seen.push(host.isIsolated === true);
+				return new SecurityCoordinator(host, { openStore: storeFactory, gitAdapter });
+			});
+			try {
+				const tool = new SecurityScanTool(session);
+				await expect(tool.execute("tool-call", { action: "status", operation_id: "secop_none" })).rejects.toThrow(
+					"Unknown security operation: secop_none",
+				);
+				expect(seen).toEqual([isIsolated]);
+			} finally {
+				spy.mockRestore();
+			}
+		}
 	});
 });

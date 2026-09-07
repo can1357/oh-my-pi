@@ -271,6 +271,41 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		expect(result.output).toContain("done");
 	});
 
+	it("carries the parent's isolation marker onto the child session", async () => {
+		// A non-isolated child of an isolated parent still executes inside the
+		// parent's worktree (cwd), so the child must inherit `isIsolated` —
+		// otherwise its own `isolated: true` spawns would bypass the
+		// task.isolation.allowNested gate (PR #7560 follow-up).
+		const harness = createAsyncSession(({ promptIndex, harness: h }) => {
+			if (promptIndex === 1) {
+				h.finishJob();
+				h.emitTerminalYield({ report: "done" });
+			}
+		});
+		let childIsIsolated: boolean | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			childIsIsolated = options?.isIsolated;
+			return {
+				session: harness.session,
+				extensionsResult: {} as unknown as LoadExtensionsResult,
+				setToolUIContext: () => {},
+				eventBus: new EventBus(),
+			} as CreateAgentSessionResult;
+		});
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "do the work",
+			index: 0,
+			id: "isolation-marker",
+			isIsolated: true,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(childIsIsolated).toBe(true);
+	});
+
 	it("does not wait on a second idle barrier after a terminal yield", async () => {
 		const harness = createAsyncSession(({ promptIndex, harness: h }) => {
 			if (promptIndex === 1) {

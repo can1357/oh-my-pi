@@ -167,6 +167,9 @@ export function createPersistedSubagentReviverFactory(
 				// Old files predate persisted spawns: deny re-spawning rather than let
 				// createAgentSession default to wildcard ("*").
 				spawns: init.spawns ?? "",
+				// Preserve the nested-isolation gate marker across cold revives so a
+				// revived child of an isolated parent still rejects nested isolation.
+				isIsolated: init.isIsolated === true,
 				hasUI: false,
 				enableLsp: restrictToolNames ? false : ctx.enableLsp,
 				...(restrictToolNames

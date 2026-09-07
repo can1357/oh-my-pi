@@ -145,6 +145,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.isolation.apply",
 	"task.isolation.merge",
 	"task.isolation.commits",
+	"task.isolation.allowNested",
 	"task.eager",
 	"task.batch",
 	"task.maxConcurrency",
