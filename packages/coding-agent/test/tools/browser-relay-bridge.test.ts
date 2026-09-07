@@ -3553,6 +3553,50 @@ describe("RelayBridge tab grouping", () => {
 		expect(Object.keys(document).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 	});
 
+	it("marks a preload even when the page tampered Object.prototype.constructor", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "this.__preloadRan = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		const marked = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		const markedSource = (marked?.params as { source?: string } | undefined)?.source ?? "";
+		// Simulate an earlier preload that poisoned the Object prototype's constructor
+		// link. A `({}).constructor.defineProperty` lookup would throw here; reading
+		// `this.Object.defineProperty` off the global must still succeed.
+		const context = vm.createContext({});
+		vm.runInContext("Object.prototype.constructor = null;", context);
+		expect(() => vm.runInContext(markedSource, context)).not.toThrow();
+		expect(context.__preloadRan).toBe(true);
+		const marker = Object.getOwnPropertyNames(context).find(key => key.startsWith("__ompRelayPreload"));
+		expect(marker).toBeDefined();
+		expect(context[marker!]).toBe(true);
+	});
+
 	it.each(["remove", "retry"] as const)(
 		"forces a fresh root when the navigation preload %s loses its result",
 		async interruptedMutation => {
