@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
+- Exported shared `TRUNCATE_LENGTHS` and `PREVIEW_LIMITS` display budgets for consumers outside coding-agent (e.g. provider status sanitization).
 - `extractMarkdownLinks()` now returns one-row visible labels for formatted and multiline links ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).
+
 
 ## [18.1.13] - 2026-09-07
 
@@ -14,7 +16,6 @@
 
 ## [18.1.12] - 2026-09-06
 
-### Fixed
 
 - Avoid inserting a trailing space when auto-completing directory paths with `@`, and keep autocomplete open when accepting a directory with Tab or Enter.
 - Horizontal wheel reports (the sideways drift of a two-finger trackpad scroll) no longer decode as a vertical wheel direction, so fullscreen selectors such as `/copy` and the rewind picker stop jumping up and back down at the end of a scroll gesture.
@@ -23,7 +24,6 @@
 
 ### Added
 
-- Exported shared `TRUNCATE_LENGTHS` and `PREVIEW_LIMITS` display budgets for consumers outside coding-agent (e.g. provider status sanitization).
 - Added Markdown hyperlink target resolution while preserving the displayed URL text.
 
 ## [18.1.6] - 2026-09-03
