@@ -22,7 +22,7 @@ async function discover(models: readonly Record<string, unknown>[]) {
 	const fetchImpl: FetchImpl = async () => Response.json({ data: models });
 	const fetchDynamicModels = kimiCodeModelManagerOptions({ apiKey: "test-key", fetch: fetchImpl }).fetchDynamicModels;
 	if (!fetchDynamicModels) throw new Error("Kimi Code dynamic discovery is not configured");
-	return (await fetchDynamicModels())?.map(buildModel) ?? [];
+	return (await fetchDynamicModels())?.map(spec => buildModel(spec)) ?? [];
 }
 
 describe("Kimi Code provider catalog", () => {

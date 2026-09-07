@@ -92,13 +92,13 @@ class IdentityFacts {
 	}
 }
 
-function resolveIdentity<TApi extends Api>(spec: ModelSpec<TApi>): ModelIdentity {
-	// `buildModel` only runs for discovered, custom, and override specs — never
-	// the curated bundled catalog. Those ids cannot be enumerated in rules.json,
-	// so a class/family tie must not abort the process (issue #10598, OmniRoute
-	// `openai-compatible-chat-<uuid>/cohere/...` vs `openai` namespace).
-	// Generator/CI still call `classifyModel` without `lenient` to catch rule defects.
-	return classifyModel(spec.provider, spec.id, { lenient: true });
+/** Curated policy rejects ambiguous identities; runtime discovery may opt out. */
+export interface ResolveModelPolicyOptions {
+	strict?: boolean;
+}
+
+function resolveIdentity<TApi extends Api>(spec: ModelSpec<TApi>, options: ResolveModelPolicyOptions): ModelIdentity {
+	return classifyModel(spec.provider, spec.id, { lenient: options.strict === false });
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,9 +1245,15 @@ export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string):
  * Resolves the full policy surface for one model spec: structured identity,
  * complete compat record, thinking metadata, and catalog-data corrections.
  */
-export function resolveModelPolicy<TApi extends Api>(spec: ModelSpec<TApi>): ResolvedModelPolicy<TApi>;
-export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Api> {
-	const identity = resolveIdentity(spec);
+export function resolveModelPolicy<TApi extends Api>(
+	spec: ModelSpec<TApi>,
+	options?: ResolveModelPolicyOptions,
+): ResolvedModelPolicy<TApi>;
+export function resolveModelPolicy(
+	spec: ModelSpec<Api>,
+	options: ResolveModelPolicyOptions = {},
+): ResolvedModelPolicy<Api> {
+	const identity = resolveIdentity(spec, options);
 	const facts = new IdentityFacts(identity);
 	const axes = resolveCascade(buildResolveTarget(spec, identity));
 	let compat: CompatOf<Api>;
