@@ -245,5 +245,83 @@ describe("createSettingsAwareStreamFn", () => {
 
 			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-sonnet-5" }]);
 		});
+
+		it("forwards a configured multi-model chain in order", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": ["claude-opus-5", "claude-opus-4-8"],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }]);
+		});
+
+		it("drops non-string chain entries instead of throwing (YAML/CLI can inject them)", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": [1, "claude-opus-5", null, "  "] as unknown as string[],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+		});
+
+		it("trims whitespace from configured chain entries before forwarding", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": [" claude-opus-5 ", "\tclaude-opus-4-8\n"],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }]);
+		});
+
+		it("treats a non-array configured value as an empty chain instead of throwing", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": "claude-opus-5" as unknown as string[],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toBeUndefined();
+		});
+
+		it("caps the forwarded chain at the wire limit of three entries", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": ["m1", "m2", "m3", "m4", "m5"],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "m1" }, { model: "m2" }, { model: "m3" }]);
+		});
+
+		it("sends no fallbacks when the configured chain is empty, even with the toggle on", () => {
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				"providers.anthropic.serverSideFallbackModels": [],
+			});
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toBeUndefined();
+		});
 	});
 });
