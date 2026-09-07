@@ -1,6 +1,41 @@
 /** Default agent used when a session has unrestricted spawning. */
 export const DEFAULT_SPAWN_AGENT = "task";
 
+const REVIEW_AGENT_NAMES = new Set(["reviewer", "security-reviewer"]);
+
+function isReviewAgent(agentName: string): boolean {
+	return REVIEW_AGENT_NAMES.has(agentName);
+}
+
+/**
+ * Estate DEFAULT spine: when the parent omits `agent`, route to the first
+ * implementation (non-reviewer) child declared in `spawns`, or the known
+ * hierarchy fallback when spawns are unrestricted (`*`).
+ */
+export const ESTATE_IMPLEMENTATION_DEFAULTS: Readonly<Record<string, string>> = {
+	"estate-sol": "task",
+	task: "estate-terra",
+	"estate-terra": "estate-luna",
+	"estate-luna": "estate-muse",
+};
+
+/** Resolve the default child agent for an omitted `agent` field. */
+export function resolveDefaultSpawnAgent(
+	parentSpawns: string | boolean | null | undefined,
+	parentAgentName?: string | null,
+): string {
+	const policy = resolveSpawnPolicy(parentSpawns);
+	if (policy.allowedAgents !== null) {
+		const implementation = policy.allowedAgents.find(agent => !isReviewAgent(agent));
+		return implementation ?? policy.defaultAgent;
+	}
+	if (parentAgentName) {
+		const fallback = ESTATE_IMPLEMENTATION_DEFAULTS[parentAgentName];
+		if (fallback) return fallback;
+	}
+	return policy.defaultAgent;
+}
+
 /** Spawn policy derived from a parent agent's `spawns` frontmatter. */
 export interface ResolvedSpawnPolicy {
 	/** True when at least one subagent may be spawned. */

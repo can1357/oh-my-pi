@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -36,13 +37,15 @@ function model(provider: string, id: string): Model<Api> {
  * - `"served"` settles a real turn on it, which moves attribution.
  * - `"unproven"` errors on its first request, producing none of the run's work.
  */
-function createYieldingSession(fallback: "served" | "unproven" = "served"): AgentSession {
+function createYieldingSession(fallback: "served" | "unproven" = "served", servedSelector?: string): AgentSession {
 	const listeners: Array<(event: { type: string; [key: string]: unknown }) => void> = [];
 	const session = {
 		agent: { state: { systemPrompt: ["test"] } },
 		state: { messages: [] },
 		model: model("primary", "bad-runtime-model"),
-		servingModel: { selector: "primary/bad-runtime-model", isFallback: false } as ServingModel | undefined,
+		servingModel: (servedSelector
+			? { selector: servedSelector, isFallback: false }
+			: { selector: "primary/bad-runtime-model", isFallback: false }) as ServingModel | undefined,
 		extensionRunner: undefined,
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["yield"],
@@ -60,16 +63,18 @@ function createYieldingSession(fallback: "served" | "unproven" = "served"): Agen
 			const emit = (event: { type: string; [key: string]: unknown }): void => {
 				for (const listener of listeners) listener(event);
 			};
-			session.model = model("fallback", "working-model");
-			emit({
-				type: "retry_fallback_applied",
-				from: "primary/bad-runtime-model",
-				to: "fallback/working-model",
-				role: "subagent:issue-2750",
-			});
-			if (fallback === "served") {
-				session.servingModel = { selector: "fallback/working-model", isFallback: true };
-				emit({ type: "retry_fallback_succeeded", model: "fallback/working-model", role: "subagent:issue-2750" });
+			if (!servedSelector) {
+				session.model = model("fallback", "working-model");
+				emit({
+					type: "retry_fallback_applied",
+					from: "primary/bad-runtime-model",
+					to: "fallback/working-model",
+					role: "subagent:issue-2750",
+				});
+				if (fallback === "served") {
+					session.servingModel = { selector: "fallback/working-model", isFallback: true };
+					emit({ type: "retry_fallback_succeeded", model: "fallback/working-model", role: "subagent:issue-2750" });
+				}
 			}
 			emit({
 				type: "tool_execution_end",
@@ -573,5 +578,95 @@ describe("subagent runtime model resolution", () => {
 		expect(childModelPatternAuthFallback).toBe("openai-codex/gpt-5.5");
 		expect(childModelPatternFallbackRole).toBe("subagent:issue-4421");
 		expect(childModelPatternDefaultFallbackChain).toEqual(["openai-codex/gpt-5.6-sol"]);
+	});
+	it("does not defer an explicit child route to the parent when fallback is disabled", async () => {
+		const parent = model("openai-codex", "gpt-6-astra");
+		let childModelPattern: unknown;
+		let childModelPatternAuthFallback: unknown;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childModelPattern = options.modelPattern;
+			childModelPatternAuthFallback = options.modelPatternAuthFallback;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+
+		const agent: AgentDefinition = {
+			name: "estate-muse",
+			description: "test",
+			systemPrompt: "test",
+			source: "project",
+			model: ["opencode-go-cornell/muse-spark-1.3-contributor"],
+		};
+		await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "work",
+			index: 0,
+			id: "explicit-muse-no-auth-fallback",
+			modelOverride: "opencode-go-cornell/muse-spark-1.3-contributor",
+			parentActiveModelPattern: "openai-codex/gpt-6-astra",
+			settings: Settings.isolated({ "retry.modelFallback": false }),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [parent],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(childModelPattern).toEqual(["opencode-go-cornell/muse-spark-1.3-contributor"]);
+		expect(childModelPatternAuthFallback).toBeUndefined();
+	});
+	it("keeps an available explicit child model and low effort when fallback is disabled", async () => {
+		const cornell = model("opencode-go-cornell", "muse-spark-1.3-contributor");
+		const parent = model("openai-codex", "gpt-6-astra");
+		let childModel: Model | undefined;
+		let childThinkingLevel: unknown;
+		let childModelPatternAuthFallback: unknown;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childModel = options.model;
+			childThinkingLevel = options.thinkingLevel;
+			childModelPatternAuthFallback = options.modelPatternAuthFallback;
+			return {
+				session: createYieldingSession("served", "opencode-go-cornell/muse-spark-1.3-contributor"),
+				extensionsResult: {},
+				setToolUIContext: () => {},
+			} as never;
+		});
+
+		const agent: AgentDefinition = {
+			name: "estate-muse",
+			description: "test",
+			systemPrompt: "test",
+			source: "project",
+			model: ["opencode-go-cornell/muse-spark-1.3-contributor"],
+			thinkingLevel: ThinkingLevel.Low,
+		};
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "work",
+			index: 0,
+			id: "explicit-muse-preserved",
+			modelOverride: "opencode-go-cornell/muse-spark-1.3-contributor",
+			thinkingLevel: ThinkingLevel.Low,
+			parentActiveModelPattern: "openai-codex/gpt-6-astra",
+			settings: Settings.isolated({ "retry.modelFallback": false }),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [cornell, parent],
+				getApiKey: async (candidate: Model<Api>) =>
+					candidate.provider === "openai-codex" ? "test-key" : undefined,
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(childModel?.provider).toBe("opencode-go-cornell");
+		expect(childModel?.id).toBe("muse-spark-1.3-contributor");
+		expect(childThinkingLevel).toBe("low");
+		expect(childModelPatternAuthFallback).toBeUndefined();
+		expect(result.resolvedModel).toBe("opencode-go-cornell/muse-spark-1.3-contributor");
+		expect(result.resolvedModelIsFallback).not.toBe(true);
 	});
 });

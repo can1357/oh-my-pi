@@ -257,6 +257,10 @@ export interface SessionInitEntry extends SessionEntryBase {
 	readSummarize?: boolean;
 	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
 	advisor?: string;
+	/** Registry id of the spawning parent agent, when spawned as a subagent. */
+	parentAgentId?: string;
+	/** Requested model patterns before resolution (role aliases and explicit selectors). */
+	requestedModelPatterns?: string[];
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

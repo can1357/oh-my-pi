@@ -15,7 +15,7 @@ import {
 	type ObservableSession,
 	SessionObserverRegistry,
 } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getSymbolTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -209,6 +209,27 @@ describe("subagent HUD lines", () => {
 		expect(multiLineDesc).toContain("First line ↵ Second line");
 		expect(multiLineDesc).not.toContain("\nSecond line");
 	});
+
+	it("shows live route, token, request, and retry state in the anchored HUD", () => {
+		const out = render([
+			makeSession({
+				id: "TopoCoverage",
+				description: "Read the topology source corpus",
+				progress: makeProgress({
+					id: "TopoCoverage",
+					resolvedModel: "opencode-zen/muse-spark-1.3-contributor-free",
+					tokens: 12_345,
+					requests: 3,
+					retryState: { attempt: 1, maxAttempts: 2, delayMs: 500, errorMessage: "overloaded", startedAtMs: 1 },
+				}),
+			}),
+		]);
+		expect(out).toContain("muse-spark-1.3");
+		expect(out).toContain("12K tok");
+		expect(out).toContain("3 req");
+		expect(out).toContain("retrying");
+		expect(getSymbolTheme().spinnerFrames.some(frame => out.includes(frame))).toBe(true);
+	});
 	it("hides non-detached spawns: sync task calls and eval agent() helpers", () => {
 		// Sync task spawn (parent blocked on the call) and eval `agent()` spawn
 		// (no detached flag at all) both stay off the HUD.
@@ -361,12 +382,15 @@ describe("InteractiveMode subagent observer UI sync", () => {
 	});
 
 	afterEach(async () => {
-		mode?.stop();
+		try {
+			mode?.stop();
+		} finally {
+			vi.useRealTimers();
+			vi.restoreAllMocks();
+		}
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.removeSync();
-		vi.useRealTimers();
-		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
 
@@ -384,7 +408,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		}
 
 		await Promise.resolve();
-		vi.runAllTimers();
+		vi.advanceTimersByTime(150);
 		await Promise.resolve();
 
 		const hud = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
@@ -392,5 +416,6 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(hud).toContain("BurstAgent5: Burst job 5");
 		expect(rebuildHud).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+		vi.useRealTimers();
 	});
 });

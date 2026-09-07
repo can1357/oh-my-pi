@@ -5,7 +5,8 @@
  */
 
 import { executeShell } from "@oh-my-pi/pi-natives";
-import { $envExact, ptree } from "@oh-my-pi/pi-utils";
+import { $envExact, getProjectDir, ptree } from "@oh-my-pi/pi-utils";
+import { resolveDopplerSecretsGetCommand } from "./doppler-secret";
 
 /** Cache for successful shell command results (persists for process lifetime). */
 const commandResultCache = new Map<string, string>();
@@ -75,6 +76,8 @@ async function executeCommand(commandConfig: string): Promise<string | undefined
  * would close.
  */
 export async function runShellCommand(command: string, timeoutMs: number): Promise<string | undefined> {
+	const dopplerSecret = await resolveDopplerSecretsGetCommand(command, getProjectDir());
+	if (dopplerSecret !== undefined) return dopplerSecret;
 	if (process.platform === "win32") {
 		try {
 			let output = "";

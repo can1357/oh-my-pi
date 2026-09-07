@@ -75,26 +75,21 @@ function prepareFake(output: string, options: { exitCode?: number; restartOnce?:
 	return { argsFile, runsFile, signalsFile, restartMarker };
 }
 
-async function waitForFileContent(filePath: string, matches: (text: string) => boolean): Promise<void> {
-	const matchesCurrentContent = (): boolean => {
+async function waitForFileContent(
+	filePath: string,
+	matches: (text: string) => boolean,
+	timeoutMs = 10_000,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
 		try {
-			return matches(fs.readFileSync(filePath, "utf8"));
+			if (matches(fs.readFileSync(filePath, "utf8"))) return;
 		} catch {
-			return false;
+			// File not created yet.
 		}
-	};
-	if (matchesCurrentContent()) return;
-	const { promise, resolve } = Promise.withResolvers<void>();
-	const listener = (): void => {
-		if (matchesCurrentContent()) resolve();
-	};
-	fs.watchFile(filePath, { interval: 25, persistent: false }, listener);
-	listener();
-	try {
-		await promise;
-	} finally {
-		fs.unwatchFile(filePath, listener);
+		await Bun.sleep(25);
 	}
+	throw new Error(`Timed out waiting for ${filePath}`);
 }
 
 async function waitForRestart(marker: string): Promise<void> {
@@ -236,9 +231,12 @@ describe("startExposure tunnel adapters", () => {
 		expect(active.baseUrl).toBe("https://stable.example.test");
 		expect(recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
 		await waitForRestart(invocation.restartMarker!);
+		// Stop immediately so the restart loop cannot spawn a third child while we assert.
+		active.stop();
+		await active.exited;
 		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
 		expect(active.baseUrl).toBe("https://stable.example.test");
-		await stopAndObserve(active, invocation);
+		expect(fs.readFileSync(invocation.signalsFile, "utf8")).toContain("SIGTERM");
 	});
 
 	it("starts devtunnel and zrok with public HTTP argv", async () => {

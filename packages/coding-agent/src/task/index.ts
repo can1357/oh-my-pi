@@ -28,7 +28,7 @@ import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
-import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
+import { isScoutSpawnable, resolveDefaultSpawnAgent, resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -53,6 +53,10 @@ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+
+function resolveEffectiveAgentBlocking(agent: AgentDefinition, settingsBlocking: Record<string, boolean>): boolean {
+	return agent.blocking === true || settingsBlocking[agent.name] === true;
+}
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -517,7 +521,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		const tasks: unknown[] = Array.isArray(params.tasks) ? params.tasks : [];
 		if (tasks.length > 0) {
-			const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+			const defaultAgent = resolveDefaultSpawnAgent(
+				this.session.getSessionSpawns?.() ?? "*",
+				this.session.getAgentId?.(),
+			);
 			const effectiveAgent = (item: unknown): string => {
 				if (item && typeof item === "object" && "agent" in item) {
 					const agent = item.agent;
@@ -685,7 +692,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
 		// item's agent type against the session's actual default agent.
-		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+		const defaultAgent = resolveDefaultSpawnAgent(
+			this.session.getSessionSpawns?.() ?? "*",
+			this.session.getAgentId?.(),
+		);
 		const batchEnabled = this.#isBatchEnabled();
 		const validationError = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
 		if (validationError) {
@@ -736,7 +746,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
-		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
+		const agentBlocking = this.session.settings.get("task.agentBlocking");
+		const itemBlocking = policies.map(policy => resolveEffectiveAgentBlocking(policy.effectiveAgent, agentBlocking));
 
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
@@ -779,16 +790,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				signal,
 				onUpdate,
 			);
-			if (!advisory) return result;
+			const combined = [advisory].filter(Boolean).join("\n\n") || undefined;
+			if (!combined) return result;
 			let appended = false;
 			const content = result.content.map(part => {
 				if (!appended && part.type === "text" && typeof part.text === "string") {
 					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
+					return { ...part, text: `${part.text}\n\n${combined}` };
 				}
 				return part;
 			});
-			if (!appended) content.push({ type: "text", text: advisory });
+			if (!appended) content.push({ type: "text", text: combined });
 			return { ...result, content };
 		}
 
@@ -812,16 +824,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// than mutating the caller's — task results are short-lived here, but an
 		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
 		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
-			if (!advisory) return result;
+			const combined = [advisory].filter(Boolean).join("\n\n") || undefined;
+			if (!combined) return result;
 			let appended = false;
 			const content = result.content.map(part => {
 				if (!appended && part.type === "text" && typeof part.text === "string") {
 					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
+					return { ...part, text: `${part.text}\n\n${combined}` };
 				}
 				return part;
 			});
-			if (!appended) content.push({ type: "text", text: advisory });
+			if (!appended) content.push({ type: "text", text: combined });
 			return { ...result, content };
 		};
 		if (asyncItems.length === 0) {
@@ -869,6 +882,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					agent: agentType,
 					agentSource,
 					modelRole: policy.modelRole,
+					parentAgentId: this.session.getAgentId?.() ?? undefined,
+					requestedModelPatterns: policy.modelOverride
+						? Array.isArray(policy.modelOverride)
+							? policy.modelOverride
+							: [policy.modelOverride]
+						: undefined,
 					status: "pending",
 					task: renderSubagentUserPrompt(assignment),
 					assignment,

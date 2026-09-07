@@ -1,5 +1,6 @@
 import { execSync } from "node:child_process";
 import { $envExact, directoryIsEnterableSync, getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { resolveDopplerSecretsGetCommandSync } from "./doppler-secret";
 
 const commandValueCache = new Map<string, string>();
 // Failed `!command` resolutions (non-zero exit, empty stdout) are negative-cached
@@ -47,6 +48,15 @@ function resolveCommandConfig(command: string, options?: ResolveConfigValueOptio
 		if (!directoryIsEnterableSync(cwd)) {
 			commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
 			return undefined;
+		}
+		// Doppler's CLI reads the OS keyring before honoring scoped tokens, which
+		// fails closed in headless/SSH children (exit 36). The HTTP API path uses
+		// the same scoped ~/.doppler token without keyring access.
+		const dopplerSecret = resolveDopplerSecretsGetCommandSync(command, cwd, 10_000);
+		if (dopplerSecret !== undefined) {
+			commandFailureRetryAt.delete(command);
+			commandValueCache.set(command, dopplerSecret);
+			return dopplerSecret;
 		}
 		const stdout = execSync(command, {
 			cwd,

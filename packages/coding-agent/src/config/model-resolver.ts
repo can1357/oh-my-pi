@@ -1616,7 +1616,10 @@ export async function resolveModelOverrideWithAuthFallback(
 	warning?: string;
 }> {
 	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
-	if (!primary.model || !parentActiveModelPattern) {
+	// `retry.modelFallback: false` is an explicit no-substitution policy. An
+	// unavailable requested child route must surface its own auth failure rather
+	// than silently inherit the parent's serving model.
+	if (settings?.get("retry.modelFallback") === false || !primary.model || !parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
 	}
 

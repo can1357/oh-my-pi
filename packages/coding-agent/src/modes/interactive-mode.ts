@@ -58,6 +58,11 @@ import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { formatKeyHint, KeybindingsManager } from "../config/keybindings";
+function formatRequestedModelRoute(patterns: readonly string[] | undefined): string | undefined {
+	if (!patterns || patterns.length === 0) return undefined;
+	return patterns.map(pattern => pattern.replace(/^@/, "")).join(">");
+}
+
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
@@ -229,7 +234,7 @@ import {
 	startMacOSAppearanceReprobeFallback,
 	theme,
 } from "./theme/theme";
-import { getSlashCommandTypeIcon } from "./theme/tui-adapters";
+import { getSlashCommandTypeIcon, getSymbolTheme } from "./theme/tui-adapters";
 import type {
 	AgentHubOpenOptions,
 	CompactionQueuedMessage,
@@ -512,6 +517,8 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	if (running.length === 0) return [];
 
 	const dot = theme.styledSymbol("status.done", "accent");
+	const spinnerFrames = getSymbolTheme().spinnerFrames;
+	const spinner = spinnerFrames[Math.floor(Date.now() / 80) % spinnerFrames.length] ?? dot;
 	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
 	const hiddenCount = running.length - visible.length;
 	const rows = renderTreeList(
@@ -522,14 +529,30 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 				const displayId = formatTaskId(session.id);
 				const role = session.agent ?? session.progress?.agent;
 				const badge = agentTypeBadge(role, theme);
-				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
+				const indicator = session.progress?.status === "running" ? theme.fg("accent", spinner) : dot;
+				let line = `${indicator} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
+				const progress = session.progress;
+				const metaParts: string[] = [];
+				if (progress?.resolvedModelIsFallback && progress.requestedModelPatterns?.length) {
+					const requested = formatRequestedModelRoute(progress.requestedModelPatterns);
+					if (requested) metaParts.push(`${requested}→`);
+				}
+				if (progress?.resolvedModel) metaParts.push(truncateToWidth(progress.resolvedModel, 28));
+				if (progress && progress.tokens > 0) metaParts.push(`${formatNumber(progress.tokens)} tok`);
+				if (progress && progress.requests > 0) metaParts.push(`${progress.requests} req`);
+				if (progress?.retryState) metaParts.push("retrying");
+				const meta = metaParts.length > 0 ? ` ${theme.fg("dim", metaParts.join(theme.sep.dot))}` : "";
 				const description = session.description?.trim() || session.progress?.description?.trim();
 				const distinctDescription =
 					description && !labelEchoesHandle(session.id, description) ? description : undefined;
 				if (distinctDescription) {
 					const budget = Math.max(
-						TRUNCATE_LENGTHS.SHORT,
-						columns - visibleWidth(displayId) - visibleWidth(Bun.stripANSI(badge)) - 10,
+						12,
+						columns -
+							visibleWidth(displayId) -
+							visibleWidth(Bun.stripANSI(badge)) -
+							visibleWidth(Bun.stripANSI(meta)) -
+							10,
 					);
 					const formatted = replaceTabs(distinctDescription).replace(/\s*[\r\n]+\s*/g, " ↵ ");
 					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
@@ -542,7 +565,7 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 						line += ` ${theme.fg("muted", truncateToWidth(formatted, TRUNCATE_LENGTHS.SHORT))}`;
 					}
 				}
-				return line;
+				return truncateToWidth(`${line}${meta}`, columns);
 			},
 		},
 		theme,
@@ -831,6 +854,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#subagentEventBus?: EventBus;
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#observerUiSyncTimer?: NodeJS.Timeout;
+	#subagentHudSpinnerTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentRegistry;
@@ -2798,9 +2822,36 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#renderSubagentList(): void {
 		this.subagentContainer.clear();
-		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
+		const sessions = this.#observerRegistry.getSessions();
+		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns);
+		this.#syncSubagentHudSpinner(
+			sessions.some(
+				session =>
+					session.kind === "subagent" &&
+					session.status === "active" &&
+					session.detached === true &&
+					session.progress?.status === "running",
+			),
+		);
 		if (lines.length === 0) return;
 		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
+	}
+
+	/** Keep running-worker glyphs moving even when a provider has not emitted a progress frame. */
+	#syncSubagentHudSpinner(shouldAnimate: boolean): void {
+		if (!shouldAnimate) {
+			if (this.#subagentHudSpinnerTimer) {
+				clearInterval(this.#subagentHudSpinnerTimer);
+				this.#subagentHudSpinnerTimer = undefined;
+			}
+			return;
+		}
+		if (this.#subagentHudSpinnerTimer) return;
+		this.#subagentHudSpinnerTimer = setInterval(() => {
+			this.#renderSubagentList();
+			this.ui.requestComponentRender(this.subagentContainer);
+		}, 80);
+		this.#subagentHudSpinnerTimer.unref?.();
 	}
 
 	async #loadTodoList(source: AgentSession = this.session): Promise<void> {
@@ -4769,6 +4820,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#liveCommandController.dispose();
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
+		this.#syncSubagentHudSpinner(false);
 		this.#cancelGoalContinuation();
 		if (this.#sttController) {
 			this.#sttController.dispose();

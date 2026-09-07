@@ -414,7 +414,16 @@ export class AgentLifecycleManager {
 	 * on-disk transcript as a fresh `parked` row. Mirrors
 	 * `finalizeSubagentLifecycle`'s genuine-kill path.
 	 */
-	async release(id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }): Promise<boolean> {
+	async release(
+		id: string,
+		expected?: AgentRefExpectation,
+		options?: { tombstone?: boolean; cascade?: boolean },
+	): Promise<boolean> {
+		if (options?.cascade !== false) {
+			for (const descendantId of this.#registry.listDescendantSubIds(id)) {
+				await this.release(descendantId, undefined, { ...options, cascade: false });
+			}
+		}
 		const adopted = this.#adopted.get(id);
 		const current = this.#registry.get(id);
 		const currentMatches =
