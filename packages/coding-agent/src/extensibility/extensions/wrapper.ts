@@ -23,8 +23,8 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
-import type { ExtensionRunner } from "./runner";
-import type { RegisteredTool, ToolCallEventResult } from "./types";
+import { assertReviewInputSafe, deepFreeze, type ExtensionRunner } from "./runner";
+import type { RegisteredTool, ToolApprovalReviewEvent, ToolApprovalReviewResult, ToolCallEventResult } from "./types";
 
 /**
  * Adapts a RegisteredTool into an AgentTool.
@@ -143,6 +143,10 @@ function safetyCheckLines(checks: readonly ComputerSafetyCheck[]): string[] {
 		return `${index + 1}. ${approvalData(value)}`;
 	});
 }
+const APPROVAL_ABORTED_REASON = "approval aborted";
+function extensionReviewDenyError(toolName: string, reason?: string): Error {
+	return new Error(`Tool "${toolName}" was denied by an extension approval review${reason ? `: ${reason}` : ""}`);
+}
 
 /**
  * Wraps a tool with extension callbacks for interception.
@@ -189,6 +193,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// the loop never saw — nested xd:// device dispatches and direct
 		// (non-loop) execution such as Cursor exec handlers.
 		const loopEmittedToolCall = this.runner.consumeToolCallEmitted(toolCallId, this.tool.name);
+		// Cancellation boundary at entry: an already-aborted invocation never
+		// proceeds to review, native approval, or execution.
+		signal?.throwIfAborted();
 		// Resolve approval settings up front. A `deny` on the original input short-circuits before the
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
@@ -206,7 +213,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// 1. Emit tool_call event first - extensions can block execution or revise the input the tool
 		// runs with. Doing this BEFORE the approval gate means approval (below) resolves against the
 		// input that actually executes, closing the "approve one thing, run another" gap: the prompt
-		// text, policy resolution, and provider safety checks all see `effectiveParams`.
+		// text, policy resolution, and provider safety checks all see the final owned input.
 		let effectiveParams = params;
 		if (!loopEmittedToolCall && this.runner.hasHandlers("tool_call")) {
 			try {
@@ -227,10 +234,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					const reason = callResult.reason || "Tool execution was blocked by an extension";
 					throw new Error(reason);
 				}
-				// A non-blocking handler may replace the execution input. The returned object is the raw
-				// input passed to `execute` (handler-owned; not re-normalized). Skipped for `computer`
-				// tool calls, whose event input is a synthetic {actions,pendingSafetyChecks} view
-				// (see toolEventArgs) rather than the real execution params.
+				// A non-blocking handler may replace the execution input. The returned object is copied
+				// into the final owned input below. Skipped for `computer` tool calls, whose event input
+				// is a synthetic {actions,pendingSafetyChecks} view (see toolEventArgs) rather than the
+				// real execution params.
 				if (callResult?.input !== undefined && context?.toolCall?.providerMetadata?.type !== "computer") {
 					effectiveParams = callResult.input as typeof params;
 				}
@@ -241,11 +248,16 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 			}
 		}
+		signal?.throwIfAborted();
+		const inputMatchesDispatch = effectiveParams === params;
 
-		// 2. Full approval gate against the (possibly revised) input that will actually run — resolves
-		// policy and prompts on `effectiveParams`, so the user approves exactly what executes. A revised
-		// input that newly resolves to `deny` is caught here even though the original passed the
-		// short-circuit above.
+		// 2. Full approval gate against the input that will actually run — resolves policy and
+		// prompts on the un-cloned execution input, so a revised input that newly resolves to
+		// `deny` is caught here even though the original passed the short-circuit above. The
+		// owned deep clone is established only inside the review boundary below: calls that
+		// never reach extension review keep the pre-review execution behavior and gain no
+		// structured-cloneability requirement (a tool_call replacement or direct dispatch may
+		// legally carry non-cloneable values).
 		const resolvedArgs = approvalArgs(effectiveParams, context);
 		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies);
 		context?.xdevTierResolved?.(resolved.tier);
@@ -261,12 +273,75 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// and tool-demanded overrides still prompt. Provider safety checks are
 		// stronger: yolo, per-tool allow, and xdev approval never acknowledge
 		// them on the user's behalf.
-		const explicitPrompt = resolved.override || Object.hasOwn(userPolicies, resolved.policyKey ?? this.tool.name);
-		const xdevBypass = context?.xdevApproved === true && effectiveParams === params;
+		const explicitPrompt = resolved.override || resolved.source === "user";
+		const xdevBypass = context?.xdevApproved === true && inputMatchesDispatch;
 		const approvalCheck = {
 			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && (explicitPrompt || !xdevBypass)),
 			reason: resolved.reason,
 		};
+
+		// Extension approval review between final input resolution and the native
+		// selector. Eligible only for mode-derived prompts. The original input
+		// remains authoritative until every review precondition succeeds and an
+		// immutable snapshot is ready for handler dispatch.
+		let executionParams = effectiveParams;
+		if (
+			approvalCheck.required &&
+			resolved.policy === "prompt" &&
+			resolved.source === "mode" &&
+			!explicitPrompt &&
+			pendingSafetyChecks.length === 0 &&
+			!xdevBypass &&
+			!signal?.aborted &&
+			this.runner.hasHandlers("tool_approval_review")
+		) {
+			let preparedReview: { params: typeof effectiveParams; event: ToolApprovalReviewEvent } | undefined;
+			try {
+				// Clone fidelity: the validator admits only graphs structuredClone
+				// reproduces verbatim, so the policy decision above — resolved on
+				// `effectiveParams` — classifies the owned clone identically and is
+				// reused here without a third policy invocation. The policy callback
+				// therefore never observes the execution-owned clone or the frozen
+				// review snapshot, and cannot retain an alias into either.
+				assertReviewInputSafe(effectiveParams);
+				preparedReview = {
+					params: structuredClone(effectiveParams),
+					event: deepFreeze({
+						type: "tool_approval_review",
+						sessionId: context?.sessionManager?.getSessionId() ?? "",
+						toolCallId,
+						toolName: this.tool.name,
+						input: structuredClone(effectiveParams) as Record<string, unknown>,
+						approvalMode,
+						tier: resolved.tier,
+					}),
+				};
+			} catch {
+				preparedReview = undefined;
+			}
+
+			if (preparedReview) {
+				// Independent graphs: execution takes its own mutable clone; review
+				// takes a separate deeply frozen snapshot. Neither aliases the source
+				// input the approval callback saw, and review approval attaches to a
+				// snapshot materially identical to what executes.
+				executionParams = preparedReview.params;
+
+				let review: ToolApprovalReviewResult;
+				try {
+					review = await this.runner.emitToolApprovalReview(preparedReview.event, signal);
+				} catch {
+					review = { decision: "escalate" };
+				}
+				signal?.throwIfAborted();
+				if (review.decision === "deny") {
+					throw extensionReviewDenyError(this.tool.name, review.reason);
+				}
+				if (review.decision === "approve") {
+					approvalCheck.required = false;
+				}
+			}
+		}
 
 		if (approvalCheck.required) {
 			const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];
@@ -302,6 +377,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					...(reason ? { reason } : {}),
 				});
 			};
+			if (signal?.aborted) {
+				// Cancelled while approval handlers were pending: resolve as
+				// not-approved so requested→resolved pairing holds, then stop.
+				await emitApprovalResolved(false, APPROVAL_ABORTED_REASON);
+				signal?.throwIfAborted();
+			}
 
 			// Provider safety checks fail closed without an interactive prompt. Unlike
 			// ordinary tier approval, no setting or yolo mode may bypass this gate.
@@ -323,23 +404,47 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 
 			const uiContext = this.runner.getUIContext();
-			const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
+			// `formatApprovalDetails` is tool-owned callback code: it must never
+			// receive the execution-owned params, or a formatter that mutates or
+			// retains its argument could change what runs after the user approves
+			// the rendered text (formatter displays A, execution receives B). Hand
+			// it a detached clone of the approval view derived from the execution
+			// input instead. On the review path this is the owned execution clone,
+			// so the prompt cannot drift from the input that executes.
+			// Unfrozen: a frozen graph would turn formatter mutation attempts into
+			// TypeErrors, changing formatter error behavior. Inputs that cannot be
+			// cloned keep the prior aliasing semantics.
+			let promptArgs = approvalArgs(executionParams, context);
+			try {
+				promptArgs = structuredClone(promptArgs);
+			} catch {
+				// Non-cloneable fallback input: keep the prior aliasing semantics.
+			}
+			const basePrompt = formatApprovalPrompt(this.tool, promptArgs, approvalCheck.reason);
 			const safetyPrompt =
 				pendingSafetyChecks.length > 0
 					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
 					: basePrompt;
 			let choice: string | undefined;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"], signal ? { signal } : undefined);
 			} catch (err) {
-				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
+				await emitApprovalResolved(false, err instanceof Error ? err.message : APPROVAL_ABORTED_REASON);
 				throw err;
+			}
+			if (signal?.aborted) {
+				// Cancelled while the selector was pending: a late "Approve" is not
+				// an approval for a cancelled invocation. Resolve as not-approved,
+				// never mark provider safety approved, and stop.
+				await emitApprovalResolved(false, APPROVAL_ABORTED_REASON);
+				signal?.throwIfAborted();
 			}
 			const approved = choice === "Approve";
 			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
 			if (!approved) {
 				throw new Error(`Tool call denied by user: ${this.tool.name}`);
 			}
+			signal?.throwIfAborted();
 			if (pendingSafetyChecks.length > 0) {
 				if (!context) throw new Error("Provider safety approval context is unavailable");
 				context.providerSafetyApproved = true;
@@ -350,14 +455,19 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		let result: AgentToolResult<TDetails, TParameters>;
 		let executionError: Error | undefined;
 
+		// Final cancellation checkpoint: no route through review or approval may
+		// start execution on an aborted signal, even if the tool ignores it.
+		signal?.throwIfAborted();
 		try {
 			// Name the owning session for process-wide file-mutation fallbacks and
 			// expose its settings to registered tools and any fallback handlers they
 			// trigger. `sdk.ts` wraps the whole tool registry with this class whenever
-			// a runner exists.
+			// a runner exists. A denied file write or delete inside this tool can be
+			// brokered to an extension handler, and that registry is PROCESS-WIDE.
+			// Inert with no fallback registered: no scope is entered.
 			result = await this.runner.runScoped(() =>
 				withFileMutationSession(this.runner.sessionId, () =>
-					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+					this.tool.execute(toolCallId, executionParams, signal, onUpdate, context),
 				),
 			);
 		} catch (err) {
@@ -376,7 +486,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				toolCallId,
 				input: normalizeToolEventInput(
 					this.tool.name,
-					resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
+					resolveToolEventInput(this.tool, toolEventArgs(executionParams, context)),
 				),
 				content: result.content,
 				details: result.details,

@@ -311,6 +311,44 @@ Cancelable pre-events:
 
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications.
 
+#### Approval review
+
+`tool_approval_review` lets permission and guard extensions resolve an otherwise eligible native approval prompt without replacing OMP's policy engine.
+
+The decision vocabularies are separate:
+
+- native policy: `allow | prompt | deny`;
+- extension review: `approve | deny | escalate`.
+
+The host emits the review only for a mode-derived native prompt. Native tool or user denies, explicit user prompts, tool-specific prompt overrides, provider computer-safety checks, native allows, and xdev-approved calls remain authoritative and do not emit it.
+
+- `approve` resolves the eligible prompt positively and suppresses the native selector;
+- `deny` vetoes the call at the extension-review layer, preserves its optional `reason`, and does not show the native selector;
+- `escalate` makes no decision and continues through the ordinary native selector;
+- input that is not a plain object/array tree (for example nested `Map`, `Set`, or `Date` values) cannot be snapshotted immutably, so review escalates without dispatching handlers;
+
+Handlers receive a deeply immutable snapshot of the final owned tool input — the value that remains after host and `tool_call` transformations and that native policy, prompt formatting, and execution all use. Review results cannot rewrite the invocation, and the owned value itself is not frozen: tools may still mutate their validated parameters internally.
+
+Approval requires unanimous valid approval from at least one handler. A valid `deny` takes precedence across handlers. Otherwise, no handlers, any `escalate`, disagreement, malformed result, thrown error, timeout, or cancellation produces `escalate`. Cancellation before execution is committed prevents execution even if a handler returned `approve`.
+
+Use runtime capability detection because an older host may accept registration of an unknown event that never fires:
+
+```ts
+const supportsApprovalReview =
+  pi.supportedEvents?.includes("tool_approval_review") ?? false;
+
+if (supportsApprovalReview) {
+  pi.on("tool_approval_review", async (event) => {
+    if (event.toolName === "bash" && event.input.command === "approved-command") {
+      return { decision: "approve" };
+    }
+    return { decision: "escalate" };
+  });
+}
+```
+
+`supportedEvents` is optional for compatibility with older hosts. Current hosts expose a frozen readonly list; extensions must not mutate it.
+
 ### Reliability/runtime signals
 
 - `auto_compaction_start` / `auto_compaction_end`

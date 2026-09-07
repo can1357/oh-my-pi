@@ -64,6 +64,8 @@ import type {
 	SessionCompactingResult,
 	SessionStopEvent,
 	SessionStopEventResult,
+	ToolApprovalReviewEvent,
+	ToolApprovalReviewResult,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolRegistrationListener,
@@ -122,6 +124,40 @@ function handlerTimeoutForEvent(eventType: string): number {
 
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
 const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
+
+function normalizeToolApprovalReviewResult(value: unknown): ToolApprovalReviewResult | undefined {
+	try {
+		if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+		const keys = Reflect.ownKeys(value);
+		const decisionDescriptor = Object.getOwnPropertyDescriptor(value, "decision");
+		if (!decisionDescriptor || !("value" in decisionDescriptor)) return undefined;
+
+		if (decisionDescriptor.value === "approve" || decisionDescriptor.value === "escalate") {
+			return keys.length === 1 && keys[0] === "decision" ? { decision: decisionDescriptor.value } : undefined;
+		}
+		if (
+			decisionDescriptor.value !== "deny" ||
+			!keys.includes("decision") ||
+			keys.some(key => key !== "decision" && key !== "reason")
+		) {
+			return undefined;
+		}
+		const reasonDescriptor = Object.getOwnPropertyDescriptor(value, "reason");
+		if (!reasonDescriptor) return { decision: "deny" };
+		if (
+			!("value" in reasonDescriptor) ||
+			(reasonDescriptor.value !== undefined && typeof reasonDescriptor.value !== "string")
+		) {
+			return undefined;
+		}
+		return {
+			decision: "deny",
+			...(reasonDescriptor.value ? { reason: reasonDescriptor.value } : {}),
+		};
+	} catch {
+		return undefined;
+	}
+}
 
 interface HandlerTimeoutBudget {
 	pause(): void;
@@ -334,6 +370,7 @@ type RunnerEmitEvent = Exclude<
 	ExtensionEvent,
 	| ToolCallEvent
 	| ToolResultEvent
+	| ToolApprovalReviewEvent
 	| UserBashEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
@@ -1510,6 +1547,78 @@ export class ExtensionRunner {
 		return result;
 	}
 
+	/**
+	 * Emit a `tool_approval_review` event to every subscribed extension.
+	 *
+	 * Review of an eligible mode-derived approval prompt. A valid deny takes
+	 * precedence over escalation; escalation includes malformed results, throws,
+	 * timeouts, cancellation, and non-plain (mutably cloneable) input values.
+	 * Approval is returned only when at least one handler participates and every
+	 * handler returns exactly a valid approve result. No handlers escalate to the
+	 * ordinary native approval path.
+	 */
+	async emitToolApprovalReview(
+		event: ToolApprovalReviewEvent,
+		signal?: AbortSignal,
+	): Promise<ToolApprovalReviewResult> {
+		// The wrapper owns the final execution input and hands this event a
+		// snapshot of it. Freeze the complete host event so one handler cannot
+		// alter what later handlers review.
+		let reviewedEvent: ToolApprovalReviewEvent;
+		try {
+			reviewedEvent = deepFreeze(event);
+		} catch {
+			return { decision: "escalate" };
+		}
+		let ctx: ExtensionContext | undefined;
+		let participated = false;
+		let hasEscalation = false;
+		let hasDenial = false;
+		let denialReason: string | undefined;
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get(event.type);
+			if (!handlers || handlers.length === 0) continue;
+			ctx ??= this.createContext();
+
+			for (const handler of handlers) {
+				const handlerResult = await this.#runHandlerWithTimeout<ToolApprovalReviewEvent, ToolApprovalReviewResult>(
+					handler as (
+						event: ToolApprovalReviewEvent,
+						ctx: ExtensionContext,
+					) => Promise<ToolApprovalReviewResult | undefined>,
+					reviewedEvent,
+					ctx,
+					ext,
+					normalizeHandlerTimeout(
+						this.settings?.get("extensionHandlers.toolCallTimeoutMs") ?? extensionHandlerTimeoutMs,
+					),
+					() => ({ decision: "escalate" }),
+					signal,
+				);
+				participated = true;
+				const result = normalizeToolApprovalReviewResult(handlerResult);
+				if (!result) {
+					hasEscalation = true;
+					continue;
+				}
+				if (result.decision === "deny") {
+					hasDenial = true;
+					denialReason ??= result.reason;
+					continue;
+				}
+				if (result.decision === "escalate") {
+					hasEscalation = true;
+				}
+			}
+		}
+
+		if (hasDenial) return { decision: "deny", ...(denialReason ? { reason: denialReason } : {}) };
+		if (hasEscalation) return { decision: "escalate" };
+		if (!participated) return { decision: "escalate" };
+		return { decision: "approve" };
+	}
+
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {
 		return this.emitUserEvent<UserBashEventResult>(event, "user_bash");
 	}
@@ -1764,4 +1873,89 @@ export class ExtensionRunner {
 
 		return undefined;
 	}
+}
+
+/**
+ * Rejects values that cannot be exposed as a deeply immutable snapshot: only
+ * plain objects/arrays without accessors freeze transitively. Tolerates
+ * non-default descriptors — an already frozen/sealed graph is exactly what
+ * freezing would produce, so re-freezing host snapshots stays a no-op.
+ */
+function assertDeepFreezable(value: unknown, seen = new WeakSet<object>()): void {
+	if (typeof value !== "object" || value === null || seen.has(value)) return;
+
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null && prototype !== Array.prototype) {
+		throw new TypeError("Review input contains an unsupported mutable value");
+	}
+	seen.add(value);
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !("value" in descriptor)) {
+			throw new TypeError("Review input contains an accessor");
+		}
+		assertDeepFreezable(descriptor.value, seen);
+	}
+}
+
+/**
+ * Rejects values that structuredClone would not reproduce verbatim, so a
+ * cloned approval-review snapshot is guaranteed to match the semantics of the
+ * input being approved. Admits only plain objects/arrays with default data
+ * descriptors and cloneable leaf values; anything else (null-prototype
+ * objects, class instances, Dates, frozen/sealed or non-enumerable graphs,
+ * accessors, symbol keys, functions) must fall back to native approval with
+ * its original semantics intact.
+ */
+export function assertReviewInputSafe(value: unknown, seen = new WeakSet<object>()): void {
+	if (typeof value === "function" || typeof value === "symbol") {
+		throw new TypeError("Review input contains a non-cloneable value");
+	}
+	if (typeof value !== "object" || value === null || seen.has(value)) return;
+
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== Array.prototype) {
+		// Includes null-prototype objects: structuredClone re-homes them on
+		// Object.prototype, so their semantics would not survive the snapshot.
+		throw new TypeError("Review input contains an unsupported mutable value");
+	}
+	const isArray = Array.isArray(value);
+	seen.add(value);
+	for (const key of Reflect.ownKeys(value)) {
+		if (typeof key === "symbol") {
+			throw new TypeError("Review input contains a symbol-keyed property");
+		}
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !("value" in descriptor)) {
+			throw new TypeError("Review input contains an accessor");
+		}
+		if (isArray && key === "length") continue;
+		if (!descriptor.writable || !descriptor.enumerable || !descriptor.configurable) {
+			// structuredClone normalizes non-default descriptors: non-enumerable
+			// properties are dropped and frozen/sealed graphs become mutable, so
+			// the snapshot would diverge from the input being approved.
+			throw new TypeError("Review input contains a non-default property descriptor");
+		}
+		assertReviewInputSafe(descriptor.value, seen);
+	}
+}
+
+/** Recursively freezes a review-safe plain object/array value. */
+export function deepFreeze<T>(value: T): T {
+	assertDeepFreezable(value);
+	return freezeReviewInput(value);
+}
+
+function freezeReviewInput<T>(value: T, seen = new WeakSet<object>()): T {
+	if (typeof value !== "object" || value === null || seen.has(value)) return value;
+
+	seen.add(value);
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (descriptor && "value" in descriptor) {
+			freezeReviewInput(descriptor.value, seen);
+		}
+	}
+	Object.freeze(value);
+	return value;
 }

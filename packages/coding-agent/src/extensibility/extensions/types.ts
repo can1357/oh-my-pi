@@ -77,7 +77,7 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../../tools";
-import type { ApprovalMode } from "../../tools/approval";
+import type { ApprovalMode, ToolTier } from "../../tools/approval";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
 import type {
@@ -927,6 +927,27 @@ export interface ToolApprovalResolvedEvent {
 	reason?: string;
 }
 
+/**
+ * Fired after final tool-input resolution for an eligible mode-derived prompt,
+ * before the native approval selector. The review may approve the call
+ * (skipping the ordinary prompt), escalate back to it, or deny the call. It
+ * cannot rewrite the deeply immutable snapshot of the input under review.
+ */
+export interface ToolApprovalReviewEvent {
+	readonly type: "tool_approval_review";
+	readonly sessionId: string;
+	readonly toolCallId: string;
+	readonly toolName: string;
+	readonly input: Readonly<Record<string, unknown>>;
+	readonly approvalMode: ApprovalMode;
+	readonly tier: ToolTier;
+}
+
+export type ToolApprovalReviewResult =
+	| { decision: "approve" }
+	| { decision: "escalate" }
+	| { decision: "deny"; reason?: string };
+
 interface ToolCallEventBase {
 	type: "tool_call";
 	toolCallId: string;
@@ -1100,7 +1121,8 @@ export type ExtensionEvent =
 	| ToolCallEvent
 	| ToolResultEvent
 	| ToolApprovalRequestedEvent
-	| ToolApprovalResolvedEvent;
+	| ToolApprovalResolvedEvent
+	| ToolApprovalReviewEvent;
 
 // ============================================================================
 // Event Results
@@ -1207,6 +1229,64 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		: ServiceTier;
 
 /**
+ * Event names dispatched by the host to extension handlers.
+ *
+ * Exposed through `supportedEvents` for runtime capability detection.
+ * Extensions should treat `supportedEvents` as optional so they remain
+ * compatible with older hosts that predate capability reporting.
+ *
+ * Keep in sync with the `on()` overloads below.
+ */
+export const EXTENSION_EVENT_NAMES: readonly string[] = Object.freeze([
+	"resources_discover",
+	"session_start",
+	"session_before_switch",
+	"session_switch",
+	"session_before_branch",
+	"session_branch",
+	"session_before_compact",
+	"session.compacting",
+	"session_compact",
+	"session_shutdown",
+	"session_before_tree",
+	"session_tree",
+	"context",
+	"before_provider_request",
+	"after_provider_response",
+	"before_agent_start",
+	"agent_start",
+	"agent_end",
+	"session_stop",
+	"turn_start",
+	"turn_end",
+	"message_start",
+	"message_update",
+	"message_end",
+	"tool_execution_start",
+	"tool_execution_update",
+	"tool_execution_end",
+	"auto_compaction_start",
+	"auto_compaction_end",
+	"auto_retry_start",
+	"auto_retry_end",
+	"retry_fallback_applied",
+	"retry_fallback_succeeded",
+	"ttsr_triggered",
+	"todo_reminder",
+	"goal_updated",
+	"credential_disabled",
+	"input",
+	"tool_approval_requested",
+	"tool_approval_resolved",
+	"tool_approval_review",
+	"tool_call",
+	"tool_result",
+	"user_bash",
+	"user_python",
+	"mcp_notification",
+]);
+
+/**
  * ExtensionAPI passed to extension factory functions.
  */
 export interface ExtensionAPI {
@@ -1228,6 +1308,9 @@ export interface ExtensionAPI {
 
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
+
+	/** Event names dispatched by this host. Absent on older hosts. */
+	supportedEvents?: readonly string[];
 
 	// =========================================================================
 	// Event Subscription
@@ -1285,6 +1368,10 @@ export interface ExtensionAPI {
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
+	on(
+		event: "tool_approval_review",
+		handler: ExtensionHandler<ToolApprovalReviewEvent, ToolApprovalReviewResult>,
+	): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
