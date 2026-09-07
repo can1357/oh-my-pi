@@ -340,6 +340,8 @@ pedantic = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
+# ext/doctor.rs and ext/index.rs compare publisher keys, not similarly named fields.
+suspicious_operation_groupings = "allow"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Synchronization Policy
