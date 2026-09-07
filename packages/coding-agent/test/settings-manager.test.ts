@@ -551,24 +551,45 @@ describe("Settings", () => {
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});
 
-		it("does not write to an unrelated sibling when a non-final component is missing before ..", async () => {
-			// config.yml -> missing/../final.yml, where `missing` does not exist.
-			// Filesystem lookup fails at `missing`, so a following `..` must NOT
-			// pop a component that was never entered. Collapsing the target
-			// lexically instead pops `missing` and lands on <configdir>/final.yml,
-			// clobbering an unrelated sibling while the real (dangling) target is
-			// never written. The resolver must not escape to that sibling.
+		it("materializes a missing component named before .. in a dangling target", async () => {
+			// config.yml -> missing/../final-config.yml, where `missing` does
+			// not exist. The filesystem resolves `missing/..` to the config
+			// dir exactly when `missing` exists as a directory — which the
+			// write can create — so the resolver materializes `missing`, lands
+			// the write on final-config.yml beside it, and the link resolves
+			// through the recreated component afterwards. (Merely collapsing
+			// the `..` lexically would write the same file while the link
+			// stays dangling.)
 			await fs.promises.symlink("missing/../final-config.yml", getConfigPath(), "file");
-			const lexicalSibling = path.join(agentDir, "final-config.yml");
+			const finalPath = path.join(agentDir, "final-config.yml");
+			const repairedDir = path.join(agentDir, "missing");
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			settings.set("setupVersion", 10);
-			// The resolved path sits under the never-entered `missing` dir (fs
-			// semantics), whose parent does not exist, so the atomic write fails
-			// rather than clobbering the sibling.
+			await settings.flush();
+
+			expect(fs.statSync(repairedDir).isDirectory()).toBe(true);
+			// The link now LIVE-resolves to the file the write landed on.
+			expect(await fs.promises.realpath(getConfigPath())).toBe(finalPath);
+			expect(YAML.parse(await Bun.file(finalPath).text())).toEqual({ setupVersion: 10 });
+			// The user-managed chain head survives as a symlink.
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+		});
+
+		it("rejects a dangling target that resolves to a directory", async () => {
+			// config.yml -> managed/.. names the config DIRECTORY itself once
+			// `managed` exists. Publishing there would rename a file over the
+			// directory — EISDIR on POSIX, and on Windows the replacement
+			// fallback would move the whole config dir aside — so the write
+			// must reject without even creating `managed`.
+			await fs.promises.symlink("managed/..", getConfigPath(), "file");
+			const managed = path.join(agentDir, "managed");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 11);
 			await expect(settings.flush()).rejects.toThrow();
 
-			expect(fs.existsSync(lexicalSibling)).toBe(false);
+			expect(fs.existsSync(managed)).toBe(false);
 			// The user-managed chain head survives as a symlink.
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 		});

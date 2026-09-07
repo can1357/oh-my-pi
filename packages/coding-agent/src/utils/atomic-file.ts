@@ -53,9 +53,35 @@ export function physicalTargetSegments(target: string, pathApi: typeof path = pa
  * needs a manual walk so the write recreates the target the user pointed at
  * instead of replacing the link; that walk resolves the target one physical
  * segment at a time (see the inline comments for the TOCTOU hardening) —
- * shared by the YAML settings flush and the JSON config writers.
+ * shared by the YAML settings flush and the JSON config writers. A target
+ * component that is itself plainly missing but named before a `..`
+ * (`managed/../config.json`) is materialized as a directory so the spelling
+ * resolves after the write. The result is always a file target: a resolution
+ * that lands on an existing directory rejects instead of publishing into it.
  */
 export async function resolveSymlinkWriteTarget(filePath: string): Promise<string> {
+	return assertFileWriteTarget(filePath, await resolveSymlinkTargetPath(filePath));
+}
+
+/**
+ * A resolved target that exists as a DIRECTORY can never be published to:
+ * rename(file, dir) fails EISDIR on POSIX, and on Windows the `EPERM`
+ * replacement fallback would move the directory aside and drop the config
+ * file in its place. Reject the write up front; a missing leaf is the normal
+ * recreate case and passes through.
+ */
+async function assertFileWriteTarget(filePath: string, resolved: string): Promise<string> {
+	try {
+		if ((await fs.promises.stat(resolved)).isDirectory()) {
+			throw enotDir(`config write target is a directory (${resolved}) for ${filePath}`);
+		}
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	return resolved;
+}
+
+async function resolveSymlinkTargetPath(filePath: string): Promise<string> {
 	try {
 		return await fs.promises.realpath(filePath);
 	} catch (error) {
@@ -176,14 +202,26 @@ function walkOriginalSpelling(filePath: string): Promise<string> {
  * following symlinked components (including dangling ones, whose referents the
  * write recreates) and popping only PHYSICAL parents for `..`. Returns the
  * resolved accumulator — canonical up to the deepest existing component, then
- * lexical once a component is missing (the freeze).
+ * lexical once a component is missing (the freeze). The one construct the
+ * write can repair mid-walk is `X/../leaf` with a plainly-missing `X`: `X` is
+ * materialized as a directory and the freeze lifted, since that is exactly
+ * the state the filesystem needs for the spelling to resolve.
  */
 async function walkPhysicalSegments(filePath: string, acc: string, segments: readonly string[]): Promise<string> {
 	let frozen = false;
 	const remaining = [...segments];
 	let linkHops = 0;
+	// Provenance for the `X/../leaf` repair: queued segments still to be
+	// consumed that came from following a dangling link, whether the frozen
+	// component was one of them, and whether plain names were appended
+	// lexically after the freeze.
+	let splicedSegments = 0;
+	let frozenViaSplice = false;
+	let lexicalSinceFreeze = false;
 	while (remaining.length > 0) {
 		const segment = remaining.shift()!;
+		const fromSplice = splicedSegments > 0;
+		if (fromSplice) splicedSegments--;
 		if (segment === "" || segment === ".") {
 			if (frozen) {
 				// An INTERIOR separator or `.` after the frozen component is
@@ -218,17 +256,38 @@ async function walkPhysicalSegments(filePath: string, acc: string, segments: rea
 		}
 		if (segment === "..") {
 			if (frozen) {
-				// `..` after a component that could not be physically
-				// traversed — a missing name or a dangling symlink — whether
-				// the `..` follows it immediately (`link/..`) or after further
-				// lexical names (`missing/child/..`). The kernel cannot take
-				// the parent of a path it never entered: `missing/child/..`
-				// fails because `missing` was never a directory to descend,
-				// so the lexically appended `child` is not a real component to
-				// pop. Popping and continuing would leave `acc` on a
-				// mislocated path and land a regular file there while
-				// reporting success. Surface the ENOTDIR the filesystem
-				// raises instead.
+				// `X/../…` where `X` is a plainly-missing component named by
+				// the target's OWN spelling is repairable: the filesystem
+				// resolves `X/..` to X's parent exactly when X exists as a
+				// directory — which this write can create — so materialize
+				// X, pop to its canonical (existing) parent, and lift the
+				// freeze; the rest of the walk resolves normally and the
+				// link resolves through the recreated component after the
+				// publish. The repair is only sound when `..` IMMEDIATELY
+				// follows X and nothing but plain leaf names remains:
+				//  - names appended lexically since the freeze
+				//    (`missing/child/..`) demand entering components that do
+				//    not exist before the pop;
+				//  - a component named by following a DANGLING LINK
+				//    (`link/..` with `link -> missing`) would "repair" to the
+				//    link target's parent — the config DIRECTORY itself for a
+				//    bare `link/..`;
+				//  - any remaining `..`/`.`/separator spelling names a
+				//    directory rather than the file leaf a config publish
+				//    needs (`X/..`, `X/../`) — the trailing variants below
+				//    and the file-target assert catch those spellings anyway,
+				//    but refusing here avoids creating directories for a
+				//    write that can never succeed.
+				// Everything else keeps surfacing ENOTDIR below: the kernel
+				// cannot take the parent of a path it never entered.
+				if (remaining.length > 0 && remaining.every(isPlainName) && !lexicalSinceFreeze && !frozenViaSplice) {
+					await fs.promises.mkdir(acc, { recursive: true, mode: 0o700 });
+					acc = path.dirname(acc);
+					frozen = false;
+					lexicalSinceFreeze = false;
+					frozenViaSplice = false;
+					continue;
+				}
 				throw enotDir(`cannot resolve '..' past an unresolved component in symlink target for ${filePath}`);
 			}
 			// `acc` was resolved by realpath() and exists on disk, but a
@@ -251,6 +310,7 @@ async function walkPhysicalSegments(filePath: string, acc: string, segments: rea
 		}
 		if (frozen) {
 			acc = path.join(acc, segment);
+			lexicalSinceFreeze = true;
 			continue;
 		}
 		const candidate = path.join(acc, segment);
@@ -276,6 +336,8 @@ async function walkPhysicalSegments(filePath: string, acc: string, segments: rea
 			if (linkTarget === undefined) {
 				acc = candidate;
 				frozen = true;
+				frozenViaSplice = fromSplice;
+				lexicalSinceFreeze = false;
 				continue;
 			}
 			// A cycle among dangling links (`a -> b`, `b -> a`) never
@@ -294,10 +356,17 @@ async function walkPhysicalSegments(filePath: string, acc: string, segments: rea
 			if (path.isAbsolute(linkTarget)) acc = path.parse(linkTarget).root;
 			// A relative target resolves against the link's parent — the
 			// canonical `acc` we are standing on.
-			remaining.unshift(...physicalTargetSegments(linkTarget));
+			const spliced = physicalTargetSegments(linkTarget);
+			splicedSegments += spliced.length;
+			remaining.unshift(...spliced);
 		}
 	}
 	return acc;
+}
+
+/** A plain path-name segment — not a separator, dot, or parent traversal. */
+function isPlainName(segment: string): boolean {
+	return segment !== "" && segment !== "." && segment !== "..";
 }
 
 /**
