@@ -77,7 +77,8 @@ const TASK_FOOTER_HINT = "↑/↓ models · Enter use for Task subagents · type
 /**
  * The alt+p picker component. Hosted as a non-fullscreen bottom-anchored
  * overlay (`ui.showOverlay(..., { anchor: "bottom-center" })`); keyboard-only,
- * since mouse tracking is reserved for fullscreen overlays.
+ * because the interactive transcript's mouse selection is suspended while
+ * blocking overlays are visible.
  */
 export class ModelPickerComponent implements Component {
 	#tui: TUI;

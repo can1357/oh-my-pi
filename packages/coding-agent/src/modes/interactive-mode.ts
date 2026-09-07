@@ -889,6 +889,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 		this.composer.setPreferences(preferences);
 		this.ui = this.composer.ui;
+		if (settings.get("tui.mouseSelection")) this.composer.enableTranscriptMouseSelection();
 		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;

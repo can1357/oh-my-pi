@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in normal-buffer SGR mouse tracking with low-noise button-motion reports and passive bottom-right overlays for hosts that need application-owned pointer interactions.
+
 ### Fixed
 
 - `extractMarkdownLinks()` now returns one-row visible labels for formatted and multiline links ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).

@@ -385,6 +385,18 @@ export function isOsc66Line(line: string): boolean {
 }
 
 /**
+ * Strip terminal styling while retaining the visible payload of Kitty OSC 66
+ * text-sizing spans. Generic ANSI stripping treats the entire span as control
+ * data even though the terminal renders its payload.
+ */
+export function stripAnsiPreservingOsc66(text: string): string {
+	if (!text.includes(OSC66_PREFIX)) return Bun.stripANSI(text);
+	OSC66_SPAN_REGEX.lastIndex = 0;
+	const withPayload = text.replace(OSC66_SPAN_REGEX, (_match, _metadata: string, payload: string) => payload);
+	return Bun.stripANSI(withPayload);
+}
+
+/**
  * Largest `s=` scale among the OSC 66 spans in a line (1 when none is scaled).
  * A scale-`s` heading occupies `s` terminal rows, so the `s - 1` blank rows
  * beneath it are the glyph's lower half and must never be erased or overdrawn.

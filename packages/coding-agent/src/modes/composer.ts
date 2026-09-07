@@ -5,11 +5,15 @@ import {
 	isInsideTerminalMultiplexer,
 	ProcessTerminal,
 	type ResizeScrollbackMode,
-	Spacer,
+	routeSgrMouseInput,
+	type SgrMouseEvent,
 	sliceWithWidth,
+	Spacer,
+	type OverlayHandle,
 	type Terminal,
 	type TerminalFramePlan,
 	type TerminalFrameProvider,
+	Text,
 	truncateToWidth,
 	TUI,
 	type TUIOptions,
@@ -17,11 +21,51 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { CustomEditor } from "./components/custom-editor";
+import {
+	highlightViewportSelection,
+	sliceViewportSelection as sliceViewportText,
+	type ViewportSelectionPoint,
+} from "./components/viewport-selection";
 import { type AnimationFrame, TranscriptContainer } from "./components/transcript-container";
 import { type LspServerInfo, type RecentSession, WelcomeComponent } from "./components/welcome";
 import { getEditorTheme, initThemeSync, theme } from "./theme/theme";
+import { copyToClipboard } from "../utils/clipboard";
 
 const DOUBLE_INTERRUPT_MS = 500;
+const EMPTY_VIEWPORT_ROWS: readonly string[] = [];
+
+function reflowRowsAtWidth(lines: readonly string[], width: number): string[] {
+	const columns = Math.max(1, width);
+	const reflowed: string[] = [];
+	for (const line of lines) {
+		const lineWidth = visibleWidth(line);
+		if (lineWidth === 0) {
+			reflowed.push("");
+			continue;
+		}
+		for (let column = 0; column < lineWidth;) {
+			let slice = sliceWithWidth(line, column, columns, true);
+			if (slice.width === 0) slice = sliceWithWidth(line, column, columns);
+			reflowed.push(slice.text);
+			column += Math.max(1, slice.width);
+		}
+	}
+	return reflowed;
+}
+
+function sameRows(previous: readonly string[], next: readonly string[]): boolean {
+	if (previous.length !== next.length) return false;
+	for (let index = 0; index < previous.length; index++) {
+		if (previous[index] !== next[index]) return false;
+	}
+	return true;
+}
+
+interface ViewportSelectionSnapshot {
+	readonly lines: readonly string[];
+	readonly columns: number;
+	readonly revision: number;
+}
 
 /** Live settings that affect the composer before and after session adoption. */
 export interface ComposerPreferences {
@@ -199,6 +243,23 @@ export class Composer implements TerminalFrameProvider {
 	#stopped = false;
 	#transferred = false;
 
+	#visibleViewportColumns = 0;
+	#visibleViewportRows = 0;
+	#visibleSelectionRevision = 0;
+	#visibleTranscriptStart = -1;
+	#visibleTranscriptRows: readonly string[] = [];
+	#visibleHistoryRows: readonly string[] = [];
+	#visibleHistoryHardRows: readonly string[] = [];
+	#visibleHistoryScreenOffset = 0;
+	#visibleHistoryWidth = 0;
+	#visibleHistoryBatchId: number | undefined;
+	#visibleHistoryBatchHardRows: readonly string[] = [];
+	#mouseSelectionUnsubscribe: (() => void) | undefined;
+	#selectionAnchor: ViewportSelectionPoint | undefined;
+	#selectionFocus: ViewportSelectionPoint | undefined;
+	#selectionSnapshot: ViewportSelectionSnapshot | undefined;
+	#copiedOverlayHandle: OverlayHandle | undefined;
+	#copiedOverlayTimer: NodeJS.Timeout | undefined;
 	constructor(options: ComposerOptions = {}) {
 		if (typeof theme === "undefined") initThemeSync();
 		this.#exit = options.exit ?? (code => process.exit(code));
@@ -247,11 +308,265 @@ export class Composer implements TerminalFrameProvider {
 		this.ui.addChild(this.#statusHost);
 		this.ui.setFocus(this.editor);
 	}
+	/**
+	 * Enable transcript selection for the coding-agent interactive CLI. This is
+	 * intentionally separate from Composer construction so standalone Composer
+	 * users and other TUI hosts retain native terminal selection by default.
+	 */
+	enableTranscriptMouseSelection(): void {
+		if (this.#mouseSelectionUnsubscribe !== undefined) return;
+		this.ui.setMouseTracking(true);
+		this.#mouseSelectionUnsubscribe = this.ui.addInputListener(data => {
+			if (this.#hasBlockingOverlay() || !data.startsWith("\x1b[<")) return undefined;
+			const parsed = routeSgrMouseInput(data, event => {
+				this.#handleMouse(event);
+				return true;
+			});
+			return parsed ? { consume: true } : undefined;
+		});
+	}
+
+	#hasBlockingOverlay(): boolean {
+		return this.ui.overlayStack.some(entry => {
+			if (entry.hidden || entry.options?.focus === false) return false;
+			const visible = entry.options?.visible;
+			return visible === undefined || visible(this.ui.terminal.columns, this.ui.terminal.rows);
+		});
+	}
+
+	#selectionLines(): readonly string[] {
+		return this.#visibleHistoryRows.length === 0
+			? this.#visibleTranscriptRows
+			: [...this.#visibleHistoryRows, ...this.#visibleTranscriptRows];
+	}
+
+	#cancelStaleSelection(): void {
+		if (this.#selectionSnapshot?.revision === this.#visibleSelectionRevision) return;
+		this.#selectionAnchor = undefined;
+		this.#selectionFocus = undefined;
+		this.#selectionSnapshot = undefined;
+	}
+
+	#transcriptPoint(row: number, col: number): ViewportSelectionPoint | undefined {
+		const screenRow = Math.trunc(row);
+		const column = Math.trunc(col);
+		if (this.#visibleViewportColumns <= 0 || column < 0 || column >= this.#visibleViewportColumns) return undefined;
+
+		const providerTop = this.ui.getProviderViewportTop();
+		const historyStart = providerTop + this.#visibleHistoryScreenOffset;
+		const historyEnd = historyStart + this.#visibleHistoryRows.length;
+		if (screenRow >= historyStart && screenRow < historyEnd) {
+			return { row: screenRow - historyStart, col: column };
+		}
+
+		const providerRow = screenRow - providerTop;
+		const transcriptStart = this.#visibleTranscriptStart;
+		const transcriptEnd = transcriptStart + this.#visibleTranscriptRows.length;
+		if (transcriptStart < 0 || providerRow < transcriptStart || providerRow >= transcriptEnd) return undefined;
+		return {
+			row: this.#visibleHistoryRows.length + providerRow - transcriptStart,
+			col: column,
+		};
+	}
+	#handleMouse(event: SgrMouseEvent): boolean {
+		if (!this.#started || this.#stopped) return false;
+		if (event.wheel !== null) {
+			return this.#transcriptPoint(event.row, event.col) !== undefined;
+		}
+
+		const point = this.#transcriptPoint(event.row, event.col);
+		if (event.release) {
+			const anchor = this.#selectionAnchor;
+			const focus = point ?? this.#selectionFocus;
+			const snapshot = this.#selectionSnapshot;
+			this.#selectionAnchor = undefined;
+			this.#selectionFocus = undefined;
+			this.#selectionSnapshot = undefined;
+			if (anchor === undefined || focus === undefined || snapshot === undefined) {
+				this.ui.requestRender();
+				return anchor !== undefined;
+			}
+			if (snapshot.revision !== this.#visibleSelectionRevision) {
+				this.ui.requestRender();
+				return true;
+			}
+			if (anchor.row === focus.row && anchor.col === focus.col) {
+				this.ui.requestRender();
+				return true;
+			}
+			void this.#copySelection(anchor, focus, snapshot);
+			this.ui.requestRender();
+			return true;
+		}
+		if (event.motion) {
+			if (this.#selectionAnchor === undefined) return false;
+			if (this.#selectionSnapshot?.revision !== this.#visibleSelectionRevision) {
+				this.#cancelStaleSelection();
+				this.ui.requestRender();
+				return true;
+			}
+			if (point !== undefined) {
+				this.#selectionFocus = point;
+				this.ui.requestRender();
+			}
+			return true;
+		}
+		if (!event.leftClick) return false;
+		if (point === undefined) {
+			this.#selectionAnchor = undefined;
+			this.#selectionFocus = undefined;
+			this.#selectionSnapshot = undefined;
+			return false;
+		}
+		this.#selectionAnchor = point;
+		this.#selectionFocus = point;
+		this.#selectionSnapshot = {
+			lines: [...this.#selectionLines()],
+			columns: this.#visibleViewportColumns,
+			revision: this.#visibleSelectionRevision,
+		};
+		this.ui.requestRender();
+		return true;
+	}
+
+	async #copySelection(
+		anchor: ViewportSelectionPoint,
+		focus: ViewportSelectionPoint,
+		snapshot: ViewportSelectionSnapshot,
+	): Promise<void> {
+		const text = sliceViewportText(snapshot.lines, snapshot.columns, anchor, focus);
+		try {
+			await copyToClipboard(text);
+			if (!this.#stopped && !this.#hasBlockingOverlay()) this.#showCopiedOverlay();
+		} catch {
+			// Clipboard implementations are best-effort; they normally swallow
+			// failures themselves, and a failed copy must not disrupt the CLI.
+		}
+	}
+
+	#showCopiedOverlay(): void {
+		this.#hideCopiedOverlay();
+		const text = theme.bold(theme.fg("accent", "Copied"));
+		const handle = this.ui.showOverlay(new Text(text, 0, 0), {
+			anchor: "bottom-right",
+			width: visibleWidth(text),
+			margin: { right: 1, bottom: 1 },
+			focus: false,
+		});
+		this.#copiedOverlayHandle = handle;
+		const timer = setTimeout(() => {
+			if (this.#copiedOverlayHandle !== handle) return;
+			this.#copiedOverlayHandle = undefined;
+			this.#copiedOverlayTimer = undefined;
+			handle.hide();
+		}, 1200);
+		timer.unref?.();
+		this.#copiedOverlayTimer = timer;
+	}
+
+	#hideCopiedOverlay(): void {
+		if (this.#copiedOverlayTimer !== undefined) {
+			clearTimeout(this.#copiedOverlayTimer);
+			this.#copiedOverlayTimer = undefined;
+		}
+		const handle = this.#copiedOverlayHandle;
+		this.#copiedOverlayHandle = undefined;
+		handle?.hide();
+	}
+	#recordVisibleViewport(
+		columns: number,
+		rows: number,
+		transcriptStart: number,
+		transcriptRows: readonly string[],
+	): void {
+		const nextRows = transcriptStart < 0 ? EMPTY_VIEWPORT_ROWS : transcriptRows;
+		const changed =
+			columns !== this.#visibleViewportColumns ||
+			rows !== this.#visibleViewportRows ||
+			transcriptStart !== this.#visibleTranscriptStart ||
+			!sameRows(this.#visibleTranscriptRows, nextRows);
+		if (changed) this.#visibleSelectionRevision++;
+		this.#visibleViewportColumns = columns;
+		this.#visibleViewportRows = rows;
+		this.#visibleTranscriptStart = transcriptStart;
+		this.#visibleTranscriptRows = nextRows;
+	}
+
+	#clearVisibleHistory(): void {
+		if (
+			this.#visibleHistoryRows.length > 0 ||
+			this.#visibleHistoryHardRows.length > 0 ||
+			this.#visibleHistoryBatchId !== undefined
+		) {
+			this.#visibleSelectionRevision++;
+		}
+		this.#visibleHistoryRows = EMPTY_VIEWPORT_ROWS;
+		this.#visibleHistoryHardRows = EMPTY_VIEWPORT_ROWS;
+		this.#visibleHistoryScreenOffset = 0;
+		this.#visibleHistoryWidth = 0;
+		this.#visibleHistoryBatchId = undefined;
+		this.#visibleHistoryBatchHardRows = EMPTY_VIEWPORT_ROWS;
+	}
+
+	#refreshVisibleHistory(width: number): void {
+		if (this.#visibleHistoryRows.length === 0) return;
+		if (this.#visibleHistoryWidth !== width) {
+			this.#visibleHistoryRows = reflowRowsAtWidth(this.#visibleHistoryHardRows, width);
+			this.#visibleHistoryScreenOffset = -this.#visibleHistoryRows.length;
+			this.#visibleSelectionRevision++;
+		}
+		this.#visibleHistoryWidth = width;
+	}
+
+	#clearViewportSelection(): void {
+		this.#selectionAnchor = undefined;
+		this.#selectionFocus = undefined;
+		this.#selectionSnapshot = undefined;
+		this.#clearVisibleHistory();
+	}
+
+	#recordVisibleHistory(history: TerminalFramePlan["history"], width: number): void {
+		if (history === undefined) return;
+		const offered = this.#offeredHistory;
+		if (offered === undefined || offered.id !== history.id || offered.source === "header") {
+			this.#clearVisibleHistory();
+			return;
+		}
+		const transcriptStart = offered.source.header === "replay" ? (offered.source.headerRows?.length ?? 0) : 0;
+		const transcriptRows = history.rows.slice(transcriptStart);
+		const sameCurrentBatch =
+			history.id === this.#visibleHistoryBatchId && sameRows(this.#visibleHistoryBatchHardRows, transcriptRows);
+		if (!sameCurrentBatch) {
+			if (history.kind === "replay" || this.#visibleHistoryBatchId === undefined) {
+				this.#visibleHistoryHardRows = transcriptRows;
+			} else if (history.id !== this.#visibleHistoryBatchId) {
+				this.#visibleHistoryHardRows = [...this.#visibleHistoryHardRows, ...transcriptRows];
+			} else {
+				const priorRows = this.#visibleHistoryHardRows.slice(
+					0,
+					Math.max(0, this.#visibleHistoryHardRows.length - this.#visibleHistoryBatchHardRows.length),
+				);
+				this.#visibleHistoryHardRows = [...priorRows, ...transcriptRows];
+			}
+			this.#visibleHistoryRows = reflowRowsAtWidth(this.#visibleHistoryHardRows, width);
+			this.#visibleHistoryScreenOffset = -this.#visibleHistoryRows.length;
+			this.#visibleHistoryBatchHardRows = transcriptRows;
+			this.#visibleSelectionRevision++;
+		}
+		this.#visibleHistoryWidth = width;
+		this.#visibleHistoryBatchId = history.id;
+	}
+
 	/** Compose the bounded mutable viewport and the next ordered history append. */
 	renderFrame(viewport: ViewportSize): TerminalFramePlan {
-		if (!this.#started || this.#stopped) return { viewport: [] };
 		const width = Math.max(1, viewport.columns);
 		const rows = Math.max(0, viewport.rows);
+		this.#refreshVisibleHistory(width);
+		if (!this.#started || this.#stopped) {
+			this.#clearVisibleHistory();
+			this.#recordVisibleViewport(width, rows, -1, []);
+			return { viewport: [] };
+		}
 		if (this.#resizeRetiredHeaderStart !== undefined) {
 			this.#retiredHeaderStart = this.#resizeRetiredHeaderStart;
 			this.#resizeRetiredHeaderStart = undefined;
@@ -262,7 +577,11 @@ export class Composer implements TerminalFrameProvider {
 			: [this.#header, this.#bootstrapInputGap, this.editor, this.#statusHost];
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
-			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
+			this.#clearVisibleHistory();
+			const composed = this.#renderRoots(roots, width);
+			const visible = rows > 0 && composed.length > rows ? composed.slice(-rows) : rows > 0 ? composed : [];
+			this.#recordVisibleViewport(width, rows, -1, []);
+			return { viewport: visible };
 		}
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
@@ -272,6 +591,7 @@ export class Composer implements TerminalFrameProvider {
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
 		const history = this.#offerHistory(transcript, width, rows, preRoots.length + after.length);
+		this.#recordVisibleHistory(history, width);
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];
 		const before = [...headerRows, ...preRoots];
@@ -283,10 +603,44 @@ export class Composer implements TerminalFrameProvider {
 			const visibleHeaderRows = Math.max(0, rows - composed.length);
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
 		}
-		return {
-			history,
-			viewport: composed.length <= rows ? composed : composed.slice(-rows),
-		};
+		const visible = rows > 0 && composed.length > rows ? composed.slice(-rows) : rows > 0 ? composed : [];
+		const composedStart = composed.length - visible.length;
+		const transcriptStartInComposed = Math.max(composedStart, before.length);
+		const transcriptEndInComposed = Math.min(composed.length, before.length + active.length);
+		let transcriptStart = -1;
+		let transcriptRows: readonly string[] = [];
+		if (transcriptStartInComposed < transcriptEndInComposed) {
+			transcriptStart = transcriptStartInComposed - composedStart;
+			transcriptRows = visible.slice(transcriptStart, transcriptEndInComposed - composedStart);
+		}
+		this.#recordVisibleViewport(width, rows, transcriptStart, transcriptRows);
+		this.#cancelStaleSelection();
+		let paintedVisible = visible;
+		const historyRows = this.#visibleHistoryRows;
+		const anchor = this.#selectionAnchor;
+		const focus = this.#selectionFocus;
+		if (anchor !== undefined && focus !== undefined && transcriptStart >= 0) {
+			const historyLength = historyRows.length;
+			const activeEndRow = Math.max(anchor.row, focus.row);
+			if (activeEndRow >= historyLength) {
+				const toActivePoint = (point: ViewportSelectionPoint): ViewportSelectionPoint => ({
+					row: Math.max(0, point.row - historyLength),
+					col: point.row < historyLength ? 0 : point.col,
+				});
+				const highlightedRows = highlightViewportSelection(
+					transcriptRows,
+					width,
+					toActivePoint(anchor),
+					toActivePoint(focus),
+				);
+				paintedVisible = [...visible];
+				for (let index = 0; index < highlightedRows.length; index++) {
+					const highlighted = highlightedRows[index];
+					if (highlighted !== undefined) paintedVisible[transcriptStart + index] = highlighted;
+				}
+			}
+		}
+		return { history, viewport: paintedVisible };
 	}
 
 	/** Acknowledges one accepted header, replay, or transcript batch. */
@@ -645,6 +999,7 @@ export class Composer implements TerminalFrameProvider {
 	/** Mount or replace session-aware root children while preserving the header and status hosts. */
 	setRuntimeChildren(children: readonly Component[]): void {
 		if (this.#stopped) return;
+		this.#clearViewportSelection();
 		this.ui.removeChild(this.#statusHost);
 		if (this.#runtimeMounted) {
 			for (const child of this.#runtimeChildren) this.ui.removeChild(child);
@@ -676,6 +1031,8 @@ export class Composer implements TerminalFrameProvider {
 	stop(): void {
 		if (!this.#started || this.#stopped || this.#transferred) return;
 		this.#welcome?.stopIntro();
+		this.#clearViewportSelection();
+		this.#hideCopiedOverlay();
 		this.ui.stop();
 		this.#stopped = true;
 	}
@@ -723,6 +1080,8 @@ export class Composer implements TerminalFrameProvider {
 		// Remains live after transfer until InteractiveMode installs its configured handlers.
 		if (this.#stopped) return;
 		this.#welcome?.stopIntro();
+		this.#clearViewportSelection();
+		this.#hideCopiedOverlay();
 		if (this.#started) this.ui.stop();
 		this.#stopped = true;
 		this.#exit(code);

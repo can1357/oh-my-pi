@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
@@ -11,6 +11,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 function plainRows(rows: readonly string[]): string[] {
@@ -20,6 +21,28 @@ function plainRows(rows: readonly string[]): string[] {
 function dump(label: string, rows: readonly string[]): void {
 	console.log(`==== ${label} ====`);
 	for (const [i, row] of rows.entries()) console.log(String(i).padStart(3), JSON.stringify(row));
+}
+
+const SELECTION_USAGE: Usage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+function assistantSelectionMessage(text: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet",
+		usage: SELECTION_USAGE,
+		stopReason: "stop",
+		timestamp: 1,
+	};
 }
 
 describe("libkitty end-to-end", () => {
@@ -37,6 +60,7 @@ describe("libkitty end-to-end", () => {
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-libkitty-e2e-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		Settings.instance.set("tui.mouseSelection", true);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
@@ -78,6 +102,66 @@ describe("libkitty end-to-end", () => {
 		const hits = viewport.filter(row => row.includes("hi there omp"));
 		if (hits.length !== 1) dump("viewport after submit", viewport);
 		expect(hits.length).toBe(1);
+	});
+
+	it("copies a visible transcript drag when release lands outside the transcript", async () => {
+		const copySpy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const target = "drag-copy-target";
+		try {
+			await mode.init({ suppressWelcomeIntro: true });
+			void mode.getUserInput();
+			await term.waitForRender();
+			mode.addMessageToChat(assistantSelectionMessage(target));
+			mode.ui.requestRender(true);
+			await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes(target)));
+
+			const viewport = plainRows(term.getViewport());
+			const screenRow = viewport.findIndex(row => row.includes(target));
+			expect(screenRow).toBeGreaterThanOrEqual(0);
+			const startColumn = viewport[screenRow]!.indexOf(target);
+			const endColumn = startColumn + target.length - 1;
+
+			term.sendInput(`\x1b[<0;${startColumn + 1};${screenRow + 1}M`);
+			term.sendInput(`\x1b[<32;${endColumn + 1};${screenRow + 1}M`);
+			term.sendInput(`\x1b[<0;${endColumn + 1};${term.rows + 1}m`);
+			await term.waitForRender();
+
+			expect(copySpy).toHaveBeenCalledWith(target);
+			expect(plainRows(term.getViewport()).some(row => row.includes("Copied"))).toBe(true);
+		} finally {
+			copySpy.mockRestore();
+		}
+	});
+
+	it("cancels a drag when transcript rows change before release", async () => {
+		const copySpy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const target = "drag-cancel-target";
+		try {
+			await mode.init({ suppressWelcomeIntro: true });
+			void mode.getUserInput();
+			await term.waitForRender();
+			mode.addMessageToChat(assistantSelectionMessage(target));
+			mode.ui.requestRender(true);
+			await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes(target)));
+
+			const viewport = plainRows(term.getViewport());
+			const screenRow = viewport.findIndex(row => row.includes(target));
+			expect(screenRow).toBeGreaterThanOrEqual(0);
+			const startColumn = viewport[screenRow]!.indexOf(target);
+			const endColumn = startColumn + target.length - 1;
+			term.sendInput(`\x1b[<0;${startColumn + 1};${screenRow + 1}M`);
+			term.sendInput(`\x1b[<32;${endColumn + 1};${screenRow + 1}M`);
+
+			mode.addMessageToChat(assistantSelectionMessage("changed-after-drag"));
+			mode.ui.requestRender(true);
+			await term.waitForRender();
+			term.sendInput(`\x1b[<0;${endColumn + 1};${screenRow + 1}m`);
+			await term.waitForRender();
+
+			expect(copySpy).not.toHaveBeenCalled();
+		} finally {
+			copySpy.mockRestore();
+		}
 	});
 
 	it("keeps the whole buffer clean across non-overflowing width resizes", async () => {
