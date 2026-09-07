@@ -42,6 +42,7 @@ import {
 	orphanSweepSeesRelayDisconnected,
 	restoreOrphanSweepDeadline,
 	runAfterStartupReconciliation,
+	runExpiredOrphanSweep,
 	seedOrphanSweepDeadline,
 	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
@@ -455,21 +456,25 @@ async function maybeRunOrphanSweep(alarmScheduledTime?: number): Promise<void> {
 	// hasTrackedAttachments recheck below cannot catch that case because the new
 	// cycle also ends disconnected with the same tabs still attached.
 	const sweepGeneration = connectionGeneration;
-	await setOrphanSweepDeadline(null);
-	if (
-		!shouldProceedWithOrphanSweep({
-			disconnected: orphanSweepSeesRelayDisconnected({
-				socketReadyState: relayInitializedReadyState(),
-				openReadyState: WebSocket.OPEN,
-			}),
-			hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
-			connectionReplaced: connectionGeneration !== sweepGeneration,
-		})
-	) {
-		await maybeScheduleOrphanSweep();
-		return;
-	}
-	attachmentGuard.onSuspend();
+	await runExpiredOrphanSweep(
+		() => setOrphanSweepDeadline(null),
+		async () => {
+			if (
+				!shouldProceedWithOrphanSweep({
+					disconnected: orphanSweepSeesRelayDisconnected({
+						socketReadyState: relayInitializedReadyState(),
+						openReadyState: WebSocket.OPEN,
+					}),
+					hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
+					connectionReplaced: connectionGeneration !== sweepGeneration,
+				})
+			) {
+				await maybeScheduleOrphanSweep();
+				return;
+			}
+			attachmentGuard.onSuspend();
+		},
+	);
 }
 
 /**

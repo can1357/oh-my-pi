@@ -226,6 +226,10 @@ async function runAfterStartupReconciliation(reconcile, runSweep) {
   await reconcile();
   await runSweep();
 }
+async function runExpiredOrphanSweep(clearDeadline, revalidateAndSweep) {
+  await clearDeadline().catch(() => {});
+  await revalidateAndSweep();
+}
 function orphanSweepAlarmDelayMinutes(deadlineMs, nowMs) {
   return Math.max((deadlineMs - nowMs) / 60000, 0.01);
 }
@@ -533,19 +537,20 @@ async function maybeRunOrphanSweep(alarmScheduledTime) {
     return;
   }
   const sweepGeneration = connectionGeneration;
-  await setOrphanSweepDeadline(null);
-  if (!shouldProceedWithOrphanSweep({
-    disconnected: orphanSweepSeesRelayDisconnected({
-      socketReadyState: relayInitializedReadyState(),
-      openReadyState: WebSocket.OPEN
-    }),
-    hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
-    connectionReplaced: connectionGeneration !== sweepGeneration
-  })) {
-    await maybeScheduleOrphanSweep();
-    return;
-  }
-  attachmentGuard.onSuspend();
+  await runExpiredOrphanSweep(() => setOrphanSweepDeadline(null), async () => {
+    if (!shouldProceedWithOrphanSweep({
+      disconnected: orphanSweepSeesRelayDisconnected({
+        socketReadyState: relayInitializedReadyState(),
+        openReadyState: WebSocket.OPEN
+      }),
+      hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
+      connectionReplaced: connectionGeneration !== sweepGeneration
+    })) {
+      await maybeScheduleOrphanSweep();
+      return;
+    }
+    attachmentGuard.onSuspend();
+  });
 }
 var attachmentGuard = new AttachmentGuard({
   graceMs: ORPHAN_GRACE_MS,

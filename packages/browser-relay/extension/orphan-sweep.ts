@@ -78,6 +78,17 @@ export async function runAfterStartupReconciliation(
 	await runSweep();
 }
 
+export async function runExpiredOrphanSweep(
+	clearDeadline: () => Promise<unknown>,
+	revalidateAndSweep: () => Promise<void>,
+): Promise<void> {
+	// Once the deadline is due, persistence is cleanup rather than a gate. A
+	// storage.session outage must not keep the debugger attachment alive and
+	// restart the grace period forever.
+	await clearDeadline().catch(() => {});
+	await revalidateAndSweep();
+}
+
 export function orphanSweepAlarmDelayMinutes(
 	deadlineMs: number,
 	nowMs: number,

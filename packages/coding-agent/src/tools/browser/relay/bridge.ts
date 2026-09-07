@@ -93,7 +93,7 @@ function markPreloadApplication(source: unknown, marker: string): string {
 	// syntax and semantics stay intact, while leaving caller declarations at the
 	// top level. `this` cannot be shadowed by top-level lexical bindings.
 	const markerAccess = `this[${JSON.stringify(marker)}]`;
-	const markerStatement = `if (${markerAccess} === true) throw undefined; ({}).constructor.defineProperty(this, ${JSON.stringify(marker)}, { value: true, configurable: true });`;
+	const markerStatement = `if (${markerAccess} === true) throw ${JSON.stringify(marker)}; ({}).constructor.defineProperty(this, ${JSON.stringify(marker)}, { value: true, configurable: true });`;
 	const program = parse(source, {
 		sourceType: "script",
 		allowAwaitOutsideFunction: true,
@@ -427,6 +427,8 @@ class TabState {
 	readonly pendingSubscriptions = new Map<string, Set<Promise<void>>>();
 	/** Preserved per-session preload scripts from Page.addScriptToEvaluateOnNewDocument. */
 	readonly preloadScripts = new Map<string, Map<string, PreservedPreloadScript>>();
+	/** Exact relay-private exceptions used to abort duplicate preload invocations. */
+	readonly preloadApplicationMarkers = new Set<string>();
 	/** Live cleanup of replayed preload scripts whose owner disappeared. */
 	preloadScriptCleaning: Promise<void> | null = null;
 	/** Root identifiers that must be removed once recovery / attach settles. */
@@ -2649,6 +2651,16 @@ export class RelayBridge {
 	): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
+		if (method === "Runtime.exceptionThrown") {
+			const details = params?.exceptionDetails;
+			const exception =
+				details && typeof details === "object" && "exception" in details ? details.exception : undefined;
+			const value = exception && typeof exception === "object" && "value" in exception ? exception.value : undefined;
+			// Marker-bearing preload registrations intentionally abort a duplicate
+			// invocation during the navigation handoff. Keep that relay-private
+			// sentinel from surfacing as a page error to downstream sessions.
+			if (typeof value === "string" && tab.preloadApplicationMarkers.has(value)) return;
+		}
 		// Track real child sessions so downstream commands can route back.
 		if (method === "Target.attachedToTarget") {
 			const child = params?.sessionId;
@@ -3155,6 +3167,7 @@ export class RelayBridge {
 				script.params?.runImmediately === true && !runImmediately && typeof script.params.source === "string"
 					? `__ompRelayPreload${tab.tabId}_${++this.#sessionSeq}`
 					: undefined;
+			if (applicationMarker !== undefined) tab.preloadApplicationMarkers.add(applicationMarker);
 			const replayParams =
 				script.params && typeof script.params === "object" && "runImmediately" in script.params
 					? {

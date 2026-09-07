@@ -3402,6 +3402,32 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		const markedSource = (marked?.params as { source?: string } | undefined)?.source;
 		const cleanupSource = (cleanup?.params as { source?: string } | undefined)?.source;
+		const privateMarker = markedSource?.match(/throw ("__ompRelayPreload[^"]+")/)?.[1];
+		expect(privateMarker).toBeDefined();
+		const messagesBeforePrivateException = cdp.messages.length;
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Runtime.exceptionThrown",
+				params: { exceptionDetails: { exception: { value: JSON.parse(privateMarker!) } } },
+			}),
+		);
+		expect(cdp.messages).toHaveLength(messagesBeforePrivateException);
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Runtime.exceptionThrown",
+				params: { exceptionDetails: { exception: { value: "__ompRelayPreload-not-owned" } } },
+			}),
+		);
+		expect(cdp.messages.at(-1)).toMatchObject({
+			sessionId: pageSession,
+			method: "Runtime.exceptionThrown",
+		});
 		const overlapDocument: Record<string, unknown> = {};
 		vm.createContext(overlapDocument);
 		vm.runInContext(markedSource!, overlapDocument);

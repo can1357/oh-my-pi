@@ -5,6 +5,7 @@ import {
 	orphanSweepSeesRelayDisconnected,
 	restoreOrphanSweepDeadline,
 	runAfterStartupReconciliation,
+	runExpiredOrphanSweep,
 	seedOrphanSweepDeadline,
 	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
@@ -198,6 +199,21 @@ describe("browser relay orphan sweep scheduling", () => {
 			() => {},
 		);
 		await expect(pending).rejects.toThrow("deadline write failed");
+	});
+
+	it("continues an expired sweep when clearing its persisted deadline fails", async () => {
+		let swept = false;
+
+		await runExpiredOrphanSweep(
+			async () => {
+				throw new Error("session storage unavailable");
+			},
+			async () => {
+				swept = true;
+			},
+		);
+
+		expect(swept).toBe(true);
 	});
 
 	it("does not restore a stale startup deadline after a newer update", () => {
