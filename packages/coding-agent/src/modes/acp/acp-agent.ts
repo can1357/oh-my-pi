@@ -163,6 +163,13 @@ function isPromptTurnInFlight(turn: PromptTurnState | undefined): turn is Prompt
 	return turn !== undefined && (!turn.settled || turn.cleanup !== undefined);
 }
 
+/** `clientCapabilities._meta["bb.dev"].agentWake === 1` — the client drains parked agent turns on wake. */
+function clientAdvertisesAgentWake(capabilities: ClientCapabilities | undefined): boolean {
+	const bbDev = capabilities?._meta?.["bb.dev"];
+	if (typeof bbDev !== "object" || bbDev === null) return false;
+	return "agentWake" in bbDev && bbDev.agentWake === 1;
+}
+
 type ManagedSessionRecord = {
 	session: AgentSession;
 	setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined;
@@ -613,6 +620,8 @@ export class AcpAgent implements Agent {
 	#disposePromise: Promise<void> | undefined;
 	#cleanupRegistered = false;
 	#clientCapabilities: ClientCapabilities | undefined;
+	/** Client advertised `bb.dev.agentWake` — parked agent turns get `_omp/session/wake`. */
+	#clientWakeAware = false;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
 
@@ -629,6 +638,7 @@ export class AcpAgent implements Agent {
 	async initialize(params: InitializeRequest): Promise<InitializeResponse> {
 		this.#registerConnectionCleanup();
 		this.#clientCapabilities = params.clientCapabilities;
+		this.#clientWakeAware = clientAdvertisesAgentWake(params.clientCapabilities);
 		const authMethods: AuthMethod[] = [
 			{
 				id: "agent",
@@ -669,6 +679,9 @@ export class AcpAgent implements Agent {
 					resume: {},
 					close: {},
 				},
+				// Mirror the client's wake advertisement so it knows parked agent turns
+				// arrive as `_omp/session/wake` notifications. Spec-ignorable `_meta`,
+				...(this.#clientWakeAware ? { _meta: { "oh-my-pi": { agentWake: 1 } } } : {}),
 			},
 		};
 	}
@@ -1320,7 +1333,9 @@ export class AcpAgent implements Agent {
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined,
 	): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext);
-		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
+		session.setClientBridge(
+			createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities, this.#clientWakeAware),
+		);
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
 		// so it shares the bootstrap race guard — see that comment for why.
 		try {
@@ -1629,7 +1644,15 @@ export class AcpAgent implements Agent {
 			promptTurn.reject(error);
 			return;
 		}
-		promptTurn.resolve(response ?? { stopReason: "end_turn" });
+		const finalResponse = response ?? { stopReason: "end_turn" };
+		// Wake-aware clients learn about async work they cannot see yet (running or
+		// parked jobs) so they can decide whether to re-prompt; `_meta` only, never
+		// a custom stopReason or root field.
+		const pendingAsyncJobs = this.#clientWakeAware ? record.session.getPendingAsyncJobCount() : 0;
+		if (pendingAsyncJobs > 0) {
+			finalResponse._meta = { ...finalResponse._meta, "oh-my-pi": { pendingAsyncJobs } };
+		}
+		promptTurn.resolve(finalResponse);
 	}
 
 	#resolveStopReason(

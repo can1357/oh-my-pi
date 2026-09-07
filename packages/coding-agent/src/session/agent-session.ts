@@ -267,7 +267,7 @@ import {
 	isSuccessfulCheckpointEntry,
 	semanticToolResult,
 } from "./checkpoint-entries";
-import type { ClientBridge } from "./client-bridge";
+import type { ClientBridge, ClientBridgeAgentWakeReason } from "./client-bridge";
 import {
 	type CodexAutoRedeemCoordinator,
 	type CodexResetAction,
@@ -1425,6 +1425,29 @@ export class AgentSession {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
+				if (
+					this.#clientBridge?.deferAgentInitiatedTurns &&
+					this.#clientBridge.notifyAgentWake &&
+					!this.#allowAcpAgentInitiatedTurns
+				) {
+					// Wake-aware client: park the settled batch for the client's next
+					// prompt instead of a server-initiated turn it cannot show as busy.
+					// Returning normally settles the flush receipts (ASIDE_MESSAGE_COMMIT),
+					// so the delivery pipeline sees the batch as handed off, not stuck.
+					// Every idle dispatcher (async-result, launch completion) builds a
+					// session CustomMessage; the queue only types it as core AgentMessage.
+					const parked = messages.filter((message): message is CustomMessage => message.role === "custom");
+					if (parked.length < messages.length) {
+						logger.warn("Wake parking dropped non-custom idle messages", {
+							dropped: messages.length - parked.length,
+						});
+					}
+					for (const message of parked) {
+						this.#queueHiddenNextTurnMessage(message, false);
+					}
+					this.#notifyAgentWake("async-jobs-settled");
+					return;
+				}
 				this.#beginInFlight();
 				try {
 					await this.agent.prompt(messages.length === 1 ? first : messages);
@@ -2105,30 +2128,26 @@ export class AgentSession {
 	}
 
 	/**
-	 * True when a background async job owned by this agent is still running with
-	 * an unsuppressed delivery, a finished job's delivery is still queued or in
-	 * flight, or a delivered result is still sitting on the yield queue awaiting
-	 * injection. In every case the async-result follow-up will re-wake the loop,
-	 * so a settle observed now is a scheduling pause rather than a terminal stop:
-	 * stop-time passes (todo reminder, session_stop hooks) defer to the settle
-	 * reached once the session is fully idle. Suppressed deliveries
-	 * (acknowledged, or watched by an in-flight `hub` wait) never wake the loop,
-	 * so they don't count.
+	 * Number of owner-scoped async jobs whose results are not yet visible in
+	 * this session's transcript: running jobs with an unsuppressed delivery,
+	 * finished jobs whose delivery is still queued or in flight, and delivered
+	 * results still sitting on the yield queue awaiting injection. In every
+	 * case the async-result follow-up will re-wake the loop, so a settle
+	 * observed now is a scheduling pause rather than a terminal stop. Suppressed
+	 * deliveries (acknowledged, or watched by an in-flight `hub` wait) never
+	 * wake the loop, so they don't count.
 	 */
-	#hasPendingAsyncWake(): boolean {
+	getPendingAsyncJobCount(): number {
 		const manager = this.#asyncJobManager;
-		if (!manager) return false;
+		if (!manager) return 0;
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
-		return (
-			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
-			manager.hasPendingDeliveries(ownerFilter) ||
-			// Delivered but not yet injected: the sink has enqueued the
-			// async-result follow-up on the yield queue, and the manager no
-			// longer reports it. Without this leg a terminal yield in the
-			// (idle-flush delay / step-boundary) handoff window would read as
-			// quiescent and the run driver would drop the queued result.
-			this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE)
-		);
+		const running = manager.getRunningJobs(ownerFilter).filter(job => !manager.isDeliverySuppressed(job.id)).length;
+		// queued already includes in-flight deliveries (see getDeliveryState).
+		return running + manager.getDeliveryState(ownerFilter).queued + this.yieldQueue.count(ASYNC_RESULT_MESSAGE_TYPE);
+	}
+
+	#hasPendingAsyncWake(): boolean {
+		return this.getPendingAsyncJobCount() > 0;
 	}
 
 	/**
@@ -6856,6 +6875,13 @@ export class AgentSession {
 		);
 	}
 
+	/** Tell a wake-aware client that agent work is parked awaiting its next prompt. */
+	#notifyAgentWake(reason: ClientBridgeAgentWakeReason): void {
+		const bridge = this.#clientBridge;
+		if (!bridge?.notifyAgentWake) return;
+		bridge.notifyAgentWake({ reason, batchId: Bun.randomUUIDv7() });
+	}
+
 	async #promptQueuedHiddenNextTurnMessages(): Promise<void> {
 		if (this.#pendingNextTurnMessages.length === 0) {
 			return;
@@ -7059,6 +7085,7 @@ export class AgentSession {
 			if (options?.triggerTurn) {
 				if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+					this.#notifyAgentWake("agent-initiated");
 					return false;
 				}
 				return await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
@@ -7098,6 +7125,7 @@ export class AgentSession {
 			}
 			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+				this.#notifyAgentWake("agent-initiated");
 				return false;
 			}
 			return await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
@@ -7108,6 +7136,7 @@ export class AgentSession {
 		if (options?.triggerTurn) {
 			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+				this.#notifyAgentWake("agent-initiated");
 				return false;
 			}
 			return await this.#promptAgentInitiatedMessage(normalizedAppMessage);

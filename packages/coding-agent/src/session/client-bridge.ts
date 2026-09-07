@@ -31,6 +31,15 @@ export interface ClientBridgePermissionToolCall {
 	locations?: { path: string; line?: number }[];
 }
 
+/** Reason an agent-side wake notification was emitted after parking agent work. */
+export type ClientBridgeAgentWakeReason = "async-jobs-settled" | "agent-initiated";
+
+export interface ClientBridgeAgentWakeNotification {
+	reason: ClientBridgeAgentWakeReason;
+	/** Correlates one parked batch; clients may use it to dedupe wake notifications. */
+	batchId: string;
+}
+
 export type ClientBridgePermissionOptionKind = "allow_once" | "allow_always" | "reject_once" | "reject_always";
 
 export interface ClientBridgePermissionOption {
@@ -74,6 +83,12 @@ export interface ClientBridge {
 	readonly capabilities: ClientBridgeCapabilities;
 	/** ACP v1 clients cannot show server-initiated turns as busy after prompt response. */
 	readonly deferAgentInitiatedTurns?: boolean;
+	/**
+	 * Present only when the client advertised wake awareness at `initialize`.
+	 * Emitted after agent work is parked for the client's next prompt instead of
+	 * starting a server-initiated turn the client cannot show as busy.
+	 */
+	notifyAgentWake?(notification: ClientBridgeAgentWakeNotification): void;
 	readTextFile?(params: { path: string; line?: number; limit?: number }): Promise<string>;
 	writeTextFile?(params: { path: string; content: string }): Promise<void>;
 	createTerminal?(params: ClientBridgeCreateTerminalParams): Promise<ClientBridgeTerminalHandle>;
