@@ -6,6 +6,10 @@
 
 - Usage attribution now uses the concrete service tier each request carried, recorded per usage entry with `null` for explicit no-tier requests so they no longer inherit a legacy family snapshot; re-syncing re-derives premium-request usage for sessions ingested earlier.
 
+### Fixed
+
+- Exclude provider-rejected priority requests from inferred premium usage while preserving positive provider-reported usage.
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed

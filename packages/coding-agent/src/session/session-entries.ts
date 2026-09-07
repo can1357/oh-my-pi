@@ -11,7 +11,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { ServiceTierOverrides } from "../config/service-tier";
+import { isServiceTierValue, type ServiceTierOverrides } from "../config/service-tier";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import type { CompactionMethod } from "./compaction-methods";
 
@@ -126,10 +126,6 @@ export interface ServiceTierChangeEntry extends SessionEntryBase {
 }
 
 const SERVICE_TIER_FAMILIES: readonly ServiceTierFamily[] = ["openai", "anthropic", "google"];
-
-function isServiceTierValue(value: unknown): value is ServiceTier {
-	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority";
-}
 
 /** Drop invalid families/values; non-records return undefined. */
 export function coerceServiceTierOverrides(value: unknown): ServiceTierOverrides | undefined {

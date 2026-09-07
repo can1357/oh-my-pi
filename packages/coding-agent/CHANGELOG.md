@@ -16,6 +16,8 @@
 ### Fixed
 
 - Keep service-tier settings and session listing independent of provider runtime imports so CLI startup preserves lazy native loading and profile environment initialization.
+- Load valid model-tier rules even when neighboring entries are malformed, warning about ignored entries without rewriting the source YAML; explicit settings mutations remain strict.
+- Share tier value validation between settings and session persistence while retaining their distinct off representations.
 
 ## [18.1.12] - 2026-09-06
 

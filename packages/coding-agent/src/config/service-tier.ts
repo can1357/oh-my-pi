@@ -28,7 +28,7 @@ export function isServiceTierFamily(value: unknown): value is ServiceTierFamily 
 
 /** Whether a runtime value is a supported service tier for one provider family. */
 export function isServiceTierForFamily(family: string, tier: unknown): tier is ServiceTier {
-	if (typeof tier !== "string" || tier === "none") return false;
+	if (!isServiceTierValue(tier)) return false;
 	let values: readonly string[];
 	switch (family) {
 		case "openai":
@@ -101,7 +101,7 @@ export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTi
 /** Map a per-family setting value to a wire {@link ServiceTier}, or `undefined` to omit. */
 export function serviceTierSettingToTier(value: string): ServiceTier | undefined {
 	if (value === "none" || value === "" || value === "inherit") return undefined;
-	return value as ServiceTier;
+	return isServiceTierValue(value) ? value : undefined;
 }
 
 /** Assemble the live per-family tier map from the three `tier.*` setting values. */
@@ -147,11 +147,12 @@ export function resolveSubagentServiceTier(setting: string, inherited: ServiceTi
 
 /** Absent keys inherit policy; null explicitly disables the family tier. */
 export type ServiceTierOverrides = Partial<Record<ServiceTierFamily, ServiceTier | null>>;
-
-export const SERVICE_TIER_OVERRIDE_VALUES = ["none", "auto", "default", "flex", "scale", "priority"] as const;
+export const SERVICE_TIER_OVERRIDE_VALUES = SERVICE_TIER_OPENAI_VALUES;
 
 export type ServiceTierOverrideSettingValue = (typeof SERVICE_TIER_OVERRIDE_VALUES)[number];
-
+export function isServiceTierValue(value: unknown): value is ServiceTier {
+	return value !== "none" && isServiceTierOverrideValue(value);
+}
 export function isServiceTierOverrideValue(value: unknown): value is ServiceTierOverrideSettingValue {
 	return SERVICE_TIER_OVERRIDE_VALUES.some(tier => tier === value);
 }
@@ -168,7 +169,10 @@ export function isValidServiceTierOverrideKey(key: string): boolean {
 }
 
 /** Validate selector syntax and tier values without requiring catalog entries. */
-export function validateServiceTierOverrides(value: unknown): Record<string, string> {
+export function validateServiceTierOverrides(
+	value: unknown,
+	onInvalid?: (invalid: readonly string[]) => void,
+): Record<string, string> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
 	const invalid: string[] = [];
 	const validated: Record<string, string> = {};
@@ -184,7 +188,8 @@ export function validateServiceTierOverrides(value: unknown): Record<string, str
 		validated[key] = tier;
 	}
 	if (invalid.length > 0) {
-		throw new Error(`Invalid tier.modelOverrides entries — ${invalid.join("; ")}`);
+		if (onInvalid) onInvalid(invalid);
+		else throw new Error(`Invalid tier.modelOverrides entries — ${invalid.join("; ")}`);
 	}
 	return validated;
 }

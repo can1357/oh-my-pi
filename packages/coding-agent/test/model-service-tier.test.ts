@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { YAML } from "bun";
@@ -9,7 +9,7 @@ import { resolveModelServiceTierOverride } from "@oh-my-pi/pi-coding-agent/confi
 import { validateServiceTierOverrides } from "@oh-my-pi/pi-coding-agent/config/service-tier";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 function makeModel(provider: string, id: string, api: Api = "openai-completions"): Model {
@@ -183,10 +183,43 @@ describe("tier.modelOverrides settings surface", () => {
 		expect(isolated.get("tier.modelOverrides")).toEqual({});
 	});
 
-	it("fails settings load loudly on a malformed entry", async () => {
-		await expect(loadWith({ tier: { modelOverrides: { "openai/gpt-5.6": "banana" } } })).rejects.toThrow(
-			/tier\.modelOverrides/,
+	it("loads valid entries, drops malformed entries, and preserves the source file", async () => {
+		const raw = {
+			tier: {
+				modelOverrides: {
+					"openai/gpt-5.6": "priority",
+					"openrouter/deepseek/deepseek-v3:free": "none",
+					"openai/gpt-5.6:high": "banana",
+					"openai/*": "flex",
+				},
+			},
+		};
+		const source = YAML.stringify(raw, null, 2);
+		await Bun.write(path.join(agentDir, "config.yml"), source);
+		const warning = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		resetSettingsForTest();
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+		expect(settings.get("tier.modelOverrides")).toEqual({
+			"openai/gpt-5.6": "priority",
+			"openrouter/deepseek/deepseek-v3:free": "none",
+		});
+		const warningCall = warning.mock.calls.find(
+			([message]) => message === "Settings: ignoring invalid tier.modelOverrides entries",
 		);
+		expect(warningCall).toBeDefined();
+		expect(warningCall?.[1]).toEqual({
+			entries: expect.arrayContaining([
+				"openai/gpt-5.6:high (value must be one of: none, auto, default, flex, scale, priority)",
+				'openai/* (key must be an exact "provider/model" or "provider/model:effort")',
+			]),
+		});
+		expect(await Bun.file(path.join(agentDir, "config.yml")).text()).toBe(source);
+	});
+
+	it("normalizes a valid dotted model-overrides root", async () => {
+		const settings = await loadWith({ "tier.modelOverrides": { "openai/gpt-5.6": "priority" } });
+		expect(settings.get("tier.modelOverrides")).toEqual({ "openai/gpt-5.6": "priority" });
 	});
 
 	it("rejects invalid sets without corrupting the current or persisted map", async () => {
@@ -199,6 +232,10 @@ describe("tier.modelOverrides settings surface", () => {
 		);
 		expect(settings.get("tier.modelOverrides")).toEqual(valid);
 		expect(() => settings.set("tier.modelOverrides", { ...valid, "openai/*": "priority" })).toThrow(
+			/tier\.modelOverrides/,
+		);
+		expect(settings.get("tier.modelOverrides")).toEqual(valid);
+		expect(() => settings.override("tier.modelOverrides", { ...valid, "openai/*": "priority" })).toThrow(
 			/tier\.modelOverrides/,
 		);
 		expect(settings.get("tier.modelOverrides")).toEqual(valid);

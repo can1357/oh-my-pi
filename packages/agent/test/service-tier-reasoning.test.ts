@@ -1,9 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Agent, type AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
+import type { AgentContext, AgentLoopConfig, AgentMessage } from "@oh-my-pi/pi-agent-core/types";
 import { GenAIAttr, GenAIOperation, OpenAIAttr, PiGenAIAttr } from "@oh-my-pi/pi-agent-core/telemetry";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { createUserMessage } from "./helpers";
+
+function identityConverter(messages: AgentMessage[]): Message[] {
+	return messages.filter(
+		message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+	) as Message[];
+}
 
 describe("service tier resolution at the request boundary", () => {
 	let exporter: InMemorySpanExporter;
@@ -87,5 +96,40 @@ describe("service tier resolution at the request boundary", () => {
 			(message): message is AssistantMessage => message.role === "assistant",
 		);
 		expect(persistedAssistant.map(message => message.serviceTier)).toEqual(["priority", "flex", null]);
+	});
+
+	it("keeps static force-off active when its dynamic resolver returns false", async () => {
+		const mock = createMockModel({
+			id: "gpt-mock",
+			provider: "openai",
+			reasoning: true,
+			responses: [
+				{ content: ["ok"], usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 } },
+			],
+		});
+		const context: AgentContext = { systemPrompt: [], messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			reasoning: ThinkingLevel.High,
+			serviceTier: "priority",
+			forceReasoningOff: true,
+			getForceReasoningOff: () => false,
+			getServiceTier: (_model, reasoning, disableReasoning) => {
+				if (disableReasoning) return undefined;
+				return reasoning === ThinkingLevel.High ? "priority" : "flex";
+			},
+		};
+
+		const messages = await agentLoop([createUserMessage("run")], context, config, undefined, mock.stream).result();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(mock.calls[0]?.options).toMatchObject({
+			reasoning: ThinkingLevel.High,
+			forceReasoningOff: true,
+			disableReasoning: true,
+		});
+		expect(mock.calls[0]?.options?.serviceTier).toBeUndefined();
+		expect(messages.at(-1)).toMatchObject({ role: "assistant", serviceTier: null });
 	});
 });

@@ -466,6 +466,8 @@ omp config get tier.modelOverrides --json
 
 Configured policy is not a manual session choice: a new config-only session does not persist a tier entry merely because `tier.*` or `tier.modelOverrides` is present. Legacy all-off (`null`), scalar, and family-map service-tier entries remain authoritative when restored. Clearing an explicit family override restores the current exact model rule or family baseline. A `null` `tier.modelOverrides` root is normalized to an empty record; use `none`, not `null`, for individual rules.
 
+When loading YAML settings, malformed model-tier entries are ignored with a warning while valid rules remain active. Loading does not rewrite the source file. Explicit settings mutations still reject malformed entries without replacing the existing rule map.
+
 Parent choices seed inheriting subagents only at launch; a revived child keeps its saved choices. Pinned advisors and their tools do not inherit the primary session's manual tier overrides. Their own exact model rules still apply, and advisor compaction uses the advisor's resolver. Previously untiered helpers such as image questions still omit unmatched family baselines.
 
 Rejected model/tier pairs remain suppressed within the current session. Successful switches to another session and new branches clear that suppression; same-session reloads and failed switches preserve it. Explicitly selecting the rejected tier again re-arms it.

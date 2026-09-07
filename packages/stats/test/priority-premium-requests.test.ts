@@ -30,6 +30,8 @@ function assistantEntry(opts: {
 	api?: string;
 	premiumRequests?: number;
 	serviceTier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	disabledFeatures?: string[];
+	model?: string;
 }): Record<string, unknown> {
 	return {
 		type: "message",
@@ -41,8 +43,9 @@ function assistantEntry(opts: {
 			content: [{ type: "text", text: "ok" }],
 			api: opts.api ?? "openai-responses",
 			provider: opts.provider,
-			model: "gpt-5.4",
+			model: opts.model ?? "gpt-5.4",
 			...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+			...(opts.disabledFeatures !== undefined ? { disabledFeatures: opts.disabledFeatures } : {}),
 			stopReason: "stop",
 			timestamp: Date.now(),
 			usage: {
@@ -263,5 +266,73 @@ describe("priority service-tier premium-request backfill", () => {
 		expect(second.stats).toHaveLength(1);
 		expect(second.stats[0]?.entryId).toBe("d1");
 		expect(second.stats[0]?.usage.premiumRequests).toBe(1);
+	});
+
+	it("treats a rejected requested priority as untiered only for inferred premium usage", async () => {
+		const sessionFile = await writeSession("--tmp--proj", "05-rejected-priority.jsonl", {
+			lines: [
+				{ type: "session", version: 1, id: "s5", timestamp: new Date().toISOString(), cwd: "/tmp/proj" },
+				assistantEntry({
+					id: "anthropic-rejected-missing",
+					provider: "anthropic",
+					api: "anthropic-messages",
+					model: "claude-opus-4-6",
+					serviceTier: "priority",
+					disabledFeatures: ["priority"],
+				}),
+				assistantEntry({
+					id: "anthropic-rejected-zero",
+					provider: "anthropic",
+					api: "anthropic-messages",
+					model: "claude-opus-4-6",
+					serviceTier: "priority",
+					disabledFeatures: ["priority"],
+					premiumRequests: 0,
+				}),
+				assistantEntry({
+					id: "anthropic-priority",
+					provider: "anthropic",
+					api: "anthropic-messages",
+					model: "claude-opus-4-6",
+					serviceTier: "priority",
+				}),
+				assistantEntry({
+					id: "anthropic-unrelated-disabled",
+					provider: "anthropic",
+					api: "anthropic-messages",
+					model: "claude-opus-4-6",
+					serviceTier: "priority",
+					disabledFeatures: ["unsigned-thinking-replay"],
+				}),
+				assistantEntry({
+					id: "copilot-reported",
+					provider: "github-copilot",
+					serviceTier: "priority",
+					disabledFeatures: ["priority"],
+					premiumRequests: 0.33,
+				}),
+			],
+		});
+
+		const parsed = await parseSessionFile(sessionFile);
+		const parsedPremium = Object.fromEntries(
+			parsed.stats.map(stat => [stat.entryId, stat.usage.premiumRequests ?? 0]),
+		);
+		expect(parsedPremium).toEqual({
+			"anthropic-rejected-missing": 0,
+			"anthropic-rejected-zero": 0,
+			"anthropic-priority": 1,
+			"anthropic-unrelated-disabled": 1,
+			"copilot-reported": 0.33,
+		});
+
+		await syncAllSessions();
+		const aggregatedPremium = Object.fromEntries(
+			getRecentRequests(5).map(request => [request.entryId, request.usage.premiumRequests ?? 0]),
+		);
+		expect(aggregatedPremium).toEqual(parsedPremium);
+		const overall = await getOverallStats();
+		expect(overall.totalRequests).toBe(5);
+		expect(overall.totalPremiumRequests).toBeCloseTo(2.33, 6);
 	});
 });

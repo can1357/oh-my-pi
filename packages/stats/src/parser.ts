@@ -177,8 +177,9 @@ function extractStats(
 	// Backfill: when the session recorded `priority` as the active service tier
 	// at this point but the AI usage payload was captured before priority
 	// requests were folded into `premiumRequests`, derive the count here so the
-	// "Premium Reqs" stat aggregates priority traffic on re-sync. Trust any
-	// non-zero value already in `usage.premiumRequests` (Copilot multipliers or
+	// "Premium Reqs" stat aggregates priority traffic on re-sync, except when
+	// the provider reports that priority was disabled during a fallback retry.
+	// Trust any non-zero `usage.premiumRequests` (Copilot multipliers or
 	// the new AI code path) and only synthesise when the field is missing/zero.
 	const recorded = rawUsage.premiumRequests ?? 0;
 	const model = {
@@ -190,7 +191,8 @@ function extractStats(
 	const tier = Object.prototype.hasOwnProperty.call(msg, "serviceTier")
 		? msg.serviceTier
 		: resolveModelServiceTier(currentServiceTier, model);
-	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(tier, model);
+	const inferredTier = tier === "priority" && msg.disabledFeatures?.includes("priority") ? undefined : tier;
+	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(inferredTier, model);
 	const wellFormed =
 		typeof rawUsage.input === "number" &&
 		typeof rawUsage.output === "number" &&

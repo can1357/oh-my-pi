@@ -1664,7 +1664,7 @@ async function streamAssistantResponse(
 	const streamFunction = streamFn || streamSimple;
 
 	const effectiveReasoning = config.getReasoning?.() ?? config.reasoning;
-	const effectiveForceReasoningOff = config.getForceReasoningOff?.(model) ?? config.forceReasoningOff;
+	const effectiveForceReasoningOff = config.getForceReasoningOff?.(model) || config.forceReasoningOff;
 	const effectiveDisableReasoning =
 		effectiveForceReasoningOff || (config.getDisableReasoning?.() ?? config.disableReasoning);
 	// Unlike reasoning, a resolver returning undefined must not fall back to the static tier.

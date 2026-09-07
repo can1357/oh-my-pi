@@ -11,6 +11,10 @@
 - Compaction summaries, handoffs, and branch summaries accept an optional `serviceTierResolver` that resolves the tier from the same concrete effort each provider call sends.
 - Added `AgentOptions.forceReasoningOffResolver` and `AgentLoopConfig.getForceReasoningOff` to resolve external-scratchpad reasoning suppression before service-tier policy matching.
 
+### Fixed
+
+- Preserve a static force-reasoning-off request when a dynamic resolver returns false, including its untiered request policy.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed

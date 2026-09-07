@@ -228,7 +228,7 @@ describe("service tier change persistence", () => {
 				parentId: "t1",
 				timestamp,
 				serviceTier: {},
-				overrides: { openai: 42, bogus: "flex", anthropic: "priority", google: null },
+				overrides: { openai: "none", bogus: "flex", anthropic: "priority", google: null, invalid: 42 },
 			},
 			{
 				// Absent both fields: no tier information either way.

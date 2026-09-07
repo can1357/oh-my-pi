@@ -2632,11 +2632,21 @@ export class Settings {
 		delete raw["computer.backend"];
 
 		const tier = isRecord(raw.tier) ? raw.tier : undefined;
+		const warnInvalidTierOverrides = (invalid: readonly string[]): void => {
+			logger.warn("Settings: ignoring invalid tier.modelOverrides entries", { entries: invalid });
+		};
 		if (tier && Object.hasOwn(tier, "modelOverrides")) {
-			tier.modelOverrides = validateServiceTierOverrides(tier.modelOverrides);
+			tier.modelOverrides = validateServiceTierOverrides(tier.modelOverrides, warnInvalidTierOverrides);
 		}
 		if (Object.hasOwn(raw, "tier.modelOverrides")) {
-			raw["tier.modelOverrides"] = validateServiceTierOverrides(raw["tier.modelOverrides"]);
+			if (tier && !Object.hasOwn(tier, "modelOverrides")) {
+				tier.modelOverrides = validateServiceTierOverrides(raw["tier.modelOverrides"], warnInvalidTierOverrides);
+			} else if (!tier) {
+				raw.tier = {
+					modelOverrides: validateServiceTierOverrides(raw["tier.modelOverrides"], warnInvalidTierOverrides),
+				};
+			}
+			delete raw["tier.modelOverrides"];
 		}
 
 		return raw;
