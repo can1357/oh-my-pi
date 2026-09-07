@@ -72,6 +72,7 @@ export function formatTaskResultSummary(
 					charSize: formatBytes(result.outputMeta.charCount),
 				}
 			: undefined,
+		modelReceipt: result.modelReceipt,
 		mergeSummary: options.mergeSummary ?? "",
 	});
 }

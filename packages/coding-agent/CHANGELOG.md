@@ -4,6 +4,10 @@
 
 ## [18.1.14] - 2026-09-07
 
+### Changed
+
+- Task results now carry a typed model receipt naming the requested model, role, and effort, what resolution actually selected, and coded reasons whenever the two diverge. The parent agent reads it in the task summary and the TUI shows it on each finished spawn.
+
 ### Fixed
 
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.

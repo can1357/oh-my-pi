@@ -1207,6 +1207,39 @@ function renderFindings(findings: FindingDetails[], continuePrefix: string, expa
 	return lines;
 }
 
+function renderModelReceipt(
+	receipt: SingleResult["modelReceipt"],
+	continuePrefix: string,
+	theme: Theme,
+): string | undefined {
+	if (!receipt) return undefined;
+	const requestedModel = receipt.requestedModel?.join(", ");
+	let text = "model receipt:";
+	let hasModel = false;
+	if (requestedModel) {
+		text += ` ${requestedModel}`;
+		hasModel = true;
+	}
+	if (receipt.requestedRole && requestedModel !== `@${receipt.requestedRole}`) {
+		text += ` (@${receipt.requestedRole})`;
+		hasModel = true;
+	}
+	if (receipt.resolvedModel) {
+		text += `${hasModel ? " →" : ""} ${receipt.resolvedModel}`;
+		hasModel = true;
+	} else if (hasModel) {
+		text += " → unresolved";
+	}
+	if (receipt.requestedEffort) {
+		text += `${hasModel ? ";" : ""} effort ${receipt.requestedEffort}`;
+		if (receipt.resolvedEffort) text += ` → ${receipt.resolvedEffort}`;
+	} else if (receipt.resolvedEffort) {
+		text += `${hasModel ? ";" : ""} effort ${receipt.resolvedEffort}`;
+	}
+	if (receipt.overrides?.length) text += `; overrides ${receipt.overrides.join(", ")}`;
+	return `${continuePrefix}${theme.fg("dim", previewLine(replaceTabs(sanitizeText(text)), 100))}`;
+}
+
 /**
  * Render final result for a single agent.
  */
@@ -1276,6 +1309,9 @@ function renderAgentResult(
 	lines.push(statusLine);
 
 	lines.push(...renderTaskSection(result.assignment ?? result.task, continuePrefix, expanded, theme));
+
+	const modelReceiptLine = renderModelReceipt(result.modelReceipt, continuePrefix, theme);
+	if (modelReceiptLine) lines.push(modelReceiptLine);
 
 	if (aborted && result.abortReason) {
 		lines.push(

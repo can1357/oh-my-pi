@@ -15,6 +15,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -172,6 +173,7 @@ describe("task.batch schema gating", () => {
 
 		flatSession.settings.override("task.enableEffort", true);
 		expect(getSchemaProperties(flat).effort).toBeDefined();
+		expect(getSchemaProperties(flat).effort).toEqual({ type: "string", enum: ["lo", "med", "hi"] });
 		expect(flat.description).toContain("`effort`");
 
 		const batchSession = createSession({ settings: { "task.batch": true } });
@@ -181,6 +183,7 @@ describe("task.batch schema gating", () => {
 
 		batchSession.settings.override("task.enableEffort", true);
 		expect(getBatchItemProperties(batch).effort).toBeDefined();
+		expect(getBatchItemProperties(batch).effort).toEqual({ type: "string", enum: ["lo", "med", "hi"] });
 		expect(batch.description).toContain("`effort`");
 	});
 
@@ -286,6 +289,24 @@ describe("task.batch validation", () => {
 			{ "task.batch": true },
 		);
 		expect(text).toContain("Duplicate task name");
+	});
+
+	it("rejects every out-of-enum effort selector with its call location", async () => {
+		const flat = await executeText(
+			{ agent: "task", task: "Work.", effort: "turbo" },
+			{ "task.batch": false, "task.enableEffort": true },
+		);
+		expect(flat).toContain('The call has an invalid `effort` value "turbo"');
+		expect(flat).toContain('Use "lo", "med", or "hi"');
+
+		const batch = await executeText(
+			{
+				context: "Shared background.",
+				tasks: [{ name: "Beta", task: "Work.", effort: "maximum" }],
+			},
+			{ "task.batch": true, "task.enableEffort": true },
+		);
+		expect(batch).toContain('Task 1 (`Beta`) has an invalid `effort` value "maximum"');
 	});
 
 	it("marks lenientArgValidation so execute() surfaces the actionable shape error", async () => {
@@ -633,6 +654,32 @@ describe("task.batch spawning", () => {
 
 		expect(text).not.toContain("agent://MissingArtifact");
 		expect(text).toContain(":END");
+	});
+
+	it("surfaces one model receipt in the parent task result", async () => {
+		mockDiscovery();
+		const receipt: NonNullable<SingleResult["modelReceipt"]> = {
+			requestedEffort: "hi",
+			requestedModel: ["@task"],
+			requestedRole: "task",
+			resolvedModel: "openai/gpt-5.6-sol",
+			resolvedEffort: Effort.Low,
+			overrides: ["effort-clamped"],
+		};
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
+			makeResult(options.id ?? "?", { modelReceipt: receipt }),
+		);
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": false } }));
+
+		const params: TaskParams = { task: "Do the thing." };
+		const result = await tool.execute("tc-model-receipt", params);
+		const text = getFirstText(result);
+
+		expect(text).toContain("<model-receipt>");
+		expect(text).toContain("<requested-model>@task</requested-model>");
+		expect(text).toContain("<resolved-model>openai/gpt-5.6-sol</resolved-model>");
+		expect(text).toContain("<reason>effort-clamped</reason>");
+		expect(result.details?.results[0]?.modelReceipt).toBe(receipt);
 	});
 
 	it("settles the batch async aggregate when a queued spawn is cancelled mid-flight", async () => {
