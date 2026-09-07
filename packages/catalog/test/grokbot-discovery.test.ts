@@ -222,6 +222,9 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(grok?.contextWindow).toBe(256_000);
 		expect(grok?.sandMaxMode).toBe(false);
 		expect(grok?.input).toEqual(["text", "image"]);
+		// Variants without isDefault* flags must not pin arbitrary param values
+		// (e.g. effort=low from array order) onto the canonical model row.
+		expect(grok?.sandParameterDefaults).toBeUndefined();
 		// Discovery must not invent output/context caps the response never supplied.
 		expect(grok?.maxTokens).toBeNull();
 		expect(composer?.maxTokens).toBeNull();
@@ -234,12 +237,12 @@ describe("grokbot AvailableModels normalize", () => {
 
 		const sol = models.find(m => m.id === "gpt-5.6-sol");
 		expect(sol?.sandParameterIds).toEqual(["context", "reasoning", "fast"]);
-		expect(sol?.sandParameterDefaults).toEqual({
-			reasoning: "medium",
-			context: "272k",
-			fast: "false",
-		});
+		// Sole variant without isDefault* must not become silent canonical defaults.
+		expect(sol?.sandParameterDefaults).toBeUndefined();
 		expect(sol?.aliases).toContain("gpt");
+
+		const gemini = models.find(m => m.id === "gemini-3-flash");
+		expect(gemini?.sandParameterDefaults).toEqual({ effort: "low" });
 
 		const auto = models.find(m => m.id === "default");
 		expect(auto?.sandParameterIds).toEqual([]);

@@ -80,6 +80,7 @@
 - Grok Bot catalog matrix `--ids` keeps commas inside `[...]`, core tool probes use bland Shell wording (write via `printf > notes/…`, read via `cat`), Anthropic Usage Policy blocks report as `provider-policy-block`, and a successful tool call still PASSes if the echo follow-up is policy-blocked.
 - Grok Bot matrix `--slice representative` picks live AvailableModels ids by `classifyModel` class/family (plus sand/Auto routers), not a hardcoded id table.
 - Grok Bot probe helpers resolve `secrets/grokbot.env` through shared `getAgentDir()` (profile / XDG / `PI_CODING_AGENT_DIR`), matching `/login grokbot`.
+- Grok Bot stream registration loads `./grokbot` lazily like other providers (no eager protobuf/TUI import on `register-builtins` startup).
 
 ### Fixed
 

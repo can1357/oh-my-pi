@@ -233,11 +233,13 @@ function collectSandParameterDefaults(
 	sandMaxMode: boolean,
 ): Record<string, string> | undefined {
 	const variants = row.variants ?? [];
+	// Only an explicitly marked default variant owns canonical defaults.
+	// Falling back to "first variant with params" would pin low/fast=false (or
+	// whatever ordering returned) onto ordinary model selection when upstream
+	// omits default flags — leave unset for reviewed/KDL correction instead.
 	const preferred = sandMaxMode
-		? (variants.find(v => v.isDefaultMaxConfig === true) ??
-			variants.find(v => v.isDefaultNonMaxConfig !== true && (v.parameterValues?.length ?? 0) > 0))
-		: (variants.find(v => v.isDefaultNonMaxConfig === true) ??
-			variants.find(v => v.isDefaultMaxConfig !== true && (v.parameterValues?.length ?? 0) > 0));
+		? variants.find(v => v.isDefaultMaxConfig === true)
+		: variants.find(v => v.isDefaultNonMaxConfig === true);
 	return preferred ? collectVariantSandParameterDefaults(preferred) : undefined;
 }
 
