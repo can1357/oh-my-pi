@@ -106,6 +106,7 @@ export async function sendLiveSessionMessage(input: LiveSessionMessage): Promise
 	}
 }
 
+/** Register through an injectable broker host for the distribution smoke probe. */
 export async function startLiveSessionRegistrationWithHost(
 	session: AttachSession,
 	createHost: LiveSessionHostFactory,
