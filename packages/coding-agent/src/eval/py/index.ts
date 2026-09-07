@@ -66,6 +66,7 @@ export default {
 			localRoots: resolveEvalUrlRoots(opts.session),
 			kernelOwnerId: identity.kernelOwnerId,
 			reset: opts.reset,
+			unboundedOutput: opts.unboundedOutput,
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,
 			toolSession: opts.session,

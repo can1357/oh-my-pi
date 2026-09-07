@@ -961,7 +961,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		params: SearchParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<GrepToolDetails>,
-		_toolContext?: AgentToolContext,
+		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<GrepToolDetails>> {
 		const { pattern, path: rawPath, case: caseSensitive, gitignore, skip } = params;
 
@@ -1584,7 +1584,14 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					outputLines.push("", warningNote);
 				}
 				const rawOutput = outputLines.join("\n");
-				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+				// A programmatic caller (`eval` bridge) parses these matches; dropping
+				// the tail of the list here is data loss the bridge's own guard runs
+				// too late to undo. The per-line column cap is upstream in the search
+				// itself and still applies.
+				const truncation = truncateHead(rawOutput, {
+					maxLines: Number.MAX_SAFE_INTEGER,
+					...(toolContext?.programmaticCaller === true ? { maxBytes: Number.MAX_SAFE_INTEGER } : {}),
+				});
 				const output = truncation.content;
 				const displayText = displayLines.join("\n");
 				const truncated = Boolean(

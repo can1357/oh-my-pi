@@ -45,6 +45,13 @@ export interface KernelExecutorBaseOptions {
 	bridgeSessionId?: string;
 	artifactId?: string;
 	artifactPath?: string;
+	/**
+	 * Keep the captured stdout whole: no inline spill budget and no per-line
+	 * column cap. Set when the cell's consumer is a kernel rather than the model
+	 * (a nested `tool.eval()` through the eval bridge), where eliding the middle
+	 * of a value the caller decodes is silent corruption.
+	 */
+	unboundedOutput?: boolean;
 }
 
 /** Normalised execution result produced by {@link executeWithKernelBase}. */
@@ -445,8 +452,9 @@ export async function executeWithKernelBase<
 		onChunk: options?.onChunk,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
-		headBytes: resolveOutputSinkHeadBytes(settings),
-		maxColumns: resolveOutputMaxColumns(settings),
+		...(options?.unboundedOutput
+			? { spillThreshold: Number.MAX_SAFE_INTEGER, headBytes: 0, maxColumns: 0 }
+			: { headBytes: resolveOutputSinkHeadBytes(settings), maxColumns: resolveOutputMaxColumns(settings) }),
 	});
 
 	const displayOutputs: KernelDisplayOutput[] = [];
