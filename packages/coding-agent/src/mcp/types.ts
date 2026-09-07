@@ -345,6 +345,9 @@ export interface MCPTransport {
 /** Transport factory function */
 export type TransportFactory = (config: MCPServerConfig) => Promise<MCPTransport>;
 
+/** Per-server outcome of a bulk tool refresh (see `MCPManager.refreshAllTools`). */
+export type MCPRefreshOutcome = { name: string; ok: true } | { name: string; ok: false; error: string };
+
 // =============================================================================
 // MCP Client Types
 // =============================================================================

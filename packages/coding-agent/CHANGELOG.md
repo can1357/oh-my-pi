@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed MCP tools staying empty for the whole session when a server first listed no tools during its warmup window ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
+### Added
+
+- Added `/mcp refresh` to re-fetch tools from connected MCP servers without reconnecting ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
