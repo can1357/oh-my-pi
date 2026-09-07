@@ -21,6 +21,7 @@
 - Grok Bot product-wire tool name collisions use one owner for both advertisement and decode (first claimant, or the preferred built-in omp tool).
 - Grok Bot tool-enabled streams publish accepted tool/text events live (incomplete siblings stay buffered), so TUI/ACP previews are not frozen until the trailer.
 - Grok Bot empty Gemini follow-ups after product-wire `edit` (advertised as Write) are accepted like Write results.
+- Grok Bot defers text flush while an earlier incomplete tool could still compact content indices, and clears abandoned responseId/upstreamModel before empty/incomplete retries.
 - Grok Bot automation/parent-chat product wire for non-Anthropic routers requires catalog `sand-tools-wire` (no raw `sand-automation` / `sand-default` id exceptions).
 - Grok Bot keep-model probes share checksum/JWT/auth helpers via `scripts/grokbot-probe-config.mjs`.
 - Grok Bot `sand-automation` now promotes grok-4.5-high fenced `{"name":"Shell",…}` text into a real Shell/bash tool call, and native-family matrix rows report `wire: native` instead of the internal `error` sentinel.

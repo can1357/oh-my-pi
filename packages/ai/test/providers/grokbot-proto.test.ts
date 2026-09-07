@@ -1212,6 +1212,49 @@ describe("grokbot incomplete tool calls", () => {
 		]);
 	});
 
+	test("remaps streamed text contentIndex after dropping a leading incomplete tool", async () => {
+		// Incomplete tool at 0 + text at 1: text must stay buffered until drop/remap,
+		// or ACP receives text events still pointing at index 1 after compaction.
+		mockAuth();
+		const leftover = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "c0", toolName: "Write", args: '{"path":', isComplete: false },
+			}),
+		);
+		const text = frameConnectProto(
+			encodeInferenceStreamResponse({ textPart: { text: "tools-pong-text", isFinal: true } }),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(leftover, text, trailer)) as FetchImpl;
+		const toolsContext: Context = {
+			messages: [{ role: "user", content: "call", timestamp: 1 }],
+			tools: [
+				{
+					name: "Write",
+					description: "write file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" }, content: { type: "string" } },
+						required: ["path", "content"],
+					},
+				},
+			],
+		};
+
+		const stream = streamGrokBot(model, toolsContext, { apiKey: "renew", fetch: fetchImpl });
+		const textEvents: Array<{ type: string; contentIndex: number }> = [];
+		for await (const event of stream) {
+			if (event.type === "text_start" || event.type === "text_delta" || event.type === "text_end") {
+				textEvents.push({ type: event.type, contentIndex: event.contentIndex });
+			}
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "tools-pong-text" })]);
+		expect(textEvents.length).toBeGreaterThan(0);
+		expect(textEvents.every(e => e.contentIndex === 0)).toBe(true);
+	});
+
 	test("publishes toolcall events live before the connect trailer arrives", async () => {
 		// Tool-enabled attempts must not hold every event until stream end — TUI/ACP
 		// need pending tool previews while the response is still open.

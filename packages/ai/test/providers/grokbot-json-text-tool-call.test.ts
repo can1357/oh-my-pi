@@ -257,6 +257,11 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 					thinkingPart: { text: "planning", isFinal: true },
 				}),
 			),
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					responseInfo: { id: "abandoned-resp", model: "abandoned-model" },
+				}),
+			),
 			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
 		]);
 		const toolCall = Buffer.concat([
@@ -308,6 +313,9 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 				arguments: { command: "echo retried" },
 			}),
 		]);
+		// Abandoned first-attempt responseInfo must not stick on the accepted retry.
+		expect(result.responseId).toBeUndefined();
+		expect(result.upstreamModel).toBeUndefined();
 	});
 
 	test("accepts an empty follow-up after a Write tool result (gemini-3-flash write)", async () => {

@@ -824,9 +824,18 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					return;
 				}
 				attemptEventBuffer.push(event);
-				if (event.type === "text_delta" || event.type === "text_end") {
+				if (
+					(event.type === "text_delta" || event.type === "text_end") &&
+					!hasEarlierIncompleteTool(event.contentIndex)
+				) {
 					flushAttemptEvents();
 				}
+			};
+
+			const clearAbandonedAttemptMetadata = () => {
+				delete output.responseId;
+				delete output.upstreamModel;
+				routedResponseModel = "";
 			};
 
 			attempt: while (true) {
@@ -1386,6 +1395,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					} else if (!incompleteToolRetryUsed && tools.length > 0) {
 						incompleteToolRetryUsed = true;
 						discardAttemptEvents();
+						clearAbandonedAttemptMetadata();
 						output.content = [];
 						output.usage = {
 							input: 0,
@@ -1452,6 +1462,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							geminiProductRetryUsed = true;
 						}
 						discardAttemptEvents();
+						clearAbandonedAttemptMetadata();
 						output.content = [];
 						output.usage = {
 							input: 0,
