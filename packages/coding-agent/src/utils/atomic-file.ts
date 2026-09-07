@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { hasFsCode, isEexist, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
@@ -329,14 +328,16 @@ function enotDir(message: string): Error & { code?: string } {
  * Stage serialized content and publish it atomically against an ALREADY-RESOLVED
  * config target — the path pinned by {@link withConfigFileLock}. The temp file
  * is per-writer unique (pid + random, in the target's own directory so the
- * rename cannot EXDEV across mounts); its mode takes only the OWNER bits of
- * the referent's current mode — credential-bearing configs drop group/world
- * bits exactly like an unconditional 0o600 did, while stricter-than-600 owner
- * modes survive, and a new file, or a referent with no owner bits at all,
- * falls back to owner-only — and is chmod'd explicitly because creation modes
- * pass through umask. The rename itself goes through {@link
- * replaceFileAtomically}, so Windows `EPERM`/`EEXIST` replacement failures
- * recover instead of failing the write.
+ * rename cannot EXDEV across mounts) and is fsync'd before the rename — the
+ * durability the YAML settings flush always had, now shared by every config
+ * writer. Its mode takes only the OWNER bits of the referent's current mode —
+ * credential-bearing configs drop group/world bits exactly like an
+ * unconditional 0o600 did, while stricter-than-600 owner modes (e.g. a
+ * read-only 0o400 dotfiles checkout) survive, and a new file, or a referent
+ * with no owner bits at all, falls back to owner-only — and is chmod'd
+ * explicitly because creation modes pass through umask. The rename itself goes
+ * through {@link replaceFileAtomically}, so Windows `EPERM`/`EEXIST`
+ * replacement failures recover instead of failing the write.
  */
 export async function publishSerializedConfig(writePath: string, content: string): Promise<void> {
 	const dir = path.dirname(writePath);
@@ -356,7 +357,13 @@ export async function publishSerializedConfig(writePath: string, content: string
 
 	const tmpPath = `${writePath}.${process.pid}.${randomUUID()}.tmp`;
 	try {
-		await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
+		const handle = await fs.promises.open(tmpPath, "wx", 0o600);
+		try {
+			await handle.writeFile(content, "utf8");
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
 		await fs.promises.chmod(tmpPath, mode);
 		await replaceFileAtomically(tmpPath, writePath);
 	} catch (error) {
@@ -364,7 +371,6 @@ export async function publishSerializedConfig(writePath: string, content: string
 		throw error;
 	}
 }
-
 /**
  * Serialize a read-modify-write against one config file on its symlink-RESOLVED
  * target: two configured paths that alias the same physical file must contend
@@ -375,7 +381,20 @@ export async function publishSerializedConfig(writePath: string, content: string
  * dangling into a directory that does not exist yet.
  */
 export async function withConfigFileLock<T>(filePath: string, fn: (writePath: string) => Promise<T>): Promise<T> {
-	const writePath = await resolveSymlinkWriteTarget(filePath);
+	return withResolvedConfigFileLock(await resolveSymlinkWriteTarget(filePath), fn);
+}
+
+/**
+ * {@link withConfigFileLock} for callers that resolve the write target
+ * THEMSELVES — e.g. the YAML settings flush, which honors its quarantine map
+ * before locking. Sharing this keeps the materialized parent's hardened 0700
+ * creation mode and the pinned-callback contract identical for every config
+ * writer instead of maintaining a parallel resolve/mkdir/lock path.
+ */
+export async function withResolvedConfigFileLock<T>(
+	writePath: string,
+	fn: (writePath: string) => Promise<T>,
+): Promise<T> {
 	await fs.promises.mkdir(path.dirname(writePath), { recursive: true, mode: 0o700 });
 	// The callback receives the LOCKED target and must do both its read and
 	// its write through it: if the link is retargeted mid-callback, resolving
@@ -391,7 +410,7 @@ export async function withConfigFileLock<T>(filePath: string, fn: (writePath: st
  */
 export async function replaceFileAtomically(tempPath: string, targetPath: string): Promise<void> {
 	try {
-		await fsp.rename(tempPath, targetPath);
+		await fs.promises.rename(tempPath, targetPath);
 		return;
 	} catch (error) {
 		if (!hasFsCode(error, "EPERM") && !isEexist(error)) throw error;
@@ -406,20 +425,20 @@ async function replaceAfterWindowsRenameFailure(
 ): Promise<void> {
 	const backupPath = `${targetPath}.${process.pid}.${crypto.randomUUID()}.bak`;
 	try {
-		await fsp.rename(targetPath, backupPath);
+		await fs.promises.rename(targetPath, backupPath);
 	} catch (error) {
 		if (isEnoent(error)) {
-			await fsp.rename(tempPath, targetPath);
+			await fs.promises.rename(tempPath, targetPath);
 			return;
 		}
 		throw renameError;
 	}
 
 	try {
-		await fsp.rename(tempPath, targetPath);
+		await fs.promises.rename(tempPath, targetPath);
 	} catch (replaceError) {
 		try {
-			await fsp.rename(backupPath, targetPath);
+			await fs.promises.rename(backupPath, targetPath);
 		} catch (rollbackError) {
 			throw new Error(
 				`Failed to replace file after ${toError(renameError).message} (retry: ${
@@ -432,7 +451,7 @@ async function replaceAfterWindowsRenameFailure(
 	}
 
 	try {
-		await fsp.rm(backupPath);
+		await fs.promises.rm(backupPath);
 	} catch (error) {
 		if (!isEnoent(error)) {
 			logger.warn("Failed to remove atomic replacement backup", {

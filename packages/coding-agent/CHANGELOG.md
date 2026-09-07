@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed atomic config writes (`mcp.json`, `ssh.json`, legacy `settings.json` migration) replacing a user-managed symlink with a regular file; writes now land on the link's target (physically resolving dangling relative targets), serialize on the resolved path, recreate a dangling referent, and clamp the published file mode to the referent's owner bits ([#10644](https://github.com/can1357/oh-my-pi/pull/10644) by [@chuzui](https://github.com/chuzui)).
+- Fixed atomic config writes (`mcp.json`, `ssh.json`, `config.yml` saves and legacy `settings.json` migration) replacing a user-managed symlink with a regular file; writes now land on the link's target (physically resolving dangling relative targets), serialize on the resolved path, recreate a dangling referent, and clamp the published file mode to the referent's owner bits ([#10644](https://github.com/can1357/oh-my-pi/pull/10644) by [@chuzui](https://github.com/chuzui)).
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.
 - Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence.
 - Fixed `/copy` link captions showing Markdown delimiters for formatted labels and splitting across two rows for multiline labels ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).

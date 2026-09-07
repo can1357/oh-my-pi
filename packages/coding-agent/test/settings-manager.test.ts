@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
-import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
@@ -333,6 +332,32 @@ describe("Settings", () => {
 			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
 			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 7 });
 			expect(settings.get("setupVersion")).toBe(7);
+			// The materialized referent directory takes the hardened 0700 creation
+			// mode shared with the JSON config writers, not the umask default.
+			if (process.platform !== "win32") {
+				expect(fs.statSync(managedDir).mode & 0o777).toBe(0o700);
+			}
+		});
+
+		it("keeps a read-only symlinked referent owner-read-only through a settings save", async () => {
+			// A dotfiles-managed config.yml can be checked out read-only (0400).
+			// Every YAML save previously staged its replacement as a blanket
+			// 0600, silently making the managed file owner-writable; the write
+			// must clamp to the referent's owner bits like the MCP/SSH writers.
+			const managedConfigPath = tempDir.join("managed-config.yml");
+			await Bun.write(managedConfigPath, YAML.stringify({ setupVersion: 1 }, null, 2));
+			await fs.promises.chmod(managedConfigPath, 0o400);
+			await fs.promises.symlink(managedConfigPath, getConfigPath(), "file");
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("setupVersion", 9);
+			await settings.flush();
+
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+			if (process.platform !== "win32") {
+				expect(fs.statSync(managedConfigPath).mode & 0o777).toBe(0o400);
+			}
+			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 9 });
 		});
 
 		it("writes through a dangling symlink chain to the final target, preserving every link", async () => {
@@ -857,9 +882,11 @@ describe("Settings", () => {
 			await writeSettings({ setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			const canonicalConfigPath = await fs.promises.realpath(getConfigPath());
-			const rename = fsp.rename.bind(fsp);
+			const rename = fs.promises.rename.bind(fs.promises);
 			let injected = false;
-			vi.spyOn(fsp, "rename").mockImplementation(async (source, target) => {
+			// Spy on the fs.promises seam the atomic publisher actually calls;
+			// node:fs/promises is a separate namespace object in Bun.
+			vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
 				if (!injected && String(source).endsWith(".tmp") && String(target) === canonicalConfigPath) {
 					injected = true;
 					throw new FsCodeError("EPERM", "injected Windows replacement failure");
