@@ -3,7 +3,7 @@ import { isEnoent, logger, once, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
 import { isPermissionDeniedError, writeFileWithFallback } from "../tools/file-write-fallback";
 import { FileChangeType, notifyWorkspaceWatchedFiles } from "./client";
-import { getServersForFile } from "./config";
+import { getConfig, getServersForFile } from "./config";
 import {
 	captureDiagnosticVersions,
 	captureOpenFileVersions,
@@ -16,7 +16,7 @@ import {
 	limitDiagnosticMessages,
 	type ServerVersionMap,
 } from "./diagnostics";
-import { getConfig, notifyFileSaved, splitServers, syncFileContent } from "./servers";
+import { notifyFileSaved, splitServers, syncFileContent } from "./servers";
 import type { ServerConfig } from "./types";
 import { summarizeDiagnosticMessages } from "./utils";
 
