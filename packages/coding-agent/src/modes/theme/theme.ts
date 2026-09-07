@@ -153,6 +153,7 @@ export type SymbolKey =
 	| "thinking.medium"
 	| "thinking.high"
 	| "thinking.xhigh"
+	| "thinking.ultra"
 	| "thinking.autoPending"
 	// Checkboxes
 	| "checkbox.checked"
@@ -355,6 +356,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"thinking.medium": "◒ med",
 	"thinking.high": "◕ high",
 	"thinking.xhigh": "◉ xhigh",
+	"thinking.ultra": "◉ ultra",
 	"thinking.autoPending": "⟳",
 	// Checkboxes
 	"checkbox.checked": "☑",
@@ -649,6 +651,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"thinking.high": "\u{F111} high",
 	// pick: 🧠 xhi | alt:  xhi  xhi
 	"thinking.xhigh": "\u{F06D} xhi",
+	"thinking.ultra": "\u{F06D} ultra",
 	// pick:  (fa-circle-o-notch) | alt: 󰂼 (nf-md-cached) ⟳
 	"thinking.autoPending": "\uf1ce",
 	// Checkboxes
@@ -862,6 +865,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"thinking.medium": "[med]",
 	"thinking.high": "[high]",
 	"thinking.xhigh": "[xhi]",
+	"thinking.ultra": "[ultra]",
 	"thinking.autoPending": "[~]",
 	// Checkboxes
 	"checkbox.checked": "[x]",
@@ -1837,6 +1841,7 @@ export class Theme {
 			medium: this.#symbols["thinking.medium"],
 			high: this.#symbols["thinking.high"],
 			xhigh: this.#symbols["thinking.xhigh"],
+			ultra: this.#symbols["thinking.ultra"],
 			autoPending: this.#symbols["thinking.autoPending"],
 		};
 	}

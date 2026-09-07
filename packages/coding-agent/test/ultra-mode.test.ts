@@ -13,6 +13,16 @@ import { parseArgs } from "@pk-nerdsaver-ai/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-resolver";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
+import {
+	renderSegment,
+	type SegmentContext,
+} from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/status-line/segments";
+import {
+	initTheme,
+	type SymbolPreset,
+	setSymbolPreset,
+	theme,
+} from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
@@ -61,6 +71,36 @@ const MOCK_ULTRA_NATIVE_MODEL: Model<"openai-codex-responses"> = buildModel({
 		efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Ultra],
 	},
 });
+
+function createStatusContext(session: AgentSession): SegmentContext {
+	return {
+		session,
+		width: 120,
+		options: {},
+		planMode: null,
+		loopMode: null,
+		goalMode: null,
+		collab: null,
+		usageStats: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			premiumRequests: 0,
+			cost: 0,
+			tokensPerSecond: null,
+		},
+		contextPercent: 0,
+		contextTokens: 0,
+		contextWindow: session.model?.contextWindow ?? 0,
+		autoCompactEnabled: false,
+		subagentCount: 0,
+		sessionStartTime: Date.now(),
+		activeRepo: null,
+		git: { branch: null, status: null, pr: null },
+		usage: null,
+	};
+}
 
 describe("Ultra mode — CLI parsing", () => {
 	it("parses --ultra flag as Ultra thinking level", () => {
@@ -231,4 +271,52 @@ describe("Ultra mode — AgentSession behavior", () => {
 		authStorage.close();
 		tempDir.removeSync();
 	});
+});
+
+describe("Ultra mode — Status line rendering", () => {
+	it.each([MOCK_REASONING_MODEL, MOCK_ULTRA_NATIVE_MODEL])(
+		"shows ultra and clears it on effort changes for $id",
+		async model => {
+			await initTheme();
+			const originalPreset = theme.getSymbolPreset();
+			const tempDir = TempDir.createSync("@pi-ultra-status-");
+			const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+			const session = new AgentSession({
+				agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated(),
+				modelRegistry: new ModelRegistry(authStorage),
+			});
+			try {
+				const ctx = createStatusContext(session);
+				const presets: SymbolPreset[] = ["unicode", "nerd", "ascii"];
+				for (const preset of presets) {
+					await setSymbolPreset(preset);
+					session.setThinkingLevel(ThinkingLevel.Ultra);
+					const ultra = renderSegment("model", ctx);
+					expect(ultra.visible).toBe(true);
+					expect(ultra.content).toContain("ultra");
+					expect(ultra.content).not.toContain(theme.thinking.xhigh);
+
+					ctx.options.model = { showThinkingLevel: false };
+					expect(renderSegment("model", ctx).content).not.toContain("ultra");
+					ctx.options.model = { showThinkingLevel: true };
+
+					for (const level of [ThinkingLevel.Low, ThinkingLevel.Medium, ThinkingLevel.High, ThinkingLevel.XHigh]) {
+						session.setThinkingLevel(level);
+						const rendered = renderSegment("model", ctx);
+						expect(rendered.content).toContain(theme.thinking[level]);
+						expect(rendered.content).not.toContain("ultra");
+					}
+					session.setThinkingLevel(ThinkingLevel.Off);
+					expect(renderSegment("model", ctx).content).not.toContain("ultra");
+				}
+			} finally {
+				await session.dispose();
+				authStorage.close();
+				tempDir.removeSync();
+				await setSymbolPreset(originalPreset);
+			}
+		},
+	);
 });
