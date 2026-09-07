@@ -3,8 +3,8 @@
 use std::{collections::BTreeSet, fs, path::Path, str::FromStr as _};
 
 use jiff::Timestamp;
-use pep440_rs::Version;
 use omp_core::Str;
+use pep440_rs::Version;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -243,7 +243,11 @@ impl SignedIndex {
 		skip_all,
 		fields(index_name = %self.name, extension_count = self.extensions.len())
 	)]
-	pub fn verify_at(self, index_key: &str, now: Timestamp) -> Result<VerifiedIndex, ExtensionError> {
+	pub fn verify_at(
+		self,
+		index_key: &str,
+		now: Timestamp,
+	) -> Result<VerifiedIndex, ExtensionError> {
 		if self.version != INDEX_VERSION {
 			return Err(ExtensionError::new(
 				ExtensionCode::EManifestParse,
@@ -348,6 +352,7 @@ impl SignedIndex {
 		verify_signed_payload(index_key, &payload, self.signature.as_str())?;
 		Ok(VerifiedIndex::new_unchecked(self))
 	}
+
 	/// Looks up one non-yanked exact release.
 	pub fn release(&self, id: &str, version: &str) -> Option<(&IndexExtension, &IndexRelease)> {
 		let extension = self
@@ -386,8 +391,6 @@ impl VerifiedIndex {
 			.iter()
 			.filter(|release| !release.yanked && (!attested_only || release.attested))
 			.max_by(|left, right| {
-				validate_version(left.version.as_str()).expect("validate_version");
-				validate_version(right.version.as_str()).expect("validate_version");
 				compare_versions(left.version.as_str(), right.version.as_str())
 					.expect("validate_version")
 			})
@@ -421,8 +424,6 @@ impl VerifiedIndex {
 							.is_none_or(|name| release.shadows.iter().any(|shadow| shadow.name == name))
 				})
 				.max_by(|left, right| {
-					validate_version(left.version.as_str()).expect("validate_version");
-					validate_version(right.version.as_str()).expect("validate_version");
 					compare_versions(left.version.as_str(), right.version.as_str())
 						.expect("validate_version")
 				})?;
@@ -448,7 +449,8 @@ pub fn validate_version(version: &str) -> Result<(), ExtensionError> {
 		)
 	})?;
 	Ok(())
-	}
+}
+
 /// Requires every manifest shadow claim to have an exact user-configured
 /// declaration. Index presence alone never changes built-in precedence.
 pub fn validate_shadow_consent(
@@ -511,7 +513,13 @@ mod tests {
 			key_rotation:  None,
 			releases:      vec![release("2.0rc1"), release("1.9"), release("2.0")],
 		};
-		assert_eq!(VerifiedIndex::new_unchecked(index).latest_release(&extension, false).unwrap().version, "2.0");
+		assert_eq!(
+			VerifiedIndex::new_unchecked(index)
+				.latest_release(&extension, false)
+				.unwrap()
+				.version,
+			"2.0"
+		);
 	}
 
 	#[test]

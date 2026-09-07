@@ -20,7 +20,7 @@ use omp_ext::{
 		MissingSourcePolicy, OfflineMode, SourceSpec, effective_missing_source,
 	},
 	doctor::{CredentialHealth, DoctorRequest, DoctorSeverity, RuntimeHealth, diagnose},
-	index::SignedIndex,
+	index::{SignedIndex, VerifiedIndex},
 	lock::{
 		InstalledExtension, InstalledRecord, LockFile, LockedExtension, LockedPackage, Wheel,
 		index_source,
@@ -2014,7 +2014,7 @@ async fn verify(state: &StatePaths, args: ExtVerifyArgs) -> miette::Result<()> {
 	Ok(())
 }
 
-fn read_catalog_for_verify(state: &StatePaths) -> miette::Result<SignedIndex> {
+fn read_catalog_for_verify(state: &StatePaths) -> miette::Result<VerifiedIndex> {
 	let key = fs::read_to_string(&state.index_key).into_diagnostic()?;
 	SignedIndex::read(&state.index_snapshot, key.trim()).map_err(extension_failure)
 }
