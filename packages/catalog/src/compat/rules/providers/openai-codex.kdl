@@ -29,16 +29,11 @@ provider "openai-codex" {
 			cache-write 15.625
 		}
 	}
-	// Codex discovery still reports Astra's stale 272K window with
-	// max_context_window=872000 (client 0.153.1, 2026-09-04) — the same stale
-	// pair it reports for Luna/Sol/Terra. Public docs list a 1.05M window and
-	// live Codex traffic succeeds past the wire maximum (895,302 input tokens
-	// observed, including cached input), so floor to the documented window like
-	// the GPT-5.6 1M floor below. Astra carries no long-context surcharge, so
-	// the window must not be gated behind `/extended-context`; the
-	// `maximum > contextWindow` guard then ignores the stale 872K live maximum.
-	// Pricing stays at the documented credit-equivalent rates, with free cache
-	// writes and no >272K multiplier.
+	// Codex reports a 272K default and a stale 872K maximum for Astra. Keep
+	// the default explicit so cached 1.05M rows from #11089 cannot bypass the
+	// opt-in; the curated maximum is applied only with extended context on.
+	// The documented total window is 1.05M (922K input plus 128K output).
+	// Codex pricing remains exempt from the API long-context multiplier.
 	models "gpt-6-astra" "gpt-6-astra-wm" {
 		cost-patch {
 			input 10.0
@@ -50,7 +45,10 @@ provider "openai-codex" {
 			flex 0.5
 			priority 2.5
 		}
-		context-window-floor 1050000
+		limits-patch {
+			context-window 272000
+		}
+		max-context-window 1050000
 	}
 	class "openai" {
 		revision ">=5.3 <5.7" {
@@ -141,8 +139,4 @@ provider "openai-codex" {
 	models "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra" {
 		context-window-floor 1000000
 	}
-	// (No `max-context-window` fallback: the 1.05M floor already exceeds the
-	// stale 872K wire maximum, so offline and cached rows compose to the
-	// documented window and the live maximum is ignored by the
-	// `maximum > contextWindow` guard — same as Luna/Sol/Terra above.)
 }
