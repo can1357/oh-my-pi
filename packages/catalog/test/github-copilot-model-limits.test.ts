@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
+import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -361,6 +364,82 @@ describe("github copilot model limits mapping", () => {
 		// Should use the Copilot-specific bundled reference (272k after models.json fix),
 		// not the OpenAI global reference (1050k).
 		expect(model?.contextWindow).toBe(272_000);
+	});
+	it("does not inherit a cross-provider wire id from the global reference index (#10796)", async () => {
+		// The bundled reference index is keyed by bare model id across every
+		// provider, so a Copilot-served id can collide with a model owned only by
+		// another provider (here `cursor`, api `cursor-agent`). `cursor-*` ids are
+		// cursor-exclusive, so the global index resolves them to the cursor spec
+		// and its cursor-only `requestModelId`/`effortRouting`. Before the fix the
+		// discovery mapper spread that spec wholesale and the model emitted the
+		// cursor wire id as `body.model` -> HTTP 400 model_not_supported. The
+		// crossing must keep provider-independent metadata but drop wire routing.
+		const collision = getBundledModels("cursor").find(
+			candidate => candidate.requestModelId && candidate.id.startsWith("cursor-"),
+		);
+		expect(collision).toBeDefined();
+		const servedId = collision!.id;
+		expect(collision!.provider).toBe("cursor");
+
+		const { models } = await discoverCopilotModels({ data: [{ id: servedId, name: servedId }] });
+		const model = models.find(candidate => candidate.id === servedId);
+		expect(model).toBeDefined();
+		expect(model?.provider).toBe("github-copilot");
+		expect(model?.requestModelId).toBeUndefined();
+		expect(model?.thinking?.effortRouting).toBeUndefined();
+		// Provider-independent metadata still crosses (this is why the global
+		// index exists): the cursor context window is inherited.
+		expect(model?.contextWindow).toBe(collision!.contextWindow);
+		// Drive the discovered model through the wire-id serializer the request
+		// builders call (`resolveWireModelId`, used by the openai-completions and
+		// anthropic request paths to fill `body.model`). The emitted id must be the
+		// logical Copilot id for every effort -- the issue reported that even
+		// `--thinking max` kept sending the wrong cursor wire id.
+		const built = buildModel(model!);
+		expect(resolveWireModelId(built, undefined)).toBe(servedId);
+		expect(resolveWireModelId(built, Effort.Max)).toBe(servedId);
+	});
+	it("abandons a pre-fix cache row carrying a cross-provider requestModelId (#10796)", async () => {
+		// The sanitizer only runs during discovery. A user who discovered a
+		// colliding model on a pre-fix build has an authoritative cache row that
+		// still carries the leaked `requestModelId`; `online-if-uncached` serves
+		// it for the full TTL without re-probing, so the invalid wire model keeps
+		// 400ing until expiry. Bumping the namespace to `models-v2` strands that
+		// row: the manager now keys on a namespace the poisoned row never used, so
+		// the read misses and discovery re-runs the sanitizer.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-copilot-xprovider-cache-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const apiKey = "copilot-test-key";
+			const currentNamespace = githubCopilotModelManagerOptions({ apiKey }).cacheProviderId;
+			expect(currentNamespace).toContain(":models-v2:");
+			// The pre-fix build wrote the poisoned row under the v1 namespace.
+			const legacyNamespace = currentNamespace!.replace(":models-v2:", ":models-v1:");
+
+			const collision = getBundledModels("cursor").find(
+				candidate => candidate.requestModelId && candidate.id.startsWith("cursor-"),
+			);
+			expect(collision).toBeDefined();
+			const servedId = collision!.id;
+			const poisoned = buildModel({
+				...cachedCopilotCompletionModel(servedId, servedId),
+				requestModelId: collision!.requestModelId,
+			});
+			expect(poisoned.requestModelId).toBe(collision!.requestModelId);
+			writeModelCache(legacyNamespace, Date.now(), [poisoned], true, "pre-10796", cacheDbPath);
+
+			const legacy = readModelCache(legacyNamespace, Number.POSITIVE_INFINITY, Date.now, cacheDbPath);
+			const current = readModelCache(currentNamespace!, Number.POSITIVE_INFINITY, Date.now, cacheDbPath);
+			// The poisoned wire id is real and still present under the old namespace...
+			expect(legacy?.models.find(candidate => candidate.id === servedId)?.requestModelId).toBe(
+				collision!.requestModelId,
+			);
+			// ...but the namespace the manager now reads never sees it, forcing a
+			// sanitized refetch instead of serving the stale cross-provider id.
+			expect(current).toBeNull();
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 	it("routes mai-code models to the openai-responses endpoint (#5612)", async () => {
 		// Copilot's /chat/completions rejects mai-* models with

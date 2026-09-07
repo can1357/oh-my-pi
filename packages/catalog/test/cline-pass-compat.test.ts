@@ -130,6 +130,37 @@ describe("ClinePass catalog", () => {
 		expect(reference?.maxTokens).toBe(1_048_576);
 	});
 
+	it("strips provider-scoped request shaping from cross-provider global references (#10796)", () => {
+		// The global index is keyed by bare id across every provider, so a resolver
+		// consumer whose own bundle lacks an id can select another provider's model.
+		// Fields that alter the OUTBOUND request must not cross that boundary:
+		// `omitMaxOutputTokens` suppresses the wire token cap for unknown-backend
+		// proxies (Ollama) and `headers` are forwarded verbatim on requests.
+		const resolve = createReferenceResolver<"openai-completions">(new Map());
+
+		// ollama-cloud `:`-tagged ids are provider-exclusive, so the global index
+		// resolves them to the ollama spec that carries the proxy output-cap flag.
+		const omitSource = getBundledModels("ollama-cloud").find(
+			model => model.omitMaxOutputTokens === true && model.id.includes(":"),
+		);
+		expect(omitSource).toBeDefined();
+		const omitRef = resolve(omitSource!.id);
+		// The output-cap source won the index (metadata still crosses)...
+		expect(omitRef?.contextWindow).toBe(omitSource!.contextWindow);
+		// ...but its proxy-only wire suppression does not.
+		expect(omitRef?.omitMaxOutputTokens).toBeUndefined();
+
+		// github-copilot bakes editor-identity headers into its Claude entries,
+		// whose dotted ids no other provider bundles.
+		const headerSource = getBundledModels("github-copilot").find(
+			model => model.headers !== undefined && model.id.startsWith("claude-"),
+		);
+		expect(headerSource).toBeDefined();
+		const headerRef = resolve(headerSource!.id);
+		expect(headerRef?.contextWindow).toBe(headerSource!.contextWindow);
+		expect(headerRef?.headers).toBeUndefined();
+	});
+
 	it("applies the verified Cline gateway request and reasoning compatibility", () => {
 		const model = sourceModel("kimi-k3");
 		const compat = resolveModelPolicy(model).compat;

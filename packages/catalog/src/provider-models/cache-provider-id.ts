@@ -92,9 +92,16 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// switching `COPILOT_GITHUB_TOKEN` to a different account misses the
 			// prior endpoint's cache and re-runs discovery instead of hitting the
 			// stale host and 403ing (PR #8510 review).
+			//
+			// v2 invalidates rows written before the cross-provider wire-routing
+			// fix: a served id colliding (bare id) with a model bundled only under
+			// another provider inherited that provider's `requestModelId`, which the
+			// authoritative cache stored verbatim and kept emitting as an invalid
+			// wire model (HTTP 400 `model_not_supported`) until the TTL lapsed
+			// (issue #10796). A fresh namespace forces a sanitized refetch.
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `github-copilot:models-v1:${Bun.hash(scope).toString(36)}`;
+			return `github-copilot:models-v2:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";
