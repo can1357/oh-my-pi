@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed atomic config writes (`mcp.json`, `ssh.json`, legacy `settings.json` migration) replacing a user-managed symlink with a regular file; writes now land on the link's target (physically resolving dangling relative targets), serialize on the resolved path, recreate a dangling referent, and clamp the published file mode to the referent's owner bits ([#10644](https://github.com/can1357/oh-my-pi/pull/10644) by [@chuzui](https://github.com/chuzui)).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
@@ -13,12 +17,6 @@
 
 ### Fixed
 
-- Fixed protocol handler incorrectly escaping raw text content from agent responses
-- Fixed `<task-result>` previews of structured subagent yields collapsing to a lone `{` when the JSON's second line exceeded the preview budget
-- Fixed `/usage` freezing the TUI for several seconds while it loaded the activity heatmap on a large stats database; the dashboard now opens immediately and the heatmap plus session sync load from a background subprocess.
-- Fixed the status line missing from the first frame at startup and appearing only after the session loaded; the last run's status row is cached per project and painted immediately, then replaced in place by the live one.
-- Fixed Bash builtins (`cut`, `sed`, `ls`, `sort`, `uniq`, `cat`, and the rest) printing `<name>: Broken pipe (os error 32)` / `write error` and exiting 1 when a downstream stage quit early (`cut f | head`, `cut f | sed 'bad'`); they now die silently with status 141 like standalone utilities under SIGPIPE.
-- Fixed atomic config writes (`mcp.json`, `ssh.json`, legacy `settings.json` migration) replacing a user-managed symlink with a regular file; writes now land on the link's target (physically resolving dangling relative targets), serialize on the resolved path, recreate a dangling referent, and clamp the published file mode to the referent's owner bits ([#10644](https://github.com/can1357/oh-my-pi/pull/10644) by [@chuzui](https://github.com/chuzui)).
 	- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
 	- Fixed GPT-6 Astra requiring `/extended-context` for its full context window: it now keeps the documented 1.05M-token window with the setting on or off, and explicit per-model `contextWindow` overrides still win.
 - Subagent `yield` no longer rejects a valid `data` payload because a non-strict OpenAI-compatible backend filled the optional `error` field with `""`; previously the worker retried the identical call until the invalid-yield cap and the parent received nothing.
@@ -173,7 +171,6 @@
 
 ### Fixed
 
-- Fixed atomic config writes (`mcp.json`, `ssh.json`, legacy `settings.json` migration) replacing a user-managed symlink with a regular file; writes now land on the link's target (physically resolving dangling relative targets), serialize on the resolved path, recreate a dangling referent, and clamp the published file mode to the referent's owner bits ([#10644](https://github.com/can1357/oh-my-pi/pull/10644) by [@chuzui](https://github.com/chuzui)).
 - Fixed local title models receiving unsupported online examples and failing with certain tokenizer templates.
 - Fixed model picker search selection so it moves to the best matching result after results change.
 - Fixed /new sometimes reviving the previous conversation in the current process or after a restart.
